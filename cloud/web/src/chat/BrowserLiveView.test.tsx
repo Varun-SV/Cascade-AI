@@ -191,6 +191,88 @@ describe('BrowserLiveView — taking the page over', () => {
     expect(onInput).not.toHaveBeenCalled();
   });
 
+  it('ignores the mouse buttons that mean Back and Forward', () => {
+    // They report 3 and 4. Mapping "not middle, not right" onto `left` turned a
+    // navigation gesture into a real left click on the remote page — the client
+    // repairing an unsupported input into a mutation nobody asked for.
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+    );
+    const img = screen.getByRole('img') as HTMLImageElement;
+    Object.defineProperty(img, 'naturalWidth', { value: 1280 });
+    Object.defineProperty(img, 'naturalHeight', { value: 800 });
+    img.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
+
+    fireEvent.mouseDown(img, { clientX: 200, clientY: 200, button: 3, detail: 1 });
+    fireEvent.mouseDown(img, { clientX: 200, clientY: 200, button: 4, detail: 1 });
+    expect(onInput, 'Back and Forward are not clicks').not.toHaveBeenCalled();
+
+    // The three that ARE buttons still work.
+    fireEvent.mouseDown(img, { clientX: 200, clientY: 200, button: 2, detail: 1 });
+    expect(onInput).toHaveBeenCalledWith({ kind: 'click', x: 0.5, y: 0.5, button: 'right', clicks: 1 });
+  });
+
+  it('scrolls by pixels whatever units the wheel reported', () => {
+    // `deltaY` is not always pixels — `deltaMode` says whether it counts pixels,
+    // lines or pages, and Firefox on Windows and Linux routinely reports lines.
+    // CDP's wheel delta is always CSS pixels, so a full notch forwarded raw
+    // scrolled about three pixels and scrolling looked broken.
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+    );
+    const img = screen.getByRole('img') as HTMLImageElement;
+    Object.defineProperty(img, 'naturalWidth', { value: 1280 });
+    Object.defineProperty(img, 'naturalHeight', { value: 800 });
+    img.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
+
+    fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 120, deltaMode: 0 });
+    expect(onInput, 'pixels are already pixels')
+      .toHaveBeenCalledWith({ kind: 'scroll', x: 0.5, y: 0.5, deltaY: 120 });
+
+    onInput.mockClear();
+    fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 3, deltaMode: 1 });
+    expect(onInput, 'three lines is a notch, not three pixels')
+      .toHaveBeenCalledWith({ kind: 'scroll', x: 0.5, y: 0.5, deltaY: 48 });
+
+    onInput.mockClear();
+    fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 1, deltaMode: 2 });
+    expect(onInput, 'and a page is the height of the picture')
+      .toHaveBeenCalledWith({ kind: 'scroll', x: 0.5, y: 0.5, deltaY: 800 });
+  });
+
+  it('does not take focus back from wherever the person put it', () => {
+    // The hidden surface focuses itself when it appears, because the element
+    // they were typing into just unmounted. An INLINE callback ref made that
+    // happen on every parent render instead: React detaches and re-runs a new
+    // function each time, so any later render — a socket status among them —
+    // snatched focus back and routed the next keystrokes to the remote page.
+    const { rerender } = render(
+      <BrowserLiveView
+        active liveViewUrl={undefined} frame={undefined} human capturing={false} confirmed
+        onStop={() => {}} notice={undefined}
+      />,
+    );
+    const surface = screen.getByRole('group', { name: /picture hidden/i });
+    expect(surface, 'it takes focus when it appears').toHaveFocus();
+
+    // The person goes back to the composer.
+    const elsewhere = document.createElement('input');
+    document.body.appendChild(elsewhere);
+    elsewhere.focus();
+    expect(elsewhere).toHaveFocus();
+
+    // Anything at all re-renders the panel.
+    rerender(
+      <BrowserLiveView
+        active liveViewUrl={undefined} frame={undefined} human capturing={false} confirmed
+        onStop={() => {}} notice="the agent said something"
+      />,
+    );
+    expect(elsewhere, 'and the caret stays where they put it').toHaveFocus();
+  });
+
   it('reports a frame only once the image says it rendered', () => {
     // The receipt opens Hide and, with it, the blind keyboard surface, so it
     // has to mean "shown". `load` is the browser saying the JPEG decoded and is

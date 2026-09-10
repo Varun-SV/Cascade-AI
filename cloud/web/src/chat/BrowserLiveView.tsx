@@ -21,7 +21,7 @@
 //  own session credential and is deliberately token-free so it can be embedded.
 //  It arrives over the socket, lives in component state, and goes nowhere else.
 
-import { useRef } from 'react';
+import { useEffect, useRef } from 'react';
 
 /** The keys the server will accept as commands. Everything else is text. */
 const COMMAND_KEYS = new Set([
@@ -41,6 +41,33 @@ const COMMAND_KEYS = new Set([
  * that the queue drains faster than they can aim.
  */
 const MOVE_INTERVAL_MS = 60;
+
+/**
+ * A wheel notch in CSS pixels, whatever units the device reported it in.
+ *
+ * `deltaY` is NOT always pixels: `deltaMode` says whether the number counts
+ * pixels, lines or pages, and Firefox on Windows and Linux routinely reports
+ * lines. CDP's `mouseWheel` delta is always CSS pixels, so forwarding the raw
+ * value made a full notch scroll about three pixels — scrolling looked broken
+ * for those clients rather than slightly off.
+ *
+ * The line height is nominal, and deliberately so: the real one belongs to the
+ * remote page's own styles, which this side cannot see and the remote side
+ * cannot attribute to a particular element under the cursor. 16px is the
+ * ordinary default and makes a notch travel about what it travels locally.
+ *
+ * Page mode is rarer still and approximated from the frame's own height, which
+ * is the only page-sized number this side has. That number is the screencast's
+ * DEVICE height rather than the page's CSS height, so at a device scale other
+ * than 1 it is off by that scale — noted rather than hidden, because the
+ * alternative is a page-mode wheel that scrolls three pixels.
+ */
+const NOMINAL_LINE_PX = 16;
+function wheelPixels(e: { deltaY: number; deltaMode: number }, framePx = 800): number {
+  if (e.deltaMode === 1) return e.deltaY * NOMINAL_LINE_PX;
+  if (e.deltaMode === 2) return e.deltaY * framePx;
+  return e.deltaY;
+}
 
 /** One thing the user did to the page. Coordinates are fractions of the frame. */
 export type BrowserInputEvent =
@@ -135,6 +162,24 @@ export function BrowserLiveView({
   // through it would be a second, uncoordinated controller racing the agent.
   const takeable = !!frame || streaming === true;
   const driving = human === true;
+  /**
+   * The person is driving a page they deliberately cannot see.
+   *
+   * Named once because two things need it and they must not drift: the surface
+   * that renders, and the effect that focuses it.
+   */
+  const blind = !frame && driving && capturing === false && confirmed === true;
+  const blindRef = useRef<HTMLDivElement>(null);
+  // Focus follows the surface, because the element the person was typing into
+  // just unmounted. From an EFFECT keyed on entering that state, not from an
+  // inline callback ref: an inline ref is a new function every render, so React
+  // detached and re-ran it on every parent update — which meant any later
+  // render, a socket status among them, snatched focus back to this div from
+  // wherever the person had since put it, and routed their next keystrokes to
+  // the remote page instead of the composer they were typing in.
+  useEffect(() => {
+    if (blind) blindRef.current?.focus();
+  }, [blind]);
 
   /**
    * Where on the PAGE the user clicked, as a fraction of it.
@@ -331,6 +376,13 @@ export function BrowserLiveView({
             // chat composer behind it.
             e.preventDefault();
             imgRef.current?.focus();
+            // 0, 1, 2 and nothing else. A mouse's Back and Forward buttons
+            // report 3 and 4, and mapping "anything that is not middle or
+            // right" onto `left` turned a navigation gesture into a real left
+            // click on the remote page — the client repairing an unsupported
+            // input into a mutation the person never asked for, which is the
+            // shape the server boundary was hardened against three rounds ago.
+            if (e.button > 2) return;
             const p = at(e.clientX, e.clientY);
             if (p) onInput?.({ kind: 'click', ...p, button: e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left', clicks: e.detail || 1 });
           } : undefined}
@@ -363,7 +415,7 @@ export function BrowserLiveView({
           onContextMenu={driving ? (e) => e.preventDefault() : undefined}
           onWheel={driving ? (e) => {
             const p = at(e.clientX, e.clientY);
-            if (p) onInput?.({ kind: 'scroll', ...p, deltaY: e.deltaY });
+            if (p) onInput?.({ kind: 'scroll', ...p, deltaY: wheelPixels(e, frame.height) });
           } : undefined}
           onKeyDown={driving ? onKey : undefined}
           onPaste={driving ? onPaste : undefined}
@@ -408,13 +460,9 @@ export function BrowserLiveView({
         // from a viewer that is gone. Showing the page is how they get out of
         // it — that control stays available, and one frame later this is a
         // choice again.
-        capturing === false && confirmed ? (
+        blind ? (
           <div
-            ref={(el) => {
-              // Focus follows the surface, because the element the person was
-              // typing into just unmounted.
-              if (el) el.focus();
-            }}
+            ref={blindRef}
             role="group"
             aria-label="Agent browser, picture hidden"
             tabIndex={0}

@@ -2386,6 +2386,119 @@ describe('handing the browser to the person watching', () => {
     }
   });
 
+  it('drops pointer samples rather than making a click wait behind them', async () => {
+    // Movement is a SAMPLE on the way somewhere; a click is a decision. The
+    // client samples on a timer, so on an endpoint slower than that interval a
+    // queued stream of positions grows without bound — and the click behind it
+    // ages out against the slot's two-second deadline and is refused. Movement
+    // would then cost the person the action they actually intended.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    // The first sample takes the slot and stays in CDP; everything else arrives
+    // while it is busy.
+    const moving = deferred();
+    const realSend = cdp.send;
+    let held_ = false;
+    cdp.send = async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'Input.dispatchMouseEvent' && params?.['type'] === 'mouseMoved' && !held_) {
+        held_ = true;
+        await moving.promise;
+      }
+      return realSend.call(cdp, method, params);
+    };
+
+    const first = c.input('run-A', { kind: 'move', x: 0.1, y: 0.1 });
+    await new Promise((r) => setTimeout(r, 10));
+    const behind = [0.2, 0.3, 0.4, 0.5].map((x) => c.input('run-A', { kind: 'move', x, y: 0.1 }));
+    const click = c.input('run-A', { kind: 'click', x: 0.9, y: 0.9 });
+    await new Promise((r) => setTimeout(r, 10));
+
+    moving.resolve();
+    cdp.send = realSend;
+    await Promise.all([first, ...behind]);
+
+    expect((await click).ok, 'the click was waiting behind at most one sample').toBe(true);
+    const moves = cdp.calls.filter((m) =>
+      m.method === 'Input.dispatchMouseEvent' && m.params?.['type'] === 'mouseMoved');
+    // The one that got the slot, and the one `dispatch` synthesises for the
+    // click itself. The four that arrived while it was busy are gone.
+    expect(moves, 'the samples that could not be applied were dropped, not banked')
+      .toHaveLength(2);
+    expect(moves.at(-1)?.params?.['x'], 'and the click moved the pointer to itself')
+      .toBe(0.9 * 1280);
+  });
+
+  it('does not report a dropped pointer sample as a refusal', async () => {
+    // `ok: false` becomes a notice on the person's screen, and the ordinary
+    // reason the slot is busy is that they are also clicking or typing — which
+    // is the thing it is busy WITH. A live view that apologised every time a
+    // mouse moved would be unusable.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    const moving = deferred();
+    const realSend = cdp.send;
+    let held_ = false;
+    cdp.send = async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'Input.dispatchMouseEvent' && !held_) { held_ = true; await moving.promise; }
+      return realSend.call(cdp, method, params);
+    };
+    const first = c.input('run-A', { kind: 'move', x: 0.1, y: 0.1 });
+    await new Promise((r) => setTimeout(r, 10));
+    const dropped = await c.input('run-A', { kind: 'move', x: 0.2, y: 0.2 });
+
+    moving.resolve();
+    cdp.send = realSend;
+    await first;
+    expect(dropped, 'handled under the lossy rule, not refused').toEqual({ ok: true });
+  });
+
+  it('does not act on a page whose restore the user stopped', async () => {
+    // Bringing the picture back is a CDP round trip, and watching a page come
+    // back is exactly when somebody presses Stop. The revoked/abort checks in
+    // `act()` all run BEFORE that await, so nothing looked again afterwards.
+    //
+    // Reaching `perform()` aborted is worse than merely doing something that
+    // was cancelled: `stoppable(page.click(…))` evaluates its argument first,
+    // so Playwright is already working when `stoppable` sees the aborted
+    // signal — and that early throw never installs the listener that closes the
+    // page, which is the only thing that actually stops Playwright. The click
+    // would land after the user stopped the browser, with nothing able to
+    // interrupt it.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+    await c.setCapture('run-A', false);
+    c.handBack('run-A');
+
+    // Stop lands while the restore is still in flight.
+    const showing = deferred();
+    const realSend = cdp.send;
+    cdp.send = async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'Page.startScreencast') await showing.promise;
+      return realSend.call(cdp, method, params);
+    };
+    const acting = c.controller({ kind: 'click', selector: '#after-stop' }, ctx('run-A', 'w2'));
+    await new Promise((r) => setTimeout(r, 20));
+    c.stopRun('run-A');
+    showing.resolve();
+    cdp.send = realSend;
+
+    const out = await acting;
+    expect(out.ok, 'the run was stopped while the picture was coming back').toBe(false);
+    expect(out.detail).toMatch(/stopped browser control/i);
+    expect(page.calls, 'and Playwright was never started at all').not.toContain('click:#after-stop');
+  });
+
   it('refuses a takeover of a run with no browser, and of a stopped one', async () => {
     const { provider } = fakeProvider();
     const c = new RemoteBrowserController({ provider });

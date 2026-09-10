@@ -866,6 +866,66 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     ]);
   });
 
+  it('keeps the newer run\'s panel when the older one gives its browser up', () => {
+    // One conversation can have two runs overlapping, and the socket carries
+    // both. A later `active: true` replaces the entry with the newer task; the
+    // older run's eventual withdrawal named a conversation and was applied to
+    // whatever was in that slot — taking away the live view and the Stop button
+    // of a browser that is still running.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-old'));
+      fake.fire('browser:live-view', liveView('conv-a', 'task-new'));
+    });
+    expect(view.result.current.browserTaskId).toBe('task-new');
+
+    act(() => {
+      fake.fire('browser:live-view', { conversationId: 'conv-a', taskId: 'task-old', active: false });
+    });
+    expect(view.result.current.browserTaskId, 'the newer browser is still there').toBe('task-new');
+    expect(view.result.current.browserActive, 'and can still be stopped').toBe(true);
+
+    // Its own withdrawal still closes it.
+    act(() => {
+      fake.fire('browser:live-view', { conversationId: 'conv-a', taskId: 'task-new', active: false });
+    });
+    expect(view.result.current.browserTaskId, 'a run giving up its own browser closes the panel').toBeUndefined();
+  });
+
+  it('confirms each run\'s own first watch, even though they are numbered alike', () => {
+    // A watch generation counts from zero inside its own run, so the first watch
+    // of every run is generation 1. Deduplicating the receipt on that number
+    // alone read B's first watch as one already reported — and a generation
+    // holds still for the life of a watch, so nothing later would send it
+    // either. B streamed frames while the server held `confirmed` false and
+    // went on refusing Hide.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    // The receipt is reported from a render — the image's `load` — so it has to
+    // follow the render that told this pane which task it is showing.
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'AAAA', 1));
+    });
+    act(() => { view.result.current.markBrowserFrameShown(1); });
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-b', 'task-b'));
+      view.result.current.setConversationId('conv-b');
+    });
+    act(() => { fake.fire('browser:frame', frame('conv-b', 'task-b', 'BBBB', 1)); });
+    act(() => { view.result.current.markBrowserFrameShown(1); });
+
+    expect(fake.sent.filter((m) => m.event === 'browser:frame-seen').map((m) => m.payload))
+      .toEqual([
+        { taskId: 'task-a', generation: 1 },
+        { taskId: 'task-b', generation: 1 },
+      ]);
+  });
+
   it('does not confirm a frame that arrived but was never rendered', () => {
     // Round 9's argument, one layer further down. The receipt used to be sent
     // from an effect keyed on the frame entering React state, which proves the

@@ -429,6 +429,26 @@ export class BrowserLease {
   }
 
   /**
+   * Take the slot only if it is free RIGHT NOW, never joining the line.
+   *
+   * For input that is a SAMPLE rather than a decision — pointer movement. A
+   * click or a keystroke is a thing the person meant to do and has to happen,
+   * so it waits its turn; a pointer position is one of many on the way
+   * somewhere, and one that cannot be applied now is worth less than the one
+   * behind it. Queueing them is actively harmful: on an endpoint slower than
+   * the client's sampling interval the backlog grows, and the click behind it
+   * can age out against `acquireActionSlot`'s bound and be refused — movement
+   * costing the person the action they actually intended.
+   *
+   * The queue length is checked as well as the slot, so a sample cannot step
+   * over a click that is already waiting.
+   */
+  tryActionSlot(): symbol | null {
+    if (this.action || this.actionQueue.length > 0) return null;
+    return this.beginAction();
+  }
+
+  /**
    * Take the per-action slot, waiting in line for it if somebody has it.
    *
    * A release can hand the browser on while the previous holder's abort is

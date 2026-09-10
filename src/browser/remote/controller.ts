@@ -1016,8 +1016,20 @@ export class RemoteBrowserController {
     // the agent acquire and act while the click was still going in. It also
     // serializes the person's own events against each other, so a fast typist
     // cannot interleave two dispatches on one page.
-    const token = await lease.acquireActionSlot();
+    // Movement never queues; everything else waits its turn. See `tryActionSlot`
+    // for why the two are different, and `emitFrame` for the same trade made on
+    // the way out — the newest picture beats a banked old one, and the newest
+    // pointer position beats a banked old one for exactly the same reason.
+    const sampled = event.kind === 'move';
+    const token = sampled ? lease.tryActionSlot() : await lease.acquireActionSlot();
     if (!token) {
+      // A dropped sample is not a refusal, and must not be reported as one:
+      // the caller turns `ok: false` into a notice on the person's screen, and
+      // the ordinary case for a busy slot is that they are also clicking or
+      // typing — which is the thing the slot is busy WITH. Saying "ok" here
+      // means the event was handled under the rule above, not that a pointer
+      // reached the page.
+      if (sampled) return { ok: true };
       return { ok: false, detail: 'The last thing you did is still finishing. Try again.' };
     }
 
@@ -1452,6 +1464,25 @@ export class RemoteBrowserController {
             ok: false,
             detail: 'The page could not be shown again, so nothing was done to it.',
           };
+        }
+        // Re-checked AFTER the restore, because the restore is a CDP round trip
+        // and Stop is exactly what somebody presses while watching a page come
+        // back. The checks above this block are not enough: they ran before it.
+        //
+        // Reaching `perform()` aborted is worse than it looks, and worse than
+        // simply doing something that was cancelled. `stoppable(page.click(…))`
+        // EVALUATES its argument first, so Playwright is already working by the
+        // time `stoppable` sees the aborted signal — and that early throw
+        // returns without installing the listener that closes the page, which
+        // is the only thing that actually stops Playwright. So the action would
+        // land, unstoppably, after the user stopped the browser.
+        if (this.revoked.has(runId)) {
+          await this.releaseIfIdle(runId);
+          return { ok: false, detail: 'The user stopped browser control for this run.' };
+        }
+        if (context.signal?.aborted || held.abort.signal.aborted) {
+          await this.releaseIfIdle(runId);
+          return { ok: false, detail: 'The run was cancelled.' };
         }
       }
 

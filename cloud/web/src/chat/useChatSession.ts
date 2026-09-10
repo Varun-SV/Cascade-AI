@@ -893,7 +893,20 @@ export function useChatSession(
         // giving the browser up — drop the entry outright rather than blanking
         // it, so the panel goes away and the spent capability URL is not kept.
         if (e?.active !== true) {
-          if (!(key in prev)) return prev;
+          const showing = prev[key];
+          if (!showing) return prev;
+          // ONLY from the run whose browser is actually on screen. One
+          // conversation can have two runs overlapping — a later `active: true`
+          // replaces this entry with the newer task — and the older run's
+          // eventual withdrawal would otherwise take the newer browser's panel
+          // and its Stop button away while that browser is still running. The
+          // frame and control handlers next to this one have required an exact
+          // task match all along; this one was reading only the conversation.
+          //
+          // A withdrawal that names no task is ignored rather than trusted: the
+          // server sends `taskId` on every live-view message including this
+          // one, so a message without it is not a run giving its browser up.
+          if (showing.taskId !== e?.taskId) return prev;
           const { [key]: _done, ...rest } = prev;
           return rest;
         }
@@ -1278,7 +1291,7 @@ export function useChatSession(
    * record of something that happened, read on the way to deciding whether it
    * has happened again.
    */
-  const shownGenRef = useRef<number | undefined>(undefined);
+  const shownGenRef = useRef<string | undefined>(undefined);
 
   /**
    * Tell the server this pane actually HAS the picture.
@@ -1309,8 +1322,18 @@ export function useChatSession(
   const markBrowserFrameShown = useCallback((generation: number) => {
     const taskId = browserTaskIdRef.current;
     if (!socket || !taskId) return;
-    if (shownGenRef.current === generation) return;
-    shownGenRef.current = generation;
+    // Keyed by TASK as well as generation. A watch generation counts from zero
+    // inside its own run, so the first watch of every run is generation 1 —
+    // and deduplicating on the number alone meant that after confirming task A
+    // the identical number from task B was read as "already reported". B's
+    // receipt was never sent, and because a generation holds still for the life
+    // of a watch, nothing later would send it either: B could stream frames
+    // indefinitely while the server held `confirmed` false and went on refusing
+    // Hide. The bug arrived with the ref — the effect this replaced had the
+    // task in its dependencies and could not make it.
+    const seen = `${taskId}:${generation}`;
+    if (shownGenRef.current === seen) return;
+    shownGenRef.current = seen;
     socket.emit('browser:frame-seen', { taskId, generation });
   }, [socket]);
 
