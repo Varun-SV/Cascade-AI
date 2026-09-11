@@ -453,8 +453,11 @@ export class BrowserLease {
    *
    * A release can hand the browser on while the previous holder's abort is
    * still propagating through an awaited navigation. That is a handoff, not a
-   * conflict, so it is waited out rather than refused — but bounded, because a
-   * wedged action must not pin the queue.
+   * conflict, so it is normally bounded: a wedged action must not pin an agent
+   * or a takeover forever. Human discrete input is the exception and passes
+   * `null`: once a click, key or committed text has been accepted into this
+   * ordered queue, expiring it merely because earlier accepted input took more
+   * than two seconds silently truncates what the person typed.
    *
    * Waiting and TAKING are one step, which they deliberately were not before:
    * the wait used to answer "the slot looks free" and leave the caller to call
@@ -464,9 +467,11 @@ export class BrowserLease {
    * front of the line gets it, and everybody else is still waiting rather than
    * refused.
    *
-   * `null` means the wait ran out, never that somebody jumped in.
+   * `null` as a RESULT means a bounded wait ran out. `null` as `withinMs` means
+   * this accepted operation is intentionally unbounded by time and will leave
+   * the queue only when its turn arrives.
    */
-  async acquireActionSlot(withinMs = ACTION_HANDOFF_MS): Promise<symbol | null> {
+  async acquireActionSlot(withinMs: number | null = ACTION_HANDOFF_MS): Promise<symbol | null> {
     // The queue is empty whenever the slot is free — `endAction` fills it again
     // in the same breath as it clears it — so this is the ordinary path, and it
     // takes no timer at all. The length check is what keeps a newcomer from
@@ -474,20 +479,23 @@ export class BrowserLease {
     if (!this.action && this.actionQueue.length === 0) return this.beginAction();
     return await new Promise<symbol | null>((resolve) => {
       let done = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const wake = () => {
         if (done) return;
         done = true;
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         resolve(this.beginAction());
       };
-      const timer = setTimeout(() => {
-        if (done) return;
-        done = true;
-        const i = this.actionQueue.indexOf(wake);
-        if (i >= 0) this.actionQueue.splice(i, 1);
-        resolve(null);
-      }, withinMs);
-      timer.unref?.();
+      if (withinMs !== null) {
+        timer = setTimeout(() => {
+          if (done) return;
+          done = true;
+          const i = this.actionQueue.indexOf(wake);
+          if (i >= 0) this.actionQueue.splice(i, 1);
+          resolve(null);
+        }, withinMs);
+        timer.unref?.();
+      }
       this.actionQueue.push(wake);
     });
   }
