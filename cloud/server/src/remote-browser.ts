@@ -115,6 +115,32 @@ export interface AttachedBrowser {
  */
 let shared: { settings: RemoteBrowserSettings; controller: RemoteBrowserController } | null = null;
 
+
+/**
+ * Every controller retirement that has to finish before a newer provider may
+ * allocate.
+ *
+ * This lives beside `shared`, not inside an individual controller. Consider
+ * A → B → C while A is still releasing: B may have opened nothing because it
+ * is parked on A's `ready` promise, so B.dispose() is correctly free to finish
+ * immediately. If C waited only for B, however, it would forget A entirely.
+ * Chaining retirements here preserves the DEPLOYMENT'S history across as many
+ * rapid rotations as occur, without turning `RemoteBrowserController.dispose`
+ * into a wait on a promise owned by its caller.
+ *
+ * The chain is kept non-rejecting. Disposal is best-effort and already reports
+ * its own cleanup failures; a stale provider failing to tidy up must not wedge
+ * every future browser action forever.
+ */
+let retirementBarrier: Promise<void> = Promise.resolve();
+
+function retireController(controller: RemoteBrowserController): Promise<void> {
+  const before = retirementBarrier.catch(() => {});
+  const mine = controller.dispose().catch(() => {});
+  retirementBarrier = Promise.all([before, mine]).then(() => {});
+  return retirementBarrier;
+}
+
 /**
  * Bumped every time a controller is built.
  *
@@ -152,7 +178,8 @@ function sameProviderConfig(a: RemoteBrowserSettings, b: RemoteBrowserSettings):
 export async function resetSharedBrowser(): Promise<void> {
   const previous = shared;
   shared = null;
-  await previous?.controller.dispose();
+  if (previous) await retireController(previous.controller);
+  else await retirementBarrier;
 }
 
 /**
@@ -177,25 +204,17 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
   // result is not available on that path.
   let taskId: string | null = null;
 
-  // Reused across runs. A settings change makes a new one and disposes the old
+  // Reused across runs. A settings change makes a new one and retires the old
   // rather than leaving its sessions running at the operator's expense.
-  let retiring: Promise<unknown> | undefined;
+  //
+  // The readiness barrier is deployment-scoped. On A → B → C, B may have no
+  // session of its own yet because it is still waiting for A; C nevertheless
+  // has to wait for BOTH retirements. `retireController` folds every outgoing
+  // controller into one chain, so a rapid second rotation cannot forget the
+  // first provider that is still handing a session back.
+  let retiring: Promise<void> | undefined;
   if (shared && !sameProviderConfig(shared.settings, settings)) {
-    // KEPT, not discarded. Disposal detaches CDP sessions and hands provider
-    // sessions back over the network, so it is not instant — and the
-    // replacement below used to start work immediately, which meant the first
-    // action after a settings change could call `createSession` while the
-    // outgoing controller was still releasing. Two controllers holding
-    // sessions against one provider's cap, which neither pool can see because
-    // each counts only its own. On a provider that enforces its own limit the
-    // action simply fails, and it is the first one after the operator changed
-    // something, which is exactly when it will be blamed on the change.
-    //
-    // Handed to the new controller as its `ready` rather than awaited here:
-    // this function is synchronous by contract — the caller wires listeners on
-    // what it returns — and the wait only has to happen before the new
-    // controller OPENS anything, not before it exists.
-    retiring = shared.controller.dispose();
+    retiring = retireController(shared.controller);
     shared = null;
   }
   if (!shared) {
@@ -205,7 +224,9 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
       controller: new RemoteBrowserController({
         provider,
         ...(settings.maxSessions ? { maxSessions: settings.maxSessions } : {}),
-        ...(retiring ? { ready: retiring } : {}),
+        // Also inherit a reset/retirement already in flight even when there is
+        // no current `shared` entry to rotate in this call.
+        ready: retiring ?? retirementBarrier,
       }),
     };
   }

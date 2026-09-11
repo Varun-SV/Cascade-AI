@@ -628,14 +628,6 @@ export class RemoteBrowserController {
   async dispose(): Promise<void> {
     // FIRST, and synchronously. See `retired`.
     this.retired = true;
-    // A replacement inherits THIS controller's whole predecessor chain, not
-    // just the sessions this instance happened to open. Consider A → B → C:
-    // B may be retired while it is still parked on A's teardown and has opened
-    // nothing of its own. If B.dispose() resolves immediately, C waits for B
-    // and then allocates while A is still releasing — exactly the overlap the
-    // ready barrier is meant to prevent. Snapshot it before any await; open()
-    // may clear the field once it observes the predecessor settle.
-    const predecessor = this.ready;
     // Runs still OPENING as well as runs already open. A run inside `open()`
     // has no RunBrowser yet, so enumerating `runs` alone walked straight past
     // it — and the caller for this is `attachRemoteBrowser` noticing the
@@ -675,13 +667,6 @@ export class RemoteBrowserController {
     // Snapshotted AFTER the two waits above, because unwinding an open or
     // ending a run is itself a thing that starts a teardown.
     await Promise.all([...this.closing.values()].map((done) => done.catch(() => {})));
-    // Last because it may be the longest wait and our own cleanup does not
-    // depend on it. It is nevertheless part of OUR disposal contract: whoever
-    // replaces us waits on this promise, so resolving before the inherited
-    // barrier does would break a repeated rotation.
-    if (predecessor) {
-      try { await predecessor; } catch { /* predecessor reports its own cleanup trouble */ }
-    }
   }
 
   /** A worker finished; it will never ask for the browser again. */
@@ -1049,10 +1034,11 @@ export class RemoteBrowserController {
       // is not is the failure this whole panel exists to avoid.
       return held.capturing === true && !held.visibilityUnconfirmed;
     }
-    // For a confirmed restore this means "the start command was accepted";
-    // the caller still waits for the frame. For every other transition it is
-    // also the resulting capture state.
-    return true;
+    // For a confirmed restore `on` is true, so this still means "the start
+    // command was accepted" and the caller waits for the frame. For an ordinary
+    // transition the return value is the resulting capture state — false for
+    // Hide, true for Show — which is the public `setCapture` contract.
+    return on;
   }
 
   /**
