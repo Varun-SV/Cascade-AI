@@ -961,6 +961,30 @@ describe('useChatSession — frames of the agent\'s browser', () => {
       ]);
   });
 
+  it('drops a refusal once the person does something else', () => {
+    // A refusal that changes none of `human`/`capturing`/`confirmed` — an
+    // unsupported key, say — is followed by silence, because `announceControl`
+    // dedupes on exactly that state and success is deliberately unacknowledged.
+    // So "that key cannot be sent" sat on the panel for the rest of the
+    // takeover while every click after it worked.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => { fake.fire('browser:live-view', liveView('conv-a', 'task-a')); });
+    act(() => {
+      fake.fire('browser:control', {
+        conversationId: 'conv-a', taskId: 'task-a', human: true, capturing: true, confirmed: true,
+      });
+      fake.fire('browser:control', {
+        conversationId: 'conv-a', taskId: 'task-a', detail: 'That key cannot be sent to the page.',
+      });
+    });
+    expect(view.result.current.browserNotice).toBe('That key cannot be sent to the page.');
+
+    act(() => { view.result.current.sendBrowserInput({ kind: 'click', x: 0.5, y: 0.5 }); });
+    expect(view.result.current.browserNotice, 'the next thing they do clears it').toBeUndefined();
+  });
+
   it('does not confirm a frame that arrived but was never rendered', () => {
     // Round 9's argument, one layer further down. The receipt used to be sent
     // from an effect keyed on the frame entering React state, which proves the

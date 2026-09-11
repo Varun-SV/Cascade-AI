@@ -21,6 +21,8 @@ function fakeCdp() {
     /** The same calls with their arguments, for the ones whose arguments are the point. */
     calls: [] as Array<{ method: string; params?: Record<string, unknown> }>,
     detached: false,
+    /** A screencast that starts and never draws — a page that will not come back. */
+    silentStart: false,
     /** Everything that happened, in order: deliveries and acks interleaved. */
     order: [] as string[],
     /**
@@ -36,6 +38,19 @@ function fakeCdp() {
     async send(method: string, params?: Record<string, unknown>) {
       session.sent.push(method);
       session.calls.push({ method, ...(params ? { params } : {}) });
+      // A STARTED SCREENCAST DRAWS AT ONCE. Chrome emits its first frame as
+      // soon as capture begins, whatever the page is doing, and this PR relies
+      // on that in three places — the unwatch/watch pair that recovers an idle
+      // panel, and the agent's restore gate, which refuses to act until a
+      // picture has actually come back. The fake did not model it, so every
+      // test of those paths was passing against a stream that never drew
+      // anything, and the restore gate could not be tested at all.
+      //
+      // Asynchronous, because Chrome's is: the caller must be able to await
+      // `Page.startScreencast` and only then find a frame waiting.
+      if (method === 'Page.startScreencast' && !session.silentStart) {
+        queueMicrotask(() => session.pushFrame(1));
+      }
       if (method === 'Page.getLayoutMetrics') {
         // `legacyOnly` models an older Chrome: the deprecated `visualViewport`
         // is present and `cssVisualViewport` is not. Its numbers are DEVICE
@@ -552,6 +567,47 @@ describe('replacing the shared controller', () => {
 
     expect((await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'))).ok).toBe(true);
     expect(created).toEqual(['sess-1']);
+  });
+});
+
+describe('retiring a controller mid-open', () => {
+  it('waits for a run that was still opening when the settings changed', async () => {
+    // `endRun` for a run inside `open()` finds no entry in `runs`, so it aborts
+    // the signal, forgets it and returns AT ONCE — while `openReserved` is
+    // still unwinding, and its rollback is what hands the allocated session
+    // back. So `dispose()` resolved with a live session still held, and the
+    // replacement controller's `ready` gate opened on that resolution: two
+    // controllers against one provider's cap, in the exact case the gate was
+    // built for — a credential rotation catching a run mid-open.
+    const { provider, created, ended } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+
+    // Held inside the open, after the session exists and before the page does.
+    const connecting = deferred();
+    const { chromium } = await import('playwright') as unknown as { chromium: { connectOverCDP: unknown } };
+    const original = chromium.connectOverCDP;
+    (chromium as { connectOverCDP: unknown }).connectOverCDP = async (...args: unknown[]) => {
+      await connecting.promise;
+      return (original as (...a: unknown[]) => unknown)(...args);
+    };
+
+    try {
+      const acting = c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(created, 'the session is allocated and the open is still in flight').toEqual(['sess-1']);
+      expect(ended, 'and nothing has been handed back yet').toEqual([]);
+
+      const disposing = c.dispose();
+      // The open unwinds only once its own await lets go.
+      await new Promise((r) => setTimeout(r, 20));
+      connecting.resolve();
+      await disposing;
+
+      expect(ended, 'dispose does not resolve until the session is back').toEqual(['sess-1']);
+      await acting;
+    } finally {
+      (chromium as { connectOverCDP: unknown }).connectOverCDP = original;
+    }
   });
 });
 
@@ -1189,6 +1245,11 @@ describe('watching a run\'s browser', () => {
       cdp.order.push(`deliver:${f.data}`);
     });
 
+    // The attach frame is real and arrives first — a started screencast draws
+    // at once — but this test is about the ack ORDER, so it starts from a clean
+    // record rather than pretending the stream was silent.
+    cdp.order.length = 0;
+    seen.length = 0;
     cdp.pushFrame(1, 'FRAME-ONE');
     cdp.pushFrame(2, 'FRAME-TWO');
 
@@ -1975,7 +2036,7 @@ describe('handing the browser to the person watching', () => {
 
     // Seeing the new watch is what makes Hide theirs to press again.
     two.pushFrame(2);
-    expect(second).toHaveLength(1);
+    expect(second, 'its own attach frame, and the one pushed to it').toHaveLength(2);
     c.frameSeen('run-A', second[0]!.generation);
     expect(await c.setCapture('run-A', false), 'now it is').toBe(false);
     expect(two.sent).toContain('Page.stopScreencast');
@@ -2061,7 +2122,7 @@ describe('handing the browser to the person watching', () => {
     ).toHaveLength(started + 1);
 
     cdp.pushFrame(2);
-    expect(second, 'and now they can see it').toHaveLength(1);
+    expect(second, 'and now they can see it').toHaveLength(2);
     c.frameSeen('run-A', second[0]!.generation);
     expect(await c.setCapture('run-A', false), 'so hiding it is a choice again').toBe(false);
     expect((await c.input('run-A', { kind: 'text', text: 'secret' })).ok).toBe(true);
@@ -2144,7 +2205,7 @@ describe('handing the browser to the person watching', () => {
     // one receipt later, hiding it is a choice this viewer made.
     expect(await c.setCapture('run-A', true), 'showing is never refused').toBe(true);
     cdp.pushFrame(2);
-    expect(second, 'the new viewer is looking at it now').toHaveLength(1);
+    expect(second, 'the new viewer is looking at it now').toHaveLength(2);
     c.frameSeen('run-A', second[0]!.generation);
     expect(await c.setCapture('run-A', false), 'hidden by somebody who saw it').toBe(false);
     expect((await c.input('run-A', { kind: 'text', text: 'password' })).ok).toBe(true);
@@ -2193,7 +2254,7 @@ describe('handing the browser to the person watching', () => {
     c.actorEnded('w1');
     await c.takeOver('run-A');
 
-    expect(sent, 'the server dispatched a frame').toHaveLength(1);
+    expect(sent, 'the server dispatched a frame').toHaveLength(2);
     expect(await c.setCapture('run-A', false), 'which is not one arriving').toBe(true);
     expect(cdp.sent).not.toContain('Page.stopScreencast');
 
@@ -2263,7 +2324,7 @@ describe('handing the browser to the person watching', () => {
     const seen: BrowserFrame[] = [];
     await c.startWatching('run-A', (f) => seen.push(f));
     cdp.send = realSend;
-    expect(seen, 'the person is looking at a picture').toHaveLength(1);
+    expect(seen, 'the person is looking at a picture').toHaveLength(2);
     // It belongs to THIS watch, which is the property: a generation bumped
     // after the awaited start would have stamped the frame with the previous
     // one and the receipt below would name a watch that no longer exists.
@@ -2292,7 +2353,7 @@ describe('handing the browser to the person watching', () => {
     const first: BrowserFrame[] = [];
     await c.startWatching('run-A', (f) => first.push(f));
     cdp.pushFrame(1);
-    expect(first, 'the first viewer saw the page').toHaveLength(1);
+    expect(first, 'the first viewer saw the page').toHaveLength(2);
     c.frameSeen('run-A', first[0]!.generation);
 
     const second: BrowserFrame[] = [];
@@ -2594,6 +2655,45 @@ describe('handing the browser to the person watching', () => {
     expect(out.ok, 'there is nothing left to take control of').toBe(false);
     expect(out.detail).toMatch(/closed while you were waiting/i);
     expect(c.humanHolds('run-A'), 'and the hold was not granted').toBe(false);
+  });
+
+  it('waits for a picture, not just for the command that asks for one', async () => {
+    // The gate says the page must be VISIBLE before anything changes it, and it
+    // was satisfied by `Page.startScreencast` RESOLVING — which means Chrome
+    // accepted the request, not that it drew anything. So the agent could click
+    // while the panel still showed the page from before the hide, or showed
+    // nothing at all on a provider with no viewer of its own.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+    await c.setCapture('run-A', false);
+    c.handBack('run-A');
+
+    // A screencast that starts and never draws: the page is not coming back.
+    cdp.silentStart = true;
+    const out = await c.controller({ kind: 'click', selector: '#blind' }, ctx('run-A', 'w2'));
+
+    expect(out.ok, 'no picture, no action').toBe(false);
+    expect(out.detail).toMatch(/did not come back on screen/i);
+    expect(page.calls, 'and the page was never touched').not.toContain('click:#blind');
+  });
+
+  it('acts as soon as the restored picture actually arrives', async () => {
+    // The other half: the gate must not become a wall. A screencast that draws
+    // — which is every real one — lets the action straight through.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+    await c.setCapture('run-A', false);
+    c.handBack('run-A');
+
+    const out = await c.controller({ kind: 'click', selector: '#after' }, ctx('run-A', 'w2'));
+    expect(out.ok).toBe(true);
+    expect(page.calls).toContain('click:#after');
   });
 
   it('does not act on a page whose restore the user stopped', async () => {
@@ -2905,7 +3005,9 @@ describe('two watches racing each other', () => {
     // And the reconnected client is the one that receives, not the dead one.
     cdp.pushFrame(1, 'AFTER-RECONNECT');
     expect(after).toEqual(['AFTER-RECONNECT']);
-    expect(before, 'the connection that went away gets nothing').toEqual([]);
+    // Its own attach frame and nothing since: a watcher that has been replaced
+    // stops receiving, which is not the same as never having received.
+    expect(before, 'the connection that went away gets nothing more').toEqual(['BASE64JPEG']);
   });
 
   it('ends up watching after watch, unwatch, watch', async () => {

@@ -63,6 +63,24 @@ const MOVE_INTERVAL_MS = 60;
  * alternative is a page-mode wheel that scrolls three pixels.
  */
 const NOMINAL_LINE_PX = 16;
+
+/**
+ * How often accumulated wheel distance is forwarded.
+ *
+ * Scrolling is sampled like movement, but it cannot be DROPPED like movement:
+ * a position is superseded by the next one, whereas a wheel delta is a distance
+ * that only exists once — throw it away and the page scrolls less far than the
+ * person asked for. So pending deltas are summed rather than discarded, and the
+ * total goes out at this rate.
+ *
+ * It needs a rate at all because a trackpad emits wheel events faster than a
+ * remote CDP round trip, and every one of them was taking the FIFO action slot.
+ * Scrolling also repaints, which invalidates the cached viewport and puts a
+ * `Page.getLayoutMetrics` in front of the next coordinate event — so the
+ * backlog grew faster than it drained, ran past the slot's two-second bound,
+ * and truncated the scroll while refusing whatever click came next.
+ */
+const SCROLL_INTERVAL_MS = 60;
 function wheelPixels(e: { deltaY: number; deltaMode: number }, framePx = 800): number {
   if (e.deltaMode === 1) return e.deltaY * NOMINAL_LINE_PX;
   if (e.deltaMode === 2) return e.deltaY * framePx;
@@ -165,6 +183,10 @@ export function BrowserLiveView({
    */
   const pendingMoveRef = useRef<{ x: number; y: number } | null>(null);
   const moveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Wheel distance not yet sent, summed. See `SCROLL_INTERVAL_MS`. */
+  const pendingScrollRef = useRef<{ x: number; y: number; deltaY: number } | null>(null);
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastScrollRef = useRef(0);
   /**
    * The person paused the picture, and the pause has to reach EVERY way of
    * seeing the page.
@@ -218,6 +240,11 @@ export function BrowserLiveView({
         moveTimerRef.current = null;
       }
       pendingMoveRef.current = null;
+      if (scrollTimerRef.current) {
+        clearTimeout(scrollTimerRef.current);
+        scrollTimerRef.current = null;
+      }
+      pendingScrollRef.current = null;
     };
   }, [driving]);
 
@@ -493,7 +520,30 @@ export function BrowserLiveView({
           onContextMenu={driving ? (e) => e.preventDefault() : undefined}
           onWheel={driving ? (e) => {
             const p = at(e.clientX, e.clientY);
-            if (p) onInput?.({ kind: 'scroll', ...p, deltaY: wheelPixels(e, frame.height) });
+            if (!p) return;
+            const dy = wheelPixels(e, frame.height);
+            const now = Date.now();
+            const since = now - lastScrollRef.current;
+            // Nothing waiting and the window has passed: this one goes as it is.
+            if (since >= SCROLL_INTERVAL_MS && !pendingScrollRef.current) {
+              lastScrollRef.current = now;
+              onInput?.({ kind: 'scroll', ...p, deltaY: dy });
+              return;
+            }
+            // SUMMED, not replaced — a wheel delta is a distance that exists
+            // once, and dropping one scrolls the page less far than the person
+            // asked. The position is the latest, since that is where they are.
+            const pending = pendingScrollRef.current;
+            pendingScrollRef.current = { ...p, deltaY: (pending?.deltaY ?? 0) + dy };
+            if (scrollTimerRef.current) return;
+            scrollTimerRef.current = setTimeout(() => {
+              scrollTimerRef.current = null;
+              const total = pendingScrollRef.current;
+              pendingScrollRef.current = null;
+              if (!total) return;
+              lastScrollRef.current = Date.now();
+              onInput?.({ kind: 'scroll', ...total });
+            }, Math.max(0, SCROLL_INTERVAL_MS - since));
           } : undefined}
           onKeyDown={driving ? onKey : undefined}
           onPaste={driving ? onPaste : undefined}

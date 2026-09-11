@@ -196,6 +196,14 @@ const SCREENCAST = { format: 'jpeg', quality: 60, maxWidth: 1280, maxHeight: 800
 
 /** Default ceiling for a single action, matching the tool's own clamp. */
 const ACTION_TIMEOUT_MS = 30_000;
+/**
+ * How long the agent waits for a restored picture before refusing to act.
+ *
+ * A started screencast emits its first frame immediately, so this is generous
+ * rather than tuned — it is the point at which "the page came back" stops being
+ * plausible, not a latency budget.
+ */
+const RESTORE_FRAME_MS = 2_000;
 
 export interface RemoteBrowserControllerOptions {
   provider: RemoteBrowserProvider;
@@ -298,6 +306,14 @@ interface RunBrowser {
    * measurement per pointer event at most.
    */
   metricsStale?: boolean;
+  /**
+   * Someone waiting for the next frame Chrome produces, resolved once.
+   *
+   * The restore path needs it. `Page.startScreencast` resolving means Chrome
+   * ACCEPTED the command, not that it has drawn anything — so the agent's
+   * visibility gate was satisfied by a request rather than by a picture.
+   */
+  framePing?: (() => void) | undefined;
   /**
    * The HOLDER asked for the picture to stop, as opposed to nobody watching.
    *
@@ -408,7 +424,7 @@ export class RemoteBrowserController {
    * Counted alongside `runs` against the cap. Without it the limit was a
    * check-then-act across four awaits, and simultaneous first uses both won.
    */
-  private opening = new Set<string>();
+  private opening = new Map<string, Promise<RunBrowser>>();
   /**
    * A run's stop signal, created when its slot is reserved.
    *
@@ -590,8 +606,24 @@ export class RemoteBrowserController {
     // rotation. Missing an in-flight open there means the session it is about
     // to allocate is allocated with the credential being retired, on a
     // controller nothing holds a reference to any more.
-    const ids = new Set([...this.runs.keys(), ...this.opening]);
+    const opening = [...this.opening.values()];
+    const ids = new Set([...this.runs.keys(), ...this.opening.keys()]);
     await Promise.all([...ids].map((runId) => this.endRun(runId)));
+    // And then the OPENS THEMSELVES, which `endRun` cannot wait for.
+    //
+    // A run past `createSession` but still inside `connectOverCDP` or page
+    // creation has no entry in `runs`, so `endRun` aborts its signal, forgets
+    // it and returns at once — while `openReserved` is still unwinding, and its
+    // rollback is what calls `endSession` on the session already allocated. So
+    // this method resolved with a live session still held, the replacement
+    // controller's `ready` gate opened on that resolution, and the very
+    // sequencing this exists to provide was defeated in the one case it was
+    // built for: a credential rotation catching a run mid-open.
+    //
+    // Failures are swallowed rather than propagated: these promises are
+    // EXPECTED to reject, because aborting the signal above is what makes them.
+    // What matters here is that they have finished, not how.
+    await Promise.all(opening.map((open) => open.catch(() => {})));
   }
 
   /** A worker finished; it will never ask for the browser again. */
@@ -700,6 +732,12 @@ export class RemoteBrowserController {
         // The page repainted, so whatever was measured before may no longer be
         // true. Broad on purpose: see `metricsStale`.
         held.metricsStale = true;
+        // Chrome has actually drawn something. Fired before delivery and
+        // cleared as it fires, because it is a one-shot answer to "has a
+        // picture come back", not a subscription.
+        const ping = held.framePing;
+        held.framePing = undefined;
+        ping?.();
         // Through the run rather than the captured argument, so a later watcher
         // that joined an already-attached stream is the one that receives.
         const deliver = held.onFrame;
@@ -932,6 +970,45 @@ export class RemoteBrowserController {
       return held.capturing === true;
     }
     return on;
+  }
+
+  /**
+   * Wait, briefly, for Chrome to produce a frame.
+   *
+   * `Page.startScreencast` resolves when the command is accepted, which is not
+   * when a picture exists. The agent's visibility gate — "the page must be
+   * VISIBLE before anything changes it" — was therefore satisfied by a request
+   * rather than by a repaint, and the agent could click while the panel was
+   * still showing the page from before it was hidden, or nothing at all.
+   *
+   * A frame rather than a client receipt, deliberately. A receipt would prove
+   * somebody SAW it, which is stronger — and would make the agent's progress
+   * depend on a viewer that may not exist: this path runs after a handback or a
+   * lapse, when there may be nobody watching at all, and an agent that stalls
+   * because a tab was closed is a worse failure than the one being fixed. What
+   * this does guarantee is ours to guarantee: the stream is producing again.
+   *
+   * Bounded, and the bound rests on the property rounds 14 and 15 already rely
+   * on — a screencast that has just been started emits its first frame at once,
+   * whatever the page is doing. If one does not arrive, the picture genuinely
+   * has not come back, and the caller refuses on the same trade it already
+   * makes when the restore itself fails.
+   */
+  private nextFrame(held: RunBrowser, withinMs = RESTORE_FRAME_MS): Promise<boolean> {
+    // ARMED BEFORE the caller asks for the picture, never after. Chrome can
+    // deliver the first frame before `Page.startScreencast` resolves — round 7
+    // was that exact ordering, on a different flag — so a waiter installed once
+    // the command came back would miss the very frame it is waiting for and
+    // then time out with the picture already on screen.
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        if (held.framePing === ping) held.framePing = undefined;
+        resolve(false);
+      }, withinMs);
+      timer.unref?.();
+      const ping = () => { clearTimeout(timer); resolve(true); };
+      held.framePing = ping;
+    });
   }
 
   /** Whether a person is driving this run's browser right now. */
@@ -1522,12 +1599,26 @@ export class RemoteBrowserController {
       // enforce. If the picture cannot be brought back, the action does not
       // happen — the same trade the desktop's visibility gate makes.
       if (held.screencast && held.capturing === false) {
+        // Listening for the picture BEFORE asking for it — see `nextFrame`.
+        const drawn = this.nextFrame(held);
         // `applyCapture`, not `setCapture`: this already holds the action slot,
         // and asking for it again would deadlock against itself.
         if (!(await this.applyCapture(runId, held, held.screencast, true))) {
           return {
             ok: false,
             detail: 'The page could not be shown again, so nothing was done to it.',
+          };
+        }
+        // And then for a PICTURE, not just for the command that asks for one.
+        // See `awaitFrame`: `Page.startScreencast` resolving says Chrome
+        // accepted the request, so the gate this block exists to enforce was
+        // being satisfied without anything having been drawn — the agent could
+        // click while the panel still showed the page from before the hide, or
+        // showed nothing at all on a provider with no viewer of its own.
+        if (!(await drawn)) {
+          return {
+            ok: false,
+            detail: 'The page did not come back on screen, so nothing was done to it.',
           };
         }
         // Re-checked AFTER the restore, because the restore is a CDP round trip
@@ -1618,14 +1709,21 @@ export class RemoteBrowserController {
         'Try again when one finishes, or raise the session limit in settings.',
       );
     }
-    this.opening.add(runId);
     // Created here, not after the browser exists, so a Stop arriving mid-open
     // has something to abort — and so the RunBrowser adopts the same signal
-    // rather than a new one that has forgotten it.
+    // rather than a new one that has forgotten it. BEFORE `openReserved` is
+    // called, because it reads this signal to cancel `createSession`.
     if (!this.aborts.has(runId)) this.aborts.set(runId, new AbortController());
+    // The reservation holds the PROMISE, not just the id, so `dispose` can wait
+    // for the open to finish unwinding rather than only asking it to stop. Both
+    // statements are synchronous with respect to each other — `openReserved`
+    // suspends at its first await and returns here before anything else can
+    // run — so the slot is still reserved before any interleaving is possible.
+    const opening = this.openReserved(runId, signal);
+    this.opening.set(runId, opening);
 
     try {
-      return await this.openReserved(runId, signal);
+      return await opening;
     } finally {
       // Released on every path. A reservation that leaked would count against
       // the cap forever and wedge the deployment.

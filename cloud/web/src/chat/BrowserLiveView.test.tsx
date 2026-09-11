@@ -144,6 +144,8 @@ describe('BrowserLiveView — taking the page over', () => {
   const frame = { data: 'AAAA', width: 1280, height: 800 };
   /** Mirrors `MOVE_INTERVAL_MS` in the component. */
   const MOVE_INTERVAL = 60;
+  /** Mirrors `SCROLL_INTERVAL_MS` in the component. */
+  const SCROLL_INTERVAL = 60;
 
   it('offers control only where there are frames to drive', () => {
     // The provider's iframe has no lease behind it: input through it would be a
@@ -258,19 +260,61 @@ describe('BrowserLiveView — taking the page over', () => {
     Object.defineProperty(img, 'naturalHeight', { value: 800 });
     img.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
 
-    fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 120, deltaMode: 0 });
-    expect(onInput, 'pixels are already pixels')
-      .toHaveBeenCalledWith({ kind: 'scroll', x: 0.5, y: 0.5, deltaY: 120 });
+    // Spaced past the sampling window, so each is sent as itself rather than
+    // summed with the one before — the accumulation has its own test below.
+    const now = vi.spyOn(Date, 'now');
+    try {
+      now.mockReturnValue(1_000);
+      fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 120, deltaMode: 0 });
+      expect(onInput, 'pixels are already pixels')
+        .toHaveBeenCalledWith({ kind: 'scroll', x: 0.5, y: 0.5, deltaY: 120 });
 
-    onInput.mockClear();
-    fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 3, deltaMode: 1 });
-    expect(onInput, 'three lines is a notch, not three pixels')
-      .toHaveBeenCalledWith({ kind: 'scroll', x: 0.5, y: 0.5, deltaY: 48 });
+      onInput.mockClear();
+      now.mockReturnValue(1_200);
+      fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 3, deltaMode: 1 });
+      expect(onInput, 'three lines is a notch, not three pixels')
+        .toHaveBeenCalledWith({ kind: 'scroll', x: 0.5, y: 0.5, deltaY: 48 });
 
-    onInput.mockClear();
-    fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 1, deltaMode: 2 });
-    expect(onInput, 'and a page is the height of the picture')
-      .toHaveBeenCalledWith({ kind: 'scroll', x: 0.5, y: 0.5, deltaY: 800 });
+      onInput.mockClear();
+      now.mockReturnValue(1_400);
+      fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 1, deltaMode: 2 });
+      expect(onInput, 'and a page is the height of the picture')
+        .toHaveBeenCalledWith({ kind: 'scroll', x: 0.5, y: 0.5, deltaY: 800 });
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('sums the wheel distance it did not send yet', async () => {
+    // Every wheel event took the FIFO action slot, and a trackpad emits them
+    // faster than a remote CDP round trip — so the backlog outran the slot's
+    // two-second bound, truncating the scroll and refusing whatever click came
+    // after it. Sampled like movement, but SUMMED rather than dropped: a
+    // position is superseded by the next one, a distance is not.
+    vi.useFakeTimers();
+    try {
+      const onInput = vi.fn();
+      render(
+        <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+      );
+      const img = screen.getByRole('img') as HTMLImageElement;
+      Object.defineProperty(img, 'naturalWidth', { value: 1280 });
+      Object.defineProperty(img, 'naturalHeight', { value: 800 });
+      img.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
+
+      // A trackpad flick: many events, one gesture.
+      for (let i = 0; i < 5; i += 1) {
+        fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 10, deltaMode: 0 });
+      }
+      expect(onInput, 'the first goes at once').toHaveBeenCalledTimes(1);
+
+      await act(async () => { vi.advanceTimersByTime(SCROLL_INTERVAL); });
+      expect(onInput, 'and the rest arrive as one').toHaveBeenCalledTimes(2);
+      expect(onInput.mock.calls.at(-1)?.[0], 'carrying every pixel of it')
+        .toEqual({ kind: 'scroll', x: 0.5, y: 0.5, deltaY: 40 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not take focus back from wherever the person put it', () => {

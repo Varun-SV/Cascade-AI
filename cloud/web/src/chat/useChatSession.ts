@@ -486,6 +486,38 @@ export function useChatSession(
     });
   }, [socket]);
 
+  /**
+   * Drop a refusal the person has moved on from.
+   *
+   * The notice was documented as lasting "until the next thing the server says
+   * about this browser" — and `announceControl` DEDUPES on `human:capturing:
+   * confirmed`, so when a refusal changes none of those (an unsupported key,
+   * say) the next thing never comes. "That key cannot be sent" then sat on the
+   * panel for the rest of the takeover while every click and keystroke after it
+   * worked, because success is silent by design: a reply per event would double
+   * the traffic to say nothing.
+   *
+   * So the person doing something else is what clears it. That is the signal
+   * actually available here — the server cannot send one without inventing an
+   * acknowledgement for every event, which is the design this deliberately does
+   * not have.
+   */
+  const clearBrowserNotice = useCallback((taskId: string) => {
+    setBrowserViews((prev) => {
+      let changed = false;
+      const next: typeof prev = {};
+      for (const [key, view] of Object.entries(prev)) {
+        if (view.taskId === taskId && view.notice !== undefined) {
+          changed = true;
+          next[key] = { ...view, notice: undefined };
+        } else {
+          next[key] = view;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, []);
+
   const stopBrowser = useCallback(() => {
     // The task id, which the server requires to match exactly. Without it the
     // Stop is ignored — which is the correct failure: better a button that does
@@ -513,13 +545,15 @@ export function useChatSession(
    */
   const takeOverBrowser = useCallback(() => {
     if (!browserTaskIdRef.current) return;
+    clearBrowserNotice(browserTaskIdRef.current);
     socket?.emit('browser:take-over', { taskId: browserTaskIdRef.current });
-  }, [socket]);
+  }, [socket, clearBrowserNotice]);
 
   const handBackBrowser = useCallback(() => {
     if (!browserTaskIdRef.current) return;
+    clearBrowserNotice(browserTaskIdRef.current);
     socket?.emit('browser:hand-back', { taskId: browserTaskIdRef.current });
-  }, [socket]);
+  }, [socket, clearBrowserNotice]);
 
   /**
    * Refused while the socket is down, rather than sent and buffered.
@@ -537,13 +571,15 @@ export function useChatSession(
    */
   const sendBrowserInput = useCallback((event: BrowserInputEvent) => {
     if (!browserTaskIdRef.current || !socket?.connected) return;
+    clearBrowserNotice(browserTaskIdRef.current);
     socket.emit('browser:input', { taskId: browserTaskIdRef.current, event });
-  }, [socket]);
+  }, [socket, clearBrowserNotice]);
 
   const setBrowserCapture = useCallback((on: boolean) => {
     if (!browserTaskIdRef.current || !socket?.connected) return;
+    clearBrowserNotice(browserTaskIdRef.current);
     socket.emit('browser:capture', { taskId: browserTaskIdRef.current, on });
-  }, [socket]);
+  }, [socket, clearBrowserNotice]);
 
   /**
    * Start a NEW viewing boundary on this run's browser.
@@ -1035,10 +1071,10 @@ export function useChatSession(
             ...(e.capturing === false ? { frame: undefined } : {}),
             // Cleared by the next thing the server says about this browser —
             // every ownership announcement carries `human`, and none of them
-            // carries a detail, so a refusal lasts until something else
-            // happens rather than sitting on the panel for the rest of the run.
-            // Not "until ownership CHANGES": a stale "that key cannot be sent"
-            // would then survive every unrelated action the user took after it.
+            // carries a detail. That is not enough on its own: `announceControl`
+            // dedupes on the state it carries, so a refusal that changed none of
+            // it is followed by silence. `clearBrowserNotice` covers that from
+            // the other side, when the person does the next thing.
             ...(typeof e.detail === 'string' ? { notice: e.detail } : { notice: undefined }),
           },
         };
