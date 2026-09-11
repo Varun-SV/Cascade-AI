@@ -457,7 +457,7 @@ export class RemoteBrowserController {
    * own teardown settles, so a later, genuine re-open of the same run id
    * never collides with one still in flight.
    */
-  private closing = new Set<string>();
+  private closing = new Map<string, Promise<void>>();
   /** Runs the user has stopped, by run id — same meaning as on the desktop. */
   private revoked = new Set<string>();
   /**
@@ -606,7 +606,6 @@ export class RemoteBrowserController {
     const held = this.runs.get(runId);
     if (!held) return;
     this.runs.delete(runId);
-    this.closing.add(runId);
     // Awaited, not fired and forgotten: the caller is about to report the
     // refusal, and the session should be gone by the time it does. Otherwise
     // "stopped" and "still paying for a browser" are true at the same moment.
@@ -642,6 +641,20 @@ export class RemoteBrowserController {
     // EXPECTED to reject, because aborting the signal above is what makes them.
     // What matters here is that they have finished, not how.
     await Promise.all(opening.map((open) => open.catch(() => {})));
+    // And the teardowns ALREADY UNDER WAY, which is the third of the three
+    // states this pool counts and the one disposal did not wait for.
+    //
+    // `stopRun` deletes the run, counts the slot in `closing` and fires the
+    // teardown WITHOUT awaiting it — deliberately, since its callers do not
+    // await `stopRun`. So a rotation landing in that window found the run in
+    // neither `runs` nor `opening`, resolved at once, and the replacement's
+    // `ready` barrier opened while the outgoing provider session was still
+    // being handed back. The admission check one screen down counts all three
+    // states; this waited for two of them.
+    //
+    // Snapshotted AFTER the two waits above, because unwinding an open or
+    // ending a run is itself a thing that starts a teardown.
+    await Promise.all([...this.closing.values()].map((done) => done.catch(() => {})));
   }
 
   /** A worker finished; it will never ask for the browser again. */
@@ -1415,13 +1428,12 @@ export class RemoteBrowserController {
     // just been told the browser is no longer in use. `revoked` keeps refusing
     // further actions, so giving the session back costs nothing.
     this.runs.delete(runId);
-    // Added to `closing` synchronously, in this same synchronous stretch of
-    // `stopRun`, so the pool counts this slot as still-in-use for the entire
-    // window between here and the fire-and-forget teardown settling — not
-    // just for the part of it this function happens to await. `stopRun` must
-    // stay synchronous (callers do not await it), so the teardown itself is
-    // still fire-and-forget; only the bookkeeping around it changed.
-    this.closing.add(runId);
+    // `teardown` counts the slot synchronously, in this same synchronous
+    // stretch of `stopRun`, so the pool sees it as still-in-use for the entire
+    // window rather than only for the part this function happens to await.
+    // `stopRun` must stay synchronous (callers do not await it), so the work
+    // itself is still fire-and-forget — but the promise is now RECORDED, which
+    // is what lets `dispose` wait for it.
     void this.teardown(runId, held);
   }
 
@@ -1437,7 +1449,6 @@ export class RemoteBrowserController {
     const held = this.runs.get(runId);
     if (!held) { this.forgetRun(runId); return; }
     this.runs.delete(runId);
-    this.closing.add(runId);
     await this.teardown(runId, held);
     this.forgetRun(runId);
   }
@@ -1509,12 +1520,19 @@ export class RemoteBrowserController {
    * guarantees the removal happens, success or failure, so a disposal that
    * throws cannot leave the slot counted against the pool forever.
    */
-  private async teardown(runId: string, held: RunBrowser): Promise<void> {
-    try {
-      await this.disposeRun(runId, held);
-    } finally {
-      this.closing.delete(runId);
-    }
+  private teardown(runId: string, held: RunBrowser): Promise<void> {
+    // Both halves live here now. The caller used to add the id and this used to
+    // remove it, which split one piece of bookkeeping across two places and
+    // meant the PROMISE — the thing `dispose` needs — existed nowhere at all.
+    //
+    // Still synchronous with respect to the caller's `runs.delete`: this runs
+    // `disposeRun` up to its first await and records the result before
+    // returning, and nothing else can interleave in a synchronous stretch. So
+    // the slot is counted for the entire window, which is what the field
+    // comment promises.
+    const done = this.disposeRun(runId, held).finally(() => { this.closing.delete(runId); });
+    this.closing.set(runId, done);
+    return done;
   }
 
   private async act(action: BrowserAction, context: BrowserActionContext): Promise<BrowserActionOutcome> {
@@ -1710,7 +1728,6 @@ export class RemoteBrowserController {
       // session is disposed of, a DIFFERENT run's admission check below could
       // see this slot as free and get admitted before the old session was
       // actually released.
-      this.closing.add(runId);
       await this.teardown(runId, existing);
     }
 

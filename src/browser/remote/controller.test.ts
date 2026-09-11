@@ -612,6 +612,44 @@ describe('retiring a controller mid-open', () => {
 });
 
 describe('a controller that has been retired', () => {
+  it('waits for a teardown the user already started', async () => {
+    // `stopRun` deletes the run, counts its slot in `closing` and fires the
+    // teardown WITHOUT awaiting it — deliberately, because its callers do not
+    // await `stopRun`. A rotation landing in that window found the run in
+    // neither `runs` nor `opening`, so disposal resolved at once and the
+    // replacement's `ready` barrier opened while the outgoing provider session
+    // was still being handed back. The pool's own admission check counts all
+    // three states; disposal waited for two of them.
+    const { provider, ended } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    // Held inside the release, after the run has left `runs`.
+    const releasing = deferred();
+    const realEnd = provider.endSession;
+    provider.endSession = async (id: string) => {
+      await releasing.promise;
+      return realEnd.call(provider, id);
+    };
+
+    c.stopRun('run-A');
+    await new Promise((r) => setTimeout(r, 20));
+    expect(ended, 'the session has not been handed back yet').toEqual([]);
+
+    // WHETHER IT HAS SETTLED, not what is true once it has. Asserting `ended`
+    // after `await disposing` passes either way: the release completes during
+    // the ticks that await costs, so the first draft of this test went green
+    // against the very thing it was written for.
+    let settled = false;
+    const disposing = c.dispose().then(() => { settled = true; });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(settled, 'dispose is still waiting for a release it did not start').toBe(false);
+
+    releasing.resolve();
+    await disposing;
+    expect(ended, 'and the session really is back').toEqual(['sess-1']);
+  });
+
   it('does not allocate after being replaced, even from a wait it was already in', async () => {
     // A caller parked on the `ready` gate holds no run and has reserved no
     // slot, so it is invisible to `dispose()`. A SECOND settings change
