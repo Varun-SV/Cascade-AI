@@ -1,0 +1,207 @@
+name: PR248 targeted follow-up
+
+on:
+  push:
+    branches:
+      - claude/desktop-app-features-j8qfoj
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Apply exact follow-up fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          controller = Path('src/browser/remote/controller.ts')
+          s = controller.read_text()
+
+          old = '''    // A replacement inherits THIS controller's whole predecessor chain, not
+              // just the sessions this instance happened to open. Consider A → B → C:
+              // B may be retired while it is still parked on A's teardown and has opened
+              // nothing of its own. If B.dispose() resolves immediately, C waits for B
+              // and then allocates while A is still releasing — exactly the overlap the
+              // ready barrier is meant to prevent. Snapshot it before any await; open()
+              // may clear the field once it observes the predecessor settle.
+              const predecessor = this.ready;
+          '''
+          # Strip indentation introduced by this Python literal itself.
+          old = old.replace('              ', '    ')
+          assert old in s, 'controller predecessor snapshot block not found'
+          s = s.replace(old, '', 1)
+
+          old = '''    // Last because it may be the longest wait and our own cleanup does not
+              // depend on it. It is nevertheless part of OUR disposal contract: whoever
+              // replaces us waits on this promise, so resolving before the inherited
+              // barrier does would break a repeated rotation.
+              if (predecessor) {
+                try { await predecessor; } catch { /* predecessor reports its own cleanup trouble */ }
+              }
+          '''
+          old = old.replace('              ', '    ')
+          assert old in s, 'controller predecessor wait block not found'
+          s = s.replace(old, '', 1)
+
+          old = '''    // For a confirmed restore this means "the start command was accepted";
+              // the caller still waits for the frame. For every other transition it is
+              // also the resulting capture state.
+              return true;
+          '''
+          old = old.replace('              ', '    ')
+          new = '''    // For a confirmed restore `on` is true, so this still means "the start
+              // command was accepted" and the caller waits for the frame. For an ordinary
+              // transition the return value is the resulting capture state — false for
+              // Hide, true for Show — which is the public `setCapture` contract.
+              return on;
+          '''
+          new = new.replace('              ', '    ')
+          assert old in s, 'applyCapture success return block not found'
+          s = s.replace(old, new, 1)
+          controller.write_text(s)
+
+          remote = Path('cloud/server/src/remote-browser.ts')
+          s = remote.read_text()
+
+          marker = "let shared: { settings: RemoteBrowserSettings; controller: RemoteBrowserController } | null = null;\n"
+          assert marker in s, 'shared controller declaration not found'
+          insertion = marker + '''
+
+          /**
+           * Every controller retirement that has to finish before a newer provider may
+           * allocate.
+           *
+           * This lives beside `shared`, not inside an individual controller. Consider
+           * A → B → C while A is still releasing: B may have opened nothing because it
+           * is parked on A's `ready` promise, so B.dispose() is correctly free to finish
+           * immediately. If C waited only for B, however, it would forget A entirely.
+           * Chaining retirements here preserves the DEPLOYMENT'S history across as many
+           * rapid rotations as occur, without turning `RemoteBrowserController.dispose`
+           * into a wait on a promise owned by its caller.
+           *
+           * The chain is kept non-rejecting. Disposal is best-effort and already reports
+           * its own cleanup failures; a stale provider failing to tidy up must not wedge
+           * every future browser action forever.
+           */
+          let retirementBarrier: Promise<void> = Promise.resolve();
+
+          function retireController(controller: RemoteBrowserController): Promise<void> {
+            const before = retirementBarrier.catch(() => {});
+            const mine = controller.dispose().catch(() => {});
+            retirementBarrier = Promise.all([before, mine]).then(() => {});
+            return retirementBarrier;
+          }
+          '''
+          insertion = insertion.replace('\n          ', '\n')
+          s = s.replace(marker, insertion, 1)
+
+          old = '''export async function resetSharedBrowser(): Promise<void> {
+            const previous = shared;
+            shared = null;
+            await previous?.controller.dispose();
+          }
+          '''.replace('\n          ', '\n')
+          new = '''export async function resetSharedBrowser(): Promise<void> {
+            const previous = shared;
+            shared = null;
+            if (previous) await retireController(previous.controller);
+            else await retirementBarrier;
+          }
+          '''.replace('\n          ', '\n')
+          assert old in s, 'resetSharedBrowser block not found'
+          s = s.replace(old, new, 1)
+
+          old = '''  // Reused across runs. A settings change makes a new one and disposes the old
+            // rather than leaving its sessions running at the operator's expense.
+            let retiring: Promise<unknown> | undefined;
+            if (shared && !sameProviderConfig(shared.settings, settings)) {
+              // KEPT, not discarded. Disposal detaches CDP sessions and hands provider
+              // sessions back over the network, so it is not instant — and the
+              // replacement below used to start work immediately, which meant the first
+              // action after a settings change could call `createSession` while the
+              // outgoing controller was still releasing. Two controllers holding
+              // sessions against one provider's cap, which neither pool can see because
+              // each counts only its own. On a provider that enforces its own limit the
+              // action simply fails, and it is the first one after the operator changed
+              // something, which is exactly when it will be blamed on the change.
+              //
+              // Handed to the new controller as its `ready` rather than awaited here:
+              // this function is synchronous by contract — the caller wires listeners on
+              // what it returns — and the wait only has to happen before the new
+              // controller OPENS anything, not before it exists.
+              retiring = shared.controller.dispose();
+              shared = null;
+            }
+            if (!shared) {
+              generation += 1;
+              shared = {
+                settings: { ...settings },
+                controller: new RemoteBrowserController({
+                  provider,
+                  ...(settings.maxSessions ? { maxSessions: settings.maxSessions } : {}),
+                  ...(retiring ? { ready: retiring } : {}),
+                }),
+              };
+            }
+          '''.replace('\n            ', '\n')
+          new = '''  // Reused across runs. A settings change makes a new one and retires the old
+            // rather than leaving its sessions running at the operator's expense.
+            //
+            // The readiness barrier is deployment-scoped. On A → B → C, B may have no
+            // session of its own yet because it is still waiting for A; C nevertheless
+            // has to wait for BOTH retirements. `retireController` folds every outgoing
+            // controller into one chain, so a rapid second rotation cannot forget the
+            // first provider that is still handing a session back.
+            let retiring: Promise<void> | undefined;
+            if (shared && !sameProviderConfig(shared.settings, settings)) {
+              retiring = retireController(shared.controller);
+              shared = null;
+            }
+            if (!shared) {
+              generation += 1;
+              shared = {
+                settings: { ...settings },
+                controller: new RemoteBrowserController({
+                  provider,
+                  ...(settings.maxSessions ? { maxSessions: settings.maxSessions } : {}),
+                  // Also inherit a reset/retirement already in flight even when there is
+                  // no current `shared` entry to rotate in this call.
+                  ready: retiring ?? retirementBarrier,
+                }),
+              };
+            }
+          '''.replace('\n            ', '\n')
+          assert old in s, 'attach rotation block not found'
+          s = s.replace(old, new, 1)
+          remote.write_text(s)
+          PY
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify targeted regressions
+        run: npx vitest run src/browser/remote/controller.test.ts cloud/server/src/remote-browser.test.ts
+
+      - name: Commit verified fixes and remove temporary workflow
+        shell: bash
+        run: |
+          git rm .github/workflows/pr248-targeted-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/browser/remote/controller.ts cloud/server/src/remote-browser.ts
+          git commit -m "fix(browser): preserve rotation barriers across replacements"
+          git push origin HEAD:claude/desktop-app-features-j8qfoj
