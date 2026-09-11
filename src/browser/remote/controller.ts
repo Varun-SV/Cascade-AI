@@ -283,6 +283,18 @@ interface RunBrowser {
    */
   capturing?: boolean;
   /**
+   * A start-screencast command has been accepted but no frame has proved that
+   * visibility has actually returned yet.
+   *
+   * This is deliberately separate from `capturing`. The latter is UI state;
+   * this is a safety gate. If Chrome accepts a restore and then produces no
+   * frame before the timeout, the first agent action is refused. Without this
+   * record the NEXT action saw `capturing: true` and skipped the gate entirely,
+   * mutating a page the user still could not see. Only an actual frame clears
+   * this flag.
+   */
+  visibilityUnconfirmed?: boolean;
+  /**
    * The main frame's viewport, in CSS pixels, from `Page.getLayoutMetrics`.
    *
    * NOT the screencast metadata, which is where this used to come from and was
@@ -616,6 +628,14 @@ export class RemoteBrowserController {
   async dispose(): Promise<void> {
     // FIRST, and synchronously. See `retired`.
     this.retired = true;
+    // A replacement inherits THIS controller's whole predecessor chain, not
+    // just the sessions this instance happened to open. Consider A → B → C:
+    // B may be retired while it is still parked on A's teardown and has opened
+    // nothing of its own. If B.dispose() resolves immediately, C waits for B
+    // and then allocates while A is still releasing — exactly the overlap the
+    // ready barrier is meant to prevent. Snapshot it before any await; open()
+    // may clear the field once it observes the predecessor settle.
+    const predecessor = this.ready;
     // Runs still OPENING as well as runs already open. A run inside `open()`
     // has no RunBrowser yet, so enumerating `runs` alone walked straight past
     // it — and the caller for this is `attachRemoteBrowser` noticing the
@@ -655,6 +675,13 @@ export class RemoteBrowserController {
     // Snapshotted AFTER the two waits above, because unwinding an open or
     // ending a run is itself a thing that starts a teardown.
     await Promise.all([...this.closing.values()].map((done) => done.catch(() => {})));
+    // Last because it may be the longest wait and our own cleanup does not
+    // depend on it. It is nevertheless part of OUR disposal contract: whoever
+    // replaces us waits on this promise, so resolving before the inherited
+    // barrier does would break a repeated rotation.
+    if (predecessor) {
+      try { await predecessor; } catch { /* predecessor reports its own cleanup trouble */ }
+    }
   }
 
   /** A worker finished; it will never ask for the browser again. */
@@ -763,6 +790,18 @@ export class RemoteBrowserController {
         // The page repainted, so whatever was measured before may no longer be
         // true. Broad on purpose: see `metricsStale`.
         held.metricsStale = true;
+        // A real frame is the only proof a requested restore became visible.
+        // When the agent is waiting for that proof we intentionally keep the
+        // external `capturing` state false until this exact point, so a reload
+        // cannot expose a provider iframe during the gap and a second agent
+        // action cannot skip the gate if the first attempt timed out.
+        if (held.visibilityUnconfirmed) {
+          held.visibilityUnconfirmed = false;
+          if (held.capturing !== true) {
+            held.capturing = true;
+            this.announceControl(runId);
+          }
+        }
         // Chrome has actually drawn something. Fired before delivery and
         // cleared as it fires, because it is a one-shot answer to "has a
         // picture come back", not a subscription.
@@ -882,6 +921,12 @@ export class RemoteBrowserController {
   async setCapture(runId: string, on: boolean): Promise<boolean> {
     const held = this.runs.get(runId);
     const cdp = held?.screencast;
+    // The view this request was aimed at. Hide is not a run-level command: it
+    // means "hide the page I just saw". A watch can be replaced while this call
+    // waits for the action slot, so post-wait authorisation must still name the
+    // same watch/session rather than merely find that SOME current watch has a
+    // receipt.
+    const watch = held?.watchGen;
     if (!held || !cdp) return false;
     // Only the person holding the page may hide it, and this is the guard that
     // makes "hidden" a property of the takeover rather than a mode anyone can
@@ -901,7 +946,7 @@ export class RemoteBrowserController {
     // client this protects is the stale one whose button is still wired to
     // `streaming`; it does not lie, it simply never got the frame, and so it
     // never sends the receipt.
-    if (!on && (held.watchGen === undefined || held.seenGen !== held.watchGen)) {
+    if (!on && (watch === undefined || held.seenGen !== watch)) {
       return held.capturing === true;
     }
     // Hide and Show are things the holder DID, so they extend the hold like any
@@ -927,43 +972,26 @@ export class RemoteBrowserController {
       // Re-checked after the wait — ALL of it, not just the hold.
       //
       // The watch queue does not take the action slot, so everything this
-      // method validated before parking can move while it is parked: a remount
-      // detaches the session and attaches another, and a reconnect keeps the
-      // session but bumps the watch. Only the hold was re-read, which made the
-      // other two stale by exactly the same mechanism the hold re-check exists
-      // for.
+      // method validated before parking can move while it is parked. For Hide,
+      // the current watch merely being confirmed is insufficient: watcher A
+      // can be replaced by confirmed watcher B while this request waits, and
+      // stopping A's captured CDP session then both fails silently and records
+      // the wrong privacy state. Authorisation is therefore tied to the exact
+      // watch AND exact session the request was aimed at.
       //
       // Refusing rather than retargeting. Hide is a statement about the page
       // the person was looking at; applying it to a watch that replaced theirs
       // is not what they asked for, and the safe direction here is the picture
-      // staying ON. Stopping the session captured before the wait would have
-      // been worse than either: it records the page as hidden while the live
-      // session keeps sending frames, so the password goes out over a panel
-      // the person believes is dark.
-      //
-      // The watch re-check covers the swapped session too, and deliberately
-      // does it alone: `attachScreencast` is reachable only through
-      // `startWatching`, which bumps the watch BEFORE it attaches, so a session
-      // that changed is always a watch that changed. A second check on
-      // `held.screencast` was written first and its revert-check went green —
-      // two answers to one question, which is how they come to disagree. If
-      // that ordering in `startWatching` ever changes, this is the comment
-      // that should stop you.
+      // staying ON. Show is different: it ends a RUN-level pause, so it may
+      // deliberately retarget the current session below.
       if (!on && !lease.heldByHuman) return held.capturing === true;
-      if (!on && (held.watchGen === undefined || held.seenGen !== held.watchGen)) {
+      if (!on && (held.screencast !== cdp || held.watchGen !== watch)) {
+        return held.capturing === true;
+      }
+      if (!on && (watch === undefined || held.seenGen !== watch)) {
         return held.capturing === true;
       }
       // SHOW re-reads the session; HIDE keeps the one it was aimed at.
-      //
-      // Not an inconsistency — the two requests are about different things.
-      // Hiding is aimed at a page somebody is looking at, so hiding whatever
-      // replaced it is the wrong page and is refused above. Showing is asking
-      // for a pause to end, and the pause lives on the RUN (`hiddenByHolder`),
-      // which the replacement session inherits and attaches paused. Aiming
-      // Show at the session captured before the wait meant that after a remount
-      // it targeted a detached one: `applyCapture` swallows the failure, the
-      // socket handler ignores its `false`, and the button silently did nothing
-      // to a page that was still hidden.
       const target = on ? held.screencast : cdp;
       if (!target) return held.capturing === true;
       const now = await this.applyCapture(runId, held, target, on);
@@ -980,13 +1008,34 @@ export class RemoteBrowserController {
    * Separate because the agent's restore in `act()` already holds the action
    * slot — taking it again there would deadlock against itself, and the whole
    * point of that call site is that it happens INSIDE the agent's turn.
+   *
+   * `confirmWithFrame` is used only by the agent's visibility gate. There, a
+   * successful CDP command is not enough: the externally visible state remains
+   * paused until a frame arrives, and the frame handler is the only code that
+   * promotes it to capturing. This makes a restore timeout sticky rather than
+   * a one-action refusal.
    */
-  private async applyCapture(runId: string, held: RunBrowser, cdp: CDPSession, on: boolean): Promise<boolean> {
-    if (held.capturing === on) return on;
+  private async applyCapture(
+    runId: string,
+    held: RunBrowser,
+    cdp: CDPSession,
+    on: boolean,
+    confirmWithFrame = false,
+  ): Promise<boolean> {
+    if (held.capturing === on && !(on && confirmWithFrame && held.visibilityUnconfirmed)) return on;
     try {
       if (on) await cdp.send('Page.startScreencast', { ...SCREENCAST });
       else await cdp.send('Page.stopScreencast');
-      held.capturing = on;
+      if (on) {
+        held.visibilityUnconfirmed = true;
+        // A user pressing Show can be told the stream command succeeded, but
+        // the agent's restore is stricter: keep it externally paused until an
+        // actual frame proves visibility is back.
+        if (!confirmWithFrame) held.capturing = true;
+      } else {
+        held.visibilityUnconfirmed = false;
+        held.capturing = false;
+      }
       // The decision, recorded separately from whether frames are flowing.
       // Turning the picture off here is only ever the holder asking for it —
       // `setCapture` refuses everyone else — and turning it back on is the one
@@ -998,9 +1047,12 @@ export class RemoteBrowserController {
       // The page went away underneath. Report what is actually true rather
       // than what was requested — a UI that believes it is streaming when it
       // is not is the failure this whole panel exists to avoid.
-      return held.capturing === true;
+      return held.capturing === true && !held.visibilityUnconfirmed;
     }
-    return on;
+    // For a confirmed restore this means "the start command was accepted";
+    // the caller still waits for the frame. For every other transition it is
+    // also the resulting capture state.
+    return true;
   }
 
   /**
@@ -1189,12 +1241,13 @@ export class RemoteBrowserController {
     // the agent acquire and act while the click was still going in. It also
     // serializes the person's own events against each other, so a fast typist
     // cannot interleave two dispatches on one page.
-    // Movement never queues; everything else waits its turn. See `tryActionSlot`
-    // for why the two are different, and `emitFrame` for the same trade made on
-    // the way out — the newest picture beats a banked old one, and the newest
-    // pointer position beats a banked old one for exactly the same reason.
+    // Movement never queues; everything else waits its turn. Discrete input is
+    // intentionally unbounded HERE: once a click, key or committed text event
+    // has been accepted into the FIFO, expiring it because earlier accepted
+    // input took two seconds would silently truncate what the person typed.
+    // Agent handoff/takeover waits remain bounded at their own call sites.
     const sampled = event.kind === 'move';
-    const token = sampled ? lease.tryActionSlot() : await lease.acquireActionSlot();
+    const token = sampled ? lease.tryActionSlot() : await lease.acquireActionSlot(null);
     if (!token) {
       // A dropped sample is not a refusal, and must not be reported as one:
       // the caller turns `ok: false` into a notice on the person's screen, and
@@ -1628,30 +1681,44 @@ export class RemoteBrowserController {
       //
       // The other half of the guard above: a takeover can end — handed back, or
       // lapsed — while capture is still suspended, and the agent's next action
-      // would then run behind a paused panel. Restoring here rather than at the
-      // moment the hold ends puts the check where it actually matters: between
-      // acquiring the browser and touching the page, nothing has happened yet,
-      // so this is the last point at which "you can see it" is still true to
-      // enforce. If the picture cannot be brought back, the action does not
-      // happen — the same trade the desktop's visibility gate makes.
-      if (held.screencast && held.capturing === false) {
+      // would then run behind a paused panel. A failed restore also remains in
+      // this gate via `visibilityUnconfirmed`: accepting startScreencast is not
+      // enough, and timing out once must not make the NEXT action skip the
+      // check. Restoring here rather than when the hold ends keeps the invariant
+      // immediately in front of the page mutation it protects.
+      if (held.screencast && (held.capturing === false || held.visibilityUnconfirmed === true)) {
+        const cdp = held.screencast;
+        // If a previous Show/restore command was accepted but produced no
+        // frame, force a clean restart. Merely calling startScreencast again on
+        // an already-running stream is allowed to be a no-op and therefore may
+        // not produce the keyframe this gate needs.
+        if (held.capturing === true) {
+          await cdp.send('Page.stopScreencast').catch(() => {});
+          held.capturing = false;
+          this.announceControl(runId);
+        }
         // Listening for the picture BEFORE asking for it — see `nextFrame`.
         const drawn = this.nextFrame(held);
         // `applyCapture`, not `setCapture`: this already holds the action slot,
-        // and asking for it again would deadlock against itself.
-        if (!(await this.applyCapture(runId, held, held.screencast, true))) {
+        // and asking for it again would deadlock against itself. Keep the
+        // external state paused until the frame itself confirms visibility.
+        if (!(await this.applyCapture(runId, held, cdp, true, true))) {
           return {
             ok: false,
             detail: 'The page could not be shown again, so nothing was done to it.',
           };
         }
         // And then for a PICTURE, not just for the command that asks for one.
-        // See `awaitFrame`: `Page.startScreencast` resolving says Chrome
-        // accepted the request, so the gate this block exists to enforce was
-        // being satisfied without anything having been drawn — the agent could
-        // click while the panel still showed the page from before the hide, or
-        // showed nothing at all on a provider with no viewer of its own.
         if (!(await drawn)) {
+          // Sticky failure. The start command succeeded, but that is precisely
+          // the state that caused the bypass: `capturing` used to stay true and
+          // the next action walked straight past this block. Keep the public
+          // state paused, keep the internal unconfirmed marker set, and stop
+          // the stream best-effort so the next attempt can force a keyframe.
+          held.visibilityUnconfirmed = true;
+          held.capturing = false;
+          await cdp.send('Page.stopScreencast').catch(() => {});
+          this.announceControl(runId);
           return {
             ok: false,
             detail: 'The page did not come back on screen, so nothing was done to it.',
