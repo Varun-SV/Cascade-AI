@@ -171,13 +171,12 @@ export interface LiveRun {
    */
   conversationId?: string;
   /**
-   * Who holds the browser, when a person does.
+   * The last browser control state that a reloaded page still needs to know.
    *
-   * The takeover is edge-triggered like everything else here — announced when
-   * it changes and never again — so a reload during one came back with the
-   * panel saying the agent had the page while the server still had the person
-   * holding it. Pressing Take control did not repair it either: the controller
-   * treats a takeover by the existing holder as a no-op.
+   * Human ownership is one such state, but not the only one: after handback a
+   * deliberately hidden picture can remain paused until the agent's next action
+   * restores it. Dropping that `capturing: false` state lets a reload expose a
+   * provider iframe while the CDP stream is still intentionally dark.
    */
   control?: Record<string, unknown>;
   /**
@@ -223,10 +222,9 @@ const TERMINAL_EVENTS = new Set(['session:complete', 'session:error']);
 /**
  * Keep the run's supervision surface up to date as it is emitted.
  *
- * Only state that is still TRUE is kept: a live view that has been given up and
- * an approval that has been answered or has expired are removed rather than
- * replayed, because handing a reloaded page a Stop button for a browser that is
- * gone, or a prompt for a decision already made, is its own kind of lie.
+ * Only state that remains relevant is kept. In particular, a paused picture is
+ * still relevant after human ownership ends: until the agent restores capture,
+ * a reloaded client must keep every viewing surface dark too.
  */
 export function rememberForReplay(run: LiveRun, event: string, payload: unknown): void {
   const p = (payload ?? {}) as Record<string, unknown>;
@@ -238,30 +236,41 @@ export function rememberForReplay(run: LiveRun, event: string, payload: unknown)
       run.liveView = p;
     } else {
       delete run.liveView;
-      // And with it, who was holding it. A takeover cannot outlive the browser
-      // it was a takeover OF, and replaying "you have control" for a session
-      // that is gone would put a live-looking panel on a dead run.
+      // And with it every control state. Neither a takeover nor a hidden
+      // handback can outlive the browser they refer to.
       delete run.control;
     }
     return;
   }
   if (event === 'browser:control') {
-    // Only a statement of OWNERSHIP is worth keeping. A message carrying just a
-    // detail describes a moment that has already passed — replaying "that key
-    // cannot be sent" into a fresh page is noise about something the person did
-    // before they reloaded.
+    // Only a statement of current state is worth keeping. A message carrying
+    // just a detail describes a moment that has already passed — replaying
+    // "that key cannot be sent" into a fresh page is noise about something the
+    // person did before they reloaded.
     if (typeof p['human'] !== 'boolean') return;
-    // And only while it is still true, the same rule the live view follows.
-    // `human: false` is the client's own default, so replaying it says nothing;
-    // storing it would only risk carrying a stale `capturing: false` into a
-    // page whose agent is about to turn the picture back on anyway.
+    // Never recreate control state after the browser was withdrawn. Teardown
+    // normally emits ownership before live-view withdrawal, but replay state
+    // should not depend on that ordering remaining true forever.
+    if (!run.liveView) {
+      delete run.control;
+      return;
+    }
+    // Human ownership must survive reload. So must a hidden picture after
+    // handback/lapse: `human: false` is the client default, but
+    // `capturing: false` is not — losing it would remount the provider iframe
+    // while the user-requested pause is still in force. Once capture is really
+    // restored (`human: false, capturing: true`) both fields are defaults and
+    // there is nothing useful to replay.
+    //
     // Stored WITHOUT `confirmed`, whatever it said. That flag is per-watch,
-    // and a replayed takeover is by definition arriving at a new one: the page
-    // being reloaded is the reason there is a replay at all. Carrying the old
+    // and a replay is by definition arriving at a new one. Carrying the old
     // watch's answer over would hand the fresh viewer a blind keyboard for a
-    // page it has not been shown, which is the whole point of the flag.
-    if (p['human'] === true) run.control = { ...p, confirmed: false };
-    else delete run.control;
+    // page it has not been shown.
+    if (p['human'] === true || p['capturing'] === false) {
+      run.control = { ...p, confirmed: false };
+    } else {
+      delete run.control;
+    }
     return;
   }
   if (event === 'permission:user-required') {
