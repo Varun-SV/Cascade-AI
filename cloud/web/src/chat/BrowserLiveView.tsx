@@ -172,6 +172,19 @@ export function BrowserLiveView({
 }: Props) {
   const imgRef = useRef<HTMLImageElement>(null);
   /**
+   * An actual editable element, kept visually out of the way, is the keyboard
+   * boundary for the remote page.
+   *
+   * This is not decorative. `keydown` can approximate ASCII, but it cannot
+   * produce what an input method commits: dead keys, CJK IMEs, compose keys,
+   * mobile/software keyboards, AltGr layouts and other text systems all turn
+   * several physical key events into one browser `input` event. Feeding the
+   * remote page `event.key` therefore dropped or corrupted perfectly ordinary
+   * text. A textarea lets the LOCAL browser do the layout/IME work it already
+   * knows how to do; we forward only the committed text.
+   */
+  const keyboardRef = useRef<HTMLTextAreaElement>(null);
+  /**
    * When a pointer move was last forwarded, so they go out at a rate rather
    * than one per mousemove event.
    *
@@ -225,16 +238,11 @@ export function BrowserLiveView({
    * that renders, and the effect that focuses it.
    */
   const blind = active && !frame && driving && capturing === false && confirmed === true;
-  const blindRef = useRef<HTMLDivElement>(null);
-  // Focus follows the surface, because the element the person was typing into
-  // just unmounted. From an EFFECT keyed on entering that state, not from an
-  // inline callback ref: an inline ref is a new function every render, so React
-  // detached and re-ran it on every parent update — which meant any later
-  // render, a socket status among them, snatched focus back to this div from
-  // wherever the person had since put it, and routed their next keystrokes to
-  // the remote page instead of the composer they were typing in.
+  // Focus follows the keyboard boundary, because the visual surface may vanish
+  // when the person presses Hide. The textarea stays mounted while they hold
+  // control, so composition/dead-key state and paste all have one stable target.
   useEffect(() => {
-    if (blind) blindRef.current?.focus();
+    if (blind) keyboardRef.current?.focus();
   }, [blind]);
 
   // A held-back move must not outlive the control it was made under, NOR the
@@ -262,6 +270,10 @@ export function BrowserLiveView({
         scrollTimerRef.current = null;
       }
       pendingScrollRef.current = null;
+      // Text accumulated by an IME belongs to the same view as the pointer
+      // samples above. Never let a composition started in task A become the
+      // first input delivered after a straight switch to task B.
+      if (keyboardRef.current) keyboardRef.current.value = '';
     };
   }, [driving, taskId]);
 
@@ -307,49 +319,65 @@ export function BrowserLiveView({
   };
 
   /**
-   * What the person typed, on its way to the page.
-   *
-   * Shared by the picture and by the privacy placeholder below, because the
-   * whole point of hiding the picture is to keep typing into a page you cannot
-   * see — a handler that lived only on the <img> disappeared with it.
-   */
-  /**
    * A paste, forwarded as the text it carries.
    *
-   * Ctrl/Cmd+V is a modifier chord, and `onKey` below deliberately lets those
-   * through to the viewer's own browser rather than stealing them. That is
-   * right for copy and reload — and it left paste going nowhere at all, because
-   * both surfaces here are non-editable, so the default paste has nothing to
-   * insert. The one thing the hidden-capture mode exists for is entering a
-   * credential, and a credential mostly arrives from a password manager, so the
-   * feature's primary use case was the one that could not be done.
-   *
-   * The clipboard is read only in response to the person's own paste gesture —
-   * this handler cannot see it otherwise — and the text goes through `onInput`
-   * like anything else they type, so it takes the lease, the action slot and
-   * the 4,000-character bound with it.
+   * Clipboard text is read only from the person's paste gesture and goes
+   * through the same lease/action slot as typed text. Preventing the local
+   * insertion also means the keyboard sink stays empty, so the subsequent
+   * `input` event cannot send the paste a second time.
    */
   const onPaste = (e: React.ClipboardEvent) => {
     const text = e.clipboardData?.getData('text') ?? '';
     if (!text) return;
     e.preventDefault();
+    e.currentTarget instanceof HTMLTextAreaElement && (e.currentTarget.value = '');
     onInput?.({ kind: 'text', text });
   };
 
-  const onKey = (e: React.KeyboardEvent) => {
-    // Modifier chords are not forwarded: they are the viewer's own shortcuts —
-    // copy, reload, close the tab — and stealing them from the person's actual
-    // browser to send to a remote one is worse than not supporting them.
+  /**
+   * Command keys are protocol commands; printable text is NOT.
+   *
+   * Printable keys fall through into the textarea so the local browser can
+   * apply Shift, AltGr, dead-key and IME rules and emit the resulting text. A
+   * shifted command, however, is a DIFFERENT command (`Shift+Tab`, selection
+   * with Shift+Arrow, newline semantics of Shift+Enter). The protocol has no
+   * modifier field, so sending its base key would perform an action the person
+   * did not request. Refuse it locally rather than silently degrading it.
+   */
+  const onKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Let local browser shortcuts and AltGr do their normal thing. If they
+    // produce text, the textarea's `input` event below is what forwards it.
     if (e.ctrlKey || e.metaKey || e.altKey) return;
-    if (e.key.length === 1) {
-      e.preventDefault();
-      onInput?.({ kind: 'text', text: e.key });
-      return;
-    }
-    if (COMMAND_KEYS.has(e.key)) {
-      e.preventDefault();
-      onInput?.({ kind: 'key', key: e.key });
-    }
+    // During composition, physical key names (`Process`, Enter, arrows) belong
+    // to the IME, not to the remote page. The committed text arrives via input.
+    if (e.nativeEvent.isComposing || e.key === 'Process' || e.key === 'Dead') return;
+    if (!COMMAND_KEYS.has(e.key)) return;
+    e.preventDefault();
+    // No modifier representation in BrowserInput yet. Fail closed instead of
+    // turning Shift+Tab/Arrow/Enter into an unshifted remote mutation.
+    if (e.shiftKey) return;
+    // A command must not leave editable residue in the sink.
+    e.currentTarget.value = '';
+    onInput?.({ kind: 'key', key: e.key });
+  };
+
+  /**
+   * Text AFTER the local browser has resolved layout/composition.
+   *
+   * `InputEvent.isComposing` remains true for intermediate IME updates, which
+   * are candidate-state rather than committed text and must never reach the
+   * remote page. The final input event is non-composing and the textarea value
+   * then contains exactly the committed string — including dead-key accents,
+   * CJK text or a Shift/AltGr-produced symbol. Send it once, then clear the
+   * sink so the next input cannot repeat it.
+   */
+  const onTextInput = (e: React.FormEvent<HTMLTextAreaElement>) => {
+    const native = e.nativeEvent as InputEvent;
+    if (native.isComposing) return;
+    const text = e.currentTarget.value;
+    if (!text) return;
+    e.currentTarget.value = '';
+    onInput?.({ kind: 'text', text });
   };
 
   const banner = driving
@@ -389,18 +417,6 @@ export function BrowserLiveView({
           style={{ width: 7, height: 7, borderRadius: '50%', background: 'currentColor', flexShrink: 0 }}
         />
         <span style={{ flex: 1 }}>{banner}</span>
-        {/*
-          Offered only once there is a picture to hide. Take control is
-          deliberately available before the first frame — pausing the agent is
-          useful on its own — but Hide was offered for any takeover, which gave a
-          one-click path from "waiting for the first picture" to the focusable
-          blind-typing placeholder. That inverts the whole claim `capturing ===
-          false` makes: a period the person chose, having already seen the page.
-
-          `capturing === false` stays in the condition so **Show** is always
-          reachable. A hidden page with no way to bring it back is a worse trap
-          than the one being closed.
-        */}
         {driving && (!!frame || capturing === false) && (
           <button
             type="button"
@@ -443,75 +459,46 @@ export function BrowserLiveView({
           {notice}
         </p>
       )}
-      {/*
-        The page, as Chrome itself rendered it.
-
-        An <img> with a data URL rather than a canvas: the browser decodes JPEG
-        natively and keeps the previous frame on screen until the next one is
-        ready, which is exactly the double-buffering a canvas would otherwise
-        have to be given by hand. Frames arrive only while this panel is
-        mounted — the hook watches on the run this pane is showing and unwatches
-        when it stops — so nothing is being encoded or shipped behind a closed
-        panel.
-
-        A minimum height because these views are unusable when squeezed: the
-        page renders at the remote viewport and scales down, so a short frame
-        shows a thumbnail nobody can read.
-
-        Inert unless the user has taken control, and that is the point of this
-        element rather than styling. Input that reached the session without
-        passing through the lease would let the agent be mid-click while the
-        user typed into the same form — which is exactly what the provider's
-        interactive viewer does, and why it stays switched off. Once the lease
-        IS the user's, the same element becomes focusable and starts forwarding
-        events, because by then the agent is being refused.
-      */}
+      {driving && (
+        <textarea
+          ref={keyboardRef}
+          aria-label="Type into the agent browser"
+          tabIndex={0}
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+          onKeyDown={onKey}
+          onInput={onTextInput}
+          onPaste={onPaste}
+          style={{
+            position: 'fixed', left: -10000, top: 0, width: 1, height: 1,
+            opacity: 0, pointerEvents: 'none', resize: 'none',
+          }}
+        />
+      )}
       {frame && (
         <img
           ref={imgRef}
           src={`data:image/jpeg;base64,${frame.data}`}
           alt="The page Cascade's browser is on"
           title={driving ? 'Agent browser session (you have control)' : 'Agent browser session (view only)'}
-          tabIndex={driving ? 0 : -1}
+          tabIndex={-1}
           onMouseDown={driving ? (e) => {
-            // The image takes focus so the keys go here rather than to the
-            // chat composer behind it.
+            // Keep the keyboard on the editable sink, where the browser can
+            // perform real layout/IME composition instead of us guessing from
+            // keydown. Pointer input still belongs to the image underneath.
             e.preventDefault();
-            imgRef.current?.focus();
-            // 0, 1, 2 and nothing else. A mouse's Back and Forward buttons
-            // report 3 and 4, and mapping "anything that is not middle or
-            // right" onto `left` turned a navigation gesture into a real left
-            // click on the remote page — the client repairing an unsupported
-            // input into a mutation the person never asked for, which is the
-            // shape the server boundary was hardened against three rounds ago.
+            keyboardRef.current?.focus();
             if (e.button > 2) return;
             const p = at(e.clientX, e.clientY);
             if (p) onInput?.({ kind: 'click', ...p, button: e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left', clicks: e.detail || 1 });
           } : undefined}
           onMouseMove={driving ? (e) => {
-            // Hover is part of the page, and the person could not see it.
-            //
-            // `dispatch` already sends `mouseMoved` immediately before
-            // `mousePressed`, so a click always arrives somewhere the pointer
-            // has "been" — but only by one event, at the click's own
-            // coordinates, a moment before the press. Anything hover reveals —
-            // a nav dropdown, a tooltip, a toolbar that appears on the row
-            // under the cursor — therefore appeared for the first time BETWEEN
-            // the frame the person aimed at and the press, so the press landed
-            // on content that was not in the picture they clicked.
-            //
-            // Forwarding movement while they travel is what puts that content
-            // in a frame first. `move` was declared on this event type and
-            // handled all the way down in `dispatch` from the start; the client
-            // simply never produced one, so the whole path was dead.
             const p = at(e.clientX, e.clientY);
-            // A move across the letterbox is not a move on the page, and must
-            // not spend the interval the next real one needs.
             if (!p) return;
             const now = Date.now();
             const since = now - lastMoveRef.current;
             if (since >= MOVE_INTERVAL_MS) {
-              // This one goes now, so anything held back is already stale.
               if (moveTimerRef.current) {
                 clearTimeout(moveTimerRef.current);
                 moveTimerRef.current = null;
@@ -521,8 +508,6 @@ export function BrowserLiveView({
               onInput?.({ kind: 'move', ...p });
               return;
             }
-            // Held back, not dropped. Only the newest is kept — the ones
-            // between are positions the pointer has already left.
             pendingMoveRef.current = p;
             if (moveTimerRef.current) return;
             moveTimerRef.current = setTimeout(() => {
@@ -541,15 +526,11 @@ export function BrowserLiveView({
             const dy = wheelPixels(e, frame.height);
             const now = Date.now();
             const since = now - lastScrollRef.current;
-            // Nothing waiting and the window has passed: this one goes as it is.
             if (since >= SCROLL_INTERVAL_MS && !pendingScrollRef.current) {
               lastScrollRef.current = now;
               onInput?.({ kind: 'scroll', ...p, deltaY: dy });
               return;
             }
-            // SUMMED, not replaced — a wheel delta is a distance that exists
-            // once, and dropping one scrolls the page less far than the person
-            // asked. The position is the latest, since that is where they are.
             const pending = pendingScrollRef.current;
             pendingScrollRef.current = { ...p, deltaY: (pending?.deltaY ?? 0) + dy };
             if (scrollTimerRef.current) return;
@@ -562,11 +543,7 @@ export function BrowserLiveView({
               onInput?.({ kind: 'scroll', ...total });
             }, Math.max(0, SCROLL_INTERVAL_MS - since));
           } : undefined}
-          onKeyDown={driving ? onKey : undefined}
-          onPaste={driving ? onPaste : undefined}
           onLoad={() => {
-            // Reported from HERE — the browser saying the JPEG decoded — rather
-            // than from the arrival of the bytes. See `onFrameShown`.
             if (frame.generation !== undefined) onFrameShown?.(frame.generation);
           }}
           style={{
@@ -576,45 +553,12 @@ export function BrowserLiveView({
           }}
         />
       )}
-      {/*
-        A place to type when there is no picture to type into — and only when
-        the person chose to have no picture.
-
-        Hiding the page is FOR entering a credential, and the input surface
-        lived entirely inside the <img>, so clearing the frame to hide it took
-        the keyboard with it and made the one thing the feature exists for
-        impossible. That is the case this restores.
-
-        The blind period has to be one the person CHOSE, though. `capturing ===
-        false` means they saw the page, put the caret where they wanted it, and
-        then asked us to stop showing it. Merely waiting for a first frame is
-        not that: the server says a stream started as soon as
-        `Page.startScreencast` returns, before Chrome has necessarily produced
-        anything, so a takeover in that window would be typing into a page
-        nobody has ever seen. That is the same "typing into the dark" the
-        server refuses input for, and it is not made acceptable by happening in
-        a component.
-
-        Keys only either way: a pointer coordinate means nothing without a
-        frame to measure it against, and inventing one would put a click
-        somewhere the person could not see.
-      */}
       {!frame && driving && (
-        // AND confirmed: a hidden page this watch has not been shown is not a
-        // blind period the person chose, it is a blind period they inherited
-        // from a viewer that is gone. Showing the page is how they get out of
-        // it — that control stays available, and one frame later this is a
-        // choice again.
         blind ? (
           <div
-            ref={blindRef}
             role="group"
             aria-label="Agent browser, picture hidden"
-            tabIndex={0}
-            onKeyDown={onKey}
-            // The surface a password is actually entered on, so the surface a
-            // password manager actually pastes into.
-            onPaste={onPaste}
+            onMouseDown={() => keyboardRef.current?.focus()}
             style={{
               width: '100%', minHeight: 400, display: 'grid', placeItems: 'center',
               background: '#000', color: 'var(--warn-fg, #f5c96b)', fontSize: 13,
@@ -624,10 +568,6 @@ export function BrowserLiveView({
             <span>The picture is hidden. What you type still goes to the page.</span>
           </div>
         ) : (
-          // Inert on purpose: nothing this watch has seen, so nothing to type
-          // into. Two ways to arrive here and they need different words — one
-          // is waiting for a stream that is running, the other is a page
-          // someone else hid before this view existed.
           <div
             aria-label={capturing === false
               ? 'Agent browser, picture hidden and not yet seen'
@@ -646,14 +586,6 @@ export function BrowserLiveView({
           </div>
         )
       )}
-      {/*
-        The provider's own viewer, for a deployment not yet streaming frames.
-        Always inert, whoever holds the lease: input here would go straight to
-        the session over the provider's channel without passing through it. And
-        `sandbox` is deliberately unset, because the viewer needs scripts and
-        same-origin access to its own session and a sandbox permitting both is
-        equivalent to none.
-      */}
       {!frame && !driving && !paused && liveViewUrl && (
         <iframe
           src={liveViewUrl}
