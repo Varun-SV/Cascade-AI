@@ -304,6 +304,7 @@ export default function App() {
             browserLiveView={chat.browserLiveView}
             browserActive={chat.browserActive}
             browserFrame={chat.browserFrame}
+            browserTaskId={chat.browserTaskId}
             browserStreaming={chat.browserStreaming}
             browserHuman={chat.browserHuman}
             browserCapturing={chat.browserCapturing}

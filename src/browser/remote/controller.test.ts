@@ -611,6 +611,33 @@ describe('retiring a controller mid-open', () => {
   });
 });
 
+describe('a controller that has been retired', () => {
+  it('does not allocate after being replaced, even from a wait it was already in', async () => {
+    // A caller parked on the `ready` gate holds no run and has reserved no
+    // slot, so it is invisible to `dispose()`. A SECOND settings change
+    // arriving while the first retirement settles therefore found nothing to
+    // wait for and let the newest controller start at once — and this parked
+    // caller then woke on a controller nobody holds a reference to any more and
+    // allocated against the superseded configuration.
+    const { provider, created } = fakeProvider();
+    const retiring = deferred();
+    const c = new RemoteBrowserController({ provider, ready: retiring.promise });
+
+    const acting = c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(created, 'still waiting for its predecessor').toEqual([]);
+
+    // Replaced while that action is still in the gate.
+    await c.dispose();
+    retiring.resolve();
+
+    const out = await acting;
+    expect(out.ok, 'a replaced controller does not act').toBe(false);
+    expect(out.detail).toMatch(/settings changed/i);
+    expect(created, 'and allocates nothing on the way out').toEqual([]);
+  });
+});
+
 describe('the session pool', () => {
   it('refuses a second run when only one session is allowed', async () => {
     // Every session is billed, so the default is one and raising it is a

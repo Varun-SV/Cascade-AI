@@ -492,6 +492,22 @@ export class RemoteBrowserController {
    * — and so the promise itself is not retained for the life of the process.
    */
   private ready: Promise<unknown> | undefined;
+  /**
+   * This controller has been retired and will never open anything again.
+   *
+   * Stronger than "its runs were ended", and it has to be. A caller parked on
+   * the `ready` gate above is invisible to `dispose()` — it holds no run and
+   * has reserved no slot, because it has not got that far — so a SECOND
+   * settings change, arriving while the first retirement is still settling,
+   * found nothing to wait for and let the newest controller start immediately.
+   * The parked caller then woke up on a controller nobody holds a reference to
+   * and allocated a session against the superseded configuration, with the
+   * newest controller free to allocate its own.
+   *
+   * Set synchronously at the top of `dispose`, so anything already waiting is
+   * excluded the moment retirement begins rather than when it finishes.
+   */
+  private retired = false;
 
   private leaseFor(runId: string): BrowserLease {
     let lease = this.leases.get(runId);
@@ -599,6 +615,8 @@ export class RemoteBrowserController {
 
   /** Release every run's session. For when the deployment's config changes. */
   async dispose(): Promise<void> {
+    // FIRST, and synchronously. See `retired`.
+    this.retired = true;
     // Runs still OPENING as well as runs already open. A run inside `open()`
     // has no RunBrowser yet, so enumerating `runs` alone walked straight past
     // it — and the caller for this is `attachRemoteBrowser` noticing the
@@ -1672,6 +1690,13 @@ export class RemoteBrowserController {
       try { await settling; } catch { /* the old one's trouble, not ours */ }
       // Only if nothing newer arrived while we waited.
       if (this.ready === settling) this.ready = undefined;
+    }
+    // Checked AFTER that wait as well as before anything is reserved, because
+    // the wait is exactly where a retirement can land on top of this caller —
+    // see `retired`. A controller that has been replaced must not allocate,
+    // whatever it was in the middle of when it was replaced.
+    if (this.retired) {
+      throw new Error('The browser settings changed while this action was waiting. Try again.');
     }
     const existing = this.runs.get(runId);
     if (existing && !existing.page.isClosed()) return existing;

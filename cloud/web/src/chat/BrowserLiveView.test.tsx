@@ -555,6 +555,38 @@ describe('BrowserLiveView — taking the page over', () => {
     }
   });
 
+  it('does not send a held-back move to the page that replaced it', async () => {
+    // Switching straight from one conversation to another whose browser is ALSO
+    // held keeps `driving` true the whole way, so nothing about the control
+    // changes — but the page does. A trailing move or an accumulated scroll
+    // armed on A would fire after the task id had moved on, and the send path
+    // reads that id at send time, so A's coordinates arrive at B: the wrong
+    // remote page moves, or scrolls.
+    vi.useFakeTimers();
+    try {
+      const onInput = vi.fn();
+      const props = { active: true, liveViewUrl: undefined, frame, human: true, onStop: () => {}, onInput };
+      const { rerender } = render(<BrowserLiveView {...props} taskId="task-a" />);
+      const img = screen.getByRole('img') as HTMLImageElement;
+      Object.defineProperty(img, 'naturalWidth', { value: 1280 });
+      Object.defineProperty(img, 'naturalHeight', { value: 800 });
+      img.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
+
+      fireEvent.mouseMove(img, { clientX: 100, clientY: 200 });
+      fireEvent.mouseMove(img, { clientX: 300, clientY: 200 });
+      fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 10, deltaMode: 0 });
+      fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 10, deltaMode: 0 });
+      onInput.mockClear();
+
+      // Another conversation, another browser, still driving.
+      rerender(<BrowserLiveView {...props} taskId="task-b" />);
+      await act(async () => { vi.advanceTimersByTime(MOVE_INTERVAL * 4); });
+      expect(onInput, 'nothing pending for A reaches B').not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not send a held-back move after the page is handed back', async () => {
     // The trailing position is armed while driving and fires later. Landing
     // after the handback, it would be refused by the server and put a notice on

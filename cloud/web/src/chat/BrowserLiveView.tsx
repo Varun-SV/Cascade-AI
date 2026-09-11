@@ -154,11 +154,21 @@ interface Props {
   onFrameShown?: (generation: number) => void;
   /** Pause or resume the picture without giving the page back. */
   onCapture?: (on: boolean) => void;
+  /**
+   * WHICH run's browser this is.
+   *
+   * Not rendered — it is the view's identity, and the sampled-input timers need
+   * it. A held-back move or an accumulated scroll belongs to the page it was
+   * made on, and switching straight from one conversation to another whose
+   * browser is ALSO under human control leaves `driving` true the whole way, so
+   * nothing else here changes to say the view did.
+   */
+  taskId?: string | undefined;
 }
 
 export function BrowserLiveView({
   active, liveViewUrl, frame, streaming, human, capturing, confirmed, notice,
-  onStop, onTakeOver, onHandBack, onInput, onCapture, onFrameShown,
+  onStop, onTakeOver, onHandBack, onInput, onCapture, onFrameShown, taskId,
 }: Props) {
   const imgRef = useRef<HTMLImageElement>(null);
   /**
@@ -227,11 +237,18 @@ export function BrowserLiveView({
     if (blind) blindRef.current?.focus();
   }, [blind]);
 
-  // A held-back move must not outlive the control it was made under. The timer
-  // is armed only while driving, so this cleanup covers both giving the page
-  // back and the panel going away — otherwise a trailing position could arrive
-  // after the handback and be refused, putting a notice on screen for a mouse
-  // that moved before the person let go.
+  // A held-back move must not outlive the control it was made under, NOR the
+  // page it was made on.
+  //
+  // Keyed on the task as well as on `driving`, because the two failures are
+  // different and only one of them changes `driving`. Giving the page back ends
+  // the control: a trailing position arriving after it would be refused and put
+  // a notice on screen for a mouse that moved before the person let go.
+  // Switching straight to another conversation whose browser is also held ends
+  // the PAGE while `driving` stays true throughout — and `sendBrowserInput`
+  // reads the task id at send time, so A's coordinates or A's accumulated
+  // scroll distance would arrive at B, moving or scrolling the wrong remote
+  // page. Anything still pending belongs to the view that produced it.
   useEffect(() => {
     if (!driving) return;
     return () => {
@@ -246,7 +263,7 @@ export function BrowserLiveView({
       }
       pendingScrollRef.current = null;
     };
-  }, [driving]);
+  }, [driving, taskId]);
 
   // AFTER every hook, and that is not a style preference.
   //

@@ -50,7 +50,9 @@ interface Props {
   /** A browser is attached, whether or not the provider can stream it. */
   browserActive?: boolean;
   /** The newest frame of that browser, streamed by the page itself over CDP. */
-  browserFrame?: { data: string; width: number; height: number } | undefined;
+  browserFrame?: { data: string; width: number; height: number; generation?: number } | undefined;
+  /** Which run's browser the panel is showing. Its view identity, not a label. */
+  browserTaskId?: string | undefined;
   /** The server confirmed the stream started, so an empty panel is worth explaining. */
   browserStreaming?: boolean;
   /** The user, not the agent, is driving that browser right now. */
@@ -80,7 +82,7 @@ export default function ChatPanel({
   onEditMessage, onDeleteMessage, onSelectSibling,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange, uiMode, approval,
   compactionNotice, providerNotice, knowledgeNotice, activity, browserLiveView, browserActive,
-  browserFrame, browserStreaming, browserHuman, browserCapturing, browserConfirmed, browserNotice,
+  browserFrame, browserTaskId, browserStreaming, browserHuman, browserCapturing, browserConfirmed, browserNotice,
   onStopBrowser, onTakeOverBrowser, onHandBackBrowser, onBrowserInput, onBrowserCapture,
   onBrowserFrameShown,
   toolApprovals, onDecideToolApproval,
@@ -237,6 +239,7 @@ export default function ChatPanel({
           active={browserActive === true}
           liveViewUrl={browserLiveView}
           frame={browserFrame}
+          taskId={browserTaskId}
           streaming={browserStreaming}
           human={browserHuman}
           capturing={browserCapturing}
