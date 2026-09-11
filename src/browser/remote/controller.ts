@@ -1709,13 +1709,6 @@ export class RemoteBrowserController {
       // Only if nothing newer arrived while we waited.
       if (this.ready === settling) this.ready = undefined;
     }
-    // Checked AFTER that wait as well as before anything is reserved, because
-    // the wait is exactly where a retirement can land on top of this caller —
-    // see `retired`. A controller that has been replaced must not allocate,
-    // whatever it was in the middle of when it was replaced.
-    if (this.retired) {
-      throw new Error('The browser settings changed while this action was waiting. Try again.');
-    }
     const existing = this.runs.get(runId);
     if (existing && !existing.page.isClosed()) return existing;
     if (existing) {
@@ -1729,6 +1722,24 @@ export class RemoteBrowserController {
       // see this slot as free and get admitted before the old session was
       // actually released.
       await this.teardown(runId, existing);
+    }
+
+    // IMMEDIATELY BEFORE THE RESERVATION, and that placement is the rule.
+    //
+    // A controller that has been replaced must not allocate, whatever it was in
+    // the middle of when it was replaced — see `retired`. There are TWO awaits
+    // above this line and a retirement can land on either: the `ready` gate,
+    // and the teardown of a stale page just above. The check used to sit after
+    // the first of them, which left the second uncovered — and worse than
+    // uncovered, because `dispose` waits on that same teardown promise and this
+    // continuation was registered on it FIRST. So `open` resumed before
+    // `dispose` did, reserved a slot, and allocated through a provider already
+    // being retired, on a run the disposal snapshot had no way to include.
+    //
+    // One check, placed where the thing it protects actually happens, rather
+    // than one per await. Nothing between here and the reservation may suspend.
+    if (this.retired) {
+      throw new Error('The browser settings changed while this action was waiting. Try again.');
     }
 
     // Counted WITH the open runs, and taken before the first await.

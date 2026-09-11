@@ -650,6 +650,39 @@ describe('a controller that has been retired', () => {
     expect(ended, 'and the session really is back').toEqual(['sess-1']);
   });
 
+  it('does not allocate after being replaced while clearing a dead page', async () => {
+    // The SECOND await before the reservation. A run whose page has closed is
+    // torn down first, and `dispose` waits on that very teardown promise — with
+    // this continuation registered on it FIRST, so `open` resumes before
+    // `dispose` does. Reserving there allocates through a provider already
+    // being retired, on a run the disposal snapshot has no way to include.
+    const { provider, created } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    expect(created).toEqual(['sess-1']);
+
+    // The page is gone, so the next action tears the stale run down first.
+    page.closed = true;
+    const releasing = deferred();
+    const realEnd = provider.endSession;
+    provider.endSession = async (id: string) => {
+      await releasing.promise;
+      return realEnd.call(provider, id);
+    };
+
+    const acting = c.controller({ kind: 'click', selector: '#b' }, ctx('run-A', 'w1'));
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Replaced while that teardown is still running.
+    const disposing = c.dispose();
+    releasing.resolve();
+    await disposing;
+
+    const out = await acting;
+    expect(out.ok, 'a replaced controller does not open a second session').toBe(false);
+    expect(created, 'and nothing new was allocated').toEqual(['sess-1']);
+  });
+
   it('does not allocate after being replaced, even from a wait it was already in', async () => {
     // A caller parked on the `ready` gate holds no run and has reserved no
     // slot, so it is invisible to `dispose()`. A SECOND settings change
