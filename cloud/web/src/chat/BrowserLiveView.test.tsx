@@ -166,57 +166,57 @@ describe('BrowserLiveView — taking the page over', () => {
       .toHaveStyle({ pointerEvents: 'none' });
   });
 
-it('becomes drivable once the server says the page is the user\'s', () => {
-  const onInput = vi.fn();
-  render(
-    <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
-  );
-  const img = screen.getByRole('img');
-  const keyboard = screen.getByLabelText(/type into the agent browser/i) as HTMLTextAreaElement;
-  expect(img).toHaveAttribute('tabindex', '-1');
-  fireEvent.mouseDown(img, { button: 0 });
-  expect(keyboard).toHaveFocus();
-  fireEvent.input(keyboard, { target: { value: 'a' } });
-  fireEvent.keyDown(keyboard, { key: 'Enter' });
-  expect(onInput.mock.calls.map((c) => c[0])).toEqual([
-    { kind: 'text', text: 'a' },
-    { kind: 'key', key: 'Enter' },
-  ]);
-});
+  it('becomes drivable once the server says the page is the user\'s', () => {
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+    );
+    const img = screen.getByRole('img');
+    const keyboard = screen.getByLabelText(/type into the agent browser/i) as HTMLTextAreaElement;
+    expect(img).toHaveAttribute('tabindex', '-1');
+    fireEvent.mouseDown(img, { button: 0 });
+    expect(keyboard).toHaveFocus();
+    fireEvent.input(keyboard, { target: { value: 'a' } });
+    fireEvent.keyDown(keyboard, { key: 'Enter' });
+    expect(onInput.mock.calls.map((c) => c[0])).toEqual([
+      { kind: 'text', text: 'a' },
+      { kind: 'key', key: 'Enter' },
+    ]);
+  });
 
-it('leaves the viewer\'s own shortcuts alone', () => {
-  const onInput = vi.fn();
-  render(
-    <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
-  );
-  const keyboard = screen.getByLabelText(/type into the agent browser/i);
-  fireEvent.keyDown(keyboard, { key: 'r', ctrlKey: true });
-  fireEvent.keyDown(keyboard, { key: 'w', metaKey: true });
-  expect(onInput).not.toHaveBeenCalled();
-});
+  it('leaves the viewer\'s own shortcuts alone', () => {
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+    );
+    const keyboard = screen.getByLabelText(/type into the agent browser/i);
+    fireEvent.keyDown(keyboard, { key: 'r', ctrlKey: true });
+    fireEvent.keyDown(keyboard, { key: 'w', metaKey: true });
+    expect(onInput).not.toHaveBeenCalled();
+  });
 
-it('forwards only text committed by the local input method', () => {
-  const onInput = vi.fn();
-  render(
-    <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
-  );
-  const keyboard = screen.getByLabelText(/type into the agent browser/i) as HTMLTextAreaElement;
-  fireEvent.input(keyboard, { target: { value: 'に' }, isComposing: true });
-  expect(onInput).not.toHaveBeenCalled();
-  fireEvent.input(keyboard, { target: { value: '日本' }, isComposing: false });
-  expect(onInput).toHaveBeenCalledWith({ kind: 'text', text: '日本' });
-});
+  it('forwards only text committed by the local input method', () => {
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+    );
+    const keyboard = screen.getByLabelText(/type into the agent browser/i) as HTMLTextAreaElement;
+    fireEvent.input(keyboard, { target: { value: 'に' }, isComposing: true });
+    expect(onInput).not.toHaveBeenCalled();
+    fireEvent.input(keyboard, { target: { value: '日本' }, isComposing: false });
+    expect(onInput).toHaveBeenCalledWith({ kind: 'text', text: '日本' });
+  });
 
-it('refuses shifted commands rather than degrading them', () => {
-  const onInput = vi.fn();
-  render(
-    <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
-  );
-  const keyboard = screen.getByLabelText(/type into the agent browser/i);
-  fireEvent.keyDown(keyboard, { key: 'Tab', shiftKey: true });
-  fireEvent.keyDown(keyboard, { key: 'ArrowLeft', shiftKey: true });
-  expect(onInput).not.toHaveBeenCalled();
-});
+  it('refuses shifted commands rather than degrading them', () => {
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+    );
+    const keyboard = screen.getByLabelText(/type into the agent browser/i);
+    fireEvent.keyDown(keyboard, { key: 'Tab', shiftKey: true });
+    fireEvent.keyDown(keyboard, { key: 'ArrowLeft', shiftKey: true });
+    expect(onInput).not.toHaveBeenCalled();
+  });
 
   it('survives a browser becoming active on a panel already mounted', () => {
     // THE ordinary path, and it was a crash. This component is mounted for the
@@ -308,16 +308,16 @@ it('refuses shifted commands rather than degrading them', () => {
     }
   });
 
-it('keeps a remote wheel gesture from scrolling the local chat', () => {
-  const onInput = vi.fn();
-  render(
-    <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
-  );
-  const img = screen.getByRole('img') as HTMLImageElement;
-  const wheel = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 120 });
-  fireEvent(img, wheel);
-  expect(wheel.defaultPrevented).toBe(true);
-});
+  it('keeps a remote wheel gesture from scrolling the local chat', () => {
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+    );
+    const img = screen.getByRole('img') as HTMLImageElement;
+    const wheel = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 120 });
+    fireEvent(img, wheel);
+    expect(wheel.defaultPrevented).toBe(true);
+  });
 
   it('sums the wheel distance it did not send yet', async () => {
     // Every wheel event took the FIFO action slot, and a trackpad emits them

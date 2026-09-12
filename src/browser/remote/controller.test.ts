@@ -2226,57 +2226,57 @@ describe('handing the browser to the person watching', () => {
     expect((await c.input('run-A', { kind: 'text', text: 'secret' })).ok).toBe(true);
   });
 
-it('keeps a deliberate pause private across handback and a later watch', async () => {
-  const { provider } = fakeProvider();
-  const c = new RemoteBrowserController({ provider });
-  await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+  it('keeps a deliberate pause private across handback and a later watch', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
 
-  const first: BrowserFrame[] = [];
-  await c.startWatching('run-A', (f) => first.push(f));
-  cdp.pushFrame(1);
-  c.frameSeen('run-A', first[0]!.generation);
-  c.actorEnded('w1');
-  await c.takeOver('run-A');
-  await c.setCapture('run-A', false);
+    const first: BrowserFrame[] = [];
+    await c.startWatching('run-A', (f) => first.push(f));
+    cdp.pushFrame(1);
+    c.frameSeen('run-A', first[0]!.generation);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+    await c.setCapture('run-A', false);
 
-  expect(c.handBack('run-A')).toBe(true);
-  await c.stopWatching('run-A');
-  const started = cdp.sent.filter((m) => m === 'Page.startScreencast').length;
-  await c.startWatching('run-A', () => {});
+    expect(c.handBack('run-A')).toBe(true);
+    await c.stopWatching('run-A');
+    const started = cdp.sent.filter((m) => m === 'Page.startScreencast').length;
+    await c.startWatching('run-A', () => {});
 
-  expect(
-    cdp.sent.filter((m) => m === 'Page.startScreencast'),
-    'rewatching does not disclose a page hidden before handback',
-  ).toHaveLength(started);
-  expect(c.humanHolds('run-A')).toBe(false);
-});
+    expect(
+      cdp.sent.filter((m) => m === 'Page.startScreencast'),
+      'rewatching does not disclose a page hidden before handback',
+    ).toHaveLength(started);
+    expect(c.humanHolds('run-A')).toBe(false);
+  });
 
-it('keeps provider fallback available when an ordinary screencast start fails', async () => {
-  const { provider } = fakeProvider('https://provider.test/live/abc');
-  const c = new RemoteBrowserController({ provider });
-  const states: Array<{ capturing: boolean }> = [];
-  await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
-  c.onControlFor('run-A', (state) => states.push({ capturing: state.capturing }));
+  it('keeps provider fallback available when an ordinary screencast start fails', async () => {
+    const { provider } = fakeProvider('https://provider.test/live/abc');
+    const c = new RemoteBrowserController({ provider });
+    const states: Array<{ capturing: boolean }> = [];
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    c.onControlFor('run-A', (state) => states.push({ capturing: state.capturing }));
 
-  await c.startWatching('run-A', () => {});
-  await c.stopWatching('run-A');
-  expect(states.at(-1)?.capturing).toBe(false);
+    await c.startWatching('run-A', () => {});
+    await c.stopWatching('run-A');
+    expect(states.at(-1)?.capturing).toBe(false);
 
-  const realSend = cdp.send;
-  cdp.send = async (method: string, params?: Record<string, unknown>) => {
-    if (method === 'Page.startScreencast') throw new Error('screencast unavailable');
-    return realSend.call(cdp, method, params);
-  };
-  try {
-    expect(await c.startWatching('run-A', () => {})).toBe(false);
-  } finally {
-    cdp.send = realSend;
-  }
-  expect(
-    states.at(-1)?.capturing,
-    'a transport failure is not advertised as a deliberate privacy pause',
-  ).toBe(true);
-});
+    const realSend = cdp.send;
+    cdp.send = async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'Page.startScreencast') throw new Error('screencast unavailable');
+      return realSend.call(cdp, method, params);
+    };
+    try {
+      expect(await c.startWatching('run-A', () => {})).toBe(false);
+    } finally {
+      cdp.send = realSend;
+    }
+    expect(
+      states.at(-1)?.capturing,
+      'a transport failure is not advertised as a deliberate privacy pause',
+    ).toBe(true);
+  });
 
   it('refuses hidden typing from a watcher that arrived after the page was hidden', async () => {
     // The full lifecycle, and the one path here reachable with the ordinary web

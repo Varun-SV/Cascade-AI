@@ -244,21 +244,21 @@ export function BrowserLiveView({
   // control, so composition/dead-key state and paste all have one stable target.
   useEffect(() => {
     if (blind) keyboardRef.current?.focus();
-}, [blind]);
+  }, [blind]);
 
-// React 19 delegates wheel through a passive listener. Consume the local
-// default with a native non-passive listener while the event still bubbles
-// to React's handler, which forwards the same gesture to CDP.
-useEffect(() => {
-  if (!active || !driving || !hasFrame) return;
-  const img = imgRef.current;
-  if (!img) return;
-  const keepWheelRemote = (event: WheelEvent) => event.preventDefault();
-  img.addEventListener('wheel', keepWheelRemote, { passive: false });
-  return () => img.removeEventListener('wheel', keepWheelRemote);
-}, [active, driving, hasFrame]);
+  // React 19 delegates wheel through a passive listener. Consume the local
+  // default with a native non-passive listener while the event still bubbles
+  // to React's handler, which forwards the same gesture to CDP.
+  useEffect(() => {
+    if (!active || !driving || !hasFrame) return;
+    const img = imgRef.current;
+    if (!img) return;
+    const keepWheelRemote = (event: WheelEvent) => event.preventDefault();
+    img.addEventListener('wheel', keepWheelRemote, { passive: false });
+    return () => img.removeEventListener('wheel', keepWheelRemote);
+  }, [active, driving, hasFrame]);
 
-// A held-back move must not outlive the control it was made under, NOR the
+  // A held-back move must not outlive the control it was made under, NOR the
   // page it was made on.
   //
   // Keyed on the task as well as on `driving`, because the two failures are
