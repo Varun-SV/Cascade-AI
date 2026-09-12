@@ -1703,7 +1703,7 @@ export class RemoteBrowserController {
       // gate below can start it and insist on a fresh frame before the action.
       // If no watcher adopts it, the action-slot finally tears it back down so
       // an unwatched run does not keep paying to encode frames.
-      if (held.hiddenByHolder === true && !held.screencast) {
+      if ((held.hiddenByHolder === true || held.visibilityUnconfirmed === true) && !held.screencast) {
         const sink = (_frame: BrowserFrame) => {};
         const watchGen = held.watchGen;
         let cdp: CDPSession | null = null;
@@ -1799,8 +1799,18 @@ export class RemoteBrowserController {
         // A watcher may have arrived while the temporary restore was running.
         // In that case it replaced the sink and bumped the watch generation,
         // so the session is now a real live view and must not be torn out from
-        // underneath it. Otherwise this was only a one-action visibility proof.
-        if (held.screencast === cdp && held.onFrame === sink && held.watchGen === watchGen) {
+        // underneath it. A failed or timed-out restore is kept attached but
+        // stopped: that state is retryable by the next action and must not be
+        // advertised as visible. Only a confirmed successful restore was a
+        // one-action visibility proof that is safe to tear back down.
+        if (
+          held.screencast === cdp
+          && held.onFrame === sink
+          && held.watchGen === watchGen
+          && held.hiddenByHolder === false
+          && held.visibilityUnconfirmed === false
+          && held.capturing === true
+        ) {
           held.onFrame = undefined;
           held.screencast = undefined;
           // The privacy pause was ended by the successful restore. With no

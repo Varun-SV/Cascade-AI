@@ -104,6 +104,8 @@ let cdpGate: Promise<void> | null = null;
  * here. When this is on, `cdp` still points at the newest.
  */
 let cdpPerAttach = false;
+/** Make newly-created per-attach sessions start without producing a frame. */
+let silentNewCdp = false;
 const cdpSessions: Array<ReturnType<typeof fakeCdp>> = [];
 
 /** A promise a test can settle by hand. */
@@ -162,7 +164,11 @@ function fakeContext(pageForThisContext: typeof page) {
     newCDPSession: async () => {
       cdpCreated += 1;
       if (cdpGate) await cdpGate;
-      if (cdpPerAttach) { cdp = fakeCdp(); cdpSessions.push(cdp); }
+      if (cdpPerAttach) {
+        cdp = fakeCdp();
+        cdp.silentStart = silentNewCdp;
+        cdpSessions.push(cdp);
+      }
       return cdp;
     },
     close: async () => { c.closed = true; },
@@ -225,6 +231,7 @@ beforeEach(() => {
   cdp = fakeCdp();
   cdpCreated = 0;
   cdpPerAttach = false;
+  silentNewCdp = false;
   cdpSessions.length = 0;
   cdpGate = null;
   pageContext = defaultContext;
@@ -2308,6 +2315,48 @@ describe('handing the browser to the person watching', () => {
     expect(restore.sent).toContain('Page.startScreencast');
     expect(page.calls).toContain('click:#after-hidden-unwatch');
     expect(restore.detached, 'the no-viewer safety stream is temporary').toBe(true);
+  });
+
+  it('keeps a failed detached restore paused and retryable', async () => {
+    cdpPerAttach = true;
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const frames: BrowserFrame[] = [];
+    await c.startWatching('run-A', (f) => frames.push(f));
+    const first = cdpSessions[0]!;
+    first.pushFrame(1);
+    c.frameSeen('run-A', frames[0]!.generation);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+    expect(await c.setCapture('run-A', false)).toBe(false);
+    expect(c.handBack('run-A')).toBe(true);
+    await c.stopWatching('run-A');
+
+    vi.useFakeTimers();
+    try {
+      silentNewCdp = true;
+      const acting = c.controller({ kind: 'click', selector: '#must-wait-for-picture' }, ctx('run-A', 'w2'));
+      for (let i = 0; i < 10 && cdpSessions.length < 2; i++) await Promise.resolve();
+      expect(cdpSessions).toHaveLength(2);
+      const restore = cdpSessions[1]!;
+
+      await vi.advanceTimersByTimeAsync(2_100);
+      const refused = await acting;
+      expect(refused.ok, 'no frame means no page mutation').toBe(false);
+      expect(page.calls).not.toContain('click:#must-wait-for-picture');
+      expect(restore.detached, 'a failed restore remains attached but stopped for retry').toBe(false);
+
+      restore.silentStart = false;
+      silentNewCdp = false;
+      const retry = await c.controller({ kind: 'click', selector: '#after-picture' }, ctx('run-A', 'w2'));
+      expect(retry.ok).toBe(true);
+      expect(page.calls).toContain('click:#after-picture');
+      expect(cdpSessions, 'retry reuses the paused session instead of bypassing it').toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps a deliberate pause private across handback and a later watch', async () => {
