@@ -1,0 +1,332 @@
+name: PR248 round25 follow-up v4
+
+on:
+  push:
+    branches: [claude/desktop-app-features-j8qfoj]
+    paths:
+      - .github/workflows/pr248-round25-fix-v4.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/desktop-app-features-j8qfoj
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Apply review fixes
+        shell: bash
+        run: |
+          python <<'PY'
+          from pathlib import Path
+          from textwrap import dedent
+
+          def one(text, old, new, label):
+              n = text.count(old)
+              if n != 1:
+                  raise SystemExit(f'{label}: expected 1 match, got {n}')
+              return text.replace(old, new, 1)
+
+          # ---- controller.ts -------------------------------------------------
+          p = Path('src/browser/remote/controller.ts')
+          s = p.read_text()
+
+          s = one(
+              s,
+              '    const paused = held.hiddenByHolder === true && this.humanHolds(runId);',
+              '    const paused = held.hiddenByHolder === true;',
+              'preserve privacy pause across handback',
+          )
+
+          # Rewrite only the catch belonging to Page.startScreencast, using the
+          # call as the anchor rather than indentation-sensitive surrounding text.
+          anchor = "await cdp.send('Page.startScreencast', { ...SCREENCAST });"
+          ai = s.index(anchor)
+          catch_i = s.index('      } catch {', ai)
+          catch_end = s.index('      }\n', catch_i) + len('      }\n')
+          old_catch = s[catch_i:catch_end]
+          if 'return null;' not in old_catch or 'cdp.detach' not in old_catch:
+              raise SystemExit('unexpected startScreencast catch shape')
+          new_catch = dedent('''
+                } catch {
+                  // An ordinary CDP-watch failure is not a privacy pause. If we
+                  // left `capturing: false` here the client would suppress the
+                  // provider viewer even though that fallback may still work.
+                  held.visibilityUnconfirmed = false;
+                  held.capturing = true;
+                  this.announceControl(runId);
+                  await cdp.detach().catch(() => {});
+                  return null;
+                }
+          ''').lstrip('\n')
+          # dedent gives zero indentation; restore the method's six-space base.
+          new_catch = ''.join(('      ' + line if line.strip() else line) for line in new_catch.splitlines(True))
+          # Inner lines were already relatively indented by dedent's source; make
+          # sure the resulting first/last braces align with the original catch.
+          new_catch = new_catch.replace('            } catch {', '      } catch {', 1)
+          s = s[:catch_i] + new_catch + s[catch_end:]
+
+          s = one(
+              s,
+              '    const token = await lease.acquireActionSlot();\n    if (!token) return held.capturing === true;',
+              '    // Hide and Show are explicit ordered human decisions. Once accepted,\n'
+              '    // a slow earlier CDP operation must not make them expire.\n'
+              '    const token = await lease.acquireActionSlot(null);\n'
+              '    if (!token) return held.capturing === true;',
+              'non-expiring capture FIFO',
+          )
+
+          s = one(
+              s,
+              '    // for it. Only while the person still holds the page: a pause with no\n'
+              '    // holder left is nobody\'s decision, and honouring it would leave the panel\n'
+              '    // dark with nothing to clear it.',
+              '    // for it. Handback or idle expiry ends exclusive control, not the privacy\n'
+              '    // decision: a later watcher remains paused until Show or the agent\'s own\n'
+              '    // pre-action visibility gate deliberately restores the picture.',
+              'reattach privacy comment',
+          )
+          p.write_text(s)
+
+          # ---- BrowserLiveView.tsx -----------------------------------------
+          p = Path('cloud/web/src/chat/BrowserLiveView.tsx')
+          s = p.read_text()
+          s = one(
+              s,
+              '  const watchable = !!frame || (!!liveViewUrl && !paused);',
+              '  const hasFrame = frame !== undefined;\n  const watchable = hasFrame || (!!liveViewUrl && !paused);',
+              'hasFrame',
+          )
+          marker = '  }, [blind]);\n\n  // A held-back move must not outlive the control it was made under, NOR the'
+          effect = dedent('''
+            }, [blind]);
+
+            // React 19 delegates wheel through a passive listener. Consume the local
+            // default with a native non-passive listener while the event still bubbles
+            // to React's handler, which forwards the same gesture to CDP.
+            useEffect(() => {
+              if (!active || !driving || !hasFrame) return;
+              const img = imgRef.current;
+              if (!img) return;
+              const keepWheelRemote = (event: WheelEvent) => event.preventDefault();
+              img.addEventListener('wheel', keepWheelRemote, { passive: false });
+              return () => img.removeEventListener('wheel', keepWheelRemote);
+            }, [active, driving, hasFrame]);
+
+            // A held-back move must not outlive the control it was made under, NOR the
+          ''').strip('\n')
+          s = one(s, marker, effect, 'native non-passive wheel listener')
+          p.write_text(s)
+
+          # ---- controller.test.ts ------------------------------------------
+          p = Path('src/browser/remote/controller.test.ts')
+          s = p.read_text()
+          start = s.index("  it('does not leave a pause standing that its holder no longer owns'")
+          end = s.index("\n  it('refuses hidden typing from a watcher that arrived after the page was hidden'", start)
+          replacement = dedent('''
+            it('keeps a deliberate pause private across handback and a later watch', async () => {
+              const { provider } = fakeProvider();
+              const c = new RemoteBrowserController({ provider });
+              await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+              const first: BrowserFrame[] = [];
+              await c.startWatching('run-A', (f) => first.push(f));
+              cdp.pushFrame(1);
+              c.frameSeen('run-A', first[0]!.generation);
+              c.actorEnded('w1');
+              await c.takeOver('run-A');
+              await c.setCapture('run-A', false);
+
+              expect(c.handBack('run-A')).toBe(true);
+              await c.stopWatching('run-A');
+              const started = cdp.sent.filter((m) => m === 'Page.startScreencast').length;
+              await c.startWatching('run-A', () => {});
+
+              expect(
+                cdp.sent.filter((m) => m === 'Page.startScreencast'),
+                'rewatching does not disclose a page hidden before handback',
+              ).toHaveLength(started);
+              expect(c.humanHolds('run-A')).toBe(false);
+            });
+
+            it('keeps provider fallback available when an ordinary screencast start fails', async () => {
+              const { provider } = fakeProvider('https://provider.test/live/abc');
+              const c = new RemoteBrowserController({ provider });
+              const states: Array<{ capturing: boolean }> = [];
+              await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+              c.onControlFor('run-A', (state) => states.push({ capturing: state.capturing }));
+
+              await c.startWatching('run-A', () => {});
+              await c.stopWatching('run-A');
+              expect(states.at(-1)?.capturing).toBe(false);
+
+              const realSend = cdp.send;
+              cdp.send = async (method: string, params?: Record<string, unknown>) => {
+                if (method === 'Page.startScreencast') throw new Error('screencast unavailable');
+                return realSend.call(cdp, method, params);
+              };
+              try {
+                expect(await c.startWatching('run-A', () => {})).toBe(false);
+              } finally {
+                cdp.send = realSend;
+              }
+              expect(
+                states.at(-1)?.capturing,
+                'a transport failure is not advertised as a deliberate privacy pause',
+              ).toBe(true);
+            });
+          ''').strip('\n')
+          s = s[:start] + replacement + '\n' + s[end:]
+          p.write_text(s)
+
+          # ---- BrowserLiveView.test.tsx ------------------------------------
+          p = Path('cloud/web/src/chat/BrowserLiveView.test.tsx')
+          s = p.read_text()
+
+          def replace_range(start_hint, end_hint, body, label):
+              global s
+              try:
+                  start = s.index(start_hint)
+                  end = s.index(end_hint, start)
+              except ValueError as exc:
+                  raise SystemExit(f'{label}: boundary not found') from exc
+              s = s[:start] + dedent(body).strip('\n') + '\n\n' + s[end:]
+
+          replace_range(
+              "  it('becomes drivable once the server says the page is the user\\'s'",
+              "  it('leaves the viewer\\'s own shortcuts alone'",
+              '''
+                it('becomes drivable once the server says the page is the user\\'s', () => {
+                  const onInput = vi.fn();
+                  render(
+                    <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+                  );
+                  const img = screen.getByRole('img');
+                  const keyboard = screen.getByLabelText(/type into the agent browser/i) as HTMLTextAreaElement;
+                  expect(img).toHaveAttribute('tabindex', '-1');
+                  fireEvent.mouseDown(img, { button: 0 });
+                  expect(keyboard).toHaveFocus();
+                  fireEvent.input(keyboard, { target: { value: 'a' } });
+                  fireEvent.keyDown(keyboard, { key: 'Enter' });
+                  expect(onInput.mock.calls.map((c) => c[0])).toEqual([
+                    { kind: 'text', text: 'a' },
+                    { kind: 'key', key: 'Enter' },
+                  ]);
+                });
+              ''',
+              'driving keyboard test',
+          )
+
+          replace_range(
+              "  it('leaves the viewer\\'s own shortcuts alone'",
+              "  it('survives a browser becoming active on a panel already mounted'",
+              '''
+                it('leaves the viewer\\'s own shortcuts alone', () => {
+                  const onInput = vi.fn();
+                  render(
+                    <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+                  );
+                  const keyboard = screen.getByLabelText(/type into the agent browser/i);
+                  fireEvent.keyDown(keyboard, { key: 'r', ctrlKey: true });
+                  fireEvent.keyDown(keyboard, { key: 'w', metaKey: true });
+                  expect(onInput).not.toHaveBeenCalled();
+                });
+
+                it('forwards only text committed by the local input method', () => {
+                  const onInput = vi.fn();
+                  render(
+                    <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+                  );
+                  const keyboard = screen.getByLabelText(/type into the agent browser/i) as HTMLTextAreaElement;
+                  fireEvent.input(keyboard, { target: { value: 'に' }, isComposing: true });
+                  expect(onInput).not.toHaveBeenCalled();
+                  fireEvent.input(keyboard, { target: { value: '日本' }, isComposing: false });
+                  expect(onInput).toHaveBeenCalledWith({ kind: 'text', text: '日本' });
+                });
+
+                it('refuses shifted commands rather than degrading them', () => {
+                  const onInput = vi.fn();
+                  render(
+                    <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+                  );
+                  const keyboard = screen.getByLabelText(/type into the agent browser/i);
+                  fireEvent.keyDown(keyboard, { key: 'Tab', shiftKey: true });
+                  fireEvent.keyDown(keyboard, { key: 'ArrowLeft', shiftKey: true });
+                  expect(onInput).not.toHaveBeenCalled();
+                });
+              ''',
+              'shortcut/IME tests',
+          )
+
+          s = one(
+              s,
+              "    const surface = screen.getByRole('group', { name: /picture hidden/i });\n    expect(surface, 'it takes focus when it appears').toHaveFocus();",
+              "    const keyboard = screen.getByLabelText(/type into the agent browser/i);\n    expect(keyboard, 'the editable sink takes focus when the blind period appears').toHaveFocus();",
+              'blind focus test',
+          )
+          s = one(
+              s,
+              "    fireEvent.paste(screen.getByRole('img'), {\n      clipboardData: { getData: () => 'correct horse battery staple' },\n    });",
+              "    fireEvent.paste(screen.getByLabelText(/type into the agent browser/i), {\n      clipboardData: { getData: () => 'correct horse battery staple' },\n    });",
+              'visible paste test',
+          )
+          s = one(
+              s,
+              "    fireEvent.paste(screen.getByRole('group', { name: /picture hidden/i }), {\n      clipboardData: { getData: () => 'hunter2' },\n    });",
+              "    fireEvent.paste(screen.getByLabelText(/type into the agent browser/i), {\n      clipboardData: { getData: () => 'hunter2' },\n    });",
+              'blind paste test',
+          )
+          s = one(
+              s,
+              "    const surface = screen.getByRole('group', { name: /picture hidden/i });\n    expect(surface, 'and focus followed it').toHaveFocus();\n\n    fireEvent.keyDown(surface, { key: 'h' });\n    fireEvent.keyDown(surface, { key: 'Enter' });",
+              "    expect(screen.getByRole('group', { name: /picture hidden/i })).toBeInTheDocument();\n    const keyboard = screen.getByLabelText(/type into the agent browser/i) as HTMLTextAreaElement;\n    expect(keyboard).toHaveFocus();\n\n    fireEvent.input(keyboard, { target: { value: 'h' } });\n    fireEvent.keyDown(keyboard, { key: 'Enter' });",
+              'hidden typing test',
+          )
+          s = one(
+              s,
+              "    const chosen = screen.getByRole('group', { name: /picture hidden/i });\n    fireEvent.keyDown(chosen, { key: 'p' });\n    expect(onInput).toHaveBeenCalledWith({ kind: 'text', text: 'p' });",
+              "    expect(screen.getByRole('group', { name: /picture hidden/i })).toBeInTheDocument();\n    const keyboard = screen.getByLabelText(/type into the agent browser/i) as HTMLTextAreaElement;\n    fireEvent.input(keyboard, { target: { value: 'p' } });\n    expect(onInput).toHaveBeenCalledWith({ kind: 'text', text: 'p' });",
+              'confirmed hidden typing test',
+          )
+
+          wheel_marker = "  it('sums the wheel distance it did not send yet', async () => {"
+          wheel_test = dedent('''
+            it('keeps a remote wheel gesture from scrolling the local chat', () => {
+              const onInput = vi.fn();
+              render(
+                <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+              );
+              const img = screen.getByRole('img') as HTMLImageElement;
+              const wheel = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 120 });
+              fireEvent(img, wheel);
+              expect(wheel.defaultPrevented).toBe(true);
+            });
+
+          ''').strip('\n') + '\n\n'
+          s = one(s, wheel_marker, wheel_test + wheel_marker, 'wheel regression test')
+          p.write_text(s)
+          PY
+      - name: Controller regressions
+        run: npx vitest run src/browser/remote/controller.test.ts
+      - name: Full cloud web unit suite
+        run: npm run test -w cascade-cloud-web
+      - name: Cloud web typecheck and build
+        run: npm run build -w cascade-cloud-web
+      - name: Commit fixes and remove helper workflows
+        if: success()
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/pr248-round25-fix.yml .github/workflows/pr248-round25-fix-v2.yml .github/workflows/pr248-round25-fix-v3.yml .github/workflows/pr248-round25-fix-v4.yml
+          git add src/browser/remote/controller.ts src/browser/remote/controller.test.ts cloud/web/src/chat/BrowserLiveView.tsx cloud/web/src/chat/BrowserLiveView.test.tsx
+          git commit -m "fix(browser): address takeover review follow-ups"
+          git push origin HEAD:claude/desktop-app-features-j8qfoj
