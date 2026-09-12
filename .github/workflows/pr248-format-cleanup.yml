@@ -1,0 +1,99 @@
+name: PR248 follow-up formatting cleanup
+
+on:
+  push:
+    branches: [claude/desktop-app-features-j8qfoj]
+    paths:
+      - .github/workflows/pr248-format-cleanup.yml
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/desktop-app-features-j8qfoj
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Normalize inserted block indentation
+        run: |
+          python <<'PY'
+          from pathlib import Path
+
+          # Production hook block.
+          p = Path('cloud/web/src/chat/BrowserLiveView.tsx')
+          s = p.read_text()
+          start = s.index('  useEffect(() => {\n    if (blind) keyboardRef.current?.focus();')
+          end_marker = '  // page it was made on.'
+          end = s.index(end_marker, start)
+          block = '''  useEffect(() => {
+              if (blind) keyboardRef.current?.focus();
+            }, [blind]);
+
+            // React 19 delegates wheel through a passive listener. Consume the local
+            // default with a native non-passive listener while the event still bubbles
+            // to React's handler, which forwards the same gesture to CDP.
+            useEffect(() => {
+              if (!active || !driving || !hasFrame) return;
+              const img = imgRef.current;
+              if (!img) return;
+              const keepWheelRemote = (event: WheelEvent) => event.preventDefault();
+              img.addEventListener('wheel', keepWheelRemote, { passive: false });
+              return () => img.removeEventListener('wheel', keepWheelRemote);
+            }, [active, driving, hasFrame]);
+
+            // A held-back move must not outlive the control it was made under, NOR the
+          '''
+          # The literal is indented by the Python source; strip that common 10-space
+          # prefix without touching the desired two-space TS indentation.
+          lines = block.splitlines(True)
+          block = ''.join(line[10:] if line.startswith('          ') else line for line in lines)
+          s = s[:start] + block + s[end:]
+          p.write_text(s)
+
+          def indent_inserted(path, start_hint, end_hint):
+              p = Path(path)
+              s = p.read_text()
+              start = s.index(start_hint)
+              end = s.index(end_hint, start)
+              chunk = s[start:end]
+              chunk = '\n'.join(('  ' + line if line else line) for line in chunk.split('\n'))
+              p.write_text(s[:start] + chunk + s[end:])
+
+          indent_inserted(
+              'src/browser/remote/controller.test.ts',
+              "it('keeps a deliberate pause private across handback and a later watch'",
+              "  it('refuses hidden typing from a watcher that arrived after the page was hidden'",
+          )
+          indent_inserted(
+              'cloud/web/src/chat/BrowserLiveView.test.tsx',
+              "it('becomes drivable once the server says the page is the user\\'s'",
+              "  it('survives a browser becoming active on a panel already mounted'",
+          )
+          indent_inserted(
+              'cloud/web/src/chat/BrowserLiveView.test.tsx',
+              "it('keeps a remote wheel gesture from scrolling the local chat'",
+              "  it('sums the wheel distance it did not send yet'",
+          )
+          PY
+      - name: Re-run focused suites
+        run: |
+          npx vitest run src/browser/remote/controller.test.ts
+          npm run test -w cascade-cloud-web
+          npm run build -w cascade-cloud-web
+      - name: Commit cleanup and remove helper
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/pr248-format-cleanup.yml
+          git add src/browser/remote/controller.test.ts cloud/web/src/chat/BrowserLiveView.tsx cloud/web/src/chat/BrowserLiveView.test.tsx
+          git commit -m "style(browser): normalize review follow-up formatting"
+          git push origin HEAD:claude/desktop-app-features-j8qfoj
