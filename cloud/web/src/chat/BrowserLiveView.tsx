@@ -340,17 +340,17 @@ export function BrowserLiveView({
    * `input` event cannot send the paste a second time.
    */
   /** Flush sampled wheel distance before a later click. */
-const flushPendingScroll = () => {
-  if (scrollTimerRef.current) {
-    clearTimeout(scrollTimerRef.current);
-    scrollTimerRef.current = null;
-  }
-  const total = pendingScrollRef.current;
-  pendingScrollRef.current = null;
-  if (!total) return;
-  lastScrollRef.current = Date.now();
-  onInput?.({ kind: 'scroll', ...total });
-};
+  const flushPendingScroll = () => {
+    if (scrollTimerRef.current) {
+      clearTimeout(scrollTimerRef.current);
+      scrollTimerRef.current = null;
+    }
+    const total = pendingScrollRef.current;
+    pendingScrollRef.current = null;
+    if (!total) return;
+    lastScrollRef.current = Date.now();
+    onInput?.({ kind: 'scroll', ...total });
+  };
 
   const onPaste = (e: React.ClipboardEvent) => {
     const text = e.clipboardData?.getData('text') ?? '';

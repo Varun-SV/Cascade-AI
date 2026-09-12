@@ -155,14 +155,14 @@ describe('BrowserLiveView — taking the page over', () => {
   });
 
   it('keeps Give it back available when the stream disappears', () => {
-  const onHandBack = vi.fn();
-  render(
-    <BrowserLiveView active liveViewUrl={undefined} frame={undefined} streaming={false} human
-      onStop={() => {}} onHandBack={onHandBack} />,
-  );
-  fireEvent.click(screen.getByRole('button', { name: /give it back/i }));
-  expect(onHandBack).toHaveBeenCalledOnce();
-});
+    const onHandBack = vi.fn();
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={undefined} streaming={false} human
+        onStop={() => {}} onHandBack={onHandBack} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /give it back/i }));
+    expect(onHandBack).toHaveBeenCalledOnce();
+  });
 
   it('asks for the page rather than assuming it got it', () => {
     // The agent may be mid-action; the server grants control only once that
@@ -330,33 +330,33 @@ describe('BrowserLiveView — taking the page over', () => {
   });
 
   it('flushes pending wheel distance before a later click', async () => {
-  vi.useFakeTimers();
-  const now = vi.spyOn(Date, 'now');
-  try {
-    const onInput = vi.fn();
-    render(<BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />);
-    const img = screen.getByRole('img') as HTMLImageElement;
-    Object.defineProperty(img, 'naturalWidth', { value: 1280 });
-    Object.defineProperty(img, 'naturalHeight', { value: 800 });
-    img.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
-    now.mockReturnValue(1_000);
-    fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 10, deltaMode: 0 });
-    onInput.mockClear();
-    now.mockReturnValue(1_010);
-    fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 20, deltaMode: 0 });
-    expect(onInput).not.toHaveBeenCalled();
-    fireEvent.mouseDown(img, { clientX: 200, clientY: 200, button: 0, detail: 1 });
-    expect(onInput.mock.calls.map((c) => c[0])).toEqual([
-      { kind: 'scroll', x: 0.5, y: 0.5, deltaY: 20 },
-      { kind: 'click', x: 0.5, y: 0.5, button: 'left', clicks: 1 },
-    ]);
-    await act(async () => { vi.advanceTimersByTime(SCROLL_INTERVAL); });
-    expect(onInput).toHaveBeenCalledTimes(2);
-  } finally {
-    now.mockRestore();
-    vi.useRealTimers();
-  }
-});
+    vi.useFakeTimers();
+    const now = vi.spyOn(Date, 'now');
+    try {
+      const onInput = vi.fn();
+      render(<BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />);
+      const img = screen.getByRole('img') as HTMLImageElement;
+      Object.defineProperty(img, 'naturalWidth', { value: 1280 });
+      Object.defineProperty(img, 'naturalHeight', { value: 800 });
+      img.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
+      now.mockReturnValue(1_000);
+      fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 10, deltaMode: 0 });
+      onInput.mockClear();
+      now.mockReturnValue(1_010);
+      fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 20, deltaMode: 0 });
+      expect(onInput).not.toHaveBeenCalled();
+      fireEvent.mouseDown(img, { clientX: 200, clientY: 200, button: 0, detail: 1 });
+      expect(onInput.mock.calls.map((c) => c[0])).toEqual([
+        { kind: 'scroll', x: 0.5, y: 0.5, deltaY: 20 },
+        { kind: 'click', x: 0.5, y: 0.5, button: 'left', clicks: 1 },
+      ]);
+      await act(async () => { vi.advanceTimersByTime(SCROLL_INTERVAL); });
+      expect(onInput).toHaveBeenCalledTimes(2);
+    } finally {
+      now.mockRestore();
+      vi.useRealTimers();
+    }
+  });
 
   it('sums the wheel distance it did not send yet', async () => {
     // Every wheel event took the FIFO action slot, and a trackpad emits them
