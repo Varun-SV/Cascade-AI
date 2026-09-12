@@ -225,7 +225,8 @@ export function BrowserLiveView({
   // still on the old path, and neither being available is now unusual rather
   // than expected. A paused page is watchable through NEITHER, whatever the
   // provider would otherwise offer.
-  const watchable = !!frame || (!!liveViewUrl && !paused);
+  const hasFrame = frame !== undefined;
+  const watchable = hasFrame || (!!liveViewUrl && !paused);
   // Taking over means driving the frames, so it is offered only where they are
   // the thing on screen. The provider's iframe has no lease behind it — input
   // through it would be a second, uncoordinated controller racing the agent.
@@ -243,9 +244,21 @@ export function BrowserLiveView({
   // control, so composition/dead-key state and paste all have one stable target.
   useEffect(() => {
     if (blind) keyboardRef.current?.focus();
-  }, [blind]);
+}, [blind]);
 
-  // A held-back move must not outlive the control it was made under, NOR the
+// React 19 delegates wheel through a passive listener. Consume the local
+// default with a native non-passive listener while the event still bubbles
+// to React's handler, which forwards the same gesture to CDP.
+useEffect(() => {
+  if (!active || !driving || !hasFrame) return;
+  const img = imgRef.current;
+  if (!img) return;
+  const keepWheelRemote = (event: WheelEvent) => event.preventDefault();
+  img.addEventListener('wheel', keepWheelRemote, { passive: false });
+  return () => img.removeEventListener('wheel', keepWheelRemote);
+}, [active, driving, hasFrame]);
+
+// A held-back move must not outlive the control it was made under, NOR the
   // page it was made on.
   //
   // Keyed on the task as well as on `driving`, because the two failures are

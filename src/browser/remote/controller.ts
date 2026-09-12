@@ -838,16 +838,20 @@ export class RemoteBrowserController {
     // A watcher coming back does not undo a deliberate Hide. The session is
     // attached either way — so Show, and the agent's own restore, have
     // something to turn on — but the stream stays stopped until somebody asks
-    // for it. Only while the person still holds the page: a pause with no
-    // holder left is nobody's decision, and honouring it would leave the panel
-    // dark with nothing to clear it.
-    const paused = held.hiddenByHolder === true && this.humanHolds(runId);
+    // for it. Handback or idle expiry ends exclusive control, not the privacy
+    // decision: a later watcher remains paused until Show or the agent's own
+    // pre-action visibility gate deliberately restores the picture.
+    const paused = held.hiddenByHolder === true;
     if (!paused) {
       try {
         await cdp.send('Page.startScreencast', { ...SCREENCAST });
       } catch {
-        // The page went away between opening the session and starting the
-        // stream. Leave nothing half-attached behind.
+        // An ordinary CDP-watch failure is not a privacy pause. If we
+        // left `capturing: false` here the client would suppress the
+        // provider viewer even though that fallback may still work.
+        held.visibilityUnconfirmed = false;
+        held.capturing = true;
+        this.announceControl(runId);
         await cdp.detach().catch(() => {});
         return null;
       }
@@ -951,7 +955,9 @@ export class RemoteBrowserController {
     // the visibility gate while `capturing` was still its old value — passing
     // the gate, then entering the page as the suspension completed behind it.
     // The same invisible-agent window, one await further along.
-    const token = await lease.acquireActionSlot();
+    // Hide and Show are explicit ordered human decisions. Once accepted,
+    // a slow earlier CDP operation must not make them expire.
+    const token = await lease.acquireActionSlot(null);
     if (!token) return held.capturing === true;
     try {
       // Re-checked after the wait — ALL of it, not just the hold.

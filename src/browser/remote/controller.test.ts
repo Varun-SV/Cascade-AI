@@ -2226,39 +2226,57 @@ describe('handing the browser to the person watching', () => {
     expect((await c.input('run-A', { kind: 'text', text: 'secret' })).ok).toBe(true);
   });
 
-  it('does not leave a pause standing that its holder no longer owns', async () => {
-    // The other half of scoping the pause to the holder. If the hold ends while
-    // the page is hidden and no agent action follows to restore it, a later
-    // watcher would inherit a dark panel with nothing able to clear it — the
-    // present-but-inert shape, arrived at from the opposite direction.
-    const { provider } = fakeProvider();
-    const c = new RemoteBrowserController({ provider });
-    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+it('keeps a deliberate pause private across handback and a later watch', async () => {
+  const { provider } = fakeProvider();
+  const c = new RemoteBrowserController({ provider });
+  await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
 
-    const first: BrowserFrame[] = [];
-    await c.startWatching('run-A', (f) => first.push(f));
-    cdp.pushFrame(1);
-    c.frameSeen('run-A', first[0]!.generation);
-    c.actorEnded('w1');
-    await c.takeOver('run-A');
-    await c.setCapture('run-A', false);
+  const first: BrowserFrame[] = [];
+  await c.startWatching('run-A', (f) => first.push(f));
+  cdp.pushFrame(1);
+  c.frameSeen('run-A', first[0]!.generation);
+  c.actorEnded('w1');
+  await c.takeOver('run-A');
+  await c.setCapture('run-A', false);
 
-    // They hand it back, and nothing else happens.
-    expect(c.handBack('run-A')).toBe(true);
-    await c.stopWatching('run-A');
-    const started = cdp.sent.filter((m) => m === 'Page.startScreencast').length;
+  expect(c.handBack('run-A')).toBe(true);
+  await c.stopWatching('run-A');
+  const started = cdp.sent.filter((m) => m === 'Page.startScreencast').length;
+  await c.startWatching('run-A', () => {});
 
-    await c.startWatching('run-A', () => {});
+  expect(
+    cdp.sent.filter((m) => m === 'Page.startScreencast'),
+    'rewatching does not disclose a page hidden before handback',
+  ).toHaveLength(started);
+  expect(c.humanHolds('run-A')).toBe(false);
+});
 
-    // Asserted on the CDP call rather than on a delivered frame: the fake hands
-    // a frame to whatever callback is installed whether or not the screencast
-    // was ever started, so `pushFrame` landing proves nothing about this.
-    expect(
-      cdp.sent.filter((m) => m === 'Page.startScreencast'),
-      'a pause nobody holds is not a pause',
-    ).toHaveLength(started + 1);
-    expect(c.humanHolds('run-A'), 'and the hold really had ended').toBe(false);
-  });
+it('keeps provider fallback available when an ordinary screencast start fails', async () => {
+  const { provider } = fakeProvider('https://provider.test/live/abc');
+  const c = new RemoteBrowserController({ provider });
+  const states: Array<{ capturing: boolean }> = [];
+  await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+  c.onControlFor('run-A', (state) => states.push({ capturing: state.capturing }));
+
+  await c.startWatching('run-A', () => {});
+  await c.stopWatching('run-A');
+  expect(states.at(-1)?.capturing).toBe(false);
+
+  const realSend = cdp.send;
+  cdp.send = async (method: string, params?: Record<string, unknown>) => {
+    if (method === 'Page.startScreencast') throw new Error('screencast unavailable');
+    return realSend.call(cdp, method, params);
+  };
+  try {
+    expect(await c.startWatching('run-A', () => {})).toBe(false);
+  } finally {
+    cdp.send = realSend;
+  }
+  expect(
+    states.at(-1)?.capturing,
+    'a transport failure is not advertised as a deliberate privacy pause',
+  ).toBe(true);
+});
 
   it('refuses hidden typing from a watcher that arrived after the page was hidden', async () => {
     // The full lifecycle, and the one path here reachable with the ordinary web
