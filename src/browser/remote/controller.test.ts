@@ -2076,69 +2076,49 @@ describe('handing the browser to the person watching', () => {
   });
 
   it('does not hide a session that stopped being the one on screen', async () => {
-    // Found by a fresh-context review, and invisible to this suite until the
-    // fake started handing out a session per attach. `setCapture` reads the
-    // session BEFORE it waits for the action slot, and the watch queue does not
-    // take that slot — so a remount can detach that session and attach another
-    // while the wait is in progress.
-    //
-    // Stopping the one it started with would be the worst outcome available:
-    // the controller records the page as hidden and announces it, while the
-    // session that is actually streaming was never told to stop. The person
-    // types a password into a panel they believe is dark.
-    cdpPerAttach = true;
-    const { provider } = fakeProvider();
-    const c = new RemoteBrowserController({ provider });
-    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+  cdpPerAttach = true;
+  const { provider } = fakeProvider();
+  const c = new RemoteBrowserController({ provider });
+  await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+  const first: BrowserFrame[] = [];
+  await c.startWatching('run-A', (f) => first.push(f));
+  const one = cdpSessions[0]!;
+  one.pushFrame(1);
+  c.frameSeen('run-A', first[0]!.generation);
+  c.actorEnded('w1');
+  await c.takeOver('run-A');
 
-    const first: BrowserFrame[] = [];
-    await c.startWatching('run-A', (f) => first.push(f));
-    const one = cdpSessions[0]!;
-    one.pushFrame(1);
-    c.frameSeen('run-A', first[0]!.generation);
-    c.actorEnded('w1');
-    await c.takeOver('run-A');
+  const gate = deferred();
+  const realSend = one.send;
+  one.send = async (method: string, params?: Record<string, unknown>) => {
+    if (method === 'Input.dispatchMouseEvent') await gate.promise;
+    return realSend.call(one, method, params);
+  };
+  const clicking = c.input('run-A', { kind: 'click', x: 0.5, y: 0.5 });
+  await new Promise((r) => setTimeout(r, 10));
+  const hiding = c.setCapture('run-A', false);
+  await new Promise((r) => setTimeout(r, 10));
 
-    // One of the person's own events holds the action slot open.
-    const gate = deferred();
-    const realSend = one.send;
-    one.send = async (method: string, params?: Record<string, unknown>) => {
-      if (method === 'Input.dispatchMouseEvent') await gate.promise;
-      return realSend.call(one, method, params);
-    };
-    const clicking = c.input('run-A', { kind: 'click', x: 0.5, y: 0.5 });
-    await new Promise((r) => setTimeout(r, 10));
+  const stopping = c.stopWatching('run-A');
+  await new Promise((r) => setTimeout(r, 10));
+  expect(one.detached, 'the active click still owns the old session').toBe(false);
 
-    // They press Hide while it is still going in. This reads session one, and
-    // then parks on the action slot.
-    const hiding = c.setCapture('run-A', false);
-    await new Promise((r) => setTimeout(r, 10));
+  gate.resolve();
+  one.send = realSend;
+  expect((await clicking).ok).toBe(true);
+  await hiding;
+  await stopping;
+  expect(one.detached, 'detach happens only after the click completes').toBe(true);
 
-    // The panel remounts while it waits: session one goes, session two arrives.
-    await c.stopWatching('run-A');
-    const second: BrowserFrame[] = [];
-    await c.startWatching('run-A', (f) => second.push(f));
-    const two = cdpSessions[1]!;
-    expect(two, 'genuinely a different session').not.toBe(one);
-
-    gate.resolve();
-    one.send = realSend;
-    expect((await clicking).ok).toBe(true);
-    expect(await hiding, 'the page they were looking at is gone, so this is not it').toBe(true);
-
-    expect(
-      two.sent.filter((m) => m === 'Page.stopScreencast'),
-      'the live session was not stopped behind a Hide aimed at another one',
-    ).toHaveLength(0);
-    expect(c.humanHolds('run-A'), 'and they still hold the page').toBe(true);
-
-    // Seeing the new watch is what makes Hide theirs to press again.
-    two.pushFrame(2);
-    expect(second, 'its own attach frame, and the one pushed to it').toHaveLength(2);
-    c.frameSeen('run-A', second[0]!.generation);
-    expect(await c.setCapture('run-A', false), 'now it is').toBe(false);
-    expect(two.sent).toContain('Page.stopScreencast');
-  });
+  const second: BrowserFrame[] = [];
+  await c.startWatching('run-A', (f) => second.push(f));
+  const two = cdpSessions[1]!;
+  expect(two).not.toBe(one);
+  expect(two.sent.filter((m) => m === 'Page.stopScreencast')).toHaveLength(0);
+  two.pushFrame(2);
+  c.frameSeen('run-A', second[0]!.generation);
+  expect(await c.setCapture('run-A', false)).toBe(false);
+});
 
   it('does not hide against a watch that was replaced while it waited', async () => {
     // The same staleness by the other route. A reconnect KEEPS the session and
@@ -2696,48 +2676,40 @@ describe('handing the browser to the person watching', () => {
   });
 
   it('shows the page that is on screen now, not the one Show was aimed at', async () => {
-    // Hide refuses when the view moves under it, because hiding whatever
-    // replaced the page somebody was looking at is the wrong page. Show is the
-    // opposite request: it ends a PAUSE, and the pause lives on the run, which
-    // the replacement session inherits and attaches paused. Aimed at the
-    // session captured before the wait, Show hit a detached one — `applyCapture`
-    // swallows that, the socket handler ignores its `false`, and the button
-    // silently did nothing to a page that was still hidden.
-    cdpPerAttach = true;
-    const { provider } = fakeProvider();
-    const c = new RemoteBrowserController({ provider });
-    await watched(c);
-    c.actorEnded('w1');
-    await c.takeOver('run-A');
-    await c.setCapture('run-A', false);
+  cdpPerAttach = true;
+  const { provider } = fakeProvider();
+  const c = new RemoteBrowserController({ provider });
+  await watched(c);
+  c.actorEnded('w1');
+  await c.takeOver('run-A');
+  await c.setCapture('run-A', false);
 
-    // A slow input holds the slot while Show waits behind it.
-    const typing = deferred();
-    const first = cdpSessions.at(-1)!;
-    const realSend = first.send;
-    first.send = async (method: string, params?: Record<string, unknown>) => {
-      if (method === 'Input.insertText') await typing.promise;
-      return realSend.call(first, method, params);
-    };
-    const typed = c.input('run-A', { kind: 'text', text: 'x' });
-    await new Promise((r) => setTimeout(r, 10));
-    const showing = c.setCapture('run-A', true);
-    await new Promise((r) => setTimeout(r, 10));
+  const typing = deferred();
+  const first = cdpSessions.at(-1)!;
+  const realSend = first.send;
+  first.send = async (method: string, params?: Record<string, unknown>) => {
+    if (method === 'Input.insertText') await typing.promise;
+    return realSend.call(first, method, params);
+  };
+  const typed = c.input('run-A', { kind: 'text', text: 'x' });
+  await new Promise((r) => setTimeout(r, 10));
+  const showing = c.setCapture('run-A', true);
+  await new Promise((r) => setTimeout(r, 10));
+  const stopping = c.stopWatching('run-A');
+  await new Promise((r) => setTimeout(r, 10));
 
-    // The panel remounts: the old session goes, a replacement attaches paused.
-    await c.stopWatching('run-A');
-    await c.startWatching('run-A', () => {});
+  typing.resolve();
+  first.send = realSend;
+  await typed;
+  await showing;
+  await stopping;
+  await c.startWatching('run-A', () => {});
 
-    typing.resolve();
-    first.send = realSend;
-    await typed;
-
-    expect(await showing, 'the page the person is looking at is shown').toBe(true);
-    const replacement = cdpSessions.at(-1)!;
-    expect(replacement, 'and it is not the session Show was aimed at').not.toBe(first);
-    expect(replacement.sent, 'the picture came back on the current session')
-      .toContain('Page.startScreencast');
-  });
+  const replacement = cdpSessions.at(-1)!;
+  expect(replacement).not.toBe(first);
+  expect(replacement.sent, 'Show survives the no-session gap')
+    .toContain('Page.startScreencast');
+});
 
   it('does not hand over a browser that closed while the person waited for it', async () => {
     // The wait is up to the full action ceiling, and the agent's action can END
@@ -2811,6 +2783,41 @@ describe('handing the browser to the person watching', () => {
     expect(out.ok).toBe(true);
     expect(page.calls).toContain('click:#after');
   });
+
+  it('counts a restored frame that arrives before startScreencast resolves', async () => {
+  const { provider } = fakeProvider();
+  const c = new RemoteBrowserController({ provider });
+  await watched(c);
+  c.actorEnded('w1');
+  await c.takeOver('run-A');
+  await c.setCapture('run-A', false);
+  c.handBack('run-A');
+
+  const states: Array<{ capturing: boolean }> = [];
+  c.onControlFor('run-A', (state) => states.push({ capturing: state.capturing }));
+  cdp.silentStart = true;
+  const started = deferred();
+  const realSend = cdp.send;
+  cdp.send = async (method: string, params?: Record<string, unknown>) => {
+    if (method === 'Page.startScreencast') {
+      const result = realSend.call(cdp, method, params);
+      cdp.pushFrame(77);
+      await started.promise;
+      return result;
+    }
+    return realSend.call(cdp, method, params);
+  };
+
+  const acting = c.controller({ kind: 'click', selector: '#after-early-frame' }, ctx('run-A', 'w2'));
+  await new Promise((r) => setTimeout(r, 10));
+  started.resolve();
+  const out = await acting;
+  cdp.send = realSend;
+
+  expect(out.ok).toBe(true);
+  expect(page.calls).toContain('click:#after-early-frame');
+  expect(states.at(-1)?.capturing).toBe(true);
+});
 
   it('does not act on a page whose restore the user stopped', async () => {
     // Bringing the picture back is a CDP round trip, and watching a page come

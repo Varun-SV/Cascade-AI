@@ -867,27 +867,32 @@ export class RemoteBrowserController {
   }
 
   /** Nobody is watching any more: stop paying to render frames. */
-  async stopWatching(runId: string): Promise<void> {
-    const held = this.runs.get(runId);
-    if (!held) return;
-    await this.queueWatch(held, async () => {
-      const cdp = held.screencast;
-      held.onFrame = undefined;
-      if (!cdp) return;
-      held.screencast = undefined;
-      // `hiddenByHolder` is deliberately NOT cleared. Nobody is watching, which
-      // is why frames stop; it says nothing about whether the person wanted the
-      // page shown, and the attach on the way back reads it.
-      held.capturing = false;
-      this.announceControl(runId);
-      // Both best-effort and in this order: stop the stream first so no further
-      // frames are produced, then let the session go. A run whose page has
-      // already closed throws on both, and neither failure is actionable.
+async stopWatching(runId: string): Promise<void> {
+  const held = this.runs.get(runId);
+  if (!held) return;
+  await this.queueWatch(held, async () => {
+    const cdp = held.screencast;
+    // Invalidate the view immediately. Queued human events must fail
+    // their post-wait identity check rather than land in a departed view.
+    held.onFrame = undefined;
+    if (!cdp) return;
+    held.screencast = undefined;
+    held.capturing = false;
+    this.announceControl(runId);
+
+    // A click is several CDP commands under one action slot. Do not
+    // detach between press and release; wait for the current human turn
+    // (and earlier queued turns) before tearing this session down.
+    const lease = this.leases.get(runId);
+    const token = lease ? await lease.acquireActionSlot(ACTION_TIMEOUT_MS) : null;
+    try {
       await cdp.send('Page.stopScreencast').catch(() => {});
       await cdp.detach().catch(() => {});
-    });
-  }
-
+    } finally {
+      if (token && lease) lease.endAction(token);
+    }
+  });
+}
   /**
    * Suspend or resume the picture without giving up control.
    *
@@ -984,8 +989,17 @@ export class RemoteBrowserController {
       }
       // SHOW re-reads the session; HIDE keeps the one it was aimed at.
       const target = on ? held.screencast : cdp;
-      if (!target) return held.capturing === true;
-      const now = await this.applyCapture(runId, held, target, on);
+if (!target) {
+  // Show ends a run-level privacy pause. If unwatch invalidated its
+  // old session while this call waited, remember that decision so the
+  // replacement watch attaches visible rather than resurrecting Hide.
+  if (on) {
+    held.hiddenByHolder = false;
+    if (lease.heldByHuman) lease.touch();
+  }
+  return held.capturing === true;
+}
+const now = await this.applyCapture(runId, held, target, on);
       if (lease.heldByHuman) lease.touch();
       return now;
     } finally {
@@ -1007,46 +1021,44 @@ export class RemoteBrowserController {
    * a one-action refusal.
    */
   private async applyCapture(
-    runId: string,
-    held: RunBrowser,
-    cdp: CDPSession,
-    on: boolean,
-    confirmWithFrame = false,
-  ): Promise<boolean> {
-    if (held.capturing === on && !(on && confirmWithFrame && held.visibilityUnconfirmed)) return on;
-    try {
-      if (on) await cdp.send('Page.startScreencast', { ...SCREENCAST });
-      else await cdp.send('Page.stopScreencast');
-      if (on) {
-        held.visibilityUnconfirmed = true;
-        // A user pressing Show can be told the stream command succeeded, but
-        // the agent's restore is stricter: keep it externally paused until an
-        // actual frame proves visibility is back.
-        if (!confirmWithFrame) held.capturing = true;
-      } else {
-        held.visibilityUnconfirmed = false;
-        held.capturing = false;
-      }
-      // The decision, recorded separately from whether frames are flowing.
-      // Turning the picture off here is only ever the holder asking for it —
-      // `setCapture` refuses everyone else — and turning it back on is the one
-      // place both ways out of the pause meet, whether the person pressed Show
-      // or the agent restored the picture on its way in.
-      held.hiddenByHolder = !on;
-      this.announceControl(runId);
-    } catch {
-      // The page went away underneath. Report what is actually true rather
-      // than what was requested — a UI that believes it is streaming when it
-      // is not is the failure this whole panel exists to avoid.
-      return held.capturing === true && !held.visibilityUnconfirmed;
-    }
-    // For a confirmed restore `on` is true, so this still means "the start
-    // command was accepted" and the caller waits for the frame. For an ordinary
-    // transition the return value is the resulting capture state — false for
-    // Hide, true for Show — which is the public `setCapture` contract.
-    return on;
-  }
+  runId: string,
+  held: RunBrowser,
+  cdp: CDPSession,
+  on: boolean,
+  confirmWithFrame = false,
+): Promise<boolean> {
+  if (held.capturing === on && !(on && confirmWithFrame && held.visibilityUnconfirmed)) return on;
 
+  // Chrome can emit the first keyframe before startScreencast resolves.
+  // Arm confirmation before the command so that frame is allowed to
+  // clear the marker and promote capture while the command is pending.
+  const wasUnconfirmed = held.visibilityUnconfirmed === true;
+  const wasCapturing = held.capturing === true;
+  if (on) held.visibilityUnconfirmed = true;
+  try {
+    if (on) await cdp.send('Page.startScreencast', { ...SCREENCAST });
+    else await cdp.send('Page.stopScreencast');
+    if (on) {
+      // Manual Show advertises that frames may flow as soon as the
+      // command is accepted. Do not re-arm visibilityUnconfirmed here:
+      // an early frame may already have cleared it.
+      if (!confirmWithFrame) held.capturing = true;
+    } else {
+      held.visibilityUnconfirmed = false;
+      held.capturing = false;
+    }
+    held.hiddenByHolder = !on;
+    this.announceControl(runId);
+  } catch {
+    if (on) {
+      held.visibilityUnconfirmed = wasUnconfirmed;
+      held.capturing = wasCapturing;
+      this.announceControl(runId);
+    }
+    return held.capturing === true && !held.visibilityUnconfirmed;
+  }
+  return on;
+}
   /**
    * Wait, briefly, for Chrome to produce a frame.
    *

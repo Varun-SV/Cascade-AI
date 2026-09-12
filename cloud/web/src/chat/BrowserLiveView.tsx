@@ -339,6 +339,19 @@ export function BrowserLiveView({
    * insertion also means the keyboard sink stays empty, so the subsequent
    * `input` event cannot send the paste a second time.
    */
+  /** Flush sampled wheel distance before a later click. */
+const flushPendingScroll = () => {
+  if (scrollTimerRef.current) {
+    clearTimeout(scrollTimerRef.current);
+    scrollTimerRef.current = null;
+  }
+  const total = pendingScrollRef.current;
+  pendingScrollRef.current = null;
+  if (!total) return;
+  lastScrollRef.current = Date.now();
+  onInput?.({ kind: 'scroll', ...total });
+};
+
   const onPaste = (e: React.ClipboardEvent) => {
     const text = e.clipboardData?.getData('text') ?? '';
     if (!text) return;
@@ -440,7 +453,7 @@ export function BrowserLiveView({
             {capturing === false ? 'Show the page' : 'Hide the page'}
           </button>
         )}
-        {takeable && (
+        {(driving || takeable) && (
           <button
             type="button"
             onClick={() => (driving ? onHandBack?.() : onTakeOver?.())}
@@ -504,7 +517,12 @@ export function BrowserLiveView({
             keyboardRef.current?.focus();
             if (e.button > 2) return;
             const p = at(e.clientX, e.clientY);
-            if (p) onInput?.({ kind: 'click', ...p, button: e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left', clicks: e.detail || 1 });
+            if (p) {
+              // The sampled wheel happened before this click. Flush it
+              // now so its timer cannot reverse their remote order.
+              flushPendingScroll();
+              onInput?.({ kind: 'click', ...p, button: e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left', clicks: e.detail || 1 });
+            }
           } : undefined}
           onMouseMove={driving ? (e) => {
             const p = at(e.clientX, e.clientY);
