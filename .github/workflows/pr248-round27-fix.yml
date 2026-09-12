@@ -1,0 +1,182 @@
+name: PR248 round27 review fixes
+
+on:
+  push:
+    branches: [claude/desktop-app-features-j8qfoj]
+    paths: [.github/workflows/pr248-round27-fix.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/desktop-app-features-j8qfoj
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Apply round 27 lifecycle fixes
+        shell: bash
+        run: |
+          python <<'PY'
+          from pathlib import Path
+
+          def once(text: str, old: str, new: str, label: str) -> str:
+              n = text.count(old)
+              if n != 1:
+                  raise SystemExit(f'{label}: expected 1 match, got {n}')
+              return text.replace(old, new, 1)
+
+          # ── Lease: distinguish holder activity from lifecycle barriers ─────
+          p = Path('src/browser/lease.ts')
+          s = p.read_text()
+          s = once(
+              s,
+              "  private action: symbol | null = null;\n",
+              "  private action: symbol | null = null;\n  /** Whether the current action slot represents activity by its holder. */\n  private actionCountsAsHumanActivity = false;\n",
+              'lease action activity flag',
+          )
+          s = once(
+              s,
+              "  private lapse(): void {\n    if (this.actor !== HUMAN_ACTOR) return;\n    if (this.action) { this.armIdle(); return; }\n    this.release();\n  }",
+              "  private lapse(): void {\n    if (this.actor !== HUMAN_ACTOR) return;\n    if (this.action && this.actionCountsAsHumanActivity) {\n      // An event the person started before the deadline is evidence they are\n      // still here, so that interaction earns a fresh idle interval.\n      this.armIdle();\n      return;\n    }\n    // A lifecycle barrier (for example watcher teardown) serializes against\n    // input but is not evidence that the person is present. The barrier keeps\n    // the action slot occupied, so releasing ownership here still cannot let\n    // an agent mutate the page until teardown has finished.\n    this.release();\n  }",
+              'lease idle lapse semantics',
+          )
+          s = once(
+              s,
+              "  private beginAction(): symbol | null {\n    if (this.action) return null;\n    const token = Symbol('browser-action');\n    this.action = token;\n    return token;\n  }",
+              "  private beginAction(countsAsHumanActivity = true): symbol | null {\n    if (this.action) return null;\n    const token = Symbol('browser-action');\n    this.action = token;\n    this.actionCountsAsHumanActivity = countsAsHumanActivity;\n    return token;\n  }",
+              'lease beginAction kind',
+          )
+          s = once(
+              s,
+              "  endAction(token: symbol): boolean {\n    if (this.action !== token) return false;\n    this.action = null;\n    this.actionQueue.shift()?.();\n    return true;\n  }",
+              "  endAction(token: symbol): boolean {\n    if (this.action !== token) return false;\n    this.action = null;\n    this.actionCountsAsHumanActivity = false;\n    this.actionQueue.shift()?.();\n    return true;\n  }",
+              'lease endAction kind reset',
+          )
+          s = once(
+              s,
+              "  async acquireActionSlot(withinMs: number | null = ACTION_HANDOFF_MS): Promise<symbol | null> {\n",
+              "  async acquireActionSlot(\n    withinMs: number | null = ACTION_HANDOFF_MS,\n    countsAsHumanActivity = true,\n  ): Promise<symbol | null> {\n",
+              'lease acquire signature',
+          )
+          s = once(
+              s,
+              "    if (!this.action && this.actionQueue.length === 0) return this.beginAction();\n",
+              "    if (!this.action && this.actionQueue.length === 0) {\n      return this.beginAction(countsAsHumanActivity);\n    }\n",
+              'lease acquire fast path',
+          )
+          s = once(
+              s,
+              "        resolve(this.beginAction());\n",
+              "        resolve(this.beginAction(countsAsHumanActivity));\n",
+              'lease acquire queued path',
+          )
+          s = once(
+              s,
+              "   * `null` as a RESULT means a bounded wait ran out. `null` as `withinMs` means\n   * this accepted operation is intentionally unbounded by time and will leave\n   * the queue only when its turn arrives.\n",
+              "   * `null` as a RESULT means a bounded wait ran out. `null` as `withinMs` means\n   * this accepted operation is intentionally unbounded by time and will leave\n   * the queue only when its turn arrives. `countsAsHumanActivity=false` is for\n   * lifecycle barriers: they still serialize, but an idle deadline must not\n   * mistake framework cleanup for evidence that the person is present.\n",
+              'lease acquire docs',
+          )
+          p.write_text(s)
+
+          # ── Controller: safe unwatch + hidden/no-watcher restore ───────────
+          p = Path('src/browser/remote/controller.ts')
+          s = p.read_text()
+          s = once(
+              s,
+              "      // A click is several CDP commands under one action slot. Do not\n      // detach between press and release; wait for the current human turn\n      // (and earlier queued turns) before tearing this session down.\n      const lease = this.leases.get(runId);\n      const token = lease ? await lease.acquireActionSlot(ACTION_TIMEOUT_MS) : null;\n      try {\n        await cdp.send('Page.stopScreencast').catch(() => {});\n        await cdp.detach().catch(() => {});\n      } finally {\n        if (token && lease) lease.endAction(token);\n      }",
+              "      // A click is several CDP commands under one action slot. Teardown\n      // joins that SAME FIFO and waits for its real turn: timing out and then\n      // detaching anyway would cut a slow click between press and release. It\n      // is marked as lifecycle work rather than holder activity, so an idle\n      // deadline that lands while teardown owns the slot can still release an\n      // abandoned takeover instead of granting it a fresh two-minute window.\n      const lease = this.leases.get(runId);\n      const token = lease ? await lease.acquireActionSlot(null, false) : null;\n      if (lease && !token) return;\n      try {\n        await cdp.send('Page.stopScreencast').catch(() => {});\n        await cdp.detach().catch(() => {});\n      } finally {\n        if (token && lease) lease.endAction(token);\n      }",
+              'controller unwatch lifecycle slot',
+          )
+
+          # Keep an ephemeral restore session visible through the agent action,
+          # then tear it down in the action-slot finally unless a watcher adopted it.
+          s = once(
+              s,
+              "    try {\n      const held = await this.open(runId, context.signal);\n",
+              "    let temporaryCapture: {\n      held: RunBrowser;\n      cdp: CDPSession;\n      sink: (frame: BrowserFrame) => void;\n      watchGen: number | undefined;\n    } | undefined;\n\n    try {\n      const held = await this.open(runId, context.signal);\n",
+              'controller temporary capture declaration',
+          )
+          marker = "      // The page must be VISIBLE before anything changes it.\n"
+          if s.count(marker) != 1:
+              raise SystemExit(f'visibility gate marker: expected 1 match, got {s.count(marker)}')
+          restore = """      // A deliberate Hide survives handback, and an unwatch deliberately\n      // detaches the CDP session. Those two facts can coexist: hiddenByHolder\n      // can still be true here with no screencast to restore. Skipping the gate\n      // in that state would let the first agent action after a conversation\n      // switch mutate a page that is still carrying the user's privacy pause.\n      // Attach a temporary, still-paused session so the ordinary visibility\n      // gate below can start it and insist on a fresh frame before the action.\n      // If no watcher adopts it, the action-slot finally tears it back down so\n      // an unwatched run does not keep paying to encode frames.\n      if (held.hiddenByHolder === true && !held.screencast) {\n        const sink = (_frame: BrowserFrame) => {};\n        const watchGen = held.watchGen;\n        let cdp: CDPSession | null = null;\n        try {\n          cdp = await this.attachScreencast(runId, held, sink);\n        } catch {\n          // A failed attach is the same safety outcome as a failed restore:\n          // without a picture proof the action must not reach the page.\n        }\n        if (!cdp) {\n          return {\n            ok: false,\n            detail: 'The page could not be shown again, so nothing was done to it.',\n          };\n        }\n        temporaryCapture = { held, cdp, sink, watchGen };\n      }\n\n"""
+          s = s.replace(marker, restore + marker, 1)
+
+          old_finally = """    } finally {\n      lease_.endAction(token);\n      // A cancelled or stopped run is finished with the browser either way, so\n      // it does not keep the lease while a queued worker waits.\n      if (context.signal?.aborted || this.revoked.has(runId)) lease_.releaseIfHeldBy(actor);\n    }\n"""
+          new_finally = """    } finally {\n      if (temporaryCapture) {\n        const { held, cdp, sink, watchGen } = temporaryCapture;\n        // A watcher may have arrived while the temporary restore was running.\n        // In that case it replaced the sink and bumped the watch generation,\n        // so the session is now a real live view and must not be torn out from\n        // underneath it. Otherwise this was only a one-action visibility proof.\n        if (held.screencast === cdp && held.onFrame === sink && held.watchGen === watchGen) {\n          held.onFrame = undefined;\n          held.screencast = undefined;\n          // The privacy pause was ended by the successful restore. With no\n          // watcher there is no screencast, but this must not be advertised as\n          // another deliberate Hide (which would suppress provider fallback).\n          held.capturing = true;\n          this.announceControl(runId);\n          await cdp.send('Page.stopScreencast').catch(() => {});\n          await cdp.detach().catch(() => {});\n        }\n      }\n      lease_.endAction(token);\n      // A cancelled or stopped run is finished with the browser either way, so\n      // it does not keep the lease while a queued worker waits.\n      if (context.signal?.aborted || this.revoked.has(runId)) lease_.releaseIfHeldBy(actor);\n    }\n"""
+          s = once(s, old_finally, new_finally, 'controller temporary capture cleanup')
+          p.write_text(s)
+
+          # ── Web: ownership alone must not leave a focused input sink ───────
+          p = Path('cloud/web/src/chat/BrowserLiveView.tsx')
+          s = p.read_text()
+          s = once(
+              s,
+              "  const blind = active && !frame && driving && capturing === false && confirmed === true;\n",
+              "  const blind = active && !frame && driving && capturing === false && confirmed === true;\n  // Ownership is not enough to type. Across a reconnect `human` deliberately\n  // survives while this watch has seen nothing yet; keeping the old textarea\n  // mounted would keep browser focus too, so the next physical key could reach\n  // a page whose fresh frame has not even been confirmed. Mount the keyboard\n  // boundary only for a confirmed current picture or confirmed blind mode.\n  const keyboardEnabled = driving && confirmed === true && (hasFrame || blind);\n",
+              'web keyboard enabled gate',
+          )
+          s = once(
+              s,
+              "      {driving && (\n        <textarea\n",
+              "      {keyboardEnabled && (\n        <textarea\n",
+              'web textarea mount gate',
+          )
+          p.write_text(s)
+
+          # ── Controller regressions ─────────────────────────────────────────
+          p = Path('src/browser/remote/controller.test.ts')
+          s = p.read_text()
+          marker = "  it('keeps a deliberate pause private across handback and a later watch', async () => {"
+          if s.count(marker) != 1:
+              raise SystemExit('controller hidden restore test marker mismatch')
+          test = """  it('restores a hidden page before acting after its watcher detached', async () => {\n    cdpPerAttach = true;\n    const { provider } = fakeProvider();\n    const c = new RemoteBrowserController({ provider });\n    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));\n\n    const frames: BrowserFrame[] = [];\n    await c.startWatching('run-A', (f) => frames.push(f));\n    const first = cdpSessions[0]!;\n    first.pushFrame(1);\n    c.frameSeen('run-A', frames[0]!.generation);\n    c.actorEnded('w1');\n    await c.takeOver('run-A');\n    expect(await c.setCapture('run-A', false)).toBe(false);\n    expect(c.handBack('run-A')).toBe(true);\n    await c.stopWatching('run-A');\n    expect(first.detached).toBe(true);\n\n    const out = await c.controller({ kind: 'click', selector: '#after-hidden-unwatch' }, ctx('run-A', 'w2'));\n    expect(out.ok, 'the action runs only after a fresh restore frame').toBe(true);\n    const restore = cdpSessions[1]!;\n    expect(restore.sent).toContain('Page.startScreencast');\n    expect(page.calls).toContain('click:#after-hidden-unwatch');\n    expect(restore.detached, 'the no-viewer safety stream is temporary').toBe(true);\n  });\n\n"""
+          s = s.replace(marker, test + marker, 1)
+
+          marker = "  it('does not hide a session that stopped being the one on screen', async () => {"
+          if s.count(marker) != 1:
+              raise SystemExit('controller teardown test marker mismatch')
+          teardown_tests = """  it('does not detach after a long action-slot wait expires', async () => {\n    vi.useFakeTimers();\n    try {\n      const { provider } = fakeProvider();\n      const c = new RemoteBrowserController({ provider });\n      const frames: BrowserFrame[] = [];\n      await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));\n      await c.startWatching('run-A', (f) => frames.push(f));\n      cdp.pushFrame(1);\n      c.frameSeen('run-A', frames[0]!.generation);\n      c.actorEnded('w1');\n      await c.takeOver('run-A');\n\n      const pressed = deferred();\n      const gate = deferred();\n      const realSend = cdp.send;\n      cdp.send = async (method: string, params?: Record<string, unknown>) => {\n        if (method === 'Input.dispatchMouseEvent' && params?.['type'] === 'mousePressed') {\n          pressed.resolve();\n          await gate.promise;\n        }\n        return realSend.call(cdp, method, params);\n      };\n\n      const clicking = c.input('run-A', { kind: 'click', x: 0.5, y: 0.5 });\n      await pressed.promise;\n      const stopping = c.stopWatching('run-A');\n      await Promise.resolve();\n      await vi.advanceTimersByTimeAsync(31_000);\n      expect(cdp.detached, 'teardown still waits after the old 30s bound').toBe(false);\n\n      gate.resolve();\n      expect((await clicking).ok).toBe(true);\n      await stopping;\n      cdp.send = realSend;\n      expect(cdp.detached, 'detach happens only after the click really ends').toBe(true);\n    } finally {\n      vi.useRealTimers();\n    }\n  });\n\n  it('does not count watcher teardown as fresh human activity', async () => {\n    vi.useFakeTimers();\n    try {\n      const { provider } = fakeProvider();\n      const c = new RemoteBrowserController({ provider });\n      const frames: BrowserFrame[] = [];\n      await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));\n      await c.startWatching('run-A', (f) => frames.push(f));\n      cdp.pushFrame(1);\n      c.frameSeen('run-A', frames[0]!.generation);\n      c.actorEnded('w1');\n      await c.takeOver('run-A');\n\n      const stoppingStarted = deferred();\n      const gate = deferred();\n      const realSend = cdp.send;\n      cdp.send = async (method: string, params?: Record<string, unknown>) => {\n        if (method === 'Page.stopScreencast') {\n          stoppingStarted.resolve();\n          await gate.promise;\n        }\n        return realSend.call(cdp, method, params);\n      };\n\n      const stopping = c.stopWatching('run-A');\n      await stoppingStarted.promise;\n      await vi.advanceTimersByTimeAsync(120_000);\n      expect(c.humanHolds('run-A'), 'framework cleanup does not earn another idle interval').toBe(false);\n\n      gate.resolve();\n      await stopping;\n      cdp.send = realSend;\n    } finally {\n      vi.useRealTimers();\n    }\n  });\n\n"""
+          s = s.replace(marker, teardown_tests + marker, 1)
+          p.write_text(s)
+
+          # ── Web regressions ────────────────────────────────────────────────
+          p = Path('cloud/web/src/chat/BrowserLiveView.test.tsx')
+          s = p.read_text()
+          # Existing visible-driving tests represent a watch that has already
+          # painted its frame; state that explicitly under the new keyboard gate.
+          s = s.replace('frame={frame} human onStop=', 'frame={frame} human confirmed onStop=')
+
+          marker = "  it('asks for the page rather than assuming it got it', () => {"
+          if s.count(marker) != 1:
+              raise SystemExit('web reconnect keyboard test marker mismatch')
+          reconnect_test = """  it('drops the keyboard sink until a reconnect has a confirmed frame', () => {\n    const onInput = vi.fn();\n    const { rerender } = render(\n      <BrowserLiveView\n        active liveViewUrl={undefined} frame={frame} human confirmed\n        onStop={() => {}} onInput={onInput}\n      />,\n    );\n    const oldKeyboard = screen.getByLabelText(/type into the agent browser/i) as HTMLTextAreaElement;\n    oldKeyboard.focus();\n    expect(oldKeyboard).toHaveFocus();\n\n    // The lease survives reconnect, but this watch has not painted anything.\n    rerender(\n      <BrowserLiveView\n        active liveViewUrl={undefined} frame={undefined} streaming human confirmed={false}\n        onStop={() => {}} onInput={onInput}\n      />,\n    );\n    expect(screen.queryByLabelText(/type into the agent browser/i)).not.toBeInTheDocument();\n    expect(oldKeyboard).not.toHaveFocus();\n    fireEvent.keyDown(document.body, { key: 'Enter' });\n    expect(onInput).not.toHaveBeenCalled();\n\n    rerender(\n      <BrowserLiveView\n        active liveViewUrl={undefined} frame={frame} human confirmed\n        onStop={() => {}} onInput={onInput}\n      />,\n    );\n    expect(screen.getByLabelText(/type into the agent browser/i)).toBeInTheDocument();\n  });\n\n"""
+          s = s.replace(marker, reconnect_test + marker, 1)
+          p.write_text(s)
+          PY
+
+      - name: Controller regressions
+        run: npx vitest run src/browser/remote/controller.test.ts
+      - name: Full cloud web unit suite
+        run: npm run test -w cascade-cloud-web
+      - name: Cloud web build
+        run: npm run build -w cascade-cloud-web
+
+      - name: Commit fixes and remove helper
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/pr248-round27-fix.yml
+          git add src/browser/lease.ts src/browser/remote/controller.ts src/browser/remote/controller.test.ts cloud/web/src/chat/BrowserLiveView.tsx cloud/web/src/chat/BrowserLiveView.test.tsx
+          git commit -m 'fix(browser): close detached-view takeover races'
+          git push origin HEAD:claude/desktop-app-features-j8qfoj
