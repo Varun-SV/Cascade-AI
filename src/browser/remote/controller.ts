@@ -265,6 +265,16 @@ interface RunBrowser {
    */
   watchQueue?: Promise<unknown>;
   /**
+   * One physical CDP attachment attempt for this run.
+   *
+   * Watchers are serialized with each other by `watchQueue`, but the
+   * agent can also need a temporary visibility-proof session while it
+   * already holds the action slot. Putting that path on `watchQueue`
+   * would deadlock behind an unwatch that is itself waiting for the
+   * action slot, so attachment has its own narrower single-flight.
+   */
+  attaching?: Promise<CDPSession | null>;
+  /**
    * Where this run's frames go, held here rather than captured in the handler.
    *
    * So that a watcher arriving to an ALREADY-attached stream still gets the
@@ -738,7 +748,11 @@ export class RemoteBrowserController {
         this.announceControl(runId);
         return true;
       }
-      return (await this.attachScreencast(runId, held, onFrame)) !== null;
+      const attached = await this.attachScreencast(runId, held, onFrame);
+      // A failed watch must not leave a dead consumer installed. A real
+      // watcher that replaced this one meanwhile owns the callback now.
+      if (!attached && held.onFrame === onFrame) held.onFrame = undefined;
+      return attached !== null;
     });
   }
 
@@ -756,13 +770,69 @@ export class RemoteBrowserController {
     return mine;
   }
 
-  /** Open the CDP session and start the stream, or leave nothing behind. */
+  /**
+   * Attach at most one physical CDP screencast session at a time.
+   *
+   * `startWatching()` already serializes watcher lifecycle through `watchQueue`,
+   * but the agent's detached-hidden restore cannot join that queue: it holds the
+   * action slot, while an earlier unwatch may be waiting for exactly that slot.
+   * Sharing only the physical attach closes the two-session race without making
+   * watcher teardown and agent mutation wait on each other in a cycle.
+   *
+   * A real watcher claims `onFrame` immediately, before it waits for an attach
+   * already started by the agent. The lower-level attach never writes the sink,
+   * so finishing an older temporary attempt cannot overwrite a newer viewer.
+   */
   private async attachScreencast(
     runId: string,
     held: RunBrowser,
-    onFrame: (frame: BrowserFrame) => void,
+    onFrame?: (frame: BrowserFrame) => void,
   ): Promise<CDPSession | null> {
-    const cdp = await held.page.context().newCDPSession(held.page);
+    if (onFrame) held.onFrame = onFrame;
+    if (held.screencast) return held.screencast;
+
+    const existing = held.attaching;
+    if (existing) {
+      const cdp = await existing;
+      if (cdp && onFrame) held.onFrame = onFrame;
+      return cdp;
+    }
+
+    const attempt = this.attachScreencastFresh(runId, held);
+    held.attaching = attempt;
+    try {
+      const cdp = await attempt;
+      if (cdp && onFrame) held.onFrame = onFrame;
+      return cdp;
+    } finally {
+      if (held.attaching === attempt) held.attaching = undefined;
+    }
+  }
+
+  /** Open one new CDP session and start the stream when it is safe to do so. */
+  private async attachScreencastFresh(
+    runId: string,
+    held: RunBrowser,
+  ): Promise<CDPSession | null> {
+    // An attachment can be requested for two very different reasons. Ordinary
+    // watching may fall back to the provider iframe if CDP viewing is broken;
+    // a privacy pause or failed visibility proof may NOT be repaired into
+    // "visible" just because the transport failed. Remember which contract this
+    // attempt started under before any awaited session creation can fail.
+    const safetyGate = held.hiddenByHolder === true || held.visibilityUnconfirmed === true;
+    let cdp: CDPSession;
+    try {
+      cdp = await held.page.context().newCDPSession(held.page);
+    } catch {
+      if (!safetyGate) {
+        // Ordinary viewer failure: do not make the UI suppress a usable provider
+        // fallback by confusing transport failure with an explicit Hide.
+        held.visibilityUnconfirmed = false;
+        held.capturing = true;
+        this.announceControl(runId);
+      }
+      return null;
+    }
 
     cdp.on('Page.screencastFrame', ((e: {
       data?: string;
@@ -846,12 +916,19 @@ export class RemoteBrowserController {
       try {
         await cdp.send('Page.startScreencast', { ...SCREENCAST });
       } catch {
-        // An ordinary CDP-watch failure is not a privacy pause. If we
-        // left `capturing: false` here the client would suppress the
-        // provider viewer even though that fallback may still work.
-        held.visibilityUnconfirmed = false;
-        held.capturing = true;
-        this.announceControl(runId);
+        if (!safetyGate) {
+          // An ordinary CDP-watch failure is not a privacy pause. If we left
+          // `capturing: false` here the client would suppress the provider
+          // viewer even though that fallback may still work.
+          held.visibilityUnconfirmed = false;
+          held.capturing = true;
+          this.announceControl(runId);
+        } else {
+          // A failed retry of a real privacy/unconfirmed state is the opposite:
+          // fail closed and let a later attempt prove visibility with a frame.
+          held.capturing = false;
+          this.announceControl(runId);
+        }
         await cdp.detach().catch(() => {});
         return null;
       }
@@ -859,7 +936,9 @@ export class RemoteBrowserController {
     // Recorded BEFORE this promise resolves, so a stop that awaited the attach
     // finds the session rather than racing the assignment.
     held.screencast = cdp;
-    held.onFrame = onFrame;
+    // Consumer ownership belongs to the caller above. In particular, never
+    // let an older temporary attach overwrite a watcher that arrived
+    // while `newCDPSession` / `startScreencast` was still pending.
     held.capturing = !paused;
     held.hiddenByHolder = paused;
     this.announceControl(runId);
@@ -1673,7 +1752,6 @@ export class RemoteBrowserController {
     let temporaryCapture: {
       held: RunBrowser;
       cdp: CDPSession;
-      sink: (frame: BrowserFrame) => void;
       watchGen: number | undefined;
     } | undefined;
 
@@ -1704,11 +1782,14 @@ export class RemoteBrowserController {
       // If no watcher adopts it, the action-slot finally tears it back down so
       // an unwatched run does not keep paying to encode frames.
       if ((held.hiddenByHolder === true || held.visibilityUnconfirmed === true) && !held.screencast) {
-        const sink = (_frame: BrowserFrame) => {};
         const watchGen = held.watchGen;
         let cdp: CDPSession | null = null;
         try {
-          cdp = await this.attachScreencast(runId, held, sink);
+          // No no-op consumer is installed here. `nextFrame` below needs the
+          // Chrome event, not a viewer callback. If a real watcher arrives while
+          // this attachment is pending it claims `held.onFrame`, bumps the watch
+          // generation, and shares this same physical session.
+          cdp = await this.attachScreencast(runId, held);
         } catch {
           // A failed attach is the same safety outcome as a failed restore:
           // without a picture proof the action must not reach the page.
@@ -1719,7 +1800,11 @@ export class RemoteBrowserController {
             detail: 'The page could not be shown again, so nothing was done to it.',
           };
         }
-        temporaryCapture = { held, cdp, sink, watchGen };
+        // Only the no-viewer path owns this as a temporary session. A watcher
+        // that arrived while the attach was pending adopts it instead.
+        if (held.onFrame === undefined && held.watchGen === watchGen) {
+          temporaryCapture = { held, cdp, watchGen };
+        }
       }
 
       // The page must be VISIBLE before anything changes it.
@@ -1795,7 +1880,7 @@ export class RemoteBrowserController {
       return { ok: false, detail: err instanceof Error ? err.message : String(err) };
     } finally {
       if (temporaryCapture) {
-        const { held, cdp, sink, watchGen } = temporaryCapture;
+        const { held, cdp, watchGen } = temporaryCapture;
         // A watcher may have arrived while the temporary restore was running.
         // In that case it replaced the sink and bumped the watch generation,
         // so the session is now a real live view and must not be torn out from
@@ -1805,7 +1890,7 @@ export class RemoteBrowserController {
         // one-action visibility proof that is safe to tear back down.
         if (
           held.screencast === cdp
-          && held.onFrame === sink
+          && held.onFrame === undefined
           && held.watchGen === watchGen
           && held.hiddenByHolder === false
           && held.visibilityUnconfirmed === false

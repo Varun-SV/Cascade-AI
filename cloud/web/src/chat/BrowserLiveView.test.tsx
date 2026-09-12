@@ -362,6 +362,58 @@ describe('BrowserLiveView — taking the page over', () => {
     expect(wheel.defaultPrevented).toBe(true);
   });
 
+  it('flushes pending wheel distance before later keyboard and text input', async () => {
+    vi.useFakeTimers();
+    const now = vi.spyOn(Date, 'now');
+    try {
+      const onInput = vi.fn();
+      render(<BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed onStop={() => {}} onInput={onInput} />);
+      const img = screen.getByRole('img') as HTMLImageElement;
+      const keyboard = screen.getByLabelText(/type into the agent browser/i) as HTMLTextAreaElement;
+      Object.defineProperty(img, 'naturalWidth', { value: 1280 });
+      Object.defineProperty(img, 'naturalHeight', { value: 800 });
+      img.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
+
+      const armPendingScroll = (base: number) => {
+        now.mockReturnValue(base);
+        fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 10, deltaMode: 0 });
+        onInput.mockClear();
+        now.mockReturnValue(base + 10);
+        fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 20, deltaMode: 0 });
+        expect(onInput).not.toHaveBeenCalled();
+      };
+
+      armPendingScroll(1_000);
+      fireEvent.keyDown(keyboard, { key: 'Enter' });
+      expect(onInput.mock.calls.map((c) => c[0]), 'scroll precedes the command key').toEqual([
+        { kind: 'scroll', x: 0.5, y: 0.5, deltaY: 20 },
+        { kind: 'key', key: 'Enter' },
+      ]);
+
+      onInput.mockClear();
+      armPendingScroll(1_200);
+      fireEvent.input(keyboard, { target: { value: 'hello' }, isComposing: false });
+      expect(onInput.mock.calls.map((c) => c[0]), 'scroll precedes committed text').toEqual([
+        { kind: 'scroll', x: 0.5, y: 0.5, deltaY: 20 },
+        { kind: 'text', text: 'hello' },
+      ]);
+
+      onInput.mockClear();
+      armPendingScroll(1_400);
+      fireEvent.paste(keyboard, { clipboardData: { getData: () => 'secret' } });
+      expect(onInput.mock.calls.map((c) => c[0]), 'scroll precedes pasted text').toEqual([
+        { kind: 'scroll', x: 0.5, y: 0.5, deltaY: 20 },
+        { kind: 'text', text: 'secret' },
+      ]);
+
+      await act(async () => { vi.advanceTimersByTime(SCROLL_INTERVAL); });
+      expect(onInput, 'flushed timers do not replay scroll after the discrete input').toHaveBeenCalledTimes(2);
+    } finally {
+      now.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('flushes pending wheel distance before a later click', async () => {
     vi.useFakeTimers();
     const now = vi.spyOn(Date, 'now');

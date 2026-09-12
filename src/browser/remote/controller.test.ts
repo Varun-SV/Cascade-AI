@@ -94,6 +94,8 @@ let cdpCreated = 0;
  * recording it, and a fake that resolves immediately never opens that window.
  */
 let cdpGate: Promise<void> | null = null;
+/** Make CDP session creation itself fail, before Page.startScreencast. */
+let cdpFailure: Error | null = null;
 /**
  * Give each attach its OWN session, and keep them.
  *
@@ -164,6 +166,7 @@ function fakeContext(pageForThisContext: typeof page) {
     newCDPSession: async () => {
       cdpCreated += 1;
       if (cdpGate) await cdpGate;
+      if (cdpFailure) throw cdpFailure;
       if (cdpPerAttach) {
         cdp = fakeCdp();
         cdp.silentStart = silentNewCdp;
@@ -234,6 +237,7 @@ beforeEach(() => {
   silentNewCdp = false;
   cdpSessions.length = 0;
   cdpGate = null;
+  cdpFailure = null;
   pageContext = defaultContext;
 });
 
@@ -2315,6 +2319,70 @@ describe('handing the browser to the person watching', () => {
     expect(restore.sent).toContain('Page.startScreencast');
     expect(page.calls).toContain('click:#after-hidden-unwatch');
     expect(restore.detached, 'the no-viewer safety stream is temporary').toBe(true);
+  });
+
+  it('shares one CDP attachment when a watcher arrives during a detached restore', async () => {
+    cdpPerAttach = true;
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const firstFrames: BrowserFrame[] = [];
+    expect(await c.startWatching('run-A', (f) => firstFrames.push(f))).toBe(true);
+    const first = cdpSessions[0]!;
+    if (firstFrames.length === 0) {
+      first.pushFrame(10);
+      await Promise.resolve();
+    }
+    c.frameSeen('run-A', firstFrames.at(-1)!.generation);
+    c.actorEnded('w1');
+    expect(await c.takeOver('run-A')).toEqual({ ok: true });
+    expect(await c.setCapture('run-A', false)).toBe(false);
+    expect(c.handBack('run-A')).toBe(true);
+    await c.stopWatching('run-A');
+    expect(first.detached).toBe(true);
+
+    const before = cdpCreated;
+    const gate = deferred();
+    cdpGate = gate.promise;
+    const acting = c.controller(
+      { kind: 'click', selector: '#after-hidden-unwatch' },
+      ctx('run-A', 'w2'),
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    expect(cdpCreated, 'the agent started one physical restore attachment').toBe(before + 1);
+
+    const watcherFrames: BrowserFrame[] = [];
+    const watching = c.startWatching('run-A', (f) => watcherFrames.push(f));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(cdpCreated, 'the arriving watcher joins that attachment instead of opening another').toBe(before + 1);
+
+    gate.resolve();
+    cdpGate = null;
+    expect(await watching).toBe(true);
+    expect((await acting).ok).toBe(true);
+
+    const shared = cdpSessions.at(-1)!;
+    expect(shared.detached, 'the watcher adopted the shared session').toBe(false);
+    expect(watcherFrames.length, 'the real watcher, not a temporary sink, receives the restore frame').toBeGreaterThan(0);
+    expect(cdpCreated, 'there was exactly one replacement CDP session').toBe(before + 1);
+  }, 10_000);
+
+  it('restores provider fallback state when CDP session creation itself fails', async () => {
+    const { provider } = fakeProvider('https://provider.test/live/abc');
+    const c = new RemoteBrowserController({ provider });
+    const states: Array<{ human: boolean; capturing: boolean; confirmed: boolean }> = [];
+    c.onControlFor('run-A', (state) => states.push(state));
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    expect(await c.startWatching('run-A', () => {})).toBe(true);
+    await c.stopWatching('run-A');
+    expect(states.at(-1)?.capturing, 'ordinary unwatch has no screencast').toBe(false);
+
+    cdpFailure = new Error('CDP session unavailable');
+    expect(await c.startWatching('run-A', () => {})).toBe(false);
+    expect(states.at(-1)?.capturing,
+      'transport failure is not advertised as a deliberate privacy pause').toBe(true);
   });
 
   it('keeps a failed detached restore paused and retryable', async () => {

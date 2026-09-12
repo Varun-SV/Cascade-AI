@@ -363,6 +363,9 @@ export function BrowserLiveView({
     if (!text) return;
     e.preventDefault();
     e.currentTarget instanceof HTMLTextAreaElement && (e.currentTarget.value = '');
+    // Preserve gesture order: a sampled wheel delta happened before
+    // this discrete paste and must reach the remote FIFO first.
+    flushPendingScroll();
     onInput?.({ kind: 'text', text });
   };
 
@@ -390,6 +393,7 @@ export function BrowserLiveView({
     if (e.shiftKey) return;
     // A command must not leave editable residue in the sink.
     e.currentTarget.value = '';
+    flushPendingScroll();
     onInput?.({ kind: 'key', key: e.key });
   };
 
@@ -409,6 +413,7 @@ export function BrowserLiveView({
     const text = e.currentTarget.value;
     if (!text) return;
     e.currentTarget.value = '';
+    flushPendingScroll();
     onInput?.({ kind: 'text', text });
   };
 
