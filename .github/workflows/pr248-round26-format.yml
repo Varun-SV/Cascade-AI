@@ -1,0 +1,108 @@
+name: PR248 round26 formatting cleanup
+
+on:
+  push:
+    branches: [claude/desktop-app-features-j8qfoj]
+    paths:
+      - .github/workflows/pr248-round26-format.yml
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/desktop-app-features-j8qfoj
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Normalize generated indentation
+        shell: bash
+        run: |
+          python <<'PY'
+          from pathlib import Path
+
+          def indent_lines(block: str, spaces: int, skip_first=False) -> str:
+              lines = block.splitlines()
+              start = 1 if skip_first else 0
+              for i in range(start, len(lines)):
+                  if lines[i]: lines[i] = ' ' * spaces + lines[i]
+              return '\n'.join(lines)
+
+          # Production controller blocks.
+          p = Path('src/browser/remote/controller.ts')
+          s = p.read_text()
+
+          a = s.index('async stopWatching(runId: string): Promise<void> {')
+          b = s.index('\n  /**\n   * Suspend or resume the picture without giving up control.', a)
+          s = s[:a] + indent_lines(s[a:b].rstrip(), 2) + '\n\n' + s[b+1:]
+
+          anchor = '      const target = on ? held.screencast : cdp;'
+          a = s.index('\nif (!target) {', s.index(anchor)) + 1
+          b = s.index('\n      if (lease.heldByHuman) lease.touch();', a)
+          s = s[:a] + indent_lines(s[a:b], 6) + s[b:]
+
+          a = s.index('  private async applyCapture(')
+          b = s.index('\n  /**\n   * Wait, briefly, for Chrome to produce a frame.', a)
+          s = s[:a] + indent_lines(s[a:b].rstrip(), 2, skip_first=True) + '\n\n' + s[b+1:]
+          p.write_text(s)
+
+          # Web helper.
+          p = Path('cloud/web/src/chat/BrowserLiveView.tsx')
+          s = p.read_text()
+          a = s.index('const flushPendingScroll = () => {')
+          b = s.index('\n\n  const onPaste =', a)
+          s = s[:a] + indent_lines(s[a:b], 2) + s[b:]
+          p.write_text(s)
+
+          # New tests: first `it` line is already aligned; indent every body line
+          # by two more spaces to match the surrounding describe block.
+          def normalize_test(s: str, name: str, next_name: str) -> str:
+              a = s.index("  it('" + name + "'")
+              b = s.index("\n  it('" + next_name + "'", a)
+              return s[:a] + indent_lines(s[a:b].rstrip(), 2, skip_first=True) + '\n' + s[b:]
+
+          p = Path('src/browser/remote/controller.test.ts')
+          s = p.read_text()
+          s = normalize_test(s,
+              'does not hide a session that stopped being the one on screen',
+              'does not hide against a watch that was replaced while it waited')
+          s = normalize_test(s,
+              'shows the page that is on screen now, not the one Show was aimed at',
+              'does not hand over a browser that closed while the person waited for it')
+          s = normalize_test(s,
+              'counts a restored frame that arrives before startScreencast resolves',
+              'does not act on a page whose restore the user stopped')
+          p.write_text(s)
+
+          p = Path('cloud/web/src/chat/BrowserLiveView.test.tsx')
+          s = p.read_text()
+          s = normalize_test(s,
+              'keeps Give it back available when the stream disappears',
+              'asks for the page rather than assuming it got it')
+          s = normalize_test(s,
+              'flushes pending wheel distance before a later click',
+              'sums the wheel distance it did not send yet')
+          p.write_text(s)
+          PY
+      - name: Re-run controller and web tests
+        run: |
+          npx vitest run src/browser/remote/controller.test.ts
+          npm test -w cascade-cloud-web
+      - name: Re-run web build
+        run: npm run build -w cascade-cloud-web
+      - name: Commit cleanup and remove helper
+        shell: bash
+        run: |
+          git rm .github/workflows/pr248-round26-format.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/browser/remote/controller.ts src/browser/remote/controller.test.ts cloud/web/src/chat/BrowserLiveView.tsx cloud/web/src/chat/BrowserLiveView.test.tsx
+          git commit -m "style(browser): normalize round 26 follow-up"
+          git push origin HEAD:claude/desktop-app-features-j8qfoj
