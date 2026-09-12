@@ -164,6 +164,39 @@ describe('BrowserLiveView — taking the page over', () => {
     expect(onHandBack).toHaveBeenCalledOnce();
   });
 
+  it('drops the keyboard sink until a reconnect has a confirmed frame', () => {
+    const onInput = vi.fn();
+    const { rerender } = render(
+      <BrowserLiveView
+        active liveViewUrl={undefined} frame={frame} human confirmed
+        onStop={() => {}} onInput={onInput}
+      />,
+    );
+    const oldKeyboard = screen.getByLabelText(/type into the agent browser/i) as HTMLTextAreaElement;
+    oldKeyboard.focus();
+    expect(oldKeyboard).toHaveFocus();
+
+    // The lease survives reconnect, but this watch has not painted anything.
+    rerender(
+      <BrowserLiveView
+        active liveViewUrl={undefined} frame={undefined} streaming human confirmed={false}
+        onStop={() => {}} onInput={onInput}
+      />,
+    );
+    expect(screen.queryByLabelText(/type into the agent browser/i)).not.toBeInTheDocument();
+    expect(oldKeyboard).not.toHaveFocus();
+    fireEvent.keyDown(document.body, { key: 'Enter' });
+    expect(onInput).not.toHaveBeenCalled();
+
+    rerender(
+      <BrowserLiveView
+        active liveViewUrl={undefined} frame={frame} human confirmed
+        onStop={() => {}} onInput={onInput}
+      />,
+    );
+    expect(screen.getByLabelText(/type into the agent browser/i)).toBeInTheDocument();
+  });
+
   it('asks for the page rather than assuming it got it', () => {
     // The agent may be mid-action; the server grants control only once that
     // has settled, and says so on its own event.
@@ -179,7 +212,7 @@ describe('BrowserLiveView — taking the page over', () => {
   it('becomes drivable once the server says the page is the user\'s', () => {
     const onInput = vi.fn();
     render(
-      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed onStop={() => {}} onInput={onInput} />,
     );
     const img = screen.getByRole('img');
     const keyboard = screen.getByLabelText(/type into the agent browser/i) as HTMLTextAreaElement;
@@ -197,7 +230,7 @@ describe('BrowserLiveView — taking the page over', () => {
   it('leaves the viewer\'s own shortcuts alone', () => {
     const onInput = vi.fn();
     render(
-      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed onStop={() => {}} onInput={onInput} />,
     );
     const keyboard = screen.getByLabelText(/type into the agent browser/i);
     fireEvent.keyDown(keyboard, { key: 'r', ctrlKey: true });
@@ -208,7 +241,7 @@ describe('BrowserLiveView — taking the page over', () => {
   it('forwards only text committed by the local input method', () => {
     const onInput = vi.fn();
     render(
-      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed onStop={() => {}} onInput={onInput} />,
     );
     const keyboard = screen.getByLabelText(/type into the agent browser/i) as HTMLTextAreaElement;
     fireEvent.input(keyboard, { target: { value: 'に' }, isComposing: true });
@@ -220,7 +253,7 @@ describe('BrowserLiveView — taking the page over', () => {
   it('refuses shifted commands rather than degrading them', () => {
     const onInput = vi.fn();
     render(
-      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed onStop={() => {}} onInput={onInput} />,
     );
     const keyboard = screen.getByLabelText(/type into the agent browser/i);
     fireEvent.keyDown(keyboard, { key: 'Tab', shiftKey: true });
@@ -245,7 +278,7 @@ describe('BrowserLiveView — taking the page over', () => {
     expect(screen.queryByRole('img'), 'nothing before a browser exists').toBeNull();
 
     expect(() => rerender(
-      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} />,
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed onStop={() => {}} />,
     )).not.toThrow();
     expect(screen.getByRole('img'), 'and the page appears').toBeInTheDocument();
 
@@ -263,7 +296,7 @@ describe('BrowserLiveView — taking the page over', () => {
     // repairing an unsupported input into a mutation nobody asked for.
     const onInput = vi.fn();
     render(
-      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed onStop={() => {}} onInput={onInput} />,
     );
     const img = screen.getByRole('img') as HTMLImageElement;
     Object.defineProperty(img, 'naturalWidth', { value: 1280 });
@@ -286,7 +319,7 @@ describe('BrowserLiveView — taking the page over', () => {
     // scrolled about three pixels and scrolling looked broken.
     const onInput = vi.fn();
     render(
-      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed onStop={() => {}} onInput={onInput} />,
     );
     const img = screen.getByRole('img') as HTMLImageElement;
     Object.defineProperty(img, 'naturalWidth', { value: 1280 });
@@ -321,7 +354,7 @@ describe('BrowserLiveView — taking the page over', () => {
   it('keeps a remote wheel gesture from scrolling the local chat', () => {
     const onInput = vi.fn();
     render(
-      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed onStop={() => {}} onInput={onInput} />,
     );
     const img = screen.getByRole('img') as HTMLImageElement;
     const wheel = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 120 });
@@ -334,7 +367,7 @@ describe('BrowserLiveView — taking the page over', () => {
     const now = vi.spyOn(Date, 'now');
     try {
       const onInput = vi.fn();
-      render(<BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />);
+      render(<BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed onStop={() => {}} onInput={onInput} />);
       const img = screen.getByRole('img') as HTMLImageElement;
       Object.defineProperty(img, 'naturalWidth', { value: 1280 });
       Object.defineProperty(img, 'naturalHeight', { value: 800 });
@@ -368,7 +401,7 @@ describe('BrowserLiveView — taking the page over', () => {
     try {
       const onInput = vi.fn();
       render(
-        <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+        <BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed onStop={() => {}} onInput={onInput} />,
       );
       const img = screen.getByRole('img') as HTMLImageElement;
       Object.defineProperty(img, 'naturalWidth', { value: 1280 });
@@ -450,7 +483,7 @@ describe('BrowserLiveView — taking the page over', () => {
     // the one thing that could not be done.
     const onInput = vi.fn();
     render(
-      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed onStop={() => {}} onInput={onInput} />,
     );
     fireEvent.paste(screen.getByLabelText(/type into the agent browser/i), {
       clipboardData: { getData: () => 'correct horse battery staple' },
@@ -491,7 +524,7 @@ describe('BrowserLiveView — taking the page over', () => {
     // the width of those bars — and wronger the narrower the panel gets.
     const onInput = vi.fn();
     render(
-      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed onStop={() => {}} onInput={onInput} />,
     );
     const img = screen.getByRole('img') as HTMLImageElement;
     // A 400×400 element showing a 1280×800 picture: the picture is 400×250,
@@ -518,7 +551,7 @@ describe('BrowserLiveView — taking the page over', () => {
     // the client never produced one, so the path was dead.
     const onInput = vi.fn();
     render(
-      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed onStop={() => {}} onInput={onInput} />,
     );
     const img = screen.getByRole('img') as HTMLImageElement;
     Object.defineProperty(img, 'naturalWidth', { value: 1280 });
@@ -606,7 +639,7 @@ describe('BrowserLiveView — taking the page over', () => {
     try {
       const onInput = vi.fn();
       render(
-        <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+        <BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed onStop={() => {}} onInput={onInput} />,
       );
       const img = screen.getByRole('img') as HTMLImageElement;
       Object.defineProperty(img, 'naturalWidth', { value: 1280 });
@@ -712,7 +745,7 @@ describe('BrowserLiveView — taking the page over', () => {
     // code and the page afterwards are not.
     const onCapture = vi.fn();
     render(
-      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onCapture={onCapture} />,
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed onStop={() => {}} onCapture={onCapture} />,
     );
     fireEvent.click(screen.getByRole('button', { name: /hide the page/i }));
     expect(onCapture).toHaveBeenCalledWith(false);
@@ -889,7 +922,7 @@ describe('BrowserLiveView — taking the page over', () => {
     const onHandBack = vi.fn();
     const onStop = vi.fn();
     render(
-      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={onStop} onHandBack={onHandBack} />,
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed onStop={onStop} onHandBack={onHandBack} />,
     );
     fireEvent.click(screen.getByRole('button', { name: /give it back/i }));
     expect(onHandBack).toHaveBeenCalledOnce();

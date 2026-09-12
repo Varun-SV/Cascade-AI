@@ -2075,6 +2075,84 @@ describe('handing the browser to the person watching', () => {
       .toEqual(['p', 'a', 's', 's']);
   });
 
+  it('does not detach after a long action-slot wait expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const { provider } = fakeProvider();
+      const c = new RemoteBrowserController({ provider });
+      const frames: BrowserFrame[] = [];
+      await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+      await c.startWatching('run-A', (f) => frames.push(f));
+      cdp.pushFrame(1);
+      c.frameSeen('run-A', frames[0]!.generation);
+      c.actorEnded('w1');
+      await c.takeOver('run-A');
+
+      const pressed = deferred();
+      const gate = deferred();
+      const realSend = cdp.send;
+      cdp.send = async (method: string, params?: Record<string, unknown>) => {
+        if (method === 'Input.dispatchMouseEvent' && params?.['type'] === 'mousePressed') {
+          pressed.resolve();
+          await gate.promise;
+        }
+        return realSend.call(cdp, method, params);
+      };
+
+      const clicking = c.input('run-A', { kind: 'click', x: 0.5, y: 0.5 });
+      await pressed.promise;
+      const stopping = c.stopWatching('run-A');
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(cdp.detached, 'teardown still waits after the old 30s bound').toBe(false);
+
+      gate.resolve();
+      expect((await clicking).ok).toBe(true);
+      await stopping;
+      cdp.send = realSend;
+      expect(cdp.detached, 'detach happens only after the click really ends').toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not count watcher teardown as fresh human activity', async () => {
+    vi.useFakeTimers();
+    try {
+      const { provider } = fakeProvider();
+      const c = new RemoteBrowserController({ provider });
+      const frames: BrowserFrame[] = [];
+      await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+      await c.startWatching('run-A', (f) => frames.push(f));
+      cdp.pushFrame(1);
+      c.frameSeen('run-A', frames[0]!.generation);
+      c.actorEnded('w1');
+      await c.takeOver('run-A');
+
+      const stoppingStarted = deferred();
+      const gate = deferred();
+      const realSend = cdp.send;
+      cdp.send = async (method: string, params?: Record<string, unknown>) => {
+        if (method === 'Page.stopScreencast') {
+          stoppingStarted.resolve();
+          await gate.promise;
+        }
+        return realSend.call(cdp, method, params);
+      };
+
+      const stopping = c.stopWatching('run-A');
+      await stoppingStarted.promise;
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(c.humanHolds('run-A'), 'framework cleanup does not earn another idle interval').toBe(false);
+
+      gate.resolve();
+      await stopping;
+      cdp.send = realSend;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not hide a session that stopped being the one on screen', async () => {
     cdpPerAttach = true;
     const { provider } = fakeProvider();
@@ -2204,6 +2282,32 @@ describe('handing the browser to the person watching', () => {
     c.frameSeen('run-A', second[0]!.generation);
     expect(await c.setCapture('run-A', false), 'so hiding it is a choice again').toBe(false);
     expect((await c.input('run-A', { kind: 'text', text: 'secret' })).ok).toBe(true);
+  });
+
+  it('restores a hidden page before acting after its watcher detached', async () => {
+    cdpPerAttach = true;
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const frames: BrowserFrame[] = [];
+    await c.startWatching('run-A', (f) => frames.push(f));
+    const first = cdpSessions[0]!;
+    first.pushFrame(1);
+    c.frameSeen('run-A', frames[0]!.generation);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+    expect(await c.setCapture('run-A', false)).toBe(false);
+    expect(c.handBack('run-A')).toBe(true);
+    await c.stopWatching('run-A');
+    expect(first.detached).toBe(true);
+
+    const out = await c.controller({ kind: 'click', selector: '#after-hidden-unwatch' }, ctx('run-A', 'w2'));
+    expect(out.ok, 'the action runs only after a fresh restore frame').toBe(true);
+    const restore = cdpSessions[1]!;
+    expect(restore.sent).toContain('Page.startScreencast');
+    expect(page.calls).toContain('click:#after-hidden-unwatch');
+    expect(restore.detached, 'the no-viewer safety stream is temporary').toBe(true);
   });
 
   it('keeps a deliberate pause private across handback and a later watch', async () => {

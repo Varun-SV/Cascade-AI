@@ -115,6 +115,8 @@ export class BrowserLease {
    * took the slot may release it.
    */
   private action: symbol | null = null;
+  /** Whether the current action slot represents activity by its holder. */
+  private actionCountsAsHumanActivity = false;
   /**
    * Everyone waiting for that slot, IN THE ORDER THEY ASKED.
    *
@@ -305,7 +307,16 @@ export class BrowserLease {
    */
   private lapse(): void {
     if (this.actor !== HUMAN_ACTOR) return;
-    if (this.action) { this.armIdle(); return; }
+    if (this.action && this.actionCountsAsHumanActivity) {
+      // An event the person started before the deadline is evidence they are
+      // still here, so that interaction earns a fresh idle interval.
+      this.armIdle();
+      return;
+    }
+    // A lifecycle barrier (for example watcher teardown) serializes against
+    // input but is not evidence that the person is present. The barrier keeps
+    // the action slot occupied, so releasing ownership here still cannot let
+    // an agent mutate the page until teardown has finished.
     this.release();
   }
 
@@ -406,10 +417,11 @@ export class BrowserLease {
    * without joining the line would be exactly the jump-the-queue the ordering
    * is there to prevent.
    */
-  private beginAction(): symbol | null {
+  private beginAction(countsAsHumanActivity = true): symbol | null {
     if (this.action) return null;
     const token = Symbol('browser-action');
     this.action = token;
+    this.actionCountsAsHumanActivity = countsAsHumanActivity;
     return token;
   }
 
@@ -424,6 +436,7 @@ export class BrowserLease {
   endAction(token: symbol): boolean {
     if (this.action !== token) return false;
     this.action = null;
+    this.actionCountsAsHumanActivity = false;
     this.actionQueue.shift()?.();
     return true;
   }
@@ -469,14 +482,21 @@ export class BrowserLease {
    *
    * `null` as a RESULT means a bounded wait ran out. `null` as `withinMs` means
    * this accepted operation is intentionally unbounded by time and will leave
-   * the queue only when its turn arrives.
+   * the queue only when its turn arrives. `countsAsHumanActivity=false` is for
+   * lifecycle barriers: they still serialize, but an idle deadline must not
+   * mistake framework cleanup for evidence that the person is present.
    */
-  async acquireActionSlot(withinMs: number | null = ACTION_HANDOFF_MS): Promise<symbol | null> {
+  async acquireActionSlot(
+    withinMs: number | null = ACTION_HANDOFF_MS,
+    countsAsHumanActivity = true,
+  ): Promise<symbol | null> {
     // The queue is empty whenever the slot is free — `endAction` fills it again
     // in the same breath as it clears it — so this is the ordinary path, and it
     // takes no timer at all. The length check is what keeps a newcomer from
     // stepping over a line that is already forming.
-    if (!this.action && this.actionQueue.length === 0) return this.beginAction();
+    if (!this.action && this.actionQueue.length === 0) {
+      return this.beginAction(countsAsHumanActivity);
+    }
     return await new Promise<symbol | null>((resolve) => {
       let done = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -484,7 +504,7 @@ export class BrowserLease {
         if (done) return;
         done = true;
         if (timer) clearTimeout(timer);
-        resolve(this.beginAction());
+        resolve(this.beginAction(countsAsHumanActivity));
       };
       if (withinMs !== null) {
         timer = setTimeout(() => {

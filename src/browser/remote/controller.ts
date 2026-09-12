@@ -880,11 +880,15 @@ export class RemoteBrowserController {
       held.capturing = false;
       this.announceControl(runId);
 
-      // A click is several CDP commands under one action slot. Do not
-      // detach between press and release; wait for the current human turn
-      // (and earlier queued turns) before tearing this session down.
+      // A click is several CDP commands under one action slot. Teardown
+      // joins that SAME FIFO and waits for its real turn: timing out and then
+      // detaching anyway would cut a slow click between press and release. It
+      // is marked as lifecycle work rather than holder activity, so an idle
+      // deadline that lands while teardown owns the slot can still release an
+      // abandoned takeover instead of granting it a fresh two-minute window.
       const lease = this.leases.get(runId);
-      const token = lease ? await lease.acquireActionSlot(ACTION_TIMEOUT_MS) : null;
+      const token = lease ? await lease.acquireActionSlot(null, false) : null;
+      if (lease && !token) return;
       try {
         await cdp.send('Page.stopScreencast').catch(() => {});
         await cdp.detach().catch(() => {});
@@ -1666,6 +1670,13 @@ export class RemoteBrowserController {
       return { ok: false, detail: refusal(lease_.heldByHuman ? 'human' : 'off') };
     }
 
+    let temporaryCapture: {
+      held: RunBrowser;
+      cdp: CDPSession;
+      sink: (frame: BrowserFrame) => void;
+      watchGen: number | undefined;
+    } | undefined;
+
     try {
       const held = await this.open(runId, context.signal);
 
@@ -1681,6 +1692,34 @@ export class RemoteBrowserController {
       if (context.signal?.aborted || held.abort.signal.aborted) {
         await this.releaseIfIdle(runId);
         return { ok: false, detail: 'The run was cancelled.' };
+      }
+
+      // A deliberate Hide survives handback, and an unwatch deliberately
+      // detaches the CDP session. Those two facts can coexist: hiddenByHolder
+      // can still be true here with no screencast to restore. Skipping the gate
+      // in that state would let the first agent action after a conversation
+      // switch mutate a page that is still carrying the user's privacy pause.
+      // Attach a temporary, still-paused session so the ordinary visibility
+      // gate below can start it and insist on a fresh frame before the action.
+      // If no watcher adopts it, the action-slot finally tears it back down so
+      // an unwatched run does not keep paying to encode frames.
+      if (held.hiddenByHolder === true && !held.screencast) {
+        const sink = (_frame: BrowserFrame) => {};
+        const watchGen = held.watchGen;
+        let cdp: CDPSession | null = null;
+        try {
+          cdp = await this.attachScreencast(runId, held, sink);
+        } catch {
+          // A failed attach is the same safety outcome as a failed restore:
+          // without a picture proof the action must not reach the page.
+        }
+        if (!cdp) {
+          return {
+            ok: false,
+            detail: 'The page could not be shown again, so nothing was done to it.',
+          };
+        }
+        temporaryCapture = { held, cdp, sink, watchGen };
       }
 
       // The page must be VISIBLE before anything changes it.
@@ -1755,6 +1794,24 @@ export class RemoteBrowserController {
     } catch (err) {
       return { ok: false, detail: err instanceof Error ? err.message : String(err) };
     } finally {
+      if (temporaryCapture) {
+        const { held, cdp, sink, watchGen } = temporaryCapture;
+        // A watcher may have arrived while the temporary restore was running.
+        // In that case it replaced the sink and bumped the watch generation,
+        // so the session is now a real live view and must not be torn out from
+        // underneath it. Otherwise this was only a one-action visibility proof.
+        if (held.screencast === cdp && held.onFrame === sink && held.watchGen === watchGen) {
+          held.onFrame = undefined;
+          held.screencast = undefined;
+          // The privacy pause was ended by the successful restore. With no
+          // watcher there is no screencast, but this must not be advertised as
+          // another deliberate Hide (which would suppress provider fallback).
+          held.capturing = true;
+          this.announceControl(runId);
+          await cdp.send('Page.stopScreencast').catch(() => {});
+          await cdp.detach().catch(() => {});
+        }
+      }
       lease_.endAction(token);
       // A cancelled or stopped run is finished with the browser either way, so
       // it does not keep the lease while a queued worker waits.

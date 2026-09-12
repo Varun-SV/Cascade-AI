@@ -239,6 +239,12 @@ export function BrowserLiveView({
    * that renders, and the effect that focuses it.
    */
   const blind = active && !frame && driving && capturing === false && confirmed === true;
+  // Ownership is not enough to type. Across a reconnect `human` deliberately
+  // survives while this watch has seen nothing yet; keeping the old textarea
+  // mounted would keep browser focus too, so the next physical key could reach
+  // a page whose fresh frame has not even been confirmed. Mount the keyboard
+  // boundary only for a confirmed current picture or confirmed blind mode.
+  const keyboardEnabled = driving && confirmed === true && (hasFrame || blind);
   // Focus follows the keyboard boundary, because the visual surface may vanish
   // when the person presses Hide. The textarea stays mounted while they hold
   // control, so composition/dead-key state and paste all have one stable target.
@@ -485,7 +491,7 @@ export function BrowserLiveView({
           {notice}
         </p>
       )}
-      {driving && (
+      {keyboardEnabled && (
         <textarea
           ref={keyboardRef}
           aria-label="Type into the agent browser"
