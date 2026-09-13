@@ -47,12 +47,27 @@ type Page = {
   on(event: string, handler: (...args: never[]) => void): void;
   /** The page's own top-level frame; sub-frames are not it. See `generation`. */
   mainFrame(): unknown;
+  /** The context this page belongs to — where a CDP session is opened from. */
+  context(): BrowserContext;
   isClosed(): boolean;
   close(): Promise<void>;
+};
+/**
+ * A raw Chrome DevTools Protocol session on one page.
+ *
+ * Playwright's high-level API has no screencast, so watching the page means
+ * talking to CDP directly. Deliberately narrow: three methods is the whole
+ * surface this needs, and a wider type would invite reaching past the seam.
+ */
+type CDPSession = {
+  send(method: string, params?: Record<string, unknown>): Promise<unknown>;
+  on(event: string, handler: (payload: never) => void): void;
+  detach(): Promise<void>;
 };
 type BrowserContext = {
   pages(): Page[];
   newPage(): Promise<Page>;
+  newCDPSession(page: Page): Promise<CDPSession>;
   close(): Promise<void>;
 };
 type Browser = {
@@ -69,8 +84,128 @@ export interface BrowserViewInfo {
   liveViewUrl?: string;
 }
 
+/**
+ * One rendered frame of a run's browser, on its way to whoever is watching.
+ *
+ * A JPEG rather than a video stream, and deliberately: CDP's screencast is
+ * adaptive — Chrome sends a frame when the page actually changes, not on a
+ * clock — so an idle page costs nothing, and there is no media pipeline to run
+ * inside the deployment. It is worse than WebRTC for video-heavy pages and
+ * better than it for everything else this feature is pointed at.
+ */
+export interface BrowserFrame {
+  /** base64 JPEG, as CDP hands it over. Never decoded on the way through. */
+  data: string;
+  /** The remote viewport, so a canvas can size itself without guessing. */
+  width: number;
+  height: number;
+  /**
+   * Which watch this frame belongs to. See `watchGen`.
+   *
+   * Travels with the picture so the receipt the client sends back names the
+   * watch it actually saw, rather than whichever one is current by the time it
+   * arrives.
+   */
+  generation: number;
+}
+
+/** Who is driving a run's browser, and whether it is being pictured. */
+export interface BrowserControlState {
+  /** True while a person holds it and the agent is being refused. */
+  human: boolean;
+  /** Whether frames are being produced right now. See `setCapture`. */
+  capturing: boolean;
+  /**
+   * Whether THIS watch has confirmed receiving a picture. See `seenGen`.
+   *
+   * Pushed rather than inferred, for the same reason ownership is: the client
+   * cannot work it out while the picture is off, because it is the frames that
+   * would tell it. A client left to guess would guess from what it remembers of
+   * a previous watch, which is exactly the state this distinguishes.
+   */
+  confirmed: boolean;
+}
+
+/**
+ * One thing a person did to the page while they held it.
+ *
+ * Coordinates are NORMALISED — 0..1 across the frame — rather than pixels, and
+ * that is a boundary decision rather than a convenience. The picture the user
+ * clicked is a JPEG scaled twice on its way to them: once by CDP into
+ * `maxWidth`/`maxHeight`, once by the panel into whatever width the layout
+ * gave it. Only this side knows the viewport those pixels came from, so only
+ * this side can turn a click back into a page coordinate. A client sending
+ * pixels would have to reconstruct both scalings and would silently miss by a
+ * few pixels whenever it got one wrong — which, on a page of small controls, is
+ * a click on the wrong thing.
+ *
+ * Typing is `text` rather than a stream of key events because `Input.insertText`
+ * puts the whole string in at once: no IME to emulate, no per-character key
+ * codes to get wrong for anything but a US layout, and no chance of a password
+ * arriving one keystroke per socket message. `key` covers the keys that are
+ * commands rather than characters, from a fixed list — see `KEYS`.
+ */
+export type BrowserInput =
+  | { kind: 'move'; x: number; y: number }
+  | { kind: 'click'; x: number; y: number; button?: 'left' | 'right' | 'middle'; clicks?: number }
+  | { kind: 'scroll'; x: number; y: number; deltaY: number }
+  | { kind: 'text'; text: string }
+  | { kind: 'key'; key: string; modifiers?: Array<'Control' | 'Meta' | 'Shift'> };
+
+/**
+ * The keys a person may send, and what Chrome needs to be told about each.
+ *
+ * An allowlist, not a passthrough. `Input.dispatchKeyEvent` is a raw protocol
+ * call: it will deliver anything, including the modifier combinations a browser
+ * itself acts on, and there is no reason a takeover needs them. These are the
+ * keys that move a caret or submit a form — everything a person actually types
+ * goes through `insertText` instead.
+ *
+ * The virtual key codes are not optional decoration: Chrome dispatches on
+ * `windowsVirtualKeyCode`, and a key event without one arrives as a keypress
+ * that no page handler recognises.
+ */
+const KEYS: Record<string, { code: number; text?: string }> = {
+  Enter: { code: 13, text: '\r' },
+  Tab: { code: 9 },
+  Backspace: { code: 8 },
+  Delete: { code: 46 },
+  Escape: { code: 27 },
+  ArrowUp: { code: 38 },
+  ArrowDown: { code: 40 },
+  ArrowLeft: { code: 37 },
+  ArrowRight: { code: 39 },
+  Home: { code: 36 },
+  End: { code: 35 },
+  PageUp: { code: 33 },
+  PageDown: { code: 34 },
+};
+
+/** Which CDP button name each pointer button maps to, and its `buttons` mask. */
+const BUTTONS = { left: 1, middle: 4, right: 2 } as const;
+
+/**
+ * How the frames are asked for.
+ *
+ * Capped rather than native-resolution: this crosses a socket to a panel a few
+ * hundred pixels wide, and a full-size frame would spend bandwidth on detail
+ * the viewer cannot see. Quality 60 is where JPEG stops being obviously lossy
+ * on text.
+ */
+const SCREENCAST = { format: 'jpeg', quality: 60, maxWidth: 1280, maxHeight: 800 } as const;
+
 /** Default ceiling for a single action, matching the tool's own clamp. */
 const ACTION_TIMEOUT_MS = 30_000;
+/**
+ * How long the agent waits for a restored picture before refusing to act.
+ *
+ * A started screencast emits its first frame immediately, so this is generous
+ * rather than tuned — it is the point at which "the page came back" stops being
+ * plausible, not a latency budget.
+ */
+const RESTORE_FRAME_MS = 2_000;
+/** Maximum accepted discrete human inputs waiting behind the active one. */
+const MAX_HUMAN_INPUT_QUEUE = 64;
 
 export interface RemoteBrowserControllerOptions {
   provider: RemoteBrowserProvider;
@@ -81,6 +216,25 @@ export interface RemoteBrowserControllerOptions {
   maxSessions?: number;
   /** Told when a run's live view becomes available, so the owner can watch. */
   onLiveView?: (runId: string, liveViewUrl: string | undefined) => void;
+  /**
+   * Something that must finish before this controller may open anything.
+   *
+   * For ROTATION. A settings change builds a new controller and disposes the
+   * old one, and disposal is not instant: it detaches CDP sessions and hands
+   * provider sessions back over the network. Installing the replacement
+   * immediately meant the first action after a rotation could call
+   * `createSession` while the previous controller was still releasing — two
+   * controllers holding sessions against one provider's cap, which the pool
+   * here cannot see because it counts only its own. On a provider that
+   * enforces its own limit that action simply fails, and it is the first one
+   * after an operator changed a setting, which is the worst moment for it.
+   *
+   * Awaited once, before the pool slot is reserved, and never awaited again.
+   * A rejection is ignored on purpose: the old controller failing to tidy up
+   * is not a reason to refuse the new one work, and `dispose` already reports
+   * its own trouble.
+   */
+  ready?: Promise<unknown>;
 }
 
 /** One run's browser, and the page it is working on. */
@@ -88,6 +242,158 @@ interface RunBrowser {
   session: RemoteBrowserSession;
   browser: Browser;
   page: Page;
+  /**
+   * The CDP session streaming this run's page, while somebody is watching.
+   *
+   * Absent whenever nobody is: an unwatched run must not pay for encoding
+   * frames nobody sees, and on a metered provider it must not pay for the
+   * bandwidth either. Started by `startWatching`, and torn down by
+   * `stopWatching` or by the run ending — whichever comes first.
+   */
+  screencast?: CDPSession;
+  /** The page `screencast` is physically attached to. */
+  screencastPage?: Page;
+  /**
+   * Watch and unwatch, applied in the order they were asked for.
+   *
+   * A queue rather than a "busy" flag, because the flag answered the wrong
+   * question. It could tell a second watcher that an attach was in progress,
+   * so that watcher gave up — and if an unwatch was sitting between the two,
+   * it then tore down the very stream the second watcher wanted, leaving a
+   * mounted panel with nothing streaming and nobody left to ask again. What
+   * matters is the LAST thing asked for, not whether something is in flight,
+   * and running the requests in order is the simplest way to honour that.
+   *
+   * The client produces exactly that sequence on its own: a mount that runs,
+   * cleans up and runs again emits watch, unwatch, watch with nothing between.
+   */
+  watchQueue?: Promise<unknown>;
+  /**
+   * One physical CDP attachment attempt for this run.
+   *
+   * Watchers are serialized with each other by `watchQueue`, but the
+   * agent can also need a temporary visibility-proof session while it
+   * already holds the action slot. Putting that path on `watchQueue`
+   * would deadlock behind an unwatch that is itself waiting for the
+   * action slot, so attachment has its own narrower single-flight.
+   */
+  attaching?: Promise<CDPSession | null>;
+  /** The page the in-flight physical attachment was started for. */
+  attachingPage?: Page;
+  /**
+   * Where this run's frames go, held here rather than captured in the handler.
+   *
+   * So that a watcher arriving to an ALREADY-attached stream still gets the
+   * frames. The CDP handler is registered once, at attach; a second watcher
+   * that only learned "someone is already watching" would otherwise be told a
+   * stream exists while its own callback was never wired to anything.
+   */
+  onFrame?: (frame: BrowserFrame) => void;
+  /**
+   * Whether that session is currently producing frames.
+   *
+   * Separate from having one, because of the credential case: a person typing
+   * a password wants the picture to stop WITHOUT giving up control, and giving
+   * up the CDP session would give up their input channel with it. So capture
+   * is suspended on a session that stays attached.
+   */
+  capturing?: boolean;
+  /**
+   * A start-screencast command has been accepted but no frame has proved that
+   * visibility has actually returned yet.
+   *
+   * This is deliberately separate from `capturing`. The latter is UI state;
+   * this is a safety gate. If Chrome accepts a restore and then produces no
+   * frame before the timeout, the first agent action is refused. Without this
+   * record the NEXT action saw `capturing: true` and skipped the gate entirely,
+   * mutating a page the user still could not see. Only an actual frame clears
+   * this flag.
+   */
+  visibilityUnconfirmed?: boolean;
+  /**
+   * The main frame's viewport, in CSS pixels, from `Page.getLayoutMetrics`.
+   *
+   * NOT the screencast metadata, which is where this used to come from and was
+   * the wrong coordinate space. `metadata.deviceWidth/deviceHeight` are the
+   * device screen in DIP; `Input.dispatchMouseEvent` documents x/y as relative
+   * to the main frame's viewport in CSS pixels. They coincide on a plain
+   * desktop page at scale 1 — exactly why a fake reporting 1280x800 could not
+   * tell the difference — and diverge under device emulation, page zoom, or a
+   * headful window.
+   */
+  viewport?: { width: number; height: number };
+  /**
+   * The page may have changed shape, so the cached CSS viewport is suspect.
+   *
+   * Set by every frame rather than by comparing screencast metadata. Those are
+   * DEVICE SCREEN properties, and the viewport can change while all of them
+   * hold still — resizing the window on one monitor is the ordinary case, page
+   * zoom another. Comparing them made the cache look correct only because the
+   * test that exercised it changed both at once. A frame means the page was
+   * repainted, which is the broadest signal available and costs one extra
+   * measurement per pointer event at most.
+   */
+  metricsStale?: boolean;
+  /**
+   * Someone waiting for the next frame Chrome produces, resolved once.
+   *
+   * The restore path needs it. `Page.startScreencast` resolving means Chrome
+   * ACCEPTED the command, not that it has drawn anything — so the agent's
+   * visibility gate was satisfied by a request rather than by a picture.
+   */
+  framePing?: (() => void) | undefined;
+  /**
+   * The HOLDER asked for the picture to stop, as opposed to nobody watching.
+   *
+   * `capturing` answers "are frames flowing", and a watcher arriving or leaving
+   * moves it for reasons that have nothing to do with what the person wants.
+   * Switching conversations tears the screencast down, and the attach on the
+   * way back used to start it again — putting a page somebody had deliberately
+   * hidden, to type a password into, back on the wire without anyone pressing
+   * Show. A watch lifecycle event may stop paying for frames; it may not
+   * overturn the holder's decision.
+   *
+   * Cleared where capture actually turns back ON, which is the one place both
+   * routes out of the pause meet: the person pressing Show, and the agent
+   * restoring the picture before it touches the page once the hold has ended.
+   * Only honoured while they still hold it, so a pause cannot outlive its
+   * holder and leave a later viewer looking at nothing.
+   */
+  hiddenByHolder?: boolean;
+  /**
+   * Which watch this is — bumped every time the frame consumer is replaced.
+   *
+   * The identity a receipt is checked against, and the reason this is a counter
+   * rather than a flag that gets reset. A reconnect deliberately keeps the
+   * existing screencast and swaps only the consumer, so a record scoped to the
+   * CDP SESSION let a reloaded page inherit the previous viewer's picture.
+   * Making it a generation means a late receipt from the viewer that left
+   * cannot vouch for the one that replaced it — by construction, rather than by
+   * a reset that has to run at the right moment.
+   */
+  watchGen?: number;
+  /**
+   * The watch the client has confirmed RECEIVING a frame for.
+   *
+   * The gate on hiding the page, and deliberately a receipt rather than a
+   * dispatch. `capturing === false` is supposed to mean a blind period the
+   * person CHOSE — they saw the page, put the caret where they wanted it, then
+   * asked us to stop showing it — and handing a frame to `onFrame` does not
+   * establish that: the consumer ends at `socket.volatile.emit`, which DROPS
+   * rather than queues when the transport is not writable.
+   *
+   * That gap is not theoretical for the client this gate exists for. An honest
+   * but stale build, one that offers Hide on `streaming` rather than on having
+   * a frame, does not lie about anything — it simply never receives the picture
+   * and never sends a receipt. Gating on dispatch let its Hide through; gating
+   * on receipt does not, because a dropped frame produces no receipt by
+   * construction.
+   *
+   * One receipt per watch, not per frame. It gates Hide only and never
+   * `Page.screencastFrameAck`, so the stream stays lossy and low-latency and
+   * nothing about the frame rate depends on the viewer answering.
+   */
+  seenGen?: number;
   /**
    * A context this run created and must therefore destroy.
    *
@@ -125,6 +431,17 @@ export class RemoteBrowserController {
    * bearer capability for a browser somebody else is driving.
    */
   private liveViewListeners = new Map<string, (info: BrowserViewInfo) => void>();
+  /**
+   * Told when a run's browser changes hands, or stops being pictured.
+   *
+   * Needed because a takeover can end without anybody asking. The hold lapses
+   * on its own after `HUMAN_IDLE_MS`, and a client left believing it still has
+   * control would keep sending input into a lease it no longer holds — every
+   * event refused, with nothing on screen saying why.
+   */
+  private controlListeners = new Map<string, (state: BrowserControlState) => void>();
+  /** What each run's listener was last told, so unchanged states stay quiet. */
+  private controlAnnounced = new Map<string, string>();
   /** An embedder that wants every run's live view, told which run each is. */
   private onLiveViewAll: ((runId: string, liveViewUrl: string | undefined) => void) | undefined;
 
@@ -135,7 +452,7 @@ export class RemoteBrowserController {
    * Counted alongside `runs` against the cap. Without it the limit was a
    * check-then-act across four awaits, and simultaneous first uses both won.
    */
-  private opening = new Set<string>();
+  private opening = new Map<string, Promise<RunBrowser>>();
   /**
    * A run's stop signal, created when its slot is reserved.
    *
@@ -168,7 +485,7 @@ export class RemoteBrowserController {
    * own teardown settles, so a later, genuine re-open of the same run id
    * never collides with one still in flight.
    */
-  private closing = new Set<string>();
+  private closing = new Map<string, Promise<void>>();
   /** Runs the user has stopped, by run id — same meaning as on the desktop. */
   private revoked = new Set<string>();
   /**
@@ -193,12 +510,40 @@ export class RemoteBrowserController {
     // Kept as its own field rather than folded into the per-run map: it needs
     // the run id, and squeezing it in under a sentinel key lost exactly that.
     this.onLiveViewAll = options.onLiveView;
+    this.ready = options.ready;
   }
+
+  /**
+   * The predecessor's teardown, until it has been waited for once.
+   *
+   * Cleared as soon as it settles so the wait is not re-entered on every open
+   * — and so the promise itself is not retained for the life of the process.
+   */
+  private ready: Promise<unknown> | undefined;
+  /**
+   * This controller has been retired and will never open anything again.
+   *
+   * Stronger than "its runs were ended", and it has to be. A caller parked on
+   * the `ready` gate above is invisible to `dispose()` — it holds no run and
+   * has reserved no slot, because it has not got that far — so a SECOND
+   * settings change, arriving while the first retirement is still settling,
+   * found nothing to wait for and let the newest controller start immediately.
+   * The parked caller then woke up on a controller nobody holds a reference to
+   * and allocated a session against the superseded configuration, with the
+   * newest controller free to allocate its own.
+   *
+   * Set synchronously at the top of `dispose`, so anything already waiting is
+   * excluded the moment retirement begins rather than when it finishes.
+   */
+  private retired = false;
 
   private leaseFor(runId: string): BrowserLease {
     let lease = this.leases.get(runId);
     if (!lease) {
-      lease = new BrowserLease({ isRevoked: (id) => this.revoked.has(id) });
+      lease = new BrowserLease({
+        isRevoked: (id) => this.revoked.has(id),
+        onChange: () => this.announceControl(runId),
+      });
       // This host reports worker terminal states (see `actorEnded`), so no
       // timer may decide ownership: a worker waiting on a human approval
       // outlives any fixed bound.
@@ -222,6 +567,48 @@ export class RemoteBrowserController {
     this.liveViewListeners.delete(runKey);
   }
 
+  onControlFor(runKey: string, listener: (state: BrowserControlState) => void): void {
+    this.controlListeners.set(runKey, listener);
+  }
+
+  offControlFor(runKey: string): void {
+    this.controlListeners.delete(runKey);
+    this.controlAnnounced.delete(runKey);
+  }
+
+  /**
+   * Say who has the browser, but only when the answer has changed.
+   *
+   * The lease reports every ownership change, and during ordinary work that is
+   * one per action as workers take it and give it back. None of those are
+   * interesting to a viewer — the agent had it before and has it now — and
+   * emitting them would put a socket message on every click the agent makes.
+   */
+  private announceControl(runId: string, force = false): void {
+    const listener = this.controlListeners.get(runId);
+    if (!listener) return;
+    const held = this.runs.get(runId);
+    const state: BrowserControlState = {
+      human: this.leases.get(runId)?.heldByHuman === true,
+      capturing: held?.capturing === true,
+      // A receipt vouches for a VIEW, so it stops meaning anything the moment
+      // there is no view. `stopWatching` clears the session without bumping the
+      // watch — deliberately, since replacing the consumer is what a new watch
+      // is about — so the receipt stayed matched across the whole detach and
+      // re-attach, which `beginWatching` performs on every reconnect and every
+      // return to a conversation. Announced `confirmed` through that window,
+      // the client mounted and FOCUSED the blind keyboard surface over a page
+      // no session was serving: keystrokes meant for the composer went to a
+      // remote page that could only refuse them.
+      confirmed: held?.screencast !== undefined
+        && held.watchGen !== undefined && held.seenGen === held.watchGen,
+    };
+    const key = `${state.human}:${state.capturing}:${state.confirmed}`;
+    if (!force && this.controlAnnounced.get(runId) === key) return;
+    this.controlAnnounced.set(runId, key);
+    listener(state);
+  }
+
   /**
    * Tell a run's listener what its browser situation is.
    *
@@ -243,19 +630,28 @@ export class RemoteBrowserController {
    * allocated and billed until the whole run ended, for a run that has just
    * been stopped.
    */
-  private async releaseIfIdle(runId: string): Promise<void> {
+  private async releaseIfIdle(runId: string, releaseSlot?: () => void): Promise<void> {
     const held = this.runs.get(runId);
-    if (!held) return;
+    if (!held) {
+      releaseSlot?.();
+      return;
+    }
     this.runs.delete(runId);
-    this.closing.add(runId);
-    // Awaited, not fired and forgotten: the caller is about to report the
-    // refusal, and the session should be gone by the time it does. Otherwise
-    // "stopped" and "still paying for a browser" are true at the same moment.
-    await this.teardown(runId, held);
+    // Start teardown while the run is already unreachable, but release the
+    // caller's action slot BEFORE awaiting it. `disposeRun()` waits for the
+    // watch queue, and an unwatch in that queue may itself be waiting for this
+    // exact slot. Releasing here breaks that cycle without weakening the older
+    // contract: the refusal still does not return until the provider session is
+    // actually handed back.
+    const teardown = this.teardown(runId, held);
+    releaseSlot?.();
+    await teardown;
   }
 
   /** Release every run's session. For when the deployment's config changes. */
   async dispose(): Promise<void> {
+    // FIRST, and synchronously. See `retired`.
+    this.retired = true;
     // Runs still OPENING as well as runs already open. A run inside `open()`
     // has no RunBrowser yet, so enumerating `runs` alone walked straight past
     // it — and the caller for this is `attachRemoteBrowser` noticing the
@@ -263,8 +659,38 @@ export class RemoteBrowserController {
     // rotation. Missing an in-flight open there means the session it is about
     // to allocate is allocated with the credential being retired, on a
     // controller nothing holds a reference to any more.
-    const ids = new Set([...this.runs.keys(), ...this.opening]);
+    const opening = [...this.opening.values()];
+    const ids = new Set([...this.runs.keys(), ...this.opening.keys()]);
     await Promise.all([...ids].map((runId) => this.endRun(runId)));
+    // And then the OPENS THEMSELVES, which `endRun` cannot wait for.
+    //
+    // A run past `createSession` but still inside `connectOverCDP` or page
+    // creation has no entry in `runs`, so `endRun` aborts its signal, forgets
+    // it and returns at once — while `openReserved` is still unwinding, and its
+    // rollback is what calls `endSession` on the session already allocated. So
+    // this method resolved with a live session still held, the replacement
+    // controller's `ready` gate opened on that resolution, and the very
+    // sequencing this exists to provide was defeated in the one case it was
+    // built for: a credential rotation catching a run mid-open.
+    //
+    // Failures are swallowed rather than propagated: these promises are
+    // EXPECTED to reject, because aborting the signal above is what makes them.
+    // What matters here is that they have finished, not how.
+    await Promise.all(opening.map((open) => open.catch(() => {})));
+    // And the teardowns ALREADY UNDER WAY, which is the third of the three
+    // states this pool counts and the one disposal did not wait for.
+    //
+    // `stopRun` deletes the run, counts the slot in `closing` and fires the
+    // teardown WITHOUT awaiting it — deliberately, since its callers do not
+    // await `stopRun`. So a rotation landing in that window found the run in
+    // neither `runs` nor `opening`, resolved at once, and the replacement's
+    // `ready` barrier opened while the outgoing provider session was still
+    // being handed back. The admission check one screen down counts all three
+    // states; this waited for two of them.
+    //
+    // Snapshotted AFTER the two waits above, because unwinding an open or
+    // ending a run is itself a thing that starts a teardown.
+    await Promise.all([...this.closing.values()].map((done) => done.catch(() => {})));
   }
 
   /** A worker finished; it will never ask for the browser again. */
@@ -272,6 +698,968 @@ export class RemoteBrowserController {
     // Every run's lease: the caller knows which worker finished, not which run
     // it belonged to, and the call is a no-op for a lease that never saw it.
     for (const lease of this.leases.values()) lease.actorEnded(actorId);
+  }
+
+  /**
+   * Start streaming this run's page to whoever is watching it.
+   *
+   * Nothing streams until someone asks. That is the whole reason this is a
+   * method rather than something `open()` does: an unwatched run would
+   * otherwise pay to encode frames nobody sees, on every run, forever — and on
+   * a metered provider it would pay for the bandwidth too.
+   *
+   * Frames are ACKED after they are handed on, never before. Chrome sends the
+   * next frame only once the previous is acknowledged, so this bounds it to one
+   * outstanding frame against OUR OWN handling. It does not reach further than
+   * that, and an earlier version of this comment claimed it did: `onFrame` ends
+   * at a socket emit, which hands the JPEG to a transport rather than to a
+   * viewer, so the ack says nothing about what the person actually received.
+   * Bounding the rest of the path is the transport's job — see `emitFrame`,
+   * where frames go out lossy so a slow connection drops pictures instead of
+   * banking stale ones. Dropping the ack stops the stream dead, which is why it
+   * is best-effort but unconditional.
+   *
+   * Returns false when there is nothing to watch — the run has no browser, or
+   * it is already being watched. Callers use that to avoid promising a viewer
+   * a stream that will never arrive.
+   */
+  async startWatching(runId: string, onFrame: (frame: BrowserFrame) => void): Promise<boolean> {
+    const held = this.runs.get(runId);
+    if (!held) return false;
+    // Queued rather than refused. The check for "already watching" happens
+    // INSIDE the queued turn, once everything asked for earlier has actually
+    // been applied — so a watch that follows an unwatch attaches, instead of
+    // seeing the outgoing stream and giving up on one it was meant to replace.
+    return await this.queueWatch(held, async () => {
+      // Already streaming is STREAMING, not a refusal. The two used to share
+      // `false`, and across a reconnect they are not the same thing at all: a
+      // transient socket drop sends no unwatch, so the screencast survives and
+      // its frames follow the transport to the new connection — but the
+      // reloaded client's `browser:watch` was answered "nothing to stream".
+      // Because CDP frames are adaptive, an idle page then sends nothing, and
+      // the panel could sit forever saying it could not be watched while it
+      // was in fact being watched.
+      held.onFrame = onFrame;
+      // A NEW watcher has been shown nothing, whatever the last one saw. This
+      // is the only place the seen-a-frame record is cleared, because replacing
+      // the consumer is precisely the event it is about: the branch below
+      // deliberately keeps an existing screencast across a reconnect, so a reset
+      // tied to the CDP session would have let a reloaded page inherit the
+      // previous viewer's picture and hide a page it had never been shown.
+      // Bumped BEFORE any attach, so a frame arriving while
+      // `Page.startScreencast` is still in flight carries this watch's number
+      // and its receipt counts. `seenGen` is deliberately NOT cleared: it does
+      // not need to be, because it can no longer match, and a record that goes
+      // stale on its own is one fewer reset to run at the right moment.
+      held.watchGen = (held.watchGen ?? 0) + 1;
+      if (held.screencast) {
+        // A new watch is unconfirmed, and a RECONNECTING one has to be told so:
+        // it may be arriving at a page that is already hidden, where there are
+        // no frames to work it out from, and a client left to infer it would
+        // infer from the last watch it remembers — the very state this
+        // distinguishes. The attach path below announces on its own way out,
+        // so announcing here too would only flap `capturing` off and on.
+        this.announceControl(runId);
+        return true;
+      }
+      const attached = await this.attachScreencast(runId, held, onFrame);
+      // A failed watch must not leave a dead consumer installed. A real
+      // watcher that replaced this one meanwhile owns the callback now.
+      if (!attached && held.onFrame === onFrame) held.onFrame = undefined;
+      return attached !== null;
+    });
+  }
+
+  /**
+   * Run one watch or unwatch after every one already asked for.
+   *
+   * The chain is kept non-rejecting on purpose: a failed attach must not poison
+   * every later request for this run, which is what a bare `.then` chain would
+   * do. The caller still sees its own failure, because that is the promise
+   * returned rather than the one stored.
+   */
+  private queueWatch<T>(held: RunBrowser, op: () => Promise<T>): Promise<T> {
+    const mine = (held.watchQueue ?? Promise.resolve()).then(op, op);
+    held.watchQueue = mine.catch(() => {});
+    return mine;
+  }
+
+  /**
+   * Attach at most one physical CDP screencast session at a time.
+   *
+   * `startWatching()` already serializes watcher lifecycle through `watchQueue`,
+   * but the agent's detached-hidden restore cannot join that queue: it holds the
+   * action slot, while an earlier unwatch may be waiting for exactly that slot.
+   * Sharing only the physical attach closes the two-session race without making
+   * watcher teardown and agent mutation wait on each other in a cycle.
+   *
+   * A real watcher claims `onFrame` immediately, before it waits for an attach
+   * already started by the agent. The lower-level attach never writes the sink,
+   * so finishing an older temporary attempt cannot overwrite a newer viewer.
+   */
+  private async attachScreencast(
+    runId: string,
+    held: RunBrowser,
+    onFrame?: (frame: BrowserFrame) => void,
+  ): Promise<CDPSession | null> {
+    if (onFrame) held.onFrame = onFrame;
+    if (held.screencast && held.screencastPage === held.page) return held.screencast;
+
+    // A popup can replace `held.page` while the old page is attaching. Never
+    // adopt that old session into the new target: wait it out, let the fresh
+    // attach notice it lost page identity, then retry against the page that is
+    // current NOW. This is deliberately narrower than `watchQueue`; the agent
+    // may hold the action slot while an unwatch in that queue waits for it.
+    const targetPage = held.page;
+    const existing = held.attaching;
+    if (existing) {
+      const existingPage = held.attachingPage;
+      await existing.catch(() => null);
+      if (held.page !== targetPage || existingPage !== targetPage) {
+        return this.attachScreencast(runId, held, onFrame);
+      }
+      const cdp = held.screencastPage === targetPage ? held.screencast ?? null : null;
+      if (cdp && onFrame) held.onFrame = onFrame;
+      return cdp;
+    }
+
+    // A stale completed stream can exist only across a page handoff. Dispose it
+    // before attaching the replacement; input has already finished and still
+    // owns the action slot when this path is used for a popup.
+    if (held.screencast && held.screencastPage !== targetPage) {
+      const stale = held.screencast;
+      held.screencast = undefined;
+      held.screencastPage = undefined;
+      await stale.send('Page.stopScreencast').catch(() => {});
+      await stale.detach().catch(() => {});
+    }
+
+    const attempt = this.attachScreencastFresh(runId, held, targetPage);
+    held.attaching = attempt;
+    held.attachingPage = targetPage;
+    try {
+      const cdp = await attempt;
+      if (cdp && onFrame) held.onFrame = onFrame;
+      return cdp;
+    } finally {
+      if (held.attaching === attempt) {
+        held.attaching = undefined;
+        held.attachingPage = undefined;
+      }
+    }
+  }
+
+  /** Open one new CDP session and start the stream when it is safe to do so. */
+  private async attachScreencastFresh(
+    runId: string,
+    held: RunBrowser,
+    targetPage: Page,
+  ): Promise<CDPSession | null> {
+    // An attachment can be requested for two very different reasons. Ordinary
+    // watching may fall back to the provider iframe if CDP viewing is broken;
+    // a privacy pause or failed visibility proof may NOT be repaired into
+    // "visible" just because the transport failed. Remember which contract this
+    // attempt started under before any awaited session creation can fail.
+    const safetyGate = held.hiddenByHolder === true || held.visibilityUnconfirmed === true;
+    let cdp: CDPSession;
+    try {
+      cdp = await targetPage.context().newCDPSession(targetPage);
+    } catch {
+      if (!safetyGate) {
+        // Ordinary viewer failure: do not make the UI suppress a usable provider
+        // fallback by confusing transport failure with an explicit Hide.
+        held.visibilityUnconfirmed = false;
+        held.capturing = true;
+        this.announceControl(runId);
+      }
+      return null;
+    }
+
+    if (held.page !== targetPage) {
+      await cdp.detach().catch(() => {});
+      return null;
+    }
+
+    cdp.on('Page.screencastFrame', ((e: {
+      data?: string;
+      sessionId?: number;
+      metadata?: { deviceWidth?: number; deviceHeight?: number; offsetTop?: number };
+    }) => {
+      if (held.page === targetPage && typeof e?.data === 'string') {
+        const width = e.metadata?.deviceWidth ?? 0;
+        const height = e.metadata?.deviceHeight ?? 0;
+        // The page repainted, so whatever was measured before may no longer be
+        // true. Broad on purpose: see `metricsStale`.
+        held.metricsStale = true;
+        // A real frame is the only proof a requested restore became visible.
+        // When the agent is waiting for that proof we intentionally keep the
+        // external `capturing` state false until this exact point, so a reload
+        // cannot expose a provider iframe during the gap and a second agent
+        // action cannot skip the gate if the first attempt timed out.
+        if (held.visibilityUnconfirmed) {
+          held.visibilityUnconfirmed = false;
+          if (held.capturing !== true) {
+            held.capturing = true;
+            this.announceControl(runId);
+          }
+        }
+        // Chrome has actually drawn something. Fired before delivery and
+        // cleared as it fires, because it is a one-shot answer to "has a
+        // picture come back", not a subscription.
+        const ping = held.framePing;
+        held.framePing = undefined;
+        ping?.();
+        // Through the run rather than the captured argument, so a later watcher
+        // that joined an already-attached stream is the one that receives.
+        const deliver = held.onFrame;
+        if (deliver) {
+          // Stamped with the watch it belongs to, so the receipt names what
+          // was actually seen. Nothing is recorded here: what happens past this
+          // consumer is lossy, and the record is the client's to send.
+          deliver({ data: e.data, width, height, generation: held.watchGen ?? 0 });
+        }
+      }
+      // ACKED WHETHER OR NOT THE PICTURE GOT ANYWHERE, and that is the choice,
+      // not an oversight. `emitFrame` is volatile: it drops a frame the
+      // transport cannot write rather than banking it. So a frame can be
+      // delivered to a consumer that discards it, and this still tells Chrome
+      // to send the next one.
+      //
+      // The alternative — ack only what was written — reads better and is
+      // worse. Chrome sends the next frame ONLY once the previous is acked, so
+      // withholding the ack does not slow the stream, it ends it: the one
+      // remaining frame is the one that was dropped, and nothing arrives to
+      // revive it. A page that has gone quiet then stays dark forever, which is
+      // the failure this whole file keeps coming back to.
+      //
+      // The residual, stated plainly so it is not rediscovered as news: a drop
+      // followed by an IDLE page leaves the viewer holding a picture older than
+      // the page, and — because `driving` alone makes the image interactive —
+      // still clickable. The per-watch receipt cannot close that; it answers
+      // "has this view ever seen the page", not "is what it shows current", and
+      // a per-frame receipt was weighed and refused (see the client's
+      // `browser:frame-seen`) because it puts a round trip on every frame.
+      // Closing it properly needs a delivery signal the transport does not
+      // give: Socket.IO drops a volatile packet silently, and inferring it from
+      // the engine's writability would couple the frame path to internals.
+      // Until there is a supported signal, the honest position is that this is
+      // a live view with the staleness every live view has, not a guarantee.
+      //
+      // Best-effort: the session may have been detached between the frame
+      // arriving and this running, and an ack into a dead session is not an
+      // error worth surfacing to a user watching a browser.
+      void cdp.send('Page.screencastFrameAck', { sessionId: e?.sessionId }).catch(() => {});
+    }) as never);
+
+    // A watcher coming back does not undo a deliberate Hide. The session is
+    // attached either way — so Show, and the agent's own restore, have
+    // something to turn on — but the stream stays stopped until somebody asks
+    // for it. Handback or idle expiry ends exclusive control, not the privacy
+    // decision: a later watcher remains paused until Show or the agent's own
+    // pre-action visibility gate deliberately restores the picture.
+    const paused = held.hiddenByHolder === true;
+    if (!paused) {
+      try {
+        await cdp.send('Page.startScreencast', { ...SCREENCAST });
+      } catch {
+        if (!safetyGate) {
+          // An ordinary CDP-watch failure is not a privacy pause. If we left
+          // `capturing: false` here the client would suppress the provider
+          // viewer even though that fallback may still work.
+          held.visibilityUnconfirmed = false;
+          held.capturing = true;
+          this.announceControl(runId);
+        } else {
+          // A failed retry of a real privacy/unconfirmed state is the opposite:
+          // fail closed and let a later attempt prove visibility with a frame.
+          held.capturing = false;
+          this.announceControl(runId);
+        }
+        await cdp.detach().catch(() => {});
+        return null;
+      }
+    }
+    // The page may have been replaced while startScreencast itself was
+    // pending. Never publish that now-stale physical session as the new page's
+    // viewer.
+    if (held.page !== targetPage) {
+      if (!paused) await cdp.send('Page.stopScreencast').catch(() => {});
+      await cdp.detach().catch(() => {});
+      return null;
+    }
+    // Recorded BEFORE this promise resolves, so a stop that awaited the attach
+    // finds the session rather than racing the assignment.
+    held.screencast = cdp;
+    held.screencastPage = targetPage;
+    // Consumer ownership belongs to the caller above. In particular, never
+    // let an older temporary attach overwrite a watcher that arrived
+    // while `newCDPSession` / `startScreencast` was still pending.
+    held.capturing = !paused;
+    held.hiddenByHolder = paused;
+    this.announceControl(runId);
+    return cdp;
+  }
+
+  /** Nobody is watching any more: stop paying to render frames. */
+  async stopWatching(runId: string): Promise<void> {
+    const held = this.runs.get(runId);
+    if (!held) return;
+    await this.queueWatch(held, async () => {
+      const cdp = held.screencast;
+      // Invalidate the view immediately. Queued human events must fail
+      // their post-wait identity check rather than land in a departed view.
+      held.onFrame = undefined;
+      if (!cdp) return;
+      held.screencast = undefined;
+      held.screencastPage = undefined;
+      held.capturing = false;
+      this.announceControl(runId);
+
+      // A click is several CDP commands under one action slot. Teardown
+      // joins that SAME FIFO and waits for its real turn: timing out and then
+      // detaching anyway would cut a slow click between press and release. It
+      // is marked as lifecycle work rather than holder activity, so an idle
+      // deadline that lands while teardown owns the slot can still release an
+      // abandoned takeover instead of granting it a fresh two-minute window.
+      const lease = this.leases.get(runId);
+      const token = lease ? await lease.acquireActionSlot(null, false) : null;
+      if (lease && !token) return;
+      try {
+        await cdp.send('Page.stopScreencast').catch(() => {});
+        await cdp.detach().catch(() => {});
+      } finally {
+        if (token && lease) lease.endAction(token);
+      }
+    });
+  }
+
+  /**
+   * Suspend or resume the picture without giving up control.
+   *
+   * The credential case, and the only reason this is separate from watching. A
+   * person who has taken the page over to sign in is about to type a password
+   * into a field whose contents are echoed as dots — but a password manager's
+   * dropdown, a "show password" toggle, a one-time code in plain text and the
+   * confirmation page afterwards are not, and all of them would otherwise be
+   * encoded into frames and sent across the network.
+   *
+   * What this does NOT do is hide anything from the agent: it stops the
+   * picture, not the page. Nothing about a suspended capture would stop a
+   * `extract_text` from reading the same screen — it is the lease that stops
+   * that, by refusing the agent for as long as the person holds it.
+   *
+   * Answers whether frames are flowing afterwards, which is what a UI needs to
+   * show and is not always what was asked for: a run with nobody watching has
+   * no session to suspend.
+   */
+  async setCapture(runId: string, on: boolean): Promise<boolean> {
+    const held = this.runs.get(runId);
+    const cdp = held?.screencast;
+    // The view this request was aimed at. Hide is not a run-level command: it
+    // means "hide the page I just saw". A watch can be replaced while this call
+    // waits for the action slot, so post-wait authorisation must still name the
+    // same watch/session rather than merely find that SOME current watch has a
+    // receipt.
+    const watch = held?.watchGen;
+    if (!held || !cdp) return false;
+    // Only the person holding the page may hide it, and this is the guard that
+    // makes "hidden" a property of the takeover rather than a mode anyone can
+    // set. Without it, a suspended capture outlived the hold that justified it:
+    // hide the page, hand back — or simply let the two-minute hold lapse while
+    // hidden — and the agent could carry on against a panel frozen on the last
+    // picture, which is precisely the invisible agent this panel exists to
+    // prevent. Turning the picture back ON is never refused: restoring
+    // visibility is not a privilege.
+    const lease = this.leaseFor(runId);
+    if (!on && !lease.heldByHuman) return held.capturing === true;
+    // And only a page this watcher has confirmed RECEIVING a picture of.
+    // Taking control before the first frame is deliberately allowed — pausing
+    // the agent is the useful half — but the UI offered Hide for any takeover,
+    // so the person could reach the blind typing surface with no picture ever
+    // on screen. Refused here as well as hidden in the client, because the
+    // client this protects is the stale one whose button is still wired to
+    // `streaming`; it does not lie, it simply never got the frame, and so it
+    // never sends the receipt.
+    if (!on && (watch === undefined || held.seenGen !== watch)) {
+      return held.capturing === true;
+    }
+    // Hide and Show are things the holder DID, so they extend the hold like any
+    // other authorised event. Without this, clicking Hide at 119.9s took the
+    // action slot, the old deadline fired while CDP was still stopping capture,
+    // and the hold lapsed moments after a fresh interaction — with the picture
+    // off, which is the worst moment for it to happen.
+    if (held.capturing === on) {
+      if (lease.heldByHuman) lease.touch();
+      return on;
+    }
+
+    // Through the ACTION SLOT, like every other thing that changes the page's
+    // state. The check above was made before an awaited CDP call and nothing
+    // recorded that the transition was in flight, so a handback landing in
+    // that window found no action, released the hold, and the agent reached
+    // the visibility gate while `capturing` was still its old value — passing
+    // the gate, then entering the page as the suspension completed behind it.
+    // The same invisible-agent window, one await further along.
+    // Hide and Show are explicit ordered human decisions. Once accepted,
+    // a slow earlier CDP operation must not make them expire.
+    const token = await lease.acquireActionSlot(null);
+    if (!token) return held.capturing === true;
+    try {
+      // Re-checked after the wait — ALL of it, not just the hold.
+      //
+      // The watch queue does not take the action slot, so everything this
+      // method validated before parking can move while it is parked. For Hide,
+      // the current watch merely being confirmed is insufficient: watcher A
+      // can be replaced by confirmed watcher B while this request waits, and
+      // stopping A's captured CDP session then both fails silently and records
+      // the wrong privacy state. Authorisation is therefore tied to the exact
+      // watch AND exact session the request was aimed at.
+      //
+      // Refusing rather than retargeting. Hide is a statement about the page
+      // the person was looking at; applying it to a watch that replaced theirs
+      // is not what they asked for, and the safe direction here is the picture
+      // staying ON. Show is different: it ends a RUN-level pause, so it may
+      // deliberately retarget the current session below.
+      if (!on && !lease.heldByHuman) return held.capturing === true;
+      if (!on && (held.screencast !== cdp || held.watchGen !== watch)) {
+        return held.capturing === true;
+      }
+      if (!on && (watch === undefined || held.seenGen !== watch)) {
+        return held.capturing === true;
+      }
+      // SHOW re-reads the session; HIDE keeps the one it was aimed at.
+      const target = on ? held.screencast : cdp;
+      if (!target) {
+        // Show ends a run-level privacy pause. If unwatch invalidated its
+        // old session while this call waited, remember that decision so the
+        // replacement watch attaches visible rather than resurrecting Hide.
+        if (on) {
+          held.hiddenByHolder = false;
+          if (lease.heldByHuman) lease.touch();
+        }
+        return held.capturing === true;
+      }
+      const now = await this.applyCapture(runId, held, target, on);
+      if (lease.heldByHuman) lease.touch();
+      return now;
+    } finally {
+      lease.endAction(token);
+    }
+  }
+
+  /**
+   * The capture transition itself, with no lease bookkeeping.
+   *
+   * Separate because the agent's restore in `act()` already holds the action
+   * slot — taking it again there would deadlock against itself, and the whole
+   * point of that call site is that it happens INSIDE the agent's turn.
+   *
+   * `confirmWithFrame` is used only by the agent's visibility gate. There, a
+   * successful CDP command is not enough: the externally visible state remains
+   * paused until a frame arrives, and the frame handler is the only code that
+   * promotes it to capturing. This makes a restore timeout sticky rather than
+   * a one-action refusal.
+   */
+  private async applyCapture(
+    runId: string,
+    held: RunBrowser,
+    cdp: CDPSession,
+    on: boolean,
+    confirmWithFrame = false,
+  ): Promise<boolean> {
+    if (held.capturing === on && !(on && confirmWithFrame && held.visibilityUnconfirmed)) return on;
+
+    // Chrome can emit the first keyframe before startScreencast resolves.
+    // Arm confirmation before the command so that frame is allowed to
+    // clear the marker and promote capture while the command is pending.
+    const wasUnconfirmed = held.visibilityUnconfirmed === true;
+    const wasCapturing = held.capturing === true;
+    if (on) held.visibilityUnconfirmed = true;
+    try {
+      if (on) await cdp.send('Page.startScreencast', { ...SCREENCAST });
+      else await cdp.send('Page.stopScreencast');
+      if (on) {
+        // Manual Show advertises that frames may flow as soon as the
+        // command is accepted. Do not re-arm visibilityUnconfirmed here:
+        // an early frame may already have cleared it.
+        if (!confirmWithFrame) held.capturing = true;
+      } else {
+        held.visibilityUnconfirmed = false;
+        held.capturing = false;
+      }
+      held.hiddenByHolder = !on;
+      this.announceControl(runId);
+    } catch {
+      if (on) {
+        held.visibilityUnconfirmed = wasUnconfirmed;
+        held.capturing = wasCapturing;
+        this.announceControl(runId);
+      }
+      return held.capturing === true && !held.visibilityUnconfirmed;
+    }
+    return on;
+  }
+
+  /**
+   * Wait, briefly, for Chrome to produce a frame.
+   *
+   * `Page.startScreencast` resolves when the command is accepted, which is not
+   * when a picture exists. The agent's visibility gate — "the page must be
+   * VISIBLE before anything changes it" — was therefore satisfied by a request
+   * rather than by a repaint, and the agent could click while the panel was
+   * still showing the page from before it was hidden, or nothing at all.
+   *
+   * A frame rather than a client receipt, deliberately. A receipt would prove
+   * somebody SAW it, which is stronger — and would make the agent's progress
+   * depend on a viewer that may not exist: this path runs after a handback or a
+   * lapse, when there may be nobody watching at all, and an agent that stalls
+   * because a tab was closed is a worse failure than the one being fixed. What
+   * this does guarantee is ours to guarantee: the stream is producing again.
+   *
+   * Bounded, and the bound rests on the property rounds 14 and 15 already rely
+   * on — a screencast that has just been started emits its first frame at once,
+   * whatever the page is doing. If one does not arrive, the picture genuinely
+   * has not come back, and the caller refuses on the same trade it already
+   * makes when the restore itself fails.
+   */
+  private nextFrame(held: RunBrowser, withinMs = RESTORE_FRAME_MS): Promise<boolean> {
+    // ARMED BEFORE the caller asks for the picture, never after. Chrome can
+    // deliver the first frame before `Page.startScreencast` resolves — round 7
+    // was that exact ordering, on a different flag — so a waiter installed once
+    // the command came back would miss the very frame it is waiting for and
+    // then time out with the picture already on screen.
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        if (held.framePing === ping) held.framePing = undefined;
+        resolve(false);
+      }, withinMs);
+      timer.unref?.();
+      const ping = () => { clearTimeout(timer); resolve(true); };
+      held.framePing = ping;
+    });
+  }
+
+  /** Whether a person is driving this run's browser right now. */
+  humanHolds(runId: string): boolean {
+    return this.leases.get(runId)?.heldByHuman === true;
+  }
+
+  /**
+   * Hand this run's browser to the person watching it.
+   *
+   * The wait is the substance. An agent action already inside Playwright cannot
+   * be interrupted — `click` waits for its element to become actionable and
+   * then clicks, whatever anyone decided in the meantime — so a takeover that
+   * returned immediately would put the person on a page an action was still
+   * about to change. Bounded by the action ceiling, because that is the longest
+   * an action can legitimately take; past it something is wedged, and saying so
+   * is better than a spinner that never resolves.
+   *
+   * Idempotent for someone who already holds it: a second click of Take control
+   * just says they are still there.
+   */
+  async takeOver(runId: string): Promise<{ ok: boolean; detail?: string }> {
+    if (this.revoked.has(runId)) {
+      return { ok: false, detail: 'Browser control was stopped for this run.' };
+    }
+    if (!this.runs.has(runId)) {
+      return { ok: false, detail: 'This run has no browser open.' };
+    }
+    const lease = this.leaseFor(runId);
+    if (lease.heldByHuman) {
+      lease.touch();
+      // Said again even though nothing changed, because "nothing changed" is
+      // exactly the situation a reloaded page cannot tell from "you never had
+      // it". Take control is the button someone presses when the panel looks
+      // wrong, so it has to be able to answer rather than dedupe itself into
+      // silence and leave them pressing it.
+      this.announceControl(runId, true);
+      return { ok: true };
+    }
+    // Held across the takeover, not merely waited out. The slot is what makes
+    // "the agent is not touching this page" true, and letting it go between the
+    // wait and `takeOver` would leave a gap the agent's next action could start
+    // in — which is the whole thing this wait exists to prevent.
+    const token = await lease.acquireActionSlot(ACTION_TIMEOUT_MS);
+    if (!token) {
+      return {
+        ok: false,
+        detail: 'The agent is still finishing an action on this page. Try again in a moment.',
+      };
+    }
+    try {
+      // Re-checked AFTER the wait, which is up to the full action ceiling. The
+      // checks above ran before it, and what they checked can be gone: the run
+      // can be stopped, and the agent's action can END the page — a site
+      // closing its own window during a navigation is ordinary. Granting the
+      // hold anyway tells the person they have control of a dead browser, and
+      // every input they then make is refused one at a time while the panel
+      // goes on saying the page is theirs.
+      const held = this.runs.get(runId);
+      if (this.revoked.has(runId)) {
+        return { ok: false, detail: 'Browser control was stopped for this run.' };
+      }
+      if (!held || held.page.isClosed()) {
+        return { ok: false, detail: 'That browser closed while you were waiting for it.' };
+      }
+      lease.takeOver(runId);
+    } finally {
+      lease.endAction(token);
+    }
+    return { ok: true };
+  }
+
+  /** The person is done. Answers whether they were holding it at all. */
+  /**
+   * The viewer confirms it received a picture of this run's page.
+   *
+   * Reliable, one per watch, and the only thing that opens Hide. Checked
+   * against the CURRENT watch: a receipt that names an older one is from a
+   * viewer that has since been replaced, and vouching for its successor is the
+   * reconnect hole this counter exists to close.
+   */
+  frameSeen(runId: string, generation: number): void {
+    const held = this.runs.get(runId);
+    if (!held) return;
+    if (typeof generation !== 'number' || !Number.isFinite(generation)) return;
+    if (held.watchGen === undefined || generation !== held.watchGen) return;
+    if (held.seenGen === generation) return;
+    held.seenGen = generation;
+    // The blind keyboard surface turns on here, so the client learns it from
+    // the same push that carries who holds the page.
+    this.announceControl(runId);
+  }
+
+  handBack(runId: string): boolean {
+    return this.leases.get(runId)?.handBack() === true;
+  }
+
+  /**
+   * One thing the person did to the page.
+   *
+   * Authorised per event, not per session. A takeover is not a channel that
+   * stays open once opened: between two clicks the run can be stopped, the hold
+   * can lapse, the page can close, and each of those has to stop the NEXT
+   * event rather than be noticed at the end. So every event re-checks that this
+   * run is live and that the lease is still the person's, and every accepted
+   * event says so by extending the hold.
+   */
+  async input(runId: string, event: BrowserInput): Promise<{ ok: boolean; detail?: string }> {
+    // No separate `revoked` check, and that is deliberate rather than an
+    // omission. Stop drops the run's lease along with everything else, so a
+    // stopped run has no human holder and the check below already refuses it —
+    // proven by taking it out and watching the stopped-run test still fail.
+    // Two answers to "may this land" is how they come to disagree.
+    const held = this.runs.get(runId);
+    const cdp = held?.screencast;
+    // The view this event is authorised against, kept so it can be compared to
+    // the view that exists when it finally runs. See the re-check below.
+    const watch = held?.watchGen;
+    if (!held || held.page.isClosed()) return { ok: false, detail: 'This run has no browser open.' };
+    // No CDP session means nobody is watching, and input you cannot see the
+    // result of is not a takeover — it is typing into the dark.
+    if (!cdp) return { ok: false, detail: 'Nothing is streaming this browser, so it cannot be driven.' };
+    const lease = this.leaseFor(runId);
+    if (!lease.heldByHuman) {
+      return { ok: false, detail: 'You do not have control of this browser. Take control first.' };
+    }
+    // Typing with the picture off is only allowed to somebody who turned it off
+    // — which means THIS watch has seen the page. A takeover survives a reload
+    // and the hidden state is replayed with it, so a fresh watcher could be
+    // handed `capturing: false` for a page it has never been shown, and the
+    // placeholder would take its keystrokes. The page can have changed while
+    // hidden, by timer or redirect or the last thing typed into it, so the
+    // previous watcher having seen it is not this one seeing it.
+    //
+    // Only while hidden. With the picture live the person can see what they are
+    // typing into, and requiring a receipt there would refuse input from a
+    // viewer looking at a perfectly good frame whose watch an idle page has not
+    // yet had cause to repaint.
+    if (held.capturing !== true && (held.watchGen === undefined || held.seenGen !== held.watchGen)) {
+      return { ok: false, detail: 'Show the page before typing into it — this view has not seen it yet.' };
+    }
+
+    // The person's events take the SAME action slot the agent's do, and that is
+    // what makes the two mutually exclusive rather than merely nominally so.
+    // Without it, `input` only checked who held the lease and then awaited a
+    // CDP dispatch with nothing recorded: a handback landing in that window let
+    // the agent acquire and act while the click was still going in. It also
+    // serializes the person's own events against each other, so a fast typist
+    // cannot interleave two dispatches on one page.
+    // Movement never queues; everything else waits its turn. Discrete input is
+    // intentionally unbounded in TIME once accepted: expiring a click, key or
+    // committed text because earlier accepted input took two seconds silently
+    // truncates what the person typed. The NUMBER accepted is bounded instead,
+    // so a stalled endpoint cannot turn this FIFO into an unbounded memory
+    // queue. Agent handoff/takeover waits remain time-bounded at their call sites.
+    const sampled = event.kind === 'move';
+    const token = sampled
+      ? lease.tryActionSlot()
+      : await lease.acquireActionSlot(null, true, MAX_HUMAN_INPUT_QUEUE);
+    if (!token) {
+      // A dropped sample is not a refusal, and must not be reported as one:
+      // the caller turns `ok: false` into a notice on the person's screen, and
+      // the ordinary case for a busy slot is that they are also clicking or
+      // typing — which is the thing the slot is busy WITH. Saying "ok" here
+      // means the event was handled under the rule above, not that a pointer
+      // reached the page.
+      if (sampled) return { ok: true };
+      return { ok: false, detail: 'Too many browser inputs are already waiting. Let the page catch up, then try again.' };
+    }
+
+    try {
+      // Re-checked after the wait — the VIEW as well as the hold, because the
+      // wait is real: a second event parks here while the first is still inside
+      // CDP, and the watch queue does not take the action slot, so the view can
+      // be torn down and rebuilt underneath it.
+      //
+      // Both halves are needed, and they catch different things. `stopWatching`
+      // clears `held.screencast` WITHOUT bumping the watch, and until its
+      // `Page.stopScreencast` and detach settle that session is still live — so
+      // a queued key could land on a page the viewer has already navigated away
+      // from. A reconnect does the opposite: it keeps the session and bumps the
+      // watch. Checking one would leave the other open.
+      //
+      // (`setCapture` needs only the watch half, because the session there can
+      // change only through `attachScreencast`, which `startWatching` reaches
+      // after bumping. An unwatch is what makes this method different.)
+      //
+      // Refused rather than retargeted, the same as Hide: a click aimed at the
+      // page somebody was looking at is not a click on whatever replaced it.
+      if (!lease.heldByHuman) {
+        return { ok: false, detail: 'Your control of this browser ended while that was waiting.' };
+      }
+      if (held.screencast !== cdp || held.watchGen !== watch) {
+        return { ok: false, detail: 'The view you were driving is gone, so that did not land.' };
+      }
+      // The blind-typing rule is deliberately NOT re-run here, and its
+      // revert-check going green is the reason. Capture can only go off under
+      // this wait through `setCapture`, which takes the same action slot and so
+      // cannot interleave — and when it does run first, it hid a page whose
+      // receipt is still current, which is exactly the case that is allowed.
+      // Reaching it with a stale receipt needs the watch to have moved, and the
+      // check above already refused that. A third answer to the same question
+      // is how they come to disagree.
+      const pagesBefore = new Set(held.page.context().pages());
+      await this.dispatch(cdp, held, event);
+      await this.followOpenedPage(runId, held, pagesBefore);
+    } catch (err) {
+      return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+    } finally {
+      lease.endAction(token);
+    }
+    lease.touch();
+    return { ok: true };
+  }
+
+  /**
+   * The page's own coordinate space, measured rather than inferred.
+   *
+   * Cached, because a click should not cost a round trip, and invalidated by
+   * the frame metadata changing shape — which arrives free with every frame. A
+   * failed measurement falls back to the last good one rather than to a guess:
+   * a stale viewport is off by a resize, an invented one is off by anything.
+   */
+  private async pageViewport(held: RunBrowser, cdp: CDPSession): Promise<{ width: number; height: number } | null> {
+    if (held.viewport && !held.metricsStale) return held.viewport;
+    try {
+      const metrics = await cdp.send('Page.getLayoutMetrics') as {
+        cssVisualViewport?: { clientWidth?: number; clientHeight?: number };
+      };
+      // `cssVisualViewport` ONLY. There is a legacy `visualViewport` on the same
+      // response and it is tempting as a fallback, but CDP documents it as
+      // deprecated and in DEVICE pixels while this one is in CSS pixels — the
+      // very units `Input.dispatchMouseEvent` wants. Reading the old field as
+      // though it were the new one reintroduces exactly the wrong-coordinate
+      // bug at any device scale but 1, on the old Chrome the fallback was meant
+      // to help. Converting instead would need a scale valid for that version,
+      // which is a guess about someone else's build; refusing is a fact about
+      // ours. Every Chrome new enough to serve a screencast has the CSS field.
+      const width = metrics?.cssVisualViewport?.clientWidth;
+      const height = metrics?.cssVisualViewport?.clientHeight;
+      if (typeof width === 'number' && typeof height === 'number' && width > 0 && height > 0) {
+        held.viewport = { width, height };
+        held.metricsStale = false;
+        return held.viewport;
+      }
+    } catch {
+      // The page may have gone. Falls through to the refusal below.
+    }
+    // NOT the previous value. Once it is known stale, using it anyway is how a
+    // click lands on whatever moved into that position after a resize — the
+    // failure this whole measurement exists to prevent, taken on faith instead
+    // of measured. A refused click is recoverable; a misplaced one is not.
+    return null;
+  }
+
+  /**
+   * Turn one authorised event into CDP calls. Coordinates arrive normalised.
+   *
+   * A switch with a default that REFUSES, rather than a chain of ifs ending in
+   * the click branch. This is a mutation boundary reached from a socket, so the
+   * question is not what a well-formed event does but what a malformed one
+   * does: the chain answered "clicks", which meant a version-skewed client
+   * sending `{ kind: 'drag', x, y }` pressed the mouse on a real page, and a
+   * kind with no coordinates at all clamped to 0 and clicked the top-left
+   * corner. Unknown input has to fail closed.
+   *
+   * The `never` in the default is the other half: adding a member to
+   * `BrowserInput` without handling it here stops compiling, so the next kind
+   * cannot silently inherit whatever the last branch happened to be.
+   */
+  private async dispatch(cdp: CDPSession, held: RunBrowser, event: BrowserInput): Promise<void> {
+    switch (event.kind) {
+      case 'text': {
+        // A string or nothing — never coerced. `String(123)` would type "123"
+        // into the page, and `String(undefined)` would have typed the word
+        // "undefined" but for an earlier `?? ''`. Same rule as the coordinates
+        // below: a malformed required field is refused, not repaired.
+        if (typeof event.text !== 'string') {
+          throw new Error('That is not text that can be typed into the page.');
+        }
+        // Bounded because it crosses a socket and lands in a page: a paste is a
+        // reasonable thing to do during a takeover, a novel is not.
+        const text = event.text.slice(0, 4_000);
+        if (!text) return;
+        await cdp.send('Input.insertText', { text });
+        return;
+      }
+      case 'key': {
+        const modifiers = event.modifiers;
+        if (modifiers !== undefined) {
+          if (!Array.isArray(modifiers)
+            || modifiers.some((m) => m !== 'Control' && m !== 'Meta' && m !== 'Shift')
+            || new Set(modifiers).size !== modifiers.length) {
+            throw new Error('That editing shortcut has invalid modifiers.');
+          }
+          const primary = modifiers.filter((m) => m === 'Control' || m === 'Meta');
+          const shifted = modifiers.includes('Shift');
+          if (primary.length !== 1) {
+            throw new Error('That editing shortcut cannot be sent to the page.');
+          }
+          const key = typeof event.key === 'string' ? event.key : '';
+          const lower = key.toLowerCase();
+          const shortcut = lower === 'a' && !shifted
+            ? { key: 'a', code: 'KeyA', vk: 65 }
+            : lower === 'z'
+              ? { key: 'z', code: 'KeyZ', vk: 90 }
+              : lower === 'y' && !shifted
+                ? { key: 'y', code: 'KeyY', vk: 89 }
+                : key === 'Backspace' && !shifted
+                  ? { key: 'Backspace', code: 'Backspace', vk: 8 }
+                  : key === 'Delete' && !shifted
+                    ? { key: 'Delete', code: 'Delete', vk: 46 }
+                    : undefined;
+          if (!shortcut) {
+            // Copy/cut cannot honestly be implemented by a remote key chord:
+            // Chrome would copy into the REMOTE machine's clipboard, not the
+            // local clipboard the person expects. Refuse those (and any future
+            // editing chord) explicitly rather than letting it mutate only the
+            // hidden textarea and then forwarding the person's next text as a
+            // different remote edit.
+            throw new Error(`That editing shortcut is not supported for the remote page: ${key}`);
+          }
+          const modifierBits = (primary[0] === 'Control' ? 2 : 4) | (shifted ? 8 : 0);
+          const base = {
+            key: shortcut.key,
+            code: shortcut.code,
+            windowsVirtualKeyCode: shortcut.vk,
+            nativeVirtualKeyCode: shortcut.vk,
+            modifiers: modifierBits,
+          };
+          await cdp.send('Input.dispatchKeyEvent', { ...base, type: 'rawKeyDown' });
+          await cdp.send('Input.dispatchKeyEvent', { ...base, type: 'keyUp' });
+          return;
+        }
+
+        // `Object.hasOwn`, not a bare lookup. `KEYS['__proto__']` is
+        // `Object.prototype` — truthy — so a bare `if (!spec)` let it through
+        // and then read `spec.code` as undefined, dispatching a key event with
+        // no virtual key code. `constructor` and `toString` do the same. An
+        // allowlist that answers for keys nobody put in it is not an allowlist.
+        const spec = typeof event.key === 'string' && Object.hasOwn(KEYS, event.key)
+          ? KEYS[event.key]
+          : undefined;
+        if (!spec) throw new Error(`That key cannot be sent to the page: ${String(event.key)}`);
+        const base = {
+          key: event.key,
+          code: event.key,
+          windowsVirtualKeyCode: spec.code,
+          nativeVirtualKeyCode: spec.code,
+          ...(spec.text ? { text: spec.text } : {}),
+        };
+        await cdp.send('Input.dispatchKeyEvent', { ...base, type: spec.text ? 'keyDown' : 'rawKeyDown' });
+        await cdp.send('Input.dispatchKeyEvent', { ...base, type: 'keyUp' });
+        return;
+      }
+      case 'move':
+      case 'scroll':
+      case 'click': {
+        // Measured from the page rather than inferred from the picture, and
+        // scaled straight in: the screencast frame IS the page render, so the
+        // fraction the client computed against that image is already a fraction
+        // of the page. An earlier version subtracted `offsetTop` here, copying
+        // DevTools' input transform without its rendering — DevTools paints a
+        // gutter of its own above the JPEG and subtracts it back off because
+        // its coordinates are against that composited canvas. We draw the raw
+        // frame, so there is no gutter to remove, and removing one anyway
+        // rejected valid clicks near the top and shifted every other one up.
+        const view = await this.pageViewport(held, cdp);
+        if (!view) throw new Error('The page has not been measured yet, so a click cannot be placed on it.');
+        const x = coordinate(event.x, 'horizontal position') * view.width;
+        const y = coordinate(event.y, 'vertical position') * view.height;
+
+        if (event.kind === 'move') {
+          await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
+          return;
+        }
+        if (event.kind === 'scroll') {
+          await cdp.send('Input.dispatchMouseEvent', {
+            type: 'mouseWheel', x, y, button: 'none', buttons: 0,
+            deltaX: 0, deltaY: scrollDelta(event.deltaY),
+          });
+          return;
+        }
+
+        // Absence and invalidity are different answers. `undefined` means "the
+        // ordinary button", but a value that is present and not one of the
+        // three used to fall through to `left` — so a version-skewed client
+        // sending `button: 'primary'` performed a real left click it never
+        // asked for. Repairing malformed input into a mutation the sender did
+        // not specify is the same shape as every other bug on this boundary.
+        // Own properties only, for the same reason as the keys above: `in`
+        // walks the prototype chain, so `button: 'toString'` passed the check
+        // and then `BUTTONS['toString']` handed CDP a FUNCTION as the button
+        // mask. That hole came in with the check itself.
+        if (event.button !== undefined && !Object.hasOwn(BUTTONS, event.button)) {
+          throw new Error(`That is not a mouse button: ${String(event.button)}`);
+        }
+        const button = event.button ?? 'left';
+        const buttons = BUTTONS[button];
+        // Double-click is two events with clickCount 2, which pages read to
+        // mean word-selection. Capped because a click count is a number from a
+        // client.
+        // Absent is one click. Present but not a finite number is malformed —
+        // `Math.trunc(NaN)` stays NaN all the way through the clamp and would
+        // have gone to CDP as `clickCount: NaN`.
+        if (event.clicks !== undefined && (typeof event.clicks !== 'number' || !Number.isFinite(event.clicks))) {
+          throw new Error('That is not a number of clicks.');
+        }
+        const clickCount = Math.min(Math.max(Math.trunc(event.clicks ?? 1), 1), 3);
+        // Moved first: hover states, menus and anything listening for mouseover
+        // otherwise never see the pointer arrive, and a press on an element
+        // that was never hovered is not what a real click looks like.
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, buttons, clickCount });
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, buttons: 0, clickCount });
+        return;
+      }
+      default: {
+        const unknown: never = event;
+        throw new Error(`That is not something that can be done to the page: ${
+          (unknown as { kind?: unknown })?.kind ?? 'an event with no kind'}`);
+      }
+    }
   }
 
   /** The user stopped this run. Refuses further actions and clears its queue. */
@@ -290,13 +1678,12 @@ export class RemoteBrowserController {
     // just been told the browser is no longer in use. `revoked` keeps refusing
     // further actions, so giving the session back costs nothing.
     this.runs.delete(runId);
-    // Added to `closing` synchronously, in this same synchronous stretch of
-    // `stopRun`, so the pool counts this slot as still-in-use for the entire
-    // window between here and the fire-and-forget teardown settling — not
-    // just for the part of it this function happens to await. `stopRun` must
-    // stay synchronous (callers do not await it), so the teardown itself is
-    // still fire-and-forget; only the bookkeeping around it changed.
-    this.closing.add(runId);
+    // `teardown` counts the slot synchronously, in this same synchronous
+    // stretch of `stopRun`, so the pool sees it as still-in-use for the entire
+    // window rather than only for the part this function happens to await.
+    // `stopRun` must stay synchronous (callers do not await it), so the work
+    // itself is still fire-and-forget — but the promise is now RECORDED, which
+    // is what lets `dispose` wait for it.
     void this.teardown(runId, held);
   }
 
@@ -312,7 +1699,6 @@ export class RemoteBrowserController {
     const held = this.runs.get(runId);
     if (!held) { this.forgetRun(runId); return; }
     this.runs.delete(runId);
-    this.closing.add(runId);
     await this.teardown(runId, held);
     this.forgetRun(runId);
   }
@@ -334,6 +1720,7 @@ export class RemoteBrowserController {
     // "browser gone" announcement has already gone out by now: `disposeRun`
     // makes it, and teardown completes before this runs.
     this.liveViewListeners.delete(runId);
+    this.offControlFor(runId);
   }
 
   /**
@@ -346,6 +1733,19 @@ export class RemoteBrowserController {
   private async disposeRun(runId: string, held: RunBrowser): Promise<void> {
     held.abort.abort();
     this.announceLiveView(runId, undefined, false);
+    // Before the page and the connection it rides on. A screencast left
+    // attached would keep Chrome encoding frames for a run that is over, into
+    // a session about to be detached underneath it.
+    // Everything asked of the stream, applied, before its session is taken
+    // away — otherwise an attach still queued completes into a run that is over.
+    await held.watchQueue?.catch(() => {});
+    const watching = held.screencast;
+    held.screencast = undefined;
+    held.screencastPage = undefined;
+    if (watching) {
+      await watching.send('Page.stopScreencast').catch(() => {});
+      await watching.detach().catch(() => {});
+    }
     // Before the connection goes, because it is reached THROUGH the connection.
     // This is the run's own context on a shared endpoint: closing it takes its
     // pages, cookies and storage with it, which is what stops the next tenant
@@ -371,12 +1771,19 @@ export class RemoteBrowserController {
    * guarantees the removal happens, success or failure, so a disposal that
    * throws cannot leave the slot counted against the pool forever.
    */
-  private async teardown(runId: string, held: RunBrowser): Promise<void> {
-    try {
-      await this.disposeRun(runId, held);
-    } finally {
-      this.closing.delete(runId);
-    }
+  private teardown(runId: string, held: RunBrowser): Promise<void> {
+    // Both halves live here now. The caller used to add the id and this used to
+    // remove it, which split one piece of bookkeeping across two places and
+    // meant the PROMISE — the thing `dispose` needs — existed nowhere at all.
+    //
+    // Still synchronous with respect to the caller's `runs.delete`: this runs
+    // `disposeRun` up to its first await and records the result before
+    // returning, and nothing else can interleave in a synchronous stretch. So
+    // the slot is counted for the entire window, which is what the field
+    // comment promises.
+    const done = this.disposeRun(runId, held).finally(() => { this.closing.delete(runId); });
+    this.closing.set(runId, done);
+    return done;
   }
 
   private async act(action: BrowserAction, context: BrowserActionContext): Promise<BrowserActionOutcome> {
@@ -423,15 +1830,39 @@ export class RemoteBrowserController {
       lease_.releaseIfHeldBy(actor);
       return { ok: false, detail: 'The run was cancelled.' };
     }
-    if (!(await lease_.awaitActionSlot())) {
+    const token = await lease_.acquireActionSlot();
+    if (!token) {
       lease_.releaseIfHeldBy(actor);
       return { ok: false, detail: 'Another browser action is still finishing. Try again.' };
     }
-
-    const token = lease_.beginAction();
-    if (!token) {
-      return { ok: false, detail: 'Another browser action is already running. Wait for it to finish.' };
+    // Re-checked AFTER the slot wait — the same question `input()` and
+    // `setCapture` are each made to ask after theirs, and the one entry point
+    // that was not made to ask it.
+    //
+    // `acquire` above is RE-ENTRANT for the holder, which is what makes a
+    // sequence of actions a sequence. So a retry from the actor that already
+    // holds the lease is granted instantly and then queues here — and a
+    // takeover queued AHEAD of it takes the slot, changes the holder to the
+    // person, and hands the slot straight on to this retry. The grant it is
+    // carrying was true when it was issued and is not true any more.
+    //
+    // Before the slot became a queue this was a race the poll usually lost;
+    // now the handoff is direct, so it is not a race at all. Either way the
+    // outcome was the agent walking into `open()` and changing a page the
+    // user had just been told was theirs — the exact overlap a takeover
+    // exists to prevent, arriving through the one door with no re-check on it.
+    if (!lease_.heldBy(actor)) {
+      lease_.endAction(token);
+      // Named from who holds it now rather than assumed: a takeover is the
+      // reachable case, and a `stopRun` mid-wait is the other one.
+      return { ok: false, detail: refusal(lease_.heldByHuman ? 'human' : 'off') };
     }
+
+    let temporaryCapture: {
+      held: RunBrowser;
+      cdp: CDPSession;
+      watchGen: number | undefined;
+    } | undefined;
 
     try {
       const held = await this.open(runId, context.signal);
@@ -442,18 +1873,150 @@ export class RemoteBrowserController {
       // straight ahead. Aborting the signal is not enough on its own — nothing
       // is awaiting it at that moment.
       if (this.revoked.has(runId)) {
-        await this.releaseIfIdle(runId);
+        await this.releaseIfIdle(runId, () => lease_.endAction(token));
         return { ok: false, detail: 'The user stopped browser control for this run.' };
       }
       if (context.signal?.aborted || held.abort.signal.aborted) {
-        await this.releaseIfIdle(runId);
+        await this.releaseIfIdle(runId, () => lease_.endAction(token));
         return { ok: false, detail: 'The run was cancelled.' };
       }
 
-      return await this.perform(held, action, planned);
+      // A deliberate Hide survives handback, and an unwatch deliberately
+      // detaches the CDP session. Those two facts can coexist: hiddenByHolder
+      // can still be true here with no screencast to restore. Skipping the gate
+      // in that state would let the first agent action after a conversation
+      // switch mutate a page that is still carrying the user's privacy pause.
+      // Attach a temporary, still-paused session so the ordinary visibility
+      // gate below can start it and insist on a fresh frame before the action.
+      // If no watcher adopts it, the action-slot finally tears it back down so
+      // an unwatched run does not keep paying to encode frames.
+      if ((held.hiddenByHolder === true || held.visibilityUnconfirmed === true) && !held.screencast) {
+        const watchGen = held.watchGen;
+        let cdp: CDPSession | null = null;
+        try {
+          // No no-op consumer is installed here. `nextFrame` below needs the
+          // Chrome event, not a viewer callback. If a real watcher arrives while
+          // this attachment is pending it claims `held.onFrame`, bumps the watch
+          // generation, and shares this same physical session.
+          cdp = await this.attachScreencast(runId, held);
+        } catch {
+          // A failed attach is the same safety outcome as a failed restore:
+          // without a picture proof the action must not reach the page.
+        }
+        if (!cdp) {
+          return {
+            ok: false,
+            detail: 'The page could not be shown again, so nothing was done to it.',
+          };
+        }
+        // Only the no-viewer path owns this as a temporary session. A watcher
+        // that arrived while the attach was pending adopts it instead.
+        if (held.onFrame === undefined && held.watchGen === watchGen) {
+          temporaryCapture = { held, cdp, watchGen };
+        }
+      }
+
+      // The page must be VISIBLE before anything changes it.
+      //
+      // The other half of the guard above: a takeover can end — handed back, or
+      // lapsed — while capture is still suspended, and the agent's next action
+      // would then run behind a paused panel. A failed restore also remains in
+      // this gate via `visibilityUnconfirmed`: accepting startScreencast is not
+      // enough, and timing out once must not make the NEXT action skip the
+      // check. Restoring here rather than when the hold ends keeps the invariant
+      // immediately in front of the page mutation it protects.
+      if (held.screencast && (held.capturing === false || held.visibilityUnconfirmed === true)) {
+        const cdp = held.screencast;
+        // If a previous Show/restore command was accepted but produced no
+        // frame, force a clean restart. Merely calling startScreencast again on
+        // an already-running stream is allowed to be a no-op and therefore may
+        // not produce the keyframe this gate needs.
+        if (held.capturing === true) {
+          await cdp.send('Page.stopScreencast').catch(() => {});
+          held.capturing = false;
+          this.announceControl(runId);
+        }
+        // Listening for the picture BEFORE asking for it — see `nextFrame`.
+        const drawn = this.nextFrame(held);
+        // `applyCapture`, not `setCapture`: this already holds the action slot,
+        // and asking for it again would deadlock against itself. Keep the
+        // external state paused until the frame itself confirms visibility.
+        if (!(await this.applyCapture(runId, held, cdp, true, true))) {
+          return {
+            ok: false,
+            detail: 'The page could not be shown again, so nothing was done to it.',
+          };
+        }
+        // And then for a PICTURE, not just for the command that asks for one.
+        if (!(await drawn)) {
+          // Sticky failure. The start command succeeded, but that is precisely
+          // the state that caused the bypass: `capturing` used to stay true and
+          // the next action walked straight past this block. Keep the public
+          // state paused, keep the internal unconfirmed marker set, and stop
+          // the stream best-effort so the next attempt can force a keyframe.
+          held.visibilityUnconfirmed = true;
+          held.capturing = false;
+          await cdp.send('Page.stopScreencast').catch(() => {});
+          this.announceControl(runId);
+          return {
+            ok: false,
+            detail: 'The page did not come back on screen, so nothing was done to it.',
+          };
+        }
+        // Re-checked AFTER the restore, because the restore is a CDP round trip
+        // and Stop is exactly what somebody presses while watching a page come
+        // back. The checks above this block are not enough: they ran before it.
+        //
+        // Reaching `perform()` aborted is worse than it looks, and worse than
+        // simply doing something that was cancelled. `stoppable(page.click(…))`
+        // EVALUATES its argument first, so Playwright is already working by the
+        // time `stoppable` sees the aborted signal — and that early throw
+        // returns without installing the listener that closes the page, which
+        // is the only thing that actually stops Playwright. So the action would
+        // land, unstoppably, after the user stopped the browser.
+        if (this.revoked.has(runId)) {
+          await this.releaseIfIdle(runId, () => lease_.endAction(token));
+          return { ok: false, detail: 'The user stopped browser control for this run.' };
+        }
+        if (context.signal?.aborted || held.abort.signal.aborted) {
+          await this.releaseIfIdle(runId, () => lease_.endAction(token));
+          return { ok: false, detail: 'The run was cancelled.' };
+        }
+      }
+
+      return await this.perform(runId, held, action, planned);
     } catch (err) {
       return { ok: false, detail: err instanceof Error ? err.message : String(err) };
     } finally {
+      if (temporaryCapture) {
+        const { held, cdp, watchGen } = temporaryCapture;
+        // A watcher may have arrived while the temporary restore was running.
+        // In that case it replaced the sink and bumped the watch generation,
+        // so the session is now a real live view and must not be torn out from
+        // underneath it. A failed or timed-out restore is kept attached but
+        // stopped: that state is retryable by the next action and must not be
+        // advertised as visible. Only a confirmed successful restore was a
+        // one-action visibility proof that is safe to tear back down.
+        if (
+          held.screencast === cdp
+          && held.onFrame === undefined
+          && held.watchGen === watchGen
+          && held.hiddenByHolder === false
+          && held.visibilityUnconfirmed === false
+          && held.capturing === true
+        ) {
+          held.onFrame = undefined;
+          held.screencast = undefined;
+          held.screencastPage = undefined;
+          // The privacy pause was ended by the successful restore. With no
+          // watcher there is no screencast, but this must not be advertised as
+          // another deliberate Hide (which would suppress provider fallback).
+          held.capturing = true;
+          this.announceControl(runId);
+          await cdp.send('Page.stopScreencast').catch(() => {});
+          await cdp.detach().catch(() => {});
+        }
+      }
       lease_.endAction(token);
       // A cancelled or stopped run is finished with the browser either way, so
       // it does not keep the lease while a queued worker waits.
@@ -472,6 +2035,15 @@ export class RemoteBrowserController {
    * it out changed no test. Two copies of a cap invite them to disagree.
    */
   private async open(runId: string, signal?: AbortSignal): Promise<RunBrowser> {
+    // BEFORE anything is reserved or allocated. See `ready`: the controller this
+    // one replaced may still be handing its sessions back, and the provider's
+    // own cap counts both of us.
+    if (this.ready) {
+      const settling = this.ready;
+      try { await settling; } catch { /* the old one's trouble, not ours */ }
+      // Only if nothing newer arrived while we waited.
+      if (this.ready === settling) this.ready = undefined;
+    }
     const existing = this.runs.get(runId);
     if (existing && !existing.page.isClosed()) return existing;
     if (existing) {
@@ -484,8 +2056,25 @@ export class RemoteBrowserController {
       // session is disposed of, a DIFFERENT run's admission check below could
       // see this slot as free and get admitted before the old session was
       // actually released.
-      this.closing.add(runId);
       await this.teardown(runId, existing);
+    }
+
+    // IMMEDIATELY BEFORE THE RESERVATION, and that placement is the rule.
+    //
+    // A controller that has been replaced must not allocate, whatever it was in
+    // the middle of when it was replaced — see `retired`. There are TWO awaits
+    // above this line and a retirement can land on either: the `ready` gate,
+    // and the teardown of a stale page just above. The check used to sit after
+    // the first of them, which left the second uncovered — and worse than
+    // uncovered, because `dispose` waits on that same teardown promise and this
+    // continuation was registered on it FIRST. So `open` resumed before
+    // `dispose` did, reserved a slot, and allocated through a provider already
+    // being retired, on a run the disposal snapshot had no way to include.
+    //
+    // One check, placed where the thing it protects actually happens, rather
+    // than one per await. Nothing between here and the reservation may suspend.
+    if (this.retired) {
+      throw new Error('The browser settings changed while this action was waiting. Try again.');
     }
 
     // Counted WITH the open runs, and taken before the first await.
@@ -508,14 +2097,21 @@ export class RemoteBrowserController {
         'Try again when one finishes, or raise the session limit in settings.',
       );
     }
-    this.opening.add(runId);
     // Created here, not after the browser exists, so a Stop arriving mid-open
     // has something to abort — and so the RunBrowser adopts the same signal
-    // rather than a new one that has forgotten it.
+    // rather than a new one that has forgotten it. BEFORE `openReserved` is
+    // called, because it reads this signal to cancel `createSession`.
     if (!this.aborts.has(runId)) this.aborts.set(runId, new AbortController());
+    // The reservation holds the PROMISE, not just the id, so `dispose` can wait
+    // for the open to finish unwinding rather than only asking it to stop. Both
+    // statements are synchronous with respect to each other — `openReserved`
+    // suspends at its first await and returns here before anything else can
+    // run — so the slot is still reserved before any interleaving is possible.
+    const opening = this.openReserved(runId, signal);
+    this.opening.set(runId, opening);
 
     try {
-      return await this.openReserved(runId, signal);
+      return await opening;
     } finally {
       // Released on every path. A reservation that leaked would count against
       // the cap forever and wedge the deployment.
@@ -543,10 +2139,6 @@ export class RemoteBrowserController {
     const abort = this.aborts.get(runId)?.signal;
     const creationSignal = signal && abort ? AbortSignal.any([signal, abort]) : (signal ?? abort);
     const session = await this.provider.createSession(creationSignal);
-    // Handed to the owner as soon as it exists, so the user can watch from the
-    // first action rather than after it. A CAPABILITY URL — see the provider
-    // seam: never persisted, never logged, never sent to another client.
-    this.announceLiveView(runId, session.liveViewUrl, true);
 
     // Everything past createSession is rolled back on failure. Without this a
     // CDP connection that dies leaves an allocated, billed session with nothing
@@ -561,6 +2153,9 @@ export class RemoteBrowserController {
     // the operator's browser for runs that never even reached `this.runs`.
     let browser: Browser | undefined;
     let owned: BrowserContext | undefined;
+    // Declared out here so the announcement below can wait for the run to be
+    // REGISTERED. See the comment on that announcement for why the wait matters.
+    let held: RunBrowser;
     try {
       browser = await playwright.chromium.connectOverCDP(session.cdpUrl) as unknown as Browser;
       // Whose context this is decides everything about how the run may use it.
@@ -593,7 +2188,7 @@ export class RemoteBrowserController {
       // `aborts` and would find nothing. Roll back instead.
       const abort = this.aborts.get(runId);
       if (!abort) throw new Error('The run ended while its browser was still opening.');
-      const held: RunBrowser = { session, browser, page, generation: 0, abort, ...(owned ? { ownedContext: owned } : {}) };
+      held = { session, browser, page, generation: 0, abort, ...(owned ? { ownedContext: owned } : {}) };
       // MAIN frame only. Playwright emits `framenavigated` for every frame,
       // sub-frames included, and this handler used to discard the frame it was
       // given and count them all — while the field it bumps is documented, and
@@ -606,14 +2201,14 @@ export class RemoteBrowserController {
       // minute to create — could come back to a bumped generation and be told
       // "the page changed while this action was waiting", about a page that had
       // not changed at all.
-      page.on('framenavigated', ((frame: unknown) => {
-        if (frame !== page.mainFrame()) return;
-        held.generation += 1;
-      }) as never);
+      this.trackPageNavigation(held, page);
       this.runs.set(runId, held);
-      return held;
     } catch (err) {
-      this.announceLiveView(runId, undefined, false);
+      // Nothing to withdraw. The live view is announced BELOW, after this
+      // block, so a browser that failed to open was never advertised in the
+      // first place — the `announceLiveView(runId, undefined, false)` that used
+      // to stand here withdrew an announcement that no longer exists.
+      //
       // Innermost first, and before endSession: the context is reached through
       // the connection, and for a shared endpoint endSession is a no-op that
       // would leave both behind.
@@ -622,9 +2217,95 @@ export class RemoteBrowserController {
       await this.provider.endSession(session.id).catch(() => {});
       throw err;
     }
+    // AFTER `this.runs.set`, and that ordering is the whole point.
+    //
+    // The announcement is what makes the client ask to watch: the live-view URL
+    // arrives, the panel mounts, and it sends `browser:watch` immediately. This
+    // used to be announced the moment `createSession` returned — before the CDP
+    // connect, the context, and the page, which together are several awaits and
+    // on a cold provider can be seconds. A watch landing inside that window
+    // looked the run up in `this.runs`, did not find it, and was answered
+    // `streaming: false`. Nothing retried once the run appeared, and because
+    // CDP frames are adaptive an idle page then produced no frame to recover
+    // on, so the panel could sit blank for the life of the run.
+    //
+    // Announcing here needs no retry, no pending-watch queue and no extra
+    // state, because it states the invariant instead: a browser is advertised
+    // only once it can actually be driven. The cost is that the URL appears a
+    // beat later than it used to; the benefit is that it is never a URL for a
+    // run that cannot yet be watched — or, on the failure path above, for one
+    // that never existed at all.
+    //
+    // A CAPABILITY URL — see the provider seam: never persisted, never logged,
+    // never sent to another client.
+    this.announceLiveView(runId, session.liveViewUrl, true);
+    return held;
   }
 
-  private async perform(held: RunBrowser, action: BrowserAction, planned: number): Promise<BrowserActionOutcome> {
+  /** Count main-frame navigation only while this page is the run's active page. */
+  private trackPageNavigation(held: RunBrowser, page: Page): void {
+    page.on('framenavigated', ((frame: unknown) => {
+      if (held.page !== page || frame !== page.mainFrame()) return;
+      held.generation += 1;
+    }) as never);
+  }
+
+  /**
+   * Follow a page opened by the action that just finished.
+   *
+   * A popup/new tab is part of the same user gesture (OAuth is the common
+   * example). Keeping `held.page` and the screencast on its opener makes the
+   * new page both invisible and impossible to drive. This runs while the SAME
+   * action slot is still held, after the opening click/key has fully landed, so
+   * no later human/agent event can slip between detecting the popup and moving
+   * the view to it.
+   */
+  private async followOpenedPage(runId: string, held: RunBrowser, before: Set<Page>): Promise<void> {
+    if (this.runs.get(runId) !== held || held.abort.signal.aborted) return;
+    const candidates = held.page.context().pages().filter((p) => !p.isClosed() && !before.has(p));
+    const next = candidates.at(-1);
+    if (!next || next === held.page) return;
+
+    held.page = next;
+    held.generation += 1;
+    held.viewport = undefined;
+    held.metricsStale = true;
+    this.trackPageNavigation(held, next);
+
+    const deliver = held.onFrame;
+    if (deliver) {
+      // The old JPEG is about the opener. Invalidate it BEFORE any awaited
+      // detach/attach and give the popup its own watch generation, so neither a
+      // late old frame nor a late old receipt can authorise input into the new
+      // page. A fresh frame will clear visibilityUnconfirmed; the client's
+      // receipt separately opens Hide/blind input.
+      held.watchGen = (held.watchGen ?? 0) + 1;
+      held.visibilityUnconfirmed = true;
+      held.capturing = false;
+      this.announceControl(runId);
+      await this.attachScreencast(runId, held, deliver);
+      return;
+    }
+
+    // No viewer is mounted. A temporary/old physical stream is useless after
+    // the target moved, so make sure it cannot keep encoding the opener. Do not
+    // manufacture a privacy pause: without `hiddenByHolder`, provider fallback
+    // remains a valid supervision surface when somebody comes back later.
+    const pending = held.attaching;
+    if (pending) await pending.catch(() => null);
+    if (held.screencast && held.screencastPage !== next) {
+      const stale = held.screencast;
+      held.screencast = undefined;
+      held.screencastPage = undefined;
+      await stale.send('Page.stopScreencast').catch(() => {});
+      await stale.detach().catch(() => {});
+    }
+    held.visibilityUnconfirmed = false;
+    held.capturing = held.hiddenByHolder !== true;
+    this.announceControl(runId);
+  }
+
+  private async perform(runId: string, held: RunBrowser, action: BrowserAction, planned: number): Promise<BrowserActionOutcome> {
     const { page } = held;
     /**
      * Race one Playwright call against this run's Stop.
@@ -663,10 +2344,10 @@ export class RemoteBrowserController {
       }
     };
     const timeout = Math.min(action.timeoutMs ?? 10_000, ACTION_TIMEOUT_MS);
-    const where = async (): Promise<{ url: string; title: string }> => ({
-      url: page.url(),
-      title: await page.title().catch(() => ''),
-    });
+    const where = async (): Promise<{ url: string; title: string }> => {
+      const current = held.page;
+      return { url: current.url(), title: await current.title().catch(() => '') };
+    };
 
     // Same rule as the desktop: an action planned against one page must not run
     // against another. `navigate` names its own destination, so it is exempt.
@@ -687,17 +2368,22 @@ export class RemoteBrowserController {
         await stoppable(page.goto(target, { timeout: ACTION_TIMEOUT_MS, waitUntil: 'domcontentloaded' }));
         return { ok: true, detail: `Opened ${target}`, ...(await where()) };
       }
-      case 'click':
+      case 'click': {
+        const pagesBefore = new Set(page.context().pages());
         await stoppable(page.click(action.selector!, { timeout }));
+        await this.followOpenedPage(runId, held, pagesBefore);
         return { ok: true, detail: `Clicked ${action.selector}`, ...(await where()) };
+      }
       case 'fill':
         await stoppable(page.fill(action.selector!, action.value ?? '', { timeout }));
         return { ok: true, detail: `Filled ${action.selector}`, ...(await where()) };
       case 'press': {
         // A selector focuses first; without one the key goes to whatever has
         // focus, which is what "press Escape" usually means.
+        const pagesBefore = new Set(page.context().pages());
         if (action.selector) await stoppable(page.press(action.selector, action.key!, { timeout }));
         else await stoppable(page.keyboard.press(action.key!));
+        await this.followOpenedPage(runId, held, pagesBefore);
         return { ok: true, detail: `Pressed ${action.key}`, ...(await where()) };
       }
       case 'wait_for':
@@ -713,10 +2399,41 @@ export class RemoteBrowserController {
   }
 }
 
-function refusal(result: 'busy' | 'cancelled' | 'off'): string {
+function refusal(result: 'busy' | 'cancelled' | 'off' | 'human'): string {
+  // Said plainly, and as a finished outcome rather than a delay: a model told
+  // "busy" retries, and retrying a person is exactly the behaviour a takeover
+  // exists to prevent.
+  if (result === 'human') {
+    return 'The user has taken control of this browser. Stop using it and tell them what you were about to do.';
+  }
   if (result === 'off') return 'Browser control was turned off while this action waited for the browser.';
   if (result === 'cancelled') return 'The run was cancelled while waiting for the browser.';
   return 'The browser is in use by another part of this run and did not come free in time. Try again, or do something else first.';
+}
+
+/**
+ * A client's coordinate, kept inside the picture it claims to be from.
+ *
+ * REFUSES anything that is not a finite number rather than coercing it. The
+ * old version returned 0 for a missing or malformed value, which meant a
+ * payload like `{ kind: 'click' }` — no coordinates at all — was not rejected
+ * but pressed the mouse at the top-left corner of a real page. Clamping is for
+ * a position that is out of range; it is not a way to invent one that was
+ * never sent.
+ */
+function coordinate(n: unknown, what: string): number {
+  if (typeof n !== 'number' || !Number.isFinite(n)) {
+    throw new Error(`That ${what} is not a position on the page.`);
+  }
+  return Math.min(Math.max(n, 0), 1);
+}
+
+/** A scroll, bounded so one wheel event cannot ask for an absurd jump. */
+function scrollDelta(n: unknown): number {
+  if (typeof n !== 'number' || !Number.isFinite(n)) {
+    throw new Error('That scroll has no distance to travel.');
+  }
+  return Math.min(Math.max(n, -2_000), 2_000);
 }
 
 /**

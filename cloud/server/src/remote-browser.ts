@@ -24,6 +24,7 @@ import {
   GenericCdpProvider,
   SteelProvider,
   isCdpEndpoint,
+  type BrowserInput,
   type Cascade,
   type CascadeConfig,
   type RemoteBrowserProvider,
@@ -44,6 +45,15 @@ interface AttachOptions {
   conversationId: string;
   /** The run owner's socket. The live view goes here and nowhere else. */
   emit: (event: string, payload: unknown) => void;
+  /**
+   * Where frames go, when the caller has a lossy channel to send them on.
+   *
+   * Separate from `emit` because frames are the one thing worth DROPPING. Every
+   * other event on this socket is a fact that must arrive — a live view, a
+   * control change, a refusal — while a frame is only the newest picture, and
+   * one that cannot be written now is worthless by the time it could be.
+   */
+  emitFrame?: (event: string, payload: unknown) => void;
   /** Somewhere to record a misconfiguration without failing the run. */
   warn?: (message: string) => void;
 }
@@ -56,6 +66,38 @@ export interface AttachedBrowser {
   endRun(): Promise<void>;
   /** The user pressed Stop. */
   stop(): void;
+  /**
+   * Somebody opened the panel: start sending them the page.
+   *
+   * Frames go to the run's own socket and nowhere else — the same rule the
+   * live-view URL had, but enforced by us rather than by a provider handing out
+   * an unguessable link. Answers false when there is nothing to stream, so the
+   * client is never promised frames that will not come.
+   */
+  watch(): Promise<boolean>;
+  /** The panel closed. Stop paying to render frames nobody is looking at. */
+  unwatch(): Promise<void>;
+  /**
+   * The user wants the page for themselves.
+   *
+   * Resolves once the agent is actually out — an action already inside the
+   * page finishes first — so "you have control" is true when the UI says it.
+   */
+  takeOver(): Promise<{ ok: boolean; detail?: string }>;
+  /** The user is done with it, so the run may carry on. */
+  handBack(): boolean;
+  /** One thing the user did to the page, authorised on its own. */
+  input(event: BrowserInput): Promise<{ ok: boolean; detail?: string }>;
+  /** Suspend or resume the picture while keeping control. For signing in. */
+  setCapture(on: boolean): Promise<boolean>;
+  /**
+   * The viewer confirms it actually received a frame for this watch.
+   *
+   * One per watch rather than per frame, and it gates Hide only — never
+   * Chrome's own frame ack — so the stream stays lossy and nothing about the
+   * frame rate waits on the viewer.
+   */
+  frameSeen(generation: number): void;
 }
 
 /**
@@ -72,6 +114,32 @@ export interface AttachedBrowser {
  * do not know about each other. Ownership has to live where the browsers do.
  */
 let shared: { settings: RemoteBrowserSettings; controller: RemoteBrowserController } | null = null;
+
+
+/**
+ * Every controller retirement that has to finish before a newer provider may
+ * allocate.
+ *
+ * This lives beside `shared`, not inside an individual controller. Consider
+ * A → B → C while A is still releasing: B may have opened nothing because it
+ * is parked on A's `ready` promise, so B.dispose() is correctly free to finish
+ * immediately. If C waited only for B, however, it would forget A entirely.
+ * Chaining retirements here preserves the DEPLOYMENT'S history across as many
+ * rapid rotations as occur, without turning `RemoteBrowserController.dispose`
+ * into a wait on a promise owned by its caller.
+ *
+ * The chain is kept non-rejecting. Disposal is best-effort and already reports
+ * its own cleanup failures; a stale provider failing to tidy up must not wedge
+ * every future browser action forever.
+ */
+let retirementBarrier: Promise<void> = Promise.resolve();
+
+function retireController(controller: RemoteBrowserController): Promise<void> {
+  const before = retirementBarrier.catch(() => {});
+  const mine = controller.dispose().catch(() => {});
+  retirementBarrier = Promise.all([before, mine]).then(() => {});
+  return retirementBarrier;
+}
 
 /**
  * Bumped every time a controller is built.
@@ -110,7 +178,19 @@ function sameProviderConfig(a: RemoteBrowserSettings, b: RemoteBrowserSettings):
 export async function resetSharedBrowser(): Promise<void> {
   const previous = shared;
   shared = null;
-  await previous?.controller.dispose();
+  if (previous) await retireController(previous.controller);
+  else await retirementBarrier;
+}
+
+/**
+ * Where this run's frames should go.
+ *
+ * Its own function because the fallback is the part that can silently regress:
+ * drop `emitFrame` and frames quietly become reliable again, banking stale
+ * JPEGs behind a slow viewer with nothing failing to say so.
+ */
+export function frameEmitter(opts: Pick<AttachOptions, 'emit' | 'emitFrame'>): (event: string, payload: unknown) => void {
+  return opts.emitFrame ?? opts.emit;
 }
 
 export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null {
@@ -124,10 +204,17 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
   // result is not available on that path.
   let taskId: string | null = null;
 
-  // Reused across runs. A settings change makes a new one and disposes the old
+  // Reused across runs. A settings change makes a new one and retires the old
   // rather than leaving its sessions running at the operator's expense.
+  //
+  // The readiness barrier is deployment-scoped. On A → B → C, B may have no
+  // session of its own yet because it is still waiting for A; C nevertheless
+  // has to wait for BOTH retirements. `retireController` folds every outgoing
+  // controller into one chain, so a rapid second rotation cannot forget the
+  // first provider that is still handing a session back.
+  let retiring: Promise<void> | undefined;
   if (shared && !sameProviderConfig(shared.settings, settings)) {
-    void shared.controller.dispose();
+    retiring = retireController(shared.controller);
     shared = null;
   }
   if (!shared) {
@@ -137,6 +224,9 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
       controller: new RemoteBrowserController({
         provider,
         ...(settings.maxSessions ? { maxSessions: settings.maxSessions } : {}),
+        // Also inherit a reset/retirement already in flight even when there is
+        // no current `shared` entry to rotate in this call.
+        ready: retiring ?? retirementBarrier,
       }),
     };
   }
@@ -157,6 +247,22 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
     const id = (e as { taskId?: string }).taskId;
     if (!id) return;
     taskId = id;
+    // Who holds the page, on the same one socket as everything else about it.
+    //
+    // Pushed rather than answered, because the interesting change is the one
+    // nobody asked for: an idle takeover lapses on its own, and a client that
+    // still believes it has control keeps typing into a lease it lost.
+    controller.onControlFor(id, ({ human, capturing, confirmed }) => {
+      opts.emit('browser:control', {
+        conversationId: opts.conversationId,
+        taskId: id,
+        human,
+        capturing,
+        // Whether THIS watch has confirmed a picture. The blind keyboard
+        // surface turns on with it, so it is pushed rather than inferred.
+        confirmed,
+      });
+    });
     controller.onLiveViewFor(id, ({ active, liveViewUrl }) => {
       // To this socket only. See the file header.
       opts.emit('browser:live-view', {
@@ -189,10 +295,56 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
       if (taskId) {
         await controller.endRun(taskId);
         controller.offLiveViewFor(taskId);
+        controller.offControlFor(taskId);
       }
     },
     stop() {
       if (taskId) controller.stopRun(taskId);
+    },
+    async watch() {
+      if (!taskId) return false;
+      const id = taskId;
+      const sendFrame = frameEmitter(opts);
+      return await controller.startWatching(id, (frame) => {
+        // To this socket only. A frame is a picture of whatever the agent is
+        // looking at — a half-filled form, a logged-in page — so it is exactly
+        // as sensitive as the live-view URL it replaces, and travels the same
+        // single path to the run's owner.
+        sendFrame('browser:frame', {
+          conversationId: opts.conversationId,
+          // Echoed so a client showing several chats can route the frame, and
+          // so a late frame from a finished run is discardable.
+          taskId: id,
+          data: frame.data,
+          width: frame.width,
+          height: frame.height,
+          // Which watch this picture belongs to, so the receipt the client
+          // sends back names what it actually saw rather than whatever is
+          // current by the time it arrives.
+          generation: frame.generation,
+        });
+      });
+    },
+    async unwatch() {
+      if (taskId) await controller.stopWatching(taskId);
+    },
+    async takeOver() {
+      if (!taskId) return { ok: false, detail: 'This run has no browser open.' };
+      return await controller.takeOver(taskId);
+    },
+    handBack() {
+      return taskId ? controller.handBack(taskId) : false;
+    },
+    async input(event: BrowserInput) {
+      if (!taskId) return { ok: false, detail: 'This run has no browser open.' };
+      return await controller.input(taskId, event);
+    },
+    frameSeen(generation: number) {
+      if (taskId) controller.frameSeen(taskId, generation);
+    },
+    async setCapture(on: boolean) {
+      if (!taskId) return false;
+      return await controller.setCapture(taskId, on);
     },
   };
 }
@@ -235,11 +387,11 @@ function buildProvider(
  * same shape as an action landing after Stop: a mutation the person believed
  * they had prevented.
  *
- * Watch and Stop is a smaller promise that this code can actually keep. A real
- * handoff needs the agent paused BEFORE viewer input is enabled, and pausing is
- * not free here — the only way to make a patient Playwright call stop is to
- * close the page it is waiting on, which is exactly the page the user wanted to
- * take over. That is a feature, not a parameter, and it is not this PR.
+ * Watch and Stop is a smaller promise that this code can actually keep, and the
+ * handoff that arrived since is deliberately NOT this: it runs over the frames
+ * this server streams, where the agent is paused on the same lease the workers
+ * queue on before a single event is accepted. The provider's viewer has no such
+ * gate, so it stays watch-only whatever else the panel can now do.
  *
  * Added as query parameters on the URL the provider gave us rather than built
  * from scratch: it carries the session's own credentials, and reconstructing it

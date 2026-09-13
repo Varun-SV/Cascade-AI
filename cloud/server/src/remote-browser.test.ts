@@ -3,7 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { attachRemoteBrowser, asWatchOnlyViewer, resetSharedBrowser, sharedBrowserGeneration } from './remote-browser.js';
+import { attachRemoteBrowser, asWatchOnlyViewer, frameEmitter, resetSharedBrowser, sharedBrowserGeneration } from './remote-browser.js';
 import { Cascade, type CascadeConfig } from '#cascade-ai';
 
 /**
@@ -231,5 +231,86 @@ describe('the session pool is the deployment\'s, not one run\'s', () => {
     attachRemoteBrowser({ cascade: b.cascade, config: b.config, conversationId: 'c2', emit });
 
     expect(sharedBrowserGeneration(), 'a changed endpoint is a different browser').toBe(before + 1);
+  });
+});
+
+// Frames are a picture of whatever the agent is looking at — a half-filled
+// form, a page someone is signed into. They are exactly as sensitive as the
+// live-view URL they replace, so who may ask for them, and where they go,
+// matters as much as who may press Stop.
+describe('where frames are sent', () => {
+  it('prefers the lossy channel, and says so by falling back only when there is none', () => {
+    // The fallback is the part that regresses silently: drop `emitFrame` and
+    // frames quietly become reliable again, banking stale JPEGs behind a slow
+    // viewer with nothing failing to say so.
+    const reliable = vi.fn();
+    const lossy = vi.fn();
+
+    frameEmitter({ emit: reliable, emitFrame: lossy })('browser:frame', { a: 1 });
+    expect(lossy).toHaveBeenCalledOnce();
+    expect(reliable, 'a frame never takes the reliable path when a lossy one exists').not.toHaveBeenCalled();
+
+    frameEmitter({ emit: reliable })('browser:frame', { a: 1 });
+    expect(reliable, 'and a caller with no lossy channel still gets its frames').toHaveBeenCalledOnce();
+  });
+});
+
+describe('asking to watch a run', () => {
+  const cdp = { tools: { remoteBrowser: { provider: 'cdp' as const, url: 'ws://browser.test:9222' } } };
+
+  it('sends frames to the run\'s own socket, tagged with the run they came from', async () => {
+    const { cascade, config } = realCascade(cdp.tools.remoteBrowser);
+    const handlers = new Map<string, (e: unknown) => void>();
+    const on = (ev: string, fn: (e: unknown) => void) => { handlers.set(ev, fn); };
+    (cascade as unknown as { on: typeof on }).on = on;
+
+    const attached = attachRemoteBrowser({ cascade, config, conversationId: 'c1', emit });
+    handlers.get('run:started')?.({ taskId: 't1' });
+    expect(attached).not.toBeNull();
+
+    // No browser has been opened, so there is nothing to stream — and saying
+    // so is the point: a panel must never be promised frames that cannot come.
+    emits.length = 0;
+    expect(await attached!.watch()).toBe(false);
+    expect(emits.filter((e) => e.event === 'browser:frame')).toEqual([]);
+  });
+
+  it('refuses to hand over a browser that is not there', async () => {
+    // Every one of these is a control path a client can reach at any moment —
+    // the panel is open while the run is still starting, or after it ended —
+    // and each has to say no rather than throw into the socket handler.
+    const { cascade, config } = realCascade(cdp.tools.remoteBrowser);
+    const handlers = new Map<string, (e: unknown) => void>();
+    (cascade as unknown as { on: (ev: string, fn: (e: unknown) => void) => void }).on =
+      (ev, fn) => { handlers.set(ev, fn); };
+
+    const attached = attachRemoteBrowser({ cascade, config, conversationId: 'c1', emit });
+    handlers.get('run:started')?.({ taskId: 't1' });
+
+    const over = await attached!.takeOver();
+    expect(over.ok).toBe(false);
+    expect(over.detail).toMatch(/no browser/i);
+
+    const typed = await attached!.input({ kind: 'text', text: 'hello' });
+    expect(typed.ok, 'and input is refused for the same reason').toBe(false);
+    expect(attached!.handBack()).toBe(false);
+    expect(await attached!.setCapture(true)).toBe(false);
+  });
+
+  it('is a no-op before the run has announced itself', async () => {
+    // `taskId` is null until `run:started`. Watching then has no run to name,
+    // and a frame with no task id could not be routed or discarded correctly.
+    const { cascade, config } = realCascade(cdp.tools.remoteBrowser);
+    const attached = attachRemoteBrowser({ cascade, config, conversationId: 'c1', emit });
+
+    expect(attached!.taskId).toBeNull();
+    expect(await attached!.watch()).toBe(false);
+    await expect(attached!.unwatch()).resolves.toBeUndefined();
+    // Control needs a run to name even more than watching does: an input event
+    // with no task id could be applied to whichever run happened to be open.
+    expect((await attached!.takeOver()).ok).toBe(false);
+    expect((await attached!.input({ kind: 'click', x: 0.5, y: 0.5 })).ok).toBe(false);
+    expect(attached!.handBack()).toBe(false);
+    expect(await attached!.setCapture(true)).toBe(false);
   });
 });

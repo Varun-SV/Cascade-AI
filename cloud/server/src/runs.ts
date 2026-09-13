@@ -14,7 +14,7 @@ import {
   distillSessionFacts, buildSessionTranscript, sessionWorthRemembering,
   azureModelForDeployment, DEFAULT_CONTEXT_LIMIT, MODELS,
 } from '#cascade-ai';
-import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ApprovalRequest, ProviderConfig } from '#cascade-ai';
+import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ApprovalRequest, ProviderConfig, BrowserInput } from '#cascade-ai';
 import { attachRemoteBrowser } from './remote-browser.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -281,6 +281,13 @@ export function formatZodError(err: ZodError): string {
  */
 export interface RunSocket {
   emit(event: string, payload: unknown): unknown;
+  /**
+   * Socket.IO's lossy channel, where a real `Socket` has one.
+   *
+   * Optional because the non-web callers of this interface do not: an SSE or
+   * OpenAI-compatible caller has no socket at all. Only the screencast uses it.
+   */
+  volatile?: { emit(event: string, payload: unknown): unknown };
   // `any[]` rather than a narrower tuple because socket.io declares `on`/`off`
   // as function-valued PROPERTIES, not methods — so strictFunctionTypes checks
   // them contravariantly and only `any` is assignable in both directions. A
@@ -290,6 +297,44 @@ export interface RunSocket {
   on(event: string, listener: (...args: any[]) => void): unknown;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   off(event: string, listener: (...args: any[]) => void): unknown;
+}
+
+/**
+ * Where a socket's droppable traffic goes.
+ *
+ * Its own function because the expression it replaces was wrong in a way
+ * nothing could see: a run is handed a `RebindableTransport`, not the raw
+ * socket, and that had no `volatile` — so the fallback fired every time and
+ * frames went out reliably in production while a test of the callback wiring
+ * said otherwise. Testing the selection against both shapes is what makes the
+ * difference between the two visible.
+ */
+/**
+ * Whether a `browser:capture` payload actually said which way to go.
+ *
+ * Its own function so the distinction can be tested at all: the handler it
+ * guards lives inside `attachRun` and is not reachable from a test, and the
+ * shape it rejects — anything that is not literally a boolean — is exactly what
+ * used to be coerced into "hide the page".
+ */
+export function capturePayload(d: { on?: unknown } | undefined): boolean | null {
+  return typeof d?.on === 'boolean' ? d.on : null;
+}
+
+/**
+ * Whether a `browser:frame-seen` payload named a real watch.
+ *
+ * Its own function for the same reason `capturePayload` is: the handler it
+ * guards lives inside `attachRun` and is not reachable from a test, and the
+ * shape it rejects is exactly what must not be coerced. A receipt is what opens
+ * Hide, so a malformed one must not become watch zero.
+ */
+export function frameSeenPayload(d: { generation?: unknown } | undefined): number | null {
+  return typeof d?.generation === 'number' && Number.isFinite(d.generation) ? d.generation : null;
+}
+
+export function lossyEmitter(socket: RunSocket): (event: string, payload: unknown) => void {
+  return (event, payload) => { (socket.volatile ?? socket).emit(event, payload); };
 }
 
 export interface WebSearchBackend {
@@ -450,6 +495,26 @@ export function buildApprovalCallback(
     if (!opts.interactive) return { approved: false, always: false };
     return await parkApproval(pending, opts, request);
   };
+}
+
+/**
+ * Whether a browser-control message names the run it claims to.
+ *
+ * Every control the client has over a run's browser — stop it, start watching
+ * it, stop watching it — goes through this, because they are the same question:
+ * is the sender addressing the run this connection is actually carrying?
+ *
+ * An EXACT match, and a required one. Conversation scoping was too coarse (two
+ * runs on one chat, from two tabs or a retry, both matched) and treating a
+ * missing id as "matches everything" meant a stale or malformed `{}` reached
+ * every run on the socket. That mattered for Stop; it matters as much for
+ * watching, because a frame is a picture of whatever the agent is looking at.
+ *
+ * Exported so the rule is tested once, rather than restated at each call site
+ * and tested nowhere.
+ */
+export function addressesRun(mine: string | null | undefined, d: { taskId?: string } | undefined): boolean {
+  return !!mine && d?.taskId === mine;
 }
 
 /** What the client sends when the user answers a dangerous-tool prompt. */
@@ -1224,22 +1289,148 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     // ONE socket, the run's owner. The live-view URL is a bearer capability:
     // anyone holding it can watch the browser and drive it.
     emit: (event, payload) => socket.emit(event, payload),
+    // Frames go out LOSSY, and that is the honest version of the backpressure
+    // story. Chrome's ack bounds it to one outstanding frame against our own
+    // handling — but `emit` only hands the JPEG to the transport, so acking
+    // after it says nothing about whether the viewer consumed anything, and a
+    // slow or half-dead connection would bank stale frames in the Engine.IO
+    // buffer. Volatile drops what the transport cannot write, which is the
+    // right trade for a live view: the next picture is always better than a
+    // queued old one.
+    emitFrame: lossyEmitter(socket),
     warn: (message) => console.warn(`[run ${conversation.id}] remote browser: ${message}`),
   });
   // The kill switch, alongside the live view that makes it meaningful. Scoped
   // to this run and removed with the run's other listeners below: a Stop is
   // something the user does to the run they are watching, not to the process.
   const onBrowserStop = (d: { taskId?: string }) => {
-    // An EXACT task-id match, not a conversation match, and not an optional
-    // one. Conversation scoping was still too coarse — two runs on the same
-    // chat (two tabs, a retry) both matched — and treating a missing id as
-    // "matches everything" meant a stale or malformed `{}` stopped every run on
-    // the socket. The client learns this id from browser:live-view.
-    const mine = remoteBrowser?.taskId;
-    if (!mine || d?.taskId !== mine) return;
+    if (!addressesRun(remoteBrowser?.taskId, d)) return;
     remoteBrowser?.stop();
   };
   socket.on('browser:stop', onBrowserStop);
+
+  // Watching costs money, so it is opt-in and scoped exactly like Stop.
+  //
+  // The same exact task-id match: a client with several chats open must not be
+  // able to start a stream of a run it is not showing, and a stale or malformed
+  // `{}` must not start every stream on the socket. Frames are a picture of
+  // whatever the agent is looking at — a half-filled form, a page someone is
+  // signed into — so who may ask for them matters as much as who may stop them.
+  const onBrowserWatch = (d: { taskId?: string }) => {
+    if (!addressesRun(remoteBrowser?.taskId, d)) return;
+    const mine = remoteBrowser!.taskId!;
+    void remoteBrowser?.watch().then((streaming) => {
+      // Said plainly rather than left to a timeout. A panel that opened and
+      // will never receive a frame — the run gave the browser up in between —
+      // should say so instead of showing an empty box forever.
+      socket.emit('browser:watching', { conversationId: conversation.id, taskId: mine, streaming });
+    }).catch(() => {
+      socket.emit('browser:watching', { conversationId: conversation.id, taskId: mine, streaming: false });
+    });
+  };
+  socket.on('browser:watch', onBrowserWatch);
+
+  // The `catch` on these two is not about a failure anyone can produce today —
+  // both swallow their own CDP errors. It is about where they sit: a socket
+  // handler is a process boundary, and in Node an unhandled rejection ends the
+  // process. "This cannot throw" is a property of code somebody will edit, and
+  // the cost of not relying on it is one clause.
+  const onBrowserUnwatch = (d: { taskId?: string }) => {
+    if (!addressesRun(remoteBrowser?.taskId, d)) return;
+    void remoteBrowser?.unwatch().catch(() => {});
+  };
+  socket.on('browser:unwatch', onBrowserUnwatch);
+
+  /**
+   * Something the user asked of the browser did not happen.
+   *
+   * Deliberately carries no `human`: a refusal is not a statement about who
+   * holds the page. An unknown key is refused while the user still has
+   * control, and saying `human: false` there would take their panel away from
+   * them over a keystroke. Who holds it is pushed by the controller, on the
+   * same event, and that is the only thing that sets it.
+   */
+  const refused = (taskId: string, detail: string | undefined) => {
+    socket.emit('browser:control', { conversationId: conversation.id, taskId, detail });
+  };
+
+  // Taking the page over, and giving it back.
+  //
+  // Same exact task-id match as Stop and Watch, and for a stricter reason: this
+  // one grants INPUT. A client with several chats open must not be able to
+  // start driving a run it is not showing, and a malformed `{}` must not grant
+  // control of every run on the socket.
+  //
+  // The answer is emitted rather than acked, because control changes hands
+  // without anyone asking too — the hold lapses on its own — so the client
+  // needs one path that tells it who has the page, not two that can disagree.
+  const onBrowserTakeOver = (d: { taskId?: string }) => {
+    if (!addressesRun(remoteBrowser?.taskId, d)) return;
+    const mine = remoteBrowser!.taskId!;
+    void remoteBrowser!.takeOver().then(({ ok, detail }) => {
+      // Only the refusal needs saying here: a granted takeover already reaches
+      // the client as a control change pushed by the controller.
+      if (!ok) refused(mine, detail);
+    }).catch(() => refused(mine, 'The browser could not be handed over.'));
+  };
+  socket.on('browser:take-over', onBrowserTakeOver);
+
+  const onBrowserHandBack = (d: { taskId?: string }) => {
+    if (!addressesRun(remoteBrowser?.taskId, d)) return;
+    remoteBrowser?.handBack();
+  };
+  socket.on('browser:hand-back', onBrowserHandBack);
+
+  // Every event, separately. A takeover is not a channel that stays open: the
+  // run can be stopped and the hold can lapse between two clicks, and the
+  // controller re-checks both — this only decides whether the event is even
+  // addressed to a run this socket owns.
+  const onBrowserInput = (d: { taskId?: string; event?: unknown }) => {
+    if (!addressesRun(remoteBrowser?.taskId, d)) return;
+    const event = d?.event;
+    if (!event || typeof event !== 'object') return;
+    const mine = remoteBrowser!.taskId!;
+    void remoteBrowser!.input(event as BrowserInput).then(({ ok, detail }) => {
+      // Silent on success. Input is a stream — a mouse move per frame while
+      // somebody drags — and a reply per event would double the traffic to say
+      // nothing. A refusal is the exception and worth a message.
+      if (!ok) refused(mine, detail);
+    }).catch(() => {});
+  };
+  socket.on('browser:input', onBrowserInput);
+
+  const onBrowserCapture = (d: { taskId?: string; on?: unknown }) => {
+    if (!addressesRun(remoteBrowser?.taskId, d)) return;
+    const mine = remoteBrowser!.taskId!;
+    // `d.on === true` turned EVERY other value into "hide the page" — a missing
+    // field, `'show'`, `1`, a version-skewed payload. Same fail-open shape as
+    // the input boundary: malformed data repaired into a real state change the
+    // sender never asked for, and this one makes the agent invisible. The
+    // TypeScript annotation on a socket handler validates nothing at runtime.
+    const on = capturePayload(d);
+    if (on === null) {
+      refused(mine, 'That was not a request to show or hide the page, so nothing changed.');
+      return;
+    }
+    void remoteBrowser?.setCapture(on).catch(() => {});
+  };
+  socket.on('browser:capture', onBrowserCapture);
+
+  // The viewer telling us it actually has the picture. Reliable rather than
+  // lossy, because a dropped receipt would leave Hide closed for a person who
+  // can see the page perfectly well.
+  //
+  // Silent on a malformed payload, unlike `browser:capture`. That one is a
+  // person pressing a button and deserves an answer when it is refused; this is
+  // the client's own bookkeeping, and a refusal notice for it would be a
+  // message about nothing the person did.
+  const onBrowserFrameSeen = (d: { taskId?: string; generation?: unknown }) => {
+    if (!addressesRun(remoteBrowser?.taskId, d)) return;
+    const generation = frameSeenPayload(d);
+    if (generation === null) return;
+    remoteBrowser?.frameSeen(generation);
+  };
+  socket.on('browser:frame-seen', onBrowserFrameSeen);
 
   // Your thumbs-up/down verdicts, folded into Auto routing as a bounded,
   // sample-size-shrunk adjustment to the public benchmark score. Read once per
@@ -1499,6 +1690,13 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     // the operator paying for a browser nobody is using, and a run that threw
     // is exactly the one that would otherwise leave one running.
     socket.off('browser:stop', onBrowserStop);
+    socket.off('browser:watch', onBrowserWatch);
+    socket.off('browser:unwatch', onBrowserUnwatch);
+    socket.off('browser:take-over', onBrowserTakeOver);
+    socket.off('browser:hand-back', onBrowserHandBack);
+    socket.off('browser:input', onBrowserInput);
+    socket.off('browser:capture', onBrowserCapture);
+    socket.off('browser:frame-seen', onBrowserFrameSeen);
     socket.off('permission:decide', onPermissionDecision);
     // Anything still parked would otherwise hang forever holding a worker.
     for (const resolve of pendingApprovals.values()) resolve({ approved: false, always: false });

@@ -27,7 +27,32 @@
  * the capability was switched off is neither. Reporting all three as "busy"
  * had a model politely retrying something that would never be granted.
  */
-export type LeaseResult = 'granted' | 'busy' | 'cancelled' | 'off';
+export type LeaseResult = 'granted' | 'busy' | 'cancelled' | 'off' | 'human';
+
+/**
+ * The actor id a human takeover holds the lease under.
+ *
+ * A person is an ACTOR, not a mode flag, because everything the lease already
+ * knows how to do — serialize, refuse, hand on, drop with the run — is exactly
+ * what a takeover needs, and a parallel `humanHasIt` boolean beside `actor`
+ * would be a second answer to "who owns the browser" that can disagree with the
+ * first. Prefixed and underscored so it cannot collide with a worker id, which
+ * is derived from the run and the worker index.
+ */
+export const HUMAN_ACTOR = '__human__';
+
+/**
+ * How long a human hold survives with no input at all.
+ *
+ * A person is not a worker: there is no terminal signal when someone closes the
+ * tab, walks away, or loses their connection mid-takeover, so the one rule that
+ * makes timers wrong for workers — a healthy holder outlasts any bound — does
+ * not hold here. And the hold is expensive: a browser session is billed while
+ * it exists and, at the default `maxSessions: 1`, one abandoned takeover blocks
+ * every other run on the deployment. Two minutes is long enough to read a page
+ * and type a password, short enough that a forgotten tab is not an outage.
+ */
+const HUMAN_IDLE_MS = 120_000;
 
 interface Waiter {
   actorId: string;
@@ -51,7 +76,15 @@ const QUEUE_WAIT_MS = 180_000;
 const MAX_QUEUED = 8;
 /** How long a new holder waits for the previous action to unwind. */
 const ACTION_HANDOFF_MS = 2_000;
-const ACTION_HANDOFF_POLL_MS = 25;
+/**
+ * How soon a handback that could not run yet asks again.
+ *
+ * A retry rather than a wait, because `handBack` is synchronous and a caller
+ * holding the lease open to await an action would deadlock against it. This is
+ * the ONLY polling left around the action slot: waiting FOR the slot is a queue
+ * now — see `acquireActionSlot`.
+ */
+const HANDBACK_RETRY_MS = 25;
 
 export interface BrowserLeaseOptions {
   /**
@@ -82,6 +115,51 @@ export class BrowserLease {
    * took the slot may release it.
    */
   private action: symbol | null = null;
+  /** Whether the current action slot represents activity by its holder. */
+  private actionCountsAsHumanActivity = false;
+  /**
+   * The human action that has already consumed its one idle-deadline grace.
+   * A single wedged CDP request must not look like fresh activity every two
+   * minutes forever. The first deadline may yield to an event that began before
+   * it; a second deadline for that SAME event becomes a pending lapse instead.
+   */
+  private idleGraceAction: symbol | null = null;
+  /** Release the human hold as soon as this overlong action finally unwinds. */
+  private idleLapseAfterAction: symbol | null = null;
+  /**
+   * Everyone waiting for that slot, IN THE ORDER THEY ASKED.
+   *
+   * A queue rather than a poll, and the ordering is the whole reason for it.
+   * `acquireActionSlot` used to spin on a 25ms timer, which decides nothing
+   * about who goes first: each waiter checks on its own phase, so the one that
+   * asked SECOND can find the slot free a full poll ahead of the one that asked
+   * first. The person types one event per keypress — `{ kind: 'text', text }`
+   * carries a single character — so that reordering is not a theoretical
+   * unfairness, it is "passowrd" appearing in the box.
+   *
+   * The slot is handed straight from `endAction` to the head of this line while
+   * still synchronous, so nothing can slip in between the two, and a waiter
+   * that reaches the front never has to be told the slot is already taken.
+   */
+  private actionQueue: Array<() => void> = [];
+  /** Lapses a human hold nobody is using. See `HUMAN_IDLE_MS`. */
+  private humanTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The person ASKED for the hold to end and it could not end yet.
+   *
+   * Kept as a request rather than only a retry timer, because the retry shares
+   * `humanTimer` with the idle deadline: an authorised event settling after the
+   * request would otherwise call `touch()`, re-arm that timer for a full idle
+   * interval, and quietly cancel a handback the person had already asked for.
+   * "Give it back" is not undone by activity that was already under way when
+   * they said it.
+   *
+   * Explicit requests ONLY. An idle expiry must never set this: a deadline that
+   * lands on the person's own in-flight event is evidence they were THERE, and
+   * recording it here made `touch()` bail afterwards, so the hold dropped the
+   * instant a fresh interaction finished. See `lapse()`.
+   */
+  private handBackWanted = false;
 
   private isRevoked: (sessionId: string) => boolean;
   private onChange: () => void;
@@ -92,6 +170,16 @@ export class BrowserLease {
   }
 
   get holderActor(): string | null { return this.actor; }
+  /** Whether a person, rather than the agent, is driving the page right now. */
+  get heldByHuman(): boolean { return this.actor === HUMAN_ACTOR; }
+  /**
+   * Whether THIS actor is the one holding the browser right now.
+   *
+   * For asking again after a wait. `acquire` is re-entrant for the holder, so
+   * "I was granted the lease" is a fact about the moment it was granted and
+   * says nothing about the moment the caller finally gets to act.
+   */
+  heldBy(actorId: string): boolean { return this.actor === actorId; }
   get holderSession(): string | null { return this.session; }
   get queueDepth(): number { return this.waiting.length; }
   get actionInFlight(): boolean { return this.action !== null; }
@@ -114,6 +202,12 @@ export class BrowserLease {
    * the same worker coming back for its next step must not queue behind itself.
    */
   async acquire(actorId: string, sessionId: string, signal?: AbortSignal): Promise<LeaseResult> {
+    // Refused outright, and deliberately not queued. A worker that parks behind
+    // a person is a worker that will act the moment they look away — minutes
+    // later, on a page they have since changed, with a plan made before they
+    // touched it. Telling the model "the user has taken over" ends the sequence
+    // instead, which is the honest outcome and the one it can report.
+    if (this.actor === HUMAN_ACTOR && actorId !== HUMAN_ACTOR) return 'human';
     if (this.actor === null || this.actor === actorId) {
       this.actor = actorId;
       this.session = sessionId;
@@ -160,6 +254,120 @@ export class BrowserLease {
     if (this.actor === actorId) this.release();
   }
 
+  /**
+   * Give the browser to the person watching it.
+   *
+   * Callers must have waited the in-flight action out first — see
+   * `acquireActionSlot`. This does not interrupt one, because it cannot: a
+   * Playwright call already inside the page finishes whatever it started, and
+   * taking the lease off it would only mean the person and a still-running
+   * `fill` were both touching the same form. Waiting is what makes "you have
+   * control" true when the UI says it.
+   *
+   * Every queued worker is turned away rather than left in line, for the same
+   * reason `acquire` refuses: they were planned against a page the person is
+   * about to change.
+   */
+  takeOver(sessionId: string): void {
+    for (let i = this.waiting.length - 1; i >= 0; i--) this.waiting[i]!.settle('human');
+    this.clearCeiling();
+    this.actor = HUMAN_ACTOR;
+    this.session = sessionId;
+    this.touch();
+    this.onChange();
+  }
+
+  /**
+   * The person is still there — anything they did counts.
+   *
+   * Called per authorised input rather than on a heartbeat, so the hold is
+   * extended by USE and not merely by a tab being open. A left-open panel on a
+   * forgotten laptop stops holding a billed session two minutes later.
+   */
+  touch(): void {
+    if (this.actor !== HUMAN_ACTOR) return;
+    if (this.handBackWanted) return;
+    this.armIdle();
+  }
+
+  /** (Re)start the idle interval. The only place the deadline is set. */
+  private armIdle(): void {
+    this.clearHumanIdle();
+    this.humanTimer = setTimeout(() => { this.lapse(); }, HUMAN_IDLE_MS);
+    this.humanTimer.unref?.();
+  }
+
+  /**
+   * The idle deadline came round.
+   *
+   * Both ways a hold ends obey the same rule — never while one of the person's
+   * own events is still landing — but they resolve that clash in OPPOSITE
+   * directions, and routing the lapse through `handBack()` collapsed them into
+   * one. An event in flight BEGAN before this deadline, which makes it evidence
+   * the person was there; deferring the lapse and then releasing the moment
+   * that event lands ends the hold immediately after a fresh interaction, which
+   * is the precise opposite of what an idle deadline measures. So an
+   * interrupted lapse yields: the interval starts again, and the next silence
+   * decides.
+   *
+   * `handBack()` keeps the deferral instead, because "Give it back" is a
+   * decision and activity already under way when it was made does not withdraw
+   * it. Same rule, different answer, which is why they are different methods.
+   */
+  private lapse(): void {
+    if (this.actor !== HUMAN_ACTOR) return;
+    if (this.action && this.actionCountsAsHumanActivity) {
+      // An event that began before the FIRST deadline is evidence the person
+      // was there, so it gets one fresh interval. But the same still-running
+      // request at the NEXT deadline is not new activity. Mark the lapse as
+      // pending and stop arming timers; when that exact action unwinds,
+      // `endAction` releases the hold before any queued event can take its slot.
+      if (this.idleGraceAction !== this.action) {
+        this.idleGraceAction = this.action;
+        this.armIdle();
+      } else {
+        this.idleLapseAfterAction = this.action;
+        this.clearHumanIdle();
+      }
+      return;
+    }
+    // A lifecycle barrier (for example watcher teardown) serializes against
+    // input but is not evidence that the person is present. The barrier keeps
+    // the action slot occupied, so releasing ownership here still cannot let
+    // an agent mutate the page until teardown has finished.
+    this.release();
+  }
+
+  /**
+   * The person hands the browser back, or their hold lapses.
+   *
+   * Answers whether there was a human hold to end, so a caller can tell a real
+   * handback from a duplicate click or a lapse that already happened.
+   */
+  handBack(): boolean {
+    if (this.actor !== HUMAN_ACTOR) return false;
+    // NEVER while one of their own events is still landing. The person's click
+    // is dispatched over CDP and awaited; releasing while it is in flight lets
+    // the next agent action acquire and start on top of a click that has not
+    // finished — the exact overlap a takeover exists to prevent, reintroduced
+    // at the moment control changes hands. Re-checked shortly rather than
+    // waited on inline, because a caller holding the lease open to wait is the
+    // same deadlock in a different shape.
+    if (this.action) {
+      this.handBackWanted = true;
+      this.clearHumanIdle();
+      this.humanTimer = setTimeout(() => { this.handBack(); }, HANDBACK_RETRY_MS);
+      this.humanTimer.unref?.();
+      return false;
+    }
+    this.release();
+    return true;
+  }
+
+  private clearHumanIdle(): void {
+    if (this.humanTimer) { clearTimeout(this.humanTimer); this.humanTimer = null; }
+  }
+
   /** Drop every queued waiter belonging to a run, and the lease if it holds it. */
   dropRun(sessionId: string): void {
     // Backwards: settle() splices, so forward iteration would skip entries.
@@ -180,6 +388,14 @@ export class BrowserLease {
   /** Hand the browser to the next actor in line, if any. */
   release(): void {
     this.clearCeiling();
+    // Unconditional, because a human hold ends by every route the lease has —
+    // the person handing it back, their idle lapsing, the run being stopped,
+    // the capability being switched off — and a timer surviving one of those
+    // would fire into a lease somebody else has since taken.
+    this.clearHumanIdle();
+    this.handBackWanted = false;
+    this.idleGraceAction = null;
+    this.idleLapseAfterAction = null;
     this.actor = null;
     this.session = null;
 
@@ -214,35 +430,133 @@ export class BrowserLease {
     if (this.ceilingTimer) { clearTimeout(this.ceilingTimer); this.ceilingTimer = null; }
   }
 
-  /** Take the per-action slot, or null when one is already running. */
-  beginAction(): symbol | null {
+  /**
+   * Take the per-action slot, or null when one is already running.
+   *
+   * PRIVATE, so the queue is the only way in. A caller that could take the slot
+   * without joining the line would be exactly the jump-the-queue the ordering
+   * is there to prevent.
+   */
+  private beginAction(countsAsHumanActivity = true): symbol | null {
     if (this.action) return null;
     const token = Symbol('browser-action');
     this.action = token;
+    this.actionCountsAsHumanActivity = countsAsHumanActivity;
     return token;
   }
 
-  /** Release the slot, but only for the action that took it. */
+  /**
+   * Release the slot, but only for the action that took it.
+   *
+   * Hands it to the head of the line rather than merely clearing it, and does
+   * so SYNCHRONOUSLY: the waiter's `beginAction` runs before this call returns,
+   * so there is no window in which the slot is free and somebody who asked
+   * later can take it.
+   */
   endAction(token: symbol): boolean {
     if (this.action !== token) return false;
+    const lapseNow = this.actor === HUMAN_ACTOR && this.idleLapseAfterAction === token;
     this.action = null;
+    this.actionCountsAsHumanActivity = false;
+    if (this.idleGraceAction === token) this.idleGraceAction = null;
+    if (this.idleLapseAfterAction === token) this.idleLapseAfterAction = null;
+    // Release BEFORE handing the action slot to the next queued operation. A
+    // later human event that was queued behind a request which consumed two
+    // complete idle intervals is stale by definition; it may take the slot but
+    // its post-wait ownership check will refuse it. This also preserves the
+    // core rule that the old event itself finishes before ownership changes.
+    if (lapseNow) this.release();
+    this.actionQueue.shift()?.();
     return true;
   }
 
   /**
-   * Wait, briefly, for an outgoing action to unwind.
+   * Take the slot only if it is free RIGHT NOW, never joining the line.
+   *
+   * For input that is a SAMPLE rather than a decision — pointer movement. A
+   * click or a keystroke is a thing the person meant to do and has to happen,
+   * so it waits its turn; a pointer position is one of many on the way
+   * somewhere, and one that cannot be applied now is worth less than the one
+   * behind it. Queueing them is actively harmful: on an endpoint slower than
+   * the client's sampling interval the backlog grows, and the click behind it
+   * can age out against `acquireActionSlot`'s bound and be refused — movement
+   * costing the person the action they actually intended.
+   *
+   * The queue length is checked as well as the slot, so a sample cannot step
+   * over a click that is already waiting.
+   */
+  tryActionSlot(): symbol | null {
+    if (this.action || this.actionQueue.length > 0) return null;
+    return this.beginAction();
+  }
+
+  /**
+   * Take the per-action slot, waiting in line for it if somebody has it.
    *
    * A release can hand the browser on while the previous holder's abort is
    * still propagating through an awaited navigation. That is a handoff, not a
-   * conflict, so it is waited out rather than refused — but bounded, because a
-   * wedged action must not pin the queue.
+   * conflict, so it is normally bounded: a wedged action must not pin an agent
+   * or a takeover forever. Human discrete input is the exception and passes
+   * `null`: once a click, key or committed text has been accepted into this
+   * ordered queue, expiring it merely because earlier accepted input took more
+   * than two seconds silently truncates what the person typed.
+   *
+   * Waiting and TAKING are one step, which they deliberately were not before:
+   * the wait used to answer "the slot looks free" and leave the caller to call
+   * `beginAction` afterwards. Two callers woken by the same release both saw it
+   * free, and the loser was told "another action is already running" — a
+   * refusal for having asked first. Granting it here means whoever reaches the
+   * front of the line gets it, and everybody else is still waiting rather than
+   * refused.
+   *
+   * `null` as a RESULT means a bounded wait ran out OR a caller-supplied queue
+   * cap refused a new waiter. `null` as `withinMs` means an ACCEPTED operation
+   * is intentionally unbounded by time and will leave the queue only when its
+   * turn arrives; it does not require accepting infinitely many operations.
+   * `countsAsHumanActivity=false` is for
+   * lifecycle barriers: they still serialize, but an idle deadline must not
+   * mistake framework cleanup for evidence that the person is present.
    */
-  async awaitActionSlot(): Promise<boolean> {
-    for (let waited = 0; waited < ACTION_HANDOFF_MS; waited += ACTION_HANDOFF_POLL_MS) {
-      if (!this.action) return true;
-      await new Promise((r) => setTimeout(r, ACTION_HANDOFF_POLL_MS));
+  async acquireActionSlot(
+    withinMs: number | null = ACTION_HANDOFF_MS,
+    countsAsHumanActivity = true,
+    maxQueued: number | null = null,
+  ): Promise<symbol | null> {
+    // The queue is empty whenever the slot is free — `endAction` fills it again
+    // in the same breath as it clears it — so this is the ordinary path, and it
+    // takes no timer at all. The length check is what keeps a newcomer from
+    // stepping over a line that is already forming.
+    if (!this.action && this.actionQueue.length === 0) {
+      return this.beginAction(countsAsHumanActivity);
     }
-    return this.action === null;
+    // An unbounded WAIT does not have to mean an unbounded QUEUE. Discrete
+    // human input passes a finite maxQueued so already-accepted keys/clicks
+    // never age out, while a client that can produce events faster than a
+    // remote endpoint can drain them cannot retain promises/callbacks without
+    // limit. Lifecycle barriers deliberately pass no cap: dropping teardown is
+    // not an acceptable form of backpressure.
+    if (maxQueued !== null && this.actionQueue.length >= maxQueued) return null;
+    return await new Promise<symbol | null>((resolve) => {
+      let done = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const wake = () => {
+        if (done) return;
+        done = true;
+        if (timer) clearTimeout(timer);
+        resolve(this.beginAction(countsAsHumanActivity));
+      };
+      if (withinMs !== null) {
+        timer = setTimeout(() => {
+          if (done) return;
+          done = true;
+          const i = this.actionQueue.indexOf(wake);
+          if (i >= 0) this.actionQueue.splice(i, 1);
+          resolve(null);
+        }, withinMs);
+        timer.unref?.();
+      }
+      this.actionQueue.push(wake);
+    });
   }
 
   /**

@@ -18,6 +18,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+## 0.80.0 - 2026-09-08
+
+### Added
+- **You can see the hosted browser now, whoever is hosting it.** Watching used
+  to depend on the provider issuing a viewer URL, so a bare CDP endpoint — the
+  configuration anyone self-hosting is most likely to have — got a Stop button
+  and an apology. The page is now streamed from the browser itself over CDP, as
+  adaptive JPEG frames: Chrome sends one when the page actually changes rather
+  than on a clock, so an idle page costs nothing and there is no media pipeline
+  running inside the deployment. Nothing is encoded until somebody opens the
+  panel, and it stops when they close it — an unwatched run does not pay to
+  render frames nobody sees. Frames go to the run's own socket and nowhere
+  else: a picture of a half-filled form is exactly as sensitive as the
+  live-view URL it replaces.
+
+- **You can take the browser off the agent, use it, and give it back.**
+  Watching left a run stuck the moment the agent reached a login, a captcha or
+  a consent dialog only a person could answer, with Stop — throwing the whole
+  session away — as the only control. **Take control** hands the page over
+  properly: the user becomes a holder of the same lease the agent's workers
+  queue on, so control is exclusive rather than concurrent. That is the
+  difference from a provider's interactive viewer, whose input goes straight to
+  the session without passing through any lease, and which stays switched off
+  for exactly that reason.
+
+  It waits before it says yes. An action already inside Playwright cannot be
+  interrupted — a click waits for its element to become actionable and then
+  clicks — so control is granted only once that has settled. Afterwards the
+  agent's next call is refused rather than queued: a worker parked behind a
+  person acts the moment they look away, on a page they have since changed.
+
+  The hold lapses after two minutes without input, because a person has no
+  terminal signal — no worker end, no run completion — and an abandoned
+  takeover holds a billed session that, at the default of one, blocks every
+  other run on the deployment. Each thing the user does extends it.
+
+  **Hide the page** suspends the picture without giving control back, for
+  signing in: the password is dots, but the manager's dropdown, a one-time code
+  and the confirmation page afterwards are not. And Stop still takes the
+  browser from everyone, the user included — a handoff must not turn the kill
+  switch into one that only stops the agent.
+
 ## 0.79.0 - 2026-09-03
 
 ### Added
