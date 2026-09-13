@@ -22,6 +22,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Repair helper splice
+        run: sed -i 's/The privacy pause was ended by the successful restore\./The privacy pause was ended by the successful restore. With no/g' .github/scripts/pr248-round31-fix.py
       - name: Apply round 31 fixes
         run: python .github/scripts/pr248-round31-fix.py
       - name: Controller regressions
