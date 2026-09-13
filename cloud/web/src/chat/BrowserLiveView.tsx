@@ -500,7 +500,14 @@ export function BrowserLiveView({
         {driving && (!!frame || capturing === false) && (
           <button
             type="button"
-            onClick={() => onCapture?.(capturing === false)}
+            onClick={() => {
+              // Hide is a discrete decision just like a click/key/handback. A
+              // sampled wheel that happened first must reach the remote FIFO
+              // first; otherwise the timer scrolls the now-hidden page after
+              // the person's last visible picture.
+              if (capturing !== false) flushPendingScroll();
+              onCapture?.(capturing === false);
+            }}
             title="Stop sending pictures of this page while you type something private"
             style={chip}
           >

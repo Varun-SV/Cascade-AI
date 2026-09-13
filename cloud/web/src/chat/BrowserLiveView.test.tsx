@@ -821,6 +821,39 @@ describe('BrowserLiveView — taking the page over', () => {
     }
   });
 
+  it('flushes wheel distance before hiding the page', async () => {
+    vi.useFakeTimers();
+    try {
+      const order: string[] = [];
+      const onInput = vi.fn(() => { order.push('scroll'); });
+      const onCapture = vi.fn(() => { order.push('hide'); });
+      render(
+        <BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed
+          onStop={() => {}} onInput={onInput} onCapture={onCapture} />,
+      );
+      const img = screen.getByRole('img') as HTMLImageElement;
+      Object.defineProperty(img, 'naturalWidth', { value: 1280 });
+      Object.defineProperty(img, 'naturalHeight', { value: 800 });
+      img.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
+
+      fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 10, deltaMode: 0 });
+      onInput.mockClear();
+      order.length = 0;
+      fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 25, deltaMode: 0 });
+      expect(onInput).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole('button', { name: /hide the page/i }));
+      expect(order, 'the earlier wheel reaches the remote FIFO before capture stops').toEqual(['scroll', 'hide']);
+      expect(onInput).toHaveBeenCalledWith({ kind: 'scroll', x: 0.5, y: 0.5, deltaY: 25 });
+      expect(onCapture).toHaveBeenCalledWith(false);
+
+      await act(async () => { vi.advanceTimersByTime(SCROLL_INTERVAL * 2); });
+      expect(onInput, 'the flushed distance is not sent again while hidden').toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not send a held-back move after the page is handed back', async () => {
     // The trailing position is armed while driving and fires later. Landing
     // after the handback, it would be refused by the server and put a notice on

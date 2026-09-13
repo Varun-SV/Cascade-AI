@@ -3606,3 +3606,190 @@ describe('round 30 review regressions', () => {
     }
   });
 });
+
+
+describe('round 33 review regressions', () => {
+  async function openWatchedHuman(c: InstanceType<typeof RemoteBrowserController>, runId: string) {
+    await c.controller({ kind: 'click', selector: '#open' }, ctx(runId, 'worker-r33'));
+    const frames: BrowserFrame[] = [];
+    await c.startWatching(runId, (f) => frames.push(f));
+    await Promise.resolve();
+    if (!frames.length) cdp.pushFrame(3301);
+    if (!frames.length) throw new Error('watch produced no frame');
+    c.frameSeen(runId, frames.at(-1)!.generation);
+    c.actorEnded('worker-r33');
+    expect((await c.takeOver(runId)).ok).toBe(true);
+  }
+
+  function popupPage(url = 'https://popup.test/') {
+    const popup = {
+      ...page,
+      closed: false,
+      currentUrl: url,
+      navHandlers: [] as Array<(frame: unknown) => void>,
+      calls: [] as string[],
+      closeCount: 0,
+      keyboard: { press: async (k: string) => { popup.calls.push(`key:${k}`); } },
+      context() { return pageContext; },
+    } as typeof page;
+    return popup;
+  }
+
+  it('bounds accepted Hide transitions behind a stalled human input', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await openWatchedHuman(c, 'run-cap-bound');
+
+    const gate = deferred();
+    const realSend = cdp.send;
+    let blocked = false;
+    cdp.send = async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'Input.insertText' && !blocked) {
+        blocked = true;
+        await gate.promise;
+      }
+      return realSend.call(cdp, method, params);
+    };
+
+    const active = c.input('run-cap-bound', { kind: 'text', text: 'hold' });
+    while (!blocked) await Promise.resolve();
+    let settled = 0;
+    const hides = Array.from({ length: 40 }, () => c.setCapture('run-cap-bound', false)
+      .then((value) => { settled += 1; return value; }));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled, 'overflow Hide requests are refused immediately instead of retaining waiters').toBeGreaterThan(0);
+    expect(settled, 'the bounded prefix is still waiting for the action slot').toBeLessThan(40);
+
+    gate.resolve();
+    await active;
+    await Promise.all(hides);
+    cdp.send = realSend;
+  });
+
+  it('bounds a stalled watch lifecycle and still applies the newest overflow request', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#open' }, ctx('run-watch-bound', 'worker'));
+
+    cdpPerAttach = true;
+    const gate = deferred();
+    cdpGate = gate.promise;
+    const requests: Array<Promise<unknown>> = [];
+    requests.push(c.startWatching('run-watch-bound', () => {}));
+    // Far more than the retained prefix. End on WATCH so final-state semantics
+    // are observable even though the middle of the flood is coalesced.
+    for (let i = 0; i < 40; i++) {
+      requests.push(i % 2 === 0
+        ? c.stopWatching('run-watch-bound')
+        : c.startWatching('run-watch-bound', () => {}));
+    }
+    requests.push(c.startWatching('run-watch-bound', () => {}));
+
+    gate.resolve();
+    await Promise.all(requests);
+    expect(cdpCreated, 'the lifecycle flood is bounded instead of replayed in full').toBeLessThan(30);
+    const driven = await c.takeOver('run-watch-bound');
+    expect(driven.ok, 'the newest watch request really became the final state').toBe(true);
+    expect((await c.input('run-watch-bound', { kind: 'text', text: 'still-visible' })).ok).toBe(true);
+  });
+
+  it('refuses queued input when an earlier accepted event navigated the main frame', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await openWatchedHuman(c, 'run-nav-input');
+
+    const gate = deferred();
+    const realSend = cdp.send;
+    let first = true;
+    cdp.send = async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'Input.insertText' && first) {
+        first = false;
+        await gate.promise;
+        page.currentUrl = 'https://destination.test/';
+        page.navHandlers.forEach((h) => h(MAIN_FRAME));
+      }
+      return realSend.call(cdp, method, params);
+    };
+
+    const one = c.input('run-nav-input', { kind: 'text', text: 'first' });
+    await Promise.resolve();
+    const two = c.input('run-nav-input', { kind: 'text', text: 'second' });
+    await Promise.resolve();
+    gate.resolve();
+    expect((await one).ok).toBe(true);
+    const refused = await two;
+    expect(refused.ok, 'input aimed at the old document does not land in the destination').toBe(false);
+    expect(refused.detail).toMatch(/page changed/i);
+    expect(cdp.calls.filter((x) => x.method === 'Input.insertText')).toHaveLength(1);
+    cdp.send = realSend;
+  });
+
+  it('does not let an in-flight popup attachment resurrect a watcher after unwatch', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    cdpPerAttach = true;
+    await openWatchedHuman(c, 'run-popup-unwatch');
+    const openerCdp = cdp;
+    const popup = popupPage();
+    const frames = vi.fn();
+    await c.startWatching('run-popup-unwatch', frames);
+    await Promise.resolve();
+    frames.mockClear();
+
+    const attachGate = deferred();
+    cdpGate = attachGate.promise;
+    const realSend = openerCdp.send;
+    openerCdp.send = async (method: string, params?: Record<string, unknown>) => {
+      const out = await realSend.call(openerCdp, method, params);
+      if (method === 'Input.dispatchMouseEvent' && params?.['type'] === 'mouseReleased') {
+        pageContext.pageList = [page, popup];
+      }
+      return out;
+    };
+
+    const clicking = c.input('run-popup-unwatch', { kind: 'click', x: 0.5, y: 0.5 });
+    for (let i = 0; i < 20 && cdpCreated < 3; i++) await Promise.resolve();
+    const unwatching = c.stopWatching('run-popup-unwatch');
+    await unwatching;
+    attachGate.resolve();
+    await clicking;
+
+    const popupCdp = cdpSessions.at(-1)!;
+    expect(popupCdp.detached, 'the attachment invalidated by unwatch is torn back down').toBe(true);
+    popupCdp.pushFrame(3302, 'LATE-POPUP');
+    expect(frames, 'no old callback is resurrected after the panel left').not.toHaveBeenCalled();
+    openerCdp.send = realSend;
+  });
+
+  it('falls back to a surviving page when a followed popup closes itself', async () => {
+    const { provider, created, ended } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    cdpPerAttach = true;
+    await openWatchedHuman(c, 'run-popup-close');
+    const openerCdp = cdp;
+    const popup = popupPage('https://login.test/');
+    pageContext.pageList = [page];
+
+    const realSend = openerCdp.send;
+    openerCdp.send = async (method: string, params?: Record<string, unknown>) => {
+      const out = await realSend.call(openerCdp, method, params);
+      if (method === 'Input.dispatchMouseEvent' && params?.['type'] === 'mouseReleased') {
+        pageContext.pageList = [page, popup];
+      }
+      return out;
+    };
+    expect((await c.input('run-popup-close', { kind: 'click', x: 0.5, y: 0.5 })).ok).toBe(true);
+    expect(c.handBack('run-popup-close')).toBe(true);
+
+    popup.closed = true;
+    pageContext.pageList = [page, popup];
+    const result = await c.controller({ kind: 'click', selector: '#after-login' }, ctx('run-popup-close', 'worker-after'));
+    expect(result.ok, 'the surviving opener is usable').toBe(true);
+    expect(page.calls).toContain('click:#after-login');
+    expect(popup.calls).not.toContain('click:#after-login');
+    expect(created, 'closing a popup does not allocate a replacement provider session').toEqual(['sess-1']);
+    expect(ended, 'nor throw away the authenticated session').toEqual([]);
+    openerCdp.send = realSend;
+  });
+});

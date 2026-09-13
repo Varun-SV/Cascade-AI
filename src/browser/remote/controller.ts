@@ -206,6 +206,19 @@ const ACTION_TIMEOUT_MS = 30_000;
 const RESTORE_FRAME_MS = 2_000;
 /** Maximum accepted discrete human inputs waiting behind the active one. */
 const MAX_HUMAN_INPUT_QUEUE = 64;
+/**
+ * Hide/Show are lossless human decisions once accepted, but admission still
+ * has to be finite when a CDP endpoint is wedged. The state transition itself
+ * is tiny, so sixteen outstanding decisions is already far beyond ordinary UI
+ * use while keeping a hostile/stuck client from retaining unbounded waiters.
+ */
+const MAX_CAPTURE_TRANSITION_QUEUE = 16;
+/**
+ * Watch lifecycle requests are ordered, but a broken attach/detach must not
+ * turn that ordering promise into an unbounded promise chain. Past this bound
+ * pending requests collapse to the newest desired lifecycle operation.
+ */
+const MAX_WATCH_LIFECYCLE_QUEUE = 16;
 
 export interface RemoteBrowserControllerOptions {
   provider: RemoteBrowserProvider;
@@ -268,6 +281,23 @@ interface RunBrowser {
    * cleans up and runs again emits watch, unwatch, watch with nothing between.
    */
   watchQueue?: Promise<unknown>;
+  /** Number of ordinary lifecycle turns retained in `watchQueue`. */
+  watchQueueDepth?: number;
+  /**
+   * Once the lifecycle queue is full, only the newest pending operation is
+   * retained. Every overflow caller shares `watchCollapsedPromise`, so a flood
+   * cannot retain one closure/promise chain node per watch/unwatch request.
+   */
+  watchCollapsed?: () => Promise<unknown>;
+  watchCollapsedPromise?: Promise<unknown>;
+  /**
+   * Bumped synchronously for every UNWATCH request. Popup page handoff is the
+   * one attachment path outside `watchQueue`; it snapshots this value and must
+   * not publish if an unwatch arrived while its CDP session was being created.
+   * Ordinary queued watches do not use it, so overlapping watchers retain the
+   * established idempotent/ordered semantics.
+   */
+  watchDetachGen?: number;
   /**
    * One physical CDP attachment attempt for this run.
    *
@@ -779,9 +809,49 @@ export class RemoteBrowserController {
    * returned rather than the one stored.
    */
   private queueWatch<T>(held: RunBrowser, op: () => Promise<T>): Promise<T> {
+    const depth = held.watchQueueDepth ?? 0;
+
+    // Keep at most one overflow operation: the newest desired lifecycle state.
+    // This is deliberately a collapse rather than a timeout. A slow attach may
+    // take as long as it takes, but a client toggling watch/unwatch thousands of
+    // times while it does so retains one closure, not thousands, and the LAST
+    // request still gets a real turn after the bounded prefix drains.
+    if (held.watchCollapsedPromise || depth >= MAX_WATCH_LIFECYCLE_QUEUE) {
+      held.watchCollapsed = op as () => Promise<unknown>;
+      if (!held.watchCollapsedPromise) {
+        const drain = async (): Promise<unknown> => {
+          let result: unknown;
+          while (held.watchCollapsed) {
+            const latest = held.watchCollapsed;
+            held.watchCollapsed = undefined;
+            try { result = await latest(); } catch { /* lifecycle chain stays usable */ }
+          }
+          return result;
+        };
+        const tail = (held.watchQueue ?? Promise.resolve()).then(drain, drain);
+        let tracked: Promise<unknown>;
+        tracked = tail.finally(() => {
+          if (held.watchCollapsedPromise === tracked) {
+            held.watchCollapsedPromise = undefined;
+            held.watchCollapsed = undefined;
+          }
+        });
+        held.watchCollapsedPromise = tracked;
+        held.watchQueue = tracked.catch(() => {});
+      }
+      // All overflow callers share the SAME promise. Its result is the newest
+      // operation that actually survives coalescing, which is the only state
+      // that matters once requests have exceeded the admission bound.
+      return held.watchCollapsedPromise as Promise<T>;
+    }
+
+    held.watchQueueDepth = depth + 1;
     const mine = (held.watchQueue ?? Promise.resolve()).then(op, op);
-    held.watchQueue = mine.catch(() => {});
-    return mine;
+    const counted = mine.finally(() => {
+      held.watchQueueDepth = Math.max(0, (held.watchQueueDepth ?? 1) - 1);
+    });
+    held.watchQueue = counted.catch(() => {});
+    return counted;
   }
 
   /**
@@ -801,7 +871,12 @@ export class RemoteBrowserController {
     runId: string,
     held: RunBrowser,
     onFrame?: (frame: BrowserFrame) => void,
+    popupDetachGen?: number,
   ): Promise<CDPSession | null> {
+    // Only popup handoff supplies this token. Normal watcher attachment is
+    // already serialized by watchQueue and must preserve overlapping-watch
+    // semantics; the token exists solely for the out-of-queue handoff race.
+    const consumerIntent = onFrame && popupDetachGen !== undefined ? popupDetachGen : undefined;
     if (onFrame) held.onFrame = onFrame;
     if (held.screencast && held.screencastPage === held.page) return held.screencast;
 
@@ -816,9 +891,10 @@ export class RemoteBrowserController {
       const existingPage = held.attachingPage;
       await existing.catch(() => null);
       if (held.page !== targetPage || existingPage !== targetPage) {
-        return this.attachScreencast(runId, held, onFrame);
+        return this.attachScreencast(runId, held, onFrame, popupDetachGen);
       }
       const cdp = held.screencastPage === targetPage ? held.screencast ?? null : null;
+      if (consumerIntent !== undefined && (held.watchDetachGen ?? 0) !== consumerIntent) return null;
       if (cdp && onFrame) held.onFrame = onFrame;
       return cdp;
     }
@@ -834,11 +910,12 @@ export class RemoteBrowserController {
       await stale.detach().catch(() => {});
     }
 
-    const attempt = this.attachScreencastFresh(runId, held, targetPage);
+    const attempt = this.attachScreencastFresh(runId, held, targetPage, consumerIntent);
     held.attaching = attempt;
     held.attachingPage = targetPage;
     try {
       const cdp = await attempt;
+      if (consumerIntent !== undefined && (held.watchDetachGen ?? 0) !== consumerIntent) return null;
       if (cdp && onFrame) held.onFrame = onFrame;
       return cdp;
     } finally {
@@ -854,6 +931,7 @@ export class RemoteBrowserController {
     runId: string,
     held: RunBrowser,
     targetPage: Page,
+    consumerIntent?: number,
   ): Promise<CDPSession | null> {
     // An attachment can be requested for two very different reasons. Ordinary
     // watching may fall back to the provider iframe if CDP viewing is broken;
@@ -987,6 +1065,16 @@ export class RemoteBrowserController {
       await cdp.detach().catch(() => {});
       return null;
     }
+    // An unwatch invalidates its consumer synchronously, even when this attach
+    // belongs to a popup handoff outside `watchQueue`. Never publish a physical
+    // stream whose viewer disappeared while newCDPSession/startScreencast was
+    // awaited; otherwise stopWatching can return with no session and this older
+    // continuation can resurrect both the stream and its callback afterwards.
+    if (consumerIntent !== undefined && (held.watchDetachGen ?? 0) !== consumerIntent) {
+      if (!paused) await cdp.send('Page.stopScreencast').catch(() => {});
+      await cdp.detach().catch(() => {});
+      return null;
+    }
     // Recorded BEFORE this promise resolves, so a stop that awaited the attach
     // finds the session rather than racing the assignment.
     held.screencast = cdp;
@@ -1004,6 +1092,13 @@ export class RemoteBrowserController {
   async stopWatching(runId: string): Promise<void> {
     const held = this.runs.get(runId);
     if (!held) return;
+    // REQUEST-TIME invalidation is intentional. Popup handoff attachment is not
+    // on `watchQueue` (putting it there can deadlock against the action slot),
+    // so an unwatch must make that in-flight consumer stale before this method
+    // waits for its own lifecycle turn. The attach path checks this generation
+    // before publishing and tears its just-created session back down.
+    held.watchDetachGen = (held.watchDetachGen ?? 0) + 1;
+    held.onFrame = undefined;
     await this.queueWatch(held, async () => {
       const cdp = held.screencast;
       // Invalidate the view immediately. Queued human events must fail
@@ -1102,7 +1197,7 @@ export class RemoteBrowserController {
     // The same invisible-agent window, one await further along.
     // Hide and Show are explicit ordered human decisions. Once accepted,
     // a slow earlier CDP operation must not make them expire.
-    const token = await lease.acquireActionSlot(null);
+    const token = await lease.acquireActionSlot(null, true, MAX_CAPTURE_TRANSITION_QUEUE);
     if (!token) return held.capturing === true;
     try {
       // Re-checked after the wait — ALL of it, not just the hold.
@@ -1356,6 +1451,12 @@ export class RemoteBrowserController {
     // the view that exists when it finally runs. See the re-check below.
     const watch = held?.watchGen;
     if (!held || held.page.isClosed()) return { ok: false, detail: 'This run has no browser open.' };
+    // A queued event is an instruction for THIS document, not for whatever a
+    // previous accepted event navigates to while it waits in the FIFO. Watch
+    // identity alone cannot see that change: main-frame navigation deliberately
+    // keeps the same screencast/session and only bumps `generation`.
+    const page = held.page;
+    const pageGeneration = held.generation;
     // No CDP session means nobody is watching, and input you cannot see the
     // result of is not a takeover — it is typing into the dark.
     if (!cdp) return { ok: false, detail: 'Nothing is streaming this browser, so it cannot be driven.' };
@@ -1428,6 +1529,9 @@ export class RemoteBrowserController {
       // page somebody was looking at is not a click on whatever replaced it.
       if (!lease.heldByHuman) {
         return { ok: false, detail: 'Your control of this browser ended while that was waiting.' };
+      }
+      if (held.page !== page || held.generation !== pageGeneration) {
+        return { ok: false, detail: 'The page changed while that input was waiting, so it did not land.' };
       }
       if (held.screencast !== cdp || held.watchGen !== watch) {
         return { ok: false, detail: 'The view you were driving is gone, so that did not land.' };
@@ -1812,7 +1916,9 @@ export class RemoteBrowserController {
     // during its own sequence. Capturing it after the wait compares the page
     // with itself and can never disagree — which is exactly what the first
     // version of this did.
-    const planned = this.runs.get(runId)?.generation ?? 0;
+    const plannedRun = this.runs.get(runId);
+    const planned = plannedRun?.generation ?? 0;
+    const recoveringClosedPage = plannedRun?.page.isClosed() === true;
 
     const lease_ = this.leaseFor(runId);
     const lease = await lease_.acquire(actor, runId, context.signal);
@@ -1984,7 +2090,7 @@ export class RemoteBrowserController {
         }
       }
 
-      return await this.perform(runId, held, action, planned);
+      return await this.perform(runId, held, action, recoveringClosedPage ? held.generation : planned);
     } catch (err) {
       return { ok: false, detail: err instanceof Error ? err.message : String(err) };
     } finally {
@@ -2046,6 +2152,18 @@ export class RemoteBrowserController {
     }
     const existing = this.runs.get(runId);
     if (existing && !existing.page.isClosed()) return existing;
+    if (existing && existing.page.isClosed()) {
+      // A followed popup commonly closes itself after OAuth/login succeeds. The
+      // session is not stale just because that one page is: the opener (or
+      // another tab in this run's isolated context) may still be live and now
+      // contains the authenticated state. Prefer it over tearing down the whole
+      // provider session and losing the flow.
+      const fallback = existing.page.context().pages().filter((p) => !p.isClosed()).at(-1);
+      if (fallback) {
+        await this.adoptPage(runId, existing, fallback);
+        return existing;
+      }
+    }
     if (existing) {
       // Its page is gone, so it is unusable — but the provider session behind
       // it is still allocated and still billed. Overwriting the map entry
@@ -2265,6 +2383,16 @@ export class RemoteBrowserController {
     const candidates = held.page.context().pages().filter((p) => !p.isClosed() && !before.has(p));
     const next = candidates.at(-1);
     if (!next || next === held.page) return;
+    await this.adoptPage(runId, held, next);
+  }
+
+  /**
+   * Make one live page the run's controlled/viewed page. Used in both
+   * directions: into a popup opened by an action, and back to another surviving
+   * page when that popup closes itself after OAuth/login completion.
+   */
+  private async adoptPage(runId: string, held: RunBrowser, next: Page): Promise<void> {
+    if (next === held.page || next.isClosed()) return;
 
     held.page = next;
     held.generation += 1;
@@ -2274,23 +2402,21 @@ export class RemoteBrowserController {
 
     const deliver = held.onFrame;
     if (deliver) {
-      // The old JPEG is about the opener. Invalidate it BEFORE any awaited
-      // detach/attach and give the popup its own watch generation, so neither a
-      // late old frame nor a late old receipt can authorise input into the new
-      // page. A fresh frame will clear visibilityUnconfirmed; the client's
-      // receipt separately opens Hide/blind input.
+      // The old JPEG is about the previous page. Invalidate it BEFORE any
+      // awaited detach/attach and give the replacement its own watch generation,
+      // so neither a late old frame nor a late old receipt can authorise input.
       held.watchGen = (held.watchGen ?? 0) + 1;
       held.visibilityUnconfirmed = true;
       held.capturing = false;
       this.announceControl(runId);
-      await this.attachScreencast(runId, held, deliver);
+      await this.attachScreencast(runId, held, deliver, held.watchDetachGen ?? 0);
       return;
     }
 
     // No viewer is mounted. A temporary/old physical stream is useless after
-    // the target moved, so make sure it cannot keep encoding the opener. Do not
-    // manufacture a privacy pause: without `hiddenByHolder`, provider fallback
-    // remains a valid supervision surface when somebody comes back later.
+    // the target moved, so make sure it cannot keep encoding the previous page.
+    // Do not manufacture a privacy pause: without `hiddenByHolder`, provider
+    // fallback remains a valid supervision surface when somebody returns.
     const pending = held.attaching;
     if (pending) await pending.catch(() => null);
     if (held.screencast && held.screencastPage !== next) {
