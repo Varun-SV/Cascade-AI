@@ -1,0 +1,45 @@
+name: PR248 round32 review fix
+
+on:
+  push:
+    branches:
+      - claude/desktop-app-features-j8qfoj
+    paths:
+      - .github/workflows/pr248-round32-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/desktop-app-features-j8qfoj
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Apply round32 patch
+        run: python .github/scripts/pr248-round32-fix.py
+      - name: BrowserLiveView regression
+        run: npm run test -w cascade-cloud-web -- src/chat/BrowserLiveView.test.tsx
+      - name: Full cloud web suite
+        run: npm run test -w cascade-cloud-web
+      - name: Cloud web production build
+        run: npm run build -w cascade-cloud-web
+      - name: Full root suite
+        run: npm test -- --run
+      - name: TypeScript checks
+        run: npm run lint
+      - name: Commit fix and remove helpers
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -f .github/scripts/pr248-round32-fix.py .github/workflows/pr248-round32-fix.yml
+          git add cloud/web/src/chat/BrowserLiveView.tsx cloud/web/src/chat/BrowserLiveView.test.tsx
+          git commit -m "fix(browser): cancel in-frame pointer drags"
+          git push origin HEAD:claude/desktop-app-features-j8qfoj
