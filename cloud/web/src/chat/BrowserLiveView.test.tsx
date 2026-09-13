@@ -315,6 +315,38 @@ describe('BrowserLiveView — taking the page over', () => {
     expect(onInput).toHaveBeenCalledWith({ kind: 'click', x: 0.5, y: 0.5, button: 'right', clicks: 1 });
   });
 
+  it('cancels a pointer drag that stays inside the frame', () => {
+    // Mouse-leave already cancels a pending click, but that is not enough: a
+    // person can press on blank space, drag across the SAME image and release
+    // over a destructive control. A normal click gesture is cancelled by that
+    // travel; committing at release coordinates would manufacture a click the
+    // person never completed. Small hand jitter remains a click.
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed onStop={() => {}} onInput={onInput} />,
+    );
+    const img = screen.getByRole('img') as HTMLImageElement;
+    Object.defineProperty(img, 'naturalWidth', { value: 1280 });
+    Object.defineProperty(img, 'naturalHeight', { value: 800 });
+    img.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
+
+    fireEvent.mouseDown(img, { clientX: 100, clientY: 200, button: 0, detail: 1 });
+    fireEvent.mouseMove(img, { clientX: 300, clientY: 200, buttons: 1 });
+    fireEvent.mouseUp(img, { clientX: 300, clientY: 200, button: 0, detail: 1 });
+    expect(
+      onInput.mock.calls.filter(([event]) => event.kind === 'click'),
+      'dragging within the image does not click whatever is under the release',
+    ).toHaveLength(0);
+
+    onInput.mockClear();
+    fireEvent.mouseDown(img, { clientX: 200, clientY: 200, button: 0, detail: 1 });
+    fireEvent.mouseUp(img, { clientX: 203, clientY: 202, button: 0, detail: 1 });
+    expect(
+      onInput.mock.calls.filter(([event]) => event.kind === 'click'),
+      'ordinary pointer jitter still completes one click',
+    ).toHaveLength(1);
+  });
+
   it('scrolls by pixels whatever units the wheel reported', () => {
     // `deltaY` is not always pixels — `deltaMode` says whether it counts pixels,
     // lines or pages, and Firefox on Windows and Linux routinely reports lines.

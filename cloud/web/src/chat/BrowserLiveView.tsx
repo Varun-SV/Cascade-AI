@@ -43,6 +43,18 @@ const COMMAND_KEYS = new Set([
 const MOVE_INTERVAL_MS = 60;
 
 /**
+ * Maximum local pointer travel that still counts as the same click gesture.
+ *
+ * Mouse-down and mouse-up are deliberately separate so a drag can cancel a
+ * destructive click. Leaving the image already cancels the candidate, but a
+ * drag can stay entirely inside the frame; without a distance check that would
+ * turn a press on one remote element into a click on whatever is under release.
+ * A few CSS pixels keeps ordinary hand jitter usable without treating a real
+ * drag as a click.
+ */
+const CLICK_SLOP_PX = 5;
+
+/**
  * A wheel notch in CSS pixels, whatever units the device reported it in.
  *
  * `deltaY` is NOT always pixels: `deltaMode` says whether the number counts
@@ -190,7 +202,9 @@ export function BrowserLiveView({
    * to cancel a destructive action: the server had already pressed AND
    * released before the local button came back up.
    */
-  const pendingClickRef = useRef<{ button: number; clicks: number } | null>(null);
+  const pendingClickRef = useRef<{
+    button: number; clicks: number; clientX: number; clientY: number;
+  } | null>(null);
   /**
    * When a pointer move was last forwarded, so they go out at a rate rather
    * than one per mousemove event.
@@ -571,13 +585,19 @@ export function BrowserLiveView({
             pendingClickRef.current = null;
             if (e.button > 2) return;
             if (!at(e.clientX, e.clientY)) return;
-            pendingClickRef.current = { button: e.button, clicks: e.detail || 1 };
+            pendingClickRef.current = {
+              button: e.button, clicks: e.detail || 1,
+              clientX: e.clientX, clientY: e.clientY,
+            };
           } : undefined}
           onMouseUp={driving ? (e) => {
             e.preventDefault();
             const press = pendingClickRef.current;
             pendingClickRef.current = null;
             if (!press || press.button !== e.button) return;
+            const dx = e.clientX - press.clientX;
+            const dy = e.clientY - press.clientY;
+            if ((dx * dx) + (dy * dy) > CLICK_SLOP_PX * CLICK_SLOP_PX) return;
             const p = at(e.clientX, e.clientY);
             if (!p) return;
             // The sampled wheel happened before this completed click. Flush it
