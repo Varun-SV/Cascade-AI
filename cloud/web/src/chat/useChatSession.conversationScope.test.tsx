@@ -807,7 +807,7 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     // Only a picture from the NEW watch, confirmed, brings the surface back.
     act(() => {
       fake.fire('browser:frame', frame('conv-a', 'task-a', 'AFTER', 5));
-      view.result.current.markBrowserFrameShown(5);
+      view.result.current.markBrowserFrameShown('task-a', 5);
       fake.fire('browser:control', {
         conversationId: 'conv-a', taskId: 'task-a', human: true, capturing: true, confirmed: true,
       });
@@ -840,7 +840,7 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     const seen = () => fake.sent.filter((m) => m.event === 'browser:frame-seen');
     // What the rendered <img> reports on `load` — the frame arriving is not
     // itself the receipt, which is the point of the test below this one.
-    act(() => { view.result.current.markBrowserFrameShown(7); });
+    act(() => { view.result.current.markBrowserFrameShown('task-a', 7); });
     expect(seen().map((m) => m.payload)).toEqual([{ taskId: 'task-a', generation: 7 }]);
 
     // Once per WATCH, not per frame: a busy page repaints constantly and every
@@ -848,9 +848,9 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     // round trip on each of them.
     act(() => {
       fake.fire('browser:frame', frame('conv-a', 'task-a', 'BBBB', 7));
-      view.result.current.markBrowserFrameShown(7);
+      view.result.current.markBrowserFrameShown('task-a', 7);
       fake.fire('browser:frame', frame('conv-a', 'task-a', 'CCCC', 7));
-      view.result.current.markBrowserFrameShown(7);
+      view.result.current.markBrowserFrameShown('task-a', 7);
     });
     expect(seen(), 'the same watch is confirmed once').toHaveLength(1);
 
@@ -858,7 +858,7 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     // generation the server has already superseded.
     act(() => {
       fake.fire('browser:frame', frame('conv-a', 'task-a', 'DDDD', 8));
-      view.result.current.markBrowserFrameShown(8);
+      view.result.current.markBrowserFrameShown('task-a', 8);
     });
     expect(seen().map((m) => m.payload)).toEqual([
       { taskId: 'task-a', generation: 7 },
@@ -901,6 +901,46 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     expect(view.result.current.browserFrame?.data).toBe('AFTER');
   });
 
+  it('promotes the older active browser when the newer run gives its browser up', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-old', 'https://viewer.example/old'));
+    });
+    act(() => {
+      fake.fire('browser:frame', frame('conv-a', 'task-old', 'OLD-BEFORE', 3));
+      fake.fire('browser:control', {
+        conversationId: 'conv-a', taskId: 'task-old', human: true, capturing: true, confirmed: true,
+      });
+      fake.fire('browser:live-view', liveView('conv-a', 'task-new', 'https://viewer.example/new'));
+    });
+    expect(view.result.current.browserTaskId).toBe('task-new');
+
+    // A late picture from the old watch must not be banked while its task is
+    // hidden. Promotion needs a new viewing boundary, not a cached JPEG.
+    act(() => { fake.fire('browser:frame', frame('conv-a', 'task-old', 'LATE-OLD', 3)); });
+
+    act(() => {
+      fake.fire('browser:live-view', { conversationId: 'conv-a', taskId: 'task-new', active: false });
+    });
+
+    expect(view.result.current.browserActive, 'the older browser is still active').toBe(true);
+    expect(view.result.current.browserTaskId).toBe('task-old');
+    expect(view.result.current.browserLiveView).toBe('https://viewer.example/old');
+    expect(view.result.current.browserHuman, 'ownership state survives while the task is hidden').toBe(true);
+    expect(view.result.current.browserFrame, 'but stale sight evidence does not').toBeUndefined();
+    expect(view.result.current.browserConfirmed).toBe(false);
+
+    // The promoted task is watched again and can supply a fresh picture.
+    act(() => {
+      fake.fire('browser:watching', { conversationId: 'conv-a', taskId: 'task-old', streaming: true });
+      fake.fire('browser:frame', frame('conv-a', 'task-old', 'OLD-FRESH', 4));
+    });
+    expect(view.result.current.browserStreaming).toBe(true);
+    expect(view.result.current.browserFrame?.data).toBe('OLD-FRESH');
+  });
+
   it('keeps the newer run\'s panel when the older one gives its browser up', () => {
     // One conversation can have two runs overlapping, and the socket carries
     // both. A later `active: true` replaces the entry with the newer task; the
@@ -929,6 +969,30 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     expect(view.result.current.browserTaskId, 'a run giving up its own browser closes the panel').toBeUndefined();
   });
 
+  it('does not retarget a delayed image receipt to the browser now on screen', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'AAAA', 1));
+      fake.fire('browser:live-view', liveView('conv-a', 'task-b'));
+      fake.fire('browser:frame', frame('conv-a', 'task-b', 'BBBB', 1));
+    });
+    expect(view.result.current.browserTaskId).toBe('task-b');
+
+    // A's <img> finished decoding after B replaced it. Both first watches use
+    // generation 1, so reading only the CURRENT task here would falsely confirm
+    // B even though B's JPEG has never loaded.
+    act(() => { view.result.current.markBrowserFrameShown('task-a', 1); });
+    expect(fake.sent.filter((m) => m.event === 'browser:frame-seen')).toHaveLength(0);
+
+    // B's own image load is the first thing allowed to confirm B.
+    act(() => { view.result.current.markBrowserFrameShown('task-b', 1); });
+    expect(fake.sent.filter((m) => m.event === 'browser:frame-seen').map((m) => m.payload))
+      .toEqual([{ taskId: 'task-b', generation: 1 }]);
+  });
+
   it('confirms each run\'s own first watch, even though they are numbered alike', () => {
     // A watch generation counts from zero inside its own run, so the first watch
     // of every run is generation 1. Deduplicating the receipt on that number
@@ -945,14 +1009,14 @@ describe('useChatSession — frames of the agent\'s browser', () => {
       fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
       fake.fire('browser:frame', frame('conv-a', 'task-a', 'AAAA', 1));
     });
-    act(() => { view.result.current.markBrowserFrameShown(1); });
+    act(() => { view.result.current.markBrowserFrameShown('task-a', 1); });
 
     act(() => {
       fake.fire('browser:live-view', liveView('conv-b', 'task-b'));
       view.result.current.setConversationId('conv-b');
     });
     act(() => { fake.fire('browser:frame', frame('conv-b', 'task-b', 'BBBB', 1)); });
-    act(() => { view.result.current.markBrowserFrameShown(1); });
+    act(() => { view.result.current.markBrowserFrameShown('task-b', 1); });
 
     expect(fake.sent.filter((m) => m.event === 'browser:frame-seen').map((m) => m.payload))
       .toEqual([
@@ -1005,7 +1069,7 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     ).toHaveLength(0);
 
     // The image reporting its own `load` is the only thing that confirms it.
-    act(() => { view.result.current.markBrowserFrameShown(9); });
+    act(() => { view.result.current.markBrowserFrameShown('task-a', 9); });
     expect(fake.sent.filter((m) => m.event === 'browser:frame-seen').map((m) => m.payload))
       .toEqual([{ taskId: 'task-a', generation: 9 }]);
   });

@@ -371,8 +371,8 @@ export function useChatSession(
    * a spent capability is not kept around.
    */
   const [browserViews, setBrowserViews] = useState<
-    Record<string, {
-      taskId?: string;
+    Record<string, Array<{
+      taskId: string;
       liveViewUrl?: string;
       /**
        * The most recent frame, and only that one.
@@ -418,9 +418,9 @@ export function useChatSession(
        * not have control" over this one's panel would be a lie about this page.
        */
       notice?: string;
-    }>
+    }>>
   >({});
-  const browserView = browserViews[activeConversationId() ?? ''];
+  const browserView = browserViews[activeConversationId() ?? '']?.at(-1);
   /** Where the agent's browser can be watched, for the conversation on screen. */
   const browserLiveView = browserView?.liveViewUrl;
   /** The latest frame of the browser this pane is showing, if it is streaming. */
@@ -506,13 +506,14 @@ export function useChatSession(
     setBrowserViews((prev) => {
       let changed = false;
       const next: typeof prev = {};
-      for (const [key, view] of Object.entries(prev)) {
-        if (view.taskId === taskId && view.notice !== undefined) {
-          changed = true;
-          next[key] = { ...view, notice: undefined };
-        } else {
-          next[key] = view;
-        }
+      for (const [key, views] of Object.entries(prev)) {
+        next[key] = views.map((view) => {
+          if (view.taskId === taskId && view.notice !== undefined) {
+            changed = true;
+            return { ...view, notice: undefined };
+          }
+          return view;
+        });
       }
       return changed ? next : prev;
     });
@@ -522,12 +523,25 @@ export function useChatSession(
     // The task id, which the server requires to match exactly. Without it the
     // Stop is ignored — which is the correct failure: better a button that does
     // nothing than one that stops somebody else's run.
-    if (!browserTaskIdRef.current) return;
-    socket?.emit('browser:stop', { taskId: browserTaskIdRef.current });
-    // This conversation's panel only. Another chat's browser is not something
-    // this button withdraws.
+    const taskId = browserTaskIdRef.current;
+    if (!taskId) return;
+    socket?.emit('browser:stop', { taskId });
+    // Withdraw THIS task optimistically. If an older browser is still active in
+    // the same conversation it becomes the displayed one immediately, keeping
+    // its own Stop control reachable instead of deleting the whole conversation
+    // slot along with the task the user actually stopped.
     const key = activeConversationId() ?? '';
-    setBrowserViews(({ [key]: _gone, ...rest }) => rest);
+    setBrowserViews((prev) => {
+      const views = prev[key];
+      if (!views) return prev;
+      const kept = views.filter((view) => view.taskId !== taskId);
+      if (kept.length === views.length) return prev;
+      if (kept.length === 0) {
+        const { [key]: _gone, ...rest } = prev;
+        return rest;
+      }
+      return { ...prev, [key]: kept };
+    });
   }, [socket]);
 
   /**
@@ -636,13 +650,14 @@ export function useChatSession(
     setBrowserViews((prev) => {
       let changed = false;
       const next: typeof prev = {};
-      for (const [key, view] of Object.entries(prev)) {
-        if (view.taskId === taskId && (view.frame || view.streaming || view.confirmed)) {
-          changed = true;
-          next[key] = { ...view, frame: undefined, streaming: false, confirmed: false };
-        } else {
-          next[key] = view;
-        }
+      for (const [key, views] of Object.entries(prev)) {
+        next[key] = views.map((view) => {
+          if (view.taskId === taskId && (view.frame || view.streaming || view.confirmed)) {
+            changed = true;
+            return { ...view, frame: undefined, streaming: false, confirmed: false };
+          }
+          return view;
+        });
       }
       return changed ? next : prev;
     });
@@ -929,13 +944,14 @@ export function useChatSession(
       setBrowserViews((prev) => {
         let changed = false;
         const next: typeof prev = {};
-        for (const [key, view] of Object.entries(prev)) {
-          if (view.frame || view.streaming || view.confirmed) {
-            changed = true;
-            next[key] = { ...view, frame: undefined, streaming: false, confirmed: false };
-          } else {
-            next[key] = view;
-          }
+        for (const [key, views] of Object.entries(prev)) {
+          next[key] = views.map((view) => {
+            if (view.frame || view.streaming || view.confirmed) {
+              changed = true;
+              return { ...view, frame: undefined, streaming: false, confirmed: false };
+            }
+            return view;
+          });
         }
         return changed ? next : prev;
       });
@@ -954,34 +970,50 @@ export function useChatSession(
       // Recorded AGAINST its conversation rather than into one shared slot. One
       // socket carries several runs, and a single slot meant switching chats
       // left another run's bearer-capability URL rendered in the pane you moved
-      // to, while a late `undefined` from the run you left cleared the view of
+      // to, while a late withdrawal from the run you left cleared the view of
       // the one you were on.
       adoptConversationId(e?.conversationId);
       const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
+      const taskId = typeof e?.taskId === 'string' && e.taskId ? e.taskId : undefined;
+      // Every server live-view message is task-addressed. An untagged message
+      // cannot safely create, replace or withdraw any browser in a conversation.
+      if (!taskId) return;
       setBrowserViews((prev) => {
-        // `active` says a browser exists even when it cannot be streamed, so
-        // Stop survives a provider with no live view. Its absence is the run
-        // giving the browser up — drop the entry outright rather than blanking
-        // it, so the panel goes away and the spent capability URL is not kept.
+        const views = prev[key] ?? [];
         if (e?.active !== true) {
-          const showing = prev[key];
-          if (!showing) return prev;
-          // ONLY from the run whose browser is actually on screen. One
-          // conversation can have two runs overlapping — a later `active: true`
-          // replaces this entry with the newer task — and the older run's
-          // eventual withdrawal would otherwise take the newer browser's panel
-          // and its Stop button away while that browser is still running. The
-          // frame and control handlers next to this one have required an exact
-          // task match all along; this one was reading only the conversation.
-          //
-          // A withdrawal that names no task is ignored rather than trusted: the
-          // server sends `taskId` on every live-view message including this
-          // one, so a message without it is not a run giving its browser up.
-          if (showing.taskId !== e?.taskId) return prev;
-          const { [key]: _done, ...rest } = prev;
-          return rest;
+          // Remove exactly the run that gave its browser up. The newest active
+          // task is the panel, so if THAT task ends the previous still-active
+          // browser is promoted rather than disappearing with it.
+          const kept = views.filter((view) => view.taskId !== taskId);
+          if (kept.length === views.length) return prev;
+          if (kept.length === 0) {
+            const { [key]: _done, ...rest } = prev;
+            return rest;
+          }
+          return { ...prev, [key]: kept };
         }
-        return { ...prev, [key]: { taskId: e?.taskId, liveViewUrl: e?.liveViewUrl } };
+
+        const existing = views.findIndex((view) => view.taskId === taskId);
+        if (existing >= 0) {
+          const current = views[existing]!;
+          if (current.liveViewUrl === e?.liveViewUrl) return prev;
+          const next = [...views];
+          next[existing] = { ...current, liveViewUrl: e?.liveViewUrl };
+          // A replay for an already-active task updates its capability URL but
+          // does not make an older run jump in front of a newer one.
+          return { ...prev, [key]: next };
+        }
+
+        // A newly-active browser becomes the visible panel. The task it covers
+        // remains active underneath, but its old picture is no longer evidence
+        // of sight: if it is promoted later it must establish a fresh watch
+        // before any image or blind keyboard can be interactive.
+        const hidden = views.map((view, index) => (
+          index === views.length - 1
+            ? { ...view, frame: undefined, streaming: false, confirmed: false }
+            : view
+        ));
+        return { ...prev, [key]: [...hidden, { taskId, liveViewUrl: e?.liveViewUrl }] };
       });
     };
     /**
@@ -996,44 +1028,44 @@ export function useChatSession(
       conversationId?: string; taskId?: string; data?: string; width?: number; height?: number;
       generation?: number;
     }) => {
-      if (typeof e?.data !== 'string') return;
+      if (typeof e?.data !== 'string' || !e.taskId) return;
       adoptConversationId(e?.conversationId);
       const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
       setBrowserViews((prev) => {
-        const view = prev[key];
-        // A frame for a run this pane has no browser entry for is a late
-        // arrival from a run that already ended — the panel is gone, and
-        // resurrecting it from a stray frame would show a Stop button for a
-        // browser nobody holds.
-        if (!view) return prev;
-        // An EXACT match, the same shape as the server's own `addressesRun`:
-        // a message that names no run is not a message about this one. The
-        // looser "reject only when both are present and differ" let an
-        // untagged frame land in whichever pane happened to be on screen,
-        // which is the one failure this keying exists to prevent — a picture
-        // of someone else's page, which is worse than no picture at all.
-        if (!e.taskId || e.taskId !== view.taskId) return prev;
-        return {
-          ...prev,
-          [key]: {
-            ...view,
-            frame: {
-              data: e.data!, width: e.width ?? 0, height: e.height ?? 0,
-              generation: typeof e.generation === 'number' ? e.generation : 0,
-            },
+        const views = prev[key];
+        if (!views) return prev;
+        const index = views.findIndex((view) => view.taskId === e.taskId);
+        if (index < 0) return prev;
+        // Only the displayed task is watched. Anything arriving for a hidden
+        // task is a late frame from the watch we just replaced; retaining it
+        // would make promotion briefly show an old, possibly interactive JPEG
+        // before the new viewing boundary has produced its own picture.
+        if (index !== views.length - 1) return prev;
+        const view = views[index]!;
+        const next = [...views];
+        next[index] = {
+          ...view,
+          frame: {
+            data: e.data!, width: e.width ?? 0, height: e.height ?? 0,
+            generation: typeof e.generation === 'number' ? e.generation : 0,
           },
         };
+        return { ...prev, [key]: next };
       });
     };
     /** The server answering whether a stream actually started. */
     const onBrowserWatching = (e: { conversationId?: string; taskId?: string; streaming?: boolean }) => {
+      if (!e.taskId) return;
       adoptConversationId(e?.conversationId);
       const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
       setBrowserViews((prev) => {
-        const view = prev[key];
-        if (!view) return prev;
-        if (!e.taskId || e.taskId !== view.taskId) return prev;
-        return { ...prev, [key]: { ...view, streaming: e?.streaming === true } };
+        const views = prev[key];
+        if (!views) return prev;
+        const index = views.findIndex((view) => view.taskId === e.taskId);
+        if (index < 0 || index !== views.length - 1) return prev;
+        const next = [...views];
+        next[index] = { ...views[index]!, streaming: e?.streaming === true };
+        return { ...prev, [key]: next };
       });
     };
     /**
@@ -1051,33 +1083,30 @@ export function useChatSession(
       conversationId?: string; taskId?: string; human?: boolean; capturing?: boolean;
       confirmed?: boolean; detail?: string;
     }) => {
+      if (!e.taskId) return;
       adoptConversationId(e?.conversationId);
       const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
       setBrowserViews((prev) => {
-        const view = prev[key];
-        if (!view) return prev;
-        if (!e.taskId || e.taskId !== view.taskId) return prev;
-        return {
-          ...prev,
-          [key]: {
-            ...view,
-            ...(typeof e.human === 'boolean' ? { human: e.human } : {}),
-            ...(typeof e.capturing === 'boolean' ? { capturing: e.capturing } : {}),
-            ...(typeof e.confirmed === 'boolean' ? { confirmed: e.confirmed } : {}),
-            // A paused picture must not keep showing the last frame. That
-            // frame is of a page which may have changed since — and a stale
-            // picture of a live browser is worse than none, because it is the
-            // failure this panel exists to prevent wearing the look of working.
-            ...(e.capturing === false ? { frame: undefined } : {}),
-            // Cleared by the next thing the server says about this browser —
-            // every ownership announcement carries `human`, and none of them
-            // carries a detail. That is not enough on its own: `announceControl`
-            // dedupes on the state it carries, so a refusal that changed none of
-            // it is followed by silence. `clearBrowserNotice` covers that from
-            // the other side, when the person does the next thing.
-            ...(typeof e.detail === 'string' ? { notice: e.detail } : { notice: undefined }),
-          },
+        const views = prev[key];
+        if (!views) return prev;
+        const index = views.findIndex((view) => view.taskId === e.taskId);
+        if (index < 0) return prev;
+        const view = views[index]!;
+        const hidden = index !== views.length - 1;
+        const nextView = {
+          ...view,
+          ...(typeof e.human === 'boolean' ? { human: e.human } : {}),
+          ...(typeof e.capturing === 'boolean' ? { capturing: e.capturing } : {}),
+          ...(!hidden && typeof e.confirmed === 'boolean' ? { confirmed: e.confirmed } : {}),
+          ...(e.capturing === false ? { frame: undefined } : {}),
+          ...(typeof e.detail === 'string' ? { notice: e.detail } : { notice: undefined }),
+          // Ownership can legitimately change while another run is in front,
+          // but visibility proof cannot survive being hidden/unwatched.
+          ...(hidden ? { frame: undefined, streaming: false, confirmed: false } : {}),
         };
+        const next = [...views];
+        next[index] = nextView;
+        return { ...prev, [key]: next };
       });
     };
     socket.on('browser:control', onBrowserControl);
@@ -1390,9 +1419,11 @@ export function useChatSession(
    * round trips. It gates Hide only and never Chrome's own frame ack, so the
    * stream stays exactly as lossy and as fast as it was.
    */
-  const markBrowserFrameShown = useCallback((generation: number) => {
-    const taskId = browserTaskIdRef.current;
-    if (!socket || !taskId) return;
+  const markBrowserFrameShown = useCallback((taskId: string, generation: number) => {
+    // The image that loaded names the task it came from. If the pane switched
+    // while that JPEG was decoding, its receipt is stale and must not be
+    // retargeted at the browser that happens to be current now.
+    if (!socket || browserTaskIdRef.current !== taskId) return;
     // Keyed by TASK as well as generation. A watch generation counts from zero
     // inside its own run, so the first watch of every run is generation 1 —
     // and deduplicating on the number alone meant that after confirming task A

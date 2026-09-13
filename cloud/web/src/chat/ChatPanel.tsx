@@ -69,7 +69,7 @@ interface Props {
   onBrowserInput?: (event: BrowserInputEvent) => void;
   /** Pause or resume the picture without giving the page back. */
   onBrowserCapture?: (on: boolean) => void;
-  onBrowserFrameShown?: (generation: number) => void;
+  onBrowserFrameShown?: (taskId: string, generation: number) => void;
   /** Dangerous tool calls waiting on the user. */
   toolApprovals?: ToolApproval[];
   onDecideToolApproval?: (requestId: string, approved: boolean, always?: boolean) => void;
@@ -236,6 +236,7 @@ export default function ChatPanel({
 
       <div className="mx-4 sm:mx-6">
         <BrowserLiveView
+          key={browserTaskId ?? 'no-browser-task'}
           active={browserActive === true}
           liveViewUrl={browserLiveView}
           frame={browserFrame}
@@ -250,7 +251,7 @@ export default function ChatPanel({
           onHandBack={() => onHandBackBrowser?.()}
           onInput={(e) => onBrowserInput?.(e)}
           onCapture={(on) => onBrowserCapture?.(on)}
-          onFrameShown={(g) => onBrowserFrameShown?.(g)}
+          onFrameShown={(g) => { if (browserTaskId) onBrowserFrameShown?.(browserTaskId, g); }}
         />
       </div>
 
