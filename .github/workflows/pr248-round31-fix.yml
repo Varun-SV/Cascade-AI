@@ -42,7 +42,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm .github/scripts/pr248-round31-fix.py .github/workflows/pr248-round31-fix.yml
+          git rm -f .github/scripts/pr248-round31-fix.py .github/workflows/pr248-round31-fix.yml
           git add src/browser/lease.ts src/browser/remote/controller.ts src/browser/remote/controller.test.ts cloud/web/src/chat/BrowserLiveView.tsx cloud/web/src/chat/BrowserLiveView.test.tsx
           git commit -m "fix(browser): bound input backlog and follow popups"
           git push origin HEAD:claude/desktop-app-features-j8qfoj
