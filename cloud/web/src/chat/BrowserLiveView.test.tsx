@@ -754,6 +754,41 @@ describe('BrowserLiveView — taking the page over', () => {
     }
   });
 
+  it('flushes wheel distance before giving the browser back', async () => {
+    vi.useFakeTimers();
+    try {
+      const order: string[] = [];
+      const onInput = vi.fn(() => { order.push('scroll'); });
+      const onHandBack = vi.fn(() => { order.push('handback'); });
+      render(
+        <BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed
+          onStop={() => {}} onInput={onInput} onHandBack={onHandBack} />,
+      );
+      const img = screen.getByRole('img') as HTMLImageElement;
+      Object.defineProperty(img, 'naturalWidth', { value: 1280 });
+      Object.defineProperty(img, 'naturalHeight', { value: 800 });
+      img.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
+
+      // First sample goes immediately; the second is waiting in the 60 ms
+      // accumulator when Give it back is pressed.
+      fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 10, deltaMode: 0 });
+      onInput.mockClear();
+      order.length = 0;
+      fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 25, deltaMode: 0 });
+      expect(onInput).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole('button', { name: /give it back/i }));
+      expect(order, 'the earlier wheel decision reaches the FIFO before handback').toEqual(['scroll', 'handback']);
+      expect(onInput).toHaveBeenCalledWith({ kind: 'scroll', x: 0.5, y: 0.5, deltaY: 25 });
+      expect(onHandBack).toHaveBeenCalledOnce();
+
+      await act(async () => { vi.advanceTimersByTime(SCROLL_INTERVAL * 2); });
+      expect(onInput, 'the cancelled timer does not send the distance twice').toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not send a held-back move after the page is handed back', async () => {
     // The trailing position is armed while driving and fires later. Landing
     // after the handback, it would be refused by the server and put a notice on

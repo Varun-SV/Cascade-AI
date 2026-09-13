@@ -204,6 +204,8 @@ const ACTION_TIMEOUT_MS = 30_000;
  * plausible, not a latency budget.
  */
 const RESTORE_FRAME_MS = 2_000;
+/** Maximum accepted discrete human inputs waiting behind the active one. */
+const MAX_HUMAN_INPUT_QUEUE = 64;
 
 export interface RemoteBrowserControllerOptions {
   provider: RemoteBrowserProvider;
@@ -249,6 +251,8 @@ interface RunBrowser {
    * `stopWatching` or by the run ending — whichever comes first.
    */
   screencast?: CDPSession;
+  /** The page `screencast` is physically attached to. */
+  screencastPage?: Page;
   /**
    * Watch and unwatch, applied in the order they were asked for.
    *
@@ -274,6 +278,8 @@ interface RunBrowser {
    * action slot, so attachment has its own narrower single-flight.
    */
   attaching?: Promise<CDPSession | null>;
+  /** The page the in-flight physical attachment was started for. */
+  attachingPage?: Page;
   /**
    * Where this run's frames go, held here rather than captured in the handler.
    *
@@ -797,23 +803,49 @@ export class RemoteBrowserController {
     onFrame?: (frame: BrowserFrame) => void,
   ): Promise<CDPSession | null> {
     if (onFrame) held.onFrame = onFrame;
-    if (held.screencast) return held.screencast;
+    if (held.screencast && held.screencastPage === held.page) return held.screencast;
 
+    // A popup can replace `held.page` while the old page is attaching. Never
+    // adopt that old session into the new target: wait it out, let the fresh
+    // attach notice it lost page identity, then retry against the page that is
+    // current NOW. This is deliberately narrower than `watchQueue`; the agent
+    // may hold the action slot while an unwatch in that queue waits for it.
+    const targetPage = held.page;
     const existing = held.attaching;
     if (existing) {
-      const cdp = await existing;
+      const existingPage = held.attachingPage;
+      await existing.catch(() => null);
+      if (held.page !== targetPage || existingPage !== targetPage) {
+        return this.attachScreencast(runId, held, onFrame);
+      }
+      const cdp = held.screencastPage === targetPage ? held.screencast ?? null : null;
       if (cdp && onFrame) held.onFrame = onFrame;
       return cdp;
     }
 
-    const attempt = this.attachScreencastFresh(runId, held);
+    // A stale completed stream can exist only across a page handoff. Dispose it
+    // before attaching the replacement; input has already finished and still
+    // owns the action slot when this path is used for a popup.
+    if (held.screencast && held.screencastPage !== targetPage) {
+      const stale = held.screencast;
+      held.screencast = undefined;
+      held.screencastPage = undefined;
+      await stale.send('Page.stopScreencast').catch(() => {});
+      await stale.detach().catch(() => {});
+    }
+
+    const attempt = this.attachScreencastFresh(runId, held, targetPage);
     held.attaching = attempt;
+    held.attachingPage = targetPage;
     try {
       const cdp = await attempt;
       if (cdp && onFrame) held.onFrame = onFrame;
       return cdp;
     } finally {
-      if (held.attaching === attempt) held.attaching = undefined;
+      if (held.attaching === attempt) {
+        held.attaching = undefined;
+        held.attachingPage = undefined;
+      }
     }
   }
 
@@ -821,6 +853,7 @@ export class RemoteBrowserController {
   private async attachScreencastFresh(
     runId: string,
     held: RunBrowser,
+    targetPage: Page,
   ): Promise<CDPSession | null> {
     // An attachment can be requested for two very different reasons. Ordinary
     // watching may fall back to the provider iframe if CDP viewing is broken;
@@ -830,7 +863,7 @@ export class RemoteBrowserController {
     const safetyGate = held.hiddenByHolder === true || held.visibilityUnconfirmed === true;
     let cdp: CDPSession;
     try {
-      cdp = await held.page.context().newCDPSession(held.page);
+      cdp = await targetPage.context().newCDPSession(targetPage);
     } catch {
       if (!safetyGate) {
         // Ordinary viewer failure: do not make the UI suppress a usable provider
@@ -842,12 +875,17 @@ export class RemoteBrowserController {
       return null;
     }
 
+    if (held.page !== targetPage) {
+      await cdp.detach().catch(() => {});
+      return null;
+    }
+
     cdp.on('Page.screencastFrame', ((e: {
       data?: string;
       sessionId?: number;
       metadata?: { deviceWidth?: number; deviceHeight?: number; offsetTop?: number };
     }) => {
-      if (typeof e?.data === 'string') {
+      if (held.page === targetPage && typeof e?.data === 'string') {
         const width = e.metadata?.deviceWidth ?? 0;
         const height = e.metadata?.deviceHeight ?? 0;
         // The page repainted, so whatever was measured before may no longer be
@@ -941,9 +979,18 @@ export class RemoteBrowserController {
         return null;
       }
     }
+    // The page may have been replaced while startScreencast itself was
+    // pending. Never publish that now-stale physical session as the new page's
+    // viewer.
+    if (held.page !== targetPage) {
+      if (!paused) await cdp.send('Page.stopScreencast').catch(() => {});
+      await cdp.detach().catch(() => {});
+      return null;
+    }
     // Recorded BEFORE this promise resolves, so a stop that awaited the attach
     // finds the session rather than racing the assignment.
     held.screencast = cdp;
+    held.screencastPage = targetPage;
     // Consumer ownership belongs to the caller above. In particular, never
     // let an older temporary attach overwrite a watcher that arrived
     // while `newCDPSession` / `startScreencast` was still pending.
@@ -964,6 +1011,7 @@ export class RemoteBrowserController {
       held.onFrame = undefined;
       if (!cdp) return;
       held.screencast = undefined;
+      held.screencastPage = undefined;
       held.capturing = false;
       this.announceControl(runId);
 
@@ -1339,12 +1387,15 @@ export class RemoteBrowserController {
     // serializes the person's own events against each other, so a fast typist
     // cannot interleave two dispatches on one page.
     // Movement never queues; everything else waits its turn. Discrete input is
-    // intentionally unbounded HERE: once a click, key or committed text event
-    // has been accepted into the FIFO, expiring it because earlier accepted
-    // input took two seconds would silently truncate what the person typed.
-    // Agent handoff/takeover waits remain bounded at their own call sites.
+    // intentionally unbounded in TIME once accepted: expiring a click, key or
+    // committed text because earlier accepted input took two seconds silently
+    // truncates what the person typed. The NUMBER accepted is bounded instead,
+    // so a stalled endpoint cannot turn this FIFO into an unbounded memory
+    // queue. Agent handoff/takeover waits remain time-bounded at their call sites.
     const sampled = event.kind === 'move';
-    const token = sampled ? lease.tryActionSlot() : await lease.acquireActionSlot(null);
+    const token = sampled
+      ? lease.tryActionSlot()
+      : await lease.acquireActionSlot(null, true, MAX_HUMAN_INPUT_QUEUE);
     if (!token) {
       // A dropped sample is not a refusal, and must not be reported as one:
       // the caller turns `ok: false` into a notice on the person's screen, and
@@ -1353,7 +1404,7 @@ export class RemoteBrowserController {
       // means the event was handled under the rule above, not that a pointer
       // reached the page.
       if (sampled) return { ok: true };
-      return { ok: false, detail: 'The last thing you did is still finishing. Try again.' };
+      return { ok: false, detail: 'Too many browser inputs are already waiting. Let the page catch up, then try again.' };
     }
 
     try {
@@ -1389,7 +1440,9 @@ export class RemoteBrowserController {
       // Reaching it with a stale receipt needs the watch to have moved, and the
       // check above already refused that. A third answer to the same question
       // is how they come to disagree.
+      const pagesBefore = new Set(held.page.context().pages());
       await this.dispatch(cdp, held, event);
+      await this.followOpenedPage(runId, held, pagesBefore);
     } catch (err) {
       return { ok: false, detail: err instanceof Error ? err.message : String(err) };
     } finally {
@@ -1688,6 +1741,7 @@ export class RemoteBrowserController {
     await held.watchQueue?.catch(() => {});
     const watching = held.screencast;
     held.screencast = undefined;
+    held.screencastPage = undefined;
     if (watching) {
       await watching.send('Page.stopScreencast').catch(() => {});
       await watching.detach().catch(() => {});
@@ -1930,7 +1984,7 @@ export class RemoteBrowserController {
         }
       }
 
-      return await this.perform(held, action, planned);
+      return await this.perform(runId, held, action, planned);
     } catch (err) {
       return { ok: false, detail: err instanceof Error ? err.message : String(err) };
     } finally {
@@ -1953,6 +2007,7 @@ export class RemoteBrowserController {
         ) {
           held.onFrame = undefined;
           held.screencast = undefined;
+          held.screencastPage = undefined;
           // The privacy pause was ended by the successful restore. With no
           // watcher there is no screencast, but this must not be advertised as
           // another deliberate Hide (which would suppress provider fallback).
@@ -2146,10 +2201,7 @@ export class RemoteBrowserController {
       // minute to create — could come back to a bumped generation and be told
       // "the page changed while this action was waiting", about a page that had
       // not changed at all.
-      page.on('framenavigated', ((frame: unknown) => {
-        if (frame !== page.mainFrame()) return;
-        held.generation += 1;
-      }) as never);
+      this.trackPageNavigation(held, page);
       this.runs.set(runId, held);
     } catch (err) {
       // Nothing to withdraw. The live view is announced BELOW, after this
@@ -2190,7 +2242,70 @@ export class RemoteBrowserController {
     return held;
   }
 
-  private async perform(held: RunBrowser, action: BrowserAction, planned: number): Promise<BrowserActionOutcome> {
+  /** Count main-frame navigation only while this page is the run's active page. */
+  private trackPageNavigation(held: RunBrowser, page: Page): void {
+    page.on('framenavigated', ((frame: unknown) => {
+      if (held.page !== page || frame !== page.mainFrame()) return;
+      held.generation += 1;
+    }) as never);
+  }
+
+  /**
+   * Follow a page opened by the action that just finished.
+   *
+   * A popup/new tab is part of the same user gesture (OAuth is the common
+   * example). Keeping `held.page` and the screencast on its opener makes the
+   * new page both invisible and impossible to drive. This runs while the SAME
+   * action slot is still held, after the opening click/key has fully landed, so
+   * no later human/agent event can slip between detecting the popup and moving
+   * the view to it.
+   */
+  private async followOpenedPage(runId: string, held: RunBrowser, before: Set<Page>): Promise<void> {
+    if (this.runs.get(runId) !== held || held.abort.signal.aborted) return;
+    const candidates = held.page.context().pages().filter((p) => !p.isClosed() && !before.has(p));
+    const next = candidates.at(-1);
+    if (!next || next === held.page) return;
+
+    held.page = next;
+    held.generation += 1;
+    held.viewport = undefined;
+    held.metricsStale = true;
+    this.trackPageNavigation(held, next);
+
+    const deliver = held.onFrame;
+    if (deliver) {
+      // The old JPEG is about the opener. Invalidate it BEFORE any awaited
+      // detach/attach and give the popup its own watch generation, so neither a
+      // late old frame nor a late old receipt can authorise input into the new
+      // page. A fresh frame will clear visibilityUnconfirmed; the client's
+      // receipt separately opens Hide/blind input.
+      held.watchGen = (held.watchGen ?? 0) + 1;
+      held.visibilityUnconfirmed = true;
+      held.capturing = false;
+      this.announceControl(runId);
+      await this.attachScreencast(runId, held, deliver);
+      return;
+    }
+
+    // No viewer is mounted. A temporary/old physical stream is useless after
+    // the target moved, so make sure it cannot keep encoding the opener. Do not
+    // manufacture a privacy pause: without `hiddenByHolder`, provider fallback
+    // remains a valid supervision surface when somebody comes back later.
+    const pending = held.attaching;
+    if (pending) await pending.catch(() => null);
+    if (held.screencast && held.screencastPage !== next) {
+      const stale = held.screencast;
+      held.screencast = undefined;
+      held.screencastPage = undefined;
+      await stale.send('Page.stopScreencast').catch(() => {});
+      await stale.detach().catch(() => {});
+    }
+    held.visibilityUnconfirmed = false;
+    held.capturing = held.hiddenByHolder !== true;
+    this.announceControl(runId);
+  }
+
+  private async perform(runId: string, held: RunBrowser, action: BrowserAction, planned: number): Promise<BrowserActionOutcome> {
     const { page } = held;
     /**
      * Race one Playwright call against this run's Stop.
@@ -2229,10 +2344,10 @@ export class RemoteBrowserController {
       }
     };
     const timeout = Math.min(action.timeoutMs ?? 10_000, ACTION_TIMEOUT_MS);
-    const where = async (): Promise<{ url: string; title: string }> => ({
-      url: page.url(),
-      title: await page.title().catch(() => ''),
-    });
+    const where = async (): Promise<{ url: string; title: string }> => {
+      const current = held.page;
+      return { url: current.url(), title: await current.title().catch(() => '') };
+    };
 
     // Same rule as the desktop: an action planned against one page must not run
     // against another. `navigate` names its own destination, so it is exempt.
@@ -2253,17 +2368,22 @@ export class RemoteBrowserController {
         await stoppable(page.goto(target, { timeout: ACTION_TIMEOUT_MS, waitUntil: 'domcontentloaded' }));
         return { ok: true, detail: `Opened ${target}`, ...(await where()) };
       }
-      case 'click':
+      case 'click': {
+        const pagesBefore = new Set(page.context().pages());
         await stoppable(page.click(action.selector!, { timeout }));
+        await this.followOpenedPage(runId, held, pagesBefore);
         return { ok: true, detail: `Clicked ${action.selector}`, ...(await where()) };
+      }
       case 'fill':
         await stoppable(page.fill(action.selector!, action.value ?? '', { timeout }));
         return { ok: true, detail: `Filled ${action.selector}`, ...(await where()) };
       case 'press': {
         // A selector focuses first; without one the key goes to whatever has
         // focus, which is what "press Escape" usually means.
+        const pagesBefore = new Set(page.context().pages());
         if (action.selector) await stoppable(page.press(action.selector, action.key!, { timeout }));
         else await stoppable(page.keyboard.press(action.key!));
+        await this.followOpenedPage(runId, held, pagesBefore);
         return { ok: true, detail: `Pressed ${action.key}`, ...(await where()) };
       }
       case 'wait_for':

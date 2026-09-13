@@ -509,15 +509,18 @@ export class BrowserLease {
    * front of the line gets it, and everybody else is still waiting rather than
    * refused.
    *
-   * `null` as a RESULT means a bounded wait ran out. `null` as `withinMs` means
-   * this accepted operation is intentionally unbounded by time and will leave
-   * the queue only when its turn arrives. `countsAsHumanActivity=false` is for
+   * `null` as a RESULT means a bounded wait ran out OR a caller-supplied queue
+   * cap refused a new waiter. `null` as `withinMs` means an ACCEPTED operation
+   * is intentionally unbounded by time and will leave the queue only when its
+   * turn arrives; it does not require accepting infinitely many operations.
+   * `countsAsHumanActivity=false` is for
    * lifecycle barriers: they still serialize, but an idle deadline must not
    * mistake framework cleanup for evidence that the person is present.
    */
   async acquireActionSlot(
     withinMs: number | null = ACTION_HANDOFF_MS,
     countsAsHumanActivity = true,
+    maxQueued: number | null = null,
   ): Promise<symbol | null> {
     // The queue is empty whenever the slot is free — `endAction` fills it again
     // in the same breath as it clears it — so this is the ordinary path, and it
@@ -526,6 +529,13 @@ export class BrowserLease {
     if (!this.action && this.actionQueue.length === 0) {
       return this.beginAction(countsAsHumanActivity);
     }
+    // An unbounded WAIT does not have to mean an unbounded QUEUE. Discrete
+    // human input passes a finite maxQueued so already-accepted keys/clicks
+    // never age out, while a client that can produce events faster than a
+    // remote endpoint can drain them cannot retain promises/callbacks without
+    // limit. Lifecycle barriers deliberately pass no cap: dropping teardown is
+    // not an acceptable form of backpressure.
+    if (maxQueued !== null && this.actionQueue.length >= maxQueued) return null;
     return await new Promise<symbol | null>((resolve) => {
       let done = false;
       let timer: ReturnType<typeof setTimeout> | undefined;

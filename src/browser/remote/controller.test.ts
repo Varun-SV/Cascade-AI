@@ -161,7 +161,8 @@ const page = {
 function fakeContext(pageForThisContext: typeof page) {
   const c = {
     closed: false,
-    pages: () => [pageForThisContext],
+    pageList: [pageForThisContext] as Array<typeof page>,
+    pages: () => c.pageList,
     newPage: async () => pageForThisContext,
     newCDPSession: async () => {
       cdpCreated += 1;
@@ -230,6 +231,7 @@ beforeEach(() => {
   browser.closed = false;
   browser.contexts = () => [defaultContext];
   defaultContext.closed = false;
+  defaultContext.pageList = [page];
   createdContexts.length = 0;
   cdp = fakeCdp();
   cdpCreated = 0;
@@ -1553,6 +1555,99 @@ describe('handing the browser to the person watching', () => {
     expect(out.ok, 'the agent does not act after control was handed to the person').toBe(false);
     expect(out.detail).toMatch(/taken control/i);
     expect(page.calls, 'and it never reached the page').not.toContain('click:#retry');
+  });
+
+  it('bounds accepted human input without expiring the inputs already in line', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    const blocked = deferred();
+    const entered = deferred();
+    const good = cdp.send;
+    let first = true;
+    cdp.send = async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'Input.insertText' && first) {
+        first = false;
+        entered.resolve();
+        await blocked.promise;
+      }
+      return good.call(cdp, method, params);
+    };
+
+    const head = c.input('run-A', { kind: 'text', text: '0' });
+    await entered.promise;
+    // 64 may wait losslessly; anything beyond the finite admission bound is
+    // refused immediately rather than retaining promises forever behind a
+    // stalled endpoint.
+    const tail = Array.from({ length: 70 }, (_, i) =>
+      c.input('run-A', { kind: 'text', text: String((i + 1) % 10) }));
+    const overflow = await Promise.race([
+      tail.at(-1)!,
+      new Promise<'hung'>((r) => setTimeout(() => r('hung'), 100)),
+    ]);
+    expect(overflow, 'queue overflow is refused rather than retained').not.toBe('hung');
+    expect((overflow as { ok: boolean }).ok).toBe(false);
+    expect((overflow as { detail?: string }).detail).toMatch(/too many browser inputs/i);
+
+    blocked.resolve();
+    const results = await Promise.all([head, ...tail]);
+    expect(results.filter((r) => r.ok), 'active input plus the 64 admitted waiters all drain').toHaveLength(65);
+    expect(results.filter((r) => !r.ok), 'only overflow is refused').toHaveLength(6);
+    cdp.send = good;
+  });
+
+  it('moves control and the screencast to a page opened by the human click', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    cdpPerAttach = true;
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    const openerCdp = cdp;
+    const popup = {
+      ...page,
+      closed: false,
+      currentUrl: 'https://login.test/popup',
+      navHandlers: [] as Array<(frame: unknown) => void>,
+      calls: [] as string[],
+      closeCount: 0,
+      keyboard: { press: async (k: string) => { popup.calls.push(`key:${k}`); } },
+      context() { return pageContext; },
+    };
+    const send = openerCdp.send;
+    let opened = false;
+    openerCdp.send = async (method: string, params?: Record<string, unknown>) => {
+      const out = await send.call(openerCdp, method, params);
+      if (!opened && method === 'Input.dispatchMouseEvent' && params?.['type'] === 'mouseReleased') {
+        opened = true;
+        defaultContext.pageList.push(popup as typeof page);
+      }
+      return out;
+    };
+
+    expect((await c.input('run-A', { kind: 'click', x: 0.5, y: 0.5 })).ok).toBe(true);
+    expect(openerCdp.detached, 'the opener stream is no longer the controlled view').toBe(true);
+    expect(cdp, 'a new physical stream was attached to the popup').not.toBe(openerCdp);
+
+    // The hold stays with the person, and subsequent human CDP input goes to
+    // the replacement session rather than the opener.
+    expect(c.humanHolds('run-A')).toBe(true);
+    expect((await c.input('run-A', { kind: 'text', text: 'otp' })).ok).toBe(true);
+    expect(cdp.calls.filter((x) => x.method === 'Input.insertText').map((x) => x.params?.['text']))
+      .toContain('otp');
+    expect(openerCdp.calls.filter((x) => x.method === 'Input.insertText').map((x) => x.params?.['text']))
+      .not.toContain('otp');
+
+    // And once control is returned, the agent works on that same popup.
+    expect(c.handBack('run-A')).toBe(true);
+    const agent = await c.controller({ kind: 'click', selector: '#continue' }, ctx('run-A', 'w2'));
+    expect(agent.ok).toBe(true);
+    expect(popup.calls).toContain('click:#continue');
+    expect(page.calls).not.toContain('click:#continue');
   });
 
   it('places a click on the page it was clicked on', async () => {

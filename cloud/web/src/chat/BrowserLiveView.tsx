@@ -353,7 +353,7 @@ export function BrowserLiveView({
    * insertion also means the keyboard sink stays empty, so the subsequent
    * `input` event cannot send the paste a second time.
    */
-  /** Flush sampled wheel distance before a later click. */
+  /** Flush sampled wheel distance before a later discrete decision. */
   const flushPendingScroll = () => {
     if (scrollTimerRef.current) {
       clearTimeout(scrollTimerRef.current);
@@ -496,7 +496,18 @@ export function BrowserLiveView({
         {(driving || takeable) && (
           <button
             type="button"
-            onClick={() => (driving ? onHandBack?.() : onTakeOver?.())}
+            onClick={() => {
+              if (driving) {
+                // A wheel delta sampled before Give it back is still part of
+                // the person's gesture. Send it first; the server's action slot
+                // then makes handback wait until that scroll has actually
+                // landed instead of releasing ownership and refusing it later.
+                flushPendingScroll();
+                onHandBack?.();
+              } else {
+                onTakeOver?.();
+              }
+            }}
             title={driving
               ? 'Give the browser back so Cascade can carry on'
               : 'Take the browser yourself — Cascade stops as soon as its current action finishes'}
