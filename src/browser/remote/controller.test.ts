@@ -3793,3 +3793,83 @@ describe('round 33 review regressions', () => {
     openerCdp.send = realSend;
   });
 });
+
+
+describe('round 34 view-boundary regressions', () => {
+  it('does not grant a queued takeover after the viewer has left', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#open' }, ctx('run-A', 'w1'));
+    await c.startWatching('run-A', () => {});
+    cdp.pushFrame(1);
+
+    const entered = deferred();
+    const release = deferred();
+    const realClick = page.click;
+    page.click = async (selector: string) => {
+      page.calls.push(`click:${selector}`);
+      if (selector === '#slow') {
+        entered.resolve();
+        await release.promise;
+      }
+    };
+
+    const acting = c.controller({ kind: 'click', selector: '#slow' }, ctx('run-A', 'w1'));
+    await entered.promise;
+    const takeover = c.takeOver('run-A');
+    await Promise.resolve();
+
+    // The person switches conversations while Take control is still waiting.
+    // stopWatching invalidates the consumer immediately, before its detach can
+    // take the action slot behind the same slow action.
+    const unwatch = c.stopWatching('run-A');
+    await Promise.resolve();
+    release.resolve();
+
+    expect((await acting).ok).toBe(true);
+    const out = await takeover;
+    expect(out.ok, 'a button from a view that no longer exists cannot acquire the human lease').toBe(false);
+    expect(out.detail).toMatch(/view changed|not being watched/i);
+    expect(c.humanHolds('run-A'), 'the hidden run remains available to the agent').toBe(false);
+    await unwatch;
+    page.click = realClick;
+  });
+
+  it('requires a fresh sight receipt after main-frame navigation', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    const frames: BrowserFrame[] = [];
+    const states: Array<{ human: boolean; capturing: boolean; confirmed: boolean }> = [];
+
+    await c.controller({ kind: 'click', selector: '#open' }, ctx('run-A', 'w1'));
+    c.onControlFor('run-A', (state) => states.push(state));
+    await c.startWatching('run-A', (frame) => frames.push(frame));
+    cdp.pushFrame(7, 'LOGIN');
+    const login = frames.at(-1)!;
+    c.frameSeen('run-A', login.generation);
+    c.actorEnded('w1');
+    expect((await c.takeOver('run-A')).ok).toBe(true);
+    expect(await c.setCapture('run-A', false), 'the confirmed login page can be hidden').toBe(false);
+
+    // A password submission can navigate while capture is deliberately off.
+    // The receipt for LOGIN must not vouch for the MFA document.
+    await page.goto('https://mfa.test/');
+    expect(states.at(-1)?.confirmed, 'navigation immediately invalidates sight').toBe(false);
+    const blind = await c.input('run-A', { kind: 'text', text: '123456' });
+    expect(blind.ok, 'blind input stays shut on a document this watch has never seen').toBe(false);
+    expect(cdp.calls.filter((x) => x.method === 'Input.insertText').map((x) => x.params?.['text']))
+      .not.toContain('123456');
+
+    // Showing produces a frame under the NEW sight generation. Only its receipt
+    // can reopen Hide/blind typing.
+    expect(await c.setCapture('run-A', true)).toBe(true);
+    await Promise.resolve();
+    const mfa = frames.at(-1)!;
+    expect(mfa.generation, 'navigation creates a new receipt namespace').not.toBe(login.generation);
+    expect(states.at(-1)?.confirmed, 'a delivered frame is not yet a viewer receipt').toBe(false);
+    c.frameSeen('run-A', mfa.generation);
+    expect(states.at(-1)?.confirmed).toBe(true);
+    expect(await c.setCapture('run-A', false)).toBe(false);
+    expect((await c.input('run-A', { kind: 'text', text: '123456' })).ok).toBe(true);
+  });
+});

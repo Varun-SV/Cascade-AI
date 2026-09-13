@@ -1357,8 +1357,19 @@ export class RemoteBrowserController {
     if (this.revoked.has(runId)) {
       return { ok: false, detail: 'Browser control was stopped for this run.' };
     }
-    if (!this.runs.has(runId)) {
+    const requested = this.runs.get(runId);
+    if (!requested) {
       return { ok: false, detail: 'This run has no browser open.' };
+    }
+    // A takeover is a request for the VIEW the person is looking at, not a
+    // reservation on whichever view happens to exist after an agent action
+    // finishes. Snapshot both halves because unwatch clears the session without
+    // bumping the watch, while reconnect/remount bumps the watch and may reuse
+    // the same physical session. Either change invalidates the request.
+    const requestedCdp = requested.screencast;
+    const requestedWatch = requested.watchGen;
+    if (!requestedCdp || requestedWatch === undefined || !requested.onFrame) {
+      return { ok: false, detail: 'This browser is not being watched right now.' };
     }
     const lease = this.leaseFor(runId);
     if (lease.heldByHuman) {
@@ -1396,6 +1407,14 @@ export class RemoteBrowserController {
       }
       if (!held || held.page.isClosed()) {
         return { ok: false, detail: 'That browser closed while you were waiting for it.' };
+      }
+      // The panel may have gone away while this request was queued. Refuse
+      // rather than retarget: granting the human lease now would pause the
+      // agent on a hidden run until idle expiry, even though nobody is left to
+      // drive it. A replacement watcher is a different viewing boundary and
+      // can ask again once it has its own picture.
+      if (held.screencast !== requestedCdp || held.watchGen !== requestedWatch || !held.onFrame) {
+        return { ok: false, detail: 'The browser view changed while you were waiting. Take control again from the current view.' };
       }
       lease.takeOver(runId);
     } finally {
@@ -2319,7 +2338,7 @@ export class RemoteBrowserController {
       // minute to create — could come back to a bumped generation and be told
       // "the page changed while this action was waiting", about a page that had
       // not changed at all.
-      this.trackPageNavigation(held, page);
+      this.trackPageNavigation(runId, held, page);
       this.runs.set(runId, held);
     } catch (err) {
       // Nothing to withdraw. The live view is announced BELOW, after this
@@ -2361,10 +2380,23 @@ export class RemoteBrowserController {
   }
 
   /** Count main-frame navigation only while this page is the run's active page. */
-  private trackPageNavigation(held: RunBrowser, page: Page): void {
+  private trackPageNavigation(runId: string, held: RunBrowser, page: Page): void {
     page.on('framenavigated', ((frame: unknown) => {
       if (held.page !== page || frame !== page.mainFrame()) return;
       held.generation += 1;
+
+      // A different main document is also a different claim of SIGHT. The CDP
+      // session and callback deliberately survive navigation, so leaving the
+      // watch generation alone let the receipt for the old document vouch for
+      // the destination: hidden input stayed enabled across a password -> MFA
+      // navigation, and a stale receipt could immediately authorize Hide if the
+      // destination's first volatile frame was dropped. Give the same physical
+      // watcher a fresh generation instead. Its next decoded frame can confirm
+      // that generation; a late receipt for the old document cannot.
+      if (held.onFrame && held.watchGen !== undefined) {
+        held.watchGen += 1;
+        this.announceControl(runId);
+      }
     }) as never);
   }
 
@@ -2398,7 +2430,7 @@ export class RemoteBrowserController {
     held.generation += 1;
     held.viewport = undefined;
     held.metricsStale = true;
-    this.trackPageNavigation(held, next);
+    this.trackPageNavigation(runId, held, next);
 
     const deliver = held.onFrame;
     if (deliver) {

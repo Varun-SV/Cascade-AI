@@ -1165,3 +1165,66 @@ describe('BrowserLiveView — round 30 review regressions', () => {
     expect(onInput.mock.calls.some((call) => call[0]?.kind === 'click'), 'release after leaving is a cancellation').toBe(false);
   });
 });
+
+
+describe('BrowserLiveView — touch takeover gestures', () => {
+  const frame = { data: 'TOUCH', width: 1280, height: 800, generation: 1 };
+
+  // jsdom does not currently expose PointerEvent, so Testing Library's
+  // pointer convenience falls back to an event without pointerType/pointerId.
+  // Build the same DOM event React receives in a browser and add the pointer
+  // fields explicitly; this tests our gesture code rather than jsdom support.
+  const touchPointer = (
+    target: Element, type: string,
+    init: { pointerId: number; clientX: number; clientY: number },
+  ) => {
+    const event = new MouseEvent(type, {
+      bubbles: true, cancelable: true, clientX: init.clientX, clientY: init.clientY,
+    });
+    Object.defineProperties(event, {
+      pointerId: { value: init.pointerId },
+      pointerType: { value: 'touch' },
+      isPrimary: { value: true },
+    });
+    fireEvent(target, event);
+  };
+
+  it('turns a finger drag into remote scroll and keeps the local chat still', () => {
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed
+        onStop={() => {}} onInput={onInput} />,
+    );
+    const img = screen.getByRole('img') as HTMLImageElement;
+    Object.defineProperty(img, 'naturalWidth', { value: 1280 });
+    Object.defineProperty(img, 'naturalHeight', { value: 800 });
+    img.getBoundingClientRect = () => ({ left: 0, top: 0, width: 640, height: 400 }) as DOMRect;
+    expect((img.style as CSSStyleDeclaration & { touchAction?: string }).touchAction).toBe('none');
+
+    touchPointer(img, 'pointerdown', { pointerId: 4, clientX: 320, clientY: 300 });
+    touchPointer(img, 'pointermove', { pointerId: 4, clientX: 320, clientY: 220 });
+    touchPointer(img, 'pointerup', { pointerId: 4, clientX: 320, clientY: 220 });
+
+    expect(onInput.mock.calls.map((c) => c[0]).filter((e) => e.kind === 'scroll'))
+      .toEqual([{ kind: 'scroll', x: 0.5, y: 0.55, deltaY: 80 }]);
+    expect(onInput.mock.calls.some((c) => c[0].kind === 'click'), 'a swipe is not a tap').toBe(false);
+  });
+
+  it('keeps a touch tap as one remote click', () => {
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human confirmed
+        onStop={() => {}} onInput={onInput} />,
+    );
+    const img = screen.getByRole('img') as HTMLImageElement;
+    Object.defineProperty(img, 'naturalWidth', { value: 1280 });
+    Object.defineProperty(img, 'naturalHeight', { value: 800 });
+    img.getBoundingClientRect = () => ({ left: 0, top: 0, width: 640, height: 400 }) as DOMRect;
+
+    touchPointer(img, 'pointerdown', { pointerId: 9, clientX: 320, clientY: 200 });
+    touchPointer(img, 'pointerup', { pointerId: 9, clientX: 322, clientY: 201 });
+
+    expect(onInput.mock.calls.map((c) => c[0]).filter((e) => e.kind === 'click'))
+      .toEqual([{ kind: 'click', x: 0.503125, y: 0.5025, button: 'left', clicks: 1 }]);
+  });
+});

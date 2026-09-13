@@ -205,6 +205,12 @@ export function BrowserLiveView({
   const pendingClickRef = useRef<{
     button: number; clicks: number; clientX: number; clientY: number;
   } | null>(null);
+  /** One active finger gesture. A tap becomes a click; a drag becomes scroll. */
+  const touchGestureRef = useRef<{
+    pointerId: number; startX: number; startY: number; lastY: number; scrolling: boolean;
+  } | null>(null);
+  /** Suppress compatibility mouse events after a touch we handled ourselves. */
+  const ignoreMouseUntilRef = useRef(0);
   /**
    * When a pointer move was last forwarded, so they go out at a rate rather
    * than one per mousemove event.
@@ -311,6 +317,7 @@ export function BrowserLiveView({
       }
       pendingScrollRef.current = null;
       pendingClickRef.current = null;
+      touchGestureRef.current = null;
       // Text accumulated by an IME belongs to the same view as the pointer
       // samples above. Never let a composition started in task A become the
       // first input delivered after a straight switch to task B.
@@ -367,7 +374,30 @@ export function BrowserLiveView({
    * insertion also means the keyboard sink stays empty, so the subsequent
    * `input` event cannot send the paste a second time.
    */
-  /** Flush sampled wheel distance before a later discrete decision. */
+  /** Queue one scroll distance without putting every sample in the remote FIFO. */
+  const queueScroll = (p: { x: number; y: number }, deltaY: number) => {
+    if (!Number.isFinite(deltaY) || deltaY === 0) return;
+    const now = Date.now();
+    const since = now - lastScrollRef.current;
+    if (since >= SCROLL_INTERVAL_MS && !pendingScrollRef.current) {
+      lastScrollRef.current = now;
+      onInput?.({ kind: 'scroll', ...p, deltaY });
+      return;
+    }
+    const pending = pendingScrollRef.current;
+    pendingScrollRef.current = { ...p, deltaY: (pending?.deltaY ?? 0) + deltaY };
+    if (scrollTimerRef.current) return;
+    scrollTimerRef.current = setTimeout(() => {
+      scrollTimerRef.current = null;
+      const total = pendingScrollRef.current;
+      pendingScrollRef.current = null;
+      if (!total) return;
+      lastScrollRef.current = Date.now();
+      onInput?.({ kind: 'scroll', ...total });
+    }, Math.max(0, SCROLL_INTERVAL_MS - since));
+  };
+
+  /** Flush sampled wheel/touch distance before a later discrete decision. */
   const flushPendingScroll = () => {
     if (scrollTimerRef.current) {
       clearTimeout(scrollTimerRef.current);
@@ -583,6 +613,7 @@ export function BrowserLiveView({
           tabIndex={-1}
           draggable={false}
           onMouseDown={driving ? (e) => {
+            if (Date.now() < ignoreMouseUntilRef.current) { e.preventDefault(); return; }
             // Keep the keyboard on the editable sink, where the browser can
             // perform real layout/IME composition instead of us guessing from
             // keydown. Mouse-down itself is NOT a remote click: the person can
@@ -598,6 +629,7 @@ export function BrowserLiveView({
             };
           } : undefined}
           onMouseUp={driving ? (e) => {
+            if (Date.now() < ignoreMouseUntilRef.current) { e.preventDefault(); return; }
             e.preventDefault();
             const press = pendingClickRef.current;
             pendingClickRef.current = null;
@@ -649,29 +681,65 @@ export function BrowserLiveView({
               onInput?.({ kind: 'move', ...last });
             }, MOVE_INTERVAL_MS - since);
           } : undefined}
+          onPointerDown={driving ? (e) => {
+            if (e.pointerType !== 'touch') return;
+            const p = at(e.clientX, e.clientY);
+            if (!p) return;
+            e.preventDefault();
+            ignoreMouseUntilRef.current = Date.now() + 750;
+            touchGestureRef.current = {
+              pointerId: e.pointerId, startX: e.clientX, startY: e.clientY,
+              lastY: e.clientY, scrolling: false,
+            };
+            try { e.currentTarget.setPointerCapture?.(e.pointerId); } catch { /* best effort */ }
+          } : undefined}
+          onPointerMove={driving ? (e) => {
+            if (e.pointerType !== 'touch') return;
+            const gesture = touchGestureRef.current;
+            if (!gesture || gesture.pointerId !== e.pointerId) return;
+            e.preventDefault();
+            const p = at(e.clientX, e.clientY);
+            if (!p) return;
+            const dx = e.clientX - gesture.startX;
+            const dyFromStart = e.clientY - gesture.startY;
+            if (!gesture.scrolling && (dx * dx) + (dyFromStart * dyFromStart) <= CLICK_SLOP_PX * CLICK_SLOP_PX) return;
+            const deltaY = gesture.lastY - e.clientY;
+            gesture.scrolling = true;
+            gesture.lastY = e.clientY;
+            queueScroll(p, deltaY);
+          } : undefined}
+          onPointerUp={driving ? (e) => {
+            if (e.pointerType !== 'touch') return;
+            const gesture = touchGestureRef.current;
+            if (!gesture || gesture.pointerId !== e.pointerId) return;
+            e.preventDefault();
+            touchGestureRef.current = null;
+            const dx = e.clientX - gesture.startX;
+            const dy = e.clientY - gesture.startY;
+            const p = at(e.clientX, e.clientY);
+            if (!p) return;
+            if (gesture.scrolling || (dx * dx) + (dy * dy) > CLICK_SLOP_PX * CLICK_SLOP_PX) {
+              if (!gesture.scrolling) queueScroll(p, gesture.startY - e.clientY);
+              flushPendingScroll();
+              return;
+            }
+            keyboardRef.current?.focus();
+            flushPendingScroll();
+            onInput?.({ kind: 'click', ...p, button: 'left', clicks: 1 });
+          } : undefined}
+          onPointerCancel={driving ? (e) => {
+            if (e.pointerType !== 'touch') return;
+            const gesture = touchGestureRef.current;
+            if (!gesture || gesture.pointerId !== e.pointerId) return;
+            e.preventDefault();
+            touchGestureRef.current = null;
+            if (gesture.scrolling) flushPendingScroll();
+          } : undefined}
           onContextMenu={driving ? (e) => e.preventDefault() : undefined}
           onWheel={driving ? (e) => {
             const p = at(e.clientX, e.clientY);
             if (!p) return;
-            const dy = wheelPixels(e, frame.height);
-            const now = Date.now();
-            const since = now - lastScrollRef.current;
-            if (since >= SCROLL_INTERVAL_MS && !pendingScrollRef.current) {
-              lastScrollRef.current = now;
-              onInput?.({ kind: 'scroll', ...p, deltaY: dy });
-              return;
-            }
-            const pending = pendingScrollRef.current;
-            pendingScrollRef.current = { ...p, deltaY: (pending?.deltaY ?? 0) + dy };
-            if (scrollTimerRef.current) return;
-            scrollTimerRef.current = setTimeout(() => {
-              scrollTimerRef.current = null;
-              const total = pendingScrollRef.current;
-              pendingScrollRef.current = null;
-              if (!total) return;
-              lastScrollRef.current = Date.now();
-              onInput?.({ kind: 'scroll', ...total });
-            }, Math.max(0, SCROLL_INTERVAL_MS - since));
+            queueScroll(p, wheelPixels(e, frame.height));
           } : undefined}
           onLoad={() => {
             if (frame.generation !== undefined) onFrameShown?.(frame.generation);
@@ -679,7 +747,7 @@ export function BrowserLiveView({
           style={{
             width: '100%', minHeight: 400, maxHeight: 600, objectFit: 'contain',
             display: 'block', background: '#000',
-            ...(driving ? { cursor: 'crosshair' } : { pointerEvents: 'none' }),
+            ...(driving ? { cursor: 'crosshair', touchAction: 'none' } : { pointerEvents: 'none' }),
           }}
         />
       )}
