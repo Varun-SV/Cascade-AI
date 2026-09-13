@@ -150,7 +150,7 @@ export type BrowserInput =
   | { kind: 'click'; x: number; y: number; button?: 'left' | 'right' | 'middle'; clicks?: number }
   | { kind: 'scroll'; x: number; y: number; deltaY: number }
   | { kind: 'text'; text: string }
-  | { kind: 'key'; key: string };
+  | { kind: 'key'; key: string; modifiers?: Array<'Control' | 'Meta' | 'Shift'> };
 
 /**
  * The keys a person may send, and what Chrome needs to be told about each.
@@ -624,14 +624,22 @@ export class RemoteBrowserController {
    * allocated and billed until the whole run ended, for a run that has just
    * been stopped.
    */
-  private async releaseIfIdle(runId: string): Promise<void> {
+  private async releaseIfIdle(runId: string, releaseSlot?: () => void): Promise<void> {
     const held = this.runs.get(runId);
-    if (!held) return;
+    if (!held) {
+      releaseSlot?.();
+      return;
+    }
     this.runs.delete(runId);
-    // Awaited, not fired and forgotten: the caller is about to report the
-    // refusal, and the session should be gone by the time it does. Otherwise
-    // "stopped" and "still paying for a browser" are true at the same moment.
-    await this.teardown(runId, held);
+    // Start teardown while the run is already unreachable, but release the
+    // caller's action slot BEFORE awaiting it. `disposeRun()` waits for the
+    // watch queue, and an unwatch in that queue may itself be waiting for this
+    // exact slot. Releasing here breaks that cycle without weakening the older
+    // contract: the refusal still does not return until the provider session is
+    // actually handed back.
+    const teardown = this.teardown(runId, held);
+    releaseSlot?.();
+    await teardown;
   }
 
   /** Release every run's session. For when the deployment's config changes. */
@@ -1464,6 +1472,53 @@ export class RemoteBrowserController {
         return;
       }
       case 'key': {
+        const modifiers = event.modifiers;
+        if (modifiers !== undefined) {
+          if (!Array.isArray(modifiers)
+            || modifiers.some((m) => m !== 'Control' && m !== 'Meta' && m !== 'Shift')
+            || new Set(modifiers).size !== modifiers.length) {
+            throw new Error('That editing shortcut has invalid modifiers.');
+          }
+          const primary = modifiers.filter((m) => m === 'Control' || m === 'Meta');
+          const shifted = modifiers.includes('Shift');
+          if (primary.length !== 1) {
+            throw new Error('That editing shortcut cannot be sent to the page.');
+          }
+          const key = typeof event.key === 'string' ? event.key : '';
+          const lower = key.toLowerCase();
+          const shortcut = lower === 'a' && !shifted
+            ? { key: 'a', code: 'KeyA', vk: 65 }
+            : lower === 'z'
+              ? { key: 'z', code: 'KeyZ', vk: 90 }
+              : lower === 'y' && !shifted
+                ? { key: 'y', code: 'KeyY', vk: 89 }
+                : key === 'Backspace' && !shifted
+                  ? { key: 'Backspace', code: 'Backspace', vk: 8 }
+                  : key === 'Delete' && !shifted
+                    ? { key: 'Delete', code: 'Delete', vk: 46 }
+                    : undefined;
+          if (!shortcut) {
+            // Copy/cut cannot honestly be implemented by a remote key chord:
+            // Chrome would copy into the REMOTE machine's clipboard, not the
+            // local clipboard the person expects. Refuse those (and any future
+            // editing chord) explicitly rather than letting it mutate only the
+            // hidden textarea and then forwarding the person's next text as a
+            // different remote edit.
+            throw new Error(`That editing shortcut is not supported for the remote page: ${key}`);
+          }
+          const modifierBits = (primary[0] === 'Control' ? 2 : 4) | (shifted ? 8 : 0);
+          const base = {
+            key: shortcut.key,
+            code: shortcut.code,
+            windowsVirtualKeyCode: shortcut.vk,
+            nativeVirtualKeyCode: shortcut.vk,
+            modifiers: modifierBits,
+          };
+          await cdp.send('Input.dispatchKeyEvent', { ...base, type: 'rawKeyDown' });
+          await cdp.send('Input.dispatchKeyEvent', { ...base, type: 'keyUp' });
+          return;
+        }
+
         // `Object.hasOwn`, not a bare lookup. `KEYS['__proto__']` is
         // `Object.prototype` — truthy — so a bare `if (!spec)` let it through
         // and then read `spec.code` as undefined, dispatching a key event with
@@ -1764,11 +1819,11 @@ export class RemoteBrowserController {
       // straight ahead. Aborting the signal is not enough on its own — nothing
       // is awaiting it at that moment.
       if (this.revoked.has(runId)) {
-        await this.releaseIfIdle(runId);
+        await this.releaseIfIdle(runId, () => lease_.endAction(token));
         return { ok: false, detail: 'The user stopped browser control for this run.' };
       }
       if (context.signal?.aborted || held.abort.signal.aborted) {
-        await this.releaseIfIdle(runId);
+        await this.releaseIfIdle(runId, () => lease_.endAction(token));
         return { ok: false, detail: 'The run was cancelled.' };
       }
 
@@ -1866,11 +1921,11 @@ export class RemoteBrowserController {
         // is the only thing that actually stops Playwright. So the action would
         // land, unstoppably, after the user stopped the browser.
         if (this.revoked.has(runId)) {
-          await this.releaseIfIdle(runId);
+          await this.releaseIfIdle(runId, () => lease_.endAction(token));
           return { ok: false, detail: 'The user stopped browser control for this run.' };
         }
         if (context.signal?.aborted || held.abort.signal.aborted) {
-          await this.releaseIfIdle(runId);
+          await this.releaseIfIdle(runId, () => lease_.endAction(token));
           return { ok: false, detail: 'The run was cancelled.' };
         }
       }

@@ -118,6 +118,15 @@ export class BrowserLease {
   /** Whether the current action slot represents activity by its holder. */
   private actionCountsAsHumanActivity = false;
   /**
+   * The human action that has already consumed its one idle-deadline grace.
+   * A single wedged CDP request must not look like fresh activity every two
+   * minutes forever. The first deadline may yield to an event that began before
+   * it; a second deadline for that SAME event becomes a pending lapse instead.
+   */
+  private idleGraceAction: symbol | null = null;
+  /** Release the human hold as soon as this overlong action finally unwinds. */
+  private idleLapseAfterAction: symbol | null = null;
+  /**
    * Everyone waiting for that slot, IN THE ORDER THEY ASKED.
    *
    * A queue rather than a poll, and the ordering is the whole reason for it.
@@ -308,9 +317,18 @@ export class BrowserLease {
   private lapse(): void {
     if (this.actor !== HUMAN_ACTOR) return;
     if (this.action && this.actionCountsAsHumanActivity) {
-      // An event the person started before the deadline is evidence they are
-      // still here, so that interaction earns a fresh idle interval.
-      this.armIdle();
+      // An event that began before the FIRST deadline is evidence the person
+      // was there, so it gets one fresh interval. But the same still-running
+      // request at the NEXT deadline is not new activity. Mark the lapse as
+      // pending and stop arming timers; when that exact action unwinds,
+      // `endAction` releases the hold before any queued event can take its slot.
+      if (this.idleGraceAction !== this.action) {
+        this.idleGraceAction = this.action;
+        this.armIdle();
+      } else {
+        this.idleLapseAfterAction = this.action;
+        this.clearHumanIdle();
+      }
       return;
     }
     // A lifecycle barrier (for example watcher teardown) serializes against
@@ -376,6 +394,8 @@ export class BrowserLease {
     // would fire into a lease somebody else has since taken.
     this.clearHumanIdle();
     this.handBackWanted = false;
+    this.idleGraceAction = null;
+    this.idleLapseAfterAction = null;
     this.actor = null;
     this.session = null;
 
@@ -435,8 +455,17 @@ export class BrowserLease {
    */
   endAction(token: symbol): boolean {
     if (this.action !== token) return false;
+    const lapseNow = this.actor === HUMAN_ACTOR && this.idleLapseAfterAction === token;
     this.action = null;
     this.actionCountsAsHumanActivity = false;
+    if (this.idleGraceAction === token) this.idleGraceAction = null;
+    if (this.idleLapseAfterAction === token) this.idleLapseAfterAction = null;
+    // Release BEFORE handing the action slot to the next queued operation. A
+    // later human event that was queued behind a request which consumed two
+    // complete idle intervals is stale by definition; it may take the slot but
+    // its post-wait ownership check will refuse it. This also preserves the
+    // core rule that the old event itself finishes before ownership changes.
+    if (lapseNow) this.release();
     this.actionQueue.shift()?.();
     return true;
   }

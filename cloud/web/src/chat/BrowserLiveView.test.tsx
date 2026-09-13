@@ -307,8 +307,11 @@ describe('BrowserLiveView — taking the page over', () => {
     fireEvent.mouseDown(img, { clientX: 200, clientY: 200, button: 4, detail: 1 });
     expect(onInput, 'Back and Forward are not clicks').not.toHaveBeenCalled();
 
-    // The three that ARE buttons still work.
+    // The three that ARE buttons still work — once the matching button is
+    // released. Mouse-down alone is deliberately only a cancellable candidate.
     fireEvent.mouseDown(img, { clientX: 200, clientY: 200, button: 2, detail: 1 });
+    expect(onInput).not.toHaveBeenCalled();
+    fireEvent.mouseUp(img, { clientX: 200, clientY: 200, button: 2, detail: 1 });
     expect(onInput).toHaveBeenCalledWith({ kind: 'click', x: 0.5, y: 0.5, button: 'right', clicks: 1 });
   });
 
@@ -431,6 +434,8 @@ describe('BrowserLiveView — taking the page over', () => {
       fireEvent.wheel(img, { clientX: 200, clientY: 200, deltaY: 20, deltaMode: 0 });
       expect(onInput).not.toHaveBeenCalled();
       fireEvent.mouseDown(img, { clientX: 200, clientY: 200, button: 0, detail: 1 });
+      expect(onInput, 'pressing has not committed either gesture yet').not.toHaveBeenCalled();
+      fireEvent.mouseUp(img, { clientX: 200, clientY: 200, button: 0, detail: 1 });
       expect(onInput.mock.calls.map((c) => c[0])).toEqual([
         { kind: 'scroll', x: 0.5, y: 0.5, deltaY: 20 },
         { kind: 'click', x: 0.5, y: 0.5, button: 'left', clicks: 1 },
@@ -586,11 +591,15 @@ describe('BrowserLiveView — taking the page over', () => {
     img.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
 
     fireEvent.mouseDown(img, { clientX: 200, clientY: 200, button: 0, detail: 1 });
+    expect(onInput, 'mouse-down is only the candidate').not.toHaveBeenCalled();
+    fireEvent.mouseUp(img, { clientX: 200, clientY: 200, button: 0, detail: 1 });
     expect(onInput).toHaveBeenCalledWith({ kind: 'click', x: 0.5, y: 0.5, button: 'left', clicks: 1 });
 
-    // In the letterbox, which is not the page at all.
+    // In the letterbox, which is not the page at all. It cannot even create a
+    // candidate, so the later release cannot turn the black bar into a click.
     onInput.mockClear();
     fireEvent.mouseDown(img, { clientX: 200, clientY: 10, button: 0, detail: 1 });
+    fireEvent.mouseUp(img, { clientX: 200, clientY: 10, button: 0, detail: 1 });
     expect(onInput, 'a click on a black bar is not a click on anything').not.toHaveBeenCalled();
   });
 
@@ -993,5 +1002,66 @@ describe('BrowserLiveView — taking the page over', () => {
       />,
     );
     expect(screen.getByRole('status')).toHaveTextContent(/still finishing/i);
+  });
+});
+
+
+describe('BrowserLiveView — round 30 review regressions', () => {
+  const frame = { data: 'ROUND30', width: 1280, height: 800, generation: 30 };
+
+  function driving(onInput: ReturnType<typeof vi.fn>) {
+    return render(
+      <BrowserLiveView
+        active liveViewUrl={undefined} frame={frame} human confirmed
+        onStop={() => {}} onInput={onInput}
+      />,
+    );
+  }
+
+  it('sends editing chords to the remote boundary instead of editing only the hidden textarea', () => {
+    const onInput = vi.fn();
+    driving(onInput);
+    const image = screen.getByRole('img') as HTMLImageElement;
+    fireEvent.mouseDown(image, { clientX: 10, clientY: 10, button: 0 });
+    const keyboard = screen.getByLabelText(/type into the agent browser/i) as HTMLTextAreaElement;
+
+    fireEvent.keyDown(keyboard, { key: 'a', ctrlKey: true });
+    fireEvent.keyDown(keyboard, { key: 'z', metaKey: true });
+    fireEvent.keyDown(keyboard, { key: 'c', ctrlKey: true });
+
+    expect(onInput.mock.calls.map((call) => call[0])).toEqual([
+      { kind: 'key', key: 'a', modifiers: ['Control'] },
+      { kind: 'key', key: 'z', modifiers: ['Meta'] },
+      { kind: 'key', key: 'c', modifiers: ['Control'] },
+    ]);
+  });
+
+  it('does not commit a remote click until the matching mouse button is released', () => {
+    const onInput = vi.fn();
+    driving(onInput);
+    const image = screen.getByRole('img') as HTMLImageElement;
+    Object.defineProperty(image, 'naturalWidth', { value: 1280 });
+    Object.defineProperty(image, 'naturalHeight', { value: 800 });
+    image.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1280, height: 800 }) as DOMRect;
+
+    fireEvent.mouseDown(image, { clientX: 320, clientY: 200, button: 0, detail: 1 });
+    expect(onInput.mock.calls.some((call) => call[0]?.kind === 'click'), 'mouse-down is only a candidate').toBe(false);
+
+    fireEvent.mouseUp(image, { clientX: 320, clientY: 200, button: 0, detail: 1 });
+    expect(onInput).toHaveBeenCalledWith({ kind: 'click', x: 0.25, y: 0.25, button: 'left', clicks: 1 });
+  });
+
+  it('lets dragging away cancel a candidate remote click', () => {
+    const onInput = vi.fn();
+    driving(onInput);
+    const image = screen.getByRole('img') as HTMLImageElement;
+    Object.defineProperty(image, 'naturalWidth', { value: 1280 });
+    Object.defineProperty(image, 'naturalHeight', { value: 800 });
+    image.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1280, height: 800 }) as DOMRect;
+
+    fireEvent.mouseDown(image, { clientX: 320, clientY: 200, button: 0, buttons: 1 });
+    fireEvent.mouseLeave(image, { clientX: 1400, clientY: 900, button: 0, buttons: 1 });
+    fireEvent.mouseUp(image, { clientX: 400, clientY: 250, button: 0, buttons: 0 });
+    expect(onInput.mock.calls.some((call) => call[0]?.kind === 'click'), 'release after leaving is a cancellation').toBe(false);
   });
 });

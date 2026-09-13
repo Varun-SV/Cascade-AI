@@ -93,7 +93,7 @@ export type BrowserInputEvent =
   | { kind: 'click'; x: number; y: number; button?: 'left' | 'right' | 'middle'; clicks?: number }
   | { kind: 'scroll'; x: number; y: number; deltaY: number }
   | { kind: 'text'; text: string }
-  | { kind: 'key'; key: string };
+  | { kind: 'key'; key: string; modifiers?: Array<'Control' | 'Meta' | 'Shift'> };
 
 interface Props {
   /**
@@ -184,6 +184,13 @@ export function BrowserLiveView({
    * knows how to do; we forward only the committed text.
    */
   const keyboardRef = useRef<HTMLTextAreaElement>(null);
+  /**
+   * A pointer press is only a candidate click until the matching release.
+   * Sending a complete remote click from mouse-down made dragging away unable
+   * to cancel a destructive action: the server had already pressed AND
+   * released before the local button came back up.
+   */
+  const pendingClickRef = useRef<{ button: number; clicks: number } | null>(null);
   /**
    * When a pointer move was last forwarded, so they go out at a rate rather
    * than one per mousemove event.
@@ -289,6 +296,7 @@ export function BrowserLiveView({
         scrollTimerRef.current = null;
       }
       pendingScrollRef.current = null;
+      pendingClickRef.current = null;
       // Text accumulated by an IME belongs to the same view as the pointer
       // samples above. Never let a composition started in task A become the
       // first input delivered after a straight switch to task B.
@@ -380,18 +388,39 @@ export function BrowserLiveView({
    * did not request. Refuse it locally rather than silently degrading it.
    */
   const onKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Let local browser shortcuts and AltGr do their normal thing. If they
-    // produce text, the textarea's `input` event below is what forwards it.
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
     // During composition, physical key names (`Process`, Enter, arrows) belong
     // to the IME, not to the remote page. The committed text arrives via input.
     if (e.nativeEvent.isComposing || e.key === 'Process' || e.key === 'Dead') return;
+
+    // Editing chords are different from browser/application shortcuts. Letting
+    // Ctrl/Meta+A run only against this always-empty off-screen textarea and
+    // then forwarding the person's replacement text changes APPEND into
+    // REPLACE-without-the-replace. Carry the chord to the remote boundary so
+    // safe edits (select-all, undo/redo, delete-word) happen there. Copy/cut are
+    // sent too, but the controller refuses them explicitly because a remote
+    // clipboard is not the local clipboard the person expects.
+    if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+      const editing = new Set(['a', 'c', 'x', 'z', 'y', 'Backspace', 'Delete']);
+      const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+      if (editing.has(key)) {
+        e.preventDefault();
+        e.currentTarget.value = '';
+        flushPendingScroll();
+        const modifiers: Array<'Control' | 'Meta' | 'Shift'> = [];
+        if (e.ctrlKey) modifiers.push('Control');
+        if (e.metaKey) modifiers.push('Meta');
+        if (e.shiftKey) modifiers.push('Shift');
+        onInput?.({ kind: 'key', key, modifiers });
+      }
+      return;
+    }
+    // Let Alt/AltGr and unrelated local browser shortcuts do their normal thing.
+    if (e.altKey) return;
     if (!COMMAND_KEYS.has(e.key)) return;
     e.preventDefault();
-    // No modifier representation in BrowserInput yet. Fail closed instead of
-    // turning Shift+Tab/Arrow/Enter into an unshifted remote mutation.
+    // Shift+Tab/Arrow/Enter is a materially different command. This protocol
+    // still does not expose those shifted navigation commands, so fail closed.
     if (e.shiftKey) return;
-    // A command must not leave editable residue in the sink.
     e.currentTarget.value = '';
     flushPendingScroll();
     onInput?.({ kind: 'key', key: e.key });
@@ -520,20 +549,41 @@ export function BrowserLiveView({
           alt="The page Cascade's browser is on"
           title={driving ? 'Agent browser session (you have control)' : 'Agent browser session (view only)'}
           tabIndex={-1}
+          draggable={false}
           onMouseDown={driving ? (e) => {
             // Keep the keyboard on the editable sink, where the browser can
             // perform real layout/IME composition instead of us guessing from
-            // keydown. Pointer input still belongs to the image underneath.
+            // keydown. Mouse-down itself is NOT a remote click: the person can
+            // still drag away and release to cancel it, just like a local page.
             e.preventDefault();
             keyboardRef.current?.focus();
+            pendingClickRef.current = null;
             if (e.button > 2) return;
+            if (!at(e.clientX, e.clientY)) return;
+            pendingClickRef.current = { button: e.button, clicks: e.detail || 1 };
+          } : undefined}
+          onMouseUp={driving ? (e) => {
+            e.preventDefault();
+            const press = pendingClickRef.current;
+            pendingClickRef.current = null;
+            if (!press || press.button !== e.button) return;
             const p = at(e.clientX, e.clientY);
-            if (p) {
-              // The sampled wheel happened before this click. Flush it
-              // now so its timer cannot reverse their remote order.
-              flushPendingScroll();
-              onInput?.({ kind: 'click', ...p, button: e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left', clicks: e.detail || 1 });
-            }
+            if (!p) return;
+            // The sampled wheel happened before this completed click. Flush it
+            // before the discrete event so the remote FIFO preserves gesture order.
+            flushPendingScroll();
+            onInput?.({
+              kind: 'click', ...p,
+              button: e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left',
+              clicks: e.detail || press.clicks || 1,
+            });
+          } : undefined}
+          onMouseLeave={driving ? (e) => {
+            // Leaving while a button is down cancels the candidate. If the
+            // person comes back before releasing, they must press again; being
+            // conservative here is preferable to committing a destructive click
+            // whose release happened somewhere else.
+            if (e.buttons !== 0) pendingClickRef.current = null;
           } : undefined}
           onMouseMove={driving ? (e) => {
             const p = at(e.clientX, e.clientY);

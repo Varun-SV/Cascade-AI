@@ -3396,3 +3396,118 @@ describe('two watches racing each other', () => {
     expect(cdp.detached, 'a run that is over leaves nothing encoding').toBe(true);
   });
 });
+
+
+describe('round 30 review regressions', () => {
+  async function openWatchedHuman(c: InstanceType<typeof RemoteBrowserController>, runId = 'run-r30') {
+    await c.controller({ kind: 'click', selector: '#open' }, ctx(runId, 'worker-r30'));
+    let generation: number | undefined;
+    await c.startWatching(runId, (f) => { generation = f.generation; });
+    await Promise.resolve();
+    if (generation === undefined) {
+      cdp.pushFrame(301);
+      await Promise.resolve();
+    }
+    if (generation === undefined) throw new Error('watch produced no generation');
+    c.frameSeen(runId, generation);
+    c.actorEnded('worker-r30');
+    expect((await c.takeOver(runId)).ok).toBe(true);
+  }
+
+  it('does not deadlock cancellation behind an unwatch waiting for the action slot', async () => {
+    const { provider, ended } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await openWatchedHuman(c);
+    expect(await c.setCapture('run-r30', false)).toBe(false);
+    expect(c.handBack('run-r30')).toBe(true);
+
+    const restoreStarted = deferred();
+    const allowRestore = deferred();
+    const realSend = cdp.send;
+    cdp.send = async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'Page.startScreencast') {
+        restoreStarted.resolve();
+        await allowRestore.promise;
+      }
+      return realSend.call(cdp, method, params);
+    };
+
+    const abort = new AbortController();
+    const acting = c.controller(
+      { kind: 'click', selector: '#after-hidden' },
+      ctx('run-r30', 'worker-after', abort.signal),
+    );
+    await restoreStarted.promise;
+
+    // The unwatch invalidates the view and then waits for the action slot which
+    // `acting` still owns. Cancellation must not await teardown/watchQueue from
+    // inside that same slot, or the three promises form a permanent cycle.
+    const unwatching = c.stopWatching('run-r30');
+    await Promise.resolve();
+    abort.abort();
+    allowRestore.resolve();
+
+    const settled = await Promise.race([
+      acting,
+      new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 500)),
+    ]);
+    expect(settled, 'cancellation releases its slot instead of waiting on its own unwatch').not.toBe('hung');
+    expect((settled as { ok?: boolean }).ok).toBe(false);
+    await unwatching;
+    await c.dispose();
+    expect(ended, 'the provider session is eventually returned').toContain('sess-1');
+  });
+
+  it('forwards safe editing chords and refuses clipboard chords explicitly', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await openWatchedHuman(c);
+
+    const selected = await c.input('run-r30', {
+      kind: 'key', key: 'a', modifiers: ['Control'],
+    });
+    expect(selected.ok).toBe(true);
+    const keyCalls = cdp.calls.filter((call) => call.method === 'Input.dispatchKeyEvent');
+    expect(keyCalls.at(-2)?.params).toMatchObject({
+      type: 'rawKeyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2,
+    });
+    expect(keyCalls.at(-1)?.params).toMatchObject({ type: 'keyUp', modifiers: 2 });
+
+    const before = cdp.calls.length;
+    const copy = await c.input('run-r30', {
+      kind: 'key', key: 'c', modifiers: ['Control'],
+    });
+    expect(copy.ok, 'remote copy would target the remote clipboard, so it is refused rather than faked').toBe(false);
+    expect(copy.detail).toMatch(/shortcut.*not supported/i);
+    expect(cdp.calls.length, 'a refused editing chord sends no CDP key event').toBe(before);
+  });
+
+  it('lets one long human event defer idle once, then lapses as soon as that same event unwinds', async () => {
+    vi.useFakeTimers();
+    try {
+      const { provider } = fakeProvider();
+      const c = new RemoteBrowserController({ provider });
+      await openWatchedHuman(c);
+
+      const gate = deferred();
+      const realSend = cdp.send;
+      cdp.send = async (method: string, params?: Record<string, unknown>) => {
+        if (method === 'Input.insertText') await gate.promise;
+        return realSend.call(cdp, method, params);
+      };
+
+      const typing = c.input('run-r30', { kind: 'text', text: 'x' });
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(c.humanHolds('run-r30'), 'the event that crossed the first deadline gets one grace interval').toBe(true);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(c.humanHolds('run-r30'), 'ownership is not torn away while the CDP event is still landing').toBe(true);
+
+      gate.resolve();
+      await typing;
+      await Promise.resolve();
+      expect(c.humanHolds('run-r30'), 'the second deadline was pending, not renewed for another two minutes').toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
