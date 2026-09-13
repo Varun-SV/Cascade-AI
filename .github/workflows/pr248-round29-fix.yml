@@ -24,9 +24,9 @@ jobs:
       - name: Apply round 29 fixes
         run: python .github/scripts/pr248-round29-fix.py
       - name: Conversation-scope regressions
-        run: npx vitest run cloud/web/src/chat/useChatSession.conversationScope.test.tsx
+        run: npm run test -w cascade-cloud-web -- src/chat/useChatSession.conversationScope.test.tsx
       - name: Browser live-view regressions
-        run: npx vitest run cloud/web/src/chat/BrowserLiveView.test.tsx
+        run: npm run test -w cascade-cloud-web -- src/chat/BrowserLiveView.test.tsx
       - name: Full cloud web unit suite
         run: npm run test -w cascade-cloud-web
       - name: Cloud web production build
