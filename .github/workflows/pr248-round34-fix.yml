@@ -1,0 +1,58 @@
+name: PR248 round 34 fix
+
+on:
+  push:
+    branches: [claude/desktop-app-features-j8qfoj]
+    paths:
+      - .github/workflows/pr248-round34-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: claude/desktop-app-features-j8qfoj
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Apply round 34 fixes
+        run: python .github/scripts/pr248-round34-fix.py
+
+      - name: Controller regressions
+        run: npm test -- src/browser/remote/controller.test.ts
+
+      - name: BrowserLiveView regressions
+        run: npm run test -w cascade-cloud-web -- BrowserLiveView.test.tsx
+
+      - name: Full cloud web suite
+        run: npm test -w cascade-cloud-web
+
+      - name: Cloud web production build
+        run: npm run build -w cascade-cloud-web
+
+      - name: Full root suite
+        run: npm test
+
+      - name: TypeScript checks
+        run: npm run lint
+
+      - name: Commit functional fix and remove temporary helpers
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/browser/remote/controller.ts src/browser/remote/controller.test.ts \
+                  cloud/web/src/chat/BrowserLiveView.tsx cloud/web/src/chat/BrowserLiveView.test.tsx
+          git rm -f .github/scripts/pr248-round34-fix.py .github/workflows/pr248-round34-fix.yml
+          git commit -m "fix(browser): bind takeover to the current sight boundary"
+          git push origin HEAD:claude/desktop-app-features-j8qfoj
