@@ -14,12 +14,49 @@ vi.mock('../lib/api.js', () => ({
 function fakeSocket() {
   const handlers = new Map<string, Set<(...args: unknown[]) => void>>();
   const sent: Array<{ event: string; payload: unknown }> = [];
+  /** Emitted while down. Socket.IO would flush these on reconnect. */
+  const buffered: Array<{ event: string; payload: unknown }> = [];
   const runAcks: Array<(a: unknown) => void> = [];
   /** Registrations and the connect, in the order they happened. */
   const order: string[] = [];
+  const socket = {
+    on(event: string, listener: (...args: unknown[]) => void) {
+      order.push(`on:${event}`);
+      let set = handlers.get(event);
+      if (!set) { set = new Set(); handlers.set(event, set); }
+      set.add(listener);
+      return this;
+    },
+    off(event: string, listener: (...args: unknown[]) => void) {
+      handlers.get(event)?.delete(listener);
+      return this;
+    },
+    connected: false,
+    connect() { socket.connected = true; order.push('connect'); return this; },
+    emit(event: string, payload: unknown, ack?: (a: unknown) => void) {
+      // Socket.IO 4.x BUFFERS anything emitted while disconnected and delivers
+      // it on reconnect. Modelled here because a fake that records every emit
+      // cannot tell "sent" from "queued to be sent later" — and that difference
+      // is the whole of the takeover's see-what-you-drive guarantee across a
+      // transport gap. See socket.io/docs/v4/client-offline-behavior.
+      if (!socket.connected) { buffered.push({ event, payload }); return this; }
+      sent.push({ event, payload });
+      if (event === 'chat:run' && ack) runAcks.push(ack);
+      return this;
+    },
+  };
   return {
     order,
     sent,
+    /** What Socket.IO is holding to deliver later. Should stay empty. */
+    buffered,
+    /** The transport drops, the way a flaky network does. */
+    drop() { socket.connected = false; },
+    /** And comes back, flushing whatever Socket.IO had queued. */
+    restore() {
+      socket.connected = true;
+      sent.push(...buffered.splice(0, buffered.length));
+    },
     /** Settle the in-flight run the way the server's `chat:run` ack does. */
     ackRun(conversationId: string) { runAcks.shift()?.({ conversationId, output: 'done' }); },
     /** The other ordinary ending: the run failed on this same socket. */
@@ -27,26 +64,7 @@ function fakeSocket() {
     fire(event: string, payload?: unknown) {
       for (const h of [...(handlers.get(event) ?? [])]) h(payload);
     },
-    socket: {
-      on(event: string, listener: (...args: unknown[]) => void) {
-        order.push(`on:${event}`);
-        let set = handlers.get(event);
-        if (!set) { set = new Set(); handlers.set(event, set); }
-        set.add(listener);
-        return this;
-      },
-      off(event: string, listener: (...args: unknown[]) => void) {
-        handlers.get(event)?.delete(listener);
-        return this;
-      },
-      connected: false,
-      connect() { (this as { connected: boolean }).connected = true; order.push('connect'); return this; },
-      emit(event: string, payload: unknown, ack?: (a: unknown) => void) {
-        sent.push({ event, payload });
-        if (event === 'chat:run' && ack) runAcks.push(ack);
-        return this;
-      },
-    } as unknown as Socket,
+    socket: socket as unknown as Socket,
   };
 }
 
@@ -700,5 +718,669 @@ describe('useChatSession — a run that finished during the reload gap', () => {
     });
 
     expect(view.result.current.conversationId).toBe('conv-mine');
+  });
+});
+
+// Frames are the same routing problem as the live view, but arriving many times
+// a second: one socket, several chats, and a picture of somebody else's page is
+// a worse failure than a blank panel — it is a plausible-looking lie about what
+// the agent is doing.
+describe('useChatSession — frames of the agent\'s browser', () => {
+  function liveView(conversationId: string, taskId: string, url?: string) {
+    return { conversationId, taskId, liveViewUrl: url, active: true };
+  }
+  function frame(conversationId: string, taskId: string, data: string, generation = 1) {
+    return { conversationId, taskId, data, width: 1280, height: 800, generation };
+  }
+
+  it('stops being driveable the moment the socket goes down', () => {
+    // A takeover survives a transport gap: the server holds the lease across
+    // the reconnect grace and the remote page keeps changing, but no frames can
+    // reach this client. Left alone, the last JPEG stayed an interactive `<img>`
+    // — and Socket.IO buffers what the person does against it and delivers it
+    // on reconnect, so the click lands on whatever the page became.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => { fake.fire('browser:live-view', liveView('conv-a', 'task-a')); });
+    act(() => {
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'BEFORE', 4));
+      fake.fire('browser:control', {
+        conversationId: 'conv-a', taskId: 'task-a', human: true, capturing: true, confirmed: true,
+      });
+    });
+    expect(view.result.current.browserFrame?.data).toBe('BEFORE');
+    expect(view.result.current.browserConfirmed).toBe(true);
+
+    act(() => { fake.drop(); fake.fire('disconnect'); });
+
+    // The evidence of sight is gone, so the panel has nothing to drive.
+    expect(view.result.current.browserFrame, 'no picture of a page nobody can see').toBeUndefined();
+    expect(view.result.current.browserStreaming).toBe(false);
+    expect(view.result.current.browserConfirmed).toBe(false);
+    // But the hold is NOT invented away — it really does survive on the server,
+    // and a client that decided its own ownership would be the failure this
+    // panel exists to prevent, in the other direction.
+    expect(view.result.current.browserHuman, 'the takeover is still theirs').toBe(true);
+
+    // Anything they try now must not even reach the send buffer.
+    act(() => {
+      view.result.current.sendBrowserInput({ kind: 'text', text: 'secret' });
+      view.result.current.setBrowserCapture(false);
+    });
+    expect(fake.sent.filter((m) => m.event === 'browser:input')).toHaveLength(0);
+    expect(fake.sent.filter((m) => m.event === 'browser:capture')).toHaveLength(0);
+    expect(fake.buffered, 'and Socket.IO is holding nothing to deliver later').toHaveLength(0);
+  });
+
+  it('starts a new viewing boundary when the socket comes back', () => {
+    // The watch effect keys on the socket OBJECT, which survives a reconnect,
+    // so it never re-runs — and the server, having received no unwatch, keeps
+    // streaming to the rebound transport as though nothing happened. Something
+    // has to invalidate the receipt this view gave before the gap.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'BEFORE', 4));
+      fake.fire('browser:control', {
+        conversationId: 'conv-a', taskId: 'task-a', human: true, capturing: true, confirmed: true,
+      });
+    });
+
+    act(() => { fake.drop(); fake.fire('disconnect'); });
+    act(() => { fake.restore(); fake.fire('connect'); });
+
+    // Unwatch AND watch, in that order: a bare watch takes the server's
+    // reconnect branch, which keeps the existing screencast, and an idle page
+    // would then never repaint — leaving the panel inert with no way back.
+    const watching = fake.sent
+      .filter((m) => m.event === 'browser:unwatch' || m.event === 'browser:watch')
+      .map((m) => m.event);
+    expect(watching.slice(-2)).toEqual(['browser:unwatch', 'browser:watch']);
+
+    // Still not driveable: the boundary is new and nothing has been seen yet.
+    expect(view.result.current.browserFrame).toBeUndefined();
+    expect(view.result.current.browserConfirmed).toBe(false);
+
+    // Only a picture from the NEW watch, confirmed, brings the surface back.
+    act(() => {
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'AFTER', 5));
+      view.result.current.markBrowserFrameShown('task-a', 5);
+      fake.fire('browser:control', {
+        conversationId: 'conv-a', taskId: 'task-a', human: true, capturing: true, confirmed: true,
+      });
+    });
+    expect(view.result.current.browserFrame?.data).toBe('AFTER');
+    expect(view.result.current.browserConfirmed).toBe(true);
+    expect(
+      fake.sent.filter((m) => m.event === 'browser:frame-seen').map((m) => m.payload),
+      'and the new watch is what got confirmed',
+    ).toContainEqual({ taskId: 'task-a', generation: 5 });
+
+    act(() => { view.result.current.sendBrowserInput({ kind: 'text', text: 'ok' }); });
+    expect(fake.sent.filter((m) => m.event === 'browser:input')).toHaveLength(1);
+  });
+
+  it('tells the server it actually has the picture, once per watch', () => {
+    // Frames go out lossy — dropped, not queued, when the transport is not
+    // writable — so handing one to the socket establishes nothing about what
+    // arrived. Hiding the page is gated on this receipt instead, which is what
+    // stops an honest stale client, whose Hide is still wired to `streaming`,
+    // asking for a blind typing surface over a page it never received.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'AAAA', 7));
+    });
+
+    const seen = () => fake.sent.filter((m) => m.event === 'browser:frame-seen');
+    // What the rendered <img> reports on `load` — the frame arriving is not
+    // itself the receipt, which is the point of the test below this one.
+    act(() => { view.result.current.markBrowserFrameShown('task-a', 7); });
+    expect(seen().map((m) => m.payload)).toEqual([{ taskId: 'task-a', generation: 7 }]);
+
+    // Once per WATCH, not per frame: a busy page repaints constantly and every
+    // repaint fires `load` again, so this would otherwise spend a reliable
+    // round trip on each of them.
+    act(() => {
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'BBBB', 7));
+      view.result.current.markBrowserFrameShown('task-a', 7);
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'CCCC', 7));
+      view.result.current.markBrowserFrameShown('task-a', 7);
+    });
+    expect(seen(), 'the same watch is confirmed once').toHaveLength(1);
+
+    // A new watch is a new thing to confirm — the previous receipt names a
+    // generation the server has already superseded.
+    act(() => {
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'DDDD', 8));
+      view.result.current.markBrowserFrameShown('task-a', 8);
+    });
+    expect(seen().map((m) => m.payload)).toEqual([
+      { taskId: 'task-a', generation: 7 },
+      { taskId: 'task-a', generation: 8 },
+    ]);
+  });
+
+  it('does not hand back a stale picture when a conversation is returned to', () => {
+    // A view is kept per conversation so switching chats and back does not throw
+    // the run's panel away — but what came back with it was a JPEG of a page
+    // from before the switch, and `driving` alone is what makes that image
+    // interactive. A hold survives a switch, so the person returned to a
+    // minutes-old picture they could still click, over a page that had moved
+    // on. Round 14's stale-and-interactive failure, reached through the switch
+    // instead of through the socket.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => { fake.fire('browser:live-view', liveView('conv-a', 'task-a')); });
+    act(() => {
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'BEFORE', 3));
+      fake.fire('browser:control', {
+        conversationId: 'conv-a', taskId: 'task-a', human: true, capturing: true, confirmed: true,
+      });
+    });
+    expect(view.result.current.browserFrame?.data).toBe('BEFORE');
+
+    // Away, and back. The page went on changing the whole time.
+    act(() => { view.result.current.setConversationId('conv-b'); });
+    act(() => { view.result.current.setConversationId('conv-a'); });
+
+    expect(view.result.current.browserFrame, 'the picture from before the switch is gone').toBeUndefined();
+    expect(view.result.current.browserConfirmed, 'and this watch has confirmed nothing').toBe(false);
+    // The hold is the SERVER's to end, and it did not end. A client deciding its
+    // own ownership is the one thing this panel never does.
+    expect(view.result.current.browserHuman, 'the hold survives the switch').toBe(true);
+
+    // What the new boundary supplies is what can be driven.
+    act(() => { fake.fire('browser:frame', frame('conv-a', 'task-a', 'AFTER', 4)); });
+    expect(view.result.current.browserFrame?.data).toBe('AFTER');
+  });
+
+  it('promotes the older active browser when the newer run gives its browser up', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-old', 'https://viewer.example/old'));
+    });
+    act(() => {
+      fake.fire('browser:frame', frame('conv-a', 'task-old', 'OLD-BEFORE', 3));
+      fake.fire('browser:control', {
+        conversationId: 'conv-a', taskId: 'task-old', human: true, capturing: true, confirmed: true,
+      });
+      fake.fire('browser:live-view', liveView('conv-a', 'task-new', 'https://viewer.example/new'));
+    });
+    expect(view.result.current.browserTaskId).toBe('task-new');
+
+    // A late picture from the old watch must not be banked while its task is
+    // hidden. Promotion needs a new viewing boundary, not a cached JPEG.
+    act(() => { fake.fire('browser:frame', frame('conv-a', 'task-old', 'LATE-OLD', 3)); });
+
+    act(() => {
+      fake.fire('browser:live-view', { conversationId: 'conv-a', taskId: 'task-new', active: false });
+    });
+
+    expect(view.result.current.browserActive, 'the older browser is still active').toBe(true);
+    expect(view.result.current.browserTaskId).toBe('task-old');
+    expect(view.result.current.browserLiveView).toBe('https://viewer.example/old');
+    expect(view.result.current.browserHuman, 'ownership state survives while the task is hidden').toBe(true);
+    expect(view.result.current.browserFrame, 'but stale sight evidence does not').toBeUndefined();
+    expect(view.result.current.browserConfirmed).toBe(false);
+
+    // The promoted task is watched again and can supply a fresh picture.
+    act(() => {
+      fake.fire('browser:watching', { conversationId: 'conv-a', taskId: 'task-old', streaming: true });
+      fake.fire('browser:frame', frame('conv-a', 'task-old', 'OLD-FRESH', 4));
+    });
+    expect(view.result.current.browserStreaming).toBe(true);
+    expect(view.result.current.browserFrame?.data).toBe('OLD-FRESH');
+  });
+
+  it('keeps the newer run\'s panel when the older one gives its browser up', () => {
+    // One conversation can have two runs overlapping, and the socket carries
+    // both. A later `active: true` replaces the entry with the newer task; the
+    // older run's eventual withdrawal named a conversation and was applied to
+    // whatever was in that slot — taking away the live view and the Stop button
+    // of a browser that is still running.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-old'));
+      fake.fire('browser:live-view', liveView('conv-a', 'task-new'));
+    });
+    expect(view.result.current.browserTaskId).toBe('task-new');
+
+    act(() => {
+      fake.fire('browser:live-view', { conversationId: 'conv-a', taskId: 'task-old', active: false });
+    });
+    expect(view.result.current.browserTaskId, 'the newer browser is still there').toBe('task-new');
+    expect(view.result.current.browserActive, 'and can still be stopped').toBe(true);
+
+    // Its own withdrawal still closes it.
+    act(() => {
+      fake.fire('browser:live-view', { conversationId: 'conv-a', taskId: 'task-new', active: false });
+    });
+    expect(view.result.current.browserTaskId, 'a run giving up its own browser closes the panel').toBeUndefined();
+  });
+
+  it('does not retarget a delayed image receipt to the browser now on screen', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'AAAA', 1));
+      fake.fire('browser:live-view', liveView('conv-a', 'task-b'));
+      fake.fire('browser:frame', frame('conv-a', 'task-b', 'BBBB', 1));
+    });
+    expect(view.result.current.browserTaskId).toBe('task-b');
+
+    // A's <img> finished decoding after B replaced it. Both first watches use
+    // generation 1, so reading only the CURRENT task here would falsely confirm
+    // B even though B's JPEG has never loaded.
+    act(() => { view.result.current.markBrowserFrameShown('task-a', 1); });
+    expect(fake.sent.filter((m) => m.event === 'browser:frame-seen')).toHaveLength(0);
+
+    // B's own image load is the first thing allowed to confirm B.
+    act(() => { view.result.current.markBrowserFrameShown('task-b', 1); });
+    expect(fake.sent.filter((m) => m.event === 'browser:frame-seen').map((m) => m.payload))
+      .toEqual([{ taskId: 'task-b', generation: 1 }]);
+  });
+
+  it('confirms each run\'s own first watch, even though they are numbered alike', () => {
+    // A watch generation counts from zero inside its own run, so the first watch
+    // of every run is generation 1. Deduplicating the receipt on that number
+    // alone read B's first watch as one already reported — and a generation
+    // holds still for the life of a watch, so nothing later would send it
+    // either. B streamed frames while the server held `confirmed` false and
+    // went on refusing Hide.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    // The receipt is reported from a render — the image's `load` — so it has to
+    // follow the render that told this pane which task it is showing.
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'AAAA', 1));
+    });
+    act(() => { view.result.current.markBrowserFrameShown('task-a', 1); });
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-b', 'task-b'));
+      view.result.current.setConversationId('conv-b');
+    });
+    act(() => { fake.fire('browser:frame', frame('conv-b', 'task-b', 'BBBB', 1)); });
+    act(() => { view.result.current.markBrowserFrameShown('task-b', 1); });
+
+    expect(fake.sent.filter((m) => m.event === 'browser:frame-seen').map((m) => m.payload))
+      .toEqual([
+        { taskId: 'task-a', generation: 1 },
+        { taskId: 'task-b', generation: 1 },
+      ]);
+  });
+
+  it('drops a refusal once the person does something else', () => {
+    // A refusal that changes none of `human`/`capturing`/`confirmed` — an
+    // unsupported key, say — is followed by silence, because `announceControl`
+    // dedupes on exactly that state and success is deliberately unacknowledged.
+    // So "that key cannot be sent" sat on the panel for the rest of the
+    // takeover while every click after it worked.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => { fake.fire('browser:live-view', liveView('conv-a', 'task-a')); });
+    act(() => {
+      fake.fire('browser:control', {
+        conversationId: 'conv-a', taskId: 'task-a', human: true, capturing: true, confirmed: true,
+      });
+      fake.fire('browser:control', {
+        conversationId: 'conv-a', taskId: 'task-a', detail: 'That key cannot be sent to the page.',
+      });
+    });
+    expect(view.result.current.browserNotice).toBe('That key cannot be sent to the page.');
+
+    act(() => { view.result.current.sendBrowserInput({ kind: 'click', x: 0.5, y: 0.5 }); });
+    expect(view.result.current.browserNotice, 'the next thing they do clears it').toBeUndefined();
+  });
+
+  it('does not confirm a frame that arrived but was never rendered', () => {
+    // Round 9's argument, one layer further down. The receipt used to be sent
+    // from an effect keyed on the frame entering React state, which proves the
+    // socket delivered bytes and nothing about whether they became a picture.
+    // A slow client — or one handed a JPEG it cannot decode — would confirm a
+    // page it has never shown anybody, and the confirmation is precisely what
+    // opens Hide and the blind keyboard surface.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => { fake.fire('browser:live-view', liveView('conv-a', 'task-a')); });
+    act(() => { fake.fire('browser:frame', frame('conv-a', 'task-a', 'UNDECODABLE', 9)); });
+
+    expect(view.result.current.browserFrame?.data, 'the bytes did arrive').toBe('UNDECODABLE');
+    expect(
+      fake.sent.filter((m) => m.event === 'browser:frame-seen'),
+      'but nothing has said it rendered, so nothing is confirmed',
+    ).toHaveLength(0);
+
+    // The image reporting its own `load` is the only thing that confirms it.
+    act(() => { view.result.current.markBrowserFrameShown('task-a', 9); });
+    expect(fake.sent.filter((m) => m.event === 'browser:frame-seen').map((m) => m.payload))
+      .toEqual([{ taskId: 'task-a', generation: 9 }]);
+  });
+
+  it('does not confirm a picture it discarded', () => {
+    // The routing guards run first: a frame this pane refused is not a frame
+    // it received, and confirming it would vouch for a page nobody was shown.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-second'));
+      // A late frame from the run this pane has replaced, and one naming no run.
+      fake.fire('browser:frame', frame('conv-a', 'task-first', 'STALE', 3));
+      fake.fire('browser:frame', { conversationId: 'conv-a', data: 'ORPHAN', width: 1, height: 1, generation: 4 });
+    });
+
+    // The receipt half of this test was DELETED rather than kept. It asserted
+    // that neither frame was confirmed, and once the receipt moved to the
+    // image's own `load` there is no image for a discarded frame, so nothing
+    // in this test could call it and the assertion could no longer fail. The
+    // property it was reaching for — a frame that arrives is not a frame that
+    // was seen — is pinned above, where it can.
+    expect(view.result.current.browserFrame, 'neither was shown').toBeUndefined();
+  });
+
+  it('shows each conversation the frames of its own browser', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    // Frames in a LATER act than the live view, deliberately. Beginning a watch
+    // drops the evidence of sight for that task, and in production a frame
+    // cannot precede the request to watch — the server streams nothing until
+    // asked. Delivering both in one batch models an order that cannot happen.
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:live-view', liveView('conv-b', 'task-b'));
+    });
+    act(() => {
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'AAAA'));
+      fake.fire('browser:frame', frame('conv-b', 'task-b', 'BBBB'));
+    });
+
+    expect(view.result.current.browserFrame?.data).toBe('AAAA');
+    // Switching redraws B's viewing boundary, so B's picture from before the
+    // switch goes with it — a JPEG of a page that has since moved on must not
+    // come back as something the person can click.
+    act(() => { view.result.current.setConversationId('conv-b'); });
+    expect(view.result.current.browserFrame, 'the stale one does not come back').toBeUndefined();
+    act(() => { fake.fire('browser:frame', frame('conv-b', 'task-b', 'BBBB')); });
+    expect(view.result.current.browserFrame?.data, 'and B still sees only its own').toBe('BBBB');
+  });
+
+  it('keeps only the newest frame', () => {
+    // A queue would spend memory rendering something already untrue, and the
+    // server acks per frame precisely so a slow client falls behind by dropping
+    // pictures rather than by growing a backlog.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => { fake.fire('browser:live-view', liveView('conv-a', 'task-a')); });
+    act(() => {
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'OLD'));
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'NEW'));
+    });
+
+    expect(view.result.current.browserFrame).toEqual({ data: 'NEW', width: 1280, height: 800, generation: 1 });
+  });
+
+  it('ignores a frame for a run this pane has no browser for', () => {
+    // A frame outliving its run must not rebuild the panel: that would put a
+    // Stop button on screen for a browser nobody holds, and the user would be
+    // watching a still picture of a session that has already been closed.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => { fake.fire('browser:frame', frame('conv-a', 'task-gone', 'LATE')); });
+
+    expect(view.result.current.browserActive).toBe(false);
+    expect(view.result.current.browserFrame).toBeUndefined();
+  });
+
+  it('ignores a frame from a different run in the same conversation', () => {
+    // Second run in the same chat: the panel exists, so the "no view" guard
+    // above does not fire, and only the task id separates the new browser's
+    // frames from the previous one's still in flight.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => { fake.fire('browser:live-view', liveView('conv-a', 'task-second')); });
+    act(() => {
+      fake.fire('browser:frame', frame('conv-a', 'task-second', 'MINE'));
+      fake.fire('browser:frame', frame('conv-a', 'task-first', 'STALE'));
+    });
+
+    expect(view.result.current.browserFrame?.data).toBe('MINE');
+  });
+
+  it('drops the picture when capture is paused', () => {
+    // Hiding the page has to actually hide it. Keeping the last frame on
+    // screen would show a page that may have changed since — the stale-picture
+    // failure, dressed up as a working panel.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => { fake.fire('browser:live-view', liveView('conv-a', 'task-a')); });
+    act(() => {
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'BEFORE'));
+      fake.fire('browser:control', { conversationId: 'conv-a', taskId: 'task-a', human: true, capturing: true });
+    });
+    expect(view.result.current.browserFrame?.data).toBe('BEFORE');
+
+    act(() => {
+      fake.fire('browser:control', { conversationId: 'conv-a', taskId: 'task-a', human: true, capturing: false });
+    });
+    expect(view.result.current.browserFrame, 'nothing to look at while it is paused').toBeUndefined();
+    expect(view.result.current.browserCapturing).toBe(false);
+  });
+
+  it('ignores a browser message that names no run at all', () => {
+    // The guard used to reject only when BOTH ids were present and differed,
+    // so an untagged message landed in whichever pane was on screen. This
+    // server always names the run, which is exactly why an unnamed message is
+    // not something to route on a guess — and a picture of someone else's page
+    // is worse than no picture.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:frame', { conversationId: 'conv-a', data: 'ORPHAN', width: 1, height: 1 });
+      fake.fire('browser:watching', { conversationId: 'conv-a', streaming: true });
+      fake.fire('browser:control', { conversationId: 'conv-a', human: true });
+    });
+
+    expect(view.result.current.browserFrame).toBeUndefined();
+    expect(view.result.current.browserStreaming).toBe(false);
+    expect(view.result.current.browserHuman).toBe(false);
+  });
+
+  it('records that the server actually started streaming, per conversation', () => {
+    // Asking to watch and being watched are different facts: a provider that
+    // refuses the screencast leaves the panel blank, and only the server's
+    // answer distinguishes "waiting for the first frame" from "never coming".
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:live-view', liveView('conv-b', 'task-b'));
+    });
+    // The server's answer follows the request, as it does on the wire.
+    act(() => {
+      fake.fire('browser:watching', { conversationId: 'conv-b', taskId: 'task-b', streaming: true });
+    });
+
+    // B's stream is B's. Borrowing it here would promise frames that are being
+    // sent to another pane, and this one would wait for them forever.
+    expect(view.result.current.browserStreaming, 'not another chat\'s stream').toBe(false);
+
+    // Switching redraws B's boundary — which unwatches and watches again, so the
+    // answer B gave to the PREVIOUS request stops being true and is dropped
+    // with the rest of the evidence of sight. The server answers the new one.
+    act(() => { view.result.current.setConversationId('conv-b'); });
+    expect(view.result.current.browserStreaming, 'the previous answer does not carry over').toBe(false);
+    act(() => {
+      fake.fire('browser:watching', { conversationId: 'conv-b', taskId: 'task-b', streaming: true });
+    });
+    expect(view.result.current.browserStreaming).toBe(true);
+  });
+
+  it('ignores a watching reply about a run this conversation has replaced', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-second'));
+      fake.fire('browser:watching', { conversationId: 'conv-a', taskId: 'task-first', streaming: true });
+    });
+
+    // The previous run's stream says nothing about this one's, and claiming it
+    // does turns "waiting for the first frame" into a permanent lie.
+    expect(view.result.current.browserStreaming).toBe(false);
+  });
+
+  it('follows who holds each conversation\'s page', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:live-view', liveView('conv-b', 'task-b'));
+      fake.fire('browser:control', { conversationId: 'conv-b', taskId: 'task-b', human: true });
+    });
+    expect(view.result.current.browserHuman, 'not another chat\'s takeover').toBe(false);
+
+    act(() => { view.result.current.setConversationId('conv-b'); });
+    expect(view.result.current.browserHuman).toBe(true);
+  });
+
+  it('does not take control away over a refusal', () => {
+    // A refusal is not a statement about who holds the page: an unknown key is
+    // refused while the user still has it, and reading that as a loss of
+    // control would close their panel over a keystroke.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:control', { conversationId: 'conv-a', taskId: 'task-a', human: true });
+      fake.fire('browser:control', {
+        conversationId: 'conv-a', taskId: 'task-a', detail: 'That key cannot be sent to the page.',
+      });
+    });
+
+    expect(view.result.current.browserHuman).toBe(true);
+    expect(view.result.current.browserNotice).toMatch(/cannot be sent/i);
+
+    // And the next statement of ownership clears it, so a refusal does not
+    // outlive the situation it described.
+    act(() => {
+      fake.fire('browser:control', { conversationId: 'conv-a', taskId: 'task-a', human: false });
+    });
+    expect(view.result.current.browserHuman).toBe(false);
+    expect(view.result.current.browserNotice).toBeUndefined();
+  });
+
+  it('drives the browser this pane is showing, and only with its own run id', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    // No browser yet: every control is a no-op rather than an event the server
+    // would have to decide about.
+    act(() => {
+      view.result.current.takeOverBrowser();
+      view.result.current.sendBrowserInput({ kind: 'text', text: 'hello' });
+    });
+    expect(fake.sent.filter((m) => m.event.startsWith('browser:'))).toEqual([]);
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:live-view', liveView('conv-b', 'task-b'));
+    });
+    act(() => { view.result.current.setConversationId('conv-b'); });
+    act(() => {
+      view.result.current.takeOverBrowser();
+      view.result.current.sendBrowserInput({ kind: 'click', x: 0.5, y: 0.5 });
+      view.result.current.setBrowserCapture(false);
+      view.result.current.handBackBrowser();
+    });
+
+    expect(fake.sent.filter((m) => ['browser:take-over', 'browser:input', 'browser:capture', 'browser:hand-back']
+      .includes(m.event)))
+      .toEqual([
+        { event: 'browser:take-over', payload: { taskId: 'task-b' } },
+        { event: 'browser:input', payload: { taskId: 'task-b', event: { kind: 'click', x: 0.5, y: 0.5 } } },
+        { event: 'browser:capture', payload: { taskId: 'task-b', on: false } },
+        { event: 'browser:hand-back', payload: { taskId: 'task-b' } },
+      ]);
+  });
+
+  it('watches the browser on screen, and stops watching when it leaves', () => {
+    // Frames cost the operator money to encode and ship, so the stream follows
+    // what is actually being looked at rather than what happens to be running.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:live-view', liveView('conv-b', 'task-b'));
+    });
+    expect(fake.sent.filter((m) => m.event === 'browser:watch'))
+      .toEqual([{ event: 'browser:watch', payload: { taskId: 'task-a' } }]);
+
+    act(() => { view.result.current.setConversationId('conv-b'); });
+    // B's browser, and A's stream shut off. The unwatch for B is the leading
+    // half of its own viewing boundary, not a second thought about A.
+    expect(fake.sent
+      .filter((m) => m.event === 'browser:unwatch' || m.event === 'browser:watch')
+      .map((m) => [m.event, (m.payload as { taskId: string }).taskId]))
+      .toEqual([
+        ['browser:unwatch', 'task-a'], ['browser:watch', 'task-a'],
+        ['browser:unwatch', 'task-a'], ['browser:unwatch', 'task-b'], ['browser:watch', 'task-b'],
+      ]);
+  });
+
+  it('starts a new viewing boundary on a page that reloaded into a live run', async () => {
+    // A reload gets a brand-new socket; the run's screencast on the server is
+    // not new. Nothing there stops watching when a socket drops, so it outlived
+    // the previous page unwatched and the run is simply re-pointed at this
+    // connection with the stream still attached.
+    //
+    // The connect handler cannot deal with that: a reloaded page learns its
+    // task id from the REPLAYED live view, which lands well after `connect`.
+    // So this falls to the watch effect — and a bare watch there takes the
+    // server's reconnect branch, which keeps the surviving screencast. CDP
+    // frames being adaptive, an idle page then repaints for nobody and the
+    // panel stays blank for the life of the run.
+    const fake = fakeSocket();
+    renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    // Awaited: `connect` also kicks off the conversation reload, and letting it
+    // settle here keeps this test about watching rather than about React.
+    await act(async () => { fake.fire('connect'); });
+    expect(fake.sent.filter((m) => m.event === 'browser:watch'),
+      'nothing is watched on connect — the replay has not arrived yet').toHaveLength(0);
+
+    act(() => { fake.fire('browser:live-view', liveView('conv-a', 'task-a')); });
+    expect(fake.sent
+      .filter((m) => m.event === 'browser:unwatch' || m.event === 'browser:watch')
+      .map((m) => m.event), 'the replayed run is re-watched from scratch, not resumed')
+      .toEqual(['browser:unwatch', 'browser:watch']);
   });
 });

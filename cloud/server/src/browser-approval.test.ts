@@ -17,7 +17,7 @@
 //  there would hand the capability to exactly the runs that cannot supervise it.
 
 import { describe, it, expect, vi } from 'vitest';
-import { applyPermissionDecision, buildApprovalCallback, type PermissionDecision } from './runs.js';
+import { addressesRun, applyPermissionDecision, buildApprovalCallback, capturePayload, frameSeenPayload, lossyEmitter, type PermissionDecision } from './runs.js';
 
 /**
  * The approval shape runs.ts builds.
@@ -229,6 +229,111 @@ describe('the approval window closing while the run continues', () => {
       expect(emit).not.toHaveBeenCalledWith('permission:resolved', expect.anything());
     } finally {
       vi.useRealTimers();
+    }
+  });
+});
+
+// Stop, watch and unwatch are the same question — is this message for the run
+// this connection is carrying? — so they share one gate. A frame is a picture
+// of whatever the agent is looking at, which makes "who may ask to watch" as
+// sensitive as "who may press Stop".
+describe('which run a browser-control message may reach', () => {
+  it('takes an exact task id, and only the run this connection carries', () => {
+    expect(addressesRun('task-1', { taskId: 'task-1' })).toBe(true);
+    expect(addressesRun('task-1', { taskId: 'task-2' }), 'another run on the same socket').toBe(false);
+  });
+
+  it('refuses a message that names no run at all', () => {
+    // A stale or malformed `{}` used to mean "matches everything" on handlers
+    // that treated a missing id as optional — one bad message reaching every
+    // run on the socket.
+    expect(addressesRun('task-1', {})).toBe(false);
+    expect(addressesRun('task-1', undefined)).toBe(false);
+    expect(addressesRun('task-1', { taskId: undefined })).toBe(false);
+  });
+
+  it('refuses everything before the run has announced itself', () => {
+    // `taskId` is null until `run:started`. Nothing can be addressed to a run
+    // that has not yet said what it is called.
+    expect(addressesRun(null, { taskId: 'task-1' })).toBe(false);
+    expect(addressesRun(undefined, { taskId: 'task-1' })).toBe(false);
+
+    // The case the `!!mine` guard is actually there for, and the only one that
+    // distinguishes it from a bare equality check: BOTH sides unknown, where
+    // JavaScript happily says `undefined === undefined`. A malformed `{}`
+    // arriving before the run announced itself would otherwise be treated as
+    // addressing it.
+    expect(addressesRun(undefined, {}), 'two unknowns are not a match').toBe(false);
+    expect(addressesRun(undefined, { taskId: undefined })).toBe(false);
+  });
+});
+
+// The expression this replaces was wrong in a way nothing could see: a run is
+// handed a RebindableTransport, not the raw socket, and that had no `volatile`
+// — so the fallback fired every time and frames went out reliably in
+// production while a test of the callback wiring said otherwise.
+describe('lossyEmitter — which channel a droppable event takes', () => {
+  it('takes the lossy channel when the socket has one', () => {
+    const reliable: string[] = [];
+    const lossy: string[] = [];
+    const socket = {
+      emit: (event: string) => { reliable.push(event); return true; },
+      volatile: { emit: (event: string) => { lossy.push(event); return true; } },
+      on: () => undefined,
+      off: () => undefined,
+    };
+
+    lossyEmitter(socket)('browser:frame', { data: 'x' });
+
+    expect(lossy).toEqual(['browser:frame']);
+    expect(reliable, 'a frame that can be dropped is never sent reliably').toEqual([]);
+  });
+
+  it('still delivers for a caller that has no lossy channel at all', () => {
+    // The SSE and OpenAI-compatible paths have no socket. Falling back is
+    // right for them — it is falling back for a transport that SHOULD have one
+    // that was the bug.
+    const reliable: string[] = [];
+    const socket = { emit: (event: string) => { reliable.push(event); return true; }, on: () => undefined, off: () => undefined };
+
+    lossyEmitter(socket)('browser:frame', { data: 'x' });
+
+    expect(reliable).toEqual(['browser:frame']);
+  });
+});
+
+// The same fail-open shape as the input boundary, on the one control that makes
+// the agent invisible: `d.on === true` turned every other value into "hide".
+describe('capturePayload — show, hide, or neither', () => {
+  it('takes only a real boolean', () => {
+    expect(capturePayload({ on: true })).toBe(true);
+    expect(capturePayload({ on: false })).toBe(false);
+  });
+
+  it('refuses anything that did not say which way to go', () => {
+    // Each of these used to mean "hide the page", which is the direction that
+    // makes the agent invisible — the failure the panel exists to prevent.
+    for (const bad of [{}, { on: 'show' }, { on: 'true' }, { on: 1 }, { on: 0 }, { on: null }, undefined]) {
+      expect(capturePayload(bad as { on?: unknown }), JSON.stringify(bad)).toBeNull();
+    }
+  });
+});
+
+// The receipt is what opens Hide, so a malformed one must not become watch
+// zero — the same rule as the capture payload, on the field that now carries
+// the whole "they have actually seen this page" claim.
+describe('frameSeenPayload — which watch the viewer is confirming', () => {
+  it('takes a real, finite generation', () => {
+    expect(frameSeenPayload({ generation: 1 })).toBe(1);
+    expect(frameSeenPayload({ generation: 0 })).toBe(0);
+  });
+
+  it('refuses anything that does not name one', () => {
+    for (const bad of [
+      {}, undefined, { generation: '1' }, { generation: null },
+      { generation: Number.NaN }, { generation: Number.POSITIVE_INFINITY },
+    ]) {
+      expect(frameSeenPayload(bad as { generation?: unknown }), JSON.stringify(bad)).toBeNull();
     }
   });
 });

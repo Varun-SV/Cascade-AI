@@ -11,6 +11,7 @@ import type { ActivityNode, ChatMessage, ForceTier, PlanApproval, RoutingMode, S
 import type { Skill } from '../lib/types.js';
 import type { UiMode } from '../lib/prefs.js';
 import { BrowserLiveView } from './BrowserLiveView.js';
+import type { BrowserInputEvent } from './BrowserLiveView.js';
 import { ToolApprovalPrompt } from './ToolApprovalPrompt.js';
 import type { ToolApproval } from './useChatSession.js';
 
@@ -48,6 +49,27 @@ interface Props {
   browserLiveView?: string | undefined;
   /** A browser is attached, whether or not the provider can stream it. */
   browserActive?: boolean;
+  /** The newest frame of that browser, streamed by the page itself over CDP. */
+  browserFrame?: { data: string; width: number; height: number; generation?: number } | undefined;
+  /** Which run's browser the panel is showing. Its view identity, not a label. */
+  browserTaskId?: string | undefined;
+  /** The server confirmed the stream started, so an empty panel is worth explaining. */
+  browserStreaming?: boolean;
+  /** The user, not the agent, is driving that browser right now. */
+  browserHuman?: boolean;
+  /** Whether it is still being pictured while they drive it. */
+  browserCapturing?: boolean;
+  browserConfirmed?: boolean;
+  /** Something the browser refused to do for this conversation. */
+  browserNotice?: string | undefined;
+  /** Ask for the browser, and give it back. */
+  onTakeOverBrowser?: () => void;
+  onHandBackBrowser?: () => void;
+  /** One thing the user did to the page while holding it. */
+  onBrowserInput?: (event: BrowserInputEvent) => void;
+  /** Pause or resume the picture without giving the page back. */
+  onBrowserCapture?: (on: boolean) => void;
+  onBrowserFrameShown?: (taskId: string, generation: number) => void;
   /** Dangerous tool calls waiting on the user. */
   toolApprovals?: ToolApproval[];
   onDecideToolApproval?: (requestId: string, approved: boolean, always?: boolean) => void;
@@ -59,7 +81,11 @@ export default function ChatPanel({
   messages, busy, error, status, hasProviders, skills, skillId, onSkillChange, onSend, onStop, onRegenerate,
   onEditMessage, onDeleteMessage, onSelectSibling,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange, uiMode, approval,
-  compactionNotice, providerNotice, knowledgeNotice, activity, browserLiveView, browserActive, onStopBrowser, toolApprovals, onDecideToolApproval,
+  compactionNotice, providerNotice, knowledgeNotice, activity, browserLiveView, browserActive,
+  browserFrame, browserTaskId, browserStreaming, browserHuman, browserCapturing, browserConfirmed, browserNotice,
+  onStopBrowser, onTakeOverBrowser, onHandBackBrowser, onBrowserInput, onBrowserCapture,
+  onBrowserFrameShown,
+  toolApprovals, onDecideToolApproval,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [activityOpen, setActivityOpen] = useState(false);
@@ -209,7 +235,24 @@ export default function ChatPanel({
       </div>
 
       <div className="mx-4 sm:mx-6">
-        <BrowserLiveView active={browserActive === true} liveViewUrl={browserLiveView} onStop={() => onStopBrowser?.()} />
+        <BrowserLiveView
+          key={browserTaskId ?? 'no-browser-task'}
+          active={browserActive === true}
+          liveViewUrl={browserLiveView}
+          frame={browserFrame}
+          taskId={browserTaskId}
+          streaming={browserStreaming}
+          human={browserHuman}
+          capturing={browserCapturing}
+          confirmed={browserConfirmed}
+          notice={browserNotice}
+          onStop={() => onStopBrowser?.()}
+          onTakeOver={() => onTakeOverBrowser?.()}
+          onHandBack={() => onHandBackBrowser?.()}
+          onInput={(e) => onBrowserInput?.(e)}
+          onCapture={(on) => onBrowserCapture?.(on)}
+          onFrameShown={(g) => { if (browserTaskId) onBrowserFrameShown?.(browserTaskId, g); }}
+        />
       </div>
 
       {!hasProviders && (

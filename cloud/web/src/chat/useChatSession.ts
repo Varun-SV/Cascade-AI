@@ -11,6 +11,7 @@ import { refreshPendingMedia } from '../lib/pendingMedia.js';
 import { promptTooLargeError, payloadTooLargeError } from '../lib/limits.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
 import { warmLocalModel } from '../lib/localModel/engine.js';
+import type { BrowserInputEvent } from './BrowserLiveView.js';
 import { classifyLocalComplexity } from '../lib/localModel/classifier.js';
 
 export interface ChatAttachment {
@@ -370,11 +371,70 @@ export function useChatSession(
    * a spent capability is not kept around.
    */
   const [browserViews, setBrowserViews] = useState<
-    Record<string, { taskId?: string; liveViewUrl?: string }>
+    Record<string, Array<{
+      taskId: string;
+      liveViewUrl?: string;
+      /**
+       * The most recent frame, and only that one.
+       *
+       * Never a queue: a viewer shows the newest picture of the page, so
+       * holding older frames would spend memory to display something already
+       * untrue. A slow client simply misses intermediate frames, which is the
+       * correct behaviour for a live view and the reason the server acks each
+       * frame only once it has been handed on.
+       */
+      frame?: {
+        data: string; width: number; height: number;
+        /**
+         * Which watch this picture belongs to.
+         *
+         * Sent straight back as a receipt, because the server cannot know a
+         * frame arrived: it goes out on the lossy channel and is DROPPED rather
+         * than queued when the transport is not writable. Hiding the page is
+         * gated on that receipt, so a picture nobody received cannot be the
+         * "you already saw it" that a blind typing surface rests on.
+         */
+        generation: number;
+      };
+      /** The server confirmed a stream started, so an empty panel is a bug. */
+      streaming?: boolean;
+      /** The user holds this page: the agent is being refused until they stop. */
+      human?: boolean;
+      /** Whether frames are being produced. False while the picture is paused. */
+      capturing?: boolean;
+      /**
+       * Whether THIS watch has confirmed receiving a picture.
+       *
+       * The server's answer, not ours: while the picture is off there are no
+       * frames to work it out from, and what this pane remembers is about the
+       * watch it had BEFORE a reload. It gates the blind keyboard surface.
+       */
+      confirmed?: boolean;
+      /**
+       * Something the user asked of the browser that did not happen.
+       *
+       * Kept with the view rather than in one shared banner, because a refusal
+       * belongs to the run it was refused for: showing another chat's "you do
+       * not have control" over this one's panel would be a lie about this page.
+       */
+      notice?: string;
+    }>>
   >({});
-  const browserView = browserViews[activeConversationId() ?? ''];
+  const browserView = browserViews[activeConversationId() ?? '']?.at(-1);
   /** Where the agent's browser can be watched, for the conversation on screen. */
   const browserLiveView = browserView?.liveViewUrl;
+  /** The latest frame of the browser this pane is showing, if it is streaming. */
+  const browserFrame = browserView?.frame;
+  /** Whether the server said a stream is running, as opposed to merely asked for. */
+  const browserStreaming = browserView?.streaming === true;
+  /** Whether the user, rather than the agent, is driving the browser on screen. */
+  const browserHuman = browserView?.human === true;
+  /** Whether frames are still being produced while they drive it. */
+  const browserCapturing = browserView?.capturing !== false;
+  /** Whether this watch has confirmed a picture. Gates the blind keyboard. */
+  const browserConfirmed = browserView?.confirmed === true;
+  /** The last thing the browser refused to do for this pane, if any. */
+  const browserNotice = browserView?.notice;
   /** A browser is attached to this run, whether or not it can be streamed. */
   const browserActive = browserView !== undefined;
   /**
@@ -426,16 +486,183 @@ export function useChatSession(
     });
   }, [socket]);
 
+  /**
+   * Drop a refusal the person has moved on from.
+   *
+   * The notice was documented as lasting "until the next thing the server says
+   * about this browser" — and `announceControl` DEDUPES on `human:capturing:
+   * confirmed`, so when a refusal changes none of those (an unsupported key,
+   * say) the next thing never comes. "That key cannot be sent" then sat on the
+   * panel for the rest of the takeover while every click and keystroke after it
+   * worked, because success is silent by design: a reply per event would double
+   * the traffic to say nothing.
+   *
+   * So the person doing something else is what clears it. That is the signal
+   * actually available here — the server cannot send one without inventing an
+   * acknowledgement for every event, which is the design this deliberately does
+   * not have.
+   */
+  const clearBrowserNotice = useCallback((taskId: string) => {
+    setBrowserViews((prev) => {
+      let changed = false;
+      const next: typeof prev = {};
+      for (const [key, views] of Object.entries(prev)) {
+        next[key] = views.map((view) => {
+          if (view.taskId === taskId && view.notice !== undefined) {
+            changed = true;
+            return { ...view, notice: undefined };
+          }
+          return view;
+        });
+      }
+      return changed ? next : prev;
+    });
+  }, []);
+
   const stopBrowser = useCallback(() => {
     // The task id, which the server requires to match exactly. Without it the
     // Stop is ignored — which is the correct failure: better a button that does
     // nothing than one that stops somebody else's run.
-    if (!browserTaskIdRef.current) return;
-    socket?.emit('browser:stop', { taskId: browserTaskIdRef.current });
-    // This conversation's panel only. Another chat's browser is not something
-    // this button withdraws.
+    const taskId = browserTaskIdRef.current;
+    if (!taskId) return;
+    socket?.emit('browser:stop', { taskId });
+    // Withdraw THIS task optimistically. If an older browser is still active in
+    // the same conversation it becomes the displayed one immediately, keeping
+    // its own Stop control reachable instead of deleting the whole conversation
+    // slot along with the task the user actually stopped.
     const key = activeConversationId() ?? '';
-    setBrowserViews(({ [key]: _gone, ...rest }) => rest);
+    setBrowserViews((prev) => {
+      const views = prev[key];
+      if (!views) return prev;
+      const kept = views.filter((view) => view.taskId !== taskId);
+      if (kept.length === views.length) return prev;
+      if (kept.length === 0) {
+        const { [key]: _gone, ...rest } = prev;
+        return rest;
+      }
+      return { ...prev, [key]: kept };
+    });
+  }, [socket]);
+
+  /**
+   * Ask for the page, give it back, drive it, or pause the picture.
+   *
+   * All four name the run rather than the conversation, and refuse to send at
+   * all without one — the server requires an exact match, so a control event
+   * with no task id is ignored, and that is the correct failure: better a
+   * button that does nothing than one that drives somebody else's browser.
+   *
+   * Nothing is applied optimistically. Ownership is stated by the server on
+   * `browser:control`, because it changes without being asked — an idle hold
+   * lapses on its own — and a client that painted itself in control would show
+   * a page it could no longer touch.
+   */
+  const takeOverBrowser = useCallback(() => {
+    if (!browserTaskIdRef.current) return;
+    clearBrowserNotice(browserTaskIdRef.current);
+    socket?.emit('browser:take-over', { taskId: browserTaskIdRef.current });
+  }, [socket, clearBrowserNotice]);
+
+  const handBackBrowser = useCallback(() => {
+    if (!browserTaskIdRef.current) return;
+    clearBrowserNotice(browserTaskIdRef.current);
+    socket?.emit('browser:hand-back', { taskId: browserTaskIdRef.current });
+  }, [socket, clearBrowserNotice]);
+
+  /**
+   * Refused while the socket is down, rather than sent and buffered.
+   *
+   * Socket.IO buffers anything emitted while disconnected and delivers it on
+   * reconnect. For a mutation aimed at a picture, that is the worst possible
+   * delivery: the person acted on the last frame before the gap, the remote
+   * page went on changing without them, and the click lands afterwards on
+   * whatever is there now. Dropping it at the source is what keeps it out of
+   * that buffer — a check on arrival cannot tell a delayed event from a fresh
+   * one, because by then it is fresh.
+   *
+   * Stop is deliberately NOT gated this way. Buffering "stop using the
+   * browser" and delivering it late is the direction that helps.
+   */
+  const sendBrowserInput = useCallback((event: BrowserInputEvent) => {
+    if (!browserTaskIdRef.current || !socket?.connected) return;
+    clearBrowserNotice(browserTaskIdRef.current);
+    socket.emit('browser:input', { taskId: browserTaskIdRef.current, event });
+  }, [socket, clearBrowserNotice]);
+
+  const setBrowserCapture = useCallback((on: boolean) => {
+    if (!browserTaskIdRef.current || !socket?.connected) return;
+    clearBrowserNotice(browserTaskIdRef.current);
+    socket.emit('browser:capture', { taskId: browserTaskIdRef.current, on });
+  }, [socket, clearBrowserNotice]);
+
+  /**
+   * Start a NEW viewing boundary on this run's browser.
+   *
+   * Unwatch and watch, never watch alone, and that pairing is the whole point.
+   * A bare watch takes the server's reconnect branch, which deliberately KEEPS
+   * an existing screencast — and because CDP frames are adaptive, an idle page
+   * then sends nothing, so the panel sits inert with no way back. Tearing the
+   * screencast down and building it again bumps the watch generation AND makes
+   * Chrome produce a first frame immediately. A deliberate Hide still survives
+   * it, because the re-attach honours the holder's pause.
+   *
+   * A screencast can survive into a view that never asked for one because
+   * nothing on the server side stops watching when a socket drops: a reload or
+   * a transient gap sends no unwatch, and the run is later re-pointed at the
+   * new connection with its stream still attached. Both ways in need the same
+   * treatment, which is why they share this rather than each spelling it out:
+   *   • a page that RELOADS learns its task id from the replayed live view,
+   *     which arrives well after `connect` — so the connect handler has no id
+   *     to act on and only the watch effect below can do it;
+   *   • a page that RECONNECTS keeps both its socket object and its task id,
+   *     so the watch effect's dependencies never change and only the connect
+   *     handler can do it.
+   * Neither one covers the other, and each was the sole path in a real blank
+   * panel.
+   *
+   * Emitted whether or not the socket is up: unlike an input event, a watch
+   * that arrives late is still the right request, and Socket.IO's buffer
+   * delivering it on connect is exactly the wanted behaviour.
+   */
+  const beginWatching = useCallback((taskId: string) => {
+    // The evidence of SIGHT goes first, before the request that replaces it.
+    //
+    // Same rule `onDisconnect` states, reached by the other door. A view is
+    // kept per conversation, deliberately, so switching chats and coming back
+    // does not throw the run's panel away — but what comes back with it is a
+    // JPEG of a page from before the switch, and `driving` alone is what makes
+    // that image interactive. A hold survives a conversation switch, so the
+    // person returns to a picture that is minutes old, still clickable, over a
+    // page that has moved on. That is round 14's stale-and-interactive failure
+    // arriving through the switch rather than through the socket.
+    //
+    // `human` is deliberately not touched here either: ownership is pushed by
+    // the server and a client deciding its own would be the one thing this
+    // panel never does. What goes is the frame, the stream and this watch's
+    // confirmation — which leaves the panel inert and saying so, and the blind
+    // keyboard shut, until the new watch supplies a picture of its own. The
+    // unwatch/watch pair below makes Chrome produce that immediately, so the
+    // gap is a round trip rather than a wait for the page to move.
+    //
+    // Scoped to the task being watched. `onDisconnect` clears every view
+    // because the socket is down for all of them; this one is about a single
+    // boundary being redrawn.
+    setBrowserViews((prev) => {
+      let changed = false;
+      const next: typeof prev = {};
+      for (const [key, views] of Object.entries(prev)) {
+        next[key] = views.map((view) => {
+          if (view.taskId === taskId && (view.frame || view.streaming || view.confirmed)) {
+            changed = true;
+            return { ...view, frame: undefined, streaming: false, confirmed: false };
+          }
+          return view;
+        });
+      }
+      return changed ? next : prev;
+    });
+    socket?.emit('browser:unwatch', { taskId });
+    socket?.emit('browser:watch', { taskId });
   }, [socket]);
   const [status, setStatus] = useState<string | null>(null);
   const [lastTokens, setLastTokens] = useState<number>(0);
@@ -699,7 +926,36 @@ export function useChatSession(
     // on, and the run would then sit until its own timeout. The case that
     // clearing protected against is covered by `run:resumed` reporting no
     // active run: that is the signal the run really is over.
-    const onDisconnect = () => {};
+    const onDisconnect = () => {
+      // The last frame stops being a picture of anything.
+      //
+      // A takeover survives a transport gap — the server holds the lease across
+      // the reconnect grace, and the remote page keeps changing — but no frames
+      // can reach this client while it is down. Left as it was, the stale JPEG
+      // stays an interactive `<img>` and invites the person to drive a page
+      // they can no longer see.
+      //
+      // `human` is deliberately NOT cleared. The hold really does survive, and
+      // a client that decided its own ownership would be the one thing this
+      // panel never does — ownership is pushed. What goes is the evidence of
+      // SIGHT: the frame, the stream, and this watch's confirmation. That
+      // leaves the panel in a state it already knows how to render, inert and
+      // saying so, and leaves the blind keyboard shut.
+      setBrowserViews((prev) => {
+        let changed = false;
+        const next: typeof prev = {};
+        for (const [key, views] of Object.entries(prev)) {
+          next[key] = views.map((view) => {
+            if (view.frame || view.streaming || view.confirmed) {
+              changed = true;
+              return { ...view, frame: undefined, streaming: false, confirmed: false };
+            }
+            return view;
+          });
+        }
+        return changed ? next : prev;
+      });
+    };
     // A run produced a file. `pending: true` means generated media the user
     // has not kept — refresh the unsaved list so its expiry badge and Save
     // button appear on the message as soon as the image lands. A saved file
@@ -714,23 +970,148 @@ export function useChatSession(
       // Recorded AGAINST its conversation rather than into one shared slot. One
       // socket carries several runs, and a single slot meant switching chats
       // left another run's bearer-capability URL rendered in the pane you moved
-      // to, while a late `undefined` from the run you left cleared the view of
+      // to, while a late withdrawal from the run you left cleared the view of
       // the one you were on.
       adoptConversationId(e?.conversationId);
       const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
+      const taskId = typeof e?.taskId === 'string' && e.taskId ? e.taskId : undefined;
+      // Every server live-view message is task-addressed. An untagged message
+      // cannot safely create, replace or withdraw any browser in a conversation.
+      if (!taskId) return;
       setBrowserViews((prev) => {
-        // `active` says a browser exists even when it cannot be streamed, so
-        // Stop survives a provider with no live view. Its absence is the run
-        // giving the browser up — drop the entry outright rather than blanking
-        // it, so the panel goes away and the spent capability URL is not kept.
+        const views = prev[key] ?? [];
         if (e?.active !== true) {
-          if (!(key in prev)) return prev;
-          const { [key]: _done, ...rest } = prev;
-          return rest;
+          // Remove exactly the run that gave its browser up. The newest active
+          // task is the panel, so if THAT task ends the previous still-active
+          // browser is promoted rather than disappearing with it.
+          const kept = views.filter((view) => view.taskId !== taskId);
+          if (kept.length === views.length) return prev;
+          if (kept.length === 0) {
+            const { [key]: _done, ...rest } = prev;
+            return rest;
+          }
+          return { ...prev, [key]: kept };
         }
-        return { ...prev, [key]: { taskId: e?.taskId, liveViewUrl: e?.liveViewUrl } };
+
+        const existing = views.findIndex((view) => view.taskId === taskId);
+        if (existing >= 0) {
+          const current = views[existing]!;
+          if (current.liveViewUrl === e?.liveViewUrl) return prev;
+          const next = [...views];
+          next[existing] = { ...current, liveViewUrl: e?.liveViewUrl };
+          // A replay for an already-active task updates its capability URL but
+          // does not make an older run jump in front of a newer one.
+          return { ...prev, [key]: next };
+        }
+
+        // A newly-active browser becomes the visible panel. The task it covers
+        // remains active underneath, but its old picture is no longer evidence
+        // of sight: if it is promoted later it must establish a fresh watch
+        // before any image or blind keyboard can be interactive.
+        const hidden = views.map((view, index) => (
+          index === views.length - 1
+            ? { ...view, frame: undefined, streaming: false, confirmed: false }
+            : view
+        ));
+        return { ...prev, [key]: [...hidden, { taskId, liveViewUrl: e?.liveViewUrl }] };
       });
     };
+    /**
+     * A rendered frame of a run's browser.
+     *
+     * Stored against the conversation it belongs to, exactly like the live view
+     * — one socket carries several chats, and a frame of somebody else's page
+     * appearing in the pane you are looking at would be worse than showing
+     * nothing. Only the newest is kept; see `browserViews`.
+     */
+    const onBrowserFrame = (e: {
+      conversationId?: string; taskId?: string; data?: string; width?: number; height?: number;
+      generation?: number;
+    }) => {
+      if (typeof e?.data !== 'string' || !e.taskId) return;
+      adoptConversationId(e?.conversationId);
+      const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
+      setBrowserViews((prev) => {
+        const views = prev[key];
+        if (!views) return prev;
+        const index = views.findIndex((view) => view.taskId === e.taskId);
+        if (index < 0) return prev;
+        // Only the displayed task is watched. Anything arriving for a hidden
+        // task is a late frame from the watch we just replaced; retaining it
+        // would make promotion briefly show an old, possibly interactive JPEG
+        // before the new viewing boundary has produced its own picture.
+        if (index !== views.length - 1) return prev;
+        const view = views[index]!;
+        const next = [...views];
+        next[index] = {
+          ...view,
+          frame: {
+            data: e.data!, width: e.width ?? 0, height: e.height ?? 0,
+            generation: typeof e.generation === 'number' ? e.generation : 0,
+          },
+        };
+        return { ...prev, [key]: next };
+      });
+    };
+    /** The server answering whether a stream actually started. */
+    const onBrowserWatching = (e: { conversationId?: string; taskId?: string; streaming?: boolean }) => {
+      if (!e.taskId) return;
+      adoptConversationId(e?.conversationId);
+      const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
+      setBrowserViews((prev) => {
+        const views = prev[key];
+        if (!views) return prev;
+        const index = views.findIndex((view) => view.taskId === e.taskId);
+        if (index < 0 || index !== views.length - 1) return prev;
+        const next = [...views];
+        next[index] = { ...views[index]!, streaming: e?.streaming === true };
+        return { ...prev, [key]: next };
+      });
+    };
+    /**
+     * Who holds the page, and anything it refused to do.
+     *
+     * One event for both, because they are one question with two kinds of
+     * answer. A message carrying `human` is the server stating ownership —
+     * including the change nobody asked for, when an idle hold lapses. A
+     * message carrying only a detail is something that did not happen, and
+     * deliberately says nothing about ownership: an unknown key is refused
+     * while the user still has control, and treating that as a loss of control
+     * would take their panel away over a keystroke.
+     */
+    const onBrowserControl = (e: {
+      conversationId?: string; taskId?: string; human?: boolean; capturing?: boolean;
+      confirmed?: boolean; detail?: string;
+    }) => {
+      if (!e.taskId) return;
+      adoptConversationId(e?.conversationId);
+      const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
+      setBrowserViews((prev) => {
+        const views = prev[key];
+        if (!views) return prev;
+        const index = views.findIndex((view) => view.taskId === e.taskId);
+        if (index < 0) return prev;
+        const view = views[index]!;
+        const hidden = index !== views.length - 1;
+        const nextView = {
+          ...view,
+          ...(typeof e.human === 'boolean' ? { human: e.human } : {}),
+          ...(typeof e.capturing === 'boolean' ? { capturing: e.capturing } : {}),
+          ...(!hidden && typeof e.confirmed === 'boolean' ? { confirmed: e.confirmed } : {}),
+          ...(e.capturing === false ? { frame: undefined } : {}),
+          ...(typeof e.detail === 'string' ? { notice: e.detail } : { notice: undefined }),
+          // Ownership can legitimately change while another run is in front,
+          // but visibility proof cannot survive being hidden/unwatched.
+          ...(hidden ? { frame: undefined, streaming: false, confirmed: false } : {}),
+        };
+        const next = [...views];
+        next[index] = nextView;
+        return { ...prev, [key]: next };
+      });
+    };
+    socket.on('browser:control', onBrowserControl);
+    socket.on('browser:frame', onBrowserFrame);
+    socket.on('browser:watching', onBrowserWatching);
     socket.on('browser:live-view', onLiveView);
     socket.on('stream:token', onToken);
     socket.on('tier:status', onStatus);
@@ -761,6 +1142,9 @@ export function useChatSession(
       socket.off('provider:exhausted', onProviderExhausted);
       socket.off('knowledge:retrieved', onKnowledge);
       socket.off('file:created', onFileCreated);
+      socket.off('browser:control', onBrowserControl);
+      socket.off('browser:frame', onBrowserFrame);
+      socket.off('browser:watching', onBrowserWatching);
       socket.off('browser:live-view', onLiveView);
     };
   }, [socket]);
@@ -847,6 +1231,20 @@ export function useChatSession(
     const onConnect = () => {
       const cid = conversationIdRef.current;
       if (cid) void reloadActivePath(cid);
+      // Start a NEW viewing boundary rather than resuming the old one.
+      //
+      // The watch effect cannot do this: it keys on the socket object, which
+      // survives a reconnect, so it never re-runs — and the server, having
+      // received no unwatch, keeps streaming to the rebound transport as though
+      // nothing happened. Nothing would then invalidate the receipt this view
+      // gave before the gap. See `beginWatching` for why it is a PAIR.
+      //
+      // A page that reloaded rather than reconnected has no task id yet — it
+      // learns it from the replayed live view, which lands after this — so
+      // there is deliberately nothing to do here for that case. The watch
+      // effect picks it up when the id arrives.
+      const taskId = browserTaskIdRef.current;
+      if (taskId) beginWatching(taskId);
     };
     const onResumed = (e: {
       active?: number;
@@ -960,7 +1358,86 @@ export function useChatSession(
       socket.off('session:complete', onComplete);
       socket.off('session:error', onError);
     };
-  }, [socket, reloadActivePath, finishWithoutAck]);
+  }, [socket, reloadActivePath, finishWithoutAck, beginWatching]);
+
+  // Watch the browser this pane is actually showing, and only that one.
+  //
+  // Driven from here rather than from the panel's own mount, because watching
+  // costs the operator money: the server encodes and ships frames only while
+  // somebody has asked for them, so a component that forgot to unwatch — on an
+  // error boundary, a fast conversation switch, a StrictMode double-mount —
+  // would quietly bill for a stream nobody is looking at. The condition is
+  // exactly "this pane is showing this run's browser", which is what the panel
+  // renders on, so the two cannot drift.
+  useEffect(() => {
+    if (!socket || !browserTaskId) return;
+    // A PAIR, not a bare watch — see `beginWatching`. This is the path a
+    // reloaded page takes: its socket is brand new but the run's screencast on
+    // the server is not, having survived the previous page's disconnect
+    // unwatched, so a bare watch here would land on a stream that only repaints
+    // on activity and leave an idle page blank for the life of the run.
+    beginWatching(browserTaskId);
+    return () => {
+      // The run may already be over, in which case the server ignores this —
+      // but an unwatch that arrives late is free and a missing one is not.
+      socket.emit('browser:unwatch', { taskId: browserTaskId });
+    };
+  }, [socket, browserTaskId, beginWatching]);
+
+  /**
+   * The generation this pane has already reported seeing.
+   *
+   * A ref, because it must not re-render and it must not be re-derived: it is a
+   * record of something that happened, read on the way to deciding whether it
+   * has happened again.
+   */
+  const shownGenRef = useRef<string | undefined>(undefined);
+
+  /**
+   * Tell the server this pane actually HAS the picture.
+   *
+   * Frames go out lossy — dropped, not queued, when the transport is not
+   * writable — so handing one to the socket establishes nothing about what
+   * arrived. Hiding the page is gated on this receipt rather than on that
+   * dispatch, because the client the gate protects is an honest stale one whose
+   * Hide is still wired to `streaming`: it never receives the frame, so it never
+   * sends this, and its Hide stays refused.
+   *
+   * CALLED FROM THE IMAGE'S OWN `load`, not from an effect keyed on the frame
+   * arriving. That distinction is round 9's argument one layer further down: an
+   * effect fires when the JPEG enters React state, which proves the socket
+   * delivered bytes and nothing about whether they became a picture. A slow
+   * client, or one handed a frame it cannot decode, would confirm a page it has
+   * never shown anybody — and the confirmation is what opens Hide and, with it,
+   * the blind keyboard surface. `load` is the browser saying the image is ready
+   * to paint, which is the closest thing to "seen" that a client can honestly
+   * report. A frame that fails to decode fires nothing, no receipt is sent, and
+   * the surface stays shut: the right way to fail.
+   *
+   * Still once per watch, not per frame — the generation is the watch's, and
+   * the ref above is what keeps a stream of repaints from becoming a stream of
+   * round trips. It gates Hide only and never Chrome's own frame ack, so the
+   * stream stays exactly as lossy and as fast as it was.
+   */
+  const markBrowserFrameShown = useCallback((taskId: string, generation: number) => {
+    // The image that loaded names the task it came from. If the pane switched
+    // while that JPEG was decoding, its receipt is stale and must not be
+    // retargeted at the browser that happens to be current now.
+    if (!socket || browserTaskIdRef.current !== taskId) return;
+    // Keyed by TASK as well as generation. A watch generation counts from zero
+    // inside its own run, so the first watch of every run is generation 1 —
+    // and deduplicating on the number alone meant that after confirming task A
+    // the identical number from task B was read as "already reported". B's
+    // receipt was never sent, and because a generation holds still for the life
+    // of a watch, nothing later would send it either: B could stream frames
+    // indefinitely while the server held `confirmed` false and went on refusing
+    // Hide. The bug arrived with the ref — the effect this replaced had the
+    // task in its dependencies and could not make it.
+    const seen = `${taskId}:${generation}`;
+    if (shownGenRef.current === seen) return;
+    shownGenRef.current = seen;
+    socket.emit('browser:frame-seen', { taskId, generation });
+  }, [socket]);
 
   // Connect only now, and deliberately LAST.
   //
@@ -1328,7 +1805,10 @@ export function useChatSession(
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, approval,
     escalation, escalationQueued: escalations.length, resolveEscalation, clearEscalation,
     contextApproval, resolveContextApproval, compactionNotice, providerNotice, knowledgeNotice, activity,
-    browserLiveView, browserActive, browserTaskId, stopBrowser,
+    browserLiveView, browserActive, browserTaskId, browserFrame, browserStreaming,
+    browserHuman, browserCapturing, browserConfirmed, browserNotice, stopBrowser,
+    takeOverBrowser, handBackBrowser, sendBrowserInput, setBrowserCapture,
+    markBrowserFrameShown,
     toolApprovals, resolveToolApproval,
   };
 }

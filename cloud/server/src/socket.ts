@@ -102,6 +102,28 @@ export class RebindableTransport implements RunSocket {
     return this.current?.emit(event, payload);
   }
 
+  /**
+   * The same transport, on Socket.IO's lossy channel.
+   *
+   * A GETTER rather than a field captured at construction, because `current`
+   * changes: a run outlives the connection that started it, and a volatile
+   * emitter frozen to the original socket would write into a dead one after a
+   * reconnect. Resolving `current` per emit is what makes this follow `rebind`.
+   *
+   * Deliberately NOT observed. `observe` feeds the replay store, and the only
+   * thing sent this way is a frame — which must never be replayed: handing a
+   * reloaded page a picture from before it reloaded is the stale-picture
+   * failure the panel exists to prevent. A dropped volatile emit is also, by
+   * definition, not state anyone is entitled to get back.
+   *
+   * With no socket bound the frame is dropped, which is the correct answer for
+   * a live view during a reconnect gap: by the time anyone could see it, it
+   * would be a picture of a page that has moved on.
+   */
+  get volatile(): { emit(event: string, payload: unknown): unknown } {
+    return { emit: (event, payload) => this.current?.volatile.emit(event, payload) };
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   on(event: string, listener: (...args: any[]) => void): unknown {
     let set = this.listeners.get(event);
@@ -149,6 +171,15 @@ export interface LiveRun {
    */
   conversationId?: string;
   /**
+   * The last browser control state that a reloaded page still needs to know.
+   *
+   * Human ownership is one such state, but not the only one: after handback a
+   * deliberately hidden picture can remain paused until the agent's next action
+   * restores it. Dropping that `capturing: false` state lets a reload expose a
+   * provider iframe while the CDP stream is still intentionally dark.
+   */
+  control?: Record<string, unknown>;
+  /**
    * The supervision surface a replacement connection has to be given back.
    *
    * These two events are what make the hosted browser safe to run at all: the
@@ -191,10 +222,9 @@ const TERMINAL_EVENTS = new Set(['session:complete', 'session:error']);
 /**
  * Keep the run's supervision surface up to date as it is emitted.
  *
- * Only state that is still TRUE is kept: a live view that has been given up and
- * an approval that has been answered or has expired are removed rather than
- * replayed, because handing a reloaded page a Stop button for a browser that is
- * gone, or a prompt for a decision already made, is its own kind of lie.
+ * Only state that remains relevant is kept. In particular, a paused picture is
+ * still relevant after human ownership ends: until the agent restores capture,
+ * a reloaded client must keep every viewing surface dark too.
  */
 export function rememberForReplay(run: LiveRun, event: string, payload: unknown): void {
   const p = (payload ?? {}) as Record<string, unknown>;
@@ -202,8 +232,45 @@ export function rememberForReplay(run: LiveRun, event: string, payload: unknown)
     // `active: false` is the run giving the browser up. Dropping the entry
     // rather than storing it also drops the live-view URL, which is a bearer
     // capability and has no business outliving the session it opens.
-    if (p['active'] === true) run.liveView = p;
-    else delete run.liveView;
+    if (p['active'] === true) {
+      run.liveView = p;
+    } else {
+      delete run.liveView;
+      // And with it every control state. Neither a takeover nor a hidden
+      // handback can outlive the browser they refer to.
+      delete run.control;
+    }
+    return;
+  }
+  if (event === 'browser:control') {
+    // Only a statement of current state is worth keeping. A message carrying
+    // just a detail describes a moment that has already passed — replaying
+    // "that key cannot be sent" into a fresh page is noise about something the
+    // person did before they reloaded.
+    if (typeof p['human'] !== 'boolean') return;
+    // Never recreate control state after the browser was withdrawn. Teardown
+    // normally emits ownership before live-view withdrawal, but replay state
+    // should not depend on that ordering remaining true forever.
+    if (!run.liveView) {
+      delete run.control;
+      return;
+    }
+    // Human ownership must survive reload. So must a hidden picture after
+    // handback/lapse: `human: false` is the client default, but
+    // `capturing: false` is not — losing it would remount the provider iframe
+    // while the user-requested pause is still in force. Once capture is really
+    // restored (`human: false, capturing: true`) both fields are defaults and
+    // there is nothing useful to replay.
+    //
+    // Stored WITHOUT `confirmed`, whatever it said. That flag is per-watch,
+    // and a replay is by definition arriving at a new one. Carrying the old
+    // watch's answer over would hand the fresh viewer a blind keyboard for a
+    // page it has not been shown.
+    if (p['human'] === true || p['capturing'] === false) {
+      run.control = { ...p, confirmed: false };
+    } else {
+      delete run.control;
+    }
     return;
   }
   if (event === 'permission:user-required') {
@@ -245,6 +312,12 @@ export function resumeAndReplay(
 export function replaySupervision(run: LiveRun, socket: Pick<Socket, 'emit'>): void {
   if (run.done) return;
   if (run.liveView) socket.emit('browser:live-view', run.liveView);
+  // AFTER the live view, and that ordering is load-bearing rather than tidy:
+  // the client files control state against the browser entry for the run, and
+  // drops a control message for a run it has no entry for. Replayed first, it
+  // would be discarded and the reloaded page would come back believing the
+  // agent still had a browser the person was actually holding.
+  if (run.control) socket.emit('browser:control', run.control);
   for (const request of run.approvals?.values() ?? []) {
     socket.emit('permission:user-required', request);
   }

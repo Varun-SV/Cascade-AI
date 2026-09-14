@@ -1079,12 +1079,18 @@ describe('RebindableTransport', () => {
   function fakeSocket() {
     const handlers = new Map<string, Set<(...args: unknown[]) => void>>();
     const emitted: Array<{ event: string; payload: unknown }> = [];
+    const volatileEmitted: Array<{ event: string; payload: unknown }> = [];
     return {
       emitted,
+      /** What went out on the lossy channel, kept apart from the reliable one. */
+      volatileEmitted,
       handlerCount: (event: string) => handlers.get(event)?.size ?? 0,
       fire: (event: string, arg: unknown) => { for (const h of handlers.get(event) ?? []) h(arg); },
       socket: {
         emit: (event: string, payload: unknown) => { emitted.push({ event, payload }); return true; },
+        volatile: {
+          emit: (event: string, payload: unknown) => { volatileEmitted.push({ event, payload }); return true; },
+        },
         on: (event: string, listener: (...args: unknown[]) => void) => {
           let set = handlers.get(event);
           if (!set) { set = new Set(); handlers.set(event, set); }
@@ -1098,6 +1104,41 @@ describe('RebindableTransport', () => {
       },
     };
   }
+
+  it('sends frames on the lossy channel, and keeps doing so after a rebind', () => {
+    // The production path is a RebindableTransport, not a raw Socket, so a
+    // `socket.volatile ?? socket` check in the run fell through to the
+    // reliable channel every time — frames banked in Engine.IO behind a slow
+    // viewer while a test of the callback wiring said the lossy path was
+    // chosen. The transport is where that has to be true.
+    const a = fakeSocket();
+    const b = fakeSocket();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const transport = new RebindableTransport(a.socket as any);
+
+    // Taken ONCE and held, which is the case that matters: a run outlives the
+    // connection that started it, so an emitter frozen to whichever socket was
+    // bound when it was obtained would write into a dead one after a
+    // reconnect. Re-reading `.volatile` before each emit would hide that.
+    const lossy = transport.volatile;
+
+    lossy.emit('browser:frame', { data: 'ONE' });
+    expect(a.volatileEmitted.map((e) => e.event)).toEqual(['browser:frame']);
+    expect(a.emitted, 'and never on the reliable one').toEqual([]);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    transport.rebind(b.socket as any);
+    lossy.emit('browser:frame', { data: 'TWO' });
+    expect(b.volatileEmitted.map((e) => (e.payload as { data: string }).data)).toEqual(['TWO']);
+    expect(a.volatileEmitted, 'nothing more went to the old connection').toHaveLength(1);
+    expect(b.emitted).toEqual([]);
+
+    // And during a reconnect gap a frame is dropped rather than queued: by the
+    // time anyone could see it, it would be a picture of a page that moved on.
+    transport.rebind(null);
+    expect(() => lossy.emit('browser:frame', { data: 'THREE' })).not.toThrow();
+    expect(b.volatileEmitted).toHaveLength(1);
+  });
 
   it('moves emits and listeners to the replacement connection', () => {
     // The interactive gates are the reason listeners have to move, not just
@@ -1232,6 +1273,57 @@ describe('rememberForReplay / replaySupervision — what a reload gets back', ()
     // hands the slot to next. Dropping the entry is what removes the URL too.
     rememberForReplay(run, 'browser:live-view', { active: false, taskId: 't1' });
     expect(run.liveView).toBeUndefined();
+  });
+
+  it('brings a takeover back after a reload, and drops it with the browser', () => {
+    // A takeover is edge-triggered like everything else here. Without this, a
+    // reload during one came back with the panel saying the agent had the page
+    // while the server still had the person holding it — and Take control
+    // could not repair it, because the controller treats a takeover by the
+    // existing holder as a no-op.
+    const run = freshRun();
+    rememberForReplay(run, 'browser:live-view', { active: true, taskId: 't1' });
+    rememberForReplay(run, 'browser:control', { taskId: 't1', human: true, capturing: false, confirmed: true });
+    // `confirmed` is stripped, whatever it said. It is per-WATCH, and a replay
+    // is by definition arriving at a new one — the page reloading is the reason
+    // there is a replay. Carrying the old watch's answer over would hand the
+    // fresh viewer a blind keyboard for a page it has not been shown.
+    expect(run.control).toEqual({ taskId: 't1', human: true, capturing: false, confirmed: false });
+
+    // A refusal is not a statement of ownership: it describes a moment that has
+    // already passed, and replaying it into a fresh page is noise about
+    // something the person did before they reloaded.
+    rememberForReplay(run, 'browser:control', { taskId: 't1', detail: 'That key cannot be sent to the page.' });
+    expect(run.control, 'still the last thing that said who holds it')
+      .toEqual({ taskId: 't1', human: true, capturing: false, confirmed: false });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+    // AFTER the live view, because the client files control state against the
+    // browser entry for the run and drops a control message for a run it has
+    // no entry for.
+    expect(emitted.map((e) => e.event)).toEqual(['browser:live-view', 'browser:control']);
+    expect(emitted[1]?.payload, 'the picture was left paused, and this view has not seen it')
+      .toEqual({ taskId: 't1', human: true, capturing: false, confirmed: false });
+
+    // Handing the browser back stops it being replayed at all.
+    rememberForReplay(run, 'browser:control', { taskId: 't1', human: false, capturing: true });
+    expect(run.control).toBeUndefined();
+  });
+
+  it('does not let a takeover outlive the browser it was a takeover of', () => {
+    const run = freshRun();
+    rememberForReplay(run, 'browser:live-view', { active: true, taskId: 't1' });
+    rememberForReplay(run, 'browser:control', { taskId: 't1', human: true, capturing: true });
+
+    // The run gives the browser up while the person still nominally holds it.
+    rememberForReplay(run, 'browser:live-view', { active: false, taskId: 't1' });
+
+    expect(run.liveView).toBeUndefined();
+    expect(run.control, 'a live-looking panel on a dead run is its own kind of lie').toBeUndefined();
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+    expect(emitted).toEqual([]);
   });
 
   it('keeps an outstanding approval until permission:resolved names it, keyed by id or requestId', () => {
