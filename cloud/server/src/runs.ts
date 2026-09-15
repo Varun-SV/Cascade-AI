@@ -177,6 +177,10 @@ const ChatRunPayloadSchema = z.object({
   // future runs will see. Off unless the user turns it on (privacy + cost).
   rememberSession: z.boolean().optional(),
   webSearch: z.boolean().optional(),
+  // Reach the internet by DRIVING a page rather than by fetching text. See
+  // `webSearchOn` for what it actually does, and why it is one decision
+  // rather than two independent toggles.
+  browserMode: z.boolean().optional(),
   // Optional web-search backend the user configured (browser-held, like keys).
   // Whichever field is set is used — SearXNG → Brave → Tavily priority in the
   // tool. Absent → the tool's keyless DuckDuckGo fallback.
@@ -353,6 +357,8 @@ export interface RunControls {
   forceTier?: 'auto' | 'T1' | 'T2' | 'T3';
   /** When false, no tools are registered for the run at all. Default true. */
   webSearch?: boolean;
+  /** Reach the internet by driving a page instead of fetching text. */
+  browserMode?: boolean;
   /** User-configured web-search backend (browser-held). Used only when webSearch is on. */
   webSearchConfig?: WebSearchBackend;
   /** Advanced per-tier generation params (developer knobs). */
@@ -568,7 +574,23 @@ export function buildCloudConfig(
   maxCostPerRunUsd: number,
   controls: RunControls = {},
 ): Partial<CascadeConfig> {
-  const webSearchOn = controls.webSearch !== false;
+  // ONE decision with three outcomes, not two toggles that can disagree.
+  //
+  // Dropping `web_search`/`web_fetch` is already exactly what turning the web
+  // off does — see `enabledTools` below — so a separate "use the browser"
+  // switch that also dropped them would be a second control with identical
+  // mechanism, and two controls that do the same thing are worse than one.
+  //
+  // What browser mode adds is a NAME. "Web off" reads as no internet at all
+  // and gives no hint that the agent will drive a real page instead, which is
+  // why the capability was undiscoverable: the only way to reach it was to
+  // turn something else off, or to type the tool's name into the prompt.
+  //
+  // Browser mode therefore wins over `webSearch` rather than combining with
+  // it. The client keeps the two mutually exclusive, and this makes that true
+  // on the server as well, so a hand-built payload cannot ask for both.
+  const browserMode = controls.browserMode === true;
+  const webSearchOn = !browserMode && controls.webSearch !== false;
   // Only pass a backend when web search is on AND the user actually configured
   // one — otherwise leave webSearch unset so the tool uses its keyless fallback.
   const wsc = controls.webSearchConfig;
@@ -1260,6 +1282,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     routingMode: payload.routingMode,
     forceTier: payload.forceTier,
     webSearch: payload.webSearch,
+    browserMode: payload.browserMode,
     webSearchConfig: payload.webSearchConfig,
     tierParams: payload.tierParams,
     extendedContext: payload.extendedContext,

@@ -220,6 +220,12 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       googleEnabled: Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),
       googleClientId: env.GOOGLE_CLIENT_ID ?? null,
       devLoginEnabled: env.CLOUD_DEV_BYPASS,
+      // Whether this deployment has a hosted browser at all. The capability
+      // does not exist until an operator supplies an endpoint, so the control
+      // for it must not either: a Browser toggle on a deployment with no
+      // provider is a button that silently does nothing. Boolean, never the
+      // endpoint or the key — this route is unauthenticated.
+      remoteBrowserEnabled: Boolean(env.REMOTE_BROWSER_PROVIDER),
       // Served from the SDK rather than hand-copied into the web bundle. The
       // web kept its own array and it went stale the moment a family was added:
       // gpt-5.4 and gpt-5.5 existed in routing and pricing but never appeared in

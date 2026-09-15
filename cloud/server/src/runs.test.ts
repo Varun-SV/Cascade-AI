@@ -32,6 +32,31 @@ describe('buildCloudConfig', () => {
     }
   });
 
+  it('drops the web tools in browser mode, so the page is the only way out', () => {
+    // Reaching the internet is ONE decision with three outcomes, not two
+    // toggles that can disagree. Turning the web off already unregisters both
+    // tools — so a separate "use the browser" switch that also unregistered
+    // them would be a second control with identical mechanism.
+    //
+    // What browser mode adds is a NAME. "Web off" reads as no internet at all
+    // and gives no hint that the agent will drive a real page instead, which is
+    // exactly why the capability was undiscoverable: the only ways to reach it
+    // were to turn something else off, or to type the tool's name in the prompt.
+    const config = buildCloudConfig([], 0.5, { browserMode: true });
+    const registry = new ToolRegistry(config.tools as ConstructorParameters<typeof ToolRegistry>[0], '/tmp');
+    expect(registry.hasTool('web_search'), 'no cheaper way to answer').toBe(false);
+    expect(registry.hasTool('web_fetch'), 'nor a way to read the page as text').toBe(false);
+  });
+
+  it('lets browser mode win over an explicit webSearch, rather than combining', () => {
+    // The client keeps the two mutually exclusive; this makes it true on the
+    // server as well, so a hand-built payload asking for both cannot leave the
+    // model a cheaper alternative to the thing the person actually asked for.
+    const config = buildCloudConfig([], 0.5, { browserMode: true, webSearch: true });
+    const registry = new ToolRegistry(config.tools as ConstructorParameters<typeof ToolRegistry>[0], '/tmp');
+    expect(registry.hasTool('web_search')).toBe(false);
+  });
+
   it('always disables generate_document, which a hosted run cannot deliver', () => {
     // It registers OUTSIDE the enabledTools allowlist (that list guards tools
     // reaching the machine; this one only writes into the run's own workspace),
