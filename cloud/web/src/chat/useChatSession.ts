@@ -915,13 +915,16 @@ export function useChatSession(
       setClarifications((q) => (q.some((c) => c.requestId === e.requestId) ? q : [...q, e]));
     };
     /**
-     * The gate gave up waiting, so the form must come down.
+     * The question is over, so the form must come down.
      *
-     * Left standing it would be a form whose submit button does nothing: the
-     * run has already moved on and resolved the question as unanswered, and
-     * the answer would land on a request nobody is holding.
+     * Sent for EVERY ending — answered, timed out, stopped, or released by the
+     * run unwinding. The timeout event alone was not enough: an abort and a
+     * teardown release settle the gate silently, so pressing Stop left a live
+     * questionnaire whose submit button answered a request nobody held. Worse,
+     * the queue shows the oldest first, so that dead form sat in front of every
+     * later question the run asked.
      */
-    const onClarificationTimeout = (e: { requestId?: string }) => {
+    const onClarificationClosed = (e: { requestId?: string }) => {
       if (!e?.requestId) return;
       setClarifications((q) => q.filter((c) => c.requestId !== e.requestId));
     };
@@ -1206,7 +1209,7 @@ export function useChatSession(
     socket.on('run:why', onWhy);
     socket.on('plan:approval-required', onPlan);
     socket.on('clarification:required', onClarificationRequired);
-    socket.on('clarification:timeout', onClarificationTimeout);
+    socket.on('clarification:closed', onClarificationClosed);
     socket.on('permission:user-required', onPermissionRequired);
     socket.on('permission:resolved', onPermissionResolved);
     socket.on('escalation:decision-required', onEscalation);
@@ -1223,7 +1226,7 @@ export function useChatSession(
       socket.off('run:why', onWhy);
       socket.off('plan:approval-required', onPlan);
       socket.off('clarification:required', onClarificationRequired);
-      socket.off('clarification:timeout', onClarificationTimeout);
+      socket.off('clarification:closed', onClarificationClosed);
       socket.off('permission:user-required', onPermissionRequired);
       socket.off('permission:resolved', onPermissionResolved);
       socket.off('escalation:decision-required', onEscalation);

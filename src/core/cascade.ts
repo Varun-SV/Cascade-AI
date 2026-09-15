@@ -604,6 +604,19 @@ export class Cascade extends EventEmitter {
         if (!this.pendingClarifications.delete(requestId)) return;
         if (timeout) clearTimeout(timeout);
         signal?.removeEventListener('abort', onAbort);
+        // Announced for EVERY outcome, not just the timeout.
+        //
+        // Whoever is showing the form has no other way to learn it is over. An
+        // abort and a teardown release both settle here silently, so a Stop —
+        // or any branch failure that unwinds the run — used to leave a live
+        // questionnaire on screen with nothing behind it: submitting answered a
+        // request nobody held, and because the queue shows the oldest first,
+        // that dead form sat in front of every later question.
+        //
+        // The map delete above is what makes this exactly-once, so the answered
+        // path emitting it too is harmless — that client has already taken the
+        // form down itself.
+        this.emit('clarification:closed', { requestId });
         resolve(result);
       };
 

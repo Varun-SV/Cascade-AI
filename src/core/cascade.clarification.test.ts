@@ -108,6 +108,50 @@ describe('Cascade.askUser — a question that cannot hang the run', () => {
     }
   });
 
+  it('says the question is over however it ended, so no dead form is left standing', async () => {
+    // The form has no other way to learn it is closed. An abort and a teardown
+    // release both settle silently, so Stop used to leave a live questionnaire
+    // whose submit button answered a request nobody held — and because the
+    // queue shows the oldest first, that dead form sat in front of every later
+    // question the run asked.
+    const c = new Cascade(baseConfig, '/tmp');
+    const closed: Array<{ requestId?: string }> = [];
+    c.on('clarification:required', () => {});
+    c.on('clarification:closed', (e: unknown) => closed.push(e as { requestId?: string }));
+
+    const abort = new AbortController();
+    const asking = c.askUser(ONE, abort.signal);
+    abort.abort();
+    await asking;
+
+    expect(closed, 'Stop closes the form too, not only a timeout').toHaveLength(1);
+    expect(closed[0]?.requestId, 'and names which form').toBeTruthy();
+  });
+
+  it('closes the form exactly once, however many ways it could settle', async () => {
+    // The map delete is what makes this exactly-once. Emitting twice would take
+    // down a LATER form: the client removes by request id, and a repeat for an
+    // id already gone is at best noise, at worst a race with the next question.
+    vi.useFakeTimers();
+    try {
+      const c = new Cascade(baseConfig, '/tmp');
+      const closed: unknown[] = [];
+      let requestId: string | undefined;
+      c.on('clarification:required', (e: unknown) => { requestId = (e as { requestId: string }).requestId; });
+      c.on('clarification:closed', (e: unknown) => closed.push(e));
+
+      const asking = c.askUser(ONE);
+      await vi.advanceTimersByTimeAsync(0);
+      c.resolveClarification([{ id: 'q1', value: 'A' }], requestId);
+      await vi.advanceTimersByTimeAsync(2 * 60_000 + 100);
+      await asking;
+
+      expect(closed, 'answered, then the timeout fires and changes nothing').toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('lets the first of answer and timeout win, and makes the loser a no-op', async () => {
     // Answer, timeout and abort all race. Settling twice would resolve a
     // promise nobody is holding any more, or worse, answer the NEXT question

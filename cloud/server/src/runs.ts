@@ -1158,6 +1158,33 @@ const MAX_CLARIFICATION_ANSWERS = 16;
 const MAX_CLARIFICATION_ANSWER_CHARS = 2_000;
 
 /**
+ * Whether an inbound answer names the run it claims to answer.
+ *
+ * BOTH identifiers, exactly. One socket carries several runs, and every run's
+ * handler sees every message on it — so a guard that only rejects a
+ * conversation id which is PRESENT AND WRONG lets a message carrying none
+ * through all of them. An absent request id then resolves as `undefined`,
+ * which `resolveClarification` answers by settling the OLDEST outstanding
+ * questionnaire. One malformed message could therefore answer, or silently
+ * skip, questions belonging to conversations it never named.
+ *
+ * Nothing legitimate is refused: the client answers with the id the QUESTION
+ * carried, which is that conversation's, under the request id it was asked on.
+ *
+ * Exported, and a predicate rather than two inline `if`s, for the reason
+ * `sanitiseClarificationAnswers` is: a rule that exists only inside a closure
+ * can be tested only by restating it, and a test that restates a rule cannot
+ * catch it being dropped from the real one.
+ */
+export function answersThisRun(
+  d: { conversationId?: string; requestId?: string } | undefined,
+  conversationId: string,
+): boolean {
+  if (d?.conversationId !== conversationId) return false;
+  return typeof d.requestId === 'string' && d.requestId !== '';
+}
+
+/**
  * Take a client's answers to a questionnaire, and keep only what is an answer.
  *
  * Validated rather than trusted: this crosses the socket from a client, so it
@@ -1610,18 +1637,30 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     socket.emit('clarification:required', { conversationId: conversation.id, ...(e as object) });
   const onClarificationTimeout = (e: unknown) =>
     socket.emit('clarification:timeout', { conversationId: conversation.id, ...(e as object) });
+  // The form must come down however the question ended — answered, timed out,
+  // stopped, or released by teardown. Only this one covers all four.
+  const onClarificationClosed = (e: unknown) =>
+    socket.emit('clarification:closed', { conversationId: conversation.id, ...(e as object) });
   const onClarificationAnswer = (d: { conversationId?: string; requestId?: string; answers?: unknown }) => {
-    // One socket can carry several conversations; only answer for this run.
-    if (d?.conversationId && d.conversationId !== conversation.id) return;
+    // BOTH identifiers, exactly. One socket carries several runs, and every
+    // run's handler sees every message on it — so a guard that only rejects a
+    // conversation id which is PRESENT AND WRONG lets a message carrying none
+    // through all of them. An absent request id then resolves as `undefined`,
+    // which `resolveClarification` answers by settling the OLDEST outstanding
+    // questionnaire. One malformed message could therefore answer, or silently
+    // skip, questions belonging to conversations it never named.
+    //
+    // Nothing legitimate is refused by this: the client answers with the id the
+    // QUESTION carried, which is this conversation's, and with the request id
+    // it was asked under.
+    if (!answersThisRun(d, conversation.id)) return;
     if (!Array.isArray(d?.answers)) return;
-    cascade.resolveClarification(
-      sanitiseClarificationAnswers(d.answers),
-      typeof d.requestId === 'string' ? d.requestId : undefined,
-    );
+    cascade.resolveClarification(sanitiseClarificationAnswers(d.answers), d.requestId as string);
   };
   if (interactive) {
     cascade.on('clarification:required', onClarification);
     cascade.on('clarification:timeout', onClarificationTimeout);
+    cascade.on('clarification:closed', onClarificationClosed);
     socket.on('clarification:answer', onClarificationAnswer);
   }
 
@@ -1789,6 +1828,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     socket.off('context:decision', onContextDecision);
     cascade.off('clarification:required', onClarification);
     cascade.off('clarification:timeout', onClarificationTimeout);
+    cascade.off('clarification:closed', onClarificationClosed);
     socket.off('clarification:answer', onClarificationAnswer);
     cascade.off('escalation:decision-required', onEscalation);
     cascade.off('escalation:timeout', onEscalationTimeout);

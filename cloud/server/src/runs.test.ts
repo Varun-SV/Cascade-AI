@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { ToolRegistry, CascadeConfigSchema } from '#cascade-ai';
-import { buildCloudConfig, buildMediaSink, parseChatRunPayload, runChatTurn, sanitiseClarificationAnswers, tenantScratchDir } from './runs.js';
+import { answersThisRun, buildCloudConfig, buildMediaSink, parseChatRunPayload, runChatTurn, sanitiseClarificationAnswers, tenantScratchDir } from './runs.js';
 import { CloudStore } from './db.js';
 import { limitsForPlan, PENDING_MEDIA_TTL_MS } from './entitlements.js';
 import type { CloudEnv } from './env.js';
@@ -275,6 +275,32 @@ describe('sanitiseClarificationAnswers — a questionnaire comes back from a cli
     // this is about the payload that is not an honest reply.
     const many = Array.from({ length: 100 }, (_, i) => ({ id: `q${i}`, value: 'x' }));
     expect(sanitiseClarificationAnswers(many)).toHaveLength(16);
+  });
+});
+
+describe('answersThisRun — an answer must name the run it answers', () => {
+  // One socket carries several runs and every run's handler sees every message,
+  // so an unkeyed answer settles the OLDEST outstanding questionnaire — in
+  // whichever conversation happens to hold it.
+  it('refuses a message that names no conversation', () => {
+    expect(answersThisRun({ requestId: 'r1' }, 'c1')).toBe(false);
+  });
+
+  it('refuses a message that names no request', () => {
+    expect(answersThisRun({ conversationId: 'c1' }, 'c1')).toBe(false);
+    expect(answersThisRun({ conversationId: 'c1', requestId: '' }, 'c1')).toBe(false);
+  });
+
+  it("refuses a message for somebody else's conversation", () => {
+    expect(answersThisRun({ conversationId: 'c2', requestId: 'r1' }, 'c1')).toBe(false);
+  });
+
+  it('refuses nothing at all', () => {
+    expect(answersThisRun(undefined, 'c1')).toBe(false);
+  });
+
+  it('accepts one that names both', () => {
+    expect(answersThisRun({ conversationId: 'c1', requestId: 'r1' }, 'c1')).toBe(true);
   });
 });
 
