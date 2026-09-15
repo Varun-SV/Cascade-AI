@@ -862,6 +862,62 @@ describe('attached is not the same as watchable', () => {
       .toEqual([{ runId: 'run-A', sessionId: 'sess-1', err: boom }]);
   });
 
+  it('does not let a throwing observer become the failure it was told about', async () => {
+    // The report runs inside the `.catch` on the release, so an observer that
+    // throws — a logging or telemetry sink briefly unavailable is the ordinary
+    // case — used to turn its own failure into a fresh rejection from
+    // `disposeRun`. `endRun` would then reject before `forgetRun`, and the
+    // fire-and-forget `stopRun` path would raise an unhandled rejection.
+    //
+    // Which is exactly the guarantee this change claims to keep: a release that
+    // fails must never fail the run. Reporting it cannot be what breaks it.
+    const { provider } = fakeProvider();
+    provider.endSession = async () => { throw new Error('release 503'); };
+
+    const c = new RemoteBrowserController({
+      provider,
+      onReleaseFailed: () => { throw new Error('the telemetry sink is down'); },
+    });
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await expect(c.endRun('run-A'), 'the run still ends').resolves.toBeUndefined();
+    // And the run is genuinely forgotten, not abandoned mid-teardown.
+    expect(c.humanHolds('run-A')).toBe(false);
+  });
+
+  it('reports a session that leaked while the browser was still opening', async () => {
+    // `openReserved` allocates the session first and only then connects, makes
+    // a context and opens a page. When one of those fails it rolls back — and
+    // that rollback releases a session exactly like any other teardown does.
+    //
+    // A session allocated and then not handed back is billable whether or not
+    // the run got as far as using it, and this path is reached precisely when
+    // something has already gone wrong, so it is no less likely to fail. The
+    // observer was wired to the ordinary teardown and not to this one: the rule
+    // was written once and applied to one of its two doors.
+    const { provider } = fakeProvider();
+    provider.endSession = async () => { throw new Error('release 503'); };
+    const failures: Array<{ runId: string; sessionId: string }> = [];
+    const c = new RemoteBrowserController({
+      provider,
+      onReleaseFailed: (runId, sessionId) => failures.push({ runId, sessionId }),
+    });
+
+    // Fail AFTER `createSession` has already allocated one, so the rollback is
+    // the path taken: the context is made once the session exists and the CDP
+    // connection is up, which is exactly the window this is about.
+    const realNewContext = browser.newContext;
+    browser.newContext = async () => { throw new Error('no context for you'); };
+    try {
+      await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    } finally {
+      browser.newContext = realNewContext;
+    }
+
+    expect(failures, 'the leaked session names itself here too')
+      .toEqual([{ runId: 'run-A', sessionId: 'sess-1' }]);
+  });
+
   it('re-advertises the browser on every action, not only when it is created', async () => {
     // A browser is created ONCE per run, and this used to be the only moment it
     // was announced — so a client with no panel for this run never got another

@@ -488,6 +488,28 @@ export class RemoteBrowserController {
   /** Told when a provider session could not be handed back. See `disposeRun`. */
   private onReleaseFailed: ((runId: string, sessionId: string, err: unknown) => void) | undefined;
 
+  /**
+   * Tell the observer a session leaked, without letting it become the leak.
+   *
+   * Guarded, because this runs inside a `.catch` on the release: an observer
+   * that throws — a logging or telemetry sink that is momentarily unavailable
+   * is the ordinary case — would turn its own failure into a fresh rejection
+   * from `disposeRun`, so `endRun` would reject before `forgetRun` and the
+   * fire-and-forget `stopRun` path would raise an unhandled rejection.
+   *
+   * That is precisely the guarantee this whole change claims to preserve: a
+   * release that fails must never fail the run. Reporting it cannot be the
+   * thing that breaks it.
+   */
+  private reportReleaseFailure(runId: string, sessionId: string, err: unknown): void {
+    try {
+      this.onReleaseFailed?.(runId, sessionId, err);
+    } catch {
+      // Nothing to escalate to. The report is best-effort by construction —
+      // everything that could act on it has already finished.
+    }
+  }
+
   private runs = new Map<string, RunBrowser>();
   /**
    * Runs that have a pool slot but no browser yet.
@@ -1902,9 +1924,8 @@ export class RemoteBrowserController {
     // only moment anything knows it happened — the run is over, the caller is
     // not waiting on an outcome, and there is nobody left to notice a session
     // that simply never went away.
-    await this.provider.endSession(held.session.id).catch((err: unknown) => {
-      this.onReleaseFailed?.(runId, held.session.id, err);
-    });
+    await this.provider.endSession(held.session.id)
+      .catch((err: unknown) => this.reportReleaseFailure(runId, held.session.id, err));
   }
 
   /**
@@ -2223,7 +2244,21 @@ export class RemoteBrowserController {
         // Same session, so the same capability URL — and the same reason to say
         // so again. A popup closing is exactly when a viewer is most likely to
         // have lost the panel.
-        this.announceLiveView(runId, existing.session.liveViewUrl, true);
+        //
+        // But only if this run still HAS that browser. `adoptPage` awaits a CDP
+        // reattachment, and Stop lands inside that await perfectly happily:
+        // `stopRun` removes the run and announces `active: false`, and an
+        // unconditional announcement here would then publish `active: true`
+        // after the teardown — resurrecting the panel, and a live capability
+        // URL, for a browser the person just stopped. Nothing would take it
+        // back down, because the withdrawal has already been sent.
+        //
+        // The sibling branch above needs no such check: it announces with no
+        // await between reading `runs` and saying so, and nothing can interleave
+        // in a synchronous stretch.
+        if (this.runs.get(runId) === existing && !existing.abort.signal.aborted) {
+          this.announceLiveView(runId, existing.session.liveViewUrl, true);
+        }
         return existing;
       }
     }
@@ -2395,7 +2430,17 @@ export class RemoteBrowserController {
       // would leave both behind.
       await owned?.close().catch(() => {});
       await browser?.close().catch(() => {});
-      await this.provider.endSession(session.id).catch(() => {});
+      // Reported like any other release, because it IS one. A session that was
+      // allocated and then could not be handed back is billable whether the
+      // run that wanted it got as far as using it or not — and this path is
+      // reached exactly when something already went wrong, so it is no less
+      // likely to fail than the ordinary teardown.
+      //
+      // The open's own error is what propagates: this release failing is a
+      // second, quieter problem, and replacing the first with it would hide
+      // the reason the browser never opened.
+      await this.provider.endSession(session.id)
+        .catch((releaseErr: unknown) => this.reportReleaseFailure(runId, session.id, releaseErr));
       throw err;
     }
     // AFTER `this.runs.set`, and that ordering is the whole point.
