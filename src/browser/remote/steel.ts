@@ -58,22 +58,43 @@ const DEFAULT_BASE = 'https://api.steel.dev';
  * config is — and a server-side copy of that decision is a second definition of
  * "hosted" free to drift from the one that actually picks the URL.
  *
- * Three configs reach the hosted API and they do not look alike: no url at all,
- * an empty one (`opts.url || DEFAULT_BASE` takes the default for both), and the
- * hosted host typed out in full. Asking about the RESOLVED destination answers
- * all three at once, which asking about the presence of `url` cannot.
+ * Several configs reach the hosted API and they do not look alike: no url at
+ * all, an empty one (`opts.url || DEFAULT_BASE` takes the default for both),
+ * the hosted host typed out in full, and the fully-qualified spelling with a
+ * terminal dot. Asking about the RESOLVED destination answers all of them at
+ * once, which asking about the presence of `url` cannot.
  *
- * Compared by hostname, so a trailing slash, a port, a path or a different
- * scheme cannot disguise it. A URL this cannot parse is not the hosted API —
- * and is refused earlier anyway, for being unparseable.
+ * Compared by host key, so a trailing slash, a port, a path, a different scheme,
+ * a different case or a root dot cannot disguise it. A URL this cannot parse is
+ * not the hosted API — and is refused earlier anyway, for being unparseable.
  */
 export function isHostedSteel(url?: string): boolean {
   if (!url) return true;
   try {
-    return new URL(url).hostname.toLowerCase() === new URL(DEFAULT_BASE).hostname;
+    return hostKey(new URL(url).hostname) === hostKey(new URL(DEFAULT_BASE).hostname);
   } catch {
     return false;
   }
+}
+
+/**
+ * A hostname reduced to the thing DNS will actually resolve.
+ *
+ * `api.steel.dev.` — the fully-qualified spelling, with the root label written
+ * out — is a valid URL that reaches the same service, and `URL.hostname` keeps
+ * the terminal dot. Compared literally it looked like somebody else's host, so
+ * the one spelling that says "resolve this exactly" was the one that slipped
+ * past the check and bought an unauthenticated hosted provider.
+ *
+ * Stripped in a loop rather than with `/\.+$/`: the parser accepts more than
+ * one trailing dot, and a greedy `+` anchored at the end is the pattern CodeQL
+ * flagged on this file's slash-stripping for polynomial backtracking. A loop is
+ * linear and needs no argument about who can reach it.
+ */
+function hostKey(hostname: string): string {
+  let host = hostname.toLowerCase();
+  while (host.endsWith('.')) host = host.slice(0, -1);
+  return host;
 }
 
 /** How long to wait for the provider to hand back a session. */

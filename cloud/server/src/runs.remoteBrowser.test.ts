@@ -223,6 +223,14 @@ describe('the Browser control is advertised only where one can be built', () => 
     expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev/' }), 'a trailing slash is not a different host').toBe(false);
     expect(providerIsUsable({ provider: 'steel', url: 'https://API.Steel.DEV' }), 'nor is shouting').toBe(false);
     expect(providerIsUsable({ provider: 'steel', url: '' }), 'an empty url takes the default too').toBe(false);
+    // The FULLY-QUALIFIED spelling, with the root label written out. `URL`
+    // keeps the terminal dot, so compared literally the one spelling that
+    // means "resolve exactly this" looked like somebody else's host — and the
+    // parser accepts more than one dot, so stripping just the last is not
+    // enough either.
+    expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev.' }), 'an FQDN is the same service').toBe(false);
+    expect(providerIsUsable({ provider: 'steel', url: 'https://API.Steel.DEV.' }), 'and shouting it does not help').toBe(false);
+    expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev../v1' }), 'nor does doubling the dot').toBe(false);
   });
 
   it('is advertised for the hosted URL when a credential comes with it', () => {
