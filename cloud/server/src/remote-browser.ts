@@ -234,10 +234,19 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
         // provider's own dashboard is keyed by, so an operator can see the
         // browser still running and match it to the release that failed. It is
         // not a capability — the live-view URL is, and is never logged.
-        onReleaseFailed: (runId, sessionId, err) => {
+        // `expiresInMs` is the provider's own ceiling, and it is the difference
+        // between a report an operator can act on and one that only worries
+        // them: "billable until the provider times it out" leaves open whether
+        // that is minutes or until somebody kills it by hand. Absent when the
+        // provider did not say, and then the sentence stays honest by not
+        // claiming a bound nobody stated.
+        onReleaseFailed: (runId, sessionId, err, expiresInMs) => {
+          const reaped = typeof expiresInMs === 'number' && expiresInMs > 0
+            ? `the provider reaps it ${Math.round(expiresInMs / 60_000)}m after creation`
+            : 'it runs until the provider times it out';
           console.error(
             `[browser ${runId}] provider session ${sessionId} was NOT released; `
-            + 'it will run until the provider times it out and is billable until then:',
+            + `${reaped}, and is billable until then:`,
             err,
           );
         },

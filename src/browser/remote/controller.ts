@@ -239,7 +239,7 @@ export interface RemoteBrowserControllerOptions {
    * timeout collects it, and without this there is no way to tell that from a
    * clean handback.
    */
-  onReleaseFailed?: (runId: string, sessionId: string, err: unknown) => void;
+  onReleaseFailed?: (runId: string, sessionId: string, err: unknown, expiresInMs?: number) => void;
   /**
    * Something that must finish before this controller may open anything.
    *
@@ -486,7 +486,7 @@ export class RemoteBrowserController {
   /** An embedder that wants every run's live view, told which run each is. */
   private onLiveViewAll: ((runId: string, liveViewUrl: string | undefined) => void) | undefined;
   /** Told when a provider session could not be handed back. See `disposeRun`. */
-  private onReleaseFailed: ((runId: string, sessionId: string, err: unknown) => void) | undefined;
+  private onReleaseFailed: ((runId: string, sessionId: string, err: unknown, expiresInMs?: number) => void) | undefined;
 
   /**
    * Tell the observer a session leaked, without letting it become the leak.
@@ -501,9 +501,15 @@ export class RemoteBrowserController {
    * release that fails must never fail the run. Reporting it cannot be the
    * thing that breaks it.
    */
-  private reportReleaseFailure(runId: string, sessionId: string, err: unknown): void {
+  private reportReleaseFailure(runId: string, sessionId: string, err: unknown, expiresInMs?: number): void {
     try {
-      this.onReleaseFailed?.(runId, sessionId, err);
+      // The provider's own ceiling, carried through so the report can say WHEN
+      // the leak stops costing money. Without it the operator is told a session
+      // is running and billable with no idea whether that means five minutes or
+      // until they go and kill it by hand — and the field incident that started
+      // this was two sessions ending at exactly five minutes with nothing
+      // anywhere recording why.
+      this.onReleaseFailed?.(runId, sessionId, err, expiresInMs);
     } catch {
       // Nothing to escalate to. The report is best-effort by construction —
       // everything that could act on it has already finished.
@@ -684,9 +690,41 @@ export class RemoteBrowserController {
    * apart — and would drop the Stop control for the first as if it were the
    * second.
    */
+  /*
+   * Guarded HERE rather than at the call sites, which is the point.
+   *
+   * This is the fifth place in this changeset where a notification could take
+   * down the thing it was notifying about — after the release observer,
+   * `clarification:closed`, `clarification:timeout` and `escalation:timeout`.
+   * The first four were fixed one door at a time, which is how a fifth door
+   * came to exist: the announcement added on the reuse path propagated out of
+   * `open()`, `act()` caught it as an action failure, and every later action
+   * against a perfectly healthy browser was skipped.
+   *
+   * Putting the guard at the source closes all four call sites at once and
+   * leaves no door for a sixth. The worst of them is not the reported one:
+   * `disposeRun` announces `active: false` as its FIRST statement, so a
+   * throwing listener aborted teardown before the screencast was stopped, the
+   * context closed, or the session handed back — leaking the provider session
+   * and never reaching `reportReleaseFailure`. The leak report would have been
+   * skipped by exactly the failure it exists to report.
+   *
+   * Two separate guards, not one around both: these are different listeners —
+   * the per-run panel and the global observer — and one failing must not cost
+   * the other its notification.
+   */
   private announceLiveView(runId: string, liveViewUrl: string | undefined, active: boolean): void {
-    this.liveViewListeners.get(runId)?.({ active, ...(liveViewUrl ? { liveViewUrl } : {}) });
-    this.onLiveViewAll?.(runId, liveViewUrl);
+    try {
+      this.liveViewListeners.get(runId)?.({ active, ...(liveViewUrl ? { liveViewUrl } : {}) });
+    } catch {
+      // A listener's own problem. Nothing here can act on it, and the browser
+      // operation being announced is not a party to it.
+    }
+    try {
+      this.onLiveViewAll?.(runId, liveViewUrl);
+    } catch {
+      // As above.
+    }
   }
 
   /**
@@ -1925,7 +1963,7 @@ export class RemoteBrowserController {
     // not waiting on an outcome, and there is nobody left to notice a session
     // that simply never went away.
     await this.provider.endSession(held.session.id)
-      .catch((err: unknown) => this.reportReleaseFailure(runId, held.session.id, err));
+      .catch((err: unknown) => this.reportReleaseFailure(runId, held.session.id, err, held.session.expiresInMs));
   }
 
   /**
@@ -2440,7 +2478,7 @@ export class RemoteBrowserController {
       // second, quieter problem, and replacing the first with it would hide
       // the reason the browser never opened.
       await this.provider.endSession(session.id)
-        .catch((releaseErr: unknown) => this.reportReleaseFailure(runId, session.id, releaseErr));
+        .catch((releaseErr: unknown) => this.reportReleaseFailure(runId, session.id, releaseErr, session.expiresInMs));
       throw err;
     }
     // AFTER `this.runs.set`, and that ordering is the whole point.

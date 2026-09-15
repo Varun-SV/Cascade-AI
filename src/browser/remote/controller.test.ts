@@ -918,6 +918,32 @@ describe('attached is not the same as watchable', () => {
       .toEqual([{ runId: 'run-A', sessionId: 'sess-1' }]);
   });
 
+  it('tells the observer when the leaked session gets reaped', async () => {
+    // "Billable until the provider times it out" leaves the operator without
+    // the one number that decides what to do about it: whether this costs five
+    // minutes or runs until somebody kills it by hand. The ceiling was read
+    // from the provider and carried on the session, and then reached nothing —
+    // parsed, typed, and used by no caller outside its own adapter test.
+    //
+    // Which is the same failure as a report that cannot be delivered: the fact
+    // was captured and then not put anywhere a person would see it.
+    const { provider } = fakeProvider();
+    provider.createSession = async () => ({ id: 'sess-1', cdpUrl: 'ws://fake/cdp', expiresInMs: 300_000 });
+    provider.endSession = async () => { throw new Error('release 503'); };
+
+    const seen: Array<{ sessionId: string; expiresInMs?: number }> = [];
+    const c = new RemoteBrowserController({
+      provider,
+      onReleaseFailed: (_runId, sessionId, _err, expiresInMs) => seen.push({ sessionId, expiresInMs }),
+    });
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await c.endRun('run-A');
+
+    expect(seen, 'the five minutes that explained the field incident')
+      .toEqual([{ sessionId: 'sess-1', expiresInMs: 300_000 }]);
+  });
+
   it('re-advertises the browser on every action, not only when it is created', async () => {
     // A browser is created ONCE per run, and this used to be the only moment it
     // was announced — so a client with no panel for this run never got another
@@ -946,6 +972,48 @@ describe('attached is not the same as watchable', () => {
       .toHaveLength(2);
     expect(seen.at(-1), 'the same browser, still watchable')
       .toEqual({ active: true, liveViewUrl: 'https://view.example/session' });
+  });
+
+  it('does not let a throwing view listener fail the action it was announcing', async () => {
+    // The re-announcement above is informational, and it sat directly in the
+    // path of `open()`. A listener that threw — a transport that has gone away
+    // is the ordinary case — propagated out, `act()` caught it as an action
+    // failure, and every later action against a perfectly healthy browser was
+    // skipped: the announcement took down the thing it was announcing.
+    //
+    // The fifth instance of that in this changeset, which is why the guard went
+    // into `announceLiveView` itself rather than onto this call site. There are
+    // four call sites; fixing the reported one would have left three.
+    const { provider } = fakeProvider('https://view.example/session');
+    const c = new RemoteBrowserController({ provider });
+    c.onLiveViewFor('run-A', () => { throw new Error('the socket is gone'); });
+
+    // `act` catches whatever escapes and reports it as a FAILED ACTION, so the
+    // assertion has to be on `ok` — an outcome object is returned either way,
+    // and a test that only checked for one would pass with the guard removed.
+    const first = await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    expect(first.ok, 'the creation announcement cannot fail the action either').toBe(true);
+
+    // The reuse path — the one the announcement was added to.
+    const again = await c.controller({ kind: 'click', selector: '#b' }, ctx('run-A', 'w1'));
+    expect(again.ok, 'and every later action against a healthy browser still runs').toBe(true);
+  });
+
+  it('still tears the session down when the view listener throws', async () => {
+    // The worst of the four call sites, and not the one that was reported:
+    // `disposeRun` announces `active: false` as its FIRST statement. A throwing
+    // listener aborted teardown before the screencast was stopped, the context
+    // closed, or the session handed back — so the report of a leak was skipped
+    // by the very failure that caused one.
+    const { provider, ended } = fakeProvider('https://view.example/session');
+    const c = new RemoteBrowserController({ provider });
+    c.onLiveViewFor('run-A', () => { throw new Error('the socket is gone'); });
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await expect(c.endRun('run-A')).resolves.toBeUndefined();
+
+    expect(ended, 'the session is handed back, not leaked by its own farewell')
+      .toEqual(['sess-1']);
   });
 });
 

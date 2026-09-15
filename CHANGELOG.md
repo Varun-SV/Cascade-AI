@@ -88,8 +88,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session id the provider's own dashboard is keyed by. Two sessions in the
   field ended at exactly five minutes — the provider's default timeout, not a
   release — and nothing anywhere recorded whether a release had been attempted
-  or had failed. That ceiling is now read from the provider and carried on the
-  session, so a leak is explicable rather than mysterious. It cannot be set:
+  or had failed. That ceiling is now read from the provider and named in the
+  failure itself — "the provider reaps it 5m after creation" rather than an
+  open-ended "until it times out" — so the report says how long the leak costs
+  money instead of only that it does. It cannot be set:
   Steel's create API accepts no timeout field, and an option feeding a field
   the API ignores would look like control while changing nothing.
 
