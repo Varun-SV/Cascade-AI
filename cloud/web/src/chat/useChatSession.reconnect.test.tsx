@@ -297,4 +297,42 @@ describe('useChatSession — a run that outlives the connection that started it'
     act(() => { fake.fire('run:resumed', { active: 0 }); });
     await waitFor(() => expect(view.result.current.escalationQueued).toBe(0));
   });
+
+  it('takes a question down when its run turns out to have already finished', async () => {
+    // The gap the closure tombstones could not reach. A question closes while
+    // the transport is unbound, and the run then ENDS before the page comes
+    // back: the server never adopts a finished run, and `replaySupervision`
+    // returns immediately for one, so no tombstone is ever emitted for it.
+    //
+    // Meanwhile the client deliberately keeps `allClarifications` across a
+    // disconnect — an unanswered question is still live and still answerable,
+    // exactly as the escalation above — so nothing took the dead form down. It
+    // stayed, and because the queue renders oldest-first, in front of every
+    // later question.
+    //
+    // Fixed at the ending rather than by replaying more state: a terminal run
+    // cannot still be asking, so "done" already implies "closed" and needs no
+    // per-id record to be trusted.
+    const fake = fakeSocket();
+    const view = startRun(fake);
+    act(() => {
+      fake.fire('clarification:required', {
+        conversationId: 'server-made-id',
+        requestId: 'req-1',
+        questions: [{ id: 'q1', prompt: 'Which account?', kind: 'choice', options: ['A', 'B'] }],
+      });
+    });
+    await waitFor(() => expect(view.result.current.clarifications).toHaveLength(1));
+
+    // It survives the blip — that part is deliberate and must not regress.
+    act(() => { fake.fire('disconnect'); });
+    expect(view.result.current.clarifications, 'still live across a blip').toHaveLength(1);
+
+    // The run is then found to have ended while nobody was connected.
+    act(() => { fake.fire('run:resumed', { active: 0, finished: [{ conversationId: 'server-made-id' }] }); });
+
+    await waitFor(() => expect(view.result.current.busy).toBe(false));
+    expect(view.result.current.clarifications, 'no form outlives the run that asked it')
+      .toHaveLength(0);
+  });
 });

@@ -501,8 +501,17 @@ export class Cascade extends EventEmitter {
       signal?.addEventListener('abort', onAbort, { once: true });
 
       timeout = setTimeout(() => {
-        this.emit('escalation:timeout', { taskId, requestId, sectionId: ctx.sectionId });
+        // Settled first, emit guarded — see the clarification timeout below.
+        // Found by walking every door of that rule rather than only the one
+        // that was reported, and this is the gate with the most to lose: an
+        // escalation that never settles holds a T2 section and its worker,
+        // where an unanswered question only costs an assumption.
         settle({ action: 'timeout' });
+        try {
+          this.emit('escalation:timeout', { taskId, requestId, sectionId: ctx.sectionId });
+        } catch {
+          // Informational only, and the section is already unblocked.
+        }
       }, ESCALATION_DECISION_TIMEOUT_MS);
 
       this.pendingEscalations.set(requestId, settle);
@@ -635,8 +644,24 @@ export class Cascade extends EventEmitter {
       signal?.addEventListener('abort', onAbort, { once: true });
 
       timeout = setTimeout(() => {
-        this.emit('clarification:timeout', { requestId });
+        // SETTLED FIRST, and the emit guarded — the same rule as the close
+        // announcement below it, and the THIRD place this gate family got it
+        // wrong (the release observer, then `clarification:closed`, then here).
+        //
+        // Worse here than there, for two reasons. `settle` had not run yet, so
+        // a throwing listener left the entry IN `pendingClarifications` with
+        // its promise unresolved — and the timer is one-shot, so nothing would
+        // ever come back for it: the run parked on the question until teardown.
+        // And this is a TIMER callback, so the throw does not unwind into any
+        // caller; it surfaces as an uncaught exception and can take the process
+        // with it.
         settle(none('timeout'));
+        try {
+          this.emit('clarification:timeout', { requestId });
+        } catch {
+          // Informational only, and the run is already unblocked. There is
+          // nothing here to escalate a listener's failure to.
+        }
       }, CLARIFICATION_TIMEOUT_MS);
 
       this.pendingClarifications.set(requestId, settle);

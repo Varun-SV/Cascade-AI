@@ -222,6 +222,34 @@ describe('escalation gate', () => {
     }
   });
 
+  it('is not parked by a timeout listener that throws', async () => {
+    // The announcement used to run BEFORE `settle`, inside a one-shot timer.
+    // A listener that threw unwound the callback before the gate settled, so
+    // the request stayed in `pendingEscalations` with its promise unresolved
+    // and nothing was ever coming back for it — the section held its worker
+    // until teardown. Being a timer callback, the throw also had no caller to
+    // unwind into: it surfaced as an uncaught exception.
+    //
+    // Not reported by review — this gate is outside the PR's diff. Found by
+    // walking every door of the rule after the same mistake was caught in the
+    // clarification gate, which was itself the second time it had been made.
+    vi.useFakeTimers();
+    try {
+      const c = new Cascade(config, '/tmp');
+      c.on('escalation:decision-required', () => { /* parked */ });
+      c.on('escalation:timeout', () => { throw new Error('the telemetry sink is down'); });
+
+      const parked = gateOf(c)(ctx('alpha'), 'task-1');
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(5 * 60_000 + 1);
+
+      await expect(parked, 'the section is released regardless')
+        .resolves.toEqual({ action: 'timeout' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('times out each parked section independently', async () => {
     // The failure this guards: one section's timer clearing the shared slot,
     // leaving the other permanently unresolvable.

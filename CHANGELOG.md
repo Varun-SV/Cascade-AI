@@ -75,6 +75,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or halt. Reported from the field: the panel appeared on the first browser
   action, was dismissed, and never returned.
 
+- **An escalation can no longer be parked by whoever was told about it.** When
+  a section's review timed out, the announcement went out before the gate
+  settled — so a listener that threw (a logging sink, a telemetry exporter)
+  unwound the timer before the section was released, leaving it waiting on a
+  one-shot timer that had already fired and holding its worker until teardown.
+  Being a timer callback, the same throw had no caller to unwind into and
+  surfaced as an uncaught exception. The gate now settles first and the
+  announcement cannot take it down.
+
 - **A provider session that could not be handed back now says so**, with the
   session id the provider's own dashboard is keyed by. Two sessions in the
   field ended at exactly five minutes — the provider's default timeout, not a

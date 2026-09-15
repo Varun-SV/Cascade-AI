@@ -1300,6 +1300,22 @@ export function useChatSession(
     awaitingFirstTurnRef.current = false;
     conversationIdRef.current = target;
     setConversationId(target);
+    // Every question this run was holding is over, whatever it was told.
+    //
+    // The other gates above are cleared unconditionally; these cannot be, so
+    // they were missed. `allClarifications` spans conversations and is filtered
+    // on read, so emptying it would take down a form belonging to another pane
+    // — which is the thing that filtering exists to prevent. Cleared by
+    // conversation instead.
+    //
+    // Deliberately NOT done by replaying closure tombstones for a finished run,
+    // which was the other way to fix this. A terminal run cannot still be
+    // asking: teardown releases every pending clarification, so "closed" is
+    // implied by "done" and needs no per-id record to be trusted. Depending on
+    // the tombstone set here would make correctness contingent on it — and it
+    // is bounded at 32, so a run that asked more than that could evict the one
+    // id that mattered and leave the dead form standing again.
+    setClarifications((q) => q.filter((c) => c.conversationId !== target));
     settleConversation(target);
     void reloadActivePath(target);
   }, [reloadActivePath, settleConversation]);

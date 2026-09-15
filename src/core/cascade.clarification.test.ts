@@ -189,6 +189,55 @@ describe('Cascade.askUser — a question that cannot hang the run', () => {
       .resolves.toEqual({ outcome: 'aborted', answers: [] });
   });
 
+  it('is not parked by a timeout listener that throws', async () => {
+    // The third place this gate family made the same mistake, and the worst of
+    // them. The close announcement at least ran AFTER the map delete, so a
+    // throwing listener left a promise nobody could settle; here the emit ran
+    // before `settle` itself, so the entry stayed in `pendingClarifications`
+    // with the timer already spent — one-shot, nothing else coming.
+    //
+    // And a timer callback has no caller to unwind into, so the throw does not
+    // merely park the run, it surfaces as an uncaught exception.
+    vi.useFakeTimers();
+    try {
+      const c = new Cascade(baseConfig, '/tmp');
+      c.on('clarification:required', () => {});
+      c.on('clarification:timeout', () => { throw new Error('a listener blew up'); });
+
+      const asking = c.askUser(ONE);
+      await vi.advanceTimersByTimeAsync(2 * 60_000 + 100);
+
+      await expect(asking, 'the run is unblocked regardless')
+        .resolves.toEqual({ outcome: 'timeout', answers: [] });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('still takes the form down when the timeout listener throws', async () => {
+    // Settling first is only half of it. `clarification:closed` is what the
+    // client removes the form on, and it is emitted from `settle` — so if the
+    // timeout announcement could still unwind the callback, the run would
+    // resume while a dead questionnaire stayed on screen in front of every
+    // later question.
+    vi.useFakeTimers();
+    try {
+      const c = new Cascade(baseConfig, '/tmp');
+      const closed: unknown[] = [];
+      c.on('clarification:required', () => {});
+      c.on('clarification:closed', (e: unknown) => closed.push(e));
+      c.on('clarification:timeout', () => { throw new Error('a listener blew up'); });
+
+      const asking = c.askUser(ONE);
+      await vi.advanceTimersByTimeAsync(2 * 60_000 + 100);
+      await asking;
+
+      expect(closed, 'the form is closed before the announcement can fail').toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('closes the form exactly once, however many ways it could settle', async () => {
     // The map delete is what makes this exactly-once. Emitting twice would take
     // down a LATER form: the client removes by request id, and a repeat for an
