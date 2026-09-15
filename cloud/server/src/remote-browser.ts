@@ -438,7 +438,7 @@ function buildProvider(
   //
   // An absent url is fine and means the hosted API: `SteelProvider` defaults it.
   if (settings.url && !isUsableSteelBase(settings.url)) {
-    warn?.(`remoteBrowser.url for steel must be an http(s) API base with no query or fragment; got ${settings.url}`);
+    warn?.('remoteBrowser.url for steel must be an http(s) API base with no query, fragment or embedded credentials; use remoteBrowser.apiKey for the credential');
     return null;
   }
   // The hosted API needs a key; a self-hosted one usually does not.

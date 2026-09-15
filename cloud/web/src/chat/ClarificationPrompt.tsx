@@ -32,24 +32,34 @@ const CHOSEN = 'border-accent-500/40 bg-accent-500/15 text-accent-300 focus-visi
 const UNCHOSEN = 'border-elev/10 bg-elev/[0.04] text-ink-400 hover:text-ink-100 focus-visible:ring-ink-500';
 
 export function ClarificationPrompt({ clarifications, onAnswer }: Props) {
-  // One at a time, oldest first — the same rule the approval queue follows.
-  // Two forms at once is a page of questions, and a page of questions is a
-  // thing people close.
-  const [current, ...rest] = clarifications;
-  if (!current) return null;
-
-  // KEYED on the request id, so React discards the draft when one form
-  // replaces another. Carrying it over would submit answers to questions that
-  // were never shown — the ids are positional (`q1`, `q2`), so a stale reply
-  // does not look stale, it looks like an answer to whatever now sits in that
-  // position.
+  // ALL of them, oldest first — not one at a time, which is what this did.
+  //
+  // I copied that rule from the approval queue, where it is right: approvals
+  // are raised one at a time by a run that is waiting, so there is no second
+  // one to hide. Questions are not. Parallel workers each call `ask_user`, and
+  // `pendingClarifications` is a map precisely because several can be open at
+  // once — and EVERY one of them started its two-minute timer the moment it was
+  // asked, whether or not anybody could see it.
+  //
+  // So the queue was not deferring the later questions, it was expiring them.
+  // Somebody answering the first form carefully could watch two more time out
+  // behind it and never know they had been asked, while the workers that asked
+  // proceeded on assumptions with a person sitting right there.
+  //
+  // "A page of questions is a thing people close" was my argument for hiding
+  // them, and it does not survive the deadline: a question nobody is shown is
+  // not a tidier interface, it is a question answered by default.
+  //
+  // KEYED on the request id, so React discards a draft when a form goes and
+  // never carries it into another. The ids are positional (`q1`, `q2`), so an
+  // inherited answer does not look stale — it looks like a reply to whatever
+  // now sits in that slot.
   return (
-    <Questionnaire
-      key={current.requestId}
-      request={current}
-      waiting={rest.length}
-      onAnswer={onAnswer}
-    />
+    <>
+      {clarifications.map((request) => (
+        <Questionnaire key={request.requestId} request={request} onAnswer={onAnswer} />
+      ))}
+    </>
   );
 }
 
@@ -80,8 +90,8 @@ function useRemaining(timeoutMs?: number, receivedAt?: number): number | undefin
 }
 
 function Questionnaire(
-  { request: current, waiting, onAnswer }:
-  { request: ClarificationRequest; waiting: number; onAnswer: Props['onAnswer'] },
+  { request: current, onAnswer }:
+  { request: ClarificationRequest; onAnswer: Props['onAnswer'] },
 ) {
   const [draft, setDraft] = useState<Record<string, string | string[]>>({});
 
@@ -113,9 +123,6 @@ function Questionnaire(
       <div className="flex items-center gap-1.5 border-b border-info-500/20 px-3 py-1.5 text-[11px] text-info-300">
         <MessagesSquare size={13} className="shrink-0" />
         <span className="flex-1 truncate">Cascade needs to know before it carries on</span>
-        {waiting > 0 && (
-          <span className="shrink-0 tabular-nums text-info-300/70">{waiting} more waiting</span>
-        )}
         {/* The gate is two minutes and the form said nothing about it, so a
             considered answer could be typed into a questionnaire that was
             already gone — the draft discarded with no warning it was running

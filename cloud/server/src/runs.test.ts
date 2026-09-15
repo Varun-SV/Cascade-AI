@@ -296,6 +296,44 @@ describe('sanitiseClarificationAnswers — a questionnaire comes back from a cli
     expect((only?.value as string).length).toBe(2_000);
   });
 
+  it('bounds what the WHOLE reply can put into the context, not just each piece', () => {
+    // Every individual cap was respected and the total was unbounded, which is
+    // the only number the caps existed to control. `AskUserTool` joins a
+    // multi-select into ONE string, so sixteen clipped elements made a single
+    // 32,000-character answer, and sixteen of those made a reply far larger
+    // than the conversation it was answering.
+    const huge = Array.from({ length: 16 }, () => 'x'.repeat(2_000));
+    const out = sanitiseClarificationAnswers(
+      Array.from({ length: 16 }, (_, i) => ({ id: `q${i + 1}`, value: huge })),
+    );
+
+    const total = out.reduce((n, a) => n + (Array.isArray(a.value) ? a.value.join('').length : a.value.length), 0);
+    expect(total, 'the budget is on the reply, not on the answer').toBeLessThanOrEqual(8_000);
+  });
+
+  it('spends the budget on what arrived first rather than rationing it', () => {
+    // An honest answer is a sentence, and should not be truncated because a
+    // later answer in the same reply happens to be enormous.
+    const out = sanitiseClarificationAnswers([
+      { id: 'q1', value: 'the personal one' },
+      { id: 'q2', value: 'y'.repeat(50_000) },
+    ]);
+    expect(out[0], 'the short one is untouched').toEqual({ id: 'q1', value: 'the personal one' });
+    expect((out[1]?.value as string).length, 'the long one takes what is left, up to its own cap').toBe(2_000);
+  });
+
+  it('drops an answer the budget clipped away to nothing', () => {
+    // A blank reads as an answer once it reaches the model. Omitting it is what
+    // keeps "(no answer given)" honest — the same rule the form follows.
+    // Four answers at the 2,000 per-answer cap spend the whole 8,000 budget,
+    // so the fifth gets nothing at all.
+    const out = sanitiseClarificationAnswers([
+      ...Array.from({ length: 4 }, (_, i) => ({ id: `q${i + 1}`, value: 'z'.repeat(2_000) })),
+      { id: 'q5', value: 'squeezed out entirely' },
+    ]);
+    expect(out.map((a) => a.id), 'not present as an empty string').toEqual(['q1', 'q2', 'q3', 'q4']);
+  });
+
   it('bounds how many answers one reply can carry', () => {
     // The tool asks at most five questions, so sixteen is already generous —
     // this is about the payload that is not an honest reply.

@@ -1167,6 +1167,20 @@ function seedConversation(store: CloudStore, userId: string, payload: ChatRunPay
  */
 const MAX_CLARIFICATION_ANSWERS = 16;
 const MAX_CLARIFICATION_ANSWER_CHARS = 2_000;
+/**
+ * What the WHOLE reply may contribute to the model's context.
+ *
+ * The two caps above bound one value and one list, and bounded nothing that
+ * matters: `AskUserTool` joins a multi-select into a single string, so sixteen
+ * clipped elements made one answer of 32,000 characters, and sixteen of those
+ * made a reply far larger than the conversation it was answering. Every
+ * individual limit was respected and the total was unbounded — which is the
+ * only number the limits existed to control.
+ *
+ * Spent as a budget across the reply rather than divided evenly: an honest
+ * answer is a sentence and should not be truncated because a later one is long.
+ */
+const MAX_CLARIFICATION_REPLY_CHARS = 8_000;
 
 /**
  * Whether an inbound answer names the run it claims to answer.
@@ -1210,20 +1224,35 @@ export function answersThisRun(
  * cannot catch a rule dropped from the real one.
  */
 export function sanitiseClarificationAnswers(raw: unknown[]): ClarificationAnswer[] {
-  const clip = (v: string) => v.slice(0, MAX_CLARIFICATION_ANSWER_CHARS);
+  // Spent down as the reply is read, so the cap is on the TOTAL rather than on
+  // each piece of it. Taking whichever is smaller keeps the per-value limit
+  // meaningful for the first answer and stops the last one being unbounded
+  // just because it arrived after the others.
+  let budget = MAX_CLARIFICATION_REPLY_CHARS;
+  const take = (v: string): string => {
+    const kept = v.slice(0, Math.min(MAX_CLARIFICATION_ANSWER_CHARS, budget));
+    budget -= kept.length;
+    return kept;
+  };
+
   return raw.slice(0, MAX_CLARIFICATION_ANSWERS).flatMap((a): ClarificationAnswer[] => {
     const row = (a ?? {}) as Record<string, unknown>;
     if (typeof row['id'] !== 'string' || row['id'] === '') return [];
     const value = row['value'];
-    if (typeof value === 'string') return [{ id: row['id'], value: clip(value) }];
+    if (typeof value === 'string') {
+      const kept = take(value);
+      // An answer clipped away to nothing is not an answer. Dropping it lets
+      // the model be told the question went unanswered, which is true, rather
+      // than handing it a blank that reads as a reply.
+      return kept === '' ? [] : [{ id: row['id'], value: kept }];
+    }
     if (Array.isArray(value)) {
-      return [{
-        id: row['id'],
-        value: value
-          .filter((v): v is string => typeof v === 'string')
-          .slice(0, MAX_CLARIFICATION_ANSWERS)
-          .map(clip),
-      }];
+      const kept = value
+        .filter((v): v is string => typeof v === 'string')
+        .slice(0, MAX_CLARIFICATION_ANSWERS)
+        .map(take)
+        .filter((v) => v !== '');
+      return kept.length === 0 ? [] : [{ id: row['id'], value: kept }];
     }
     return [];
   });

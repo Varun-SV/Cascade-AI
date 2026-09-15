@@ -96,17 +96,59 @@ describe('ClarificationPrompt', () => {
     expect(onAnswer).toHaveBeenCalledWith('req-1', []);
   });
 
-  it('asks one at a time and says how many are behind it', () => {
-    // A queue nobody can see looks like a stuck run — the same rule the
-    // approval prompt follows.
+  it('shows every open question, because every one of them is already expiring', () => {
+    // This test used to assert the opposite — one form, with "2 more waiting"
+    // behind it. That was my rule, copied from the approval queue, and it was
+    // wrong here for a reason the approval queue does not have: parallel
+    // workers each call `ask_user`, and every request starts its two-minute
+    // timer the moment it is asked, visible or not.
+    //
+    // So hiding the later ones did not defer them, it expired them. Somebody
+    // answering the first form carefully could have two more time out behind
+    // it, never knowing they had been asked, while the workers that asked went
+    // ahead on assumptions with a person sitting right there.
     render(
       <ClarificationPrompt
         clarifications={[ask(), ask({ requestId: 'req-2' }), ask({ requestId: 'req-3' })]}
         onAnswer={() => {}}
       />,
     );
-    expect(screen.getByText(/2 more waiting/i)).toBeInTheDocument();
-    expect(screen.getAllByText('Which account?'), 'one form, not three').toHaveLength(1);
+    expect(screen.getAllByText('Which account?'), 'all three, not one').toHaveLength(3);
+    expect(screen.getAllByRole('button', { name: /send answers/i }), 'each answerable on its own').toHaveLength(3);
+  });
+
+  it('answers the form that was filled in, not the first one on screen', () => {
+    // The corollary of showing them all: `onAnswer` has to carry the request id
+    // of the form that was submitted. Routing by position would answer the
+    // oldest question with a later one's reply.
+    const onAnswer = vi.fn();
+    render(
+      <ClarificationPrompt
+        clarifications={[ask(), ask({ requestId: 'req-2' })]}
+        onAnswer={onAnswer}
+      />,
+    );
+    fireEvent.click(screen.getAllByRole('button', { name: 'Work' })[1]!);
+    fireEvent.click(screen.getAllByRole('button', { name: /send answers/i })[1]!);
+
+    expect(onAnswer).toHaveBeenCalledWith('req-2', [{ id: 'q1', value: 'Work' }]);
+  });
+
+  it("keeps each form's draft to itself", () => {
+    // They render together now, so a shared draft would put one person's answer
+    // into another question — the ids are positional (`q1`), so it would not
+    // even look wrong.
+    const onAnswer = vi.fn();
+    render(
+      <ClarificationPrompt
+        clarifications={[ask(), ask({ requestId: 'req-2' })]}
+        onAnswer={onAnswer}
+      />,
+    );
+    fireEvent.click(screen.getAllByRole('button', { name: 'Personal' })[0]!);
+    fireEvent.click(screen.getAllByRole('button', { name: /send answers/i })[1]!);
+
+    expect(onAnswer, 'the untouched form sends nothing').toHaveBeenCalledWith('req-2', []);
   });
 
   it('says how long is left, so a considered answer is not typed into a dead form', () => {

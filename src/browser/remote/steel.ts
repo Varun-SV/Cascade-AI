@@ -90,16 +90,26 @@ export function isHostedSteel(url?: string): boolean {
  * meant it, and quietly dropping it would send their requests somewhere they
  * did not ask for; saying so lets them fix it.
  *
+ * Userinfo is refused for a harder reason: `fetch` will not send it at all.
+ * `https://user:pass@steel.internal` parses, has no query and no fragment, and
+ * then throws `TypeError: Request cannot be constructed from a URL that
+ * includes credentials` on the first request. Steel's own credential is
+ * `apiKey`, which becomes a header — so this is not a capability being
+ * withheld, it is a spelling that cannot work being named early instead of at
+ * the first browser action.
+ *
  * Lives here for the same reason `isHostedSteel` does — beside the
  * concatenation it constrains. A caller that validates a URL against its own
  * idea of how this class uses it is a rule in two places, free to drift the
- * moment `call()` changes.
+ * moment `call()` changes. This is the same file that has to change if `call()`
+ * ever stops using `fetch`.
  */
 export function isUsableSteelBase(url: string): boolean {
   try {
     const u = new URL(url);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
-    // `search`/`hash` are empty strings when absent, so this is "has one".
+    // Empty strings when absent, so each of these reads as "has one".
+    if (u.username !== '' || u.password !== '') return false;
     return u.search === '' && u.hash === '';
   } catch {
     return false;

@@ -283,6 +283,20 @@ describe('the Browser control is advertised only where one can be built', () => 
     expect(remoteBrowserControls(env).remoteBrowser?.url).toBe('https://steel.internal');
   });
 
+  it('is not advertised for a base carrying credentials fetch will not send', () => {
+    // `https://user:pass@steel.internal` parses, has no query and no fragment,
+    // and passes every earlier version of this check — and then Node's fetch
+    // throws `Request cannot be constructed from a URL that includes
+    // credentials` before a single byte goes out. Verified against fetch, not
+    // assumed.
+    //
+    // Not a capability withheld: Steel's credential is `apiKey`, which becomes
+    // a header. This is a spelling that cannot work, named at config time
+    // rather than at the first browser action.
+    expect(providerIsUsable({ provider: 'steel', url: 'https://user:pass@steel.internal' })).toBe(false);
+    expect(providerIsUsable({ provider: 'steel', url: 'https://user@steel.internal' }), 'a username alone is enough to break it').toBe(false);
+  });
+
   it('is advertised for a self-hosted steel with no credential', () => {
     // Only the hosted FALLBACK is refused. A Steel behind a private network or
     // its own gateway legitimately has no key, and demanding one for a URL the
