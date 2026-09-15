@@ -142,8 +142,23 @@ describe('cloud/server app', () => {
     await restartWith({ REMOTE_BROWSER_PROVIDER: 'cdp', REMOTE_BROWSER_URL: 'ws://browser.internal:3000' });
     expect(await away(), 'this one can actually be driven').toBe(true);
 
+    // This assertion used to read `steel defaults its own endpoint` and expect
+    // TRUE, which encoded the bug rather than the rule: defaulting the URL is
+    // not the same as being able to reach a browser, because the hosted API
+    // refuses an unauthenticated request. The switch was advertised and the
+    // first action failed on authentication — the third shape of the same
+    // inert control, after cdp-with-no-endpoint and steel-with-a-bad-URL.
     await restartWith({ REMOTE_BROWSER_PROVIDER: 'steel' });
-    expect(await away(), 'steel defaults its own endpoint').toBe(true);
+    expect(await away(), 'the hosted API cannot be reached without a key').toBe(false);
+
+    await restartWith({ REMOTE_BROWSER_PROVIDER: 'steel', REMOTE_BROWSER_API_KEY: 'sk-test' });
+    expect(await away(), 'hosted, with a credential').toBe(true);
+
+    // A self-hosted Steel behind a private network or its own gateway
+    // legitimately has no key. Requiring one to guard the DEFAULT would break
+    // a working deployment.
+    await restartWith({ REMOTE_BROWSER_PROVIDER: 'steel', REMOTE_BROWSER_URL: 'https://steel.internal' });
+    expect(await away(), 'a URL the operator supplied is their business').toBe(true);
   });
 
   it('GET /api/config serves the Azure base-model list from the SDK', async () => {

@@ -228,7 +228,7 @@ export interface LiveRun {
    * BLOCKED on somebody, and a reload that loses them leaves the person
    * looking at a spinner for something nobody will ever be asked.
    */
-  clarifications?: Map<string, Record<string, unknown>>;
+  clarifications?: Map<string, { payload: Record<string, unknown>; askedAt: number }>;
   terminal?: { conversationId?: string; error?: string };
 }
 
@@ -314,7 +314,12 @@ export function rememberForReplay(run: LiveRun, event: string, payload: unknown)
   if (event === 'clarification:required') {
     const id = p['requestId'];
     if (typeof id !== 'string') return;
-    (run.clarifications ??= new Map()).set(id, p);
+    // WHEN it was asked, not only what was asked. The gate is two minutes and
+    // the payload states that flatly, so replaying it unchanged would hand a
+    // reconnecting page a fresh two minutes while the server's timer kept
+    // running — the countdown would read a minute and a half remaining on a
+    // question about to be given up on.
+    (run.clarifications ??= new Map()).set(id, { payload: p, askedAt: Date.now() });
     return;
   }
   if (event === 'clarification:closed') {
@@ -378,6 +383,30 @@ export function resumeAndReplay(
 }
 
 /** Give a replacement connection back the state the reloaded page lost. */
+/**
+ * The same question, with the time it has actually got left.
+ *
+ * Adjusted HERE, in server time, rather than by shipping an absolute deadline
+ * for the client to subtract from its own clock: the two clocks disagree, and
+ * a page whose clock runs a few minutes fast would show a question as already
+ * expired. The client keeps the arrival-stamp arithmetic it already uses for
+ * escalations, and this makes the number it is handed true at the moment of
+ * replay.
+ *
+ * Clamped at zero rather than dropped. A question this late is about to be
+ * closed by the gate's own timer, and `clarification:closed` is what takes the
+ * form down — withholding it here would leave the page unable to show what the
+ * run is still blocked on in the seconds before that arrives.
+ */
+function remainingDeadline(
+  payload: Record<string, unknown>,
+  askedAt: number,
+): Record<string, unknown> {
+  const stated = payload['timeoutMs'];
+  if (typeof stated !== 'number' || !Number.isFinite(stated)) return payload;
+  return { ...payload, timeoutMs: Math.max(0, stated - (Date.now() - askedAt)) };
+}
+
 export function replaySupervision(run: LiveRun, socket: Pick<Socket, 'emit'>): void {
   if (run.done) return;
   if (run.liveView) socket.emit('browser:live-view', run.liveView);
@@ -398,8 +427,8 @@ export function replaySupervision(run: LiveRun, socket: Pick<Socket, 'emit'>): v
   }
   // Still open, so still blocking the run: a reloaded page that never sees the
   // question waits out the full gate before the model gives up and assumes.
-  for (const question of run.clarifications?.values() ?? []) {
-    socket.emit('clarification:required', question);
+  for (const { payload, askedAt } of run.clarifications?.values() ?? []) {
+    socket.emit('clarification:required', remainingDeadline(payload, askedAt));
   }
 }
 

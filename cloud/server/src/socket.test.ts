@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import fs from 'node:fs/promises';
@@ -1366,6 +1366,58 @@ describe('rememberForReplay / replaySupervision — what a reload gets back', ()
     expect(emitted.map((e) => e.event), 'the ending, never the question')
       .toEqual(['clarification:closed']);
     expect((emitted[0]?.payload as { requestId?: string }).requestId).toBe('req-1');
+  });
+
+  it('replays what is LEFT of the gate, not the whole of it again', () => {
+    // The payload states the gate flatly ("two minutes"), so replaying it
+    // unchanged hands a reconnecting page a fresh two minutes while the
+    // server's timer keeps running — the countdown would read 1:58 remaining
+    // on a question about to be given up on, and somebody would start typing.
+    //
+    // Adjusted in SERVER time rather than by shipping an absolute deadline for
+    // the client to subtract from its own clock: the two disagree, and a page
+    // running fast would show a live question as already expired.
+    vi.useFakeTimers();
+    try {
+      const run = freshRun();
+      rememberForReplay(run, 'clarification:required', {
+        conversationId: 'c1', requestId: 'req-1', timeoutMs: 120_000,
+        questions: [{ id: 'q1', prompt: 'Which account?', kind: 'text' }],
+      });
+      vi.advanceTimersByTime(90_000);
+
+      const { emitted, socket } = recorder();
+      replaySupervision(run, socket);
+
+      expect((emitted[0]?.payload as { timeoutMs?: number }).timeoutMs, 'thirty seconds, not two minutes')
+        .toBe(30_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('replays a question that is out of time rather than withholding it', () => {
+    // Clamped at zero, not dropped. Its own timer is about to close it and
+    // `clarification:closed` is what takes the form down; withholding it here
+    // would leave the page unable to show what the run is blocked on in the
+    // seconds before that arrives.
+    vi.useFakeTimers();
+    try {
+      const run = freshRun();
+      rememberForReplay(run, 'clarification:required', {
+        conversationId: 'c1', requestId: 'req-1', timeoutMs: 120_000,
+        questions: [{ id: 'q1', prompt: 'Which?', kind: 'text' }],
+      });
+      vi.advanceTimersByTime(200_000);
+
+      const { emitted, socket } = recorder();
+      replaySupervision(run, socket);
+
+      expect(emitted.map((e) => e.event)).toEqual(['clarification:required']);
+      expect((emitted[0]?.payload as { timeoutMs?: number }).timeoutMs, 'never negative').toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('takes a dead form down on a reconnect, which an open-only replay cannot', () => {

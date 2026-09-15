@@ -242,7 +242,7 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
         // claiming a bound nobody stated.
         onReleaseFailed: (runId, sessionId, err, expiresInMs) => {
           const reaped = typeof expiresInMs === 'number' && expiresInMs > 0
-            ? `the provider reaps it ${Math.round(expiresInMs / 60_000)}m after creation`
+            ? `the provider reaps it ${formatCeiling(expiresInMs)} after creation`
             : 'it runs until the provider times it out';
           console.error(
             `[browser ${runId}] provider session ${sessionId} was NOT released; `
@@ -376,6 +376,22 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
 }
 
 /** An http(s) URL, which is what a Steel API base has to be. */
+/**
+ * The provider's ceiling, said precisely enough to be acted on.
+ *
+ * Rounding to the nearest minute was my own shortcut and it broke the one
+ * thing the number is for: a 30s ceiling read as `1m`, and anything under 30s
+ * as `0m` — a leak reported as already collected. Whole minutes stay whole
+ * ("5m"), and anything else keeps its seconds.
+ */
+export function formatCeiling(ms: number): string {
+  const totalSeconds = Math.max(1, Math.round(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes === 0) return `${seconds}s`;
+  return seconds === 0 ? `${minutes}m` : `${minutes}m${seconds}s`;
+}
+
 function isHttpUrl(value: string): boolean {
   try {
     const { protocol } = new URL(value);
@@ -429,6 +445,24 @@ function buildProvider(
   // An absent url is fine and means the hosted API: `SteelProvider` defaults it.
   if (settings.url && !isHttpUrl(settings.url)) {
     warn?.(`remoteBrowser.url for steel must be an http(s) API base; got ${settings.url}`);
+    return null;
+  }
+  // The hosted API needs a key; a self-hosted one usually does not.
+  //
+  // "An absent url means the hosted API" is written above as though it settles
+  // the matter, and it does not: falling back to `api.steel.dev` with no
+  // credential produces a provider that builds, advertises a Browser control,
+  // and then fails authentication on the first request. That is the third
+  // shape of the same inert control — after `cdp` with no endpoint and `steel`
+  // with a malformed one — and the reason it survived two rounds of fixing
+  // exactly this is that both earlier fixes asked "is the URL valid" rather
+  // than "can this configuration actually reach a browser".
+  //
+  // Only the fallback is refused. A self-hosted Steel behind a private network
+  // or its own gateway legitimately has no key, so requiring one for a URL the
+  // operator supplied would break a working deployment to guard a default.
+  if (!settings.url && !settings.apiKey) {
+    warn?.('remoteBrowser.apiKey is required for the hosted Steel API; set it, or point remoteBrowser.url at a self-hosted endpoint');
     return null;
   }
   return new SteelProvider({

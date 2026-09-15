@@ -298,6 +298,34 @@ describe('useChatSession — a run that outlives the connection that started it'
     await waitFor(() => expect(view.result.current.escalationQueued).toBe(0));
   });
 
+  it('stamps a question with when it arrived, so the countdown is anchored', async () => {
+    // The form shows how long is left, and that arithmetic needs an anchor the
+    // server cannot supply: an absolute deadline would be compared against the
+    // browser's own clock, and a page running fast would show a live question
+    // as already expired. So the server sends what is LEFT and the client
+    // stamps the moment it heard it.
+    //
+    // Tested at the hook rather than only in the prompt, because the prompt
+    // takes `receivedAt` as a prop — a component test cannot tell whether
+    // anything actually sets it.
+    const fake = fakeSocket();
+    const view = startRun(fake);
+    const before = Date.now();
+    act(() => {
+      fake.fire('clarification:required', {
+        conversationId: 'server-made-id',
+        requestId: 'req-1',
+        timeoutMs: 120_000,
+        questions: [{ id: 'q1', prompt: 'Which account?', kind: 'text' }],
+      });
+    });
+
+    await waitFor(() => expect(view.result.current.clarifications).toHaveLength(1));
+    const got = view.result.current.clarifications[0]!;
+    expect(got.timeoutMs, 'the gate the server is actually holding').toBe(120_000);
+    expect(got.receivedAt, 'anchored to arrival').toBeGreaterThanOrEqual(before);
+  });
+
   it('takes a question down when its run turns out to have already finished', async () => {
     // The gap the closure tombstones could not reach. A question closes while
     // the transport is unbound, and the run then ENDS before the page comes

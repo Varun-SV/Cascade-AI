@@ -109,6 +109,41 @@ describe('ClarificationPrompt', () => {
     expect(screen.getAllByText('Which account?'), 'one form, not three').toHaveLength(1);
   });
 
+  it('says how long is left, so a considered answer is not typed into a dead form', () => {
+    // The gate is two minutes and the form said nothing about it. Somebody
+    // thinking carefully about which account to pick could lose the lot with
+    // no warning it was running out — and `timeoutMs` was being sent over the
+    // wire and declared on the client the whole time, read by nobody.
+    render(
+      <ClarificationPrompt
+        clarifications={[ask({ timeoutMs: 120_000, receivedAt: Date.now() })]}
+        onAnswer={() => {}}
+      />,
+    );
+    expect(screen.getByText(/2:00 left/)).toBeInTheDocument();
+  });
+
+  it('shows what is LEFT on a question inherited from before a reconnect', () => {
+    // The server subtracts the elapsed time when it replays, so a page that
+    // reconnects 90s into a two-minute gate is handed 30s, not 120s. Showing
+    // the full gate here would promise time the run has no intention of
+    // giving.
+    render(
+      <ClarificationPrompt
+        clarifications={[ask({ timeoutMs: 30_000, receivedAt: Date.now() })]}
+        onAnswer={() => {}}
+      />,
+    );
+    expect(screen.getByText(/0:30 left/)).toBeInTheDocument();
+  });
+
+  it('says nothing about a deadline the run never stated', () => {
+    // Inventing one would be a promise about what happens when it runs out
+    // that nothing behind it intends to keep.
+    render(<ClarificationPrompt clarifications={[ask()]} onAnswer={() => {}} />);
+    expect(screen.queryByText(/left/)).not.toBeInTheDocument();
+  });
+
   it('does not carry a draft from one questionnaire into the next', () => {
     // Question ids are positional (`q1`, `q2`), so an inherited answer does not
     // look stale — it looks like a reply to whatever now sits in that slot.

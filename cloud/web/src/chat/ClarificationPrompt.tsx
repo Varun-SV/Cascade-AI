@@ -16,7 +16,7 @@
 //  the whole time. The server reads an empty answer set as a deliberate skip
 //  and tells the model exactly that, distinct from never having replied.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import clsx from 'clsx';
 import { MessagesSquare } from 'lucide-react';
 import type { ClarificationAnswer, ClarificationQuestion, ClarificationRequest } from './useChatSession.js';
@@ -53,6 +53,32 @@ export function ClarificationPrompt({ clarifications, onAnswer }: Props) {
   );
 }
 
+/**
+ * Seconds left on the gate, or `undefined` when the run did not state one.
+ *
+ * Anchored to `receivedAt`, never to when this effect last ran: the interval
+ * is re-armed on any re-render whose deps changed, and anchoring to that would
+ * quietly restart the countdown while the server's timer kept going — the
+ * exact bug the escalation modal carries a comment about.
+ *
+ * `undefined` rather than a guessed default when either value is missing. A
+ * deadline is a promise about what happens when it runs out, and inventing one
+ * the server never made is worse than showing nothing.
+ */
+function useRemaining(timeoutMs?: number, receivedAt?: number): number | undefined {
+  const known = typeof timeoutMs === 'number' && typeof receivedAt === 'number';
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!known) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [known, receivedAt]);
+
+  if (!known) return undefined;
+  return Math.max(0, Math.ceil((timeoutMs - (now - receivedAt)) / 1000));
+}
+
 function Questionnaire(
   { request: current, waiting, onAnswer }:
   { request: ClarificationRequest; waiting: number; onAnswer: Props['onAnswer'] },
@@ -60,6 +86,8 @@ function Questionnaire(
   const [draft, setDraft] = useState<Record<string, string | string[]>>({});
 
   const set = (id: string, value: string | string[]) => setDraft((d) => ({ ...d, [id]: value }));
+
+  const left = useRemaining(current.timeoutMs, current.receivedAt);
 
   const toggle = (q: ClarificationQuestion, option: string) => {
     const held = draft[q.id];
@@ -87,6 +115,19 @@ function Questionnaire(
         <span className="flex-1 truncate">Cascade needs to know before it carries on</span>
         {waiting > 0 && (
           <span className="shrink-0 tabular-nums text-info-300/70">{waiting} more waiting</span>
+        )}
+        {/* The gate is two minutes and the form said nothing about it, so a
+            considered answer could be typed into a questionnaire that was
+            already gone — the draft discarded with no warning it was running
+            out. The escalation modal has always shown its deadline; this is
+            the same courtesy, quieter, because a question is not a hazard. */}
+        {left !== undefined && (
+          <span
+            className={clsx('shrink-0 tabular-nums', left <= 30 ? 'text-warning-300' : 'text-info-300/70')}
+            title="Cascade proceeds on its own reading when this runs out"
+          >
+            {Math.floor(left / 60)}:{String(left % 60).padStart(2, '0')} left
+          </span>
         )}
       </div>
 

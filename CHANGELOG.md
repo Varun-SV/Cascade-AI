@@ -31,7 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   park a run — if nobody is watching, if the run is unattended or autonomous,
   if you press Stop, or if two minutes pass, the model is told to proceed on
   its best reading and to say which assumption it made. "Skip, decide for me"
-  says that deliberately, so declining does not mean waiting out the gate.
+  says that deliberately, so declining does not mean waiting out the gate. The
+  form shows how long is left, and says what is LEFT rather than starting over
+  when a question is inherited by a page that reconnected, so a considered
+  answer is not typed into a questionnaire that has already expired.
 
 - **A Browser control beside Web, named for what it does.** The hosted browser
   was reachable two ways and neither was discoverable: turn the web toggle off
@@ -48,6 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than something a model reached for — and a capability that cannot be
   gated cannot be metered. With the control off the tool is not refused at call
   time, it is absent, and the model never sees a capability it was not given.
+
+  **A Steel deployment now needs a credential to advertise a browser.** Setting
+  `REMOTE_BROWSER_PROVIDER=steel` with no URL falls back to the hosted API, and
+  with no API key that endpoint refuses the first request — so the control
+  appeared and then failed on authentication. A self-hosted Steel given its own
+  URL is unaffected and still needs no key: only the hosted fallback is refused,
+  because requiring one for an endpoint the operator typed would break a working
+  deployment to guard a default.
 
 ### Changed
 - **The permission prompt looks like the rest of Cascade.** It was the one

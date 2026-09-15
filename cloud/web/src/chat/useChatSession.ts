@@ -292,7 +292,17 @@ export interface ClarificationQuestion {
 export interface ClarificationRequest {
   requestId: string;
   questions: ClarificationQuestion[];
+  /**
+   * How long the gate will wait, from the moment this arrived.
+   *
+   * Server-adjusted on replay, so a question inherited by a reconnecting page
+   * carries what is LEFT rather than the full gate — see `remainingDeadline`
+   * in the server's socket layer. That is why the arithmetic here can stay the
+   * same shape as the escalation modal's and still be right after a reconnect.
+   */
   timeoutMs?: number;
+  /** Stamped on arrival, so a re-render cannot restart the countdown. */
+  receivedAt?: number;
 }
 
 export interface ClarificationAnswer {
@@ -912,7 +922,12 @@ export function useChatSession(
     const onClarificationRequired = (e: ClarificationRequest & { conversationId?: string }) => {
       adoptConversationId(e?.conversationId);
       if (!e?.requestId || !Array.isArray(e.questions) || e.questions.length === 0) return;
-      setClarifications((q) => (q.some((c) => c.requestId === e.requestId) ? q : [...q, e]));
+      // Stamped once, on arrival. The countdown is anchored to this rather
+      // than to when a component last rendered, for the reason the escalation
+      // modal documents: an unrelated re-render would otherwise restart it and
+      // the form would claim more time than the server intends to give.
+      const arrived = { ...e, receivedAt: Date.now() };
+      setClarifications((q) => (q.some((c) => c.requestId === e.requestId) ? q : [...q, arrived]));
     };
     /**
      * The question is over, so the form must come down.
