@@ -120,11 +120,38 @@ export function isUsableSteelBase(url: string): boolean {
     // that is right rather than awkward: the same path prefix is correct for
     // one base and broken for another, so a rule that looked only at the URL's
     // form could never tell them apart.
-    if (isHostedSteel(url) && u.pathname !== '/') return false;
+    if (isHostedSteel(url) && withoutTrailingSlashes(u.pathname) !== '') return false;
     return true;
   } catch {
     return false;
   }
+}
+
+/**
+ * A URL or path with its trailing slashes removed.
+ *
+ * SHARED with the constructor rather than restated beside it, which is the
+ * whole point. `call()` builds `${base}${path}`, so the constructor strips
+ * these to stop `//v1/sessions` forming — and the usability check did its own
+ * thing, comparing `pathname` literally. The two then disagreed about
+ * `https://api.steel.dev//`: the provider normalises it to the working hosted
+ * base, and the check refused it and hid the Browser control for a deployment
+ * that would have worked.
+ *
+ * Every earlier finding here was a configuration advertised and then unusable.
+ * This was the mirror image — usable and refused — and it has the same cause:
+ * a rule that described what the code does instead of being what the code does.
+ *
+ * A loop rather than `/\/+$/`, which CodeQL flagged and was right to: a greedy
+ * `+` anchored at the end backtracks polynomially, so a URL of many slashes
+ * turns a config read into a stall. The input is operator-supplied rather than
+ * attacker-supplied, which makes it unlikely — not safe. A loop is linear and
+ * needs no argument about who can reach it.
+ */
+function withoutTrailingSlashes(value: string): string {
+  let out = value;
+  while (out.endsWith('/')) out = out.slice(0, -1);
+  return out;
 }
 
 /**
@@ -168,17 +195,11 @@ export class SteelProvider implements RemoteBrowserProvider {
   private apiKey: string | undefined;
 
   constructor(opts: { url?: string; apiKey?: string } = {}) {
-    // Trailing slashes stripped so `${base}/v1/sessions` cannot become a double
-    // slash — some gateways 404 on that, which reads as "wrong endpoint".
-    //
-    // Done with a loop rather than /\/+$/, which CodeQL flagged and was right
-    // to: a greedy `+` anchored at the end backtracks polynomially, so a URL of
-    // many slashes turns a config read into a stall. The input is
-    // operator-supplied rather than attacker-supplied, which makes it unlikely
-    // — not safe. A loop is linear and needs no argument about who can reach it.
-    let base = opts.url || DEFAULT_BASE;
-    while (base.endsWith('/')) base = base.slice(0, -1);
-    this.base = base;
+    // Stripped so `${base}/v1/sessions` cannot become a double slash — some
+    // gateways 404 on that, which reads as "wrong endpoint". The rule itself
+    // lives in `withoutTrailingSlashes`, because the usability check has to
+    // apply exactly the same one.
+    this.base = withoutTrailingSlashes(opts.url || DEFAULT_BASE);
     this.apiKey = opts.apiKey;
   }
 

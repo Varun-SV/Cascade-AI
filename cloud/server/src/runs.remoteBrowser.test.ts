@@ -306,6 +306,16 @@ describe('the Browser control is advertised only where one can be built', () => 
     // The bare host, with or without the root slash, is what the hosted API is.
     expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev', apiKey: 'sk-test' })).toBe(true);
     expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev/', apiKey: 'sk-test' })).toBe(true);
+    // Extra trailing slashes normalise to the same working base — the provider
+    // strips them before building a request, so refusing them here hid the
+    // control for a deployment that would have worked. Every other finding on
+    // this predicate was the opposite mistake, advertising something unusable;
+    // this one was usable and refused.
+    expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev//', apiKey: 'sk-test' }), 'the provider strips these').toBe(true);
+    expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev///', apiKey: 'sk-test' }), 'however many there are').toBe(true);
+    // A real path prefix still is one, with or without a trailing slash: the
+    // provider keeps `/v1` and asks for `/v1/v1/sessions`.
+    expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev/v1/', apiKey: 'sk-test' }), 'not a slash to be stripped').toBe(false);
     // And the same prefix stays valid for somebody else's endpoint, which is
     // the point: usability depends on the destination, not only on the shape.
     expect(providerIsUsable({ provider: 'steel', url: 'https://steel.internal/v1' }), 'legitimate for a self-hosted gateway').toBe(true);
