@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { ToolRegistry, CascadeConfigSchema } from '#cascade-ai';
-import { buildCloudConfig, buildMediaSink, parseChatRunPayload, runChatTurn, tenantScratchDir } from './runs.js';
+import { buildCloudConfig, buildMediaSink, parseChatRunPayload, runChatTurn, sanitiseClarificationAnswers, tenantScratchDir } from './runs.js';
 import { CloudStore } from './db.js';
 import { limitsForPlan, PENDING_MEDIA_TTL_MS } from './entitlements.js';
 import type { CloudEnv } from './env.js';
@@ -224,6 +224,57 @@ describe('buildCloudConfig', () => {
     const cfg = buildCloudConfig([], 0.5, { maxTokensPerRun: 500_000 });
     expect(cfg.budget?.maxTokensPerRun).toBe(500_000);
     expect(cfg.budget?.maxCostPerRunUsd).toBe(0.5);
+  });
+});
+
+describe('sanitiseClarificationAnswers — a questionnaire comes back from a client', () => {
+  it('keeps one typed answer and one set of selections', () => {
+    expect(sanitiseClarificationAnswers([
+      { id: 'q1', value: 'the personal one' },
+      { id: 'q2', value: ['Drafts', 'Archived'] },
+    ])).toEqual([
+      { id: 'q1', value: 'the personal one' },
+      { id: 'q2', value: ['Drafts', 'Archived'] },
+    ]);
+  });
+
+  it('drops a row that cannot name the question it answers', () => {
+    // An answer with no id has nowhere to land: `ask_user` matches by id, so
+    // this would be carried into the model's context attached to nothing.
+    expect(sanitiseClarificationAnswers([
+      { value: 'orphan' },
+      { id: '', value: 'also orphan' },
+      { id: 42, value: 'wrong type' },
+      { id: 'q1', value: 'kept' },
+    ])).toEqual([{ id: 'q1', value: 'kept' }]);
+  });
+
+  it('drops a value that is not an answer rather than passing it on', () => {
+    // A number, an object or a null reads as an answer once it is a string in
+    // the transcript. Dropping it is what keeps "(no answer given)" honest.
+    expect(sanitiseClarificationAnswers([
+      { id: 'q1', value: 7 },
+      { id: 'q2', value: { nested: true } },
+      { id: 'q3', value: null },
+    ])).toEqual([]);
+  });
+
+  it('keeps only the strings inside a set of selections', () => {
+    expect(sanitiseClarificationAnswers([{ id: 'q1', value: ['ok', 3, null, 'fine'] }]))
+      .toEqual([{ id: 'q1', value: ['ok', 'fine'] }]);
+  });
+
+  it('bounds what one answer can put into the model\'s context', () => {
+    // The honest case is a sentence. The cap is not about that case.
+    const [only] = sanitiseClarificationAnswers([{ id: 'q1', value: 'x'.repeat(10_000) }]);
+    expect((only?.value as string).length).toBe(2_000);
+  });
+
+  it('bounds how many answers one reply can carry', () => {
+    // The tool asks at most five questions, so sixteen is already generous —
+    // this is about the payload that is not an honest reply.
+    const many = Array.from({ length: 100 }, (_, i) => ({ id: `q${i}`, value: 'x' }));
+    expect(sanitiseClarificationAnswers(many)).toHaveLength(16);
   });
 });
 

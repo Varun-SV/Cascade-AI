@@ -16,6 +16,7 @@ import {
 } from '#cascade-ai';
 import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ApprovalRequest, ProviderConfig, BrowserInput } from '#cascade-ai';
 import { attachRemoteBrowser } from './remote-browser.js';
+import type { ClarificationAnswer } from '#cascade-ai';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { z, type ZodError } from 'zod';
@@ -1145,6 +1146,51 @@ function seedConversation(store: CloudStore, userId: string, payload: ChatRunPay
   return store.getConversation(seeded.id, userId);
 }
 
+/**
+ * Bounds on an answered questionnaire, which arrives from a client.
+ *
+ * The tool asks at most five questions, so five answers is already generous —
+ * the cap is not about the honest case but about the payload that is not one.
+ * Both numbers exist so a malformed or hostile answer cannot put an unbounded
+ * string into the model's context.
+ */
+const MAX_CLARIFICATION_ANSWERS = 16;
+const MAX_CLARIFICATION_ANSWER_CHARS = 2_000;
+
+/**
+ * Take a client's answers to a questionnaire, and keep only what is an answer.
+ *
+ * Validated rather than trusted: this crosses the socket from a client, so it
+ * is untrusted input like any other payload. Bounded in count and in length so
+ * a malformed or hostile reply cannot put an unbounded string into the model's
+ * context, and shaped so a wrong type is DROPPED rather than handed on as
+ * something that reads as a real answer.
+ *
+ * Exported, and a function rather than an inline block at its one call site,
+ * for the reason `remoteBrowserControls` is: a mapping that exists only inline
+ * can be tested only by restating it, and a test that restates the mapping
+ * cannot catch a rule dropped from the real one.
+ */
+export function sanitiseClarificationAnswers(raw: unknown[]): ClarificationAnswer[] {
+  const clip = (v: string) => v.slice(0, MAX_CLARIFICATION_ANSWER_CHARS);
+  return raw.slice(0, MAX_CLARIFICATION_ANSWERS).flatMap((a): ClarificationAnswer[] => {
+    const row = (a ?? {}) as Record<string, unknown>;
+    if (typeof row['id'] !== 'string' || row['id'] === '') return [];
+    const value = row['value'];
+    if (typeof value === 'string') return [{ id: row['id'], value: clip(value) }];
+    if (Array.isArray(value)) {
+      return [{
+        id: row['id'],
+        value: value
+          .filter((v): v is string => typeof v === 'string')
+          .slice(0, MAX_CLARIFICATION_ANSWERS)
+          .map(clip),
+      }];
+    }
+    return [];
+  });
+}
+
 async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Promise<ChatRunResult> {
   const { env, store, userId, socket, signal } = deps;
   const interactive = deps.interactive !== false;
@@ -1544,6 +1590,41 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     socket.on('escalation:decide', onEscalationDecision);
   }
 
+  // ── Clarification: the model asking instead of assuming ──────────────
+  //
+  // Same shape as the escalation above, with one deliberate difference: an
+  // unanswered escalation discards a section's work, so it is worth waiting
+  // out; an unanswered question only means the model proceeds on its own
+  // reading and says which assumption it made. So nothing here has to
+  // guarantee an answer — only that a non-answer resolves, which the SDK gate
+  // already does on a two-minute timer, on abort, and when nothing is
+  // listening at all.
+  //
+  // NOT replayed to a reconnecting page, unlike an approval. Doing that would
+  // need the answer path to clear the stored record — the answer arrives on
+  // the socket, not as an emit, so `rememberForReplay` never sees it — and a
+  // question replayed after it was answered is a worse failure than the one it
+  // would fix. What a reload costs today is bounded and safe: the question is
+  // lost, the gate times out, and the model proceeds on its best reading.
+  const onClarification = (e: unknown) =>
+    socket.emit('clarification:required', { conversationId: conversation.id, ...(e as object) });
+  const onClarificationTimeout = (e: unknown) =>
+    socket.emit('clarification:timeout', { conversationId: conversation.id, ...(e as object) });
+  const onClarificationAnswer = (d: { conversationId?: string; requestId?: string; answers?: unknown }) => {
+    // One socket can carry several conversations; only answer for this run.
+    if (d?.conversationId && d.conversationId !== conversation.id) return;
+    if (!Array.isArray(d?.answers)) return;
+    cascade.resolveClarification(
+      sanitiseClarificationAnswers(d.answers),
+      typeof d.requestId === 'string' ? d.requestId : undefined,
+    );
+  };
+  if (interactive) {
+    cascade.on('clarification:required', onClarification);
+    cascade.on('clarification:timeout', onClarificationTimeout);
+    socket.on('clarification:answer', onClarificationAnswer);
+  }
+
   // ── Dangerous-tool approval ──────────────────────────────────────────
   //
   // Without this the hosted browser is not merely ungated, it is unusable:
@@ -1706,6 +1787,9 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     cascade.off('context:approval-required', onContextApproval);
     cascade.off('context:compacted', onCompacted);
     socket.off('context:decision', onContextDecision);
+    cascade.off('clarification:required', onClarification);
+    cascade.off('clarification:timeout', onClarificationTimeout);
+    socket.off('clarification:answer', onClarificationAnswer);
     cascade.off('escalation:decision-required', onEscalation);
     cascade.off('escalation:timeout', onEscalationTimeout);
     socket.off('escalation:decide', onEscalationDecision);
