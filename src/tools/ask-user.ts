@@ -154,7 +154,15 @@ export class AskUserTool extends BaseTool {
         ? 'There is nobody watching this run to answer'
         : result.outcome === 'aborted'
           ? 'The run was stopped while the question was open'
-          : 'They did not answer in time';
+          // An `answered` outcome carrying nothing is a DELIBERATE skip: the
+          // timeout and the abort have outcomes of their own, so the only way
+          // to arrive here is somebody looking at the questionnaire and
+          // choosing not to fill it in. Reporting that as "did not answer in
+          // time" would describe a person who walked away as one who never saw
+          // it, and the difference matters to whoever reads the transcript.
+          : result.outcome === 'answered'
+            ? 'They saw the questions and chose not to answer'
+            : 'They did not answer in time';
       return `${why}. Proceed on your best reading of the request, and say plainly which assumption you made.`;
     }
 

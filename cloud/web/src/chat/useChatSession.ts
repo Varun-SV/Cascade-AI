@@ -281,6 +281,25 @@ export interface ToolApproval {
   isDangerous?: boolean;
 }
 
+/** One thing the model needs to know before it can act. Mirrors the SDK's shape. */
+export interface ClarificationQuestion {
+  id: string;
+  prompt: string;
+  kind: 'choice' | 'multi' | 'text';
+  options?: string[];
+}
+
+export interface ClarificationRequest {
+  requestId: string;
+  questions: ClarificationQuestion[];
+  timeoutMs?: number;
+}
+
+export interface ClarificationAnswer {
+  id: string;
+  value: string | string[];
+}
+
 export interface PlanApproval {
   taskId?: string;
   summary?: string;
@@ -464,6 +483,38 @@ export function useChatSession(
    * the run is blocked waiting, and a prompt that stays on screen after you
    * answer it invites a second, contradictory answer.
    */
+  /**
+   * Answer a questionnaire, or say plainly that you would rather not.
+   *
+   * An empty `answers` is a DELIBERATE skip and the model is told so — the
+   * timeout and the abort have their own outcomes, so nothing else can produce
+   * an answered-but-empty reply. It exists so somebody who does not want to
+   * fill the form in is not made to wait out the two-minute gate to say that.
+   *
+   * Removed from the queue immediately rather than on an acknowledgement: the
+   * run is blocked waiting, and a form that stays on screen after you submit it
+   * invites a second, contradictory answer.
+   */
+  const answerClarification = useCallback((requestId: string, answers: ClarificationAnswer[]) => {
+    setClarifications((q) => {
+      const asked = q.find((c) => c.requestId === requestId);
+      // Nothing queued under that id — a double submit, or a form already
+      // pruned by its run ending. Emitting anyway would name a conversation
+      // this pane merely happens to be showing.
+      if (!asked) return q;
+      socket?.emit('clarification:answer', {
+        // The conversation the QUESTION came from, not the one on screen: the
+        // pane's own id is undefined in a blank New Chat, and answering by
+        // request id alone would let a reply in one chat settle a question in
+        // another.
+        conversationId: asked.conversationId,
+        requestId,
+        answers,
+      });
+      return q.filter((c) => c.requestId !== requestId);
+    });
+  }, [socket]);
+
   const resolveToolApproval = useCallback((requestId: string, approved: boolean, always = false) => {
     setToolApprovals((q) => {
       const answered = q.find((a) => a.requestId === requestId);
@@ -684,6 +735,12 @@ export function useChatSession(
    * once, and holding only the newest would strand the others until timeout.
    */
   const [allToolApprovals, setToolApprovals] = useState<Array<ToolApproval & { conversationId?: string }>>([]);
+  // Kept for whichever conversation asked, and filtered on READ — the same
+  // shape as the approvals above, and for the same reason recorded there: a
+  // filter applied on RECEIPT drops the whole first turn of a new chat,
+  // because the server tags the request with a conversation id this side does
+  // not learn until the closing ack.
+  const [allClarifications, setClarifications] = useState<Array<ClarificationRequest & { conversationId?: string }>>([]);
   /**
    * The ones belonging to the conversation on screen.
    *
@@ -706,6 +763,7 @@ export function useChatSession(
    * gives a genuine first turn a real id to match on.
    */
   const toolApprovals = allToolApprovals.filter((a) => a.conversationId === currentConversation);
+  const clarifications = allClarifications.filter((c) => c.conversationId === currentConversation);
 
   /**
    * Open a different conversation in this pane.
@@ -851,6 +909,22 @@ export function useChatSession(
     };
     const onWhy = (r: WhyReport) => { pendingWhyRef.current = r; };
     const onPlan = (e: PlanApproval) => setApproval(e);
+    const onClarificationRequired = (e: ClarificationRequest & { conversationId?: string }) => {
+      adoptConversationId(e?.conversationId);
+      if (!e?.requestId || !Array.isArray(e.questions) || e.questions.length === 0) return;
+      setClarifications((q) => (q.some((c) => c.requestId === e.requestId) ? q : [...q, e]));
+    };
+    /**
+     * The gate gave up waiting, so the form must come down.
+     *
+     * Left standing it would be a form whose submit button does nothing: the
+     * run has already moved on and resolved the question as unanswered, and
+     * the answer would land on a request nobody is holding.
+     */
+    const onClarificationTimeout = (e: { requestId?: string }) => {
+      if (!e?.requestId) return;
+      setClarifications((q) => q.filter((c) => c.requestId !== e.requestId));
+    };
     const onPermissionRequired = (e: ToolApproval & { conversationId?: string; id?: string }) => {
       // Queued for whichever conversation it belongs to, not filtered here.
       //
@@ -1131,6 +1205,8 @@ export function useChatSession(
     socket.on('tier:status', onStatus);
     socket.on('run:why', onWhy);
     socket.on('plan:approval-required', onPlan);
+    socket.on('clarification:required', onClarificationRequired);
+    socket.on('clarification:timeout', onClarificationTimeout);
     socket.on('permission:user-required', onPermissionRequired);
     socket.on('permission:resolved', onPermissionResolved);
     socket.on('escalation:decision-required', onEscalation);
@@ -1146,6 +1222,8 @@ export function useChatSession(
       socket.off('tier:status', onStatus);
       socket.off('run:why', onWhy);
       socket.off('plan:approval-required', onPlan);
+      socket.off('clarification:required', onClarificationRequired);
+      socket.off('clarification:timeout', onClarificationTimeout);
       socket.off('permission:user-required', onPermissionRequired);
       socket.off('permission:resolved', onPermissionResolved);
       socket.off('escalation:decision-required', onEscalation);
@@ -1824,6 +1902,6 @@ export function useChatSession(
     browserHuman, browserCapturing, browserConfirmed, browserNotice, stopBrowser,
     takeOverBrowser, handBackBrowser, sendBrowserInput, setBrowserCapture,
     markBrowserFrameShown,
-    toolApprovals, resolveToolApproval,
+    toolApprovals, resolveToolApproval, clarifications, answerClarification,
   };
 }

@@ -13,6 +13,7 @@ import type { UiMode } from '../lib/prefs.js';
 import { BrowserLiveView } from './BrowserLiveView.js';
 import type { BrowserInputEvent } from './BrowserLiveView.js';
 import { ToolApprovalPrompt } from './ToolApprovalPrompt.js';
+import { ClarificationPrompt } from './ClarificationPrompt.js';
 import type { ToolApproval } from './useChatSession.js';
 
 interface Props {
@@ -38,6 +39,8 @@ interface Props {
   forceTier: ForceTier;
   onForceTierChange: (t: ForceTier) => void;
   webSearch: boolean;
+  clarifications: import('./useChatSession.js').ClarificationRequest[];
+  onAnswerClarification: (requestId: string, answers: import('./useChatSession.js').ClarificationAnswer[]) => void;
   browserMode: boolean;
   onBrowserModeChange: (on: boolean) => void;
   /** False on a deployment with no hosted browser: the chip is absent, not inert. */
@@ -85,6 +88,7 @@ export default function ChatPanel({
   messages, busy, error, status, hasProviders, skills, skillId, onSkillChange, onSend, onStop, onRegenerate,
   onEditMessage, onDeleteMessage, onSelectSibling,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
+  clarifications, onAnswerClarification,
   browserMode, onBrowserModeChange, browserAvailable, uiMode, approval,
   compactionNotice, providerNotice, knowledgeNotice, activity, browserLiveView, browserActive,
   browserFrame, browserTaskId, browserStreaming, browserHuman, browserCapturing, browserConfirmed, browserNotice,
@@ -232,6 +236,10 @@ export default function ChatPanel({
           wanted it. */}
       {/* Above the browser panel: the run is BLOCKED on this, so it is the
           most urgent thing on screen. */}
+      <div className="mx-4 sm:mx-6">
+        <ClarificationPrompt clarifications={clarifications} onAnswer={onAnswerClarification} />
+      </div>
+
       <div className="mx-4 sm:mx-6">
         <ToolApprovalPrompt
           approvals={toolApprovals ?? []}

@@ -328,6 +328,8 @@ export default function App() {
             onForceTierChange={chat.setForceTier}
             webSearch={chat.webSearch}
             onWebSearchChange={chat.setWebSearch}
+            clarifications={chat.clarifications}
+            onAnswerClarification={chat.answerClarification}
             browserMode={chat.browserMode}
             onBrowserModeChange={chat.setBrowserMode}
             browserAvailable={config?.remoteBrowserEnabled === true}
