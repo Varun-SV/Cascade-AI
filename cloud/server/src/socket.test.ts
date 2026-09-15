@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import fs from 'node:fs/promises';
@@ -1324,6 +1324,182 @@ describe('rememberForReplay / replaySupervision — what a reload gets back', ()
     const { emitted, socket } = recorder();
     replaySupervision(run, socket);
     expect(emitted).toEqual([]);
+  });
+
+  it('gives a reloaded page back a SECTION the run is still blocked on', () => {
+    // The gate the clarification gate was copied from, and the one that never
+    // got this. A reload while a section was parked left the run alive on the
+    // server and the modal gone from the page — no way to answer, and the
+    // section failed when its five-minute timer ran out.
+    const run = freshRun();
+    rememberForReplay(run, 'escalation:decision-required', {
+      conversationId: 'c1', requestId: 'req-1', sectionId: 's1',
+      sectionTitle: 'Section alpha', issues: [], timeoutMs: 300_000,
+    });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+    expect(emitted.map((e) => e.event)).toEqual(['escalation:decision-required']);
+    expect((emitted[0]?.payload as { requestId?: string }).requestId).toBe('req-1');
+  });
+
+  it('replays what is LEFT of a section\'s five minutes, not the whole of it', () => {
+    vi.useFakeTimers();
+    try {
+      const run = freshRun();
+      rememberForReplay(run, 'escalation:decision-required', {
+        conversationId: 'c1', requestId: 'req-1', sectionId: 's1', timeoutMs: 300_000,
+      });
+      vi.advanceTimersByTime(240_000);
+
+      const { emitted, socket } = recorder();
+      replaySupervision(run, socket);
+
+      expect((emitted[0]?.payload as { timeoutMs?: number }).timeoutMs, 'one minute, not five').toBe(60_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('takes a decided section down on a reconnect, which an open-only replay cannot', () => {
+    // `escalation:closed` is what makes remembering these safe at all: the
+    // ANSWER arrives on the socket rather than as an emit, so without a
+    // reliable delete a reconnecting page could be handed back a decision that
+    // had already been made.
+    const run = freshRun();
+    rememberForReplay(run, 'escalation:decision-required', {
+      conversationId: 'c1', requestId: 'req-1', sectionId: 's1', timeoutMs: 300_000,
+    });
+    rememberForReplay(run, 'escalation:decision-required', {
+      conversationId: 'c1', requestId: 'req-2', sectionId: 's2', timeoutMs: 300_000,
+    });
+    rememberForReplay(run, 'escalation:closed', { conversationId: 'c1', requestId: 'req-1' });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+
+    expect(emitted.map((e) => e.event)).toEqual(['escalation:closed', 'escalation:decision-required']);
+    expect((emitted[0]?.payload as { requestId?: string }).requestId).toBe('req-1');
+    expect((emitted[1]?.payload as { requestId?: string }).requestId).toBe('req-2');
+  });
+
+  it('gives a reloaded page back a question the run is still blocked on', () => {
+    // I argued against replaying these, because nothing could clear the record:
+    // the ANSWER arrives on the socket rather than as an emit, so
+    // `rememberForReplay` would never see it, and a question replayed after it
+    // was answered is worse than one lost.
+    //
+    // `clarification:closed` removed that objection. It is emitted for every
+    // ending, the answered one included, so the record now has a reliable
+    // delete — and the reverse case is fixed with it: a close emitted while the
+    // transport had no socket used to be dropped, leaving a dead form on screen
+    // after reconnection, in front of every later question the run asked.
+    const run = freshRun();
+    rememberForReplay(run, 'clarification:required', {
+      conversationId: 'c1', requestId: 'req-1', questions: [{ id: 'q1', prompt: 'Which account?', kind: 'text' }],
+    });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+    expect(emitted.map((e) => e.event)).toEqual(['clarification:required']);
+    expect((emitted[0]?.payload as { requestId?: string }).requestId).toBe('req-1');
+  });
+
+  it('stops replaying a question the moment it is over, however it ended', () => {
+    // Answered, timed out, stopped, released by teardown — `clarification:closed`
+    // covers all four, which is what makes keeping the record safe at all.
+    const run = freshRun();
+    rememberForReplay(run, 'clarification:required', {
+      conversationId: 'c1', requestId: 'req-1', questions: [{ id: 'q1', prompt: 'Which?', kind: 'text' }],
+    });
+    rememberForReplay(run, 'clarification:closed', { conversationId: 'c1', requestId: 'req-1' });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+
+    // Never put back as OPEN — that was the whole worry about replaying these,
+    // and it holds. What IS replayed is the closure, so a page that still has
+    // the form on screen takes it down; a page that never had one ignores it.
+    expect(emitted.map((e) => e.event), 'the ending, never the question')
+      .toEqual(['clarification:closed']);
+    expect((emitted[0]?.payload as { requestId?: string }).requestId).toBe('req-1');
+  });
+
+  it('replays what is LEFT of the gate, not the whole of it again', () => {
+    // The payload states the gate flatly ("two minutes"), so replaying it
+    // unchanged hands a reconnecting page a fresh two minutes while the
+    // server's timer keeps running — the countdown would read 1:58 remaining
+    // on a question about to be given up on, and somebody would start typing.
+    //
+    // Adjusted in SERVER time rather than by shipping an absolute deadline for
+    // the client to subtract from its own clock: the two disagree, and a page
+    // running fast would show a live question as already expired.
+    vi.useFakeTimers();
+    try {
+      const run = freshRun();
+      rememberForReplay(run, 'clarification:required', {
+        conversationId: 'c1', requestId: 'req-1', timeoutMs: 120_000,
+        questions: [{ id: 'q1', prompt: 'Which account?', kind: 'text' }],
+      });
+      vi.advanceTimersByTime(90_000);
+
+      const { emitted, socket } = recorder();
+      replaySupervision(run, socket);
+
+      expect((emitted[0]?.payload as { timeoutMs?: number }).timeoutMs, 'thirty seconds, not two minutes')
+        .toBe(30_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('replays a question that is out of time rather than withholding it', () => {
+    // Clamped at zero, not dropped. Its own timer is about to close it and
+    // `clarification:closed` is what takes the form down; withholding it here
+    // would leave the page unable to show what the run is blocked on in the
+    // seconds before that arrives.
+    vi.useFakeTimers();
+    try {
+      const run = freshRun();
+      rememberForReplay(run, 'clarification:required', {
+        conversationId: 'c1', requestId: 'req-1', timeoutMs: 120_000,
+        questions: [{ id: 'q1', prompt: 'Which?', kind: 'text' }],
+      });
+      vi.advanceTimersByTime(200_000);
+
+      const { emitted, socket } = recorder();
+      replaySupervision(run, socket);
+
+      expect(emitted.map((e) => e.event)).toEqual(['clarification:required']);
+      expect((emitted[0]?.payload as { timeoutMs?: number }).timeoutMs, 'never negative').toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('takes a dead form down on a reconnect, which an open-only replay cannot', () => {
+    // A full page RELOAD starts with no forms, so replaying the open set is
+    // enough for it. A transient socket RECONNECT is different: the page keeps
+    // what it had on screen, and absence from an open-only replay cannot remove
+    // anything — so a question that closed while the transport was unbound left
+    // a dead form standing, in front of every later question.
+    const run = freshRun();
+    rememberForReplay(run, 'clarification:required', {
+      conversationId: 'c1', requestId: 'req-1', questions: [{ id: 'q1', prompt: 'Gone?', kind: 'text' }],
+    });
+    rememberForReplay(run, 'clarification:required', {
+      conversationId: 'c1', requestId: 'req-2', questions: [{ id: 'q1', prompt: 'Still asking?', kind: 'text' }],
+    });
+    // The first ends while nobody is connected to hear it.
+    rememberForReplay(run, 'clarification:closed', { conversationId: 'c1', requestId: 'req-1' });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+
+    // Closures first, so the page settles on exactly what is still being asked.
+    expect(emitted.map((e) => e.event)).toEqual(['clarification:closed', 'clarification:required']);
+    expect((emitted[0]?.payload as { requestId?: string }).requestId).toBe('req-1');
+    expect((emitted[1]?.payload as { requestId?: string }).requestId).toBe('req-2');
   });
 
   it('keeps an outstanding approval until permission:resolved names it, keyed by id or requestId', () => {

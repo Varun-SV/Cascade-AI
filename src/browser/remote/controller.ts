@@ -230,6 +230,17 @@ export interface RemoteBrowserControllerOptions {
   /** Told when a run's live view becomes available, so the owner can watch. */
   onLiveView?: (runId: string, liveViewUrl: string | undefined) => void;
   /**
+   * Told when a provider session could not be handed back.
+   *
+   * Release is best-effort by design — a run that has finished must not be
+   * reported as failed because the provider was briefly unreachable — but
+   * best-effort is not the same as unobservable. A release that silently did
+   * not happen leaves a billed browser running until the provider's own
+   * timeout collects it, and without this there is no way to tell that from a
+   * clean handback.
+   */
+  onReleaseFailed?: (runId: string, sessionId: string, err: unknown, expiresInMs?: number) => void;
+  /**
    * Something that must finish before this controller may open anything.
    *
    * For ROTATION. A settings change builds a new controller and disposes the
@@ -474,6 +485,36 @@ export class RemoteBrowserController {
   private controlAnnounced = new Map<string, string>();
   /** An embedder that wants every run's live view, told which run each is. */
   private onLiveViewAll: ((runId: string, liveViewUrl: string | undefined) => void) | undefined;
+  /** Told when a provider session could not be handed back. See `disposeRun`. */
+  private onReleaseFailed: ((runId: string, sessionId: string, err: unknown, expiresInMs?: number) => void) | undefined;
+
+  /**
+   * Tell the observer a session leaked, without letting it become the leak.
+   *
+   * Guarded, because this runs inside a `.catch` on the release: an observer
+   * that throws — a logging or telemetry sink that is momentarily unavailable
+   * is the ordinary case — would turn its own failure into a fresh rejection
+   * from `disposeRun`, so `endRun` would reject before `forgetRun` and the
+   * fire-and-forget `stopRun` path would raise an unhandled rejection.
+   *
+   * That is precisely the guarantee this whole change claims to preserve: a
+   * release that fails must never fail the run. Reporting it cannot be the
+   * thing that breaks it.
+   */
+  private reportReleaseFailure(runId: string, sessionId: string, err: unknown, expiresInMs?: number): void {
+    try {
+      // The provider's own ceiling, carried through so the report can say WHEN
+      // the leak stops costing money. Without it the operator is told a session
+      // is running and billable with no idea whether that means five minutes or
+      // until they go and kill it by hand — and the field incident that started
+      // this was two sessions ending at exactly five minutes with nothing
+      // anywhere recording why.
+      this.onReleaseFailed?.(runId, sessionId, err, expiresInMs);
+    } catch {
+      // Nothing to escalate to. The report is best-effort by construction —
+      // everything that could act on it has already finished.
+    }
+  }
 
   private runs = new Map<string, RunBrowser>();
   /**
@@ -540,6 +581,7 @@ export class RemoteBrowserController {
     // Kept as its own field rather than folded into the per-run map: it needs
     // the run id, and squeezing it in under a sentinel key lost exactly that.
     this.onLiveViewAll = options.onLiveView;
+    this.onReleaseFailed = options.onReleaseFailed;
     this.ready = options.ready;
   }
 
@@ -648,9 +690,41 @@ export class RemoteBrowserController {
    * apart — and would drop the Stop control for the first as if it were the
    * second.
    */
+  /*
+   * Guarded HERE rather than at the call sites, which is the point.
+   *
+   * This is the fifth place in this changeset where a notification could take
+   * down the thing it was notifying about — after the release observer,
+   * `clarification:closed`, `clarification:timeout` and `escalation:timeout`.
+   * The first four were fixed one door at a time, which is how a fifth door
+   * came to exist: the announcement added on the reuse path propagated out of
+   * `open()`, `act()` caught it as an action failure, and every later action
+   * against a perfectly healthy browser was skipped.
+   *
+   * Putting the guard at the source closes all four call sites at once and
+   * leaves no door for a sixth. The worst of them is not the reported one:
+   * `disposeRun` announces `active: false` as its FIRST statement, so a
+   * throwing listener aborted teardown before the screencast was stopped, the
+   * context closed, or the session handed back — leaking the provider session
+   * and never reaching `reportReleaseFailure`. The leak report would have been
+   * skipped by exactly the failure it exists to report.
+   *
+   * Two separate guards, not one around both: these are different listeners —
+   * the per-run panel and the global observer — and one failing must not cost
+   * the other its notification.
+   */
   private announceLiveView(runId: string, liveViewUrl: string | undefined, active: boolean): void {
-    this.liveViewListeners.get(runId)?.({ active, ...(liveViewUrl ? { liveViewUrl } : {}) });
-    this.onLiveViewAll?.(runId, liveViewUrl);
+    try {
+      this.liveViewListeners.get(runId)?.({ active, ...(liveViewUrl ? { liveViewUrl } : {}) });
+    } catch {
+      // A listener's own problem. Nothing here can act on it, and the browser
+      // operation being announced is not a party to it.
+    }
+    try {
+      this.onLiveViewAll?.(runId, liveViewUrl);
+    } catch {
+      // As above.
+    }
   }
 
   /**
@@ -1883,7 +1957,13 @@ export class RemoteBrowserController {
     // own page intact. If that ever changes, this is the line that would start
     // terminating somebody else's browser.
     await held.browser.close().catch(() => {});
-    await this.provider.endSession(held.session.id).catch(() => {});
+    // Reported, not discarded. A release that fails leaves a browser running
+    // at the operator's expense until the provider reaps it, and this is the
+    // only moment anything knows it happened — the run is over, the caller is
+    // not waiting on an outcome, and there is nobody left to notice a session
+    // that simply never went away.
+    await this.provider.endSession(held.session.id)
+      .catch((err: unknown) => this.reportReleaseFailure(runId, held.session.id, err, held.session.expiresInMs));
   }
 
   /**
@@ -2170,7 +2250,26 @@ export class RemoteBrowserController {
       if (this.ready === settling) this.ready = undefined;
     }
     const existing = this.runs.get(runId);
-    if (existing && !existing.page.isClosed()) return existing;
+    if (existing && !existing.page.isClosed()) {
+      // RE-ADVERTISED, not just returned.
+      //
+      // The announcement below is made once, at the end of the creation path,
+      // and a browser is created once per run — so a client that is not
+      // currently showing this run's panel never got another chance at one.
+      // Nothing re-announces and nothing on the client retries: the panel is
+      // pure server state (`browserActive = browserView !== undefined`), so a
+      // view entry that is gone stays gone for the life of the run, and with it
+      // the Stop button and Take control. The agent goes on driving a browser
+      // the person can no longer see or halt, which is the one thing this whole
+      // panel exists to prevent.
+      //
+      // Idempotent, so it costs nothing when the panel IS up: the client
+      // compares the capability URL it already holds and returns the previous
+      // state unchanged. The only case it changes anything is the case it is
+      // here for — the client has no entry for this run and needs one back.
+      this.announceLiveView(runId, existing.session.liveViewUrl, true);
+      return existing;
+    }
     if (existing && existing.page.isClosed()) {
       // A followed popup commonly closes itself after OAuth/login succeeds. The
       // session is not stale just because that one page is: the opener (or
@@ -2180,6 +2279,24 @@ export class RemoteBrowserController {
       const fallback = existing.page.context().pages().filter((p) => !p.isClosed()).at(-1);
       if (fallback) {
         await this.adoptPage(runId, existing, fallback);
+        // Same session, so the same capability URL — and the same reason to say
+        // so again. A popup closing is exactly when a viewer is most likely to
+        // have lost the panel.
+        //
+        // But only if this run still HAS that browser. `adoptPage` awaits a CDP
+        // reattachment, and Stop lands inside that await perfectly happily:
+        // `stopRun` removes the run and announces `active: false`, and an
+        // unconditional announcement here would then publish `active: true`
+        // after the teardown — resurrecting the panel, and a live capability
+        // URL, for a browser the person just stopped. Nothing would take it
+        // back down, because the withdrawal has already been sent.
+        //
+        // The sibling branch above needs no such check: it announces with no
+        // await between reading `runs` and saying so, and nothing can interleave
+        // in a synchronous stretch.
+        if (this.runs.get(runId) === existing && !existing.abort.signal.aborted) {
+          this.announceLiveView(runId, existing.session.liveViewUrl, true);
+        }
         return existing;
       }
     }
@@ -2351,7 +2468,17 @@ export class RemoteBrowserController {
       // would leave both behind.
       await owned?.close().catch(() => {});
       await browser?.close().catch(() => {});
-      await this.provider.endSession(session.id).catch(() => {});
+      // Reported like any other release, because it IS one. A session that was
+      // allocated and then could not be handed back is billable whether the
+      // run that wanted it got as far as using it or not — and this path is
+      // reached exactly when something already went wrong, so it is no less
+      // likely to fail than the ordinary teardown.
+      //
+      // The open's own error is what propagates: this release failing is a
+      // second, quieter problem, and replacing the first with it would hide
+      // the reason the browser never opened.
+      await this.provider.endSession(session.id)
+        .catch((releaseErr: unknown) => this.reportReleaseFailure(runId, session.id, releaseErr, session.expiresInMs));
       throw err;
     }
     // AFTER `this.runs.set`, and that ordering is the whole point.

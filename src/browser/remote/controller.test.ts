@@ -831,6 +831,190 @@ describe('attached is not the same as watchable', () => {
 
     expect(seen.at(-1)).toEqual({ active: false });
   });
+
+  it('says so when a provider session could not be handed back', async () => {
+    // Release is best-effort and must stay that way — a finished run must not
+    // be reported as failed because the provider was briefly unreachable — but
+    // best-effort is not the same as unobservable. Both layers used to swallow
+    // the rejection whole, so a release that never happened was indistinguish-
+    // able from a clean handback, and the only evidence was a browser still
+    // running on the provider's dashboard until its own timeout collected it.
+    //
+    // Found while trying to explain two Steel sessions that ended at exactly
+    // 5:00 — the provider's default timeout — with no agent activity in the
+    // last four minutes of either. Nothing in the system could answer whether
+    // the release had failed, which is the gap this closes.
+    const { provider } = fakeProvider();
+    const boom = new Error('Steel POST /v1/sessions/sess-1/release failed: 503');
+    provider.endSession = async () => { throw boom; };
+
+    const failures: Array<{ runId: string; sessionId: string; err: unknown }> = [];
+    const c = new RemoteBrowserController({
+      provider,
+      onReleaseFailed: (runId, sessionId, err) => failures.push({ runId, sessionId, err }),
+    });
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    // Not rejected. The run is over either way — that contract is unchanged.
+    await expect(c.endRun('run-A')).resolves.toBeUndefined();
+
+    expect(failures, 'the operator is told, once, which session is still running')
+      .toEqual([{ runId: 'run-A', sessionId: 'sess-1', err: boom }]);
+  });
+
+  it('does not let a throwing observer become the failure it was told about', async () => {
+    // The report runs inside the `.catch` on the release, so an observer that
+    // throws — a logging or telemetry sink briefly unavailable is the ordinary
+    // case — used to turn its own failure into a fresh rejection from
+    // `disposeRun`. `endRun` would then reject before `forgetRun`, and the
+    // fire-and-forget `stopRun` path would raise an unhandled rejection.
+    //
+    // Which is exactly the guarantee this change claims to keep: a release that
+    // fails must never fail the run. Reporting it cannot be what breaks it.
+    const { provider } = fakeProvider();
+    provider.endSession = async () => { throw new Error('release 503'); };
+
+    const c = new RemoteBrowserController({
+      provider,
+      onReleaseFailed: () => { throw new Error('the telemetry sink is down'); },
+    });
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await expect(c.endRun('run-A'), 'the run still ends').resolves.toBeUndefined();
+    // And the run is genuinely forgotten, not abandoned mid-teardown.
+    expect(c.humanHolds('run-A')).toBe(false);
+  });
+
+  it('reports a session that leaked while the browser was still opening', async () => {
+    // `openReserved` allocates the session first and only then connects, makes
+    // a context and opens a page. When one of those fails it rolls back — and
+    // that rollback releases a session exactly like any other teardown does.
+    //
+    // A session allocated and then not handed back is billable whether or not
+    // the run got as far as using it, and this path is reached precisely when
+    // something has already gone wrong, so it is no less likely to fail. The
+    // observer was wired to the ordinary teardown and not to this one: the rule
+    // was written once and applied to one of its two doors.
+    const { provider } = fakeProvider();
+    provider.endSession = async () => { throw new Error('release 503'); };
+    const failures: Array<{ runId: string; sessionId: string }> = [];
+    const c = new RemoteBrowserController({
+      provider,
+      onReleaseFailed: (runId, sessionId) => failures.push({ runId, sessionId }),
+    });
+
+    // Fail AFTER `createSession` has already allocated one, so the rollback is
+    // the path taken: the context is made once the session exists and the CDP
+    // connection is up, which is exactly the window this is about.
+    const realNewContext = browser.newContext;
+    browser.newContext = async () => { throw new Error('no context for you'); };
+    try {
+      await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    } finally {
+      browser.newContext = realNewContext;
+    }
+
+    expect(failures, 'the leaked session names itself here too')
+      .toEqual([{ runId: 'run-A', sessionId: 'sess-1' }]);
+  });
+
+  it('tells the observer when the leaked session gets reaped', async () => {
+    // "Billable until the provider times it out" leaves the operator without
+    // the one number that decides what to do about it: whether this costs five
+    // minutes or runs until somebody kills it by hand. The ceiling was read
+    // from the provider and carried on the session, and then reached nothing —
+    // parsed, typed, and used by no caller outside its own adapter test.
+    //
+    // Which is the same failure as a report that cannot be delivered: the fact
+    // was captured and then not put anywhere a person would see it.
+    const { provider } = fakeProvider();
+    provider.createSession = async () => ({ id: 'sess-1', cdpUrl: 'ws://fake/cdp', expiresInMs: 300_000 });
+    provider.endSession = async () => { throw new Error('release 503'); };
+
+    const seen: Array<{ sessionId: string; expiresInMs?: number }> = [];
+    const c = new RemoteBrowserController({
+      provider,
+      onReleaseFailed: (_runId, sessionId, _err, expiresInMs) => seen.push({ sessionId, expiresInMs }),
+    });
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await c.endRun('run-A');
+
+    expect(seen, 'the five minutes that explained the field incident')
+      .toEqual([{ sessionId: 'sess-1', expiresInMs: 300_000 }]);
+  });
+
+  it('re-advertises the browser on every action, not only when it is created', async () => {
+    // A browser is created ONCE per run, and this used to be the only moment it
+    // was announced — so a client with no panel for this run never got another
+    // chance at one. There is nothing on the client to retry with: the panel is
+    // pure server state (`browserActive = browserView !== undefined`), so a view
+    // entry that has gone stays gone for the life of the run, and the Stop
+    // button and Take control go with it.
+    //
+    // Reported from the field: the panel appeared on the first browser action,
+    // the person dismissed it, and every later action returned results with no
+    // way left to watch or halt the page it had just driven.
+    const { provider } = fakeProvider('https://view.example/session');
+    const c = new RemoteBrowserController({ provider });
+    const seen: Array<{ active: boolean; liveViewUrl?: string }> = [];
+    c.onLiveViewFor('run-A', (info) => seen.push(info));
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    expect(seen, 'announced when the browser is created').toHaveLength(1);
+
+    // The SAME run acting again. One session throughout — `open()` returns the
+    // one it already has — which is exactly why the announcement had to be
+    // moved off the creation path to be made at all.
+    await c.controller({ kind: 'click', selector: '#b' }, ctx('run-A', 'w1'));
+
+    expect(seen, 'and again, so a client that lost the panel can get it back')
+      .toHaveLength(2);
+    expect(seen.at(-1), 'the same browser, still watchable')
+      .toEqual({ active: true, liveViewUrl: 'https://view.example/session' });
+  });
+
+  it('does not let a throwing view listener fail the action it was announcing', async () => {
+    // The re-announcement above is informational, and it sat directly in the
+    // path of `open()`. A listener that threw — a transport that has gone away
+    // is the ordinary case — propagated out, `act()` caught it as an action
+    // failure, and every later action against a perfectly healthy browser was
+    // skipped: the announcement took down the thing it was announcing.
+    //
+    // The fifth instance of that in this changeset, which is why the guard went
+    // into `announceLiveView` itself rather than onto this call site. There are
+    // four call sites; fixing the reported one would have left three.
+    const { provider } = fakeProvider('https://view.example/session');
+    const c = new RemoteBrowserController({ provider });
+    c.onLiveViewFor('run-A', () => { throw new Error('the socket is gone'); });
+
+    // `act` catches whatever escapes and reports it as a FAILED ACTION, so the
+    // assertion has to be on `ok` — an outcome object is returned either way,
+    // and a test that only checked for one would pass with the guard removed.
+    const first = await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    expect(first.ok, 'the creation announcement cannot fail the action either').toBe(true);
+
+    // The reuse path — the one the announcement was added to.
+    const again = await c.controller({ kind: 'click', selector: '#b' }, ctx('run-A', 'w1'));
+    expect(again.ok, 'and every later action against a healthy browser still runs').toBe(true);
+  });
+
+  it('still tears the session down when the view listener throws', async () => {
+    // The worst of the four call sites, and not the one that was reported:
+    // `disposeRun` announces `active: false` as its FIRST statement. A throwing
+    // listener aborted teardown before the screencast was stopped, the context
+    // closed, or the session handed back — so the report of a leak was skipped
+    // by the very failure that caused one.
+    const { provider, ended } = fakeProvider('https://view.example/session');
+    const c = new RemoteBrowserController({ provider });
+    c.onLiveViewFor('run-A', () => { throw new Error('the socket is gone'); });
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await expect(c.endRun('run-A')).resolves.toBeUndefined();
+
+    expect(ended, 'the session is handed back, not leaked by its own farewell')
+      .toEqual(['sess-1']);
+  });
 });
 
 describe('two runs starting at the same moment', () => {

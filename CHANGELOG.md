@@ -18,6 +18,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+## 0.81.0 - 2026-09-15
+
+### Added
+- **Cascade can ask instead of guessing.** A model with no way to ask has one
+  move when a request is ambiguous: guess, and present the guess as though it
+  were the request. `ask_user` gives it the other move — a short questionnaire,
+  rendered as controls rather than typed into the chat, because prose comes
+  back as prose and has to be parsed into a decision by the thing that asked.
+  Several questions are asked together: ambiguity arrives in clusters, and the
+  same questions one per turn read as an interrogation. A question can never
+  park a run — if nobody is watching, if the run is unattended or autonomous,
+  if you press Stop, or if two minutes pass, the model is told to proceed on
+  its best reading and to say which assumption it made. "Skip, decide for me"
+  says that deliberately, so declining does not mean waiting out the gate. The
+  form shows how long is left, and says what is LEFT rather than starting over
+  when a question is inherited by a page that reconnected, so a considered
+  answer is not typed into a questionnaire that has already expired.
+
+- **A Browser control beside Web, named for what it does.** The hosted browser
+  was reachable two ways and neither was discoverable: turn the web toggle off
+  so the model has nothing cheaper to answer with, or type `browser_control`
+  into the prompt. Reaching the internet is now one decision with three
+  outcomes — read pages as text, drive a real one, or neither. The control is
+  absent rather than disabled where no provider is configured, because the
+  capability does not exist until an operator supplies an endpoint.
+
+  **This changes when a browser can be opened.** An operator configuring a
+  provider is now necessary but no longer sufficient: a turn has to ask for the
+  browser before `browser_control` is registered or any session is allocated.
+  Every session is billed, so reaching one should be something a person chose
+  rather than something a model reached for — and a capability that cannot be
+  gated cannot be metered. With the control off the tool is not refused at call
+  time, it is absent, and the model never sees a capability it was not given.
+
+  **A Steel deployment now needs a credential to advertise a browser.** Setting
+  `REMOTE_BROWSER_PROVIDER=steel` with no URL falls back to the hosted API, and
+  with no API key that endpoint refuses the first request — so the control
+  appeared and then failed on authentication. A self-hosted Steel given its own
+  URL is unaffected and still needs no key: only the hosted fallback is refused,
+  because requiring one for an endpoint the operator typed would break a working
+  deployment to guard a default.
+
+### Changed
+- **The permission prompt looks like the rest of Cascade.** It was the one
+  surface built from inline styles and hardcoded hex, and those were dark-theme
+  colours written literally — so the most consequential thing the UI ever asks
+  rendered as a muddy brown box in the light theme and could not follow a
+  palette change. Rebuilt on the design tokens, with Deny in `danger` rather
+  than sharing a border colour with Allow, and moved away from "Allow for this
+  run", which sat a mis-click from it.
+
+- **`SteelProvider.endSession` now rejects when a release fails**, where it
+  previously resolved silently. A release that never happened leaves a billed
+  browser running until the provider reaps it, and both layers discarded that
+  fact — so a leak and a clean handback were the same event to everything
+  above them. The guarantee that a failed release must not fail the run is
+  unchanged; it now lives in the caller, which catches and reports. Embedders
+  calling the provider directly will see a rejection where they saw a silent
+  resolve.
+
+### Fixed
+- **The live view comes back if you lose the panel.** A browser was advertised
+  only when it was created, once per run, and nothing re-announced it — so a
+  panel that went away stayed away for the life of the run, taking Stop and
+  Take control with it while the agent went on driving a page nobody could see
+  or halt. Reported from the field: the panel appeared on the first browser
+  action, was dismissed, and never returned.
+
+- **A parked section survives a reload, and no longer hides behind another.**
+  A section that stops and asks for a decision starts a five-minute timer the
+  moment it asks. Two things quietly spent that timer for you. Reloading the
+  page lost the prompt while the server kept the run — nothing replayed it, so
+  there was no way to answer and the section failed when the clock ran out. And
+  a Complex wave dispatches sections concurrently, so several can be parked at
+  once, but only the first was shown and the rest were counted: they were not
+  waiting their turn, they were expiring unseen while you worked through the one
+  on top. Every parked section is now shown, in one window, each with its own
+  deadline and its own controls; and a reload gets them back with the time they
+  have actually got left rather than a fresh five minutes.
+
+- **An escalation can no longer be parked by whoever was told about it.** When
+  a section's review timed out, the announcement went out before the gate
+  settled — so a listener that threw (a logging sink, a telemetry exporter)
+  unwound the timer before the section was released, leaving it waiting on a
+  one-shot timer that had already fired and holding its worker until teardown.
+  Being a timer callback, the same throw had no caller to unwind into and
+  surfaced as an uncaught exception. The gate now settles first and the
+  announcement cannot take it down.
+
+- **A provider session that could not be handed back now says so**, with the
+  session id the provider's own dashboard is keyed by. Two sessions in the
+  field ended at exactly five minutes — the provider's default timeout, not a
+  release — and nothing anywhere recorded whether a release had been attempted
+  or had failed. That ceiling is now read from the provider and named in the
+  failure itself — "the provider reaps it 5m after creation" rather than an
+  open-ended "until it times out" — so the report says how long the leak costs
+  money instead of only that it does. It cannot be set:
+  Steel's create API accepts no timeout field, and an option feeding a field
+  the API ignores would look like control while changing nothing.
+
 ## 0.80.0 - 2026-09-08
 
 ### Added

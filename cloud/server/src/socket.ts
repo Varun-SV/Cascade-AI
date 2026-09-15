@@ -213,8 +213,44 @@ export interface LiveRun {
    * spinner, surfaced no error, and for a new chat had no id to reload either.
    * Which is the original "the response just died", one disconnect later.
    */
+  /**
+   * Questionnaires that have ENDED, so a reconnecting page can drop their forms.
+   *
+   * A reload needs only the open set; a reconnect keeps whatever it had on
+   * screen, and nothing in an open-only replay can remove a form the page is
+   * still showing. Bounded — see `MAX_REMEMBERED_CLOSURES`.
+   */
+  clarificationsClosed?: Set<string>;
+  /**
+   * Questionnaires still waiting on a person, keyed by request id.
+   *
+   * Same shape as `approvals`, and for the same reason: both are the run
+   * BLOCKED on somebody, and a reload that loses them leaves the person
+   * looking at a spinner for something nobody will ever be asked.
+   */
+  clarifications?: Map<string, { payload: Record<string, unknown>; askedAt: number }>;
+  /**
+   * Sections parked on a decision, keyed by request id.
+   *
+   * The same shape and the same reason as `clarifications`. This gate was the
+   * one the clarification gate was modelled on, and it is the one that never
+   * got the replay: a reload while a section was parked left the run alive on
+   * the server and the modal gone from the page, with no way to answer until
+   * the five-minute timer failed the section.
+   */
+  escalations?: Map<string, { payload: Record<string, unknown>; askedAt: number }>;
+  escalationsClosed?: Set<string>;
   terminal?: { conversationId?: string; error?: string };
 }
+
+/**
+ * How many ended questionnaires a run remembers for a reconnecting page.
+ *
+ * `ask_user` asks at most five questions per call, and a run makes few calls,
+ * so this is far above the honest case — it exists so a long run cannot grow
+ * this set without bound, not to ration anything.
+ */
+const MAX_REMEMBERED_CLOSURES = 32;
 
 /** The events that mean a run is over, in either direction. */
 const TERMINAL_EVENTS = new Set(['session:complete', 'session:error']);
@@ -273,6 +309,77 @@ export function rememberForReplay(run: LiveRun, event: string, payload: unknown)
     }
     return;
   }
+  // A question outstanding when the connection dropped.
+  //
+  // I argued against replaying these, on the grounds that nothing could clear
+  // the record: the ANSWER arrives on the socket rather than as an emit, so
+  // this function would never see it, and a question replayed after it was
+  // answered is worse than one lost. `clarification:closed` removed that
+  // objection — it is emitted for every ending, including the answered one, so
+  // the record now has a reliable delete.
+  //
+  // Which also fixes the reverse case: a close emitted while the transport had
+  // no socket was simply dropped, leaving a dead form on screen after
+  // reconnection — and because the queue renders oldest-first, in front of
+  // every later question the run asks.
+  if (event === 'escalation:decision-required') {
+    const id = p['requestId'];
+    if (typeof id !== 'string') return;
+    (run.escalations ??= new Map()).set(id, { payload: p, askedAt: Date.now() });
+    return;
+  }
+  if (event === 'escalation:closed') {
+    const id = p['requestId'];
+    if (typeof id !== 'string') return;
+    run.escalations?.delete(id);
+    // Remembered as well as removed, for the reason the clarification
+    // tombstones are: a reconnecting page keeps what it had on screen, so
+    // absence from an open-only replay cannot take a dead modal down.
+    const closed = (run.escalationsClosed ??= new Set());
+    closed.add(id);
+    while (closed.size > MAX_REMEMBERED_CLOSURES) {
+      const oldest = closed.values().next();
+      if (oldest.done) break;
+      closed.delete(oldest.value);
+    }
+    return;
+  }
+  if (event === 'clarification:required') {
+    const id = p['requestId'];
+    if (typeof id !== 'string') return;
+    // WHEN it was asked, not only what was asked. The gate is two minutes and
+    // the payload states that flatly, so replaying it unchanged would hand a
+    // reconnecting page a fresh two minutes while the server's timer kept
+    // running — the countdown would read a minute and a half remaining on a
+    // question about to be given up on.
+    (run.clarifications ??= new Map()).set(id, { payload: p, askedAt: Date.now() });
+    return;
+  }
+  if (event === 'clarification:closed') {
+    const id = p['requestId'];
+    if (typeof id !== 'string') return;
+    run.clarifications?.delete(id);
+    // Remembered as well as removed, because replay has to be able to take a
+    // form DOWN and not only put one up.
+    //
+    // A full page reload starts with no forms, so the open set alone is right
+    // for it. A transient socket reconnect does not: the page keeps what it had,
+    // so a question that closed while the transport was unbound is invisible to
+    // an open-only replay — absence cannot remove anything — and the dead form
+    // stays, in front of every later question.
+    //
+    // Bounded, because a long run can ask many questions and this must not grow
+    // without limit. Oldest first: the ones most likely to still be on a screen
+    // are the recent ones.
+    const closed = (run.clarificationsClosed ??= new Set());
+    closed.add(id);
+    while (closed.size > MAX_REMEMBERED_CLOSURES) {
+      const oldest = closed.values().next();
+      if (oldest.done) break;
+      closed.delete(oldest.value);
+    }
+    return;
+  }
   if (event === 'permission:user-required') {
     const id = p['id'] ?? p['requestId'];
     if (typeof id !== 'string') return;
@@ -309,6 +416,30 @@ export function resumeAndReplay(
 }
 
 /** Give a replacement connection back the state the reloaded page lost. */
+/**
+ * The same question, with the time it has actually got left.
+ *
+ * Adjusted HERE, in server time, rather than by shipping an absolute deadline
+ * for the client to subtract from its own clock: the two clocks disagree, and
+ * a page whose clock runs a few minutes fast would show a question as already
+ * expired. The client keeps the arrival-stamp arithmetic it already uses for
+ * escalations, and this makes the number it is handed true at the moment of
+ * replay.
+ *
+ * Clamped at zero rather than dropped. A question this late is about to be
+ * closed by the gate's own timer, and `clarification:closed` is what takes the
+ * form down — withholding it here would leave the page unable to show what the
+ * run is still blocked on in the seconds before that arrives.
+ */
+function remainingDeadline(
+  payload: Record<string, unknown>,
+  askedAt: number,
+): Record<string, unknown> {
+  const stated = payload['timeoutMs'];
+  if (typeof stated !== 'number' || !Number.isFinite(stated)) return payload;
+  return { ...payload, timeoutMs: Math.max(0, stated - (Date.now() - askedAt)) };
+}
+
 export function replaySupervision(run: LiveRun, socket: Pick<Socket, 'emit'>): void {
   if (run.done) return;
   if (run.liveView) socket.emit('browser:live-view', run.liveView);
@@ -320,6 +451,25 @@ export function replaySupervision(run: LiveRun, socket: Pick<Socket, 'emit'>): v
   if (run.control) socket.emit('browser:control', run.control);
   for (const request of run.approvals?.values() ?? []) {
     socket.emit('permission:user-required', request);
+  }
+  // The parked sections, same ordering rule as the questions below: a closure
+  // can take a dead modal down, and an open-only replay could only ever add.
+  for (const requestId of run.escalationsClosed ?? []) {
+    socket.emit('escalation:closed', { requestId });
+  }
+  for (const { payload, askedAt } of run.escalations?.values() ?? []) {
+    socket.emit('escalation:decision-required', remainingDeadline(payload, askedAt));
+  }
+  // Closures BEFORE openings, so a page that reconnects mid-question ends up
+  // showing exactly what is still being asked: the dead ones come down first,
+  // and anything genuinely open is put back after.
+  for (const requestId of run.clarificationsClosed ?? []) {
+    socket.emit('clarification:closed', { requestId });
+  }
+  // Still open, so still blocking the run: a reloaded page that never sees the
+  // question waits out the full gate before the model gives up and assumes.
+  for (const { payload, askedAt } of run.clarifications?.values() ?? []) {
+    socket.emit('clarification:required', remainingDeadline(payload, askedAt));
   }
 }
 

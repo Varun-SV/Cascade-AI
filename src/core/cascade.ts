@@ -33,6 +33,16 @@ import { DeadModelStore, fileDeadModelPersistence } from './router/dead-models.j
  * run doesn't hold a worker slot all afternoon.
  */
 const ESCALATION_DECISION_TIMEOUT_MS = 5 * 60_000;
+/**
+ * How long a questionnaire waits for an answer.
+ *
+ * Shorter than the escalation gate deliberately. An unanswered escalation
+ * discards a section's work, so it is worth waiting out; an unanswered question
+ * only means the model proceeds on its own reading and says so, which is a much
+ * cheaper outcome to reach — and two minutes is already long enough that anyone
+ * who is going to answer has.
+ */
+const CLARIFICATION_TIMEOUT_MS = 2 * 60_000;
 import { buildMediaTools, type AssetSink } from '../tools/generate-media.js';
 import { buildDocumentTools } from '../tools/generate-document.js';
 import { RunBreaker } from './run-breaker.js';
@@ -67,6 +77,12 @@ import {
 import { GuidanceQueue } from './steering/guidance.js';
 import { CurrentPageTool, type CurrentPageProvider } from '../tools/current-page.js';
 import { BrowserControlTool, type BrowserController, type BrowserActorRelease } from '../tools/browser-control.js';
+import {
+  AskUserTool,
+  type ClarificationAnswer,
+  type ClarificationQuestion,
+  type ClarificationResult,
+} from '../tools/ask-user.js';
 
 /** One entry in the per-run orchestration decision trail (see /why). */
 export interface DecisionLogEntry {
@@ -437,6 +453,14 @@ export class Cascade extends EventEmitter {
   // timeout. Same class of bug as the twelve-failover dead-model race: a wave
   // is concurrent, so per-run singletons are never safe inside it.
   private pendingEscalations = new Map<string, (decision: EscalationDecision) => void>();
+  /**
+   * Questionnaires waiting on a person, keyed by request id.
+   *
+   * Exactly the shape `pendingEscalations` uses, and for the same reason: the
+   * answer, the timeout and the abort all race, and one settle path guarded by
+   * the map delete is what makes the first of them win.
+   */
+  private pendingClarifications = new Map<string, (result: ClarificationResult) => void>();
 
   private async requestEscalationDecision(
     ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string },
@@ -463,7 +487,29 @@ export class Cascade extends EventEmitter {
         if (!this.pendingEscalations.delete(requestId)) return;
         if (timeout) clearTimeout(timeout);
         signal?.removeEventListener('abort', onAbort);
+        // RESOLVED FIRST, then a guarded emit — the rule this file now applies
+        // in five places. A listener that throws must not be able to park the
+        // section it is being told about.
         resolve(decision);
+        // Announced for EVERY ending, which is what makes the request safe to
+        // REMEMBER and replay.
+        //
+        // `escalation:timeout` is not enough and never was: an answer arrives
+        // on the socket rather than as an emit, so the replay store never sees
+        // it, and an abort or a teardown settle silently. Without a reliable
+        // delete, a page that reloaded could be handed back a decision that had
+        // already been made — worse than losing it, because answering it a
+        // second time resolves nothing and the section looks answerable when it
+        // is gone.
+        //
+        // The map delete above is what makes this exactly-once, so the answered
+        // path emitting it too costs nothing: that client has already taken its
+        // own modal down.
+        try {
+          this.emit('escalation:closed', { taskId, requestId, sectionId: ctx.sectionId });
+        } catch {
+          // A listener's problem, and the section is already released.
+        }
       };
 
       // Stop / disconnect must unpark the run. T2 has already passed its
@@ -477,8 +523,17 @@ export class Cascade extends EventEmitter {
       signal?.addEventListener('abort', onAbort, { once: true });
 
       timeout = setTimeout(() => {
-        this.emit('escalation:timeout', { taskId, requestId, sectionId: ctx.sectionId });
+        // Settled first, emit guarded — see the clarification timeout below.
+        // Found by walking every door of that rule rather than only the one
+        // that was reported, and this is the gate with the most to lose: an
+        // escalation that never settles holds a T2 section and its worker,
+        // where an unanswered question only costs an assumption.
         settle({ action: 'timeout' });
+        try {
+          this.emit('escalation:timeout', { taskId, requestId, sectionId: ctx.sectionId });
+        } catch {
+          // Informational only, and the section is already unblocked.
+        }
       }, ESCALATION_DECISION_TIMEOUT_MS);
 
       this.pendingEscalations.set(requestId, settle);
@@ -528,6 +583,141 @@ export class Cascade extends EventEmitter {
    */
   private releasePendingEscalations(action: EscalationDecision['action'] = 'skip'): void {
     for (const settle of Array.from(this.pendingEscalations.values())) settle({ action, automatic: true });
+  }
+
+  // ── Clarification: asking instead of assuming ───────────────────────
+  // The same gate shape as the escalation above, and for the same reasons. The
+  // difference that matters: an unanswered escalation SKIPS a section, while an
+  // unanswered question just means the model proceeds on its own reading — so
+  // every non-answer here is benign, and none of them may park the run.
+
+  /**
+   * Put a questionnaire to whoever is watching, if anybody is.
+   *
+   * Returns `no-listener` rather than waiting when there is nothing attached to
+   * answer — a scheduled run, an API caller with no socket, an autonomous run
+   * that has already said it wants no prompts. That check is the whole reason
+   * this can be offered to the model at all: a tool that might hang a headless
+   * run forever is a tool that cannot be registered.
+   */
+  async askUser(
+    questions: ClarificationQuestion[],
+    signal?: AbortSignal,
+  ): Promise<ClarificationResult> {
+    const none = (outcome: ClarificationResult['outcome']): ClarificationResult =>
+      ({ outcome, answers: [] });
+
+    // Nobody to ask, by three different routes. An unattended run has already
+    // declared there is no person; `auto` has declared they do not want to be
+    // interrupted; and no listener means the host never wired the event, which
+    // is the API and scheduled cases.
+    if (this.unattended) return none('no-listener');
+    if (this.config.autonomy === 'auto') return none('no-listener');
+    if (this.listenerCount('clarification:required') === 0) return none('no-listener');
+    if (signal?.aborted) return none('aborted');
+
+    const requestId = randomUUID();
+
+    return await new Promise<ClarificationResult>((resolve) => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+
+      // One settle path for every outcome, guarded by the map delete so the
+      // first of {answer, timeout, abort} wins and the losers are no-ops.
+      const settle = (result: ClarificationResult) => {
+        if (!this.pendingClarifications.delete(requestId)) return;
+        if (timeout) clearTimeout(timeout);
+        signal?.removeEventListener('abort', onAbort);
+        // Announced for EVERY outcome, not just the timeout.
+        //
+        // Whoever is showing the form has no other way to learn it is over. An
+        // abort and a teardown release both settle here silently, so a Stop —
+        // or any branch failure that unwinds the run — used to leave a live
+        // questionnaire on screen with nothing behind it: submitting answered a
+        // request nobody held, and because the queue shows the oldest first,
+        // that dead form sat in front of every later question.
+        //
+        // The map delete above is what makes this exactly-once, so the answered
+        // path emitting it too is harmless — that client has already taken the
+        // form down itself.
+        //
+        // RESOLVED FIRST, and the emit guarded. Announcing before resolving put
+        // the whole gate at the mercy of a listener: one that threw unwound
+        // `settle` before `resolve` ever ran, and because the map entry was
+        // already deleted, the timeout, the abort and any answer had all become
+        // no-ops. The promise stayed pending forever — the run parked on a
+        // question, which is the single thing this gate promises cannot happen.
+        //
+        // The same mistake as `reportReleaseFailure`, made again in a second
+        // place: a report must not become the failure it is reporting.
+        resolve(result);
+        try {
+          this.emit('clarification:closed', { requestId });
+        } catch {
+          // A listener's problem, and the run is already unblocked. There is
+          // nothing here to escalate it to.
+        }
+      };
+
+      // Stop must unpark the run. Without this the person presses Stop, watches
+      // the question stay on screen, and the run sits holding its worker until
+      // the full timeout — which is the same "pressed Stop and nothing stopped"
+      // failure the escalation gate exists to avoid.
+      const onAbort = () => settle(none('aborted'));
+      signal?.addEventListener('abort', onAbort, { once: true });
+
+      timeout = setTimeout(() => {
+        // SETTLED FIRST, and the emit guarded — the same rule as the close
+        // announcement below it, and the THIRD place this gate family got it
+        // wrong (the release observer, then `clarification:closed`, then here).
+        //
+        // Worse here than there, for two reasons. `settle` had not run yet, so
+        // a throwing listener left the entry IN `pendingClarifications` with
+        // its promise unresolved — and the timer is one-shot, so nothing would
+        // ever come back for it: the run parked on the question until teardown.
+        // And this is a TIMER callback, so the throw does not unwind into any
+        // caller; it surfaces as an uncaught exception and can take the process
+        // with it.
+        settle(none('timeout'));
+        try {
+          this.emit('clarification:timeout', { requestId });
+        } catch {
+          // Informational only, and the run is already unblocked. There is
+          // nothing here to escalate a listener's failure to.
+        }
+      }, CLARIFICATION_TIMEOUT_MS);
+
+      this.pendingClarifications.set(requestId, settle);
+      this.emit('clarification:required', {
+        requestId,
+        questions,
+        timeoutMs: CLARIFICATION_TIMEOUT_MS,
+      });
+    });
+  }
+
+  /**
+   * Answer a questionnaire from a REPL / dashboard / cloud listener.
+   *
+   * `requestId` comes back on the `clarification:required` event and is what
+   * makes an answer land on the question that asked. Optional for a host with
+   * only one in flight, matching `resolveEscalation`: without it the oldest
+   * outstanding request is answered, which is correct whenever there is one.
+   */
+  resolveClarification(answers: ClarificationAnswer[], requestId?: string): void {
+    const result: ClarificationResult = { outcome: 'answered', answers };
+    if (requestId) {
+      this.pendingClarifications.get(requestId)?.(result);
+      return;
+    }
+    const oldest = this.pendingClarifications.keys().next();
+    if (!oldest.done) this.pendingClarifications.get(oldest.value)?.(result);
+  }
+
+  /** Release every parked questionnaire — run teardown, so none outlive the run. */
+  private releasePendingClarifications(): void {
+    for (const settle of Array.from(this.pendingClarifications.values())) {
+      settle({ outcome: 'aborted', answers: [] });
+    }
   }
 
   /**
@@ -787,6 +977,35 @@ export class Cascade extends EventEmitter {
     if (!enabled) return;
     if ((this.config.tools?.disabledTools ?? []).includes('browser_control')) return;
     this.toolRegistry.register(new BrowserControlTool(controller, release));
+  }
+
+  /**
+   * Declare that this host can put a questionnaire to a person and answer it.
+   *
+   * Explicit, and NOT done at construction, because registering a tool is a
+   * promise the host has to keep. A host that registers `ask_user` without
+   * listening for `clarification:required` gives the model a tool that always
+   * answers "there is nobody watching this run" — while a person sits at the
+   * terminal looking at it. That is worse than not offering the tool at all:
+   * it costs a round trip and then tells the model something false.
+   *
+   * Only `cloud/server` bridges the protocol today. The CLI REPL and the
+   * dashboard do not, so they do not call this, and their models are not shown
+   * a capability nobody can serve. Wiring either of them is a matter of
+   * listening for the event and calling `resolveClarification`, then calling
+   * this.
+   *
+   * Still gated on the same conditions as the call itself, and `askUser`
+   * re-checks them: `setUnattended` can land after this, so the tool can be
+   * registered for a run that later turns out to have nobody on it. Then it
+   * answers `no-listener` and the model proceeds on its own reading, which is
+   * the same defence-in-depth `BrowserControlTool.revoke` provides.
+   */
+  enableClarification(): void {
+    if (this.unattended) return;
+    if (this.config.autonomy === 'auto') return;
+    if ((this.config.tools?.disabledTools ?? []).includes('ask_user')) return;
+    this.toolRegistry.register(new AskUserTool((questions, signal) => this.askUser(questions, signal)));
   }
 
   private registerMediaTools(workspacePath: string): void {
@@ -2140,6 +2359,7 @@ ${prompt}`
       // (error, abort, budget kill) must not leave a live timer and an
       // unresolved promise holding the next run's map.
       try { this.releasePendingEscalations(); } catch { /* non-critical */ }
+      try { this.releasePendingClarifications(); } catch { /* non-critical */ }
 
       // Restore tier models to the configured baseline so Cascade Auto's
       // per-task picks don't leak into /why, the status bar, or the next run.

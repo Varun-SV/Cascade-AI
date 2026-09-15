@@ -106,8 +106,24 @@ const EnvSchema = z.object({
   //   steel — a Steel deployment. REMOTE_BROWSER_URL is the API base and
   //           defaults to Steel's hosted API; REMOTE_BROWSER_API_KEY is its key.
   REMOTE_BROWSER_PROVIDER: z.enum(['cdp', 'steel']).optional(),
-  REMOTE_BROWSER_URL: z.string().optional(),
-  REMOTE_BROWSER_API_KEY: z.string().optional(),
+  // TRIMMED, so a value that is only whitespace becomes empty and is then
+  // dropped by `remoteBrowserControls` as absent.
+  //
+  // Both of these arrive from a deployment's environment, where a trailing
+  // space survives a copy-paste, a here-doc or a dashboard field without ever
+  // being visible. Untrimmed, each produced its own inert control:
+  //
+  //   - a blank API KEY is truthy, so the hosted gate read the provider as
+  //     authenticated, advertised the browser, and sent whitespace as
+  //     `steel-api-key` for the request to be refused;
+  //   - a padded URL parses (the URL parser ignores surrounding spaces) but is
+  //     concatenated raw, so `${base}${path}` became `https://host /v1/sessions`.
+  //
+  // Normalised HERE, at the one boundary the operator's value enters, rather
+  // than at each place that reads it. The gate and the provider then agree
+  // about what was configured, which is the point: they disagreed before.
+  REMOTE_BROWSER_URL: z.string().trim().optional(),
+  REMOTE_BROWSER_API_KEY: z.string().trim().optional(),
   // Concurrent sessions across the whole deployment. One by default and
   // deliberately so: every session is billed, and a wave of workers each
   // opening their own is a cost the operator did not choose. A bare CDP

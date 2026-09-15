@@ -260,7 +260,7 @@ export interface EscalationRequest {
  * Identity of a parked escalation. `requestId` when the server supplies it;
  * `sectionId` is the fallback for an older server that predates the id.
  */
-function escalationKey(e: { requestId?: string; sectionId?: string }): string {
+export function escalationKey(e: { requestId?: string; sectionId?: string }): string {
   return e.requestId ?? `section:${e.sectionId ?? ''}`;
 }
 
@@ -279,6 +279,35 @@ export interface ToolApproval {
   input: Record<string, unknown>;
   description?: string;
   isDangerous?: boolean;
+}
+
+/** One thing the model needs to know before it can act. Mirrors the SDK's shape. */
+export interface ClarificationQuestion {
+  id: string;
+  prompt: string;
+  kind: 'choice' | 'multi' | 'text';
+  options?: string[];
+}
+
+export interface ClarificationRequest {
+  requestId: string;
+  questions: ClarificationQuestion[];
+  /**
+   * How long the gate will wait, from the moment this arrived.
+   *
+   * Server-adjusted on replay, so a question inherited by a reconnecting page
+   * carries what is LEFT rather than the full gate — see `remainingDeadline`
+   * in the server's socket layer. That is why the arithmetic here can stay the
+   * same shape as the escalation modal's and still be right after a reconnect.
+   */
+  timeoutMs?: number;
+  /** Stamped on arrival, so a re-render cannot restart the countdown. */
+  receivedAt?: number;
+}
+
+export interface ClarificationAnswer {
+  id: string;
+  value: string | string[];
 }
 
 export interface PlanApproval {
@@ -300,6 +329,14 @@ export function useChatSession(
   skillId: string,
   webSearchConfig?: WebSearchPayload,
   initialConversationId?: string,
+  /**
+   * Whether the routing controls are on screen at all.
+   *
+   * False in Simple view, which hides the whole row. Passed in because this
+   * hook holds `browserMode`, and a per-run billed opt-in must not stay set
+   * while the only control for it is gone — see the effect below.
+   */
+  controlsVisible = true,
 ) {
   const [conversationId, setConversationId] = useState<string | undefined>(initialConversationId);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -464,6 +501,38 @@ export function useChatSession(
    * the run is blocked waiting, and a prompt that stays on screen after you
    * answer it invites a second, contradictory answer.
    */
+  /**
+   * Answer a questionnaire, or say plainly that you would rather not.
+   *
+   * An empty `answers` is a DELIBERATE skip and the model is told so — the
+   * timeout and the abort have their own outcomes, so nothing else can produce
+   * an answered-but-empty reply. It exists so somebody who does not want to
+   * fill the form in is not made to wait out the two-minute gate to say that.
+   *
+   * Removed from the queue immediately rather than on an acknowledgement: the
+   * run is blocked waiting, and a form that stays on screen after you submit it
+   * invites a second, contradictory answer.
+   */
+  const answerClarification = useCallback((requestId: string, answers: ClarificationAnswer[]) => {
+    setClarifications((q) => {
+      const asked = q.find((c) => c.requestId === requestId);
+      // Nothing queued under that id — a double submit, or a form already
+      // pruned by its run ending. Emitting anyway would name a conversation
+      // this pane merely happens to be showing.
+      if (!asked) return q;
+      socket?.emit('clarification:answer', {
+        // The conversation the QUESTION came from, not the one on screen: the
+        // pane's own id is undefined in a blank New Chat, and answering by
+        // request id alone would let a reply in one chat settle a question in
+        // another.
+        conversationId: asked.conversationId,
+        requestId,
+        answers,
+      });
+      return q.filter((c) => c.requestId !== requestId);
+    });
+  }, [socket]);
+
   const resolveToolApproval = useCallback((requestId: string, approved: boolean, always = false) => {
     setToolApprovals((q) => {
       const answered = q.find((a) => a.requestId === requestId);
@@ -684,6 +753,12 @@ export function useChatSession(
    * once, and holding only the newest would strand the others until timeout.
    */
   const [allToolApprovals, setToolApprovals] = useState<Array<ToolApproval & { conversationId?: string }>>([]);
+  // Kept for whichever conversation asked, and filtered on READ — the same
+  // shape as the approvals above, and for the same reason recorded there: a
+  // filter applied on RECEIPT drops the whole first turn of a new chat,
+  // because the server tags the request with a conversation id this side does
+  // not learn until the closing ack.
+  const [allClarifications, setClarifications] = useState<Array<ClarificationRequest & { conversationId?: string }>>([]);
   /**
    * The ones belonging to the conversation on screen.
    *
@@ -706,6 +781,7 @@ export function useChatSession(
    * gives a genuine first turn a real id to match on.
    */
   const toolApprovals = allToolApprovals.filter((a) => a.conversationId === currentConversation);
+  const clarifications = allClarifications.filter((c) => c.conversationId === currentConversation);
 
   /**
    * Open a different conversation in this pane.
@@ -752,7 +828,22 @@ export function useChatSession(
   // precisely because a Complex wave dispatches sections concurrently, so two
   // can be waiting at once — storing one here threw the first away, and
   // answering the visible prompt left the hidden section parked until timeout.
-  const [escalations, setEscalations] = useState<EscalationRequest[]>([]);
+  const [allEscalations, setEscalations] = useState<EscalationRequest[]>([]);
+  /**
+   * The parked sections belonging to the chat on screen.
+   *
+   * Filtered on read, exactly as `clarifications` is, and for the reason that
+   * comment gives — switching chats must not strand a run, so the request stays
+   * queued and re-appears when you come back to it.
+   *
+   * This mattered the moment the modal began rendering the whole queue: one
+   * socket carries concurrent runs for several conversations, so an unfiltered
+   * list put background conversations' sections into the window for the chat
+   * you were looking at, and closing it skipped them.
+   */
+  const escalations = allEscalations.filter(
+    (e) => !e.conversationId || e.conversationId === currentConversation,
+  );
   const escalation = escalations[0] ?? null;
   // Extended context: a pending "process this huge input?" confirm, and a
   // transient notice once a compaction actually happened.
@@ -773,7 +864,42 @@ export function useChatSession(
   // Default OFF: a hosted chat is pure conversation unless the user opts into
   // web tools. With the toggle off the run registers no tools at all, so the
   // model is never handed a capability it can't reliably use.
-  const [webSearch, setWebSearch] = useState(() => defaultWebSearch());
+  const [webSearch, setWebSearchRaw] = useState(() => defaultWebSearch());
+  // Reaching the internet is ONE decision with three outcomes — read text,
+  // drive a page, or neither — so the two switches cannot both be on. Enforced
+  // here rather than in the chip's onClick, because it is a property of the
+  // choice and not of the button: anything that sets one must clear the other,
+  // however it reaches these setters. The server enforces it independently.
+  const [browserMode, setBrowserModeRaw] = useState(false);
+  const setWebSearch = useCallback((on: boolean) => {
+    setWebSearchRaw(on);
+    if (on) setBrowserModeRaw(false);
+  }, []);
+  const setBrowserMode = useCallback((on: boolean) => {
+    setBrowserModeRaw(on);
+    if (on) setWebSearchRaw(false);
+  }, []);
+
+  // Browser mode does not survive its own control being taken off screen.
+  //
+  // It is modelled on the Web toggle beside it and it is NOT the same kind of
+  // thing, which is exactly the mistake: Web is a durable preference — it costs
+  // nothing, it is fine for it to persist unseen, and it is DELIBERATELY left
+  // alone here. Browser is a per-run opt-in to a billed capability, and the
+  // whole point of putting it behind a chip was that opening a browser should
+  // be something a person chose.
+  //
+  // Sticky through a switch to Simple view, it stopped being chosen: the row
+  // vanishes, the flag stays true, and every later send still carries
+  // `browserMode: true` with nothing on screen to say so or turn it off.
+  //
+  // Cleared rather than shown as an indicator in Simple, because Simple's rule
+  // is that these controls are not there — surfacing one of them would be a
+  // different product decision, and the safe reading of an invisible billed
+  // capability is that it is not granted.
+  useEffect(() => {
+    if (!controlsVisible) setBrowserModeRaw(false);
+  }, [controlsVisible]);
   const streamingRef = useRef('');
   // run:why arrives just before the chat:run ack; stash it so the ack can
   // attach the full report to the assistant message it creates.
@@ -837,6 +963,30 @@ export function useChatSession(
     };
     const onWhy = (r: WhyReport) => { pendingWhyRef.current = r; };
     const onPlan = (e: PlanApproval) => setApproval(e);
+    const onClarificationRequired = (e: ClarificationRequest & { conversationId?: string }) => {
+      adoptConversationId(e?.conversationId);
+      if (!e?.requestId || !Array.isArray(e.questions) || e.questions.length === 0) return;
+      // Stamped once, on arrival. The countdown is anchored to this rather
+      // than to when a component last rendered, for the reason the escalation
+      // modal documents: an unrelated re-render would otherwise restart it and
+      // the form would claim more time than the server intends to give.
+      const arrived = { ...e, receivedAt: Date.now() };
+      setClarifications((q) => (q.some((c) => c.requestId === e.requestId) ? q : [...q, arrived]));
+    };
+    /**
+     * The question is over, so the form must come down.
+     *
+     * Sent for EVERY ending — answered, timed out, stopped, or released by the
+     * run unwinding. The timeout event alone was not enough: an abort and a
+     * teardown release settle the gate silently, so pressing Stop left a live
+     * questionnaire whose submit button answered a request nobody held. Worse,
+     * the queue shows the oldest first, so that dead form sat in front of every
+     * later question the run asked.
+     */
+    const onClarificationClosed = (e: { requestId?: string }) => {
+      if (!e?.requestId) return;
+      setClarifications((q) => q.filter((c) => c.requestId !== e.requestId));
+    };
     const onPermissionRequired = (e: ToolApproval & { conversationId?: string; id?: string }) => {
       // Queued for whichever conversation it belongs to, not filtered here.
       //
@@ -883,6 +1033,20 @@ export function useChatSession(
     // Drop only the section that timed out. Without the id an older request's
     // timeout would clear a NEWER prompt the user is mid-answer on.
     const onEscalationTimeout = (e: { requestId?: string; sectionId?: string }) =>
+      setEscalations((prev) => prev.filter((x) => escalationKey(x) !== escalationKey(e)));
+    /**
+     * The section is no longer parked, however it stopped being parked.
+     *
+     * The timeout alone was never enough — it is one of four endings, and the
+     * other three (answered, Stop, the run unwinding) settled silently. A modal
+     * left standing on a section that has moved on can be answered into
+     * nothing, and on a page that reconnects it is the only thing that can take
+     * it down, since absence from a replay cannot remove anything.
+     *
+     * The same event the clarification gate got two rounds earlier; this is the
+     * gate that one was copied from.
+     */
+    const onEscalationClosed = (e: { requestId?: string; sectionId?: string }) =>
       setEscalations((prev) => prev.filter((x) => escalationKey(x) !== escalationKey(e)));
     const onContextApproval = (e: ContextApprovalInfo) => setContextApproval(e);
     const onCompacted = (e: { kind?: string; chunks?: number; foldedTurns?: number; truncated?: boolean }) => {
@@ -1117,10 +1281,13 @@ export function useChatSession(
     socket.on('tier:status', onStatus);
     socket.on('run:why', onWhy);
     socket.on('plan:approval-required', onPlan);
+    socket.on('clarification:required', onClarificationRequired);
+    socket.on('clarification:closed', onClarificationClosed);
     socket.on('permission:user-required', onPermissionRequired);
     socket.on('permission:resolved', onPermissionResolved);
     socket.on('escalation:decision-required', onEscalation);
     socket.on('escalation:timeout', onEscalationTimeout);
+    socket.on('escalation:closed', onEscalationClosed);
     socket.on('disconnect', onDisconnect);
     socket.on('context:approval-required', onContextApproval);
     socket.on('context:compacted', onCompacted);
@@ -1132,10 +1299,13 @@ export function useChatSession(
       socket.off('tier:status', onStatus);
       socket.off('run:why', onWhy);
       socket.off('plan:approval-required', onPlan);
+      socket.off('clarification:required', onClarificationRequired);
+      socket.off('clarification:closed', onClarificationClosed);
       socket.off('permission:user-required', onPermissionRequired);
       socket.off('permission:resolved', onPermissionResolved);
       socket.off('escalation:decision-required', onEscalation);
       socket.off('escalation:timeout', onEscalationTimeout);
+      socket.off('escalation:closed', onEscalationClosed);
       socket.off('disconnect', onDisconnect);
       socket.off('context:approval-required', onContextApproval);
       socket.off('context:compacted', onCompacted);
@@ -1205,6 +1375,22 @@ export function useChatSession(
     awaitingFirstTurnRef.current = false;
     conversationIdRef.current = target;
     setConversationId(target);
+    // Every question this run was holding is over, whatever it was told.
+    //
+    // The other gates above are cleared unconditionally; these cannot be, so
+    // they were missed. `allClarifications` spans conversations and is filtered
+    // on read, so emptying it would take down a form belonging to another pane
+    // — which is the thing that filtering exists to prevent. Cleared by
+    // conversation instead.
+    //
+    // Deliberately NOT done by replaying closure tombstones for a finished run,
+    // which was the other way to fix this. A terminal run cannot still be
+    // asking: teardown releases every pending clarification, so "closed" is
+    // implied by "done" and needs no per-id record to be trusted. Depending on
+    // the tombstone set here would make correctness contingent on it — and it
+    // is bounded at 32, so a run that asked more than that could evict the one
+    // id that mattered and leave the dead form standing again.
+    setClarifications((q) => q.filter((c) => c.conversationId !== target));
     settleConversation(target);
     void reloadActivePath(target);
   }, [reloadActivePath, settleConversation]);
@@ -1518,6 +1704,13 @@ export function useChatSession(
             routingMode,
             forceTier,
             webSearch,
+            // Never alongside a fast answer. `runFastAnswer` is one model call
+            // with no tools by contract, so `browser_control` is never
+            // registered — sending both would show the Browser chip lit, bill
+            // nothing, and silently answer from the model's own knowledge a
+            // question that needed a page. Withheld rather than quietly
+            // honoured, so the run matches what the composer claims.
+            browserMode: fast ? false : browserMode,
             webSearchConfig,
             complexityHint,
             fastAnswer: fast || undefined,
@@ -1662,7 +1855,7 @@ export function useChatSession(
         emitRun();
       }
     },
-    [socket, busy, conversationId, providers, skillId, routingMode, forceTier, webSearch, webSearchConfig, messages, reloadActivePath],
+    [socket, busy, conversationId, providers, skillId, routingMode, forceTier, webSearch, browserMode, webSearchConfig, messages, reloadActivePath],
   );
 
   const send = useCallback((input: SendInput) => runChat(input.prompt, input.attachments, true, input.fast), [runChat]);
@@ -1693,22 +1886,60 @@ export function useChatSession(
    * never happened and queue a decision with nowhere to land. Distinct from
    * dismissing deliberately, which IS an answer (see resolveEscalation).
    */
-  const clearEscalation = useCallback(() => setEscalations((prev) => prev.slice(1)), []);
+  const clearEscalation = useCallback((key?: string) => setEscalations((prev) => (
+    // BY KEY now that several are on screen at once. Dropping the first was
+    // right when only the first was visible; with all of them rendered, an
+    // older section's expiry would have taken down whichever happened to be
+    // first — quite possibly the one being answered.
+    key === undefined ? prev.slice(1) : prev.filter((x) => escalationKey(x) !== key)
+  )), []);
 
   const resolveEscalation = useCallback(
-    (action: 'retry' | 'skip' | 'guidance', note?: string) => {
-      if (!socket || !escalation) return;
+    (action: 'retry' | 'skip' | 'guidance', note?: string, key?: string) => {
+      if (!socket) return;
+      // Answers the section NAMED, not the one that happens to be first.
+      // Several can be parked at once and all of them are now on screen, so
+      // routing by position would apply one section's decision to another —
+      // and a guidance note meant for different work is worse than no answer.
+      const target = key === undefined ? escalations[0] : escalations.find((x) => escalationKey(x) === key);
+      if (!target) return;
       socket.emit('escalation:decide', {
-        conversationId: escalation.conversationId,
-        ...(escalation.requestId ? { requestId: escalation.requestId } : {}),
+        conversationId: target.conversationId,
+        ...(target.requestId ? { requestId: target.requestId } : {}),
         action,
         ...(note ? { note } : {}),
       });
-      setEscalations((prev) => prev.slice(1));
+      setEscalations((prev) => prev.filter((x) => escalationKey(x) !== escalationKey(target)));
       setStatus(action === 'skip' ? 'Skipping section…' : 'Retrying section…');
     },
-    [socket, escalation],
+    [socket, escalations],
   );
+
+  /**
+   * Close the window on every parked section at once.
+   *
+   * Dismissing meant 'skip' when one prompt was visible, for the reason that
+   * comment gives: the run is parked, so closing without an answer just waits
+   * out the timeout and fails the section anyway. That reasoning applies to
+   * each of them, so it is applied to each of them rather than to whichever
+   * was on top.
+   */
+  const skipAllEscalations = useCallback(() => {
+    if (!socket) return;
+    // `escalations`, not `allEscalations` — only what the window actually
+    // showed. Closing a window is a statement about the sections in it, and
+    // skipping a background conversation's work on the strength of it would
+    // silently accept partial output in a run nobody was looking at.
+    for (const e of escalations) {
+      socket.emit('escalation:decide', {
+        conversationId: e.conversationId,
+        ...(e.requestId ? { requestId: e.requestId } : {}),
+        action: 'skip',
+      });
+    }
+    setEscalations([]);
+    if (escalations.length > 0) setStatus('Skipping section…');
+  }, [socket, escalations]);
 
   // Answer the extended-context confirm: proceed with (or skip) compacting the
   // oversized input. Either way the run continues — skip just means the model
@@ -1802,13 +2033,14 @@ export function useChatSession(
     busy, error, status, lastTokens, lastSaved, conversationId, loadMessages,
     setConversationId: selectConversation,
     contextTokens, contextWindow,
-    routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, approval,
-    escalation, escalationQueued: escalations.length, resolveEscalation, clearEscalation,
+    routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, browserMode, setBrowserMode, approval,
+    escalation, escalations, escalationQueued: escalations.length, resolveEscalation, clearEscalation,
+    skipAllEscalations,
     contextApproval, resolveContextApproval, compactionNotice, providerNotice, knowledgeNotice, activity,
     browserLiveView, browserActive, browserTaskId, browserFrame, browserStreaming,
     browserHuman, browserCapturing, browserConfirmed, browserNotice, stopBrowser,
     takeOverBrowser, handBackBrowser, sendBrowserInput, setBrowserCapture,
     markBrowserFrameShown,
-    toolApprovals, resolveToolApproval,
+    toolApprovals, resolveToolApproval, clarifications, answerClarification,
   };
 }

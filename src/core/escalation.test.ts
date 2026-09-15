@@ -222,6 +222,96 @@ describe('escalation gate', () => {
     }
   });
 
+  it('says the section is no longer parked, however it stopped being parked', () => {
+    // The gate had exactly one announcement of an ending — `escalation:timeout`
+    // — and that is one of four. Answered, stopped and released-by-teardown all
+    // settled silently, so nothing downstream could tell a live section from a
+    // decided one.
+    //
+    // That is what made the request unsafe to REMEMBER: a replay store sees
+    // emits, never the answer (which arrives on a socket), so without a
+    // reliable delete a reloaded page could be handed back a decision already
+    // made. The clarification gate got this event two rounds earlier; this is
+    // the gate it was copied from.
+    const c = new Cascade(config, '/tmp');
+    const closed: Array<{ requestId?: string }> = [];
+    c.on('escalation:decision-required', () => {});
+    c.on('escalation:closed', (e: unknown) => closed.push(e as { requestId?: string }));
+
+    const parked = gateOf(c)(ctx('alpha'), 'task-1');
+    c.resolveEscalation('skip');
+
+    return parked.then(() => {
+      expect(closed, 'answering is an ending too, not only the timeout').toHaveLength(1);
+      expect(closed[0]?.requestId, 'and it names which section').toBeTruthy();
+    });
+  });
+
+  it('closes the section exactly once, however many ways it could settle', async () => {
+    // The map delete is what makes this exactly-once. A second emission would
+    // take down a LATER prompt: the client removes by request id, and a repeat
+    // for an id already gone races the next section to park.
+    vi.useFakeTimers();
+    try {
+      const c = new Cascade(config, '/tmp');
+      const closed: unknown[] = [];
+      c.on('escalation:decision-required', () => {});
+      c.on('escalation:closed', (e: unknown) => closed.push(e));
+
+      const parked = gateOf(c)(ctx('alpha'), 'task-1');
+      await vi.advanceTimersByTimeAsync(0);
+      c.resolveEscalation('retry');
+      await vi.advanceTimersByTimeAsync(5 * 60_000 + 1);
+      await parked;
+
+      expect(closed, 'answered, then the timeout fires and changes nothing').toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('is not parked by a closed listener that throws', async () => {
+    // The rule this file now applies in five places, applied to the new emit
+    // before it had a chance to become the sixth door.
+    const c = new Cascade(config, '/tmp');
+    c.on('escalation:decision-required', () => {});
+    c.on('escalation:closed', () => { throw new Error('the telemetry sink is down'); });
+
+    const parked = gateOf(c)(ctx('alpha'), 'task-1');
+    c.resolveEscalation('skip');
+
+    await expect(parked, 'the section is released regardless')
+      .resolves.toMatchObject({ action: 'skip' });
+  });
+
+  it('is not parked by a timeout listener that throws', async () => {
+    // The announcement used to run BEFORE `settle`, inside a one-shot timer.
+    // A listener that threw unwound the callback before the gate settled, so
+    // the request stayed in `pendingEscalations` with its promise unresolved
+    // and nothing was ever coming back for it — the section held its worker
+    // until teardown. Being a timer callback, the throw also had no caller to
+    // unwind into: it surfaced as an uncaught exception.
+    //
+    // Not reported by review — this gate is outside the PR's diff. Found by
+    // walking every door of the rule after the same mistake was caught in the
+    // clarification gate, which was itself the second time it had been made.
+    vi.useFakeTimers();
+    try {
+      const c = new Cascade(config, '/tmp');
+      c.on('escalation:decision-required', () => { /* parked */ });
+      c.on('escalation:timeout', () => { throw new Error('the telemetry sink is down'); });
+
+      const parked = gateOf(c)(ctx('alpha'), 'task-1');
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(5 * 60_000 + 1);
+
+      await expect(parked, 'the section is released regardless')
+        .resolves.toEqual({ action: 'timeout' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('times out each parked section independently', async () => {
     // The failure this guards: one section's timer clearing the shared slot,
     // leaving the other permanently unresolvable.

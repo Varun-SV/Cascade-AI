@@ -20,6 +20,8 @@ import {
   parseCookies,
   type AuthedRequest,
 } from './auth/session.js';
+import { providerIsUsable } from './remote-browser.js';
+import { remoteBrowserControls } from './runs.js';
 import { NativeAuthStore, isLoopbackRedirect, hashRefreshToken } from './native-auth.js';
 import { githubAuthUrl, exchangeGithubCode, googleAuthUrl, exchangeGoogleCode, type OAuthProfile } from './auth/oauth.js';
 import { limitsForPlan, todayKey, checkStorageQuota } from './entitlements.js';
@@ -220,6 +222,20 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       googleEnabled: Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),
       googleClientId: env.GOOGLE_CLIENT_ID ?? null,
       devLoginEnabled: env.CLOUD_DEV_BYPASS,
+      // Whether this deployment can actually produce a hosted browser. The
+      // capability does not exist until an operator supplies a WORKING
+      // endpoint, so the control for it must not either: a Browser toggle on a
+      // deployment that cannot serve one is a button that silently does
+      // nothing.
+      //
+      // Asked through the real mapping and the real provider check rather than
+      // read off `REMOTE_BROWSER_PROVIDER`. A `cdp` provider with a missing or
+      // non-websocket URL passes the env schema and fails at `buildProvider`,
+      // so deciding from the provider name alone put back exactly the inert
+      // switch this flag exists to prevent.
+      //
+      // Boolean, never the endpoint or the key — this route is unauthenticated.
+      remoteBrowserEnabled: providerIsUsable(remoteBrowserControls(env).remoteBrowser),
       // Served from the SDK rather than hand-copied into the web bundle. The
       // web kept its own array and it went stale the moment a family was added:
       // gpt-5.4 and gpt-5.5 existed in routing and pricing but never appeared in
