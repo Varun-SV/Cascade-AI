@@ -117,6 +117,24 @@ describe('ClarificationPrompt', () => {
     expect(screen.getAllByRole('button', { name: /send answers/i }), 'each answerable on its own').toHaveLength(3);
   });
 
+  it('keeps the forms in a bounded, scrollable region', () => {
+    // Rendering them all is not the same as making them reachable. The chat
+    // panel is fixed-height with `overflow-hidden` above this, so on a short or
+    // mobile viewport the later forms — and their Send and Skip buttons — are
+    // clipped off the bottom. A form nobody can scroll to expires exactly like
+    // a form nobody was shown, which is the failure showing them all was meant
+    // to end.
+    const { container } = render(
+      <ClarificationPrompt
+        clarifications={[ask(), ask({ requestId: 'req-2' }), ask({ requestId: 'req-3' })]}
+        onAnswer={() => {}}
+      />,
+    );
+    const region = container.firstElementChild;
+    expect(region?.className, 'bounded').toMatch(/max-h-/);
+    expect(region?.className, 'and scrollable within that bound').toMatch(/overflow-y-auto/);
+  });
+
   it('answers the form that was filled in, not the first one on screen', () => {
     // The corollary of showing them all: `onAnswer` has to carry the request id
     // of the form that was submitted. Routing by position would answer the

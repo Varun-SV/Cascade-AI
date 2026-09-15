@@ -81,3 +81,46 @@ describe('reaching the internet is one decision, not two toggles', () => {
     expect(lastRun(fake)?.['webSearch'], 'and says so about the other one too').toBe(false);
   });
 });
+
+describe('a billed opt-in does not outlive the control that grants it', () => {
+  it('clears browser mode when the routing controls leave the screen', async () => {
+    // Simple view hides the whole routing row, including the Browser chip.
+    // Sticky through that switch, the flag stayed true and every later send
+    // carried `browserMode: true` — a billed capability with nothing on screen
+    // to say it was on or to turn it off.
+    //
+    // This is the Web toggle's behaviour, inherited from sitting beside it, and
+    // Web is a different kind of thing: a durable preference that costs nothing
+    // to persist unseen.
+    const fake = fakeSocket();
+    const view = renderHook(
+      ({ visible }) => useChatSession(fake.socket, [], 'general', undefined, undefined, visible),
+      { initialProps: { visible: true } },
+    );
+
+    act(() => { view.result.current.setBrowserMode(true); });
+    await waitFor(() => expect(view.result.current.browserMode).toBe(true));
+
+    view.rerender({ visible: false });
+
+    await waitFor(() => expect(view.result.current.browserMode, 'not granted once it cannot be seen').toBe(false));
+    act(() => { view.result.current.send({ prompt: 'hello' }); });
+    expect(lastRun(fake)?.['browserMode'], 'and the send says so too').toBe(false);
+  });
+
+  it('leaves the web toggle alone, because it is not the same kind of thing', async () => {
+    // The distinction this whole fix rests on. Web costs nothing, persists as a
+    // preference, and clearing it on a view switch would lose a setting the
+    // person meant to keep. Only the billed opt-in is revoked.
+    const fake = fakeSocket();
+    const view = renderHook(
+      ({ visible }) => useChatSession(fake.socket, [], 'general', undefined, undefined, visible),
+      { initialProps: { visible: true } },
+    );
+
+    act(() => { view.result.current.setWebSearch(true); });
+    view.rerender({ visible: false });
+
+    await waitFor(() => expect(view.result.current.webSearch, 'still a preference').toBe(true));
+  });
+});

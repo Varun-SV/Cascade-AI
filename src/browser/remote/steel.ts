@@ -110,7 +110,18 @@ export function isUsableSteelBase(url: string): boolean {
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
     // Empty strings when absent, so each of these reads as "has one".
     if (u.username !== '' || u.password !== '') return false;
-    return u.search === '' && u.hash === '';
+    if (u.search !== '' || u.hash !== '') return false;
+    // A path prefix is the whole reason `call()` concatenates — a self-hosted
+    // Steel behind a gateway lives at one. The HOSTED service does not: its
+    // endpoints are at the root, so `https://api.steel.dev/v1` asks for
+    // `/v1/v1/sessions`.
+    //
+    // Which makes usability depend on the destination as well as the shape, and
+    // that is right rather than awkward: the same path prefix is correct for
+    // one base and broken for another, so a rule that looked only at the URL's
+    // form could never tell them apart.
+    if (isHostedSteel(url) && u.pathname !== '/') return false;
+    return true;
   } catch {
     return false;
   }

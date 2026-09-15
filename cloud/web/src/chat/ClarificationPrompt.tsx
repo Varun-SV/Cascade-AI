@@ -54,12 +54,27 @@ export function ClarificationPrompt({ clarifications, onAnswer }: Props) {
   // never carries it into another. The ids are positional (`q1`, `q2`), so an
   // inherited answer does not look stale — it looks like a reply to whatever
   // now sits in that slot.
+  // BOUNDED and scrollable, because rendering them all is not the same as
+  // making them reachable. The chat panel is fixed-height with `overflow-hidden`
+  // above it, so on a short or mobile viewport the later forms — and their Send
+  // and Skip buttons — are simply clipped off the bottom, and a form nobody can
+  // scroll to expires exactly like a form nobody was shown. That is the failure
+  // this component was just fixed for, reintroduced by the fix.
+  //
+  // `40vh` leaves the transcript visible so the questions stay in the context
+  // of what is being asked about, and `overflow-y-auto` adds no scrollbar at
+  // all in the ordinary case of one form.
+  // Nothing at all when nothing is being asked — the wrapper must not become a
+  // permanent empty box in the transcript, which is what it was when the scroll
+  // region was added without this guard.
+  if (clarifications.length === 0) return null;
+
   return (
-    <>
+    <div className="max-h-[40vh] overflow-y-auto">
       {clarifications.map((request) => (
         <Questionnaire key={request.requestId} request={request} onAnswer={onAnswer} />
       ))}
-    </>
+    </div>
   );
 }
 

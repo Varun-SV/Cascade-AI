@@ -297,6 +297,20 @@ describe('the Browser control is advertised only where one can be built', () => 
     expect(providerIsUsable({ provider: 'steel', url: 'https://user@steel.internal' }), 'a username alone is enough to break it').toBe(false);
   });
 
+  it('is not advertised for the hosted endpoint with a path prefix', () => {
+    // A path prefix is the whole reason `call()` concatenates — a self-hosted
+    // Steel behind a gateway lives at one. The hosted service does not, so
+    // `https://api.steel.dev/v1` asks for `/v1/v1/sessions` and the first
+    // action fails with a key present and everything else looking right.
+    expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev/v1', apiKey: 'sk-test' })).toBe(false);
+    // The bare host, with or without the root slash, is what the hosted API is.
+    expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev', apiKey: 'sk-test' })).toBe(true);
+    expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev/', apiKey: 'sk-test' })).toBe(true);
+    // And the same prefix stays valid for somebody else's endpoint, which is
+    // the point: usability depends on the destination, not only on the shape.
+    expect(providerIsUsable({ provider: 'steel', url: 'https://steel.internal/v1' }), 'legitimate for a self-hosted gateway').toBe(true);
+  });
+
   it('is advertised for a self-hosted steel with no credential', () => {
     // Only the hosted FALLBACK is refused. A Steel behind a private network or
     // its own gateway legitimately has no key, and demanding one for a URL the

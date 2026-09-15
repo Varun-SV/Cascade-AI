@@ -329,6 +329,14 @@ export function useChatSession(
   skillId: string,
   webSearchConfig?: WebSearchPayload,
   initialConversationId?: string,
+  /**
+   * Whether the routing controls are on screen at all.
+   *
+   * False in Simple view, which hides the whole row. Passed in because this
+   * hook holds `browserMode`, and a per-run billed opt-in must not stay set
+   * while the only control for it is gone — see the effect below.
+   */
+  controlsVisible = true,
 ) {
   const [conversationId, setConversationId] = useState<string | undefined>(initialConversationId);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -856,6 +864,27 @@ export function useChatSession(
     setBrowserModeRaw(on);
     if (on) setWebSearchRaw(false);
   }, []);
+
+  // Browser mode does not survive its own control being taken off screen.
+  //
+  // It is modelled on the Web toggle beside it and it is NOT the same kind of
+  // thing, which is exactly the mistake: Web is a durable preference — it costs
+  // nothing, it is fine for it to persist unseen, and it is DELIBERATELY left
+  // alone here. Browser is a per-run opt-in to a billed capability, and the
+  // whole point of putting it behind a chip was that opening a browser should
+  // be something a person chose.
+  //
+  // Sticky through a switch to Simple view, it stopped being chosen: the row
+  // vanishes, the flag stays true, and every later send still carries
+  // `browserMode: true` with nothing on screen to say so or turn it off.
+  //
+  // Cleared rather than shown as an indicator in Simple, because Simple's rule
+  // is that these controls are not there — surfacing one of them would be a
+  // different product decision, and the safe reading of an invisible billed
+  // capability is that it is not granted.
+  useEffect(() => {
+    if (!controlsVisible) setBrowserModeRaw(false);
+  }, [controlsVisible]);
   const streamingRef = useRef('');
   // run:why arrives just before the chat:run ack; stash it so the ack can
   // attach the full report to the assistant message it creates.

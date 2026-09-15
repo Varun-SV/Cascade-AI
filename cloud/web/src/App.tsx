@@ -115,7 +115,7 @@ export default function App() {
   }, [user, refreshSkills]);
 
   const socket = user ? getSocket() : null;
-  const chat = useChatSession(socket, providers, skillId, webSearchPayload(webSearch));
+  const chat = useChatSession(socket, providers, skillId, webSearchPayload(webSearch), undefined, mode === 'advanced');
   const [localModelOn, setLocalModelOn] = useState(() => localModelEnabled());
 
   // A run may have created a new conversation or renamed one — refresh the
