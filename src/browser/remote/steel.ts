@@ -18,6 +18,21 @@
 //      websocketUrl  the CDP endpoint to drive
 //      debugUrl      "URL for viewing the live browser instance"
 //
+//  THE SESSION TIMEOUT IS THE PROVIDER'S, NOT OURS. `POST /v1/sessions` accepts
+//  no timeout field — verified against the same source, whose create-session
+//  body takes sessionId, proxyUrl, userAgent, sessionContext, isSelenium,
+//  blockAds, optimizeBandwidth, skipFingerprintInjection, deviceConfig,
+//  fullscreen, logSinkUrl, extensions, persist, userDataDir, timezone,
+//  dimensions, userPreferences, extra, credentials and headless, and nothing
+//  else. `timeout` exists only on SessionDetails, the RESPONSE, in ms.
+//
+//  So the ceiling cannot be set here, only read; an env var feeding a field the
+//  API ignores would let an operator believe they had bounded their spend while
+//  nothing had changed, which is worse than the ceiling simply being the
+//  provider's. It is read and carried on the session so a leak is explicable:
+//  a session nobody released dies at exactly that number, and two field
+//  sessions ended at precisely 0:05:00 with nothing recording the limit.
+//
 //  ONE THING IS NOT VERIFIED: the header the HOSTED service expects for an API
 //  key. The open-source API has no authentication at all — there is no key
 //  handling anywhere in it — and npm is blocked from here, so the hosted SDK
@@ -41,6 +56,8 @@ interface SteelSessionDetails {
   id?: string;
   websocketUrl?: string;
   debugUrl?: string;
+  /** The provider's own ceiling for this session, in ms. Response-only. */
+  timeout?: number;
 }
 
 export class SteelProvider implements RemoteBrowserProvider {
@@ -80,6 +97,10 @@ export class SteelProvider implements RemoteBrowserProvider {
       id: details.id,
       cdpUrl: details.websocketUrl,
       ...(details.debugUrl ? { liveViewUrl: details.debugUrl } : {}),
+      // Carried through because it explains an otherwise mysterious death. A
+      // session nobody released dies at exactly this number, and without it a
+      // leak looks identical to an orderly shutdown.
+      ...(typeof details.timeout === 'number' ? { expiresInMs: details.timeout } : {}),
     };
   }
 

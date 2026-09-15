@@ -46,6 +46,21 @@ export interface RemoteBrowserSession {
    * than the one that owns the run.
    */
   liveViewUrl?: string;
+  /**
+   * How long the provider will keep this session before reaping it, in ms.
+   *
+   * Reported by the provider, never chosen by us: Steel's create API accepts
+   * no timeout field (verified against the API source — see steel.ts), so this
+   * ceiling is the provider's and the only thing we can do about it is know
+   * what it is. Absent where a provider says nothing, which includes a bare
+   * CDP endpoint: that browser is somebody else's and has no session at all.
+   *
+   * Worth surfacing because a session that outlives its usefulness dies at
+   * exactly this number, and a leak is otherwise indistinguishable from a
+   * deliberate shutdown — two field sessions ended at precisely 0:05:00 with
+   * nothing anywhere recording that five minutes was the limit.
+   */
+  expiresInMs?: number;
 }
 
 /**

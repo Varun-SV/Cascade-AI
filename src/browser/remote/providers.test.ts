@@ -75,6 +75,27 @@ describe('Steel', () => {
     await expect(new SteelProvider().createSession()).rejects.toThrow(/no id or websocket/i);
   });
 
+  it("carries the provider's own session ceiling, which is the only thing we can know about it", async () => {
+    // `POST /v1/sessions` accepts NO timeout field — verified against the API
+    // source. The ceiling is the provider's; setting it is not on offer, and an
+    // env var feeding a field the API ignores would let an operator believe
+    // they had bounded their spend while nothing had changed.
+    //
+    // Reading it is on offer, and it is what makes a leak explicable: a session
+    // nobody released dies at exactly this number. Two field sessions ended at
+    // precisely 0:05:00 — 300000ms — with nothing anywhere recording the limit.
+    stubFetch([{ body: { id: 'sess-1', websocketUrl: 'wss://s/cdp', timeout: 300_000 } }]);
+    const session = await new SteelProvider().createSession();
+    expect(session.expiresInMs, 'the five minutes, said out loud').toBe(300_000);
+  });
+
+  it('says nothing about a ceiling the provider did not report', async () => {
+    // Absent, not guessed. A number we invented would be worse than none: it
+    // would look like knowledge.
+    stubFetch([{ body: { id: 'sess-1', websocketUrl: 'wss://s/cdp' } }]);
+    expect(await new SteelProvider().createSession()).not.toHaveProperty('expiresInMs');
+  });
+
   it('omits the live view rather than inventing one', async () => {
     stubFetch([{ body: { id: 'sess-1', websocketUrl: 'wss://s/cdp' } }]);
     const session = await new SteelProvider().createSession();
