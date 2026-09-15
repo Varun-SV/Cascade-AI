@@ -608,8 +608,23 @@ export class Cascade extends EventEmitter {
         // The map delete above is what makes this exactly-once, so the answered
         // path emitting it too is harmless — that client has already taken the
         // form down itself.
-        this.emit('clarification:closed', { requestId });
+        //
+        // RESOLVED FIRST, and the emit guarded. Announcing before resolving put
+        // the whole gate at the mercy of a listener: one that threw unwound
+        // `settle` before `resolve` ever ran, and because the map entry was
+        // already deleted, the timeout, the abort and any answer had all become
+        // no-ops. The promise stayed pending forever — the run parked on a
+        // question, which is the single thing this gate promises cannot happen.
+        //
+        // The same mistake as `reportReleaseFailure`, made again in a second
+        // place: a report must not become the failure it is reporting.
         resolve(result);
+        try {
+          this.emit('clarification:closed', { requestId });
+        } catch {
+          // A listener's problem, and the run is already unblocked. There is
+          // nothing here to escalate it to.
+        }
       };
 
       // Stop must unpark the run. Without this the person presses Stop, watches

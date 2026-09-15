@@ -168,6 +168,27 @@ describe('Cascade.askUser — a question that cannot hang the run', () => {
     expect(closed[0]?.requestId, 'and names which form').toBeTruthy();
   });
 
+  it('is not parked by a listener that throws on the way out', async () => {
+    // The close used to be announced BEFORE the promise resolved, which put the
+    // whole gate at the mercy of a listener: one that threw unwound `settle`
+    // before `resolve` ran, and the map entry was already deleted — so the
+    // timeout, the abort and any answer had all become no-ops and the run
+    // parked on a question forever. That is the single thing this gate promises
+    // cannot happen.
+    //
+    // The same mistake as the release observer, made again somewhere else.
+    const c = new Cascade(baseConfig, '/tmp');
+    c.on('clarification:required', () => {});
+    c.on('clarification:closed', () => { throw new Error('a listener blew up'); });
+
+    const abort = new AbortController();
+    const asking = c.askUser(ONE, abort.signal);
+    abort.abort();
+
+    await expect(asking, 'the run is unblocked regardless')
+      .resolves.toEqual({ outcome: 'aborted', answers: [] });
+  });
+
   it('closes the form exactly once, however many ways it could settle', async () => {
     // The map delete is what makes this exactly-once. Emitting twice would take
     // down a LATER form: the client removes by request id, and a repeat for an

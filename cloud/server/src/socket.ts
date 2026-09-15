@@ -214,6 +214,14 @@ export interface LiveRun {
    * Which is the original "the response just died", one disconnect later.
    */
   /**
+   * Questionnaires that have ENDED, so a reconnecting page can drop their forms.
+   *
+   * A reload needs only the open set; a reconnect keeps whatever it had on
+   * screen, and nothing in an open-only replay can remove a form the page is
+   * still showing. Bounded — see `MAX_REMEMBERED_CLOSURES`.
+   */
+  clarificationsClosed?: Set<string>;
+  /**
    * Questionnaires still waiting on a person, keyed by request id.
    *
    * Same shape as `approvals`, and for the same reason: both are the run
@@ -223,6 +231,15 @@ export interface LiveRun {
   clarifications?: Map<string, Record<string, unknown>>;
   terminal?: { conversationId?: string; error?: string };
 }
+
+/**
+ * How many ended questionnaires a run remembers for a reconnecting page.
+ *
+ * `ask_user` asks at most five questions per call, and a run makes few calls,
+ * so this is far above the honest case — it exists so a long run cannot grow
+ * this set without bound, not to ration anything.
+ */
+const MAX_REMEMBERED_CLOSURES = 32;
 
 /** The events that mean a run is over, in either direction. */
 const TERMINAL_EVENTS = new Set(['session:complete', 'session:error']);
@@ -302,7 +319,27 @@ export function rememberForReplay(run: LiveRun, event: string, payload: unknown)
   }
   if (event === 'clarification:closed') {
     const id = p['requestId'];
-    if (typeof id === 'string') run.clarifications?.delete(id);
+    if (typeof id !== 'string') return;
+    run.clarifications?.delete(id);
+    // Remembered as well as removed, because replay has to be able to take a
+    // form DOWN and not only put one up.
+    //
+    // A full page reload starts with no forms, so the open set alone is right
+    // for it. A transient socket reconnect does not: the page keeps what it had,
+    // so a question that closed while the transport was unbound is invisible to
+    // an open-only replay — absence cannot remove anything — and the dead form
+    // stays, in front of every later question.
+    //
+    // Bounded, because a long run can ask many questions and this must not grow
+    // without limit. Oldest first: the ones most likely to still be on a screen
+    // are the recent ones.
+    const closed = (run.clarificationsClosed ??= new Set());
+    closed.add(id);
+    while (closed.size > MAX_REMEMBERED_CLOSURES) {
+      const oldest = closed.values().next();
+      if (oldest.done) break;
+      closed.delete(oldest.value);
+    }
     return;
   }
   if (event === 'permission:user-required') {
@@ -352,6 +389,12 @@ export function replaySupervision(run: LiveRun, socket: Pick<Socket, 'emit'>): v
   if (run.control) socket.emit('browser:control', run.control);
   for (const request of run.approvals?.values() ?? []) {
     socket.emit('permission:user-required', request);
+  }
+  // Closures BEFORE openings, so a page that reconnects mid-question ends up
+  // showing exactly what is still being asked: the dead ones come down first,
+  // and anything genuinely open is put back after.
+  for (const requestId of run.clarificationsClosed ?? []) {
+    socket.emit('clarification:closed', { requestId });
   }
   // Still open, so still blocking the run: a reloaded page that never sees the
   // question waits out the full gate before the model gives up and assumes.

@@ -196,6 +196,16 @@ describe('the Browser control is advertised only where one can be built', () => 
     expect(providerIsUsable({ provider: 'steel' })).toBe(true);
   });
 
+  it('is not advertised for a steel base that is not an http(s) URL', () => {
+    // The cdp branch grew endpoint validation and the steel branch did not, so
+    // a malformed base passed the env schema, produced a usable-looking
+    // provider, and failed at the first fetch — the inert control back again,
+    // for the one provider the cdp fix did not cover.
+    expect(providerIsUsable({ provider: 'steel', url: 'not a url' })).toBe(false);
+    expect(providerIsUsable({ provider: 'steel', url: 'ws://api.steel.example' })).toBe(false);
+    expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.example' })).toBe(true);
+  });
+
   it('is not advertised where the operator configured nothing', () => {
     expect(providerIsUsable(undefined)).toBe(false);
   });

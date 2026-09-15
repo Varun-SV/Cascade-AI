@@ -366,6 +366,16 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
   };
 }
 
+/** An http(s) URL, which is what a Steel API base has to be. */
+function isHttpUrl(value: string): boolean {
+  try {
+    const { protocol } = new URL(value);
+    return protocol === 'http:' || protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Whether these settings can actually produce a browser.
  *
@@ -401,6 +411,17 @@ function buildProvider(
     return new GenericCdpProvider(settings.url);
   }
 
+  // Validated like the cdp endpoint above, and for the same reason. The cdp
+  // branch grew this check and the steel branch did not, so a malformed base
+  // passed the env schema, produced a usable-looking provider, and failed at
+  // the first `fetch` — putting the inert control back for the one provider
+  // the CDP fix did not cover.
+  //
+  // An absent url is fine and means the hosted API: `SteelProvider` defaults it.
+  if (settings.url && !isHttpUrl(settings.url)) {
+    warn?.(`remoteBrowser.url for steel must be an http(s) API base; got ${settings.url}`);
+    return null;
+  }
   return new SteelProvider({
     ...(settings.url ? { url: settings.url } : {}),
     ...(settings.apiKey ? { apiKey: settings.apiKey } : {}),

@@ -1359,7 +1359,38 @@ describe('rememberForReplay / replaySupervision — what a reload gets back', ()
 
     const { emitted, socket } = recorder();
     replaySupervision(run, socket);
-    expect(emitted, 'nothing left to put back on screen').toEqual([]);
+
+    // Never put back as OPEN — that was the whole worry about replaying these,
+    // and it holds. What IS replayed is the closure, so a page that still has
+    // the form on screen takes it down; a page that never had one ignores it.
+    expect(emitted.map((e) => e.event), 'the ending, never the question')
+      .toEqual(['clarification:closed']);
+    expect((emitted[0]?.payload as { requestId?: string }).requestId).toBe('req-1');
+  });
+
+  it('takes a dead form down on a reconnect, which an open-only replay cannot', () => {
+    // A full page RELOAD starts with no forms, so replaying the open set is
+    // enough for it. A transient socket RECONNECT is different: the page keeps
+    // what it had on screen, and absence from an open-only replay cannot remove
+    // anything — so a question that closed while the transport was unbound left
+    // a dead form standing, in front of every later question.
+    const run = freshRun();
+    rememberForReplay(run, 'clarification:required', {
+      conversationId: 'c1', requestId: 'req-1', questions: [{ id: 'q1', prompt: 'Gone?', kind: 'text' }],
+    });
+    rememberForReplay(run, 'clarification:required', {
+      conversationId: 'c1', requestId: 'req-2', questions: [{ id: 'q1', prompt: 'Still asking?', kind: 'text' }],
+    });
+    // The first ends while nobody is connected to hear it.
+    rememberForReplay(run, 'clarification:closed', { conversationId: 'c1', requestId: 'req-1' });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+
+    // Closures first, so the page settles on exactly what is still being asked.
+    expect(emitted.map((e) => e.event)).toEqual(['clarification:closed', 'clarification:required']);
+    expect((emitted[0]?.payload as { requestId?: string }).requestId).toBe('req-1');
+    expect((emitted[1]?.payload as { requestId?: string }).requestId).toBe('req-2');
   });
 
   it('keeps an outstanding approval until permission:resolved names it, keyed by id or requestId', () => {
