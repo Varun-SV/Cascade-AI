@@ -33,6 +33,16 @@ import { DeadModelStore, fileDeadModelPersistence } from './router/dead-models.j
  * run doesn't hold a worker slot all afternoon.
  */
 const ESCALATION_DECISION_TIMEOUT_MS = 5 * 60_000;
+/**
+ * How long a questionnaire waits for an answer.
+ *
+ * Shorter than the escalation gate deliberately. An unanswered escalation
+ * discards a section's work, so it is worth waiting out; an unanswered question
+ * only means the model proceeds on its own reading and says so, which is a much
+ * cheaper outcome to reach — and two minutes is already long enough that anyone
+ * who is going to answer has.
+ */
+const CLARIFICATION_TIMEOUT_MS = 2 * 60_000;
 import { buildMediaTools, type AssetSink } from '../tools/generate-media.js';
 import { buildDocumentTools } from '../tools/generate-document.js';
 import { RunBreaker } from './run-breaker.js';
@@ -67,6 +77,12 @@ import {
 import { GuidanceQueue } from './steering/guidance.js';
 import { CurrentPageTool, type CurrentPageProvider } from '../tools/current-page.js';
 import { BrowserControlTool, type BrowserController, type BrowserActorRelease } from '../tools/browser-control.js';
+import {
+  AskUserTool,
+  type ClarificationAnswer,
+  type ClarificationQuestion,
+  type ClarificationResult,
+} from '../tools/ask-user.js';
 
 /** One entry in the per-run orchestration decision trail (see /why). */
 export interface DecisionLogEntry {
@@ -218,6 +234,14 @@ export class Cascade extends EventEmitter {
     );
     this.registerMediaTools(workspacePath);
     this.registerDocumentTools(workspacePath);
+    // Registered at construction, and re-checked at call time. `setUnattended`
+    // can land afterwards, so `askUser` tests the same conditions again and
+    // answers `no-listener` — the model is told to proceed on its own reading
+    // rather than discovering a dead tool by calling it. The same
+    // defence-in-depth `BrowserControlTool.revoke` uses, for the same reason:
+    // a registration-time gate cannot express "this run turned out to be
+    // unattended".
+    this.registerAskUser();
     this.telemetry = config.telemetry?.enabled
       ? new Telemetry(config.telemetry, config.telemetry.distinctId ?? 'anonymous')
       : noopTelemetry;
@@ -437,6 +461,14 @@ export class Cascade extends EventEmitter {
   // timeout. Same class of bug as the twelve-failover dead-model race: a wave
   // is concurrent, so per-run singletons are never safe inside it.
   private pendingEscalations = new Map<string, (decision: EscalationDecision) => void>();
+  /**
+   * Questionnaires waiting on a person, keyed by request id.
+   *
+   * Exactly the shape `pendingEscalations` uses, and for the same reason: the
+   * answer, the timeout and the abort all race, and one settle path guarded by
+   * the map delete is what makes the first of them win.
+   */
+  private pendingClarifications = new Map<string, (result: ClarificationResult) => void>();
 
   private async requestEscalationDecision(
     ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string },
@@ -528,6 +560,97 @@ export class Cascade extends EventEmitter {
    */
   private releasePendingEscalations(action: EscalationDecision['action'] = 'skip'): void {
     for (const settle of Array.from(this.pendingEscalations.values())) settle({ action, automatic: true });
+  }
+
+  // ── Clarification: asking instead of assuming ───────────────────────
+  // The same gate shape as the escalation above, and for the same reasons. The
+  // difference that matters: an unanswered escalation SKIPS a section, while an
+  // unanswered question just means the model proceeds on its own reading — so
+  // every non-answer here is benign, and none of them may park the run.
+
+  /**
+   * Put a questionnaire to whoever is watching, if anybody is.
+   *
+   * Returns `no-listener` rather than waiting when there is nothing attached to
+   * answer — a scheduled run, an API caller with no socket, an autonomous run
+   * that has already said it wants no prompts. That check is the whole reason
+   * this can be offered to the model at all: a tool that might hang a headless
+   * run forever is a tool that cannot be registered.
+   */
+  async askUser(
+    questions: ClarificationQuestion[],
+    signal?: AbortSignal,
+  ): Promise<ClarificationResult> {
+    const none = (outcome: ClarificationResult['outcome']): ClarificationResult =>
+      ({ outcome, answers: [] });
+
+    // Nobody to ask, by three different routes. An unattended run has already
+    // declared there is no person; `auto` has declared they do not want to be
+    // interrupted; and no listener means the host never wired the event, which
+    // is the API and scheduled cases.
+    if (this.unattended) return none('no-listener');
+    if (this.config.autonomy === 'auto') return none('no-listener');
+    if (this.listenerCount('clarification:required') === 0) return none('no-listener');
+    if (signal?.aborted) return none('aborted');
+
+    const requestId = randomUUID();
+
+    return await new Promise<ClarificationResult>((resolve) => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+
+      // One settle path for every outcome, guarded by the map delete so the
+      // first of {answer, timeout, abort} wins and the losers are no-ops.
+      const settle = (result: ClarificationResult) => {
+        if (!this.pendingClarifications.delete(requestId)) return;
+        if (timeout) clearTimeout(timeout);
+        signal?.removeEventListener('abort', onAbort);
+        resolve(result);
+      };
+
+      // Stop must unpark the run. Without this the person presses Stop, watches
+      // the question stay on screen, and the run sits holding its worker until
+      // the full timeout — which is the same "pressed Stop and nothing stopped"
+      // failure the escalation gate exists to avoid.
+      const onAbort = () => settle(none('aborted'));
+      signal?.addEventListener('abort', onAbort, { once: true });
+
+      timeout = setTimeout(() => {
+        this.emit('clarification:timeout', { requestId });
+        settle(none('timeout'));
+      }, CLARIFICATION_TIMEOUT_MS);
+
+      this.pendingClarifications.set(requestId, settle);
+      this.emit('clarification:required', {
+        requestId,
+        questions,
+        timeoutMs: CLARIFICATION_TIMEOUT_MS,
+      });
+    });
+  }
+
+  /**
+   * Answer a questionnaire from a REPL / dashboard / cloud listener.
+   *
+   * `requestId` comes back on the `clarification:required` event and is what
+   * makes an answer land on the question that asked. Optional for a host with
+   * only one in flight, matching `resolveEscalation`: without it the oldest
+   * outstanding request is answered, which is correct whenever there is one.
+   */
+  resolveClarification(answers: ClarificationAnswer[], requestId?: string): void {
+    const result: ClarificationResult = { outcome: 'answered', answers };
+    if (requestId) {
+      this.pendingClarifications.get(requestId)?.(result);
+      return;
+    }
+    const oldest = this.pendingClarifications.keys().next();
+    if (!oldest.done) this.pendingClarifications.get(oldest.value)?.(result);
+  }
+
+  /** Release every parked questionnaire — run teardown, so none outlive the run. */
+  private releasePendingClarifications(): void {
+    for (const settle of Array.from(this.pendingClarifications.values())) {
+      settle({ outcome: 'aborted', answers: [] });
+    }
   }
 
   /**
@@ -787,6 +910,20 @@ export class Cascade extends EventEmitter {
     if (!enabled) return;
     if ((this.config.tools?.disabledTools ?? []).includes('browser_control')) return;
     this.toolRegistry.register(new BrowserControlTool(controller, release));
+  }
+
+  /**
+   * Offer the model a way to ask, unless there is nobody to answer.
+   *
+   * Gated on `unattended` for the same reason `browser_control` is: a tool the
+   * run cannot actually use is one the model will still try, and a refusal it
+   * has to discover by calling is worse than an absence it can see.
+   */
+  private registerAskUser(): void {
+    if (this.unattended) return;
+    if (this.config.autonomy === 'auto') return;
+    if ((this.config.tools?.disabledTools ?? []).includes('ask_user')) return;
+    this.toolRegistry.register(new AskUserTool((questions, signal) => this.askUser(questions, signal)));
   }
 
   private registerMediaTools(workspacePath: string): void {
@@ -2140,6 +2277,7 @@ ${prompt}`
       // (error, abort, budget kill) must not leave a live timer and an
       // unresolved promise holding the next run's map.
       try { this.releasePendingEscalations(); } catch { /* non-critical */ }
+      try { this.releasePendingClarifications(); } catch { /* non-critical */ }
 
       // Restore tier models to the configured baseline so Cascade Auto's
       // per-task picks don't leak into /why, the status bar, or the next run.
