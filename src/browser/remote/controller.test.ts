@@ -831,6 +831,36 @@ describe('attached is not the same as watchable', () => {
 
     expect(seen.at(-1)).toEqual({ active: false });
   });
+
+  it('re-advertises the browser on every action, not only when it is created', async () => {
+    // A browser is created ONCE per run, and this used to be the only moment it
+    // was announced — so a client with no panel for this run never got another
+    // chance at one. There is nothing on the client to retry with: the panel is
+    // pure server state (`browserActive = browserView !== undefined`), so a view
+    // entry that has gone stays gone for the life of the run, and the Stop
+    // button and Take control go with it.
+    //
+    // Reported from the field: the panel appeared on the first browser action,
+    // the person dismissed it, and every later action returned results with no
+    // way left to watch or halt the page it had just driven.
+    const { provider } = fakeProvider('https://view.example/session');
+    const c = new RemoteBrowserController({ provider });
+    const seen: Array<{ active: boolean; liveViewUrl?: string }> = [];
+    c.onLiveViewFor('run-A', (info) => seen.push(info));
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    expect(seen, 'announced when the browser is created').toHaveLength(1);
+
+    // The SAME run acting again. One session throughout — `open()` returns the
+    // one it already has — which is exactly why the announcement had to be
+    // moved off the creation path to be made at all.
+    await c.controller({ kind: 'click', selector: '#b' }, ctx('run-A', 'w1'));
+
+    expect(seen, 'and again, so a client that lost the panel can get it back')
+      .toHaveLength(2);
+    expect(seen.at(-1), 'the same browser, still watchable')
+      .toEqual({ active: true, liveViewUrl: 'https://view.example/session' });
+  });
 });
 
 describe('two runs starting at the same moment', () => {

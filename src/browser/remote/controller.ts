@@ -2170,7 +2170,26 @@ export class RemoteBrowserController {
       if (this.ready === settling) this.ready = undefined;
     }
     const existing = this.runs.get(runId);
-    if (existing && !existing.page.isClosed()) return existing;
+    if (existing && !existing.page.isClosed()) {
+      // RE-ADVERTISED, not just returned.
+      //
+      // The announcement below is made once, at the end of the creation path,
+      // and a browser is created once per run — so a client that is not
+      // currently showing this run's panel never got another chance at one.
+      // Nothing re-announces and nothing on the client retries: the panel is
+      // pure server state (`browserActive = browserView !== undefined`), so a
+      // view entry that is gone stays gone for the life of the run, and with it
+      // the Stop button and Take control. The agent goes on driving a browser
+      // the person can no longer see or halt, which is the one thing this whole
+      // panel exists to prevent.
+      //
+      // Idempotent, so it costs nothing when the panel IS up: the client
+      // compares the capability URL it already holds and returns the previous
+      // state unchanged. The only case it changes anything is the case it is
+      // here for — the client has no entry for this run and needs one back.
+      this.announceLiveView(runId, existing.session.liveViewUrl, true);
+      return existing;
+    }
     if (existing && existing.page.isClosed()) {
       // A followed popup commonly closes itself after OAuth/login succeeds. The
       // session is not stale just because that one page is: the opener (or
@@ -2180,6 +2199,10 @@ export class RemoteBrowserController {
       const fallback = existing.page.context().pages().filter((p) => !p.isClosed()).at(-1);
       if (fallback) {
         await this.adoptPage(runId, existing, fallback);
+        // Same session, so the same capability URL — and the same reason to say
+        // so again. A popup closing is exactly when a viewer is most likely to
+        // have lost the panel.
+        this.announceLiveView(runId, existing.session.liveViewUrl, true);
         return existing;
       }
     }
