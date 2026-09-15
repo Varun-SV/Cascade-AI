@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { ToolRegistry, CascadeConfigSchema } from '#cascade-ai';
-import { answersThisRun, buildCloudConfig, buildMediaSink, parseChatRunPayload, runChatTurn, sanitiseClarificationAnswers, tenantScratchDir } from './runs.js';
+import { answersThisRun, buildCloudConfig, buildMediaSink, parseChatRunPayload, runChatTurn, sanitiseClarificationAnswers, sanitiseEscalationNote, tenantScratchDir } from './runs.js';
 import { CloudStore } from './db.js';
 import { limitsForPlan, PENDING_MEDIA_TTL_MS } from './entitlements.js';
 import type { CloudEnv } from './env.js';
@@ -873,5 +873,42 @@ describe('ChatRunPayloadSchema — a client that predates a provider removal', (
       prompt: 'hi',
       providers: [{ type: 'github-models', apiKey: 'dead' }],
     })).toThrow();
+  });
+});
+
+describe('sanitiseEscalationNote — guidance comes back from a client', () => {
+  it('keeps an ordinary note untouched', () => {
+    expect(sanitiseEscalationNote('only the public repos')).toBe('only the public repos');
+  });
+
+  it('bounds what one decision can append to the next prompt', () => {
+    // I argued this needed no bound, because the note is typed by the person at
+    // the keyboard rather than arriving from an untrusted client. That is not a
+    // distinction the server can make: both arrive as `escalation:decide` on a
+    // socket, so "entered through our UI" is a claim about the sender and not a
+    // fact about the data. The only ceiling was Socket.IO's ~2MB frame, and T2
+    // appends this straight onto the retry prompt.
+    expect(sanitiseEscalationNote('x'.repeat(50_000))).toHaveLength(2_000);
+  });
+
+  it('is nothing at all when there is nothing to say', () => {
+    // Distinct from an empty string, which would reach T2 as a guidance note
+    // that says nothing — a retry claiming to be guided by silence.
+    expect(sanitiseEscalationNote('   ')).toBeUndefined();
+    expect(sanitiseEscalationNote('')).toBeUndefined();
+    expect(sanitiseEscalationNote(undefined)).toBeUndefined();
+  });
+
+  it('refuses a value that is not text rather than coercing it', () => {
+    // A number or an object becomes a plausible-looking instruction the moment
+    // it is interpolated into a prompt.
+    expect(sanitiseEscalationNote(42)).toBeUndefined();
+    expect(sanitiseEscalationNote({ note: 'nested' })).toBeUndefined();
+    expect(sanitiseEscalationNote(null)).toBeUndefined();
+  });
+
+  it('trims before measuring, so padding cannot spend the budget', () => {
+    expect(sanitiseEscalationNote(`${' '.repeat(5_000)}retry with the archive included`))
+      .toBe('retry with the archive included');
   });
 });

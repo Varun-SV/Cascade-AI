@@ -1183,6 +1183,39 @@ const MAX_CLARIFICATION_ANSWER_CHARS = 2_000;
 const MAX_CLARIFICATION_REPLY_CHARS = 8_000;
 
 /**
+ * What a guidance note may contribute to the next worker's prompt.
+ *
+ * The same ceiling one clarification answer gets, and for the same reason —
+ * which I argued it did not need. My reasoning was that this text is typed by
+ * the person at the keyboard rather than arriving from an untrusted client, and
+ * that is not a distinction the server can make: both arrive as
+ * `escalation:decide` on a socket, so "entered through our UI" is a claim about
+ * the sender, not a fact about the data. The only ceiling was Socket.IO's frame
+ * limit, around two megabytes, and T2 appends this straight onto the retry
+ * prompt — so one decision could exhaust the run's token budget instead of
+ * retrying the section.
+ *
+ * Truncated rather than refused. Dropping an over-long note would retry the
+ * section as-if-unguided while the person believed their instructions had been
+ * applied, which is a worse failure than applying most of them.
+ */
+export const MAX_ESCALATION_NOTE_CHARS = 2_000;
+
+/**
+ * A guidance note, bounded and normalised, or nothing.
+ *
+ * Exported and a function rather than an inline expression, for the reason
+ * `answersThisRun` and `sanitiseClarificationAnswers` are: a rule that lives
+ * only inside a closure can be tested only by restating it, and a test that
+ * restates a rule cannot catch it being dropped from the real one.
+ */
+export function sanitiseEscalationNote(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const kept = raw.trim().slice(0, MAX_ESCALATION_NOTE_CHARS).trim();
+  return kept === '' ? undefined : kept;
+}
+
+/**
  * Whether an inbound answer names the run it claims to answer.
  *
  * BOTH identifiers, exactly. One socket carries several runs, and every run's
@@ -1661,7 +1694,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     if (d?.action === 'retry' || d?.action === 'skip' || d?.action === 'guidance') {
       cascade.resolveEscalation(
         d.action,
-        typeof d.note === 'string' ? d.note : undefined,
+        sanitiseEscalationNote(d.note),
         d.requestId,
       );
     }
