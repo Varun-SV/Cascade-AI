@@ -773,7 +773,21 @@ export function useChatSession(
   // Default OFF: a hosted chat is pure conversation unless the user opts into
   // web tools. With the toggle off the run registers no tools at all, so the
   // model is never handed a capability it can't reliably use.
-  const [webSearch, setWebSearch] = useState(() => defaultWebSearch());
+  const [webSearch, setWebSearchRaw] = useState(() => defaultWebSearch());
+  // Reaching the internet is ONE decision with three outcomes — read text,
+  // drive a page, or neither — so the two switches cannot both be on. Enforced
+  // here rather than in the chip's onClick, because it is a property of the
+  // choice and not of the button: anything that sets one must clear the other,
+  // however it reaches these setters. The server enforces it independently.
+  const [browserMode, setBrowserModeRaw] = useState(false);
+  const setWebSearch = useCallback((on: boolean) => {
+    setWebSearchRaw(on);
+    if (on) setBrowserModeRaw(false);
+  }, []);
+  const setBrowserMode = useCallback((on: boolean) => {
+    setBrowserModeRaw(on);
+    if (on) setWebSearchRaw(false);
+  }, []);
   const streamingRef = useRef('');
   // run:why arrives just before the chat:run ack; stash it so the ack can
   // attach the full report to the assistant message it creates.
@@ -1518,6 +1532,7 @@ export function useChatSession(
             routingMode,
             forceTier,
             webSearch,
+            browserMode,
             webSearchConfig,
             complexityHint,
             fastAnswer: fast || undefined,
@@ -1662,7 +1677,7 @@ export function useChatSession(
         emitRun();
       }
     },
-    [socket, busy, conversationId, providers, skillId, routingMode, forceTier, webSearch, webSearchConfig, messages, reloadActivePath],
+    [socket, busy, conversationId, providers, skillId, routingMode, forceTier, webSearch, browserMode, webSearchConfig, messages, reloadActivePath],
   );
 
   const send = useCallback((input: SendInput) => runChat(input.prompt, input.attachments, true, input.fast), [runChat]);
@@ -1802,7 +1817,7 @@ export function useChatSession(
     busy, error, status, lastTokens, lastSaved, conversationId, loadMessages,
     setConversationId: selectConversation,
     contextTokens, contextWindow,
-    routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, approval,
+    routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, browserMode, setBrowserMode, approval,
     escalation, escalationQueued: escalations.length, resolveEscalation, clearEscalation,
     contextApproval, resolveContextApproval, compactionNotice, providerNotice, knowledgeNotice, activity,
     browserLiveView, browserActive, browserTaskId, browserFrame, browserStreaming,

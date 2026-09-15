@@ -38,6 +38,10 @@ interface Props {
   forceTier: ForceTier;
   onForceTierChange: (t: ForceTier) => void;
   webSearch: boolean;
+  browserMode: boolean;
+  onBrowserModeChange: (on: boolean) => void;
+  /** False on a deployment with no hosted browser: the chip is absent, not inert. */
+  browserAvailable: boolean;
   onWebSearchChange: (on: boolean) => void;
   uiMode: UiMode;
   approval: PlanApproval | null;
@@ -80,7 +84,8 @@ interface Props {
 export default function ChatPanel({
   messages, busy, error, status, hasProviders, skills, skillId, onSkillChange, onSend, onStop, onRegenerate,
   onEditMessage, onDeleteMessage, onSelectSibling,
-  routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange, uiMode, approval,
+  routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
+  browserMode, onBrowserModeChange, browserAvailable, uiMode, approval,
   compactionNotice, providerNotice, knowledgeNotice, activity, browserLiveView, browserActive,
   browserFrame, browserTaskId, browserStreaming, browserHuman, browserCapturing, browserConfirmed, browserNotice,
   onStopBrowser, onTakeOverBrowser, onHandBackBrowser, onBrowserInput, onBrowserCapture,
@@ -275,6 +280,9 @@ export default function ChatPanel({
         forceTier={forceTier}
         onForceTierChange={onForceTierChange}
         webSearch={webSearch}
+        browserMode={browserMode}
+        onBrowserModeChange={onBrowserModeChange}
+        browserAvailable={browserAvailable}
         onWebSearchChange={onWebSearchChange}
         uiMode={uiMode}
       />
