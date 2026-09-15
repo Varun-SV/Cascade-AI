@@ -78,6 +78,35 @@ export function isHostedSteel(url?: string): boolean {
 }
 
 /**
+ * Whether this can serve as the API base — judged by what is DONE with it.
+ *
+ * `call()` builds every request as `${this.base}${path}`, so the base has to be
+ * something a path can be appended to. A query or a fragment is not: for
+ * `https://steel.internal?tenant=a`, appending `/v1/sessions` yields a POST to
+ * `/` with `?tenant=a/v1/sessions` — the endpoint swallowed into the query
+ * string. It parses, it looks like a URL, and it cannot reach a session.
+ *
+ * Refused rather than silently stripped. An operator who wrote `?tenant=a`
+ * meant it, and quietly dropping it would send their requests somewhere they
+ * did not ask for; saying so lets them fix it.
+ *
+ * Lives here for the same reason `isHostedSteel` does — beside the
+ * concatenation it constrains. A caller that validates a URL against its own
+ * idea of how this class uses it is a rule in two places, free to drift the
+ * moment `call()` changes.
+ */
+export function isUsableSteelBase(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    // `search`/`hash` are empty strings when absent, so this is "has one".
+    return u.search === '' && u.hash === '';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * A hostname reduced to the thing DNS will actually resolve.
  *
  * `api.steel.dev.` — the fully-qualified spelling, with the root label written

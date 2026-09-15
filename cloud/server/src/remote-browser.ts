@@ -24,6 +24,7 @@ import {
   GenericCdpProvider,
   SteelProvider,
   isHostedSteel,
+  isUsableSteelBase,
   isCdpEndpoint,
   type BrowserInput,
   type Cascade,
@@ -393,14 +394,6 @@ export function formatCeiling(ms: number): string {
   return seconds === 0 ? `${minutes}m` : `${minutes}m${seconds}s`;
 }
 
-function isHttpUrl(value: string): boolean {
-  try {
-    const { protocol } = new URL(value);
-    return protocol === 'http:' || protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Whether these settings can actually produce a browser.
@@ -444,8 +437,8 @@ function buildProvider(
   // the CDP fix did not cover.
   //
   // An absent url is fine and means the hosted API: `SteelProvider` defaults it.
-  if (settings.url && !isHttpUrl(settings.url)) {
-    warn?.(`remoteBrowser.url for steel must be an http(s) API base; got ${settings.url}`);
+  if (settings.url && !isUsableSteelBase(settings.url)) {
+    warn?.(`remoteBrowser.url for steel must be an http(s) API base with no query or fragment; got ${settings.url}`);
     return null;
   }
   // The hosted API needs a key; a self-hosted one usually does not.

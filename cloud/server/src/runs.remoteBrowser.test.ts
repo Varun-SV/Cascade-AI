@@ -237,6 +237,52 @@ describe('the Browser control is advertised only where one can be built', () => 
     expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev', apiKey: 'sk-test' })).toBe(true);
   });
 
+  it('is not advertised for a base a path cannot be appended to', () => {
+    // `SteelProvider.call` builds every request as `${base}${path}`, so a base
+    // carrying a query or a fragment cannot reach an endpoint: appending
+    // `/v1/sessions` to `https://steel.internal?tenant=a` POSTs to `/` with
+    // `?tenant=a/v1/sessions`. It parses, it looks like a URL, and the first
+    // action fails — the inert control again, this time hiding behind a URL
+    // that IS well-formed.
+    expect(providerIsUsable({ provider: 'steel', url: 'https://steel.internal?tenant=a' })).toBe(false);
+    expect(providerIsUsable({ provider: 'steel', url: 'https://steel.internal#frag' })).toBe(false);
+    // A base PATH is fine and is the reason the concatenation exists — a Steel
+    // behind a gateway prefix.
+    expect(providerIsUsable({ provider: 'steel', url: 'https://steel.internal/api' }), 'a path prefix is legitimate').toBe(true);
+  });
+
+  it('does not count whitespace as a credential, all the way from the env', () => {
+    // A trailing space survives a copy-paste, a here-doc or a dashboard field
+    // without ever being visible. Untrimmed it is TRUTHY, so the hosted gate
+    // read the deployment as authenticated, advertised the browser, and sent
+    // whitespace as `steel-api-key` for the first request to be refused.
+    //
+    // Asserted from `loadEnv` through `remoteBrowserControls` to the gate
+    // rather than by handing the gate a config directly: the normalisation
+    // lives in the env schema, and a test that starts after it would pass
+    // whether or not the schema does anything.
+    const env = loadEnv({
+      ...baseEnv('/tmp'),
+      REMOTE_BROWSER_PROVIDER: 'steel',
+      REMOTE_BROWSER_API_KEY: '   ',
+    });
+    expect(env.REMOTE_BROWSER_API_KEY, 'trimmed to nothing at the boundary').toBe('');
+    expect(providerIsUsable(remoteBrowserControls(env).remoteBrowser), 'so the hosted gate refuses it').toBe(false);
+  });
+
+  it('does not let a padded URL through to be concatenated raw', () => {
+    // The URL PARSER ignores surrounding spaces, so this validated cleanly —
+    // and then `${base}${path}` produced `https://steel.internal /v1/sessions`.
+    const env = loadEnv({
+      ...baseEnv('/tmp'),
+      REMOTE_BROWSER_PROVIDER: 'steel',
+      REMOTE_BROWSER_URL: '  https://steel.internal  ',
+      REMOTE_BROWSER_API_KEY: 'sk-test',
+    });
+    expect(env.REMOTE_BROWSER_URL, 'trimmed at the boundary').toBe('https://steel.internal');
+    expect(remoteBrowserControls(env).remoteBrowser?.url).toBe('https://steel.internal');
+  });
+
   it('is advertised for a self-hosted steel with no credential', () => {
     // Only the hosted FALLBACK is refused. A Steel behind a private network or
     // its own gateway legitimately has no key, and demanding one for a URL the
