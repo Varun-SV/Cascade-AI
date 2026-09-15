@@ -12,13 +12,26 @@
 //  Rendered as a queue rather than one prompt. A run can have several workers
 //  asking at once, and answering the newest while the rest time out is the
 //  failure this replaces.
+//
+//  Built on the design tokens rather than inline styles, which it used to
+//  carry alone: a hardcoded `#f5c96b` on `#4a3410` went on looking like a
+//  warning in the dark theme and like nothing in particular in the light one,
+//  and could not follow a palette change the rest of the app made. This is the
+//  most consequential thing the UI ever asks — the moment a person authorises
+//  an agent to act on a real page — so it is the last surface that should look
+//  like it belongs to a different product.
 
+import { ShieldAlert } from 'lucide-react';
 import type { ToolApproval } from './useChatSession.js';
 
 interface Props {
   approvals: ToolApproval[];
   onDecide: (requestId: string, approved: boolean, always?: boolean) => void;
 }
+
+/** Shared button shape; the colour is what separates the three answers. */
+const ACTION = 'rounded-lg border px-2.5 py-1 text-[11px] font-medium transition-colors '
+  + 'focus-visible:outline-none focus-visible:ring-1';
 
 export function ToolApprovalPrompt({ approvals, onDecide }: Props) {
   if (approvals.length === 0) return null;
@@ -28,55 +41,60 @@ export function ToolApprovalPrompt({ approvals, onDecide }: Props) {
   return (
     <section
       aria-label="Tool approval"
-      style={{
-        border: '1px solid var(--warn-fg, #f5c96b)', borderRadius: 8,
-        margin: '8px 0', padding: '10px 12px', background: 'var(--warn-bg, #4a3410)',
-        color: 'var(--warn-fg, #f5c96b)', fontSize: 13,
-      }}
+      className="my-2 overflow-hidden rounded-xl border border-warning-500/30 bg-warning-500/[0.06]"
     >
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 6 }}>
-        <strong style={{ flex: 1 }}>
-          Cascade wants to run <code>{current.toolName}</code>
-        </strong>
+      <div className="flex items-center gap-1.5 border-b border-warning-500/20 px-3 py-1.5 text-[11px] text-warning-300">
+        <ShieldAlert size={13} className="shrink-0" />
+        <span className="flex-1 truncate">
+          Cascade wants to run <code className="font-mono text-warning-300">{current.toolName}</code>
+        </span>
         {/* Said out loud: a queue nobody can see looks like a stuck run, and
             the person answering should know how many more are behind it. */}
-        {rest.length > 0 && <span style={{ opacity: 0.85 }}>{rest.length} more waiting</span>}
+        {rest.length > 0 && (
+          <span className="shrink-0 tabular-nums text-warning-300/70">{rest.length} more waiting</span>
+        )}
       </div>
 
-      {current.description && (
-        <p style={{ margin: '0 0 8px', opacity: 0.9 }}>{current.description}</p>
-      )}
+      <div className="px-3 py-2.5">
+        {current.description && (
+          <p className="mb-2 text-xs text-ink-200">{current.description}</p>
+        )}
 
-      {/* The arguments, because "approve this tool" without them is not consent.
-          Truncated: a model can pass a very large input and an unbounded dump
-          would push the buttons off screen. */}
-      <pre
-        style={{
-          margin: '0 0 8px', padding: 8, maxHeight: 160, overflow: 'auto',
-          background: 'rgba(0,0,0,0.25)', borderRadius: 4, fontSize: 12, whiteSpace: 'pre-wrap',
-        }}
-      >
-        {JSON.stringify(current.input, null, 2).slice(0, 2_000)}
-      </pre>
+        {/* The arguments, because "approve this tool" without them is not
+            consent — the selector is the difference between clicking Search
+            and clicking Delete. Truncated: a model can pass a very large input
+            and an unbounded dump would push the buttons off screen. */}
+        <pre className="mb-2.5 max-h-40 overflow-auto rounded-lg border border-elev/10 bg-ink-950/40 p-2 font-mono text-[11px] leading-relaxed text-ink-300 whitespace-pre-wrap">
+          {JSON.stringify(current.input, null, 2).slice(0, 2_000)}
+        </pre>
 
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button type="button" onClick={() => onDecide(current.requestId, true)} style={btn}>
-          Allow once
-        </button>
-        {/* What makes a ten-step form fill one prompt instead of ten. Scoped to
-            the run by the escalator's own task-wide cache, not forever. */}
-        <button type="button" onClick={() => onDecide(current.requestId, true, true)} style={btn}>
-          Allow for this run
-        </button>
-        <button type="button" onClick={() => onDecide(current.requestId, false)} style={btn}>
-          Deny
-        </button>
+        <div className="flex flex-wrap gap-1.5">
+          <button
+            type="button"
+            onClick={() => onDecide(current.requestId, true)}
+            className={`${ACTION} border-accent-500/30 bg-accent-500/10 text-accent-300 hover:bg-accent-500/20 focus-visible:ring-accent-500`}
+          >
+            Allow once
+          </button>
+          {/* What makes a ten-step form fill one prompt instead of ten. Scoped
+              to the run by the escalator's own task-wide cache, not forever —
+              so it reads as the lesser commitment it is, not the louder one. */}
+          <button
+            type="button"
+            onClick={() => onDecide(current.requestId, true, true)}
+            className={`${ACTION} border-elev/10 bg-elev/[0.04] text-ink-300 hover:text-ink-100 focus-visible:ring-ink-500`}
+          >
+            Allow for this run
+          </button>
+          <button
+            type="button"
+            onClick={() => onDecide(current.requestId, false)}
+            className={`${ACTION} ml-auto border-danger-500/30 bg-danger-500/10 text-danger-300 hover:bg-danger-500/20 focus-visible:ring-danger-500`}
+          >
+            Deny
+          </button>
+        </div>
       </div>
     </section>
   );
 }
-
-const btn: React.CSSProperties = {
-  padding: '4px 10px', background: 'transparent', color: 'inherit',
-  border: '1px solid currentColor', borderRadius: 4, fontSize: 12.5, cursor: 'pointer',
-};
