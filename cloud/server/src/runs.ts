@@ -1669,6 +1669,11 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     cascade.resolveClarification(sanitiseClarificationAnswers(d.answers), d.requestId as string);
   };
   if (interactive) {
+    // This host can put a questionnaire to somebody and carry the answer back,
+    // so it says so. Without this the tool is not registered at all — a model
+    // shown `ask_user` on a surface that cannot answer would be told "nobody is
+    // watching" by a run somebody is sitting in front of.
+    cascade.enableClarification();
     cascade.on('clarification:required', onClarification);
     cascade.on('clarification:timeout', onClarificationTimeout);
     cascade.on('clarification:closed', onClarificationClosed);

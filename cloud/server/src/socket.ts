@@ -213,6 +213,14 @@ export interface LiveRun {
    * spinner, surfaced no error, and for a new chat had no id to reload either.
    * Which is the original "the response just died", one disconnect later.
    */
+  /**
+   * Questionnaires still waiting on a person, keyed by request id.
+   *
+   * Same shape as `approvals`, and for the same reason: both are the run
+   * BLOCKED on somebody, and a reload that loses them leaves the person
+   * looking at a spinner for something nobody will ever be asked.
+   */
+  clarifications?: Map<string, Record<string, unknown>>;
   terminal?: { conversationId?: string; error?: string };
 }
 
@@ -273,6 +281,30 @@ export function rememberForReplay(run: LiveRun, event: string, payload: unknown)
     }
     return;
   }
+  // A question outstanding when the connection dropped.
+  //
+  // I argued against replaying these, on the grounds that nothing could clear
+  // the record: the ANSWER arrives on the socket rather than as an emit, so
+  // this function would never see it, and a question replayed after it was
+  // answered is worse than one lost. `clarification:closed` removed that
+  // objection — it is emitted for every ending, including the answered one, so
+  // the record now has a reliable delete.
+  //
+  // Which also fixes the reverse case: a close emitted while the transport had
+  // no socket was simply dropped, leaving a dead form on screen after
+  // reconnection — and because the queue renders oldest-first, in front of
+  // every later question the run asks.
+  if (event === 'clarification:required') {
+    const id = p['requestId'];
+    if (typeof id !== 'string') return;
+    (run.clarifications ??= new Map()).set(id, p);
+    return;
+  }
+  if (event === 'clarification:closed') {
+    const id = p['requestId'];
+    if (typeof id === 'string') run.clarifications?.delete(id);
+    return;
+  }
   if (event === 'permission:user-required') {
     const id = p['id'] ?? p['requestId'];
     if (typeof id !== 'string') return;
@@ -320,6 +352,11 @@ export function replaySupervision(run: LiveRun, socket: Pick<Socket, 'emit'>): v
   if (run.control) socket.emit('browser:control', run.control);
   for (const request of run.approvals?.values() ?? []) {
     socket.emit('permission:user-required', request);
+  }
+  // Still open, so still blocking the run: a reloaded page that never sees the
+  // question waits out the full gate before the model gives up and assumes.
+  for (const question of run.clarifications?.values() ?? []) {
+    socket.emit('clarification:required', question);
   }
 }
 

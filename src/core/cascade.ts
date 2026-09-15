@@ -234,14 +234,6 @@ export class Cascade extends EventEmitter {
     );
     this.registerMediaTools(workspacePath);
     this.registerDocumentTools(workspacePath);
-    // Registered at construction, and re-checked at call time. `setUnattended`
-    // can land afterwards, so `askUser` tests the same conditions again and
-    // answers `no-listener` — the model is told to proceed on its own reading
-    // rather than discovering a dead tool by calling it. The same
-    // defence-in-depth `BrowserControlTool.revoke` uses, for the same reason:
-    // a registration-time gate cannot express "this run turned out to be
-    // unattended".
-    this.registerAskUser();
     this.telemetry = config.telemetry?.enabled
       ? new Telemetry(config.telemetry, config.telemetry.distinctId ?? 'anonymous')
       : noopTelemetry;
@@ -926,13 +918,28 @@ export class Cascade extends EventEmitter {
   }
 
   /**
-   * Offer the model a way to ask, unless there is nobody to answer.
+   * Declare that this host can put a questionnaire to a person and answer it.
    *
-   * Gated on `unattended` for the same reason `browser_control` is: a tool the
-   * run cannot actually use is one the model will still try, and a refusal it
-   * has to discover by calling is worse than an absence it can see.
+   * Explicit, and NOT done at construction, because registering a tool is a
+   * promise the host has to keep. A host that registers `ask_user` without
+   * listening for `clarification:required` gives the model a tool that always
+   * answers "there is nobody watching this run" — while a person sits at the
+   * terminal looking at it. That is worse than not offering the tool at all:
+   * it costs a round trip and then tells the model something false.
+   *
+   * Only `cloud/server` bridges the protocol today. The CLI REPL and the
+   * dashboard do not, so they do not call this, and their models are not shown
+   * a capability nobody can serve. Wiring either of them is a matter of
+   * listening for the event and calling `resolveClarification`, then calling
+   * this.
+   *
+   * Still gated on the same conditions as the call itself, and `askUser`
+   * re-checks them: `setUnattended` can land after this, so the tool can be
+   * registered for a run that later turns out to have nobody on it. Then it
+   * answers `no-listener` and the model proceeds on its own reading, which is
+   * the same defence-in-depth `BrowserControlTool.revoke` provides.
    */
-  private registerAskUser(): void {
+  enableClarification(): void {
     if (this.unattended) return;
     if (this.config.autonomy === 'auto') return;
     if ((this.config.tools?.disabledTools ?? []).includes('ask_user')) return;

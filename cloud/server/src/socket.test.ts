@@ -1326,6 +1326,42 @@ describe('rememberForReplay / replaySupervision — what a reload gets back', ()
     expect(emitted).toEqual([]);
   });
 
+  it('gives a reloaded page back a question the run is still blocked on', () => {
+    // I argued against replaying these, because nothing could clear the record:
+    // the ANSWER arrives on the socket rather than as an emit, so
+    // `rememberForReplay` would never see it, and a question replayed after it
+    // was answered is worse than one lost.
+    //
+    // `clarification:closed` removed that objection. It is emitted for every
+    // ending, the answered one included, so the record now has a reliable
+    // delete — and the reverse case is fixed with it: a close emitted while the
+    // transport had no socket used to be dropped, leaving a dead form on screen
+    // after reconnection, in front of every later question the run asked.
+    const run = freshRun();
+    rememberForReplay(run, 'clarification:required', {
+      conversationId: 'c1', requestId: 'req-1', questions: [{ id: 'q1', prompt: 'Which account?', kind: 'text' }],
+    });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+    expect(emitted.map((e) => e.event)).toEqual(['clarification:required']);
+    expect((emitted[0]?.payload as { requestId?: string }).requestId).toBe('req-1');
+  });
+
+  it('stops replaying a question the moment it is over, however it ended', () => {
+    // Answered, timed out, stopped, released by teardown — `clarification:closed`
+    // covers all four, which is what makes keeping the record safe at all.
+    const run = freshRun();
+    rememberForReplay(run, 'clarification:required', {
+      conversationId: 'c1', requestId: 'req-1', questions: [{ id: 'q1', prompt: 'Which?', kind: 'text' }],
+    });
+    rememberForReplay(run, 'clarification:closed', { conversationId: 'c1', requestId: 'req-1' });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+    expect(emitted, 'nothing left to put back on screen').toEqual([]);
+  });
+
   it('keeps an outstanding approval until permission:resolved names it, keyed by id or requestId', () => {
     const run = freshRun();
     rememberForReplay(run, 'permission:user-required', { id: 'req-1', conversationId: 'c1', tool: 'browser_control' });

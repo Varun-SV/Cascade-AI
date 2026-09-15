@@ -85,6 +85,15 @@ describe('cloud/server app', () => {
     baseUrl = `http://127.0.0.1:${port}`;
   });
 
+  /** Rebuild the app with extra env, for settings `createApp` closes over. */
+  async function restartWith(extra: Partial<CloudEnv>): Promise<void> {
+    await new Promise((resolve) => server.close(resolve));
+    const app = createApp({ ...env, ...extra } as CloudEnv, store);
+    server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  }
+
   afterEach(async () => {
     store.close();
     await new Promise((resolve) => server.close(resolve));
@@ -106,6 +115,35 @@ describe('cloud/server app', () => {
       googleClientId: null,
       devLoginEnabled: true,
     });
+  });
+
+  it('GET /api/config advertises the browser only where one can be built', async () => {
+    // The flag exists so a deployment that cannot serve a browser does not show
+    // a switch for one. Reading it off `REMOTE_BROWSER_PROVIDER` alone put the
+    // inert switch straight back: a `cdp` provider with a missing or
+    // non-websocket URL passes the env schema and then fails at `buildProvider`.
+    //
+    // Exercised through the ENDPOINT rather than the helper it calls, because
+    // the helper already had tests and the wiring did not — reverting this very
+    // line changed no test at all.
+    const away = async () => {
+      const res = await fetch(`${baseUrl}/api/config`);
+      return (await res.json() as { remoteBrowserEnabled?: boolean }).remoteBrowserEnabled;
+    };
+
+    expect(await away(), 'nothing configured').toBe(false);
+
+    await restartWith({ REMOTE_BROWSER_PROVIDER: 'cdp' });
+    expect(await away(), 'cdp with no endpoint cannot be driven').toBe(false);
+
+    await restartWith({ REMOTE_BROWSER_PROVIDER: 'cdp', REMOTE_BROWSER_URL: 'https://browser.example' });
+    expect(await away(), 'an http endpoint is the likely mistake, not a browser').toBe(false);
+
+    await restartWith({ REMOTE_BROWSER_PROVIDER: 'cdp', REMOTE_BROWSER_URL: 'ws://browser.internal:3000' });
+    expect(await away(), 'this one can actually be driven').toBe(true);
+
+    await restartWith({ REMOTE_BROWSER_PROVIDER: 'steel' });
+    expect(await away(), 'steel defaults its own endpoint').toBe(true);
   });
 
   it('GET /api/config serves the Azure base-model list from the SDK', async () => {

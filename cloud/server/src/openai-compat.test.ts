@@ -27,6 +27,10 @@ vi.mock('#cascade-ai', async (importOriginal) => {
   const GATE_EVENTS = [
     'escalation:decision-required', 'escalation:timeout', 'context:approval-required',
     'context:compacted', 'plan:approval-required', 'stream:token', 'tier:status', 'log',
+    // `ask_user`'s gate belongs here for the same reason as the rest: a
+    // listener on a path where nobody can answer makes the SDK park the run for
+    // the full two minutes, when it would return `no-listener` for free.
+    'clarification:required', 'clarification:closed',
   ];
 
   class FakeCascade extends EventEmitter {
@@ -36,6 +40,8 @@ vi.mock('#cascade-ai', async (importOriginal) => {
     resolvePlanApproval(): void { /* unused here */ }
     resolveContextApproval(): void { /* unused here */ }
     resolveEscalation(): void { /* unused here */ }
+    resolveClarification(): void { /* unused here */ }
+    enableClarification(): void { /* the real one registers ask_user */ }
     getDecisionLog(): unknown[] { return []; }
     getRouter() {
       return {
@@ -543,6 +549,11 @@ describe('/v1 routes', () => {
     expect(gates['escalation:timeout']).toBe(0);
     expect(gates['context:approval-required']).toBe(0);
     expect(gates['plan:approval-required']).toBe(0);
+    // And the questionnaire gate. This path has no way to put a form to anybody,
+    // so a listener here would park the run for the full two minutes before the
+    // model was told what it could have learned at once: nobody is watching.
+    expect(gates['clarification:required']).toBe(0);
+    expect(gates['clarification:closed']).toBe(0);
     // Streaming and diagnostics are NOT gates and stay attached — without them
     // the endpoint could not stream at all.
     expect(gates['stream:token']).toBe(1);
@@ -563,6 +574,8 @@ describe('/v1 routes', () => {
     expect(gates['escalation:timeout']).toBe(1);
     expect(gates['context:approval-required']).toBe(1);
     expect(gates['plan:approval-required']).toBe(1);
+    expect(gates['clarification:required']).toBe(1);
+    expect(gates['clarification:closed']).toBe(1);
   });
 
   it('rejects an unknown model, unsupported params and a non-user last turn before running anything', async () => {

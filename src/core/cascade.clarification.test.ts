@@ -32,6 +32,46 @@ const baseConfig: CascadeConfig = {
 
 const ONE = [{ id: 'q1', prompt: 'Which account?', kind: 'choice' as const, options: ['A', 'B'] }];
 
+describe('ask_user is offered only where somebody can answer', () => {
+  it('is absent until a host says it can put the question to a person', () => {
+    // Registering a tool is a promise the host has to keep. A host that offers
+    // `ask_user` without listening for `clarification:required` hands the model
+    // a tool that always answers "there is nobody watching this run" — while a
+    // person sits at the terminal looking at it. Worse than not offering it:
+    // it costs a round trip and then says something false.
+    //
+    // Only cloud/server bridges the protocol today; the CLI REPL and the
+    // dashboard do not, and must not advertise it.
+    const c = new Cascade(baseConfig, '/tmp');
+    expect(c.getToolRegistry().hasTool('ask_user'), 'not offered by default').toBe(false);
+
+    c.enableClarification();
+    expect(c.getToolRegistry().hasTool('ask_user'), 'offered once a host can serve it').toBe(true);
+  });
+
+  it('stays absent on a run that has nobody on it, whatever the host claims', () => {
+    const c = new Cascade(baseConfig, '/tmp');
+    c.setUnattended(true);
+    c.enableClarification();
+    expect(c.getToolRegistry().hasTool('ask_user')).toBe(false);
+  });
+
+  it('stays absent on a run whose whole point is not being interrupted', () => {
+    const c = new Cascade({ ...baseConfig, autonomy: 'auto' } as CascadeConfig, '/tmp');
+    c.enableClarification();
+    expect(c.getToolRegistry().hasTool('ask_user')).toBe(false);
+  });
+
+  it('honours a deployment that turned it off', () => {
+    const c = new Cascade(
+      { ...baseConfig, tools: { ...baseConfig.tools, disabledTools: ['ask_user'] } } as CascadeConfig,
+      '/tmp',
+    );
+    c.enableClarification();
+    expect(c.getToolRegistry().hasTool('ask_user')).toBe(false);
+  });
+});
+
 describe('Cascade.askUser — a question that cannot hang the run', () => {
   it('answers no-listener rather than waiting when nothing is attached', async () => {
     // The headless case: a scheduled run, an API caller with no socket. Nothing

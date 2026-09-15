@@ -5,7 +5,7 @@ import os from 'node:os';
 import { buildCloudConfig, parseChatRunPayload, remoteBrowserControls, runChatTurn } from './runs.js';
 import { CloudStore } from './db.js';
 import { loadEnv } from './env.js';
-import { sharedBrowserGeneration, resetSharedBrowser } from './remote-browser.js';
+import { providerIsUsable, sharedBrowserGeneration, resetSharedBrowser } from './remote-browser.js';
 import { startStubOpenAIServer, type StubOpenAIServer } from './test-support/stub-openai-server.js';
 
 class FakeSocket {
@@ -174,6 +174,33 @@ describe('the operator configures a browser for their deployment', () => {
 // Every field, not just the two the end-to-end test happens to exercise. That
 // one asserts a controller was built, which is true as soon as provider+url
 // arrive — so a dropped `apiKey` or `maxSessions` line would sail past it.
+describe('the Browser control is advertised only where one can be built', () => {
+  // The control exists so a deployment that cannot serve a browser does not
+  // show a switch for one. Deciding that from the provider NAME alone put the
+  // inert switch straight back: a `cdp` provider with a missing or
+  // non-websocket URL passes the env schema and then fails at `buildProvider`.
+  it('is not advertised for a cdp provider with no endpoint', () => {
+    expect(providerIsUsable({ provider: 'cdp' })).toBe(false);
+  });
+
+  it('is not advertised for a cdp endpoint that is not a websocket', () => {
+    // An http:// URL copied from a provider's docs is the likely mistake.
+    expect(providerIsUsable({ provider: 'cdp', url: 'https://browser.example' })).toBe(false);
+  });
+
+  it('is advertised for a cdp endpoint that can actually be driven', () => {
+    expect(providerIsUsable({ provider: 'cdp', url: 'ws://browser.internal:3000' })).toBe(true);
+  });
+
+  it('is advertised for steel, which defaults its own endpoint', () => {
+    expect(providerIsUsable({ provider: 'steel' })).toBe(true);
+  });
+
+  it('is not advertised where the operator configured nothing', () => {
+    expect(providerIsUsable(undefined)).toBe(false);
+  });
+});
+
 describe('every REMOTE_BROWSER_* value reaches the run config', () => {
   it('carries the credential and the session cap, not only the endpoint', () => {
     const env = loadEnv({

@@ -366,6 +366,23 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
   };
 }
 
+/**
+ * Whether these settings can actually produce a browser.
+ *
+ * Asks `buildProvider` rather than restating its rules, so the two cannot
+ * drift: `/api/config` advertises the Browser control on this, and the control
+ * exists precisely so a deployment that cannot serve a browser does not show
+ * one. Deciding that from `provider` alone reintroduced the inert switch — a
+ * `cdp` provider with a missing or non-websocket URL passes the env schema,
+ * fails here, and would have put a button on screen that silently does
+ * nothing.
+ *
+ * No network, no allocation: `buildProvider` only constructs an adapter.
+ */
+export function providerIsUsable(settings: RemoteBrowserSettings | undefined): boolean {
+  return buildProvider(settings) !== null;
+}
+
 /** Which provider the operator asked for, or null when they asked for none. */
 function buildProvider(
   settings: RemoteBrowserSettings | undefined,
