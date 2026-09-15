@@ -283,6 +283,22 @@ describe('the Browser control is advertised only where one can be built', () => 
     expect(remoteBrowserControls(env).remoteBrowser?.url).toBe('https://steel.internal');
   });
 
+  it('is not advertised for a base whose delimiter swallows the endpoint', () => {
+    // The seventh way a base could look fine and not work, and the one that
+    // ended the sequence: a bare `?` or `#` leaves `search` and `hash` EMPTY
+    // while `href` keeps the delimiter, so no component inspection could see
+    // it. `${base}/v1/sessions` becomes `...?/v1/sessions` and the POST lands
+    // on `/`.
+    //
+    // The check now builds the request `call()` will build and asks whether it
+    // addresses the endpoint, so a spelling nobody has thought of fails by
+    // construction rather than by being listed here.
+    expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev?', apiKey: 'sk-test' })).toBe(false);
+    expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev#', apiKey: 'sk-test' })).toBe(false);
+    expect(providerIsUsable({ provider: 'steel', url: 'https://steel.internal?' })).toBe(false);
+    expect(providerIsUsable({ provider: 'steel', url: 'https://steel.internal#' })).toBe(false);
+  });
+
   it('is not advertised for a base carrying credentials fetch will not send', () => {
     // `https://user:pass@steel.internal` parses, has no query and no fragment,
     // and passes every earlier version of this check — and then Node's fetch

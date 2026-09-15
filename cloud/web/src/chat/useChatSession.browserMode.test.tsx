@@ -124,3 +124,36 @@ describe('a billed opt-in does not outlive the control that grants it', () => {
     await waitFor(() => expect(view.result.current.webSearch, 'still a preference').toBe(true));
   });
 });
+
+describe('a fast answer and a browser are not both on offer', () => {
+  it('withholds browser mode from a fast answer rather than honouring it silently', async () => {
+    // `runFastAnswer` is one model call with no tools by contract, so
+    // `browser_control` is never registered. Sending both showed the Browser
+    // chip lit, billed nothing, and answered from the model's own knowledge a
+    // question that needed a page — the run quietly not matching the composer.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { view.result.current.setBrowserMode(true); });
+    await waitFor(() => expect(view.result.current.browserMode).toBe(true));
+
+    act(() => { view.result.current.send({ prompt: 'hello', fast: true }); });
+
+    expect(lastRun(fake)?.['fastAnswer'], 'it is still a fast answer').toBe(true);
+    expect(lastRun(fake)?.['browserMode'], 'but not one with a browser').toBe(false);
+  });
+
+  it('still sends browser mode on an ordinary turn', async () => {
+    // The guard is about the fast path only — it must not quietly disable the
+    // capability everywhere.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { view.result.current.setBrowserMode(true); });
+    await waitFor(() => expect(view.result.current.browserMode).toBe(true));
+
+    act(() => { view.result.current.send({ prompt: 'hello' }); });
+
+    expect(lastRun(fake)?.['browserMode']).toBe(true);
+  });
+});

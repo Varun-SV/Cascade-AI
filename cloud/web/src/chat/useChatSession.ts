@@ -828,7 +828,22 @@ export function useChatSession(
   // precisely because a Complex wave dispatches sections concurrently, so two
   // can be waiting at once — storing one here threw the first away, and
   // answering the visible prompt left the hidden section parked until timeout.
-  const [escalations, setEscalations] = useState<EscalationRequest[]>([]);
+  const [allEscalations, setEscalations] = useState<EscalationRequest[]>([]);
+  /**
+   * The parked sections belonging to the chat on screen.
+   *
+   * Filtered on read, exactly as `clarifications` is, and for the reason that
+   * comment gives — switching chats must not strand a run, so the request stays
+   * queued and re-appears when you come back to it.
+   *
+   * This mattered the moment the modal began rendering the whole queue: one
+   * socket carries concurrent runs for several conversations, so an unfiltered
+   * list put background conversations' sections into the window for the chat
+   * you were looking at, and closing it skipped them.
+   */
+  const escalations = allEscalations.filter(
+    (e) => !e.conversationId || e.conversationId === currentConversation,
+  );
   const escalation = escalations[0] ?? null;
   // Extended context: a pending "process this huge input?" confirm, and a
   // transient notice once a compaction actually happened.
@@ -1689,7 +1704,13 @@ export function useChatSession(
             routingMode,
             forceTier,
             webSearch,
-            browserMode,
+            // Never alongside a fast answer. `runFastAnswer` is one model call
+            // with no tools by contract, so `browser_control` is never
+            // registered — sending both would show the Browser chip lit, bill
+            // nothing, and silently answer from the model's own knowledge a
+            // question that needed a page. Withheld rather than quietly
+            // honoured, so the run matches what the composer claims.
+            browserMode: fast ? false : browserMode,
             webSearchConfig,
             complexityHint,
             fastAnswer: fast || undefined,
@@ -1905,6 +1926,10 @@ export function useChatSession(
    */
   const skipAllEscalations = useCallback(() => {
     if (!socket) return;
+    // `escalations`, not `allEscalations` — only what the window actually
+    // showed. Closing a window is a statement about the sections in it, and
+    // skipping a background conversation's work on the strength of it would
+    // silently accept partial output in a run nobody was looking at.
     for (const e of escalations) {
       socket.emit('escalation:decide', {
         conversationId: e.conversationId,

@@ -78,54 +78,52 @@ export function isHostedSteel(url?: string): boolean {
 }
 
 /**
- * Whether this can serve as the API base — judged by what is DONE with it.
+ * Whether this can serve as the API base — asked of the URL ACTUALLY BUILT.
  *
- * `call()` builds every request as `${this.base}${path}`, so the base has to be
- * something a path can be appended to. A query or a fragment is not: for
- * `https://steel.internal?tenant=a`, appending `/v1/sessions` yields a POST to
- * `/` with `?tenant=a/v1/sessions` — the endpoint swallowed into the query
- * string. It parses, it looks like a URL, and it cannot reach a session.
+ * Six rounds of review found six ways a base could look fine and not work:
+ * a wrong host, a terminal dot, a query string, userinfo, a path prefix on the
+ * hosted service, doubled trailing slashes. Each was answered by inspecting one
+ * more component, and a seventh arrived that no component exposes — a bare `?`
+ * or `#` leaves `search` and `hash` EMPTY while `href` keeps the delimiter, so
+ * `${base}/v1/sessions` becomes `...?/v1/sessions` and the POST lands on `/`.
  *
- * Refused rather than silently stripped. An operator who wrote `?tenant=a`
- * meant it, and quietly dropping it would send their requests somewhere they
- * did not ask for; saying so lets them fix it.
- *
- * Userinfo is refused for a harder reason: `fetch` will not send it at all.
- * `https://user:pass@steel.internal` parses, has no query and no fragment, and
- * then throws `TypeError: Request cannot be constructed from a URL that
- * includes credentials` on the first request. Steel's own credential is
- * `apiKey`, which becomes a header — so this is not a capability being
- * withheld, it is a spelling that cannot work being named early instead of at
- * the first browser action.
- *
- * Lives here for the same reason `isHostedSteel` does — beside the
- * concatenation it constrains. A caller that validates a URL against its own
- * idea of how this class uses it is a rule in two places, free to drift the
- * moment `call()` changes. This is the same file that has to change if `call()`
- * ever stops using `fetch`.
+ * So this stopped adding conditions and started asking the only question that
+ * was ever the real one: build the request `call()` will build, and see whether
+ * it addresses the endpoint. A spelling nobody has thought of yet fails this by
+ * construction rather than by being enumerated.
  */
 export function isUsableSteelBase(url: string): boolean {
   try {
     const u = new URL(url);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
-    // Empty strings when absent, so each of these reads as "has one".
+    // Checked separately because `fetch` refuses these before sending, so they
+    // are not a URL-shape problem the built request would reveal — the request
+    // is well-formed and throws anyway.
     if (u.username !== '' || u.password !== '') return false;
-    if (u.search !== '' || u.hash !== '') return false;
-    // A path prefix is the whole reason `call()` concatenates — a self-hosted
-    // Steel behind a gateway lives at one. The HOSTED service does not: its
-    // endpoints are at the root, so `https://api.steel.dev/v1` asks for
-    // `/v1/v1/sessions`.
-    //
-    // Which makes usability depend on the destination as well as the shape, and
-    // that is right rather than awkward: the same path prefix is correct for
-    // one base and broken for another, so a rule that looked only at the URL's
-    // form could never tell them apart.
-    if (isHostedSteel(url) && withoutTrailingSlashes(u.pathname) !== '') return false;
+
+    // THE request, assembled exactly as `call()` assembles it.
+    const built = new URL(withoutTrailingSlashes(url) + PROBE_PATH);
+    // Anything that swallowed the path into a query or fragment shows up here,
+    // whatever the base looked like component by component.
+    if (built.search !== '' || built.hash !== '') return false;
+    if (!built.pathname.endsWith(PROBE_PATH)) return false;
+    // A path prefix is legitimate for a self-hosted gateway and impossible for
+    // the hosted service, whose endpoints are at the root — so the same prefix
+    // is correct for one base and broken for another.
+    if (isHostedSteel(url) && built.pathname !== PROBE_PATH) return false;
     return true;
   } catch {
     return false;
   }
 }
+
+/**
+ * A real endpoint, used to test the assembly rather than a made-up one.
+ *
+ * `createSession` is the first request any browser makes, so if this cannot be
+ * addressed the configuration cannot open a browser at all.
+ */
+const PROBE_PATH = '/v1/sessions';
 
 /**
  * A URL or path with its trailing slashes removed.

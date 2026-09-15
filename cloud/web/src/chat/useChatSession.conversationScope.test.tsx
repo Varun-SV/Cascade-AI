@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
+import { renderHook, act, waitFor } from '@testing-library/react';
 import type { Socket } from 'socket.io-client';
 import { useChatSession } from './useChatSession.js';
 
@@ -1382,5 +1382,53 @@ describe('useChatSession — frames of the agent\'s browser', () => {
       .filter((m) => m.event === 'browser:unwatch' || m.event === 'browser:watch')
       .map((m) => m.event), 'the replayed run is re-watched from scratch, not resumed')
       .toEqual(['browser:unwatch', 'browser:watch']);
+  });
+});
+
+describe('a parked section belongs to the chat that parked it', () => {
+  it('shows only the sections for the conversation on screen', async () => {
+    // One socket carries concurrent runs for several conversations. The modal
+    // renders the whole queue now, so an unfiltered list would put a background
+    // run's sections into the window for the chat you are looking at.
+    //
+    // Filtered on READ, like clarifications: switching chats must not strand a
+    // run, so the request stays queued and re-appears when you come back.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-A'));
+
+    act(() => {
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-A', requestId: 'e1', sectionId: 's1', issues: [], timeoutMs: 300_000,
+      });
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-B', requestId: 'e2', sectionId: 's2', issues: [], timeoutMs: 300_000,
+      });
+    });
+
+    await waitFor(() => expect(view.result.current.escalations).toHaveLength(1));
+    expect(view.result.current.escalations[0]?.requestId, 'this chat only').toBe('e1');
+  });
+
+  it('skips only what the window showed, not another conversation\'s work', async () => {
+    // Closing the window is a statement about the sections in it. Skipping a
+    // background conversation's section on the strength of it would silently
+    // accept partial output in a run nobody was looking at.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-A'));
+
+    act(() => {
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-A', requestId: 'e1', sectionId: 's1', issues: [], timeoutMs: 300_000,
+      });
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-B', requestId: 'e2', sectionId: 's2', issues: [], timeoutMs: 300_000,
+      });
+    });
+    await waitFor(() => expect(view.result.current.escalations).toHaveLength(1));
+
+    act(() => { view.result.current.skipAllEscalations(); });
+
+    const decided = fake.sent.filter((e) => e.event === 'escalation:decide') as Array<{ event: string; payload: Record<string, unknown> }>;
+    expect(decided.map((d) => d.payload['requestId']), 'the other run is untouched').toEqual(['e1']);
   });
 });
