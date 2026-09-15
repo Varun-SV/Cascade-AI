@@ -705,7 +705,18 @@ export function buildCloudConfig(
       //
       // Emitted only when a provider is named, so the untouched default stays
       // exactly as it was: no key, no tool.
-      ...(controls.remoteBrowser?.provider
+      //
+      // AND only when this turn asked for the browser. Every session is billed,
+      // so reaching one has to be something a person chose rather than
+      // something a model reached for: with the chip off the tool is not
+      // refused at call time, it is absent, and the model never sees a
+      // capability it was not given. That is also what makes metering possible
+      // at all — a capability that cannot be gated cannot be counted.
+      //
+      // One lever for both halves: `attachRemoteBrowser` reads this same field
+      // and returns null without it, so nothing is attached and no provider
+      // session can be opened either.
+      ...(controls.remoteBrowser?.provider && browserMode
         ? {
             remoteBrowser: {
               provider: controls.remoteBrowser.provider,

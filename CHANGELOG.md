@@ -41,6 +41,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   absent rather than disabled where no provider is configured, because the
   capability does not exist until an operator supplies an endpoint.
 
+  **This changes when a browser can be opened.** An operator configuring a
+  provider is now necessary but no longer sufficient: a turn has to ask for the
+  browser before `browser_control` is registered or any session is allocated.
+  Every session is billed, so reaching one should be something a person chose
+  rather than something a model reached for — and a capability that cannot be
+  gated cannot be metered. With the control off the tool is not refused at call
+  time, it is absent, and the model never sees a capability it was not given.
+
 ### Changed
 - **The permission prompt looks like the rest of Cascade.** It was the one
   surface built from inline styles and hardcoded hex, and those were dark-theme

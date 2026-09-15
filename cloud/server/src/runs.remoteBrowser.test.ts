@@ -71,7 +71,12 @@ describe('the operator configures a browser for their deployment', () => {
     // the controls object here was the bug in this test: dropping `apiKey` or
     // `maxSessions` from the real mapping would have changed nothing it could
     // see, because it never called the real mapping at all.
-    const config = buildCloudConfig([], env.MAX_COST_PER_RUN_USD, remoteBrowserControls(env));
+    //
+    // `browserMode: true` because the operator having configured a provider is
+    // necessary and no longer sufficient — every session is billed, so the turn
+    // has to ask for one. What is under test here is still the env mapping: that
+    // every REMOTE_BROWSER_* value survives the trip into the run config.
+    const config = buildCloudConfig([], env.MAX_COST_PER_RUN_USD, { ...remoteBrowserControls(env), browserMode: true });
 
     expect(config.tools?.remoteBrowser).toEqual({
       provider: 'cdp',
@@ -85,7 +90,7 @@ describe('the operator configures a browser for their deployment', () => {
     const env = loadEnv(baseEnv(dir));
     expect(env.REMOTE_BROWSER_PROVIDER).toBeUndefined();
 
-    const config = buildCloudConfig([], env.MAX_COST_PER_RUN_USD, remoteBrowserControls(env));
+    const config = buildCloudConfig([], env.MAX_COST_PER_RUN_USD, { ...remoteBrowserControls(env), browserMode: true });
 
     // Not "present but disabled" — absent. `setRemoteBrowserController` gates on
     // the field, so the tool is never registered and the model never sees it.
@@ -112,6 +117,10 @@ describe('the operator configures a browser for their deployment', () => {
     const payload = parseChatRunPayload({
       prompt: 'hello',
       providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }],
+      // The turn has to ASK. Every session is billed, so an operator having
+      // configured a provider is necessary and no longer sufficient — see
+      // "withholds the browser entirely when this turn did not ask for it".
+      browserMode: true,
     });
     const result = await runChatTurn(payload, {
       env, store, userId: user.id,
@@ -175,7 +184,7 @@ describe('every REMOTE_BROWSER_* value reaches the run config', () => {
       REMOTE_BROWSER_MAX_SESSIONS: '4',
     });
 
-    expect(buildCloudConfig([], 1, remoteBrowserControls(env)).tools?.remoteBrowser).toEqual({
+    expect(buildCloudConfig([], 1, { ...remoteBrowserControls(env), browserMode: true }).tools?.remoteBrowser).toEqual({
       provider: 'steel',
       url: 'https://api.steel.example',
       apiKey: 'sk-operator-key',
@@ -192,7 +201,7 @@ describe('every REMOTE_BROWSER_* value reaches the run config', () => {
       REMOTE_BROWSER_PROVIDER: 'steel',
     });
 
-    expect(buildCloudConfig([], 1, remoteBrowserControls(env)).tools?.remoteBrowser).toEqual({
+    expect(buildCloudConfig([], 1, { ...remoteBrowserControls(env), browserMode: true }).tools?.remoteBrowser).toEqual({
       provider: 'steel',
       maxSessions: 1,
     });

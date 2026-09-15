@@ -380,7 +380,7 @@ export default function Composer({
             {browserAvailable && (
               <button
                 type="button"
-                title="Drive a real browser for this run — for pages that are images, or need signing in"
+                title="Give this run a real browser — for pages that are images, or need signing in. Off means Cascade cannot open one."
                 disabled={disabled}
                 aria-pressed={browserMode}
                 onClick={() => onBrowserModeChange(!browserMode)}

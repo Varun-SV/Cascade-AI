@@ -57,6 +57,32 @@ describe('buildCloudConfig', () => {
     expect(registry.hasTool('web_search')).toBe(false);
   });
 
+  it('withholds the browser entirely when this turn did not ask for it', () => {
+    // Every session is billed, so reaching one must be something a person chose
+    // rather than something a model reached for. With the chip off the tool is
+    // not refused at call time — it is ABSENT, and the model never sees a
+    // capability it was not given.
+    //
+    // One field does both halves: `setRemoteBrowserController` gates
+    // registration on it, and `attachRemoteBrowser` returns null without it, so
+    // no provider session can be opened either.
+    const off = buildCloudConfig([], 0.5, {
+      remoteBrowser: { provider: 'cdp', url: 'ws://browser.internal:3000', maxSessions: 1 },
+      browserMode: false,
+    });
+    expect(off.tools?.remoteBrowser, 'configured by the operator, not asked for by this turn')
+      .toBeUndefined();
+  });
+
+  it('hands the browser over when the turn did ask', () => {
+    const on = buildCloudConfig([], 0.5, {
+      remoteBrowser: { provider: 'cdp', url: 'ws://browser.internal:3000', maxSessions: 1 },
+      browserMode: true,
+    });
+    expect(on.tools?.remoteBrowser?.provider).toBe('cdp');
+    expect(on.tools?.remoteBrowser?.url).toBe('ws://browser.internal:3000');
+  });
+
   it('always disables generate_document, which a hosted run cannot deliver', () => {
     // It registers OUTSIDE the enabledTools allowlist (that list guards tools
     // reaching the machine; this one only writes into the run's own workspace),
