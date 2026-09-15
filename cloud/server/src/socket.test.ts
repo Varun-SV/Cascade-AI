@@ -1326,6 +1326,63 @@ describe('rememberForReplay / replaySupervision — what a reload gets back', ()
     expect(emitted).toEqual([]);
   });
 
+  it('gives a reloaded page back a SECTION the run is still blocked on', () => {
+    // The gate the clarification gate was copied from, and the one that never
+    // got this. A reload while a section was parked left the run alive on the
+    // server and the modal gone from the page — no way to answer, and the
+    // section failed when its five-minute timer ran out.
+    const run = freshRun();
+    rememberForReplay(run, 'escalation:decision-required', {
+      conversationId: 'c1', requestId: 'req-1', sectionId: 's1',
+      sectionTitle: 'Section alpha', issues: [], timeoutMs: 300_000,
+    });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+    expect(emitted.map((e) => e.event)).toEqual(['escalation:decision-required']);
+    expect((emitted[0]?.payload as { requestId?: string }).requestId).toBe('req-1');
+  });
+
+  it('replays what is LEFT of a section\'s five minutes, not the whole of it', () => {
+    vi.useFakeTimers();
+    try {
+      const run = freshRun();
+      rememberForReplay(run, 'escalation:decision-required', {
+        conversationId: 'c1', requestId: 'req-1', sectionId: 's1', timeoutMs: 300_000,
+      });
+      vi.advanceTimersByTime(240_000);
+
+      const { emitted, socket } = recorder();
+      replaySupervision(run, socket);
+
+      expect((emitted[0]?.payload as { timeoutMs?: number }).timeoutMs, 'one minute, not five').toBe(60_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('takes a decided section down on a reconnect, which an open-only replay cannot', () => {
+    // `escalation:closed` is what makes remembering these safe at all: the
+    // ANSWER arrives on the socket rather than as an emit, so without a
+    // reliable delete a reconnecting page could be handed back a decision that
+    // had already been made.
+    const run = freshRun();
+    rememberForReplay(run, 'escalation:decision-required', {
+      conversationId: 'c1', requestId: 'req-1', sectionId: 's1', timeoutMs: 300_000,
+    });
+    rememberForReplay(run, 'escalation:decision-required', {
+      conversationId: 'c1', requestId: 'req-2', sectionId: 's2', timeoutMs: 300_000,
+    });
+    rememberForReplay(run, 'escalation:closed', { conversationId: 'c1', requestId: 'req-1' });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+
+    expect(emitted.map((e) => e.event)).toEqual(['escalation:closed', 'escalation:decision-required']);
+    expect((emitted[0]?.payload as { requestId?: string }).requestId).toBe('req-1');
+    expect((emitted[1]?.payload as { requestId?: string }).requestId).toBe('req-2');
+  });
+
   it('gives a reloaded page back a question the run is still blocked on', () => {
     // I argued against replaying these, because nothing could clear the record:
     // the ANSWER arrives on the socket rather than as an emit, so

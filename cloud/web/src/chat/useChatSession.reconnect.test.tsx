@@ -298,6 +298,44 @@ describe('useChatSession — a run that outlives the connection that started it'
     await waitFor(() => expect(view.result.current.escalationQueued).toBe(0));
   });
 
+  it('takes a parked section down when it stops being parked, however that happened', async () => {
+    // `escalation:timeout` was the only ending the client heard about, and it
+    // is one of four. Answered elsewhere, Stop, and the run unwinding all
+    // settled silently, leaving a modal that could be answered into nothing —
+    // and on a reconnect it is the only thing that can remove it, since absence
+    // from a replay cannot take anything down.
+    const fake = fakeSocket();
+    const view = startRun(fake);
+    act(() => {
+      fake.fire('escalation:decision-required', {
+        requestId: 'e1', sectionId: 's1', sectionTitle: 'Section alpha',
+        issues: [], timeoutMs: 300_000,
+      });
+    });
+    await waitFor(() => expect(view.result.current.escalationQueued).toBe(1));
+
+    act(() => { fake.fire('escalation:closed', { requestId: 'e1', sectionId: 's1' }); });
+
+    await waitFor(() => expect(view.result.current.escalationQueued, 'no modal outlives its section').toBe(0));
+  });
+
+  it('closes only the section named, not whichever is first', async () => {
+    // They are all on screen now, so closing "the first" would take down a
+    // prompt somebody may be mid-answer on.
+    const fake = fakeSocket();
+    const view = startRun(fake);
+    act(() => {
+      fake.fire('escalation:decision-required', { requestId: 'e1', sectionId: 's1', issues: [], timeoutMs: 300_000 });
+      fake.fire('escalation:decision-required', { requestId: 'e2', sectionId: 's2', issues: [], timeoutMs: 300_000 });
+    });
+    await waitFor(() => expect(view.result.current.escalationQueued).toBe(2));
+
+    act(() => { fake.fire('escalation:closed', { requestId: 'e2', sectionId: 's2' }); });
+
+    await waitFor(() => expect(view.result.current.escalationQueued).toBe(1));
+    expect(view.result.current.escalations[0]?.requestId, 'the one still parked').toBe('e1');
+  });
+
   it('stamps a question with when it arrived, so the countdown is anchored', async () => {
     // The form shows how long is left, and that arithmetic needs an anchor the
     // server cannot supply: an absolute deadline would be compared against the

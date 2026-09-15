@@ -370,16 +370,18 @@ export default function App() {
         {/* A parked run waiting on a decision. Rendered ahead of the other
             modals because the run is blocked until it is answered — everything
             else can wait, this cannot. */}
-        {chat.escalation && (
+        {chat.escalations.length > 0 && (
           <EscalationModal
-            request={chat.escalation}
+            requests={chat.escalations}
             onResolve={chat.resolveEscalation}
             // Dismissing is 'skip', not silence: the run is parked, so closing
             // the window without an answer would leave it waiting out the full
-            // timeout and then failing the section for no reason.
-            onDismiss={() => chat.resolveEscalation('skip')}
+            // timeout and then failing the section for no reason. Applied to
+            // every section in the window, because that reasoning is about each
+            // of them rather than about whichever was on top.
+            onDismiss={chat.skipAllEscalations}
             // The countdown running out is not a decision — the server already
-            // failed the section, so only clear the prompt.
+            // failed the section, so only clear that prompt.
             onExpire={chat.clearEscalation}
           />
         )}

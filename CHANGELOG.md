@@ -86,6 +86,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or halt. Reported from the field: the panel appeared on the first browser
   action, was dismissed, and never returned.
 
+- **A parked section survives a reload, and no longer hides behind another.**
+  A section that stops and asks for a decision starts a five-minute timer the
+  moment it asks. Two things quietly spent that timer for you. Reloading the
+  page lost the prompt while the server kept the run — nothing replayed it, so
+  there was no way to answer and the section failed when the clock ran out. And
+  a Complex wave dispatches sections concurrently, so several can be parked at
+  once, but only the first was shown and the rest were counted: they were not
+  waiting their turn, they were expiring unseen while you worked through the one
+  on top. Every parked section is now shown, in one window, each with its own
+  deadline and its own controls; and a reload gets them back with the time they
+  have actually got left rather than a fresh five minutes.
+
 - **An escalation can no longer be parked by whoever was told about it.** When
   a section's review timed out, the announcement went out before the gate
   settled — so a listener that threw (a logging sink, a telemetry exporter)

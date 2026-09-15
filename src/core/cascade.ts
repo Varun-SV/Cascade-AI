@@ -487,7 +487,29 @@ export class Cascade extends EventEmitter {
         if (!this.pendingEscalations.delete(requestId)) return;
         if (timeout) clearTimeout(timeout);
         signal?.removeEventListener('abort', onAbort);
+        // RESOLVED FIRST, then a guarded emit — the rule this file now applies
+        // in five places. A listener that throws must not be able to park the
+        // section it is being told about.
         resolve(decision);
+        // Announced for EVERY ending, which is what makes the request safe to
+        // REMEMBER and replay.
+        //
+        // `escalation:timeout` is not enough and never was: an answer arrives
+        // on the socket rather than as an emit, so the replay store never sees
+        // it, and an abort or a teardown settle silently. Without a reliable
+        // delete, a page that reloaded could be handed back a decision that had
+        // already been made — worse than losing it, because answering it a
+        // second time resolves nothing and the section looks answerable when it
+        // is gone.
+        //
+        // The map delete above is what makes this exactly-once, so the answered
+        // path emitting it too costs nothing: that client has already taken its
+        // own modal down.
+        try {
+          this.emit('escalation:closed', { taskId, requestId, sectionId: ctx.sectionId });
+        } catch {
+          // A listener's problem, and the section is already released.
+        }
       };
 
       // Stop / disconnect must unpark the run. T2 has already passed its

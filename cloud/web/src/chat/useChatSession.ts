@@ -260,7 +260,7 @@ export interface EscalationRequest {
  * Identity of a parked escalation. `requestId` when the server supplies it;
  * `sectionId` is the fallback for an older server that predates the id.
  */
-function escalationKey(e: { requestId?: string; sectionId?: string }): string {
+export function escalationKey(e: { requestId?: string; sectionId?: string }): string {
   return e.requestId ?? `section:${e.sectionId ?? ''}`;
 }
 
@@ -1019,6 +1019,20 @@ export function useChatSession(
     // timeout would clear a NEWER prompt the user is mid-answer on.
     const onEscalationTimeout = (e: { requestId?: string; sectionId?: string }) =>
       setEscalations((prev) => prev.filter((x) => escalationKey(x) !== escalationKey(e)));
+    /**
+     * The section is no longer parked, however it stopped being parked.
+     *
+     * The timeout alone was never enough — it is one of four endings, and the
+     * other three (answered, Stop, the run unwinding) settled silently. A modal
+     * left standing on a section that has moved on can be answered into
+     * nothing, and on a page that reconnects it is the only thing that can take
+     * it down, since absence from a replay cannot remove anything.
+     *
+     * The same event the clarification gate got two rounds earlier; this is the
+     * gate that one was copied from.
+     */
+    const onEscalationClosed = (e: { requestId?: string; sectionId?: string }) =>
+      setEscalations((prev) => prev.filter((x) => escalationKey(x) !== escalationKey(e)));
     const onContextApproval = (e: ContextApprovalInfo) => setContextApproval(e);
     const onCompacted = (e: { kind?: string; chunks?: number; foldedTurns?: number; truncated?: boolean }) => {
       setContextApproval(null);
@@ -1258,6 +1272,7 @@ export function useChatSession(
     socket.on('permission:resolved', onPermissionResolved);
     socket.on('escalation:decision-required', onEscalation);
     socket.on('escalation:timeout', onEscalationTimeout);
+    socket.on('escalation:closed', onEscalationClosed);
     socket.on('disconnect', onDisconnect);
     socket.on('context:approval-required', onContextApproval);
     socket.on('context:compacted', onCompacted);
@@ -1275,6 +1290,7 @@ export function useChatSession(
       socket.off('permission:resolved', onPermissionResolved);
       socket.off('escalation:decision-required', onEscalation);
       socket.off('escalation:timeout', onEscalationTimeout);
+      socket.off('escalation:closed', onEscalationClosed);
       socket.off('disconnect', onDisconnect);
       socket.off('context:approval-required', onContextApproval);
       socket.off('context:compacted', onCompacted);
@@ -1849,22 +1865,56 @@ export function useChatSession(
    * never happened and queue a decision with nowhere to land. Distinct from
    * dismissing deliberately, which IS an answer (see resolveEscalation).
    */
-  const clearEscalation = useCallback(() => setEscalations((prev) => prev.slice(1)), []);
+  const clearEscalation = useCallback((key?: string) => setEscalations((prev) => (
+    // BY KEY now that several are on screen at once. Dropping the first was
+    // right when only the first was visible; with all of them rendered, an
+    // older section's expiry would have taken down whichever happened to be
+    // first — quite possibly the one being answered.
+    key === undefined ? prev.slice(1) : prev.filter((x) => escalationKey(x) !== key)
+  )), []);
 
   const resolveEscalation = useCallback(
-    (action: 'retry' | 'skip' | 'guidance', note?: string) => {
-      if (!socket || !escalation) return;
+    (action: 'retry' | 'skip' | 'guidance', note?: string, key?: string) => {
+      if (!socket) return;
+      // Answers the section NAMED, not the one that happens to be first.
+      // Several can be parked at once and all of them are now on screen, so
+      // routing by position would apply one section's decision to another —
+      // and a guidance note meant for different work is worse than no answer.
+      const target = key === undefined ? escalations[0] : escalations.find((x) => escalationKey(x) === key);
+      if (!target) return;
       socket.emit('escalation:decide', {
-        conversationId: escalation.conversationId,
-        ...(escalation.requestId ? { requestId: escalation.requestId } : {}),
+        conversationId: target.conversationId,
+        ...(target.requestId ? { requestId: target.requestId } : {}),
         action,
         ...(note ? { note } : {}),
       });
-      setEscalations((prev) => prev.slice(1));
+      setEscalations((prev) => prev.filter((x) => escalationKey(x) !== escalationKey(target)));
       setStatus(action === 'skip' ? 'Skipping section…' : 'Retrying section…');
     },
-    [socket, escalation],
+    [socket, escalations],
   );
+
+  /**
+   * Close the window on every parked section at once.
+   *
+   * Dismissing meant 'skip' when one prompt was visible, for the reason that
+   * comment gives: the run is parked, so closing without an answer just waits
+   * out the timeout and fails the section anyway. That reasoning applies to
+   * each of them, so it is applied to each of them rather than to whichever
+   * was on top.
+   */
+  const skipAllEscalations = useCallback(() => {
+    if (!socket) return;
+    for (const e of escalations) {
+      socket.emit('escalation:decide', {
+        conversationId: e.conversationId,
+        ...(e.requestId ? { requestId: e.requestId } : {}),
+        action: 'skip',
+      });
+    }
+    setEscalations([]);
+    if (escalations.length > 0) setStatus('Skipping section…');
+  }, [socket, escalations]);
 
   // Answer the extended-context confirm: proceed with (or skip) compacting the
   // oversized input. Either way the run continues — skip just means the model
@@ -1959,7 +2009,8 @@ export function useChatSession(
     setConversationId: selectConversation,
     contextTokens, contextWindow,
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, browserMode, setBrowserMode, approval,
-    escalation, escalationQueued: escalations.length, resolveEscalation, clearEscalation,
+    escalation, escalations, escalationQueued: escalations.length, resolveEscalation, clearEscalation,
+    skipAllEscalations,
     contextApproval, resolveContextApproval, compactionNotice, providerNotice, knowledgeNotice, activity,
     browserLiveView, browserActive, browserTaskId, browserFrame, browserStreaming,
     browserHuman, browserCapturing, browserConfirmed, browserNotice, stopBrowser,

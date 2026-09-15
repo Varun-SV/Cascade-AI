@@ -1637,6 +1637,11 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     socket.emit('escalation:decision-required', { conversationId: conversation.id, ...(e as object) });
   const onEscalationTimeout = (e: unknown) =>
     socket.emit('escalation:timeout', { conversationId: conversation.id, ...(e as object) });
+  // Every ending, not only the timeout — which is what lets the replay store
+  // hold a parked section safely and what takes a dead modal off a page that
+  // was not connected when the section was answered or the run was stopped.
+  const onEscalationClosed = (e: unknown) =>
+    socket.emit('escalation:closed', { conversationId: conversation.id, ...(e as object) });
   const onEscalationDecision = (d: { conversationId?: string; requestId?: string; action?: string; note?: string }) => {
     // BOTH identifiers, via the same predicate the clarification answer uses.
     //
@@ -1664,6 +1669,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   if (interactive) {
     cascade.on('escalation:decision-required', onEscalation);
     cascade.on('escalation:timeout', onEscalationTimeout);
+    cascade.on('escalation:closed', onEscalationClosed);
     socket.on('escalation:decide', onEscalationDecision);
   }
 
@@ -1887,6 +1893,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     socket.off('clarification:answer', onClarificationAnswer);
     cascade.off('escalation:decision-required', onEscalation);
     cascade.off('escalation:timeout', onEscalationTimeout);
+    cascade.off('escalation:closed', onEscalationClosed);
     socket.off('escalation:decide', onEscalationDecision);
     // Before closing the cascade: releasing the provider session is what stops
     // the operator paying for a browser nobody is using, and a run that threw

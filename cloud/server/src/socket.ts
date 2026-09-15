@@ -229,6 +229,17 @@ export interface LiveRun {
    * looking at a spinner for something nobody will ever be asked.
    */
   clarifications?: Map<string, { payload: Record<string, unknown>; askedAt: number }>;
+  /**
+   * Sections parked on a decision, keyed by request id.
+   *
+   * The same shape and the same reason as `clarifications`. This gate was the
+   * one the clarification gate was modelled on, and it is the one that never
+   * got the replay: a reload while a section was parked left the run alive on
+   * the server and the modal gone from the page, with no way to answer until
+   * the five-minute timer failed the section.
+   */
+  escalations?: Map<string, { payload: Record<string, unknown>; askedAt: number }>;
+  escalationsClosed?: Set<string>;
   terminal?: { conversationId?: string; error?: string };
 }
 
@@ -311,6 +322,28 @@ export function rememberForReplay(run: LiveRun, event: string, payload: unknown)
   // no socket was simply dropped, leaving a dead form on screen after
   // reconnection — and because the queue renders oldest-first, in front of
   // every later question the run asks.
+  if (event === 'escalation:decision-required') {
+    const id = p['requestId'];
+    if (typeof id !== 'string') return;
+    (run.escalations ??= new Map()).set(id, { payload: p, askedAt: Date.now() });
+    return;
+  }
+  if (event === 'escalation:closed') {
+    const id = p['requestId'];
+    if (typeof id !== 'string') return;
+    run.escalations?.delete(id);
+    // Remembered as well as removed, for the reason the clarification
+    // tombstones are: a reconnecting page keeps what it had on screen, so
+    // absence from an open-only replay cannot take a dead modal down.
+    const closed = (run.escalationsClosed ??= new Set());
+    closed.add(id);
+    while (closed.size > MAX_REMEMBERED_CLOSURES) {
+      const oldest = closed.values().next();
+      if (oldest.done) break;
+      closed.delete(oldest.value);
+    }
+    return;
+  }
   if (event === 'clarification:required') {
     const id = p['requestId'];
     if (typeof id !== 'string') return;
@@ -418,6 +451,14 @@ export function replaySupervision(run: LiveRun, socket: Pick<Socket, 'emit'>): v
   if (run.control) socket.emit('browser:control', run.control);
   for (const request of run.approvals?.values() ?? []) {
     socket.emit('permission:user-required', request);
+  }
+  // The parked sections, same ordering rule as the questions below: a closure
+  // can take a dead modal down, and an open-only replay could only ever add.
+  for (const requestId of run.escalationsClosed ?? []) {
+    socket.emit('escalation:closed', { requestId });
+  }
+  for (const { payload, askedAt } of run.escalations?.values() ?? []) {
+    socket.emit('escalation:decision-required', remainingDeadline(payload, askedAt));
   }
   // Closures BEFORE openings, so a page that reconnects mid-question ends up
   // showing exactly what is still being asked: the dead ones come down first,
