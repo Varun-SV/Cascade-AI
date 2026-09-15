@@ -148,12 +148,22 @@ describe('Steel', () => {
     expect(calls[0]?.url).toBe('https://steel.test/v1/sessions/sess-1/release');
   });
 
-  it('does not turn a failed release into a failed run', async () => {
-    // Release is cleanup, usually running while a run is already ending. A
-    // provider that is briefly unreachable must not escalate that into an
-    // error the user sees; its own idle timeout collects the session.
+  it('reports a failed release instead of hiding it', async () => {
+    // Release is cleanup, usually running while a run is already ending, and a
+    // provider that is briefly unreachable must never escalate that into an
+    // error the user sees. That property still holds — but it is the CALLER's
+    // to enforce, and it is enforced: `RemoteBrowserController.disposeRun`
+    // catches this and `endRun` still resolves, which its own suite pins.
+    //
+    // Swallowing it here as well destroyed the information irrecoverably. A
+    // release that failed and a release that succeeded were the same event to
+    // every layer above, so a session left RUNNING and BILLING until the
+    // provider's own timeout reaped it was indistinguishable from a clean
+    // handback — and two such sessions, each ending at exactly the 5-minute
+    // default, could not be explained by anything the system knew.
     stubFetch([{ ok: false, status: 503, text: 'upstream down' }]);
-    await expect(new SteelProvider().endSession('sess-1')).resolves.toBeUndefined();
+    await expect(new SteelProvider().endSession('sess-1'))
+      .rejects.toThrow(/503/);
   });
 
   it('escapes a session id rather than splicing it into the path', async () => {

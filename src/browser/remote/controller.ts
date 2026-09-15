@@ -230,6 +230,17 @@ export interface RemoteBrowserControllerOptions {
   /** Told when a run's live view becomes available, so the owner can watch. */
   onLiveView?: (runId: string, liveViewUrl: string | undefined) => void;
   /**
+   * Told when a provider session could not be handed back.
+   *
+   * Release is best-effort by design — a run that has finished must not be
+   * reported as failed because the provider was briefly unreachable — but
+   * best-effort is not the same as unobservable. A release that silently did
+   * not happen leaves a billed browser running until the provider's own
+   * timeout collects it, and without this there is no way to tell that from a
+   * clean handback.
+   */
+  onReleaseFailed?: (runId: string, sessionId: string, err: unknown) => void;
+  /**
    * Something that must finish before this controller may open anything.
    *
    * For ROTATION. A settings change builds a new controller and disposes the
@@ -474,6 +485,8 @@ export class RemoteBrowserController {
   private controlAnnounced = new Map<string, string>();
   /** An embedder that wants every run's live view, told which run each is. */
   private onLiveViewAll: ((runId: string, liveViewUrl: string | undefined) => void) | undefined;
+  /** Told when a provider session could not be handed back. See `disposeRun`. */
+  private onReleaseFailed: ((runId: string, sessionId: string, err: unknown) => void) | undefined;
 
   private runs = new Map<string, RunBrowser>();
   /**
@@ -540,6 +553,7 @@ export class RemoteBrowserController {
     // Kept as its own field rather than folded into the per-run map: it needs
     // the run id, and squeezing it in under a sentinel key lost exactly that.
     this.onLiveViewAll = options.onLiveView;
+    this.onReleaseFailed = options.onReleaseFailed;
     this.ready = options.ready;
   }
 
@@ -1883,7 +1897,14 @@ export class RemoteBrowserController {
     // own page intact. If that ever changes, this is the line that would start
     // terminating somebody else's browser.
     await held.browser.close().catch(() => {});
-    await this.provider.endSession(held.session.id).catch(() => {});
+    // Reported, not discarded. A release that fails leaves a browser running
+    // at the operator's expense until the provider reaps it, and this is the
+    // only moment anything knows it happened — the run is over, the caller is
+    // not waiting on an outcome, and there is nobody left to notice a session
+    // that simply never went away.
+    await this.provider.endSession(held.session.id).catch((err: unknown) => {
+      this.onReleaseFailed?.(runId, held.session.id, err);
+    });
   }
 
   /**

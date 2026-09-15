@@ -88,11 +88,13 @@ export class SteelProvider implements RemoteBrowserProvider {
     // already ending or being torn down; a provider that is briefly unreachable
     // must not turn "the run finished" into "the run failed". The session's own
     // idle timeout collects it on the provider side.
-    try {
-      await this.call('POST', `/v1/sessions/${encodeURIComponent(id)}/release`, undefined, {});
-    } catch {
-      // Nothing useful to do; the provider expires it on its own.
-    }
+    // Rethrown rather than swallowed here. Both callers — `disposeRun` and
+    // `openReserved`'s rollback — already catch, so this cannot turn "the run
+    // finished" into "the run failed"; all the empty catch ever did was make a
+    // failed release indistinguishable from a successful one. It is not: a
+    // release that did not happen leaves a BILLED browser running until the
+    // provider's own timeout collects it, and nothing anywhere said so.
+    await this.call('POST', `/v1/sessions/${encodeURIComponent(id)}/release`, undefined, {});
   }
 
   private async call<T>(method: string, path: string, signal: AbortSignal | undefined, body: unknown): Promise<T> {

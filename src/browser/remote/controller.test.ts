@@ -832,6 +832,36 @@ describe('attached is not the same as watchable', () => {
     expect(seen.at(-1)).toEqual({ active: false });
   });
 
+  it('says so when a provider session could not be handed back', async () => {
+    // Release is best-effort and must stay that way — a finished run must not
+    // be reported as failed because the provider was briefly unreachable — but
+    // best-effort is not the same as unobservable. Both layers used to swallow
+    // the rejection whole, so a release that never happened was indistinguish-
+    // able from a clean handback, and the only evidence was a browser still
+    // running on the provider's dashboard until its own timeout collected it.
+    //
+    // Found while trying to explain two Steel sessions that ended at exactly
+    // 5:00 — the provider's default timeout — with no agent activity in the
+    // last four minutes of either. Nothing in the system could answer whether
+    // the release had failed, which is the gap this closes.
+    const { provider } = fakeProvider();
+    const boom = new Error('Steel POST /v1/sessions/sess-1/release failed: 503');
+    provider.endSession = async () => { throw boom; };
+
+    const failures: Array<{ runId: string; sessionId: string; err: unknown }> = [];
+    const c = new RemoteBrowserController({
+      provider,
+      onReleaseFailed: (runId, sessionId, err) => failures.push({ runId, sessionId, err }),
+    });
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    // Not rejected. The run is over either way — that contract is unchanged.
+    await expect(c.endRun('run-A')).resolves.toBeUndefined();
+
+    expect(failures, 'the operator is told, once, which session is still running')
+      .toEqual([{ runId: 'run-A', sessionId: 'sess-1', err: boom }]);
+  });
+
   it('re-advertises the browser on every action, not only when it is created', async () => {
     // A browser is created ONCE per run, and this used to be the only moment it
     // was announced — so a client with no panel for this run never got another

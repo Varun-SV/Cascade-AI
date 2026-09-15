@@ -224,6 +224,23 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
       controller: new RemoteBrowserController({
         provider,
         ...(settings.maxSessions ? { maxSessions: settings.maxSessions } : {}),
+        // Logged here rather than through this attach's `warn`, deliberately.
+        // The controller is module-scoped and outlives every run on it, so
+        // closing over one run's callback would pin that run's socket for the
+        // life of the process — the same leak the listener registration below
+        // is careful to avoid.
+        //
+        // The session id is what makes this actionable: it is the column the
+        // provider's own dashboard is keyed by, so an operator can see the
+        // browser still running and match it to the release that failed. It is
+        // not a capability — the live-view URL is, and is never logged.
+        onReleaseFailed: (runId, sessionId, err) => {
+          console.error(
+            `[browser ${runId}] provider session ${sessionId} was NOT released; `
+            + 'it will run until the provider times it out and is billable until then:',
+            err,
+          );
+        },
         // Also inherit a reset/retirement already in flight even when there is
         // no current `shared` entry to rotate in this call.
         ready: retiring ?? retirementBarrier,
