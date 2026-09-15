@@ -1638,16 +1638,26 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   const onEscalationTimeout = (e: unknown) =>
     socket.emit('escalation:timeout', { conversationId: conversation.id, ...(e as object) });
   const onEscalationDecision = (d: { conversationId?: string; requestId?: string; action?: string; note?: string }) => {
-    // One socket can carry several conversations; only answer for this run.
-    if (d?.conversationId && d.conversationId !== conversation.id) return;
+    // BOTH identifiers, via the same predicate the clarification answer uses.
+    //
+    // This handler had the permissive shape that `answersThisRun` was written
+    // to replace, and it kept it: a conversation id was rejected only when
+    // PRESENT AND WRONG, so a message carrying none passed every run's handler
+    // on the socket, and an absent request id then resolved the OLDEST parked
+    // section in each. One malformed `{ action: 'skip' }` could skip work in
+    // conversations it never named.
+    //
+    // I fixed that for clarifications when it was reported and did not come
+    // back to the gate the clarification gate was modelled on — which is the
+    // whole of this finding: the copy was corrected and the original was not.
+    // Sharing the predicate rather than repeating the check is what stops the
+    // two drifting apart again.
+    if (!answersThisRun(d, conversation.id)) return;
     if (d?.action === 'retry' || d?.action === 'skip' || d?.action === 'guidance') {
-      // requestId picks the parked section: a Complex run dispatches sections
-      // concurrently, so two can be waiting and an unkeyed answer would resolve
-      // whichever happened to be first in the map.
       cascade.resolveEscalation(
         d.action,
         typeof d.note === 'string' ? d.note : undefined,
-        typeof d.requestId === 'string' ? d.requestId : undefined,
+        d.requestId,
       );
     }
   };
