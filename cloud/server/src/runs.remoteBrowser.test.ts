@@ -192,8 +192,29 @@ describe('the Browser control is advertised only where one can be built', () => 
     expect(providerIsUsable({ provider: 'cdp', url: 'ws://browser.internal:3000' })).toBe(true);
   });
 
-  it('is advertised for steel, which defaults its own endpoint', () => {
-    expect(providerIsUsable({ provider: 'steel' })).toBe(true);
+  it('is not advertised for the hosted Steel API with no credential', () => {
+    // This assertion used to read `is advertised for steel, which defaults its
+    // own endpoint` and expect TRUE. Defaulting the URL is not the same as
+    // being able to reach a browser: the hosted API refuses an unauthenticated
+    // request, so the control appeared and the first action failed on
+    // authentication.
+    //
+    // It was also the SECOND copy of that claim. I corrected the one in
+    // `app.test.ts` and missed this one, which is the same mistake the rule
+    // itself is about — a thing fixed at one of its two doors — committed
+    // while writing the fix for exactly that.
+    expect(providerIsUsable({ provider: 'steel' })).toBe(false);
+  });
+
+  it('is advertised for the hosted Steel API with a credential', () => {
+    expect(providerIsUsable({ provider: 'steel', apiKey: 'sk-test' })).toBe(true);
+  });
+
+  it('is advertised for a self-hosted steel with no credential', () => {
+    // Only the hosted FALLBACK is refused. A Steel behind a private network or
+    // its own gateway legitimately has no key, and demanding one for a URL the
+    // operator supplied would break a working deployment to guard a default.
+    expect(providerIsUsable({ provider: 'steel', url: 'https://steel.internal' })).toBe(true);
   });
 
   it('is not advertised for a steel base that is not an http(s) URL', () => {
