@@ -49,6 +49,33 @@ import type { RemoteBrowserProvider, RemoteBrowserSession } from './provider.js'
 
 const DEFAULT_BASE = 'https://api.steel.dev';
 
+/**
+ * Whether this configuration will end up talking to Steel's hosted API.
+ *
+ * Lives HERE, next to the default it has to agree with, rather than in the
+ * caller that needs the answer. The hosted endpoint requires a credential and a
+ * self-hosted one usually does not, so something has to decide which a given
+ * config is — and a server-side copy of that decision is a second definition of
+ * "hosted" free to drift from the one that actually picks the URL.
+ *
+ * Three configs reach the hosted API and they do not look alike: no url at all,
+ * an empty one (`opts.url || DEFAULT_BASE` takes the default for both), and the
+ * hosted host typed out in full. Asking about the RESOLVED destination answers
+ * all three at once, which asking about the presence of `url` cannot.
+ *
+ * Compared by hostname, so a trailing slash, a port, a path or a different
+ * scheme cannot disguise it. A URL this cannot parse is not the hosted API —
+ * and is refused earlier anyway, for being unparseable.
+ */
+export function isHostedSteel(url?: string): boolean {
+  if (!url) return true;
+  try {
+    return new URL(url).hostname.toLowerCase() === new URL(DEFAULT_BASE).hostname;
+  } catch {
+    return false;
+  }
+}
+
 /** How long to wait for the provider to hand back a session. */
 const CREATE_TIMEOUT_MS = 60_000;
 

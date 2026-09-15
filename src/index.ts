@@ -72,7 +72,7 @@ export type {
 export { RemoteBrowserController } from './browser/remote/controller.js';
 export type { BrowserFrame, BrowserInput, BrowserControlState } from './browser/remote/controller.js';
 export { GenericCdpProvider, isCdpEndpoint } from './browser/remote/generic-cdp.js';
-export { SteelProvider } from './browser/remote/steel.js';
+export { SteelProvider, isHostedSteel } from './browser/remote/steel.js';
 export { BrowserLease } from './browser/lease.js';
 export type { RemoteBrowserProvider, RemoteBrowserSession, RemoteBrowserConfig } from './browser/remote/provider.js';
 export type { CurrentPageProvider, CurrentPageSnapshot } from './tools/current-page.js';

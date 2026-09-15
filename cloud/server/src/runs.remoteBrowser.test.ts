@@ -210,6 +210,25 @@ describe('the Browser control is advertised only where one can be built', () => 
     expect(providerIsUsable({ provider: 'steel', apiKey: 'sk-test' })).toBe(true);
   });
 
+  it('is not advertised for the hosted URL typed out in full', () => {
+    // The fourth shape, and the one that showed the first three fixes were all
+    // asking the wrong question. Requiring a key only when `url` was ABSENT
+    // treated "no url" and "https://api.steel.dev" as different configurations
+    // when they are the same destination — so naming the hosted endpoint
+    // explicitly bought an unauthenticated provider and an inert control.
+    //
+    // The check now asks where the request actually goes, which answers every
+    // spelling of it at once.
+    expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev' })).toBe(false);
+    expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev/' }), 'a trailing slash is not a different host').toBe(false);
+    expect(providerIsUsable({ provider: 'steel', url: 'https://API.Steel.DEV' }), 'nor is shouting').toBe(false);
+    expect(providerIsUsable({ provider: 'steel', url: '' }), 'an empty url takes the default too').toBe(false);
+  });
+
+  it('is advertised for the hosted URL when a credential comes with it', () => {
+    expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev', apiKey: 'sk-test' })).toBe(true);
+  });
+
   it('is advertised for a self-hosted steel with no credential', () => {
     // Only the hosted FALLBACK is refused. A Steel behind a private network or
     // its own gateway legitimately has no key, and demanding one for a URL the

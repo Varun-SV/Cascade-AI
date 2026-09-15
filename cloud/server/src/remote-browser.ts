@@ -23,6 +23,7 @@ import {
   RemoteBrowserController,
   GenericCdpProvider,
   SteelProvider,
+  isHostedSteel,
   isCdpEndpoint,
   type BrowserInput,
   type Cascade,
@@ -449,19 +450,23 @@ function buildProvider(
   }
   // The hosted API needs a key; a self-hosted one usually does not.
   //
-  // "An absent url means the hosted API" is written above as though it settles
-  // the matter, and it does not: falling back to `api.steel.dev` with no
-  // credential produces a provider that builds, advertises a Browser control,
-  // and then fails authentication on the first request. That is the third
-  // shape of the same inert control — after `cdp` with no endpoint and `steel`
-  // with a malformed one — and the reason it survived two rounds of fixing
-  // exactly this is that both earlier fixes asked "is the URL valid" rather
-  // than "can this configuration actually reach a browser".
+  // Asked of the RESOLVED DESTINATION, not of the shape of the config. This is
+  // the fourth time this gate has been wrong and the first three were all the
+  // same error — each fix asked a question about the fields (is there a url? is
+  // it well-formed? is it absent?) when the thing that decides whether a
+  // browser can be opened is where the request actually goes. "No url" and
+  // "`https://api.steel.dev` typed out in full" are the same destination and
+  // were given opposite answers.
   //
-  // Only the fallback is refused. A self-hosted Steel behind a private network
-  // or its own gateway legitimately has no key, so requiring one for a URL the
-  // operator supplied would break a working deployment to guard a default.
-  if (!settings.url && !settings.apiKey) {
+  // `isHostedSteel` lives with `SteelProvider`, beside the default it has to
+  // agree with. A copy of that rule here would be a second definition of
+  // "hosted" with its own opinion, which is how this drifted in the first
+  // place.
+  //
+  // Only the hosted endpoint is refused. A self-hosted Steel behind a private
+  // network or its own gateway legitimately has no key, so requiring one for
+  // somebody else's endpoint would break a working deployment to guard ours.
+  if (isHostedSteel(settings.url) && !settings.apiKey) {
     warn?.('remoteBrowser.apiKey is required for the hosted Steel API; set it, or point remoteBrowser.url at a self-hosted endpoint');
     return null;
   }
