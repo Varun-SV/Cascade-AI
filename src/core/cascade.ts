@@ -462,6 +462,41 @@ export class Cascade extends EventEmitter {
    */
   private pendingClarifications = new Map<string, (result: ClarificationResult) => void>();
 
+  /**
+   * Put a gate's opening question to its listeners, and NOTICE when one fails.
+   *
+   * `emit` cannot do this job. It calls listeners synchronously and discards
+   * what they return, so an `async` listener — the ordinary shape for anything
+   * that has to reach a socket or a UI — does not fail in a way `emit` reports:
+   * it returns a REJECTED PROMISE that nobody is holding. The `try` around the
+   * emit sees nothing, the gate is never told delivery failed, and it parks for
+   * its full timeout while Node raises an unhandled rejection that can take the
+   * process down.
+   *
+   * `onFailed` is called for either shape, and it is safe to call more than
+   * once: both gates route it to `settle`, which is guarded by a map delete, so
+   * the first failure wins and the rest are no-ops.
+   *
+   * PER LISTENER, not around the loop. `emit` stops dispatching at the first
+   * throw, so one broken host used to cost a working one its notification —
+   * the same reason `announceLiveView` delivers its two listeners separately.
+   * A synchronous failure settles the gate immediately; an asynchronous one
+   * settles it when the rejection arrives, which is still far better than the
+   * two-minute park it replaces.
+   */
+  private deliverGate(event: string, payload: unknown, onFailed: () => void): void {
+    for (const listener of this.listeners(event)) {
+      try {
+        const out = (listener as (p: unknown) => unknown)(payload);
+        if (out && typeof (out as PromiseLike<unknown>).then === 'function') {
+          void Promise.resolve(out).catch(() => { onFailed(); });
+        }
+      } catch {
+        onFailed();
+      }
+    }
+  }
+
   private async requestEscalationDecision(
     ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string },
     taskId: string,
@@ -549,8 +584,9 @@ export class Cascade extends EventEmitter {
       // listener that throws on receipt did not receive it. `automatic` is
       // what keeps T2 from reading this as a person having accepted the
       // section, which nobody did.
-      try {
-        this.emit('escalation:decision-required', {
+      this.deliverGate(
+        'escalation:decision-required',
+        {
           taskId,
           requestId,
           sectionId: ctx.sectionId,
@@ -558,10 +594,9 @@ export class Cascade extends EventEmitter {
           issues: ctx.issues,
           summary: ctx.summary,
           timeoutMs: ESCALATION_DECISION_TIMEOUT_MS,
-        });
-      } catch {
-        settle({ action: 'skip', automatic: true });
-      }
+        },
+        () => settle({ action: 'skip', automatic: true }),
+      );
     });
   }
 
@@ -722,15 +757,11 @@ export class Cascade extends EventEmitter {
       // `settle` is already in the map, so if some listeners rendered the form
       // before another threw, the `clarification:closed` it emits takes those
       // copies down too.
-      try {
-        this.emit('clarification:required', {
-          requestId,
-          questions,
-          timeoutMs: CLARIFICATION_TIMEOUT_MS,
-        });
-      } catch {
-        settle(none('no-listener'));
-      }
+      this.deliverGate(
+        'clarification:required',
+        { requestId, questions, timeoutMs: CLARIFICATION_TIMEOUT_MS },
+        () => settle(none('no-listener')),
+      );
     });
   }
 

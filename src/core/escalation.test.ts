@@ -366,4 +366,27 @@ describe('escalation gate', () => {
       { taskId: 'task-1', requestId: openedFor, sectionId: 'a' },
     ]);
   });
+
+  it('releases the section when an async listener REJECTS, not only when it throws', async () => {
+    // The twin of the clarification case, and the one with more to lose: an
+    // escalation that never settles holds a T2 section and its worker for the
+    // full five minutes. `emit` discards what a listener returns, so an async
+    // host failing was invisible to the guard around it.
+    //
+    // Real timers and no advance: if the rejection did not settle the gate,
+    // this hangs rather than passes.
+    const escaped: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { escaped.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const c = new Cascade(config, '/tmp');
+      c.on('escalation:decision-required', async () => { throw new Error('the socket is down'); });
+
+      await expect(gateOf(c)(ctx('a'), 'task-1')).resolves.toEqual({ action: 'skip', automatic: true });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(escaped, 'and nothing reached the process').toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
 });

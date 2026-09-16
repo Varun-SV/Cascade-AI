@@ -1728,10 +1728,18 @@ describe('a run ending takes down its own gates and nobody else\'s', () => {
     expect(view.result.current.escalations, 'and A is what gets settled').toEqual([]);
   });
 
-  it('claims nothing when several runs came back and none of them is on screen', async () => {
-    // The adoption block refuses to guess between concurrent runs, and the
-    // origin has to refuse for the same reason — settling the wrong
-    // conversation is worse than settling none.
+  it('settles every run the resume named, not whichever one it picked', async () => {
+    // This assertion used to be the weaker one — that several concurrent runs
+    // meant claiming NOTHING, on the reasoning that settling the wrong
+    // conversation beats settling none. That was a false choice: the report
+    // that ends them carries no id precisely because it ends them ALL, so
+    // keeping every named origin settles exactly the runs this pane is
+    // answerable for and guesses about none of them.
+    //
+    // Picking one was the actual harm. The ack-less ending clears the shared
+    // busy and ack-lost state whichever conversation it chose, so the runs it
+    // did not choose were left holding approvals, questionnaires and parked
+    // sections with nothing that would ever come back for them.
     const fake = fakeSocket();
     const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
 
@@ -1740,14 +1748,68 @@ describe('a run ending takes down its own gates and nobody else\'s', () => {
       fake.fire('escalation:decision-required', {
         conversationId: 'convo-A', requestId: 'e1', sectionId: 's1', issues: [], timeoutMs: 300_000,
       });
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-B', requestId: 'e2', sectionId: 's2', issues: [], timeoutMs: 300_000,
+      });
     });
     act(() => { fake.fire('run:resumed', { active: 0, finished: [] }); });
 
     act(() => { view.result.current.setConversationId('convo-A'); });
+    expect(view.result.current.escalations, 'A is settled').toEqual([]);
+    act(() => { view.result.current.setConversationId('convo-B'); });
+    expect(view.result.current.escalations, 'and so is B, which used to be left behind').toEqual([]);
+  });
+
+  it('leaves no origin behind when the send is refused before it goes out', async () => {
+    // The origin used to be recorded at the top of `runChat`, before the
+    // authoritative frame-size check. A send that check rejects emits nothing
+    // and will never end — but it left this pane's conversation sitting in the
+    // origin, so the next run INHERITED through a reconnect found it occupied
+    // and an ack-less ending settled the conversation of a send that never
+    // happened, while the run that really ended went unreconciled.
+    //
+    // A payload of backslashes is the case the two checks exist to separate:
+    // the raw text is under the limit and its JSON encoding is not.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-X'));
+
+    act(() => { void view.result.current.send({ prompt: '\\'.repeat(1_000_000) }); });
+    expect(fake.sent.filter((m) => m.event === 'chat:run'), 'nothing went out').toEqual([]);
+    expect(view.result.current.error, 'and the user was told why').toBeTruthy();
+
+    // Now a run arrives that this pane did not start.
+    act(() => { fake.fire('run:resumed', { active: 1, active_conversations: ['convo-A'] }); });
+    act(() => {
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-A', requestId: 'e1', sectionId: 's1', issues: [], timeoutMs: 300_000,
+      });
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-X', requestId: 'ex', sectionId: 's2', issues: [], timeoutMs: 300_000,
+      });
+    });
+    act(() => { fake.fire('run:resumed', { active: 0, finished: [] }); });
+
     expect(
       view.result.current.escalations.map((e) => e.requestId),
-      'nothing was picked, so nothing was cleared',
-    ).toEqual(['e1']);
+      'the refused send did not settle the chat it was typed in',
+    ).toEqual(['ex']);
+    act(() => { view.result.current.setConversationId('convo-A'); });
+    expect(view.result.current.escalations, 'the inherited run is what ended').toEqual([]);
+  });
+
+  it('adopts nothing when several runs ended and the pane has no conversation', async () => {
+    // Settling every run is a fact; deciding which transcript to SHOW is still
+    // a guess, and the pane refuses it for the same reason `active_conversations`
+    // refuses to adopt one of several.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { fake.fire('run:resumed', { active: 1, active_conversations: ['convo-A', 'convo-B'] }); });
+    vi.mocked(getMessages).mockClear();
+    act(() => { fake.fire('run:resumed', { active: 0, finished: [] }); });
+
+    expect(view.result.current.conversationId, 'no chat was picked for the pane').toBeUndefined();
+    expect(vi.mocked(getMessages), 'and no transcript was loaded into it').not.toHaveBeenCalled();
   });
 
   it('does not pull a run\'s transcript into the chat the user moved to', async () => {

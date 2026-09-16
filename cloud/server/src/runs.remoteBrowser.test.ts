@@ -360,6 +360,27 @@ describe('the Browser control is advertised only where one can be built', () => 
     expect(providerIsUsable({ provider: 'steel', url: 'https://steel.internal/v1' }), 'legitimate for a self-hosted gateway').toBe(true);
   });
 
+  it('is not advertised for the hosted endpoint over cleartext', () => {
+    // The only finding on this predicate that is a SECURITY one rather than an
+    // availability one. `http://api.steel.dev` parses, addresses the endpoint
+    // and is recognised as hosted — so the key gate is satisfied and the
+    // credential goes out in cleartext on the very first request. A redirect to
+    // https cannot save it: the header is already on the wire.
+    expect(providerIsUsable({ provider: 'steel', url: 'http://api.steel.dev', apiKey: 'sk-test' })).toBe(false);
+    expect(providerIsUsable({ provider: 'steel', url: 'http://api.steel.dev/' }), 'with or without a key').toBe(false);
+    expect(providerIsUsable({ provider: 'steel', url: 'http://api.steel.dev.', apiKey: 'sk-test' }), 'and however the host is spelled').toBe(false);
+    // The canonical spelling is unaffected, including the default that is used
+    // when no url is given at all.
+    expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev', apiKey: 'sk-test' })).toBe(true);
+    expect(providerIsUsable({ provider: 'steel', apiKey: 'sk-test' }), 'the default is https').toBe(true);
+    // ONLY the hosted endpoint. Plain http is exactly right for a self-hosted
+    // Steel on a private network, and refusing it would break working
+    // deployments to guard a service they are not talking to — the mirror
+    // mistake this predicate has made before.
+    expect(providerIsUsable({ provider: 'steel', url: 'http://steel.internal' }), 'self-hosted http is legitimate').toBe(true);
+    expect(providerIsUsable({ provider: 'steel', url: 'http://steel.internal:8080', apiKey: 'sk-test' }), 'key or no key').toBe(true);
+  });
+
   it('is not advertised for a credential that cannot be sent as a header', () => {
     // The env schema trims, which removes surrounding whitespace and nothing
     // else — so a key pasted out of a wrapped terminal or a here-doc can carry

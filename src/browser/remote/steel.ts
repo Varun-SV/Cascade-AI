@@ -112,10 +112,25 @@ export function isUsableSteelBase(url: string): boolean {
     // whatever the base looked like component by component.
     if (built.search !== '' || built.hash !== '') return false;
     if (!built.pathname.endsWith(PROBE_PATH)) return false;
-    // A path prefix is legitimate for a self-hosted gateway and impossible for
-    // the hosted service, whose endpoints are at the root — so the same prefix
-    // is correct for one base and broken for another.
-    if (isHostedSteel(url) && built.pathname !== PROBE_PATH) return false;
+    if (isHostedSteel(url)) {
+      // A path prefix is legitimate for a self-hosted gateway and impossible
+      // for the hosted service, whose endpoints are at the root — so the same
+      // prefix is correct for one base and broken for another.
+      if (built.pathname !== PROBE_PATH) return false;
+      // AND THE SCHEME, for the same reason and a worse consequence.
+      //
+      // `http://api.steel.dev` parses, addresses the endpoint, and is hosted —
+      // so the key gate is satisfied and the credential goes out in cleartext
+      // on the very first request, before any redirect could upgrade it. A
+      // redirect does not help: the header is already on the wire.
+      //
+      // Only the HOSTED endpoint. Plain http is exactly right for a self-hosted
+      // Steel on a private network, and refusing it would break working
+      // deployments to guard a service they are not talking to — the mirror
+      // mistake this predicate has made before. But there is no configuration
+      // in which cleartext to `api.steel.dev` is what an operator meant.
+      if (u.protocol !== 'https:') return false;
+    }
     return true;
   } catch {
     return false;

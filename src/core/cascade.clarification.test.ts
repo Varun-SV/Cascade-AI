@@ -318,4 +318,42 @@ describe('Cascade.askUser — a question that cannot hang the run', () => {
     expect(drawnFor, 'the first host did render it').toBeTruthy();
     expect(closed, 'and is told to take it down').toEqual([{ requestId: drawnFor }]);
   });
+
+  it('settles when an async listener REJECTS, which emit cannot even see', async () => {
+    // A host that has to reach a socket or a browser is `async`, and an async
+    // function does not throw — it returns a rejected promise. `emit` calls
+    // listeners synchronously and discards what they return, so the guard
+    // around it saw nothing: the gate stayed parked for its full two minutes
+    // while Node raised an unhandled rejection that can take the host down.
+    //
+    // Asserted with real timers and no advance, so a pass cannot come from the
+    // timeout: if the rejection did not settle it, this test hangs rather than
+    // succeeds.
+    const escaped: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { escaped.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const c = new Cascade(baseConfig, '/tmp');
+      c.on('clarification:required', async () => { throw new Error('the socket is down'); });
+
+      await expect(c.askUser(ONE)).resolves.toEqual({ outcome: 'no-listener', answers: [] });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(escaped, 'and nothing reached the process').toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('still reaches the listeners after one that throws', async () => {
+    // `emit` stops dispatching at the first throw, so one broken host cost a
+    // working one its notification — the same reason the live-view announcer
+    // delivers its two listeners separately.
+    const c = new Cascade(baseConfig, '/tmp');
+    const reached: string[] = [];
+    c.on('clarification:required', () => { throw new Error('first host is down'); });
+    c.on('clarification:required', () => { reached.push('second'); });
+
+    await expect(c.askUser(ONE)).resolves.toEqual({ outcome: 'no-listener', answers: [] });
+    expect(reached, 'the working host was still told').toEqual(['second']);
+  });
 });

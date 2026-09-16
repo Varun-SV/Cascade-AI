@@ -397,11 +397,18 @@ export function useChatSession(
    * so the replacement socket reports `active: 0` with an empty `finished`.
    * Both then fell through to whatever was on screen.
    *
-   * Overwritten by the next `runChat` rather than cleared at the ending: `busy`
-   * allows one run at a time per pane, so it always names the pane's current or
-   * last run, which is exactly what an ending is asking about.
+   * A SET, because a resume can hand this pane more than one. `busy` allows the
+   * pane to START only one run, but `run:resumed` can report several already
+   * live — and then a single slot has to pick, which is a guess either way:
+   * choose one and the others' approvals, questionnaires and parked sections
+   * are never reconciled when the ack-less ending settles; choose none and
+   * nothing is. Keeping all of them means the ending settles exactly the runs
+   * this pane is answerable for.
+   *
+   * Emptied at every ending rather than left to be overwritten, so a finished
+   * run cannot be mistaken for an inherited one on the next resume.
    */
-  const runOriginRef = useRef<string | undefined>(undefined);
+  const runOriginsRef = useRef<Set<string>>(new Set());
   /** The conversation this pane's events belong to — known, or adopted below. */
   const activeConversationId = (): string | undefined =>
     conversationIdRef.current ?? pendingConversationIdRef.current;
@@ -412,9 +419,9 @@ export function useChatSession(
     if (typeof convo === 'string' && convo) {
       pendingConversationIdRef.current = convo;
       // The same id, kept for a different question and a longer life — see
-      // `runOriginRef`. This is the only place a first turn ever learns the id
+      // `runOriginsRef`. This is the only place a first turn ever learns the id
       // the server minted for it.
-      runOriginRef.current = convo;
+      runOriginsRef.current.add(convo);
     }
   };
   /**
@@ -1450,27 +1457,37 @@ export function useChatSession(
     // anywhere. Fall back to the pane and a user who moved to B has B's live
     // approvals, questionnaires and sections settled, B's transcript reloaded,
     // and A's answer never reconciled.
-    const ended = cid ?? runOriginRef.current;
-    // Retired here, so the `??=` in `run:resumed` cannot mistake a finished
+    // ALL of them, not one. A resume can hand this pane several live runs, and
+    // when the report that ends them carries no id it ends every one of them —
+    // so settling only a chosen conversation left the others' approvals,
+    // questionnaires and parked sections standing while the shared busy and
+    // ack-lost state was cleared out from under them.
+    const ended = cid ? [cid] : [...runOriginsRef.current];
+    // Retired here, so the seeding in `run:resumed` cannot mistake a finished
     // run's conversation for an inherited one's.
-    runOriginRef.current = undefined;
-    // Before the early return, because no-id is the case that needs it most: a
-    // first turn whose ack was lost is holding gates naming a conversation this
-    // pane never learned, and nothing later can reach them. `settleConversation`
+    runOriginsRef.current = new Set();
+    // Before the early return, because the empty case needs it most: a first
+    // turn whose ack was lost is holding gates naming a conversation this pane
+    // never learned, and nothing later can reach them. `settleConversation`
     // takes no-id as a case rather than a reason to do nothing.
-    settleConversation(ended);
-    if (!ended) return;
-    // Adoption is the pane's business, and only when the pane has no
-    // conversation of its own or already is this one. `run:resumed`'s handler
-    // has this guard at its call site; the other three endings did not, so a
+    if (ended.length === 0) { settleConversation(undefined); return; }
+    for (const id of ended) settleConversation(id);
+    // Adoption and the reload are the PANE's business, and a different question
+    // from which runs ended. Only this pane's own conversation, and only when
+    // it is one of the runs that just finished — `run:resumed`'s handler had
+    // this guard at its call site and the other three endings did not, so a
     // terminal event for the run you walked away from could pull its transcript
-    // into the chat you walked to.
+    // into the chat you walked to. A blank pane adopts only when there is
+    // exactly one candidate; with several there is nothing to pick.
     const mine = conversationIdRef.current;
-    if (mine && mine !== ended) return;
+    const show = mine
+      ? (ended.includes(mine) ? mine : undefined)
+      : (ended.length === 1 ? ended[0] : undefined);
+    if (!show) return;
     pendingConversationIdRef.current = undefined;
     awaitingFirstTurnRef.current = false;
-    conversationIdRef.current = ended;
-    setConversationId(ended);
+    conversationIdRef.current = show;
+    setConversationId(show);
     // Every question this run was holding is over, whatever it was told —
     // approvals, questionnaires and parked sections alike, and all three by
     // conversation. The rule is `settleConversation`'s; restating any part of
@@ -1484,7 +1501,7 @@ export function useChatSession(
     // tombstone set here would make correctness contingent on it — and it is
     // bounded at 32, so a run that asked more than that could evict the one id
     // that mattered and leave the dead form standing again.
-    void reloadActivePath(ended);
+    void reloadActivePath(show);
   }, [reloadActivePath, settleConversation]);
 
   // A reconnect re-reads the transcript, and settles what the lost ack cannot.
@@ -1597,15 +1614,24 @@ export function useChatSession(
         // Nothing named at all is an older server, and the pane's own id is
         // then the only thing available; it is right whenever this pane is the
         // one that started the run.
-        const mine = conversationIdRef.current;
-        const onTheWire = named.length === 1
-          ? named[0]
-          : (mine && named.includes(mine) ? mine : undefined);
-        // `??=`, not `=`. A pane that started its own run already knows whose it
-        // is, and a user who moved to another chat meanwhile would otherwise
-        // have this overwrite A's origin with B — re-creating, through the
-        // reconnect path, the exact bug the origin was introduced to fix.
-        runOriginRef.current ??= onTheWire ?? (named.length === 0 ? mine : undefined);
+        // EVERY run the resume named, not a chosen one. Collapsing several to
+        // the pane's own id made the ack-less ending settle that conversation
+        // and clear the shared busy and ack-lost state, leaving the other runs'
+        // gates standing with nothing left that would ever come back for them.
+        //
+        // Only when this pane is not already answerable for a run of its own —
+        // the same reason the assignment was `??=`: a user who moved to another
+        // chat would otherwise have a reconnect replace A's origin with B, the
+        // exact bug the origin was introduced to fix.
+        //
+        // Nothing named at all is an older server, and the pane's own id is
+        // then the only thing available; it is right whenever this pane is the
+        // one that started the run.
+        if (runOriginsRef.current.size === 0) {
+          const mine = conversationIdRef.current;
+          for (const id of named) runOriginsRef.current.add(id);
+          if (named.length === 0 && mine) runOriginsRef.current.add(mine);
+        }
         return;
       }
       // Nothing running. On a page that WAS running something, the block below
@@ -1799,10 +1825,6 @@ export function useChatSession(
       // carries it. Armed only here: adoption is a thing this pane does for a
       // run it started, never something an arriving event can do to it.
       awaitingFirstTurnRef.current = !conversationIdRef.current;
-      // WHICH CONVERSATION THIS RUN IS FOR, decided here rather than read back
-      // at the ending — see `runOriginRef`. Undefined on a first turn, and
-      // adoption fills it in when the server's id arrives.
-      runOriginRef.current = conversationIdRef.current;
       setBusy(true);
       setError(null);
       setStatus('Sizing up the task…');
@@ -1905,6 +1927,19 @@ export function useChatSession(
           setMessages(transcriptBeforeSend);
           return;
         }
+        // WHICH CONVERSATION THIS RUN IS FOR, recorded HERE — immediately
+        // before the emit, and after every local refusal above it.
+        //
+        // It used to be set at the top of `runChat`, which meant a send the
+        // frame-size check rejected still left an origin behind: nothing was
+        // emitted, nothing would ever end, and the next run inherited through a
+        // reconnect found the ref occupied — so an ack-less ending settled the
+        // conversation of a send that never happened.
+        //
+        // Empty on a first turn; adoption fills it in when the server's id
+        // arrives. Replaces whatever a resume left, because this pane starting
+        // a run makes that run the one it is answerable for.
+        runOriginsRef.current = new Set(conversationIdRef.current ? [conversationIdRef.current] : []);
         socket.emit('chat:run', payload, onAck);
       };
 
@@ -1914,8 +1949,8 @@ export function useChatSession(
           // Read once and retired, for both branches below: the run is over
           // whichever way this ack goes, and a leftover origin would let the
           // `??=` in `run:resumed` mistake it for an inherited run's.
-          const origin = runOriginRef.current;
-          runOriginRef.current = undefined;
+          const origins = [...runOriginsRef.current];
+          runOriginsRef.current = new Set();
           setBusy(false);
           setStatus(null);
           setApproval(null);
@@ -1949,10 +1984,11 @@ export function useChatSession(
             // `settleConversation` then drops only the unanswerable unkeyed
             // entries, and the server announces every gate it releases at
             // teardown, so nothing is left holding a dead control either way.
-            const failed = ack.conversationId ?? origin;
+            const failed = ack.conversationId ? [ack.conversationId] : origins;
             pendingConversationIdRef.current = undefined;
             awaitingFirstTurnRef.current = false;
-            settleConversation(failed);
+            if (failed.length === 0) settleConversation(undefined);
+            for (const id of failed) settleConversation(id);
             return;
           }
           if (typeof ack.totalTokens === 'number') setLastTokens(ack.totalTokens);
