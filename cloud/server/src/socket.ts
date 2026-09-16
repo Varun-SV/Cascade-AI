@@ -921,8 +921,14 @@ export function attachSocket(
     // user is most likely to hit. Older clients send no payload at all and get
     // exactly the previous behaviour.
     socket.on('chat:stop', (payload?: unknown) => {
-      const asked = (payload ?? {}) as { conversationId?: unknown; runId?: unknown };
-      const askedRun = typeof asked.runId === 'string' && asked.runId ? asked.runId : undefined;
+      const asked = (payload ?? {}) as { conversationId?: unknown; runIds?: unknown };
+      // A LIST, because one Stop button in one chat can honestly mean several
+      // runs: two of them can share the conversation on screen, and the client
+      // has no way to offer a choice between them. Naming them is still exact —
+      // it is the conversation fallback that was not.
+      const askedRuns = Array.isArray(asked.runIds)
+        ? asked.runIds.filter((id): id is string => typeof id === 'string' && !!id)
+        : [];
       const only = typeof asked.conversationId === 'string' && asked.conversationId
         ? asked.conversationId
         : undefined;
@@ -935,8 +941,9 @@ export function attachSocket(
       // A named run that is not here is a run that already ended. Aborting
       // everything else instead would be the original bug wearing the fix's
       // clothes, so a miss stops nothing.
-      if (askedRun) {
-        for (const r of activeRuns) if (r.runId === askedRun) r.controller.abort();
+      if (askedRuns.length > 0) {
+        const wanted = new Set(askedRuns);
+        for (const r of activeRuns) if (wanted.has(r.runId)) r.controller.abort();
         return;
       }
       for (const r of activeRuns) {

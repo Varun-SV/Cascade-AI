@@ -543,7 +543,7 @@ export function useChatSession(
   const unnamedRunsRef = useRef(0);
   const runOriginsRef = useRef<RunOrigins>(new Map());
   /**
-   * WHICH RUN this pane is showing the output of.
+   * WHICH RUNS this pane is showing — by name, and there can be more than one.
    *
    * A conversation was the only address this hook had, and two runs can share
    * one — a duplicated tab inherits the incumbent's run while holding its own —
@@ -551,14 +551,22 @@ export function useChatSession(
    * of them, and both runs' tokens were appended to the single streaming
    * bubble, interleaving two answers into one.
    *
+   * A LIST rather than one slot, because the first version of this was a slot
+   * that emptied whenever it could not pick — and an empty slot meant "no run
+   * filter", so the filters fell straight back to the conversation address that
+   * matches both. It degraded OPEN precisely in the multi-run case it was
+   * written for. Holding the candidates instead lets each consumer answer for
+   * itself, and they want different things: Stop means all of them, while the
+   * streaming bubble can only mean one.
+   *
    * Set when this pane EMITS a run, because the id is its own — minted here and
    * sent with the payload, so it is known from the instant the run starts
-   * rather than whenever a message happens to name it. Set from a resume when
-   * exactly one run comes back, which is the same non-guessing rule
-   * `active_conversations` gets: with several there is nothing to pick, so it
-   * is cleared and the run-scoped filters fall back to the conversation.
+   * rather than whenever a message happens to name it. Set from a resume to
+   * whichever live runs could be this pane's: the ones on its conversation,
+   * plus those the server cannot place. EMPTY means no information at all —
+   * an older server — and only then does anything fall back to the conversation.
    */
-  const shownRunIdRef = useRef<string | undefined>(undefined);
+  const shownRunsRef = useRef<string[]>([]);
   /** The conversation this pane's events belong to — known, or adopted below. */
   const activeConversationId = (): string | undefined =>
     conversationIdRef.current ?? pendingConversationIdRef.current;
@@ -1175,8 +1183,18 @@ export function useChatSession(
       // the rule this handler already follows for another chat's tokens — the
       // pane renders ONE transcript, so a second run's output has nowhere to
       // go in it, and the bubble is rebuilt from the persisted answer anyway.
-      const shown = shownRunIdRef.current;
-      if (shown && e.runId && e.runId !== shown) return;
+      // ONE BUBBLE, so one run. With a single candidate this admits only its
+      // tokens; with several it admits NONE of them that name a run, because
+      // the pane cannot tell whose answer it would be writing and appending
+      // both is the interleaving this exists to stop. Dropped rather than
+      // buffered, on the rule this handler already follows for another chat's
+      // tokens — the persisted answer replaces the bubble either way.
+      //
+      // An empty list is no information rather than ambiguity: an older server
+      // names no runs at all, and the conversation check below is what it had.
+      const shown = shownRunsRef.current;
+      if (shown.length > 0 && e.runId && !shown.includes(e.runId)) return;
+      if (shown.length > 1 && e.runId) return;
       const current = activeConversationId();
       if (current) {
         if (e.conversationId && e.conversationId !== current) return;
@@ -1780,9 +1798,9 @@ export function useChatSession(
     const lastOneOut = runOriginsRef.current.size === 0 && unnamedRunsRef.current === 0;
     if (lastOneOut) {
       ackLostRef.current = false;
-      // Nothing is running, so no run is the one being shown. Left behind, a
-      // dead run's name would filter out the tokens of the next one.
-      shownRunIdRef.current = undefined;
+      // Nothing is running, so no run is being shown. Left behind, a dead run's
+      // name would filter out the tokens of the next one.
+      shownRunsRef.current = [];
       setBusy(false);
       setStatus(null);
       setApproval(null);
@@ -2049,11 +2067,22 @@ export function useChatSession(
           // Exactly the runs it could not name, counted rather than derived
           // from a subtraction against `active`.
           unnamedRunsRef.current = reportedRuns.filter((r) => !r?.conversationId).length;
-          // And which one this pane is showing, on the same non-guessing rule
-          // the conversation adoption above follows: exactly one, or nothing.
-          shownRunIdRef.current = reportedRuns.length === 1 && typeof reportedRuns[0]?.runId === 'string'
-            ? reportedRuns[0].runId
-            : undefined;
+          // And which runs this pane could be showing: the ones on its own
+          // conversation, plus the ones the server cannot place yet — a
+          // first-turn run has no conversation anywhere until its first event,
+          // and excluding it would leave the pane unable to name the very run
+          // it is waiting on.
+          //
+          // Narrowed by conversation rather than taking "exactly one run in
+          // total", which was the first version and was needlessly blind: two
+          // runs in DIFFERENT chats left the pane unable to name either, so it
+          // fell back to the conversation address for a case it could have
+          // answered exactly.
+          const mine = conversationIdRef.current;
+          shownRunsRef.current = reportedRuns
+            .filter((r) => !r?.conversationId || !mine || r.conversationId === mine)
+            .map((r) => r?.runId)
+            .filter((id): id is string => typeof id === 'string' && !!id);
         } else if (named.length > 0) {
           runOriginsRef.current = tallyOrigins(named);
         }
@@ -2124,7 +2153,28 @@ export function useChatSession(
           // run succeed is worse than the missed notice, and with several
           // finished entries whichever came last simply won.
           if (done?.error && showsErrorFor(done.conversationId)) setError(done.error);
-          if (done?.conversationId) finishWithoutAck(done.conversationId, true);
+          if (!done?.conversationId) continue;
+          // AND NOT AGAINST A LIVE SET THAT ALREADY EXCLUDES IT.
+          //
+          // `active_runs` is active-only and authoritative: it was just used to
+          // build the origins wholesale, so a finished run is already absent
+          // from them. Handing its conversation to `finishWithoutAck` anyway
+          // removed an entry that belongs to a run still going — the two are
+          // indistinguishable there, because the origins are keyed by
+          // conversation and the finished list names one too.
+          //
+          // With A finished and B live on the SAME conversation that emptied
+          // the map: the pane declared itself idle, cleared the lost-ack flag
+          // that was B's only remaining way to end, and freed the composer to
+          // start another run on top of a run that was still writing.
+          //
+          // So the live set decides. A conversation no live run holds is
+          // settled exactly as before; one that is still held is left alone,
+          // which also leaves its gates up — right for the same reason the
+          // counting map leaves them up, since nothing distinguishes A's
+          // questions from B's on a shared conversation.
+          const stillLive = reportedRuns?.some((r) => r?.conversationId === done.conversationId);
+          if (!stillLive) finishWithoutAck(done.conversationId, true);
         }
         unnamedRunsRef.current = liveButUnnamed();
         // Whatever the entries above did to the pane, at least one run is still
@@ -2513,7 +2563,7 @@ export function useChatSession(
         // The run this pane is now showing, by name. Replaces whatever a resume
         // left for the same reason the origin does: this pane starting a run
         // makes that run the one it is answerable for.
-        shownRunIdRef.current = thisRunId;
+        shownRunsRef.current = [thisRunId];
         runOriginsRef.current = tallyOrigins(payload.conversationId ? [payload.conversationId] : []);
         // This pane starting a run replaces whatever a resume left, including
         // its count of runs it could not name.
@@ -2529,7 +2579,7 @@ export function useChatSession(
           // `??=` in `run:resumed` mistake it for an inherited run's.
           const origins = [...runOriginsRef.current.keys()];
           runOriginsRef.current = new Map();
-          shownRunIdRef.current = undefined;
+          shownRunsRef.current = [];
           unnamedRunsRef.current = 0;
           setBusy(false);
           setStatus(null);
@@ -2670,15 +2720,20 @@ export function useChatSession(
     // one, well before the ack. Only the window before that event has no id to
     // send — and there the server falls back to stopping everything, which is
     // what this did unconditionally until now.
-    // THE RUN, where this pane knows which one it is showing. Scoping by
-    // conversation was still ambiguous where it counts: two runs in one chat
-    // both matched, so Stop aborted the background one too and it acked with
-    // its partial output as though that were its answer.
+    // THE RUNS THIS PANE IS SHOWING, by name — all of them, which is what one
+    // Stop button in one chat can honestly mean.
     //
-    // The conversation goes too, for a server that predates the run id — it
-    // reads that field and ignores this one, which is the behaviour it had.
+    // Naming a single run and falling back to the conversation when the pane
+    // could not pick was the wrong shape: the fallback is the address that
+    // matches both runs, so Stop went back to killing the sibling in exactly
+    // the case the run id was added for. Sending the candidates instead keeps
+    // it precise whether there is one or several — the user asked to stop what
+    // is running HERE, and these are those runs, named.
+    //
+    // The conversation still goes for a server that predates this: it reads
+    // that field and ignores this one, which is the behaviour it had.
     socket.emit('chat:stop', {
-      ...(shownRunIdRef.current ? { runId: shownRunIdRef.current } : {}),
+      ...(shownRunsRef.current.length > 0 ? { runIds: [...shownRunsRef.current] } : {}),
       conversationId: activeConversationId(),
     });
     setStatus('Stopping…');

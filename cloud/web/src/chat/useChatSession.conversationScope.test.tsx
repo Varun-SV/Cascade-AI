@@ -2170,6 +2170,115 @@ describe('a run ending takes down its own gates and nobody else\'s', () => {
     expect(view.result.current.busy, 'the run that ended is the run that was counted').toBe(false);
   });
 
+  it('stays busy when one of two runs on a conversation finishes during the gap', async () => {
+    // A regression the run id introduced. `active_runs` is active-only and
+    // authoritative, so it was used to rebuild the origins wholesale — and then
+    // the separate `finished` list was handed to `finishWithoutAck` anyway.
+    // The two name CONVERSATIONS, so with A finished and B live on the same
+    // one, A's entry removed B's: the pane declared itself idle, cleared the
+    // lost-ack flag that was B's only remaining way to end, and freed the
+    // composer to start another run on top of one still writing its answer.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-A'));
+
+    act(() => {
+      fake.fire('run:resumed', {
+        active: 1,
+        active_conversations: ['convo-A'],
+        // B is live on convo-A; A finished during the gap, on the same chat.
+        active_runs: [{ runId: 'run-b', conversationId: 'convo-A' }],
+        finished: [{ conversationId: 'convo-A' }],
+      });
+    });
+
+    expect(view.result.current.busy, 'B is still running').toBe(true);
+
+    // And B's own ending is still the thing that frees the pane.
+    act(() => { fake.fire('session:complete', { conversationId: 'convo-A' }); });
+    expect(view.result.current.busy, 'the live run ended it').toBe(false);
+  });
+
+  it('drops tokens it cannot attribute rather than interleaving them', async () => {
+    // The run filter was one slot that emptied whenever it could not pick — and
+    // empty meant "no run filter", so it fell straight back to the conversation
+    // address that matches both runs. It degraded OPEN in precisely the
+    // multi-run case it was written for, and the interleaved bubble came back.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-A'));
+
+    // Two runs, same conversation, neither distinguishable as "the one shown".
+    act(() => {
+      fake.fire('run:resumed', {
+        active: 2,
+        active_conversations: ['convo-A', 'convo-A'],
+        active_runs: [{ runId: 'run-1', conversationId: 'convo-A' }, { runId: 'run-2', conversationId: 'convo-A' }],
+        finished: [],
+      });
+    });
+
+    act(() => {
+      fake.fire('stream:token', { conversationId: 'convo-A', runId: 'run-1', text: 'one ' });
+      fake.fire('stream:token', { conversationId: 'convo-A', runId: 'run-2', text: 'two ' });
+    });
+
+    expect(
+      view.result.current.messages.filter((m) => m.streaming),
+      'neither answer is written, rather than both spliced together',
+    ).toEqual([]);
+  });
+
+  it('names every run it is showing when Stop is pressed', async () => {
+    // Falling back to the conversation when the pane could not pick a single
+    // run was the same hole through the other door: the fallback is the address
+    // that matches BOTH runs, so the server's conversation loop aborted the
+    // sibling exactly as it had before the run id existed. One Stop button in
+    // one chat honestly means all of that chat's runs — so it says so, by name.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-A'));
+
+    act(() => {
+      fake.fire('run:resumed', {
+        active: 2,
+        active_conversations: ['convo-A', 'convo-A'],
+        active_runs: [{ runId: 'run-1', conversationId: 'convo-A' }, { runId: 'run-2', conversationId: 'convo-A' }],
+        finished: [],
+      });
+    });
+    act(() => { view.result.current.stop(); });
+
+    const stop = fake.sent.filter((m) => m.event === 'chat:stop').map((m) => m.payload as Record<string, unknown>);
+    expect(stop[0]?.['runIds'], 'both runs named, none left to a loose address').toEqual(['run-1', 'run-2']);
+  });
+
+  it('names the run in this chat when another chat is also running', async () => {
+    // The first version asked for exactly one run IN TOTAL, which was needlessly
+    // blind: two runs in DIFFERENT chats left the pane unable to name either, so
+    // it fell back to the conversation for a case it could have answered
+    // exactly. Narrowing by conversation first makes the ambiguous case rare.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-A'));
+
+    act(() => {
+      fake.fire('run:resumed', {
+        active: 2,
+        active_conversations: ['convo-A', 'convo-B'],
+        active_runs: [{ runId: 'run-a', conversationId: 'convo-A' }, { runId: 'run-b', conversationId: 'convo-B' }],
+        finished: [],
+      });
+    });
+    act(() => { view.result.current.stop(); });
+
+    const stop = fake.sent.filter((m) => m.event === 'chat:stop').map((m) => m.payload as Record<string, unknown>);
+    expect(stop[0]?.['runIds'], 'only this chat\'s run').toEqual(['run-a']);
+
+    // And its tokens still stream, because one candidate is not ambiguous.
+    act(() => { fake.fire('stream:token', { conversationId: 'convo-A', runId: 'run-a', text: 'mine' }); });
+    expect(
+      view.result.current.messages.filter((m) => m.streaming).map((m) => m.content),
+      'a run this pane can name still streams',
+    ).toEqual(['mine']);
+  });
+
   it('keeps a conversation\'s gates up while a second run on it is still going', async () => {
     // `runOriginsRef` was a SET, and two runs can share one conversation:
     // nothing on the server enforces one run per conversation, and
@@ -2303,7 +2412,7 @@ describe('a run ending takes down its own gates and nobody else\'s', () => {
     // pins that Stop names the run this pane started rather than merely that
     // some id is present.
     const started = fake.sent.find((m) => m.event === 'chat:run')?.payload as Record<string, unknown>;
-    expect(stops[0]?.['runId'], 'Stop names the run this pane started').toBe(started?.['runId']);
+    expect(stops[0]?.['runIds'], 'Stop names the run this pane started').toEqual([started?.['runId']]);
     expect(typeof started?.['runId'], 'and that run was named when it was sent').toBe('string');
     // And the conversation still goes, for a server that predates the run id.
     expect(stops[0]?.['conversationId'], 'the older address is still sent').toBe('convo-A');

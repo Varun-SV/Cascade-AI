@@ -752,7 +752,7 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
     socket.emit('chat:run', { prompt: 'hello', conversationId: shared.id, runId: 'run-survives', providers }, () => { /* finishes */ });
 
     await new Promise((r) => setTimeout(r, 300));
-    socket.emit('chat:stop', { runId: 'run-stopped', conversationId: shared.id });
+    socket.emit('chat:stop', { runIds: ['run-stopped'], conversationId: shared.id });
 
     // One reply on the conversation, not none and not two: the survivor wrote
     // its answer and the stopped run never got to.
@@ -760,6 +760,35 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
     const replies = (store.getMessages(shared.id) as Array<{ role: string; content: string }>)
       .filter((m) => m.role === 'assistant' && m.content.includes('Hello from the stub model.'));
     expect(replies, 'the sibling on the same conversation was not touched').toHaveLength(1);
+  }, 30_000);
+
+  it('stops every run the client named and nothing else', async () => {
+    // One Stop button in one chat can honestly mean several runs — two can
+    // share the conversation on screen and the client has no way to offer a
+    // choice — so it names them all rather than falling back to the
+    // conversation, which is the loose address that started this.
+    await start(8_000);
+    stub = await startStubOpenAIServer({ delayMs: 3_000 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'stop-many', email: null, name: 'Many', avatar: null });
+    store.setUserSubscription(user.id, { subscriptionId: 'sub-3', status: 'active', currentEnd: null, plan: 'pro' });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    const here = store.createConversation(user.id, 'the chat on screen');
+    const elsewhere = store.createConversation(user.id, 'another chat entirely');
+
+    const socket = connect(cookie);
+    await connected(socket);
+    const providers = [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }];
+    socket.emit('chat:run', { prompt: 'hello', conversationId: here.id, runId: 'r1', providers }, () => { /* stopped */ });
+    socket.emit('chat:run', { prompt: 'hello', conversationId: here.id, runId: 'r2', providers }, () => { /* stopped */ });
+    socket.emit('chat:run', { prompt: 'hello', conversationId: elsewhere.id, runId: 'r3', providers }, () => { /* survives */ });
+
+    await new Promise((r) => setTimeout(r, 300));
+    socket.emit('chat:stop', { runIds: ['r1', 'r2'], conversationId: here.id });
+
+    await new Promise((r) => setTimeout(r, 4_000));
+    expect(assistantReply(here.id), 'both named runs stopped').not.toContain('Hello from the stub model.');
+    expect(assistantReply(elsewhere.id), 'and the one nobody named did not').toContain('Hello from the stub model.');
   }, 30_000);
 
   it('still stops everything when the client names no conversation', async () => {
