@@ -60,6 +60,28 @@ const TierParamSchema = z
 // persisted server-side (see db.ts: no api key column anywhere).
 const ChatRunPayloadSchema = z.object({
   conversationId: z.string().optional(),
+  /**
+   * WHICH RUN this is, chosen by the client that starts it.
+   *
+   * A conversation is not a run. One connection carries several runs and two of
+   * them can belong to the SAME conversation — a duplicated tab inherits the
+   * incumbent's run while holding one of its own — so every place that used the
+   * conversation as an address was ambiguous exactly there: Stop aborted both,
+   * one context decision answered both gates, and both runs' tokens were
+   * appended to one streaming bubble.
+   *
+   * Minted by the CLIENT rather than handed back by the server, and that is the
+   * point: a client needs its run's name from the instant it starts it. A
+   * server-assigned id would arrive in a message, and Stop pressed before that
+   * message lands would have nothing to say. Optional, because older clients
+   * send none and must keep working — the server falls back to its own id for
+   * them, and the addressing degrades to the conversation, which is what it was.
+   *
+   * It names nothing outside the connection that sent it: every use is a lookup
+   * within that socket's own `activeRuns`, so the worst a client can do with it
+   * is address its own runs.
+   */
+  runId: z.string().min(1).max(200).optional(),
   // Deliberately unbounded above the minimum. The 20k-character cap that used
   // to be here rejected exactly the long inputs Cascade is for — a pasted
   // document, a stack trace, a whole file — and the transport already imposes
@@ -1272,9 +1294,23 @@ export function releasePendingApprovals(
  * around it.
  */
 export function addressesContextGate(
-  d: { conversationId?: string } | undefined,
+  d: { conversationId?: string; runId?: string } | undefined,
   conversationId: string,
+  runId?: string,
 ): boolean {
+  // THE RUN FIRST, when both ends can name it. Two runs in one conversation
+  // both registered a decision handler and this predicate said yes to both, so
+  // a single Approve resolved both gates with the same answer — and the client,
+  // which collapses the prompts by conversation, had no way to answer the
+  // second one differently even if it had wanted to.
+  //
+  // An exact match, and a mismatch is refused outright: once a decision names a
+  // run, the conversation it belongs to adds nothing.
+  if (d?.runId !== undefined) return runId !== undefined && d.runId === runId;
+  // Otherwise the conversation, exactly as before. A decision naming neither is
+  // still accepted: this gate has no request id to fall back on, and refusing
+  // unkeyed decisions would break the compaction prompt for every client that
+  // predates the id. The cost is the old ambiguity, and only for those clients.
   return d?.conversationId === undefined || d.conversationId === conversationId;
 }
 
@@ -1713,7 +1749,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // in the finally block. If the client never answers, the SDK gate times out
   // and proceeds — the run's budget cap is the real guardrail.
   const onContextApproval = (e: unknown) =>
-    socket.emit('context:approval-required', { conversationId: conversation.id, ...(e as object) });
+    socket.emit('context:approval-required', { conversationId: conversation.id, runId: payload.runId, ...(e as object) });
   // Every ending of that gate, which is what lets a reconnecting page be given
   // back the question it is still blocked on WITHOUT being given back one that
   // was already answered. The other three gates have had this for rounds; this
@@ -1721,7 +1757,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // therefore was not replayed — leaving a reloaded page unable to answer, and
   // the SDK gate proceeding on its own two-minute timeout.
   const onContextClosed = (e: unknown) =>
-    socket.emit('context:approval-closed', { conversationId: conversation.id, ...(e as object) });
+    socket.emit('context:approval-closed', { conversationId: conversation.id, runId: payload.runId, ...(e as object) });
   const onCompacted = (e: unknown) =>
     socket.emit('context:compacted', { conversationId: conversation.id, ...(e as object) });
   // Guarded like every other inbound answer. One socket carries several runs
@@ -1735,8 +1771,8 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // clients send no id at all and are still accepted, because refusing them
   // would break the compaction prompt for anything that has not updated — a
   // real cost against a narrow race. Stated rather than silently assumed.
-  const onContextDecision = (d: { approved?: boolean; conversationId?: string }) => {
-    if (!addressesContextGate(d, conversation.id)) return;
+  const onContextDecision = (d: { approved?: boolean; conversationId?: string; runId?: string }) => {
+    if (!addressesContextGate(d, conversation.id, payload.runId)) return;
     cascade.resolveContextApproval(!!d?.approved);
   };
   if (interactive) {

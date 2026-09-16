@@ -235,6 +235,15 @@ export interface ContextApprovalInfo {
    * could not be routed.
    */
   conversationId?: string;
+  /**
+   * And WHICH RUN, which the conversation cannot say when two share one.
+   *
+   * Both of them register a decision handler on the shared socket, and a
+   * conversation-addressed answer satisfied both — one Approve resolved two
+   * gates, and the second could not be answered differently even deliberately,
+   * because the prompts were collapsed by conversation before anyone saw them.
+   */
+  runId?: string;
 }
 
 /** A boardroom plan Cascade produced for this run — surfaced read-only (the
@@ -533,6 +542,23 @@ export function useChatSession(
    */
   const unnamedRunsRef = useRef(0);
   const runOriginsRef = useRef<RunOrigins>(new Map());
+  /**
+   * WHICH RUN this pane is showing the output of.
+   *
+   * A conversation was the only address this hook had, and two runs can share
+   * one — a duplicated tab inherits the incumbent's run while holding its own —
+   * so everything addressed that way was ambiguous exactly there. Stop hit both
+   * of them, and both runs' tokens were appended to the single streaming
+   * bubble, interleaving two answers into one.
+   *
+   * Set when this pane EMITS a run, because the id is its own — minted here and
+   * sent with the payload, so it is known from the instant the run starts
+   * rather than whenever a message happens to name it. Set from a resume when
+   * exactly one run comes back, which is the same non-guessing rule
+   * `active_conversations` gets: with several there is nothing to pick, so it
+   * is cleared and the run-scoped filters fall back to the conversation.
+   */
+  const shownRunIdRef = useRef<string | undefined>(undefined);
   /** The conversation this pane's events belong to — known, or adopted below. */
   const activeConversationId = (): string | undefined =>
     conversationIdRef.current ?? pendingConversationIdRef.current;
@@ -1126,7 +1152,7 @@ export function useChatSession(
 
   useEffect(() => {
     if (!socket) return;
-    const onToken = (e: { text: string; primary?: boolean; conversationId?: string }) => {
+    const onToken = (e: { text: string; primary?: boolean; conversationId?: string; runId?: string }) => {
       // Only stream the PRESENTER tier's output (the actual answer). Intermediate
       // nodes — planning, decomposition, background workers — emit primary:false;
       // showing those made each node's output flash by before the final result,
@@ -1142,6 +1168,15 @@ export function useChatSession(
       // this side does not learn until the closing ack, so comparing against
       // `undefined` would discard the entire first run — the most common case
       // there is.
+      // THE RUN FIRST, where both ends can name it. Conversation scoping was
+      // right between chats and blind within one: two runs on the same
+      // conversation both passed this filter, and their answers were appended
+      // to the same bubble a token at a time. Dropped rather than buffered, on
+      // the rule this handler already follows for another chat's tokens — the
+      // pane renders ONE transcript, so a second run's output has nowhere to
+      // go in it, and the bubble is rebuilt from the persisted answer anyway.
+      const shown = shownRunIdRef.current;
+      if (shown && e.runId && e.runId !== shown) return;
       const current = activeConversationId();
       if (current) {
         if (e.conversationId && e.conversationId !== current) return;
@@ -1292,13 +1327,20 @@ export function useChatSession(
      */
     const onEscalationClosed = (e: { requestId?: string; sectionId?: string }) =>
       setEscalations((prev) => prev.filter((x) => escalationKey(x) !== escalationKey(e)));
-    const onContextApproval = (e: ContextApprovalInfo & { conversationId?: string }) => {
+    const onContextApproval = (e: ContextApprovalInfo & { conversationId?: string; runId?: string }) => {
       // Adopted and kept, like every other blocking gate. This one was the last
       // unkeyed member of the family: a single slot with no idea whose question
       // it was, so a sibling run's ending could not take it down and answering
       // it sent a decision nothing could route.
       adoptConversationId(e?.conversationId);
-      setContextApprovals((q) => (q.some((a) => a.conversationId === e?.conversationId) ? q : [...q, e]));
+      // De-duplicated by RUN where there is one, so a replay after a reconnect
+      // does not queue a second copy — and so two runs on one conversation get
+      // two questions rather than the first silently swallowing the second.
+      setContextApprovals((q) => (
+        q.some((a) => (e?.runId ? a.runId === e.runId : !a.runId && a.conversationId === e?.conversationId))
+          ? q
+          : [...q, e]
+      ));
     };
     // EVERY ending of that gate, and not only the one that compacted.
     //
@@ -1308,8 +1350,13 @@ export function useChatSession(
     // in both cases with buttons that reach a gate the run has already moved
     // past. The same event is what the server replays, so a page that reloaded
     // while the question was up is not handed back one that has been answered.
-    const onContextClosed = (e: { conversationId?: string }) => {
-      setContextApprovals((q) => q.filter((a) => (a.conversationId ?? '') !== (e?.conversationId ?? '')));
+    const onContextClosed = (e: { conversationId?: string; runId?: string }) => {
+      // By run where the closure names one, so one run's gate ending does not
+      // take down the question its sibling on the same conversation is still
+      // blocked on.
+      setContextApprovals((q) => q.filter((a) => (e?.runId
+        ? a.runId !== e.runId
+        : (a.conversationId ?? '') !== (e?.conversationId ?? ''))));
     };
     const onCompacted = (e: { kind?: string; chunks?: number; foldedTurns?: number; truncated?: boolean; conversationId?: string }) => {
       // The compaction happened, so THAT run's question is over — and only
@@ -1733,6 +1780,9 @@ export function useChatSession(
     const lastOneOut = runOriginsRef.current.size === 0 && unnamedRunsRef.current === 0;
     if (lastOneOut) {
       ackLostRef.current = false;
+      // Nothing is running, so no run is the one being shown. Left behind, a
+      // dead run's name would filter out the tokens of the next one.
+      shownRunIdRef.current = undefined;
       setBusy(false);
       setStatus(null);
       setApproval(null);
@@ -1852,6 +1902,8 @@ export function useChatSession(
     const onResumed = (e: {
       active?: number;
       active_conversations?: string[];
+      /** One entry per live run, including those whose conversation is unknown. */
+      active_runs?: Array<{ runId?: string; conversationId?: string }>;
       finished?: Array<{ conversationId?: string; error?: string }>;
     }) => {
       // A live run is authoritative even on a page that has never seen one.
@@ -1968,7 +2020,41 @@ export function useChatSession(
         // — and a set read that as one, which then made `active` disagree with
         // the origins by exactly the number of duplicates and turned the
         // difference into runs this pane supposedly could not name.
-        if (named.length > 0) {
+        // EXHAUSTIVE, when the server can be exhaustive.
+        //
+        // `active_runs` is one entry per run, including runs whose conversation
+        // is not known yet — which `active_conversations` drops — so there is
+        // nothing left to infer. The counting and the guessing below exist only
+        // because the older field could not say these things, and where this
+        // one is present they are simply not needed: the origins are whatever
+        // it says, the unnamed count is the entries without a conversation, and
+        // an EMPTY list is a statement too rather than a reason to keep what an
+        // earlier resume happened to leave.
+        //
+        // Which is the whole of the stale-origin bug: a resume naming A beside
+        // an unnamed B, with A gone by the next reconnect, reports `active: 1`
+        // and names nobody — and A stayed in the map, so the unnamed count came
+        // out as zero and B's own ending could discharge neither. The composer
+        // was disabled for the life of the page.
+        //
+        // The pane's own in-flight run is in here too, by id, because the
+        // client minted that id and sent it — so replacing wholesale no longer
+        // throws away what this pane knows from having sent the run itself,
+        // which is why the older path below still cannot replace unconditionally.
+        const reportedRuns = Array.isArray(e?.active_runs) ? e.active_runs : undefined;
+        if (reportedRuns) {
+          runOriginsRef.current = tallyOrigins(
+            reportedRuns.map((r) => r?.conversationId).filter((id): id is string => typeof id === 'string' && !!id),
+          );
+          // Exactly the runs it could not name, counted rather than derived
+          // from a subtraction against `active`.
+          unnamedRunsRef.current = reportedRuns.filter((r) => !r?.conversationId).length;
+          // And which one this pane is showing, on the same non-guessing rule
+          // the conversation adoption above follows: exactly one, or nothing.
+          shownRunIdRef.current = reportedRuns.length === 1 && typeof reportedRuns[0]?.runId === 'string'
+            ? reportedRuns[0].runId
+            : undefined;
+        } else if (named.length > 0) {
           runOriginsRef.current = tallyOrigins(named);
         }
         // AND NOTHING WHEN NOTHING IS NAMED. There used to be a fallback here
@@ -2015,7 +2101,13 @@ export function useChatSession(
         // `originCount`, not `size`: `active` counts RUNS and the map counts them
         // per conversation, so measuring against the number of conversations
         // over-reported the unnamed runs whenever two shared one.
-        const liveButUnnamed = () => Math.max(0, (e?.active ?? 0) - originCount(runOriginsRef.current));
+        // The estimate, for a server that sends no `active_runs`. Where one
+        // arrived the count above is a FACT and this must not overwrite it —
+        // the subtraction is only ever an inference about what the older field
+        // left out.
+        const liveButUnnamed = () => (reportedRuns
+          ? reportedRuns.filter((r) => !r?.conversationId).length
+          : Math.max(0, (e?.active ?? 0) - originCount(runOriginsRef.current)));
         unnamedRunsRef.current = liveButUnnamed();
         // And AGAIN afterwards. `finishWithoutAck` treats a keyed ending for a
         // run not in the set as that run naming itself at last, which is right
@@ -2267,6 +2359,14 @@ export function useChatSession(
       // is covered by it — including the classifier continuation below, which
       // runs a turn later and is the reason this exists.
       const thisSend = Symbol('send');
+      // AND ITS NAME, minted here rather than asked for.
+      //
+      // The client chooses it so the run has an address from the instant it
+      // starts: a server-assigned id would arrive in a message, and Stop
+      // pressed before that message lands would have nothing to say. It is
+      // only ever looked up within this connection's own runs, so choosing it
+      // here addresses nothing that is not already this pane's.
+      const thisRunId = crypto.randomUUID();
       // `transcriptBeforeSend` is captured above, before any optimistic change,
       // and is exactly what the frame-size refusal already restores.
       pendingSendRef.current = {
@@ -2318,6 +2418,7 @@ export function useChatSession(
         if (pendingSendRef.current?.token !== thisSend) return;
         const payload = {
             conversationId,
+            runId: thisRunId,
             prompt: text,
             providers,
             attachmentIds: attachments?.map((a) => a.id),
@@ -2409,6 +2510,10 @@ export function useChatSession(
         // chat while classification was pending sent a run for A and recorded
         // an origin of B, so the ending settled B's gates and left A's
         // standing. The id that goes on the wire is the id this run is for.
+        // The run this pane is now showing, by name. Replaces whatever a resume
+        // left for the same reason the origin does: this pane starting a run
+        // makes that run the one it is answerable for.
+        shownRunIdRef.current = thisRunId;
         runOriginsRef.current = tallyOrigins(payload.conversationId ? [payload.conversationId] : []);
         // This pane starting a run replaces whatever a resume left, including
         // its count of runs it could not name.
@@ -2424,6 +2529,7 @@ export function useChatSession(
           // `??=` in `run:resumed` mistake it for an inherited run's.
           const origins = [...runOriginsRef.current.keys()];
           runOriginsRef.current = new Map();
+          shownRunIdRef.current = undefined;
           unnamedRunsRef.current = 0;
           setBusy(false);
           setStatus(null);
@@ -2564,7 +2670,17 @@ export function useChatSession(
     // one, well before the ack. Only the window before that event has no id to
     // send — and there the server falls back to stopping everything, which is
     // what this did unconditionally until now.
-    socket.emit('chat:stop', { conversationId: activeConversationId() });
+    // THE RUN, where this pane knows which one it is showing. Scoping by
+    // conversation was still ambiguous where it counts: two runs in one chat
+    // both matched, so Stop aborted the background one too and it acked with
+    // its partial output as though that were its answer.
+    //
+    // The conversation goes too, for a server that predates the run id — it
+    // reads that field and ignores this one, which is the behaviour it had.
+    socket.emit('chat:stop', {
+      ...(shownRunIdRef.current ? { runId: shownRunIdRef.current } : {}),
+      conversationId: activeConversationId(),
+    });
     setStatus('Stopping…');
   }, [socket, busy, cancelPendingSend]);
 
@@ -2660,7 +2776,15 @@ export function useChatSession(
     const answering = contextApproval;
     if (!answering) return;
     const cid = answering.conversationId ?? activeConversationId();
-    socket?.emit('context:decision', { approved, ...(cid ? { conversationId: cid } : {}) });
+    // THE RUN when the question named one. Two runs in one conversation both
+    // registered a decision handler and a conversation-addressed answer
+    // satisfied both, so one Approve resolved both gates — and compacted a run
+    // nobody had said yes to.
+    socket?.emit('context:decision', {
+      approved,
+      ...(answering.runId ? { runId: answering.runId } : {}),
+      ...(cid ? { conversationId: cid } : {}),
+    });
     // Only the one that was answered. Clearing the queue would displace a
     // sibling's question exactly as the single slot did.
     setContextApprovals((q) => q.filter((a) => a !== answering));

@@ -88,18 +88,47 @@ export class RebindableTransport implements RunSocket {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly listeners = new Map<string, Set<(...args: any[]) => void>>();
   private readonly observe: (event: string, payload: unknown) => void;
+  /**
+   * WHICH RUN everything sent through here belongs to.
+   *
+   * Stamped at the transport rather than at each emit site, because the number
+   * of emit sites is the problem: `runs.ts` adds `conversationId` to roughly
+   * thirty of them by hand, and a run identity added the same way would be
+   * missing from whichever one was written next. Here it cannot be forgotten —
+   * every event a run emits passes through this method, by construction.
+   *
+   * A FUNCTION rather than a value, because the run's own record is built
+   * around this transport: the id is read at emit time, so construction order
+   * does not decide whether the stamp is there.
+   */
+  private readonly runId: () => string | undefined;
 
-  constructor(socket: Socket, observe: (event: string, payload: unknown) => void = () => {}) {
+  constructor(
+    socket: Socket,
+    observe: (event: string, payload: unknown) => void = () => {},
+    runId: () => string | undefined = () => undefined,
+  ) {
     this.current = socket;
     this.observe = observe;
+    this.runId = runId;
   }
 
   emit(event: string, payload: unknown): unknown {
+    // Stamped BEFORE it is observed, so the replay store holds what the client
+    // would have received — a replayed gate has to be answerable, and answering
+    // it now means naming the run.
+    //
+    // UNDER whatever the payload says, not over it: a caller that names a run
+    // explicitly is describing something this transport cannot know better.
+    const id = this.runId();
+    const stamped = id !== undefined && payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? { runId: id, ...(payload as Record<string, unknown>) }
+      : payload;
     // Observed BEFORE delivery, and whether or not anything is bound. A run
     // that ends while its socket is gone emits into nothing, so this is the
     // only moment its outcome exists anywhere.
-    this.observe(event, payload);
-    return this.current?.emit(event, payload);
+    this.observe(event, stamped);
+    return this.current?.emit(event, stamped);
   }
 
   /**
@@ -160,6 +189,18 @@ export interface LiveRun {
   controller: AbortController;
   transport: RebindableTransport;
   done: boolean;
+  /**
+   * WHICH RUN this is — the identity a conversation cannot supply.
+   *
+   * One connection carries several runs and two of them can belong to the same
+   * conversation, so addressing by conversation was ambiguous exactly where it
+   * mattered: `chat:stop` aborted both, and a context decision answered both
+   * gates. Taken from the client's `chat:run` payload when it sent one, so the
+   * client can name its run from the instant it starts it rather than waiting
+   * for a message to tell it; generated here otherwise, so the field is never
+   * absent and the replay and resume paths never have to ask.
+   */
+  runId: string;
   /**
    * Which conversation this run belongs to, once anything knows.
    *
@@ -802,6 +843,7 @@ export function attachSocket(
       // connection the user currently has.
       const run: LiveRun = {
         controller: new AbortController(),
+        runId: randomUUID(),
         transport: new RebindableTransport(socket, (event, payload) => {
           // Captured on the way out, whether or not anything is listening —
           // which is the point: the events worth replaying are exactly the ones
@@ -820,12 +862,25 @@ export function attachSocket(
           if (p.conversationId) run.conversationId = p.conversationId;
           if (!TERMINAL_EVENTS.has(event)) return;
           run.terminal = { conversationId: p.conversationId, error: p.error };
-        }),
+        }, () => run.runId),
         done: false,
       };
       activeRuns.add(run);
       try {
         const parsed = parseChatRunPayload(payload);
+        // THE CLIENT'S NAME FOR THIS RUN, when it sent one.
+        //
+        // Taken rather than assigned back, because the client needs the name
+        // from the instant it starts the run: a server-assigned id would arrive
+        // in a message, and a Stop pressed before that message lands would have
+        // nothing to say. The generated id above stands for clients that send
+        // none, so the field is never absent.
+        //
+        // It addresses nothing outside this connection — every use is a lookup
+        // in this socket's own `activeRuns` — so the worst a client can do by
+        // choosing it, including choosing one it has already used, is address
+        // its own runs.
+        if (parsed.runId) run.runId = parsed.runId;
         // Known now for an existing conversation; only the result knows it for
         // a new one. Recorded at both points because a run can be orphaned
         // before it ever reaches the second.
@@ -866,10 +921,24 @@ export function attachSocket(
     // user is most likely to hit. Older clients send no payload at all and get
     // exactly the previous behaviour.
     socket.on('chat:stop', (payload?: unknown) => {
-      const asked = (payload ?? {}) as { conversationId?: unknown };
+      const asked = (payload ?? {}) as { conversationId?: unknown; runId?: unknown };
+      const askedRun = typeof asked.runId === 'string' && asked.runId ? asked.runId : undefined;
       const only = typeof asked.conversationId === 'string' && asked.conversationId
         ? asked.conversationId
         : undefined;
+      // THE RUN, when the client named one — and nothing else, not even as a
+      // fallback. Scoping by conversation was still ambiguous where it counts:
+      // two runs in one chat both matched, so Stop aborted the background one
+      // as well and it acked with its partial output as though that were its
+      // answer. A run id is the only address that distinguishes them.
+      //
+      // A named run that is not here is a run that already ended. Aborting
+      // everything else instead would be the original bug wearing the fix's
+      // clothes, so a miss stops nothing.
+      if (askedRun) {
+        for (const r of activeRuns) if (r.runId === askedRun) r.controller.abort();
+        return;
+      }
       for (const r of activeRuns) {
         if (only && r.conversationId && r.conversationId !== only) continue;
         r.controller.abort();
@@ -1012,6 +1081,18 @@ export function attachSocket(
         // now holding, and cannot claim the state replayed for it below.
         active_conversations: [...activeRuns].filter((r) => !r.done)
           .map((r) => r.conversationId).filter((id): id is string => !!id),
+        // The same runs, named as RUNS — which `active_conversations` cannot
+        // do. It drops those whose conversation is not known yet and collapses
+        // nothing when two share one, so a client reading it has to reconstruct
+        // the count from `active` and guess at the difference. This is
+        // exhaustive and one entry per run, so there is nothing left to infer:
+        // a run with no conversation still appears, by id.
+        //
+        // Alongside rather than instead of, because an older client reads only
+        // the other field and a newer one must still work against a server that
+        // sends only the other field.
+        active_runs: [...activeRuns].filter((r) => !r.done)
+          .map((r) => ({ runId: r.runId, ...(r.conversationId ? { conversationId: r.conversationId } : {}) })),
         ...(assigned ? { clientId: assigned } : {}),
       }, pendingReplay.splice(0));
     };

@@ -730,6 +730,38 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
     expect(assistantReply(background.id), 'the run in another chat was not touched').toContain('Hello from the stub model.');
   }, 30_000);
 
+  it('stops one of two runs in the SAME conversation', async () => {
+    // Conversation scoping was still ambiguous where it counts. Two runs can
+    // share a chat — a duplicated tab inherits the incumbent's run while
+    // holding its own — and both matched the keyed payload, so Stop aborted the
+    // background one too and it acked with its partial output as though that
+    // were its answer. A run id is the only address that separates them.
+    await start(8_000);
+    stub = await startStubOpenAIServer({ delayMs: 3_000 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'stop-run', email: null, name: 'Run', avatar: null });
+    store.setUserSubscription(user.id, { subscriptionId: 'sub-2', status: 'active', currentEnd: null, plan: 'pro' });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    // ONE conversation, two runs on it.
+    const shared = store.createConversation(user.id, 'two runs, one chat');
+
+    const socket = connect(cookie);
+    await connected(socket);
+    const providers = [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }];
+    socket.emit('chat:run', { prompt: 'hello', conversationId: shared.id, runId: 'run-stopped', providers }, () => { /* stopped */ });
+    socket.emit('chat:run', { prompt: 'hello', conversationId: shared.id, runId: 'run-survives', providers }, () => { /* finishes */ });
+
+    await new Promise((r) => setTimeout(r, 300));
+    socket.emit('chat:stop', { runId: 'run-stopped', conversationId: shared.id });
+
+    // One reply on the conversation, not none and not two: the survivor wrote
+    // its answer and the stopped run never got to.
+    await new Promise((r) => setTimeout(r, 4_000));
+    const replies = (store.getMessages(shared.id) as Array<{ role: string; content: string }>)
+      .filter((m) => m.role === 'assistant' && m.content.includes('Hello from the stub model.'));
+    expect(replies, 'the sibling on the same conversation was not touched').toHaveLength(1);
+  }, 30_000);
+
   it('still stops everything when the client names no conversation', async () => {
     // Older clients send no payload, and so does a page whose run has not yet
     // emitted the event carrying its id. Both have to keep working: a Stop that
@@ -1272,6 +1304,63 @@ describe('RebindableTransport', () => {
     expect(b.handlerCount('context:decision')).toBe(0);
     b.fire('context:decision', { approved: true });
     expect(seen).toEqual([]);
+  });
+});
+
+describe('RebindableTransport — every event says which run it is', () => {
+  function recorder() {
+    const emitted: Array<{ event: string; payload: unknown }> = [];
+    const volatileEmitted: Array<{ event: string; payload: unknown }> = [];
+    return {
+      emitted,
+      volatileEmitted,
+      socket: {
+        emit: (event: string, payload: unknown) => { emitted.push({ event, payload }); return true; },
+        volatile: { emit: (event: string, payload: unknown) => { volatileEmitted.push({ event, payload }); return true; } },
+        on: () => undefined,
+        off: () => undefined,
+      },
+    };
+  }
+
+  it('stamps the run on everything it sends, and on what the replay store keeps', () => {
+    // Stamped at the TRANSPORT rather than at each emit site, because the
+    // number of emit sites is the problem: `runs.ts` adds `conversationId` to
+    // roughly thirty of them by hand, and a run identity added the same way
+    // would be missing from whichever one was written next.
+    //
+    // Observed with the stamp on, not before it: a replayed gate has to be
+    // answerable, and answering one now means naming its run.
+    const { emitted, socket } = recorder();
+    const observed: Array<{ event: string; payload: unknown }> = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const t = new RebindableTransport(socket as any, (event, payload) => { observed.push({ event, payload }); }, () => 'run-7');
+
+    t.emit('stream:token', { conversationId: 'c1', text: 'hello' });
+
+    expect((emitted[0]?.payload as { runId?: string }).runId, 'on the wire').toBe('run-7');
+    expect((observed[0]?.payload as { runId?: string }).runId, 'and in what is remembered').toBe('run-7');
+  });
+
+  it('does not overwrite a run a caller named itself', () => {
+    // Under the payload, not over it: a caller naming a run explicitly is
+    // describing something the transport cannot know better.
+    const { emitted, socket } = recorder();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const t = new RebindableTransport(socket as any, () => {}, () => 'run-7');
+    t.emit('stream:token', { runId: 'run-elsewhere', text: 'hello' });
+    expect((emitted[0]?.payload as { runId?: string }).runId).toBe('run-elsewhere');
+  });
+
+  it('leaves a payload that is not an object alone', () => {
+    // Nothing in-tree emits one, but a stamp that threw on a string or an array
+    // would take the run down over a message rather than lose a field on it.
+    const { emitted, socket } = recorder();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const t = new RebindableTransport(socket as any, () => {}, () => 'run-7');
+    t.emit('odd', 'just a string');
+    t.emit('odder', [1, 2, 3]);
+    expect(emitted.map((e) => e.payload)).toEqual(['just a string', [1, 2, 3]]);
   });
 });
 

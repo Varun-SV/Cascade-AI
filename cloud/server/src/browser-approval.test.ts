@@ -309,6 +309,28 @@ describe('which run a context decision may settle', () => {
     expect(addressesContextGate({}, 'c1')).toBe(true);
     expect(addressesContextGate(undefined, 'c1')).toBe(true);
   });
+
+  it('separates two runs that share one conversation', () => {
+    // The conversation was the whole of the address, and two runs can share
+    // one: both registered a decision handler and this said yes to both, so a
+    // single Approve resolved two gates — compacting a run nobody had answered
+    // for. A run id is the only thing that tells them apart.
+    expect(addressesContextGate({ runId: 'r1' }, 'c1', 'r1'), 'its own run').toBe(true);
+    expect(addressesContextGate({ runId: 'r2' }, 'c1', 'r1'), 'and not its sibling\'s').toBe(false);
+    // The conversation adds nothing once a run is named, so it cannot rescue a
+    // mismatch — matching on either would put the ambiguity straight back.
+    expect(
+      addressesContextGate({ runId: 'r2', conversationId: 'c1' }, 'c1', 'r1'),
+      'the right chat is not the right run',
+    ).toBe(false);
+  });
+
+  it('refuses a decision naming a run this one cannot answer for', () => {
+    // A decision that names a run reaching a handler with no run of its own is
+    // an older server's handler meeting a newer client's answer. Accepting it
+    // would be the unkeyed behaviour under a keyed name.
+    expect(addressesContextGate({ runId: 'r1' }, 'c1')).toBe(false);
+  });
 });
 
 // Stop, watch and unwatch are the same question — is this message for the run
