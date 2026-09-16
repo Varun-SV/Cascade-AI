@@ -33,6 +33,16 @@ import { DeadModelStore, fileDeadModelPersistence } from './router/dead-models.j
  * run doesn't hold a worker slot all afternoon.
  */
 const ESCALATION_DECISION_TIMEOUT_MS = 5 * 60_000;
+/**
+ * How long a questionnaire waits for an answer.
+ *
+ * Shorter than the escalation gate deliberately. An unanswered escalation
+ * discards a section's work, so it is worth waiting out; an unanswered question
+ * only means the model proceeds on its own reading and says so, which is a much
+ * cheaper outcome to reach — and two minutes is already long enough that anyone
+ * who is going to answer has.
+ */
+const CLARIFICATION_TIMEOUT_MS = 2 * 60_000;
 import { buildMediaTools, type AssetSink } from '../tools/generate-media.js';
 import { buildDocumentTools } from '../tools/generate-document.js';
 import { RunBreaker } from './run-breaker.js';
@@ -67,6 +77,12 @@ import {
 import { GuidanceQueue } from './steering/guidance.js';
 import { CurrentPageTool, type CurrentPageProvider } from '../tools/current-page.js';
 import { BrowserControlTool, type BrowserController, type BrowserActorRelease } from '../tools/browser-control.js';
+import {
+  AskUserTool,
+  type ClarificationAnswer,
+  type ClarificationQuestion,
+  type ClarificationResult,
+} from '../tools/ask-user.js';
 
 /** One entry in the per-run orchestration decision trail (see /why). */
 export interface DecisionLogEntry {
@@ -437,6 +453,131 @@ export class Cascade extends EventEmitter {
   // timeout. Same class of bug as the twelve-failover dead-model race: a wave
   // is concurrent, so per-run singletons are never safe inside it.
   private pendingEscalations = new Map<string, (decision: EscalationDecision) => void>();
+  /**
+   * Questionnaires waiting on a person, keyed by request id.
+   *
+   * Exactly the shape `pendingEscalations` uses, and for the same reason: the
+   * answer, the timeout and the abort all race, and one settle path guarded by
+   * the map delete is what makes the first of them win.
+   */
+  private pendingClarifications = new Map<string, (result: ClarificationResult) => void>();
+
+  /**
+   * Put a gate's opening question to its listeners, and NOTICE when one fails.
+   *
+   * `emit` cannot do this job. It calls listeners synchronously and discards
+   * what they return, so an `async` listener — the ordinary shape for anything
+   * that has to reach a socket or a UI — does not fail in a way `emit` reports:
+   * it returns a REJECTED PROMISE that nobody is holding. The `try` around the
+   * emit sees nothing, the gate is never told delivery failed, and it parks for
+   * its full timeout while Node raises an unhandled rejection that can take the
+   * process down.
+   *
+   * `onFailed` is called for either shape, and it is safe to call more than
+   * once: both gates route it to `settle`, which is guarded by a map delete, so
+   * the first failure wins and the rest are no-ops.
+   *
+   * PER LISTENER, not around the loop. `emit` stops dispatching at the first
+   * throw, so one broken host used to cost a working one its notification —
+   * the same reason `announceLiveView` delivers its two listeners separately.
+   * A synchronous failure settles the gate once the whole snapshot has been
+   * delivered; an asynchronous one settles it when the rejection arrives, which
+   * is still far better than the window-long park it replaces.
+   *
+   * SETTLED AFTER THE LOOP, not inside it, and that is not tidiness. `onFailed`
+   * settles the gate, and settling emits the gate's CLOSURE — so failing
+   * mid-dispatch announced "this request is over" and then went on handing the
+   * OPENING event to the listeners after it. A host later in the list would
+   * draw a form whose only closure notification had already gone past, and it
+   * would stand there forever. Deliver to everyone, then decide.
+   *
+   * `rawListeners`, NOT `listeners`. Bypassing `emit` means taking on what
+   * `emit` was doing, and `once` is the part that bites: `listeners()` hands
+   * back the UNWRAPPED callback, so calling it never runs the wrapper that
+   * deregisters it. A host that asked to be told once would be told every
+   * time — and told through a transport it had set up for one gate only.
+   * `rawListeners()` returns the wrapper, which removes the registration and
+   * passes the underlying listener's return value straight through, so the
+   * promise below is still the one being observed. Verified against Node.
+   *
+   * `.call(this, …)`, which is the third thing `emit` was doing. EventEmitter
+   * invokes listeners with the emitter as the receiver, so
+   * `function () { this.resolveClarification(...) }` is a legitimate host — and
+   * calling it bare gave it `this === undefined`, which throws, which this
+   * would then have read as the host failing to receive the question and
+   * settled the gate unanswered. A working listener turned into a delivery
+   * failure by the thing delivering it.
+   */
+  private deliverGate(event: string, payload: unknown, onFailed: () => void): void {
+    // "Did ANYBODY get it", not "did anybody fail". Deferring settlement fixed
+    // the ordering and still answered the wrong question: with two hosts, one
+    // throwing and one receiving the question perfectly well, settling closed
+    // the gate under the host that was already rendering it — so one broken
+    // observer still forced every clarification to proceed unanswered and every
+    // escalation to skip. A gate is undelivered only when NO listener took it.
+    let delivered = false;
+    let threw = false;
+    const pending: Promise<boolean>[] = [];
+    for (const listener of this.rawListeners(event)) {
+      try {
+        const out = (listener as (this: Cascade, p: unknown) => unknown).call(this, payload);
+        if (out && typeof (out as PromiseLike<unknown>).then === 'function') {
+          // Not delivered YET. An async host has taken the question but has not
+          // finished getting it anywhere, so its verdict joins the tally below
+          // rather than counting either way now.
+          pending.push(Promise.resolve(out).then(() => true, () => false));
+        } else {
+          delivered = true;
+        }
+      } catch {
+        threw = true;
+      }
+    }
+    // Somebody has it. Nothing else can make that untrue, so no verdict is
+    // owed and the pending promises are left to settle unobserved-but-handled.
+    if (delivered) return;
+    // Every listener was synchronous and every one of them failed: answerable
+    // right here, which keeps the common case off the microtask queue.
+    if (pending.length === 0) {
+      if (threw) onFailed();
+      return;
+    }
+    // Otherwise wait for the async ones. `some` rather than `every`: one host
+    // succeeding is enough for the question to have been asked.
+    void Promise.all(pending).then((results) => {
+      if (!results.some(Boolean)) onFailed();
+    });
+  }
+
+  /**
+   * Tell listeners something that is over, and let none of them make it worse.
+   *
+   * The closing half of the gate family — `clarification:closed`,
+   * `clarification:timeout`, `escalation:closed`, `escalation:timeout`. Each
+   * was already wrapped in a `try` for the synchronous case, and each had the
+   * same hole `deliverGate` had before last round: `emit` discards what a
+   * listener returns, so an `async` host fails by returning a rejected promise
+   * nobody is holding and Node raises an unhandled rejection.
+   *
+   * There is nothing to settle here — the gate is already closed, which is the
+   * whole message — so unlike `deliverGate` this reports to no one. It exists
+   * so that the four informational emits cannot take the process down, and so
+   * the rule is written once rather than four times.
+   */
+  private announceGateClosed(event: string, payload: unknown): void {
+    for (const listener of this.rawListeners(event)) {
+      try {
+        const out = (listener as (this: Cascade, p: unknown) => unknown).call(this, payload);
+        if (out && typeof (out as PromiseLike<unknown>).then === 'function') {
+          void Promise.resolve(out).catch(() => {
+            // A listener's problem, and the gate it describes is already gone.
+          });
+        }
+      } catch {
+        // As above. Delivery continues to the listeners after it.
+      }
+    }
+  }
 
   private async requestEscalationDecision(
     ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string },
@@ -463,7 +604,27 @@ export class Cascade extends EventEmitter {
         if (!this.pendingEscalations.delete(requestId)) return;
         if (timeout) clearTimeout(timeout);
         signal?.removeEventListener('abort', onAbort);
+        // RESOLVED FIRST, then a guarded emit — the rule this file now applies
+        // in five places. A listener that throws must not be able to park the
+        // section it is being told about.
         resolve(decision);
+        // Announced for EVERY ending, which is what makes the request safe to
+        // REMEMBER and replay.
+        //
+        // `escalation:timeout` is not enough and never was: an answer arrives
+        // on the socket rather than as an emit, so the replay store never sees
+        // it, and an abort or a teardown settle silently. Without a reliable
+        // delete, a page that reloaded could be handed back a decision that had
+        // already been made — worse than losing it, because answering it a
+        // second time resolves nothing and the section looks answerable when it
+        // is gone.
+        //
+        // The map delete above is what makes this exactly-once, so the answered
+        // path emitting it too costs nothing: that client has already taken its
+        // own modal down.
+        // Through `announceGateClosed`, not `emit`: an async host fails by
+        // returning a rejected promise this `try` could never see.
+        this.announceGateClosed('escalation:closed', { taskId, requestId, sectionId: ctx.sectionId });
       };
 
       // Stop / disconnect must unpark the run. T2 has already passed its
@@ -477,20 +638,44 @@ export class Cascade extends EventEmitter {
       signal?.addEventListener('abort', onAbort, { once: true });
 
       timeout = setTimeout(() => {
-        this.emit('escalation:timeout', { taskId, requestId, sectionId: ctx.sectionId });
+        // Settled first, emit guarded — see the clarification timeout below.
+        // Found by walking every door of that rule rather than only the one
+        // that was reported, and this is the gate with the most to lose: an
+        // escalation that never settles holds a T2 section and its worker,
+        // where an unanswered question only costs an assumption.
         settle({ action: 'timeout' });
+        // Informational only, and the section is already unblocked — but an
+        // async listener's rejection still reaches the process, so it goes
+        // through `announceGateClosed` like its three siblings.
+        this.announceGateClosed('escalation:timeout', { taskId, requestId, sectionId: ctx.sectionId });
       }, ESCALATION_DECISION_TIMEOUT_MS);
 
       this.pendingEscalations.set(requestId, settle);
-      this.emit('escalation:decision-required', {
-        taskId,
-        requestId,
-        sectionId: ctx.sectionId,
-        sectionTitle: ctx.sectionTitle,
-        issues: ctx.issues,
-        summary: ctx.summary,
-        timeoutMs: ESCALATION_DECISION_TIMEOUT_MS,
-      });
+      // The delivery emit, guarded — not reported here, but the same door in
+      // the gate this one was copied from, and this is the copy with more to
+      // lose. An unguarded throw propagates out of the Promise executor and
+      // REJECTS the promise, so a host whose UI transport is momentarily down
+      // does not merely fail to show the prompt: it throws inside T2's review,
+      // where the clarification twin only costs the model an assumption.
+      //
+      // Settled `skip`/`automatic`, identical to the `listenerCount === 0`
+      // early-return above, because it is the same fact arriving later — a
+      // listener that throws on receipt did not receive it. `automatic` is
+      // what keeps T2 from reading this as a person having accepted the
+      // section, which nobody did.
+      this.deliverGate(
+        'escalation:decision-required',
+        {
+          taskId,
+          requestId,
+          sectionId: ctx.sectionId,
+          sectionTitle: ctx.sectionTitle,
+          issues: ctx.issues,
+          summary: ctx.summary,
+          timeoutMs: ESCALATION_DECISION_TIMEOUT_MS,
+        },
+        () => settle({ action: 'skip', automatic: true }),
+      );
     });
   }
 
@@ -530,6 +715,154 @@ export class Cascade extends EventEmitter {
     for (const settle of Array.from(this.pendingEscalations.values())) settle({ action, automatic: true });
   }
 
+  // ── Clarification: asking instead of assuming ───────────────────────
+  // The same gate shape as the escalation above, and for the same reasons. The
+  // difference that matters: an unanswered escalation SKIPS a section, while an
+  // unanswered question just means the model proceeds on its own reading — so
+  // every non-answer here is benign, and none of them may park the run.
+
+  /**
+   * Put a questionnaire to whoever is watching, if anybody is.
+   *
+   * Returns `no-listener` rather than waiting when there is nothing attached to
+   * answer — a scheduled run, an API caller with no socket, an autonomous run
+   * that has already said it wants no prompts. That check is the whole reason
+   * this can be offered to the model at all: a tool that might hang a headless
+   * run forever is a tool that cannot be registered.
+   */
+  async askUser(
+    questions: ClarificationQuestion[],
+    signal?: AbortSignal,
+  ): Promise<ClarificationResult> {
+    const none = (outcome: ClarificationResult['outcome']): ClarificationResult =>
+      ({ outcome, answers: [] });
+
+    // Nobody to ask, by three different routes. An unattended run has already
+    // declared there is no person; `auto` has declared they do not want to be
+    // interrupted; and no listener means the host never wired the event, which
+    // is the API and scheduled cases.
+    if (this.unattended) return none('no-listener');
+    if (this.config.autonomy === 'auto') return none('no-listener');
+    if (this.listenerCount('clarification:required') === 0) return none('no-listener');
+    if (signal?.aborted) return none('aborted');
+
+    const requestId = randomUUID();
+
+    return await new Promise<ClarificationResult>((resolve) => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+
+      // One settle path for every outcome, guarded by the map delete so the
+      // first of {answer, timeout, abort} wins and the losers are no-ops.
+      const settle = (result: ClarificationResult) => {
+        if (!this.pendingClarifications.delete(requestId)) return;
+        if (timeout) clearTimeout(timeout);
+        signal?.removeEventListener('abort', onAbort);
+        // Announced for EVERY outcome, not just the timeout.
+        //
+        // Whoever is showing the form has no other way to learn it is over. An
+        // abort and a teardown release both settle here silently, so a Stop —
+        // or any branch failure that unwinds the run — used to leave a live
+        // questionnaire on screen with nothing behind it: submitting answered a
+        // request nobody held, and because the queue shows the oldest first,
+        // that dead form sat in front of every later question.
+        //
+        // The map delete above is what makes this exactly-once, so the answered
+        // path emitting it too is harmless — that client has already taken the
+        // form down itself.
+        //
+        // RESOLVED FIRST, and the emit guarded. Announcing before resolving put
+        // the whole gate at the mercy of a listener: one that threw unwound
+        // `settle` before `resolve` ever ran, and because the map entry was
+        // already deleted, the timeout, the abort and any answer had all become
+        // no-ops. The promise stayed pending forever — the run parked on a
+        // question, which is the single thing this gate promises cannot happen.
+        //
+        // The same mistake as `reportReleaseFailure`, made again in a second
+        // place: a report must not become the failure it is reporting.
+        resolve(result);
+        // A listener's problem either way, and the run is already unblocked —
+        // but only `announceGateClosed` can see the asynchronous half of it.
+        this.announceGateClosed('clarification:closed', { requestId });
+      };
+
+      // Stop must unpark the run. Without this the person presses Stop, watches
+      // the question stay on screen, and the run sits holding its worker until
+      // the full timeout — which is the same "pressed Stop and nothing stopped"
+      // failure the escalation gate exists to avoid.
+      const onAbort = () => settle(none('aborted'));
+      signal?.addEventListener('abort', onAbort, { once: true });
+
+      timeout = setTimeout(() => {
+        // SETTLED FIRST, and the emit guarded — the same rule as the close
+        // announcement below it, and the THIRD place this gate family got it
+        // wrong (the release observer, then `clarification:closed`, then here).
+        //
+        // Worse here than there, for two reasons. `settle` had not run yet, so
+        // a throwing listener left the entry IN `pendingClarifications` with
+        // its promise unresolved — and the timer is one-shot, so nothing would
+        // ever come back for it: the run parked on the question until teardown.
+        // And this is a TIMER callback, so the throw does not unwind into any
+        // caller; it surfaces as an uncaught exception and can take the process
+        // with it.
+        settle(none('timeout'));
+        // Informational only, and the run is already unblocked. Routed like
+        // the other three so an async host cannot take the process down.
+        this.announceGateClosed('clarification:timeout', { requestId });
+      }, CLARIFICATION_TIMEOUT_MS);
+
+      this.pendingClarifications.set(requestId, settle);
+      // DELIVERY, and the fourth emit in this gate family to need guarding —
+      // the first three were all about a listener throwing on the way OUT.
+      //
+      // This one is on the way in, and it is the worst place for it: an
+      // unguarded throw here propagates out of the Promise executor, which
+      // REJECTS the promise. `askUser` would then throw at its caller, so the
+      // model's `ask_user` call fails for no reason except that whatever draws
+      // the form could not draw it — a host whose UI transport is momentarily
+      // down turns an optional question into a tool error.
+      //
+      // Settled as `no-listener`, which is not a euphemism: the three
+      // early-returns above ask exactly this question — is there anybody who
+      // can receive this? — and a listener that throws on receipt did not
+      // receive it. The run proceeds on the model's own reading, which is the
+      // documented benign outcome, instead of failing.
+      //
+      // `settle` is already in the map, so if some listeners rendered the form
+      // before another threw, the `clarification:closed` it emits takes those
+      // copies down too.
+      this.deliverGate(
+        'clarification:required',
+        { requestId, questions, timeoutMs: CLARIFICATION_TIMEOUT_MS },
+        () => settle(none('no-listener')),
+      );
+    });
+  }
+
+  /**
+   * Answer a questionnaire from a REPL / dashboard / cloud listener.
+   *
+   * `requestId` comes back on the `clarification:required` event and is what
+   * makes an answer land on the question that asked. Optional for a host with
+   * only one in flight, matching `resolveEscalation`: without it the oldest
+   * outstanding request is answered, which is correct whenever there is one.
+   */
+  resolveClarification(answers: ClarificationAnswer[], requestId?: string): void {
+    const result: ClarificationResult = { outcome: 'answered', answers };
+    if (requestId) {
+      this.pendingClarifications.get(requestId)?.(result);
+      return;
+    }
+    const oldest = this.pendingClarifications.keys().next();
+    if (!oldest.done) this.pendingClarifications.get(oldest.value)?.(result);
+  }
+
+  /** Release every parked questionnaire — run teardown, so none outlive the run. */
+  private releasePendingClarifications(): void {
+    for (const settle of Array.from(this.pendingClarifications.values())) {
+      settle({ outcome: 'aborted', answers: [] });
+    }
+  }
+
   /**
    * Resolve a pending boardroom plan approval from a REPL / dashboard listener.
    * An optional `note` re-plans and re-asks; an optional `editedPlan` is applied
@@ -560,12 +893,24 @@ export class Cascade extends EventEmitter {
       const timeout = setTimeout(() => {
         if (this.pendingContextApproval) {
           this.pendingContextApproval = undefined;
+          // TIMED OUT IS AN ENDING TOO. See the closure below: a host that
+          // waited out the gate must be told it is over, or the dialog stays
+          // up and its buttons reach a gate that is already gone.
+          this.announceGateClosed('context:approval-closed', {});
           resolve(true);
         }
       }, 120_000);
       this.pendingContextApproval = (approved) => {
         clearTimeout(timeout);
         this.pendingContextApproval = undefined;
+        // The one thing this gate never said. Its three siblings all announce
+        // their ending, and hosts depend on it: a hosted client that was
+        // disconnected when the gate settled has no other way to learn that the
+        // question is over, so a reconnect would put the answered question back
+        // on screen. Through `announceGateClosed` rather than `emit` for the
+        // reason the siblings use it — the gate is already settled, so a
+        // listener that throws or rejects must not be allowed to change that.
+        this.announceGateClosed('context:approval-closed', {});
         resolve(approved);
       };
       this.emit('context:approval-required', info);
@@ -787,6 +1132,35 @@ export class Cascade extends EventEmitter {
     if (!enabled) return;
     if ((this.config.tools?.disabledTools ?? []).includes('browser_control')) return;
     this.toolRegistry.register(new BrowserControlTool(controller, release));
+  }
+
+  /**
+   * Declare that this host can put a questionnaire to a person and answer it.
+   *
+   * Explicit, and NOT done at construction, because registering a tool is a
+   * promise the host has to keep. A host that registers `ask_user` without
+   * listening for `clarification:required` gives the model a tool that always
+   * answers "there is nobody watching this run" — while a person sits at the
+   * terminal looking at it. That is worse than not offering the tool at all:
+   * it costs a round trip and then tells the model something false.
+   *
+   * Only `cloud/server` bridges the protocol today. The CLI REPL and the
+   * dashboard do not, so they do not call this, and their models are not shown
+   * a capability nobody can serve. Wiring either of them is a matter of
+   * listening for the event and calling `resolveClarification`, then calling
+   * this.
+   *
+   * Still gated on the same conditions as the call itself, and `askUser`
+   * re-checks them: `setUnattended` can land after this, so the tool can be
+   * registered for a run that later turns out to have nobody on it. Then it
+   * answers `no-listener` and the model proceeds on its own reading, which is
+   * the same defence-in-depth `BrowserControlTool.revoke` provides.
+   */
+  enableClarification(): void {
+    if (this.unattended) return;
+    if (this.config.autonomy === 'auto') return;
+    if ((this.config.tools?.disabledTools ?? []).includes('ask_user')) return;
+    this.toolRegistry.register(new AskUserTool((questions, signal) => this.askUser(questions, signal)));
   }
 
   private registerMediaTools(workspacePath: string): void {
@@ -2140,6 +2514,7 @@ ${prompt}`
       // (error, abort, budget kill) must not leave a live timer and an
       // unresolved promise holding the next run's map.
       try { this.releasePendingEscalations(); } catch { /* non-critical */ }
+      try { this.releasePendingClarifications(); } catch { /* non-critical */ }
 
       // Restore tier models to the configured baseline so Cascade Auto's
       // per-task picks don't leak into /why, the status bar, or the next run.

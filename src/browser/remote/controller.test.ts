@@ -831,6 +831,285 @@ describe('attached is not the same as watchable', () => {
 
     expect(seen.at(-1)).toEqual({ active: false });
   });
+
+  it('says so when a provider session could not be handed back', async () => {
+    // Release is best-effort and must stay that way — a finished run must not
+    // be reported as failed because the provider was briefly unreachable — but
+    // best-effort is not the same as unobservable. Both layers used to swallow
+    // the rejection whole, so a release that never happened was indistinguish-
+    // able from a clean handback, and the only evidence was a browser still
+    // running on the provider's dashboard until its own timeout collected it.
+    //
+    // Found while trying to explain two Steel sessions that ended at exactly
+    // 5:00 — the provider's default timeout — with no agent activity in the
+    // last four minutes of either. Nothing in the system could answer whether
+    // the release had failed, which is the gap this closes.
+    const { provider } = fakeProvider();
+    const boom = new Error('Steel POST /v1/sessions/sess-1/release failed: 503');
+    provider.endSession = async () => { throw boom; };
+
+    const failures: Array<{ runId: string; sessionId: string; err: unknown }> = [];
+    const c = new RemoteBrowserController({
+      provider,
+      onReleaseFailed: (runId, sessionId, err) => failures.push({ runId, sessionId, err }),
+    });
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    // Not rejected. The run is over either way — that contract is unchanged.
+    await expect(c.endRun('run-A')).resolves.toBeUndefined();
+
+    expect(failures, 'the operator is told, once, which session is still running')
+      .toEqual([{ runId: 'run-A', sessionId: 'sess-1', err: boom }]);
+  });
+
+  it('does not let a throwing observer become the failure it was told about', async () => {
+    // The report runs inside the `.catch` on the release, so an observer that
+    // throws — a logging or telemetry sink briefly unavailable is the ordinary
+    // case — used to turn its own failure into a fresh rejection from
+    // `disposeRun`. `endRun` would then reject before `forgetRun`, and the
+    // fire-and-forget `stopRun` path would raise an unhandled rejection.
+    //
+    // Which is exactly the guarantee this change claims to keep: a release that
+    // fails must never fail the run. Reporting it cannot be what breaks it.
+    const { provider } = fakeProvider();
+    provider.endSession = async () => { throw new Error('release 503'); };
+
+    const c = new RemoteBrowserController({
+      provider,
+      onReleaseFailed: () => { throw new Error('the telemetry sink is down'); },
+    });
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await expect(c.endRun('run-A'), 'the run still ends').resolves.toBeUndefined();
+    // And the run is genuinely forgotten, not abandoned mid-teardown.
+    expect(c.humanHolds('run-A')).toBe(false);
+  });
+
+  it('observes an async report that rejects, rather than letting it reach the process', async () => {
+    // The same guarantee as the test above, through the door its `try` cannot
+    // cover. A telemetry sink is usually `async`, and an async function does
+    // not throw — it returns a REJECTED PROMISE. A `try` around a call that is
+    // never awaited sees nothing, so Node raises an unhandled rejection and can
+    // terminate the process: the observer would not merely have failed to
+    // report the leak, it would have killed the run.
+    //
+    // Asserted against the PROCESS rather than against `endRun`, because
+    // `endRun` resolving is exactly what it did before the fix — the failure
+    // was invisible from inside the call.
+    const { provider } = fakeProvider();
+    provider.endSession = async () => { throw new Error('release 503'); };
+
+    const escaped: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { escaped.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const c = new RemoteBrowserController({
+        provider,
+        onReleaseFailed: async () => { throw new Error('the telemetry sink is down'); },
+      });
+
+      await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+      await expect(c.endRun('run-A'), 'the run still ends').resolves.toBeUndefined();
+      // Node reports an unhandled rejection only once the microtask queue has
+      // drained, so ask on the next macrotask rather than immediately.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(escaped, 'the sink failing stays the sink\'s problem').toEqual([]);
+      expect(c.humanHolds('run-A')).toBe(false);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('isolates every embedder callback, sync or async, not only the release report', async () => {
+    // The rule was applied to these one at a time across three rounds, missing
+    // the siblings each time — so it is one function now, and this asserts all
+    // four doors at once rather than the one that was last reported.
+    //
+    // `announceControl` is the one that had NO guard, not even for a
+    // synchronous throw, and it is the worst place to be missing one:
+    // `announceLiveView` was guarded at source specifically to cover its four
+    // call sites, and this has eighteen — including the lease's own `onChange`
+    // and the paths that stop a screencast and hand a session back.
+    const { provider } = fakeProvider('https://provider.test/live/abc');
+    provider.endSession = async () => { throw new Error('release 503'); };
+
+    const escaped: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { escaped.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const c = new RemoteBrowserController({
+        provider,
+        onLiveView: async () => { throw new Error('the global observer is down'); },
+        onReleaseFailed: async () => { throw new Error('the telemetry sink is down'); },
+      });
+      c.onLiveViewFor('run-A', async () => { throw new Error('the panel transport is down'); });
+      c.onControlFor('run-A', async () => { throw new Error('the control transport is down'); });
+
+      // Every announcement happens across these: the live view on open, the
+      // control state on each lease change, and the release report on teardown.
+      await expect(
+        c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1')),
+        'a browser action is not a party to a listener failing',
+      ).resolves.toBeDefined();
+      await expect(c.endRun('run-A'), 'and the run still ends').resolves.toBeUndefined();
+
+      // Node reports an unhandled rejection once the microtask queue drains.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(escaped, 'four failing sinks, and none of them reaches the process').toEqual([]);
+      expect(c.humanHolds('run-A')).toBe(false);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('keeps a synchronous throw in one listener off the others', () => {
+    // Two separate deliveries, not one `try` around both: these are different
+    // listeners — the per-run panel and the global observer — and one failing
+    // must not cost the other its notification.
+    const seen: string[] = [];
+    const c = new RemoteBrowserController({
+      provider: fakeProvider('https://provider.test/live/abc').provider,
+      onLiveView: (runId) => { seen.push(`all:${runId}`); },
+    });
+    c.onLiveViewFor('run-A', () => { throw new Error('the panel is down'); });
+
+    expect(
+      () => (c as unknown as { announceLiveView(r: string, u: string | undefined, a: boolean): void })
+        .announceLiveView('run-A', 'https://provider.test/live/abc', true),
+    ).not.toThrow();
+    expect(seen, 'the observer still heard it').toEqual(['all:run-A']);
+  });
+
+  it('reports a session that leaked while the browser was still opening', async () => {
+    // `openReserved` allocates the session first and only then connects, makes
+    // a context and opens a page. When one of those fails it rolls back — and
+    // that rollback releases a session exactly like any other teardown does.
+    //
+    // A session allocated and then not handed back is billable whether or not
+    // the run got as far as using it, and this path is reached precisely when
+    // something has already gone wrong, so it is no less likely to fail. The
+    // observer was wired to the ordinary teardown and not to this one: the rule
+    // was written once and applied to one of its two doors.
+    const { provider } = fakeProvider();
+    provider.endSession = async () => { throw new Error('release 503'); };
+    const failures: Array<{ runId: string; sessionId: string }> = [];
+    const c = new RemoteBrowserController({
+      provider,
+      onReleaseFailed: (runId, sessionId) => failures.push({ runId, sessionId }),
+    });
+
+    // Fail AFTER `createSession` has already allocated one, so the rollback is
+    // the path taken: the context is made once the session exists and the CDP
+    // connection is up, which is exactly the window this is about.
+    const realNewContext = browser.newContext;
+    browser.newContext = async () => { throw new Error('no context for you'); };
+    try {
+      await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    } finally {
+      browser.newContext = realNewContext;
+    }
+
+    expect(failures, 'the leaked session names itself here too')
+      .toEqual([{ runId: 'run-A', sessionId: 'sess-1' }]);
+  });
+
+  it('tells the observer when the leaked session gets reaped', async () => {
+    // "Billable until the provider times it out" leaves the operator without
+    // the one number that decides what to do about it: whether this costs five
+    // minutes or runs until somebody kills it by hand. The ceiling was read
+    // from the provider and carried on the session, and then reached nothing —
+    // parsed, typed, and used by no caller outside its own adapter test.
+    //
+    // Which is the same failure as a report that cannot be delivered: the fact
+    // was captured and then not put anywhere a person would see it.
+    const { provider } = fakeProvider();
+    provider.createSession = async () => ({ id: 'sess-1', cdpUrl: 'ws://fake/cdp', expiresInMs: 300_000 });
+    provider.endSession = async () => { throw new Error('release 503'); };
+
+    const seen: Array<{ sessionId: string; expiresInMs?: number }> = [];
+    const c = new RemoteBrowserController({
+      provider,
+      onReleaseFailed: (_runId, sessionId, _err, expiresInMs) => seen.push({ sessionId, expiresInMs }),
+    });
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await c.endRun('run-A');
+
+    expect(seen, 'the five minutes that explained the field incident')
+      .toEqual([{ sessionId: 'sess-1', expiresInMs: 300_000 }]);
+  });
+
+  it('re-advertises the browser on every action, not only when it is created', async () => {
+    // A browser is created ONCE per run, and this used to be the only moment it
+    // was announced — so a client with no panel for this run never got another
+    // chance at one. There is nothing on the client to retry with: the panel is
+    // pure server state (`browserActive = browserView !== undefined`), so a view
+    // entry that has gone stays gone for the life of the run, and the Stop
+    // button and Take control go with it.
+    //
+    // Reported from the field: the panel appeared on the first browser action,
+    // the person dismissed it, and every later action returned results with no
+    // way left to watch or halt the page it had just driven.
+    const { provider } = fakeProvider('https://view.example/session');
+    const c = new RemoteBrowserController({ provider });
+    const seen: Array<{ active: boolean; liveViewUrl?: string }> = [];
+    c.onLiveViewFor('run-A', (info) => seen.push(info));
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    expect(seen, 'announced when the browser is created').toHaveLength(1);
+
+    // The SAME run acting again. One session throughout — `open()` returns the
+    // one it already has — which is exactly why the announcement had to be
+    // moved off the creation path to be made at all.
+    await c.controller({ kind: 'click', selector: '#b' }, ctx('run-A', 'w1'));
+
+    expect(seen, 'and again, so a client that lost the panel can get it back')
+      .toHaveLength(2);
+    expect(seen.at(-1), 'the same browser, still watchable')
+      .toEqual({ active: true, liveViewUrl: 'https://view.example/session' });
+  });
+
+  it('does not let a throwing view listener fail the action it was announcing', async () => {
+    // The re-announcement above is informational, and it sat directly in the
+    // path of `open()`. A listener that threw — a transport that has gone away
+    // is the ordinary case — propagated out, `act()` caught it as an action
+    // failure, and every later action against a perfectly healthy browser was
+    // skipped: the announcement took down the thing it was announcing.
+    //
+    // The fifth instance of that in this changeset, which is why the guard went
+    // into `announceLiveView` itself rather than onto this call site. There are
+    // four call sites; fixing the reported one would have left three.
+    const { provider } = fakeProvider('https://view.example/session');
+    const c = new RemoteBrowserController({ provider });
+    c.onLiveViewFor('run-A', () => { throw new Error('the socket is gone'); });
+
+    // `act` catches whatever escapes and reports it as a FAILED ACTION, so the
+    // assertion has to be on `ok` — an outcome object is returned either way,
+    // and a test that only checked for one would pass with the guard removed.
+    const first = await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    expect(first.ok, 'the creation announcement cannot fail the action either').toBe(true);
+
+    // The reuse path — the one the announcement was added to.
+    const again = await c.controller({ kind: 'click', selector: '#b' }, ctx('run-A', 'w1'));
+    expect(again.ok, 'and every later action against a healthy browser still runs').toBe(true);
+  });
+
+  it('still tears the session down when the view listener throws', async () => {
+    // The worst of the four call sites, and not the one that was reported:
+    // `disposeRun` announces `active: false` as its FIRST statement. A throwing
+    // listener aborted teardown before the screencast was stopped, the context
+    // closed, or the session handed back — so the report of a leak was skipped
+    // by the very failure that caused one.
+    const { provider, ended } = fakeProvider('https://view.example/session');
+    const c = new RemoteBrowserController({ provider });
+    c.onLiveViewFor('run-A', () => { throw new Error('the socket is gone'); });
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await expect(c.endRun('run-A')).resolves.toBeUndefined();
+
+    expect(ended, 'the session is handed back, not leaked by its own farewell')
+      .toEqual(['sess-1']);
+  });
 });
 
 describe('two runs starting at the same moment', () => {
@@ -1370,6 +1649,59 @@ describe('watching a run\'s browser', () => {
       'deliver:FRAME-ONE', 'ack:1',
       'deliver:FRAME-TWO', 'ack:2',
     ]);
+  });
+
+  it('acks Chrome even when the frame consumer throws, and keeps streaming', async () => {
+    // The fifth embedder callback, missed when the other four were swept into
+    // one rule — and the one with the worst failure. Chrome sends the next
+    // frame only once the previous is ACKED, and a synchronous throw here left
+    // the CDP handler before the ack: one bad frame from one consumer would
+    // darken the live view for the rest of the run, which is exactly the
+    // never-ack failure the ack-ordering test above exists to prevent, reached
+    // from the other side.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const seen: string[] = [];
+    await c.startWatching('run-A', (f) => {
+      seen.push(f.data);
+      throw new Error('the viewer transport is down');
+    });
+
+    cdp.order.length = 0;
+    seen.length = 0;
+    expect(() => cdp.pushFrame(1, 'FRAME-ONE')).not.toThrow();
+    expect(cdp.order, 'Chrome was told to send the next one').toEqual(['ack:1']);
+
+    // And it does: the stream is still alive for the frame after the failure.
+    cdp.pushFrame(2, 'FRAME-TWO');
+    expect(seen, 'a failing consumer costs its own frame and nothing else').toEqual(['FRAME-ONE', 'FRAME-TWO']);
+    expect(cdp.order).toEqual(['ack:1', 'ack:2']);
+  });
+
+  it('keeps an async frame consumer\'s rejection off the process', async () => {
+    // The other shape, and one the `void` signature used to accept silently: an
+    // `async` consumer does not throw, it returns a rejected promise that no
+    // `try` around an un-awaited call can see.
+    const escaped: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { escaped.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const { provider } = fakeProvider();
+      const c = new RemoteBrowserController({ provider });
+      await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+      await c.startWatching('run-A', async () => { throw new Error('the viewer transport is down'); });
+
+      cdp.order.length = 0;
+      cdp.pushFrame(1, 'FRAME-ONE');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(escaped, 'the consumer failing stays the consumer\'s problem').toEqual([]);
+      expect(cdp.order, 'and Chrome is still being acked').toEqual(['ack:1']);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 
   it('reports the remote viewport, so a canvas need not guess', async () => {

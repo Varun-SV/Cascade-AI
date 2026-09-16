@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import fs from 'node:fs/promises';
@@ -696,6 +696,128 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
     expect(reply).not.toContain('Hello from the stub model.');
   }, 30_000);
 
+  it('stops only the run the Stop button was pressed in', async () => {
+    // One connection carries several runs — that is the premise of `activeRuns`
+    // being a set — and `chat:stop` aborted all of them. A user watching one
+    // chat pressed Stop and killed a run in another, which then acked with
+    // whatever partial output it had as though that were its answer. Nothing
+    // told them it had happened.
+    await start(8_000);
+    stub = await startStubOpenAIServer({ delayMs: 3_000 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'stop-scope', email: null, name: 'Scope', avatar: null });
+    // Two at once needs the plan that allows two at once.
+    store.setUserSubscription(user.id, { subscriptionId: 'sub-1', status: 'active', currentEnd: null, plan: 'pro' });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    // Named up front, so the test does not have to wait for an ack to learn
+    // the ids — which is the very thing a Stop has to work without.
+    const watched = store.createConversation(user.id, 'the one being watched');
+    const background = store.createConversation(user.id, 'the one in another tab');
+
+    const socket = connect(cookie);
+    await connected(socket);
+    const providers = [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }];
+    socket.emit('chat:run', { prompt: 'hello', conversationId: watched.id, providers }, () => { /* stopped */ });
+    socket.emit('chat:run', { prompt: 'hello', conversationId: background.id, providers }, () => { /* finishes */ });
+
+    await new Promise((r) => setTimeout(r, 300));
+    socket.emit('chat:stop', { conversationId: watched.id });
+
+    // Past the stub's delay: a run that was genuinely stopped never gets the
+    // reply written, and one the Stop did not touch does.
+    await new Promise((r) => setTimeout(r, 4_000));
+    expect(assistantReply(watched.id), 'the run whose Stop was pressed').not.toContain('Hello from the stub model.');
+    expect(assistantReply(background.id), 'the run in another chat was not touched').toContain('Hello from the stub model.');
+  }, 30_000);
+
+  it('stops one of two runs in the SAME conversation', async () => {
+    // Conversation scoping was still ambiguous where it counts. Two runs can
+    // share a chat — a duplicated tab inherits the incumbent's run while
+    // holding its own — and both matched the keyed payload, so Stop aborted the
+    // background one too and it acked with its partial output as though that
+    // were its answer. A run id is the only address that separates them.
+    await start(8_000);
+    stub = await startStubOpenAIServer({ delayMs: 3_000 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'stop-run', email: null, name: 'Run', avatar: null });
+    store.setUserSubscription(user.id, { subscriptionId: 'sub-2', status: 'active', currentEnd: null, plan: 'pro' });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    // ONE conversation, two runs on it.
+    const shared = store.createConversation(user.id, 'two runs, one chat');
+
+    const socket = connect(cookie);
+    await connected(socket);
+    const providers = [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }];
+    socket.emit('chat:run', { prompt: 'hello', conversationId: shared.id, runId: 'run-stopped', providers }, () => { /* stopped */ });
+    socket.emit('chat:run', { prompt: 'hello', conversationId: shared.id, runId: 'run-survives', providers }, () => { /* finishes */ });
+
+    await new Promise((r) => setTimeout(r, 300));
+    socket.emit('chat:stop', { runIds: ['run-stopped'], conversationId: shared.id });
+
+    // One reply on the conversation, not none and not two: the survivor wrote
+    // its answer and the stopped run never got to.
+    await new Promise((r) => setTimeout(r, 4_000));
+    const replies = (store.getMessages(shared.id) as Array<{ role: string; content: string }>)
+      .filter((m) => m.role === 'assistant' && m.content.includes('Hello from the stub model.'));
+    expect(replies, 'the sibling on the same conversation was not touched').toHaveLength(1);
+  }, 30_000);
+
+  it('stops every run the client named and nothing else', async () => {
+    // One Stop button in one chat can honestly mean several runs — two can
+    // share the conversation on screen and the client has no way to offer a
+    // choice — so it names them all rather than falling back to the
+    // conversation, which is the loose address that started this.
+    await start(8_000);
+    stub = await startStubOpenAIServer({ delayMs: 3_000 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'stop-many', email: null, name: 'Many', avatar: null });
+    store.setUserSubscription(user.id, { subscriptionId: 'sub-3', status: 'active', currentEnd: null, plan: 'pro' });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    const here = store.createConversation(user.id, 'the chat on screen');
+    const elsewhere = store.createConversation(user.id, 'another chat entirely');
+
+    const socket = connect(cookie);
+    await connected(socket);
+    const providers = [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }];
+    socket.emit('chat:run', { prompt: 'hello', conversationId: here.id, runId: 'r1', providers }, () => { /* stopped */ });
+    socket.emit('chat:run', { prompt: 'hello', conversationId: here.id, runId: 'r2', providers }, () => { /* stopped */ });
+    socket.emit('chat:run', { prompt: 'hello', conversationId: elsewhere.id, runId: 'r3', providers }, () => { /* survives */ });
+
+    await new Promise((r) => setTimeout(r, 300));
+    socket.emit('chat:stop', { runIds: ['r1', 'r2'], conversationId: here.id });
+
+    await new Promise((r) => setTimeout(r, 4_000));
+    expect(assistantReply(here.id), 'both named runs stopped').not.toContain('Hello from the stub model.');
+    expect(assistantReply(elsewhere.id), 'and the one nobody named did not').toContain('Hello from the stub model.');
+  }, 30_000);
+
+  it('still stops everything when the client names no conversation', async () => {
+    // Older clients send no payload, and so does a page whose run has not yet
+    // emitted the event carrying its id. Both have to keep working: a Stop that
+    // did nothing at the very start of a turn would be a worse failure than the
+    // over-abort the keyed form replaces.
+    await start(8_000);
+    stub = await startStubOpenAIServer({ delayMs: 3_000 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'stop-unkeyed', email: null, name: 'Unkeyed', avatar: null });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    const socket = connect(cookie);
+    await connected(socket);
+    socket.emit(
+      'chat:run',
+      { prompt: 'hello', providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }] },
+      () => { /* stopped */ },
+    );
+
+    await new Promise((r) => setTimeout(r, 300));
+    socket.emit('chat:stop');
+
+    await new Promise((r) => setTimeout(r, 4_000));
+    const conversations = store.listConversations(user.id) as Array<{ id: string }>;
+    const reply = conversations.length ? assistantReply(conversations[0]!.id) : '';
+    expect(reply, 'an unkeyed Stop still reaches the run').not.toContain('Hello from the stub model.');
+  }, 30_000);
+
   it('parks a run rather than handing it to a socket that has already gone', async () => {
     // The client's rotation path makes this ordinary: a duplicated tab
     // connects on the COPIED id, discovers the collision, rotates to a fresh
@@ -1214,6 +1336,63 @@ describe('RebindableTransport', () => {
   });
 });
 
+describe('RebindableTransport — every event says which run it is', () => {
+  function recorder() {
+    const emitted: Array<{ event: string; payload: unknown }> = [];
+    const volatileEmitted: Array<{ event: string; payload: unknown }> = [];
+    return {
+      emitted,
+      volatileEmitted,
+      socket: {
+        emit: (event: string, payload: unknown) => { emitted.push({ event, payload }); return true; },
+        volatile: { emit: (event: string, payload: unknown) => { volatileEmitted.push({ event, payload }); return true; } },
+        on: () => undefined,
+        off: () => undefined,
+      },
+    };
+  }
+
+  it('stamps the run on everything it sends, and on what the replay store keeps', () => {
+    // Stamped at the TRANSPORT rather than at each emit site, because the
+    // number of emit sites is the problem: `runs.ts` adds `conversationId` to
+    // roughly thirty of them by hand, and a run identity added the same way
+    // would be missing from whichever one was written next.
+    //
+    // Observed with the stamp on, not before it: a replayed gate has to be
+    // answerable, and answering one now means naming its run.
+    const { emitted, socket } = recorder();
+    const observed: Array<{ event: string; payload: unknown }> = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const t = new RebindableTransport(socket as any, (event, payload) => { observed.push({ event, payload }); }, () => 'run-7');
+
+    t.emit('stream:token', { conversationId: 'c1', text: 'hello' });
+
+    expect((emitted[0]?.payload as { runId?: string }).runId, 'on the wire').toBe('run-7');
+    expect((observed[0]?.payload as { runId?: string }).runId, 'and in what is remembered').toBe('run-7');
+  });
+
+  it('does not overwrite a run a caller named itself', () => {
+    // Under the payload, not over it: a caller naming a run explicitly is
+    // describing something the transport cannot know better.
+    const { emitted, socket } = recorder();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const t = new RebindableTransport(socket as any, () => {}, () => 'run-7');
+    t.emit('stream:token', { runId: 'run-elsewhere', text: 'hello' });
+    expect((emitted[0]?.payload as { runId?: string }).runId).toBe('run-elsewhere');
+  });
+
+  it('leaves a payload that is not an object alone', () => {
+    // Nothing in-tree emits one, but a stamp that threw on a string or an array
+    // would take the run down over a message rather than lose a field on it.
+    const { emitted, socket } = recorder();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const t = new RebindableTransport(socket as any, () => {}, () => 'run-7');
+    t.emit('odd', 'just a string');
+    t.emit('odder', [1, 2, 3]);
+    expect(emitted.map((e) => e.payload)).toEqual(['just a string', [1, 2, 3]]);
+  });
+});
+
 describe('rememberForReplay / replaySupervision — what a reload gets back', () => {
   // A held run survives a page reload, but two of the events that make the
   // hosted browser safe are one-shot: `browser:live-view` (the panel and its
@@ -1326,6 +1505,182 @@ describe('rememberForReplay / replaySupervision — what a reload gets back', ()
     expect(emitted).toEqual([]);
   });
 
+  it('gives a reloaded page back a SECTION the run is still blocked on', () => {
+    // The gate the clarification gate was copied from, and the one that never
+    // got this. A reload while a section was parked left the run alive on the
+    // server and the modal gone from the page — no way to answer, and the
+    // section failed when its five-minute timer ran out.
+    const run = freshRun();
+    rememberForReplay(run, 'escalation:decision-required', {
+      conversationId: 'c1', requestId: 'req-1', sectionId: 's1',
+      sectionTitle: 'Section alpha', issues: [], timeoutMs: 300_000,
+    });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+    expect(emitted.map((e) => e.event)).toEqual(['escalation:decision-required']);
+    expect((emitted[0]?.payload as { requestId?: string }).requestId).toBe('req-1');
+  });
+
+  it('replays what is LEFT of a section\'s five minutes, not the whole of it', () => {
+    vi.useFakeTimers();
+    try {
+      const run = freshRun();
+      rememberForReplay(run, 'escalation:decision-required', {
+        conversationId: 'c1', requestId: 'req-1', sectionId: 's1', timeoutMs: 300_000,
+      });
+      vi.advanceTimersByTime(240_000);
+
+      const { emitted, socket } = recorder();
+      replaySupervision(run, socket);
+
+      expect((emitted[0]?.payload as { timeoutMs?: number }).timeoutMs, 'one minute, not five').toBe(60_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('takes a decided section down on a reconnect, which an open-only replay cannot', () => {
+    // `escalation:closed` is what makes remembering these safe at all: the
+    // ANSWER arrives on the socket rather than as an emit, so without a
+    // reliable delete a reconnecting page could be handed back a decision that
+    // had already been made.
+    const run = freshRun();
+    rememberForReplay(run, 'escalation:decision-required', {
+      conversationId: 'c1', requestId: 'req-1', sectionId: 's1', timeoutMs: 300_000,
+    });
+    rememberForReplay(run, 'escalation:decision-required', {
+      conversationId: 'c1', requestId: 'req-2', sectionId: 's2', timeoutMs: 300_000,
+    });
+    rememberForReplay(run, 'escalation:closed', { conversationId: 'c1', requestId: 'req-1' });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+
+    expect(emitted.map((e) => e.event)).toEqual(['escalation:closed', 'escalation:decision-required']);
+    expect((emitted[0]?.payload as { requestId?: string }).requestId).toBe('req-1');
+    expect((emitted[1]?.payload as { requestId?: string }).requestId).toBe('req-2');
+  });
+
+  it('gives a reloaded page back a question the run is still blocked on', () => {
+    // I argued against replaying these, because nothing could clear the record:
+    // the ANSWER arrives on the socket rather than as an emit, so
+    // `rememberForReplay` would never see it, and a question replayed after it
+    // was answered is worse than one lost.
+    //
+    // `clarification:closed` removed that objection. It is emitted for every
+    // ending, the answered one included, so the record now has a reliable
+    // delete — and the reverse case is fixed with it: a close emitted while the
+    // transport had no socket used to be dropped, leaving a dead form on screen
+    // after reconnection, in front of every later question the run asked.
+    const run = freshRun();
+    rememberForReplay(run, 'clarification:required', {
+      conversationId: 'c1', requestId: 'req-1', questions: [{ id: 'q1', prompt: 'Which account?', kind: 'text' }],
+    });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+    expect(emitted.map((e) => e.event)).toEqual(['clarification:required']);
+    expect((emitted[0]?.payload as { requestId?: string }).requestId).toBe('req-1');
+  });
+
+  it('stops replaying a question the moment it is over, however it ended', () => {
+    // Answered, timed out, stopped, released by teardown — `clarification:closed`
+    // covers all four, which is what makes keeping the record safe at all.
+    const run = freshRun();
+    rememberForReplay(run, 'clarification:required', {
+      conversationId: 'c1', requestId: 'req-1', questions: [{ id: 'q1', prompt: 'Which?', kind: 'text' }],
+    });
+    rememberForReplay(run, 'clarification:closed', { conversationId: 'c1', requestId: 'req-1' });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+
+    // Never put back as OPEN — that was the whole worry about replaying these,
+    // and it holds. What IS replayed is the closure, so a page that still has
+    // the form on screen takes it down; a page that never had one ignores it.
+    expect(emitted.map((e) => e.event), 'the ending, never the question')
+      .toEqual(['clarification:closed']);
+    expect((emitted[0]?.payload as { requestId?: string }).requestId).toBe('req-1');
+  });
+
+  it('replays what is LEFT of the gate, not the whole of it again', () => {
+    // The payload states the gate flatly ("two minutes"), so replaying it
+    // unchanged hands a reconnecting page a fresh two minutes while the
+    // server's timer keeps running — the countdown would read 1:58 remaining
+    // on a question about to be given up on, and somebody would start typing.
+    //
+    // Adjusted in SERVER time rather than by shipping an absolute deadline for
+    // the client to subtract from its own clock: the two disagree, and a page
+    // running fast would show a live question as already expired.
+    vi.useFakeTimers();
+    try {
+      const run = freshRun();
+      rememberForReplay(run, 'clarification:required', {
+        conversationId: 'c1', requestId: 'req-1', timeoutMs: 120_000,
+        questions: [{ id: 'q1', prompt: 'Which account?', kind: 'text' }],
+      });
+      vi.advanceTimersByTime(90_000);
+
+      const { emitted, socket } = recorder();
+      replaySupervision(run, socket);
+
+      expect((emitted[0]?.payload as { timeoutMs?: number }).timeoutMs, 'thirty seconds, not two minutes')
+        .toBe(30_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('replays a question that is out of time rather than withholding it', () => {
+    // Clamped at zero, not dropped. Its own timer is about to close it and
+    // `clarification:closed` is what takes the form down; withholding it here
+    // would leave the page unable to show what the run is blocked on in the
+    // seconds before that arrives.
+    vi.useFakeTimers();
+    try {
+      const run = freshRun();
+      rememberForReplay(run, 'clarification:required', {
+        conversationId: 'c1', requestId: 'req-1', timeoutMs: 120_000,
+        questions: [{ id: 'q1', prompt: 'Which?', kind: 'text' }],
+      });
+      vi.advanceTimersByTime(200_000);
+
+      const { emitted, socket } = recorder();
+      replaySupervision(run, socket);
+
+      expect(emitted.map((e) => e.event)).toEqual(['clarification:required']);
+      expect((emitted[0]?.payload as { timeoutMs?: number }).timeoutMs, 'never negative').toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('takes a dead form down on a reconnect, which an open-only replay cannot', () => {
+    // A full page RELOAD starts with no forms, so replaying the open set is
+    // enough for it. A transient socket RECONNECT is different: the page keeps
+    // what it had on screen, and absence from an open-only replay cannot remove
+    // anything — so a question that closed while the transport was unbound left
+    // a dead form standing, in front of every later question.
+    const run = freshRun();
+    rememberForReplay(run, 'clarification:required', {
+      conversationId: 'c1', requestId: 'req-1', questions: [{ id: 'q1', prompt: 'Gone?', kind: 'text' }],
+    });
+    rememberForReplay(run, 'clarification:required', {
+      conversationId: 'c1', requestId: 'req-2', questions: [{ id: 'q1', prompt: 'Still asking?', kind: 'text' }],
+    });
+    // The first ends while nobody is connected to hear it.
+    rememberForReplay(run, 'clarification:closed', { conversationId: 'c1', requestId: 'req-1' });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+
+    // Closures first, so the page settles on exactly what is still being asked.
+    expect(emitted.map((e) => e.event)).toEqual(['clarification:closed', 'clarification:required']);
+    expect((emitted[0]?.payload as { requestId?: string }).requestId).toBe('req-1');
+    expect((emitted[1]?.payload as { requestId?: string }).requestId).toBe('req-2');
+  });
+
   it('keeps an outstanding approval until permission:resolved names it, keyed by id or requestId', () => {
     const run = freshRun();
     rememberForReplay(run, 'permission:user-required', { id: 'req-1', conversationId: 'c1', tool: 'browser_control' });
@@ -1376,6 +1731,51 @@ describe('rememberForReplay / replaySupervision — what a reload gets back', ()
     replaySupervision(run, socket);
 
     expect(emitted).toEqual([]);
+  });
+
+  it('hands back the extended-context question a reload lost', () => {
+    // The last gate with no replay, and the only one whose absence SPENDS
+    // money. The SDK's gate resolves TRUE on its two-minute timeout — that is
+    // deliberate, since the feature is opt-in and the budget cap is the real
+    // guardrail — so a page that reloaded while the question was up could not
+    // answer it, the timer ran out, and the run compacted anyway. The user was
+    // asked before the money was spent and then it was spent without them.
+    const run = freshRun();
+    rememberForReplay(run, 'context:approval-required', {
+      conversationId: 'c1', inputTokens: 400_000, windowTokens: 128_000, multiplier: 2, estChunks: 7,
+    });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+
+    expect(emitted.map((e) => e.event)).toEqual(['context:approval-required']);
+    expect((emitted[0]?.payload as { estChunks?: number }).estChunks).toBe(7);
+  });
+
+  it('takes the context question down instead of putting an answered one back', () => {
+    // The same rule the questionnaire gate is held to, and the reason the gate
+    // now announces its own ending at all. The ANSWER arrives as an inbound
+    // socket message that `rememberForReplay` never sees, so without a closure
+    // event there was no reliable delete — and a reconnect would have handed
+    // back a question that had already been decided, with buttons reaching a
+    // gate that was gone.
+    //
+    // A single slot rather than a keyed map, because the gate is a single slot:
+    // `Cascade.pendingContextApproval` holds one callback, so a run can only be
+    // asking this once.
+    const run = freshRun();
+    rememberForReplay(run, 'context:approval-required', {
+      conversationId: 'c1', inputTokens: 400_000, windowTokens: 128_000, multiplier: 2, estChunks: 7,
+    });
+    rememberForReplay(run, 'context:approval-closed', { conversationId: 'c1' });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+
+    // The closure and not the question: a page that kept the dialog through a
+    // transient reconnect has it taken down, and a page that reloaded is not
+    // shown one it already answered.
+    expect(emitted.map((e) => e.event), 'the ending, never the question').toEqual(['context:approval-closed']);
   });
 
   it('replays nothing for a run that never touched the browser or a dangerous tool', () => {

@@ -16,6 +16,7 @@ import {
 } from '#cascade-ai';
 import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ApprovalRequest, ProviderConfig, BrowserInput } from '#cascade-ai';
 import { attachRemoteBrowser } from './remote-browser.js';
+import type { ClarificationAnswer } from '#cascade-ai';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { z, type ZodError } from 'zod';
@@ -59,6 +60,28 @@ const TierParamSchema = z
 // persisted server-side (see db.ts: no api key column anywhere).
 const ChatRunPayloadSchema = z.object({
   conversationId: z.string().optional(),
+  /**
+   * WHICH RUN this is, chosen by the client that starts it.
+   *
+   * A conversation is not a run. One connection carries several runs and two of
+   * them can belong to the SAME conversation — a duplicated tab inherits the
+   * incumbent's run while holding one of its own — so every place that used the
+   * conversation as an address was ambiguous exactly there: Stop aborted both,
+   * one context decision answered both gates, and both runs' tokens were
+   * appended to one streaming bubble.
+   *
+   * Minted by the CLIENT rather than handed back by the server, and that is the
+   * point: a client needs its run's name from the instant it starts it. A
+   * server-assigned id would arrive in a message, and Stop pressed before that
+   * message lands would have nothing to say. Optional, because older clients
+   * send none and must keep working — the server falls back to its own id for
+   * them, and the addressing degrades to the conversation, which is what it was.
+   *
+   * It names nothing outside the connection that sent it: every use is a lookup
+   * within that socket's own `activeRuns`, so the worst a client can do with it
+   * is address its own runs.
+   */
+  runId: z.string().min(1).max(200).optional(),
   // Deliberately unbounded above the minimum. The 20k-character cap that used
   // to be here rejected exactly the long inputs Cascade is for — a pasted
   // document, a stack trace, a whole file — and the transport already imposes
@@ -177,6 +200,10 @@ const ChatRunPayloadSchema = z.object({
   // future runs will see. Off unless the user turns it on (privacy + cost).
   rememberSession: z.boolean().optional(),
   webSearch: z.boolean().optional(),
+  // Reach the internet by DRIVING a page rather than by fetching text. See
+  // `webSearchOn` for what it actually does, and why it is one decision
+  // rather than two independent toggles.
+  browserMode: z.boolean().optional(),
   // Optional web-search backend the user configured (browser-held, like keys).
   // Whichever field is set is used — SearXNG → Brave → Tavily priority in the
   // tool. Absent → the tool's keyless DuckDuckGo fallback.
@@ -353,6 +380,8 @@ export interface RunControls {
   forceTier?: 'auto' | 'T1' | 'T2' | 'T3';
   /** When false, no tools are registered for the run at all. Default true. */
   webSearch?: boolean;
+  /** Reach the internet by driving a page instead of fetching text. */
+  browserMode?: boolean;
   /** User-configured web-search backend (browser-held). Used only when webSearch is on. */
   webSearchConfig?: WebSearchBackend;
   /** Advanced per-tier generation params (developer knobs). */
@@ -568,7 +597,23 @@ export function buildCloudConfig(
   maxCostPerRunUsd: number,
   controls: RunControls = {},
 ): Partial<CascadeConfig> {
-  const webSearchOn = controls.webSearch !== false;
+  // ONE decision with three outcomes, not two toggles that can disagree.
+  //
+  // Dropping `web_search`/`web_fetch` is already exactly what turning the web
+  // off does — see `enabledTools` below — so a separate "use the browser"
+  // switch that also dropped them would be a second control with identical
+  // mechanism, and two controls that do the same thing are worse than one.
+  //
+  // What browser mode adds is a NAME. "Web off" reads as no internet at all
+  // and gives no hint that the agent will drive a real page instead, which is
+  // why the capability was undiscoverable: the only way to reach it was to
+  // turn something else off, or to type the tool's name into the prompt.
+  //
+  // Browser mode therefore wins over `webSearch` rather than combining with
+  // it. The client keeps the two mutually exclusive, and this makes that true
+  // on the server as well, so a hand-built payload cannot ask for both.
+  const browserMode = controls.browserMode === true;
+  const webSearchOn = !browserMode && controls.webSearch !== false;
   // Only pass a backend when web search is on AND the user actually configured
   // one — otherwise leave webSearch unset so the tool uses its keyless fallback.
   const wsc = controls.webSearchConfig;
@@ -682,7 +727,18 @@ export function buildCloudConfig(
       //
       // Emitted only when a provider is named, so the untouched default stays
       // exactly as it was: no key, no tool.
-      ...(controls.remoteBrowser?.provider
+      //
+      // AND only when this turn asked for the browser. Every session is billed,
+      // so reaching one has to be something a person chose rather than
+      // something a model reached for: with the chip off the tool is not
+      // refused at call time, it is absent, and the model never sees a
+      // capability it was not given. That is also what makes metering possible
+      // at all — a capability that cannot be gated cannot be counted.
+      //
+      // One lever for both halves: `attachRemoteBrowser` reads this same field
+      // and returns null without it, so nothing is attached and no provider
+      // session can be opened either.
+      ...(controls.remoteBrowser?.provider && browserMode
         ? {
             remoteBrowser: {
               provider: controls.remoteBrowser.provider,
@@ -1123,6 +1179,217 @@ function seedConversation(store: CloudStore, userId: string, payload: ChatRunPay
   return store.getConversation(seeded.id, userId);
 }
 
+/**
+ * Bounds on an answered questionnaire, which arrives from a client.
+ *
+ * The tool asks at most five questions, so five answers is already generous —
+ * the cap is not about the honest case but about the payload that is not one.
+ * Both numbers exist so a malformed or hostile answer cannot put an unbounded
+ * string into the model's context.
+ */
+const MAX_CLARIFICATION_ANSWERS = 16;
+const MAX_CLARIFICATION_ANSWER_CHARS = 2_000;
+/**
+ * What the WHOLE reply may contribute to the model's context.
+ *
+ * The two caps above bound one value and one list, and bounded nothing that
+ * matters: `AskUserTool` joins a multi-select into a single string, so sixteen
+ * clipped elements made one answer of 32,000 characters, and sixteen of those
+ * made a reply far larger than the conversation it was answering. Every
+ * individual limit was respected and the total was unbounded — which is the
+ * only number the limits existed to control.
+ *
+ * Spent as a budget across the reply rather than divided evenly: an honest
+ * answer is a sentence and should not be truncated because a later one is long.
+ */
+const MAX_CLARIFICATION_REPLY_CHARS = 8_000;
+
+/**
+ * What a guidance note may contribute to the next worker's prompt.
+ *
+ * The same ceiling one clarification answer gets, and for the same reason —
+ * which I argued it did not need. My reasoning was that this text is typed by
+ * the person at the keyboard rather than arriving from an untrusted client, and
+ * that is not a distinction the server can make: both arrive as
+ * `escalation:decide` on a socket, so "entered through our UI" is a claim about
+ * the sender, not a fact about the data. The only ceiling was Socket.IO's frame
+ * limit, around two megabytes, and T2 appends this straight onto the retry
+ * prompt — so one decision could exhaust the run's token budget instead of
+ * retrying the section.
+ *
+ * Truncated rather than refused. Dropping an over-long note would retry the
+ * section as-if-unguided while the person believed their instructions had been
+ * applied, which is a worse failure than applying most of them.
+ */
+export const MAX_ESCALATION_NOTE_CHARS = 2_000;
+
+/**
+ * A guidance note, bounded and normalised, or nothing.
+ *
+ * Exported and a function rather than an inline expression, for the reason
+ * `answersThisRun` and `sanitiseClarificationAnswers` are: a rule that lives
+ * only inside a closure can be tested only by restating it, and a test that
+ * restates a rule cannot catch it being dropped from the real one.
+ */
+export function sanitiseEscalationNote(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const kept = raw.trim().slice(0, MAX_ESCALATION_NOTE_CHARS).trim();
+  return kept === '' ? undefined : kept;
+}
+
+/**
+ * Release every approval still parked when a run ends, and SAY SO.
+ *
+ * The releasing half was always here — anything still parked would otherwise
+ * hang forever holding a worker. The ANNOUNCEMENT is what was missing, and it
+ * is the same omission this gate family has now produced three times.
+ *
+ * The other two blocking gates announce every ending: a clarification gets
+ * `clarification:closed`, an escalation gets `escalation:closed`, and both were
+ * added precisely so a client cannot be left holding a control for a request
+ * that is gone. Approvals announce a DECISION and a TIMEOUT and said nothing
+ * here — so a prompt released by teardown outlived its own run: invisible while
+ * the user was in another chat, and back on screen the moment they reopened
+ * that conversation, offering Allow/Deny for a dangerous tool call nobody is
+ * waiting on. The client cannot fix this end of it; absence is not an event.
+ *
+ * It also clears the replay record (see socket.ts, which intercepts
+ * `permission:resolved`), so a page that reloads is not handed the same dead
+ * prompt a second time.
+ *
+ * Exported so this is tested rather than a copy of it — the same reason
+ * `parkApproval` and `applyPermissionDecision` are. It runs inside a `finally`,
+ * where a test would otherwise have to drive a whole run to reach it.
+ */
+export function releasePendingApprovals(
+  pending: Map<string, (d: { approved: boolean; always: boolean }) => void>,
+  opts: {
+    conversationId: string;
+    emit: (event: string, payload: Record<string, unknown>) => void;
+  },
+): void {
+  for (const [requestId, resolve] of pending) {
+    resolve({ approved: false, always: false });
+    // Guarded PER REQUEST. This runs in a `finally`, so one emit throwing must
+    // not strand the approvals behind it — nor skip the provider release and
+    // `cascade.close()` that follow, which is what stops the operator paying
+    // for a browser nobody is using.
+    try {
+      opts.emit('permission:resolved', { conversationId: opts.conversationId, requestId, reason: 'released' });
+    } catch { /* the run is ending; there is nothing to escalate this to */ }
+  }
+  pending.clear();
+}
+
+/**
+ * Whether a context decision is this run's to consume.
+ *
+ * The context gate is the one blocking question with no request id — it is at
+ * most one per run — so the conversation is the whole key. A decision naming a
+ * DIFFERENT conversation is refused outright; one naming none is accepted, on
+ * the deliberate trade written at the call site: a client that predates the id
+ * would otherwise lose its compaction prompt entirely.
+ *
+ * Exported so this is tested rather than a copy of it, like the three guards
+ * around it.
+ */
+export function addressesContextGate(
+  d: { conversationId?: string; runId?: string } | undefined,
+  conversationId: string,
+  runId?: string,
+): boolean {
+  // THE RUN FIRST, when both ends can name it. Two runs in one conversation
+  // both registered a decision handler and this predicate said yes to both, so
+  // a single Approve resolved both gates with the same answer — and the client,
+  // which collapses the prompts by conversation, had no way to answer the
+  // second one differently even if it had wanted to.
+  //
+  // An exact match, and a mismatch is refused outright: once a decision names a
+  // run, the conversation it belongs to adds nothing.
+  if (d?.runId !== undefined) return runId !== undefined && d.runId === runId;
+  // Otherwise the conversation, exactly as before. A decision naming neither is
+  // still accepted: this gate has no request id to fall back on, and refusing
+  // unkeyed decisions would break the compaction prompt for every client that
+  // predates the id. The cost is the old ambiguity, and only for those clients.
+  return d?.conversationId === undefined || d.conversationId === conversationId;
+}
+
+/**
+ * Whether an inbound answer names the run it claims to answer.
+ *
+ * BOTH identifiers, exactly. One socket carries several runs, and every run's
+ * handler sees every message on it — so a guard that only rejects a
+ * conversation id which is PRESENT AND WRONG lets a message carrying none
+ * through all of them. An absent request id then resolves as `undefined`,
+ * which `resolveClarification` answers by settling the OLDEST outstanding
+ * questionnaire. One malformed message could therefore answer, or silently
+ * skip, questions belonging to conversations it never named.
+ *
+ * Nothing legitimate is refused: the client answers with the id the QUESTION
+ * carried, which is that conversation's, under the request id it was asked on.
+ *
+ * Exported, and a predicate rather than two inline `if`s, for the reason
+ * `sanitiseClarificationAnswers` is: a rule that exists only inside a closure
+ * can be tested only by restating it, and a test that restates a rule cannot
+ * catch it being dropped from the real one.
+ */
+export function answersThisRun(
+  d: { conversationId?: string; requestId?: string } | undefined,
+  conversationId: string,
+): boolean {
+  if (d?.conversationId !== conversationId) return false;
+  return typeof d.requestId === 'string' && d.requestId !== '';
+}
+
+/**
+ * Take a client's answers to a questionnaire, and keep only what is an answer.
+ *
+ * Validated rather than trusted: this crosses the socket from a client, so it
+ * is untrusted input like any other payload. Bounded in count and in length so
+ * a malformed or hostile reply cannot put an unbounded string into the model's
+ * context, and shaped so a wrong type is DROPPED rather than handed on as
+ * something that reads as a real answer.
+ *
+ * Exported, and a function rather than an inline block at its one call site,
+ * for the reason `remoteBrowserControls` is: a mapping that exists only inline
+ * can be tested only by restating it, and a test that restates the mapping
+ * cannot catch a rule dropped from the real one.
+ */
+export function sanitiseClarificationAnswers(raw: unknown[]): ClarificationAnswer[] {
+  // Spent down as the reply is read, so the cap is on the TOTAL rather than on
+  // each piece of it. Taking whichever is smaller keeps the per-value limit
+  // meaningful for the first answer and stops the last one being unbounded
+  // just because it arrived after the others.
+  let budget = MAX_CLARIFICATION_REPLY_CHARS;
+  const take = (v: string): string => {
+    const kept = v.slice(0, Math.min(MAX_CLARIFICATION_ANSWER_CHARS, budget));
+    budget -= kept.length;
+    return kept;
+  };
+
+  return raw.slice(0, MAX_CLARIFICATION_ANSWERS).flatMap((a): ClarificationAnswer[] => {
+    const row = (a ?? {}) as Record<string, unknown>;
+    if (typeof row['id'] !== 'string' || row['id'] === '') return [];
+    const value = row['value'];
+    if (typeof value === 'string') {
+      const kept = take(value);
+      // An answer clipped away to nothing is not an answer. Dropping it lets
+      // the model be told the question went unanswered, which is true, rather
+      // than handing it a blank that reads as a reply.
+      return kept === '' ? [] : [{ id: row['id'], value: kept }];
+    }
+    if (Array.isArray(value)) {
+      const kept = value
+        .filter((v): v is string => typeof v === 'string')
+        .slice(0, MAX_CLARIFICATION_ANSWERS)
+        .map(take)
+        .filter((v) => v !== '');
+      return kept.length === 0 ? [] : [{ id: row['id'], value: kept }];
+    }
+    return [];
+  });
+}
+
 async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Promise<ChatRunResult> {
   const { env, store, userId, socket, signal } = deps;
   const interactive = deps.interactive !== false;
@@ -1260,6 +1527,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     routingMode: payload.routingMode,
     forceTier: payload.forceTier,
     webSearch: payload.webSearch,
+    browserMode: payload.browserMode,
     webSearchConfig: payload.webSearchConfig,
     tierParams: payload.tierParams,
     extendedContext: payload.extendedContext,
@@ -1481,12 +1749,35 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // in the finally block. If the client never answers, the SDK gate times out
   // and proceeds — the run's budget cap is the real guardrail.
   const onContextApproval = (e: unknown) =>
-    socket.emit('context:approval-required', { conversationId: conversation.id, ...(e as object) });
+    socket.emit('context:approval-required', { conversationId: conversation.id, runId: payload.runId, ...(e as object) });
+  // Every ending of that gate, which is what lets a reconnecting page be given
+  // back the question it is still blocked on WITHOUT being given back one that
+  // was already answered. The other three gates have had this for rounds; this
+  // one had no closure event at all, so it could not be replayed safely and
+  // therefore was not replayed — leaving a reloaded page unable to answer, and
+  // the SDK gate proceeding on its own two-minute timeout.
+  const onContextClosed = (e: unknown) =>
+    socket.emit('context:approval-closed', { conversationId: conversation.id, runId: payload.runId, ...(e as object) });
   const onCompacted = (e: unknown) =>
     socket.emit('context:compacted', { conversationId: conversation.id, ...(e as object) });
-  const onContextDecision = (d: { approved?: boolean }) => cascade.resolveContextApproval(!!d?.approved);
+  // Guarded like every other inbound answer. One socket carries several runs
+  // and each run's handler sees every message on it, so a decision that named
+  // nothing was consumed by whichever run happened to be listening — including
+  // a decision the user gave to a dialog left over from a run that had already
+  // ended, which then compacted a live one on their behalf.
+  //
+  // `addressesContextGate` rather than `answersThisRun`: this gate has no
+  // request id to carry, so the conversation is the whole of the key. Older
+  // clients send no id at all and are still accepted, because refusing them
+  // would break the compaction prompt for anything that has not updated — a
+  // real cost against a narrow race. Stated rather than silently assumed.
+  const onContextDecision = (d: { approved?: boolean; conversationId?: string; runId?: string }) => {
+    if (!addressesContextGate(d, conversation.id, payload.runId)) return;
+    cascade.resolveContextApproval(!!d?.approved);
+  };
   if (interactive) {
     cascade.on('context:approval-required', onContextApproval);
+    cascade.on('context:approval-closed', onContextClosed);
     cascade.on('context:compacted', onCompacted);
     socket.on('context:decision', onContextDecision);
   }
@@ -1501,24 +1792,92 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     socket.emit('escalation:decision-required', { conversationId: conversation.id, ...(e as object) });
   const onEscalationTimeout = (e: unknown) =>
     socket.emit('escalation:timeout', { conversationId: conversation.id, ...(e as object) });
+  // Every ending, not only the timeout — which is what lets the replay store
+  // hold a parked section safely and what takes a dead modal off a page that
+  // was not connected when the section was answered or the run was stopped.
+  const onEscalationClosed = (e: unknown) =>
+    socket.emit('escalation:closed', { conversationId: conversation.id, ...(e as object) });
   const onEscalationDecision = (d: { conversationId?: string; requestId?: string; action?: string; note?: string }) => {
-    // One socket can carry several conversations; only answer for this run.
-    if (d?.conversationId && d.conversationId !== conversation.id) return;
+    // BOTH identifiers, via the same predicate the clarification answer uses.
+    //
+    // This handler had the permissive shape that `answersThisRun` was written
+    // to replace, and it kept it: a conversation id was rejected only when
+    // PRESENT AND WRONG, so a message carrying none passed every run's handler
+    // on the socket, and an absent request id then resolved the OLDEST parked
+    // section in each. One malformed `{ action: 'skip' }` could skip work in
+    // conversations it never named.
+    //
+    // I fixed that for clarifications when it was reported and did not come
+    // back to the gate the clarification gate was modelled on — which is the
+    // whole of this finding: the copy was corrected and the original was not.
+    // Sharing the predicate rather than repeating the check is what stops the
+    // two drifting apart again.
+    if (!answersThisRun(d, conversation.id)) return;
     if (d?.action === 'retry' || d?.action === 'skip' || d?.action === 'guidance') {
-      // requestId picks the parked section: a Complex run dispatches sections
-      // concurrently, so two can be waiting and an unkeyed answer would resolve
-      // whichever happened to be first in the map.
       cascade.resolveEscalation(
         d.action,
-        typeof d.note === 'string' ? d.note : undefined,
-        typeof d.requestId === 'string' ? d.requestId : undefined,
+        sanitiseEscalationNote(d.note),
+        d.requestId,
       );
     }
   };
   if (interactive) {
     cascade.on('escalation:decision-required', onEscalation);
     cascade.on('escalation:timeout', onEscalationTimeout);
+    cascade.on('escalation:closed', onEscalationClosed);
     socket.on('escalation:decide', onEscalationDecision);
+  }
+
+  // ── Clarification: the model asking instead of assuming ──────────────
+  //
+  // Same shape as the escalation above, with one deliberate difference: an
+  // unanswered escalation discards a section's work, so it is worth waiting
+  // out; an unanswered question only means the model proceeds on its own
+  // reading and says which assumption it made. So nothing here has to
+  // guarantee an answer — only that a non-answer resolves, which the SDK gate
+  // already does on a two-minute timer, on abort, and when nothing is
+  // listening at all.
+  //
+  // NOT replayed to a reconnecting page, unlike an approval. Doing that would
+  // need the answer path to clear the stored record — the answer arrives on
+  // the socket, not as an emit, so `rememberForReplay` never sees it — and a
+  // question replayed after it was answered is a worse failure than the one it
+  // would fix. What a reload costs today is bounded and safe: the question is
+  // lost, the gate times out, and the model proceeds on its best reading.
+  const onClarification = (e: unknown) =>
+    socket.emit('clarification:required', { conversationId: conversation.id, ...(e as object) });
+  const onClarificationTimeout = (e: unknown) =>
+    socket.emit('clarification:timeout', { conversationId: conversation.id, ...(e as object) });
+  // The form must come down however the question ended — answered, timed out,
+  // stopped, or released by teardown. Only this one covers all four.
+  const onClarificationClosed = (e: unknown) =>
+    socket.emit('clarification:closed', { conversationId: conversation.id, ...(e as object) });
+  const onClarificationAnswer = (d: { conversationId?: string; requestId?: string; answers?: unknown }) => {
+    // BOTH identifiers, exactly. One socket carries several runs, and every
+    // run's handler sees every message on it — so a guard that only rejects a
+    // conversation id which is PRESENT AND WRONG lets a message carrying none
+    // through all of them. An absent request id then resolves as `undefined`,
+    // which `resolveClarification` answers by settling the OLDEST outstanding
+    // questionnaire. One malformed message could therefore answer, or silently
+    // skip, questions belonging to conversations it never named.
+    //
+    // Nothing legitimate is refused by this: the client answers with the id the
+    // QUESTION carried, which is this conversation's, and with the request id
+    // it was asked under.
+    if (!answersThisRun(d, conversation.id)) return;
+    if (!Array.isArray(d?.answers)) return;
+    cascade.resolveClarification(sanitiseClarificationAnswers(d.answers), d.requestId as string);
+  };
+  if (interactive) {
+    // This host can put a questionnaire to somebody and carry the answer back,
+    // so it says so. Without this the tool is not registered at all — a model
+    // shown `ask_user` on a surface that cannot answer would be told "nobody is
+    // watching" by a run somebody is sitting in front of.
+    cascade.enableClarification();
+    cascade.on('clarification:required', onClarification);
+    cascade.on('clarification:timeout', onClarificationTimeout);
+    cascade.on('clarification:closed', onClarificationClosed);
+    socket.on('clarification:answer', onClarificationAnswer);
   }
 
   // ── Dangerous-tool approval ──────────────────────────────────────────
@@ -1681,10 +2040,16 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     cascade.off('tier:status', onStatus);
     cascade.off('plan:approval-required', onPlan);
     cascade.off('context:approval-required', onContextApproval);
+    cascade.off('context:approval-closed', onContextClosed);
     cascade.off('context:compacted', onCompacted);
     socket.off('context:decision', onContextDecision);
+    cascade.off('clarification:required', onClarification);
+    cascade.off('clarification:timeout', onClarificationTimeout);
+    cascade.off('clarification:closed', onClarificationClosed);
+    socket.off('clarification:answer', onClarificationAnswer);
     cascade.off('escalation:decision-required', onEscalation);
     cascade.off('escalation:timeout', onEscalationTimeout);
+    cascade.off('escalation:closed', onEscalationClosed);
     socket.off('escalation:decide', onEscalationDecision);
     // Before closing the cascade: releasing the provider session is what stops
     // the operator paying for a browser nobody is using, and a run that threw
@@ -1698,9 +2063,10 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     socket.off('browser:capture', onBrowserCapture);
     socket.off('browser:frame-seen', onBrowserFrameSeen);
     socket.off('permission:decide', onPermissionDecision);
-    // Anything still parked would otherwise hang forever holding a worker.
-    for (const resolve of pendingApprovals.values()) resolve({ approved: false, always: false });
-    pendingApprovals.clear();
+    releasePendingApprovals(pendingApprovals, {
+      conversationId: conversation.id,
+      emit: (event, payload) => socket.emit(event, payload),
+    });
     try { await remoteBrowser?.endRun(); } catch { /* non-critical */ }
     try { await cascade.close(); } catch { /* non-critical */ }
   }

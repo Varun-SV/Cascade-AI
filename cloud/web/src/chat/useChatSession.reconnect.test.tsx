@@ -297,4 +297,108 @@ describe('useChatSession — a run that outlives the connection that started it'
     act(() => { fake.fire('run:resumed', { active: 0 }); });
     await waitFor(() => expect(view.result.current.escalationQueued).toBe(0));
   });
+
+  it('takes a parked section down when it stops being parked, however that happened', async () => {
+    // `escalation:timeout` was the only ending the client heard about, and it
+    // is one of four. Answered elsewhere, Stop, and the run unwinding all
+    // settled silently, leaving a modal that could be answered into nothing —
+    // and on a reconnect it is the only thing that can remove it, since absence
+    // from a replay cannot take anything down.
+    const fake = fakeSocket();
+    const view = startRun(fake);
+    act(() => {
+      fake.fire('escalation:decision-required', {
+        requestId: 'e1', sectionId: 's1', sectionTitle: 'Section alpha',
+        issues: [], timeoutMs: 300_000,
+      });
+    });
+    await waitFor(() => expect(view.result.current.escalationQueued).toBe(1));
+
+    act(() => { fake.fire('escalation:closed', { requestId: 'e1', sectionId: 's1' }); });
+
+    await waitFor(() => expect(view.result.current.escalationQueued, 'no modal outlives its section').toBe(0));
+  });
+
+  it('closes only the section named, not whichever is first', async () => {
+    // They are all on screen now, so closing "the first" would take down a
+    // prompt somebody may be mid-answer on.
+    const fake = fakeSocket();
+    const view = startRun(fake);
+    act(() => {
+      fake.fire('escalation:decision-required', { requestId: 'e1', sectionId: 's1', issues: [], timeoutMs: 300_000 });
+      fake.fire('escalation:decision-required', { requestId: 'e2', sectionId: 's2', issues: [], timeoutMs: 300_000 });
+    });
+    await waitFor(() => expect(view.result.current.escalationQueued).toBe(2));
+
+    act(() => { fake.fire('escalation:closed', { requestId: 'e2', sectionId: 's2' }); });
+
+    await waitFor(() => expect(view.result.current.escalationQueued).toBe(1));
+    expect(view.result.current.escalations[0]?.requestId, 'the one still parked').toBe('e1');
+  });
+
+  it('stamps a question with when it arrived, so the countdown is anchored', async () => {
+    // The form shows how long is left, and that arithmetic needs an anchor the
+    // server cannot supply: an absolute deadline would be compared against the
+    // browser's own clock, and a page running fast would show a live question
+    // as already expired. So the server sends what is LEFT and the client
+    // stamps the moment it heard it.
+    //
+    // Tested at the hook rather than only in the prompt, because the prompt
+    // takes `receivedAt` as a prop — a component test cannot tell whether
+    // anything actually sets it.
+    const fake = fakeSocket();
+    const view = startRun(fake);
+    const before = Date.now();
+    act(() => {
+      fake.fire('clarification:required', {
+        conversationId: 'server-made-id',
+        requestId: 'req-1',
+        timeoutMs: 120_000,
+        questions: [{ id: 'q1', prompt: 'Which account?', kind: 'text' }],
+      });
+    });
+
+    await waitFor(() => expect(view.result.current.clarifications).toHaveLength(1));
+    const got = view.result.current.clarifications[0]!;
+    expect(got.timeoutMs, 'the gate the server is actually holding').toBe(120_000);
+    expect(got.receivedAt, 'anchored to arrival').toBeGreaterThanOrEqual(before);
+  });
+
+  it('takes a question down when its run turns out to have already finished', async () => {
+    // The gap the closure tombstones could not reach. A question closes while
+    // the transport is unbound, and the run then ENDS before the page comes
+    // back: the server never adopts a finished run, and `replaySupervision`
+    // returns immediately for one, so no tombstone is ever emitted for it.
+    //
+    // Meanwhile the client deliberately keeps `allClarifications` across a
+    // disconnect — an unanswered question is still live and still answerable,
+    // exactly as the escalation above — so nothing took the dead form down. It
+    // stayed, and because the queue renders oldest-first, in front of every
+    // later question.
+    //
+    // Fixed at the ending rather than by replaying more state: a terminal run
+    // cannot still be asking, so "done" already implies "closed" and needs no
+    // per-id record to be trusted.
+    const fake = fakeSocket();
+    const view = startRun(fake);
+    act(() => {
+      fake.fire('clarification:required', {
+        conversationId: 'server-made-id',
+        requestId: 'req-1',
+        questions: [{ id: 'q1', prompt: 'Which account?', kind: 'choice', options: ['A', 'B'] }],
+      });
+    });
+    await waitFor(() => expect(view.result.current.clarifications).toHaveLength(1));
+
+    // It survives the blip — that part is deliberate and must not regress.
+    act(() => { fake.fire('disconnect'); });
+    expect(view.result.current.clarifications, 'still live across a blip').toHaveLength(1);
+
+    // The run is then found to have ended while nobody was connected.
+    act(() => { fake.fire('run:resumed', { active: 0, finished: [{ conversationId: 'server-made-id' }] }); });
+
+    await waitFor(() => expect(view.result.current.busy).toBe(false));
+    expect(view.result.current.clarifications, 'no form outlives the run that asked it')
+      .toHaveLength(0);
+  });
 });

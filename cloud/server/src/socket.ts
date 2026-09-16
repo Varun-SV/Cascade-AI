@@ -88,18 +88,47 @@ export class RebindableTransport implements RunSocket {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly listeners = new Map<string, Set<(...args: any[]) => void>>();
   private readonly observe: (event: string, payload: unknown) => void;
+  /**
+   * WHICH RUN everything sent through here belongs to.
+   *
+   * Stamped at the transport rather than at each emit site, because the number
+   * of emit sites is the problem: `runs.ts` adds `conversationId` to roughly
+   * thirty of them by hand, and a run identity added the same way would be
+   * missing from whichever one was written next. Here it cannot be forgotten —
+   * every event a run emits passes through this method, by construction.
+   *
+   * A FUNCTION rather than a value, because the run's own record is built
+   * around this transport: the id is read at emit time, so construction order
+   * does not decide whether the stamp is there.
+   */
+  private readonly runId: () => string | undefined;
 
-  constructor(socket: Socket, observe: (event: string, payload: unknown) => void = () => {}) {
+  constructor(
+    socket: Socket,
+    observe: (event: string, payload: unknown) => void = () => {},
+    runId: () => string | undefined = () => undefined,
+  ) {
     this.current = socket;
     this.observe = observe;
+    this.runId = runId;
   }
 
   emit(event: string, payload: unknown): unknown {
+    // Stamped BEFORE it is observed, so the replay store holds what the client
+    // would have received — a replayed gate has to be answerable, and answering
+    // it now means naming the run.
+    //
+    // UNDER whatever the payload says, not over it: a caller that names a run
+    // explicitly is describing something this transport cannot know better.
+    const id = this.runId();
+    const stamped = id !== undefined && payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? { runId: id, ...(payload as Record<string, unknown>) }
+      : payload;
     // Observed BEFORE delivery, and whether or not anything is bound. A run
     // that ends while its socket is gone emits into nothing, so this is the
     // only moment its outcome exists anywhere.
-    this.observe(event, payload);
-    return this.current?.emit(event, payload);
+    this.observe(event, stamped);
+    return this.current?.emit(event, stamped);
   }
 
   /**
@@ -161,6 +190,18 @@ export interface LiveRun {
   transport: RebindableTransport;
   done: boolean;
   /**
+   * WHICH RUN this is — the identity a conversation cannot supply.
+   *
+   * One connection carries several runs and two of them can belong to the same
+   * conversation, so addressing by conversation was ambiguous exactly where it
+   * mattered: `chat:stop` aborted both, and a context decision answered both
+   * gates. Taken from the client's `chat:run` payload when it sent one, so the
+   * client can name its run from the instant it starts it rather than waiting
+   * for a message to tell it; generated here otherwise, so the field is never
+   * absent and the replay and resume paths never have to ask.
+   */
+  runId: string;
+  /**
    * Which conversation this run belongs to, once anything knows.
    *
    * On a NEW chat the client has no id at all until the ack tells it — and the
@@ -213,8 +254,72 @@ export interface LiveRun {
    * spinner, surfaced no error, and for a new chat had no id to reload either.
    * Which is the original "the response just died", one disconnect later.
    */
+  /**
+   * Questionnaires that have ENDED, so a reconnecting page can drop their forms.
+   *
+   * A reload needs only the open set; a reconnect keeps whatever it had on
+   * screen, and nothing in an open-only replay can remove a form the page is
+   * still showing. Bounded — see `MAX_REMEMBERED_CLOSURES`.
+   */
+  clarificationsClosed?: Set<string>;
+  /**
+   * Questionnaires still waiting on a person, keyed by request id.
+   *
+   * Same shape as `approvals`, and for the same reason: both are the run
+   * BLOCKED on somebody, and a reload that loses them leaves the person
+   * looking at a spinner for something nobody will ever be asked.
+   */
+  clarifications?: Map<string, { payload: Record<string, unknown>; askedAt: number }>;
+  /**
+   * Sections parked on a decision, keyed by request id.
+   *
+   * The same shape and the same reason as `clarifications`. This gate was the
+   * one the clarification gate was modelled on, and it is the one that never
+   * got the replay: a reload while a section was parked left the run alive on
+   * the server and the modal gone from the page, with no way to answer until
+   * the five-minute timer failed the section.
+   */
+  escalations?: Map<string, { payload: Record<string, unknown>; askedAt: number }>;
+  escalationsClosed?: Set<string>;
+  /**
+   * The extended-context confirmation this run is blocked on, if it is.
+   *
+   * ONE SLOT, unlike the three keyed maps above, because the gate itself is one
+   * slot: `Cascade.pendingContextApproval` holds a single callback, so a run can
+   * only ever be asking this question once. There is no request id to key by
+   * either — the conversation is the whole of the answer's address.
+   *
+   * It is the only gate that was not replayed, and the consequence was not a
+   * missing dialog: the SDK's gate resolves TRUE on its two-minute timeout, so
+   * a page that reloaded while the question was up could not answer it and the
+   * run went ahead and compacted anyway. The user was asked before the money
+   * was spent, and then it was spent without them.
+   */
+  contextApproval?: Record<string, unknown>;
+  /**
+   * Or its ENDING, when that is the last thing that happened to it.
+   *
+   * A tombstone for the same reason the questionnaire gate has a set of them:
+   * a transient reconnect keeps whatever the page had on screen, so an
+   * open-only replay can put a dialog up and never take one down — and the
+   * question that was answered while the transport was unbound would sit there
+   * with buttons that reach a gate which is already gone.
+   *
+   * One slot rather than a bounded set, because the gate is one slot. The two
+   * fields are mutually exclusive by construction: each write clears the other.
+   */
+  contextApprovalClosed?: Record<string, unknown>;
   terminal?: { conversationId?: string; error?: string };
 }
+
+/**
+ * How many ended questionnaires a run remembers for a reconnecting page.
+ *
+ * `ask_user` asks at most five questions per call, and a run makes few calls,
+ * so this is far above the honest case — it exists so a long run cannot grow
+ * this set without bound, not to ration anything.
+ */
+const MAX_REMEMBERED_CLOSURES = 32;
 
 /** The events that mean a run is over, in either direction. */
 const TERMINAL_EVENTS = new Set(['session:complete', 'session:error']);
@@ -273,6 +378,92 @@ export function rememberForReplay(run: LiveRun, event: string, payload: unknown)
     }
     return;
   }
+  // A question outstanding when the connection dropped.
+  //
+  // I argued against replaying these, on the grounds that nothing could clear
+  // the record: the ANSWER arrives on the socket rather than as an emit, so
+  // this function would never see it, and a question replayed after it was
+  // answered is worse than one lost. `clarification:closed` removed that
+  // objection — it is emitted for every ending, including the answered one, so
+  // the record now has a reliable delete.
+  //
+  // Which also fixes the reverse case: a close emitted while the transport had
+  // no socket was simply dropped, leaving a dead form on screen after
+  // reconnection — and because the queue renders oldest-first, in front of
+  // every later question the run asks.
+  if (event === 'escalation:decision-required') {
+    const id = p['requestId'];
+    if (typeof id !== 'string') return;
+    (run.escalations ??= new Map()).set(id, { payload: p, askedAt: Date.now() });
+    return;
+  }
+  if (event === 'escalation:closed') {
+    const id = p['requestId'];
+    if (typeof id !== 'string') return;
+    run.escalations?.delete(id);
+    // Remembered as well as removed, for the reason the clarification
+    // tombstones are: a reconnecting page keeps what it had on screen, so
+    // absence from an open-only replay cannot take a dead modal down.
+    const closed = (run.escalationsClosed ??= new Set());
+    closed.add(id);
+    while (closed.size > MAX_REMEMBERED_CLOSURES) {
+      const oldest = closed.values().next();
+      if (oldest.done) break;
+      closed.delete(oldest.value);
+    }
+    return;
+  }
+  if (event === 'clarification:required') {
+    const id = p['requestId'];
+    if (typeof id !== 'string') return;
+    // WHEN it was asked, not only what was asked. The gate is two minutes and
+    // the payload states that flatly, so replaying it unchanged would hand a
+    // reconnecting page a fresh two minutes while the server's timer kept
+    // running — the countdown would read a minute and a half remaining on a
+    // question about to be given up on.
+    (run.clarifications ??= new Map()).set(id, { payload: p, askedAt: Date.now() });
+    return;
+  }
+  if (event === 'clarification:closed') {
+    const id = p['requestId'];
+    if (typeof id !== 'string') return;
+    run.clarifications?.delete(id);
+    // Remembered as well as removed, because replay has to be able to take a
+    // form DOWN and not only put one up.
+    //
+    // A full page reload starts with no forms, so the open set alone is right
+    // for it. A transient socket reconnect does not: the page keeps what it had,
+    // so a question that closed while the transport was unbound is invisible to
+    // an open-only replay — absence cannot remove anything — and the dead form
+    // stays, in front of every later question.
+    //
+    // Bounded, because a long run can ask many questions and this must not grow
+    // without limit. Oldest first: the ones most likely to still be on a screen
+    // are the recent ones.
+    const closed = (run.clarificationsClosed ??= new Set());
+    closed.add(id);
+    while (closed.size > MAX_REMEMBERED_CLOSURES) {
+      const oldest = closed.values().next();
+      if (oldest.done) break;
+      closed.delete(oldest.value);
+    }
+    return;
+  }
+  // The extended-context confirmation, which has no request id to key by — see
+  // `contextApproval`. A plain slot and a plain clear, with the clear coming
+  // from `context:approval-closed`: the answer arrives as an inbound socket
+  // message this function never sees, exactly as it does for the questionnaire
+  // gate, so the closure event is what makes the record safe to keep at all.
+  if (event === 'context:approval-required') {
+    run.contextApproval = p;
+    delete run.contextApprovalClosed;
+    return;
+  }
+  if (event === 'context:approval-closed') {
+    delete run.contextApproval;
+    run.contextApprovalClosed = p;
+    return;
+  }
   if (event === 'permission:user-required') {
     const id = p['id'] ?? p['requestId'];
     if (typeof id !== 'string') return;
@@ -309,6 +500,30 @@ export function resumeAndReplay(
 }
 
 /** Give a replacement connection back the state the reloaded page lost. */
+/**
+ * The same question, with the time it has actually got left.
+ *
+ * Adjusted HERE, in server time, rather than by shipping an absolute deadline
+ * for the client to subtract from its own clock: the two clocks disagree, and
+ * a page whose clock runs a few minutes fast would show a question as already
+ * expired. The client keeps the arrival-stamp arithmetic it already uses for
+ * escalations, and this makes the number it is handed true at the moment of
+ * replay.
+ *
+ * Clamped at zero rather than dropped. A question this late is about to be
+ * closed by the gate's own timer, and `clarification:closed` is what takes the
+ * form down — withholding it here would leave the page unable to show what the
+ * run is still blocked on in the seconds before that arrives.
+ */
+function remainingDeadline(
+  payload: Record<string, unknown>,
+  askedAt: number,
+): Record<string, unknown> {
+  const stated = payload['timeoutMs'];
+  if (typeof stated !== 'number' || !Number.isFinite(stated)) return payload;
+  return { ...payload, timeoutMs: Math.max(0, stated - (Date.now() - askedAt)) };
+}
+
 export function replaySupervision(run: LiveRun, socket: Pick<Socket, 'emit'>): void {
   if (run.done) return;
   if (run.liveView) socket.emit('browser:live-view', run.liveView);
@@ -321,6 +536,31 @@ export function replaySupervision(run: LiveRun, socket: Pick<Socket, 'emit'>): v
   for (const request of run.approvals?.values() ?? []) {
     socket.emit('permission:user-required', request);
   }
+  // The parked sections, same ordering rule as the questions below: a closure
+  // can take a dead modal down, and an open-only replay could only ever add.
+  for (const requestId of run.escalationsClosed ?? []) {
+    socket.emit('escalation:closed', { requestId });
+  }
+  for (const { payload, askedAt } of run.escalations?.values() ?? []) {
+    socket.emit('escalation:decision-required', remainingDeadline(payload, askedAt));
+  }
+  // Closures BEFORE openings, so a page that reconnects mid-question ends up
+  // showing exactly what is still being asked: the dead ones come down first,
+  // and anything genuinely open is put back after.
+  for (const requestId of run.clarificationsClosed ?? []) {
+    socket.emit('clarification:closed', { requestId });
+  }
+  // Still open, so still blocking the run: a reloaded page that never sees the
+  // question waits out the full gate before the model gives up and assumes.
+  for (const { payload, askedAt } of run.clarifications?.values() ?? []) {
+    socket.emit('clarification:required', remainingDeadline(payload, askedAt));
+  }
+  // Closure before opening, the same ordering rule the two gates above follow
+  // — though here the two are mutually exclusive, so exactly one of them ever
+  // fires. A page that kept the dialog through a transient reconnect gets it
+  // taken down; a page that reloaded gets it put back.
+  if (run.contextApprovalClosed) socket.emit('context:approval-closed', run.contextApprovalClosed);
+  if (run.contextApproval) socket.emit('context:approval-required', run.contextApproval);
 }
 
 export interface SocketOptions {
@@ -603,21 +843,44 @@ export function attachSocket(
       // connection the user currently has.
       const run: LiveRun = {
         controller: new AbortController(),
+        runId: randomUUID(),
         transport: new RebindableTransport(socket, (event, payload) => {
           // Captured on the way out, whether or not anything is listening —
           // which is the point: the events worth replaying are exactly the ones
           // a disconnected or reloading client missed.
           rememberForReplay(run, event, payload);
-          if (!TERMINAL_EVENTS.has(event)) return;
           const p = (payload ?? {}) as { conversationId?: string; error?: string };
-          run.terminal = { conversationId: p.conversationId, error: p.error };
+          // AS SOON AS ANYTHING SAYS SO, not only at the end. Every event a run
+          // emits carries the conversation it belongs to, and on a new chat the
+          // first of them is the earliest moment the id exists at all — it is
+          // how the client learns it too, long before the ack.
+          //
+          // Recorded from the terminal event only, a live first-turn run was
+          // nameless for its whole duration: absent from `active_conversations`,
+          // so a reconnecting page could not claim it, and indistinguishable
+          // from another chat's run when a keyed `chat:stop` arrived.
           if (p.conversationId) run.conversationId = p.conversationId;
-        }),
+          if (!TERMINAL_EVENTS.has(event)) return;
+          run.terminal = { conversationId: p.conversationId, error: p.error };
+        }, () => run.runId),
         done: false,
       };
       activeRuns.add(run);
       try {
         const parsed = parseChatRunPayload(payload);
+        // THE CLIENT'S NAME FOR THIS RUN, when it sent one.
+        //
+        // Taken rather than assigned back, because the client needs the name
+        // from the instant it starts the run: a server-assigned id would arrive
+        // in a message, and a Stop pressed before that message lands would have
+        // nothing to say. The generated id above stands for clients that send
+        // none, so the field is never absent.
+        //
+        // It addresses nothing outside this connection — every use is a lookup
+        // in this socket's own `activeRuns` — so the worst a client can do by
+        // choosing it, including choosing one it has already used, is address
+        // its own runs.
+        if (parsed.runId) run.runId = parsed.runId;
         // Known now for an existing conversation; only the result knows it for
         // a new one. Recorded at both points because a run can be orphaned
         // before it ever reaches the second.
@@ -640,10 +903,53 @@ export function attachSocket(
       }
     });
 
-    // Stop every run in flight on this connection. The run resolves with its
-    // partial output, which still gets persisted and acked normally.
-    socket.on('chat:stop', () => {
-      for (const r of activeRuns) r.controller.abort();
+    // Stop the run the client named, or every run in flight on this connection
+    // when it names none. The run resolves with its partial output, which still
+    // gets persisted and acked normally.
+    //
+    // This used to abort them all, unconditionally. One connection carries
+    // several runs — that is the whole premise of `activeRuns` being a set —
+    // so a Stop pressed in one chat aborted a background run in another, which
+    // then acked with whatever it had produced as though that were its answer.
+    // Nothing told the user their other run had been killed.
+    //
+    // A run the server cannot yet NAME is still aborted either way. Its
+    // conversation id arrives with its first event, which is a moment or two
+    // into the run; before that there is nothing to compare against, and
+    // refusing to stop it would make Stop do nothing at the very start of a
+    // turn — a worse failure than the over-abort this replaces, and the one a
+    // user is most likely to hit. Older clients send no payload at all and get
+    // exactly the previous behaviour.
+    socket.on('chat:stop', (payload?: unknown) => {
+      const asked = (payload ?? {}) as { conversationId?: unknown; runIds?: unknown };
+      // A LIST, because one Stop button in one chat can honestly mean several
+      // runs: two of them can share the conversation on screen, and the client
+      // has no way to offer a choice between them. Naming them is still exact —
+      // it is the conversation fallback that was not.
+      const askedRuns = Array.isArray(asked.runIds)
+        ? asked.runIds.filter((id): id is string => typeof id === 'string' && !!id)
+        : [];
+      const only = typeof asked.conversationId === 'string' && asked.conversationId
+        ? asked.conversationId
+        : undefined;
+      // THE RUN, when the client named one — and nothing else, not even as a
+      // fallback. Scoping by conversation was still ambiguous where it counts:
+      // two runs in one chat both matched, so Stop aborted the background one
+      // as well and it acked with its partial output as though that were its
+      // answer. A run id is the only address that distinguishes them.
+      //
+      // A named run that is not here is a run that already ended. Aborting
+      // everything else instead would be the original bug wearing the fix's
+      // clothes, so a miss stops nothing.
+      if (askedRuns.length > 0) {
+        const wanted = new Set(askedRuns);
+        for (const r of activeRuns) if (wanted.has(r.runId)) r.controller.abort();
+        return;
+      }
+      for (const r of activeRuns) {
+        if (only && r.conversationId && r.conversationId !== only) continue;
+        r.controller.abort();
+      }
     });
 
     // Connection lost. That is NOT the same as "the user left": a missed
@@ -782,6 +1088,18 @@ export function attachSocket(
         // now holding, and cannot claim the state replayed for it below.
         active_conversations: [...activeRuns].filter((r) => !r.done)
           .map((r) => r.conversationId).filter((id): id is string => !!id),
+        // The same runs, named as RUNS — which `active_conversations` cannot
+        // do. It drops those whose conversation is not known yet and collapses
+        // nothing when two share one, so a client reading it has to reconstruct
+        // the count from `active` and guess at the difference. This is
+        // exhaustive and one entry per run, so there is nothing left to infer:
+        // a run with no conversation still appears, by id.
+        //
+        // Alongside rather than instead of, because an older client reads only
+        // the other field and a newer one must still work against a server that
+        // sends only the other field.
+        active_runs: [...activeRuns].filter((r) => !r.done)
+          .map((r) => ({ runId: r.runId, ...(r.conversationId ? { conversationId: r.conversationId } : {}) })),
         ...(assigned ? { clientId: assigned } : {}),
       }, pendingReplay.splice(0));
     };

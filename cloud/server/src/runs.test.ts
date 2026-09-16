@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { ToolRegistry, CascadeConfigSchema } from '#cascade-ai';
-import { buildCloudConfig, buildMediaSink, parseChatRunPayload, runChatTurn, tenantScratchDir } from './runs.js';
+import { answersThisRun, buildCloudConfig, buildMediaSink, parseChatRunPayload, runChatTurn, sanitiseClarificationAnswers, sanitiseEscalationNote, tenantScratchDir } from './runs.js';
 import { CloudStore } from './db.js';
 import { limitsForPlan, PENDING_MEDIA_TTL_MS } from './entitlements.js';
 import type { CloudEnv } from './env.js';
@@ -30,6 +30,57 @@ describe('buildCloudConfig', () => {
     for (const name of ['shell', 'file_read', 'file_write', 'file_edit', 'file_delete', 'git', 'github', 'run_code']) {
       expect(registry.hasTool(name), name).toBe(false);
     }
+  });
+
+  it('drops the web tools in browser mode, so the page is the only way out', () => {
+    // Reaching the internet is ONE decision with three outcomes, not two
+    // toggles that can disagree. Turning the web off already unregisters both
+    // tools — so a separate "use the browser" switch that also unregistered
+    // them would be a second control with identical mechanism.
+    //
+    // What browser mode adds is a NAME. "Web off" reads as no internet at all
+    // and gives no hint that the agent will drive a real page instead, which is
+    // exactly why the capability was undiscoverable: the only ways to reach it
+    // were to turn something else off, or to type the tool's name in the prompt.
+    const config = buildCloudConfig([], 0.5, { browserMode: true });
+    const registry = new ToolRegistry(config.tools as ConstructorParameters<typeof ToolRegistry>[0], '/tmp');
+    expect(registry.hasTool('web_search'), 'no cheaper way to answer').toBe(false);
+    expect(registry.hasTool('web_fetch'), 'nor a way to read the page as text').toBe(false);
+  });
+
+  it('lets browser mode win over an explicit webSearch, rather than combining', () => {
+    // The client keeps the two mutually exclusive; this makes it true on the
+    // server as well, so a hand-built payload asking for both cannot leave the
+    // model a cheaper alternative to the thing the person actually asked for.
+    const config = buildCloudConfig([], 0.5, { browserMode: true, webSearch: true });
+    const registry = new ToolRegistry(config.tools as ConstructorParameters<typeof ToolRegistry>[0], '/tmp');
+    expect(registry.hasTool('web_search')).toBe(false);
+  });
+
+  it('withholds the browser entirely when this turn did not ask for it', () => {
+    // Every session is billed, so reaching one must be something a person chose
+    // rather than something a model reached for. With the chip off the tool is
+    // not refused at call time — it is ABSENT, and the model never sees a
+    // capability it was not given.
+    //
+    // One field does both halves: `setRemoteBrowserController` gates
+    // registration on it, and `attachRemoteBrowser` returns null without it, so
+    // no provider session can be opened either.
+    const off = buildCloudConfig([], 0.5, {
+      remoteBrowser: { provider: 'cdp', url: 'ws://browser.internal:3000', maxSessions: 1 },
+      browserMode: false,
+    });
+    expect(off.tools?.remoteBrowser, 'configured by the operator, not asked for by this turn')
+      .toBeUndefined();
+  });
+
+  it('hands the browser over when the turn did ask', () => {
+    const on = buildCloudConfig([], 0.5, {
+      remoteBrowser: { provider: 'cdp', url: 'ws://browser.internal:3000', maxSessions: 1 },
+      browserMode: true,
+    });
+    expect(on.tools?.remoteBrowser?.provider).toBe('cdp');
+    expect(on.tools?.remoteBrowser?.url).toBe('ws://browser.internal:3000');
   });
 
   it('always disables generate_document, which a hosted run cannot deliver', () => {
@@ -199,6 +250,121 @@ describe('buildCloudConfig', () => {
     const cfg = buildCloudConfig([], 0.5, { maxTokensPerRun: 500_000 });
     expect(cfg.budget?.maxTokensPerRun).toBe(500_000);
     expect(cfg.budget?.maxCostPerRunUsd).toBe(0.5);
+  });
+});
+
+describe('sanitiseClarificationAnswers — a questionnaire comes back from a client', () => {
+  it('keeps one typed answer and one set of selections', () => {
+    expect(sanitiseClarificationAnswers([
+      { id: 'q1', value: 'the personal one' },
+      { id: 'q2', value: ['Drafts', 'Archived'] },
+    ])).toEqual([
+      { id: 'q1', value: 'the personal one' },
+      { id: 'q2', value: ['Drafts', 'Archived'] },
+    ]);
+  });
+
+  it('drops a row that cannot name the question it answers', () => {
+    // An answer with no id has nowhere to land: `ask_user` matches by id, so
+    // this would be carried into the model's context attached to nothing.
+    expect(sanitiseClarificationAnswers([
+      { value: 'orphan' },
+      { id: '', value: 'also orphan' },
+      { id: 42, value: 'wrong type' },
+      { id: 'q1', value: 'kept' },
+    ])).toEqual([{ id: 'q1', value: 'kept' }]);
+  });
+
+  it('drops a value that is not an answer rather than passing it on', () => {
+    // A number, an object or a null reads as an answer once it is a string in
+    // the transcript. Dropping it is what keeps "(no answer given)" honest.
+    expect(sanitiseClarificationAnswers([
+      { id: 'q1', value: 7 },
+      { id: 'q2', value: { nested: true } },
+      { id: 'q3', value: null },
+    ])).toEqual([]);
+  });
+
+  it('keeps only the strings inside a set of selections', () => {
+    expect(sanitiseClarificationAnswers([{ id: 'q1', value: ['ok', 3, null, 'fine'] }]))
+      .toEqual([{ id: 'q1', value: ['ok', 'fine'] }]);
+  });
+
+  it('bounds what one answer can put into the model\'s context', () => {
+    // The honest case is a sentence. The cap is not about that case.
+    const [only] = sanitiseClarificationAnswers([{ id: 'q1', value: 'x'.repeat(10_000) }]);
+    expect((only?.value as string).length).toBe(2_000);
+  });
+
+  it('bounds what the WHOLE reply can put into the context, not just each piece', () => {
+    // Every individual cap was respected and the total was unbounded, which is
+    // the only number the caps existed to control. `AskUserTool` joins a
+    // multi-select into ONE string, so sixteen clipped elements made a single
+    // 32,000-character answer, and sixteen of those made a reply far larger
+    // than the conversation it was answering.
+    const huge = Array.from({ length: 16 }, () => 'x'.repeat(2_000));
+    const out = sanitiseClarificationAnswers(
+      Array.from({ length: 16 }, (_, i) => ({ id: `q${i + 1}`, value: huge })),
+    );
+
+    const total = out.reduce((n, a) => n + (Array.isArray(a.value) ? a.value.join('').length : a.value.length), 0);
+    expect(total, 'the budget is on the reply, not on the answer').toBeLessThanOrEqual(8_000);
+  });
+
+  it('spends the budget on what arrived first rather than rationing it', () => {
+    // An honest answer is a sentence, and should not be truncated because a
+    // later answer in the same reply happens to be enormous.
+    const out = sanitiseClarificationAnswers([
+      { id: 'q1', value: 'the personal one' },
+      { id: 'q2', value: 'y'.repeat(50_000) },
+    ]);
+    expect(out[0], 'the short one is untouched').toEqual({ id: 'q1', value: 'the personal one' });
+    expect((out[1]?.value as string).length, 'the long one takes what is left, up to its own cap').toBe(2_000);
+  });
+
+  it('drops an answer the budget clipped away to nothing', () => {
+    // A blank reads as an answer once it reaches the model. Omitting it is what
+    // keeps "(no answer given)" honest — the same rule the form follows.
+    // Four answers at the 2,000 per-answer cap spend the whole 8,000 budget,
+    // so the fifth gets nothing at all.
+    const out = sanitiseClarificationAnswers([
+      ...Array.from({ length: 4 }, (_, i) => ({ id: `q${i + 1}`, value: 'z'.repeat(2_000) })),
+      { id: 'q5', value: 'squeezed out entirely' },
+    ]);
+    expect(out.map((a) => a.id), 'not present as an empty string').toEqual(['q1', 'q2', 'q3', 'q4']);
+  });
+
+  it('bounds how many answers one reply can carry', () => {
+    // The tool asks at most five questions, so sixteen is already generous —
+    // this is about the payload that is not an honest reply.
+    const many = Array.from({ length: 100 }, (_, i) => ({ id: `q${i}`, value: 'x' }));
+    expect(sanitiseClarificationAnswers(many)).toHaveLength(16);
+  });
+});
+
+describe('answersThisRun — an answer must name the run it answers', () => {
+  // One socket carries several runs and every run's handler sees every message,
+  // so an unkeyed answer settles the OLDEST outstanding questionnaire — in
+  // whichever conversation happens to hold it.
+  it('refuses a message that names no conversation', () => {
+    expect(answersThisRun({ requestId: 'r1' }, 'c1')).toBe(false);
+  });
+
+  it('refuses a message that names no request', () => {
+    expect(answersThisRun({ conversationId: 'c1' }, 'c1')).toBe(false);
+    expect(answersThisRun({ conversationId: 'c1', requestId: '' }, 'c1')).toBe(false);
+  });
+
+  it("refuses a message for somebody else's conversation", () => {
+    expect(answersThisRun({ conversationId: 'c2', requestId: 'r1' }, 'c1')).toBe(false);
+  });
+
+  it('refuses nothing at all', () => {
+    expect(answersThisRun(undefined, 'c1')).toBe(false);
+  });
+
+  it('accepts one that names both', () => {
+    expect(answersThisRun({ conversationId: 'c1', requestId: 'r1' }, 'c1')).toBe(true);
   });
 });
 
@@ -707,5 +873,42 @@ describe('ChatRunPayloadSchema — a client that predates a provider removal', (
       prompt: 'hi',
       providers: [{ type: 'github-models', apiKey: 'dead' }],
     })).toThrow();
+  });
+});
+
+describe('sanitiseEscalationNote — guidance comes back from a client', () => {
+  it('keeps an ordinary note untouched', () => {
+    expect(sanitiseEscalationNote('only the public repos')).toBe('only the public repos');
+  });
+
+  it('bounds what one decision can append to the next prompt', () => {
+    // I argued this needed no bound, because the note is typed by the person at
+    // the keyboard rather than arriving from an untrusted client. That is not a
+    // distinction the server can make: both arrive as `escalation:decide` on a
+    // socket, so "entered through our UI" is a claim about the sender and not a
+    // fact about the data. The only ceiling was Socket.IO's ~2MB frame, and T2
+    // appends this straight onto the retry prompt.
+    expect(sanitiseEscalationNote('x'.repeat(50_000))).toHaveLength(2_000);
+  });
+
+  it('is nothing at all when there is nothing to say', () => {
+    // Distinct from an empty string, which would reach T2 as a guidance note
+    // that says nothing — a retry claiming to be guided by silence.
+    expect(sanitiseEscalationNote('   ')).toBeUndefined();
+    expect(sanitiseEscalationNote('')).toBeUndefined();
+    expect(sanitiseEscalationNote(undefined)).toBeUndefined();
+  });
+
+  it('refuses a value that is not text rather than coercing it', () => {
+    // A number or an object becomes a plausible-looking instruction the moment
+    // it is interpolated into a prompt.
+    expect(sanitiseEscalationNote(42)).toBeUndefined();
+    expect(sanitiseEscalationNote({ note: 'nested' })).toBeUndefined();
+    expect(sanitiseEscalationNote(null)).toBeUndefined();
+  });
+
+  it('trims before measuring, so padding cannot spend the budget', () => {
+    expect(sanitiseEscalationNote(`${' '.repeat(5_000)}retry with the archive included`))
+      .toBe('retry with the archive included');
   });
 });

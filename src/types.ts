@@ -978,6 +978,7 @@ export type CascadeEventType =
   | 'mcp:approval-required'
   | 'plan:approval-required'
   | 'context:approval-required'
+  | 'context:approval-closed'
   | 'context:compacted';
 
 export interface CascadeEvent<T = unknown> {

@@ -1,7 +1,7 @@
 import { useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react';
 import clsx from 'clsx';
 import { motion } from 'framer-motion';
-import { Send, Paperclip, X, Loader2, Globe, Square, Zap, FileText } from 'lucide-react';
+import { Send, Paperclip, X, Loader2, Globe, Square, Zap, FileText, MonitorPlay } from 'lucide-react';
 import { uploadImage, uploadDocument } from '../lib/api.js';
 import type { Skill } from '../lib/types.js';
 import type { ChatAttachment, ForceTier, RoutingMode, SendInput } from './useChatSession.js';
@@ -64,13 +64,17 @@ interface Props {
   forceTier: ForceTier;
   onForceTierChange: (t: ForceTier) => void;
   webSearch: boolean;
+  browserMode: boolean;
+  onBrowserModeChange: (on: boolean) => void;
+  browserAvailable: boolean;
   onWebSearchChange: (on: boolean) => void;
   uiMode: UiMode;
 }
 
 export default function Composer({
   skills, skillId, onSkillChange, hasProviders, busy, onSend, onStop,
-  routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange, uiMode,
+  routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
+  browserMode, onBrowserModeChange, browserAvailable, uiMode,
 }: Props) {
   const [input, setInput] = useState('');
   const [pending, setPending] = useState<Pending[]>([]);
@@ -361,6 +365,36 @@ export default function Composer({
               <Globe size={12} />
               Web
             </button>
+
+            {/* Absent, not disabled, where no provider is configured: the
+                capability does not exist until an operator supplies an
+                endpoint, and a switch that silently does nothing is worse
+                than no switch.
+
+                Its own control rather than a second meaning for Web, because
+                "Web off" reads as NO INTERNET and gives no hint that the agent
+                will drive a real page instead — which is why the browser was
+                reachable only by turning something else off, or by typing the
+                tool's name into the prompt. The two are mutually exclusive;
+                `useChatSession` clears one when the other is set. */}
+            {browserAvailable && (
+              <button
+                type="button"
+                title="Give this run a real browser — for pages that are images, or need signing in. Off means Cascade cannot open one."
+                disabled={disabled}
+                aria-pressed={browserMode}
+                onClick={() => onBrowserModeChange(!browserMode)}
+                className={clsx(
+                  'flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-40',
+                  browserMode
+                    ? 'border-accent-500/30 bg-accent-500/10 text-accent-300'
+                    : 'border-elev/10 bg-elev/[0.04] text-ink-400 hover:text-ink-100',
+                )}
+              >
+                <MonitorPlay size={12} />
+                Browser
+              </button>
+            )}
           </div>
         )}
       </div>

@@ -222,6 +222,96 @@ describe('escalation gate', () => {
     }
   });
 
+  it('says the section is no longer parked, however it stopped being parked', () => {
+    // The gate had exactly one announcement of an ending — `escalation:timeout`
+    // — and that is one of four. Answered, stopped and released-by-teardown all
+    // settled silently, so nothing downstream could tell a live section from a
+    // decided one.
+    //
+    // That is what made the request unsafe to REMEMBER: a replay store sees
+    // emits, never the answer (which arrives on a socket), so without a
+    // reliable delete a reloaded page could be handed back a decision already
+    // made. The clarification gate got this event two rounds earlier; this is
+    // the gate it was copied from.
+    const c = new Cascade(config, '/tmp');
+    const closed: Array<{ requestId?: string }> = [];
+    c.on('escalation:decision-required', () => {});
+    c.on('escalation:closed', (e: unknown) => closed.push(e as { requestId?: string }));
+
+    const parked = gateOf(c)(ctx('alpha'), 'task-1');
+    c.resolveEscalation('skip');
+
+    return parked.then(() => {
+      expect(closed, 'answering is an ending too, not only the timeout').toHaveLength(1);
+      expect(closed[0]?.requestId, 'and it names which section').toBeTruthy();
+    });
+  });
+
+  it('closes the section exactly once, however many ways it could settle', async () => {
+    // The map delete is what makes this exactly-once. A second emission would
+    // take down a LATER prompt: the client removes by request id, and a repeat
+    // for an id already gone races the next section to park.
+    vi.useFakeTimers();
+    try {
+      const c = new Cascade(config, '/tmp');
+      const closed: unknown[] = [];
+      c.on('escalation:decision-required', () => {});
+      c.on('escalation:closed', (e: unknown) => closed.push(e));
+
+      const parked = gateOf(c)(ctx('alpha'), 'task-1');
+      await vi.advanceTimersByTimeAsync(0);
+      c.resolveEscalation('retry');
+      await vi.advanceTimersByTimeAsync(5 * 60_000 + 1);
+      await parked;
+
+      expect(closed, 'answered, then the timeout fires and changes nothing').toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('is not parked by a closed listener that throws', async () => {
+    // The rule this file now applies in five places, applied to the new emit
+    // before it had a chance to become the sixth door.
+    const c = new Cascade(config, '/tmp');
+    c.on('escalation:decision-required', () => {});
+    c.on('escalation:closed', () => { throw new Error('the telemetry sink is down'); });
+
+    const parked = gateOf(c)(ctx('alpha'), 'task-1');
+    c.resolveEscalation('skip');
+
+    await expect(parked, 'the section is released regardless')
+      .resolves.toMatchObject({ action: 'skip' });
+  });
+
+  it('is not parked by a timeout listener that throws', async () => {
+    // The announcement used to run BEFORE `settle`, inside a one-shot timer.
+    // A listener that threw unwound the callback before the gate settled, so
+    // the request stayed in `pendingEscalations` with its promise unresolved
+    // and nothing was ever coming back for it — the section held its worker
+    // until teardown. Being a timer callback, the throw also had no caller to
+    // unwind into: it surfaced as an uncaught exception.
+    //
+    // Not reported by review — this gate is outside the PR's diff. Found by
+    // walking every door of the rule after the same mistake was caught in the
+    // clarification gate, which was itself the second time it had been made.
+    vi.useFakeTimers();
+    try {
+      const c = new Cascade(config, '/tmp');
+      c.on('escalation:decision-required', () => { /* parked */ });
+      c.on('escalation:timeout', () => { throw new Error('the telemetry sink is down'); });
+
+      const parked = gateOf(c)(ctx('alpha'), 'task-1');
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(5 * 60_000 + 1);
+
+      await expect(parked, 'the section is released regardless')
+        .resolves.toEqual({ action: 'timeout' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('times out each parked section independently', async () => {
     // The failure this guards: one section's timer clearing the shared slot,
     // leaving the other permanently unresolvable.
@@ -239,6 +329,68 @@ describe('escalation gate', () => {
       await expect(second).resolves.toEqual({ action: 'timeout' });
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it('releases the section when the listener throws on delivery, rather than failing T2', async () => {
+    // The delivery emit sits inside the Promise executor, so an unguarded
+    // throw does not merely fail to show the prompt — it REJECTS the gate, and
+    // the rejection surfaces inside T2's review of the section. A host whose
+    // socket is momentarily down would turn "ask about this section" into a
+    // thrown error in the run.
+    //
+    // Same answer as `listenerCount === 0` above, because it is the same fact
+    // arriving later: a listener that throws on receipt did not receive it.
+    // `automatic: true` keeps T2 from reading this as a person having accepted
+    // the section — nobody saw it.
+    const c = new Cascade(config, '/tmp');
+    c.on('escalation:decision-required', () => { throw new Error('socket is down'); });
+
+    await expect(gateOf(c)(ctx('a'), 'task-1')).resolves.toEqual({ action: 'skip', automatic: true });
+  });
+
+  it('leaves the section parked when one host got it and another threw', async () => {
+    // This used to assert the opposite — that a partial failure skips the
+    // section — and the opposite was the bug. One dashboard has the section on
+    // screen waiting for a decision; a second host being down is not a reason
+    // to skip work on the first one's behalf.
+    const c = new Cascade(config, '/tmp');
+    const closed: unknown[] = [];
+    let openedFor: string | undefined;
+    c.on('escalation:decision-required', (e: { requestId: string }) => { openedFor = e.requestId; });
+    c.on('escalation:decision-required', () => { throw new Error('second host is down'); });
+    c.on('escalation:closed', (e: unknown) => closed.push(e));
+
+    const parked = gateOf(c)(ctx('a'), 'task-1');
+    await Promise.resolve();
+    expect(openedFor, 'the first host did open it').toBeTruthy();
+    expect(closed, 'and nothing has closed it under them').toEqual([]);
+
+    c.resolveEscalation('retry', undefined, openedFor);
+    await expect(parked, 'the decision they gave is the one that lands')
+      .resolves.toEqual({ action: 'retry' });
+  });
+
+  it('releases the section when an async listener REJECTS, not only when it throws', async () => {
+    // The twin of the clarification case, and the one with more to lose: an
+    // escalation that never settles holds a T2 section and its worker for the
+    // full five minutes. `emit` discards what a listener returns, so an async
+    // host failing was invisible to the guard around it.
+    //
+    // Real timers and no advance: if the rejection did not settle the gate,
+    // this hangs rather than passes.
+    const escaped: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { escaped.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const c = new Cascade(config, '/tmp');
+      c.on('escalation:decision-required', async () => { throw new Error('the socket is down'); });
+
+      await expect(gateOf(c)(ctx('a'), 'task-1')).resolves.toEqual({ action: 'skip', automatic: true });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(escaped, 'and nothing reached the process').toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
     }
   });
 });

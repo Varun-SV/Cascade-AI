@@ -10,6 +10,15 @@ export interface CloudConfig {
   googleEnabled: boolean;
   googleClientId: string | null;
   devLoginEnabled: boolean;
+  /**
+   * Whether this deployment has a hosted browser at all.
+   *
+   * Optional, and absent means no: a config request that failed should leave
+   * the control hidden rather than offering a button that silently does
+   * nothing. The capability does not exist until an operator supplies an
+   * endpoint, so neither should the switch for it.
+   */
+  remoteBrowserEnabled?: boolean;
 }
 
 async function json<T>(fetchPromise: Promise<Response>): Promise<T> {

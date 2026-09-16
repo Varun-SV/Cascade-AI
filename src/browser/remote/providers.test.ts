@@ -75,6 +75,27 @@ describe('Steel', () => {
     await expect(new SteelProvider().createSession()).rejects.toThrow(/no id or websocket/i);
   });
 
+  it("carries the provider's own session ceiling, which is the only thing we can know about it", async () => {
+    // `POST /v1/sessions` accepts NO timeout field — verified against the API
+    // source. The ceiling is the provider's; setting it is not on offer, and an
+    // env var feeding a field the API ignores would let an operator believe
+    // they had bounded their spend while nothing had changed.
+    //
+    // Reading it is on offer, and it is what makes a leak explicable: a session
+    // nobody released dies at exactly this number. Two field sessions ended at
+    // precisely 0:05:00 — 300000ms — with nothing anywhere recording the limit.
+    stubFetch([{ body: { id: 'sess-1', websocketUrl: 'wss://s/cdp', timeout: 300_000 } }]);
+    const session = await new SteelProvider().createSession();
+    expect(session.expiresInMs, 'the five minutes, said out loud').toBe(300_000);
+  });
+
+  it('says nothing about a ceiling the provider did not report', async () => {
+    // Absent, not guessed. A number we invented would be worse than none: it
+    // would look like knowledge.
+    stubFetch([{ body: { id: 'sess-1', websocketUrl: 'wss://s/cdp' } }]);
+    expect(await new SteelProvider().createSession()).not.toHaveProperty('expiresInMs');
+  });
+
   it('omits the live view rather than inventing one', async () => {
     stubFetch([{ body: { id: 'sess-1', websocketUrl: 'wss://s/cdp' } }]);
     const session = await new SteelProvider().createSession();
@@ -148,12 +169,22 @@ describe('Steel', () => {
     expect(calls[0]?.url).toBe('https://steel.test/v1/sessions/sess-1/release');
   });
 
-  it('does not turn a failed release into a failed run', async () => {
-    // Release is cleanup, usually running while a run is already ending. A
-    // provider that is briefly unreachable must not escalate that into an
-    // error the user sees; its own idle timeout collects the session.
+  it('reports a failed release instead of hiding it', async () => {
+    // Release is cleanup, usually running while a run is already ending, and a
+    // provider that is briefly unreachable must never escalate that into an
+    // error the user sees. That property still holds — but it is the CALLER's
+    // to enforce, and it is enforced: `RemoteBrowserController.disposeRun`
+    // catches this and `endRun` still resolves, which its own suite pins.
+    //
+    // Swallowing it here as well destroyed the information irrecoverably. A
+    // release that failed and a release that succeeded were the same event to
+    // every layer above, so a session left RUNNING and BILLING until the
+    // provider's own timeout reaped it was indistinguishable from a clean
+    // handback — and two such sessions, each ending at exactly the 5-minute
+    // default, could not be explained by anything the system knew.
     stubFetch([{ ok: false, status: 503, text: 'upstream down' }]);
-    await expect(new SteelProvider().endSession('sess-1')).resolves.toBeUndefined();
+    await expect(new SteelProvider().endSession('sess-1'))
+      .rejects.toThrow(/503/);
   });
 
   it('escapes a session id rather than splicing it into the path', async () => {

@@ -23,6 +23,9 @@ import {
   RemoteBrowserController,
   GenericCdpProvider,
   SteelProvider,
+  isHostedSteel,
+  isUsableSteelBase,
+  isUsableSteelKey,
   isCdpEndpoint,
   type BrowserInput,
   type Cascade,
@@ -224,6 +227,32 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
       controller: new RemoteBrowserController({
         provider,
         ...(settings.maxSessions ? { maxSessions: settings.maxSessions } : {}),
+        // Logged here rather than through this attach's `warn`, deliberately.
+        // The controller is module-scoped and outlives every run on it, so
+        // closing over one run's callback would pin that run's socket for the
+        // life of the process — the same leak the listener registration below
+        // is careful to avoid.
+        //
+        // The session id is what makes this actionable: it is the column the
+        // provider's own dashboard is keyed by, so an operator can see the
+        // browser still running and match it to the release that failed. It is
+        // not a capability — the live-view URL is, and is never logged.
+        // `expiresInMs` is the provider's own ceiling, and it is the difference
+        // between a report an operator can act on and one that only worries
+        // them: "billable until the provider times it out" leaves open whether
+        // that is minutes or until somebody kills it by hand. Absent when the
+        // provider did not say, and then the sentence stays honest by not
+        // claiming a bound nobody stated.
+        onReleaseFailed: (runId, sessionId, err, expiresInMs) => {
+          const reaped = typeof expiresInMs === 'number' && expiresInMs > 0
+            ? `the provider reaps it ${formatCeiling(expiresInMs)} after creation`
+            : 'it runs until the provider times it out';
+          console.error(
+            `[browser ${runId}] provider session ${sessionId} was NOT released; `
+            + `${reaped}, and is billable until then:`,
+            err,
+          );
+        },
         // Also inherit a reset/retirement already in flight even when there is
         // no current `shared` entry to rotate in this call.
         ready: retiring ?? retirementBarrier,
@@ -349,6 +378,41 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
   };
 }
 
+/** An http(s) URL, which is what a Steel API base has to be. */
+/**
+ * The provider's ceiling, said precisely enough to be acted on.
+ *
+ * Rounding to the nearest minute was my own shortcut and it broke the one
+ * thing the number is for: a 30s ceiling read as `1m`, and anything under 30s
+ * as `0m` — a leak reported as already collected. Whole minutes stay whole
+ * ("5m"), and anything else keeps its seconds.
+ */
+export function formatCeiling(ms: number): string {
+  const totalSeconds = Math.max(1, Math.round(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes === 0) return `${seconds}s`;
+  return seconds === 0 ? `${minutes}m` : `${minutes}m${seconds}s`;
+}
+
+
+/**
+ * Whether these settings can actually produce a browser.
+ *
+ * Asks `buildProvider` rather than restating its rules, so the two cannot
+ * drift: `/api/config` advertises the Browser control on this, and the control
+ * exists precisely so a deployment that cannot serve a browser does not show
+ * one. Deciding that from `provider` alone reintroduced the inert switch — a
+ * `cdp` provider with a missing or non-websocket URL passes the env schema,
+ * fails here, and would have put a button on screen that silently does
+ * nothing.
+ *
+ * No network, no allocation: `buildProvider` only constructs an adapter.
+ */
+export function providerIsUsable(settings: RemoteBrowserSettings | undefined): boolean {
+  return buildProvider(settings) !== null;
+}
+
 /** Which provider the operator asked for, or null when they asked for none. */
 function buildProvider(
   settings: RemoteBrowserSettings | undefined,
@@ -367,6 +431,52 @@ function buildProvider(
     return new GenericCdpProvider(settings.url);
   }
 
+  // Validated like the cdp endpoint above, and for the same reason. The cdp
+  // branch grew this check and the steel branch did not, so a malformed base
+  // passed the env schema, produced a usable-looking provider, and failed at
+  // the first `fetch` — putting the inert control back for the one provider
+  // the CDP fix did not cover.
+  //
+  // An absent url is fine and means the hosted API: `SteelProvider` defaults it.
+  if (settings.url && !isUsableSteelBase(settings.url)) {
+    warn?.('remoteBrowser.url for steel must be an http(s) API base with no query, fragment or embedded credentials; use remoteBrowser.apiKey for the credential');
+    return null;
+  }
+  // A credential that cannot be SENT is the same class of problem as a base
+  // that cannot be addressed, and it is checked wherever one is present rather
+  // than only for the hosted endpoint: a self-hosted Steel behind a gateway
+  // takes a key too, and a malformed one fails its first request just as hard.
+  //
+  // The rule lives in `steel.ts` with the `call()` that builds the header, for
+  // the reason `isHostedSteel` and `isUsableSteelBase` do — a copy here would
+  // be a second opinion about what the request will accept, free to drift from
+  // the one that actually sends it.
+  if (settings.apiKey && !isUsableSteelKey(settings.apiKey)) {
+    warn?.('remoteBrowser.apiKey must be sendable as an HTTP header value; a line break or NUL in the key makes every request fail before it is sent');
+    return null;
+  }
+  // The hosted API needs a key; a self-hosted one usually does not.
+  //
+  // Asked of the RESOLVED DESTINATION, not of the shape of the config. This is
+  // the fourth time this gate has been wrong and the first three were all the
+  // same error — each fix asked a question about the fields (is there a url? is
+  // it well-formed? is it absent?) when the thing that decides whether a
+  // browser can be opened is where the request actually goes. "No url" and
+  // "`https://api.steel.dev` typed out in full" are the same destination and
+  // were given opposite answers.
+  //
+  // `isHostedSteel` lives with `SteelProvider`, beside the default it has to
+  // agree with. A copy of that rule here would be a second definition of
+  // "hosted" with its own opinion, which is how this drifted in the first
+  // place.
+  //
+  // Only the hosted endpoint is refused. A self-hosted Steel behind a private
+  // network or its own gateway legitimately has no key, so requiring one for
+  // somebody else's endpoint would break a working deployment to guard ours.
+  if (isHostedSteel(settings.url) && !settings.apiKey) {
+    warn?.('remoteBrowser.apiKey is required for the hosted Steel API; set it, or point remoteBrowser.url at a self-hosted endpoint');
+    return null;
+  }
   return new SteelProvider({
     ...(settings.url ? { url: settings.url } : {}),
     ...(settings.apiKey ? { apiKey: settings.apiKey } : {}),

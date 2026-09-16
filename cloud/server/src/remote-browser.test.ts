@@ -3,7 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { attachRemoteBrowser, asWatchOnlyViewer, frameEmitter, resetSharedBrowser, sharedBrowserGeneration } from './remote-browser.js';
+import { attachRemoteBrowser, asWatchOnlyViewer, frameEmitter, formatCeiling, resetSharedBrowser, sharedBrowserGeneration } from './remote-browser.js';
 import { Cascade, type CascadeConfig } from '#cascade-ai';
 
 /**
@@ -87,6 +87,34 @@ describe('a deployment with no provider configured', () => {
     });
     expect(attached).toBeNull();
     expect(warn).toHaveBeenCalled();
+  });
+
+  it('refuses the hosted Steel API with no credential', () => {
+    // Both earlier fixes to this asked "is the URL valid" — and an ABSENT url
+    // is valid, because it means the hosted API. But falling back to
+    // api.steel.dev with no key builds a provider that advertises a Browser
+    // control and then fails authentication on the first request, which is the
+    // inert control those fixes existed to remove, in its third shape.
+    const warn = vi.fn();
+    const { cascade } = fakeCascade();
+    const attached = attachRemoteBrowser({
+      cascade, conversationId: 'c1', emit, warn,
+      config: { tools: { remoteBrowser: { provider: 'steel' } } },
+    });
+    expect(attached).toBeNull();
+    expect(warn.mock.calls[0]?.[0]).toMatch(/apiKey/);
+  });
+
+  it('allows a self-hosted Steel with no credential', () => {
+    // Only the FALLBACK is refused. A Steel behind a private network or its
+    // own gateway legitimately has no key, and requiring one for a URL the
+    // operator typed would break a working deployment to guard a default.
+    const { cascade } = fakeCascade();
+    const attached = attachRemoteBrowser({
+      cascade, conversationId: 'c1', emit,
+      config: { tools: { remoteBrowser: { provider: 'steel', url: 'https://steel.internal' } } },
+    });
+    expect(attached).not.toBeNull();
   });
 });
 
@@ -312,5 +340,24 @@ describe('asking to watch a run', () => {
     expect((await attached!.input({ kind: 'click', x: 0.5, y: 0.5 })).ok).toBe(false);
     expect(attached!.handBack()).toBe(false);
     expect(await attached!.setCapture(true)).toBe(false);
+  });
+});
+
+describe('the ceiling in a release-failure report', () => {
+  it('keeps the seconds it was given', () => {
+    // Rounding to the nearest minute was my own shortcut in the previous round
+    // and it broke the one thing the number is for. A 30s ceiling read as
+    // `1m`, and anything under 30s as `0m` — a session still running and
+    // billable, reported as already collected.
+    expect(formatCeiling(300_000), 'whole minutes stay whole').toBe('5m');
+    expect(formatCeiling(30_000), 'not 1m').toBe('30s');
+    expect(formatCeiling(5_000), 'not 0m').toBe('5s');
+    expect(formatCeiling(90_000)).toBe('1m30s');
+  });
+
+  it('never reports a live session as already reaped', () => {
+    // The floor is what makes the sentence safe to act on: whatever the
+    // provider said, a session being reported is one that was still there.
+    expect(formatCeiling(1)).toBe('1s');
   });
 });
