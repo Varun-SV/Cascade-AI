@@ -2378,6 +2378,115 @@ describe('a run ending takes down its own gates and nobody else\'s', () => {
     expect(view.result.current.contextApprovals.map((a) => a.runId), 'the other still stands').toEqual(['run-1']);
   });
 
+  it('follows the pane when the user navigates, in both directions', async () => {
+    // The candidate list used to be the ANSWER, computed at `run:resumed`
+    // against whatever conversation was on screen then — and
+    // `selectConversation` moves the pane without recomputing it. So after
+    // resuming A and B on A's pane and walking to B, the stored answer still
+    // said A: Stop sent A's run id alongside B's conversation, the server gives
+    // run ids precedence, and it aborted the run the user had just walked away
+    // from while B carried on.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-A'));
+
+    act(() => {
+      fake.fire('run:resumed', {
+        active: 2,
+        active_conversations: ['convo-A', 'convo-B'],
+        active_runs: [{ runId: 'run-a', conversationId: 'convo-A' }, { runId: 'run-b', conversationId: 'convo-B' }],
+        finished: [],
+      });
+    });
+
+    act(() => { view.result.current.setConversationId('convo-B'); });
+    act(() => { view.result.current.stop(); });
+
+    const first = fake.sent.filter((m) => m.event === 'chat:stop').map((m) => m.payload as Record<string, unknown>);
+    expect(first[0]?.['runIds'], 'Stop in B means B').toEqual(['run-b']);
+
+    // AND BACK. Deriving on read rather than clearing on navigation is what
+    // keeps A addressable when the user returns to it — clearing forever would
+    // have fixed the bug by losing the feature.
+    act(() => { view.result.current.setConversationId('convo-A'); });
+    act(() => { view.result.current.stop(); });
+
+    const second = fake.sent.filter((m) => m.event === 'chat:stop').map((m) => m.payload as Record<string, unknown>);
+    expect(second[1]?.['runIds'], 'and going back makes A addressable again').toEqual(['run-a']);
+  });
+
+  it('streams the run belonging to the chat the user navigated to', async () => {
+    // The mirror of the same staleness, and the one a Stop test would miss:
+    // `onToken` consults the run filter BEFORE conversation scoping, so a
+    // candidate list left pointing at A dropped B's own tokens as belonging to
+    // some other run — on the screen showing B.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-A'));
+
+    act(() => {
+      fake.fire('run:resumed', {
+        active: 2,
+        active_conversations: ['convo-A', 'convo-B'],
+        active_runs: [{ runId: 'run-a', conversationId: 'convo-A' }, { runId: 'run-b', conversationId: 'convo-B' }],
+        finished: [],
+      });
+    });
+    act(() => { view.result.current.setConversationId('convo-B'); });
+    act(() => { fake.fire('stream:token', { conversationId: 'convo-B', runId: 'run-b', text: 'B is writing' }); });
+
+    expect(
+      view.result.current.messages.filter((m) => m.streaming).map((m) => m.content),
+      'the chat on screen streams its own run',
+    ).toEqual(['B is writing']);
+  });
+
+  it('names nothing when the user navigates to a chat with no run of its own', async () => {
+    // `busy` is global to the pane, so a chat with nothing running can still
+    // render a Stop button while another conversation's run keeps it busy.
+    // Pressing it must not reach for whatever was last addressable.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-A'));
+
+    act(() => {
+      fake.fire('run:resumed', {
+        active: 1,
+        active_conversations: ['convo-A'],
+        active_runs: [{ runId: 'run-a', conversationId: 'convo-A' }],
+        finished: [],
+      });
+    });
+    act(() => { view.result.current.setConversationId('convo-quiet'); });
+    act(() => { view.result.current.stop(); });
+
+    const stop = fake.sent.filter((m) => m.event === 'chat:stop').map((m) => m.payload as Record<string, unknown>);
+    expect(stop[0]?.['runIds'], 'a quiet chat speaks for no run').toBeUndefined();
+    expect(stop[0]?.['conversationId'], 'and says which chat it meant').toBe('convo-quiet');
+  });
+
+  it('still lets a blank pane stop the run it started itself', async () => {
+    // A first turn has no conversation on either side, so `mine` is the only
+    // thing separating this pane's run from a stranger's. Deriving purely from
+    // the conversation would have made a blank pane refuse to stop its own work.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { void view.result.current.send({ prompt: 'refactor the parser' }); });
+    const started = (fake.sent.find((m) => m.event === 'chat:run')?.payload as Record<string, unknown>)['runId'];
+
+    // A background run exists too, so "exactly one live run" cannot be the rule.
+    act(() => {
+      fake.fire('run:resumed', {
+        active: 2,
+        active_conversations: ['convo-elsewhere'],
+        active_runs: [{ runId: started as string }, { runId: 'run-stranger', conversationId: 'convo-elsewhere' }],
+        finished: [],
+      });
+    });
+    act(() => { view.result.current.stop(); });
+
+    const stop = fake.sent.filter((m) => m.event === 'chat:stop').map((m) => m.payload as Record<string, unknown>);
+    expect(stop[0]?.['runIds'], 'its own run, not the stranger\'s').toEqual([started]);
+  });
+
   it('keeps a conversation\'s gates up while a second run on it is still going', async () => {
     // `runOriginsRef` was a SET, and two runs can share one conversation:
     // nothing on the server enforces one run per conversation, and

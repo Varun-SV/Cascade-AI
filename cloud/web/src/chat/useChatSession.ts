@@ -562,14 +562,51 @@ export function useChatSession(
    * Set when this pane EMITS a run, because the id is its own — minted here and
    * sent with the payload, so it is known from the instant the run starts
    * rather than whenever a message happens to name it. Set from a resume to
-   * whichever live runs could be this pane's: the ones on its conversation,
-   * plus those the server cannot place. EMPTY means no information at all —
-   * an older server — and only then does anything fall back to the conversation.
+   * whichever live runs could be this pane's. EMPTY means no information at
+   * all — an older server — and only then does anything fall back to the
+   * conversation.
+   *
+   * WHAT IS LIVE, not what was showing. This used to store the answer, computed
+   * at `run:resumed` against whatever conversation happened to be on screen
+   * then — and `selectConversation` moves the pane without recomputing it. So
+   * after resuming A and B on A's pane and navigating to B, the stored answer
+   * still said A: Stop sent A's run id alongside B's conversation, the server
+   * gives run ids precedence, and it aborted the run the user had just walked
+   * away from while B carried on. The token filter had the mirror failure —
+   * B's own tokens were dropped as belonging to some other run, on the screen
+   * showing B.
+   *
+   * Storing the INPUTS and deriving the answer on read fixes both directions at
+   * once, and it also keeps the property that made a stored answer tempting:
+   * walking back to A makes A's run addressable again, because the derivation
+   * is the same either way. There is no navigation hook to remember to update,
+   * which is the failure this shape removes rather than patches.
    */
-  const shownRunsRef = useRef<string[]>([]);
+  const knownRunsRef = useRef<Array<{ runId: string; conversationId?: string; mine?: boolean }>>([]);
   /** The conversation this pane's events belong to — known, or adopted below. */
   const activeConversationId = (): string | undefined =>
     conversationIdRef.current ?? pendingConversationIdRef.current;
+  /**
+   * The runs this pane may speak for RIGHT NOW — derived, never stored.
+   *
+   * A pane that knows its conversation speaks only for runs on it: an
+   * unattributed run cannot be this pane's, because a pane with a conversation
+   * emitted its run WITH that id and the server therefore knows it too.
+   *
+   * A blank pane speaks for the run it started, if it started one — that is the
+   * first turn, where neither side has a conversation yet and `mine` is the only
+   * thing that distinguishes its run from a stranger's. Failing that it speaks
+   * for a uniquely adoptable run, and for nothing at all when there is a choice
+   * to make: the same non-guessing rule the conversation adoption follows.
+   */
+  const shownRuns = (): string[] => {
+    const runs = knownRunsRef.current;
+    const mine = conversationIdRef.current;
+    if (mine) return runs.filter((r) => r.conversationId === mine).map((r) => r.runId);
+    const own = runs.filter((r) => r.mine);
+    if (own.length === 1) return [own[0]!.runId];
+    return runs.length === 1 ? [runs[0]!.runId] : [];
+  };
   /** Learn the id the server minted for the run this pane just started. */
   const adoptConversationId = (convo: unknown): void => {
     if (!awaitingFirstTurnRef.current) return;
@@ -1201,7 +1238,7 @@ export function useChatSession(
       //
       // An empty list is no information rather than ambiguity: an older server
       // names no runs at all, and the conversation check below is what it had.
-      const shown = shownRunsRef.current;
+      const shown = shownRuns();
       if (shown.length > 0 && e.runId && !shown.includes(e.runId)) return;
       if (shown.length > 1 && e.runId) return;
       const current = activeConversationId();
@@ -1820,9 +1857,9 @@ export function useChatSession(
     const lastOneOut = runOriginsRef.current.size === 0 && unnamedRunsRef.current === 0;
     if (lastOneOut) {
       ackLostRef.current = false;
-      // Nothing is running, so no run is being shown. Left behind, a dead run's
-      // name would filter out the tokens of the next one.
-      shownRunsRef.current = [];
+      // Nothing is running, so there are no live runs to speak for. Left
+      // behind, a dead run's name would filter out the tokens of the next one.
+      knownRunsRef.current = [];
       setBusy(false);
       setStatus(null);
       setApproval(null);
@@ -2125,13 +2162,22 @@ export function useChatSession(
           // reconciles correctly for work it cannot claim. Being carried and
           // being shown are different questions, and only the second one
           // decides what Stop may abort.
-          const mine = conversationIdRef.current;
-          const attributable = mine
-            ? reportedRuns.filter((r) => r?.conversationId === mine)
-            : (reportedRuns.length === 1 ? reportedRuns : []);
-          shownRunsRef.current = attributable
-            .map((r) => r?.runId)
-            .filter((id): id is string => typeof id === 'string' && !!id);
+          // WHAT IS LIVE, recorded whole. Which of these the pane may speak for
+          // is `shownRuns()`'s question and is answered on read, so navigating
+          // afterwards changes the answer instead of leaving a stale one behind.
+          //
+          // `mine` is carried across for ids already known to be this pane's:
+          // the server has no idea which runs a given page started, and a first
+          // turn is reported with no conversation at all, so dropping the flag
+          // here would make a blank pane stop recognising its own run.
+          const wasMine = new Set(knownRunsRef.current.filter((r) => r.mine).map((r) => r.runId));
+          knownRunsRef.current = reportedRuns
+            .filter((r): r is { runId: string; conversationId?: string } => typeof r?.runId === 'string' && !!r.runId)
+            .map((r) => ({
+              runId: r.runId,
+              ...(r.conversationId ? { conversationId: r.conversationId } : {}),
+              ...(wasMine.has(r.runId) ? { mine: true as const } : {}),
+            }));
         } else if (named.length > 0) {
           runOriginsRef.current = tallyOrigins(named);
         }
@@ -2612,7 +2658,15 @@ export function useChatSession(
         // The run this pane is now showing, by name. Replaces whatever a resume
         // left for the same reason the origin does: this pane starting a run
         // makes that run the one it is answerable for.
-        shownRunsRef.current = [thisRunId];
+        knownRunsRef.current = [{
+          runId: thisRunId,
+          ...(payload.conversationId ? { conversationId: payload.conversationId } : {}),
+          // THIS PANE'S OWN, which nothing else can tell. On a first turn the
+          // run has no conversation on either side, so without this a blank
+          // pane could not distinguish the run it just started from a
+          // stranger's and would refuse to stop its own work.
+          mine: true,
+        }];
         runOriginsRef.current = tallyOrigins(payload.conversationId ? [payload.conversationId] : []);
         // This pane starting a run replaces whatever a resume left, including
         // its count of runs it could not name.
@@ -2628,7 +2682,7 @@ export function useChatSession(
           // `??=` in `run:resumed` mistake it for an inherited run's.
           const origins = [...runOriginsRef.current.keys()];
           runOriginsRef.current = new Map();
-          shownRunsRef.current = [];
+          knownRunsRef.current = [];
           unnamedRunsRef.current = 0;
           setBusy(false);
           setStatus(null);
@@ -2782,7 +2836,7 @@ export function useChatSession(
     // The conversation still goes for a server that predates this: it reads
     // that field and ignores this one, which is the behaviour it had.
     socket.emit('chat:stop', {
-      ...(shownRunsRef.current.length > 0 ? { runIds: [...shownRunsRef.current] } : {}),
+      ...((): { runIds?: string[] } => { const ids = shownRuns(); return ids.length > 0 ? { runIds: ids } : {}; })(),
       conversationId: activeConversationId(),
     });
     setStatus('Stopping…');
