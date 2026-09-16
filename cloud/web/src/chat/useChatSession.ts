@@ -1077,14 +1077,23 @@ export function useChatSession(
   // it displaced sat blocked until its own gate timed out.
   const [allContextApprovals, setContextApprovals] = useState<ContextApprovalInfo[]>([]);
   /**
-   * The one this chat is being asked, filtered on read exactly as the other
-   * three gates are — so a background conversation's dialog is not put in front
-   * of somebody watching a different run, and switching chats does not strand
-   * the question the run is still blocked on.
+   * EVERY question this chat is being asked, filtered on read exactly as the
+   * other three gates are — so a background conversation's dialog is not put in
+   * front of somebody watching a different run, and switching chats does not
+   * strand the question the run is still blocked on.
+   *
+   * ALL of them, not the first. Each run's server-side gate starts its own
+   * 120-second timer when it asks, and that gate resolves TRUE on timeout — so
+   * a question queued behind a sibling had its deadline running while nobody
+   * could see it, and a billed compaction proceeded on a confirmation that was
+   * never shown, let alone given. Queueing is only safe when the thing being
+   * queued is not also expiring.
    */
-  const contextApproval = allContextApprovals.find(
+  const contextApprovals = allContextApprovals.filter(
     (a) => !a.conversationId || a.conversationId === currentConversation,
-  ) ?? null;
+  );
+  /** The first of them, kept for callers that only ever showed one. */
+  const contextApproval = contextApprovals[0] ?? null;
   const [compactionNotice, setCompactionNotice] = useState<string | null>(null);
   /**
    * A provider's account went out of service mid-run and the work moved
@@ -1376,10 +1385,23 @@ export function useChatSession(
         ? a.runId !== e.runId
         : (a.conversationId ?? '') !== (e?.conversationId ?? ''))));
     };
-    const onCompacted = (e: { kind?: string; chunks?: number; foldedTurns?: number; truncated?: boolean; conversationId?: string }) => {
+    const onCompacted = (e: {
+      kind?: string; chunks?: number; foldedTurns?: number; truncated?: boolean;
+      conversationId?: string; runId?: string;
+    }) => {
       // The compaction happened, so THAT run's question is over — and only
       // that one. It used to empty the single slot whoever had asked.
-      setContextApprovals((q) => q.filter((a) => (a.conversationId ?? '') !== (e?.conversationId ?? '')));
+      //
+      // BY RUN, the same rule `context:approval-closed` above was given and
+      // this sibling was not. The transport stamps `runId` on every event a run
+      // emits, so this one has always carried the identity it needed. Filtering
+      // by conversation meant approving run-1 removed run-2's still-live
+      // question as well — and run-2 stayed blocked server-side until its own
+      // 120s gate timed out and proceeded on its own, which is a billed
+      // compaction nobody agreed to.
+      setContextApprovals((q) => q.filter((a) => (e?.runId
+        ? a.runId !== e.runId
+        : (a.conversationId ?? '') !== (e?.conversationId ?? ''))));
       if (e.kind === 'input') {
         setCompactionNotice(`Compacted a large input into ${e.chunks ?? 0} chunks${e.truncated ? ' (truncated at the cap)' : ''}.`);
       } else if (e.kind === 'history') {
@@ -2078,9 +2100,36 @@ export function useChatSession(
           // runs in DIFFERENT chats left the pane unable to name either, so it
           // fell back to the conversation address for a case it could have
           // answered exactly.
+          //
+          // ATTRIBUTABLE, not merely compatible. Admitting runs the server
+          // could not place — on the grounds that a first-turn run has no
+          // conversation yet — pulled strangers in: with `active_runs` naming
+          // this pane's run for A beside somebody's unattributed run B, both
+          // landed here, and Stop names every candidate. So pressing Stop in A
+          // aborted B, exactly, by id. That is worse than the loose address it
+          // replaced, because a conversation filter would never have matched B.
+          //
+          // A pane that knows its conversation emitted its run WITH that id, so
+          // the server knows it too — an unattributed run therefore cannot be
+          // this pane's, and `!r.conversationId` was never evidence of anything.
+          // The first-turn case it was reaching for is a pane with no
+          // conversation at all, which is the other branch.
+          //
+          // A blank pane claims a run only when there is exactly one to claim,
+          // the same non-guessing rule the conversation adoption above follows.
+          // `!mine` used to short-circuit the whole filter, which made a blank
+          // pane the owner of every live run on the connection.
+          //
+          // Runs left out are still COUNTED — the origins and the unnamed count
+          // above are built from the whole list — so the pane stays busy and
+          // reconciles correctly for work it cannot claim. Being carried and
+          // being shown are different questions, and only the second one
+          // decides what Stop may abort.
           const mine = conversationIdRef.current;
-          shownRunsRef.current = reportedRuns
-            .filter((r) => !r?.conversationId || !mine || r.conversationId === mine)
+          const attributable = mine
+            ? reportedRuns.filter((r) => r?.conversationId === mine)
+            : (reportedRuns.length === 1 ? reportedRuns : []);
+          shownRunsRef.current = attributable
             .map((r) => r?.runId)
             .filter((id): id is string => typeof id === 'string' && !!id);
         } else if (named.length > 0) {
@@ -2822,13 +2871,16 @@ export function useChatSession(
   // Answer the extended-context confirm: proceed with (or skip) compacting the
   // oversized input. Either way the run continues — skip just means the model
   // handles the raw input (truncating naturally).
-  const resolveContextApproval = useCallback((approved: boolean) => {
+  const resolveContextApproval = useCallback((approved: boolean, target?: ContextApprovalInfo) => {
     // NAMED, so the server can tell whose decision this is. It used to go out
     // bare, which was survivable only while one run could be waiting at a time:
     // with two resumed together, answering a dialog left over from the run that
     // ended was consumed by the one still waiting, and the user's "no" to a
     // finished run compacted a live one.
-    const answering = contextApproval;
+    // WHICH ONE, because there can be several and they are each a different
+    // run's question. Defaulting to the first keeps the single-dialog callers
+    // working; passing one answers exactly that run.
+    const answering = target ?? contextApprovals[0];
     if (!answering) return;
     const cid = answering.conversationId ?? activeConversationId();
     // THE RUN when the question named one. Two runs in one conversation both
@@ -2843,7 +2895,7 @@ export function useChatSession(
     // Only the one that was answered. Clearing the queue would displace a
     // sibling's question exactly as the single slot did.
     setContextApprovals((q) => q.filter((a) => a !== answering));
-  }, [socket, contextApproval]);
+  }, [socket, contextApprovals]);
 
   // Regenerate a reply as a NEW sibling of the given assistant turn (or the last
   // one). The original answer stays on disk under < n/m >.
@@ -2932,7 +2984,7 @@ export function useChatSession(
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, browserMode, setBrowserMode, approval,
     escalation, escalations, escalationQueued: escalations.length, resolveEscalation, clearEscalation,
     skipAllEscalations,
-    contextApproval, resolveContextApproval, compactionNotice, providerNotice, knowledgeNotice, activity,
+    contextApproval, contextApprovals, resolveContextApproval, compactionNotice, providerNotice, knowledgeNotice, activity,
     browserLiveView, browserActive, browserTaskId, browserFrame, browserStreaming,
     browserHuman, browserCapturing, browserConfirmed, browserNotice, stopBrowser,
     takeOverBrowser, handBackBrowser, sendBrowserInput, setBrowserCapture,

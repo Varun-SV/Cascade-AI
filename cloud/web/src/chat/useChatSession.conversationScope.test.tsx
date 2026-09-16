@@ -2279,6 +2279,105 @@ describe('a run ending takes down its own gates and nobody else\'s', () => {
     ).toEqual(['mine']);
   });
 
+  it('does not put an unattributable run on this pane\'s Stop button', async () => {
+    // The candidate filter admitted runs the server could not place, on the
+    // grounds that a first-turn run has no conversation yet. That pulled
+    // STRANGERS in: with this pane's run for A beside somebody's unattributed
+    // run B, both became candidates — and Stop names every candidate, exactly,
+    // by id. Pressing Stop in A therefore aborted B. That is worse than the
+    // loose address it replaced, because a conversation filter would never have
+    // matched B at all.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-A'));
+
+    act(() => {
+      fake.fire('run:resumed', {
+        active: 2,
+        active_conversations: ['convo-A'],
+        active_runs: [{ runId: 'run-a', conversationId: 'convo-A' }, { runId: 'run-b' }],
+        finished: [],
+      });
+    });
+    act(() => { view.result.current.stop(); });
+
+    const stop = fake.sent.filter((m) => m.event === 'chat:stop').map((m) => m.payload as Record<string, unknown>);
+    expect(stop[0]?.['runIds'], 'only the run this pane can actually claim').toEqual(['run-a']);
+
+    // And the stranger is still CARRIED — being carried and being shown are
+    // different questions, so the pane stays busy for work it cannot claim.
+    expect(view.result.current.busy, 'still busy for both').toBe(true);
+  });
+
+  it('claims nothing on a blank pane with several runs to choose from', async () => {
+    // `!mine` short-circuited the whole filter, which made a blank pane the
+    // owner of every live run on the connection — so its Stop named all of them.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => {
+      fake.fire('run:resumed', {
+        active: 2,
+        active_conversations: ['convo-A', 'convo-B'],
+        active_runs: [{ runId: 'run-a', conversationId: 'convo-A' }, { runId: 'run-b', conversationId: 'convo-B' }],
+        finished: [],
+      });
+    });
+    act(() => { view.result.current.stop(); });
+
+    const stop = fake.sent.filter((m) => m.event === 'chat:stop').map((m) => m.payload as Record<string, unknown>);
+    expect(stop[0]?.['runIds'], 'a blank pane owns no run it cannot pick').toBeUndefined();
+  });
+
+  it('keeps a sibling\'s context question when one run compacts', async () => {
+    // `context:approval-closed` was made run-aware and this sibling was not.
+    // The transport stamps `runId` on every event a run emits, so this one has
+    // always carried what it needed. Filtered by conversation, approving run-1
+    // removed run-2's still-live question — and run-2 stayed blocked until its
+    // own 120s gate timed out and proceeded on its own, billing a compaction
+    // nobody agreed to.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-A'));
+
+    act(() => {
+      fake.fire('context:approval-required', { conversationId: 'convo-A', runId: 'run-1', estChunks: 7 });
+      fake.fire('context:approval-required', { conversationId: 'convo-A', runId: 'run-2', estChunks: 12 });
+    });
+    act(() => { view.result.current.resolveContextApproval(true); });
+
+    // run-1 compacts. run-2 has not been answered at all.
+    act(() => { fake.fire('context:compacted', { conversationId: 'convo-A', runId: 'run-1', kind: 'input', chunks: 7 }); });
+
+    expect(
+      view.result.current.contextApprovals.map((a) => a.runId),
+      'the sibling is still asking',
+    ).toEqual(['run-2']);
+  });
+
+  it('shows every waiting context question, not just the first', async () => {
+    // Each run's server-side gate starts its own 120-second timer when it asks,
+    // and that gate resolves TRUE on timeout. A question queued behind a sibling
+    // therefore had its deadline running while nobody could see it, and a billed
+    // compaction proceeded on a confirmation that was never shown.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-A'));
+
+    act(() => {
+      fake.fire('context:approval-required', { conversationId: 'convo-A', runId: 'run-1', estChunks: 7 });
+      fake.fire('context:approval-required', { conversationId: 'convo-A', runId: 'run-2', estChunks: 12 });
+    });
+
+    expect(
+      view.result.current.contextApprovals.map((a) => a.runId),
+      'both are surfaced, because both are expiring',
+    ).toEqual(['run-1', 'run-2']);
+
+    // And either can be answered directly, rather than only the one in front.
+    act(() => { view.result.current.resolveContextApproval(false, view.result.current.contextApprovals[1]); });
+    const decisions = fake.sent.filter((m) => m.event === 'context:decision').map((m) => m.payload as Record<string, unknown>);
+    expect(decisions[0]?.['runId'], 'the one that was answered').toBe('run-2');
+    expect(view.result.current.contextApprovals.map((a) => a.runId), 'the other still stands').toEqual(['run-1']);
+  });
+
   it('keeps a conversation\'s gates up while a second run on it is still going', async () => {
     // `runOriginsRef` was a SET, and two runs can share one conversation:
     // nothing on the server enforces one run per conversation, and

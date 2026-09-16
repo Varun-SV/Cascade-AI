@@ -414,8 +414,8 @@ export default function App() {
             onRedeemed={handleRedeemed}
           />
         )}
-        {chat.contextApproval && (
-          <ContextApprovalDialog info={chat.contextApproval} onResolve={chat.resolveContextApproval} />
+        {chat.contextApprovals.length > 0 && (
+          <ContextApprovalDialog infos={chat.contextApprovals} onResolve={chat.resolveContextApproval} />
         )}
       </AnimatePresence>
     </div>
