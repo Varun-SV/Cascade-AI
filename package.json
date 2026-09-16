@@ -68,7 +68,7 @@
     "ink-spinner": "^5.0.0",
     "ink-text-input": "^6.0.0",
     "jsonwebtoken": "^9.0.2",
-    "marked": "^13.0.0",
+    "marked": "^18.0.13",
     "node-cron": "^3.0.3",
     "node-notifier": "^10.0.1",
     "openai": "^4.67.0",
