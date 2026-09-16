@@ -2006,6 +2006,44 @@ describe('a run ending takes down its own gates and nobody else\'s', () => {
     expect(view.result.current.escalations, 'A is still cleaned up').toEqual([]);
   });
 
+  it('does not let a live background failure replace the banner of the run on screen', async () => {
+    // The resume's `finished` list got this rule and the LIVE terminal path did
+    // not — so a background run failing while both were still going replaced
+    // the banner of the run the user was actually watching.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-B'));
+
+    act(() => { fake.fire('run:resumed', { active: 2, active_conversations: ['convo-A', 'convo-B'] }); });
+    act(() => { fake.fire('session:error', { conversationId: 'convo-A', error: 'the background run failed' }); });
+
+    expect(view.result.current.error, 'not this chat\'s failure to report').toBeNull();
+    expect(view.result.current.busy, 'and B is still going').toBe(true);
+    // Settled all the same — only the banner is scoped.
+    act(() => { view.result.current.setConversationId('convo-A'); });
+    expect(view.result.current.escalations, 'A is cleaned up').toEqual([]);
+  });
+
+  it('forgets a run the resume no longer reports as live', async () => {
+    // A run can end between the transport dying and the server processing
+    // `disconnect`: it leaves `activeRuns` before either list is built, so it
+    // appears in NEITHER `active_conversations` nor `finished`. Keeping the
+    // previous origin set whenever it was non-empty left it there forever — the
+    // sibling's ending removed only the sibling, the set never emptied, and the
+    // composer stayed busy until a reload.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { fake.fire('run:resumed', { active: 2, active_conversations: ['convo-A', 'convo-B'] }); });
+    expect(view.result.current.busy).toBe(true);
+
+    // Reconnect. A is simply gone — not active, not finished.
+    act(() => { fake.fire('run:resumed', { active: 1, active_conversations: ['convo-B'] }); });
+
+    // B's own ending must now free the composer, with nothing left behind.
+    act(() => { fake.fire('session:complete', { conversationId: 'convo-B' }); });
+    expect(view.result.current.busy, 'the last one out frees it').toBe(false);
+  });
+
   it('adopts nothing when several runs ended and the pane has no conversation', async () => {
     // Settling every run is a fact; deciding which transcript to SHOW is still
     // a guess, and the pane refuses it for the same reason `active_conversations`

@@ -1547,6 +1547,33 @@ export function useChatSession(
     setMessages(pending.restore);
   }, []);
 
+  /**
+   * Whether a run's failure belongs in front of whoever is looking.
+   *
+   * Every other event in this hook is filtered by conversation and the error
+   * banner is the most conspicuous thing it has, so a background run's failure
+   * replacing the banner of the run being watched is the worst version of the
+   * mismatch. Stated once because it is needed on BOTH terminal paths — the
+   * resume's `finished` list and the live `session:error` — and the second of
+   * those was missed when the first was fixed.
+   *
+   * An unnamed error is shown: an older server sends no conversation with it,
+   * and suppressing those would lose every failure such a server reports.
+   *
+   * And the first-turn exception this hook applies everywhere else: a pane with
+   * no id of its own, still waiting to learn one for a run it started, owns the
+   * event that names it. Without that a reloaded first turn's failure would be
+   * silently swallowed — the error is stamped with an id this side does not
+   * learn until the ack it already knows is lost. `awaitingFirstTurnRef` is
+   * what separates that from the multi-resume state, where the pane refused to
+   * claim any conversation and a background failure really is not its business.
+   */
+  const showsErrorFor = useCallback((cid?: string) => {
+    if (!cid) return true;
+    const current = activeConversationId();
+    return current ? cid === current : awaitingFirstTurnRef.current;
+  }, []);
+
   const finishWithoutAck = useCallback((cid?: string, reportedByResume = false) => {
     // WHICH runs this ending covers, decided before anything is cleared.
     //
@@ -1783,10 +1810,26 @@ export function useChatSession(
         // Nothing named at all is an older server, and the pane's own id is
         // then the only thing available; it is right whenever this pane is the
         // one that started the run.
-        if (runOriginsRef.current.size === 0) {
+        // RECONCILED, not merely seeded. Keeping the existing set whenever it
+        // was non-empty meant a run that ended between the transport dying and
+        // the server processing `disconnect` — absent from `active_conversations`
+        // AND from `finished`, because it left `activeRuns` before either was
+        // built — stayed in the set forever. Its sibling's ending then removed
+        // only the sibling, the set never emptied, and the composer was busy
+        // until reload.
+        //
+        // Replacing is safe where seeding was not: the danger this guard was
+        // added for was the FALLBACK below overwriting a started run's origin
+        // with whatever chat the user had opened. `named` is not a guess about
+        // this pane — it is the server saying which runs are still going.
+        if (named.length > 0) {
+          runOriginsRef.current = new Set(named);
+        } else if (runOriginsRef.current.size === 0) {
+          // Nothing named at all — an older server, or ids not yet known. The
+          // pane's own conversation is the only thing available, and only when
+          // there is nothing else to go on.
           const mine = conversationIdRef.current;
-          for (const id of named) runOriginsRef.current.add(id);
-          if (named.length === 0 && mine) runOriginsRef.current.add(mine);
+          if (mine) runOriginsRef.current.add(mine);
         }
 
         // AND THE ONES THAT FINISHED, which this branch used to return past.
@@ -1828,7 +1871,7 @@ export function useChatSession(
           // background run's failure in front of someone watching a different
           // run succeed is worse than the missed notice, and with several
           // finished entries whichever came last simply won.
-          if (done?.error && done.conversationId === activeConversationId()) setError(done.error);
+          if (done?.error && showsErrorFor(done.conversationId)) setError(done.error);
           if (done?.conversationId) finishWithoutAck(done.conversationId, true);
         }
         unnamedRunsRef.current = liveButUnnamed();
@@ -1889,7 +1932,16 @@ export function useChatSession(
     // failed run left the composer disabled forever and said nothing about why.
     const onError = (e: { conversationId?: string; error?: string }) => {
       if (!ackLostRef.current) return;
-      setError(e?.error ?? 'The run failed after the connection dropped.');
+      // SETTLED always, SHOWN only when it is this chat's — the same rule the
+      // resume's `finished` loop got, applied to the live path that was left
+      // out of it. Two runs can be resumed together, and a background one
+      // failing replaced the banner of the run the user was actually watching.
+      //
+      // An error naming no conversation is still shown: an older server sends
+      // none, and suppressing those would lose every failure it reports.
+      if (showsErrorFor(e?.conversationId)) {
+        setError(e?.error ?? 'The run failed after the connection dropped.');
+      }
       finishWithoutAck(e?.conversationId);
     };
     socket.on('connect', onConnect);
