@@ -263,6 +263,38 @@ describe('useChatSession — switching conversations mid-run', () => {
     ]);
     expect(view.result.current.toolApprovals).toEqual([]);
   });
+
+  it('shows a first-turn escalation instead of deadlocking on it', () => {
+    // The same first-turn problem as the approval above, and the worst place
+    // in the app to have it. An approval hidden this way merely goes
+    // unanswered; an escalation BLOCKS the section, so the closing ack that
+    // would have taught this pane the conversation id cannot arrive until the
+    // gate settles — and the gate cannot settle because nothing rendered it.
+    // The two wait on each other for the full five minutes and the section
+    // fails.
+    //
+    // It only became reachable when this list started being filtered on read,
+    // which is why the handler beside it was adopting and this one was not.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    expect(view.result.current.conversationId).toBeUndefined();
+
+    act(() => { void view.result.current.send({ prompt: 'refactor the parser' }); });
+    act(() => {
+      fake.fire('escalation:decision-required', {
+        conversationId: 'conv-new', requestId: 'e1', sectionId: 's1', issues: [], timeoutMs: 300_000,
+      });
+    });
+
+    expect(view.result.current.escalations.map((e) => e.requestId), 'visible on the first turn').toEqual(['e1']);
+
+    // And answerable against the id the server made, which is the half that
+    // makes it more than a rendering fix.
+    act(() => { view.result.current.resolveEscalation('skip'); });
+    expect(fake.sent.filter((m) => m.event === 'escalation:decide')).toEqual([
+      { event: 'escalation:decide', payload: { conversationId: 'conv-new', requestId: 'e1', action: 'skip' } },
+    ]);
+  });
 });
 
 // New Chat is not "every conversation" — it is a pane with no conversation at
@@ -1430,5 +1462,40 @@ describe('a parked section belongs to the chat that parked it', () => {
 
     const decided = fake.sent.filter((e) => e.event === 'escalation:decide') as Array<{ event: string; payload: Record<string, unknown> }>;
     expect(decided.map((d) => d.payload['requestId']), 'the other run is untouched').toEqual(['e1']);
+  });
+
+  it('leaves the other conversation\'s section answerable after the window is dismissed', async () => {
+    // The other half of the test above, and the half that was missing: the
+    // loop emitted only for the visible sections while the reset cleared the
+    // WHOLE queue. That is worse than never filtering at all — B's request is
+    // gone from this client with no decision ever sent for it, so nothing can
+    // bring it back and nothing answers it. It stays parked on the server
+    // until its deadline and then fails the section, which is the exact
+    // outcome the filter was added to prevent.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-A'));
+
+    act(() => {
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-A', requestId: 'e1', sectionId: 's1', issues: [], timeoutMs: 300_000,
+      });
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-B', requestId: 'e2', sectionId: 's2', issues: [], timeoutMs: 300_000,
+      });
+    });
+    await waitFor(() => expect(view.result.current.escalations).toHaveLength(1));
+
+    act(() => { view.result.current.skipAllEscalations(); });
+    expect(view.result.current.escalations, 'this chat is clear').toEqual([]);
+
+    // Go to B. Its section was never decided, so it must still be there.
+    act(() => { view.result.current.setConversationId('convo-B'); });
+    expect(view.result.current.escalations.map((e) => e.requestId), 'still waiting to be answered').toEqual(['e2']);
+
+    act(() => { view.result.current.resolveEscalation('retry'); });
+    expect(fake.sent.filter((m) => m.event === 'escalation:decide')).toEqual([
+      { event: 'escalation:decide', payload: { conversationId: 'convo-A', requestId: 'e1', action: 'skip' } },
+      { event: 'escalation:decide', payload: { conversationId: 'convo-B', requestId: 'e2', action: 'retry' } },
+    ]);
   });
 });

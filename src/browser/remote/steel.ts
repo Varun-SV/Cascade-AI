@@ -96,13 +96,18 @@ export function isUsableSteelBase(url: string): boolean {
   try {
     const u = new URL(url);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
-    // Checked separately because `fetch` refuses these before sending, so they
-    // are not a URL-shape problem the built request would reveal — the request
-    // is well-formed and throws anyway.
+    // Checked separately — this and the port below — because `fetch` refuses
+    // both before sending, so neither is a URL-shape problem the built request
+    // would reveal: the request is well-formed and throws anyway.
     if (u.username !== '' || u.password !== '') return false;
 
     // THE request, assembled exactly as `call()` assembles it.
     const built = new URL(withoutTrailingSlashes(url) + PROBE_PATH);
+    // The second member of the userinfo category, and the reason that comment
+    // now says "checked separately" in the plural: `fetch` refuses a blocked
+    // port before it opens a connection, so the built request is perfectly
+    // well-formed and throws anyway. Nothing about the URL's shape reveals it.
+    if (FETCH_BLOCKED_PORTS.has(built.port)) return false;
     // Anything that swallowed the path into a query or fragment shows up here,
     // whatever the base looked like component by component.
     if (built.search !== '' || built.hash !== '') return false;
@@ -116,6 +121,35 @@ export function isUsableSteelBase(url: string): boolean {
     return false;
   }
 }
+
+/**
+ * The ports `fetch` will not open, as strings, to compare with `URL.port`.
+ *
+ * Verbatim from WHATWG Fetch's "bad port" list, which is what Node implements:
+ * `http://host:6000/v1/sessions` is a valid URL that builds and addresses the
+ * endpoint correctly, and every request to it dies as `TypeError: fetch failed`
+ * with `cause: bad port` before a packet leaves. A self-hosted Steel on 6000
+ * (X11) or 587 (submission) is an unremarkable thing for an operator to do, so
+ * without this the Browser control is offered for a deployment that cannot make
+ * a single call.
+ *
+ * A literal list rather than a probe: the set is fixed by the spec, and the
+ * alternative — sending a request to find out — is a network call inside what
+ * has to stay a synchronous config check.
+ *
+ * `URL.port` is empty for a scheme's default port, which is never on this list,
+ * so the ordinary 80/443 case compares against `''` and passes.
+ */
+const FETCH_BLOCKED_PORTS: ReadonlySet<string> = new Set([
+  '1', '7', '9', '11', '13', '15', '17', '19', '20', '21', '22', '23', '25',
+  '37', '42', '43', '53', '69', '77', '79', '87', '95', '101', '102', '103',
+  '104', '109', '110', '111', '113', '115', '117', '119', '123', '135', '137',
+  '139', '143', '161', '179', '389', '427', '465', '512', '513', '514', '515',
+  '526', '530', '531', '532', '540', '548', '554', '556', '563', '587', '601',
+  '636', '989', '990', '993', '995', '1719', '1720', '1723', '2049', '3659',
+  '4045', '4190', '5060', '5061', '6000', '6566', '6665', '6666', '6667',
+  '6668', '6669', '6679', '6697', '10080',
+]);
 
 /**
  * A real endpoint, used to test the assembly rather than a made-up one.

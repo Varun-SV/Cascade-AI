@@ -286,4 +286,36 @@ describe('Cascade.askUser — a question that cannot hang the run', () => {
       vi.useRealTimers();
     }
   });
+
+  it('returns a non-answer when the listener throws on delivery, rather than failing the call', async () => {
+    // A host whose UI transport is momentarily down throws out of the emit,
+    // and that emit is inside the Promise executor — so an unguarded throw
+    // REJECTS the promise and `ask_user` fails at the model. A question the
+    // model asked optionally would become a tool error because the form could
+    // not be drawn, which is the one thing the four no-answer routes above
+    // exist to prevent.
+    //
+    // `no-listener` is not a euphemism: the early-returns ask whether anybody
+    // can receive this, and a listener that throws on receipt did not.
+    const c = new Cascade(baseConfig, '/tmp');
+    c.on('clarification:required', () => { throw new Error('UI transport is down'); });
+
+    await expect(c.askUser(ONE)).resolves.toEqual({ outcome: 'no-listener', answers: [] });
+  });
+
+  it('takes down any form a listener DID manage to draw before a later one threw', async () => {
+    // Emit runs listeners in order, so one host can have rendered the
+    // questionnaire before the next one throws. Settling silently would leave
+    // that copy on screen answering a request the SDK has already given up on.
+    const c = new Cascade(baseConfig, '/tmp');
+    const closed: unknown[] = [];
+    let drawnFor: string | undefined;
+    c.on('clarification:required', (e: unknown) => { drawnFor = (e as { requestId: string }).requestId; });
+    c.on('clarification:required', () => { throw new Error('second host is down'); });
+    c.on('clarification:closed', (e: unknown) => closed.push(e));
+
+    await expect(c.askUser(ONE)).resolves.toEqual({ outcome: 'no-listener', answers: [] });
+    expect(drawnFor, 'the first host did render it').toBeTruthy();
+    expect(closed, 'and is told to take it down').toEqual([{ requestId: drawnFor }]);
+  });
 });

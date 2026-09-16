@@ -156,4 +156,40 @@ describe('a fast answer and a browser are not both on offer', () => {
 
     expect(lastRun(fake)?.['browserMode']).toBe(true);
   });
+
+  it('takes the chip down, not just the flag off the payload', async () => {
+    // Withholding `browserMode` from the payload fixed the RUN and left the
+    // CLAIM. `Composer` renders the chip from this state, so it stayed pressed
+    // for the whole tool-less answer — the same visible-capability mismatch
+    // the payload guard was written to end, one layer up.
+    //
+    // Both halves are needed and neither substitutes for the other: the setter
+    // cannot change the `browserMode` already captured in the send's closure,
+    // and clearing the state cannot un-send a payload.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { view.result.current.setBrowserMode(true); });
+    await waitFor(() => expect(view.result.current.browserMode).toBe(true));
+
+    act(() => { view.result.current.send({ prompt: 'hello', fast: true }); });
+
+    await waitFor(() => expect(view.result.current.browserMode, 'the chip stops saying it will drive a page').toBe(false));
+    expect(lastRun(fake)?.['browserMode'], 'and this send was already without it').toBe(false);
+  });
+
+  it('does not take the chip down on an ordinary turn', async () => {
+    // The clearing is the fast path's, exactly as the withholding is. A normal
+    // send has to leave the selection standing or every browser turn would
+    // need the chip pressed again.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { view.result.current.setBrowserMode(true); });
+    await waitFor(() => expect(view.result.current.browserMode).toBe(true));
+
+    act(() => { view.result.current.send({ prompt: 'hello' }); });
+
+    expect(view.result.current.browserMode, 'still selected').toBe(true);
+  });
 });

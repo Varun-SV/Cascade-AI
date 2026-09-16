@@ -537,15 +537,31 @@ export class Cascade extends EventEmitter {
       }, ESCALATION_DECISION_TIMEOUT_MS);
 
       this.pendingEscalations.set(requestId, settle);
-      this.emit('escalation:decision-required', {
-        taskId,
-        requestId,
-        sectionId: ctx.sectionId,
-        sectionTitle: ctx.sectionTitle,
-        issues: ctx.issues,
-        summary: ctx.summary,
-        timeoutMs: ESCALATION_DECISION_TIMEOUT_MS,
-      });
+      // The delivery emit, guarded — not reported here, but the same door in
+      // the gate this one was copied from, and this is the copy with more to
+      // lose. An unguarded throw propagates out of the Promise executor and
+      // REJECTS the promise, so a host whose UI transport is momentarily down
+      // does not merely fail to show the prompt: it throws inside T2's review,
+      // where the clarification twin only costs the model an assumption.
+      //
+      // Settled `skip`/`automatic`, identical to the `listenerCount === 0`
+      // early-return above, because it is the same fact arriving later — a
+      // listener that throws on receipt did not receive it. `automatic` is
+      // what keeps T2 from reading this as a person having accepted the
+      // section, which nobody did.
+      try {
+        this.emit('escalation:decision-required', {
+          taskId,
+          requestId,
+          sectionId: ctx.sectionId,
+          sectionTitle: ctx.sectionTitle,
+          issues: ctx.issues,
+          summary: ctx.summary,
+          timeoutMs: ESCALATION_DECISION_TIMEOUT_MS,
+        });
+      } catch {
+        settle({ action: 'skip', automatic: true });
+      }
     });
   }
 
@@ -687,11 +703,34 @@ export class Cascade extends EventEmitter {
       }, CLARIFICATION_TIMEOUT_MS);
 
       this.pendingClarifications.set(requestId, settle);
-      this.emit('clarification:required', {
-        requestId,
-        questions,
-        timeoutMs: CLARIFICATION_TIMEOUT_MS,
-      });
+      // DELIVERY, and the fourth emit in this gate family to need guarding —
+      // the first three were all about a listener throwing on the way OUT.
+      //
+      // This one is on the way in, and it is the worst place for it: an
+      // unguarded throw here propagates out of the Promise executor, which
+      // REJECTS the promise. `askUser` would then throw at its caller, so the
+      // model's `ask_user` call fails for no reason except that whatever draws
+      // the form could not draw it — a host whose UI transport is momentarily
+      // down turns an optional question into a tool error.
+      //
+      // Settled as `no-listener`, which is not a euphemism: the three
+      // early-returns above ask exactly this question — is there anybody who
+      // can receive this? — and a listener that throws on receipt did not
+      // receive it. The run proceeds on the model's own reading, which is the
+      // documented benign outcome, instead of failing.
+      //
+      // `settle` is already in the map, so if some listeners rendered the form
+      // before another threw, the `clarification:closed` it emits takes those
+      // copies down too.
+      try {
+        this.emit('clarification:required', {
+          requestId,
+          questions,
+          timeoutMs: CLARIFICATION_TIMEOUT_MS,
+        });
+      } catch {
+        settle(none('no-listener'));
+      }
     });
   }
 

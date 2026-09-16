@@ -1018,16 +1018,31 @@ export function useChatSession(
       if (!e?.requestId) return;
       setToolApprovals((q) => q.filter((a) => a.requestId !== e.requestId));
     };
-    const onEscalation = (e: EscalationRequest) => setEscalations((prev) => {
-      const incoming = { ...e, receivedAt: Date.now() };
-      // Re-delivery of one already queued (a reconnect replay) updates in place
-      // rather than showing the same question twice.
-      const i = prev.findIndex((x) => escalationKey(x) === escalationKey(incoming));
-      if (i < 0) return [...prev, incoming];
-      const copy = [...prev];
-      copy[i] = incoming;
-      return copy;
-    });
+    const onEscalation = (e: EscalationRequest) => {
+      // Adopted BEFORE the queue sees it, exactly as the clarification and
+      // approval handlers do — and the thing that was missing when this gate's
+      // list started being filtered on read.
+      //
+      // The server creates the conversation before the run and tags the gate
+      // with that real id, while this side does not learn it until the closing
+      // ack. So on a new chat's first turn the filter compared a real id
+      // against `undefined` and hid the request. An approval hidden that way
+      // merely goes unanswered; this one is WORSE, because the escalation
+      // blocks the run — the ack that would have supplied the id cannot arrive
+      // until the gate settles, and the gate cannot settle because nobody can
+      // see it. It deadlocks until the five-minute timeout fails the section.
+      adoptConversationId(e?.conversationId);
+      setEscalations((prev) => {
+        const incoming = { ...e, receivedAt: Date.now() };
+        // Re-delivery of one already queued (a reconnect replay) updates in
+        // place rather than showing the same question twice.
+        const i = prev.findIndex((x) => escalationKey(x) === escalationKey(incoming));
+        if (i < 0) return [...prev, incoming];
+        const copy = [...prev];
+        copy[i] = incoming;
+        return copy;
+      });
+    };
     // The window closed without an answer — clear the prompt so a stale modal
     // can't be answered into a run that has already moved on.
     // Drop only the section that timed out. Without the id an older request's
@@ -1676,6 +1691,19 @@ export function useChatSession(
       setBusy(true);
       setError(null);
       setStatus('Sizing up the task…');
+      // A fast answer cannot drive a browser, so the chip must stop saying it
+      // will. Withholding `browserMode` from the payload — which is what the
+      // last round did — fixed the RUN and left the CLAIM: the state stayed
+      // true, so `Composer` kept rendering Browser as pressed for the whole
+      // tool-less run, which is the visible-capability mismatch the payload
+      // guard was meant to end.
+      //
+      // Cleared rather than suppressed for display, on the same reading as the
+      // `controlsVisible` effect above: a billed capability the run will not
+      // grant is not granted, and a control that shows otherwise is the bug.
+      // The payload keeps its own ternary regardless — this setter does not
+      // reach the `browserMode` already captured in this closure.
+      if (fast) setBrowserModeRaw(false);
       setApproval(null);
       setContextApproval(null);
       setCompactionNotice(null);
@@ -1706,10 +1734,14 @@ export function useChatSession(
             webSearch,
             // Never alongside a fast answer. `runFastAnswer` is one model call
             // with no tools by contract, so `browser_control` is never
-            // registered — sending both would show the Browser chip lit, bill
-            // nothing, and silently answer from the model's own knowledge a
-            // question that needed a page. Withheld rather than quietly
-            // honoured, so the run matches what the composer claims.
+            // registered — sending both would bill nothing and silently answer
+            // from the model's own knowledge a question that needed a page.
+            //
+            // The chip is dealt with at the top of this function, because the
+            // two halves are separate: `setBrowserModeRaw` cannot change the
+            // `browserMode` this closure already captured, and clearing the
+            // state cannot un-send a payload. Both are needed for the run and
+            // the composer to be making the same claim.
             browserMode: fast ? false : browserMode,
             webSearchConfig,
             complexityHint,
@@ -1937,7 +1969,15 @@ export function useChatSession(
         action: 'skip',
       });
     }
-    setEscalations([]);
+    // Removed BY KEY, for the same reason the loop above is filtered — and the
+    // half of it that was missed. Emitting only for the window's own sections
+    // while clearing the whole queue is worse than not filtering at all: the
+    // background conversation's request is gone from this client with no
+    // decision ever sent for it, so nothing can bring it back and nothing
+    // answers it. It stays parked on the server until its deadline and then
+    // fails the section — the exact outcome the filter was added to prevent.
+    const dismissed = new Set(escalations.map(escalationKey));
+    setEscalations((prev) => prev.filter((x) => !dismissed.has(escalationKey(x))));
     if (escalations.length > 0) setStatus('Skipping section…');
   }, [socket, escalations]);
 

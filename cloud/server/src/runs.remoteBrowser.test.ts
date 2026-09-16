@@ -313,6 +313,29 @@ describe('the Browser control is advertised only where one can be built', () => 
     expect(providerIsUsable({ provider: 'steel', url: 'https://user@steel.internal' }), 'a username alone is enough to break it').toBe(false);
   });
 
+  it('is not advertised on a port fetch will not open', () => {
+    // The second member of the userinfo category, and the reason that test now
+    // has a sibling: the URL is well-formed, the built request addresses
+    // `/v1/sessions` exactly, and Node still refuses it —
+    // `TypeError: fetch failed` with `cause: bad port` — before a packet
+    // leaves. Verified against Node's fetch, not assumed.
+    //
+    // 6000 is X11 and 587 is mail submission; neither is a strange choice for
+    // an internal service behind its own network, so this is an ordinary
+    // deployment being advertised as usable and failing on its first call.
+    expect(providerIsUsable({ provider: 'steel', url: 'http://steel.internal:6000' })).toBe(false);
+    expect(providerIsUsable({ provider: 'steel', url: 'https://steel.internal:587' }), 'the scheme does not rescue it').toBe(false);
+    expect(providerIsUsable({ provider: 'steel', url: 'http://steel.internal:6000/api' }), 'nor does a gateway prefix').toBe(false);
+    // An ordinary high port is fine, which is what keeps this from being a
+    // blanket refusal of non-default ports.
+    expect(providerIsUsable({ provider: 'steel', url: 'http://steel.internal:3000' }), 'an unremarkable port still works').toBe(true);
+    expect(providerIsUsable({ provider: 'steel', url: 'http://steel.internal:8080' })).toBe(true);
+    // And the default ports, which `URL.port` reports as empty string — the
+    // one value that must never match the list.
+    expect(providerIsUsable({ provider: 'steel', url: 'http://steel.internal:80' })).toBe(true);
+    expect(providerIsUsable({ provider: 'steel', url: 'https://steel.internal:443' })).toBe(true);
+  });
+
   it('is not advertised for the hosted endpoint with a path prefix', () => {
     // A path prefix is the whole reason `call()` concatenates — a self-hosted
     // Steel behind a gateway lives at one. The hosted service does not, so

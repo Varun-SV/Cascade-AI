@@ -331,4 +331,39 @@ describe('escalation gate', () => {
       vi.useRealTimers();
     }
   });
+
+  it('releases the section when the listener throws on delivery, rather than failing T2', async () => {
+    // The delivery emit sits inside the Promise executor, so an unguarded
+    // throw does not merely fail to show the prompt — it REJECTS the gate, and
+    // the rejection surfaces inside T2's review of the section. A host whose
+    // socket is momentarily down would turn "ask about this section" into a
+    // thrown error in the run.
+    //
+    // Same answer as `listenerCount === 0` above, because it is the same fact
+    // arriving later: a listener that throws on receipt did not receive it.
+    // `automatic: true` keeps T2 from reading this as a person having accepted
+    // the section — nobody saw it.
+    const c = new Cascade(config, '/tmp');
+    c.on('escalation:decision-required', () => { throw new Error('socket is down'); });
+
+    await expect(gateOf(c)(ctx('a'), 'task-1')).resolves.toEqual({ action: 'skip', automatic: true });
+  });
+
+  it('closes a modal another host DID open before a later listener threw', async () => {
+    // Listeners run in order, so one dashboard can have the section on screen
+    // when the next host throws. Without the close it stays there, answerable
+    // into a gate that has already settled.
+    const c = new Cascade(config, '/tmp');
+    const closed: unknown[] = [];
+    let openedFor: string | undefined;
+    c.on('escalation:decision-required', (e: { requestId: string }) => { openedFor = e.requestId; });
+    c.on('escalation:decision-required', () => { throw new Error('second host is down'); });
+    c.on('escalation:closed', (e: unknown) => closed.push(e));
+
+    await expect(gateOf(c)(ctx('a'), 'task-1')).resolves.toEqual({ action: 'skip', automatic: true });
+    expect(openedFor, 'the first host did open it').toBeTruthy();
+    expect(closed, 'and is told to close it').toEqual([
+      { taskId: 'task-1', requestId: openedFor, sectionId: 'a' },
+    ]);
+  });
 });
