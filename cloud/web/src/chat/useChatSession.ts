@@ -1451,6 +1451,9 @@ export function useChatSession(
     // approvals, questionnaires and sections settled, B's transcript reloaded,
     // and A's answer never reconciled.
     const ended = cid ?? runOriginRef.current;
+    // Retired here, so the `??=` in `run:resumed` cannot mistake a finished
+    // run's conversation for an inherited one's.
+    runOriginRef.current = undefined;
     // Before the early return, because no-id is the case that needs it most: a
     // first turn whose ack was lost is holding gates naming a conversation this
     // pane never learned, and nothing later can reach them. `settleConversation`
@@ -1569,6 +1572,21 @@ export function useChatSession(
             if (named.length === 1) pendingConversationIdRef.current = named[0];
           }
         }
+        // This pane is carrying a run it did not start, so `runChat` never set
+        // an origin for it — and the ending that needs one is exactly the
+        // ack-less ending this branch exists for. Without it a resumed run
+        // finishing in the gap that reports `active: 0` with an empty
+        // `finished` settles nothing and reloads nothing: the answer is on disk
+        // and the page never goes and gets it.
+        //
+        // `??=`, not `=`. A pane that started its own run already knows whose
+        // it is, and a user who moved to another chat meanwhile would otherwise
+        // have this overwrite A's origin with B — re-creating, through the
+        // reconnect path, the exact bug the origin was introduced to fix.
+        //
+        // Undefined when the resume could establish nothing: several runs came
+        // back at once and claiming one would be a guess.
+        runOriginRef.current ??= conversationIdRef.current ?? pendingConversationIdRef.current;
         return;
       }
       // Nothing running. On a page that WAS running something, the block below
@@ -1874,6 +1892,11 @@ export function useChatSession(
       const onAck = (ack: ChatRunAck) => {
           // The ack did arrive, so the reconnect fallback must not fire later.
           ackLostRef.current = false;
+          // Read once and retired, for both branches below: the run is over
+          // whichever way this ack goes, and a leftover origin would let the
+          // `??=` in `run:resumed` mistake it for an inherited run's.
+          const origin = runOriginRef.current;
+          runOriginRef.current = undefined;
           setBusy(false);
           setStatus(null);
           setApproval(null);
@@ -1907,7 +1930,7 @@ export function useChatSession(
             // `settleConversation` then drops only the unanswerable unkeyed
             // entries, and the server announces every gate it releases at
             // teardown, so nothing is left holding a dead control either way.
-            const failed = ack.conversationId ?? runOriginRef.current;
+            const failed = ack.conversationId ?? origin;
             pendingConversationIdRef.current = undefined;
             awaitingFirstTurnRef.current = false;
             settleConversation(failed);

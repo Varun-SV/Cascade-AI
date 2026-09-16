@@ -360,6 +360,31 @@ describe('the Browser control is advertised only where one can be built', () => 
     expect(providerIsUsable({ provider: 'steel', url: 'https://steel.internal/v1' }), 'legitimate for a self-hosted gateway').toBe(true);
   });
 
+  it('is not advertised for a credential that cannot be sent as a header', () => {
+    // The env schema trims, which removes surrounding whitespace and nothing
+    // else — so a key pasted out of a wrapped terminal or a here-doc can carry
+    // an embedded newline. It is truthy, so the hosted gate read the deployment
+    // as authenticated and `/api/config` advertised Browser mode; then `fetch`
+    // refused the header before a byte went out.
+    //
+    // The third member of the category `fetch` refuses BEFORE sending, after
+    // userinfo and blocked ports. Verified against Node's `Headers`, which is
+    // the WHATWG validity check itself: CR, LF and NUL are rejected, and tab,
+    // space, DEL and non-ASCII are not.
+    expect(providerIsUsable({ provider: 'steel', apiKey: 'sk-a\nb' })).toBe(false);
+    expect(providerIsUsable({ provider: 'steel', apiKey: 'sk-a\rb' }), 'a carriage return too').toBe(false);
+    expect(providerIsUsable({ provider: 'steel', apiKey: 'sk-a\u0000b' }), 'and a NUL').toBe(false);
+    // Checked wherever a key is present, not only for the hosted endpoint: a
+    // self-hosted Steel behind a gateway takes a key too, and a malformed one
+    // fails its first request just as hard.
+    expect(providerIsUsable({ provider: 'steel', url: 'https://steel.internal', apiKey: 'sk-a\nb' })).toBe(false);
+    // And a key with something merely UNUSUAL in it is still a key. Refusing
+    // these would be the mirror mistake — a working deployment turned off to
+    // guard against a character the runtime is perfectly happy to send.
+    expect(providerIsUsable({ provider: 'steel', apiKey: 'sk-a\tb' }), 'a tab is a legal header value').toBe(true);
+    expect(providerIsUsable({ provider: 'steel', apiKey: 'sk-live-0123456789' })).toBe(true);
+  });
+
   it('is advertised for a self-hosted steel with no credential', () => {
     // Only the hosted FALLBACK is refused. A Steel behind a private network or
     // its own gateway legitimately has no key, and demanding one for a URL the

@@ -123,6 +123,44 @@ export function isUsableSteelBase(url: string): boolean {
 }
 
 /**
+ * Whether this credential can actually be sent — asked of the HEADER BUILT.
+ *
+ * The same question `isUsableSteelBase` settled for the URL, and the same
+ * answer: construct the thing the request will construct and see whether it is
+ * accepted, rather than enumerating what is forbidden.
+ *
+ * The env schema trims, which removes surrounding whitespace and nothing else,
+ * so a key pasted out of a wrapped terminal or a here-doc can carry an embedded
+ * newline. It is truthy, so the hosted gate reads the deployment as
+ * authenticated and `/api/config` advertises Browser mode — and then `fetch`
+ * refuses the header before a byte is sent, leaving a control that cannot make
+ * one call. The third member of the category `fetch` refuses before sending,
+ * after userinfo and blocked ports.
+ *
+ * `Headers` is the WHATWG validity check itself and is synchronous, so this
+ * tracks exactly what the runtime will refuse instead of a list of characters
+ * that has to be kept in step with it. Verified against Node: CR, LF and NUL
+ * are rejected; tab, space, DEL and non-ASCII are not.
+ */
+export function isUsableSteelKey(apiKey: string): boolean {
+  try {
+    new Headers({ [API_KEY_HEADER]: apiKey });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The header the hosted service is expected to take the credential in.
+ *
+ * Named once and shared with `call()`, so the validity check cannot end up
+ * asking about a header the request does not send — the same reason
+ * `withoutTrailingSlashes` is shared with the constructor.
+ */
+const API_KEY_HEADER = 'steel-api-key';
+
+/**
  * The ports `fetch` will not open, as strings, to compare with `URL.port`.
  *
  * Verbatim from WHATWG Fetch's "bad port" list, which is what Node implements:
@@ -282,7 +320,7 @@ export class SteelProvider implements RemoteBrowserProvider {
         'content-type': 'application/json',
         // Sent only when configured — the self-hosted API takes no key, and an
         // empty header is worse than none.
-        ...(this.apiKey ? { 'steel-api-key': this.apiKey } : {}),
+        ...(this.apiKey ? { [API_KEY_HEADER]: this.apiKey } : {}),
       },
       body: JSON.stringify(body),
       signal: composed,

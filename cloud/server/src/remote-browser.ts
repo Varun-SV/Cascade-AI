@@ -25,6 +25,7 @@ import {
   SteelProvider,
   isHostedSteel,
   isUsableSteelBase,
+  isUsableSteelKey,
   isCdpEndpoint,
   type BrowserInput,
   type Cascade,
@@ -439,6 +440,19 @@ function buildProvider(
   // An absent url is fine and means the hosted API: `SteelProvider` defaults it.
   if (settings.url && !isUsableSteelBase(settings.url)) {
     warn?.('remoteBrowser.url for steel must be an http(s) API base with no query, fragment or embedded credentials; use remoteBrowser.apiKey for the credential');
+    return null;
+  }
+  // A credential that cannot be SENT is the same class of problem as a base
+  // that cannot be addressed, and it is checked wherever one is present rather
+  // than only for the hosted endpoint: a self-hosted Steel behind a gateway
+  // takes a key too, and a malformed one fails its first request just as hard.
+  //
+  // The rule lives in `steel.ts` with the `call()` that builds the header, for
+  // the reason `isHostedSteel` and `isUsableSteelBase` do — a copy here would
+  // be a second opinion about what the request will accept, free to drift from
+  // the one that actually sends it.
+  if (settings.apiKey && !isUsableSteelKey(settings.apiKey)) {
+    warn?.('remoteBrowser.apiKey must be sendable as an HTTP header value; a line break or NUL in the key makes every request fail before it is sent');
     return null;
   }
   // The hosted API needs a key; a self-hosted one usually does not.

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import type { Socket } from 'socket.io-client';
 import { useChatSession } from './useChatSession.js';
+import { getMessages } from '../lib/api.js';
 
 vi.mock('../lib/api.js', () => ({
   getMessages: vi.fn(async () => ({ messages: [] })),
@@ -1639,6 +1640,58 @@ describe('a run ending takes down its own gates and nobody else\'s', () => {
     expect(view.result.current.escalations.map((e) => e.requestId), 'B is untouched').toEqual(['e2']);
     act(() => { view.result.current.setConversationId('convo-A'); });
     expect(view.result.current.escalations, 'and the run that failed is settled').toEqual([]);
+  });
+
+  it('learns the origin of a run it inherited, rather than only one it started', async () => {
+    // A page that reloads into a live run gets it from `run:resumed`, not from
+    // `runChat` — so nothing had set an origin for it. And the ending that
+    // needs one is exactly the ack-less ending this path exists for: a run that
+    // finishes between its ack packet being lost and its socket's `disconnect`
+    // landing is already out of `activeRuns`, so the resume reports `active: 0`
+    // with an EMPTY `finished` and no id anywhere.
+    //
+    // Nothing then settled and nothing reloaded: the answer sat on disk and the
+    // page never went and got it.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    // Inherited, and uniquely identified — so the pane can claim it.
+    act(() => { fake.fire('run:resumed', { active: 1, active_conversations: ['convo-A'] }); });
+    act(() => {
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-A', requestId: 'e1', sectionId: 's1', issues: [], timeoutMs: 300_000,
+      });
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-B', requestId: 'e2', sectionId: 's2', issues: [], timeoutMs: 300_000,
+      });
+    });
+    await waitFor(() => expect(view.result.current.escalations.map((e) => e.requestId)).toEqual(['e1']));
+
+    vi.mocked(getMessages).mockClear();
+    // The reported shape: nothing running, and nothing named.
+    act(() => { fake.fire('run:resumed', { active: 0, finished: [] }); });
+
+    await waitFor(() => expect(view.result.current.escalations, 'the inherited run is settled').toEqual([]));
+    expect(vi.mocked(getMessages).mock.calls.map((c) => c[0]), 'and its answer is fetched').toEqual(['convo-A']);
+    act(() => { view.result.current.setConversationId('convo-B'); });
+    expect(view.result.current.escalations.map((e) => e.requestId), 'B is untouched').toEqual(['e2']);
+  });
+
+  it('does not let an inherited run overwrite the origin of one this pane started', async () => {
+    // The `??=` rather than `=`, and the reason for it. A pane that started its
+    // own run already knows whose it is; a reconnect arriving after the user
+    // moved to another chat would otherwise replace A's origin with B and
+    // re-create, through this path, the bug the origin exists to fix.
+    const { fake, view } = twoParked('convo-A');
+    await waitFor(() => expect(view.result.current.escalations).toHaveLength(1));
+
+    act(() => { view.result.current.setConversationId('convo-B'); });
+    act(() => { fake.fire('run:resumed', { active: 1 }); });
+    act(() => { fake.fire('run:resumed', { active: 0, finished: [] }); });
+
+    expect(view.result.current.escalations.map((e) => e.requestId), 'B keeps its section').toEqual(['e2']);
+    act(() => { view.result.current.setConversationId('convo-A'); });
+    expect(view.result.current.escalations, 'and A, whose run ended, is settled').toEqual([]);
   });
 
   it('does not pull a run\'s transcript into the chat the user moved to', async () => {
