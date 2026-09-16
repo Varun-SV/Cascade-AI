@@ -240,6 +240,34 @@ export interface LiveRun {
    */
   escalations?: Map<string, { payload: Record<string, unknown>; askedAt: number }>;
   escalationsClosed?: Set<string>;
+  /**
+   * The extended-context confirmation this run is blocked on, if it is.
+   *
+   * ONE SLOT, unlike the three keyed maps above, because the gate itself is one
+   * slot: `Cascade.pendingContextApproval` holds a single callback, so a run can
+   * only ever be asking this question once. There is no request id to key by
+   * either — the conversation is the whole of the answer's address.
+   *
+   * It is the only gate that was not replayed, and the consequence was not a
+   * missing dialog: the SDK's gate resolves TRUE on its two-minute timeout, so
+   * a page that reloaded while the question was up could not answer it and the
+   * run went ahead and compacted anyway. The user was asked before the money
+   * was spent, and then it was spent without them.
+   */
+  contextApproval?: Record<string, unknown>;
+  /**
+   * Or its ENDING, when that is the last thing that happened to it.
+   *
+   * A tombstone for the same reason the questionnaire gate has a set of them:
+   * a transient reconnect keeps whatever the page had on screen, so an
+   * open-only replay can put a dialog up and never take one down — and the
+   * question that was answered while the transport was unbound would sit there
+   * with buttons that reach a gate which is already gone.
+   *
+   * One slot rather than a bounded set, because the gate is one slot. The two
+   * fields are mutually exclusive by construction: each write clears the other.
+   */
+  contextApprovalClosed?: Record<string, unknown>;
   terminal?: { conversationId?: string; error?: string };
 }
 
@@ -380,6 +408,21 @@ export function rememberForReplay(run: LiveRun, event: string, payload: unknown)
     }
     return;
   }
+  // The extended-context confirmation, which has no request id to key by — see
+  // `contextApproval`. A plain slot and a plain clear, with the clear coming
+  // from `context:approval-closed`: the answer arrives as an inbound socket
+  // message this function never sees, exactly as it does for the questionnaire
+  // gate, so the closure event is what makes the record safe to keep at all.
+  if (event === 'context:approval-required') {
+    run.contextApproval = p;
+    delete run.contextApprovalClosed;
+    return;
+  }
+  if (event === 'context:approval-closed') {
+    delete run.contextApproval;
+    run.contextApprovalClosed = p;
+    return;
+  }
   if (event === 'permission:user-required') {
     const id = p['id'] ?? p['requestId'];
     if (typeof id !== 'string') return;
@@ -471,6 +514,12 @@ export function replaySupervision(run: LiveRun, socket: Pick<Socket, 'emit'>): v
   for (const { payload, askedAt } of run.clarifications?.values() ?? []) {
     socket.emit('clarification:required', remainingDeadline(payload, askedAt));
   }
+  // Closure before opening, the same ordering rule the two gates above follow
+  // — though here the two are mutually exclusive, so exactly one of them ever
+  // fires. A page that kept the dialog through a transient reconnect gets it
+  // taken down; a page that reloaded gets it put back.
+  if (run.contextApprovalClosed) socket.emit('context:approval-closed', run.contextApprovalClosed);
+  if (run.contextApproval) socket.emit('context:approval-required', run.contextApproval);
 }
 
 export interface SocketOptions {
@@ -758,10 +807,19 @@ export function attachSocket(
           // which is the point: the events worth replaying are exactly the ones
           // a disconnected or reloading client missed.
           rememberForReplay(run, event, payload);
-          if (!TERMINAL_EVENTS.has(event)) return;
           const p = (payload ?? {}) as { conversationId?: string; error?: string };
-          run.terminal = { conversationId: p.conversationId, error: p.error };
+          // AS SOON AS ANYTHING SAYS SO, not only at the end. Every event a run
+          // emits carries the conversation it belongs to, and on a new chat the
+          // first of them is the earliest moment the id exists at all — it is
+          // how the client learns it too, long before the ack.
+          //
+          // Recorded from the terminal event only, a live first-turn run was
+          // nameless for its whole duration: absent from `active_conversations`,
+          // so a reconnecting page could not claim it, and indistinguishable
+          // from another chat's run when a keyed `chat:stop` arrived.
           if (p.conversationId) run.conversationId = p.conversationId;
+          if (!TERMINAL_EVENTS.has(event)) return;
+          run.terminal = { conversationId: p.conversationId, error: p.error };
         }),
         done: false,
       };
@@ -790,10 +848,32 @@ export function attachSocket(
       }
     });
 
-    // Stop every run in flight on this connection. The run resolves with its
-    // partial output, which still gets persisted and acked normally.
-    socket.on('chat:stop', () => {
-      for (const r of activeRuns) r.controller.abort();
+    // Stop the run the client named, or every run in flight on this connection
+    // when it names none. The run resolves with its partial output, which still
+    // gets persisted and acked normally.
+    //
+    // This used to abort them all, unconditionally. One connection carries
+    // several runs — that is the whole premise of `activeRuns` being a set —
+    // so a Stop pressed in one chat aborted a background run in another, which
+    // then acked with whatever it had produced as though that were its answer.
+    // Nothing told the user their other run had been killed.
+    //
+    // A run the server cannot yet NAME is still aborted either way. Its
+    // conversation id arrives with its first event, which is a moment or two
+    // into the run; before that there is nothing to compare against, and
+    // refusing to stop it would make Stop do nothing at the very start of a
+    // turn — a worse failure than the over-abort this replaces, and the one a
+    // user is most likely to hit. Older clients send no payload at all and get
+    // exactly the previous behaviour.
+    socket.on('chat:stop', (payload?: unknown) => {
+      const asked = (payload ?? {}) as { conversationId?: unknown };
+      const only = typeof asked.conversationId === 'string' && asked.conversationId
+        ? asked.conversationId
+        : undefined;
+      for (const r of activeRuns) {
+        if (only && r.conversationId && r.conversationId !== only) continue;
+        r.controller.abort();
+      }
     });
 
     // Connection lost. That is NOT the same as "the user left": a missed

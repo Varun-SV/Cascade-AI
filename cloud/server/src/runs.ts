@@ -1714,6 +1714,14 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // and proceeds — the run's budget cap is the real guardrail.
   const onContextApproval = (e: unknown) =>
     socket.emit('context:approval-required', { conversationId: conversation.id, ...(e as object) });
+  // Every ending of that gate, which is what lets a reconnecting page be given
+  // back the question it is still blocked on WITHOUT being given back one that
+  // was already answered. The other three gates have had this for rounds; this
+  // one had no closure event at all, so it could not be replayed safely and
+  // therefore was not replayed — leaving a reloaded page unable to answer, and
+  // the SDK gate proceeding on its own two-minute timeout.
+  const onContextClosed = (e: unknown) =>
+    socket.emit('context:approval-closed', { conversationId: conversation.id, ...(e as object) });
   const onCompacted = (e: unknown) =>
     socket.emit('context:compacted', { conversationId: conversation.id, ...(e as object) });
   // Guarded like every other inbound answer. One socket carries several runs
@@ -1733,6 +1741,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   };
   if (interactive) {
     cascade.on('context:approval-required', onContextApproval);
+    cascade.on('context:approval-closed', onContextClosed);
     cascade.on('context:compacted', onCompacted);
     socket.on('context:decision', onContextDecision);
   }
@@ -1995,6 +2004,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     cascade.off('tier:status', onStatus);
     cascade.off('plan:approval-required', onPlan);
     cascade.off('context:approval-required', onContextApproval);
+    cascade.off('context:approval-closed', onContextClosed);
     cascade.off('context:compacted', onCompacted);
     socket.off('context:decision', onContextDecision);
     cascade.off('clarification:required', onClarification);

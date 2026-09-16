@@ -696,6 +696,67 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
     expect(reply).not.toContain('Hello from the stub model.');
   }, 30_000);
 
+  it('stops only the run the Stop button was pressed in', async () => {
+    // One connection carries several runs — that is the premise of `activeRuns`
+    // being a set — and `chat:stop` aborted all of them. A user watching one
+    // chat pressed Stop and killed a run in another, which then acked with
+    // whatever partial output it had as though that were its answer. Nothing
+    // told them it had happened.
+    await start(8_000);
+    stub = await startStubOpenAIServer({ delayMs: 3_000 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'stop-scope', email: null, name: 'Scope', avatar: null });
+    // Two at once needs the plan that allows two at once.
+    store.setUserSubscription(user.id, { subscriptionId: 'sub-1', status: 'active', currentEnd: null, plan: 'pro' });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    // Named up front, so the test does not have to wait for an ack to learn
+    // the ids — which is the very thing a Stop has to work without.
+    const watched = store.createConversation(user.id, 'the one being watched');
+    const background = store.createConversation(user.id, 'the one in another tab');
+
+    const socket = connect(cookie);
+    await connected(socket);
+    const providers = [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }];
+    socket.emit('chat:run', { prompt: 'hello', conversationId: watched.id, providers }, () => { /* stopped */ });
+    socket.emit('chat:run', { prompt: 'hello', conversationId: background.id, providers }, () => { /* finishes */ });
+
+    await new Promise((r) => setTimeout(r, 300));
+    socket.emit('chat:stop', { conversationId: watched.id });
+
+    // Past the stub's delay: a run that was genuinely stopped never gets the
+    // reply written, and one the Stop did not touch does.
+    await new Promise((r) => setTimeout(r, 4_000));
+    expect(assistantReply(watched.id), 'the run whose Stop was pressed').not.toContain('Hello from the stub model.');
+    expect(assistantReply(background.id), 'the run in another chat was not touched').toContain('Hello from the stub model.');
+  }, 30_000);
+
+  it('still stops everything when the client names no conversation', async () => {
+    // Older clients send no payload, and so does a page whose run has not yet
+    // emitted the event carrying its id. Both have to keep working: a Stop that
+    // did nothing at the very start of a turn would be a worse failure than the
+    // over-abort the keyed form replaces.
+    await start(8_000);
+    stub = await startStubOpenAIServer({ delayMs: 3_000 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'stop-unkeyed', email: null, name: 'Unkeyed', avatar: null });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    const socket = connect(cookie);
+    await connected(socket);
+    socket.emit(
+      'chat:run',
+      { prompt: 'hello', providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }] },
+      () => { /* stopped */ },
+    );
+
+    await new Promise((r) => setTimeout(r, 300));
+    socket.emit('chat:stop');
+
+    await new Promise((r) => setTimeout(r, 4_000));
+    const conversations = store.listConversations(user.id) as Array<{ id: string }>;
+    const reply = conversations.length ? assistantReply(conversations[0]!.id) : '';
+    expect(reply, 'an unkeyed Stop still reaches the run').not.toContain('Hello from the stub model.');
+  }, 30_000);
+
   it('parks a run rather than handing it to a socket that has already gone', async () => {
     // The client's rotation path makes this ordinary: a duplicated tab
     // connects on the COPIED id, discovers the collision, rotates to a fresh
@@ -1552,6 +1613,51 @@ describe('rememberForReplay / replaySupervision — what a reload gets back', ()
     replaySupervision(run, socket);
 
     expect(emitted).toEqual([]);
+  });
+
+  it('hands back the extended-context question a reload lost', () => {
+    // The last gate with no replay, and the only one whose absence SPENDS
+    // money. The SDK's gate resolves TRUE on its two-minute timeout — that is
+    // deliberate, since the feature is opt-in and the budget cap is the real
+    // guardrail — so a page that reloaded while the question was up could not
+    // answer it, the timer ran out, and the run compacted anyway. The user was
+    // asked before the money was spent and then it was spent without them.
+    const run = freshRun();
+    rememberForReplay(run, 'context:approval-required', {
+      conversationId: 'c1', inputTokens: 400_000, windowTokens: 128_000, multiplier: 2, estChunks: 7,
+    });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+
+    expect(emitted.map((e) => e.event)).toEqual(['context:approval-required']);
+    expect((emitted[0]?.payload as { estChunks?: number }).estChunks).toBe(7);
+  });
+
+  it('takes the context question down instead of putting an answered one back', () => {
+    // The same rule the questionnaire gate is held to, and the reason the gate
+    // now announces its own ending at all. The ANSWER arrives as an inbound
+    // socket message that `rememberForReplay` never sees, so without a closure
+    // event there was no reliable delete — and a reconnect would have handed
+    // back a question that had already been decided, with buttons reaching a
+    // gate that was gone.
+    //
+    // A single slot rather than a keyed map, because the gate is a single slot:
+    // `Cascade.pendingContextApproval` holds one callback, so a run can only be
+    // asking this once.
+    const run = freshRun();
+    rememberForReplay(run, 'context:approval-required', {
+      conversationId: 'c1', inputTokens: 400_000, windowTokens: 128_000, multiplier: 2, estChunks: 7,
+    });
+    rememberForReplay(run, 'context:approval-closed', { conversationId: 'c1' });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+
+    // The closure and not the question: a page that kept the dialog through a
+    // transient reconnect has it taken down, and a page that reloaded is not
+    // shown one it already answered.
+    expect(emitted.map((e) => e.event), 'the ending, never the question').toEqual(['context:approval-closed']);
   });
 
   it('replays nothing for a run that never touched the browser or a dangerous tool', () => {

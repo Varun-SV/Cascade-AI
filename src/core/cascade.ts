@@ -893,12 +893,24 @@ export class Cascade extends EventEmitter {
       const timeout = setTimeout(() => {
         if (this.pendingContextApproval) {
           this.pendingContextApproval = undefined;
+          // TIMED OUT IS AN ENDING TOO. See the closure below: a host that
+          // waited out the gate must be told it is over, or the dialog stays
+          // up and its buttons reach a gate that is already gone.
+          this.announceGateClosed('context:approval-closed', {});
           resolve(true);
         }
       }, 120_000);
       this.pendingContextApproval = (approved) => {
         clearTimeout(timeout);
         this.pendingContextApproval = undefined;
+        // The one thing this gate never said. Its three siblings all announce
+        // their ending, and hosts depend on it: a hosted client that was
+        // disconnected when the gate settled has no other way to learn that the
+        // question is over, so a reconnect would put the answered question back
+        // on screen. Through `announceGateClosed` rather than `emit` for the
+        // reason the siblings use it — the gate is already settled, so a
+        // listener that throws or rejects must not be allowed to change that.
+        this.announceGateClosed('context:approval-closed', {});
         resolve(approved);
       };
       this.emit('context:approval-required', info);

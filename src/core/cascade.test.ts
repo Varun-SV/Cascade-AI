@@ -757,6 +757,54 @@ describe('Extended context (compaction integration)', () => {
     expect(out.prompt).toBe(bigInput);
     expect(generate).not.toHaveBeenCalled();
   });
+
+  it('announces that the confirm is over, whichever way it was answered', async () => {
+    // The one thing this gate never said. Its three siblings all announce their
+    // ending and hosts depend on it: the cloud server keeps the open question so
+    // a reloaded page can be handed it back, and without a closure event there
+    // is no reliable delete — the ANSWER arrives as an inbound socket message
+    // the replay store never sees. A reconnecting page would have been shown a
+    // question it had already decided, with buttons reaching a gate that is
+    // gone.
+    const cascade = new Cascade(enabledConfig, process.cwd());
+    (cascade as any).router = mockRouter(1000, vi.fn(async () => ({ content: 'S', usage: {}, finishReason: 'stop' })));
+    const closed: unknown[] = [];
+    cascade.on('context:approval-closed', (e) => { closed.push(e); });
+    cascade.on('context:approval-required', () => cascade.resolveContextApproval(true));
+
+    await (cascade as any).applyExtendedContext({ prompt: bigInput, conversationHistory: [] });
+    expect(closed, 'approved is an ending too').toHaveLength(1);
+
+    cascade.removeAllListeners('context:approval-required');
+    cascade.on('context:approval-required', () => cascade.resolveContextApproval(false));
+    await (cascade as any).applyExtendedContext({ prompt: bigInput, conversationHistory: [] });
+    expect(closed, 'and so is denied').toHaveLength(2);
+  });
+
+  it('announces the ending when nobody ever answered', async () => {
+    // The gate resolves TRUE on its own two-minute timer — deliberately, since
+    // the feature is opt-in and the budget cap is the real guardrail. That path
+    // settles the gate without any host involvement at all, so it is exactly
+    // the one where a dialog would be left standing over a run that has already
+    // moved on.
+    vi.useFakeTimers();
+    try {
+      const cascade = new Cascade(enabledConfig, process.cwd());
+      (cascade as any).router = mockRouter(1000, vi.fn(async () => ({ content: 'S', usage: {}, finishReason: 'stop' })));
+      const closed: unknown[] = [];
+      cascade.on('context:approval-closed', (e) => { closed.push(e); });
+      // Asked, and never answered.
+      cascade.on('context:approval-required', () => { /* nobody is there */ });
+
+      const running = (cascade as any).applyExtendedContext({ prompt: bigInput, conversationHistory: [] });
+      await vi.advanceTimersByTimeAsync(120_001);
+      await running;
+
+      expect(closed, 'the timeout is an ending like any other').toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('provider:exhausted reaches consumers', () => {
