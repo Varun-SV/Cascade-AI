@@ -107,4 +107,47 @@ describe('an ending names the run that was sent', () => {
     act(() => { view.result.current.setConversationId('convo-A'); });
     expect(view.result.current.escalations, 'the run that was sent is the one settled').toEqual([]);
   });
+
+  it('does not emit a send the reconnect already settled', async () => {
+    // There is a window where `busy` is true and NOTHING has been emitted: the
+    // classifier runs first, and the emit is its continuation. A reconnect in
+    // that window correctly reports `active: 0` — the server really does have
+    // no run — so the pane clears `busy`, and the continuation then started the
+    // run anyway. A live run with no Stop state, and a composer free to start
+    // a second one on top of it.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-A'));
+
+    act(() => { void view.result.current.send({ prompt: 'refactor the parser' }); });
+    expect(view.result.current.busy, 'waiting on the classifier').toBe(true);
+    expect(fake.sent.filter((m) => m.event === 'chat:run'), 'nothing on the wire yet').toEqual([]);
+
+    // The socket comes back and the server has no run for this pane.
+    act(() => { fake.fire('run:resumed', { active: 0, finished: [] }); });
+    expect(view.result.current.busy, 'the pane is idle').toBe(false);
+
+    // The classifier finally answers. The send is over and must stay over.
+    await act(async () => { releaseClassifier?.(null); await Promise.resolve(); });
+
+    expect(fake.sent.filter((m) => m.event === 'chat:run'), 'the cancelled send stayed cancelled').toEqual([]);
+    expect(view.result.current.busy, 'and the composer is still free').toBe(false);
+  });
+
+  it('cancels a send Stop reached before the wire did', async () => {
+    // The same window through the other door, and not reported: with nothing
+    // emitted there is no run for the server to abort and no ack coming back,
+    // so `chat:stop` would go into the void and the composer would sit disabled
+    // until the continuation started the very run the user asked not to happen.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-A'));
+
+    act(() => { void view.result.current.send({ prompt: 'refactor the parser' }); });
+    act(() => { view.result.current.stop(); });
+
+    expect(view.result.current.busy, 'stopped immediately, with nothing to wait for').toBe(false);
+    expect(fake.sent.filter((m) => m.event === 'chat:stop'), 'and nothing was asked to abort').toEqual([]);
+
+    await act(async () => { releaseClassifier?.(null); await Promise.resolve(); });
+    expect(fake.sent.filter((m) => m.event === 'chat:run'), 'the run never happened').toEqual([]);
+  });
 });

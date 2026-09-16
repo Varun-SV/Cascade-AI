@@ -357,6 +357,71 @@ describe('Cascade.askUser — a question that cannot hang the run', () => {
     expect(reached, 'the working host was still told').toEqual(['second']);
   });
 
+  it('gives a listener the emitter as `this`, the way emit does', async () => {
+    // `function () { this.resolveClarification(...) }` is a legitimate host
+    // under EventEmitter's contract. Dispatching the raw listener bare gave it
+    // `this === undefined`, which throws — and this gate reads a throw as the
+    // host failing to receive the question, so a WORKING listener was turned
+    // into a delivery failure by the thing delivering it, and the gate settled
+    // unanswered.
+    const c = new Cascade(baseConfig, '/tmp');
+    c.on('clarification:required', function (this: Cascade, e: unknown) {
+      this.resolveClarification([{ id: 'q1', value: 'A' }], (e as { requestId: string }).requestId);
+    });
+
+    await expect(c.askUser(ONE), 'answered, not settled as undeliverable').resolves.toEqual({
+      outcome: 'answered',
+      answers: [{ id: 'q1', value: 'A' }],
+    });
+  });
+
+  it('delivers to every host before deciding the question failed', async () => {
+    // Settling emits the gate's CLOSURE, so failing mid-dispatch announced
+    // "this is over" and then went on handing the OPENING event to the hosts
+    // after it. The later host drew a form whose only closure notification had
+    // already gone past, and it would stand there forever.
+    const c = new Cascade(baseConfig, '/tmp');
+    const order: string[] = [];
+    c.on('clarification:required', () => { order.push('open:first'); throw new Error('first host is down'); });
+    c.on('clarification:required', () => { order.push('open:second'); });
+    c.on('clarification:closed', () => { order.push('closed'); });
+
+    await expect(c.askUser(ONE)).resolves.toEqual({ outcome: 'no-listener', answers: [] });
+
+    expect(order, 'the closure comes after every opening, not between them')
+      .toEqual(['open:first', 'open:second', 'closed']);
+  });
+
+  it('observes a rejection from a CLOSING listener too', async () => {
+    // The closing half of the family — `clarification:closed` and
+    // `:timeout`, and their two escalation twins — kept a plain `try` around
+    // `emit` after the opening half was fixed. There is nothing to settle here,
+    // the gate is already closed; the requirement is only that an async host
+    // cannot take the process down on its way out.
+    const escaped: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { escaped.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const c = new Cascade(baseConfig, '/tmp');
+      let requestId: string | undefined;
+      c.on('clarification:required', (e: unknown) => { requestId = (e as { requestId: string }).requestId; });
+      c.on('clarification:closed', async () => { throw new Error('the closing transport is down'); });
+
+      const asking = c.askUser(ONE);
+      await Promise.resolve();
+      c.resolveClarification([{ id: 'q1', value: 'A' }], requestId);
+      await expect(asking, 'the answer still lands').resolves.toEqual({
+        outcome: 'answered',
+        answers: [{ id: 'q1', value: 'A' }],
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(escaped, 'and the rejection stays the host\'s problem').toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('honours a host that asked to be told ONCE', async () => {
     // Dispatching the listeners directly, rather than through `emit`, means
     // taking on what `emit` was doing — and `once` is the part that bites.

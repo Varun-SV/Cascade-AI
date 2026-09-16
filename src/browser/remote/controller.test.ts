@@ -1651,6 +1651,59 @@ describe('watching a run\'s browser', () => {
     ]);
   });
 
+  it('acks Chrome even when the frame consumer throws, and keeps streaming', async () => {
+    // The fifth embedder callback, missed when the other four were swept into
+    // one rule — and the one with the worst failure. Chrome sends the next
+    // frame only once the previous is ACKED, and a synchronous throw here left
+    // the CDP handler before the ack: one bad frame from one consumer would
+    // darken the live view for the rest of the run, which is exactly the
+    // never-ack failure the ack-ordering test above exists to prevent, reached
+    // from the other side.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const seen: string[] = [];
+    await c.startWatching('run-A', (f) => {
+      seen.push(f.data);
+      throw new Error('the viewer transport is down');
+    });
+
+    cdp.order.length = 0;
+    seen.length = 0;
+    expect(() => cdp.pushFrame(1, 'FRAME-ONE')).not.toThrow();
+    expect(cdp.order, 'Chrome was told to send the next one').toEqual(['ack:1']);
+
+    // And it does: the stream is still alive for the frame after the failure.
+    cdp.pushFrame(2, 'FRAME-TWO');
+    expect(seen, 'a failing consumer costs its own frame and nothing else').toEqual(['FRAME-ONE', 'FRAME-TWO']);
+    expect(cdp.order).toEqual(['ack:1', 'ack:2']);
+  });
+
+  it('keeps an async frame consumer\'s rejection off the process', async () => {
+    // The other shape, and one the `void` signature used to accept silently: an
+    // `async` consumer does not throw, it returns a rejected promise that no
+    // `try` around an un-awaited call can see.
+    const escaped: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { escaped.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const { provider } = fakeProvider();
+      const c = new RemoteBrowserController({ provider });
+      await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+      await c.startWatching('run-A', async () => { throw new Error('the viewer transport is down'); });
+
+      cdp.order.length = 0;
+      cdp.pushFrame(1, 'FRAME-ONE');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(escaped, 'the consumer failing stays the consumer\'s problem').toEqual([]);
+      expect(cdp.order, 'and Chrome is still being acked').toEqual(['ack:1']);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('reports the remote viewport, so a canvas need not guess', async () => {
     const { provider } = fakeProvider();
     const c = new RemoteBrowserController({ provider });

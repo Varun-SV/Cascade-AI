@@ -1834,6 +1834,80 @@ describe('a run ending takes down its own gates and nobody else\'s', () => {
     expect(view.result.current.busy, 'and only now is the composer free').toBe(false);
   });
 
+  it('retires a finished run even while another is still active', async () => {
+    // A resume reports BOTH: `active` names what is still running, `finished`
+    // names what ended during the gap, and a pane carrying two runs easily gets
+    // one of each. The active branch returned past the finished list — which
+    // was survivable until the shared state started being released only when
+    // the LAST origin goes. Then it is permanent: the survivor's ending removes
+    // only itself, the set never empties, and `busy` sticks for the life of the
+    // page.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { fake.fire('run:resumed', { active: 1, active_conversations: ['convo-A', 'convo-B'] }); });
+    act(() => {
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-A', requestId: 'e1', sectionId: 's1', issues: [], timeoutMs: 300_000,
+      });
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-B', requestId: 'e2', sectionId: 's2', issues: [], timeoutMs: 300_000,
+      });
+    });
+
+    // A finished in the gap; B is still going.
+    act(() => { fake.fire('run:resumed', { active: 1, active_conversations: ['convo-B'], finished: [{ conversationId: 'convo-A' }] }); });
+
+    act(() => { view.result.current.setConversationId('convo-A'); });
+    expect(view.result.current.escalations, 'A is settled by the report that named it').toEqual([]);
+    act(() => { view.result.current.setConversationId('convo-B'); });
+    expect(view.result.current.escalations.map((e) => e.requestId), 'B is untouched').toEqual(['e2']);
+    expect(view.result.current.busy, 'and the pane is still carrying B').toBe(true);
+
+    // The crux: B ending must now actually free the composer.
+    act(() => { fake.fire('session:complete', { conversationId: 'convo-B' }); });
+    expect(view.result.current.busy, 'the last one out frees it').toBe(false);
+  });
+
+  it('streams a run\'s tokens into its own transcript and no other', async () => {
+    // `stream:token` read no conversation at all, so with two runs resumed
+    // together the second one's output appended to the bubble the first was
+    // streaming into — somebody else's answer growing in the transcript on
+    // screen.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-A'));
+
+    act(() => { fake.fire('run:resumed', { active: 1, active_conversations: ['convo-A', 'convo-B'] }); });
+    act(() => { fake.fire('stream:token', { conversationId: 'convo-A', text: 'mine' }); });
+    act(() => { fake.fire('stream:token', { conversationId: 'convo-B', text: ' AND THEIRS' }); });
+
+    const streaming = view.result.current.messages.filter((m) => m.streaming);
+    expect(streaming.map((m) => m.content), 'only this chat\'s tokens').toEqual(['mine']);
+  });
+
+  it('takes down the context dialog of the run that ended, and only that one', async () => {
+    // The last blocking gate that could not say whose question it was. Left up
+    // after its run ended, answering it emitted a decision the sibling still
+    // waiting at ITS context gate would take as its own — so a "no" to a
+    // finished run compacted a live one.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { fake.fire('run:resumed', { active: 1, active_conversations: ['convo-A', 'convo-B'] }); });
+    act(() => { fake.fire('context:approval-required', { conversationId: 'convo-A', inputTokens: 900_000 }); });
+    expect(view.result.current.contextApproval, 'A is asking').toBeTruthy();
+
+    act(() => { fake.fire('session:complete', { conversationId: 'convo-A' }); });
+    expect(view.result.current.contextApproval, 'and it goes when A does').toBeNull();
+
+    // B's own question survives its sibling's ending, and is answered by name.
+    act(() => { fake.fire('context:approval-required', { conversationId: 'convo-B', inputTokens: 900_000 }); });
+    act(() => { view.result.current.resolveContextApproval(false); });
+    expect(fake.sent.filter((m) => m.event === 'context:decision')).toEqual([
+      { event: 'context:decision', payload: { approved: false, conversationId: 'convo-B' } },
+    ]);
+  });
+
   it('adopts nothing when several runs ended and the pane has no conversation', async () => {
     // Settling every run is a fact; deciding which transcript to SHOW is still
     // a guess, and the pane refuses it for the same reason `active_conversations`

@@ -342,7 +342,7 @@ interface RunBrowser {
    * that only learned "someone is already watching" would otherwise be told a
    * stream exists while its own callback was never wired to anything.
    */
-  onFrame?: (frame: BrowserFrame) => void;
+  onFrame?: (frame: BrowserFrame) => void | Promise<void>;
   /**
    * Whether that session is currently producing frames.
    *
@@ -877,7 +877,7 @@ export class RemoteBrowserController {
    * it is already being watched. Callers use that to avoid promising a viewer
    * a stream that will never arrive.
    */
-  async startWatching(runId: string, onFrame: (frame: BrowserFrame) => void): Promise<boolean> {
+  async startWatching(runId: string, onFrame: (frame: BrowserFrame) => void | Promise<void>): Promise<boolean> {
     const held = this.runs.get(runId);
     if (!held) return false;
     // Queued rather than refused. The check for "already watching" happens
@@ -994,7 +994,7 @@ export class RemoteBrowserController {
   private async attachScreencast(
     runId: string,
     held: RunBrowser,
-    onFrame?: (frame: BrowserFrame) => void,
+    onFrame?: (frame: BrowserFrame) => void | Promise<void>,
     popupDetachGen?: number,
   ): Promise<CDPSession | null> {
     // Only popup handoff supplies this token. Normal watcher attachment is
@@ -1118,7 +1118,19 @@ export class RemoteBrowserController {
           // Stamped with the watch it belongs to, so the receipt names what
           // was actually seen. Nothing is recorded here: what happens past this
           // consumer is lossy, and the record is the client's to send.
-          deliver({ data: e.data, width, height, generation: held.watchGen ?? 0 });
+          //
+          // Through `notify` like every other embedder callback, and this is
+          // the fifth — it was missed when the other four were swept into one
+          // rule, which is the same mistake that sweep existed to end. It is
+          // also the one with the worst failure: a synchronous throw here would
+          // leave the CDP handler before the ACK below, and Chrome sends the
+          // next frame only once the previous is acked, so one bad frame from
+          // one consumer would darken the live view for the rest of the run.
+          // An async consumer fails the other way and reaches the process.
+          // Read out here rather than inside the closure: the narrowing that
+          // proves `e.data` is a string does not survive into a callback.
+          const frame = { data: e.data, width, height, generation: held.watchGen ?? 0 };
+          notify(() => deliver(frame));
         }
       }
       // ACKED WHETHER OR NOT THE PICTURE GOT ANYWHERE, and that is the choice,

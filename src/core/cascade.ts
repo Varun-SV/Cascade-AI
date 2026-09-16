@@ -480,9 +480,16 @@ export class Cascade extends EventEmitter {
    * PER LISTENER, not around the loop. `emit` stops dispatching at the first
    * throw, so one broken host used to cost a working one its notification —
    * the same reason `announceLiveView` delivers its two listeners separately.
-   * A synchronous failure settles the gate immediately; an asynchronous one
-   * settles it when the rejection arrives, which is still far better than the
-   * two-minute park it replaces.
+   * A synchronous failure settles the gate once the whole snapshot has been
+   * delivered; an asynchronous one settles it when the rejection arrives, which
+   * is still far better than the window-long park it replaces.
+   *
+   * SETTLED AFTER THE LOOP, not inside it, and that is not tidiness. `onFailed`
+   * settles the gate, and settling emits the gate's CLOSURE — so failing
+   * mid-dispatch announced "this request is over" and then went on handing the
+   * OPENING event to the listeners after it. A host later in the list would
+   * draw a form whose only closure notification had already gone past, and it
+   * would stand there forever. Deliver to everyone, then decide.
    *
    * `rawListeners`, NOT `listeners`. Bypassing `emit` means taking on what
    * `emit` was doing, and `once` is the part that bites: `listeners()` hands
@@ -492,16 +499,60 @@ export class Cascade extends EventEmitter {
    * `rawListeners()` returns the wrapper, which removes the registration and
    * passes the underlying listener's return value straight through, so the
    * promise below is still the one being observed. Verified against Node.
+   *
+   * `.call(this, …)`, which is the third thing `emit` was doing. EventEmitter
+   * invokes listeners with the emitter as the receiver, so
+   * `function () { this.resolveClarification(...) }` is a legitimate host — and
+   * calling it bare gave it `this === undefined`, which throws, which this
+   * would then have read as the host failing to receive the question and
+   * settled the gate unanswered. A working listener turned into a delivery
+   * failure by the thing delivering it.
    */
   private deliverGate(event: string, payload: unknown, onFailed: () => void): void {
+    let failed = false;
     for (const listener of this.rawListeners(event)) {
       try {
-        const out = (listener as (p: unknown) => unknown)(payload);
+        const out = (listener as (this: Cascade, p: unknown) => unknown).call(this, payload);
         if (out && typeof (out as PromiseLike<unknown>).then === 'function') {
+          // Asynchronous failure cannot wait for the loop — it arrives after
+          // every listener has already been told — so it settles on arrival.
+          // Harmless: by then the opening event has reached everyone, which is
+          // the ordering the deferral above exists to protect.
           void Promise.resolve(out).catch(() => { onFailed(); });
         }
       } catch {
-        onFailed();
+        failed = true;
+      }
+    }
+    if (failed) onFailed();
+  }
+
+  /**
+   * Tell listeners something that is over, and let none of them make it worse.
+   *
+   * The closing half of the gate family — `clarification:closed`,
+   * `clarification:timeout`, `escalation:closed`, `escalation:timeout`. Each
+   * was already wrapped in a `try` for the synchronous case, and each had the
+   * same hole `deliverGate` had before last round: `emit` discards what a
+   * listener returns, so an `async` host fails by returning a rejected promise
+   * nobody is holding and Node raises an unhandled rejection.
+   *
+   * There is nothing to settle here — the gate is already closed, which is the
+   * whole message — so unlike `deliverGate` this reports to no one. It exists
+   * so that the four informational emits cannot take the process down, and so
+   * the rule is written once rather than four times.
+   */
+  private announceGateClosed(event: string, payload: unknown): void {
+    for (const listener of this.rawListeners(event)) {
+      try {
+        const out = (listener as (this: Cascade, p: unknown) => unknown).call(this, payload);
+        if (out && typeof (out as PromiseLike<unknown>).then === 'function') {
+          void Promise.resolve(out).catch(() => {
+            // A listener's problem, and the gate it describes is already gone.
+          });
+        }
+      } catch {
+        // As above. Delivery continues to the listeners after it.
       }
     }
   }
@@ -549,11 +600,9 @@ export class Cascade extends EventEmitter {
         // The map delete above is what makes this exactly-once, so the answered
         // path emitting it too costs nothing: that client has already taken its
         // own modal down.
-        try {
-          this.emit('escalation:closed', { taskId, requestId, sectionId: ctx.sectionId });
-        } catch {
-          // A listener's problem, and the section is already released.
-        }
+        // Through `announceGateClosed`, not `emit`: an async host fails by
+        // returning a rejected promise this `try` could never see.
+        this.announceGateClosed('escalation:closed', { taskId, requestId, sectionId: ctx.sectionId });
       };
 
       // Stop / disconnect must unpark the run. T2 has already passed its
@@ -573,11 +622,10 @@ export class Cascade extends EventEmitter {
         // escalation that never settles holds a T2 section and its worker,
         // where an unanswered question only costs an assumption.
         settle({ action: 'timeout' });
-        try {
-          this.emit('escalation:timeout', { taskId, requestId, sectionId: ctx.sectionId });
-        } catch {
-          // Informational only, and the section is already unblocked.
-        }
+        // Informational only, and the section is already unblocked — but an
+        // async listener's rejection still reaches the process, so it goes
+        // through `announceGateClosed` like its three siblings.
+        this.announceGateClosed('escalation:timeout', { taskId, requestId, sectionId: ctx.sectionId });
       }, ESCALATION_DECISION_TIMEOUT_MS);
 
       this.pendingEscalations.set(requestId, settle);
@@ -710,12 +758,9 @@ export class Cascade extends EventEmitter {
         // The same mistake as `reportReleaseFailure`, made again in a second
         // place: a report must not become the failure it is reporting.
         resolve(result);
-        try {
-          this.emit('clarification:closed', { requestId });
-        } catch {
-          // A listener's problem, and the run is already unblocked. There is
-          // nothing here to escalate it to.
-        }
+        // A listener's problem either way, and the run is already unblocked —
+        // but only `announceGateClosed` can see the asynchronous half of it.
+        this.announceGateClosed('clarification:closed', { requestId });
       };
 
       // Stop must unpark the run. Without this the person presses Stop, watches
@@ -738,12 +783,9 @@ export class Cascade extends EventEmitter {
         // caller; it surfaces as an uncaught exception and can take the process
         // with it.
         settle(none('timeout'));
-        try {
-          this.emit('clarification:timeout', { requestId });
-        } catch {
-          // Informational only, and the run is already unblocked. There is
-          // nothing here to escalate a listener's failure to.
-        }
+        // Informational only, and the run is already unblocked. Routed like
+        // the other three so an async host cannot take the process down.
+        this.announceGateClosed('clarification:timeout', { requestId });
       }, CLARIFICATION_TIMEOUT_MS);
 
       this.pendingClarifications.set(requestId, settle);

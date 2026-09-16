@@ -1260,6 +1260,25 @@ export function releasePendingApprovals(
 }
 
 /**
+ * Whether a context decision is this run's to consume.
+ *
+ * The context gate is the one blocking question with no request id — it is at
+ * most one per run — so the conversation is the whole key. A decision naming a
+ * DIFFERENT conversation is refused outright; one naming none is accepted, on
+ * the deliberate trade written at the call site: a client that predates the id
+ * would otherwise lose its compaction prompt entirely.
+ *
+ * Exported so this is tested rather than a copy of it, like the three guards
+ * around it.
+ */
+export function addressesContextGate(
+  d: { conversationId?: string } | undefined,
+  conversationId: string,
+): boolean {
+  return d?.conversationId === undefined || d.conversationId === conversationId;
+}
+
+/**
  * Whether an inbound answer names the run it claims to answer.
  *
  * BOTH identifiers, exactly. One socket carries several runs, and every run's
@@ -1697,7 +1716,21 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     socket.emit('context:approval-required', { conversationId: conversation.id, ...(e as object) });
   const onCompacted = (e: unknown) =>
     socket.emit('context:compacted', { conversationId: conversation.id, ...(e as object) });
-  const onContextDecision = (d: { approved?: boolean }) => cascade.resolveContextApproval(!!d?.approved);
+  // Guarded like every other inbound answer. One socket carries several runs
+  // and each run's handler sees every message on it, so a decision that named
+  // nothing was consumed by whichever run happened to be listening — including
+  // a decision the user gave to a dialog left over from a run that had already
+  // ended, which then compacted a live one on their behalf.
+  //
+  // `addressesContextGate` rather than `answersThisRun`: this gate has no
+  // request id to carry, so the conversation is the whole of the key. Older
+  // clients send no id at all and are still accepted, because refusing them
+  // would break the compaction prompt for anything that has not updated — a
+  // real cost against a narrow race. Stated rather than silently assumed.
+  const onContextDecision = (d: { approved?: boolean; conversationId?: string }) => {
+    if (!addressesContextGate(d, conversation.id)) return;
+    cascade.resolveContextApproval(!!d?.approved);
+  };
   if (interactive) {
     cascade.on('context:approval-required', onContextApproval);
     cascade.on('context:compacted', onCompacted);

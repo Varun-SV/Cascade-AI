@@ -228,6 +228,13 @@ export interface ContextApprovalInfo {
   windowTokens?: number;
   multiplier?: number;
   estChunks?: number;
+  /**
+   * Whose question this is. The server has always stamped it; this side did
+   * not keep it, which left the only blocking gate that could not say which run
+   * it belonged to — so a sibling's ending could not remove it and the answer
+   * could not be routed.
+   */
+  conversationId?: string;
 }
 
 /** A boardroom plan Cascade produced for this run — surfaced read-only (the
@@ -408,6 +415,22 @@ export function useChatSession(
    * Emptied at every ending rather than left to be overwritten, so a finished
    * run cannot be mistaken for an inherited one on the next resume.
    */
+  /**
+   * A send this pane has STARTED but not yet put on the wire, if any.
+   *
+   * There is a window where `busy` is true and nothing has been emitted: the
+   * on-device classifier runs first when it is enabled, and `emitRun` is its
+   * continuation. Nothing named that state, so anything that declared the pane
+   * idle during it — a reconnect reporting `active: 0`, which is CORRECT,
+   * because the server really does have no run — cleared `busy` and then
+   * watched the continuation emit the run anyway. A live run with no Stop
+   * state, and a composer free to start a second one on top of it.
+   *
+   * Identity rather than a flag, so a cancelled send cannot be confused with
+   * the next one: `emitRun` refuses unless the marker is still the one its own
+   * `runChat` created.
+   */
+  const pendingSendRef = useRef<symbol | undefined>(undefined);
   const runOriginsRef = useRef<Set<string>>(new Set());
   /** The conversation this pane's events belong to — known, or adopted below. */
   const activeConversationId = (): string | undefined =>
@@ -987,12 +1010,24 @@ export function useChatSession(
 
   useEffect(() => {
     if (!socket) return;
-    const onToken = (e: { text: string; primary?: boolean }) => {
+    const onToken = (e: { text: string; primary?: boolean; conversationId?: string }) => {
       // Only stream the PRESENTER tier's output (the actual answer). Intermediate
       // nodes — planning, decomposition, background workers — emit primary:false;
       // showing those made each node's output flash by before the final result,
       // which read as a runaway. Keep the status chip up while they work.
       if (e.primary === false) return;
+      // AND ONLY THIS CHAT'S TOKENS. One socket carries several runs, and this
+      // handler read none of that — so with two runs resumed together, B's
+      // output appended to the bubble A was streaming into, and the transcript
+      // on screen grew somebody else's answer.
+      //
+      // The same shape as `onStatus` below, including the reason for the
+      // `current &&` guard: on a first turn the server tags events with an id
+      // this side does not learn until the closing ack, so comparing against
+      // `undefined` would discard the entire first run — the most common case
+      // there is.
+      const current = activeConversationId();
+      if (current && e.conversationId && e.conversationId !== current) return;
       streamingRef.current += e.text;
       setStatus(null); // presenter tokens are flowing — drop the "planning" chip
       setMessages((prev) => {
@@ -1127,7 +1162,14 @@ export function useChatSession(
      */
     const onEscalationClosed = (e: { requestId?: string; sectionId?: string }) =>
       setEscalations((prev) => prev.filter((x) => escalationKey(x) !== escalationKey(e)));
-    const onContextApproval = (e: ContextApprovalInfo) => setContextApproval(e);
+    const onContextApproval = (e: ContextApprovalInfo & { conversationId?: string }) => {
+      // Adopted and kept, like every other blocking gate. This one was the last
+      // unkeyed member of the family: a single slot with no idea whose question
+      // it was, so a sibling run's ending could not take it down and answering
+      // it sent a decision nothing could route.
+      adoptConversationId(e?.conversationId);
+      setContextApproval(e);
+    };
     const onCompacted = (e: { kind?: string; chunks?: number; foldedTurns?: number; truncated?: boolean }) => {
       setContextApproval(null);
       if (e.kind === 'input') {
@@ -1454,8 +1496,18 @@ export function useChatSession(
       setBusy(false);
       setStatus(null);
       setApproval(null);
-      setContextApproval(null);
+      // Declaring the pane idle has to CANCEL a send that has not gone out
+      // yet, not merely stop waiting for it. Otherwise the classifier's
+      // continuation emits afterwards into a pane that has already cleared
+      // `busy`, and the run it starts has no Stop button.
+      pendingSendRef.current = undefined;
     }
+    // NOT behind `lastOneOut`, unlike the four above. Those are properties of
+    // the pane; a context approval is a question one RUN is waiting on, and
+    // leaving the ended run's dialog up is not merely untidy — answering it
+    // sends a decision that the sibling still waiting at its own context gate
+    // would take as its own.
+    setContextApproval((q) => (q && ended.includes(q.conversationId ?? '') ? null : q));
     // The streaming bubble is stitched from tokens that stopped arriving; the
     // persisted answer replaces it. Also only once the last run is out — a
     // sibling still streaming into this pane must not have its bubble taken
@@ -1641,6 +1693,24 @@ export function useChatSession(
           const mine = conversationIdRef.current;
           for (const id of named) runOriginsRef.current.add(id);
           if (named.length === 0 && mine) runOriginsRef.current.add(mine);
+        }
+        // AND THE ONES THAT FINISHED, which this branch used to return past.
+        //
+        // A resume reports both: `active` names what is still running and
+        // `finished` names what ended during the gap, and a pane carrying two
+        // runs can easily get one of each. Returning here left the finished
+        // one in the set forever — and with the shared state now released only
+        // when the LAST origin goes, "forever" is exactly the word: the
+        // survivor's own ending removes only itself, the set never empties,
+        // and `busy`, the lost-ack flag and the composer stay stuck for the
+        // rest of the page's life.
+        //
+        // `finishWithoutAck` per entry, because that is what a keyed ending
+        // means: settle that conversation's gates, take it out of the set, and
+        // leave everything shared alone while a sibling is still running.
+        for (const done of e?.finished ?? []) {
+          if (done?.error) setError(done.error);
+          if (done?.conversationId) finishWithoutAck(done.conversationId);
         }
         return;
       }
@@ -1835,6 +1905,11 @@ export function useChatSession(
       // carries it. Armed only here: adoption is a thing this pane does for a
       // run it started, never something an arriving event can do to it.
       awaitingFirstTurnRef.current = !conversationIdRef.current;
+      // Claimed before anything is shown, so every path out of this function
+      // is covered by it — including the classifier continuation below, which
+      // runs a turn later and is the reason this exists.
+      const thisSend = Symbol('send');
+      pendingSendRef.current = thisSend;
       setBusy(true);
       setError(null);
       setStatus('Sizing up the task…');
@@ -1870,6 +1945,13 @@ export function useChatSession(
       }
 
       const emitRun = (complexityHint?: 'Simple' | 'Moderate' | 'Complex') => {
+        // The send may have been settled while the classifier was thinking —
+        // by a reconnect that found no run, or by Stop. Emitting now would put
+        // a run on the wire that this pane has already told itself is over.
+        if (pendingSendRef.current !== thisSend) return;
+        // Claimed: from here the send either goes out or is refused locally,
+        // and either way it is no longer waiting to be emitted.
+        pendingSendRef.current = undefined;
         const payload = {
             conversationId,
             prompt: text,
@@ -2081,6 +2163,18 @@ export function useChatSession(
   // reflect "stopping" until it lands.
   const stop = useCallback(() => {
     if (!socket || !busy) return;
+    // Nothing has been sent yet — the classifier is still thinking — so there
+    // is no run for the server to abort and no ack coming back to finalise
+    // this. Cancel it here, or Stop would emit into the void and leave the
+    // composer disabled until the continuation started the very run the user
+    // just asked not to happen. Not reported; the same window as the
+    // reconnect case above, through the other door.
+    if (pendingSendRef.current) {
+      pendingSendRef.current = undefined;
+      setBusy(false);
+      setStatus(null);
+      return;
+    }
     socket.emit('chat:stop');
     setStatus('Stopping…');
   }, [socket, busy]);
@@ -2169,9 +2263,15 @@ export function useChatSession(
   // oversized input. Either way the run continues — skip just means the model
   // handles the raw input (truncating naturally).
   const resolveContextApproval = useCallback((approved: boolean) => {
-    socket?.emit('context:decision', { approved });
+    // NAMED, so the server can tell whose decision this is. It used to go out
+    // bare, which was survivable only while one run could be waiting at a time:
+    // with two resumed together, answering a dialog left over from the run that
+    // ended was consumed by the one still waiting, and the user's "no" to a
+    // finished run compacted a live one.
+    const cid = contextApproval?.conversationId ?? activeConversationId();
+    socket?.emit('context:decision', { approved, ...(cid ? { conversationId: cid } : {}) });
     setContextApproval(null);
-  }, [socket]);
+  }, [socket, contextApproval]);
 
   // Regenerate a reply as a NEW sibling of the given assistant turn (or the last
   // one). The original answer stays on disk under < n/m >.

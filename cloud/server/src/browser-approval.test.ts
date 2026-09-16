@@ -17,7 +17,7 @@
 //  there would hand the capability to exactly the runs that cannot supervise it.
 
 import { describe, it, expect, vi } from 'vitest';
-import { addressesRun, applyPermissionDecision, buildApprovalCallback, capturePayload, frameSeenPayload, lossyEmitter, releasePendingApprovals, type PermissionDecision } from './runs.js';
+import { addressesContextGate, addressesRun, applyPermissionDecision, buildApprovalCallback, capturePayload, frameSeenPayload, lossyEmitter, releasePendingApprovals, type PermissionDecision } from './runs.js';
 
 /**
  * The approval shape runs.ts builds.
@@ -284,6 +284,30 @@ describe('a run ending on approvals nobody answered', () => {
     expect(settled.map((x) => x.id), 'both waiters released').toEqual(['req-1', 'req-2']);
     expect(emit).toHaveBeenCalledTimes(2);
     expect(pending.size).toBe(0);
+  });
+});
+
+// The context gate is the one blocking question with no request id, and it was
+// the last one whose answer named nothing at all. One socket carries several
+// runs and every run's handler sees every message, so an unkeyed decision was
+// consumed by whichever run was listening — including a decision the user gave
+// to a dialog left over from a run that had already ended.
+describe('which run a context decision may settle', () => {
+  it('refuses a decision that names a different conversation', () => {
+    expect(addressesContextGate({ conversationId: 'c2' }, 'c1')).toBe(false);
+  });
+
+  it('accepts the run\'s own', () => {
+    expect(addressesContextGate({ conversationId: 'c1' }, 'c1')).toBe(true);
+  });
+
+  it('still accepts one that names nothing, deliberately', () => {
+    // The trade, stated rather than silently assumed: this gate has no request
+    // id to fall back on, so refusing an unkeyed decision would break the
+    // compaction prompt for every client that predates the id. A real cost
+    // against a narrow race, and the client now always sends it.
+    expect(addressesContextGate({}, 'c1')).toBe(true);
+    expect(addressesContextGate(undefined, 'c1')).toBe(true);
   });
 });
 
