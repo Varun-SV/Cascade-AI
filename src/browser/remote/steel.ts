@@ -130,6 +130,20 @@ export function isUsableSteelBase(url: string): boolean {
       // mistake this predicate has made before. But there is no configuration
       // in which cleartext to `api.steel.dev` is what an operator meant.
       if (u.protocol !== 'https:') return false;
+      // AND THE PORT, which is a third thing that is true of the hosted service
+      // and not of a gateway somebody runs themselves.
+      //
+      // `isHostedSteel` compares by host key and says nothing about the port,
+      // so `https://api.steel.dev:80` is "hosted", is https, addresses the
+      // endpoint, and is on a port `fetch` will happily open — and is a
+      // DIFFERENT ORIGIN from the one `DEFAULT_BASE` names. The blocked-port
+      // check does not cover this: 80 and 444 are perfectly legal to fetch,
+      // they simply are not where the hosted API is.
+      //
+      // `URL.port` is empty for a scheme's default, so this asks for 443
+      // without hard-coding it, and `:443` written out normalises to the same
+      // empty string rather than being refused.
+      if (built.port !== '') return false;
     }
     return true;
   } catch {

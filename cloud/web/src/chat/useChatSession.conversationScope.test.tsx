@@ -1797,6 +1797,43 @@ describe('a run ending takes down its own gates and nobody else\'s', () => {
     expect(view.result.current.escalations, 'the inherited run is what ended').toEqual([]);
   });
 
+  it('keeps the other resumed runs alive when one of them ends by name', async () => {
+    // A KEYED ending names one run; the no-id report ends every run this pane
+    // carries, which is why it has no id to give. Treating them alike wiped the
+    // whole origin set for a single `session:complete` — so the sibling lost
+    // its origin, and then its OWN terminal event was refused by the ack-lost
+    // guard that had just been cleared on its behalf. Its gates and its answer
+    // were never reconciled, and the composer was free to start another run on
+    // top of a live one.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { fake.fire('run:resumed', { active: 1, active_conversations: ['convo-A', 'convo-B'] }); });
+    act(() => {
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-A', requestId: 'e1', sectionId: 's1', issues: [], timeoutMs: 300_000,
+      });
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-B', requestId: 'e2', sectionId: 's2', issues: [], timeoutMs: 300_000,
+      });
+    });
+
+    // A ends by name. B is still running.
+    act(() => { fake.fire('session:complete', { conversationId: 'convo-A' }); });
+
+    expect(view.result.current.busy, 'the pane is still carrying B').toBe(true);
+    act(() => { view.result.current.setConversationId('convo-A'); });
+    expect(view.result.current.escalations, 'A is settled').toEqual([]);
+    act(() => { view.result.current.setConversationId('convo-B'); });
+    expect(view.result.current.escalations.map((e) => e.requestId), 'B is untouched').toEqual(['e2']);
+
+    // And B's own ending is still heard, rather than refused by a flag cleared
+    // on A's behalf.
+    act(() => { fake.fire('session:complete', { conversationId: 'convo-B' }); });
+    expect(view.result.current.escalations, 'B is settled by its own event').toEqual([]);
+    expect(view.result.current.busy, 'and only now is the composer free').toBe(false);
+  });
+
   it('adopts nothing when several runs ended and the pane has no conversation', async () => {
     // Settling every run is a fact; deciding which transcript to SHOW is still
     // a guess, and the pane refuses it for the same reason `active_conversations`

@@ -381,6 +381,25 @@ describe('the Browser control is advertised only where one can be built', () => 
     expect(providerIsUsable({ provider: 'steel', url: 'http://steel.internal:8080', apiKey: 'sk-test' }), 'key or no key').toBe(true);
   });
 
+  it('is not advertised for the hosted endpoint on a port that is not its own', () => {
+    // `isHostedSteel` compares by host key and says nothing about the port, so
+    // `https://api.steel.dev:80` is "hosted", is https, addresses the endpoint
+    // and sits on a port `fetch` will happily open — and is a DIFFERENT ORIGIN
+    // from the one the default names. The blocked-port check does not cover
+    // this: 80 and 444 are legal to fetch, they simply are not where the hosted
+    // API is, so the credential would go to whatever answers there.
+    expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev:80', apiKey: 'sk-test' })).toBe(false);
+    expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev:444', apiKey: 'sk-test' }), 'nor a near miss').toBe(false);
+    expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev.:8443', apiKey: 'sk-test' }), 'however the host is spelled').toBe(false);
+    // `:443` written out normalises to the empty port, so it is the canonical
+    // endpoint and must still work — refusing it would be the mirror mistake.
+    expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev:443', apiKey: 'sk-test' }), 'the default port spelled out').toBe(true);
+    expect(providerIsUsable({ provider: 'steel', url: 'https://api.steel.dev', apiKey: 'sk-test' })).toBe(true);
+    // Arbitrary ports stay right for a deployment somebody runs themselves.
+    expect(providerIsUsable({ provider: 'steel', url: 'https://steel.internal:8443' }), 'self-hosted picks its own port').toBe(true);
+    expect(providerIsUsable({ provider: 'steel', url: 'http://steel.internal:3000' })).toBe(true);
+  });
+
   it('is not advertised for a credential that cannot be sent as a header', () => {
     // The env schema trims, which removes surrounding whitespace and nothing
     // else — so a key pasted out of a wrapped terminal or a here-doc can carry

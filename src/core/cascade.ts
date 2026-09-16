@@ -483,9 +483,18 @@ export class Cascade extends EventEmitter {
    * A synchronous failure settles the gate immediately; an asynchronous one
    * settles it when the rejection arrives, which is still far better than the
    * two-minute park it replaces.
+   *
+   * `rawListeners`, NOT `listeners`. Bypassing `emit` means taking on what
+   * `emit` was doing, and `once` is the part that bites: `listeners()` hands
+   * back the UNWRAPPED callback, so calling it never runs the wrapper that
+   * deregisters it. A host that asked to be told once would be told every
+   * time — and told through a transport it had set up for one gate only.
+   * `rawListeners()` returns the wrapper, which removes the registration and
+   * passes the underlying listener's return value straight through, so the
+   * promise below is still the one being observed. Verified against Node.
    */
   private deliverGate(event: string, payload: unknown, onFailed: () => void): void {
-    for (const listener of this.listeners(event)) {
+    for (const listener of this.rawListeners(event)) {
       try {
         const out = (listener as (p: unknown) => unknown)(payload);
         if (out && typeof (out as PromiseLike<unknown>).then === 'function') {

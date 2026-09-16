@@ -356,4 +356,27 @@ describe('Cascade.askUser — a question that cannot hang the run', () => {
     await expect(c.askUser(ONE)).resolves.toEqual({ outcome: 'no-listener', answers: [] });
     expect(reached, 'the working host was still told').toEqual(['second']);
   });
+
+  it('honours a host that asked to be told ONCE', async () => {
+    // Dispatching the listeners directly, rather than through `emit`, means
+    // taking on what `emit` was doing — and `once` is the part that bites.
+    // `listeners()` hands back the UNWRAPPED callback, so calling it never runs
+    // the wrapper that deregisters it: a host that asked to be told once would
+    // be told every time, through a transport it had set up for one gate only.
+    const c = new Cascade(baseConfig, '/tmp');
+    const told: string[] = [];
+    c.once('clarification:required', (e: unknown) => { told.push((e as { requestId: string }).requestId); });
+    expect(c.listenerCount('clarification:required'), 'registered to start with').toBe(1);
+
+    const first = c.askUser(ONE);
+    await vi.waitFor(() => expect(told).toHaveLength(1));
+    expect(c.listenerCount('clarification:required'), 'and deregistered by being called').toBe(0);
+    c.resolveClarification([{ id: 'q1', value: 'A' }]);
+    await first;
+
+    // The second question finds no listener at all, which is the correct
+    // consequence — not a second delivery to a host that asked for one.
+    await expect(c.askUser(ONE)).resolves.toEqual({ outcome: 'no-listener', answers: [] });
+    expect(told, 'told exactly once').toHaveLength(1);
+  });
 });

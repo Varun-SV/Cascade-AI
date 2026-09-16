@@ -1434,14 +1434,33 @@ export function useChatSession(
    * disabled forever with no error and no reply.
    */
   const finishWithoutAck = useCallback((cid?: string) => {
-    ackLostRef.current = false;
-    setBusy(false);
-    setStatus(null);
-    setApproval(null);
-    setContextApproval(null);
+    // WHICH runs this ending covers, decided before anything is cleared.
+    //
+    // A KEYED ending names one run; a report with no id ends every run this
+    // pane is carrying, which is why it has no id to give. Treating them the
+    // same wiped the whole set for a single conversation's `session:complete`,
+    // so a sibling resumed run lost its origin — and then its own terminal
+    // event was refused by the `ackLostRef` guards that had just been cleared
+    // on its behalf. Its gates and its answer were never reconciled, and the
+    // composer was free to start another run on top of it.
+    const ended = cid ? [cid] : [...runOriginsRef.current];
+    for (const id of ended) runOriginsRef.current.delete(id);
+    // The shared state belongs to ALL of them, so it is only safe to release
+    // once the last one has ended. A keyed ending with siblings still running
+    // leaves `busy` and the lost-ack flag exactly as they were.
+    const lastOneOut = runOriginsRef.current.size === 0;
+    if (lastOneOut) {
+      ackLostRef.current = false;
+      setBusy(false);
+      setStatus(null);
+      setApproval(null);
+      setContextApproval(null);
+    }
     // The streaming bubble is stitched from tokens that stopped arriving; the
-    // persisted answer replaces it.
-    setMessages((prev) => prev.filter((m) => !m.streaming));
+    // persisted answer replaces it. Also only once the last run is out — a
+    // sibling still streaming into this pane must not have its bubble taken
+    // away by another conversation's ending.
+    if (lastOneOut) setMessages((prev) => prev.filter((m) => !m.streaming));
     // Adopt the id as well as the transcript. On a first turn the client has
     // NO conversation id — the server creates it and the client learns it from
     // the ack, which is the one thing a reconnect is guaranteed to lose. Ending
@@ -1457,15 +1476,6 @@ export function useChatSession(
     // anywhere. Fall back to the pane and a user who moved to B has B's live
     // approvals, questionnaires and sections settled, B's transcript reloaded,
     // and A's answer never reconciled.
-    // ALL of them, not one. A resume can hand this pane several live runs, and
-    // when the report that ends them carries no id it ends every one of them —
-    // so settling only a chosen conversation left the others' approvals,
-    // questionnaires and parked sections standing while the shared busy and
-    // ack-lost state was cleared out from under them.
-    const ended = cid ? [cid] : [...runOriginsRef.current];
-    // Retired here, so the seeding in `run:resumed` cannot mistake a finished
-    // run's conversation for an inherited one's.
-    runOriginsRef.current = new Set();
     // Before the early return, because the empty case needs it most: a first
     // turn whose ack was lost is holding gates naming a conversation this pane
     // never learned, and nothing later can reach them. `settleConversation`
@@ -1939,7 +1949,15 @@ export function useChatSession(
         // Empty on a first turn; adoption fills it in when the server's id
         // arrives. Replaces whatever a resume left, because this pane starting
         // a run makes that run the one it is answerable for.
-        runOriginsRef.current = new Set(conversationIdRef.current ? [conversationIdRef.current] : []);
+        //
+        // FROM THE PAYLOAD, not from the ref. `emitRun` can run a turn later
+        // than `runChat` — the on-device classifier is awaited first when it is
+        // enabled — and the payload was built with the conversation captured at
+        // send time. Reading the live ref here meant a user who opened another
+        // chat while classification was pending sent a run for A and recorded
+        // an origin of B, so the ending settled B's gates and left A's
+        // standing. The id that goes on the wire is the id this run is for.
+        runOriginsRef.current = new Set(payload.conversationId ? [payload.conversationId] : []);
         socket.emit('chat:run', payload, onAck);
       };
 
