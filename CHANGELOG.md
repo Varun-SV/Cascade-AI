@@ -118,6 +118,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Steel's create API accepts no timeout field, and an option feeding a field
   the API ignores would look like control while changing nothing.
 
+- **One chat's work no longer speaks for another's.** A hosted connection can
+  carry several runs at once — a reconnect hands a dropped page's run back, a
+  duplicated tab inherits one while starting its own — and almost everything
+  addressed those runs by their *conversation*, which is not the same thing:
+  two runs can share one chat. So Stop aborted every run on the connection and
+  the background one acked with its partial output as though that were its
+  answer; a second run's tokens were appended to the first's reply a token at a
+  time, splicing two answers into one bubble; and a run ending settled the
+  approvals, questionnaires and parked sections its sibling was still blocked
+  on. Runs are now addressed by identity rather than by chat: Stop names the
+  runs it means, tokens are attributed or dropped rather than guessed at, and a
+  chat's gates wait for its last run to finish.
+
+- **The "this input is too large" confirm survives a reload, and cannot expire
+  behind another one.** That gate proceeds on its own after two minutes, on
+  purpose — the feature is opt-in and the budget cap is the real guardrail — so
+  a question nobody could answer was not a missing dialog but a compaction
+  billed without consent. A reload lost it entirely, with nothing to replay it;
+  and when two runs asked at once only the first was shown while the second's
+  timer ran down unseen. The question now comes back after a reload with the
+  run it belongs to, every pending one is shown rather than queued, and
+  answering one no longer takes its sibling's away.
+
 ## 0.80.0 - 2026-09-08
 
 ### Added
