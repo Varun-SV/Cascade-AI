@@ -380,6 +380,28 @@ export function useChatSession(
    * panel and its dangerous-tool prompts with it.
    */
   const awaitingFirstTurnRef = useRef(false);
+  /**
+   * The conversation the run THIS PANE STARTED belongs to.
+   *
+   * Deliberately not `pendingConversationIdRef`, and deliberately not cleared
+   * by `selectConversation`. That ref answers "where should arriving events be
+   * routed", which stops being this run's business the moment the user opens
+   * another chat. This one answers "whose gates does this run's ending settle",
+   * and that does not change because somebody navigated: the run is still that
+   * conversation's, and its approvals, questionnaires and parked sections are
+   * still queued under its id.
+   *
+   * Every ending needs it, because none of them reliably carries an id — the
+   * error ack is `{ error }` and nothing else, and a run that finishes in the
+   * gap before its socket's `disconnect` lands is already out of `activeRuns`,
+   * so the replacement socket reports `active: 0` with an empty `finished`.
+   * Both then fell through to whatever was on screen.
+   *
+   * Overwritten by the next `runChat` rather than cleared at the ending: `busy`
+   * allows one run at a time per pane, so it always names the pane's current or
+   * last run, which is exactly what an ending is asking about.
+   */
+  const runOriginRef = useRef<string | undefined>(undefined);
   /** The conversation this pane's events belong to — known, or adopted below. */
   const activeConversationId = (): string | undefined =>
     conversationIdRef.current ?? pendingConversationIdRef.current;
@@ -387,7 +409,13 @@ export function useChatSession(
   const adoptConversationId = (convo: unknown): void => {
     if (!awaitingFirstTurnRef.current) return;
     if (conversationIdRef.current || pendingConversationIdRef.current) return;
-    if (typeof convo === 'string' && convo) pendingConversationIdRef.current = convo;
+    if (typeof convo === 'string' && convo) {
+      pendingConversationIdRef.current = convo;
+      // The same id, kept for a different question and a longer life — see
+      // `runOriginRef`. This is the only place a first turn ever learns the id
+      // the server minted for it.
+      runOriginRef.current = convo;
+    }
   };
   /**
    * Where the agent's browser can be watched, while it has one — per
@@ -1412,18 +1440,34 @@ export function useChatSession(
     // the ack, which is the one thing a reconnect is guaranteed to lose. Ending
     // the wait without it clears the spinner over an empty chat while the
     // answer sits on a conversation the page cannot name.
-    const target = cid ?? activeConversationId();
-    // BEFORE the early return, because the case with no id is the one that
-    // needs it most: a first turn whose ack was lost is holding gates that
-    // name a conversation this pane never learned, and nothing later can
-    // reach them. `settleConversation` takes no-id as a case rather than a
-    // reason to do nothing.
-    settleConversation(target);
-    if (!target) return;
+    // WHICH RUN ENDED and WHERE THE PANE SHOULD BE are two questions, and
+    // `activeConversationId()` was answering the first with the second.
+    //
+    // A run can finish in the gap between its ack packet being lost and its
+    // socket's `disconnect` landing. The server has already dropped it from
+    // `activeRuns` by then, so it is never copied into `inFlight` and the
+    // replacement socket reports `active: 0` with an EMPTY `finished` — no id
+    // anywhere. Fall back to the pane and a user who moved to B has B's live
+    // approvals, questionnaires and sections settled, B's transcript reloaded,
+    // and A's answer never reconciled.
+    const ended = cid ?? runOriginRef.current;
+    // Before the early return, because no-id is the case that needs it most: a
+    // first turn whose ack was lost is holding gates naming a conversation this
+    // pane never learned, and nothing later can reach them. `settleConversation`
+    // takes no-id as a case rather than a reason to do nothing.
+    settleConversation(ended);
+    if (!ended) return;
+    // Adoption is the pane's business, and only when the pane has no
+    // conversation of its own or already is this one. `run:resumed`'s handler
+    // has this guard at its call site; the other three endings did not, so a
+    // terminal event for the run you walked away from could pull its transcript
+    // into the chat you walked to.
+    const mine = conversationIdRef.current;
+    if (mine && mine !== ended) return;
     pendingConversationIdRef.current = undefined;
     awaitingFirstTurnRef.current = false;
-    conversationIdRef.current = target;
-    setConversationId(target);
+    conversationIdRef.current = ended;
+    setConversationId(ended);
     // Every question this run was holding is over, whatever it was told —
     // approvals, questionnaires and parked sections alike, and all three by
     // conversation. The rule is `settleConversation`'s; restating any part of
@@ -1437,7 +1481,7 @@ export function useChatSession(
     // tombstone set here would make correctness contingent on it — and it is
     // bounded at 32, so a run that asked more than that could evict the one id
     // that mattered and leave the dead form standing again.
-    void reloadActivePath(target);
+    void reloadActivePath(ended);
   }, [reloadActivePath, settleConversation]);
 
   // A reconnect re-reads the transcript, and settles what the lost ack cannot.
@@ -1719,13 +1763,9 @@ export function useChatSession(
       // run it started, never something an arriving event can do to it.
       awaitingFirstTurnRef.current = !conversationIdRef.current;
       // WHICH CONVERSATION THIS RUN IS FOR, decided here rather than read back
-      // at the ending. The error ack is `{ error }` and carries no id at all,
-      // so the ending has to get one from somewhere — and "whatever this pane
-      // is showing now" is a different question with the same shape. Leave the
-      // chat while the run is in flight and it answers with the conversation
-      // you moved TO, which is how a failure in A came to settle B's live
-      // gates and leave A's standing.
-      const ranFor = conversationIdRef.current;
+      // at the ending — see `runOriginRef`. Undefined on a first turn, and
+      // adoption fills it in when the server's id arrives.
+      runOriginRef.current = conversationIdRef.current;
       setBusy(true);
       setError(null);
       setStatus('Sizing up the task…');
@@ -1861,16 +1901,13 @@ export function useChatSession(
             // stopped asking. `session:error` does not cover this — it
             // deliberately ignores errors while the ack is still reachable,
             // which is exactly the case here.
-            // `ranFor` before anything read at ack time, and NO
-            // `activeConversationId()` fallback — that is the navigated-away
-            // case, and settling the wrong conversation is worse than settling
-            // none. `pendingConversationIdRef` is the first-turn id this run
-            // adopted, read before the line below clears it; if the user left
-            // that chat it is already gone, and then there is nothing this pane
-            // can honestly name. Undefined is handled: `settleConversation`
-            // drops only the unanswerable unkeyed entries, and A's own gates
-            // still come down on `clarification:closed` / `escalation:closed`.
-            const failed = ack.conversationId ?? ranFor ?? pendingConversationIdRef.current;
+            // The run's own origin, never `activeConversationId()` — that is
+            // the navigated-away case, and settling the wrong conversation is
+            // worse than settling none. Undefined stays handled:
+            // `settleConversation` then drops only the unanswerable unkeyed
+            // entries, and the server announces every gate it releases at
+            // teardown, so nothing is left holding a dead control either way.
+            const failed = ack.conversationId ?? runOriginRef.current;
             pendingConversationIdRef.current = undefined;
             awaitingFirstTurnRef.current = false;
             settleConversation(failed);

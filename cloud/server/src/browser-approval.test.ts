@@ -17,7 +17,7 @@
 //  there would hand the capability to exactly the runs that cannot supervise it.
 
 import { describe, it, expect, vi } from 'vitest';
-import { addressesRun, applyPermissionDecision, buildApprovalCallback, capturePayload, frameSeenPayload, lossyEmitter, type PermissionDecision } from './runs.js';
+import { addressesRun, applyPermissionDecision, buildApprovalCallback, capturePayload, frameSeenPayload, lossyEmitter, releasePendingApprovals, type PermissionDecision } from './runs.js';
 
 /**
  * The approval shape runs.ts builds.
@@ -230,6 +230,60 @@ describe('the approval window closing while the run continues', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// A run ending is the THIRD way an approval stops being answerable, after a
+// decision and the window closing. The first two announce themselves; this one
+// did not, which is the whole of the bug: absence is not an event, so a client
+// holding the prompt had nothing to learn from.
+describe('a run ending on approvals nobody answered', () => {
+  const pendingWith = (...ids: string[]) => {
+    const settled: Array<{ id: string; approved: boolean }> = [];
+    const pending = new Map<string, (d: { approved: boolean; always: boolean }) => void>();
+    for (const id of ids) pending.set(id, (d) => settled.push({ id, approved: d.approved }));
+    return { pending, settled };
+  };
+
+  it('denies every one of them, rather than leaving a worker held', () => {
+    const { pending, settled } = pendingWith('req-1', 'req-2');
+    releasePendingApprovals(pending, { conversationId: 'c1', emit: vi.fn() });
+
+    expect(settled).toEqual([
+      { id: 'req-1', approved: false },
+      { id: 'req-2', approved: false },
+    ]);
+    expect(pending.size, 'and nothing is left in the map').toBe(0);
+  });
+
+  it('tells the client about each one, so no prompt outlives its run', () => {
+    // The failure this pins: the prompt was invisible while the user was in
+    // another chat and came back the moment they reopened that conversation,
+    // offering Allow/Deny for a dangerous tool call nobody is waiting on.
+    const emit = vi.fn();
+    const { pending } = pendingWith('req-1', 'req-2');
+    releasePendingApprovals(pending, { conversationId: 'c1', emit });
+
+    expect(emit.mock.calls).toEqual([
+      ['permission:resolved', { conversationId: 'c1', requestId: 'req-1', reason: 'released' }],
+      ['permission:resolved', { conversationId: 'c1', requestId: 'req-2', reason: 'released' }],
+    ]);
+  });
+
+  it('does not let one failed announcement strand the approvals behind it', () => {
+    // This runs inside the run's `finally`, ahead of releasing the provider
+    // session and closing the cascade. An emit that throws must cost exactly
+    // its own notification — not the remaining waiters, and not the browser the
+    // operator is still being billed for.
+    const emit = vi.fn((_event: string, payload: Record<string, unknown>) => {
+      if (payload['requestId'] === 'req-1') throw new Error('socket is gone');
+    });
+    const { pending, settled } = pendingWith('req-1', 'req-2');
+
+    expect(() => releasePendingApprovals(pending, { conversationId: 'c1', emit })).not.toThrow();
+    expect(settled.map((x) => x.id), 'both waiters released').toEqual(['req-1', 'req-2']);
+    expect(emit).toHaveBeenCalledTimes(2);
+    expect(pending.size).toBe(0);
   });
 });
 

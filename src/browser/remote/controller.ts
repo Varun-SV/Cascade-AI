@@ -239,7 +239,12 @@ export interface RemoteBrowserControllerOptions {
    * timeout collects it, and without this there is no way to tell that from a
    * clean handback.
    */
-  onReleaseFailed?: (runId: string, sessionId: string, err: unknown, expiresInMs?: number) => void;
+  /**
+   * `void | Promise<void>`: an async sink is the ordinary shape for telemetry,
+   * and a signature promising `void` tells an embedder their rejection is
+   * somebody's problem when it is nobody's. `reportReleaseFailure` observes it.
+   */
+  onReleaseFailed?: (runId: string, sessionId: string, err: unknown, expiresInMs?: number) => void | Promise<void>;
   /**
    * Something that must finish before this controller may open anything.
    *
@@ -486,7 +491,7 @@ export class RemoteBrowserController {
   /** An embedder that wants every run's live view, told which run each is. */
   private onLiveViewAll: ((runId: string, liveViewUrl: string | undefined) => void) | undefined;
   /** Told when a provider session could not be handed back. See `disposeRun`. */
-  private onReleaseFailed: ((runId: string, sessionId: string, err: unknown, expiresInMs?: number) => void) | undefined;
+  private onReleaseFailed: ((runId: string, sessionId: string, err: unknown, expiresInMs?: number) => void | Promise<void>) | undefined;
 
   /**
    * Tell the observer a session leaked, without letting it become the leak.
@@ -500,6 +505,18 @@ export class RemoteBrowserController {
    * That is precisely the guarantee this whole change claims to preserve: a
    * release that fails must never fail the run. Reporting it cannot be the
    * thing that breaks it.
+   *
+   * TWO WAYS TO FAIL, not one. The `try` catches a synchronous throw; an
+   * `async` sink — which is what a telemetry or logging callback usually is —
+   * fails by returning a REJECTED PROMISE, which no `try` around a call that is
+   * never awaited can see. Node then raises an unhandled rejection and can take
+   * the process down: the observer would not merely have failed to report the
+   * leak, it would have killed the run, which is the one outcome this function
+   * exists to prevent, reached through the door the guard did not cover.
+   *
+   * Not awaited, though. The caller is a `.catch` on the release and is not
+   * going to wait for a telemetry round trip; attaching a handler is what makes
+   * the rejection observed, which is the whole requirement.
    */
   private reportReleaseFailure(runId: string, sessionId: string, err: unknown, expiresInMs?: number): void {
     try {
@@ -509,7 +526,15 @@ export class RemoteBrowserController {
       // until they go and kill it by hand — and the field incident that started
       // this was two sessions ending at exactly five minutes with nothing
       // anywhere recording why.
-      this.onReleaseFailed?.(runId, sessionId, err, expiresInMs);
+      const reported = this.onReleaseFailed?.(runId, sessionId, err, expiresInMs);
+      // `Promise.resolve` rather than a `typeof .then` test: it is the same
+      // answer for a promise, a thenable and a plain `undefined`, and a sink
+      // returning something thenable-but-not-a-promise is exactly the case a
+      // hand-rolled check gets wrong.
+      void Promise.resolve(reported).catch(() => {
+        // Same reasoning as the synchronous branch below, and the same
+        // nothing to escalate to.
+      });
     } catch {
       // Nothing to escalate to. The report is best-effort by construction —
       // everything that could act on it has already finished.

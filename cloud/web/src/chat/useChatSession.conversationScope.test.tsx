@@ -1609,19 +1609,55 @@ describe('a run ending takes down its own gates and nobody else\'s', () => {
     expect(view.result.current.escalations, 'and A, which failed, is settled').toEqual([]);
   });
 
-  it('settles nothing keyed when a failed first turn never learned its id', async () => {
-    // The honest end of the same rule. A first turn adopts its id into a ref
-    // that navigating away deliberately clears, so after the switch this pane
-    // cannot name what it started. Naming the pane's CURRENT conversation
-    // would be the bug above; naming nothing costs a modal that
-    // `escalation:closed` takes down anyway.
+  it('keeps a first turn\'s adopted id through a navigation, and settles it', async () => {
+    // This assertion USED TO BE the opposite, and the weaker version was the
+    // finding. A first turn adopts its server-minted id into the ref that
+    // routes arriving events, and leaving the chat deliberately clears that —
+    // so the ending could name nothing and settled nothing, which I recorded
+    // as an acceptable cost.
+    //
+    // It is not one. Where a clarification and an escalation are both taken
+    // down by their own closure events, a dangerous-tool approval released by
+    // teardown had no such event: the prompt survived its run, invisible while
+    // the user was elsewhere and back on screen the moment they reopened that
+    // conversation, offering Allow/Deny for a call nobody is waiting on.
+    //
+    // So the run's origin is now kept separately from the routing id and
+    // outlives navigation — it answers "whose gates does this ending settle",
+    // which does not change because somebody opened another chat.
     const { fake, view } = twoParked(undefined);
+    // Adoption already happened, from the first event that named itself — so
+    // the pane is showing A and B's section is filtered out of it.
+    await waitFor(() => expect(view.result.current.escalations.map((e) => e.requestId)).toEqual(['e1']));
+
+    // Away, while the first turn is still running.
     act(() => { view.result.current.setConversationId('convo-B'); });
+    expect(view.result.current.escalations.map((e) => e.requestId)).toEqual(['e2']);
 
     act(() => { fake.failRun('the run failed'); });
 
-    expect(view.result.current.escalations.map((e) => e.requestId), 'B is not settled by it').toEqual(['e2']);
+    expect(view.result.current.escalations.map((e) => e.requestId), 'B is untouched').toEqual(['e2']);
     act(() => { view.result.current.setConversationId('convo-A'); });
-    expect(view.result.current.escalations.map((e) => e.requestId), 'nor is A silently cleared').toEqual(['e1']);
+    expect(view.result.current.escalations, 'and the run that failed is settled').toEqual([]);
+  });
+
+  it('does not pull a run\'s transcript into the chat the user moved to', async () => {
+    // `finishWithoutAck` adopts as well as settles, and those are two
+    // questions. Now that the ending names the run rather than the pane,
+    // adopting unconditionally would be the mirror bug: A ending would drag
+    // this pane back out of B.
+    const { fake, view } = twoParked('convo-A');
+    await waitFor(() => expect(view.result.current.escalations).toHaveLength(1));
+
+    // `session:complete` only finalises once the ack is known lost, and
+    // `run:resumed` with a live run is what says so. Without this the handler
+    // returns immediately and the test asserts nothing — which is how it first
+    // passed with the fix reverted.
+    act(() => { fake.fire('run:resumed', { active: 1 }); });
+    act(() => { view.result.current.setConversationId('convo-B'); });
+    act(() => { fake.fire('session:complete', { conversationId: 'convo-A' }); });
+
+    expect(view.result.current.conversationId, 'still where the user put it').toBe('convo-B');
+    expect(view.result.current.escalations.map((e) => e.requestId), 'and B keeps its section').toEqual(['e2']);
   });
 });

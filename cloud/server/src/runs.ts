@@ -1216,6 +1216,50 @@ export function sanitiseEscalationNote(raw: unknown): string | undefined {
 }
 
 /**
+ * Release every approval still parked when a run ends, and SAY SO.
+ *
+ * The releasing half was always here — anything still parked would otherwise
+ * hang forever holding a worker. The ANNOUNCEMENT is what was missing, and it
+ * is the same omission this gate family has now produced three times.
+ *
+ * The other two blocking gates announce every ending: a clarification gets
+ * `clarification:closed`, an escalation gets `escalation:closed`, and both were
+ * added precisely so a client cannot be left holding a control for a request
+ * that is gone. Approvals announce a DECISION and a TIMEOUT and said nothing
+ * here — so a prompt released by teardown outlived its own run: invisible while
+ * the user was in another chat, and back on screen the moment they reopened
+ * that conversation, offering Allow/Deny for a dangerous tool call nobody is
+ * waiting on. The client cannot fix this end of it; absence is not an event.
+ *
+ * It also clears the replay record (see socket.ts, which intercepts
+ * `permission:resolved`), so a page that reloads is not handed the same dead
+ * prompt a second time.
+ *
+ * Exported so this is tested rather than a copy of it — the same reason
+ * `parkApproval` and `applyPermissionDecision` are. It runs inside a `finally`,
+ * where a test would otherwise have to drive a whole run to reach it.
+ */
+export function releasePendingApprovals(
+  pending: Map<string, (d: { approved: boolean; always: boolean }) => void>,
+  opts: {
+    conversationId: string;
+    emit: (event: string, payload: Record<string, unknown>) => void;
+  },
+): void {
+  for (const [requestId, resolve] of pending) {
+    resolve({ approved: false, always: false });
+    // Guarded PER REQUEST. This runs in a `finally`, so one emit throwing must
+    // not strand the approvals behind it — nor skip the provider release and
+    // `cascade.close()` that follow, which is what stops the operator paying
+    // for a browser nobody is using.
+    try {
+      opts.emit('permission:resolved', { conversationId: opts.conversationId, requestId, reason: 'released' });
+    } catch { /* the run is ending; there is nothing to escalate this to */ }
+  }
+  pending.clear();
+}
+
+/**
  * Whether an inbound answer names the run it claims to answer.
  *
  * BOTH identifiers, exactly. One socket carries several runs, and every run's
@@ -1940,9 +1984,10 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     socket.off('browser:capture', onBrowserCapture);
     socket.off('browser:frame-seen', onBrowserFrameSeen);
     socket.off('permission:decide', onPermissionDecision);
-    // Anything still parked would otherwise hang forever holding a worker.
-    for (const resolve of pendingApprovals.values()) resolve({ approved: false, always: false });
-    pendingApprovals.clear();
+    releasePendingApprovals(pendingApprovals, {
+      conversationId: conversation.id,
+      emit: (event, payload) => socket.emit(event, payload),
+    });
     try { await remoteBrowser?.endRun(); } catch { /* non-critical */ }
     try { await cascade.close(); } catch { /* non-critical */ }
   }

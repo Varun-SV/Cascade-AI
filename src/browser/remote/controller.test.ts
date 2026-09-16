@@ -885,6 +885,41 @@ describe('attached is not the same as watchable', () => {
     expect(c.humanHolds('run-A')).toBe(false);
   });
 
+  it('observes an async report that rejects, rather than letting it reach the process', async () => {
+    // The same guarantee as the test above, through the door its `try` cannot
+    // cover. A telemetry sink is usually `async`, and an async function does
+    // not throw — it returns a REJECTED PROMISE. A `try` around a call that is
+    // never awaited sees nothing, so Node raises an unhandled rejection and can
+    // terminate the process: the observer would not merely have failed to
+    // report the leak, it would have killed the run.
+    //
+    // Asserted against the PROCESS rather than against `endRun`, because
+    // `endRun` resolving is exactly what it did before the fix — the failure
+    // was invisible from inside the call.
+    const { provider } = fakeProvider();
+    provider.endSession = async () => { throw new Error('release 503'); };
+
+    const escaped: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { escaped.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const c = new RemoteBrowserController({
+        provider,
+        onReleaseFailed: async () => { throw new Error('the telemetry sink is down'); },
+      });
+
+      await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+      await expect(c.endRun('run-A'), 'the run still ends').resolves.toBeUndefined();
+      // Node reports an unhandled rejection only once the microtask queue has
+      // drained, so ask on the next macrotask rather than immediately.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(escaped, 'the sink failing stays the sink\'s problem').toEqual([]);
+      expect(c.humanHolds('run-A')).toBe(false);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('reports a session that leaked while the browser was still opening', async () => {
     // `openReserved` allocates the session first and only then connects, makes
     // a context and opens a page. When one of those fails it rolls back — and
