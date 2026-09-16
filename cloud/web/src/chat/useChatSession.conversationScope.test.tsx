@@ -1694,6 +1694,62 @@ describe('a run ending takes down its own gates and nobody else\'s', () => {
     expect(view.result.current.escalations, 'and A, whose run ended, is settled').toEqual([]);
   });
 
+  it('takes the origin from the run the resume NAMED, not the chat on screen', async () => {
+    // Start A, move to B, reload. The replacement page has B on screen and A on
+    // the wire, and `active_conversations` is the only thing here that knows
+    // it. Reading the pane first was the same mistake the origin exists to fix,
+    // one level in: the fresh mount would record B and then settle B — and
+    // reload B — for a run in A.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-B'));
+
+    act(() => { fake.fire('run:resumed', { active: 1, active_conversations: ['convo-A'] }); });
+    act(() => {
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-A', requestId: 'e1', sectionId: 's1', issues: [], timeoutMs: 300_000,
+      });
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-B', requestId: 'e2', sectionId: 's2', issues: [], timeoutMs: 300_000,
+      });
+    });
+    await waitFor(() => expect(view.result.current.escalations.map((e) => e.requestId)).toEqual(['e2']));
+
+    vi.mocked(getMessages).mockClear();
+    act(() => { fake.fire('run:resumed', { active: 0, finished: [] }); });
+
+    // And NOT reloaded, which is the two fixes meeting. Settling A's gates is
+    // right; pulling A's transcript into a pane showing B would be the yank the
+    // adoption guard exists to stop. A's answer is fetched when the user goes
+    // back to it — the sibling test above covers the case where the pane IS
+    // showing the run that ended, and there the reload does happen.
+    expect(vi.mocked(getMessages), 'B\'s transcript is not replaced').not.toHaveBeenCalled();
+    expect(view.result.current.escalations.map((e) => e.requestId), 'B is on screen and untouched').toEqual(['e2']);
+    act(() => { view.result.current.setConversationId('convo-A'); });
+    expect(view.result.current.escalations, 'and A is what gets settled').toEqual([]);
+  });
+
+  it('claims nothing when several runs came back and none of them is on screen', async () => {
+    // The adoption block refuses to guess between concurrent runs, and the
+    // origin has to refuse for the same reason — settling the wrong
+    // conversation is worse than settling none.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { fake.fire('run:resumed', { active: 1, active_conversations: ['convo-A', 'convo-B'] }); });
+    act(() => {
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-A', requestId: 'e1', sectionId: 's1', issues: [], timeoutMs: 300_000,
+      });
+    });
+    act(() => { fake.fire('run:resumed', { active: 0, finished: [] }); });
+
+    act(() => { view.result.current.setConversationId('convo-A'); });
+    expect(
+      view.result.current.escalations.map((e) => e.requestId),
+      'nothing was picked, so nothing was cleared',
+    ).toEqual(['e1']);
+  });
+
   it('does not pull a run\'s transcript into the chat the user moved to', async () => {
     // `finishWithoutAck` adopts as well as settles, and those are two
     // questions. Now that the ending names the run rather than the pane,

@@ -227,8 +227,16 @@ export interface RemoteBrowserControllerOptions {
    * a wave of workers each opening their own is a cost nobody chose.
    */
   maxSessions?: number;
-  /** Told when a run's live view becomes available, so the owner can watch. */
-  onLiveView?: (runId: string, liveViewUrl: string | undefined) => void;
+  /**
+   * Told when a run's live view becomes available, so the owner can watch.
+   *
+   * `void | Promise<void>`, like `onReleaseFailed` below and for the same
+   * reason: an async sink is the ordinary shape, TypeScript accepts one
+   * wherever a `void` return is declared, and a signature promising `void`
+   * tells an embedder their rejection is somebody's problem when it is
+   * nobody's. `announceLiveView` observes it.
+   */
+  onLiveView?: (runId: string, liveViewUrl: string | undefined) => void | Promise<void>;
   /**
    * Told when a provider session could not be handed back.
    *
@@ -465,6 +473,40 @@ interface RunBrowser {
   abort: AbortController;
 }
 
+/**
+ * Hand something to an EMBEDDER'S callback without letting it become ours.
+ *
+ * One function because there are four of these — the per-run live view, the
+ * global live-view observer, the control state and the release report — and the
+ * rule has been applied to them one at a time, in three separate rounds, each
+ * time missing the others. A listener belongs to whoever registered it; its
+ * failure is theirs, and none of these announcements is a party to the browser
+ * operation that triggered it.
+ *
+ * TWO WAYS TO FAIL, which is the half that kept being missed. The `try` catches
+ * a synchronous throw. An `async` callback — the ordinary shape for a telemetry
+ * or transport sink, and one TypeScript accepts wherever a `void` return is
+ * declared — does not throw at all: it returns a REJECTED PROMISE, which no
+ * `try` around an un-awaited call can see. Node then raises an unhandled
+ * rejection and can terminate the process, so the observer would not merely
+ * have failed to observe, it would have killed the run.
+ *
+ * Deliberately not awaited. Every caller is mid-teardown or mid-action and is
+ * not going to wait on somebody's telemetry round trip; attaching a handler is
+ * the whole requirement. `Promise.resolve` rather than a `typeof .then` test,
+ * because it is the same answer for a promise, a thenable and a plain
+ * `undefined`.
+ */
+function notify(deliver: () => unknown): void {
+  try {
+    void Promise.resolve(deliver()).catch(() => {
+      // Theirs, and asynchronously so. Same as the branch below.
+    });
+  } catch {
+    // Nothing here can act on it, and nothing here is waiting for it.
+  }
+}
+
 export class RemoteBrowserController {
   private provider: RemoteBrowserProvider;
   private maxSessions: number;
@@ -476,7 +518,7 @@ export class RemoteBrowserController {
    * A's live-view URL to whichever run registered last — and that URL is a
    * bearer capability for a browser somebody else is driving.
    */
-  private liveViewListeners = new Map<string, (info: BrowserViewInfo) => void>();
+  private liveViewListeners = new Map<string, (info: BrowserViewInfo) => void | Promise<void>>();
   /**
    * Told when a run's browser changes hands, or stops being pictured.
    *
@@ -485,11 +527,11 @@ export class RemoteBrowserController {
    * control would keep sending input into a lease it no longer holds — every
    * event refused, with nothing on screen saying why.
    */
-  private controlListeners = new Map<string, (state: BrowserControlState) => void>();
+  private controlListeners = new Map<string, (state: BrowserControlState) => void | Promise<void>>();
   /** What each run's listener was last told, so unchanged states stay quiet. */
   private controlAnnounced = new Map<string, string>();
   /** An embedder that wants every run's live view, told which run each is. */
-  private onLiveViewAll: ((runId: string, liveViewUrl: string | undefined) => void) | undefined;
+  private onLiveViewAll: ((runId: string, liveViewUrl: string | undefined) => void | Promise<void>) | undefined;
   /** Told when a provider session could not be handed back. See `disposeRun`. */
   private onReleaseFailed: ((runId: string, sessionId: string, err: unknown, expiresInMs?: number) => void | Promise<void>) | undefined;
 
@@ -519,26 +561,12 @@ export class RemoteBrowserController {
    * the rejection observed, which is the whole requirement.
    */
   private reportReleaseFailure(runId: string, sessionId: string, err: unknown, expiresInMs?: number): void {
-    try {
-      // The provider's own ceiling, carried through so the report can say WHEN
-      // the leak stops costing money. Without it the operator is told a session
-      // is running and billable with no idea whether that means five minutes or
-      // until they go and kill it by hand — and the field incident that started
-      // this was two sessions ending at exactly five minutes with nothing
-      // anywhere recording why.
-      const reported = this.onReleaseFailed?.(runId, sessionId, err, expiresInMs);
-      // `Promise.resolve` rather than a `typeof .then` test: it is the same
-      // answer for a promise, a thenable and a plain `undefined`, and a sink
-      // returning something thenable-but-not-a-promise is exactly the case a
-      // hand-rolled check gets wrong.
-      void Promise.resolve(reported).catch(() => {
-        // Same reasoning as the synchronous branch below, and the same
-        // nothing to escalate to.
-      });
-    } catch {
-      // Nothing to escalate to. The report is best-effort by construction —
-      // everything that could act on it has already finished.
-    }
+    // The provider's own ceiling is carried through so the report can say WHEN
+    // the leak stops costing money. Without it the operator is told a session is
+    // running and billable with no idea whether that means five minutes or until
+    // they go and kill it by hand — and the field incident that started this was
+    // two sessions ending at exactly five minutes with nothing recording why.
+    notify(() => this.onReleaseFailed?.(runId, sessionId, err, expiresInMs));
   }
 
   private runs = new Map<string, RunBrowser>();
@@ -656,7 +684,7 @@ export class RemoteBrowserController {
   }
 
   /** Watch one run's browser. The URL never goes to any other run's listener. */
-  onLiveViewFor(runKey: string, listener: (info: BrowserViewInfo) => void): void {
+  onLiveViewFor(runKey: string, listener: (info: BrowserViewInfo) => void | Promise<void>): void {
     this.liveViewListeners.set(runKey, listener);
   }
 
@@ -664,7 +692,7 @@ export class RemoteBrowserController {
     this.liveViewListeners.delete(runKey);
   }
 
-  onControlFor(runKey: string, listener: (state: BrowserControlState) => void): void {
+  onControlFor(runKey: string, listener: (state: BrowserControlState) => void | Promise<void>): void {
     this.controlListeners.set(runKey, listener);
   }
 
@@ -703,7 +731,13 @@ export class RemoteBrowserController {
     const key = `${state.human}:${state.capturing}:${state.confirmed}`;
     if (!force && this.controlAnnounced.get(runId) === key) return;
     this.controlAnnounced.set(runId, key);
-    listener(state);
+    // Guarded like the other three, and this one had no guard at all — not even
+    // for a synchronous throw. It is also the worst place to be missing one:
+    // `announceLiveView` was given its guard at source precisely so four call
+    // sites were covered at once, and this has EIGHTEEN, including the lease's
+    // own `onChange` and the paths that stop a screencast and hand a session
+    // back. A throwing control listener could abort any of them.
+    notify(() => listener(state));
   }
 
   /**
@@ -739,17 +773,8 @@ export class RemoteBrowserController {
    * the other its notification.
    */
   private announceLiveView(runId: string, liveViewUrl: string | undefined, active: boolean): void {
-    try {
-      this.liveViewListeners.get(runId)?.({ active, ...(liveViewUrl ? { liveViewUrl } : {}) });
-    } catch {
-      // A listener's own problem. Nothing here can act on it, and the browser
-      // operation being announced is not a party to it.
-    }
-    try {
-      this.onLiveViewAll?.(runId, liveViewUrl);
-    } catch {
-      // As above.
-    }
+    notify(() => this.liveViewListeners.get(runId)?.({ active, ...(liveViewUrl ? { liveViewUrl } : {}) }));
+    notify(() => this.onLiveViewAll?.(runId, liveViewUrl));
   }
 
   /**

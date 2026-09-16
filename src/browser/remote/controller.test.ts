@@ -920,6 +920,66 @@ describe('attached is not the same as watchable', () => {
     }
   });
 
+  it('isolates every embedder callback, sync or async, not only the release report', async () => {
+    // The rule was applied to these one at a time across three rounds, missing
+    // the siblings each time — so it is one function now, and this asserts all
+    // four doors at once rather than the one that was last reported.
+    //
+    // `announceControl` is the one that had NO guard, not even for a
+    // synchronous throw, and it is the worst place to be missing one:
+    // `announceLiveView` was guarded at source specifically to cover its four
+    // call sites, and this has eighteen — including the lease's own `onChange`
+    // and the paths that stop a screencast and hand a session back.
+    const { provider } = fakeProvider('https://provider.test/live/abc');
+    provider.endSession = async () => { throw new Error('release 503'); };
+
+    const escaped: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { escaped.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const c = new RemoteBrowserController({
+        provider,
+        onLiveView: async () => { throw new Error('the global observer is down'); },
+        onReleaseFailed: async () => { throw new Error('the telemetry sink is down'); },
+      });
+      c.onLiveViewFor('run-A', async () => { throw new Error('the panel transport is down'); });
+      c.onControlFor('run-A', async () => { throw new Error('the control transport is down'); });
+
+      // Every announcement happens across these: the live view on open, the
+      // control state on each lease change, and the release report on teardown.
+      await expect(
+        c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1')),
+        'a browser action is not a party to a listener failing',
+      ).resolves.toBeDefined();
+      await expect(c.endRun('run-A'), 'and the run still ends').resolves.toBeUndefined();
+
+      // Node reports an unhandled rejection once the microtask queue drains.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(escaped, 'four failing sinks, and none of them reaches the process').toEqual([]);
+      expect(c.humanHolds('run-A')).toBe(false);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('keeps a synchronous throw in one listener off the others', () => {
+    // Two separate deliveries, not one `try` around both: these are different
+    // listeners — the per-run panel and the global observer — and one failing
+    // must not cost the other its notification.
+    const seen: string[] = [];
+    const c = new RemoteBrowserController({
+      provider: fakeProvider('https://provider.test/live/abc').provider,
+      onLiveView: (runId) => { seen.push(`all:${runId}`); },
+    });
+    c.onLiveViewFor('run-A', () => { throw new Error('the panel is down'); });
+
+    expect(
+      () => (c as unknown as { announceLiveView(r: string, u: string | undefined, a: boolean): void })
+        .announceLiveView('run-A', 'https://provider.test/live/abc', true),
+    ).not.toThrow();
+    expect(seen, 'the observer still heard it').toEqual(['all:run-A']);
+  });
+
   it('reports a session that leaked while the browser was still opening', async () => {
     // `openReserved` allocates the session first and only then connects, makes
     // a context and opens a page. When one of those fails it rolls back — and

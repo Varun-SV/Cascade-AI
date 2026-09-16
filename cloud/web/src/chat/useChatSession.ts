@@ -1551,13 +1551,17 @@ export function useChatSession(
         //
         // Only when there is genuinely nothing to compare against. A pane that
         // already knows its conversation must keep matching on it.
+        // Hoisted out of the block below, because the block asks "may this pane
+        // ADOPT an id" and the origin asks "which run is on the wire". They are
+        // not the same question and the guard belongs to only one of them.
+        //
+        // Taken from the resume itself rather than inferred from whichever
+        // event happens to arrive next. The server replays this run's live view
+        // and approval prompt immediately after this message, and those are
+        // one-shot: a pane still guessing at its own id when they land filters
+        // them out and never sees them again.
+        const named = (e?.active_conversations ?? []).filter((id): id is string => typeof id === 'string');
         if (!conversationIdRef.current) {
-          // Taken from the resume itself rather than inferred from whichever
-          // event happens to arrive next. The server replays this run's live
-          // view and approval prompt immediately after this message, and those
-          // are one-shot: a pane still guessing at its own id when they land
-          // filters them out and never sees them again.
-          const named = (e?.active_conversations ?? []).filter((id): id is string => typeof id === 'string');
           if (named.length > 1) {
             // Several runs came back at once, so this pane cannot know which of
             // them it is showing. Claim NOTHING: adopting the first id to
@@ -1579,14 +1583,29 @@ export function useChatSession(
         // `finished` settles nothing and reloads nothing: the answer is on disk
         // and the page never goes and gets it.
         //
-        // `??=`, not `=`. A pane that started its own run already knows whose
-        // it is, and a user who moved to another chat meanwhile would otherwise
+        // THE RUN THE RESUME NAMED, ahead of whatever this pane is showing.
+        // Reading the pane first was the same mistake in miniature that the
+        // origin exists to fix: start A, move to B, reload, and the replacement
+        // page has B on screen and A on the wire. `active_conversations` names
+        // A and is the only thing here that does.
+        //
+        // With several named, only when this pane's own conversation is one of
+        // them — then it is a fact rather than a guess. Otherwise nothing, on
+        // the same rule the adoption block uses: several runs came back at once
+        // and picking one would drop somebody else's conversation into this.
+        //
+        // Nothing named at all is an older server, and the pane's own id is
+        // then the only thing available; it is right whenever this pane is the
+        // one that started the run.
+        const mine = conversationIdRef.current;
+        const onTheWire = named.length === 1
+          ? named[0]
+          : (mine && named.includes(mine) ? mine : undefined);
+        // `??=`, not `=`. A pane that started its own run already knows whose it
+        // is, and a user who moved to another chat meanwhile would otherwise
         // have this overwrite A's origin with B — re-creating, through the
         // reconnect path, the exact bug the origin was introduced to fix.
-        //
-        // Undefined when the resume could establish nothing: several runs came
-        // back at once and claiming one would be a guess.
-        runOriginRef.current ??= conversationIdRef.current ?? pendingConversationIdRef.current;
+        runOriginRef.current ??= onTheWire ?? (named.length === 0 ? mine : undefined);
         return;
       }
       // Nothing running. On a page that WAS running something, the block below
