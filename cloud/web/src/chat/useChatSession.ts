@@ -805,6 +805,11 @@ export function useChatSession(
     setConversationId(id);
   }, []);
 
+  // A QUEUE, not one slot. The SDK keys parked escalations by requestId
+  // precisely because a Complex wave dispatches sections concurrently, so two
+  // can be waiting at once — storing one here threw the first away, and
+  // answering the visible prompt left the hidden section parked until timeout.
+  const [allEscalations, setEscalations] = useState<EscalationRequest[]>([]);
   /**
    * A run is over, so nothing is still waiting on its questions.
    *
@@ -814,21 +819,45 @@ export function useChatSession(
    * the user comes back to that conversation, and clicking it answers a waiter
    * that no longer exists, which reads as a control that silently does nothing.
    *
-   * Approvals only. The browser panel has its own authoritative ending in
-   * `browser:live-view` with `active: false`, which is scoped to the task
-   * rather than the conversation and so is the more precise of the two.
+   * ALL THREE BLOCKING GATES, and that is the point of it being one function.
+   *
+   * It started as approvals only, and the other two were then cleared
+   * wholesale at each ending — `setEscalations([])`, and a by-conversation
+   * clarification filter written out again at one of the two call sites. Every
+   * one of those queues spans conversations, so emptying one because A
+   * finished took down B's live section: its modal vanished with no
+   * `escalation:decide` ever sent, and the run stayed parked until the server
+   * timed it out. That is the same failure the dismissal path was fixed for one
+   * round earlier, through a different door — which is why the rule now lives
+   * here, with the three queues it governs, instead of being restated at each
+   * ending that has to obey it.
+   *
+   * An entry is kept only when it names a DIFFERENT conversation. One naming
+   * none is not "somebody else's, so leave it" — the server's `answersThisRun`
+   * requires an exact conversation id on every inbound answer, so an unkeyed
+   * entry cannot be answered by any run at all. Keeping it past the ending
+   * leaves a control that does nothing.
+   *
+   * WHICH IS WHY THERE IS NO `if (!cid) return` HERE, and the guard that used
+   * to be one is the reason `finishWithoutAck` cleared the whole queue before
+   * reaching this function. A first turn whose ack was lost never learned an
+   * id, so there is nothing to scope by — and its gates are precisely the ones
+   * no later event can name either. Called with no id this drops exactly the
+   * unkeyed entries and leaves every conversation's own work alone, which is
+   * the same rule, not an exception to it.
+   *
+   * The browser panel is deliberately not here. It has its own authoritative
+   * ending in `browser:live-view` with `active: false`, which is scoped to the
+   * TASK rather than the conversation and so is the more precise of the two.
    */
   const settleConversation = useCallback((cid?: string) => {
-    if (!cid) return;
-    setToolApprovals((q) => (q.some((a) => a.conversationId === cid)
-      ? q.filter((a) => a.conversationId !== cid)
-      : q));
+    // Identity kept when nothing matches, so an ending in one conversation does
+    // not re-render the panes of the others.
+    const elsewhere = (x: { conversationId?: string }) => !!x.conversationId && x.conversationId !== cid;
+    setToolApprovals((q) => (q.every(elsewhere) ? q : q.filter(elsewhere)));
+    setClarifications((q) => (q.every(elsewhere) ? q : q.filter(elsewhere)));
+    setEscalations((q) => (q.every(elsewhere) ? q : q.filter(elsewhere)));
   }, []);
-  // A QUEUE, not one slot. The SDK keys parked escalations by requestId
-  // precisely because a Complex wave dispatches sections concurrently, so two
-  // can be waiting at once — storing one here threw the first away, and
-  // answering the visible prompt left the hidden section parked until timeout.
-  const [allEscalations, setEscalations] = useState<EscalationRequest[]>([]);
   /**
    * The parked sections belonging to the chat on screen.
    *
@@ -1375,7 +1404,6 @@ export function useChatSession(
     setStatus(null);
     setApproval(null);
     setContextApproval(null);
-    setEscalations([]);
     // The streaming bubble is stitched from tokens that stopped arriving; the
     // persisted answer replaces it.
     setMessages((prev) => prev.filter((m) => !m.streaming));
@@ -1385,28 +1413,30 @@ export function useChatSession(
     // the wait without it clears the spinner over an empty chat while the
     // answer sits on a conversation the page cannot name.
     const target = cid ?? activeConversationId();
+    // BEFORE the early return, because the case with no id is the one that
+    // needs it most: a first turn whose ack was lost is holding gates that
+    // name a conversation this pane never learned, and nothing later can
+    // reach them. `settleConversation` takes no-id as a case rather than a
+    // reason to do nothing.
+    settleConversation(target);
     if (!target) return;
     pendingConversationIdRef.current = undefined;
     awaitingFirstTurnRef.current = false;
     conversationIdRef.current = target;
     setConversationId(target);
-    // Every question this run was holding is over, whatever it was told.
-    //
-    // The other gates above are cleared unconditionally; these cannot be, so
-    // they were missed. `allClarifications` spans conversations and is filtered
-    // on read, so emptying it would take down a form belonging to another pane
-    // — which is the thing that filtering exists to prevent. Cleared by
-    // conversation instead.
+    // Every question this run was holding is over, whatever it was told —
+    // approvals, questionnaires and parked sections alike, and all three by
+    // conversation. The rule is `settleConversation`'s; restating any part of
+    // it here is what let the escalation queue be emptied wholesale two lines
+    // above while the clarification queue beside it was scoped correctly.
     //
     // Deliberately NOT done by replaying closure tombstones for a finished run,
     // which was the other way to fix this. A terminal run cannot still be
-    // asking: teardown releases every pending clarification, so "closed" is
-    // implied by "done" and needs no per-id record to be trusted. Depending on
-    // the tombstone set here would make correctness contingent on it — and it
-    // is bounded at 32, so a run that asked more than that could evict the one
-    // id that mattered and leave the dead form standing again.
-    setClarifications((q) => q.filter((c) => c.conversationId !== target));
-    settleConversation(target);
+    // asking: teardown releases every pending gate, so "closed" is implied by
+    // "done" and needs no per-id record to be trusted. Depending on the
+    // tombstone set here would make correctness contingent on it — and it is
+    // bounded at 32, so a run that asked more than that could evict the one id
+    // that mattered and leave the dead form standing again.
     void reloadActivePath(target);
   }, [reloadActivePath, settleConversation]);
 
@@ -1800,14 +1830,18 @@ export function useChatSession(
           setStatus(null);
           setApproval(null);
           setContextApproval(null);
-          // The run is over, so any parked question is stale — its buttons
+          // A parked question is stale the moment its run ends — its buttons
           // would emit into a run that has already finished. Chat.stop() is the
           // case that made this visible (the server aborts the controller
           // WITHOUT disconnecting, the SDK settles the gate as 'skip', and the
-          // run acknowledges normally), but the same is true of every ending:
-          // clearing here covers stop, completion and error in one place,
-          // exactly as the approval prompts above already do.
-          setEscalations([]);
+          // run acknowledges normally), but the same is true of every ending.
+          //
+          // Both endings below reach `settleConversation`, which is where that
+          // now happens and which takes all three gates down TOGETHER and BY
+          // CONVERSATION. It used to be an unconditional `setEscalations([])`
+          // here: one socket carries concurrent runs, so this conversation
+          // finishing erased another one's live section without ever sending a
+          // decision for it.
           if (ack.error) {
             setError(ack.error);
             setMessages((prev) => prev.filter((m) => !m.streaming));

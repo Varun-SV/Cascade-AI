@@ -1499,3 +1499,92 @@ describe('a parked section belongs to the chat that parked it', () => {
     ]);
   });
 });
+
+// The same rule as the dismissal above, reached through the THREE other doors
+// that end a run. Each of them used to empty the whole queue, so a background
+// conversation's live section vanished with no decision ever sent for it — the
+// dismissal path was fixed and these were not, because the rule was written at
+// the door instead of where the queue lives.
+describe('a run ending takes down its own gates and nobody else\'s', () => {
+  /** A pane on `convo-A` with a run in flight and two conversations parked. */
+  function twoParked(initial?: string) {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, initial));
+    act(() => { void view.result.current.send({ prompt: 'refactor the parser' }); });
+    act(() => {
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-A', requestId: 'e1', sectionId: 's1', issues: [], timeoutMs: 300_000,
+      });
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-B', requestId: 'e2', sectionId: 's2', issues: [], timeoutMs: 300_000,
+      });
+    });
+    return { fake, view };
+  }
+
+  /** What survived, seen from B's pane. */
+  const stillParkedInB = (view: ReturnType<typeof twoParked>['view']) => {
+    act(() => { view.result.current.setConversationId('convo-B'); });
+    return view.result.current.escalations.map((e) => e.requestId);
+  };
+
+  it('leaves another conversation parked when this run acks', async () => {
+    const { fake, view } = twoParked('convo-A');
+    await waitFor(() => expect(view.result.current.escalations).toHaveLength(1));
+
+    act(() => { fake.ackRun('convo-A'); });
+
+    expect(stillParkedInB(view), 'B is still waiting on a person').toEqual(['e2']);
+    act(() => { view.result.current.resolveEscalation('retry'); });
+    expect(fake.sent.filter((m) => m.event === 'escalation:decide')).toEqual([
+      { event: 'escalation:decide', payload: { conversationId: 'convo-B', requestId: 'e2', action: 'retry' } },
+    ]);
+  });
+
+  it('leaves another conversation parked when this run fails', async () => {
+    // The error ack is a separate branch with its own cleanup, so it is its own
+    // door — and it was clearing the queue before the branch even split.
+    const { fake, view } = twoParked('convo-A');
+    await waitFor(() => expect(view.result.current.escalations).toHaveLength(1));
+
+    act(() => { fake.failRun('the run failed'); });
+
+    expect(view.result.current.error).toBe('the run failed');
+    expect(stillParkedInB(view), 'B did not fail').toEqual(['e2']);
+  });
+
+  it('leaves another conversation parked when this run ends without its ack', async () => {
+    // `finishWithoutAck` — the reconnect ending, where the ack went to a socket
+    // that no longer exists.
+    const { fake, view } = twoParked('convo-A');
+    await waitFor(() => expect(view.result.current.escalations).toHaveLength(1));
+
+    act(() => { fake.fire('run:resumed', { active: 0 }); });
+
+    await waitFor(() => expect(view.result.current.escalations).toHaveLength(0));
+    expect(stillParkedInB(view), 'B is untouched by A ending').toEqual(['e2']);
+  });
+
+  it('still clears a first turn whose conversation it never learned', async () => {
+    // The case that makes the no-id ending a CASE rather than a no-op. This
+    // pane never learned an id, so nothing scoped can name what it is holding
+    // — and an entry naming no conversation cannot be answered by any run,
+    // because the server requires an exact id on every answer. It goes; a
+    // keyed one belonging to somebody else does not.
+    const { fake, view } = twoParked(undefined);
+    act(() => {
+      fake.fire('escalation:decision-required', {
+        requestId: 'e-unkeyed', sectionId: 's3', issues: [], timeoutMs: 300_000,
+      });
+    });
+    await waitFor(() => expect(view.result.current.escalations.map((e) => e.requestId)).toContain('e-unkeyed'));
+
+    act(() => { fake.fire('run:resumed', { active: 0 }); });
+
+    await waitFor(() => expect(
+      view.result.current.escalations.map((e) => e.requestId),
+      'the unanswerable one is gone',
+    ).not.toContain('e-unkeyed'));
+    expect(stillParkedInB(view), 'and a real conversation keeps its section').toEqual(['e2']);
+  });
+});
