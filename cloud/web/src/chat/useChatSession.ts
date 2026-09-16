@@ -1718,6 +1718,14 @@ export function useChatSession(
       // carries it. Armed only here: adoption is a thing this pane does for a
       // run it started, never something an arriving event can do to it.
       awaitingFirstTurnRef.current = !conversationIdRef.current;
+      // WHICH CONVERSATION THIS RUN IS FOR, decided here rather than read back
+      // at the ending. The error ack is `{ error }` and carries no id at all,
+      // so the ending has to get one from somewhere — and "whatever this pane
+      // is showing now" is a different question with the same shape. Leave the
+      // chat while the run is in flight and it answers with the conversation
+      // you moved TO, which is how a failure in A came to settle B's live
+      // gates and leave A's standing.
+      const ranFor = conversationIdRef.current;
       setBusy(true);
       setError(null);
       setStatus('Sizing up the task…');
@@ -1853,7 +1861,16 @@ export function useChatSession(
             // stopped asking. `session:error` does not cover this — it
             // deliberately ignores errors while the ack is still reachable,
             // which is exactly the case here.
-            const failed = ack.conversationId ?? activeConversationId();
+            // `ranFor` before anything read at ack time, and NO
+            // `activeConversationId()` fallback — that is the navigated-away
+            // case, and settling the wrong conversation is worse than settling
+            // none. `pendingConversationIdRef` is the first-turn id this run
+            // adopted, read before the line below clears it; if the user left
+            // that chat it is already gone, and then there is nothing this pane
+            // can honestly name. Undefined is handled: `settleConversation`
+            // drops only the unanswerable unkeyed entries, and A's own gates
+            // still come down on `clarification:closed` / `escalation:closed`.
+            const failed = ack.conversationId ?? ranFor ?? pendingConversationIdRef.current;
             pendingConversationIdRef.current = undefined;
             awaitingFirstTurnRef.current = false;
             settleConversation(failed);

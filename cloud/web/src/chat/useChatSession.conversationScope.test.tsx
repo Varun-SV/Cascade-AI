@@ -1587,4 +1587,41 @@ describe('a run ending takes down its own gates and nobody else\'s', () => {
     ).not.toContain('e-unkeyed'));
     expect(stillParkedInB(view), 'and a real conversation keeps its section').toEqual(['e2']);
   });
+
+  it('settles the conversation the run was FOR when an error ack names none', async () => {
+    // The error ack is `{ error }` and carries no conversation id, so the
+    // ending has to get one from somewhere. Reading "whatever this pane is
+    // showing" answers a different question with the same shape: leave the
+    // chat while the run is in flight and it names the conversation you moved
+    // TO. A's failure then took down B's live gates and left A's standing —
+    // precisely inverted.
+    const { fake, view } = twoParked('convo-A');
+    await waitFor(() => expect(view.result.current.escalations).toHaveLength(1));
+
+    // Away, while A is still running.
+    act(() => { view.result.current.setConversationId('convo-B'); });
+    expect(view.result.current.escalations.map((e) => e.requestId)).toEqual(['e2']);
+
+    act(() => { fake.failRun('the run failed'); });
+
+    expect(view.result.current.escalations.map((e) => e.requestId), 'B is untouched').toEqual(['e2']);
+    act(() => { view.result.current.setConversationId('convo-A'); });
+    expect(view.result.current.escalations, 'and A, which failed, is settled').toEqual([]);
+  });
+
+  it('settles nothing keyed when a failed first turn never learned its id', async () => {
+    // The honest end of the same rule. A first turn adopts its id into a ref
+    // that navigating away deliberately clears, so after the switch this pane
+    // cannot name what it started. Naming the pane's CURRENT conversation
+    // would be the bug above; naming nothing costs a modal that
+    // `escalation:closed` takes down anyway.
+    const { fake, view } = twoParked(undefined);
+    act(() => { view.result.current.setConversationId('convo-B'); });
+
+    act(() => { fake.failRun('the run failed'); });
+
+    expect(view.result.current.escalations.map((e) => e.requestId), 'B is not settled by it').toEqual(['e2']);
+    act(() => { view.result.current.setConversationId('convo-A'); });
+    expect(view.result.current.escalations.map((e) => e.requestId), 'nor is A silently cleared').toEqual(['e1']);
+  });
 });
