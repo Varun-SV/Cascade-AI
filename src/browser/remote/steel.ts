@@ -152,11 +152,7 @@ export function isUsableSteelBase(url: string): boolean {
 }
 
 /**
- * Whether this credential can actually be sent — asked of the HEADER BUILT.
- *
- * The same question `isUsableSteelBase` settled for the URL, and the same
- * answer: construct the thing the request will construct and see whether it is
- * accepted, rather than enumerating what is forbidden.
+ * Whether this credential can actually be SENT.
  *
  * The env schema trims, which removes surrounding whitespace and nothing else,
  * so a key pasted out of a wrapped terminal or a here-doc can carry an embedded
@@ -166,18 +162,34 @@ export function isUsableSteelBase(url: string): boolean {
  * one call. The third member of the category `fetch` refuses before sending,
  * after userinfo and blocked ports.
  *
- * `Headers` is the WHATWG validity check itself and is synchronous, so this
- * tracks exactly what the runtime will refuse instead of a list of characters
- * that has to be kept in step with it. Verified against Node: CR, LF and NUL
- * are rejected; tab, space, DEL and non-ASCII are not.
+ * CONSTRUCTING A HEADER IS NOT SENDING ONE, and the first version of this asked
+ * the wrong one of those two questions. It built a `Headers` and trusted the
+ * result — but `Headers` (and `Request`) accept DEL and every C0 control except
+ * CR, LF and NUL, while the SEND path refuses them, so a key containing `\x7f`
+ * was advertised as usable and then died as `invalid steel-api-key header`
+ * before DNS. The comment here stated that as verified fact; it had verified
+ * the constructor, which is a different thing.
+ *
+ * So this asks the send path's own rule — RFC 9110's field value: horizontal
+ * tab, printable ASCII, or a high byte — because no constructor asks it.
+ * Confirmed by probing every byte from 0x00 to 0xff through `fetch` itself:
+ * refused are 0x00-0x08, 0x0a-0x1f and 0x7f, and this predicate agrees with it
+ * on all 256. The test pins that set rather than describing it.
+ *
+ * A scan rather than a regex: the equivalent character class is linear, but
+ * this file already carries two loops written to avoid CodeQL's backtracking
+ * finding, and one idiom is easier to keep true than two. Code points above
+ * 0xff fail here and at `fetch`, which refuses them as un-ByteString-able.
  */
 export function isUsableSteelKey(apiKey: string): boolean {
-  try {
-    new Headers({ [API_KEY_HEADER]: apiKey });
-    return true;
-  } catch {
+  for (const ch of apiKey) {
+    const c = ch.codePointAt(0) ?? 0;
+    if (c === 0x09) continue;
+    if (c >= 0x20 && c <= 0x7e) continue;
+    if (c >= 0x80 && c <= 0xff) continue;
     return false;
   }
+  return true;
 }
 
 /**

@@ -418,10 +418,31 @@ describe('the Browser control is advertised only where one can be built', () => 
     // self-hosted Steel behind a gateway takes a key too, and a malformed one
     // fails its first request just as hard.
     expect(providerIsUsable({ provider: 'steel', url: 'https://steel.internal', apiKey: 'sk-a\nb' })).toBe(false);
+    // DEL, and every other C0 control. CONSTRUCTING a header accepts these —
+    // `new Headers()` and `new Request()` both take `\x7f` — and the SEND path
+    // does not, so the first version of this check asked the question next to
+    // the one that mattered and advertised a key that dies as
+    // `invalid steel-api-key header` before DNS.
+    expect(providerIsUsable({ provider: 'steel', apiKey: 'sk-a\u007fb' }), 'DEL').toBe(false);
+    expect(providerIsUsable({ provider: 'steel', apiKey: 'sk-a\u0001b' }), 'and the rest of C0').toBe(false);
+    expect(providerIsUsable({ provider: 'steel', apiKey: 'sk-a\u001fb' })).toBe(false);
+    // The whole refused set, probed against `fetch` itself rather than
+    // described: 0x00-0x08, 0x0a-0x1f and 0x7f. Asserting it here means a
+    // change to the rule has to change this list too.
+    const refused: number[] = [];
+    for (let i = 0; i <= 0xff; i++) {
+      if (!providerIsUsable({ provider: 'steel', apiKey: `sk-a${String.fromCharCode(i)}b` })) refused.push(i);
+    }
+    expect(refused).toEqual([
+      ...Array.from({ length: 9 }, (_, i) => i),
+      ...Array.from({ length: 22 }, (_, i) => i + 10),
+      0x7f,
+    ]);
     // And a key with something merely UNUSUAL in it is still a key. Refusing
     // these would be the mirror mistake — a working deployment turned off to
     // guard against a character the runtime is perfectly happy to send.
     expect(providerIsUsable({ provider: 'steel', apiKey: 'sk-a\tb' }), 'a tab is a legal header value').toBe(true);
+    expect(providerIsUsable({ provider: 'steel', apiKey: 'sk-\u00e9' }), 'nor is a high byte a problem').toBe(true);
     expect(providerIsUsable({ provider: 'steel', apiKey: 'sk-live-0123456789' })).toBe(true);
   });
 

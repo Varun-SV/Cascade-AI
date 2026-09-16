@@ -509,22 +509,44 @@ export class Cascade extends EventEmitter {
    * failure by the thing delivering it.
    */
   private deliverGate(event: string, payload: unknown, onFailed: () => void): void {
-    let failed = false;
+    // "Did ANYBODY get it", not "did anybody fail". Deferring settlement fixed
+    // the ordering and still answered the wrong question: with two hosts, one
+    // throwing and one receiving the question perfectly well, settling closed
+    // the gate under the host that was already rendering it — so one broken
+    // observer still forced every clarification to proceed unanswered and every
+    // escalation to skip. A gate is undelivered only when NO listener took it.
+    let delivered = false;
+    let threw = false;
+    const pending: Promise<boolean>[] = [];
     for (const listener of this.rawListeners(event)) {
       try {
         const out = (listener as (this: Cascade, p: unknown) => unknown).call(this, payload);
         if (out && typeof (out as PromiseLike<unknown>).then === 'function') {
-          // Asynchronous failure cannot wait for the loop — it arrives after
-          // every listener has already been told — so it settles on arrival.
-          // Harmless: by then the opening event has reached everyone, which is
-          // the ordering the deferral above exists to protect.
-          void Promise.resolve(out).catch(() => { onFailed(); });
+          // Not delivered YET. An async host has taken the question but has not
+          // finished getting it anywhere, so its verdict joins the tally below
+          // rather than counting either way now.
+          pending.push(Promise.resolve(out).then(() => true, () => false));
+        } else {
+          delivered = true;
         }
       } catch {
-        failed = true;
+        threw = true;
       }
     }
-    if (failed) onFailed();
+    // Somebody has it. Nothing else can make that untrue, so no verdict is
+    // owed and the pending promises are left to settle unobserved-but-handled.
+    if (delivered) return;
+    // Every listener was synchronous and every one of them failed: answerable
+    // right here, which keeps the common case off the microtask queue.
+    if (pending.length === 0) {
+      if (threw) onFailed();
+      return;
+    }
+    // Otherwise wait for the async ones. `some` rather than `every`: one host
+    // succeeding is enough for the question to have been asked.
+    void Promise.all(pending).then((results) => {
+      if (!results.some(Boolean)) onFailed();
+    });
   }
 
   /**

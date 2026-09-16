@@ -150,4 +150,47 @@ describe('an ending names the run that was sent', () => {
     await act(async () => { releaseClassifier?.(null); await Promise.resolve(); });
     expect(fake.sent.filter((m) => m.event === 'chat:run'), 'the run never happened').toEqual([]);
   });
+
+  it('takes the unsent turn back off screen when the send is cancelled', async () => {
+    // `runChat` shows the user's turn before the classifier is consulted, so
+    // cancelling left it standing for a `chat:run` that never went out — an
+    // unsent message visible indefinitely, with nothing to remove it.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-A'));
+
+    act(() => { void view.result.current.send({ prompt: 'refactor the parser' }); });
+    expect(view.result.current.messages.map((m) => m.content), 'shown optimistically').toEqual(['refactor the parser']);
+
+    act(() => { view.result.current.stop(); });
+
+    expect(view.result.current.messages, 'and taken back when it is cancelled').toEqual([]);
+    await act(async () => { releaseClassifier?.(null); await Promise.resolve(); });
+    expect(view.result.current.messages, 'and it stays gone').toEqual([]);
+  });
+
+  it('restores the transcript a cancelled reconnect send had truncated', async () => {
+    // The worse half of the same bug. An edit or a regenerate TRUNCATES the
+    // branch before sending, so cancelling one left the conversation visibly
+    // shortened until a reload — messages the user still had, hidden on the
+    // strength of a run that never happened.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-A'));
+
+    // Two turns on screen, then an edit of the first — which truncates.
+    act(() => { void view.result.current.send({ prompt: 'first' }); });
+    await act(async () => { releaseClassifier?.(null); await Promise.resolve(); });
+    act(() => { fake.fire('stream:token', { conversationId: 'convo-A', text: 'an answer' }); });
+    const before = view.result.current.messages.length;
+    expect(before, 'a turn and its streaming reply').toBeGreaterThan(1);
+
+    act(() => { fake.fire('run:resumed', { active: 0, finished: [] }); });
+    expect(view.result.current.busy).toBe(false);
+    act(() => { void view.result.current.send({ prompt: 'second' }); });
+    act(() => { fake.fire('run:resumed', { active: 0, finished: [] }); });
+
+    expect(
+      view.result.current.messages.map((m) => m.content),
+      'the pre-send transcript is back, without the unsent turn',
+    ).not.toContain('second');
+  });
 });

@@ -303,10 +303,14 @@ describe('Cascade.askUser — a question that cannot hang the run', () => {
     await expect(c.askUser(ONE)).resolves.toEqual({ outcome: 'no-listener', answers: [] });
   });
 
-  it('takes down any form a listener DID manage to draw before a later one threw', async () => {
-    // Emit runs listeners in order, so one host can have rendered the
-    // questionnaire before the next one throws. Settling silently would leave
-    // that copy on screen answering a request the SDK has already given up on.
+  it('leaves the gate open when one host got it and another threw', async () => {
+    // This assertion used to be the OPPOSITE — that a partial failure settles
+    // the question and closes it — and the opposite was the bug. The host that
+    // rendered the form is waiting to be answered; closing the gate under it
+    // means one broken observer makes every clarification proceed unanswered
+    // and every escalation skip.
+    //
+    // "Undelivered" means NOBODY took it, not "somebody did not".
     const c = new Cascade(baseConfig, '/tmp');
     const closed: unknown[] = [];
     let drawnFor: string | undefined;
@@ -314,9 +318,15 @@ describe('Cascade.askUser — a question that cannot hang the run', () => {
     c.on('clarification:required', () => { throw new Error('second host is down'); });
     c.on('clarification:closed', (e: unknown) => closed.push(e));
 
-    await expect(c.askUser(ONE)).resolves.toEqual({ outcome: 'no-listener', answers: [] });
+    const asking = c.askUser(ONE);
+    await Promise.resolve();
     expect(drawnFor, 'the first host did render it').toBeTruthy();
-    expect(closed, 'and is told to take it down').toEqual([{ requestId: drawnFor }]);
+    expect(closed, 'and nothing has told it to stop').toEqual([]);
+
+    // So its answer still lands, which is the whole point.
+    c.resolveClarification([{ id: 'q1', value: 'A' }], drawnFor);
+    await expect(asking).resolves.toEqual({ outcome: 'answered', answers: [{ id: 'q1', value: 'A' }] });
+    expect(closed, 'closed once, by being answered').toEqual([{ requestId: drawnFor }]);
   });
 
   it('settles when an async listener REJECTS, which emit cannot even see', async () => {
@@ -350,11 +360,20 @@ describe('Cascade.askUser — a question that cannot hang the run', () => {
     // delivers its two listeners separately.
     const c = new Cascade(baseConfig, '/tmp');
     const reached: string[] = [];
+    let requestId: string | undefined;
     c.on('clarification:required', () => { throw new Error('first host is down'); });
-    c.on('clarification:required', () => { reached.push('second'); });
+    c.on('clarification:required', (e: unknown) => {
+      reached.push('second');
+      requestId = (e as { requestId: string }).requestId;
+    });
 
-    await expect(c.askUser(ONE)).resolves.toEqual({ outcome: 'no-listener', answers: [] });
+    const asking = c.askUser(ONE);
+    await Promise.resolve();
     expect(reached, 'the working host was still told').toEqual(['second']);
+
+    // And being told is only worth something if it can still answer.
+    c.resolveClarification([{ id: 'q1', value: 'B' }], requestId);
+    await expect(asking).resolves.toEqual({ outcome: 'answered', answers: [{ id: 'q1', value: 'B' }] });
   });
 
   it('gives a listener the emitter as `this`, the way emit does', async () => {
@@ -380,10 +399,14 @@ describe('Cascade.askUser — a question that cannot hang the run', () => {
     // "this is over" and then went on handing the OPENING event to the hosts
     // after it. The later host drew a form whose only closure notification had
     // already gone past, and it would stand there forever.
+    // BOTH hosts fail, because that is now the only way the gate settles as
+    // undelivered — a partial failure deliberately leaves it open. The ordering
+    // this pins is still the point: no closure may be announced until every
+    // host has had the opening event.
     const c = new Cascade(baseConfig, '/tmp');
     const order: string[] = [];
     c.on('clarification:required', () => { order.push('open:first'); throw new Error('first host is down'); });
-    c.on('clarification:required', () => { order.push('open:second'); });
+    c.on('clarification:required', () => { order.push('open:second'); throw new Error('second host is down'); });
     c.on('clarification:closed', () => { order.push('closed'); });
 
     await expect(c.askUser(ONE)).resolves.toEqual({ outcome: 'no-listener', answers: [] });

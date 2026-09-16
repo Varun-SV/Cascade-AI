@@ -1893,19 +1893,117 @@ describe('a run ending takes down its own gates and nobody else\'s', () => {
     const fake = fakeSocket();
     const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
 
-    act(() => { fake.fire('run:resumed', { active: 1, active_conversations: ['convo-A', 'convo-B'] }); });
+    act(() => { fake.fire('run:resumed', { active: 2, active_conversations: ['convo-A', 'convo-B'] }); });
     act(() => { fake.fire('context:approval-required', { conversationId: 'convo-A', inputTokens: 900_000 }); });
+    // Filtered on read like every other gate, so a blank pane showing no
+    // conversation is shown nobody's dialog. Open A to see A's.
+    expect(view.result.current.contextApproval, 'not while the pane shows nothing').toBeNull();
+    act(() => { view.result.current.setConversationId('convo-A'); });
     expect(view.result.current.contextApproval, 'A is asking').toBeTruthy();
 
     act(() => { fake.fire('session:complete', { conversationId: 'convo-A' }); });
     expect(view.result.current.contextApproval, 'and it goes when A does').toBeNull();
 
-    // B's own question survives its sibling's ending, and is answered by name.
+    // B's own question survives its sibling's ending, and is answered by name —
+    // from B's own chat, since the dialog you answer is the one you are shown.
     act(() => { fake.fire('context:approval-required', { conversationId: 'convo-B', inputTokens: 900_000 }); });
+    expect(view.result.current.contextApproval, 'not visible from A').toBeNull();
+    act(() => { view.result.current.setConversationId('convo-B'); });
+    expect(view.result.current.contextApproval, 'B is still asking').toBeTruthy();
     act(() => { view.result.current.resolveContextApproval(false); });
     expect(fake.sent.filter((m) => m.event === 'context:decision')).toEqual([
       { event: 'context:decision', payload: { approved: false, conversationId: 'convo-B' } },
     ]);
+  });
+
+  it('stays busy for a live run it cannot name', async () => {
+    // `active_conversations` is NOT the whole of `active`: the server drops
+    // runs whose conversation id is not known yet, which on a reloaded first
+    // turn is exactly the run being recovered. So the origin set can be empty
+    // while a run is genuinely live — and "the set is empty" is what releases
+    // the shared state. Processing the finished sibling then freed the composer
+    // over a run that was still going, whose own terminal event the cleared
+    // ack-lost flag would have discarded.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    // One live run the server could not name, plus one that ended in the gap.
+    act(() => {
+      fake.fire('run:resumed', { active: 1, active_conversations: [], finished: [{ conversationId: 'convo-A' }] });
+    });
+
+    expect(view.result.current.busy, 'the unnamed run is still running').toBe(true);
+
+    // And it is still heard from when it finally names itself.
+    act(() => { fake.fire('session:complete', { conversationId: 'convo-live' }); });
+    expect(view.result.current.busy, 'only now is the composer free').toBe(false);
+  });
+
+  it('does not wipe a live unnamed run\'s answer when a sibling finishes', async () => {
+    // The sharper half of the same fault, and the one a busy flag cannot show.
+    // `finishWithoutAck` releases the STREAMING BUBBLE along with the rest of
+    // the shared state — so a resume carrying a live run it cannot name plus a
+    // finished sibling took the live run's answer off screen mid-stream, while
+    // the run went on producing it.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    // A live run with no id of its own, streaming into the blank pane — the
+    // first-turn exception exists precisely for this.
+    act(() => { fake.fire('run:resumed', { active: 1, active_conversations: [] }); });
+    act(() => { fake.fire('stream:token', { text: 'half an answer' }); });
+    expect(view.result.current.messages.map((m) => m.content)).toEqual(['half an answer']);
+
+    // A sibling that ended during the gap is reported alongside it.
+    act(() => {
+      fake.fire('run:resumed', { active: 1, active_conversations: [], finished: [{ conversationId: 'convo-A' }] });
+    });
+
+    expect(
+      view.result.current.messages.map((m) => m.content),
+      'the live run keeps the answer it is still writing',
+    ).toEqual(['half an answer']);
+  });
+
+  it('drops tokens when it deliberately refused to adopt any conversation', async () => {
+    // The first-turn exception lets tokens through before this pane knows its
+    // id — the server tags events with an id the ack has not delivered yet. But
+    // `run:resumed` creates the OTHER no-id state on purpose: several runs came
+    // back and the pane claimed none of them. Accepting everything there
+    // concatenated two runs' answers into one buffer and one blank transcript.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { fake.fire('run:resumed', { active: 2, active_conversations: ['convo-A', 'convo-B'] }); });
+    expect(view.result.current.conversationId, 'claimed nothing, by design').toBeUndefined();
+
+    act(() => { fake.fire('stream:token', { conversationId: 'convo-A', text: 'from A' }); });
+    act(() => { fake.fire('stream:token', { conversationId: 'convo-B', text: ' and from B' }); });
+
+    expect(view.result.current.messages, 'neither run wrote into the blank pane').toEqual([]);
+  });
+
+  it('does not put a background run\'s failure in front of the chat on screen', async () => {
+    // Every other event in this hook is filtered by conversation, and an error
+    // banner is the most conspicuous thing it has. A resume reporting a failed
+    // background run put its message in front of somebody watching a different
+    // run succeed — and with several finished entries, whichever was processed
+    // last simply won.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-B'));
+
+    act(() => {
+      fake.fire('run:resumed', {
+        active: 1,
+        active_conversations: ['convo-B'],
+        finished: [{ conversationId: 'convo-A', error: 'the background run failed' }],
+      });
+    });
+
+    expect(view.result.current.error, 'not this chat\'s failure to report').toBeNull();
+    // Settled all the same — the banner is the only thing that is scoped.
+    act(() => { view.result.current.setConversationId('convo-A'); });
+    expect(view.result.current.escalations, 'A is still cleaned up').toEqual([]);
   });
 
   it('adopts nothing when several runs ended and the pane has no conversation', async () => {

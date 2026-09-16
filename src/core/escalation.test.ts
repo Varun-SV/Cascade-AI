@@ -349,10 +349,11 @@ describe('escalation gate', () => {
     await expect(gateOf(c)(ctx('a'), 'task-1')).resolves.toEqual({ action: 'skip', automatic: true });
   });
 
-  it('closes a modal another host DID open before a later listener threw', async () => {
-    // Listeners run in order, so one dashboard can have the section on screen
-    // when the next host throws. Without the close it stays there, answerable
-    // into a gate that has already settled.
+  it('leaves the section parked when one host got it and another threw', async () => {
+    // This used to assert the opposite — that a partial failure skips the
+    // section — and the opposite was the bug. One dashboard has the section on
+    // screen waiting for a decision; a second host being down is not a reason
+    // to skip work on the first one's behalf.
     const c = new Cascade(config, '/tmp');
     const closed: unknown[] = [];
     let openedFor: string | undefined;
@@ -360,11 +361,14 @@ describe('escalation gate', () => {
     c.on('escalation:decision-required', () => { throw new Error('second host is down'); });
     c.on('escalation:closed', (e: unknown) => closed.push(e));
 
-    await expect(gateOf(c)(ctx('a'), 'task-1')).resolves.toEqual({ action: 'skip', automatic: true });
+    const parked = gateOf(c)(ctx('a'), 'task-1');
+    await Promise.resolve();
     expect(openedFor, 'the first host did open it').toBeTruthy();
-    expect(closed, 'and is told to close it').toEqual([
-      { taskId: 'task-1', requestId: openedFor, sectionId: 'a' },
-    ]);
+    expect(closed, 'and nothing has closed it under them').toEqual([]);
+
+    c.resolveEscalation('retry', undefined, openedFor);
+    await expect(parked, 'the decision they gave is the one that lands')
+      .resolves.toEqual({ action: 'retry' });
   });
 
   it('releases the section when an async listener REJECTS, not only when it throws', async () => {

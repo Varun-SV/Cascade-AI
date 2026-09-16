@@ -429,8 +429,32 @@ export function useChatSession(
    * Identity rather than a flag, so a cancelled send cannot be confused with
    * the next one: `emitRun` refuses unless the marker is still the one its own
    * `runChat` created.
+   *
+   * It carries the transcript as it stood BEFORE the send, because cancelling
+   * has to undo the optimistic mutation as well as the intent. `runChat` shows
+   * the user's turn — and, for an edit or a regenerate, TRUNCATES the branch —
+   * before the classifier is consulted, so a cancelled send otherwise left an
+   * unsent message on screen forever, or a conversation visibly shortened, for
+   * a `chat:run` that never went out.
    */
-  const pendingSendRef = useRef<symbol | undefined>(undefined);
+  const pendingSendRef = useRef<{ token: symbol; restore: ChatMessage[] } | undefined>(undefined);
+  /**
+   * Runs this pane is carrying that it cannot NAME.
+   *
+   * `active_conversations` is not the whole of `active`: the server drops runs
+   * whose conversation id is not known yet (socket.ts), which on a reloaded
+   * first turn is exactly the run being recovered. So the origin set can be
+   * empty while a run is genuinely live — and once the shared state is released
+   * on "the set is empty", that reads as "nothing is running" and frees the
+   * composer over a run that is still going, whose own terminal event the
+   * cleared ack-lost flag then discards.
+   *
+   * A count rather than a sentinel in the set, because the set is what gets
+   * SETTLED and there is nothing here to settle by name. It goes down when one
+   * of them is adopted — a named run belongs in the set instead — and a report
+   * that ends everything clears it outright.
+   */
+  const unnamedRunsRef = useRef(0);
   const runOriginsRef = useRef<Set<string>>(new Set());
   /** The conversation this pane's events belong to — known, or adopted below. */
   const activeConversationId = (): string | undefined =>
@@ -445,6 +469,8 @@ export function useChatSession(
       // `runOriginsRef`. This is the only place a first turn ever learns the id
       // the server minted for it.
       runOriginsRef.current.add(convo);
+      // And it is no longer one of the runs this pane cannot name.
+      if (unnamedRunsRef.current > 0) unnamedRunsRef.current -= 1;
     }
   };
   /**
@@ -934,7 +960,20 @@ export function useChatSession(
   const escalation = escalations[0] ?? null;
   // Extended context: a pending "process this huge input?" confirm, and a
   // transient notice once a compaction actually happened.
-  const [contextApproval, setContextApproval] = useState<ContextApprovalInfo | null>(null);
+  // A QUEUE, not one slot — the last gate still holding a single value. Two
+  // resumed conversations can reach the extended-context gate at once, and the
+  // second overwrote the first: only the newest could be answered, and the run
+  // it displaced sat blocked until its own gate timed out.
+  const [allContextApprovals, setContextApprovals] = useState<ContextApprovalInfo[]>([]);
+  /**
+   * The one this chat is being asked, filtered on read exactly as the other
+   * three gates are — so a background conversation's dialog is not put in front
+   * of somebody watching a different run, and switching chats does not strand
+   * the question the run is still blocked on.
+   */
+  const contextApproval = allContextApprovals.find(
+    (a) => !a.conversationId || a.conversationId === currentConversation,
+  ) ?? null;
   const [compactionNotice, setCompactionNotice] = useState<string | null>(null);
   /**
    * A provider's account went out of service mid-run and the work moved
@@ -1027,7 +1066,21 @@ export function useChatSession(
       // `undefined` would discard the entire first run — the most common case
       // there is.
       const current = activeConversationId();
-      if (current && e.conversationId && e.conversationId !== current) return;
+      if (current) {
+        if (e.conversationId && e.conversationId !== current) return;
+      } else if (!awaitingFirstTurnRef.current) {
+        // No id AND not expecting one. The first-turn exception exists because
+        // the server tags events with an id this side does not learn until the
+        // closing ack — but `run:resumed` deliberately creates the other
+        // no-id state, where SEVERAL runs came back and the pane refused to
+        // claim any of them. Accepting everything there concatenated two runs'
+        // answers into one buffer and one blank transcript.
+        //
+        // `awaitingFirstTurnRef` is what separates them: it is armed when this
+        // pane expects to learn an id for a run it owns, and explicitly
+        // disarmed by the multi-resume branch that claims nothing.
+        return;
+      }
       streamingRef.current += e.text;
       setStatus(null); // presenter tokens are flowing — drop the "planning" chip
       setMessages((prev) => {
@@ -1168,10 +1221,12 @@ export function useChatSession(
       // it was, so a sibling run's ending could not take it down and answering
       // it sent a decision nothing could route.
       adoptConversationId(e?.conversationId);
-      setContextApproval(e);
+      setContextApprovals((q) => (q.some((a) => a.conversationId === e?.conversationId) ? q : [...q, e]));
     };
-    const onCompacted = (e: { kind?: string; chunks?: number; foldedTurns?: number; truncated?: boolean }) => {
-      setContextApproval(null);
+    const onCompacted = (e: { kind?: string; chunks?: number; foldedTurns?: number; truncated?: boolean; conversationId?: string }) => {
+      // The compaction happened, so THAT run's question is over — and only
+      // that one. It used to empty the single slot whoever had asked.
+      setContextApprovals((q) => q.filter((a) => (a.conversationId ?? '') !== (e?.conversationId ?? '')));
       if (e.kind === 'input') {
         setCompactionNotice(`Compacted a large input into ${e.chunks ?? 0} chunks${e.truncated ? ' (truncated at the cap)' : ''}.`);
       } else if (e.kind === 'history') {
@@ -1475,7 +1530,24 @@ export function useChatSession(
    * interrupted by a reconnect needs a second way to end or the composer stays
    * disabled forever with no error and no reply.
    */
-  const finishWithoutAck = useCallback((cid?: string) => {
+  /**
+   * Forget a send that never reached the wire, and put the view back.
+   *
+   * Both halves matter and they are easy to separate by accident: dropping the
+   * marker stops the classifier's continuation from emitting, and restoring the
+   * transcript undoes what was shown on the strength of a run that will now
+   * never happen. Restored LOCALLY from the pre-send array rather than
+   * re-fetched, for the same reason the frame-size refusal does it that way —
+   * a value already in memory cannot fail to arrive.
+   */
+  const cancelPendingSend = useCallback(() => {
+    const pending = pendingSendRef.current;
+    if (!pending) return;
+    pendingSendRef.current = undefined;
+    setMessages(pending.restore);
+  }, []);
+
+  const finishWithoutAck = useCallback((cid?: string, reportedByResume = false) => {
     // WHICH runs this ending covers, decided before anything is cleared.
     //
     // A KEYED ending names one run; a report with no id ends every run this
@@ -1486,11 +1558,30 @@ export function useChatSession(
     // on its behalf. Its gates and its answer were never reconciled, and the
     // composer was free to start another run on top of it.
     const ended = cid ? [cid] : [...runOriginsRef.current];
-    for (const id of ended) runOriginsRef.current.delete(id);
+    for (const id of ended) {
+      // A keyed ending for a run this pane could not name is usually that run
+      // naming ITSELF, at last — the terminal event carries the id
+      // `active_conversations` could not. Without that the count never comes
+      // down and `lastOneOut` never becomes true, which is this mechanism's own
+      // failure inverted: the composer disabled forever rather than freed early.
+      //
+      // `reportedByResume` is the exception, and it is a fact rather than a
+      // guess: a resume's `finished` entries are BY CONSTRUCTION not among its
+      // active runs, so one of them can never be an unnamed live run naming
+      // itself. Letting it discharge the count released the shared state — the
+      // streaming bubble included — out from under a run that was still
+      // writing its answer.
+      if (!runOriginsRef.current.delete(id) && !reportedByResume && unnamedRunsRef.current > 0) {
+        unnamedRunsRef.current -= 1;
+      }
+    }
     // The shared state belongs to ALL of them, so it is only safe to release
     // once the last one has ended. A keyed ending with siblings still running
     // leaves `busy` and the lost-ack flag exactly as they were.
-    const lastOneOut = runOriginsRef.current.size === 0;
+    // A report with no id ends everything this pane carries, named or not; a
+    // keyed one speaks only for itself and leaves the unnamed count alone.
+    if (!cid) unnamedRunsRef.current = 0;
+    const lastOneOut = runOriginsRef.current.size === 0 && unnamedRunsRef.current === 0;
     if (lastOneOut) {
       ackLostRef.current = false;
       setBusy(false);
@@ -1500,14 +1591,17 @@ export function useChatSession(
       // yet, not merely stop waiting for it. Otherwise the classifier's
       // continuation emits afterwards into a pane that has already cleared
       // `busy`, and the run it starts has no Stop button.
-      pendingSendRef.current = undefined;
+      //
+      // And UNDO it: the optimistic turn was shown before the classifier ran,
+      // so a cancelled send leaves it standing for a run that never happened.
+      cancelPendingSend();
     }
     // NOT behind `lastOneOut`, unlike the four above. Those are properties of
     // the pane; a context approval is a question one RUN is waiting on, and
     // leaving the ended run's dialog up is not merely untidy — answering it
     // sends a decision that the sibling still waiting at its own context gate
     // would take as its own.
-    setContextApproval((q) => (q && ended.includes(q.conversationId ?? '') ? null : q));
+    setContextApprovals((q) => q.filter((a) => !ended.includes(a.conversationId ?? '')));
     // The streaming bubble is stitched from tokens that stopped arriving; the
     // persisted answer replaces it. Also only once the last run is out — a
     // sibling still streaming into this pane must not have its bubble taken
@@ -1564,7 +1658,7 @@ export function useChatSession(
     // bounded at 32, so a run that asked more than that could evict the one id
     // that mattered and leave the dead form standing again.
     void reloadActivePath(show);
-  }, [reloadActivePath, settleConversation]);
+  }, [reloadActivePath, settleConversation, cancelPendingSend]);
 
   // A reconnect re-reads the transcript, and settles what the lost ack cannot.
   //
@@ -1694,6 +1788,7 @@ export function useChatSession(
           for (const id of named) runOriginsRef.current.add(id);
           if (named.length === 0 && mine) runOriginsRef.current.add(mine);
         }
+
         // AND THE ONES THAT FINISHED, which this branch used to return past.
         //
         // A resume reports both: `active` names what is still running and
@@ -1708,9 +1803,40 @@ export function useChatSession(
         // `finishWithoutAck` per entry, because that is what a keyed ending
         // means: settle that conversation's gates, take it out of the set, and
         // leave everything shared alone while a sibling is still running.
+        // What `active` counted and the origin set cannot represent. Measured
+        // against the SET rather than against `active_conversations`, because
+        // the pane's own id may be standing in for an unnamed run above — that
+        // is a guess about which run, and counting it twice would leave the
+        // composer disabled forever when that run ends by name.
+        //
+        // Asserted BEFORE the finished entries are processed, because each of
+        // them asks `finishWithoutAck` whether this was the last run out and
+        // that answer is only right if the live ones are already counted.
+        const liveButUnnamed = () => Math.max(0, (e?.active ?? 0) - runOriginsRef.current.size);
+        unnamedRunsRef.current = liveButUnnamed();
+        // And AGAIN afterwards. `finishWithoutAck` treats a keyed ending for a
+        // run not in the set as that run naming itself at last, which is right
+        // between resumes and wrong here: a `finished` entry was never one of
+        // the ACTIVE runs, so letting it discharge the count would free the
+        // composer over the live run this exists to protect. The resume is the
+        // authoritative statement of what is live, so it gets the last word
+        // rather than an argument about which caller meant what.
         for (const done of e?.finished ?? []) {
-          if (done?.error) setError(done.error);
-          if (done?.conversationId) finishWithoutAck(done.conversationId);
+          // SETTLED always, SHOWN only if it is this chat's. The rest of this
+          // hook filters tokens, statuses and every gate by conversation, and
+          // an error banner is the most conspicuous thing it has — putting a
+          // background run's failure in front of someone watching a different
+          // run succeed is worse than the missed notice, and with several
+          // finished entries whichever came last simply won.
+          if (done?.error && done.conversationId === activeConversationId()) setError(done.error);
+          if (done?.conversationId) finishWithoutAck(done.conversationId, true);
+        }
+        unnamedRunsRef.current = liveButUnnamed();
+        // Whatever the entries above did to the pane, at least one run is still
+        // going — so it is still busy and its ack is still lost.
+        if (unnamedRunsRef.current > 0 || runOriginsRef.current.size > 0) {
+          ackLostRef.current = true;
+          setBusy(true);
         }
         return;
       }
@@ -1909,7 +2035,9 @@ export function useChatSession(
       // is covered by it — including the classifier continuation below, which
       // runs a turn later and is the reason this exists.
       const thisSend = Symbol('send');
-      pendingSendRef.current = thisSend;
+      // `transcriptBeforeSend` is captured above, before any optimistic change,
+      // and is exactly what the frame-size refusal already restores.
+      pendingSendRef.current = { token: thisSend, restore: transcriptBeforeSend };
       setBusy(true);
       setError(null);
       setStatus('Sizing up the task…');
@@ -1927,7 +2055,9 @@ export function useChatSession(
       // reach the `browserMode` already captured in this closure.
       if (fast) setBrowserModeRaw(false);
       setApproval(null);
-      setContextApproval(null);
+      // This chat's own question only. A background conversation's context gate
+      // is not resolved by somebody typing in a different chat.
+      setContextApprovals((q) => q.filter((a) => (a.conversationId ?? '') !== (conversationIdRef.current ?? '')));
       setCompactionNotice(null);
       setKnowledgeNotice(null);
       // The banner says "out for THIS run". Verdicts are cleared at the router's
@@ -1948,7 +2078,7 @@ export function useChatSession(
         // The send may have been settled while the classifier was thinking —
         // by a reconnect that found no run, or by Stop. Emitting now would put
         // a run on the wire that this pane has already told itself is over.
-        if (pendingSendRef.current !== thisSend) return;
+        if (pendingSendRef.current?.token !== thisSend) return;
         // Claimed: from here the send either goes out or is refused locally,
         // and either way it is no longer waiting to be emitted.
         pendingSendRef.current = undefined;
@@ -2040,6 +2170,9 @@ export function useChatSession(
         // an origin of B, so the ending settled B's gates and left A's
         // standing. The id that goes on the wire is the id this run is for.
         runOriginsRef.current = new Set(payload.conversationId ? [payload.conversationId] : []);
+        // This pane starting a run replaces whatever a resume left, including
+        // its count of runs it could not name.
+        unnamedRunsRef.current = payload.conversationId ? 0 : 1;
         socket.emit('chat:run', payload, onAck);
       };
 
@@ -2051,10 +2184,14 @@ export function useChatSession(
           // `??=` in `run:resumed` mistake it for an inherited run's.
           const origins = [...runOriginsRef.current];
           runOriginsRef.current = new Set();
+          unnamedRunsRef.current = 0;
           setBusy(false);
           setStatus(null);
           setApproval(null);
-          setContextApproval(null);
+          // Scoped like the rest of this gate family: the ack belongs to the
+          // run this pane emitted, and only its question is over.
+          setContextApprovals((q) => q.filter((a) => !origins.includes(a.conversationId ?? '')
+            && (a.conversationId ?? '') !== (ack.conversationId ?? '\u0000none')));
           // A parked question is stale the moment its run ends — its buttons
           // would emit into a run that has already finished. Chat.stop() is the
           // case that made this visible (the server aborts the controller
@@ -2170,14 +2307,14 @@ export function useChatSession(
     // just asked not to happen. Not reported; the same window as the
     // reconnect case above, through the other door.
     if (pendingSendRef.current) {
-      pendingSendRef.current = undefined;
+      cancelPendingSend();
       setBusy(false);
       setStatus(null);
       return;
     }
     socket.emit('chat:stop');
     setStatus('Stopping…');
-  }, [socket, busy]);
+  }, [socket, busy, cancelPendingSend]);
 
   /**
    * Answer a section that escalated.
@@ -2268,9 +2405,13 @@ export function useChatSession(
     // with two resumed together, answering a dialog left over from the run that
     // ended was consumed by the one still waiting, and the user's "no" to a
     // finished run compacted a live one.
-    const cid = contextApproval?.conversationId ?? activeConversationId();
+    const answering = contextApproval;
+    if (!answering) return;
+    const cid = answering.conversationId ?? activeConversationId();
     socket?.emit('context:decision', { approved, ...(cid ? { conversationId: cid } : {}) });
-    setContextApproval(null);
+    // Only the one that was answered. Clearing the queue would displace a
+    // sibling's question exactly as the single slot did.
+    setContextApprovals((q) => q.filter((a) => a !== answering));
   }, [socket, contextApproval]);
 
   // Regenerate a reply as a NEW sibling of the given assistant turn (or the last
