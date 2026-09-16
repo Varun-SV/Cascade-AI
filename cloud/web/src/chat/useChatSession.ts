@@ -494,7 +494,27 @@ export function useChatSession(
    * unsent message on screen forever, or a conversation visibly shortened, for
    * a `chat:run` that never went out.
    */
-  const pendingSendRef = useRef<{ token: symbol; restore: ChatMessage[] } | undefined>(undefined);
+  const pendingSendRef = useRef<{
+    token: symbol;
+    restore: ChatMessage[];
+    /**
+     * WHICH CHAT the snapshot is of. Restoring it anywhere else is not a
+     * rollback, it is an overwrite: start a send in A, open B while the
+     * classifier is still thinking, press Stop, and B's loaded transcript was
+     * replaced by A's pre-send array — messages from the wrong conversation,
+     * standing until another reload.
+     */
+    conversationId?: string;
+    /**
+     * And whether this send is what ARMED first-turn adoption, so cancelling
+     * can disarm it. Cancellation put the transcript back and left the routing
+     * state alone, so a blank pane stayed willing to adopt — and the next event
+     * from a background or inherited run naming a conversation claimed the pane
+     * for a run it never started, bringing that run's browser panel and
+     * approval prompts with it.
+     */
+    armedFirstTurn: boolean;
+  } | undefined>(undefined);
   /**
    * Runs this pane is carrying that it cannot NAME.
    *
@@ -1614,7 +1634,19 @@ export function useChatSession(
     const pending = pendingSendRef.current;
     if (!pending) return;
     pendingSendRef.current = undefined;
-    setMessages(pending.restore);
+    // Adoption is armed by a send and must not outlive one. See `armedFirstTurn`.
+    if (pending.armedFirstTurn) awaitingFirstTurnRef.current = false;
+    // ONLY IN THE CHAT IT IS A SNAPSHOT OF. A cancelled send in A has nothing
+    // to say about what B should be showing, and the pane may well have moved:
+    // the whole reason this deferred cancellation exists is that the classifier
+    // runs for a while, which is time enough to open another chat.
+    //
+    // Skipping the restore loses nothing when the pane has moved — switching
+    // conversations reloads the transcript from the server, and the optimistic
+    // turn was never persisted, so what comes back is already correct.
+    if ((pending.conversationId ?? '') === (conversationIdRef.current ?? '')) {
+      setMessages(pending.restore);
+    }
   }, []);
 
   /**
@@ -1854,6 +1886,21 @@ export function useChatSession(
         // one-shot: a pane still guessing at its own id when they land filters
         // them out and never sees them again.
         const named = (e?.active_conversations ?? []).filter((id): id is string => typeof id === 'string');
+        // A SEND THAT HAS NOT GONE OUT IS OVER, here as much as on the
+        // `active: 0` path — and this branch is where it was missed.
+        //
+        // The successor of a tab collision is told `active: 0`, starts a send,
+        // and while its classifier is still thinking the incumbent drops and
+        // hands over its live run. So this branch runs with a pending send
+        // underneath it. Left alone, the classifier's continuation then emits a
+        // SECOND run and overwrites `runOriginsRef` — the inherited run loses
+        // its origin and nothing will ever end it — and on a plan that allows
+        // one run at a time the second is refused outright, whose ack clears
+        // `busy` and the lost-ack flag over a run that is still going.
+        //
+        // The typed turn is taken back off screen with it, which is the honest
+        // outcome: it was never sent, and there is no room to send it.
+        cancelPendingSend();
         if (!conversationIdRef.current) {
           if (named.length > 1) {
             // Several runs came back at once, so this pane cannot know which of
@@ -2087,7 +2134,7 @@ export function useChatSession(
       socket.off('session:complete', onComplete);
       socket.off('session:error', onError);
     };
-  }, [socket, reloadActivePath, finishWithoutAck, beginWatching]);
+  }, [socket, reloadActivePath, finishWithoutAck, beginWatching, cancelPendingSend]);
 
   // Watch the browser this pane is actually showing, and only that one.
   //
@@ -2222,7 +2269,12 @@ export function useChatSession(
       const thisSend = Symbol('send');
       // `transcriptBeforeSend` is captured above, before any optimistic change,
       // and is exactly what the frame-size refusal already restores.
-      pendingSendRef.current = { token: thisSend, restore: transcriptBeforeSend };
+      pendingSendRef.current = {
+        token: thisSend,
+        restore: transcriptBeforeSend,
+        conversationId: conversationIdRef.current,
+        armedFirstTurn: awaitingFirstTurnRef.current,
+      };
       setBusy(true);
       setError(null);
       setStatus('Sizing up the task…');
@@ -2264,9 +2316,6 @@ export function useChatSession(
         // by a reconnect that found no run, or by Stop. Emitting now would put
         // a run on the wire that this pane has already told itself is over.
         if (pendingSendRef.current?.token !== thisSend) return;
-        // Claimed: from here the send either goes out or is refused locally,
-        // and either way it is no longer waiting to be emitted.
-        pendingSendRef.current = undefined;
         const payload = {
             conversationId,
             prompt: text,
@@ -2320,20 +2369,26 @@ export function useChatSession(
           setBusy(false);
           setStatus(null);
           setError(tooBig);
-          // Put the transcript back exactly as it was. Nothing was emitted or
-          // persisted, so the pre-send array is authoritative and restoring it
-          // covers every caller in one step: a fresh send loses the optimistic
-          // user turn, and an edit or regenerate — which truncate before
-          // calling this — get their hidden reply and later turns back.
+          // THROUGH `cancelPendingSend`, not a restore of its own.
           //
-          // Restored LOCALLY rather than re-fetched. Recovery went through
-          // reloadActivePath, whose getMessages call swallows its own failure
-          // by design, so a network blip left the conversation looking
-          // permanently shortened for an operation that never happened. A
-          // value already in memory cannot fail to arrive.
-          setMessages(transcriptBeforeSend);
+          // This is the same cancellation as Stop and the reconnect, reached
+          // through a third door, and it had its own copy of half the rule: it
+          // put the transcript back unconditionally — into whatever chat the
+          // pane had moved to while the classifier was thinking — and left
+          // first-turn adoption armed for a run that was never sent. Both are
+          // `cancelPendingSend`'s job, and stating them here again is exactly
+          // how the two drifted apart.
+          //
+          // Which is also why the send is claimed BELOW this rather than above
+          // it: a refusal has to leave the marker in place for this call to
+          // find. There is no await between the token check and the emit, so
+          // nothing can slip in and send twice in the meantime.
+          cancelPendingSend();
           return;
         }
+        // Claimed: from here the send goes out, and it is no longer waiting to
+        // be emitted.
+        pendingSendRef.current = undefined;
         // WHICH CONVERSATION THIS RUN IS FOR, recorded HERE — immediately
         // before the emit, and after every local refusal above it.
         //
@@ -2475,7 +2530,7 @@ export function useChatSession(
         emitRun();
       }
     },
-    [socket, busy, conversationId, providers, skillId, routingMode, forceTier, webSearch, browserMode, webSearchConfig, messages, reloadActivePath],
+    [socket, busy, conversationId, providers, skillId, routingMode, forceTier, webSearch, browserMode, webSearchConfig, messages, reloadActivePath, cancelPendingSend],
   );
 
   const send = useCallback((input: SendInput) => runChat(input.prompt, input.attachments, true, input.fast), [runChat]);

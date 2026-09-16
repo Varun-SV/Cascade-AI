@@ -61,6 +61,8 @@ function fakeSocket() {
     sent,
     /** The run failed, on an ack that carries no conversation id at all. */
     failRun(error = 'the run failed') { runAcks.shift()?.({ error }); },
+    /** And the ordinary ending, so a test can get a second send past `busy`. */
+    ackRun(conversationId: string) { runAcks.shift()?.({ conversationId, output: 'done' }); },
     fire(event: string, payload?: unknown) { for (const h of [...(handlers.get(event) ?? [])]) h(payload); },
     socket: socket as unknown as Socket,
   };
@@ -166,6 +168,124 @@ describe('an ending names the run that was sent', () => {
     expect(view.result.current.messages, 'and taken back when it is cancelled').toEqual([]);
     await act(async () => { releaseClassifier?.(null); await Promise.resolve(); });
     expect(view.result.current.messages, 'and it stays gone').toEqual([]);
+  });
+
+  it('does not restore one chat\'s snapshot into another chat', async () => {
+    // The rollback and the chat it belongs to are two things, and cancellation
+    // knew only the first. The classifier runs for a while — that is the whole
+    // reason this cancellation is deferred — which is time enough to open
+    // another chat, and the pre-send snapshot was then written over WHATEVER
+    // was on screen. B's loaded transcript replaced by A's, standing until
+    // another reload.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-A'));
+
+    // A turn lands in A, so there is a snapshot worth mis-restoring.
+    act(() => { void view.result.current.send({ prompt: 'first' }); });
+    await act(async () => { releaseClassifier?.(null); await Promise.resolve(); });
+    act(() => { fake.ackRun('convo-A'); });
+
+    // A second send in A, then the user opens B while it is still classifying.
+    act(() => { void view.result.current.send({ prompt: 'second' }); });
+    act(() => { view.result.current.setConversationId('convo-B'); });
+    // Let B's own transcript land, so what is on screen is genuinely B's and
+    // not A's optimistic turn still waiting to be replaced.
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(view.result.current.messages, 'B, freshly loaded').toEqual([]);
+
+    act(() => { view.result.current.stop(); });
+
+    expect(
+      view.result.current.messages,
+      'B is left exactly as it was — A\'s rollback is not B\'s business',
+    ).toEqual([]);
+    await act(async () => { releaseClassifier?.(null); await Promise.resolve(); });
+    expect(fake.sent.filter((m) => m.event === 'chat:run'), 'and the cancelled send stayed cancelled').toHaveLength(1);
+  });
+
+  it('stops expecting a first-turn id once the send is cancelled', async () => {
+    // Cancellation put the transcript back and left the ROUTING state alone.
+    // `awaitingFirstTurnRef` stayed armed from `runChat`, so the blank pane was
+    // still willing to adopt — and the next event naming a conversation, from a
+    // background or inherited run this pane never started, claimed it. That
+    // run's browser panel and approval prompts then rendered in a chat the user
+    // had never opened.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    expect(view.result.current.conversationId, 'a blank pane').toBeUndefined();
+
+    act(() => { void view.result.current.send({ prompt: 'refactor the parser' }); });
+    act(() => { view.result.current.stop(); });
+
+    // Somebody else's run says its name. The pane must not take it.
+    act(() => {
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-elsewhere', requestId: 'e1', sectionId: 's1', issues: [], timeoutMs: 300_000,
+      });
+    });
+
+    expect(view.result.current.conversationId, 'the pane claimed nothing').toBeUndefined();
+    expect(
+      view.result.current.escalations,
+      'and is not showing a run it never started',
+    ).toEqual([]);
+  });
+
+  it('disarms adoption when the encoded payload is refused too', async () => {
+    // The third door onto the same cancellation, and the one that had its own
+    // copy of half the rule. A prompt of backslashes passes the raw byte check
+    // and fails the encoded one — JSON escaping nearly doubles it — so the
+    // refusal happens after the optimistic turn is on screen and after
+    // adoption is armed. It restored the transcript and left the routing state
+    // armed, which is the same stranded blank pane, reached by a path Stop and
+    // the reconnect never touch.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    // Under the 1.9 MB raw ceiling, over it once encoded.
+    act(() => { void view.result.current.send({ prompt: '\\'.repeat(1_000_000) }); });
+    await act(async () => { releaseClassifier?.(null); await Promise.resolve(); });
+
+    expect(fake.sent.filter((m) => m.event === 'chat:run'), 'refused before the wire').toEqual([]);
+    expect(view.result.current.error, 'and said so').toBeTruthy();
+
+    act(() => {
+      fake.fire('escalation:decision-required', {
+        conversationId: 'convo-elsewhere', requestId: 'e1', sectionId: 's1', issues: [], timeoutMs: 300_000,
+      });
+    });
+
+    expect(view.result.current.conversationId, 'the pane claimed nothing').toBeUndefined();
+    expect(view.result.current.escalations, 'and shows no run it never started').toEqual([]);
+  });
+
+  it('cancels a pending send rather than stacking it on an inherited run', async () => {
+    // The successor of a tab collision is told `active: 0`, starts a send, and
+    // while its classifier is thinking the incumbent drops and hands over its
+    // live run. The `active: 0` cancellation was already handled; this is the
+    // same window with `active > 0`, and it was not.
+    //
+    // Left alone the continuation emits a SECOND run, which overwrites the
+    // inherited run's origin so nothing will ever end it — and on a plan that
+    // allows one run at a time the second is refused outright, whose ack frees
+    // the composer over a run that is still going.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'convo-A'));
+
+    act(() => { void view.result.current.send({ prompt: 'refactor the parser' }); });
+    expect(fake.sent.filter((m) => m.event === 'chat:run'), 'still classifying').toEqual([]);
+
+    // The incumbent's run arrives instead.
+    act(() => { fake.fire('run:resumed', { active: 1, active_conversations: ['convo-B'] }); });
+
+    await act(async () => { releaseClassifier?.(null); await Promise.resolve(); });
+
+    expect(fake.sent.filter((m) => m.event === 'chat:run'), 'no second run was stacked on it').toEqual([]);
+    expect(view.result.current.busy, 'and the pane is busy for the run it inherited').toBe(true);
+
+    // The inherited run ends by name, and that is what frees the composer.
+    act(() => { fake.fire('session:complete', { conversationId: 'convo-B' }); });
+    expect(view.result.current.busy, 'the inherited run kept its origin').toBe(false);
   });
 
   it('restores the transcript a cancelled reconnect send had truncated', async () => {
