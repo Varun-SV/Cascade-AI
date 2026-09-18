@@ -5,11 +5,14 @@ import { createRequire } from 'module';
 // their (heavy, optional) type surface into our build.
 const require = createRequire(import.meta.url);
 
-/** Hard ceiling on a single uploaded document (raw bytes). */
+/**
+ * Hard ceiling on a single uploaded document (raw bytes), across every plan.
+ *
+ * The limit that actually applies is the caller's plan ceiling
+ * (`PlanLimits.documentBytes`); this is the outer bound the request body is
+ * sized against, and it must stay at or below the largest plan's allowance.
+ */
 export const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
-/** Cap on the extracted text we keep + inject, so one huge PDF can't blow the
- *  run's context budget. The extended-context path still chunks what remains. */
-export const MAX_EXTRACTED_CHARS = 200_000;
 
 // Document MIME types we accept. Plain-text family is parsed directly; PDF and
 // DOCX go through dedicated extractors. Everything else is rejected up front.
@@ -49,14 +52,30 @@ export function resolveDocumentMime(reportedMime: string, filename: string): str
   return undefined;
 }
 
-function normalizeText(raw: string): { text: string; truncated: boolean } {
+/**
+ * Tidy extracted text. It does NOT shorten it.
+ *
+ * There used to be a 200,000-character cut here, and it was the wrong decision
+ * in the wrong place. Extraction is an ingestion concern; how much of a
+ * document fits a model is a *run* concern, and `resolveDocuments`
+ * (cloud/server/src/runs.ts) already answers it properly — against the real
+ * context window of the models the user has pinned, injecting what fits and
+ * retrieving over what does not. Its own comment promises "no fixed byte
+ * cliff", and this function was the fixed byte cliff standing in front of it.
+ *
+ * Worse, the cut was destructive: only the trimmed text was persisted, so the
+ * rest of the document was gone before any of that machinery could see it —
+ * while the original bytes sat on disk, unread. Nothing downstream could
+ * recover what ingestion had already thrown away.
+ *
+ * The limit on a document is now its SIZE, enforced per plan at upload
+ * (`PlanLimits.documentBytes`), which is a resource question with a resource
+ * answer.
+ */
+function normalizeText(raw: string): string {
   // Collapse the runs of blank lines PDF/DOCX extraction tends to produce, and
   // trim — keeps the injected context tight without altering meaning.
-  const cleaned = raw.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-  if (cleaned.length > MAX_EXTRACTED_CHARS) {
-    return { text: cleaned.slice(0, MAX_EXTRACTED_CHARS), truncated: true };
-  }
-  return { text: cleaned, truncated: false };
+  return raw.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 /**
@@ -68,7 +87,7 @@ export async function parseDocument(input: {
   bytes: Buffer;
   mime: string;
   filename: string;
-}): Promise<{ text: string; truncated: boolean }> {
+}): Promise<string> {
   const { bytes, mime } = input;
 
   if (PDF_MIME_TYPES.has(mime)) {

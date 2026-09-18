@@ -1458,13 +1458,28 @@ export function useChatSession(
         ? `${who} is out for this run — ${e.message ?? ''} Continuing on ${e.failedOverTo}; the rest of this run is billed to that account.`
         : `${who} is out for this run — ${e.message ?? ''}`);
     };
-    const onKnowledge = (e: { mode?: string; docCount?: number; passages?: number; reranked?: boolean }) => {
+    const onKnowledge = (e: {
+      mode?: string; docCount?: number; passages?: number; reranked?: boolean;
+      keptChars?: number; totalChars?: number;
+    }) => {
       if (e.mode === 'searched') {
         const docs = e.docCount === 1 ? 'the document' : `${e.docCount} documents`;
         const verb = e.reranked ? 'reranked to the' : 'pulled the';
         setKnowledgeNotice(`Searched ${docs} and ${verb} ${e.passages ?? 0} most relevant passages.`);
       } else if (e.mode === 'nokey') {
-        setKnowledgeNotice('These documents are very large. The full text was still included — to retrieve just the most relevant parts of files this big, add an embeddings-capable key (OpenAI, an OpenAI-compatible endpoint, or a local Ollama).');
+        // SAYS WHAT WAS ACTUALLY SENT. This used to claim "the full text was
+        // still included", which was true only because ingestion had already
+        // cut every document at 200,000 characters — so the reassurance was
+        // resting on the very truncation it was reassuring the user about.
+        //
+        // Now the run trims to the real document budget and the notice reports
+        // the share that reached the model, because a user deciding whether to
+        // trust an answer needs to know how much of the file it saw.
+        const docs = e.docCount === 1 ? 'This document is' : 'These documents are';
+        const share = e.keptChars !== undefined && e.totalChars
+          ? ` About ${Math.max(1, Math.round((e.keptChars / e.totalChars) * 100))}% of the text was included, from the start of each file.`
+          : ' Only the beginning of each was included.';
+        setKnowledgeNotice(`${docs} larger than this model's context window.${share} Nothing was lost from the upload — add an embeddings-capable key (OpenAI, an OpenAI-compatible endpoint, or a local Ollama) to search the whole of it instead.`);
       }
     };
     // Deliberately does NOT clear the escalation prompt any more.

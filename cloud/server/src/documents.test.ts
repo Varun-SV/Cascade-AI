@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-  MAX_EXTRACTED_CHARS, isDocumentMime, resolveDocumentMime, parseDocument,
+  MAX_DOCUMENT_BYTES, isDocumentMime, resolveDocumentMime, parseDocument,
 } from './documents.js';
 
 const fixture = (name: string) => readFileSync(fileURLToPath(new URL(`./__fixtures__/${name}`, import.meta.url)));
@@ -42,25 +42,38 @@ describe('resolveDocumentMime', () => {
 describe('parseDocument', () => {
   it('reads plain text and collapses blank-line runs', async () => {
     const bytes = Buffer.from('First line\r\n\r\n\r\n\r\nSecond line   ', 'utf8');
-    const { text, truncated } = await parseDocument({ bytes, mime: 'text/plain', filename: 'a.txt' });
+    const text = await parseDocument({ bytes, mime: 'text/plain', filename: 'a.txt' });
     expect(text).toBe('First line\n\nSecond line');
-    expect(truncated).toBe(false);
   });
 
-  it('truncates over the extracted-char cap', async () => {
-    const bytes = Buffer.from('x'.repeat(MAX_EXTRACTED_CHARS + 5000), 'utf8');
-    const { text, truncated } = await parseDocument({ bytes, mime: 'text/plain', filename: 'big.txt' });
-    expect(text.length).toBe(MAX_EXTRACTED_CHARS);
-    expect(truncated).toBe(true);
+  it('keeps a very long document whole', async () => {
+    // This test used to assert the opposite: that extraction cut the text at
+    // 200,000 characters. That cut was a CONTEXT decision taken at INGESTION,
+    // before storage — so the rest of the document was destroyed in front of
+    // `resolveDocuments`, which sizes documents against the run's real window
+    // and promises "no fixed byte cliff" in its own comment.
+    //
+    // How much of a document reaches a model is decided per run. How big a
+    // document may be is a resource question, answered per plan at upload by
+    // `PlanLimits.documentBytes`. Neither of those is extraction's business,
+    // and extraction no longer has an opinion.
+    const chars = 250_000;
+    const bytes = Buffer.from('x'.repeat(chars), 'utf8');
+    expect(bytes.length, 'a document this size is still within the hard ceiling')
+      .toBeLessThanOrEqual(MAX_DOCUMENT_BYTES);
+
+    const text = await parseDocument({ bytes, mime: 'text/plain', filename: 'big.txt' });
+
+    expect(text.length, 'every character survives extraction').toBe(chars);
   });
 
   it('extracts text from a real PDF', async () => {
-    const { text } = await parseDocument({ bytes: fixture('sample.pdf'), mime: 'application/pdf', filename: 'sample.pdf' });
+    const text = await parseDocument({ bytes: fixture('sample.pdf'), mime: 'application/pdf', filename: 'sample.pdf' });
     expect(text).toContain('Hello Cascade PDF');
   });
 
   it('extracts text from a DOCX', async () => {
-    const { text } = await parseDocument({
+    const text = await parseDocument({
       bytes: fixture('sample.docx'),
       mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       filename: 'sample.docx',

@@ -942,6 +942,41 @@ describe('cloud/server app', () => {
     expect(body.charCount).toBeGreaterThan(0);
   });
 
+  it('POST /api/uploads holds a free account to its per-plan document ceiling', async () => {
+    // The limit on a document is its SIZE, per plan — not a fixed cut through
+    // its text at ingestion. The free ceiling is 5 MB; 6 MB is refused, and the
+    // message says which plan it is talking about so the user knows whether the
+    // file is wrong or their account is.
+    const alice = await login('Alice');
+    const dataBase64 = Buffer.alloc(6 * 1024 * 1024, 0x61).toString('base64');
+    const res = await fetch(`${baseUrl}/api/uploads`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ mime: 'text/plain', filename: 'huge.txt', dataBase64 }),
+    });
+    expect(res.status).toBe(413);
+    const body = await res.json();
+    expect(body.error).toMatch(/free plan/i);
+    expect(body.error).toMatch(/upgrade/i);
+  });
+
+  it('POST /api/uploads keeps the whole of a long document, with no truncation notice', async () => {
+    // 250k characters — comfortably past the 200,000-char cut that extraction
+    // used to make, and comfortably under the 5 MB free ceiling. Every
+    // character is stored, and the response carries no `truncated` flag at all,
+    // because nothing here shortens a document any more.
+    const alice = await login('Alice');
+    const chars = 250_000;
+    const dataBase64 = Buffer.from('y'.repeat(chars), 'utf8').toString('base64');
+    const res = await fetch(`${baseUrl}/api/uploads`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ mime: 'text/plain', filename: 'long.txt', dataBase64 }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.charCount, 'stored whole, not cut at 200k').toBe(chars);
+    expect(body.truncated, 'there is no truncation left to report').toBeUndefined();
+  });
+
   it('MCP servers: add validates the URL, redacts auth, lists, toggles, deletes', async () => {
     const alice = await login('Alice');
     const hdr = { 'Content-Type': 'application/json', Cookie: alice };

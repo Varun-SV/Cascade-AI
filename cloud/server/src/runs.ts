@@ -966,7 +966,7 @@ export function runContextWindowTokens(providers: ProviderConfig[], fastAnswerMo
  * errors, and emits a `knowledge:retrieved` notice so the client can show what
  * happened. A fast answer is a single direct call, so docs pass through as-is.
  */
-async function resolveDocuments(
+export async function resolveDocuments(
   docSources: Array<{ sourceId: string; filename: string; text: string }>,
   payload: ChatRunPayload,
   store: CloudStore,
@@ -993,12 +993,40 @@ async function resolveDocuments(
 
   const embedder = embedderFromProviders(payload.providers as ProviderConfig[]);
   if (!embedder) {
-    // Only reached for a corpus too large for the window AND no embeddings-
-    // capable key. We still inject the whole document — nothing is silently
-    // trimmed here — so the notice reflects that honestly and points at every
-    // provider that would unlock passage retrieval, not just OpenAI.
-    socket.emit('knowledge:retrieved', { conversationId, mode: 'nokey', docCount: docSources.length });
-    return full();
+    // A corpus too large for the window AND no embeddings-capable key.
+    //
+    // This used to inject the whole thing, and that was survivable only because
+    // ingestion had already cut every document at 200,000 characters. With that
+    // cut gone — it was destroying the rest of the file before anything could
+    // ask for it — injecting everything here would hand a 10 MB PDF to a model
+    // with a 200k-token window, so the run fails on the provider's own limit
+    // instead of on ours. The accident that protected this path is not a design.
+    //
+    // So each document is given an equal share of the run's real document
+    // budget and trimmed to it. Trimming rather than dropping keeps the head of
+    // every attachment in play — which for most documents is title, abstract
+    // and contents — instead of silently losing whole files to whichever
+    // happened to be first.
+    //
+    // This is still lossy FOR THIS TURN, and the notice says so plainly rather
+    // than implying retrieval happened. Nothing is lost from STORAGE: the full
+    // text is on the attachment, so a key added later, or the navigation tools,
+    // reach the rest without re-uploading anything.
+    const share = Math.floor(cagCharBudget(windowTokens) / Math.max(1, docSources.length));
+    const trimmed = docSources.map((d) => ({
+      filename: d.filename,
+      text: d.text.length > share ? d.text.slice(0, share) : d.text,
+    }));
+    socket.emit('knowledge:retrieved', {
+      conversationId,
+      mode: 'nokey',
+      docCount: docSources.length,
+      // What the user actually got, so the notice can say "the first N% of
+      // this file" rather than something reassuring and wrong.
+      keptChars: trimmed.reduce((n, d) => n + d.text.length, 0),
+      totalChars,
+    });
+    return trimmed;
   }
   try {
     // Second stage: an LLM reranker over the fused candidates, when the user

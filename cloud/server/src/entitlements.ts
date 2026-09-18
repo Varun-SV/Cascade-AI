@@ -21,12 +21,29 @@ export interface PlanLimits {
    * to a saved file still goes through `checkStorageQuota`.
    */
   pendingMediaBytes: number;
+  /**
+   * Largest single document this plan may attach to a run (bytes).
+   *
+   * A RESOURCE limit, and the only limit on a document's length. What stood
+   * here before was a fixed 200,000-character cut applied during text
+   * extraction — a context-window decision taken at ingestion, in front of a
+   * pipeline that already sizes documents against the run's real window. It
+   * destroyed the rest of the file before anything could ask for it.
+   *
+   * Cost tracks size: indexing a document is proportional to its length, so
+   * bounding the bytes per plan bounds the spend per plan without interrupting
+   * anyone mid-run to ask.
+   *
+   * Distinct from `storageBytes`, which is the total a user may keep. This is
+   * how big any ONE of them may be.
+   */
+  documentBytes: number;
 }
 
 const MB = 1024 * 1024;
 const PLAN_LIMITS: Record<string, PlanLimits> = {
-  free: { dailyRuns: 20, maxConcurrentRuns: 1, storageBytes: 10 * MB, pendingMediaBytes: 64 * MB },
-  pro: { dailyRuns: 200, maxConcurrentRuns: 3, storageBytes: 1024 * MB, pendingMediaBytes: 512 * MB },
+  free: { dailyRuns: 20, maxConcurrentRuns: 1, storageBytes: 10 * MB, pendingMediaBytes: 64 * MB, documentBytes: 5 * MB },
+  pro: { dailyRuns: 200, maxConcurrentRuns: 3, storageBytes: 1024 * MB, pendingMediaBytes: 512 * MB, documentBytes: 10 * MB },
 };
 
 /**

@@ -3,7 +3,8 @@
 Design analysis. No implementation. The recommendation is at the end of each
 section; the reasoning is the point of the document.
 
-Status: proposal. Nothing here is built.
+Status: proposal. The three open questions in §8 are decided; Phase 0 (§6) is
+in progress. Nothing else here is built.
 
 ---
 
@@ -240,16 +241,58 @@ Phase 1 is what makes Phase 2 get called.
 
 ---
 
-## 8. Open decisions
+## 8. Decisions
 
-These need a human answer; they change the work.
+The three questions this document was written to raise have been answered.
 
-1. **CLI corpus scope.** Does the CLI's `DocumentCorpus` cover only explicitly
-   attached documents, or should it unify with `WorkspaceIndex` so
-   `document_*` and `code_search` become one navigation surface? Unifying is
-   more coherent and more work.
-2. **Hosted indexing spend.** Who pays to index a 10 MB PDF, and is consent
-   per-document or per-run? Phase 1 sidesteps this; Phase 2 cannot.
-3. **Outline for structureless documents.** A PDF with no headings has no
-   natural sections. Page ranges are the honest fallback; LLM-generated section
-   gists are better but cost a pass over the document at ingestion.
+### 8.1 CLI corpus scope — **unify**
+
+The CLI's corpus is not a second, parallel thing beside `WorkspaceIndex`.
+`document_*` and `code_search` become one navigation surface: files in the
+workspace and documents the user attached are both addressable, with the same
+three verbs.
+
+This is the more coherent answer and the more work, and it is worth it for a
+reason this codebase has already paid for twice: two indexes over the same
+corpus drift. `code_search` and a separate `document_search` would answer the
+same question differently depending on whether a file happened to arrive as a
+workspace file or as an attachment, which is exactly the class of surprise the
+run-identity work spent several rounds removing.
+
+Consequence for §3: the CLI and desktop `DocumentCorpus` implementations are
+adapters over `WorkspaceIndex` rather than a separate store, and `document_read`
+resolves locators through it. `code_search` stays as a name — it is the
+narrower, code-shaped entry point people already use — but both sit on one index.
+
+### 8.2 Hosted spend — **a per-plan size ceiling, not a per-run gate**
+
+Free accounts may upload documents up to **5 MB**; larger files require a paid
+plan. The ceiling lives in `PlanLimits` beside the quotas that already exist
+(`cloud/server/src/entitlements.ts`), not as a constant in the upload handler.
+
+This answers the spend question by bounding the input rather than interrupting
+the user: indexing cost is a function of document size, so capping size per plan
+caps the cost per plan. It is also the honest place for the limit — the previous
+200k-character cut was a *context* decision wearing a resource limit's clothes,
+and this is the resource limit it was pretending to be.
+
+Residual, deliberately not solved here: a paid user attaching several 10 MB
+documents in one run can still run up a real embedding bill on first index.
+Phase 2 can put that behind the existing `context:approval-required` gate if it
+proves to matter; it is not worth a consent prompt before then.
+
+### 8.3 Structureless documents — **user-selectable, page-wise by default**
+
+The outline strategy is a user setting, defaulting to **page-wise**.
+
+Page-wise is the right default because it is the only strategy that is always
+available and never lies: every document has positions, not every document has
+headings. Heading-derived sections are better when headings exist; LLM-generated
+gists are better still and cost a pass over the document at ingestion. The user
+picks; the default never fails.
+
+One wrinkle to handle rather than paper over: "page" is a PDF concept. For
+DOCX, Markdown and plain text there are no pages, so the page-wise strategy
+degrades to fixed-size positional windows labelled by their char range. The
+setting is therefore named for the *idea* — positional rather than semantic —
+not for the PDF-specific word.
