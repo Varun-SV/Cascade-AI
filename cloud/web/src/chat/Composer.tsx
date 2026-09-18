@@ -105,7 +105,6 @@ export default function Composer({
                 ? prev
                 : [...prev, { id: res.id, mime: res.mime, kind: 'document', filename: res.filename ?? file.name, charCount: res.charCount ?? null }],
             );
-            if (res.truncated) setUploadError(`"${file.name}" was long — only the first part was kept as context.`);
           }
         } catch (err) {
           setUploadError(err instanceof Error ? err.message : `Couldn't add "${file.name}".`);

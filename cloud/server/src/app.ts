@@ -991,18 +991,36 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       res.status(400).json({ error: 'Unsupported file type. Upload an image, PDF, Word (.docx), or a text file.' });
       return;
     }
-    if (bytes.length === 0 || bytes.length > MAX_DOCUMENT_BYTES) {
-      res.status(400).json({ error: `Document must be between 1 byte and ${MAX_DOCUMENT_BYTES / (1024 * 1024)} MB` });
+    // THE CALLER'S PLAN, not one constant for everybody. Document size is what
+    // indexing cost tracks, so the ceiling is a plan entitlement beside the
+    // other quotas rather than a number buried in this handler.
+    //
+    // The message says which plan it is talking about and what lifts it. A bare
+    // "too large" leaves the user guessing whether the file is wrong or their
+    // account is.
+    const uploaderPlan = store.getUserById(userId)?.plan ?? 'free';
+    const documentBytes = Math.min(limitsForPlan(uploaderPlan).documentBytes, MAX_DOCUMENT_BYTES);
+    if (bytes.length === 0) {
+      res.status(400).json({ error: 'That document is empty.' });
       return;
     }
-    let extracted: { text: string; truncated: boolean };
+    if (bytes.length > documentBytes) {
+      const mb = (n: number) => `${Math.round((n / (1024 * 1024)) * 10) / 10} MB`;
+      res.status(413).json({
+        error: uploaderPlan === 'free'
+          ? `That document is ${mb(bytes.length)}. The free plan accepts up to ${mb(documentBytes)} per file — upgrade to attach larger ones.`
+          : `That document is ${mb(bytes.length)}, over the ${mb(documentBytes)} limit for a single file.`,
+      });
+      return;
+    }
+    let extractedText: string;
     try {
-      extracted = await parseDocument({ bytes, mime: docMime, filename });
+      extractedText = await parseDocument({ bytes, mime: docMime, filename });
     } catch {
       res.status(422).json({ error: "Couldn't read that document — it may be scanned, encrypted, or corrupt." });
       return;
     }
-    if (!extracted.text.trim()) {
+    if (!extractedText.trim()) {
       res.status(422).json({ error: 'No text could be extracted from that document.' });
       return;
     }
@@ -1011,9 +1029,12 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     fs.writeFileSync(filePath, bytes);
     const att = store.addAttachment({
       userId, messageId: null, kind: 'document', mime: docMime, path: filePath,
-      filename: filename || 'document', extractedText: extracted.text,
+      filename: filename || 'document', extractedText,
     });
-    res.json({ id: att.id, kind: att.kind, mime: att.mime, filename: att.filename, charCount: att.charCount, truncated: extracted.truncated });
+    // No `truncated` any more: nothing here shortens a document, so there is
+    // nothing to warn about. How much of it reaches a given model is decided
+    // per run, against that run's real context window.
+    res.json({ id: att.id, kind: att.kind, mime: att.mime, filename: att.filename, charCount: att.charCount });
   });
 
   app.get('/api/uploads/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {

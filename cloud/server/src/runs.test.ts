@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { ToolRegistry, CascadeConfigSchema } from '#cascade-ai';
-import { answersThisRun, buildCloudConfig, buildMediaSink, parseChatRunPayload, runChatTurn, sanitiseClarificationAnswers, sanitiseEscalationNote, tenantScratchDir } from './runs.js';
+import { answersThisRun, buildCloudConfig, buildMediaSink, parseChatRunPayload, resolveDocuments, runChatTurn, sanitiseClarificationAnswers, sanitiseEscalationNote, tenantScratchDir } from './runs.js';
 import { CloudStore } from './db.js';
 import { limitsForPlan, PENDING_MEDIA_TTL_MS } from './entitlements.js';
 import type { CloudEnv } from './env.js';
@@ -910,5 +910,69 @@ describe('sanitiseEscalationNote — guidance comes back from a client', () => {
   it('trims before measuring, so padding cannot spend the budget', () => {
     expect(sanitiseEscalationNote(`${' '.repeat(5_000)}retry with the archive included`))
       .toBe('retry with the archive included');
+  });
+});
+
+// With no embeddings-capable key, an over-budget corpus used to be injected
+// whole. That was survivable only because ingestion had already cut every
+// document at 200,000 characters — an accident, not a design. With the cut
+// removed, this path is what stands between a 5 MB PDF and a 200k-token window.
+describe('documents with no embeddings key', () => {
+  const payloadFor = (docs: number) => parseChatRunPayload({
+    prompt: 'what does the contract say about termination?',
+    // A chat-capable key with no embeddings support: enough to run, not enough
+    // to retrieve. This is the state the branch exists for.
+    providers: [{ type: 'anthropic', apiKey: 'sk-ant-test' }],
+    ...(docs ? {} : {}),
+  });
+
+  it('trims to the run budget instead of injecting the whole corpus', async () => {
+    const socket = new FakeSocket();
+    // Far past any real window: 4 million characters across two documents.
+    const big = 'lorem ipsum dolor sit amet. '.repeat(75_000);
+    const docSources = [
+      { sourceId: 'a', filename: 'contract.pdf', text: big },
+      { sourceId: 'b', filename: 'appendix.pdf', text: big },
+    ];
+
+    const out = await resolveDocuments(
+      docSources,
+      payloadFor(2),
+      {} as never,
+      'user-1',
+      'convo-1',
+      socket as never,
+    );
+
+    expect(out, 'both documents still reach the run').toHaveLength(2);
+    const kept = out.reduce((n, d) => n + d.text.length, 0);
+    expect(kept, 'and together they are far smaller than the corpus').toBeLessThan(big.length);
+    // Each gets an equal share rather than the first swallowing the budget.
+    expect(out[0]!.text.length, 'the share is equal').toBe(out[1]!.text.length);
+    expect(out[0]!.text.startsWith('lorem ipsum'), 'kept from the head of the file').toBe(true);
+
+    const notice = socket.events.find((e) => e.event === 'knowledge:retrieved');
+    expect(notice, 'the user is told what happened').toBeTruthy();
+    const p = notice!.payload as { mode?: string; keptChars?: number; totalChars?: number };
+    expect(p.mode).toBe('nokey');
+    // The notice reports the real numbers, so the UI cannot claim the whole
+    // text was included when it was not — which is what it used to say.
+    expect(p.keptChars).toBe(kept);
+    expect(p.totalChars).toBe(big.length * 2);
+    expect(p.keptChars!).toBeLessThan(p.totalChars!);
+  });
+
+  it('leaves a small corpus alone', async () => {
+    const socket = new FakeSocket();
+    const out = await resolveDocuments(
+      [{ sourceId: 'a', filename: 'note.txt', text: 'a short note' }],
+      payloadFor(1),
+      {} as never,
+      'user-1',
+      'convo-1',
+      socket as never,
+    );
+    expect(out[0]!.text, 'nothing to trim, nothing trimmed').toBe('a short note');
+    expect(socket.events.find((e) => e.event === 'knowledge:retrieved'), 'and no notice').toBeFalsy();
   });
 });
