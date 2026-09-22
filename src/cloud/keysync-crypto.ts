@@ -25,11 +25,22 @@ function toBase64(buf: ArrayBuffer | Uint8Array): string {
   return Buffer.from(bytes).toString('base64');
 }
 
-function fromBase64(b64: string): Uint8Array {
-  return new Uint8Array(Buffer.from(b64, 'base64'));
+// WebCrypto's `BufferSource` accepts only an ArrayBuffer-backed view, and
+// `Buffer.from` hands back a view onto Node's shared buffer pool — typed
+// `ArrayBufferLike`, which is what it really is. So copy into a buffer of our
+// own rather than assert the pooled one is something it is not. The blobs here
+// are keys and salts; the copy is a few dozen bytes.
+function fromBase64(b64: string): Uint8Array<ArrayBuffer> {
+  const pooled = Buffer.from(b64, 'base64');
+  const bytes = new Uint8Array(pooled.byteLength);
+  bytes.set(pooled);
+  return bytes;
 }
 
-async function deriveKey(passphrase: string, salt: Uint8Array): Promise<webcrypto.CryptoKey> {
+async function deriveKey(
+  passphrase: string,
+  salt: Uint8Array<ArrayBuffer>,
+): Promise<webcrypto.CryptoKey> {
   const baseKey = await webcrypto.subtle.importKey(
     'raw',
     new TextEncoder().encode(passphrase),

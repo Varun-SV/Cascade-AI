@@ -1,5 +1,5 @@
-import { describe, it, expect, afterEach } from 'vitest';
-import { assertPublicUrl, isPrivateAddress, SsrfBlockedError } from './safe-fetch.js';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { assertPublicUrl, isPrivateAddress, safeFetch, SsrfBlockedError } from './safe-fetch.js';
 
 afterEach(() => {
   delete process.env['CASCADE_ALLOW_LOCAL_FETCH'];
@@ -123,5 +123,110 @@ describe('assertPublicUrl', () => {
   it('honors the CASCADE_ALLOW_LOCAL_FETCH opt-out', async () => {
     process.env['CASCADE_ALLOW_LOCAL_FETCH'] = '1';
     await expect(assertPublicUrl('http://127.0.0.1/')).resolves.toBeInstanceOf(URL);
+  });
+});
+
+// `safeFetch` itself had no coverage: every assertion above exercises the
+// pre-flight checks, and none of them reached the function that does the
+// fetching. That matters most for the dispatcher. `ssrfAgent`'s own doc
+// comment is explicit that it — not `assertPublicUrl` — is what closes the
+// DNS-rebinding gap, because it validates the address inside the lookup the
+// socket actually uses. All of that protection rests on one option reaching
+// `fetch`, and that option is passed through a cast, so the type checker
+// cannot vouch for it. Drop `dispatcher` from the call and every test above
+// still passes while the connect-time re-check silently stops running.
+describe('safeFetch', () => {
+  // A literal public IP: `assertPublicUrl` takes the `net.isIP` branch, so no
+  // DNS lookup happens and these tests touch no network.
+  const PUBLIC = 'http://93.184.216.34/thing';
+  const OTHER_PUBLIC = 'http://93.184.216.35/elsewhere';
+
+  type FetchInit = RequestInit & { dispatcher?: { dispatch?: unknown } };
+  const calls = (spy: ReturnType<typeof vi.fn>): FetchInit[] =>
+    spy.mock.calls.map((c) => c[1] as FetchInit);
+
+  const stubFetch = (...responses: Response[]) => {
+    let i = 0;
+    const spy = vi.fn(async () => responses[Math.min(i++, responses.length - 1)]!);
+    vi.stubGlobal('fetch', spy);
+    return spy;
+  };
+
+  const redirectTo = (location: string) =>
+    new Response(null, { status: 302, headers: { location } });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('pins the connection to the SSRF agent', async () => {
+    const spy = stubFetch(new Response('ok', { status: 200 }));
+    await safeFetch(PUBLIC);
+    const [init] = calls(spy);
+    expect(init?.dispatcher).toBeDefined();
+    expect(typeof init?.dispatcher?.dispatch).toBe('function');
+  });
+
+  it('asks for manual redirects, so the loop and not fetch decides each hop', async () => {
+    const spy = stubFetch(new Response('ok', { status: 200 }));
+    await safeFetch(PUBLIC);
+    expect(calls(spy)[0]?.redirect).toBe('manual');
+  });
+
+  it('keeps the caller\'s own init alongside what it adds', async () => {
+    const spy = stubFetch(new Response('ok', { status: 200 }));
+    await safeFetch(PUBLIC, { method: 'POST', headers: { 'x-trace': 'abc' } });
+    const [init] = calls(spy);
+    expect(init?.method).toBe('POST');
+    expect(init?.headers).toEqual({ 'x-trace': 'abc' });
+    // …and still pins the connection while doing it.
+    expect(init?.dispatcher).toBeDefined();
+  });
+
+  it('returns a non-redirect response without a second request', async () => {
+    const spy = stubFetch(new Response('body', { status: 200 }));
+    const resp = await safeFetch(PUBLIC);
+    expect(resp.status).toBe(200);
+    expect(await resp.text()).toBe('body');
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('pins every hop, not just the first', async () => {
+    const spy = stubFetch(redirectTo(OTHER_PUBLIC), new Response('ok', { status: 200 }));
+    await safeFetch(PUBLIC);
+    expect(spy).toHaveBeenCalledTimes(2);
+    for (const init of calls(spy)) expect(init.dispatcher).toBeDefined();
+  });
+
+  // Assert on the MESSAGE, not just the class. Deleting the hop re-validation
+  // leaves this rejecting anyway — the loop just follows the metadata redirect
+  // until it runs out of hops and throws "Too many redirects", which is also an
+  // SsrfBlockedError. Naming the address is what separates "we refused this
+  // hop" from "we gave up after chasing it five times".
+  it('re-validates each hop and blocks a redirect to a private address', async () => {
+    const spy = stubFetch(redirectTo('http://169.254.169.254/latest/meta-data/'));
+    await expect(safeFetch(PUBLIC)).rejects.toThrow(/169\.254\.169\.254/);
+    // Refused before the second request, not after chasing it.
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('resolves a relative Location against the current URL', async () => {
+    const spy = stubFetch(redirectTo('/moved'), new Response('ok', { status: 200 }));
+    await safeFetch(PUBLIC);
+    expect(spy.mock.calls[1]?.[0]).toBe('http://93.184.216.34/moved');
+  });
+
+  it('returns the redirect itself when it carries no Location', async () => {
+    const spy = stubFetch(new Response(null, { status: 302 }));
+    const resp = await safeFetch(PUBLIC);
+    expect(resp.status).toBe(302);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives up rather than following a redirect loop forever', async () => {
+    const spy = stubFetch(redirectTo(PUBLIC));
+    await expect(safeFetch(PUBLIC)).rejects.toThrow(/too many redirects/i);
+    // MAX_REDIRECTS is 5, and the loop runs for i = 0..5 inclusive.
+    expect(spy).toHaveBeenCalledTimes(6);
   });
 });

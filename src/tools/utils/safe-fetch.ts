@@ -278,11 +278,21 @@ export async function safeFetch(rawUrl: string, init: RequestInit = {}): Promise
   let currentUrl = (await assertPublicUrl(rawUrl)).toString();
 
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    // `dispatcher` is undici's, which is what Node's global fetch is built on;
-    // it is absent from the DOM RequestInit type, hence the cast. Nothing in
-    // this repo installs a global dispatcher, so scoping one here overrides no
-    // proxy or pool configured elsewhere.
-    const resp = await fetch(currentUrl, { ...init, redirect: 'manual', dispatcher: ssrfAgent } as RequestInit);
+    // `dispatcher` is undici's, which is what Node's global fetch is built on.
+    // @types/node 26 declares the option, so the whole-object cast this
+    // replaces is gone — `init` is type-checked again, which it had not been
+    // for as long as that cast was there. What remains is the one genuine
+    // mismatch: `ssrfAgent` is the standalone `undici` package's Agent and the
+    // declared type is Node's own bundled copy of the same class, so the two
+    // are nominally distinct and structurally identical. Assert that one value
+    // and nothing else. Nothing in this repo installs a global dispatcher, so
+    // scoping one here overrides no proxy or pool configured elsewhere.
+    const request: RequestInit = {
+      ...init,
+      redirect: 'manual',
+      dispatcher: ssrfAgent as unknown as RequestInit['dispatcher'],
+    };
+    const resp = await fetch(currentUrl, request);
 
     // Not a redirect — return as-is.
     if (resp.status < 300 || resp.status >= 400) return resp;
