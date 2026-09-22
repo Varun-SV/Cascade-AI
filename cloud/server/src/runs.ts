@@ -966,6 +966,67 @@ export function runContextWindowTokens(providers: ProviderConfig[], fastAnswerMo
  * errors, and emits a `knowledge:retrieved` notice so the client can show what
  * happened. A fast answer is a single direct call, so docs pass through as-is.
  */
+/**
+ * Why a corpus is being injected without retrieval. Each carries a different
+ * remedy, so the client can say something true rather than something generic:
+ * `nokey` wants a key, `fast` wants the run repeated without Fast Answer, and
+ * `degraded` had both and still got nothing back from the index.
+ */
+export type UnretrievedMode = 'nokey' | 'fast' | 'degraded';
+
+/**
+ * The ONE door through which a corpus reaches the model without retrieval.
+ *
+ * Every such path used to answer with the whole corpus, and every one of them
+ * was safe only because ingestion had already cut each document at 200,000
+ * characters. Removing that cut — the point of this change — made all of them
+ * unbounded at once, not just the no-embedder path that was fixed first:
+ * planning returns `cag` unconditionally for a fast answer, and the retrieval
+ * branch falls back to the full corpus on zero hits and on any error. Each is
+ * reached only when the corpus is already known not to fit, so each could hand
+ * a 10 MB attachment to a 200k-token window and fail on the provider's limit
+ * instead of ours.
+ *
+ * A budget is not a rule that lives at one door. Putting it in a helper and
+ * routing all four through it is what stops the next path from being written
+ * without it.
+ *
+ * Under budget this is a no-op — no trim, no notice — so the ordinary CAG case
+ * behaves exactly as before. Over budget each document gets an equal share, so
+ * one file cannot swallow the allowance, and is trimmed from the head, where a
+ * title and contents live. Lossy for this turn only: storage keeps the whole
+ * text, and the notice reports what actually reached the model rather than
+ * reassuring the user about a file it only half read.
+ */
+function injectWithinBudget(
+  docSources: Array<{ filename: string; text: string }>,
+  windowTokens: number,
+  mode: UnretrievedMode,
+  conversationId: string,
+  socket: RunSocket,
+): RunDocument[] {
+  const asIs = (): RunDocument[] => docSources.map((d) => ({ filename: d.filename, text: d.text }));
+  const totalChars = docSources.reduce((n, d) => n + d.text.length, 0);
+  const budget = cagCharBudget(windowTokens);
+  if (totalChars <= budget) return asIs();
+
+  const share = Math.floor(budget / Math.max(1, docSources.length));
+  const trimmed = docSources.map((d) => ({
+    filename: d.filename,
+    text: d.text.length > share ? d.text.slice(0, share) : d.text,
+  }));
+  socket.emit('knowledge:retrieved', {
+    conversationId,
+    mode,
+    docCount: docSources.length,
+    // What the user actually got, so the notice can say "the first N% of this
+    // file" rather than something reassuring and wrong.
+    keptChars: trimmed.reduce((n, d) => n + d.text.length, 0),
+    totalChars,
+  });
+  return trimmed;
+}
+
 export async function resolveDocuments(
   docSources: Array<{ sourceId: string; filename: string; text: string }>,
   payload: ChatRunPayload,
@@ -974,7 +1035,6 @@ export async function resolveDocuments(
   conversationId: string,
   socket: RunSocket,
 ): Promise<RunDocument[]> {
-  const full = (): RunDocument[] => docSources.map((d) => ({ filename: d.filename, text: d.text }));
 
   // Adaptive decision: none / CAG (inject in full) / RAG (retrieve passages).
   // The CAG budget is derived from the run's real context window, so ordinary
@@ -989,7 +1049,12 @@ export async function resolveDocuments(
     cagCharBudget: cagCharBudget(windowTokens),
     fastAnswer: payload.fastAnswer,
   });
-  if (plan.mode !== 'rag') return full();
+  // `cag` here is either "it fits" — where the helper is a no-op — or a fast
+  // answer, which planning returns unconditionally without consulting size at
+  // all. That second case is the one that needs the bound.
+  if (plan.mode !== 'rag') {
+    return injectWithinBudget(docSources, windowTokens, 'fast', conversationId, socket);
+  }
 
   const embedder = embedderFromProviders(payload.providers as ProviderConfig[]);
   if (!embedder) {
@@ -1012,21 +1077,7 @@ export async function resolveDocuments(
     // than implying retrieval happened. Nothing is lost from STORAGE: the full
     // text is on the attachment, so a key added later, or the navigation tools,
     // reach the rest without re-uploading anything.
-    const share = Math.floor(cagCharBudget(windowTokens) / Math.max(1, docSources.length));
-    const trimmed = docSources.map((d) => ({
-      filename: d.filename,
-      text: d.text.length > share ? d.text.slice(0, share) : d.text,
-    }));
-    socket.emit('knowledge:retrieved', {
-      conversationId,
-      mode: 'nokey',
-      docCount: docSources.length,
-      // What the user actually got, so the notice can say "the first N% of
-      // this file" rather than something reassuring and wrong.
-      keptChars: trimmed.reduce((n, d) => n + d.text.length, 0),
-      totalChars,
-    });
-    return trimmed;
+    return injectWithinBudget(docSources, windowTokens, 'nokey', conversationId, socket);
   }
   try {
     // Second stage: an LLM reranker over the fused candidates, when the user
@@ -1045,7 +1096,11 @@ export async function resolveDocuments(
     const hits = await retriever.search(payload.prompt, {
       namespace: userId, sourceIds: docSources.map((d) => d.sourceId), k: RAG_TOP_K, candidates: 40,
     });
-    if (hits.length === 0) return full();
+    // The index answered, with nothing. We are past the point where the corpus
+    // was judged too large, so the whole of it is not an option.
+    if (hits.length === 0) {
+      return injectWithinBudget(docSources, windowTokens, 'degraded', conversationId, socket);
+    }
 
     const nameById = new Map(docSources.map((d) => [d.sourceId, d.filename]));
     const grouped = new Map<string, string[]>();
@@ -1062,7 +1117,10 @@ export async function resolveDocuments(
       text: passages.join('\n\n[…]\n\n'),
     }));
   } catch {
-    return full();
+    // Embedding outage, indexing failure, a vector store that will not answer.
+    // Falling back to the full corpus here was the same unbounded injection
+    // wearing a different hat.
+    return injectWithinBudget(docSources, windowTokens, 'degraded', conversationId, socket);
   }
 }
 

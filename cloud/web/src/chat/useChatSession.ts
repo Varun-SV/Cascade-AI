@@ -1466,7 +1466,7 @@ export function useChatSession(
         const docs = e.docCount === 1 ? 'the document' : `${e.docCount} documents`;
         const verb = e.reranked ? 'reranked to the' : 'pulled the';
         setKnowledgeNotice(`Searched ${docs} and ${verb} ${e.passages ?? 0} most relevant passages.`);
-      } else if (e.mode === 'nokey') {
+      } else if (e.mode === 'nokey' || e.mode === 'fast' || e.mode === 'degraded') {
         // SAYS WHAT WAS ACTUALLY SENT. This used to claim "the full text was
         // still included", which was true only because ingestion had already
         // cut every document at 200,000 characters — so the reassurance was
@@ -1479,7 +1479,16 @@ export function useChatSession(
         const share = e.keptChars !== undefined && e.totalChars
           ? ` About ${Math.max(1, Math.round((e.keptChars / e.totalChars) * 100))}% of the text was included, from the start of each file.`
           : ' Only the beginning of each was included.';
-        setKnowledgeNotice(`${docs} larger than this model's context window.${share} Nothing was lost from the upload — add an embeddings-capable key (OpenAI, an OpenAI-compatible endpoint, or a local Ollama) to search the whole of it instead.`);
+        // The three modes reach the same trim by different routes, and the
+        // route decides the remedy. Telling someone who already has a key to
+        // add one — which the single 'nokey' branch did for every fallback —
+        // is advice they cannot act on.
+        const remedy = e.mode === 'nokey'
+          ? 'add an embeddings-capable key (OpenAI, an OpenAI-compatible endpoint, or a local Ollama) to search the whole of it instead'
+          : e.mode === 'fast'
+            ? 'Fast Answer skips the search step — ask again without it to search the whole of it instead'
+            : 'the search step could not run for this turn — asking again will retry it';
+        setKnowledgeNotice(`${docs} larger than this model's context window.${share} Nothing was lost from the upload — ${remedy}.`);
       }
     };
     // Deliberately does NOT clear the escalation prompt any more.

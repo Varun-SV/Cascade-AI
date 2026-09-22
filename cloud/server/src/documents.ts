@@ -14,6 +14,56 @@ const require = createRequire(import.meta.url);
  */
 export const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
 
+/**
+ * Ceiling on EXTRACTED text, enforced as a REFUSAL and never as a trim.
+ *
+ * `MAX_DOCUMENT_BYTES` bounds the bytes that arrive. It does not bound what
+ * they become: PDF and DOCX are compressed containers, so a small upload can
+ * decompress into a much larger body of text, and with the 200,000-character
+ * cut gone there is nothing downstream that shrinks it before it is persisted
+ * to SQLite and read back into a run. A 10 MB DOCX of one repeated paragraph
+ * is a few megabytes on the wire and hundreds of megabytes of text.
+ *
+ * So this is a resource guard, not a context decision — which is the whole
+ * distinction the removed cut got wrong. It REJECTS rather than truncates: a
+ * document we cannot take is refused with a reason the user can act on, and a
+ * document we accept is stored whole. Silently keeping a prefix is exactly the
+ * behaviour this release removed, and re-introducing it here under a different
+ * name would be worse, not better, for being further from the upload.
+ *
+ * 25M characters is chosen to be unreachable by legitimate input and far below
+ * a pathological one. UTF-8 never yields more characters than bytes, so the
+ * largest plain-text upload this server accepts is 10M characters — this sits
+ * 2.5x above that, and well above the ~1-3M characters of real text a 10 MB
+ * PDF or DOCX carries, while refusing the order-of-magnitude expansions that
+ * only a crafted file produces.
+ *
+ * What it does NOT bound: peak memory *inside* the extractor. `pdf-parse` and
+ * `mammoth.extractRawText` both materialize the whole string before returning
+ * it, and neither offers a streaming or bounded API, so the check can only run
+ * on what they hand back. This bounds what is persisted and what a run can
+ * load, which is the part that outlives the request.
+ */
+export const EXPANSION_CEILING_CHARS = 25_000_000;
+
+/**
+ * An upload whose extracted text exceeds {@link EXPANSION_CEILING_CHARS}.
+ *
+ * Distinct from a parse failure on purpose: the upload route catches anything
+ * `parseDocument` throws and reports it as "scanned, encrypted, or corrupt",
+ * which would be a wrong and unactionable answer for a file that read
+ * perfectly well and was simply too big once opened.
+ */
+export class DocumentTooLargeError extends Error {
+  constructor(readonly chars: number) {
+    super(
+      `That document contains ${Math.round(chars / 1_000_000)}M characters of text once extracted, `
+      + `over the ${EXPANSION_CEILING_CHARS / 1_000_000}M limit. Split it into smaller files.`,
+    );
+    this.name = 'DocumentTooLargeError';
+  }
+}
+
 // Document MIME types we accept. Plain-text family is parsed directly; PDF and
 // DOCX go through dedicated extractors. Everything else is rejected up front.
 const PLAINTEXT_MIME_TYPES = new Set([
@@ -75,7 +125,11 @@ export function resolveDocumentMime(reportedMime: string, filename: string): str
 function normalizeText(raw: string): string {
   // Collapse the runs of blank lines PDF/DOCX extraction tends to produce, and
   // trim — keeps the injected context tight without altering meaning.
-  return raw.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  const text = raw.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  // Measured AFTER collapsing, so the blank-line padding extraction invents
+  // cannot push an otherwise fine document over the line.
+  if (text.length > EXPANSION_CEILING_CHARS) throw new DocumentTooLargeError(text.length);
+  return text;
 }
 
 /**

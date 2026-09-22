@@ -35,7 +35,7 @@ import {
 } from './billing.js';
 import { HandoffStore, parseHandoffBody } from './handoff.js';
 import { DownloadResolver, isTargetId, isCascadeReleaseAsset, RELEASES_PAGE_URL } from './downloads.js';
-import { MAX_DOCUMENT_BYTES, parseDocument, resolveDocumentMime } from './documents.js';
+import { DocumentTooLargeError, MAX_DOCUMENT_BYTES, parseDocument, resolveDocumentMime } from './documents.js';
 import { connectorCatalog, getConnector, validateRemoteMcpUrl } from './mcp.js';
 import { McpOAuthFlows, encodeOAuthBlob, resolveRunMcpServers } from './mcp-oauth.js';
 import {
@@ -1016,7 +1016,15 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     let extractedText: string;
     try {
       extractedText = await parseDocument({ bytes, mime: docMime, filename });
-    } catch {
+    } catch (err) {
+      // A file that decompressed into more text than we will store read
+      // perfectly well; saying it may be corrupt would send the user looking
+      // for a problem that is not there. It is a size refusal, so it gets the
+      // size status and the size remedy.
+      if (err instanceof DocumentTooLargeError) {
+        res.status(413).json({ error: err.message });
+        return;
+      }
       res.status(422).json({ error: "Couldn't read that document — it may be scanned, encrypted, or corrupt." });
       return;
     }

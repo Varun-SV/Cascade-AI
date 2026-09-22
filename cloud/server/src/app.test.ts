@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
 import { buildMediaSink } from './runs.js';
 import { CloudStore } from './db.js';
+import { DOCX_MIME, expandingDocx } from './test-support/expanding-docx.js';
 import type { CloudEnv } from './env.js';
 import { SESSION_COOKIE_NAME } from './auth/session.js';
 
@@ -976,6 +977,33 @@ describe('cloud/server app', () => {
     expect(body.charCount, 'stored whole, not cut at 200k').toBe(chars);
     expect(body.truncated, 'there is no truncation left to report').toBeUndefined();
   });
+
+  it('POST /api/uploads refuses a document that explodes when opened, and says so', async () => {
+    // The per-plan byte ceiling above cannot catch this one: the file is a few
+    // tens of KB, far inside the free allowance, and becomes ~30M characters
+    // once DOCX decompression is done with it. Without the extraction ceiling
+    // that text goes straight into SQLite and then into every run that reads
+    // the attachment.
+    const alice = await login('Alice');
+    const bytes = await expandingDocx();
+    expect(bytes.length, 'size alone would wave this through').toBeLessThan(5 * 1024 * 1024);
+
+    const res = await fetch(`${baseUrl}/api/uploads`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ mime: DOCX_MIME, filename: 'bomb.docx', dataBase64: bytes.toString('base64') }),
+    });
+
+    // 413 and a size remedy — NOT the 422 "scanned, encrypted, or corrupt" that
+    // the route gives every other parse failure. The file read perfectly well;
+    // telling this user to check it for corruption would send them looking for
+    // a problem that does not exist.
+    expect(res.status).toBe(413);
+    const body = await res.json();
+    expect(body.error).toMatch(/characters of text once extracted/);
+    expect(body.error).toMatch(/Split it into smaller files/);
+    expect(body.error, 'and not the corruption message').not.toMatch(/corrupt/i);
+  }, 60_000);
 
   it('MCP servers: add validates the URL, redacts auth, lists, toggles, deletes', async () => {
     const alice = await login('Alice');

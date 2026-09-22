@@ -976,3 +976,115 @@ describe('documents with no embeddings key', () => {
     expect(socket.events.find((e) => e.event === 'knowledge:retrieved'), 'and no notice').toBeFalsy();
   });
 });
+
+// The no-embeddings-key path above was the FIRST door to get a budget, not the
+// only one that needed it. Three more inject a corpus without retrieval, and
+// each is reached only once the corpus is already known not to fit: a fast
+// answer (planning returns `cag` for it without consulting size at all), a
+// search that returns nothing, and a retrieval error. Every one of them
+// answered with the whole corpus, and every one was safe only for as long as
+// ingestion truncated at 200,000 characters. These pin the rule at each door
+// rather than at the one that was reported.
+describe('documents injected without retrieval', () => {
+  // Big enough that no real context window holds it.
+  const big = 'lorem ipsum dolor sit amet. '.repeat(75_000);
+  const twoBigDocs = () => [
+    { sourceId: 'a', filename: 'contract.pdf', text: big },
+    { sourceId: 'b', filename: 'appendix.pdf', text: big },
+  ];
+  const noticeOf = (socket: FakeSocket) => socket.events
+    .find((e) => e.event === 'knowledge:retrieved')?.payload as
+      { mode?: string; keptChars?: number; totalChars?: number } | undefined;
+
+  const boundedAndReported = (out: Array<{ text: string }>, socket: FakeSocket, mode: string) => {
+    const kept = out.reduce((n, d) => n + d.text.length, 0);
+    expect(kept, 'the corpus is bounded, not injected whole').toBeLessThan(big.length * 2);
+    expect(out[0]!.text.length, 'each document gets an equal share').toBe(out[1]!.text.length);
+    const notice = noticeOf(socket);
+    expect(notice, 'and the user is told').toBeTruthy();
+    expect(notice!.mode, 'with the reason, because the remedy differs').toBe(mode);
+    expect(notice!.keptChars).toBe(kept);
+    expect(notice!.totalChars).toBe(big.length * 2);
+  };
+
+  // planRetrieval returns `cag` unconditionally when fastAnswer is set, so
+  // resolveDocuments never reaches the retrieval branch at all here.
+  it('bounds an over-budget corpus on a fast answer', async () => {
+    const socket = new FakeSocket();
+    const out = await resolveDocuments(
+      twoBigDocs(),
+      parseChatRunPayload({
+        prompt: 'what does the contract say about termination?',
+        providers: [{ type: 'openai', apiKey: 'sk-test' }],
+        fastAnswer: true,
+      }),
+      {} as never, 'user-1', 'convo-1', socket as never,
+    );
+    expect(out, 'both documents still reach the run').toHaveLength(2);
+    boundedAndReported(out, socket, 'fast');
+  });
+
+  it('leaves a small corpus alone on a fast answer too', async () => {
+    const socket = new FakeSocket();
+    const out = await resolveDocuments(
+      [{ sourceId: 'a', filename: 'note.txt', text: 'a short note' }],
+      parseChatRunPayload({
+        prompt: 'summarise this',
+        providers: [{ type: 'openai', apiKey: 'sk-test' }],
+        fastAnswer: true,
+      }),
+      {} as never, 'user-1', 'convo-1', socket as never,
+    );
+    expect(out[0]!.text, 'a fast answer still reads what it was given').toBe('a short note');
+    expect(noticeOf(socket), 'and says nothing about it').toBeUndefined();
+  });
+
+  // The remaining door: the index answered, and answered with nothing. Reached
+  // with a store that reports the sources already indexed — so no embedding
+  // round-trip is needed to get there — and returns no hits from either search.
+  // The embedder points at a closed port, which `Retriever.search` catches and
+  // degrades to lexical-only exactly as it would on a provider hiccup, so this
+  // touches no network.
+  it('bounds the corpus when the search comes back empty', async () => {
+    const socket = new FakeSocket();
+    const store = {
+      getVectorStore: () => ({
+        upsert() {},
+        hasSource: () => true,
+        lexicalSearch: () => [],
+        denseSearch: () => [],
+        deleteSource() {},
+      }),
+    } as never;
+    const out = await resolveDocuments(
+      twoBigDocs(),
+      parseChatRunPayload({
+        prompt: 'what does the contract say about termination?',
+        providers: [{ type: 'openai', apiKey: 'sk-test', baseUrl: 'http://127.0.0.1:1/v1' }],
+      }),
+      store, 'user-1', 'convo-1', socket as never,
+    );
+    expect(out, 'both documents still reach the run').toHaveLength(2);
+    boundedAndReported(out, socket, 'degraded');
+  });
+
+  it('bounds the corpus when retrieval fails outright', async () => {
+    const socket = new FakeSocket();
+    // An embeddings-capable provider, so the rag branch is entered, with a
+    // store that throws the moment it is touched — an embeddings outage, an
+    // indexing failure, a vector store that will not answer.
+    const store = {
+      getVectorStore() { throw new Error('vector store unavailable'); },
+    } as never;
+    const out = await resolveDocuments(
+      twoBigDocs(),
+      parseChatRunPayload({
+        prompt: 'what does the contract say about termination?',
+        providers: [{ type: 'openai', apiKey: 'sk-test' }],
+      }),
+      store, 'user-1', 'convo-1', socket as never,
+    );
+    expect(out, 'both documents still reach the run').toHaveLength(2);
+    boundedAndReported(out, socket, 'degraded');
+  });
+});
