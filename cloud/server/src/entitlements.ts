@@ -21,12 +21,51 @@ export interface PlanLimits {
    * to a saved file still goes through `checkStorageQuota`.
    */
   pendingMediaBytes: number;
+  /**
+   * Largest single document this plan may attach to a run (bytes).
+   *
+   * A RESOURCE limit, and the only limit on a document's length. What stood
+   * here before was a fixed 200,000-character cut applied during text
+   * extraction — a context-window decision taken at ingestion, in front of a
+   * pipeline that already sizes documents against the run's real window. It
+   * destroyed the rest of the file before anything could ask for it.
+   *
+   * Cost tracks size: indexing a document is proportional to its length, so
+   * bounding the bytes per plan bounds the spend per plan without interrupting
+   * anyone mid-run to ask.
+   *
+   * Distinct from `storageBytes`, which is the total a user may keep. This is
+   * how big any ONE of them may be.
+   */
+  documentBytes: number;
+  /**
+   * Cumulative extracted document TEXT this plan may keep in the shared
+   * database, in characters.
+   *
+   * `documentBytes` bounds one upload. It does not bound a user: ingestion used
+   * to cut every document at 200,000 characters, and removing that cut — which
+   * was destroying the rest of the file before anything could ask for it — left
+   * nothing counting what a tenant accumulates. A DOCX compresses well, so a
+   * few megabytes of upload can become tens of megabytes of durable text, and
+   * rows uploaded but never attached to a run are not reached by conversation
+   * deletion. Repeat that and one account quietly owns the database.
+   *
+   * Characters rather than bytes, because that is what the row stores and what
+   * `char_count` already reports, so the number the user is shown and the
+   * number enforced here are the same one.
+   *
+   * Free gets one maximal document's worth (EXPANSION_CEILING_CHARS), so the
+   * ceiling never refuses a single legitimate file; Pro gets ten. Starting
+   * points, chosen to be generous against real documents and finite against
+   * crafted ones — a 1,000-page PDF is about 3M characters.
+   */
+  documentTextChars: number;
 }
 
 const MB = 1024 * 1024;
 const PLAN_LIMITS: Record<string, PlanLimits> = {
-  free: { dailyRuns: 20, maxConcurrentRuns: 1, storageBytes: 10 * MB, pendingMediaBytes: 64 * MB },
-  pro: { dailyRuns: 200, maxConcurrentRuns: 3, storageBytes: 1024 * MB, pendingMediaBytes: 512 * MB },
+  free: { dailyRuns: 20, maxConcurrentRuns: 1, storageBytes: 10 * MB, pendingMediaBytes: 64 * MB, documentBytes: 5 * MB, documentTextChars: 25_000_000 },
+  pro: { dailyRuns: 200, maxConcurrentRuns: 3, storageBytes: 1024 * MB, pendingMediaBytes: 512 * MB, documentBytes: 10 * MB, documentTextChars: 250_000_000 },
 };
 
 /**
@@ -43,6 +82,26 @@ const PLAN_LIMITS: Record<string, PlanLimits> = {
  * retuning the window is a one-line change.
  */
 export const PENDING_MEDIA_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * How long an uploaded document may sit unattached to any message before it is
+ * swept.
+ *
+ * An upload starts with `message_id` NULL and is linked when a run uses it, so
+ * a row still NULL long afterwards is one the user never sent. Those are the
+ * rows nothing else removes: conversation deletion cascades from `messages`,
+ * and an orphan has no message to cascade from. Without a sweep the only way
+ * out of the text ceiling would be deleting conversations that were never the
+ * problem.
+ *
+ * Seven days rather than the 24 hours pending media gets, because this is
+ * content the USER made rather than something a tool generated: a draft left
+ * open over a long weekend should still have its attachment. The trade is that
+ * an upload abandoned for longer than a week is silently absent if it is ever
+ * sent — the run path skips ids it cannot find — and a week is long enough
+ * that this is a fair place to draw it.
+ */
+export const ORPHAN_UPLOAD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function limitsForPlan(plan: string): PlanLimits {
   return PLAN_LIMITS[plan] ?? PLAN_LIMITS['free']!;

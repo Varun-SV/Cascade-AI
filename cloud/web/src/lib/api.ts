@@ -314,7 +314,6 @@ export interface UploadResult {
   kind?: 'image' | 'document';
   filename?: string | null;
   charCount?: number | null;
-  truncated?: boolean;
 }
 
 /** Uploads one image and returns its server id (referenced later in chat:run). */

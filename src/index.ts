@@ -84,7 +84,7 @@ export {
   buildManifest, diffManifest, hashContent, WorkspaceIndex, GraphRetriever,
 } from './retrieval/index.js';
 export type {
-  Chunk, ScoredChunk, Embedder, VectorStore, SearchOptions, ChunkOptions,
+  Chunk, ScoredChunk, Embedder, VectorStore, SearchOptions, DenseSearchOptions, ChunkOptions,
   RetrieverSearchOptions, OpenAIEmbedderOptions, Reranker, CompleteFn,
   RetrievalMode, RetrievalPlan, RetrievalContext, CodeChunker, CodeChunkOptions,
   FileManifest, ManifestDiff, WorkspaceIndexOptions, RefreshResult,

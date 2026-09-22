@@ -1,9 +1,10 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { ToolRegistry, CascadeConfigSchema } from '#cascade-ai';
-import { answersThisRun, buildCloudConfig, buildMediaSink, parseChatRunPayload, runChatTurn, sanitiseClarificationAnswers, sanitiseEscalationNote, tenantScratchDir } from './runs.js';
+import { ToolRegistry, CascadeConfigSchema, Retriever, embedderFromProviders } from '#cascade-ai';
+import type { Chunk, ProviderConfig, ScoredChunk } from '#cascade-ai';
+import { allowances, answersThisRun, buildCloudConfig, buildMediaSink, parseChatRunPayload, resolveDocuments, runChatTurn, sanitiseClarificationAnswers, sanitiseEscalationNote, tenantScratchDir } from './runs.js';
 import { CloudStore } from './db.js';
 import { limitsForPlan, PENDING_MEDIA_TTL_MS } from './entitlements.js';
 import type { CloudEnv } from './env.js';
@@ -910,5 +911,371 @@ describe('sanitiseEscalationNote — guidance comes back from a client', () => {
   it('trims before measuring, so padding cannot spend the budget', () => {
     expect(sanitiseEscalationNote(`${' '.repeat(5_000)}retry with the archive included`))
       .toBe('retry with the archive included');
+  });
+});
+
+// With no embeddings-capable key, an over-budget corpus used to be injected
+// whole. That was survivable only because ingestion had already cut every
+// document at 200,000 characters — an accident, not a design. With the cut
+// removed, this path is what stands between a 5 MB PDF and a 200k-token window.
+describe('documents with no embeddings key', () => {
+  const payloadFor = (docs: number) => parseChatRunPayload({
+    prompt: 'what does the contract say about termination?',
+    // A chat-capable key with no embeddings support: enough to run, not enough
+    // to retrieve. This is the state the branch exists for.
+    providers: [{ type: 'anthropic', apiKey: 'sk-ant-test' }],
+    ...(docs ? {} : {}),
+  });
+
+  it('trims to the run budget instead of injecting the whole corpus', async () => {
+    const socket = new FakeSocket();
+    // Far past any real window: 4 million characters across two documents.
+    const big = 'lorem ipsum dolor sit amet. '.repeat(75_000);
+    const docSources = [
+      { sourceId: 'a', filename: 'contract.pdf', text: big },
+      { sourceId: 'b', filename: 'appendix.pdf', text: big },
+    ];
+
+    const out = await resolveDocuments(
+      docSources,
+      payloadFor(2),
+      {} as never,
+      'user-1',
+      'convo-1',
+      socket as never,
+    );
+
+    expect(out, 'both documents still reach the run').toHaveLength(2);
+    const kept = out.reduce((n, d) => n + d.text.length, 0);
+    expect(kept, 'and together they are far smaller than the corpus').toBeLessThan(big.length);
+    // Each gets an equal share rather than the first swallowing the budget.
+    expect(out[0]!.text.length, 'the share is equal').toBe(out[1]!.text.length);
+    expect(out[0]!.text.startsWith('lorem ipsum'), 'kept from the head of the file').toBe(true);
+
+    const notice = socket.events.find((e) => e.event === 'knowledge:retrieved');
+    expect(notice, 'the user is told what happened').toBeTruthy();
+    const p = notice!.payload as { mode?: string; keptChars?: number; totalChars?: number };
+    expect(p.mode).toBe('nokey');
+    // The notice reports the real numbers, so the UI cannot claim the whole
+    // text was included when it was not — which is what it used to say.
+    expect(p.keptChars).toBe(kept);
+    expect(p.totalChars).toBe(big.length * 2);
+    expect(p.keptChars!).toBeLessThan(p.totalChars!);
+  });
+
+  it('leaves a small corpus alone', async () => {
+    const socket = new FakeSocket();
+    const out = await resolveDocuments(
+      [{ sourceId: 'a', filename: 'note.txt', text: 'a short note' }],
+      payloadFor(1),
+      {} as never,
+      'user-1',
+      'convo-1',
+      socket as never,
+    );
+    expect(out[0]!.text, 'nothing to trim, nothing trimmed').toBe('a short note');
+    expect(socket.events.find((e) => e.event === 'knowledge:retrieved'), 'and no notice').toBeFalsy();
+  });
+});
+
+// The no-embeddings-key path above was the FIRST door to get a budget, not the
+// only one that needed it. Three more inject a corpus without retrieval, and
+// each is reached only once the corpus is already known not to fit: a fast
+// answer (planning returns `cag` for it without consulting size at all), a
+// search that returns nothing, and a retrieval error. Every one of them
+// answered with the whole corpus, and every one was safe only for as long as
+// ingestion truncated at 200,000 characters. These pin the rule at each door
+// rather than at the one that was reported.
+describe('documents injected without retrieval', () => {
+  // Big enough that no real context window holds it.
+  const big = 'lorem ipsum dolor sit amet. '.repeat(75_000);
+  const twoBigDocs = () => [
+    { sourceId: 'a', filename: 'contract.pdf', text: big },
+    { sourceId: 'b', filename: 'appendix.pdf', text: big },
+  ];
+  const noticeOf = (socket: FakeSocket) => socket.events
+    .find((e) => e.event === 'knowledge:retrieved')?.payload as
+      { mode?: string; keptChars?: number; totalChars?: number } | undefined;
+
+  const boundedAndReported = (out: Array<{ text: string }>, socket: FakeSocket, mode: string) => {
+    const kept = out.reduce((n, d) => n + d.text.length, 0);
+    expect(kept, 'the corpus is bounded, not injected whole').toBeLessThan(big.length * 2);
+    expect(out[0]!.text.length, 'each document gets an equal share').toBe(out[1]!.text.length);
+    const notice = noticeOf(socket);
+    expect(notice, 'and the user is told').toBeTruthy();
+    expect(notice!.mode, 'with the reason, because the remedy differs').toBe(mode);
+    expect(notice!.keptChars).toBe(kept);
+    expect(notice!.totalChars).toBe(big.length * 2);
+  };
+
+  // planRetrieval returns `cag` unconditionally when fastAnswer is set, so
+  // resolveDocuments never reaches the retrieval branch at all here.
+  it('bounds an over-budget corpus on a fast answer', async () => {
+    const socket = new FakeSocket();
+    const out = await resolveDocuments(
+      twoBigDocs(),
+      parseChatRunPayload({
+        prompt: 'what does the contract say about termination?',
+        providers: [{ type: 'openai', apiKey: 'sk-test' }],
+        fastAnswer: true,
+      }),
+      {} as never, 'user-1', 'convo-1', socket as never,
+    );
+    expect(out, 'both documents still reach the run').toHaveLength(2);
+    boundedAndReported(out, socket, 'fast');
+  });
+
+  it('leaves a small corpus alone on a fast answer too', async () => {
+    const socket = new FakeSocket();
+    const out = await resolveDocuments(
+      [{ sourceId: 'a', filename: 'note.txt', text: 'a short note' }],
+      parseChatRunPayload({
+        prompt: 'summarise this',
+        providers: [{ type: 'openai', apiKey: 'sk-test' }],
+        fastAnswer: true,
+      }),
+      {} as never, 'user-1', 'convo-1', socket as never,
+    );
+    expect(out[0]!.text, 'a fast answer still reads what it was given').toBe('a short note');
+    expect(noticeOf(socket), 'and says nothing about it').toBeUndefined();
+  });
+
+  // The remaining door: the index answered, and answered with nothing. Reached
+  // with a store that reports the sources already indexed — so no embedding
+  // round-trip is needed to get there — and returns no hits from either search.
+  // The embedder points at a closed port, which `Retriever.search` catches and
+  // degrades to lexical-only exactly as it would on a provider hiccup, so this
+  // touches no network.
+  it('bounds the corpus when the search comes back empty', async () => {
+    const socket = new FakeSocket();
+    const store = {
+      getVectorStore: () => ({
+        upsert() {},
+        hasSource: () => true,
+        lexicalSearch: () => [],
+        denseSearch: () => [],
+        deleteSource() {},
+      }),
+    } as never;
+    const out = await resolveDocuments(
+      twoBigDocs(),
+      parseChatRunPayload({
+        prompt: 'what does the contract say about termination?',
+        providers: [{ type: 'openai', apiKey: 'sk-test', baseUrl: 'http://127.0.0.1:1/v1' }],
+      }),
+      store, 'user-1', 'convo-1', socket as never,
+    );
+    expect(out, 'both documents still reach the run').toHaveLength(2);
+    boundedAndReported(out, socket, 'degraded');
+  });
+
+  it('bounds the corpus when retrieval fails outright', async () => {
+    const socket = new FakeSocket();
+    // An embeddings-capable provider, so the rag branch is entered, with a
+    // store that throws the moment it is touched — an embeddings outage, an
+    // indexing failure, a vector store that will not answer.
+    const store = {
+      getVectorStore() { throw new Error('vector store unavailable'); },
+    } as never;
+    const out = await resolveDocuments(
+      twoBigDocs(),
+      parseChatRunPayload({
+        prompt: 'what does the contract say about termination?',
+        providers: [{ type: 'openai', apiKey: 'sk-test' }],
+      }),
+      store, 'user-1', 'convo-1', socket as never,
+    );
+    expect(out, 'both documents still reach the run').toHaveLength(2);
+    boundedAndReported(out, socket, 'degraded');
+  });
+});
+
+
+// An equal share is fair and mostly empty: it gives a long report the same room
+// as a one-line note and discards what the note never wanted.
+describe('allowances', () => {
+  const total = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+
+  it('gives a long document the room the short ones did not use', () => {
+    // Nine documents of one character and one large. An equal split would hand
+    // the large document 100 of a 1000 budget and waste ~891.
+    const lengths = [...Array(9).fill(1), 10_000];
+    const room = allowances(lengths, 1000);
+    expect(room.slice(0, 9), 'the short ones take exactly what they are').toEqual(Array(9).fill(1));
+    expect(room[9], 'and the rest goes where it can be used').toBe(991);
+    expect(total(room)).toBeLessThanOrEqual(1000);
+  });
+
+  it('divides equally when every document wants more than its share', () => {
+    // The floor is a guarantee against the others, so this is the old
+    // behaviour exactly — nothing to redistribute.
+    expect(allowances([5000, 5000, 5000], 900)).toEqual([300, 300, 300]);
+  });
+
+  it('never gives a document more than it has', () => {
+    const room = allowances([10, 20, 30], 10_000);
+    expect(room).toEqual([10, 20, 30]);
+  });
+
+  it('starves nobody: every document keeps at least its equal share', () => {
+    const lengths = [1, 2, 3, 400_000, 500_000];
+    const room = allowances(lengths, 1000);
+    const equal = Math.floor(1000 / lengths.length);
+    for (let i = 0; i < lengths.length; i++) {
+      expect(room[i]!, `document ${i}`).toBeGreaterThanOrEqual(Math.min(lengths[i]!, equal));
+    }
+  });
+
+  it('spends the budget when it can', () => {
+    const room = allowances([1, 1, 100_000], 999);
+    expect(total(room), 'not 3 documents x 333 with 664 thrown away').toBe(999);
+  });
+
+  it('handles the degenerate inputs without inventing room', () => {
+    expect(allowances([], 1000)).toEqual([]);
+    expect(allowances([100, 100], 0)).toEqual([0, 0]);
+    expect(allowances([100, 100], 1)).toEqual([0, 0]);
+  });
+});
+
+
+// The retriever serializes indexing attempts per source, and that lock is worth
+// having only if every caller enters it. `resolveDocuments` used to ask
+// `isIndexed` itself and skip `index()` whenever rows already existed — which
+// is precisely the question the lock exists to make unsafe to ask from outside:
+// rows exist from the moment the FIRST slice commits, long before the attempt
+// that wrote them knows whether it will finish.
+describe('documents another run is still indexing', () => {
+  const NS = 'user-1';
+  // 127.0.0.1:1 is closed, so the run\'s own embedder fails the instant it is
+  // used and the retrieval branch degrades: nothing here touches the network.
+  const providers = [
+    { type: 'openai', apiKey: 'sk-test', baseUrl: 'http://127.0.0.1:1/v1' },
+  ] as ProviderConfig[];
+
+  it('waits for an in-flight attempt instead of answering from rows it is about to roll back', async () => {
+    const runEmbedModel = embedderFromProviders(providers)!.model;
+
+    // One store behind both the writer below and the run under test, so the run
+    // sees exactly the rows the writer has committed so far — and stops seeing
+    // them when the writer takes them back.
+    type Row = { ns: string; src: string; id: string; text: string; model: string };
+    const rows: Row[] = [];
+    // What each search saw. A search that ran while the writer still held rows
+    // is a search that read a half-written index.
+    const searchedOver: number[] = [];
+    const shared = {
+      upsert(records: Array<{ chunk: Chunk }>, model: string) {
+        for (const r of records) {
+          // The namespace rides in `meta`, exactly as the SQLite store reads it.
+          const ns = String(r.chunk.meta?.['namespace'] ?? '');
+          rows.push({ ns, src: r.chunk.sourceId, id: r.chunk.id, text: r.chunk.text, model });
+        }
+      },
+      hasSource: (ns: string, src: string, model: string) =>
+        rows.some((r) => r.ns === ns && r.src === src && r.model === model),
+      deleteSource(ns: string, src: string) {
+        for (let i = rows.length - 1; i >= 0; i--) {
+          if (rows[i]!.ns === ns && rows[i]!.src === src) rows.splice(i, 1);
+        }
+      },
+      lexicalSearch(_q: string, opts: { namespace: string }): ScoredChunk[] {
+        searchedOver.push(rows.length);
+        return rows.filter((r) => r.ns === opts.namespace).slice(0, 5)
+          .map((r, i) => ({ id: r.id, sourceId: r.src, ord: i, text: r.text, score: 1 }));
+      },
+      denseSearch: (): ScoredChunk[] => [],
+    };
+
+    // A writer that gets its first slice down and then stalls, still holding
+    // the lock, before the failure that rolls all of it back.
+    let stall!: () => void;
+    const stalled = new Promise<void>((resolve) => { stall = resolve; });
+    let embedCalls = 0;
+    const writerEmbedder = {
+      model: runEmbedModel, dims: 4,
+      async embed(texts: string[]) {
+        embedCalls++;
+        if (embedCalls === 1) return texts.map(() => [1, 0, 0, 0]);
+        await stalled;
+        throw new Error('provider went away');
+      },
+    };
+    const writer = new Retriever(writerEmbedder, shared as never)
+      .index(NS, 'a', Array.from({ length: 600 }, (_, i) => ({ text: `chunk ${i}`, ord: i })))
+      .catch((e: unknown) => e);
+
+    // From here the source looks indexed to anyone who asks the store rather
+    // than the lock — which is the state the old pre-check answered out of.
+    await vi.waitFor(() => expect(rows.length).toBeGreaterThan(0));
+    expect(shared.hasSource(NS, 'a', runEmbedModel), 'the store says the source is there').toBe(true);
+
+    const socket = new FakeSocket();
+    let settled = false;
+    const run = resolveDocuments(
+      [{ sourceId: 'a', filename: 'contract.pdf', text: 'lorem ipsum dolor sit amet. '.repeat(75_000) }],
+      parseChatRunPayload({ prompt: 'what does the contract say about termination?', providers }),
+      { getVectorStore: () => shared } as never,
+      NS, 'convo-1', socket as never,
+    ).then((out) => { settled = true; return out; });
+
+    // Every chance to answer early.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(settled, 'the run waits for the writer instead of reading past it').toBe(false);
+
+    stall();
+    await writer;
+    expect(rows, 'and the writer took its half-written rows back with it').toHaveLength(0);
+
+    const out = await run;
+    expect(searchedOver.filter((n) => n > 0), 'nothing was ever searched out of a partial index').toEqual([]);
+    expect(out, 'and the document still reaches the run').toHaveLength(1);
+    const notice = socket.events.find((e) => e.event === 'knowledge:retrieved')?.payload as { mode?: string };
+    expect(notice?.mode, 'by the degraded door, which says so').toBe('degraded');
+  });
+});
+
+// Indexing a newly attached document is the longest uninterruptible stretch in
+// a run: near the 25M-character ceiling it is ~12,500 chunks and well over a
+// hundred paid embedding requests. The run signal reached `cascade.run()` and
+// nothing before it, so Stop bought none of that back — the run kept embedding
+// to completion while the UI sat unable to finish a turn already cancelled.
+describe('documents when the run is stopped', () => {
+  const providers = [
+    { type: 'openai', apiKey: 'sk-test', baseUrl: 'http://127.0.0.1:1/v1' },
+  ] as ProviderConfig[];
+
+  it('indexes nothing and returns nothing once the run is cancelled', async () => {
+    const socket = new FakeSocket();
+    const controller = new AbortController();
+    controller.abort();
+
+    let embedded = false;
+    const store = {
+      getVectorStore: () => ({
+        upsert() { embedded = true; },
+        hasSource: () => false,
+        deleteSource() {},
+        lexicalSearch: (): ScoredChunk[] => [],
+        denseSearch: (): ScoredChunk[] => [],
+      }),
+    } as never;
+
+    const big = 'lorem ipsum dolor sit amet. '.repeat(75_000);
+    const out = await resolveDocuments(
+      [
+        { sourceId: 'a', filename: 'contract.pdf', text: big },
+        { sourceId: 'b', filename: 'appendix.pdf', text: big },
+      ],
+      parseChatRunPayload({ prompt: 'what does the contract say about termination?', providers }),
+      store, 'user-1', 'convo-1', socket as never, controller.signal,
+    );
+
+    expect(out, 'no documents for a turn the user stopped').toEqual([]);
+    expect(embedded, 'and nothing was embedded on the way out').toBe(false);
+    expect(
+      socket.events.find((e) => e.event === 'knowledge:retrieved'),
+      'no retrieval notice either — a cancelled run is not a degraded one',
+    ).toBeUndefined();
   });
 });

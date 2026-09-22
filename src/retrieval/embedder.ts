@@ -42,16 +42,19 @@ export class OpenAICompatibleEmbedder implements Embedder {
     return this.dimensions ?? this.resolvedDims;
   }
 
-  async embed(texts: string[]): Promise<number[][]> {
+  async embed(texts: string[], opts: { signal?: AbortSignal } = {}): Promise<number[][]> {
     if (texts.length === 0) return [];
     const out: number[][] = [];
     for (let i = 0; i < texts.length; i += BATCH) {
+      // Checked per batch AND handed to the request, so a cancelled run stops
+      // paying immediately rather than at the next batch boundary.
+      opts.signal?.throwIfAborted();
       const batch = texts.slice(i, i + BATCH).map((t) => (t.trim() ? t : ' '));
       const res = await this.client.embeddings.create({
         model: this.model,
         input: batch,
         ...(this.dimensions ? { dimensions: this.dimensions } : {}),
-      });
+      }, { signal: opts.signal });
       // The API returns items with an `index`; sort to guarantee input order.
       const rows = [...res.data].sort((a, b) => a.index - b.index);
       for (const row of rows) {

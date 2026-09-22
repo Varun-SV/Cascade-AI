@@ -1,0 +1,21 @@
+{
+  "source": "mteb-beir15-classic-retrieval-computed",
+  "modality": "embeddings",
+  "metric": "Unweighted average nDCG@10 across the 15 classic BEIR retrieval datasets, computed directly from MTEB's own raw per-dataset results file",
+  "label": "MTEB Retrieval (classic BEIR-15, computed)",
+  "url": "https://raw.githubusercontent.com/embeddings-benchmark/leaderboard/main/EXTERNAL_MODEL_RESULTS.json",
+  "capturedAt": "2026-09-21",
+  "provenance": "captured",
+  "lowerIsBetter": false,
+  "note": "Downloaded directly from the MTEB project's own GitHub repo (embeddings-benchmark/leaderboard — the actual maintainers, not a mirror) and averaged the per-dataset ndcg_at_10 fields across the 15 classic BEIR retrieval sets for every model with full 15/15 coverage. This cached results file only covers model vintages through roughly early 2025 (no Qwen3-Embedding/Gemini-Embedding/current Cohere), which is why it's a separate, older-vintage source alongside embeddings-mteb-technical-reports.json rather than merged into it.",
+  "models": {
+    "voyage-large-2-instruct": 57.3,
+    "voyage-lite-02-instruct": 56.6,
+    "gte-qwen1.5-7b-instruct": 56.24,
+    "text-embedding-004-google-gecko": 55.7,
+    "text-embedding-3-large-openai": 55.43,
+    "nomic-embed-text-v1.5": 52.4,
+    "text-embedding-3-small-openai": 51.08,
+    "text-embedding-ada-002-openai": 49.25
+  }
+}

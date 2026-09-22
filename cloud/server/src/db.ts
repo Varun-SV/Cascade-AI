@@ -1422,6 +1422,37 @@ export class CloudStore {
     return rows.map((r) => this.deserializePendingMedia(r));
   }
 
+  /**
+   * Total characters of extracted document text this user is storing.
+   *
+   * Summed from `char_count`, which every document row already carries, so the
+   * ceiling is charged against exactly the number the client is shown.
+   */
+  totalAttachmentChars(userId: string): number {
+    const row = this.db
+      .prepare('SELECT COALESCE(SUM(char_count), 0) AS total FROM attachments WHERE user_id = ?')
+      .get(userId) as { total: number };
+    return row.total;
+  }
+
+  /**
+   * Uploads never attached to a message and older than `before` — what the
+   * sweep removes. Global rather than per-user, like the pending-media sweep:
+   * whoever happens to upload next pays for everyone's abandoned rows, which is
+   * the only way a user who never came back gets cleaned up at all.
+   */
+  listExpiredOrphanUploads(before: number): CloudAttachment[] {
+    const rows = this.db
+      .prepare('SELECT * FROM attachments WHERE message_id IS NULL AND created_at <= ?')
+      .all(before) as DbAttachmentRow[];
+    return rows.map((r) => this.deserializeAttachment(r));
+  }
+
+  /** Drop a swept attachment row by id (the sweeper already holds the row). */
+  deleteAttachmentById(id: string): void {
+    this.db.prepare('DELETE FROM attachments WHERE id = ?').run(id);
+  }
+
   /** Drop a swept row by id (the sweeper already holds the row). */
   deletePendingMediaById(id: string): void {
     this.db.prepare('DELETE FROM pending_media WHERE id = ?').run(id);

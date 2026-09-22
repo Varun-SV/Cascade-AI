@@ -1,0 +1,18 @@
+{
+  "source": "artificial-analysis-music-arena-vocals",
+  "modality": "music-generation",
+  "metric": "Artificial Analysis Music Arena Elo — vocal tracks",
+  "label": "Artificial Analysis Music Arena (Vocals)",
+  "url": "https://artificialanalysis.ai/music/leaderboard/vocals",
+  "capturedAt": "2026-09-21",
+  "provenance": "captured-via-search",
+  "lowerIsBetter": false,
+  "note": "Same retrieval method as music-generation-aa-instrumental.json.",
+  "models": {
+    "suno-v5.5": 1169,
+    "mureka-v9": 1155,
+    "mureka-v8": 1139,
+    "suno-v5": 1097,
+    "minimax-music-2.5-plus": 1092
+  }
+}

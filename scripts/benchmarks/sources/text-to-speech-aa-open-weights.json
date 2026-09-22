@@ -1,0 +1,18 @@
+{
+  "source": "artificial-analysis-tts-open-weights",
+  "modality": "text-to-speech",
+  "metric": "Artificial Analysis Text-to-Speech Open Weights leaderboard Elo",
+  "label": "Artificial Analysis TTS Open Weights",
+  "url": "https://artificialanalysis.ai/text-to-speech/leaderboard/provider-voice/open-weights",
+  "capturedAt": "2026-09-21",
+  "provenance": "captured-via-search",
+  "lowerIsBetter": false,
+  "note": "Same retrieval method as text-to-speech-aa-arena.json (web-search quote of the live page, direct fetch blocked).",
+  "models": {
+    "breeze-tts-2": 1205,
+    "fish-audio-s2-pro": 1122,
+    "step-audio-editx": 1098,
+    "voxtral-tts": 1075,
+    "kokoro-82m-v1.0": 1062
+  }
+}

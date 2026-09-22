@@ -1,0 +1,27 @@
+{
+  "source": "hf-open-asr-leaderboard-shortform",
+  "modality": "speech-to-text",
+  "metric": "Open ASR Leaderboard — English short-form average Word Error Rate %",
+  "label": "Open ASR Leaderboard (short-form)",
+  "url": "https://raw.githubusercontent.com/huggingface/open_asr_leaderboard/main/scripts/data/en_shortform.csv",
+  "capturedAt": "2026-09-21",
+  "provenance": "captured",
+  "lowerIsBetter": true,
+  "note": "Read directly from the Open ASR Leaderboard's own official GitHub repo (huggingface/open_asr_leaderboard), the maintainers' own results data, not a third-party mirror.",
+  "models": {
+    "cohere-transcribe-03-2026": 5.42,
+    "elevenlabs-scribe-v2": 5.83,
+    "granite-4.0-1b-speech": 5.52,
+    "canary-qwen-2.5b": 5.63,
+    "qwen3-asr-1.7b": 5.76,
+    "parakeet-tdt-0.6b-v2": 6.05,
+    "assemblyai-universal-3-pro": 6.21,
+    "parakeet-tdt-0.6b-v3": 6.32,
+    "chirp-2": 6.42,
+    "elevenlabs-scribe-v1": 6.88,
+    "whisper-large-v3": 7.44,
+    "whisper-large-v3-turbo": 7.83,
+    "canary-1b": 6.50375,
+    "mms-1b-all": 22.53875
+  }
+}

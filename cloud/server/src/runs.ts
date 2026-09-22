@@ -935,14 +935,75 @@ export function wantsFileDelivery(
 const RAG_TOP_K = 8;
 
 /**
+ * The context window of an explicitly pinned model id (`provider:id`, or a
+ * bare id). Azure ids are DEPLOYMENT names and are absent from `MODELS`, so
+ * they resolve through the matching provider entry instead — without that, a
+ * pinned Azure deployment reads as an unknown model and the caller falls back
+ * to the cross-provider minimum, which is the outcome pinning exists to avoid.
+ */
+function pinnedModelWindow(pinned: string, providers: ProviderConfig[]): number | undefined {
+  const sep = pinned.indexOf(':');
+  const providerType = sep > 0 ? pinned.slice(0, sep) : undefined;
+  const id = sep > 0 ? pinned.slice(sep + 1) : pinned;
+
+  // The PROVIDER first, the catalog second. An Azure deployment is named by
+  // whoever created it, so a deployment called `gpt-4.1` may be configured with
+  // any base model at all — and consulting the catalog first handed that
+  // deployment gpt-4.1's 1,047,576-token budget when the thing behind it was a
+  // 128k gpt-4o-mini. The run then finds out by failing on the provider's own
+  // limit. The pin names which provider it means; that provider is the only
+  // thing that knows what its deployment actually is.
+  //
+  // An unqualified pin checks Azure too, since a configured deployment with
+  // exactly that name is a better answer than a catalog entry that merely
+  // shares its id.
+  if (!providerType || providerType === 'azure') {
+    for (const p of providers) {
+      if (p.type !== 'azure' || p.deploymentName?.trim() !== id) continue;
+      const cw = azureModelForDeployment(p)?.contextWindow;
+      if (cw) return cw;
+    }
+  }
+
+  // The catalog only answers for the provider it describes. `gpt-4.1` in there
+  // is OpenAI's, with a 1,047,576-token window; an `openai-compatible:gpt-4.1`
+  // pin is a GATEWAY that has borrowed the name and may hold 128k, and handing
+  // it OpenAI's window admits a document budget the model serving the request
+  // will reject. A qualifier that does not match the entry's provider means we
+  // do not know what will answer, which is what the conservative minimum is for.
+  const catalog = MODELS[id];
+  if (!catalog) return undefined;
+  if (providerType && catalog.provider !== providerType) return undefined;
+  return catalog.contextWindow;
+}
+
+/**
  * The context window (in tokens) this run can rely on, taken conservatively as
  * the smallest window among the models the user has actually pinned — Azure
  * deployments (the deployment name IS the model) and any explicit fast-answer
  * model. Unpinned cloud providers fall back to the SDK's default window. The
  * document budget is derived from this, so a big-window setup injects big docs
  * in full while a small one retrieves sooner — no fixed byte cliff.
+ *
+ * A Fast Answer that pins a model is the exception, and it is not a
+ * conservatism question: that one model answers the turn and nothing else in
+ * the provider list participates, so the minimum across the list is a bound
+ * belonging to a model this run will never call. Someone who pins the
+ * 1,047,576-token `gpt-4.1` while a 128k Azure deployment sits unused in their
+ * settings was having ~88% of their document allowance trimmed away for it.
+ * Every other shape of run still takes the minimum, because the router there
+ * really may reach any configured provider.
  */
-export function runContextWindowTokens(providers: ProviderConfig[], fastAnswerModel?: string): number {
+export function runContextWindowTokens(
+  providers: ProviderConfig[],
+  fastAnswer?: { enabled?: boolean; model?: string },
+): number {
+  if (fastAnswer?.enabled && fastAnswer.model) {
+    const pinnedWindow = pinnedModelWindow(fastAnswer.model, providers);
+    // An unresolvable id means we do not know what will answer, so fall through
+    // to the conservative minimum rather than inventing a window for it.
+    if (pinnedWindow) return pinnedWindow;
+  }
   const windows: number[] = [];
   for (const p of providers) {
     if (p.type === 'azure') {
@@ -950,9 +1011,8 @@ export function runContextWindowTokens(providers: ProviderConfig[], fastAnswerMo
       if (m?.contextWindow) windows.push(m.contextWindow);
     }
   }
-  if (fastAnswerModel) {
-    const id = fastAnswerModel.includes(':') ? fastAnswerModel.split(':').slice(1).join(':') : fastAnswerModel;
-    const cw = MODELS[id]?.contextWindow;
+  if (fastAnswer?.model) {
+    const cw = pinnedModelWindow(fastAnswer.model, providers);
     if (cw) windows.push(cw);
   }
   return windows.length ? Math.min(...windows) : DEFAULT_CONTEXT_LIMIT;
@@ -966,15 +1026,125 @@ export function runContextWindowTokens(providers: ProviderConfig[], fastAnswerMo
  * errors, and emits a `knowledge:retrieved` notice so the client can show what
  * happened. A fast answer is a single direct call, so docs pass through as-is.
  */
-async function resolveDocuments(
+/**
+ * Why a corpus is being injected without retrieval. Each carries a different
+ * remedy, so the client can say something true rather than something generic:
+ * `nokey` wants a key, `fast` wants the run repeated without Fast Answer, and
+ * `degraded` had both and still got nothing back from the index.
+ */
+export type UnretrievedMode = 'nokey' | 'fast' | 'degraded';
+
+/**
+ * The ONE door through which a corpus reaches the model without retrieval.
+ *
+ * Every such path used to answer with the whole corpus, and every one of them
+ * was safe only because ingestion had already cut each document at 200,000
+ * characters. Removing that cut — the point of this change — made all of them
+ * unbounded at once, not just the no-embedder path that was fixed first:
+ * planning returns `cag` unconditionally for a fast answer, and the retrieval
+ * branch falls back to the full corpus on zero hits and on any error. Each is
+ * reached only when the corpus is already known not to fit, so each could hand
+ * a 10 MB attachment to a 200k-token window and fail on the provider's limit
+ * instead of ours.
+ *
+ * A budget is not a rule that lives at one door. Putting it in a helper and
+ * routing all four through it is what stops the next path from being written
+ * without it.
+ *
+ * Under budget this is a no-op — no trim, no notice — so the ordinary CAG case
+ * behaves exactly as before. Over budget each document gets an equal share, so
+ * one file cannot swallow the allowance, and is trimmed from the head, where a
+ * title and contents live. Lossy for this turn only: storage keeps the whole
+ * text, and the notice reports what actually reached the model rather than
+ * reassuring the user about a file it only half read.
+ */
+/**
+ * Split a budget across documents so none is starved and none is wasted.
+ *
+ * An equal share is fair and, on real attachments, mostly empty: nine notes of
+ * a few hundred characters beside one long report gave the report a tenth of
+ * the allowance and threw the other nine tenths away, so the run answered from
+ * a fraction of the only document that mattered while most of the window sat
+ * unused. Fair is not the same as useful.
+ *
+ * Water-filling instead. Everyone is offered an equal share; whoever wants
+ * less than that takes what they need and the remainder is re-offered to the
+ * rest, repeatedly, until nobody is under-served or the budget is spent. The
+ * fixed share is the FLOOR each document is guaranteed against the others, not
+ * the ceiling it is held to, so a long document can use room a short one never
+ * wanted — and a corpus of equally long documents divides exactly as before.
+ */
+export function allowances(lengths: readonly number[], budget: number): number[] {
+  const out = lengths.map(() => 0);
+  let remaining = budget;
+  let open = lengths.map((_, i) => i);
+  while (open.length > 0 && remaining > 0) {
+    const share = Math.floor(remaining / open.length);
+    if (share <= 0) break;
+    const satisfied = open.filter((i) => lengths[i]! <= share);
+    if (satisfied.length === 0) {
+      // Everyone still open wants more than an equal share, so an equal share
+      // is the answer and there is nothing left to redistribute.
+      for (const i of open) out[i] = share;
+      return out;
+    }
+    for (const i of satisfied) {
+      out[i] = lengths[i]!;
+      remaining -= lengths[i]!;
+    }
+    open = open.filter((i) => lengths[i]! > share);
+  }
+  return out;
+}
+
+function injectWithinBudget(
+  docSources: Array<{ filename: string; text: string }>,
+  windowTokens: number,
+  mode: UnretrievedMode,
+  conversationId: string,
+  socket: RunSocket,
+): RunDocument[] {
+  const asIs = (): RunDocument[] => docSources.map((d) => ({ filename: d.filename, text: d.text }));
+  const totalChars = docSources.reduce((n, d) => n + d.text.length, 0);
+  const budget = cagCharBudget(windowTokens);
+  if (totalChars <= budget) return asIs();
+
+  const room = allowances(docSources.map((d) => d.text.length), budget);
+  const trimmed = docSources.map((d, i) => ({
+    filename: d.filename,
+    text: d.text.slice(0, room[i]!),
+  }));
+  socket.emit('knowledge:retrieved', {
+    conversationId,
+    mode,
+    docCount: docSources.length,
+    // What the user actually got, so the notice can say "the first N% of this
+    // file" rather than something reassuring and wrong.
+    keptChars: trimmed.reduce((n, d) => n + d.text.length, 0),
+    totalChars,
+  });
+  return trimmed;
+}
+
+export async function resolveDocuments(
   docSources: Array<{ sourceId: string; filename: string; text: string }>,
   payload: ChatRunPayload,
   store: CloudStore,
   userId: string,
   conversationId: string,
   socket: RunSocket,
+  /**
+   * The run's abort signal (client "Stop", or socket disconnect).
+   *
+   * Indexing a newly attached document is the longest uninterruptible stretch
+   * in a run: near the 25M-character ceiling it is ~12,500 chunks and well over
+   * a hundred paid embedding requests. Without the signal, Stop bought none of
+   * them back — the run kept embedding to completion while the UI sat unable to
+   * finish a run the user had already cancelled. The signal reached
+   * `cascade.run()` and nothing before it.
+   */
+  signal?: AbortSignal,
 ): Promise<RunDocument[]> {
-  const full = (): RunDocument[] => docSources.map((d) => ({ filename: d.filename, text: d.text }));
 
   // Adaptive decision: none / CAG (inject in full) / RAG (retrieve passages).
   // The CAG budget is derived from the run's real context window, so ordinary
@@ -982,23 +1152,45 @@ async function resolveDocuments(
   // pushed to retrieval — retrieval is reserved for corpora that genuinely
   // wouldn't fit the window.
   const totalChars = docSources.reduce((n, d) => n + d.text.length, 0);
-  const windowTokens = runContextWindowTokens(payload.providers as ProviderConfig[], payload.fastAnswerModel);
+  const windowTokens = runContextWindowTokens(
+    payload.providers as ProviderConfig[],
+    { enabled: payload.fastAnswer, model: payload.fastAnswerModel },
+  );
   const plan = planRetrieval({
     sourceCount: docSources.length,
     totalChars,
     cagCharBudget: cagCharBudget(windowTokens),
     fastAnswer: payload.fastAnswer,
   });
-  if (plan.mode !== 'rag') return full();
+  // `cag` here is either "it fits" — where the helper is a no-op — or a fast
+  // answer, which planning returns unconditionally without consulting size at
+  // all. That second case is the one that needs the bound.
+  if (plan.mode !== 'rag') {
+    return injectWithinBudget(docSources, windowTokens, 'fast', conversationId, socket);
+  }
 
   const embedder = embedderFromProviders(payload.providers as ProviderConfig[]);
   if (!embedder) {
-    // Only reached for a corpus too large for the window AND no embeddings-
-    // capable key. We still inject the whole document — nothing is silently
-    // trimmed here — so the notice reflects that honestly and points at every
-    // provider that would unlock passage retrieval, not just OpenAI.
-    socket.emit('knowledge:retrieved', { conversationId, mode: 'nokey', docCount: docSources.length });
-    return full();
+    // A corpus too large for the window AND no embeddings-capable key.
+    //
+    // This used to inject the whole thing, and that was survivable only because
+    // ingestion had already cut every document at 200,000 characters. With that
+    // cut gone — it was destroying the rest of the file before anything could
+    // ask for it — injecting everything here would hand a 10 MB PDF to a model
+    // with a 200k-token window, so the run fails on the provider's own limit
+    // instead of on ours. The accident that protected this path is not a design.
+    //
+    // So each document is given an equal share of the run's real document
+    // budget and trimmed to it. Trimming rather than dropping keeps the head of
+    // every attachment in play — which for most documents is title, abstract
+    // and contents — instead of silently losing whole files to whichever
+    // happened to be first.
+    //
+    // This is still lossy FOR THIS TURN, and the notice says so plainly rather
+    // than implying retrieval happened. Nothing is lost from STORAGE: the full
+    // text is on the attachment, so a key added later, or the navigation tools,
+    // reach the rest without re-uploading anything.
+    return injectWithinBudget(docSources, windowTokens, 'nokey', conversationId, socket);
   }
   try {
     // Second stage: an LLM reranker over the fused candidates, when the user
@@ -1010,14 +1202,25 @@ async function resolveDocuments(
 
     const retriever = new Retriever(embedder, store.getVectorStore(), reranker);
     for (const d of docSources) {
-      if (!retriever.isIndexed(userId, d.sourceId)) {
-        await retriever.index(userId, d.sourceId, chunkText(d.text));
-      }
+      // No `isIndexed` guard here, deliberately. Asking it out here is asking
+      // it OUTSIDE the retriever's per-source lock: a second run that starts
+      // after the first has committed its opening slice sees rows, decides the
+      // work is done, skips `index()` entirely and searches a half-written
+      // index — and if the writer then fails, its rollback removes the very
+      // rows this run just answered from. `index()` asks the same question
+      // while holding the lock, which is the only place the answer is stable.
+      // The chunking is passed as a thunk so the already-indexed case, which
+      // is the common one, still does not re-chunk the document.
+      await retriever.index(userId, d.sourceId, () => chunkText(d.text), { signal });
     }
     const hits = await retriever.search(payload.prompt, {
-      namespace: userId, sourceIds: docSources.map((d) => d.sourceId), k: RAG_TOP_K, candidates: 40,
+      namespace: userId, sourceIds: docSources.map((d) => d.sourceId), k: RAG_TOP_K, candidates: 40, signal,
     });
-    if (hits.length === 0) return full();
+    // The index answered, with nothing. We are past the point where the corpus
+    // was judged too large, so the whole of it is not an option.
+    if (hits.length === 0) {
+      return injectWithinBudget(docSources, windowTokens, 'degraded', conversationId, socket);
+    }
 
     const nameById = new Map(docSources.map((d) => [d.sourceId, d.filename]));
     const grouped = new Map<string, string[]>();
@@ -1034,7 +1237,15 @@ async function resolveDocuments(
       text: passages.join('\n\n[…]\n\n'),
     }));
   } catch {
-    return full();
+    // A cancelled run is not a degraded one. Returning documents here would
+    // announce a retrieval outcome for a turn the user has already stopped;
+    // returning none lets the run reach `cascade.run()`, which sees the same
+    // signal and settles through the ordinary cancellation path.
+    if (signal?.aborted) return [];
+    // Embedding outage, indexing failure, a vector store that will not answer.
+    // Falling back to the full corpus here was the same unbounded injection
+    // wearing a different hat.
+    return injectWithinBudget(docSources, windowTokens, 'degraded', conversationId, socket);
   }
 }
 
@@ -1467,7 +1678,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // by attachment + embed model, so re-runs are free) and inject only the most
   // relevant passages for this prompt. A fast answer skips docs entirely.
   const documents: RunDocument[] = await resolveDocuments(
-    docSources, payload, store, userId, conversation.id, socket,
+    docSources, payload, store, userId, conversation.id, socket, signal,
   );
 
   // Persist the user's ORIGINAL text (not the skill/memory-augmented prompt) as

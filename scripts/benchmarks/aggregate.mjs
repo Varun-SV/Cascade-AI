@@ -25,6 +25,8 @@
 //  unit-testable and the refresh script (scripts/refresh-benchmarks.mjs) and the
 //  GitHub Action can run it with zero dependencies.
 
+import { bareMap } from './bare-map.mjs';
+
 export const TASK_KEYS = ['code', 'analysis', 'creative', 'data'];
 
 /** Default Elo→0–100 reference band. 1000 reads as 0, 1500 as 100. */
@@ -84,19 +86,21 @@ export function normalizeValue(raw, band) {
   return clampScore(((v - min) / (max - min)) * 100);
 }
 
+
+
 /**
  * Normalize one source into { family: { task: 0–100 } }, keeping only the cells
  * the source actually rates. `source` shape:
  *   { source, scale, eloFloor?, eloCeil?, calibration?, models: { family: {…} } }
  */
 export function normalizeSource(source) {
-  const bands = {};
+  const bands = bareMap();
   for (const task of TASK_KEYS) bands[task] = calibrationFor(source, task);
-  const out = {};
+  const out = bareMap();
   const models = source?.models ?? {};
   for (const [family, profile] of Object.entries(models)) {
     if (!profile || typeof profile !== 'object') continue;
-    const clean = {};
+    const clean = bareMap();
     for (const task of TASK_KEYS) {
       const norm = normalizeValue(profile[task], bands[task]);
       if (norm !== null) clean[task] = norm;
@@ -132,18 +136,18 @@ export function conservativeAggregate(values, mode = 'min') {
  */
 export function buildFamilies(sources, opts = {}) {
   const mode = opts.mode === 'robust' ? 'robust' : 'min';
-  const base = opts.base ?? {};
+  const base = bareMap(opts.base);
   const normalized = sources.map((s) => ({ name: s?.source ?? 'unknown', map: normalizeSource(s) }));
 
   // Every family mentioned by any source, plus every family already in the base.
   const families = new Set(Object.keys(base));
   for (const { map } of normalized) for (const fam of Object.keys(map)) families.add(fam);
 
-  const outFamilies = {};
-  const trace = {};
+  const outFamilies = bareMap();
+  const trace = bareMap();
   for (const fam of [...families].sort()) {
-    const profile = {};
-    const famTrace = {};
+    const profile = bareMap();
+    const famTrace = bareMap();
     for (const task of TASK_KEYS) {
       const contributors = [];
       for (const { name, map } of normalized) {

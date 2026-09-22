@@ -29,8 +29,15 @@ export interface Embedder {
   readonly model: string;
   /** Vector dimension. 0 until the first embed call resolves it. */
   readonly dims: number;
-  /** Embed a batch of texts → one vector per input (same order). */
-  embed(texts: string[]): Promise<number[][]>;
+  /**
+   * Embed a batch of texts → one vector per input (same order).
+   *
+   * `signal` is honoured between batches and, where the transport supports it,
+   * on the in-flight request. Indexing a 25M-character document is ~12,500
+   * chunks and well over a hundred paid requests; without a signal, pressing
+   * Stop bought none of them back.
+   */
+  embed(texts: string[], opts?: { signal?: AbortSignal }): Promise<number[][]>;
 }
 
 export interface SearchOptions {
@@ -38,6 +45,25 @@ export interface SearchOptions {
   k?: number;
   /** Restrict results to these source ids (e.g. the docs attached to a run). */
   sourceIds?: string[];
+}
+
+/**
+ * Dense search options. `embedModel` is REQUIRED, and required rather than
+ * optional on purpose.
+ *
+ * A source's rows carry whichever model wrote them, chunk ids are
+ * `namespace:source:ord` with no model in them, and `upsert` is INSERT OR
+ * REPLACE — so a second model does not add rows, it replaces them one slice at
+ * a time. A reader that does not say which model it means can therefore score
+ * its own query vector against another model's vectors, at another
+ * dimensionality, and the cosine loop will truncate to the shorter of the two
+ * and return a number. `hasSource` has always been asked per model; this is the
+ * same question on the read side, and making it optional would just leave the
+ * next caller free to forget it.
+ */
+export interface DenseSearchOptions extends SearchOptions {
+  /** Only score vectors written by this embedding model. */
+  embedModel: string;
 }
 
 /** Persists chunk vectors and answers the two first-stage queries of hybrid
@@ -48,6 +74,6 @@ export interface VectorStore {
   /** True once this source has chunks for the given embed model (skip re-embed). */
   hasSource(namespace: string, sourceId: string, embedModel: string): boolean;
   lexicalSearch(query: string, opts: SearchOptions): ScoredChunk[];
-  denseSearch(queryVector: number[], opts: SearchOptions): ScoredChunk[];
+  denseSearch(queryVector: number[], opts: DenseSearchOptions): ScoredChunk[];
   deleteSource(namespace: string, sourceId: string): void;
 }

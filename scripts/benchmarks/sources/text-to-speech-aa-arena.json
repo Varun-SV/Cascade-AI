@@ -1,0 +1,21 @@
+{
+  "source": "artificial-analysis-tts-arena",
+  "modality": "text-to-speech",
+  "metric": "Artificial Analysis Text-to-Speech Arena Elo (proprietary + open, blended)",
+  "label": "Artificial Analysis Speech Arena",
+  "url": "https://artificialanalysis.ai/text-to-speech/arena",
+  "capturedAt": "2026-09-21",
+  "provenance": "captured-via-search",
+  "lowerIsBetter": false,
+  "note": "artificialanalysis.ai was unreachable from the research sandbox (org egress policy blocked WebFetch); these figures came from web-search results directly quoting the live arena page with attribution, not from any third-party API mirror.",
+  "models": {
+    "cartesia-sonic-3.6": 1276,
+    "qwen-audio-3.0-tts-plus": 1260,
+    "inworld-realtime-tts-2": 1247,
+    "simba-3.2": 1240,
+    "luna-tts": 1231,
+    "fun-realtime-tts": 1219,
+    "gemini-3.1-flash-tts": 1214,
+    "cartesia-sonic-3.5": 1203
+  }
+}

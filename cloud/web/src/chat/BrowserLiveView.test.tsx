@@ -4,8 +4,8 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
-import '@testing-library/jest-dom';
-import { BrowserLiveView } from './BrowserLiveView.js';
+import '@testing-library/jest-dom/vitest';
+import { BrowserLiveView, type BrowserInputEvent } from './BrowserLiveView.js';
 
 describe('BrowserLiveView', () => {
   it('shows nothing when no browser is attached', () => {
@@ -1109,7 +1109,10 @@ describe('BrowserLiveView — taking the page over', () => {
 describe('BrowserLiveView — round 30 review regressions', () => {
   const frame = { data: 'ROUND30', width: 1280, height: 800, generation: 30 };
 
-  function driving(onInput: ReturnType<typeof vi.fn>) {
+  // Typed for the prop it fills. `ReturnType<typeof vi.fn>` is `Mock<Procedure
+  // | Constructable>` in vitest 5 — no longer assignable to a specific
+  // signature, and it never described what this helper wanted anyway.
+  function driving(onInput: (event: BrowserInputEvent) => void) {
     return render(
       <BrowserLiveView
         active liveViewUrl={undefined} frame={frame} human confirmed
@@ -1119,7 +1122,7 @@ describe('BrowserLiveView — round 30 review regressions', () => {
   }
 
   it('sends editing chords to the remote boundary instead of editing only the hidden textarea', () => {
-    const onInput = vi.fn();
+    const onInput = vi.fn<(event: BrowserInputEvent) => void>();
     driving(onInput);
     const image = screen.getByRole('img') as HTMLImageElement;
     fireEvent.mouseDown(image, { clientX: 10, clientY: 10, button: 0 });
@@ -1137,7 +1140,7 @@ describe('BrowserLiveView — round 30 review regressions', () => {
   });
 
   it('does not commit a remote click until the matching mouse button is released', () => {
-    const onInput = vi.fn();
+    const onInput = vi.fn<(event: BrowserInputEvent) => void>();
     driving(onInput);
     const image = screen.getByRole('img') as HTMLImageElement;
     Object.defineProperty(image, 'naturalWidth', { value: 1280 });
@@ -1152,7 +1155,7 @@ describe('BrowserLiveView — round 30 review regressions', () => {
   });
 
   it('lets dragging away cancel a candidate remote click', () => {
-    const onInput = vi.fn();
+    const onInput = vi.fn<(event: BrowserInputEvent) => void>();
     driving(onInput);
     const image = screen.getByRole('img') as HTMLImageElement;
     Object.defineProperty(image, 'naturalWidth', { value: 1280 });

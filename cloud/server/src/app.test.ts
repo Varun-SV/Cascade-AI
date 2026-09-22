@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import fs from 'node:fs/promises';
@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
 import { buildMediaSink } from './runs.js';
 import { CloudStore } from './db.js';
+import { DOCX_MIME, expandingDocx } from './test-support/expanding-docx.js';
+import { MAX_CONCURRENT_EXTRACTIONS, MAX_QUEUED_EXTRACTION_BYTES, withExtractionSlot } from './documents.js';
+import { limitsForPlan, ORPHAN_UPLOAD_TTL_MS } from './entitlements.js';
 import type { CloudEnv } from './env.js';
 import { SESSION_COOKIE_NAME } from './auth/session.js';
 
@@ -941,6 +944,170 @@ describe('cloud/server app', () => {
     expect(body.filename).toBe('notes.txt');
     expect(body.charCount).toBeGreaterThan(0);
   });
+
+  it('POST /api/uploads holds a free account to its per-plan document ceiling', async () => {
+    // The limit on a document is its SIZE, per plan — not a fixed cut through
+    // its text at ingestion. The free ceiling is 5 MB; 6 MB is refused, and the
+    // message says which plan it is talking about so the user knows whether the
+    // file is wrong or their account is.
+    const alice = await login('Alice');
+    const dataBase64 = Buffer.alloc(6 * 1024 * 1024, 0x61).toString('base64');
+    const res = await fetch(`${baseUrl}/api/uploads`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ mime: 'text/plain', filename: 'huge.txt', dataBase64 }),
+    });
+    expect(res.status).toBe(413);
+    const body = await res.json();
+    expect(body.error).toMatch(/free plan/i);
+    expect(body.error).toMatch(/upgrade/i);
+  });
+
+  it('POST /api/uploads keeps the whole of a long document, with no truncation notice', async () => {
+    // 250k characters — comfortably past the 200,000-char cut that extraction
+    // used to make, and comfortably under the 5 MB free ceiling. Every
+    // character is stored, and the response carries no `truncated` flag at all,
+    // because nothing here shortens a document any more.
+    const alice = await login('Alice');
+    const chars = 250_000;
+    const dataBase64 = Buffer.from('y'.repeat(chars), 'utf8').toString('base64');
+    const res = await fetch(`${baseUrl}/api/uploads`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ mime: 'text/plain', filename: 'long.txt', dataBase64 }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.charCount, 'stored whole, not cut at 200k').toBe(chars);
+    expect(body.truncated, 'there is no truncation left to report').toBeUndefined();
+  });
+
+  // `documentBytes` bounds ONE upload. Nothing bounded what an account
+  // accumulates once ingestion stopped cutting every document at 200,000
+  // characters, and a DOCX compresses well enough that a few megabytes of
+  // upload become tens of megabytes of durable text in the shared database.
+  it('POST /api/uploads refuses once the account is at its stored-text ceiling', async () => {
+    const alice = await login('Alice');
+    const userId = await userIdFor(alice);
+    const ceiling = limitsForPlan('free').documentTextChars;
+    store.addAttachment({
+      userId, messageId: null, kind: 'document', mime: 'text/plain',
+      path: path.join(dir, 'seed.txt'), filename: 'seed.txt',
+      extractedText: 'x'.repeat(ceiling),
+    });
+
+    const res = await fetch(`${baseUrl}/api/uploads`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({
+        mime: 'text/plain', filename: 'one-more.txt',
+        dataBase64: Buffer.from('one more line', 'utf8').toString('base64'),
+      }),
+    });
+
+    expect(res.status, 'a size refusal, with the size status').toBe(413);
+    const body = await res.json() as { error: string };
+    expect(body.error, 'naming the plan, so the user knows what to change').toMatch(/free plan/i);
+    expect(body.error, 'and the remedy').toMatch(/make room/i);
+  });
+
+  it('POST /api/uploads sweeps uploads abandoned past the orphan TTL', async () => {
+    // An upload starts with message_id NULL and is linked when a run uses it.
+    // A row still NULL a week later is one nothing else removes — conversation
+    // deletion cascades from `messages`, and an orphan has none — so without
+    // this the only way out of the ceiling would be deleting conversations
+    // that were never the problem.
+    const alice = await login('Alice');
+    const userId = await userIdFor(alice);
+    const orphanPath = path.join(dir, 'abandoned.bin');
+    await fs.writeFile(orphanPath, 'bytes');
+    const orphan = store.addAttachment({
+      userId, messageId: null, kind: 'document', mime: 'text/plain',
+      path: orphanPath, filename: 'abandoned.txt', extractedText: 'x'.repeat(1_000),
+    });
+
+    // Only Date is faked: undici still needs real timers to make the request.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + ORPHAN_UPLOAD_TTL_MS + 1_000);
+      const res = await fetch(`${baseUrl}/api/uploads`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+        body: JSON.stringify({
+          mime: 'text/plain', filename: 'fresh.txt',
+          dataBase64: Buffer.from('a week later', 'utf8').toString('base64'),
+        }),
+      });
+      expect(res.status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(store.getOwnedAttachment(orphan.id, userId), 'the abandoned row is gone').toBeNull();
+    expect(
+      await fs.access(orphanPath).then(() => true, () => false),
+      'and its bytes with it',
+    ).toBe(false);
+    expect(
+      store.totalAttachmentChars(userId),
+      'so its text stopped counting against the ceiling',
+    ).toBeLessThan(1_000);
+  });
+
+  it('POST /api/uploads answers 503 when the extraction queue is full', async () => {
+    // Busy is not broken. Telling this user the file may be corrupt would send
+    // them to fix something that is fine.
+    const alice = await login('Alice');
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const holders = Array.from({ length: MAX_CONCURRENT_EXTRACTIONS }, () =>
+      withExtractionSlot(async () => { await held; }));
+    await new Promise((r) => setImmediate(r));
+    // Claims the whole queue budget, so any upload behind it is refused.
+    const filler = withExtractionSlot(async () => { /* admitted later */ }, MAX_QUEUED_EXTRACTION_BYTES);
+    await new Promise((r) => setImmediate(r));
+
+    const bytes = await expandingDocx({ runChars: 64, runs: 4 });
+    const pending = fetch(`${baseUrl}/api/uploads`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ mime: DOCX_MIME, filename: 'queued.docx', dataBase64: bytes.toString('base64') }),
+    });
+    // Long enough for the route to reach the queue. The slots are then freed
+    // BEFORE anything is asserted, so a version that queues the upload instead
+    // of refusing it completes and fails on the status rather than hanging.
+    await new Promise((r) => setTimeout(r, 50));
+    release();
+    await Promise.all([...holders, filler]);
+
+    const res = await pending;
+    expect(res.status, 'busy, not broken').toBe(503);
+    expect(res.headers.get('retry-after'), 'with something to act on').toBe('5');
+    const body = await res.json() as { error: string };
+    expect(body.error, 'and no suggestion the document is at fault').not.toMatch(/corrupt/i);
+  });
+
+  it('POST /api/uploads refuses a document that explodes when opened, and says so', async () => {
+    // The per-plan byte ceiling above cannot catch this one: the file is a few
+    // tens of KB, far inside the free allowance, and becomes ~30M characters
+    // once DOCX decompression is done with it. Without the extraction ceiling
+    // that text goes straight into SQLite and then into every run that reads
+    // the attachment.
+    const alice = await login('Alice');
+    const bytes = await expandingDocx();
+    expect(bytes.length, 'size alone would wave this through').toBeLessThan(5 * 1024 * 1024);
+
+    const res = await fetch(`${baseUrl}/api/uploads`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ mime: DOCX_MIME, filename: 'bomb.docx', dataBase64: bytes.toString('base64') }),
+    });
+
+    // 413 and a size remedy — NOT the 422 "scanned, encrypted, or corrupt" that
+    // the route gives every other parse failure. The file read perfectly well;
+    // telling this user to check it for corruption would send them looking for
+    // a problem that does not exist.
+    expect(res.status).toBe(413);
+    const body = await res.json();
+    expect(body.error).toMatch(/characters of text once extracted/);
+    expect(body.error).toMatch(/Split it into smaller files/);
+    expect(body.error, 'and not the corruption message').not.toMatch(/corrupt/i);
+  }, 60_000);
 
   it('MCP servers: add validates the URL, redacts auth, lists, toggles, deletes', async () => {
     const alice = await login('Alice');

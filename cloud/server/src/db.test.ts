@@ -356,11 +356,20 @@ describe('CloudStore', () => {
     expect(lex[0]!.id).toBe('u1:d1:0');
 
     // Dense finds the nearest vector.
-    const dense = vs.denseSearch([0.9, 0.1, 0], { namespace: 'u1', k: 1 });
+    const dense = vs.denseSearch([0.9, 0.1, 0], { namespace: 'u1', k: 1, embedModel: 'fake-model' });
     expect(dense[0]!.id).toBe('u1:d1:0');
 
     // Namespace isolation.
-    expect(vs.denseSearch([1, 0, 0], { namespace: 'other', k: 5 })).toHaveLength(0);
+    expect(vs.denseSearch([1, 0, 0], { namespace: 'other', k: 5, embedModel: 'fake-model' })).toHaveLength(0);
+
+    // Model isolation, for the same reason. These rows belong to 'fake-model';
+    // a query embedded by anything else must not be scored against them, or a
+    // 1,536-dimension query silently scores 768-dimension vectors over their
+    // shared prefix and returns a plausible number.
+    expect(
+      vs.denseSearch([1, 0, 0], { namespace: 'u1', k: 5, embedModel: 'other-model' }),
+      'another model sees none of them',
+    ).toHaveLength(0);
   });
 });
 
@@ -764,5 +773,82 @@ describe('CloudStore — pending media', () => {
     const stale = park(userId, 100, -1);
     expect(store.promotePendingMedia(stale.id, userId)).toBeNull();
     expect(store.sumUserFileBytes(userId)).toBe(0);
+  });
+});
+
+// `documentBytes` bounds one upload; nothing bounded what a tenant accumulates
+// once ingestion stopped cutting every document at 200,000 characters. These
+// are the two primitives the ceiling and its sweep are built on.
+describe('CloudStore — stored document text', () => {
+  let dir: string;
+  let store: CloudStore;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-att-'));
+    store = new CloudStore(path.join(dir, 'cloud.db'));
+  });
+  afterEach(async () => {
+    store.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  const user = (id: string) =>
+    store.upsertUser({ provider: 'github', providerId: id, email: null, name: null, avatar: null });
+  const doc = (userId: string, text: string | null) => store.addAttachment({
+    userId, messageId: null, kind: 'document', mime: 'text/plain',
+    path: `/tmp/${Math.random()}`, filename: 'a.txt', extractedText: text,
+  });
+
+  it('sums a user\u2019s extracted text and nobody else\u2019s', () => {
+    const alice = user('alice');
+    const bob = user('bob');
+    doc(alice.id, 'x'.repeat(100));
+    doc(alice.id, 'y'.repeat(250));
+    doc(bob.id, 'z'.repeat(9_000));
+    expect(store.totalAttachmentChars(alice.id), 'only her own rows').toBe(350);
+    expect(store.totalAttachmentChars(bob.id)).toBe(9_000);
+  });
+
+  it('counts an image attachment as nothing rather than as null', () => {
+    // Images store no text, so `char_count` is NULL — a SUM that did not
+    // coalesce would return null and break every comparison against it.
+    const alice = user('alice');
+    doc(alice.id, null);
+    expect(store.totalAttachmentChars(alice.id)).toBe(0);
+  });
+
+  it('starts a user with nothing stored', () => {
+    expect(store.totalAttachmentChars(user('alice').id)).toBe(0);
+  });
+
+  // An upload starts with message_id NULL and is linked when a run uses it.
+  // A row still NULL long afterwards is one nothing else will ever remove:
+  // conversation deletion cascades from `messages`, and an orphan has none.
+  it('finds uploads never attached to a message, and only those', () => {
+    const alice = user('alice');
+    const orphan = doc(alice.id, 'x'.repeat(10));
+    const attached = doc(alice.id, 'y'.repeat(10));
+    const convo = store.createConversation(alice.id, 'c');
+    const msg = store.addMessage({ conversationId: convo.id, role: 'user', content: 'hi' });
+    store.linkAttachmentToMessage(attached.id, alice.id, msg.id);
+
+    const expired = store.listExpiredOrphanUploads(Date.now() + 1_000).map((a) => a.id);
+    expect(expired, 'the orphan is swept').toContain(orphan.id);
+    expect(expired, 'the attached one never is, however old').not.toContain(attached.id);
+  });
+
+  it('leaves an orphan alone until it is past the cutoff', () => {
+    const alice = user('alice');
+    const orphan = doc(alice.id, 'x'.repeat(10));
+    expect(store.listExpiredOrphanUploads(orphan.createdAt - 1), 'not yet').toEqual([]);
+  });
+
+  it('deletes a swept row and stops counting its text', () => {
+    const alice = user('alice');
+    const orphan = doc(alice.id, 'x'.repeat(500));
+    expect(store.totalAttachmentChars(alice.id)).toBe(500);
+    store.deleteAttachmentById(orphan.id);
+    expect(store.getOwnedAttachment(orphan.id, alice.id), 'the row is gone').toBeNull();
+    expect(store.totalAttachmentChars(alice.id), 'and its text no longer counts').toBe(0);
   });
 });

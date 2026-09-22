@@ -34,6 +34,45 @@ export class SsrfBlockedError extends Error {
 const ALLOWED_PROTOCOLS = new Set(['http:', 'https:']);
 const MAX_REDIRECTS = 5;
 
+/**
+ * Headers kept when a redirect leaves the origin. EVERYTHING else is dropped.
+ *
+ * An allowlist, because the question "is this header a credential?" has no
+ * bounded answer. The Fetch standard strips `Authorization`, `Cookie` and
+ * `Proxy-Authorization`, and stripping only those was worth exactly nothing
+ * here: the keys this codebase actually carries are `x-api-key`,
+ * `x-goog-api-key`, `api-key`, `steel-api-key` — and a generated tool can
+ * invent a name no list anticipates. Enumerating the dangerous ones is a race
+ * against every vendor's naming taste, and losing it silently forwards a live
+ * key to whoever the previous host names.
+ *
+ * So the default is drop, and this is the short list of headers that describe
+ * the REQUEST rather than the requester. `content-*` are here because a 307 or
+ * 308 preserves the body across origins and a body without its content-type is
+ * a broken request, not a safer one. `range` is here because dropping it is
+ * not the cautious choice it looks like: an origin that redirects to a CDN or
+ * object store is the NORMAL way a large file is served, and a probe that
+ * asked for the first 64 KB arrives at the CDN asking for everything. The
+ * callers that send a range are the ones being careful about size, and
+ * `bridgeFetch` reads the response through `resp.text()` — it materializes the
+ * whole body before its own character limit can apply — so silently widening
+ * the request is how a bounded probe turns into a multi-gigabyte download.
+ * It carries no identity; the Fetch standard safelists it for the same reason.
+ */
+const CROSS_ORIGIN_SAFE_HEADERS: ReadonlySet<string> = new Set([
+  'accept',
+  'accept-encoding',
+  'accept-language',
+  'content-language',
+  'content-length',
+  'content-type',
+  'range',
+  'user-agent',
+]);
+
+/** Headers that describe a body, dropped whenever the body is. */
+const BODY_HEADERS = ['content-type', 'content-length', 'content-encoding', 'content-language'] as const;
+
 function allowLocal(): boolean {
   return process.env['CASCADE_ALLOW_LOCAL_FETCH'] === '1';
 }
@@ -276,13 +315,43 @@ const ssrfAgent = new Agent({
  */
 export async function safeFetch(rawUrl: string, init: RequestInit = {}): Promise<Response> {
   let currentUrl = (await assertPublicUrl(rawUrl)).toString();
+  let origin = new URL(currentUrl).origin;
+
+  // Per-hop request state, seeded from the caller's init and then MUTATED as
+  // the chain moves. Replaying the original `init` at every hop — which is
+  // what this did — meant a caller's `Authorization` followed the redirect to
+  // wherever it pointed, and a POST stayed a POST through a 303. Choosing
+  // `redirect: 'manual'` takes those rules away from `fetch`, so they have to
+  // be honoured here; they are not optional extras of the redirect-following
+  // `fetch` was doing for us.
+  let method = init.method ?? 'GET';
+  let body = init.body;
+  const headers = new Headers(init.headers);
 
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    // `dispatcher` is undici's, which is what Node's global fetch is built on;
-    // it is absent from the DOM RequestInit type, hence the cast. Nothing in
-    // this repo installs a global dispatcher, so scoping one here overrides no
-    // proxy or pool configured elsewhere.
-    const resp = await fetch(currentUrl, { ...init, redirect: 'manual', dispatcher: ssrfAgent } as RequestInit);
+    // `dispatcher` is undici's, which is what Node's global fetch is built on.
+    // @types/node 26 declares the option, so the whole-object cast this
+    // replaces is gone — `init` is type-checked again, which it had not been
+    // for as long as that cast was there. What remains is the one genuine
+    // mismatch: `ssrfAgent` is the standalone `undici` package's Agent and the
+    // declared type is Node's own bundled copy of the same class, so the two
+    // are nominally distinct and structurally identical. Assert that one value
+    // and nothing else. Nothing in this repo installs a global dispatcher, so
+    // scoping one here overrides no proxy or pool configured elsewhere.
+    const request: RequestInit = {
+      ...init,
+      method,
+      body,
+      // A SNAPSHOT per hop, not the mutable object itself. Handing the same
+      // instance to every call means a later `delete` is visible to anything
+      // that kept a reference to an earlier request — which is exactly how a
+      // test observing hop 1 saw hop 2's stripped credentials, and would be a
+      // genuine hazard for any dispatcher that read headers lazily.
+      headers: new Headers(headers),
+      redirect: 'manual',
+      dispatcher: ssrfAgent as unknown as RequestInit['dispatcher'],
+    };
+    const resp = await fetch(currentUrl, request);
 
     // Not a redirect — return as-is.
     if (resp.status < 300 || resp.status >= 400) return resp;
@@ -292,6 +361,41 @@ export async function safeFetch(rawUrl: string, init: RequestInit = {}): Promise
 
     const next = new URL(location, currentUrl);
     await assertPublicUrl(next.toString()); // re-validate each hop
+
+    // 303 is defined as "GET the other thing" — but only for a method that was
+    // asking for something else. A GET or a HEAD is already that request, and
+    // rewriting a HEAD to a GET turns a metadata probe into a download of a
+    // body the caller never asked for. 301 and 302 on a POST are rewritten to
+    // GET by every browser and by fetch itself, de facto since long before it
+    // was written down. The body goes with the method, and so do the headers
+    // that described it.
+    const verb = method.toUpperCase();
+    const rewriteToGet = (resp.status === 303 && verb !== 'GET' && verb !== 'HEAD')
+      || ((resp.status === 301 || resp.status === 302) && verb === 'POST');
+    if (rewriteToGet) {
+      method = 'GET';
+      body = undefined;
+      for (const h of BODY_HEADERS) headers.delete(h);
+    }
+
+    // Leaving the origin drops everything the caller supplied except the few
+    // headers that describe the request itself. This is the whole point of the
+    // rule: a redirect is chosen by the server being redirected FROM, so
+    // following one while still carrying the caller's key hands that key to
+    // whoever the previous host names. `bridgeFetch` routes model-authored tool
+    // headers through here, so "the caller" can be a generated tool holding a
+    // real credential under a name nobody has seen before.
+    //
+    // Once dropped they stay dropped, even if the chain returns to the first
+    // origin — stricter than the spec, and the strictness costs nothing a
+    // legitimate caller wanted.
+    if (next.origin !== origin) {
+      for (const [name] of [...headers]) {
+        if (!CROSS_ORIGIN_SAFE_HEADERS.has(name.toLowerCase())) headers.delete(name);
+      }
+    }
+
+    origin = next.origin;
     currentUrl = next.toString();
   }
 

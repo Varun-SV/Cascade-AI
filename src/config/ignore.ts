@@ -12,11 +12,17 @@ const ignore = (_ignoreModule as unknown as { default: () => Ignore }).default ?
 export class CascadeIgnore {
   private ig: Ignore;
   private loaded = false;
+  // Every pattern this matcher was given, in the order it was given them.
+  // `getPatterns` used to read `ignore`'s private `_rules` instead, which
+  // stopped being an array in ignore 7 and turned the getter into a
+  // TypeError. What the caller wants is what we put in, and we know that
+  // without asking the library.
+  private readonly patterns: string[] = [];
 
   constructor() {
     this.ig = ignore();
     // Built-in defaults — always protected
-    this.ig.add([
+    this.add([
       '.cascade/keystore.enc',
       '.cascade/memory.db',
       '.env',
@@ -28,12 +34,18 @@ export class CascadeIgnore {
     ]);
   }
 
+  /** The one place a pattern enters the matcher, so the record cannot drift. */
+  private add(patterns: string[]): void {
+    this.patterns.push(...patterns);
+    this.ig.add(patterns);
+  }
+
   async load(workspacePath: string): Promise<void> {
     const filePath = path.join(workspacePath, '.cascadeignore');
     try {
       const content = await fs.readFile(filePath, 'utf-8');
       const lines = content.split('\n').filter((l) => l.trim() && !l.startsWith('#'));
-      this.ig.add(lines);
+      this.add(lines);
       this.loaded = true;
     } catch {
       // No .cascadeignore file — only built-in defaults apply
@@ -52,7 +64,7 @@ export class CascadeIgnore {
   }
 
   getPatterns(): string[] {
-    return (this.ig as unknown as { _rules: Array<{ pattern: string }> })._rules?.map((r) => r.pattern) ?? [];
+    return [...this.patterns];
   }
 }
 

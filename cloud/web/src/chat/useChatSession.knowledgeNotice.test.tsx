@@ -1,0 +1,169 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { renderHook, act } from '@testing-library/react';
+import type { Socket } from 'socket.io-client';
+import { useChatSession } from './useChatSession.js';
+
+vi.mock('../lib/api.js', () => ({
+  getMessages: vi.fn(async () => ({ messages: [] })),
+  fetchFeedback: vi.fn(async () => ({ feedback: {} })),
+  selectBranch: vi.fn(async () => ({ messages: [] })),
+  deleteMessage: vi.fn(async () => ({ messages: [] })),
+}));
+
+/** A socket that records subscriptions and lets a test deliver server events. */
+function fakeSocket() {
+  const handlers = new Map<string, Set<(...args: unknown[]) => void>>();
+  return {
+    subscribed: (event: string) => (handlers.get(event)?.size ?? 0) > 0,
+    fire(event: string, payload?: unknown) {
+      for (const h of [...(handlers.get(event) ?? [])]) h(payload);
+    },
+    socket: {
+      connected: true,
+      on(event: string, listener: (...args: unknown[]) => void) {
+        let set = handlers.get(event);
+        if (!set) { set = new Set(); handlers.set(event, set); }
+        set.add(listener);
+        return this;
+      },
+      off(event: string, listener: (...args: unknown[]) => void) {
+        handlers.get(event)?.delete(listener);
+        return this;
+      },
+      emit() { return this; },
+    } as unknown as Socket,
+  };
+}
+
+beforeEach(() => { vi.clearAllMocks(); });
+
+// One socket carries several conversations on plans that allow concurrent
+// runs. `provider:exhausted` next door has filtered by conversation since it
+// was written; this handler had not, so a background chat's trimming notice
+// landed in whichever chat was open — telling a user their document had been
+// cut when it had not been. Phase 0 made that reachable far more often by
+// adding two more modes that emit it.
+describe('useChatSession — the document-trimming notice', () => {
+  it('shows the notice for the conversation the user is looking at', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    expect(fake.subscribed('knowledge:retrieved')).toBe(true);
+
+    act(() => {
+      fake.fire('knowledge:retrieved', {
+        mode: 'fast', docCount: 2, keptChars: 40_000, totalChars: 200_000,
+      });
+    });
+
+    expect(view.result.current.knowledgeNotice).toBeTruthy();
+  });
+
+  it('ignores one addressed to a different conversation', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => {
+      fake.fire('knowledge:retrieved', {
+        conversationId: 'some-other-conversation',
+        mode: 'degraded', docCount: 1, keptChars: 10_000, totalChars: 500_000,
+      });
+    });
+
+    expect(view.result.current.knowledgeNotice).toBeNull();
+  });
+
+  // The regression the conversation filter introduced. On the FIRST message of
+  // a new chat the server mints the conversation and resolves documents before
+  // the chat:run acknowledgement tells this pane its id — so a filter comparing
+  // against a still-undefined ref reads the pane's own first turn as somebody
+  // else's. That is precisely the attachment flow this notice exists for.
+  it('keeps the notice on the first turn, before the pane knows its id', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    // A send arms first-turn adoption; nothing has told the pane an id yet.
+    act(() => { view.result.current.send({ prompt: 'what does this say?' }); });
+
+    act(() => {
+      fake.fire('knowledge:retrieved', {
+        conversationId: 'server-minted-on-this-turn',
+        mode: 'fast', docCount: 1, keptChars: 20_000, totalChars: 400_000,
+      });
+    });
+
+    expect(view.result.current.knowledgeNotice, 'the pane owns this turn').toBeTruthy();
+  });
+
+  // A blank pane waiting for its first turn used to adopt whatever conversation
+  // arrived first. On a socket that also carries a resumed background run, that
+  // race is winnable by the wrong event — and the pane would then show the
+  // stranger's notice and reject its own run's events until the closing
+  // acknowledgement corrected the id.
+  it('does not adopt a background run\'s conversation while waiting for its own', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { view.result.current.send({ prompt: 'my question' }); });
+
+    // A resumed run on the same socket, named, and not this pane's.
+    act(() => {
+      fake.fire('knowledge:retrieved', {
+        runId: 'someone-elses-run',
+        conversationId: 'a-background-conversation',
+        mode: 'degraded', docCount: 3, keptChars: 10, totalChars: 900_000,
+      });
+    });
+
+    expect(view.result.current.knowledgeNotice, 'not this pane\'s business').toBeNull();
+  });
+
+  it('still adopts an event that carries no run id at all', () => {
+    // Older servers and emits outside a run context do not stamp one. Refusing
+    // those would break the first turn outright to close a race.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    act(() => { view.result.current.send({ prompt: 'my question' }); });
+    act(() => {
+      fake.fire('knowledge:retrieved', {
+        conversationId: 'server-minted', mode: 'fast', docCount: 1, keptChars: 5, totalChars: 99,
+      });
+    });
+    expect(view.result.current.knowledgeNotice).toBeTruthy();
+  });
+
+  it('names the run budget, not the model, so it invents no limitation', () => {
+    // The trim is against `cagCharBudget` — half the context window by default
+    // — so a corpus can fit the model and still be cut. Saying the model could
+    // not hold it sends the user to buy a bigger one for nothing.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => {
+      fake.fire('knowledge:retrieved', {
+        mode: 'nokey', docCount: 1, keptChars: 50_000, totalChars: 100_000,
+      });
+    });
+
+    const notice = view.result.current.knowledgeNotice ?? '';
+    expect(notice).toContain("run's document budget");
+    expect(notice).not.toContain('context window');
+  });
+
+  it('gives each reason its own remedy, because they are not the same problem', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    const fire = (mode: string) => act(() => {
+      fake.fire('knowledge:retrieved', { mode, docCount: 1, keptChars: 1, totalChars: 2 });
+    });
+
+    fire('nokey');
+    expect(view.result.current.knowledgeNotice).toContain('embeddings-capable key');
+
+    fire('fast');
+    expect(view.result.current.knowledgeNotice).toContain('Fast Answer');
+
+    fire('degraded');
+    expect(view.result.current.knowledgeNotice).toContain('could not run');
+  });
+});

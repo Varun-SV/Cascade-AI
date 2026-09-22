@@ -24,7 +24,7 @@ import { providerIsUsable } from './remote-browser.js';
 import { remoteBrowserControls } from './runs.js';
 import { NativeAuthStore, isLoopbackRedirect, hashRefreshToken } from './native-auth.js';
 import { githubAuthUrl, exchangeGithubCode, googleAuthUrl, exchangeGoogleCode, type OAuthProfile } from './auth/oauth.js';
-import { limitsForPlan, todayKey, checkStorageQuota } from './entitlements.js';
+import { limitsForPlan, ORPHAN_UPLOAD_TTL_MS, todayKey, checkStorageQuota } from './entitlements.js';
 import { skillCatalog } from './skills.js';
 import { renderDocsPage } from './docs.js';
 import { tenantScratchDir } from './paths.js';
@@ -35,7 +35,7 @@ import {
 } from './billing.js';
 import { HandoffStore, parseHandoffBody } from './handoff.js';
 import { DownloadResolver, isTargetId, isCascadeReleaseAsset, RELEASES_PAGE_URL } from './downloads.js';
-import { MAX_DOCUMENT_BYTES, parseDocument, resolveDocumentMime } from './documents.js';
+import { DocumentTooLargeError, ExtractionBusyError, MAX_DOCUMENT_BYTES, parseDocument, resolveDocumentMime } from './documents.js';
 import { connectorCatalog, getConnector, validateRemoteMcpUrl } from './mcp.js';
 import { McpOAuthFlows, encodeOAuthBlob, resolveRunMcpServers } from './mcp-oauth.js';
 import {
@@ -991,19 +991,88 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       res.status(400).json({ error: 'Unsupported file type. Upload an image, PDF, Word (.docx), or a text file.' });
       return;
     }
-    if (bytes.length === 0 || bytes.length > MAX_DOCUMENT_BYTES) {
-      res.status(400).json({ error: `Document must be between 1 byte and ${MAX_DOCUMENT_BYTES / (1024 * 1024)} MB` });
+    // THE CALLER'S PLAN, not one constant for everybody. Document size is what
+    // indexing cost tracks, so the ceiling is a plan entitlement beside the
+    // other quotas rather than a number buried in this handler.
+    //
+    // The message says which plan it is talking about and what lifts it. A bare
+    // "too large" leaves the user guessing whether the file is wrong or their
+    // account is.
+    const uploaderPlan = store.getUserById(userId)?.plan ?? 'free';
+    const documentBytes = Math.min(limitsForPlan(uploaderPlan).documentBytes, MAX_DOCUMENT_BYTES);
+    if (bytes.length === 0) {
+      res.status(400).json({ error: 'That document is empty.' });
       return;
     }
-    let extracted: { text: string; truncated: boolean };
+    if (bytes.length > documentBytes) {
+      const mb = (n: number) => `${Math.round((n / (1024 * 1024)) * 10) / 10} MB`;
+      res.status(413).json({
+        error: uploaderPlan === 'free'
+          ? `That document is ${mb(bytes.length)}. The free plan accepts up to ${mb(documentBytes)} per file — upgrade to attach larger ones.`
+          : `That document is ${mb(bytes.length)}, over the ${mb(documentBytes)} limit for a single file.`,
+      });
+      return;
+    }
+    // Abandoned uploads go first, so a ceiling is never held up by files the
+    // user never sent. Opportunistic and global, like the pending-media sweep:
+    // whoever uploads next pays for everyone's, which is the only way a tenant
+    // who never came back is cleaned up at all.
+    for (const orphan of store.listExpiredOrphanUploads(Date.now() - ORPHAN_UPLOAD_TTL_MS)) {
+      try { fs.rmSync(orphan.path, { force: true }); } catch { /* the row still goes */ }
+      store.deleteAttachmentById(orphan.id);
+    }
+
+    // Cheap refusal before the expensive part: someone already at the ceiling
+    // gains nothing from extracting 25M characters we are about to refuse.
+    const textCeiling = limitsForPlan(uploaderPlan).documentTextChars;
+    const tooMuchStored = (used: number): boolean => used >= textCeiling;
+    const refuseOverCeiling = (used: number): void => {
+      const m = (n: number) => `${(n / 1_000_000).toFixed(1)}M characters`;
+      res.status(413).json({
+        error: uploaderPlan === 'free'
+          ? `You are storing ${m(used)} of document text, and the free plan keeps up to ${m(textCeiling)}. `
+            + 'Delete some conversations with attachments, or upgrade, to make room.'
+          : `You are storing ${m(used)} of document text, over the ${m(textCeiling)} this plan keeps. `
+            + 'Delete some conversations with attachments to make room.',
+      });
+    };
+    if (tooMuchStored(store.totalAttachmentChars(userId))) {
+      refuseOverCeiling(store.totalAttachmentChars(userId));
+      return;
+    }
+
+    let extractedText: string;
     try {
-      extracted = await parseDocument({ bytes, mime: docMime, filename });
-    } catch {
+      extractedText = await parseDocument({ bytes, mime: docMime, filename });
+    } catch (err) {
+      // A file that decompressed into more text than we will store read
+      // perfectly well; saying it may be corrupt would send the user looking
+      // for a problem that is not there. It is a size refusal, so it gets the
+      // size status and the size remedy.
+      if (err instanceof DocumentTooLargeError) {
+        res.status(413).json({ error: err.message });
+        return;
+      }
+      // Not this document's fault and not permanent — the queue of uploads
+      // waiting to be read is full. Saying "corrupt" would send the user to
+      // fix a file that is fine.
+      if (err instanceof ExtractionBusyError) {
+        res.setHeader('Retry-After', '5');
+        res.status(503).json({ error: err.message });
+        return;
+      }
       res.status(422).json({ error: "Couldn't read that document — it may be scanned, encrypted, or corrupt." });
       return;
     }
-    if (!extracted.text.trim()) {
+    if (!extractedText.trim()) {
       res.status(422).json({ error: 'No text could be extracted from that document.' });
+      return;
+    }
+    // Re-read rather than reusing the pre-extraction figure: another upload of
+    // this user's may have landed while this one was being read.
+    const storedChars = store.totalAttachmentChars(userId);
+    if (storedChars + extractedText.length > textCeiling) {
+      refuseOverCeiling(storedChars);
       return;
     }
     fs.mkdirSync(dir, { recursive: true });
@@ -1011,9 +1080,12 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     fs.writeFileSync(filePath, bytes);
     const att = store.addAttachment({
       userId, messageId: null, kind: 'document', mime: docMime, path: filePath,
-      filename: filename || 'document', extractedText: extracted.text,
+      filename: filename || 'document', extractedText,
     });
-    res.json({ id: att.id, kind: att.kind, mime: att.mime, filename: att.filename, charCount: att.charCount, truncated: extracted.truncated });
+    // No `truncated` any more: nothing here shortens a document, so there is
+    // nothing to warn about. How much of it reaches a given model is decided
+    // per run, against that run's real context window.
+    res.json({ id: att.id, kind: att.kind, mime: att.mime, filename: att.filename, charCount: att.charCount });
   });
 
   app.get('/api/uploads/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {

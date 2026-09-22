@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
-import '@testing-library/jest-dom';
+import '@testing-library/jest-dom/vitest';
 import { ToolApprovalPrompt } from './ToolApprovalPrompt.js';
 
 const req = (over: Partial<Parameters<typeof ToolApprovalPrompt>[0]['approvals'][number]> = {}) => ({
