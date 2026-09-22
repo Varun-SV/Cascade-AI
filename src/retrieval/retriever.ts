@@ -74,6 +74,19 @@ const INDEX_SLICE = 512;
  * embedding anything, which also stops the duplicate spend that racing
  * attempts were quietly paying for.
  *
+ * Keyed by SOURCE ALONE, deliberately not by source-and-embed-model. Adding
+ * the model to the key handed two models separate locks over one source, and
+ * everything underneath is model-blind: chunk ids are `namespace:source:ord`
+ * with no model in them, `chunk_id` is the PRIMARY KEY, and `upsert` is
+ * INSERT OR REPLACE. So the second model does not sit alongside the first, it
+ * overwrites it row by row — and `deleteSource` is unscoped, so either
+ * attempt's rollback takes the other's rows with it. Because `hasSource` is
+ * asked per model, the wreckage reads as a complete index while search mixes
+ * two models' vectors, at two different dimensionalities, through a cosine
+ * stage that will not complain. One writer per source keeps it coherent: the
+ * loser waits, re-checks under ITS OWN model, and either finds nothing to do
+ * or replaces the source whole.
+ *
  * Per PROCESS. Two server processes over one database would still race, and
  * closing that needs staging rows and an atomic publish rather than a lock.
  * The cloud server is a single process against its own SQLite file today, so
@@ -81,6 +94,14 @@ const INDEX_SLICE = 512;
  * person to add a second process knows what they inherit.
  */
 const indexLocks = new Map<string, Promise<unknown>>();
+
+/**
+ * The chunks to index, or a thunk producing them. See {@link Retriever.index}
+ * for why the lazy form is offered.
+ */
+export type IndexChunks =
+  | Array<{ text: string; ord: number }>
+  | (() => Array<{ text: string; ord: number }>);
 
 export class Retriever {
   constructor(
@@ -105,19 +126,27 @@ export class Retriever {
    * Embed and store a source's chunks. Skips work when the source is already
    * indexed under the current embed model (so re-runs don't re-embed). Returns
    * the number of chunks newly indexed.
+   *
+   * `chunks` may be a function, resolved only once this call holds the lock AND
+   * has found the source unindexed — so the ordinary "already indexed" path
+   * costs nothing to re-chunk a 25M-character document. That option exists
+   * because the alternative is the caller deciding whether to chunk by asking
+   * `isIndexed` itself, and a caller that asks `isIndexed` is a caller that can
+   * skip `index()` altogether: it then searches whatever slices the current
+   * writer happens to have committed, and answers from rows the writer is about
+   * to roll back. The check belongs on this side of the lock, and only here.
    */
   async index(
     namespace: string,
     sourceId: string,
-    chunks: Array<{ text: string; ord: number }>,
+    chunks: IndexChunks,
   ): Promise<number> {
-    if (chunks.length === 0) return 0;
 
     // Wait out any attempt already running on this source, then re-check. The
     // loop matters: several callers can be waiting on the same promise, and
     // whichever resumes first takes the lock — the others must see it and wait
     // again rather than barge in.
-    const lockKey = `${this.embedder.model}\u0000${namespace}\u0000${sourceId}`;
+    const lockKey = `${namespace}\u0000${sourceId}`;
     for (;;) {
       const inFlight = indexLocks.get(lockKey);
       if (!inFlight) break;
@@ -133,7 +162,9 @@ export class Retriever {
     const claim = new Promise<void>((resolve) => { release = resolve; });
     indexLocks.set(lockKey, claim);
     try {
-      return await this.indexSlices(namespace, sourceId, chunks);
+      const pieces = typeof chunks === 'function' ? chunks() : chunks;
+      if (pieces.length === 0) return 0;
+      return await this.indexSlices(namespace, sourceId, pieces);
     } finally {
       indexLocks.delete(lockKey);
       release();

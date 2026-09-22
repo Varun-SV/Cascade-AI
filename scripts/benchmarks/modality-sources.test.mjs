@@ -36,6 +36,15 @@ describe('validateModalitySource', () => {
     expect(out.models).not.toHaveProperty('bad');
   });
 
+  // `typeof [] === 'object'`, so an array walked through the old guard and
+  // `Object.entries` below read its INDICES as family names — publishing
+  // percentile scores for families called "0" and "1" into the committed
+  // snapshot rather than skipping the file as this function promises.
+  it('refuses an array-shaped models map instead of naming families after its indices', () => {
+    expect(validateModalitySource(source([10, 20])), 'the file is skipped').toBeNull();
+    expect(warn, 'and said so').toHaveBeenCalled();
+  });
+
   it('says which row it dropped, instead of quietly rating fewer models', () => {
     validateModalitySource(source({ good: 10, missing: null }));
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('"missing"'));

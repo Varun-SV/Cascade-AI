@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { LLMReranker, planRetrieval, cagCharBudget, chatCompleterFromProviders, DEFAULT_CONTEXT_LIMIT } from '#cascade-ai';
+import type { ProviderConfig } from '#cascade-ai';
 import { runContextWindowTokens } from './runs.js';
 
 // Confirms the Phase-2 retrieval surface is exported by the vendored SDK bundle
@@ -25,6 +26,47 @@ describe('vendored retrieval exports (Phase 2)', () => {
       .toBeGreaterThanOrEqual(128_000);
     // No pinned model → conservative default.
     expect(runContextWindowTokens([{ type: 'anthropic', apiKey: 'x' }])).toBe(DEFAULT_CONTEXT_LIMIT);
+  });
+
+  // A Fast Answer that pins a model is a SINGLE-model run: that model answers
+  // and nothing else in the provider list participates. Taking the minimum
+  // across the list then sized the corpus for a window belonging to a model the
+  // run would never call — pinning the 1,047,576-token gpt-4.1 next to an
+  // unused 128k Azure deployment threw away ~88% of the document allowance.
+  describe('runContextWindowTokens and a pinned Fast Answer', () => {
+    const azure128k: ProviderConfig = {
+      type: 'azure', deploymentName: 'gpt-4o-mini', apiKey: 'x', baseUrl: 'https://x.openai.azure.com',
+    };
+    const providers: ProviderConfig[] = [azure128k, { type: 'openai', apiKey: 'sk-test' }];
+
+    it('sizes the run by the pinned model, not by a deployment it cannot call', () => {
+      expect(runContextWindowTokens(providers), 'the unpinned run is still conservative').toBe(128_000);
+      expect(
+        runContextWindowTokens(providers, { enabled: true, model: 'openai:gpt-4.1' }),
+        'and the pinned Fast Answer gets its own window',
+      ).toBe(1_047_576);
+    });
+
+    it('resolves a pinned Azure deployment through its provider entry', () => {
+      // Azure ids are DEPLOYMENT names and are absent from the model catalog,
+      // so a pin that reads as "unknown model" falls back to the very minimum
+      // pinning exists to escape.
+      const pinned: ProviderConfig = {
+        type: 'azure', deploymentName: 'prod-chat', model: 'gpt-4.1', apiKey: 'x', baseUrl: 'https://x.openai.azure.com',
+      };
+      expect(
+        runContextWindowTokens([azure128k, pinned], { enabled: true, model: 'azure:prod-chat' }),
+        'the deployment name resolves to the model behind it',
+      ).toBe(1_047_576);
+    });
+
+    it('stays conservative when the run is not a single pinned model', () => {
+      // Without Fast Answer the router may reach any configured provider, so
+      // the smallest window is the only one the corpus is safe against.
+      expect(runContextWindowTokens(providers, { model: 'openai:gpt-4.1' })).toBe(128_000);
+      // An id nothing can resolve means we do not know what will answer.
+      expect(runContextWindowTokens(providers, { enabled: true, model: 'openai:not-a-model' })).toBe(128_000);
+    });
   });
 
   it('LLMReranker reorders candidates via the provided completer', async () => {

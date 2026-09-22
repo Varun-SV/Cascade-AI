@@ -935,14 +935,51 @@ export function wantsFileDelivery(
 const RAG_TOP_K = 8;
 
 /**
+ * The context window of an explicitly pinned model id (`provider:id`, or a
+ * bare id). Azure ids are DEPLOYMENT names and are absent from `MODELS`, so
+ * they resolve through the matching provider entry instead — without that, a
+ * pinned Azure deployment reads as an unknown model and the caller falls back
+ * to the cross-provider minimum, which is the outcome pinning exists to avoid.
+ */
+function pinnedModelWindow(pinned: string, providers: ProviderConfig[]): number | undefined {
+  const id = pinned.includes(':') ? pinned.split(':').slice(1).join(':') : pinned;
+  const direct = MODELS[id]?.contextWindow;
+  if (direct) return direct;
+  for (const p of providers) {
+    if (p.type !== 'azure' || p.deploymentName?.trim() !== id) continue;
+    const cw = azureModelForDeployment(p)?.contextWindow;
+    if (cw) return cw;
+  }
+  return undefined;
+}
+
+/**
  * The context window (in tokens) this run can rely on, taken conservatively as
  * the smallest window among the models the user has actually pinned — Azure
  * deployments (the deployment name IS the model) and any explicit fast-answer
  * model. Unpinned cloud providers fall back to the SDK's default window. The
  * document budget is derived from this, so a big-window setup injects big docs
  * in full while a small one retrieves sooner — no fixed byte cliff.
+ *
+ * A Fast Answer that pins a model is the exception, and it is not a
+ * conservatism question: that one model answers the turn and nothing else in
+ * the provider list participates, so the minimum across the list is a bound
+ * belonging to a model this run will never call. Someone who pins the
+ * 1,047,576-token `gpt-4.1` while a 128k Azure deployment sits unused in their
+ * settings was having ~88% of their document allowance trimmed away for it.
+ * Every other shape of run still takes the minimum, because the router there
+ * really may reach any configured provider.
  */
-export function runContextWindowTokens(providers: ProviderConfig[], fastAnswerModel?: string): number {
+export function runContextWindowTokens(
+  providers: ProviderConfig[],
+  fastAnswer?: { enabled?: boolean; model?: string },
+): number {
+  if (fastAnswer?.enabled && fastAnswer.model) {
+    const pinnedWindow = pinnedModelWindow(fastAnswer.model, providers);
+    // An unresolvable id means we do not know what will answer, so fall through
+    // to the conservative minimum rather than inventing a window for it.
+    if (pinnedWindow) return pinnedWindow;
+  }
   const windows: number[] = [];
   for (const p of providers) {
     if (p.type === 'azure') {
@@ -950,9 +987,8 @@ export function runContextWindowTokens(providers: ProviderConfig[], fastAnswerMo
       if (m?.contextWindow) windows.push(m.contextWindow);
     }
   }
-  if (fastAnswerModel) {
-    const id = fastAnswerModel.includes(':') ? fastAnswerModel.split(':').slice(1).join(':') : fastAnswerModel;
-    const cw = MODELS[id]?.contextWindow;
+  if (fastAnswer?.model) {
+    const cw = pinnedModelWindow(fastAnswer.model, providers);
     if (cw) windows.push(cw);
   }
   return windows.length ? Math.min(...windows) : DEFAULT_CONTEXT_LIMIT;
@@ -1081,7 +1117,10 @@ export async function resolveDocuments(
   // pushed to retrieval — retrieval is reserved for corpora that genuinely
   // wouldn't fit the window.
   const totalChars = docSources.reduce((n, d) => n + d.text.length, 0);
-  const windowTokens = runContextWindowTokens(payload.providers as ProviderConfig[], payload.fastAnswerModel);
+  const windowTokens = runContextWindowTokens(
+    payload.providers as ProviderConfig[],
+    { enabled: payload.fastAnswer, model: payload.fastAnswerModel },
+  );
   const plan = planRetrieval({
     sourceCount: docSources.length,
     totalChars,
@@ -1128,9 +1167,16 @@ export async function resolveDocuments(
 
     const retriever = new Retriever(embedder, store.getVectorStore(), reranker);
     for (const d of docSources) {
-      if (!retriever.isIndexed(userId, d.sourceId)) {
-        await retriever.index(userId, d.sourceId, chunkText(d.text));
-      }
+      // No `isIndexed` guard here, deliberately. Asking it out here is asking
+      // it OUTSIDE the retriever's per-source lock: a second run that starts
+      // after the first has committed its opening slice sees rows, decides the
+      // work is done, skips `index()` entirely and searches a half-written
+      // index — and if the writer then fails, its rollback removes the very
+      // rows this run just answered from. `index()` asks the same question
+      // while holding the lock, which is the only place the answer is stable.
+      // The chunking is passed as a thunk so the already-indexed case, which
+      // is the common one, still does not re-chunk the document.
+      await retriever.index(userId, d.sourceId, () => chunkText(d.text));
     }
     const hits = await retriever.search(payload.prompt, {
       namespace: userId, sourceIds: docSources.map((d) => d.sourceId), k: RAG_TOP_K, candidates: 40,

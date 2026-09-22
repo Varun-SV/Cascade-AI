@@ -45,8 +45,15 @@ export function validateModalitySource(raw, filename = '<inline>') {
     console.warn(`modality source ${filename}: missing "source" id — skipping.`);
     return null;
   }
-  if (!raw.models || typeof raw.models !== 'object') {
-    console.warn(`modality source ${raw.source}: no "models" map — skipping.`);
+  // `typeof [] === 'object'`, so an array walked straight through the old
+  // check and `Object.entries` below then read its INDICES as model-family
+  // names. A file saying `"models": [10, 20]` did not get skipped as this
+  // function promises — it published scores for families called "0" and "1"
+  // into the committed snapshot, where nothing downstream has any way to tell
+  // them from a real family. A map is an object that is not an array, and the
+  // guard has to say the second half out loud.
+  if (!raw.models || typeof raw.models !== 'object' || Array.isArray(raw.models)) {
+    console.warn(`modality source ${raw.source}: "models" is not an object map — skipping.`);
     return null;
   }
   // A real number, not anything JavaScript will coerce into one. `Number(null)`,

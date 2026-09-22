@@ -286,6 +286,21 @@ describe('safeFetch', () => {
       expect(hdr(second, 'x-api-key'), 'while the key does not follow').toBeNull();
     });
 
+    // A `Range` is not a credential, and dropping it is not the cautious
+    // choice it resembles. An origin that redirects to a CDN or object store is
+    // the ordinary way a large file is served, so the probe that asked for the
+    // first 64 KB arrives at the CDN asking for the whole object — and
+    // `bridgeFetch` reads the answer through `resp.text()`, materializing all
+    // of it before any limit of its own can apply.
+    it('keeps a bounded range across an origin change', async () => {
+      const spy = stubFetch(redirectTo(OTHER_PUBLIC), new Response('partial', { status: 206 }));
+      await safeFetch(PUBLIC, { headers: { range: 'bytes=0-65535', 'x-api-key': 'sk-live-1' } });
+      const [first, second] = calls(spy);
+      expect(hdr(first, 'range'), 'the origin is asked for a slice').toBe('bytes=0-65535');
+      expect(hdr(second, 'range'), 'and so is the host it redirects to').toBe('bytes=0-65535');
+      expect(hdr(second, 'x-api-key'), 'while the key still does not follow').toBeNull();
+    });
+
     it('keeps them on a same-origin redirect, which is the whole point of the distinction', async () => {
       const spy = stubFetch(redirectTo('/moved'), new Response('ok', { status: 200 }));
       await safeFetch(PUBLIC, { headers: { authorization: 'Bearer sk-secret' } });

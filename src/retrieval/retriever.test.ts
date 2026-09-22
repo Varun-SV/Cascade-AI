@@ -211,6 +211,67 @@ describe('Retriever + SqliteVectorStore', () => {
     expect(embedCalls, 'and the provider was asked once per slice, not twice').toBe(2);
   });
 
+  it('serializes attempts on one source across different embedding models', async () => {
+    // The lock used to be keyed by model as well as source, which handed a run
+    // on the hosted default and a run on a local model separate locks over the
+    // same source. Nothing underneath is model-aware: chunk ids carry no model,
+    // `chunk_id` is the primary key so one model's rows REPLACE the other's,
+    // and rollback is `deleteSource`, which is unscoped. So the failing attempt
+    // takes the survivor's slices with it and the survivor finishes over the
+    // hole, reporting itself complete under its own model.
+    const db = new Database(':memory:');
+    const store = new SqliteVectorStore(db);
+    const chunks = Array.from({ length: 1000 }, (_, i) => ({ text: `chunk ${i}`, ord: i }));
+
+    let failerCalls = 0;
+    const failing: Embedder = {
+      model: 'embed-hosted', dims: 64,
+      async embed(texts: string[]) {
+        failerCalls++;
+        await new Promise((r) => setTimeout(r, 0));
+        if (failerCalls > 1) throw new Error('provider went away');
+        return texts.map(() => new Array(64).fill(0.01));
+      },
+    };
+    const working: Embedder = {
+      model: 'embed-local', dims: 64,
+      async embed(texts: string[]) {
+        await new Promise((r) => setTimeout(r, 0));
+        return texts.map(() => new Array(64).fill(0.02));
+      },
+    };
+
+    const a = new Retriever(failing, store).index(NS, 'shared', chunks);
+    const b = new Retriever(working, store).index(NS, 'shared', chunks);
+    await Promise.allSettled([a, b]);
+
+    const rows = store.lexicalSearch('chunk', { namespace: NS, k: 10_000 }).length;
+    const claimed = ['embed-hosted', 'embed-local'].filter((m) => store.hasSource(NS, 'shared', m));
+    if (claimed.length > 0) {
+      expect(rows, 'a source indexed under ANY model holds every chunk').toBe(1000);
+    } else {
+      expect(rows, 'and one indexed under none holds nothing to be mistaken for the whole').toBe(0);
+    }
+  });
+
+  it('resolves a lazy chunk source only when it is about to do the work', async () => {
+    // Callers must not ask `isIndexed` themselves to decide whether to chunk:
+    // a caller that asks outside the lock is a caller that can skip `index()`
+    // altogether and read a half-written index. So the question is asked here,
+    // under the lock, and the chunking waits until the answer is no — which is
+    // what makes dropping the caller-side check free rather than a re-chunking
+    // tax on every run that attaches an already-indexed document.
+    const r = build();
+    let chunked = 0;
+    const lazily = () => { chunked++; return [{ text: 'hello world', ord: 0 }]; };
+
+    expect(await r.index(NS, 'lazy', lazily), 'the first attempt indexes').toBe(1);
+    expect(chunked, 'chunking the document exactly once').toBe(1);
+
+    expect(await r.index(NS, 'lazy', lazily), 'the second finds the work done').toBe(0);
+    expect(chunked, 'without re-chunking what it was never going to embed').toBe(1);
+  });
+
   it('skips re-embedding an already-indexed source', async () => {
     const r = build();
     const first = await r.index(NS, 'doc1', [{ text: 'hello world', ord: 0 }]);

@@ -49,7 +49,15 @@ const MAX_REDIRECTS = 5;
  * So the default is drop, and this is the short list of headers that describe
  * the REQUEST rather than the requester. `content-*` are here because a 307 or
  * 308 preserves the body across origins and a body without its content-type is
- * a broken request, not a safer one.
+ * a broken request, not a safer one. `range` is here because dropping it is
+ * not the cautious choice it looks like: an origin that redirects to a CDN or
+ * object store is the NORMAL way a large file is served, and a probe that
+ * asked for the first 64 KB arrives at the CDN asking for everything. The
+ * callers that send a range are the ones being careful about size, and
+ * `bridgeFetch` reads the response through `resp.text()` — it materializes the
+ * whole body before its own character limit can apply — so silently widening
+ * the request is how a bounded probe turns into a multi-gigabyte download.
+ * It carries no identity; the Fetch standard safelists it for the same reason.
  */
 const CROSS_ORIGIN_SAFE_HEADERS: ReadonlySet<string> = new Set([
   'accept',
@@ -58,6 +66,7 @@ const CROSS_ORIGIN_SAFE_HEADERS: ReadonlySet<string> = new Set([
   'content-language',
   'content-length',
   'content-type',
+  'range',
   'user-agent',
 ]);
 

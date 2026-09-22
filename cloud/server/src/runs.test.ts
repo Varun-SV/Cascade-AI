@@ -1,8 +1,9 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { ToolRegistry, CascadeConfigSchema } from '#cascade-ai';
+import { ToolRegistry, CascadeConfigSchema, Retriever, embedderFromProviders } from '#cascade-ai';
+import type { Chunk, ProviderConfig, ScoredChunk } from '#cascade-ai';
 import { allowances, answersThisRun, buildCloudConfig, buildMediaSink, parseChatRunPayload, resolveDocuments, runChatTurn, sanitiseClarificationAnswers, sanitiseEscalationNote, tenantScratchDir } from './runs.js';
 import { CloudStore } from './db.js';
 import { limitsForPlan, PENDING_MEDIA_TTL_MS } from './entitlements.js';
@@ -1134,5 +1135,102 @@ describe('allowances', () => {
     expect(allowances([], 1000)).toEqual([]);
     expect(allowances([100, 100], 0)).toEqual([0, 0]);
     expect(allowances([100, 100], 1)).toEqual([0, 0]);
+  });
+});
+
+
+// The retriever serializes indexing attempts per source, and that lock is worth
+// having only if every caller enters it. `resolveDocuments` used to ask
+// `isIndexed` itself and skip `index()` whenever rows already existed — which
+// is precisely the question the lock exists to make unsafe to ask from outside:
+// rows exist from the moment the FIRST slice commits, long before the attempt
+// that wrote them knows whether it will finish.
+describe('documents another run is still indexing', () => {
+  const NS = 'user-1';
+  // 127.0.0.1:1 is closed, so the run\'s own embedder fails the instant it is
+  // used and the retrieval branch degrades: nothing here touches the network.
+  const providers = [
+    { type: 'openai', apiKey: 'sk-test', baseUrl: 'http://127.0.0.1:1/v1' },
+  ] as ProviderConfig[];
+
+  it('waits for an in-flight attempt instead of answering from rows it is about to roll back', async () => {
+    const runEmbedModel = embedderFromProviders(providers)!.model;
+
+    // One store behind both the writer below and the run under test, so the run
+    // sees exactly the rows the writer has committed so far — and stops seeing
+    // them when the writer takes them back.
+    type Row = { ns: string; src: string; id: string; text: string; model: string };
+    const rows: Row[] = [];
+    // What each search saw. A search that ran while the writer still held rows
+    // is a search that read a half-written index.
+    const searchedOver: number[] = [];
+    const shared = {
+      upsert(records: Array<{ chunk: Chunk }>, model: string) {
+        for (const r of records) {
+          // The namespace rides in `meta`, exactly as the SQLite store reads it.
+          const ns = String(r.chunk.meta?.['namespace'] ?? '');
+          rows.push({ ns, src: r.chunk.sourceId, id: r.chunk.id, text: r.chunk.text, model });
+        }
+      },
+      hasSource: (ns: string, src: string, model: string) =>
+        rows.some((r) => r.ns === ns && r.src === src && r.model === model),
+      deleteSource(ns: string, src: string) {
+        for (let i = rows.length - 1; i >= 0; i--) {
+          if (rows[i]!.ns === ns && rows[i]!.src === src) rows.splice(i, 1);
+        }
+      },
+      lexicalSearch(_q: string, opts: { namespace: string }): ScoredChunk[] {
+        searchedOver.push(rows.length);
+        return rows.filter((r) => r.ns === opts.namespace).slice(0, 5)
+          .map((r, i) => ({ id: r.id, sourceId: r.src, ord: i, text: r.text, score: 1 }));
+      },
+      denseSearch: (): ScoredChunk[] => [],
+    };
+
+    // A writer that gets its first slice down and then stalls, still holding
+    // the lock, before the failure that rolls all of it back.
+    let stall!: () => void;
+    const stalled = new Promise<void>((resolve) => { stall = resolve; });
+    let embedCalls = 0;
+    const writerEmbedder = {
+      model: runEmbedModel, dims: 4,
+      async embed(texts: string[]) {
+        embedCalls++;
+        if (embedCalls === 1) return texts.map(() => [1, 0, 0, 0]);
+        await stalled;
+        throw new Error('provider went away');
+      },
+    };
+    const writer = new Retriever(writerEmbedder, shared as never)
+      .index(NS, 'a', Array.from({ length: 600 }, (_, i) => ({ text: `chunk ${i}`, ord: i })))
+      .catch((e: unknown) => e);
+
+    // From here the source looks indexed to anyone who asks the store rather
+    // than the lock — which is the state the old pre-check answered out of.
+    await vi.waitFor(() => expect(rows.length).toBeGreaterThan(0));
+    expect(shared.hasSource(NS, 'a', runEmbedModel), 'the store says the source is there').toBe(true);
+
+    const socket = new FakeSocket();
+    let settled = false;
+    const run = resolveDocuments(
+      [{ sourceId: 'a', filename: 'contract.pdf', text: 'lorem ipsum dolor sit amet. '.repeat(75_000) }],
+      parseChatRunPayload({ prompt: 'what does the contract say about termination?', providers }),
+      { getVectorStore: () => shared } as never,
+      NS, 'convo-1', socket as never,
+    ).then((out) => { settled = true; return out; });
+
+    // Every chance to answer early.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(settled, 'the run waits for the writer instead of reading past it').toBe(false);
+
+    stall();
+    await writer;
+    expect(rows, 'and the writer took its half-written rows back with it').toHaveLength(0);
+
+    const out = await run;
+    expect(searchedOver.filter((n) => n > 0), 'nothing was ever searched out of a partial index').toEqual([]);
+    expect(out, 'and the document still reaches the run').toHaveLength(1);
+    const notice = socket.events.find((e) => e.event === 'knowledge:retrieved')?.payload as { mode?: string };
+    expect(notice?.mode, 'by the degraded door, which says so').toBe('degraded');
   });
 });
