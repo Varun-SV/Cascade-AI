@@ -223,6 +223,35 @@ there is no shared `resolveFamily`-style canonicalization across image/video/aud
 model names yet, and inventing one without real usage data would be exactly the kind of
 guess the integrity rule rules out.
 
+### What percentile rank does NOT give you
+
+Normalizing within a source removes the unit problem and introduces a population
+problem in its place, and the second one is not solved yet. **A percentile is a rank
+inside one source's own model set.** Being the best of five open-weights models and
+being the best of a forty-model blended arena both come out near 100, and nothing in
+the number says which happened. Reading two such scores off one 0-100 axis is only
+valid when the sources share enough models to anchor one to the other.
+
+The committed text-to-speech pair is the live example: `text-to-speech-aa-arena`
+rates eight models, `text-to-speech-aa-open-weights` rates five, and **they share
+none**. There is no measurement linking the two populations, so no amount of
+arithmetic here can calibrate them — the information simply is not in the data.
+
+So the aggregator reports the condition instead of hiding it. `cohortOverlap()`
+returns `{ sources, families, shared, disjoint }` per modality, where `shared` counts
+the models more than one source rates (the anchors calibration would need) and
+`disjoint` marks the case with no honest single axis at all. `buildAllModalities()`
+surfaces it as `comparabilities[modality]`.
+
+**Before `modalities` drives routing**, a consumer must either require
+`disjoint === false` with enough `shared` anchors to calibrate against, or keep each
+source's percentiles separate rather than collapsing them onto one axis. Treating
+today's values as comparable quality scores would rank a small model top of a weak
+field above a strong model mid-field in a hard one. `modality-aggregate.test.mjs`
+pins that failure mode with a disjoint strong-vs-weak pair, and asserts the committed
+TTS sources are disjoint — so a future refresh that adds a bridging source will show
+up as that test changing.
+
 ### Running it
 
 The same `node scripts/refresh-benchmarks.mjs` run aggregates both pipelines in one

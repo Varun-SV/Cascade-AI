@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-  DocumentTooLargeError, EXPANSION_CEILING_CHARS, MAX_DOCUMENT_BYTES,
-  isDocumentMime, resolveDocumentMime, parseDocument,
+  DocumentTooLargeError, EXPANSION_CEILING_CHARS, MAX_DECOMPRESSED_BYTES, MAX_DOCUMENT_BYTES,
+  declaredUncompressedBytes, isDocumentMime, resolveDocumentMime, parseDocument,
 } from './documents.js';
 
-import { DOCX_MIME, expandingDocx } from './test-support/expanding-docx.js';
+import { DOCX_MIME, expandingDocx, preflightTrippingDocx } from './test-support/expanding-docx.js';
 
 const fixture = (name: string) => readFileSync(fileURLToPath(new URL(`./__fixtures__/${name}`, import.meta.url)));
 
@@ -157,6 +157,66 @@ describe('extraction expansion ceiling', () => {
     expect(text.length, 'and it is nowhere near the ceiling')
       .toBeLessThan(EXPANSION_CEILING_CHARS);
   }, 60_000);
+
+  // The post-extraction ceiling above bounds STORAGE and runs after mammoth has
+  // already allocated the expansion. That is the wrong moment to stop a memory
+  // attack: scaling the shape above while staying under the 5 MB upload ceiling
+  // can ask for gigabytes, and the process dies before any check of ours runs.
+  // A ZIP declares what it expands to, in the clear, before anything is
+  // decompressed.
+  describe('the preflight that runs before the extractor', () => {
+    it('reads what a normal DOCX declares, without decompressing it', async () => {
+      const bytes = await expandingDocx({ runChars: 2_000, runs: 500 });
+      const declared = declaredUncompressedBytes(bytes);
+      expect(declared, 'the central directory parses').not.toBeNull();
+      expect(declared!, 'and reports far more than the file itself').toBeGreaterThan(bytes.length * 10);
+      expect(declared!, 'while staying under the ceiling').toBeLessThan(MAX_DECOMPRESSED_BYTES);
+    }, 60_000);
+
+    it('refuses an over-declaring DOCX BEFORE mammoth ever sees it', async () => {
+      const bytes = await preflightTrippingDocx();
+      expect(bytes.length, 'a small upload by every byte limit we have')
+        .toBeLessThan(5 * 1024 * 1024);
+      expect(declaredUncompressedBytes(bytes)!, 'that claims more than the memory ceiling')
+        .toBeGreaterThan(MAX_DECOMPRESSED_BYTES);
+
+      // WHICH guard fired is the whole point, so the assertion is on the
+      // message and not just the class. The two limits word themselves
+      // differently on purpose: "expands to N MB once decompressed" can only
+      // come from the preflight, which has the archive's claim and not its
+      // contents, while "contains NM characters" can only come from the
+      // post-extraction ceiling, which has the text.
+      //
+      // Removing the preflight is what proved this is worth asserting: mammoth
+      // turns out to read this archive quite happily despite it having no
+      // [Content_Types].xml and no relationships, and it duly allocated ~135M
+      // characters before the second ceiling caught it. That allocation is the
+      // attack, and it is exactly what the class-only assertion would have
+      // called a pass.
+      await expect(parseDocument({ bytes, mime: DOCX_MIME, filename: 'bomb.docx' }))
+        .rejects.toThrow(DocumentTooLargeError);
+      await expect(parseDocument({ bytes, mime: DOCX_MIME, filename: 'bomb.docx' }))
+        .rejects.toThrow(/expands to \d+ MB once decompressed/);
+    }, 120_000);
+
+    it('says nothing about a container it cannot parse, rather than guessing', () => {
+      // A damaged archive is not evidence of an attack. `parseDocument` will
+      // still fail honestly on it, and the post-extraction ceiling still
+      // applies to anything that does open.
+      expect(declaredUncompressedBytes(Buffer.from('not a zip at all'))).toBeNull();
+      expect(declaredUncompressedBytes(Buffer.alloc(0))).toBeNull();
+    });
+
+    it('treats a Zip64 sentinel as bigger than anything we would accept', () => {
+      // 0xFFFFFFFF means "the real size is in the Zip64 extra field", i.e. at
+      // least 4 GB. Refusing without parsing further is the safe reading.
+      const eocd = Buffer.alloc(22);
+      eocd.writeUInt32LE(0x06054b50, 0);
+      eocd.writeUInt16LE(1, 10);          // one entry
+      eocd.writeUInt32LE(0xffffffff, 16); // central directory offset sentinel
+      expect(declaredUncompressedBytes(eocd)).toBe(Infinity);
+    });
+  });
 
   it('names the size, not corruption, so the user knows what to do', () => {
     const err = new DocumentTooLargeError(30_000_000);

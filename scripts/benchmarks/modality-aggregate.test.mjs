@@ -7,6 +7,7 @@ import {
   groupByModality,
   buildModalityFamilies,
   buildAllModalities,
+  cohortOverlap,
 } from './modality-aggregate.mjs';
 
 describe('percentileNormalizeSource', () => {
@@ -132,5 +133,76 @@ describe('buildAllModalities', () => {
 
   it('returns no modalities for an empty source list and empty base', () => {
     expect(buildAllModalities([]).modalities).toEqual({});
+  });
+});
+
+
+// Percentile rank removes the unit problem (an Elo, a WER, an nDCG@10 have no
+// common scale) and introduces a population one in its place. These pin that
+// failure mode so it cannot be mistaken for a calibrated score.
+describe('cohorts that do not overlap', () => {
+  // Deliberately extreme: every model in `weak` is worse than every model in
+  // `strong`, and the two name entirely different models — which is exactly
+  // the shape of the committed text-to-speech pair (a blended arena of 8 and
+  // an open-weights-only leaderboard of 5, sharing nothing).
+  const strong = {
+    source: 'blended-arena', modality: 'demo',
+    models: { 'frontier-a': 1500, 'frontier-b': 1480, 'frontier-c': 1460, 'frontier-d': 1440 },
+  };
+  const weak = {
+    source: 'open-weights-only', modality: 'demo',
+    models: { 'small-a': 900, 'small-b': 880, 'small-c': 860, 'small-d': 840 },
+  };
+
+  it('gives the best of a weak field the same score as the best of a strong one', () => {
+    const { families } = buildModalityFamilies([strong, weak]);
+    // This is the bug, asserted rather than described. `small-a` is the worst
+    // model in the union by a wide margin and scores identically to
+    // `frontier-a`, because each is top of its own cohort.
+    expect(families['small-a']).toBe(families['frontier-a']);
+    expect(families['small-a']).toBeGreaterThan(families['frontier-d']);
+  });
+
+  it('reports the cohorts as disjoint, so a consumer can refuse them', () => {
+    const { comparability } = buildModalityFamilies([strong, weak]);
+    expect(comparability).toEqual({ sources: 2, families: 8, shared: 0, disjoint: true });
+  });
+
+  it('does not call a single source disjoint — there is nothing to compare it to', () => {
+    expect(cohortOverlap([strong])).toEqual({ sources: 1, families: 4, shared: 0, disjoint: false });
+  });
+
+  it('counts the anchors when sources do share models', () => {
+    const overlapping = {
+      source: 'second-arena', modality: 'demo',
+      models: { 'frontier-a': 91, 'frontier-b': 88, 'newcomer': 80 },
+    };
+    const o = cohortOverlap([strong, overlapping]);
+    expect(o.shared, 'frontier-a and frontier-b appear in both').toBe(2);
+    expect(o.disjoint).toBe(false);
+  });
+
+  it('surfaces comparability per modality from the top-level build', () => {
+    const { comparabilities } = buildAllModalities([strong, weak]);
+    expect(comparabilities['demo'].disjoint).toBe(true);
+  });
+});
+
+// The committed data, checked as data: if a future refresh adds a source that
+// bridges these two cohorts, this test is the thing that notices.
+describe('the committed text-to-speech sources', () => {
+  it('are disjoint today, which is why their scores are not yet comparable', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const read = (n) => JSON.parse(readFileSync(
+      fileURLToPath(new URL(`./sources/${n}`, import.meta.url)), 'utf8',
+    ));
+    const o = cohortOverlap([
+      read('text-to-speech-aa-arena.json'),
+      read('text-to-speech-aa-open-weights.json'),
+    ]);
+    expect(o.sources).toBe(2);
+    expect(o.shared, 'no model appears in both leaderboards').toBe(0);
+    expect(o.disjoint).toBe(true);
   });
 });

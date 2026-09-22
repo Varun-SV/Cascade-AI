@@ -1475,6 +1475,13 @@ export function useChatSession(
         // Now the run trims to the real document budget and the notice reports
         // the share that reached the model, because a user deciding whether to
         // trust an answer needs to know how much of the file it saw.
+        // NOT "larger than the context window". `injectWithinBudget` measures
+        // against `cagCharBudget`, which is a FRACTION of the window (half, by
+        // default) held back for the system prompt, the history and the reply.
+        // A corpus can sit comfortably inside the model's real window and
+        // still be trimmed here, and telling the user their model could not
+        // hold it invents a limitation the model does not have — they might go
+        // and buy a bigger one.
         const docs = e.docCount === 1 ? 'This document is' : 'These documents are';
         const share = e.keptChars !== undefined && e.totalChars
           ? ` About ${Math.max(1, Math.round((e.keptChars / e.totalChars) * 100))}% of the text was included, from the start of each file.`
@@ -1488,7 +1495,7 @@ export function useChatSession(
           : e.mode === 'fast'
             ? 'Fast Answer skips the search step — ask again without it to search the whole of it instead'
             : 'the search step could not run for this turn — asking again will retry it';
-        setKnowledgeNotice(`${docs} larger than this model's context window.${share} Nothing was lost from the upload — ${remedy}.`);
+        setKnowledgeNotice(`${docs} larger than this run's document budget.${share} Nothing was lost from the upload — ${remedy}.`);
       }
     };
     // Deliberately does NOT clear the escalation prompt any more.

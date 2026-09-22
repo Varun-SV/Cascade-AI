@@ -34,6 +34,16 @@ export class SsrfBlockedError extends Error {
 const ALLOWED_PROTOCOLS = new Set(['http:', 'https:']);
 const MAX_REDIRECTS = 5;
 
+/**
+ * Headers that authenticate the CALLER, dropped the moment a redirect leaves
+ * the origin they were meant for. The same set the Fetch standard removes on a
+ * cross-origin redirect.
+ */
+const CREDENTIAL_HEADERS = ['authorization', 'cookie', 'proxy-authorization'] as const;
+
+/** Headers that describe a body, dropped whenever the body is. */
+const BODY_HEADERS = ['content-type', 'content-length', 'content-encoding', 'content-language'] as const;
+
 function allowLocal(): boolean {
   return process.env['CASCADE_ALLOW_LOCAL_FETCH'] === '1';
 }
@@ -276,6 +286,18 @@ const ssrfAgent = new Agent({
  */
 export async function safeFetch(rawUrl: string, init: RequestInit = {}): Promise<Response> {
   let currentUrl = (await assertPublicUrl(rawUrl)).toString();
+  let origin = new URL(currentUrl).origin;
+
+  // Per-hop request state, seeded from the caller's init and then MUTATED as
+  // the chain moves. Replaying the original `init` at every hop — which is
+  // what this did — meant a caller's `Authorization` followed the redirect to
+  // wherever it pointed, and a POST stayed a POST through a 303. Choosing
+  // `redirect: 'manual'` takes those rules away from `fetch`, so they have to
+  // be honoured here; they are not optional extras of the redirect-following
+  // `fetch` was doing for us.
+  let method = init.method ?? 'GET';
+  let body = init.body;
+  const headers = new Headers(init.headers);
 
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
     // `dispatcher` is undici's, which is what Node's global fetch is built on.
@@ -289,6 +311,14 @@ export async function safeFetch(rawUrl: string, init: RequestInit = {}): Promise
     // scoping one here overrides no proxy or pool configured elsewhere.
     const request: RequestInit = {
       ...init,
+      method,
+      body,
+      // A SNAPSHOT per hop, not the mutable object itself. Handing the same
+      // instance to every call means a later `delete` is visible to anything
+      // that kept a reference to an earlier request — which is exactly how a
+      // test observing hop 1 saw hop 2's stripped credentials, and would be a
+      // genuine hazard for any dispatcher that read headers lazily.
+      headers: new Headers(headers),
       redirect: 'manual',
       dispatcher: ssrfAgent as unknown as RequestInit['dispatcher'],
     };
@@ -302,6 +332,34 @@ export async function safeFetch(rawUrl: string, init: RequestInit = {}): Promise
 
     const next = new URL(location, currentUrl);
     await assertPublicUrl(next.toString()); // re-validate each hop
+
+    // 303 is defined as "GET the other thing"; 301 and 302 on a POST are
+    // rewritten to GET by every browser and by fetch itself, de facto since
+    // long before it was written down. The body goes with the method, and so
+    // do the headers that described it.
+    const rewriteToGet = resp.status === 303
+      || ((resp.status === 301 || resp.status === 302) && method.toUpperCase() === 'POST');
+    if (rewriteToGet) {
+      method = 'GET';
+      body = undefined;
+      for (const h of BODY_HEADERS) headers.delete(h);
+    }
+
+    // Leaving the origin drops the credentials. This is the whole point of the
+    // rule: a redirect is chosen by the server being redirected FROM, so
+    // following one while still carrying the caller's bearer token hands that
+    // token to whoever the previous host names. `bridgeFetch` routes
+    // model-authored tool headers through here, so "the caller" can be a
+    // generated tool holding a real key.
+    //
+    // Once dropped they stay dropped, even if the chain returns to the first
+    // origin — stricter than the spec, and the strictness costs nothing a
+    // legitimate caller wanted.
+    if (next.origin !== origin) {
+      for (const h of CREDENTIAL_HEADERS) headers.delete(h);
+    }
+
+    origin = next.origin;
     currentUrl = next.toString();
   }
 

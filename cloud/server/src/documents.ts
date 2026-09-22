@@ -47,6 +47,79 @@ export const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
 export const EXPANSION_CEILING_CHARS = 25_000_000;
 
 /**
+ * Ceiling on a DOCX's DECLARED uncompressed size, checked before the extractor
+ * is allowed near it.
+ *
+ * {@link EXPANSION_CEILING_CHARS} bounds what is stored, which is the right
+ * bound for storage and the wrong one for memory: `mammoth.extractRawText`
+ * materializes the whole expanded document before it returns, so a check on
+ * its output runs after the allocation it is meant to prevent. At the ~680x
+ * expansion a crafted DOCX reaches, a file that still fits inside the 5 MB
+ * free-plan ceiling can ask for multiple gigabytes, and the process dies
+ * before any of our code gets a turn. Authenticated free users can reach the
+ * upload route, which makes that a tenant denial of service rather than a
+ * theoretical one.
+ *
+ * A ZIP says how large each member expands to, in its central directory,
+ * before any of it is decompressed. That is a claim rather than a proof — a
+ * lying header inflates to whatever it likes — but it is a claim the
+ * decompressor will hold itself to, so refusing on it costs the attacker the
+ * cheap version of the attack and costs an honest document nothing.
+ *
+ * 128 MB is ~12x the largest upload any plan accepts, so no real document
+ * reaches it, and it bounds the allocation to something a hosted process
+ * survives. The post-extraction ceiling stays as the second line: this bounds
+ * MEMORY, that bounds STORAGE, and a file can fail either.
+ */
+export const MAX_DECOMPRESSED_BYTES = 128 * 1024 * 1024;
+
+const EOCD_SIGNATURE = 0x06054b50;
+const CENTRAL_FILE_SIGNATURE = 0x02014b50;
+/** A size of 0xFFFFFFFF means "see the Zip64 extra field" — i.e. >= 4 GB. */
+const ZIP64_SENTINEL = 0xffffffff;
+
+/**
+ * Total uncompressed size a ZIP declares for its members, read from the
+ * central directory without decompressing anything.
+ *
+ * Returns `null` when the archive cannot be parsed — a damaged or unusual
+ * container is not evidence of an attack, and `parseDocument` will still fail
+ * honestly on it further down. Returns `Infinity` for a Zip64 sentinel, which
+ * is a member claiming at least 4 GB.
+ */
+export function declaredUncompressedBytes(bytes: Buffer): number | null {
+  // The end-of-central-directory record sits at the very end, after a comment
+  // of up to 65535 bytes, so it is found by scanning backwards rather than by
+  // arithmetic.
+  const minEocd = 22;
+  if (bytes.length < minEocd) return null;
+  const scanFrom = Math.max(0, bytes.length - (minEocd + 0xffff));
+  let eocd = -1;
+  for (let i = bytes.length - minEocd; i >= scanFrom; i--) {
+    if (bytes.readUInt32LE(i) === EOCD_SIGNATURE) { eocd = i; break; }
+  }
+  if (eocd < 0) return null;
+
+  const entries = bytes.readUInt16LE(eocd + 10);
+  let offset = bytes.readUInt32LE(eocd + 16);
+  if (offset === ZIP64_SENTINEL) return Infinity;
+
+  let total = 0;
+  for (let i = 0; i < entries; i++) {
+    if (offset + 46 > bytes.length) return null;
+    if (bytes.readUInt32LE(offset) !== CENTRAL_FILE_SIGNATURE) return null;
+    const uncompressed = bytes.readUInt32LE(offset + 24);
+    if (uncompressed === ZIP64_SENTINEL) return Infinity;
+    total += uncompressed;
+    const nameLen = bytes.readUInt16LE(offset + 28);
+    const extraLen = bytes.readUInt16LE(offset + 30);
+    const commentLen = bytes.readUInt16LE(offset + 32);
+    offset += 46 + nameLen + extraLen + commentLen;
+  }
+  return total;
+}
+
+/**
  * An upload whose extracted text exceeds {@link EXPANSION_CEILING_CHARS}.
  *
  * Distinct from a parse failure on purpose: the upload route catches anything
@@ -55,12 +128,21 @@ export const EXPANSION_CEILING_CHARS = 25_000_000;
  * perfectly well and was simply too big once opened.
  */
 export class DocumentTooLargeError extends Error {
-  constructor(readonly chars: number) {
+  constructor(readonly amount: number, readonly kind: 'extracted' | 'declared' = 'extracted') {
     super(
-      `That document contains ${Math.round(chars / 1_000_000)}M characters of text once extracted, `
-      + `over the ${EXPANSION_CEILING_CHARS / 1_000_000}M limit. Split it into smaller files.`,
+      kind === 'declared'
+        // Refused before opening it, so the honest word is "expands to", not
+        // "contains" — we have the archive's claim, not its contents.
+        ? `That document expands to ${DocumentTooLargeError.mb(amount)} once decompressed, `
+          + `over the ${MAX_DECOMPRESSED_BYTES / (1024 * 1024)} MB limit. Split it into smaller files.`
+        : `That document contains ${Math.round(amount / 1_000_000)}M characters of text once extracted, `
+          + `over the ${EXPANSION_CEILING_CHARS / 1_000_000}M limit. Split it into smaller files.`,
     );
     this.name = 'DocumentTooLargeError';
+  }
+
+  private static mb(bytes: number): string {
+    return Number.isFinite(bytes) ? `${Math.round(bytes / (1024 * 1024))} MB` : 'more than 4 GB';
   }
 }
 
@@ -153,6 +235,13 @@ export async function parseDocument(input: {
   }
 
   if (DOCX_MIME_TYPES.has(mime)) {
+    // BEFORE mammoth, not after: the extractor allocates the whole expansion
+    // and only then returns it, so a check on its output cannot prevent the
+    // allocation. The archive states what it expands to; refuse on the claim.
+    const declared = declaredUncompressedBytes(bytes);
+    if (declared !== null && declared > MAX_DECOMPRESSED_BYTES) {
+      throw new DocumentTooLargeError(declared, 'declared');
+    }
     const mammoth = require('mammoth') as { extractRawText(o: { buffer: Buffer }): Promise<{ value: string }> };
     const parsed = await mammoth.extractRawText({ buffer: bytes });
     return normalizeText(parsed.value ?? '');

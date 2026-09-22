@@ -68,6 +68,43 @@ export function percentileNormalizeSource(source) {
  * that doesn't declare one (i.e. the legacy text pipeline's sources, which
  * aggregate.mjs/buildFamilies already handles).
  */
+/**
+ * How far a modality's sources actually overlap.
+ *
+ * Percentile rank is a rank WITHIN a source's own model set, which removes the
+ * unit problem and creates a population one: being top of five open-weights
+ * models and being top of a forty-model blended arena both come out near 100,
+ * and nothing in the number says which happened. Two sources can only be read
+ * on one axis if they share enough models to anchor one to the other.
+ *
+ * So the overlap is computed and reported rather than assumed. `shared` counts
+ * families more than one source scores — the anchors calibration would need.
+ * `disjoint` is the case that has no honest single axis at all: sources that
+ * name entirely different models, where every score is a rank in a population
+ * no other score shares.
+ *
+ * This does not correct the scores; nothing here can, because with disjoint
+ * cohorts there is no measurement linking them. It makes the limitation
+ * machine-visible, so a consumer that needs comparable values can refuse
+ * rather than quietly assume it has them.
+ */
+export function cohortOverlap(sources) {
+  const perSource = (sources ?? []).map((s) => new Set(Object.keys(s?.models ?? {})));
+  const counts = new Map();
+  for (const set of perSource) {
+    for (const fam of set) counts.set(fam, (counts.get(fam) ?? 0) + 1);
+  }
+  let shared = 0;
+  for (const n of counts.values()) if (n > 1) shared++;
+  return {
+    sources: perSource.length,
+    families: counts.size,
+    shared,
+    // One source is trivially self-consistent; the question only arises at two.
+    disjoint: perSource.length > 1 && shared === 0,
+  };
+}
+
 export function groupByModality(sources) {
   const groups = {};
   for (const s of sources ?? []) {
@@ -119,7 +156,7 @@ export function buildModalityFamilies(sources, opts = {}) {
       trace[fam] = { value: base[fam], mode: 'baseline', contributors: [] };
     }
   }
-  return { families: outFamilies, trace };
+  return { families: outFamilies, trace, comparability: cohortOverlap(sources ?? []) };
 }
 
 /**
@@ -139,14 +176,16 @@ export function buildAllModalities(sources, opts = {}) {
 
   const modalities = {};
   const traces = {};
+  const comparabilities = {};
   for (const modality of Object.keys(groups).sort()) {
-    const { families, trace } = buildModalityFamilies(groups[modality], {
+    const { families, trace, comparability } = buildModalityFamilies(groups[modality], {
       mode,
       base: base[modality],
     });
     if (Object.keys(families).length > 0) {
       modalities[modality] = families;
       traces[modality] = trace;
+      comparabilities[modality] = comparability;
     }
   }
   for (const modality of Object.keys(base).sort()) {
@@ -155,5 +194,5 @@ export function buildAllModalities(sources, opts = {}) {
       modalities[modality] = base[modality];
     }
   }
-  return { modalities, traces };
+  return { modalities, traces, comparabilities };
 }

@@ -29,9 +29,14 @@ const RELS = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
  * to work out whether it is a test asset or an accident. Generated here, its
  * intent is in the code that makes it.
  */
-export async function expandingDocx(opts: { runChars?: number; runs?: number } = {}): Promise<Buffer> {
+export async function expandingDocx(
+  opts: { runChars?: number; runs?: number; level?: 1 | 9 } = {},
+): Promise<Buffer> {
   const runChars = opts.runChars ?? 5_000;
   const runs = opts.runs ?? 6_000;
+  // Level 1 still compresses a repeated run by three orders of magnitude and
+  // is several times quicker, which matters for the 130 MB variant.
+  const level = opts.level ?? 9;
   const paragraph = `<w:p><w:r><w:t>${'A'.repeat(runChars)}</w:t></w:r></w:p>`;
   const zip = new JSZip();
   zip.file('[Content_Types].xml', CONTENT_TYPES);
@@ -46,9 +51,19 @@ export async function expandingDocx(opts: { runChars?: number; runs?: number } =
   return zip.generateAsync({
     type: 'nodebuffer',
     compression: 'DEFLATE',
-    compressionOptions: { level: 9 },
+    compressionOptions: { level },
   });
 }
 
 export const DOCX_MIME =
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+/**
+ * The same shape, sized so the archive DECLARES more than
+ * `MAX_DECOMPRESSED_BYTES` in its central directory — about 130 MB, from a
+ * ~650 KB file. This is the variant the preflight must refuse without ever
+ * handing the buffer to mammoth.
+ */
+export function preflightTrippingDocx(): Promise<Buffer> {
+  return expandingDocx({ runChars: 5_000, runs: 27_000, level: 1 });
+}

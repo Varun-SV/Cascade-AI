@@ -178,7 +178,10 @@ describe('safeFetch', () => {
     await safeFetch(PUBLIC, { method: 'POST', headers: { 'x-trace': 'abc' } });
     const [init] = calls(spy);
     expect(init?.method).toBe('POST');
-    expect(init?.headers).toEqual({ 'x-trace': 'abc' });
+    // Normalised into a Headers instance now, because the redirect loop has to
+    // be able to delete from it per hop.
+    expect(init?.headers instanceof Headers).toBe(true);
+    expect((init?.headers as Headers).get('x-trace')).toBe('abc');
     // …and still pins the connection while doing it.
     expect(init?.dispatcher).toBeDefined();
   });
@@ -221,6 +224,92 @@ describe('safeFetch', () => {
     const resp = await safeFetch(PUBLIC);
     expect(resp.status).toBe(302);
     expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  // Choosing `redirect: 'manual'` takes the redirect rules away from `fetch`
+  // and makes them this loop's job. It used to rebuild every hop from the
+  // caller's original `init`, which kept the caller's credentials and the
+  // original method all the way down the chain — so a redirect chosen by the
+  // FIRST host decided who received the SECOND host's copy of the caller's
+  // bearer token. `bridgeFetch` (src/tools/tool-creator.ts) routes
+  // model-authored tool headers straight through here, so "the caller" can be
+  // a generated tool holding a real key.
+  describe('what a redirect may carry', () => {
+    const hdr = (init: FetchInit | undefined, name: string): string | null =>
+      init?.headers instanceof Headers ? init.headers.get(name) : null;
+
+    it('drops the caller credentials when the redirect leaves the origin', async () => {
+      const spy = stubFetch(redirectTo(OTHER_PUBLIC), new Response('ok', { status: 200 }));
+      await safeFetch(PUBLIC, {
+        headers: { authorization: 'Bearer sk-secret', cookie: 'session=abc', 'x-trace': 'keep-me' },
+      });
+      const [first, second] = calls(spy);
+      expect(hdr(first, 'authorization'), 'sent to the host it was meant for').toBe('Bearer sk-secret');
+      expect(hdr(second, 'authorization'), 'and NOT to the one it was redirected to').toBeNull();
+      expect(hdr(second, 'cookie'), 'nor the cookie').toBeNull();
+      expect(hdr(second, 'x-trace'), 'an ordinary header is not a credential').toBe('keep-me');
+    });
+
+    it('keeps them on a same-origin redirect, which is the whole point of the distinction', async () => {
+      const spy = stubFetch(redirectTo('/moved'), new Response('ok', { status: 200 }));
+      await safeFetch(PUBLIC, { headers: { authorization: 'Bearer sk-secret' } });
+      expect(hdr(calls(spy)[1], 'authorization')).toBe('Bearer sk-secret');
+    });
+
+    it('does not hand them back if the chain returns to the first origin', async () => {
+      // Stricter than the standard, and the strictness costs a legitimate
+      // caller nothing: once a third party has been told where to send you,
+      // the token it could have captured is already spent.
+      const spy = stubFetch(redirectTo(OTHER_PUBLIC), redirectTo(PUBLIC), new Response('ok', { status: 200 }));
+      await safeFetch(PUBLIC, { headers: { authorization: 'Bearer sk-secret' } });
+      expect(hdr(calls(spy)[2], 'authorization')).toBeNull();
+    });
+
+    it('rewrites POST to GET on a 302 and leaves the body behind', async () => {
+      const spy = stubFetch(redirectTo(OTHER_PUBLIC), new Response('ok', { status: 200 }));
+      await safeFetch(PUBLIC, {
+        method: 'POST', body: '{"a":1}', headers: { 'content-type': 'application/json' },
+      });
+      const [first, second] = calls(spy);
+      expect(first?.method).toBe('POST');
+      expect(second?.method, 'a 302 on a POST becomes a GET').toBe('GET');
+      expect(second?.body, 'and the body does not follow').toBeUndefined();
+      expect(hdr(second, 'content-type'), 'nor the header describing it').toBeNull();
+    });
+
+    it('rewrites to GET on a 303 whatever the method was', async () => {
+      const spy = stubFetch(
+        new Response(null, { status: 303, headers: { location: OTHER_PUBLIC } }),
+        new Response('ok', { status: 200 }),
+      );
+      await safeFetch(PUBLIC, { method: 'PUT', body: 'payload' });
+      const second = calls(spy)[1];
+      expect(second?.method).toBe('GET');
+      expect(second?.body).toBeUndefined();
+    });
+
+    it('preserves the method and body on a 307, which is what 307 means', async () => {
+      const spy = stubFetch(
+        new Response(null, { status: 307, headers: { location: OTHER_PUBLIC } }),
+        new Response('ok', { status: 200 }),
+      );
+      await safeFetch(PUBLIC, { method: 'POST', body: '{"a":1}' });
+      const second = calls(spy)[1];
+      expect(second?.method).toBe('POST');
+      expect(second?.body).toBe('{"a":1}');
+      // Still cross-origin, so credentials would still have been dropped.
+    });
+
+    it('preserves them on a 308 too', async () => {
+      const spy = stubFetch(
+        new Response(null, { status: 308, headers: { location: OTHER_PUBLIC } }),
+        new Response('ok', { status: 200 }),
+      );
+      await safeFetch(PUBLIC, { method: 'PATCH', body: 'diff' });
+      const second = calls(spy)[1];
+      expect(second?.method).toBe('PATCH');
+      expect(second?.body).toBe('diff');
+    });
   });
 
   it('gives up rather than following a redirect loop forever', async () => {
