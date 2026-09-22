@@ -247,6 +247,13 @@ qualifies, not only in the refresh log, so a consumer reads both from the same f
   is a second. `disjoint` is `components > 1`.
 - `shared` is how many models more than one source rates — the anchors calibration
   would actually need.
+- `carriedFamilies` is how many cells were kept from the previous snapshot because
+  no source covered them this run. Those scores were measured against a population
+  that is not present, so a run that carries anything cannot claim its cohorts are
+  connected — the absent source counts as its own component. Without that, skipping
+  one of two disjoint sources would leave its scores in the file while the metadata
+  reported one source, one component and `disjoint: false`: the gate saying yes to
+  exactly the values it exists to refuse.
 
 **Both matter, and neither is sufficient alone.** Counting shared models says A and B
 are linked and says nothing about C, which is why connectivity is measured rather than

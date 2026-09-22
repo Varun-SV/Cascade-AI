@@ -1452,7 +1452,15 @@ export function useChatSession(
       // concurrent runs, so an exhaustion in a background conversation would
       // otherwise post an account-switch and billing warning into whichever
       // chat happens to be open.
-      if (e.conversationId && e.conversationId !== conversationIdRef.current) return;
+      //
+      // Adopt BEFORE filtering. On the first message of a new chat the server
+      // mints the conversation and starts the run before the `chat:run`
+      // acknowledgement gives this pane the id — so comparing against a ref
+      // that is still undefined reads the pane's OWN first turn as somebody
+      // else's and drops it. `activeConversationId()` also counts the adopted
+      // id, which `conversationIdRef` alone does not.
+      adoptConversationId(e?.conversationId);
+      if (e.conversationId && e.conversationId !== activeConversationId()) return;
       const who = e.provider ?? 'A provider';
       setProviderNotice(e.failedOverTo
         ? `${who} is out for this run — ${e.message ?? ''} Continuing on ${e.failedOverTo}; the rest of this run is billed to that account.`
@@ -1467,10 +1475,15 @@ export function useChatSession(
       // concurrent runs, so an over-budget Fast Answer or a degraded retrieval
       // in a BACKGROUND chat would otherwise post its notice into whichever
       // chat happens to be open — telling the user their current document was
-      // trimmed when it was not. The provider handler directly above already
-      // does this; the server has always sent the id, and this handler was
-      // simply not reading it.
-      if (e.conversationId && e.conversationId !== conversationIdRef.current) return;
+      // trimmed when it was not.
+      //
+      // Adopt before filtering, for the reason the provider handler above now
+      // gives: the FIRST turn of a new chat resolves documents before this pane
+      // has been told the conversation id, and the attachment flow that most
+      // needs this notice is exactly that turn. Filtering on a ref that is
+      // still undefined discarded every first-turn notice.
+      adoptConversationId(e?.conversationId);
+      if (e.conversationId && e.conversationId !== activeConversationId()) return;
       if (e.mode === 'searched') {
         const docs = e.docCount === 1 ? 'the document' : `${e.docCount} documents`;
         const verb = e.reranked ? 'reranked to the' : 'pulled the';

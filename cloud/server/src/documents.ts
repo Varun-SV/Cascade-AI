@@ -1,5 +1,6 @@
 import { createRequire } from 'module';
 import zlib from 'node:zlib';
+import { promisify } from 'node:util';
 
 // pdf-parse / mammoth are CommonJS with no first-class ESM types; load them
 // through createRequire so the bundle resolves them at runtime without pulling
@@ -77,6 +78,11 @@ export const MAX_DECOMPRESSED_BYTES = 128 * 1024 * 1024;
 const EOCD_SIGNATURE = 0x06054b50;
 const CENTRAL_FILE_SIGNATURE = 0x02014b50;
 const LOCAL_FILE_SIGNATURE = 0x04034b50;
+// The async form runs on libuv's threadpool. The sync one runs on the single
+// JavaScript thread, where producing the whole 128 MB allowance before the cap
+// fires stalls every other request in the process — a denial of service that
+// survives the memory bound rather than being fixed by it.
+const inflateRaw = promisify(zlib.inflateRaw);
 /** A size of 0xFFFFFFFF means "see the Zip64 extra field" — i.e. >= 4 GB. */
 const ZIP64_SENTINEL = 0xffffffff;
 
@@ -192,8 +198,15 @@ function readCentralDirectory(bytes: Buffer): ZipEntry[] | null {
  * through with the cap's worth of memory allocated and no more. It costs an
  * honest document one extra decompression of a few megabytes, which is the
  * price of the guarantee being real rather than declared.
+ *
+ * And it inflates ASYNCHRONOUSLY, on libuv's threadpool. The synchronous form
+ * this replaces held the one JavaScript thread for as long as it took to
+ * produce the cap's worth of output, so an attacker who could not exhaust
+ * memory any more could still stall every other tenant's request by uploading
+ * repeatedly — the bound made the process survive and did nothing for anyone
+ * waiting on it.
  */
-function assertInflatesWithin(bytes: Buffer, cap: number): void {
+async function assertInflatesWithin(bytes: Buffer, cap: number): Promise<void> {
   const entries = readCentralDirectory(bytes);
   // Fail CLOSED. An unreadable container is not proof of an attack, but it is
   // proof we cannot bound it, and "we could not check" must never mean "go
@@ -224,7 +237,7 @@ function assertInflatesWithin(bytes: Buffer, cap: number): void {
       produced = payload.length; // stored, no expansion possible
     } else if (e.method === 8) {
       try {
-        produced = zlib.inflateRawSync(payload, { maxOutputLength: remaining }).length;
+        produced = (await inflateRaw(payload, { maxOutputLength: remaining })).length;
       } catch (err) {
         // zlib raises ERR_BUFFER_TOO_LARGE once output passes the cap. That is
         // the bomb, caught mid-inflation with only `remaining` bytes spent.
@@ -366,7 +379,7 @@ export async function parseDocument(input: {
     // size the archive claims for itself. Fails closed on a container it
     // cannot walk, so a prepended byte or a miscounted directory refuses the
     // upload instead of waving it through.
-    assertInflatesWithin(bytes, MAX_DECOMPRESSED_BYTES);
+    await assertInflatesWithin(bytes, MAX_DECOMPRESSED_BYTES);
     const mammoth = require('mammoth') as { extractRawText(o: { buffer: Buffer }): Promise<{ value: string }> };
     const parsed = await mammoth.extractRawText({ buffer: bytes });
     return normalizeText(parsed.value ?? '');

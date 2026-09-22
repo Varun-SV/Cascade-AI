@@ -128,6 +128,9 @@ export function cohortOverlap(sources) {
     families: counts.size,
     shared,
     components,
+    // Cells kept from the previous snapshot because no source covered them
+    // this run. Zero unless `buildModalityFamilies` fills it in.
+    carriedFamilies: 0,
     // More than one island means at least one source's ranks are measured
     // against a population nothing else touches.
     disjoint: components > 1,
@@ -170,6 +173,7 @@ export function buildModalityFamilies(sources, opts = {}) {
 
   const outFamilies = {};
   const trace = {};
+  let carried = 0;
   for (const fam of [...families].sort()) {
     const contributors = [];
     for (const { name, map } of normalized) {
@@ -183,9 +187,27 @@ export function buildModalityFamilies(sources, opts = {}) {
     } else if (Number.isFinite(base[fam])) {
       outFamilies[fam] = base[fam];
       trace[fam] = { value: base[fam], mode: 'baseline', contributors: [] };
+      carried++;
     }
   }
-  return { families: outFamilies, trace, comparability: cohortOverlap(sources ?? []) };
+
+  // Comparability has to describe the SCORES, not the sources that happened to
+  // run. A carried-over cell was measured against a population that is not
+  // here — if one of the two disjoint text-to-speech sources goes missing or
+  // is skipped as malformed, its scores stay in the snapshot while a naive
+  // recount reports one source, one component and `disjoint: false`, which is
+  // the documented gate saying yes to exactly the values it exists to refuse.
+  //
+  // So a run that carries anything forward cannot claim the cohorts are
+  // connected. `carriedFamilies` says how many cells came from the baseline,
+  // and their absent source counts as its own component.
+  const comparability = cohortOverlap(sources ?? []);
+  comparability.carriedFamilies = carried;
+  if (carried > 0) {
+    comparability.components += 1;
+    comparability.disjoint = comparability.components > 1;
+  }
+  return { families: outFamilies, trace, comparability };
 }
 
 /**

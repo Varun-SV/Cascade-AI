@@ -998,6 +998,45 @@ export type UnretrievedMode = 'nokey' | 'fast' | 'degraded';
  * text, and the notice reports what actually reached the model rather than
  * reassuring the user about a file it only half read.
  */
+/**
+ * Split a budget across documents so none is starved and none is wasted.
+ *
+ * An equal share is fair and, on real attachments, mostly empty: nine notes of
+ * a few hundred characters beside one long report gave the report a tenth of
+ * the allowance and threw the other nine tenths away, so the run answered from
+ * a fraction of the only document that mattered while most of the window sat
+ * unused. Fair is not the same as useful.
+ *
+ * Water-filling instead. Everyone is offered an equal share; whoever wants
+ * less than that takes what they need and the remainder is re-offered to the
+ * rest, repeatedly, until nobody is under-served or the budget is spent. The
+ * fixed share is the FLOOR each document is guaranteed against the others, not
+ * the ceiling it is held to, so a long document can use room a short one never
+ * wanted — and a corpus of equally long documents divides exactly as before.
+ */
+export function allowances(lengths: readonly number[], budget: number): number[] {
+  const out = lengths.map(() => 0);
+  let remaining = budget;
+  let open = lengths.map((_, i) => i);
+  while (open.length > 0 && remaining > 0) {
+    const share = Math.floor(remaining / open.length);
+    if (share <= 0) break;
+    const satisfied = open.filter((i) => lengths[i]! <= share);
+    if (satisfied.length === 0) {
+      // Everyone still open wants more than an equal share, so an equal share
+      // is the answer and there is nothing left to redistribute.
+      for (const i of open) out[i] = share;
+      return out;
+    }
+    for (const i of satisfied) {
+      out[i] = lengths[i]!;
+      remaining -= lengths[i]!;
+    }
+    open = open.filter((i) => lengths[i]! > share);
+  }
+  return out;
+}
+
 function injectWithinBudget(
   docSources: Array<{ filename: string; text: string }>,
   windowTokens: number,
@@ -1010,10 +1049,10 @@ function injectWithinBudget(
   const budget = cagCharBudget(windowTokens);
   if (totalChars <= budget) return asIs();
 
-  const share = Math.floor(budget / Math.max(1, docSources.length));
-  const trimmed = docSources.map((d) => ({
+  const room = allowances(docSources.map((d) => d.text.length), budget);
+  const trimmed = docSources.map((d, i) => ({
     filename: d.filename,
-    text: d.text.length > share ? d.text.slice(0, share) : d.text,
+    text: d.text.slice(0, room[i]!),
   }));
   socket.emit('knowledge:retrieved', {
     conversationId,

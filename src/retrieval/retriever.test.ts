@@ -73,6 +73,41 @@ describe('Retriever + SqliteVectorStore', () => {
     expect(hits[0]!.text).toContain('computeRRFScore');
   });
 
+  // A 25M-character document is ~12,500 chunks; embedding them all and holding
+  // every vector before the first write was ~150 MB of JS numbers at 1,536
+  // dimensions, on top of the text and the rows. Survivable only while
+  // ingestion truncated at 200,000 characters — which it no longer does.
+  it('embeds and writes in slices, so one corpus is not held whole', async () => {
+    const db = new Database(':memory:');
+    // An embedder that records how many texts it was handed per call, and how
+    // many records the store already held at that moment. If indexing still
+    // did one pass, the second number would be 0 right up to the end.
+    let calls: number[] = [];
+    const storedWhenCalled: number[] = [];
+    const store = new SqliteVectorStore(db);
+    const counting: Embedder = {
+      model: 'fake-embed',
+      dims: 64,
+      async embed(texts: string[]) {
+        calls.push(texts.length);
+        storedWhenCalled.push(store.lexicalSearch('chunk', { namespace: NS, k: 10_000 }).length);
+        return texts.map(() => new Array(64).fill(0.01));
+      },
+    };
+    const r = new Retriever(counting, store);
+
+    const chunks = Array.from({ length: 1300 }, (_, i) => ({ text: `chunk ${i}`, ord: i }));
+    const n = await r.index(NS, 'big', chunks);
+
+    expect(n, 'every chunk is still indexed').toBe(1300);
+    expect(calls.length, 'across several passes, not one').toBeGreaterThan(1);
+    expect(Math.max(...calls), 'and no pass holds more than a slice').toBeLessThanOrEqual(512);
+    // The point of the change: rows are written as it goes, so the vectors for
+    // earlier slices are already released by the time later ones are embedded.
+    expect(storedWhenCalled[storedWhenCalled.length - 1], 'earlier slices were written before the last')
+      .toBeGreaterThan(0);
+  });
+
   it('skips re-embedding an already-indexed source', async () => {
     const r = build();
     const first = await r.index(NS, 'doc1', [{ text: 'hello world', ord: 0 }]);

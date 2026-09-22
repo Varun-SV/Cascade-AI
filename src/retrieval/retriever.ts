@@ -43,6 +43,15 @@ export function reciprocalRankFusion(lists: ScoredChunk[][], rrfK = 60): ScoredC
     .sort((a, b) => b.score - a.score);
 }
 
+/**
+ * Chunks embedded and written per pass in {@link Retriever.index}.
+ *
+ * Bounds what indexing RETAINS at once: at 1,536 dimensions, 512 vectors are
+ * roughly 6 MB of JS numbers, against ~150 MB for a 25M-character document
+ * embedded in one go.
+ */
+const INDEX_SLICE = 512;
+
 export class Retriever {
   constructor(
     private readonly embedder: Embedder,
@@ -73,13 +82,33 @@ export class Retriever {
     chunks: Array<{ text: string; ord: number }>,
   ): Promise<number> {
     if (chunks.length === 0 || this.isIndexed(namespace, sourceId)) return 0;
-    const vectors = await this.embedder.embed(chunks.map((c) => c.text));
-    const records = chunks.map((c, i) => ({
-      chunk: { id: `${namespace}:${sourceId}:${c.ord}`, text: c.text, sourceId, ord: c.ord, meta: { namespace } },
-      vector: vectors[i] ?? [],
-    })).filter((r) => r.vector.length > 0);
-    this.store.upsert(records, this.embedder.model);
-    return records.length;
+
+    // Embedded and written in slices, so peak memory is one slice rather than
+    // the whole corpus.
+    //
+    // This used to embed every chunk and hold every vector before writing a
+    // single record. That was survivable while ingestion truncated documents at
+    // 200,000 characters; once a document may be 25M characters it is about
+    // 12,500 chunks, and at 1,536 dimensions the vectors ALONE are ~150 MB of
+    // JS numbers before counting the text, the response objects or the rows.
+    // Two tenants indexing at once was then enough to exhaust a server that had
+    // just been taught not to run out of memory during extraction.
+    //
+    // The slice is deliberately larger than the embedder's own request batch:
+    // it bounds what is RETAINED, while the embedder bounds what is asked for
+    // in one call, and conflating the two would make either hard to tune.
+    let indexed = 0;
+    for (let i = 0; i < chunks.length; i += INDEX_SLICE) {
+      const slice = chunks.slice(i, i + INDEX_SLICE);
+      const vectors = await this.embedder.embed(slice.map((c) => c.text));
+      const records = slice.map((c, j) => ({
+        chunk: { id: `${namespace}:${sourceId}:${c.ord}`, text: c.text, sourceId, ord: c.ord, meta: { namespace } },
+        vector: vectors[j] ?? [],
+      })).filter((r) => r.vector.length > 0);
+      this.store.upsert(records, this.embedder.model);
+      indexed += records.length;
+    }
+    return indexed;
   }
 
   /** Hybrid search: lexical ∪ dense, fused with RRF, then optionally reranked. */

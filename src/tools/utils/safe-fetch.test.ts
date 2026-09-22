@@ -241,13 +241,49 @@ describe('safeFetch', () => {
     it('drops the caller credentials when the redirect leaves the origin', async () => {
       const spy = stubFetch(redirectTo(OTHER_PUBLIC), new Response('ok', { status: 200 }));
       await safeFetch(PUBLIC, {
-        headers: { authorization: 'Bearer sk-secret', cookie: 'session=abc', 'x-trace': 'keep-me' },
+        headers: { authorization: 'Bearer sk-secret', cookie: 'session=abc', accept: 'application/json' },
       });
       const [first, second] = calls(spy);
       expect(hdr(first, 'authorization'), 'sent to the host it was meant for').toBe('Bearer sk-secret');
       expect(hdr(second, 'authorization'), 'and NOT to the one it was redirected to').toBeNull();
       expect(hdr(second, 'cookie'), 'nor the cookie').toBeNull();
-      expect(hdr(second, 'x-trace'), 'an ordinary header is not a credential').toBe('keep-me');
+      expect(hdr(second, 'accept'), 'a header describing the request, not the requester').toBe('application/json');
+    });
+
+    // Stripping only the three headers the Fetch standard names was worth
+    // nothing here: the keys this codebase carries are all custom, and a
+    // generated tool can invent a name no list anticipates. The policy is an
+    // allowlist for that reason — these are the real ones, and the last is a
+    // name nobody would think to enumerate.
+    it.each([
+      ['x-api-key', 'sk-live-1'],
+      ['x-goog-api-key', 'AIza-secret'],
+      ['api-key', 'azure-secret'],
+      ['steel-api-key', 'steel-secret'],
+      ['x-totally-bespoke-token', 'invented-today'],
+    ])('drops %s across an origin change', async (name, value) => {
+      const spy = stubFetch(redirectTo(OTHER_PUBLIC), new Response('ok', { status: 200 }));
+      await safeFetch(PUBLIC, { headers: { [name]: value } });
+      const [first, second] = calls(spy);
+      expect(hdr(first, name), 'the host it was meant for still gets it').toBe(value);
+      expect(hdr(second, name), 'the redirect target does not').toBeNull();
+    });
+
+    it('keeps a body describable across a 307, which crosses origins', async () => {
+      // 307 preserves method and body cross-origin, and a body without its
+      // content-type is a broken request rather than a safer one.
+      const spy = stubFetch(
+        new Response(null, { status: 307, headers: { location: OTHER_PUBLIC } }),
+        new Response('ok', { status: 200 }),
+      );
+      await safeFetch(PUBLIC, {
+        method: 'POST', body: '{"a":1}',
+        headers: { 'content-type': 'application/json', 'x-api-key': 'sk-live-1' },
+      });
+      const second = calls(spy)[1];
+      expect(second?.body, 'the body survives, as 307 requires').toBe('{"a":1}');
+      expect(hdr(second, 'content-type'), 'and stays describable').toBe('application/json');
+      expect(hdr(second, 'x-api-key'), 'while the key does not follow').toBeNull();
     });
 
     it('keeps them on a same-origin redirect, which is the whole point of the distinction', async () => {

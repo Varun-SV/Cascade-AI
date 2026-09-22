@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { ToolRegistry, CascadeConfigSchema } from '#cascade-ai';
-import { answersThisRun, buildCloudConfig, buildMediaSink, parseChatRunPayload, resolveDocuments, runChatTurn, sanitiseClarificationAnswers, sanitiseEscalationNote, tenantScratchDir } from './runs.js';
+import { allowances, answersThisRun, buildCloudConfig, buildMediaSink, parseChatRunPayload, resolveDocuments, runChatTurn, sanitiseClarificationAnswers, sanitiseEscalationNote, tenantScratchDir } from './runs.js';
 import { CloudStore } from './db.js';
 import { limitsForPlan, PENDING_MEDIA_TTL_MS } from './entitlements.js';
 import type { CloudEnv } from './env.js';
@@ -1086,5 +1086,53 @@ describe('documents injected without retrieval', () => {
     );
     expect(out, 'both documents still reach the run').toHaveLength(2);
     boundedAndReported(out, socket, 'degraded');
+  });
+});
+
+
+// An equal share is fair and mostly empty: it gives a long report the same room
+// as a one-line note and discards what the note never wanted.
+describe('allowances', () => {
+  const total = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+
+  it('gives a long document the room the short ones did not use', () => {
+    // Nine documents of one character and one large. An equal split would hand
+    // the large document 100 of a 1000 budget and waste ~891.
+    const lengths = [...Array(9).fill(1), 10_000];
+    const room = allowances(lengths, 1000);
+    expect(room.slice(0, 9), 'the short ones take exactly what they are').toEqual(Array(9).fill(1));
+    expect(room[9], 'and the rest goes where it can be used').toBe(991);
+    expect(total(room)).toBeLessThanOrEqual(1000);
+  });
+
+  it('divides equally when every document wants more than its share', () => {
+    // The floor is a guarantee against the others, so this is the old
+    // behaviour exactly — nothing to redistribute.
+    expect(allowances([5000, 5000, 5000], 900)).toEqual([300, 300, 300]);
+  });
+
+  it('never gives a document more than it has', () => {
+    const room = allowances([10, 20, 30], 10_000);
+    expect(room).toEqual([10, 20, 30]);
+  });
+
+  it('starves nobody: every document keeps at least its equal share', () => {
+    const lengths = [1, 2, 3, 400_000, 500_000];
+    const room = allowances(lengths, 1000);
+    const equal = Math.floor(1000 / lengths.length);
+    for (let i = 0; i < lengths.length; i++) {
+      expect(room[i]!, `document ${i}`).toBeGreaterThanOrEqual(Math.min(lengths[i]!, equal));
+    }
+  });
+
+  it('spends the budget when it can', () => {
+    const room = allowances([1, 1, 100_000], 999);
+    expect(total(room), 'not 3 documents x 333 with 664 thrown away').toBe(999);
+  });
+
+  it('handles the degenerate inputs without inventing room', () => {
+    expect(allowances([], 1000)).toEqual([]);
+    expect(allowances([100, 100], 0)).toEqual([0, 0]);
+    expect(allowances([100, 100], 1)).toEqual([0, 0]);
   });
 });

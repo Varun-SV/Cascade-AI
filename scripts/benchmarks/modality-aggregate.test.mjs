@@ -165,11 +165,11 @@ describe('cohorts that do not overlap', () => {
 
   it('reports the cohorts as disjoint, so a consumer can refuse them', () => {
     const { comparability } = buildModalityFamilies([strong, weak]);
-    expect(comparability).toEqual({ sources: 2, families: 8, shared: 0, components: 2, disjoint: true });
+    expect(comparability).toEqual({ sources: 2, families: 8, shared: 0, components: 2, carriedFamilies: 0, disjoint: true });
   });
 
   it('does not call a single source disjoint — there is nothing to compare it to', () => {
-    expect(cohortOverlap([strong])).toEqual({ sources: 1, families: 4, shared: 0, components: 1, disjoint: false });
+    expect(cohortOverlap([strong])).toEqual({ sources: 1, families: 4, shared: 0, components: 1, carriedFamilies: 0, disjoint: false });
   });
 
   it('counts the anchors when sources do share models', () => {
@@ -213,7 +213,7 @@ describe('cohorts that do not overlap', () => {
   });
 
   it('reports no sources without pretending they are comparable', () => {
-    expect(cohortOverlap([])).toEqual({ sources: 0, families: 0, shared: 0, components: 0, disjoint: false });
+    expect(cohortOverlap([])).toEqual({ sources: 0, families: 0, shared: 0, components: 0, carriedFamilies: 0, disjoint: false });
   });
 
   it('surfaces comparability per modality from the top-level build', () => {
@@ -269,5 +269,39 @@ describe('the committed text-to-speech sources', () => {
     ]);
     expect(o.components).toBe(1);
     expect(o.shared, 'one anchor across sixteen families').toBe(1);
+  });
+});
+
+
+// A cell carried from the previous snapshot was measured against a population
+// that is not present this run. Recounting comparability from only the sources
+// that happened to appear describes the wrong thing.
+describe('scores carried from the baseline', () => {
+  const a = { source: 'a', modality: 'demo', models: { m1: 10, m2: 9 } };
+  const b = { source: 'b', modality: 'demo', models: { z1: 8, z2: 7 } };
+
+  it('does not call the cohorts connected just because a source went missing', () => {
+    // a and b are disjoint. Skip b — as a malformed or unreachable source would
+    // be — and its scores stay in the snapshot via `base`. A naive recount sees
+    // one source, one component, and says the values are comparable.
+    const { families } = buildModalityFamilies([a, b]);
+    const { comparability } = buildModalityFamilies([a], { base: families });
+
+    expect(comparability.sources, 'only one source ran').toBe(1);
+    expect(comparability.carriedFamilies, "but b's families are still in the output").toBe(2);
+    expect(comparability.components, "so b's absent population counts as its own").toBe(2);
+    expect(comparability.disjoint, 'and the gate still refuses them').toBe(true);
+  });
+
+  it('carries nothing, and claims nothing, when every source is present', () => {
+    const { comparability } = buildModalityFamilies([a, b]);
+    expect(comparability.carriedFamilies).toBe(0);
+  });
+
+  it('a single source that covers everything is still comparable with itself', () => {
+    const { families } = buildModalityFamilies([a]);
+    const { comparability } = buildModalityFamilies([a], { base: families });
+    expect(comparability.carriedFamilies, 'a covers its own families, nothing is carried').toBe(0);
+    expect(comparability.disjoint).toBe(false);
   });
 });

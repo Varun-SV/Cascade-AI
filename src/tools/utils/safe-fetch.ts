@@ -35,11 +35,31 @@ const ALLOWED_PROTOCOLS = new Set(['http:', 'https:']);
 const MAX_REDIRECTS = 5;
 
 /**
- * Headers that authenticate the CALLER, dropped the moment a redirect leaves
- * the origin they were meant for. The same set the Fetch standard removes on a
- * cross-origin redirect.
+ * Headers kept when a redirect leaves the origin. EVERYTHING else is dropped.
+ *
+ * An allowlist, because the question "is this header a credential?" has no
+ * bounded answer. The Fetch standard strips `Authorization`, `Cookie` and
+ * `Proxy-Authorization`, and stripping only those was worth exactly nothing
+ * here: the keys this codebase actually carries are `x-api-key`,
+ * `x-goog-api-key`, `api-key`, `steel-api-key` — and a generated tool can
+ * invent a name no list anticipates. Enumerating the dangerous ones is a race
+ * against every vendor's naming taste, and losing it silently forwards a live
+ * key to whoever the previous host names.
+ *
+ * So the default is drop, and this is the short list of headers that describe
+ * the REQUEST rather than the requester. `content-*` are here because a 307 or
+ * 308 preserves the body across origins and a body without its content-type is
+ * a broken request, not a safer one.
  */
-const CREDENTIAL_HEADERS = ['authorization', 'cookie', 'proxy-authorization'] as const;
+const CROSS_ORIGIN_SAFE_HEADERS: ReadonlySet<string> = new Set([
+  'accept',
+  'accept-encoding',
+  'accept-language',
+  'content-language',
+  'content-length',
+  'content-type',
+  'user-agent',
+]);
 
 /** Headers that describe a body, dropped whenever the body is. */
 const BODY_HEADERS = ['content-type', 'content-length', 'content-encoding', 'content-language'] as const;
@@ -349,18 +369,21 @@ export async function safeFetch(rawUrl: string, init: RequestInit = {}): Promise
       for (const h of BODY_HEADERS) headers.delete(h);
     }
 
-    // Leaving the origin drops the credentials. This is the whole point of the
+    // Leaving the origin drops everything the caller supplied except the few
+    // headers that describe the request itself. This is the whole point of the
     // rule: a redirect is chosen by the server being redirected FROM, so
-    // following one while still carrying the caller's bearer token hands that
-    // token to whoever the previous host names. `bridgeFetch` routes
-    // model-authored tool headers through here, so "the caller" can be a
-    // generated tool holding a real key.
+    // following one while still carrying the caller's key hands that key to
+    // whoever the previous host names. `bridgeFetch` routes model-authored tool
+    // headers through here, so "the caller" can be a generated tool holding a
+    // real credential under a name nobody has seen before.
     //
     // Once dropped they stay dropped, even if the chain returns to the first
     // origin — stricter than the spec, and the strictness costs nothing a
     // legitimate caller wanted.
     if (next.origin !== origin) {
-      for (const h of CREDENTIAL_HEADERS) headers.delete(h);
+      for (const [name] of [...headers]) {
+        if (!CROSS_ORIGIN_SAFE_HEADERS.has(name.toLowerCase())) headers.delete(name);
+      }
     }
 
     origin = next.origin;

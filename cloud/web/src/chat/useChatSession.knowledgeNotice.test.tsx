@@ -73,6 +73,28 @@ describe('useChatSession — the document-trimming notice', () => {
     expect(view.result.current.knowledgeNotice).toBeNull();
   });
 
+  // The regression the conversation filter introduced. On the FIRST message of
+  // a new chat the server mints the conversation and resolves documents before
+  // the chat:run acknowledgement tells this pane its id — so a filter comparing
+  // against a still-undefined ref reads the pane's own first turn as somebody
+  // else's. That is precisely the attachment flow this notice exists for.
+  it('keeps the notice on the first turn, before the pane knows its id', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    // A send arms first-turn adoption; nothing has told the pane an id yet.
+    act(() => { view.result.current.send({ prompt: 'what does this say?' }); });
+
+    act(() => {
+      fake.fire('knowledge:retrieved', {
+        conversationId: 'server-minted-on-this-turn',
+        mode: 'fast', docCount: 1, keptChars: 20_000, totalChars: 400_000,
+      });
+    });
+
+    expect(view.result.current.knowledgeNotice, 'the pane owns this turn').toBeTruthy();
+  });
+
   it('names the run budget, not the model, so it invents no limitation', () => {
     // The trim is against `cagCharBudget` — half the context window by default
     // — so a corpus can fit the model and still be cut. Saying the model could
