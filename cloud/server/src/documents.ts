@@ -1,4 +1,5 @@
 import { createRequire } from 'module';
+import zlib from 'node:zlib';
 
 // pdf-parse / mammoth are CommonJS with no first-class ESM types; load them
 // through createRequire so the bundle resolves them at runtime without pulling
@@ -75,6 +76,7 @@ export const MAX_DECOMPRESSED_BYTES = 128 * 1024 * 1024;
 
 const EOCD_SIGNATURE = 0x06054b50;
 const CENTRAL_FILE_SIGNATURE = 0x02014b50;
+const LOCAL_FILE_SIGNATURE = 0x04034b50;
 /** A size of 0xFFFFFFFF means "see the Zip64 extra field" — i.e. >= 4 GB. */
 const ZIP64_SENTINEL = 0xffffffff;
 
@@ -88,11 +90,48 @@ const ZIP64_SENTINEL = 0xffffffff;
  * is a member claiming at least 4 GB.
  */
 export function declaredUncompressedBytes(bytes: Buffer): number | null {
-  // The end-of-central-directory record sits at the very end, after a comment
-  // of up to 65535 bytes, so it is found by scanning backwards rather than by
-  // arithmetic.
+  const dir = readCentralDirectory(bytes);
+  if (dir === null) return null;
+  let total = 0;
+  for (const e of dir) {
+    if (e.uncompressed === ZIP64_SENTINEL) return Infinity;
+    total += e.uncompressed;
+  }
+  return total;
+}
+
+interface ZipEntry {
+  compressed: number;
+  uncompressed: number;
+  method: number;
+  localOffset: number;
+}
+
+/**
+ * Every record in the central directory, or `null` if it cannot be read whole.
+ *
+ * Two things here are deliberately NOT taken from the archive at face value.
+ *
+ * The directory is located as `eocd - size`, not from the stored offset. A ZIP
+ * may carry arbitrary bytes BEFORE its payload — self-extracting archives are
+ * the usual reason — and every reader worth the name, JSZip included,
+ * compensates by measuring the shift. Trusting the stored offset meant a
+ * single prepended byte made this return `null`, and `null` used to mean
+ * "carry on to mammoth". One byte disabled the guard.
+ *
+ * And the loop is bounded by the directory's EXTENT, not by the EOCD's entry
+ * count. That count is a uint16 an attacker writes, it is not checksummed, and
+ * tolerant readers walk the signatures instead — so understating it left this
+ * summing the first small record and reporting a safe total while JSZip went
+ * on to find the rest. Walking the extent and then checking the count against
+ * what was actually there turns a lie into a refusal instead of a bypass.
+ */
+function readCentralDirectory(bytes: Buffer): ZipEntry[] | null {
   const minEocd = 22;
   if (bytes.length < minEocd) return null;
+  // The EOCD sits at the end behind a comment of up to 65535 bytes, so it is
+  // found by scanning backwards. Scanning from the END means a crafted comment
+  // containing a second EOCD signature loses to the real trailing one.
   const scanFrom = Math.max(0, bytes.length - (minEocd + 0xffff));
   let eocd = -1;
   for (let i = bytes.length - minEocd; i >= scanFrom; i--) {
@@ -100,23 +139,108 @@ export function declaredUncompressedBytes(bytes: Buffer): number | null {
   }
   if (eocd < 0) return null;
 
-  const entries = bytes.readUInt16LE(eocd + 10);
-  let offset = bytes.readUInt32LE(eocd + 16);
-  if (offset === ZIP64_SENTINEL) return Infinity;
+  const declaredCount = bytes.readUInt16LE(eocd + 10);
+  const cdSize = bytes.readUInt32LE(eocd + 12);
+  const storedOffset = bytes.readUInt32LE(eocd + 16);
+  if (cdSize === ZIP64_SENTINEL || storedOffset === ZIP64_SENTINEL) {
+    return [{ compressed: 0, uncompressed: ZIP64_SENTINEL, method: 0, localOffset: 0 }];
+  }
+  const start = eocd - cdSize;
+  if (start < 0 || cdSize === 0) return null;
+  // Whatever prefix shifted the archive shifts every stored offset by the same
+  // amount; measuring it once lets local-header offsets be corrected too.
+  const shift = start - storedOffset;
 
-  let total = 0;
-  for (let i = 0; i < entries; i++) {
-    if (offset + 46 > bytes.length) return null;
+  const entries: ZipEntry[] = [];
+  let offset = start;
+  while (offset + 46 <= eocd) {
     if (bytes.readUInt32LE(offset) !== CENTRAL_FILE_SIGNATURE) return null;
-    const uncompressed = bytes.readUInt32LE(offset + 24);
-    if (uncompressed === ZIP64_SENTINEL) return Infinity;
-    total += uncompressed;
     const nameLen = bytes.readUInt16LE(offset + 28);
     const extraLen = bytes.readUInt16LE(offset + 30);
     const commentLen = bytes.readUInt16LE(offset + 32);
+    entries.push({
+      method: bytes.readUInt16LE(offset + 10),
+      compressed: bytes.readUInt32LE(offset + 20),
+      uncompressed: bytes.readUInt32LE(offset + 24),
+      localOffset: bytes.readUInt32LE(offset + 42) + shift,
+    });
     offset += 46 + nameLen + extraLen + commentLen;
   }
-  return total;
+  // The walk must land exactly on the directory's end, and must have found as
+  // many records as the EOCD claims. Either mismatch means the container does
+  // not describe itself consistently, and an inconsistent container is one we
+  // refuse rather than interpret.
+  if (offset !== eocd) return null;
+  if (entries.length !== declaredCount) return null;
+  return entries;
+}
+
+/**
+ * Inflate every member under a hard output cap, and refuse the archive if it
+ * cannot be done.
+ *
+ * The declared sizes above are a claim, and the claim is free to lie: an
+ * attacker patches the central directory to say "small" and leaves the DEFLATE
+ * stream expanding to gigabytes. JSZip compares the observed length against
+ * the declared one only AFTER its decompression worker has produced the data,
+ * so the allocation this guard exists to prevent has already happened by the
+ * time the mismatch is noticed. A check that reads only the header is a check
+ * an attacker writes the answer to.
+ *
+ * So this decompresses the members itself, with `maxOutputLength` — enforced
+ * by zlib DURING inflation, not after — as the bound. A bomb aborts partway
+ * through with the cap's worth of memory allocated and no more. It costs an
+ * honest document one extra decompression of a few megabytes, which is the
+ * price of the guarantee being real rather than declared.
+ */
+function assertInflatesWithin(bytes: Buffer, cap: number): void {
+  const entries = readCentralDirectory(bytes);
+  // Fail CLOSED. An unreadable container is not proof of an attack, but it is
+  // proof we cannot bound it, and "we could not check" must never mean "go
+  // ahead". The route reports this as an unreadable document, which is what it
+  // is from here.
+  if (entries === null) throw new Error('Unreadable document container');
+
+  let remaining = cap;
+  for (const e of entries) {
+    if (e.uncompressed === ZIP64_SENTINEL) throw new DocumentTooLargeError(Infinity, 'declared');
+    if (e.localOffset < 0 || e.localOffset + 30 > bytes.length) {
+      throw new Error('Unreadable document container');
+    }
+    if (bytes.readUInt32LE(e.localOffset) !== LOCAL_FILE_SIGNATURE) {
+      throw new Error('Unreadable document container');
+    }
+    // The local header's own name/extra lengths, not the central directory's —
+    // they are allowed to differ, and the data starts after the local ones.
+    const nameLen = bytes.readUInt16LE(e.localOffset + 26);
+    const extraLen = bytes.readUInt16LE(e.localOffset + 28);
+    const dataStart = e.localOffset + 30 + nameLen + extraLen;
+    const dataEnd = dataStart + e.compressed;
+    if (dataEnd > bytes.length) throw new Error('Unreadable document container');
+    const payload = bytes.subarray(dataStart, dataEnd);
+
+    let produced: number;
+    if (e.method === 0) {
+      produced = payload.length; // stored, no expansion possible
+    } else if (e.method === 8) {
+      try {
+        produced = zlib.inflateRawSync(payload, { maxOutputLength: remaining }).length;
+      } catch (err) {
+        // zlib raises ERR_BUFFER_TOO_LARGE once output passes the cap. That is
+        // the bomb, caught mid-inflation with only `remaining` bytes spent.
+        if ((err as NodeJS.ErrnoException)?.code === 'ERR_BUFFER_TOO_LARGE') {
+          throw new DocumentTooLargeError(cap, 'declared');
+        }
+        throw new Error('Unreadable document container');
+      }
+    } else {
+      // A method we cannot bound is a method we do not accept.
+      throw new Error('Unreadable document container');
+    }
+
+    remaining -= produced;
+    if (remaining < 0) throw new DocumentTooLargeError(cap, 'declared');
+  }
 }
 
 /**
@@ -238,10 +362,11 @@ export async function parseDocument(input: {
     // BEFORE mammoth, not after: the extractor allocates the whole expansion
     // and only then returns it, so a check on its output cannot prevent the
     // allocation. The archive states what it expands to; refuse on the claim.
-    const declared = declaredUncompressedBytes(bytes);
-    if (declared !== null && declared > MAX_DECOMPRESSED_BYTES) {
-      throw new DocumentTooLargeError(declared, 'declared');
-    }
+    // Bounded for real, by inflating under a cap rather than by reading the
+    // size the archive claims for itself. Fails closed on a container it
+    // cannot walk, so a prepended byte or a miscounted directory refuses the
+    // upload instead of waving it through.
+    assertInflatesWithin(bytes, MAX_DECOMPRESSED_BYTES);
     const mammoth = require('mammoth') as { extractRawText(o: { buffer: Buffer }): Promise<{ value: string }> };
     const parsed = await mammoth.extractRawText({ buffer: bytes });
     return normalizeText(parsed.value ?? '');

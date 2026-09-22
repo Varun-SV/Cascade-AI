@@ -67,3 +67,71 @@ export const DOCX_MIME =
 export function preflightTrippingDocx(): Promise<Buffer> {
   return expandingDocx({ runChars: 5_000, runs: 27_000, level: 1 });
 }
+
+const EOCD_SIG = 0x06054b50;
+const CENTRAL_SIG = 0x02014b50;
+
+/** Locate the end-of-central-directory record, scanning back from the end. */
+function findEocd(zip: Buffer): number {
+  for (let i = zip.length - 22; i >= 0; i--) {
+    if (zip.readUInt32LE(i) === EOCD_SIG) return i;
+  }
+  throw new Error('no EOCD');
+}
+
+/**
+ * Rewrite every central-directory record's uncompressed size to a small lie,
+ * leaving the DEFLATE payload untouched.
+ *
+ * This is the attack a declared-size check cannot see: the archive says it
+ * expands to almost nothing and then expands to whatever it likes. Nothing is
+ * recomputed, because nothing needs to be — the size fields are not covered by
+ * any checksum.
+ */
+export function withLyingDeclaredSizes(zip: Buffer, claim = 1024): Buffer {
+  const out = Buffer.from(zip);
+  const eocd = findEocd(out);
+  const cdSize = out.readUInt32LE(eocd + 12);
+  let offset = eocd - cdSize;
+  while (offset + 46 <= eocd && out.readUInt32LE(offset) === CENTRAL_SIG) {
+    out.writeUInt32LE(claim, offset + 24);
+    offset += 46 + out.readUInt16LE(offset + 28)
+      + out.readUInt16LE(offset + 30) + out.readUInt16LE(offset + 32);
+  }
+  return out;
+}
+
+/**
+ * Prepend bytes before the ZIP payload, as a self-extracting archive does.
+ *
+ * Every stored offset is now short by `prefix.length`. A reader that trusts
+ * them finds nothing; a reader that measures the shift — as JSZip does, and as
+ * `readCentralDirectory` now does — reads the archive normally.
+ */
+export function withPrefix(zip: Buffer, prefix = Buffer.from('MZ')): Buffer {
+  return Buffer.concat([prefix, zip]);
+}
+
+/**
+ * Understate the EOCD's entry count while leaving every record in place.
+ *
+ * A reader that uses the count as its loop bound sees only the first few
+ * members and totals up a reassuring number; a reader that walks the
+ * directory's extent sees all of them, and notices the disagreement.
+ */
+export function withUnderstatedEntryCount(zip: Buffer, claim = 1): Buffer {
+  const out = Buffer.from(zip);
+  const eocd = findEocd(out);
+  out.writeUInt16LE(claim, eocd + 8);  // entries on this disk
+  out.writeUInt16LE(claim, eocd + 10); // total entries
+  return out;
+}
+
+/** A DOCX with several members, so an understated count has something to hide. */
+export async function multiPartDocx(): Promise<Buffer> {
+  const JSZip = (await import('jszip')).default;
+  const zip = new JSZip();
+  zip.file('a.txt', 'A'.repeat(200_000));
+  zip.file('word/document.xml', `<w:t>${'B'.repeat(40_000_000)}</w:t>`);
+  return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 1 } });
+}

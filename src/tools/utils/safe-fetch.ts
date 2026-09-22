@@ -333,12 +333,16 @@ export async function safeFetch(rawUrl: string, init: RequestInit = {}): Promise
     const next = new URL(location, currentUrl);
     await assertPublicUrl(next.toString()); // re-validate each hop
 
-    // 303 is defined as "GET the other thing"; 301 and 302 on a POST are
-    // rewritten to GET by every browser and by fetch itself, de facto since
-    // long before it was written down. The body goes with the method, and so
-    // do the headers that described it.
-    const rewriteToGet = resp.status === 303
-      || ((resp.status === 301 || resp.status === 302) && method.toUpperCase() === 'POST');
+    // 303 is defined as "GET the other thing" — but only for a method that was
+    // asking for something else. A GET or a HEAD is already that request, and
+    // rewriting a HEAD to a GET turns a metadata probe into a download of a
+    // body the caller never asked for. 301 and 302 on a POST are rewritten to
+    // GET by every browser and by fetch itself, de facto since long before it
+    // was written down. The body goes with the method, and so do the headers
+    // that described it.
+    const verb = method.toUpperCase();
+    const rewriteToGet = (resp.status === 303 && verb !== 'GET' && verb !== 'HEAD')
+      || ((resp.status === 301 || resp.status === 302) && verb === 'POST');
     if (rewriteToGet) {
       method = 'GET';
       body = undefined;

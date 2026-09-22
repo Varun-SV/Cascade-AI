@@ -1459,9 +1459,18 @@ export function useChatSession(
         : `${who} is out for this run — ${e.message ?? ''}`);
     };
     const onKnowledge = (e: {
+      conversationId?: string;
       mode?: string; docCount?: number; passages?: number; reranked?: boolean;
       keptChars?: number; totalChars?: number;
     }) => {
+      // One socket carries several conversations on plans that allow
+      // concurrent runs, so an over-budget Fast Answer or a degraded retrieval
+      // in a BACKGROUND chat would otherwise post its notice into whichever
+      // chat happens to be open — telling the user their current document was
+      // trimmed when it was not. The provider handler directly above already
+      // does this; the server has always sent the id, and this handler was
+      // simply not reading it.
+      if (e.conversationId && e.conversationId !== conversationIdRef.current) return;
       if (e.mode === 'searched') {
         const docs = e.docCount === 1 ? 'the document' : `${e.docCount} documents`;
         const verb = e.reranked ? 'reranked to the' : 'pulled the';

@@ -87,6 +87,13 @@ export function percentileNormalizeSource(source) {
  * cohorts there is no measurement linking them. It makes the limitation
  * machine-visible, so a consumer that needs comparable values can refuse
  * rather than quietly assume it has them.
+ *
+ * `shared` and `components` answer different questions and a consumer wants
+ * both. `components === 1` says the sources form ONE population — necessary,
+ * and not sufficient: the committed `embeddings` pair is connected by exactly
+ * ONE shared model across sixteen, which is a bridge in the graph sense and
+ * nowhere near enough to calibrate against. A gate that cares about accuracy
+ * requires `components === 1` AND enough of `shared` to mean it.
  */
 export function cohortOverlap(sources) {
   const perSource = (sources ?? []).map((s) => new Set(Object.keys(s?.models ?? {})));
@@ -96,12 +103,34 @@ export function cohortOverlap(sources) {
   }
   let shared = 0;
   for (const n of counts.values()) if (n > 1) shared++;
+
+  // Connectivity, not "did any model appear twice". Counting shared models
+  // says A and B are linked; it says nothing about C, which can share nothing
+  // with either and still be waved through by a `shared > 0` test. Sources
+  // form one axis only when the overlap graph is CONNECTED, so the graph is
+  // what gets measured: union sources that share a model, then count the
+  // components left over.
+  const parent = perSource.map((_, i) => i);
+  const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+  const union = (a, b) => { const ra = find(a); const rb = find(b); if (ra !== rb) parent[rb] = ra; };
+  for (let i = 0; i < perSource.length; i++) {
+    for (let j = i + 1; j < perSource.length; j++) {
+      for (const fam of perSource[i]) {
+        if (perSource[j].has(fam)) { union(i, j); break; }
+      }
+    }
+  }
+  const roots = new Set(perSource.map((_, i) => find(i)));
+  const components = roots.size;
+
   return {
     sources: perSource.length,
     families: counts.size,
     shared,
-    // One source is trivially self-consistent; the question only arises at two.
-    disjoint: perSource.length > 1 && shared === 0,
+    components,
+    // More than one island means at least one source's ranks are measured
+    // against a population nothing else touches.
+    disjoint: components > 1,
   };
 }
 

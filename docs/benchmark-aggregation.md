@@ -238,19 +238,34 @@ none**. There is no measurement linking the two populations, so no amount of
 arithmetic here can calibrate them — the information simply is not in the data.
 
 So the aggregator reports the condition instead of hiding it. `cohortOverlap()`
-returns `{ sources, families, shared, disjoint }` per modality, where `shared` counts
-the models more than one source rates (the anchors calibration would need) and
-`disjoint` marks the case with no honest single axis at all. `buildAllModalities()`
-surfaces it as `comparabilities[modality]`.
+returns `{ sources, families, shared, components, disjoint }` per modality, and it
+**ships in `benchmark-data.json` as `modalityComparability`** — beside the scores it
+qualifies, not only in the refresh log, so a consumer reads both from the same file.
 
-**Before `modalities` drives routing**, a consumer must either require
-`disjoint === false` with enough `shared` anchors to calibrate against, or keep each
-source's percentiles separate rather than collapsing them onto one axis. Treating
-today's values as comparable quality scores would rank a small model top of a weak
-field above a strong model mid-field in a hard one. `modality-aggregate.test.mjs`
-pins that failure mode with a disjoint strong-vs-weak pair, and asserts the committed
-TTS sources are disjoint — so a future refresh that adds a bridging source will show
-up as that test changing.
+- `components` is the number of connected islands in the source-overlap graph. Two
+  sources that share a model are one island; a third that shares nothing with either
+  is a second. `disjoint` is `components > 1`.
+- `shared` is how many models more than one source rates — the anchors calibration
+  would actually need.
+
+**Both matter, and neither is sufficient alone.** Counting shared models says A and B
+are linked and says nothing about C, which is why connectivity is measured rather than
+occurrence. And `components === 1` is necessary but not sufficient: the committed
+`embeddings` pair is connected by exactly **one** shared model out of sixteen — a
+bridge in the graph sense, nowhere near a calibration.
+
+Over the committed sources today, **two modalities are disjoint: `text-to-speech` and
+`vision`** (the second found by running the measure rather than by reasoning about the
+first).
+
+**Before `modalities` drives routing**, a consumer must require `components === 1`
+*and* enough `shared` anchors to mean it, or keep each source's percentiles separate
+rather than collapsing them onto one axis. Treating today's values as comparable
+quality scores would rank a small model top of a weak field above a strong model
+mid-field in a hard one. `modality-aggregate.test.mjs` pins that failure mode with a
+disjoint strong-vs-weak pair, pins the unconnected-third-source case, and asserts the
+committed TTS and vision sources are disjoint — so a future refresh that adds a
+bridging source shows up as those tests changing.
 
 ### Running it
 

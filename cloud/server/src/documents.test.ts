@@ -6,7 +6,10 @@ import {
   declaredUncompressedBytes, isDocumentMime, resolveDocumentMime, parseDocument,
 } from './documents.js';
 
-import { DOCX_MIME, expandingDocx, preflightTrippingDocx } from './test-support/expanding-docx.js';
+import {
+  DOCX_MIME, expandingDocx, multiPartDocx, preflightTrippingDocx,
+  withLyingDeclaredSizes, withPrefix, withUnderstatedEntryCount,
+} from './test-support/expanding-docx.js';
 
 const fixture = (name: string) => readFileSync(fileURLToPath(new URL(`./__fixtures__/${name}`, import.meta.url)));
 
@@ -215,6 +218,57 @@ describe('extraction expansion ceiling', () => {
       eocd.writeUInt16LE(1, 10);          // one entry
       eocd.writeUInt32LE(0xffffffff, 16); // central directory offset sentinel
       expect(declaredUncompressedBytes(eocd)).toBe(Infinity);
+    });
+  });
+
+  // A guard that reads only what the archive SAYS is a guard whose answer the
+  // attacker writes. These are the three ways of lying to it.
+  describe('an archive that lies about itself', () => {
+    it('refuses a bomb whose declared sizes claim it is tiny', async () => {
+      const honest = await preflightTrippingDocx();
+      const lying = withLyingDeclaredSizes(honest);
+
+      // The lie works: read the header and the file looks trivial.
+      expect(declaredUncompressedBytes(lying)!, 'it claims almost nothing')
+        .toBeLessThan(MAX_DECOMPRESSED_BYTES);
+
+      // And it is refused anyway, because the bound is applied by inflating
+      // under a cap rather than by believing the claim.
+      await expect(parseDocument({ bytes: lying, mime: DOCX_MIME, filename: 'liar.docx' }))
+        .rejects.toThrow(DocumentTooLargeError);
+    }, 120_000);
+
+    it('refuses a bomb with bytes prepended before the ZIP payload', async () => {
+      // Every stored offset is now short by the prefix. A reader that trusts
+      // them finds nothing and gives up; giving up used to mean "carry on".
+      const bytes = withPrefix(await preflightTrippingDocx());
+      await expect(parseDocument({ bytes, mime: DOCX_MIME, filename: 'sfx.docx' }))
+        .rejects.toThrow(DocumentTooLargeError);
+    }, 120_000);
+
+    it('still reads a normal archive that has a prefix', async () => {
+      // The compensation must not be a refusal in disguise: a prefixed archive
+      // is legitimate, and its real size still has to come out.
+      const honest = await expandingDocx({ runChars: 2_000, runs: 100 });
+      expect(declaredUncompressedBytes(withPrefix(honest)))
+        .toBe(declaredUncompressedBytes(honest));
+    }, 60_000);
+
+    it('refuses an archive whose entry count disagrees with its directory', async () => {
+      // Understating the count used to bound the loop, so only the first small
+      // member was summed while JSZip went on to find the rest.
+      const bytes = withUnderstatedEntryCount(await multiPartDocx());
+      expect(declaredUncompressedBytes(bytes), 'the container contradicts itself').toBeNull();
+      await expect(parseDocument({ bytes, mime: DOCX_MIME, filename: 'miscount.docx' }))
+        .rejects.toThrow();
+    }, 120_000);
+
+    it('fails CLOSED on a container it cannot walk', async () => {
+      // "We could not check" must never mean "go ahead". A DOCX whose ZIP
+      // structure does not parse is refused before mammoth sees it.
+      const junk = Buffer.concat([Buffer.from('PK\x03\x04'), Buffer.alloc(200, 0x41)]);
+      await expect(parseDocument({ bytes: junk, mime: DOCX_MIME, filename: 'broken.docx' }))
+        .rejects.toThrow();
     });
   });
 

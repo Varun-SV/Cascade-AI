@@ -165,11 +165,11 @@ describe('cohorts that do not overlap', () => {
 
   it('reports the cohorts as disjoint, so a consumer can refuse them', () => {
     const { comparability } = buildModalityFamilies([strong, weak]);
-    expect(comparability).toEqual({ sources: 2, families: 8, shared: 0, disjoint: true });
+    expect(comparability).toEqual({ sources: 2, families: 8, shared: 0, components: 2, disjoint: true });
   });
 
   it('does not call a single source disjoint — there is nothing to compare it to', () => {
-    expect(cohortOverlap([strong])).toEqual({ sources: 1, families: 4, shared: 0, disjoint: false });
+    expect(cohortOverlap([strong])).toEqual({ sources: 1, families: 4, shared: 0, components: 1, disjoint: false });
   });
 
   it('counts the anchors when sources do share models', () => {
@@ -180,6 +180,40 @@ describe('cohorts that do not overlap', () => {
     const o = cohortOverlap([strong, overlapping]);
     expect(o.shared, 'frontier-a and frontier-b appear in both').toBe(2);
     expect(o.disjoint).toBe(false);
+  });
+
+  // The case a "did any model appear twice" test waves through: A and B are
+  // linked, C shares nothing with either, and the answer used to be
+  // `disjoint: false` because SOME family occurred twice. A consumer following
+  // the documented gate would then read C's ranks off the A/B axis.
+  it('sees an unconnected third source even when two others overlap', () => {
+    const a = { source: 'a', modality: 'demo', models: { m1: 10, m2: 9 } };
+    const b = { source: 'b', modality: 'demo', models: { m2: 8, m3: 7 } };
+    const c = { source: 'c', modality: 'demo', models: { z1: 6, z2: 5 } };
+
+    const linked = cohortOverlap([a, b]);
+    expect(linked.components, 'a and b share m2').toBe(1);
+    expect(linked.disjoint).toBe(false);
+
+    const withIsland = cohortOverlap([a, b, c]);
+    expect(withIsland.shared, 'a family still occurs twice, which is why the old test passed').toBe(1);
+    expect(withIsland.components, 'but c is its own island').toBe(2);
+    expect(withIsland.disjoint).toBe(true);
+  });
+
+  it('joins a chain of sources that overlap pairwise', () => {
+    // A-B and B-C, with A and C sharing nothing directly. Still one
+    // population: B anchors both ends.
+    const a = { source: 'a', modality: 'demo', models: { m1: 10, m2: 9 } };
+    const b = { source: 'b', modality: 'demo', models: { m2: 8, m3: 7 } };
+    const c = { source: 'c', modality: 'demo', models: { m3: 6, m4: 5 } };
+    const o = cohortOverlap([a, b, c]);
+    expect(o.components).toBe(1);
+    expect(o.disjoint).toBe(false);
+  });
+
+  it('reports no sources without pretending they are comparable', () => {
+    expect(cohortOverlap([])).toEqual({ sources: 0, families: 0, shared: 0, components: 0, disjoint: false });
   });
 
   it('surfaces comparability per modality from the top-level build', () => {
@@ -203,6 +237,37 @@ describe('the committed text-to-speech sources', () => {
     ]);
     expect(o.sources).toBe(2);
     expect(o.shared, 'no model appears in both leaderboards').toBe(0);
+    expect(o.components).toBe(2);
     expect(o.disjoint).toBe(true);
+  });
+
+  it('is not the only disjoint modality — vision is too', () => {
+    // Found by running the overlap over the real committed sources rather than
+    // reasoning about the one that was reported. Two vision sources, 43
+    // families between them, and not a single model in both.
+    const { readFileSync } = require('node:fs');
+    const { fileURLToPath } = require('node:url');
+    const read = (n) => JSON.parse(readFileSync(
+      fileURLToPath(new URL(`./sources/${n}`, import.meta.url)), 'utf8',
+    ));
+    const o = cohortOverlap([read('vision-arena.json'), read('vision-mmmu.json')]);
+    expect(o.shared).toBe(0);
+    expect(o.disjoint).toBe(true);
+  });
+
+  it('embeddings is connected by a single model, which is a bridge and not a calibration', () => {
+    // `components === 1`, so a gate testing only that would accept it — on one
+    // shared model out of sixteen. This is why `shared` is reported too.
+    const { readFileSync } = require('node:fs');
+    const { fileURLToPath } = require('node:url');
+    const read = (n) => JSON.parse(readFileSync(
+      fileURLToPath(new URL(`./sources/${n}`, import.meta.url)), 'utf8',
+    ));
+    const o = cohortOverlap([
+      read('embeddings-mteb-beir15-computed.json'),
+      read('embeddings-mteb-technical-reports.json'),
+    ]);
+    expect(o.components).toBe(1);
+    expect(o.shared, 'one anchor across sixteen families').toBe(1);
   });
 });

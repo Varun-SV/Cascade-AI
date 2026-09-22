@@ -196,6 +196,7 @@ async function main() {
 
   let nextFamilies = { ...currentFamilies };
   let nextModalities = { ...currentModalities };
+  let nextComparability = null;
   let usedAggregator = false;
 
   // 1. Aggregator over the committed per-source files (unless disabled). Text
@@ -223,9 +224,26 @@ async function main() {
 
     if (modalitySources.length > 0) {
       const mode = process.env.BENCHMARK_AGG_MODE === 'min' ? 'min' : 'robust';
-      const { modalities, traces } = buildAllModalities(modalitySources, { mode, base: currentModalities });
+      const { modalities, traces, comparabilities } = buildAllModalities(modalitySources, { mode, base: currentModalities });
       nextModalities = modalities;
+      // Carried into the snapshot, not just printed. The scores are percentile
+      // ranks inside each source's own model set, so two of them are only
+      // comparable when their sources share models. Dropping that fact here —
+      // which is what happened when only `modalities` and `traces` were taken —
+      // hands a future routing consumer a page of plain 0-100 numbers with
+      // nothing to tell it which ones may be read against each other.
+      nextComparability = comparabilities;
       usedAggregator = true;
+      const incomparable = Object.entries(comparabilities)
+        .filter(([, c]) => c.disjoint)
+        .map(([m]) => m);
+      if (incomparable.length > 0) {
+        console.log(
+          `  ${incomparable.length} modality/ies have DISJOINT sources and are not yet comparable: ` +
+          `${incomparable.join(', ')}. See "What percentile rank does NOT give you" in ` +
+          'docs/benchmark-aggregation.md.',
+        );
+      }
       console.log(
         `Aggregated ${modalitySources.length} modality source(s) [${modalitySources.map((s) => s.source).join(', ')}] ` +
         `→ ${Object.keys(modalities).length} modalities.`,
@@ -253,7 +271,12 @@ async function main() {
 
   const familiesChanged = canonicalFamilies(nextFamilies) !== canonicalFamilies(currentFamilies);
   const modalitiesChanged = canonicalModalities(nextModalities) !== canonicalModalities(currentModalities);
-  if (!familiesChanged && !modalitiesChanged) {
+  // A modality whose sources stopped (or started) overlapping is a change even
+  // when every score lands the same, because it changes what the scores MEAN.
+  const nextComparabilities = nextComparability ?? current.modalityComparability ?? null;
+  const comparabilityChanged =
+    JSON.stringify(nextComparabilities) !== JSON.stringify(current.modalityComparability ?? null);
+  if (!familiesChanged && !modalitiesChanged && !comparabilityChanged) {
     console.log('No snapshot changes — nothing to write.');
     return;
   }
@@ -264,6 +287,10 @@ async function main() {
     source: sourceUrl ? 'external+aggregate' : (usedAggregator ? 'aggregate' : current.source),
     families: nextFamilies,
     ...(Object.keys(nextModalities).length > 0 ? { modalities: nextModalities } : {}),
+    // Ships WITH the scores it qualifies. A consumer reading `modalities` can
+    // read this in the same file and refuse a modality whose sources share no
+    // models, instead of discovering the caveat in a doc it never opened.
+    ...(nextComparabilities ? { modalityComparability: nextComparabilities } : {}),
   };
   await writeFile(dataFile, serialize(next), 'utf-8');
   console.log('Snapshot updated.');

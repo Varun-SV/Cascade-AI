@@ -59,7 +59,7 @@ jobs:
         with:
           # 22 to match release.yml — optional native deps (isolated-vm) ship
           # prebuilds for the Node 22/24 ABIs only.
-          node-version: '22.12'
+          node-version: '22.22.2'
           cache: 'npm'
 
       - run: npm ci
@@ -90,7 +90,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: '22.12'
+          node-version: '22.22.2'
           cache: 'npm'
 
       - run: npm ci

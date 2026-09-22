@@ -288,6 +288,28 @@ describe('safeFetch', () => {
       expect(second?.body).toBeUndefined();
     });
 
+    it('leaves a HEAD as a HEAD through a 303', async () => {
+      // 303 means "GET the other thing" for a request that was asking for
+      // something else. A HEAD is already asking for metadata, and promoting
+      // it to GET downloads a body the caller deliberately did not want —
+      // which for a model-authored probe could be very large.
+      const spy = stubFetch(
+        new Response(null, { status: 303, headers: { location: OTHER_PUBLIC } }),
+        new Response('ok', { status: 200 }),
+      );
+      await safeFetch(PUBLIC, { method: 'HEAD' });
+      expect(calls(spy)[1]?.method).toBe('HEAD');
+    });
+
+    it('leaves a GET as a GET through a 303', async () => {
+      const spy = stubFetch(
+        new Response(null, { status: 303, headers: { location: OTHER_PUBLIC } }),
+        new Response('ok', { status: 200 }),
+      );
+      await safeFetch(PUBLIC, { method: 'GET' });
+      expect(calls(spy)[1]?.method).toBe('GET');
+    });
+
     it('preserves the method and body on a 307, which is what 307 means', async () => {
       const spy = stubFetch(
         new Response(null, { status: 307, headers: { location: OTHER_PUBLIC } }),
