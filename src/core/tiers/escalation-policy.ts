@@ -38,6 +38,25 @@ export function settledEscalationStatus(results: T3Result[]): T2Result['status']
 }
 
 /**
+ * Is a root section's T2 summary part of the run's answer?
+ *
+ * On a Moderate run `cascade.ts` leads the output with `sectionSummary` (see
+ * composeRootSectionOutput) only when some worker COMPLETED. Otherwise it
+ * returns the longest partial worker output plus the reasons, and the summary
+ * appears nowhere in it.
+ *
+ * The presenter T2 streams its summary AS that answer, so it must stream
+ * exactly when this holds. Clients append streamed tokens and fill a bubble
+ * from the returned output only when nothing streamed, so a summary streamed
+ * when this is false is the one text the transcript keeps and the run never
+ * returned — on an unanswered escalation, the "no T3 workers completed"
+ * placeholder in place of the worker's work and the timeout reason.
+ */
+export function summaryLeadsRootAnswer(results: T3Result[]): boolean {
+  return results.some((r) => r.status === 'COMPLETED');
+}
+
+/**
  * The user-facing text for a root-T2 (Moderate complexity — no T1, one
  * section) run.
  *

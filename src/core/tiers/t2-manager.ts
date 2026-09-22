@@ -28,7 +28,7 @@ import type { ToolCreator } from '../../tools/tool-creator.js';
 import { RunBreaker } from '../run-breaker.js';
 import type { EscalationDecision, TaskType } from '../../types.js';
 import { RedactionLayer } from '../audit/redaction.js';
-import { sectionNeedsDecision, settledEscalationStatus } from './escalation-policy.js';
+import { sectionNeedsDecision, settledEscalationStatus, summaryLeadsRootAnswer } from './escalation-policy.js';
 import { describeGenerationForPlanner } from '../multimodal/registry.js';
 import { compileSubtaskGraph } from '../orchestration/adapters.js';
 import { planSpecShape, typedFieldRules } from './plan-spec.js';
@@ -323,8 +323,14 @@ export class T2Manager extends BaseTier {
       // replace non-empty streamed content on finalize — while the run's own
       // returned output held only the retry. So a pending section aggregates
       // silently and says it with `present` at the moment it becomes final.
+      //
+      // And only when the run's answer is built on it at all: with no worker
+      // COMPLETED the answer is the worker's partial output and the reason,
+      // and a streamed summary would be the text the transcript keeps in its
+      // place (see summaryLeadsRootAnswer).
+      const streamsAnswer = summaryLeadsRootAnswer(t3Results);
       const present = (text: string) => {
-        if (this.isPresenter && text) this.emit('stream:token', { tierId: this.id, text, primary: true });
+        if (this.isPresenter && streamsAnswer && text) this.emit('stream:token', { tierId: this.id, text, primary: true });
       };
 
       // `let`: a skipped escalation re-aggregates to keep the escalated output.
@@ -349,7 +355,7 @@ export class T2Manager extends BaseTier {
       // feature exists to remove.
       const settleEscalated = async (reason?: string) => {
         if (reason) issues.push(reason);
-        summary = await this.aggregateResults(assignment, t3Results, { includeEscalated: true });
+        summary = await this.aggregateResults(assignment, t3Results, { includeEscalated: true, stream: streamsAnswer });
         overallStatus = settledEscalationStatus(t3Results);
       };
 
@@ -448,7 +454,10 @@ export class T2Manager extends BaseTier {
           // silent stall is indistinguishable from a crash.
           issues.push('Escalated, but no decision was received in time.');
           overallStatus = 'FAILED';
-          // The silent first aggregation is this section's output after all.
+          // The silent first aggregation is this section's output after all —
+          // when it summarises finished work. With none, it is the "no T3
+          // workers completed" placeholder, and `present` keeps it off the
+          // transcript so the worker's work and this reason fill the answer.
           present(summary);
         }
       }

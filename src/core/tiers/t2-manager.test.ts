@@ -410,12 +410,14 @@ describe('T2Manager', () => {
     });
 
     // On a presenter T2 (a Moderate root run) every aggregation streams itself
-    // as the primary answer. A section waiting on a decision has no answer yet:
-    // a retry replaces the draft wholesale. Streaming the draft anyway left the
-    // transcript holding it with the retry's answer appended — clients append
-    // streamed tokens and do not replace non-empty streamed content on finalize
-    // — while the run's returned output held only the retry.
+    // as the primary answer, and clients keep what streamed: they append
+    // tokens and fill a bubble from the returned output only when nothing
+    // streamed. So what streams has to be the answer the run returns — never a
+    // draft a retry replaces, and never a summary when the run's answer is not
+    // built on one (with no worker COMPLETED, `cascade.ts` returns the worker's
+    // partial output and the reason instead — see summaryLeadsRootAnswer).
     describe('streaming a pending section', () => {
+      // One worker, which escalates every time.
       const escalatingRouter = () => ({
         generate: vi.fn(async (_tier: unknown, options: { messages: Array<{ content: unknown }> }, onChunk?: (c: { text: string }) => void) => {
           const latest = options.messages[options.messages.length - 1];
@@ -431,78 +433,98 @@ describe('T2Manager', () => {
         getModelForTier: () => undefined,
       }) as unknown as CascadeRouter;
 
-      const presenting = (decide: 'retry' | 'skip') => {
+      // Two workers: the draft passes its self-test, the finalize escalates.
+      // The one-worker shape cannot see a streamed draft through the FIRST
+      // aggregation: with nothing COMPLETED it returns early without a model
+      // call. Here it summarises finished work and really streams.
+      const mixedRouter = () => ({
+        generate: vi.fn(async (
+          _tier: unknown,
+          options: { messages: Array<{ content: unknown }>; systemPrompt?: string },
+          onChunk?: (c: { text: string }) => void,
+        ) => {
+          const all = [options.systemPrompt ?? '', ...options.messages.map((m) => (typeof m.content === 'string' ? m.content : ''))].join('\n');
+          const latest = options.messages[options.messages.length - 1];
+          const content = typeof latest?.content === 'string' ? latest.content : '';
+          if (content.startsWith('Self-test this output')) {
+            return makeResult(content.includes('OUTPUT-FINALIZE')
+              ? '{"completeness":"fail","correctness":"fail","compliance":"fail","notes":"needs more"}'
+              : '{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+          }
+          if (content.startsWith('Summarize these T3 worker outputs')) {
+            onChunk?.({ text: 'SECTION-SUMMARY' });
+            return makeResult('SECTION-SUMMARY');
+          }
+          const text = all.includes('Finalize after the draft') ? 'OUTPUT-FINALIZE' : 'OUTPUT-DRAFT';
+          onChunk?.({ text });
+          return makeResult(text);
+        }),
+        getModelForTier: () => undefined,
+      }) as unknown as CascadeRouter;
+
+      const presenting = async (shape: 'one worker' | 'mixed', decide: 'retry' | 'skip' | 'timeout') => {
         const assignment = makeAssignment();
-        assignment.t3Subtasks = [assignment.t3Subtasks[0]!];
-        assignment.t3Subtasks[0]!.dependsOn = [];
-        const manager = new T2Manager(escalatingRouter(), makeToolRegistry(), 't1-root');
+        if (shape === 'one worker') {
+          assignment.t3Subtasks = [assignment.t3Subtasks[0]!];
+          assignment.t3Subtasks[0]!.dependsOn = [];
+        }
+        const manager = new T2Manager(shape === 'mixed' ? mixedRouter() : escalatingRouter(), makeToolRegistry(), 't1-root');
         manager.setPresenter(true);
+        // EVERY primary token, not only the marked summary: the text this
+        // guards against on a timeout is the "no T3 workers completed"
+        // placeholder, which is not SECTION-SUMMARY.
         const answer: string[] = [];
         manager.on('stream:token', (e: { text: string; primary?: boolean }) => {
-          if (e.primary && e.text === 'SECTION-SUMMARY') answer.push(e.text);
+          if (e.primary) answer.push(e.text);
         });
         manager.setEscalationCallback(async () => ({ action: decide }));
-        return { manager, assignment, answer };
+        const result = await manager.execute(assignment, `task-${shape}-${decide}`);
+        return { result, answer };
       };
 
-      it('streams one answer on a retry, not the abandoned draft followed by it', async () => {
-        const { manager, assignment, answer } = presenting('retry');
-        await manager.execute(assignment, 'task-retry');
-        expect(answer, 'the retry\u2019s answer, and nothing before it').toHaveLength(1);
-      });
-
-      it('does not stream the first aggregation of a MIXED section as the answer either', async () => {
-        // The same draft, arriving through the other door. With one worker
-        // finished and one escalated, the section's first aggregation has
-        // completed work to summarise and makes a real model call — which on a
-        // presenter streamed the draft before anyone had decided anything. The
-        // one-worker tests above cannot see this: with nothing COMPLETED that
-        // aggregation returns early and never streams at all.
-        const router = {
-          generate: vi.fn(async (
-            _tier: unknown,
-            options: { messages: Array<{ content: unknown }>; systemPrompt?: string },
-            onChunk?: (c: { text: string }) => void,
-          ) => {
-            const all = [options.systemPrompt ?? '', ...options.messages.map((m) => (typeof m.content === 'string' ? m.content : ''))].join('\n');
-            const latest = options.messages[options.messages.length - 1];
-            const content = typeof latest?.content === 'string' ? latest.content : '';
-            if (content.startsWith('Self-test this output')) {
-              // The draft worker passes; the finalize worker escalates.
-              return makeResult(content.includes('OUTPUT-FINALIZE')
-                ? '{"completeness":"fail","correctness":"fail","compliance":"fail","notes":"needs more"}'
-                : '{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
-            }
-            if (content.startsWith('Summarize these T3 worker outputs')) {
-              onChunk?.({ text: 'SECTION-SUMMARY' });
-              return makeResult('SECTION-SUMMARY');
-            }
-            const text = all.includes('Finalize after the draft') ? 'OUTPUT-FINALIZE' : 'OUTPUT-DRAFT';
-            onChunk?.({ text });
-            return makeResult(text);
-          }),
-          getModelForTier: () => undefined,
-        } as unknown as CascadeRouter;
-
-        const manager = new T2Manager(router, makeToolRegistry(), 't1-root');
-        manager.setPresenter(true);
-        const answer: string[] = [];
-        manager.on('stream:token', (e: { text: string; primary?: boolean }) => {
-          if (e.primary && e.text === 'SECTION-SUMMARY') answer.push(e.text);
+      describe('a section where a worker finished — the summary leads the answer', () => {
+        it('streams one answer on a retry, not a draft per attempt', async () => {
+          const { result, answer } = await presenting('mixed', 'retry');
+          expect(answer, 'the retry\u2019s answer, and nothing before it').toEqual(['SECTION-SUMMARY']);
+          expect(result.sectionSummary).toBe('SECTION-SUMMARY');
         });
-        manager.setEscalationCallback(async () => ({ action: 'retry' }));
 
-        await manager.execute(makeAssignment(), 'task-mixed');
+        it('streams the kept summary on a skip, once, at the moment it becomes final', async () => {
+          // The draft is silent until the person answers — so Skip must say
+          // it, or the one choice that KEEPS the work would stream nothing.
+          const { result, answer } = await presenting('mixed', 'skip');
+          expect(answer, 'exactly the kept summary').toEqual(['SECTION-SUMMARY']);
+          expect(result.sectionSummary).toBe('SECTION-SUMMARY');
+        });
 
-        expect(answer, 'one answer for the section, not a draft per attempt').toHaveLength(1);
+        it('streams the finished work\u2019s summary when nobody answers', async () => {
+          const { result, answer } = await presenting('mixed', 'timeout');
+          expect(answer, 'the silent first aggregation, said once').toEqual(['SECTION-SUMMARY']);
+          expect(result.status).toBe('FAILED');
+        });
       });
 
-      it('still streams the answer on a skip, once, at the moment it becomes final', async () => {
-        // The draft is silent until the person answers — so Skip must say it,
-        // or the one choice that KEEPS the work would stream nothing at all.
-        const { manager, assignment, answer } = presenting('skip');
-        await manager.execute(assignment, 'task-skip-stream');
-        expect(answer, 'exactly the kept summary').toHaveLength(1);
+      describe('a section where nothing finished — the worker\u2019s own work is the answer', () => {
+        // Streaming a summary here put a text in the transcript that the run
+        // never returned, and — because a non-empty stream is not replaced —
+        // kept it there in place of the work and the reason it stopped.
+        it('streams no placeholder when nobody answers', async () => {
+          const { result, answer } = await presenting('one worker', 'timeout');
+          expect(answer, 'nothing streamed, so the returned work and reason fill the answer').toEqual([]);
+          expect(result.issues).toContain('Escalated, but no decision was received in time.');
+        });
+
+        it('streams no summary on a skip', async () => {
+          const { result, answer } = await presenting('one worker', 'skip');
+          expect(answer).toEqual([]);
+          expect(result.status, 'the work is still kept').toBe('PARTIAL');
+        });
+
+        it('streams neither the draft nor a summary on a retry that escalates again', async () => {
+          const { result, answer } = await presenting('one worker', 'retry');
+          expect(answer).toEqual([]);
+          expect(result.issues).toContain('Escalated again after the retry — no further attempts were made.');
+        });
       });
     });
 

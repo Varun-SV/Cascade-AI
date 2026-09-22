@@ -23,7 +23,7 @@ import { CascadeRouter } from './router/index.js';
 import { T1Administrator, type PlanApprovalDecision, type TaskPlan } from './tiers/t1-administrator.js';
 import { calculateCost } from '../utils/cost.js';
 import { T2Manager } from './tiers/t2-manager.js';
-import { composeRootSectionOutput } from './tiers/escalation-policy.js';
+import { composeRootSectionOutput, summaryLeadsRootAnswer } from './tiers/escalation-policy.js';
 import { MultimodalRegistry } from './multimodal/registry.js';
 import type { FeedbackSource } from './router/feedback-prior.js';
 import { DeadModelStore, fileDeadModelPersistence } from './router/dead-models.js';
@@ -2353,7 +2353,9 @@ ${prompt}`
       this.emit('tier:status', { tierId: 't2-root', status: 'COMPLETED', role: 'T2' });
       t2Results = [t2Result];
       const completed = t2Result.t3Results.filter((r: T3Result) => r.status === 'COMPLETED');
-      if (completed.length > 0) {
+      // One rule with the presenter T2's streaming: it streams its summary
+      // exactly when this branch will lead the answer with it.
+      if (summaryLeadsRootAnswer(t2Result.t3Results)) {
         finalOutput = composeRootSectionOutput(
           t2Result,
           completed.map((r: T3Result) => (typeof r.output === 'string' ? r.output : JSON.stringify(r.output))),

@@ -3,7 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { describe, expect, it } from 'vitest';
-import { sectionNeedsDecision, settledEscalationStatus, composeRootSectionOutput } from './escalation-policy.js';
+import { sectionNeedsDecision, settledEscalationStatus, composeRootSectionOutput, summaryLeadsRootAnswer } from './escalation-policy.js';
 import type { T3Result, T2Result } from '../../types.js';
 
 function result(status: T3Result['status'], output = ''): T3Result {
@@ -70,6 +70,21 @@ describe('settledEscalationStatus', () => {
     expect(settledEscalationStatus([result('ESCALATED')])).toBe('FAILED');
     expect(settledEscalationStatus([result('FAILED'), result('ESCALATED')])).toBe('FAILED');
     expect(settledEscalationStatus([])).toBe('FAILED');
+  });
+});
+
+describe('summaryLeadsRootAnswer', () => {
+  it('holds when any worker finished, whatever its siblings did', () => {
+    expect(summaryLeadsRootAnswer([result('COMPLETED', 'done')])).toBe(true);
+    expect(summaryLeadsRootAnswer([result('COMPLETED', 'done'), result('ESCALATED', 'partial')])).toBe(true);
+  });
+
+  it('does not hold when nothing finished — escalated work alone is returned as itself, not summarised', () => {
+    // The unanswered one-worker escalation: its work is real, but the run's
+    // answer is that work and the reason, so a summary must not stream.
+    expect(summaryLeadsRootAnswer([result('ESCALATED', 'partial work')])).toBe(false);
+    expect(summaryLeadsRootAnswer([result('FAILED'), result('ESCALATED', 'partial')])).toBe(false);
+    expect(summaryLeadsRootAnswer([])).toBe(false);
   });
 });
 
