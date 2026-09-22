@@ -183,8 +183,11 @@ describe('EscalationModal', () => {
     render(<EscalationModal requests={[parked()]} onResolve={noop} onDismiss={noop} onExpire={noop} />);
     expect(screen.getByRole('button', { name: /retry with guidance/i }))
       .toHaveAccessibleName(/replaces the work above/i);
+    // BOTH retries discard the work shown above — not only the guided one.
+    // "Retry as-is" said only that it runs unchanged, which made the second
+    // irreversible choice read as the harmless one.
     expect(screen.getByRole('button', { name: /retry as-is/i }))
-      .toHaveAccessibleName(/unchanged/i);
+      .toHaveAccessibleName(/unchanged, replacing the work above/i);
     expect(screen.getByRole('button', { name: /skip this section/i }))
       .toHaveAccessibleName(/keeps the work above/i);
   });

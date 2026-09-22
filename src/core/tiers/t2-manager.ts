@@ -355,6 +355,14 @@ export class T2Manager extends BaseTier {
           currentAction: 'Escalated — waiting for your decision',
           status: 'ESCALATING',
         });
+        // What the person is deciding ABOUT, so it has to be the work Skip
+        // would keep — escalated outputs included. The default aggregation
+        // drops ESCALATED results, so for a one-worker section (the common
+        // shape) the prompt read "no T3 workers completed" while Skip went on
+        // to keep real work the person had never been shown, and either retry
+        // could throw it away unseen. Computed once and reused by Skip below,
+        // which used to aggregate the very same results a second time.
+        const decisionSummary = await this.aggregateResults(assignment, t3Results, { includeEscalated: true });
         const decision = await this.escalationCallback({
           sectionId: assignment.sectionId,
           sectionTitle: assignment.sectionTitle,
@@ -365,7 +373,7 @@ export class T2Manager extends BaseTier {
           // failure in front of them.
           ...(assignment.description?.trim() ? { goal: assignment.description.trim() } : {}),
           issues,
-          summary,
+          summary: decisionSummary,
         });
         this.log(`Escalation decision for "${assignment.sectionTitle}": ${decision.action}`);
 
@@ -381,7 +389,12 @@ export class T2Manager extends BaseTier {
           // even when nothing reached COMPLETED: PARTIAL is what carries the
           // section past T1's filter, and it is also the honest status — work
           // exists, it just is not finished.
-          summary = await this.aggregateResults(assignment, t3Results, { includeEscalated: true });
+          //
+          // And it is exactly what the person was shown: nothing has changed
+          // `t3Results` while the decision was pending, so what Skip keeps and
+          // what the prompt displayed are one value, not two aggregations that
+          // could disagree.
+          summary = decisionSummary;
           overallStatus = settledEscalationStatus(t3Results);
           userSkipped = decision.automatic !== true;
         } else if (decision.action === 'retry' || decision.action === 'guidance') {

@@ -211,7 +211,7 @@ function ParkedSection({
         <Choice
           icon={<RefreshCw size={14} />}
           label="Retry as-is"
-          detail="Runs it again unchanged. Worth a try if this looked like a one-off failure."
+          detail="Runs it again unchanged, replacing the work above. Worth it if this looked like a one-off."
           onClick={() => onResolve('retry', undefined, key)}
         />
         <Choice

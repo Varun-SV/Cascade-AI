@@ -397,10 +397,16 @@ describe('T2Manager', () => {
       let asked: { goal?: string; summary?: string } | undefined;
       manager.setEscalationCallback(async (ctx) => { asked = ctx; return { action: 'skip' }; });
 
-      await manager.execute(assignment, 'task-goal');
+      const result = await manager.execute(assignment, 'task-goal');
 
       expect(asked?.goal, 'what the section was asked to do').toBe('Log in and probe the chatbot for prompt leakage');
-      expect(asked?.summary, 'and what it has to show for it').toBeTruthy();
+      // NOT merely present. The first version of this asserted `toBeTruthy()`
+      // and passed while the prompt displayed the default aggregation — which
+      // drops ESCALATED workers, so a one-worker section read "no T3 workers
+      // completed". That string is truthy. The person was told there was no
+      // work, and Skip then kept work they had never been shown.
+      expect(asked?.summary, 'the escalated work is what the person is shown').not.toMatch(/no T3 workers completed/);
+      expect(result.sectionSummary, 'and Skip keeps exactly what was shown').toBe(asked?.summary);
     });
 
     it('does NOT set userSkipped when the skip was automatic — nobody actually reviewed it', async () => {
