@@ -83,6 +83,42 @@ const LOCAL_FILE_SIGNATURE = 0x04034b50;
 // fires stalls every other request in the process — a denial of service that
 // survives the memory bound rather than being fixed by it.
 const inflateRaw = promisify(zlib.inflateRaw);
+
+/**
+ * How many uploads may be inflating at once, process-wide.
+ *
+ * A per-request cap bounds one request. It does not bound the server: moving
+ * the work to libuv's threadpool let four run in parallel, so the 128 MB
+ * ceiling became ~512 MB of simultaneous peak — enough to kill a modest box
+ * that the per-request bound had just been written to protect. Fixing latency
+ * created a concurrency problem, which is the shape these two rounds keep
+ * taking: the guard moves and the exposure moves with it.
+ *
+ * Two, so the worst case is ~256 MB rather than ~512 MB, and the threadpool
+ * keeps headroom for the filesystem and DNS work everything else depends on.
+ * Uploads queue instead of competing; an upload is not a latency-critical
+ * path, and a queued one is strictly better than a dead process.
+ */
+export const MAX_CONCURRENT_INFLATIONS = 2;
+
+let inflationsInFlight = 0;
+const inflationQueue: Array<() => void> = [];
+
+/** Wait for a slot, run, and hand the slot to whoever is next. */
+export async function withInflationSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (inflationsInFlight >= MAX_CONCURRENT_INFLATIONS) {
+    await new Promise<void>((resolve) => inflationQueue.push(resolve));
+  }
+  inflationsInFlight++;
+  try {
+    return await fn();
+  } finally {
+    inflationsInFlight--;
+    // Hand the slot on rather than letting every waiter wake and re-check,
+    // so the bound holds exactly instead of approximately.
+    inflationQueue.shift()?.();
+  }
+}
 /** A size of 0xFFFFFFFF means "see the Zip64 extra field" — i.e. >= 4 GB. */
 const ZIP64_SENTINEL = 0xffffffff;
 
@@ -378,8 +414,9 @@ export async function parseDocument(input: {
     // Bounded for real, by inflating under a cap rather than by reading the
     // size the archive claims for itself. Fails closed on a container it
     // cannot walk, so a prepended byte or a miscounted directory refuses the
-    // upload instead of waving it through.
-    await assertInflatesWithin(bytes, MAX_DECOMPRESSED_BYTES);
+    // upload instead of waving it through. Bounded process-wide as well as
+    // per-request: see MAX_CONCURRENT_INFLATIONS.
+    await withInflationSlot(() => assertInflatesWithin(bytes, MAX_DECOMPRESSED_BYTES));
     const mammoth = require('mammoth') as { extractRawText(o: { buffer: Buffer }): Promise<{ value: string }> };
     const parsed = await mammoth.extractRawText({ buffer: bytes });
     return normalizeText(parsed.value ?? '');

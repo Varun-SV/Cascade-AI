@@ -49,9 +49,26 @@ export function validateModalitySource(raw, filename = '<inline>') {
     console.warn(`modality source ${raw.source}: no "models" map — skipping.`);
     return null;
   }
+  // A real number, not anything JavaScript will coerce into one. `Number(null)`,
+  // `Number('')`, `Number(false)` and `Number([])` are all 0 and all finite, so
+  // the old check accepted a MISSING measurement and stored it as a score of
+  // zero. On a lower-is-better metric — a Word Error Rate, a latency — that
+  // silently makes the model nobody measured the best in the field, and because
+  // normalization is a percentile within the source, one invented zero shifts
+  // every other model's rank in that file.
+  //
+  // A dropped row is said out loud. Quietly ignoring one is how a source ends
+  // up ranking fewer models than anyone thinks it does.
   const models = {};
   for (const [family, value] of Object.entries(raw.models)) {
-    if (Number.isFinite(Number(value))) models[family] = Number(value);
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      models[family] = value;
+    } else {
+      console.warn(
+        `modality source ${raw.source}: "${family}" is not a finite number `
+        + `(${value === null ? 'null' : typeof value}) — dropping that row.`,
+      );
+    }
   }
   if (Object.keys(models).length === 0) {
     console.warn(`modality source ${raw.source}: no valid model rows — skipping.`);

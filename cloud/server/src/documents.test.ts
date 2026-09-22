@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-  DocumentTooLargeError, EXPANSION_CEILING_CHARS, MAX_DECOMPRESSED_BYTES, MAX_DOCUMENT_BYTES,
+  DocumentTooLargeError, EXPANSION_CEILING_CHARS, MAX_CONCURRENT_INFLATIONS,
+  MAX_DECOMPRESSED_BYTES, MAX_DOCUMENT_BYTES,
   declaredUncompressedBytes, isDocumentMime, resolveDocumentMime, parseDocument,
+  withInflationSlot,
 } from './documents.js';
 
 import {
@@ -277,5 +279,50 @@ describe('extraction expansion ceiling', () => {
     expect(err.message).toMatch(/30M characters/);
     expect(err.message).toMatch(/Split it into smaller files/);
     expect(err.name).toBe('DocumentTooLargeError');
+  });
+});
+
+
+// A per-request cap bounds ONE request. Moving inflation to the threadpool let
+// several run at once, so the 128 MB ceiling became ~512 MB of simultaneous
+// peak — the latency fix handing back the memory problem it was built on.
+describe('the process-wide inflation bound', () => {
+  it('never runs more than the limit at once, however many arrive together', async () => {
+    let live = 0;
+    let peak = 0;
+    const release: Array<() => void> = [];
+    const task = () => withInflationSlot(async () => {
+      live++;
+      peak = Math.max(peak, live);
+      await new Promise<void>((resolve) => release.push(resolve));
+      live--;
+      return true;
+    });
+
+    // Ten uploads land together, as concurrent tenants would.
+    const all = Promise.all(Array.from({ length: 10 }, task));
+    // Let the admitted ones reach their await.
+    await new Promise((r) => setImmediate(r));
+    expect(live, 'only a slotful is admitted').toBe(MAX_CONCURRENT_INFLATIONS);
+
+    // Drain: each release lets exactly one more in.
+    while (release.length > 0) {
+      release.shift()!();
+      await new Promise((r) => setImmediate(r));
+    }
+    await all;
+
+    expect(peak, 'and the peak never exceeded the bound').toBeLessThanOrEqual(MAX_CONCURRENT_INFLATIONS);
+    expect(live, 'every slot is handed back').toBe(0);
+  });
+
+  it('hands the slot back when the work throws, rather than leaking it', async () => {
+    // A slot lost on failure would shrink the pool one bomb at a time until
+    // uploads stopped entirely — a denial of service built out of the guard.
+    for (let i = 0; i < MAX_CONCURRENT_INFLATIONS + 2; i++) {
+      await expect(withInflationSlot(async () => { throw new Error('boom'); })).rejects.toThrow('boom');
+    }
+    // Still admits work afterwards.
+    await expect(withInflationSlot(async () => 'ok')).resolves.toBe('ok');
   });
 });

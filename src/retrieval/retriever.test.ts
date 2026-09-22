@@ -108,6 +108,35 @@ describe('Retriever + SqliteVectorStore', () => {
       .toBeGreaterThan(0);
   });
 
+  // Slicing made indexing partially durable, and `hasSource` answers "is there
+  // ANY row" — so a slice that landed before a later one failed would mark the
+  // source indexed forever and every later search would silently miss the rest.
+  it('leaves nothing behind when a later slice fails, so a retry can work', async () => {
+    const db = new Database(':memory:');
+    const store = new SqliteVectorStore(db);
+    let calls = 0;
+    const flaky: Embedder = {
+      model: 'fake-embed',
+      dims: 64,
+      async embed(texts: string[]) {
+        calls++;
+        if (calls > 1) throw new Error('embedding provider went away');
+        return texts.map(() => new Array(64).fill(0.01));
+      },
+    };
+    const r = new Retriever(flaky, store);
+    const chunks = Array.from({ length: 1000 }, (_, i) => ({ text: `chunk ${i}`, ord: i }));
+
+    await expect(r.index(NS, 'half', chunks)).rejects.toThrow(/went away/);
+
+    expect(calls, 'the first slice did land before the second failed').toBeGreaterThan(1);
+    expect(r.isIndexed(NS, 'half'), 'but the source is NOT marked indexed').toBe(false);
+    expect(
+      store.lexicalSearch('chunk', { namespace: NS, k: 10_000 }).length,
+      'and no partial rows survive to be mistaken for the whole',
+    ).toBe(0);
+  });
+
   it('skips re-embedding an already-indexed source', async () => {
     const r = build();
     const first = await r.index(NS, 'doc1', [{ text: 'hello world', ord: 0 }]);

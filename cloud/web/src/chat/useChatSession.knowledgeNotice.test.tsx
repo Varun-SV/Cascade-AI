@@ -95,6 +95,43 @@ describe('useChatSession — the document-trimming notice', () => {
     expect(view.result.current.knowledgeNotice, 'the pane owns this turn').toBeTruthy();
   });
 
+  // A blank pane waiting for its first turn used to adopt whatever conversation
+  // arrived first. On a socket that also carries a resumed background run, that
+  // race is winnable by the wrong event — and the pane would then show the
+  // stranger's notice and reject its own run's events until the closing
+  // acknowledgement corrected the id.
+  it('does not adopt a background run\'s conversation while waiting for its own', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { view.result.current.send({ prompt: 'my question' }); });
+
+    // A resumed run on the same socket, named, and not this pane's.
+    act(() => {
+      fake.fire('knowledge:retrieved', {
+        runId: 'someone-elses-run',
+        conversationId: 'a-background-conversation',
+        mode: 'degraded', docCount: 3, keptChars: 10, totalChars: 900_000,
+      });
+    });
+
+    expect(view.result.current.knowledgeNotice, 'not this pane\'s business').toBeNull();
+  });
+
+  it('still adopts an event that carries no run id at all', () => {
+    // Older servers and emits outside a run context do not stamp one. Refusing
+    // those would break the first turn outright to close a race.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    act(() => { view.result.current.send({ prompt: 'my question' }); });
+    act(() => {
+      fake.fire('knowledge:retrieved', {
+        conversationId: 'server-minted', mode: 'fast', docCount: 1, keptChars: 5, totalChars: 99,
+      });
+    });
+    expect(view.result.current.knowledgeNotice).toBeTruthy();
+  });
+
   it('names the run budget, not the model, so it invents no limitation', () => {
     // The trim is against `cagCharBudget` — half the context window by default
     // — so a corpus can fit the model and still be cut. Saying the model could

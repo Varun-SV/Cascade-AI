@@ -224,7 +224,13 @@ async function main() {
 
     if (modalitySources.length > 0) {
       const mode = process.env.BENCHMARK_AGG_MODE === 'min' ? 'min' : 'robust';
-      const { modalities, traces, comparabilities } = buildAllModalities(modalitySources, { mode, base: currentModalities });
+      const { modalities, traces, comparabilities } = buildAllModalities(modalitySources, {
+        mode,
+        base: currentModalities,
+        // So a modality whose sources all went missing keeps what was
+        // known about it rather than losing its warning entirely.
+        baseComparability: current.modalityComparability ?? {},
+      });
       nextModalities = modalities;
       // Carried into the snapshot, not just printed. The scores are percentile
       // ranks inside each source's own model set, so two of them are only

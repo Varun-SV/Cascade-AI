@@ -97,16 +97,32 @@ export class Retriever {
     // The slice is deliberately larger than the embedder's own request batch:
     // it bounds what is RETAINED, while the embedder bounds what is asked for
     // in one call, and conflating the two would make either hard to tune.
+    //
+    // All of it or none of it. Slicing made indexing partially durable, and
+    // `hasSource` answers "is there ANY row for this source" — so a slice that
+    // succeeded before a later one failed would mark the source indexed
+    // FOREVER, and every search from then on would quietly miss every chunk
+    // after the failure. A caller that falls back for one turn expects to
+    // retry; the rows have to let it. Unwinding on failure costs the work
+    // already done and keeps the source eligible, which is the trade that
+    // makes a retry mean something.
     let indexed = 0;
-    for (let i = 0; i < chunks.length; i += INDEX_SLICE) {
-      const slice = chunks.slice(i, i + INDEX_SLICE);
-      const vectors = await this.embedder.embed(slice.map((c) => c.text));
-      const records = slice.map((c, j) => ({
-        chunk: { id: `${namespace}:${sourceId}:${c.ord}`, text: c.text, sourceId, ord: c.ord, meta: { namespace } },
-        vector: vectors[j] ?? [],
-      })).filter((r) => r.vector.length > 0);
-      this.store.upsert(records, this.embedder.model);
-      indexed += records.length;
+    try {
+      for (let i = 0; i < chunks.length; i += INDEX_SLICE) {
+        const slice = chunks.slice(i, i + INDEX_SLICE);
+        const vectors = await this.embedder.embed(slice.map((c) => c.text));
+        const records = slice.map((c, j) => ({
+          chunk: { id: `${namespace}:${sourceId}:${c.ord}`, text: c.text, sourceId, ord: c.ord, meta: { namespace } },
+          vector: vectors[j] ?? [],
+        })).filter((r) => r.vector.length > 0);
+        this.store.upsert(records, this.embedder.model);
+        indexed += records.length;
+      }
+    } catch (err) {
+      // Best-effort: if the unwind itself fails there is nothing further to be
+      // done here, and the original failure is the one worth reporting.
+      try { this.store.deleteSource(namespace, sourceId); } catch { /* ignore */ }
+      throw err;
     }
     return indexed;
   }

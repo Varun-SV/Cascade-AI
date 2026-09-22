@@ -607,10 +607,32 @@ export function useChatSession(
     if (own.length === 1) return [own[0]!.runId];
     return runs.length === 1 ? [runs[0]!.runId] : [];
   };
-  /** Learn the id the server minted for the run this pane just started. */
-  const adoptConversationId = (convo: unknown): void => {
+  /**
+   * Learn the id the server minted for the run this pane just started.
+   *
+   * VERIFIES THE RUN FIRST. A blank pane waiting for its first turn will adopt
+   * whatever conversation arrives, and on a socket that also carries a resumed
+   * background run, that race is winnable by the wrong event: the pane adopts
+   * the stranger's conversation, shows its notices, and then rejects its own
+   * run's events until the closing acknowledgement corrects the id.
+   *
+   * Every event is stamped with its `runId` by the transport, and
+   * `knownRunsRef` already records the run this pane minted with `mine: true`.
+   * So identity is available at exactly the moment adoption needs it, and an
+   * event that names a run this pane does not own is not evidence about this
+   * pane's conversation.
+   *
+   * An event with NO runId still adopts, as before. Older servers and emits
+   * outside a run context do not stamp one, and refusing those would break the
+   * first turn outright to close a race — worse than the race.
+   */
+  const adoptConversationId = (convo: unknown, runId?: unknown): void => {
     if (!awaitingFirstTurnRef.current) return;
     if (conversationIdRef.current || pendingConversationIdRef.current) return;
+    if (typeof runId === 'string' && runId) {
+      const mine = knownRunsRef.current.some((r) => r.mine && r.runId === runId);
+      if (!mine) return;
+    }
     if (typeof convo === 'string' && convo) {
       pendingConversationIdRef.current = convo;
       // The same id, kept for a different question and a longer life — see
@@ -1292,7 +1314,7 @@ export function useChatSession(
     const onWhy = (r: WhyReport) => { pendingWhyRef.current = r; };
     const onPlan = (e: PlanApproval) => setApproval(e);
     const onClarificationRequired = (e: ClarificationRequest & { conversationId?: string }) => {
-      adoptConversationId(e?.conversationId);
+      adoptConversationId(e?.conversationId, (e as { runId?: unknown })?.runId);
       if (!e?.requestId || !Array.isArray(e.questions) || e.questions.length === 0) return;
       // Stamped once, on arrival. The countdown is anchored to this rather
       // than to when a component last rendered, for the reason the escalation
@@ -1327,7 +1349,7 @@ export function useChatSession(
       // timeout denied it. Adopting the id fixes that; keeping every request
       // and filtering on read fixes the other half, where switching chats
       // stranded a question the run was still blocked on.
-      adoptConversationId(e?.conversationId);
+      adoptConversationId(e?.conversationId, (e as { runId?: unknown })?.runId);
       // The SDK calls it `id`; keep one name on this side.
       const requestId = e.requestId ?? e.id;
       if (!requestId) return;
@@ -1359,7 +1381,7 @@ export function useChatSession(
       // blocks the run — the ack that would have supplied the id cannot arrive
       // until the gate settles, and the gate cannot settle because nobody can
       // see it. It deadlocks until the five-minute timeout fails the section.
-      adoptConversationId(e?.conversationId);
+      adoptConversationId(e?.conversationId, (e as { runId?: unknown })?.runId);
       setEscalations((prev) => {
         const incoming = { ...e, receivedAt: Date.now() };
         // Re-delivery of one already queued (a reconnect replay) updates in
@@ -1396,7 +1418,7 @@ export function useChatSession(
       // unkeyed member of the family: a single slot with no idea whose question
       // it was, so a sibling run's ending could not take it down and answering
       // it sent a decision nothing could route.
-      adoptConversationId(e?.conversationId);
+      adoptConversationId(e?.conversationId, (e as { runId?: unknown })?.runId);
       // De-duplicated by RUN where there is one, so a replay after a reconnect
       // does not queue a second copy — and so two runs on one conversation get
       // two questions rather than the first silently swallowing the second.
@@ -1459,7 +1481,7 @@ export function useChatSession(
       // that is still undefined reads the pane's OWN first turn as somebody
       // else's and drops it. `activeConversationId()` also counts the adopted
       // id, which `conversationIdRef` alone does not.
-      adoptConversationId(e?.conversationId);
+      adoptConversationId(e?.conversationId, (e as { runId?: unknown })?.runId);
       if (e.conversationId && e.conversationId !== activeConversationId()) return;
       const who = e.provider ?? 'A provider';
       setProviderNotice(e.failedOverTo
@@ -1482,7 +1504,7 @@ export function useChatSession(
       // has been told the conversation id, and the attachment flow that most
       // needs this notice is exactly that turn. Filtering on a ref that is
       // still undefined discarded every first-turn notice.
-      adoptConversationId(e?.conversationId);
+      adoptConversationId(e?.conversationId, (e as { runId?: unknown })?.runId);
       if (e.conversationId && e.conversationId !== activeConversationId()) return;
       if (e.mode === 'searched') {
         const docs = e.docCount === 1 ? 'the document' : `${e.docCount} documents`;
@@ -1577,7 +1599,7 @@ export function useChatSession(
       // left another run's bearer-capability URL rendered in the pane you moved
       // to, while a late withdrawal from the run you left cleared the view of
       // the one you were on.
-      adoptConversationId(e?.conversationId);
+      adoptConversationId(e?.conversationId, (e as { runId?: unknown })?.runId);
       const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
       const taskId = typeof e?.taskId === 'string' && e.taskId ? e.taskId : undefined;
       // Every server live-view message is task-addressed. An untagged message
@@ -1634,7 +1656,7 @@ export function useChatSession(
       generation?: number;
     }) => {
       if (typeof e?.data !== 'string' || !e.taskId) return;
-      adoptConversationId(e?.conversationId);
+      adoptConversationId(e?.conversationId, (e as { runId?: unknown })?.runId);
       const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
       setBrowserViews((prev) => {
         const views = prev[key];
@@ -1661,7 +1683,7 @@ export function useChatSession(
     /** The server answering whether a stream actually started. */
     const onBrowserWatching = (e: { conversationId?: string; taskId?: string; streaming?: boolean }) => {
       if (!e.taskId) return;
-      adoptConversationId(e?.conversationId);
+      adoptConversationId(e?.conversationId, (e as { runId?: unknown })?.runId);
       const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
       setBrowserViews((prev) => {
         const views = prev[key];
@@ -1689,7 +1711,7 @@ export function useChatSession(
       confirmed?: boolean; detail?: string;
     }) => {
       if (!e.taskId) return;
-      adoptConversationId(e?.conversationId);
+      adoptConversationId(e?.conversationId, (e as { runId?: unknown })?.runId);
       const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
       setBrowserViews((prev) => {
         const views = prev[key];

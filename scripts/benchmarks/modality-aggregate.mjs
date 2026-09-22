@@ -223,6 +223,9 @@ export function buildModalityFamilies(sources, opts = {}) {
 export function buildAllModalities(sources, opts = {}) {
   const mode = opts.mode === 'robust' ? 'robust' : 'min';
   const base = opts.base ?? {};
+  // The committed snapshot's `modalityComparability`, so a modality carried
+  // wholesale keeps what is known about how its scores were made.
+  const baseComparability = opts.baseComparability ?? {};
   const groups = groupByModality(sources);
 
   const modalities = {};
@@ -242,7 +245,25 @@ export function buildAllModalities(sources, opts = {}) {
   for (const modality of Object.keys(base).sort()) {
     if (modalities[modality]) continue;
     if (base[modality] && Object.keys(base[modality]).length > 0) {
+      const carried = Object.keys(base[modality]).length;
       modalities[modality] = base[modality];
+      // This branch carries a whole modality forward when every one of its
+      // sources is absent or malformed — and it bypasses `buildModalityFamilies`
+      // entirely, so without this the scores would reappear in the next snapshot
+      // with NO comparability entry at all: the machine-visible warning deleted
+      // by the very run that made it most necessary.
+      //
+      // Nothing measured anything this time, so nothing vouches for these
+      // ranks. Previous metadata is preserved where it exists, because it still
+      // describes how these numbers were made — but `sources: 0` and
+      // `disjoint: true` overwrite whatever it said, since a run that measured
+      // nothing cannot inherit a claim that the cohorts were comparable.
+      comparabilities[modality] = {
+        ...(baseComparability[modality] ?? { families: carried, shared: 0, components: 0 }),
+        sources: 0,
+        carriedFamilies: carried,
+        disjoint: true,
+      };
     }
   }
   return { modalities, traces, comparabilities };
