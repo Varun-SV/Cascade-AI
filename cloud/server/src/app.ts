@@ -24,7 +24,7 @@ import { providerIsUsable } from './remote-browser.js';
 import { remoteBrowserControls } from './runs.js';
 import { NativeAuthStore, isLoopbackRedirect, hashRefreshToken } from './native-auth.js';
 import { githubAuthUrl, exchangeGithubCode, googleAuthUrl, exchangeGoogleCode, type OAuthProfile } from './auth/oauth.js';
-import { limitsForPlan, todayKey, checkStorageQuota } from './entitlements.js';
+import { limitsForPlan, ORPHAN_UPLOAD_TTL_MS, todayKey, checkStorageQuota } from './entitlements.js';
 import { skillCatalog } from './skills.js';
 import { renderDocsPage } from './docs.js';
 import { tenantScratchDir } from './paths.js';
@@ -35,7 +35,7 @@ import {
 } from './billing.js';
 import { HandoffStore, parseHandoffBody } from './handoff.js';
 import { DownloadResolver, isTargetId, isCascadeReleaseAsset, RELEASES_PAGE_URL } from './downloads.js';
-import { DocumentTooLargeError, MAX_DOCUMENT_BYTES, parseDocument, resolveDocumentMime } from './documents.js';
+import { DocumentTooLargeError, ExtractionBusyError, MAX_DOCUMENT_BYTES, parseDocument, resolveDocumentMime } from './documents.js';
 import { connectorCatalog, getConnector, validateRemoteMcpUrl } from './mcp.js';
 import { McpOAuthFlows, encodeOAuthBlob, resolveRunMcpServers } from './mcp-oauth.js';
 import {
@@ -1013,6 +1013,34 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       });
       return;
     }
+    // Abandoned uploads go first, so a ceiling is never held up by files the
+    // user never sent. Opportunistic and global, like the pending-media sweep:
+    // whoever uploads next pays for everyone's, which is the only way a tenant
+    // who never came back is cleaned up at all.
+    for (const orphan of store.listExpiredOrphanUploads(Date.now() - ORPHAN_UPLOAD_TTL_MS)) {
+      try { fs.rmSync(orphan.path, { force: true }); } catch { /* the row still goes */ }
+      store.deleteAttachmentById(orphan.id);
+    }
+
+    // Cheap refusal before the expensive part: someone already at the ceiling
+    // gains nothing from extracting 25M characters we are about to refuse.
+    const textCeiling = limitsForPlan(uploaderPlan).documentTextChars;
+    const tooMuchStored = (used: number): boolean => used >= textCeiling;
+    const refuseOverCeiling = (used: number): void => {
+      const m = (n: number) => `${(n / 1_000_000).toFixed(1)}M characters`;
+      res.status(413).json({
+        error: uploaderPlan === 'free'
+          ? `You are storing ${m(used)} of document text, and the free plan keeps up to ${m(textCeiling)}. `
+            + 'Delete some conversations with attachments, or upgrade, to make room.'
+          : `You are storing ${m(used)} of document text, over the ${m(textCeiling)} this plan keeps. `
+            + 'Delete some conversations with attachments to make room.',
+      });
+    };
+    if (tooMuchStored(store.totalAttachmentChars(userId))) {
+      refuseOverCeiling(store.totalAttachmentChars(userId));
+      return;
+    }
+
     let extractedText: string;
     try {
       extractedText = await parseDocument({ bytes, mime: docMime, filename });
@@ -1025,11 +1053,26 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
         res.status(413).json({ error: err.message });
         return;
       }
+      // Not this document's fault and not permanent — the queue of uploads
+      // waiting to be read is full. Saying "corrupt" would send the user to
+      // fix a file that is fine.
+      if (err instanceof ExtractionBusyError) {
+        res.setHeader('Retry-After', '5');
+        res.status(503).json({ error: err.message });
+        return;
+      }
       res.status(422).json({ error: "Couldn't read that document — it may be scanned, encrypted, or corrupt." });
       return;
     }
     if (!extractedText.trim()) {
       res.status(422).json({ error: 'No text could be extracted from that document.' });
+      return;
+    }
+    // Re-read rather than reusing the pre-extraction figure: another upload of
+    // this user's may have landed while this one was being read.
+    const storedChars = store.totalAttachmentChars(userId);
+    if (storedChars + extractedText.length > textCeiling) {
+      refuseOverCeiling(storedChars);
       return;
     }
     fs.mkdirSync(dir, { recursive: true });

@@ -28,7 +28,8 @@
 //  take the lowest per family, or drop one low outlier in 'robust' mode when
 //  >= 3 sources cover a cell.
 
-import { bareMap, clampScore, conservativeAggregate } from './aggregate.mjs';
+import { clampScore, conservativeAggregate } from './aggregate.mjs';
+import { bareMap } from './bare-map.mjs';
 
 export { clampScore, conservativeAggregate };
 

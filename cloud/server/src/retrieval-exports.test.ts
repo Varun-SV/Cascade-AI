@@ -75,6 +75,25 @@ describe('vendored retrieval exports (Phase 2)', () => {
       ).toBe(128_000);
     });
 
+    it('refuses a catalog entry whose provider is not the one the pin named', () => {
+      // `gpt-4.1` in the catalog is OpenAI's, at 1,047,576 tokens. An
+      // `openai-compatible:gpt-4.1` pin is a GATEWAY that borrowed the name and
+      // may hold 128k; handing it OpenAI's window admits a document budget the
+      // model serving the request then rejects.
+      expect(
+        runContextWindowTokens(providers, { enabled: true, model: 'openai-compatible:gpt-4.1' }),
+        'an unmatched qualifier falls back to the conservative minimum',
+      ).toBe(128_000);
+      expect(
+        runContextWindowTokens([{ type: 'openai', apiKey: 'sk-test' }], { enabled: true, model: 'ollama:gpt-4.1' }),
+        'and to the SDK default when there is no minimum to fall back to',
+      ).toBe(DEFAULT_CONTEXT_LIMIT);
+      expect(
+        runContextWindowTokens(providers, { enabled: true, model: 'openai:gpt-4.1' }),
+        'while the provider the catalog actually describes still resolves',
+      ).toBe(1_047_576);
+    });
+
     it('stays conservative when the run is not a single pinned model', () => {
       // Without Fast Answer the router may reach any configured provider, so
       // the smallest window is the only one the corpus is safe against.

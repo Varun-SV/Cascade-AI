@@ -116,13 +116,58 @@ const inflateRaw = promisify(zlib.inflateRaw);
  */
 export const MAX_CONCURRENT_EXTRACTIONS = 2;
 
+/**
+ * How many bytes of upload may be WAITING for a slot, across all tenants.
+ *
+ * Bounding the extractions did not bound the queue behind them, and a waiter is
+ * not free: by the time it gets here the request body has been materialized and
+ * copied into a Buffer, and it holds that Buffer for as long as it waits. One
+ * authenticated client can fire dozens of maximum-size uploads inside the
+ * per-minute API limit and have every one of them parked on a 10 MB buffer
+ * while two extractions run — the process-wide exhaustion the semaphore was
+ * added to prevent, reached through the queue instead of through the work.
+ *
+ * 64 MB, so the queue holds roughly six maximum-size documents (or many small
+ * ones), and the worst case is that plus the two in flight. Over that, the
+ * upload is refused with a retry rather than admitted and remembered.
+ *
+ * What this bounds is RETENTION, not admission: the body exists before this
+ * function is ever reached, because the JSON parser built it before the handler
+ * ran. Refusing quickly lets it be collected instead of pinning it behind
+ * however many extractions are ahead of it. Bounding admission itself needs the
+ * upload to stream rather than arrive as base64 in a JSON body, which is the
+ * same change as bounding extraction for real, and neither is in this PR.
+ */
+export const MAX_QUEUED_EXTRACTION_BYTES = 64 * 1024 * 1024;
+
+/** Refusal when the extraction queue is already holding all it will hold. */
+export class ExtractionBusyError extends Error {
+  constructor() {
+    super('The server is busy reading other documents. Try again in a moment.');
+    this.name = 'ExtractionBusyError';
+  }
+}
+
 let extractionsInFlight = 0;
+let queuedBytes = 0;
 const extractionQueue: Array<() => void> = [];
 
-/** Wait for a slot, run, and hand the slot to whoever is next. */
-export async function withExtractionSlot<T>(fn: () => Promise<T>): Promise<T> {
+/**
+ * Wait for a slot, run, and hand the slot to whoever is next.
+ *
+ * `bytes` is what the caller is holding while it waits, and it is what the
+ * queue is measured in. Callers that hold nothing (tests, small internal work)
+ * pass nothing and are never refused.
+ */
+export async function withExtractionSlot<T>(fn: () => Promise<T>, bytes = 0): Promise<T> {
   if (extractionsInFlight >= MAX_CONCURRENT_EXTRACTIONS) {
-    await new Promise<void>((resolve) => extractionQueue.push(resolve));
+    if (queuedBytes + bytes > MAX_QUEUED_EXTRACTION_BYTES) throw new ExtractionBusyError();
+    queuedBytes += bytes;
+    try {
+      await new Promise<void>((resolve) => extractionQueue.push(resolve));
+    } finally {
+      queuedBytes -= bytes;
+    }
   }
   extractionsInFlight++;
   try {
@@ -424,7 +469,7 @@ export async function parseDocument(input: {
       const pdfParse = require('pdf-parse/lib/pdf-parse.js') as (b: Buffer) => Promise<{ text: string }>;
       const parsed = await pdfParse(bytes);
       return normalizeText(parsed.text ?? '');
-    });
+    }, bytes.length);
   }
 
   if (DOCX_MIME_TYPES.has(mime)) {
@@ -446,7 +491,7 @@ export async function parseDocument(input: {
       const mammoth = require('mammoth') as { extractRawText(o: { buffer: Buffer }): Promise<{ value: string }> };
       const parsed = await mammoth.extractRawText({ buffer: bytes });
       return normalizeText(parsed.value ?? '');
-    });
+    }, bytes.length);
   }
 
   if (PLAINTEXT_MIME_TYPES.has(mime)) {

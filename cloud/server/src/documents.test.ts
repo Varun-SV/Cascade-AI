@@ -3,8 +3,9 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import {
-  DocumentTooLargeError, EXPANSION_CEILING_CHARS, MAX_CONCURRENT_EXTRACTIONS,
-  MAX_DECOMPRESSED_BYTES, MAX_DOCUMENT_BYTES,
+  DocumentTooLargeError, EXPANSION_CEILING_CHARS, ExtractionBusyError,
+  MAX_CONCURRENT_EXTRACTIONS, MAX_DECOMPRESSED_BYTES, MAX_DOCUMENT_BYTES,
+  MAX_QUEUED_EXTRACTION_BYTES,
   declaredUncompressedBytes, isDocumentMime, resolveDocumentMime, parseDocument,
   withExtractionSlot,
 } from './documents.js';
@@ -393,6 +394,56 @@ describe('the process-wide extraction bound', () => {
     await Promise.all(holders);
     const text = await pdf;
     expect(text.length, 'and still extracts once it has one').toBeGreaterThan(0);
+  });
+
+  // Bounding the extractions did not bound the queue behind them. A waiter
+  // arrives holding the request body — already materialized and copied into a
+  // Buffer before the handler ran — and holds it for as long as it waits, so
+  // one client could park dozens of maximum-size uploads behind two
+  // extractions and reach the same exhaustion through the queue.
+  it('refuses an upload rather than remembering it once the queue is full', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const holders = Array.from({ length: MAX_CONCURRENT_EXTRACTIONS }, () =>
+      withExtractionSlot(async () => { await held; }));
+    await new Promise((r) => setImmediate(r));
+
+    // Exactly the cap is admitted and remembered.
+    const queued = withExtractionSlot(async () => 'queued', MAX_QUEUED_EXTRACTION_BYTES);
+    await new Promise((r) => setImmediate(r));
+
+    // One byte more must be refused outright rather than queued. Captured
+    // rather than awaited so that a version which QUEUES it still finishes
+    // this test — and fails on the assertion below instead of hanging, and
+    // without stranding the slots for every test after it.
+    let refusal: unknown = 'never settled';
+    const over = withExtractionSlot(async () => 'over', 1)
+      .then((v) => { refusal = v; }, (e: unknown) => { refusal = e; });
+    await new Promise((r) => setImmediate(r));
+    release();
+    await Promise.all([over, ...holders]);
+
+    expect(refusal, 'the queue says no rather than holding another body')
+      .toBeInstanceOf(ExtractionBusyError);
+    expect(await queued, 'and the one already admitted still runs').toBe('queued');
+    // The refusal released its claim, so the queue is usable again.
+    await expect(withExtractionSlot(async () => 'after', MAX_QUEUED_EXTRACTION_BYTES)).resolves.toBe('after');
+  });
+
+  it('never refuses a caller that is holding nothing', async () => {
+    // The bound is on RETAINED BYTES, not on the number of waiters: internal
+    // work that holds no upload must not be turned away by someone else's.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const holders = Array.from({ length: MAX_CONCURRENT_EXTRACTIONS }, () =>
+      withExtractionSlot(async () => { await held; }));
+    await new Promise((r) => setImmediate(r));
+    const big = withExtractionSlot(async () => 'big', MAX_QUEUED_EXTRACTION_BYTES);
+    const weightless = withExtractionSlot(async () => 'weightless');
+    release();
+    await Promise.all(holders);
+    expect(await weightless).toBe('weightless');
+    expect(await big).toBe('big');
   });
 
   it('hands the slot back when the work throws, rather than leaking it', async () => {

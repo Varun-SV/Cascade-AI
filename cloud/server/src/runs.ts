@@ -964,7 +964,17 @@ function pinnedModelWindow(pinned: string, providers: ProviderConfig[]): number 
       if (cw) return cw;
     }
   }
-  return MODELS[id]?.contextWindow;
+
+  // The catalog only answers for the provider it describes. `gpt-4.1` in there
+  // is OpenAI's, with a 1,047,576-token window; an `openai-compatible:gpt-4.1`
+  // pin is a GATEWAY that has borrowed the name and may hold 128k, and handing
+  // it OpenAI's window admits a document budget the model serving the request
+  // will reject. A qualifier that does not match the entry's provider means we
+  // do not know what will answer, which is what the conservative minimum is for.
+  const catalog = MODELS[id];
+  if (!catalog) return undefined;
+  if (providerType && catalog.provider !== providerType) return undefined;
+  return catalog.contextWindow;
 }
 
 /**

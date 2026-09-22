@@ -21,6 +21,7 @@
 //  warning rather than aborting the whole refresh.
 
 import { readdir, readFile } from 'node:fs/promises';
+import { bareMap } from './bare-map.mjs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { TASK_KEYS } from './aggregate.mjs';
@@ -64,7 +65,13 @@ export function validateSource(raw, filename = '<inline>') {
     return null;
   }
   // Keep only well-formed model rows (an object with at least one task number).
-  const models = {};
+  // Prototype-free, like every other map keyed by a name out of a source file.
+  // A family called `__proto__` assigned into a plain object runs the inherited
+  // setter and stores nothing, so a perfectly valid measurement disappears here
+  // — and if it were the only row, the source is then rejected as empty. The
+  // aggregator's own maps are already bare; they never get the chance to be if
+  // the data is lost on the way in.
+  const models = bareMap();
   for (const [family, profile] of Object.entries(raw.models)) {
     if (!profile || typeof profile !== 'object') continue;
     const hasAnyTask = TASK_KEYS.some((t) => Number.isFinite(Number(profile[t])));

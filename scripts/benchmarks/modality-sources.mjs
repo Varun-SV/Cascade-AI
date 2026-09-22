@@ -27,6 +27,7 @@
 //  skipped with a warning, never aborting the refresh.
 
 import { readdir, readFile } from 'node:fs/promises';
+import { bareMap } from './bare-map.mjs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -66,7 +67,13 @@ export function validateModalitySource(raw, filename = '<inline>') {
   //
   // A dropped row is said out loud. Quietly ignoring one is how a source ends
   // up ranking fewer models than anyone thinks it does.
-  const models = {};
+  // Prototype-free, like every other map keyed by a name out of a source file.
+  // A family called `__proto__` assigned into a plain object runs the inherited
+  // setter and stores nothing, so a perfectly valid measurement disappears here
+  // — and if it were the only row, the source is then rejected as empty. The
+  // aggregator's own maps are already bare; they never get the chance to be if
+  // the data is lost on the way in.
+  const models = bareMap();
   for (const [family, value] of Object.entries(raw.models)) {
     if (typeof value === 'number' && Number.isFinite(value)) {
       models[family] = value;

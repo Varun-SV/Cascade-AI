@@ -26,6 +26,15 @@ describe('validateSource', () => {
     expect(warn, 'and said so').toHaveBeenCalled();
   });
 
+  // The same hole on the text side: JSON.parse makes `__proto__` an own
+  // property, and assigning it into a plain `{}` silently stores nothing.
+  it('keeps a family called __proto__ instead of losing it to the prototype setter', () => {
+    const models = JSON.parse('{"__proto__": {"code": 80}, "gpt-5": {"code": 70}}');
+    const out = validateSource(source(models));
+    expect(Object.keys(out.models).sort(), 'both rows survive').toEqual(['__proto__', 'gpt-5']);
+    expect(out.models['__proto__'], 'with its profile intact').toEqual({ code: 80 });
+  });
+
   it('still refuses a missing models map', () => {
     expect(validateSource({ source: 'demo-source' })).toBeNull();
   });

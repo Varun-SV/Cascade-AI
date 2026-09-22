@@ -45,6 +45,24 @@ describe('validateModalitySource', () => {
     expect(warn, 'and said so').toHaveBeenCalled();
   });
 
+  // JSON.parse creates `__proto__` as an ordinary OWN property, unlike an
+  // object literal — so a source file really can carry a family by that name,
+  // and assigning it into a plain `{}` runs the inherited setter and stores
+  // nothing. The measurement disappears, and if it were the only row the whole
+  // source is then rejected as empty.
+  it('keeps a family called __proto__ instead of losing it to the prototype setter', () => {
+    const models = JSON.parse('{"__proto__": 42, "gpt-5": 10}');
+    const out = validateModalitySource(source(models));
+    expect(Object.keys(out.models).sort(), 'both rows survive').toEqual(['__proto__', 'gpt-5']);
+    expect(out.models['__proto__'], 'with its measurement intact').toBe(42);
+  });
+
+  it('does not reject a source whose only family is called __proto__', () => {
+    const out = validateModalitySource(source(JSON.parse('{"__proto__": 42}')));
+    expect(out, 'the source is not mistaken for an empty one').not.toBeNull();
+    expect(Object.keys(out.models)).toEqual(['__proto__']);
+  });
+
   it('says which row it dropped, instead of quietly rating fewer models', () => {
     validateModalitySource(source({ good: 10, missing: null }));
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('"missing"'));
