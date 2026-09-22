@@ -28,7 +28,7 @@
 //  take the lowest per family, or drop one low outlier in 'robust' mode when
 //  >= 3 sources cover a cell.
 
-import { clampScore, conservativeAggregate } from './aggregate.mjs';
+import { bareMap, clampScore, conservativeAggregate } from './aggregate.mjs';
 
 export { clampScore, conservativeAggregate };
 
@@ -47,7 +47,7 @@ export function percentileNormalizeSource(source) {
   if (n === 0) return {};
   const values = entries.map(([, v]) => Number(v));
 
-  const out = {};
+  const out = bareMap();
   for (const [family, rawVal] of entries) {
     const v = Number(rawVal);
     let below = 0;
@@ -138,7 +138,11 @@ export function cohortOverlap(sources) {
 }
 
 export function groupByModality(sources) {
-  const groups = {};
+  // Prototype-free: a source whose `modality` is `toString` or `__proto__`
+  // used to abort the entire refresh here rather than being skipped, because
+  // `groups[modality]` answered with an inherited value and `??=` left it in
+  // place. See `bareMap`.
+  const groups = bareMap();
   for (const s of sources ?? []) {
     const modality = s?.modality;
     if (typeof modality !== 'string' || !modality.trim()) continue;
@@ -162,7 +166,7 @@ export function groupByModality(sources) {
  */
 export function buildModalityFamilies(sources, opts = {}) {
   const mode = opts.mode === 'robust' ? 'robust' : 'min';
-  const base = opts.base ?? {};
+  const base = bareMap(opts.base);
   const normalized = (sources ?? []).map((s) => ({
     name: s?.source ?? 'unknown',
     map: percentileNormalizeSource(s),
@@ -171,8 +175,8 @@ export function buildModalityFamilies(sources, opts = {}) {
   const families = new Set(Object.keys(base));
   for (const { map } of normalized) for (const fam of Object.keys(map)) families.add(fam);
 
-  const outFamilies = {};
-  const trace = {};
+  const outFamilies = bareMap();
+  const trace = bareMap();
   let carried = 0;
   for (const fam of [...families].sort()) {
     const contributors = [];
@@ -222,15 +226,15 @@ export function buildModalityFamilies(sources, opts = {}) {
  */
 export function buildAllModalities(sources, opts = {}) {
   const mode = opts.mode === 'robust' ? 'robust' : 'min';
-  const base = opts.base ?? {};
+  const base = bareMap(opts.base);
   // The committed snapshot's `modalityComparability`, so a modality carried
   // wholesale keeps what is known about how its scores were made.
-  const baseComparability = opts.baseComparability ?? {};
+  const baseComparability = bareMap(opts.baseComparability);
   const groups = groupByModality(sources);
 
-  const modalities = {};
-  const traces = {};
-  const comparabilities = {};
+  const modalities = bareMap();
+  const traces = bareMap();
+  const comparabilities = bareMap();
   for (const modality of Object.keys(groups).sort()) {
     const { families, trace, comparability } = buildModalityFamilies(groups[modality], {
       mode,

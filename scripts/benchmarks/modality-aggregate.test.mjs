@@ -52,6 +52,39 @@ describe('percentileNormalizeSource', () => {
   });
 });
 
+// A plain `{}` already answers for every key on Object.prototype, so a source
+// file naming its modality `toString` or `__proto__` did not get skipped as the
+// loader promises — it took the whole refresh down, or vanished in silence.
+describe('groupByModality and hostile modality names', () => {
+  it.each(['toString', 'constructor', 'valueOf', 'hasOwnProperty'])(
+    'groups a modality called %s instead of throwing on an inherited value',
+    (name) => {
+      const groups = groupByModality([
+        { modality: name, source: 'a' },
+        { modality: 'vision', source: 'b' },
+      ]);
+      expect(Object.keys(groups).sort(), 'both modalities are present').toEqual([name, 'vision'].sort());
+      expect(groups[name], 'and the hostile one really holds its source').toHaveLength(1);
+    },
+  );
+
+  it('keeps a modality called __proto__ as data rather than as a prototype', () => {
+    // The quiet half of the same bug: assigning to `__proto__` on a plain
+    // object runs the inherited setter and stores nothing at all.
+    const groups = groupByModality([{ modality: '__proto__', source: 'a' }]);
+    expect(Object.keys(groups), 'it is an ordinary key').toEqual(['__proto__']);
+    expect(groups['__proto__'], 'holding its source like any other').toHaveLength(1);
+  });
+
+  it('does not abort a whole refresh over one hostile name', () => {
+    const out = buildAllModalities([
+      { modality: 'toString', source: 'x', models: { a: 1, b: 2 } },
+      { modality: 'vision', source: 'y', models: { a: 1, b: 2 } },
+    ]);
+    expect(Object.keys(out.modalities), 'every modality still aggregates').toEqual(['toString', 'vision']);
+  });
+});
+
 describe('groupByModality', () => {
   it('groups sources by their declared modality, dropping untagged ones', () => {
     const sources = [

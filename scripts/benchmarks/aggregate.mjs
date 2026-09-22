@@ -84,19 +84,46 @@ export function normalizeValue(raw, band) {
   return clampScore(((v - min) / (max - min)) * 100);
 }
 
+
+/**
+ * A map with NO prototype, for keys that come out of source files.
+ *
+ * Model families and modality names are arbitrary strings from JSON, and a
+ * plain `{}` already has an answer for every one of `Object.prototype`'s.
+ * `groups['toString']` is a function, so `??=` leaves it alone and the `.push`
+ * after it throws — aborting the whole refresh over one source file the loader
+ * promises to merely skip. `__proto__` fails the other way and more quietly:
+ * assigning to it on a plain object runs the inherited setter instead of
+ * storing anything, so the row vanishes without a warning and the snapshot is
+ * short by one, which nobody notices because nothing said so.
+ *
+ * Null-prototype objects have neither behaviour — every key is an ordinary own
+ * property, `__proto__` included. Denylisting the dangerous names instead
+ * would be the same race this codebase already lost once over headers: the set
+ * is fixed today and the cost of missing one is silent.
+ *
+ * They stringify, spread and enumerate exactly like `{}`, so nothing
+ * downstream can tell the difference.
+ */
+export function bareMap(from) {
+  const map = Object.create(null);
+  if (from) for (const [k, v] of Object.entries(from)) map[k] = v;
+  return map;
+}
+
 /**
  * Normalize one source into { family: { task: 0–100 } }, keeping only the cells
  * the source actually rates. `source` shape:
  *   { source, scale, eloFloor?, eloCeil?, calibration?, models: { family: {…} } }
  */
 export function normalizeSource(source) {
-  const bands = {};
+  const bands = bareMap();
   for (const task of TASK_KEYS) bands[task] = calibrationFor(source, task);
-  const out = {};
+  const out = bareMap();
   const models = source?.models ?? {};
   for (const [family, profile] of Object.entries(models)) {
     if (!profile || typeof profile !== 'object') continue;
-    const clean = {};
+    const clean = bareMap();
     for (const task of TASK_KEYS) {
       const norm = normalizeValue(profile[task], bands[task]);
       if (norm !== null) clean[task] = norm;
@@ -132,18 +159,18 @@ export function conservativeAggregate(values, mode = 'min') {
  */
 export function buildFamilies(sources, opts = {}) {
   const mode = opts.mode === 'robust' ? 'robust' : 'min';
-  const base = opts.base ?? {};
+  const base = bareMap(opts.base);
   const normalized = sources.map((s) => ({ name: s?.source ?? 'unknown', map: normalizeSource(s) }));
 
   // Every family mentioned by any source, plus every family already in the base.
   const families = new Set(Object.keys(base));
   for (const { map } of normalized) for (const fam of Object.keys(map)) families.add(fam);
 
-  const outFamilies = {};
-  const trace = {};
+  const outFamilies = bareMap();
+  const trace = bareMap();
   for (const fam of [...families].sort()) {
-    const profile = {};
-    const famTrace = {};
+    const profile = bareMap();
+    const famTrace = bareMap();
     for (const task of TASK_KEYS) {
       const contributors = [];
       for (const { name, map } of normalized) {
