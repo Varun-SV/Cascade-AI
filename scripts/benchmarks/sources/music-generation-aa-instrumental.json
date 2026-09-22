@@ -1,0 +1,18 @@
+{
+  "source": "artificial-analysis-music-arena-instrumental",
+  "modality": "music-generation",
+  "metric": "Artificial Analysis Music Arena Elo — instrumental tracks",
+  "label": "Artificial Analysis Music Arena (Instrumental)",
+  "url": "https://artificialanalysis.ai/music/leaderboard/instrumental",
+  "capturedAt": "2026-09-21",
+  "provenance": "captured-via-search",
+  "lowerIsBetter": false,
+  "note": "Retrieved via web-search quote of the live page (direct fetch blocked). This is the only rigorous public music-generation arena found; no equivalent head-to-head leaderboard exists yet for Udio, Stability Audio, or Meta MusicGen.",
+  "models": {
+    "suno-v5.5": 1186,
+    "mureka-v9": 1174,
+    "mureka-v8": 1166,
+    "suno-v5": 1159,
+    "lyria-3-pro": 1118
+  }
+}

@@ -38,6 +38,11 @@ export function validateSource(raw, filename = '<inline>') {
     console.warn(`benchmark source ${filename}: not an object — skipping.`);
     return null;
   }
+  // A modality-tagged file (vision, image-generation, ...) belongs to the
+  // separate modality-sources.mjs/modality-aggregate.mjs pipeline, which
+  // percentile-normalizes within its own source rather than using TASK_KEYS
+  // + a fixed band. Not this loader's concern, and not a malformed file.
+  if (typeof raw.modality === 'string' && raw.modality.trim()) return null;
   if (typeof raw.source !== 'string' || !raw.source.trim()) {
     console.warn(`benchmark source ${filename}: missing "source" id — skipping.`);
     return null;

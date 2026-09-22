@@ -138,3 +138,94 @@ to its family, reads the live/cached snapshot (falling back to the bundled table
 returns the 0–1 strength the router multiplies against cost. Azure deployments resolve
 through their `baseModelId`, so a deployment named `prod-fast` still scores as its real
 base model.
+
+## Non-text modalities
+
+Cascade's routing scope is expanding beyond text/chat to every kind of model on the
+market — vision, image generation, video generation, speech-to-text, text-to-speech,
+music generation, embeddings/reranking. Those modalities aren't wired into
+`benchmarkScore01`/`TaskType` yet (that's a router change, not a data change), but the
+**data side** ships ahead of it: a `modalities` section in `benchmark-data.json`,
+additive and backwards-compatible with everything above — a consumer that only knows
+about `families` never has to look at it.
+
+### Why a different normalization
+
+The text pipeline above normalizes each source onto a common 0–100 scale via a fixed
+band (`scale` + optional `calibration`), because its four task types share a reasonably
+stable meaning across sources. Non-text modalities don't: an LMArena image-generation
+Elo, a Word Error Rate, and an MTEB retrieval nDCG@10 have no shared unit at all, and
+unlike text Elo there's no well-established floor/ceiling to anchor a band against. So
+modality sources are normalized by **percentile rank within that source's own model
+set** instead — `scripts/benchmarks/modality-aggregate.mjs`. A model's score says only
+"how this model compared to the other models this same source also rated," which is
+always well-defined no matter what the source's raw units are. This is the core rule
+for the whole redesign: **never compare a raw number from one source against a raw
+number from another** — normalize first, in that source's own terms, always.
+
+Percentile rank uses the standard mid-rank formula (ties split the difference):
+`rank(v) = (countBelow(v) + 0.5 * countEqual(v)) / n * 100`. A source with only one
+model normalizes to a neutral 50 — with nothing to compare against, no claim is made.
+`lowerIsBetter: true` on a source (e.g. a WER-based speech-to-text source) flips which
+direction counts as "below."
+
+Once every source is in percentile terms, cross-source aggregation is the *same*
+conservative policy as the text pipeline (imported from `aggregate.mjs`, not
+reimplemented): the lowest value per family, or `robust` mode's "drop one low outlier
+when ≥ 3 sources cover the cell."
+
+### Modality source files
+
+Same directory, `scripts/benchmarks/sources/*.json`, distinguished by a `modality` key
+the legacy text loader (`sources.mjs`) skips over:
+
+```json
+{
+  "source":     "hf-open-asr-leaderboard-shortform",
+  "modality":   "speech-to-text",
+  "metric":     "Open ASR Leaderboard English short-form average WER %",
+  "label":      "Open ASR Leaderboard (short-form)",
+  "url":        "https://raw.githubusercontent.com/huggingface/open_asr_leaderboard/main/scripts/data/en_shortform.csv",
+  "capturedAt": "2026-09-21",
+  "provenance": "captured",
+  "lowerIsBetter": true,
+  "models": { "openai/whisper-large-v3": 7.44, "nvidia/parakeet-tdt-0.6b-v2": 6.05 }
+}
+```
+
+No `scale`/`calibration` — the raw number's units don't matter, only its rank among the
+other models the same source rates. A source may cover as many or as few models and
+families as it has real data for.
+
+### Provenance values
+
+- **`captured`** — read from the primary source itself (its own page, or a data file the
+  primary source's own maintainers publish — e.g. the MMMU project's or Hugging Face's
+  own GitHub repo).
+- **`captured-via-search`** — the primary source's page couldn't be fetched directly
+  (blocked, dynamic-JS-rendered, etc.), but a search result surfaced a direct quote of
+  its published numbers, with attribution. Real numbers, one hop removed from the page.
+- **`mirror-captured`** — read from a third-party mirror/scraper of the primary source
+  (not the vendor's own infrastructure), used because the vendor's domain was
+  unreachable from the research environment. Its legitimacy (real project, transparent
+  methodology, not a ToS violation) should be checked before trusting it, and this is
+  strictly lower-confidence than `captured` — treat it as a candidate for replacement by
+  a direct `captured` read once the source becomes reachable.
+- **`seed-approximation`** — maintainer-approximated starting values, not a real
+  capture. As with the text pipeline: honestly labelled, never invented to fill a gap.
+
+### Family keys are per-modality
+
+Unlike the text pipeline's `families`, which key against Cascade's canonical chat-model
+families (`resolveFamily` in `benchmarks.ts`), modality family keys are whatever the
+source calls the model (kept close to the source's own naming, lightly slugified) —
+there is no shared `resolveFamily`-style canonicalization across image/video/audio
+model names yet, and inventing one without real usage data would be exactly the kind of
+guess the integrity rule rules out.
+
+### Running it
+
+The same `node scripts/refresh-benchmarks.mjs` run aggregates both pipelines in one
+pass — text sources into `families`, modality sources into `modalities` — and writes
+`benchmark-data.json` only when either section actually changed. `--explain` /
+`BENCHMARK_EXPLAIN=1` prints both traces; `BENCHMARK_AGG=off` skips both aggregators.

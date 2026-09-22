@@ -1,0 +1,19 @@
+{
+  "source": "reranker-beir-ndcg10-jina-technical-reports",
+  "modality": "reranking",
+  "metric": "BEIR nDCG@10 (English reranking), as published in reranker technical reports/model cards",
+  "label": "BEIR Reranking nDCG@10",
+  "url": "https://arxiv.org/abs/2607.18152",
+  "capturedAt": "2026-09-21",
+  "provenance": "captured",
+  "lowerIsBetter": false,
+  "note": "From the jina-reranker-v3.5 (arXiv 2607.18152) and jina-reranker-v3 papers, which publish a shared BEIR nDCG@10 comparison table against contemporary rerankers. Cohere Rerank 3.5 and Voyage rerank-2.5 were investigated but excluded: neither publishes an absolute BEIR/nDCG@10 figure comparable to this table, only self-reported relative outperformance percentages that were not even internally consistent across the vendor's own reported comparisons — converting those into a synthetic score would be exactly the kind of interpolation the integrity rule rules out, so they're left out rather than guessed.",
+  "models": {
+    "jina-reranker-v3.5": 63.2,
+    "querit-reranker-4b": 62.29,
+    "qwen3-reranker-4b": 62.28,
+    "jina-reranker-v3": 62.1,
+    "mxbai-rerank-large": 61.44,
+    "bge-reranker-v2-m3": 56.42
+  }
+}

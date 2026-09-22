@@ -18,6 +18,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+## 0.82.0 - 2026-09-22
+
+### Added
+- **Benchmark data now covers every modality, not just text.** Cascade's
+  routing scope is expanding to orchestrate every kind of model on the
+  market, so the weekly benchmark refresh now also ingests vision/multimodal
+  understanding, image generation, video generation, speech-to-text,
+  text-to-speech, music generation, embeddings, and reranking — 13 new source
+  files, 8 modalities, real published numbers for 100+ models. It lives in a
+  new, additive `modalities` section of `benchmark-data.json` (nothing about
+  `families`/`TaskType`/`benchmarkScore01` changed, so this ships ahead of the
+  router actually routing non-text requests on it).
+- **A second, source-appropriate normalization method.** Different sources
+  benchmark differently, and non-text sources have no shared unit at all (an
+  Elo, a Word Error Rate, an nDCG@10) and no established floor/ceiling to
+  calibrate against the way SWE-bench's ~75% frontier ceiling does for code.
+  `scripts/benchmarks/modality-aggregate.mjs` normalizes each modality source
+  by **percentile rank within that source's own model set** instead of a
+  fixed band, then aggregates across sources with the same conservative
+  (lowest-value, outlier-dropping `robust` mode) policy as the text pipeline.
+  See "Non-text modalities" in `docs/benchmark-aggregation.md`.
+- **Documents are limited by size, not cut through their text.** Uploads now
+  carry a per-plan byte limit — `PlanLimits.documentBytes`, 5 MB on free and
+  10 MB on pro — enforced at upload beside the quotas that already live there,
+  and the refusal names the plan and what lifts it.
+
+### Changed
+- `scripts/refresh-benchmarks.mjs` now aggregates the text and modality
+  source pipelines in the same pass and writes both sections only when either
+  actually changed, so a quiet week still produces a no-op diff.
+
+### Fixed
+- **A document's text is no longer destroyed at ingestion.** Extraction cut
+  every file at 200,000 characters and persisted only the trimmed text, in
+  front of the retrieval layer that sizes documents against the run's real
+  context window. The original bytes were on disk the whole time, unread.
+- **The no-embeddings-key path reports what it actually did.** It told you the
+  full text was included, which it could only claim because ingestion had
+  already truncated the file. Each document now gets an equal share of the
+  run's real document budget and the notice carries real character counts.
+- **`CascadeIgnore.getPatterns()` no longer reads the `ignore` library's
+  private internals.** That field stopped being an array in ignore 7, turning
+  the getter into a TypeError. It reports the patterns it was given instead,
+  and `src/config/ignore.ts` has tests now.
+- **The SSRF guard's connection pinning is verified.** `safeFetch` passes
+  undici's dispatcher — the thing that closes the DNS-rebinding gap by
+  validating inside the lookup the socket uses — through a cast, and had no
+  tests at all. Nine now cover it, including that the agent reaches `fetch` on
+  every redirect hop.
+
+### Security
+- **33 advisories down to 25, and one of two criticals cleared.** `express`
+  4.22.3 lifts `qs` past the array-limit bypass and the isBuffer denial of
+  service; `@anthropic-ai/sdk` 0.125 closes the insecure-default file
+  permissions on the local filesystem memory tool; `vitest` 5 and `vite` 8
+  close the Vitest UI arbitrary file read and execute, the `@vitest/mocker`
+  path traversal, and vite's optimized-deps `.map` traversal. The remaining
+  critical is node-tar, reached through electron-builder's toolchain.
+- **Two dependencies removed rather than upgraded.** `conf` and `marked` were
+  declared at the root and imported nowhere, in no source tree and in no
+  built bundle. The declarations are gone.
+
 ## 0.81.0 - 2026-09-15
 
 ### Added

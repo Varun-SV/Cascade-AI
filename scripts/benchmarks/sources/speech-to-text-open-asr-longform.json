@@ -1,0 +1,24 @@
+{
+  "source": "hf-open-asr-leaderboard-longform",
+  "modality": "speech-to-text",
+  "metric": "Open ASR Leaderboard — English long-form (earnings21/22, tedlium, coraal) average Word Error Rate %",
+  "label": "Open ASR Leaderboard (long-form)",
+  "url": "https://raw.githubusercontent.com/huggingface/open_asr_leaderboard/main/scripts/data/en_longform.csv",
+  "capturedAt": "2026-09-21",
+  "provenance": "captured",
+  "lowerIsBetter": true,
+  "note": "Read directly from the Open ASR Leaderboard's own official GitHub repo (huggingface/open_asr_leaderboard).",
+  "models": {
+    "elevenlabs-scribe-v1": 5.896666667,
+    "cohere-transcribe-03-2026": 9.733125,
+    "parakeet-tdt-0.6b-v3": 10.72,
+    "whisper-large-v3-turbo": 11.01,
+    "parakeet-tdt-0.6b-v2": 11.1775,
+    "canary-qwen-2.5b": 11.2025,
+    "whisper-large-v3": 11.2275,
+    "assemblyai-universal-3-pro": 8.34,
+    "speechmatics-enhanced": 8.8,
+    "chirp-3": 9.62,
+    "parakeet-ctc-1.1b": 12.935
+  }
+}

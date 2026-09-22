@@ -1,0 +1,22 @@
+{
+  "source": "mteb-eng-v2-retrieval-technical-reports",
+  "modality": "embeddings",
+  "metric": "MTEB(eng, v2) Retrieval nDCG@10 sub-score, as published in each model's own technical report / paper comparison table",
+  "label": "MTEB English v2 — Retrieval",
+  "url": "https://arxiv.org/abs/2508.21632",
+  "capturedAt": "2026-09-21",
+  "provenance": "captured",
+  "lowerIsBetter": false,
+  "note": "huggingface.co (the live MTEB Spaces leaderboard) was unreachable from the research sandbox. These figures were cross-referenced across the QZhou-Embedding (arXiv 2508.21632), Gemini Embedding (arXiv 2503.07891), Qwen3-Embedding (arXiv 2506.05176) and LGAI-Embedding-Preview (arXiv 2506.07438) technical reports, each of which publishes a shared MTEB(eng,v2) Retrieval comparison table; overlapping figures (gemini-embedding-001, NV-Embed-v2) matched within noise across two independent papers.",
+  "models": {
+    "qwen3-embedding-8b": 69.44,
+    "qwen3-embedding-4b": 68.46,
+    "qzhou-embedding": 67.12,
+    "lgai-embedding-preview": 66.18,
+    "gemini-embedding-001": 64.35,
+    "nv-embed-v2": 62.84,
+    "text-embedding-005-google-gecko": 58.8,
+    "gte-qwen2-7b-instruct": 58.09,
+    "text-embedding-3-large-openai": 55.44
+  }
+}
