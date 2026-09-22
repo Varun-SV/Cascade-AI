@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
-import '@testing-library/jest-dom';
+import '@testing-library/jest-dom/vitest';
 import ContinueModal from './ContinueModal.js';
 import { createHandoff, fetchHandoff, importConversation } from '../lib/api.js';
 

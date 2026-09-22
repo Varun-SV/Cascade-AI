@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import '@testing-library/jest-dom';
+import '@testing-library/jest-dom/vitest';
 import Message from './Message.js';
 import { fetchPendingMedia, saveFile } from '../lib/api.js';
 import { _resetPendingMediaForTests } from '../lib/pendingMedia.js';
