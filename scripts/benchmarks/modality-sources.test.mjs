@@ -54,6 +54,37 @@ describe('validateModalitySource', () => {
     expect(Object.keys(out.models).sort()).toEqual(['alsoGood', 'good']);
   });
 
+  // `!!"false"` is true, and so is `!!"0"`. A flag that flips turns the whole
+  // source upside down — every model's rank, not one cell — and it does so
+  // while passing every other check.
+  describe('the ranking direction', () => {
+    it('accepts a real boolean, either way', () => {
+      expect(validateModalitySource({ ...source({ a: 1 }), lowerIsBetter: true }).lowerIsBetter).toBe(true);
+      expect(validateModalitySource({ ...source({ a: 1 }), lowerIsBetter: false }).lowerIsBetter).toBe(false);
+    });
+
+    it('defaults to higher-is-better when the flag is absent', () => {
+      expect(validateModalitySource(source({ a: 1 })).lowerIsBetter).toBe(false);
+    });
+
+    it.each([
+      ['the string "false"', 'false'],
+      ['the string "true"', 'true'],
+      ['the string "0"', '0'],
+      ['a number', 1],
+      ['null', null],
+      ['an object', {}],
+    ])('refuses %s rather than guessing which direction it meant', (_label, value) => {
+      expect(validateModalitySource({ ...source({ a: 1, b: 2 }), lowerIsBetter: value })).toBeNull();
+    });
+
+    it('says why it skipped the source, since losing one silently looks like a quiet week', () => {
+      validateModalitySource({ ...source({ a: 1 }), lowerIsBetter: 'false' });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('lowerIsBetter'));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('invert'));
+    });
+  });
+
   it('skips a file with no usable rows at all rather than emitting an empty source', () => {
     expect(validateModalitySource(source({ a: null, b: '' }))).toBeNull();
   });

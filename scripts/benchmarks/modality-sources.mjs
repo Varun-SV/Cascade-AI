@@ -74,7 +74,26 @@ export function validateModalitySource(raw, filename = '<inline>') {
     console.warn(`modality source ${raw.source}: no valid model rows — skipping.`);
     return null;
   }
-  return { ...raw, modality: raw.modality.trim(), lowerIsBetter: !!raw.lowerIsBetter, models };
+  // An ACTUAL boolean, or absent. `!!raw.lowerIsBetter` turned the string
+  // "false" — the single likeliest way for a hand-edited or
+  // machine-serialized JSON file to get this wrong — into `true`, silently
+  // reversing the ranking direction for every model in the source. ("0" too.)
+  // And because these files feed the committed percentile snapshot, one
+  // flipped flag inverts every score the source produces while passing
+  // validation cleanly.
+  //
+  // Skipped rather than defaulted. A file that says "false" meant something,
+  // and guessing which direction it meant is how the whole source ends up
+  // backwards; refusing it loses one source for one run, which is recoverable.
+  if (raw.lowerIsBetter !== undefined && typeof raw.lowerIsBetter !== 'boolean') {
+    console.warn(
+      `modality source ${raw.source}: "lowerIsBetter" is ${typeof raw.lowerIsBetter} `
+      + `(${JSON.stringify(raw.lowerIsBetter)}), not a boolean — skipping the whole source, `
+      + 'because guessing the ranking direction would invert every score in it.',
+    );
+    return null;
+  }
+  return { ...raw, modality: raw.modality.trim(), lowerIsBetter: raw.lowerIsBetter === true, models };
 }
 
 /** Load and validate every modality-tagged source JSON in `dir` (default: sources/). */

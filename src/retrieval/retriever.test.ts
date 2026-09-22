@@ -137,6 +137,80 @@ describe('Retriever + SqliteVectorStore', () => {
     ).toBe(0);
   });
 
+  // The rollback added for the partial-index bug is unscoped — `deleteSource`
+  // is the only removal the store offers. Two runs attaching the same document
+  // at once both pass `isIndexed`, both write, and a failure in one then wipes
+  // the other's rows; the survivor finishes its remaining slices and leaves
+  // `hasSource` TRUE over an index missing everything the loser wrote. Worse
+  // than the bug it was fixing, because it looks complete.
+  it('serializes two attempts on one source, so a failure cannot eat the other', async () => {
+    const db = new Database(':memory:');
+    const store = new SqliteVectorStore(db);
+    const chunks = Array.from({ length: 1000 }, (_, i) => ({ text: `chunk ${i}`, ord: i }));
+
+    let failerCalls = 0;
+    const failing: Embedder = {
+      model: 'fake-embed', dims: 64,
+      async embed(texts: string[]) {
+        failerCalls++;
+        await new Promise((r) => setTimeout(r, 0));
+        if (failerCalls > 1) throw new Error('provider went away');
+        return texts.map(() => new Array(64).fill(0.01));
+      },
+    };
+    const working: Embedder = {
+      model: 'fake-embed', dims: 64,
+      async embed(texts: string[]) {
+        await new Promise((r) => setTimeout(r, 0));
+        return texts.map(() => new Array(64).fill(0.02));
+      },
+    };
+
+    // Both start against the same unindexed source, at the same time.
+    const a = new Retriever(failing, store).index(NS, 'shared', chunks);
+    const b = new Retriever(working, store).index(NS, 'shared', chunks);
+    const [ra, rb] = await Promise.allSettled([a, b]);
+
+    // One of them failed; whichever did must not have left the other holding a
+    // half-index that reports itself complete.
+    const outcomes = [ra.status, rb.status].sort();
+    expect(outcomes, 'one attempt failed and one did not').toEqual(['fulfilled', 'rejected']);
+
+    const rows = store.lexicalSearch('chunk', { namespace: NS, k: 10_000 }).length;
+    if (store.hasSource(NS, 'shared', 'fake-embed')) {
+      expect(rows, 'a source that reports itself indexed holds every chunk').toBe(1000);
+    } else {
+      expect(rows, 'and one that does not holds nothing to be mistaken for the whole').toBe(0);
+    }
+  });
+
+  it('does not embed twice when two runs attach the same document at once', async () => {
+    // The lock is also a cost fix: the second attempt finds the work done and
+    // returns without asking the provider for anything.
+    const db = new Database(':memory:');
+    const store = new SqliteVectorStore(db);
+    let embedCalls = 0;
+    const counting: Embedder = {
+      model: 'fake-embed', dims: 64,
+      async embed(texts: string[]) {
+        embedCalls++;
+        await new Promise((r) => setTimeout(r, 0));
+        return texts.map(() => new Array(64).fill(0.01));
+      },
+    };
+    const chunks = Array.from({ length: 600 }, (_, i) => ({ text: `chunk ${i}`, ord: i }));
+
+    const [first, second] = await Promise.all([
+      new Retriever(counting, store).index(NS, 'once', chunks),
+      new Retriever(counting, store).index(NS, 'once', chunks),
+    ]);
+
+    expect(first + second, 'indexed once between them').toBe(600);
+    expect(Math.min(first, second), 'the loser did no work at all').toBe(0);
+    // 600 chunks is two slices; a second attempt would have made it four.
+    expect(embedCalls, 'and the provider was asked once per slice, not twice').toBe(2);
+  });
+
   it('skips re-embedding an already-indexed source', async () => {
     const r = build();
     const first = await r.index(NS, 'doc1', [{ text: 'hello world', ord: 0 }]);

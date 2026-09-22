@@ -52,6 +52,36 @@ export function reciprocalRankFusion(lists: ScoredChunk[][], rrfK = 60): ScoredC
  */
 const INDEX_SLICE = 512;
 
+/**
+ * One indexing attempt per source at a time.
+ *
+ * Two runs can attach the same not-yet-indexed document at once — the same
+ * user in two tabs, or a Pro account with concurrent runs. Both pass
+ * `isIndexed`, both write slices, and then a failure in one triggers a
+ * rollback that deletes rows belonging to BOTH: `deleteSource` is the only
+ * removal the store offers and it is unscoped. The survivor then writes its
+ * remaining slices and finishes, leaving `hasSource` true over an index that
+ * is permanently missing whatever the loser had already written. Worse than
+ * the partial-index bug the rollback was added to fix, because it looks
+ * complete.
+ *
+ * Deleting only "our" rows would not help: both attempts chunk the same
+ * document, so they write the same ids, and by rollback time those rows are
+ * the other writer's content under our keys.
+ *
+ * So attempts are serialized per source instead. The second caller waits, then
+ * re-checks — and normally finds the work already done and returns without
+ * embedding anything, which also stops the duplicate spend that racing
+ * attempts were quietly paying for.
+ *
+ * Per PROCESS. Two server processes over one database would still race, and
+ * closing that needs staging rows and an atomic publish rather than a lock.
+ * The cloud server is a single process against its own SQLite file today, so
+ * this is the bound that matches the deployment; the note is here so the next
+ * person to add a second process knows what they inherit.
+ */
+const indexLocks = new Map<string, Promise<unknown>>();
+
 export class Retriever {
   constructor(
     private readonly embedder: Embedder,
@@ -81,7 +111,41 @@ export class Retriever {
     sourceId: string,
     chunks: Array<{ text: string; ord: number }>,
   ): Promise<number> {
-    if (chunks.length === 0 || this.isIndexed(namespace, sourceId)) return 0;
+    if (chunks.length === 0) return 0;
+
+    // Wait out any attempt already running on this source, then re-check. The
+    // loop matters: several callers can be waiting on the same promise, and
+    // whichever resumes first takes the lock — the others must see it and wait
+    // again rather than barge in.
+    const lockKey = `${this.embedder.model}\u0000${namespace}\u0000${sourceId}`;
+    for (;;) {
+      const inFlight = indexLocks.get(lockKey);
+      if (!inFlight) break;
+      // A failed attempt is not our failure; it just means the source is still
+      // unindexed and this attempt may try.
+      try { await inFlight; } catch { /* fall through and re-check */ }
+    }
+    if (this.isIndexed(namespace, sourceId)) return 0;
+
+    // No await between the check above and the claim below, so the claim is
+    // atomic with respect to every other caller.
+    let release!: () => void;
+    const claim = new Promise<void>((resolve) => { release = resolve; });
+    indexLocks.set(lockKey, claim);
+    try {
+      return await this.indexSlices(namespace, sourceId, chunks);
+    } finally {
+      indexLocks.delete(lockKey);
+      release();
+    }
+  }
+
+  /** The slice-and-write loop, run under the per-source lock above. */
+  private async indexSlices(
+    namespace: string,
+    sourceId: string,
+    chunks: Array<{ text: string; ord: number }>,
+  ): Promise<number> {
 
     // Embedded and written in slices, so peak memory is one slice rather than
     // the whole corpus.
