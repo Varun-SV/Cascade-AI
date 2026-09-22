@@ -10,7 +10,7 @@
 // LanceDB) later without touching callers.
 
 import type Database from 'better-sqlite3';
-import type { Chunk, ScoredChunk, SearchOptions, VectorStore } from './types.js';
+import type { Chunk, DenseSearchOptions, ScoredChunk, SearchOptions, VectorStore } from './types.js';
 
 interface ChunkRow {
   chunk_id: string;
@@ -130,16 +130,21 @@ export class SqliteVectorStore implements VectorStore {
     return rows.map((r, i) => ({ id: r.chunk_id, sourceId: r.source_id, ord: i, text: r.text, score: -r.score }));
   }
 
-  denseSearch(queryVector: number[], opts: SearchOptions): ScoredChunk[] {
+  denseSearch(queryVector: number[], opts: DenseSearchOptions): ScoredChunk[] {
     const q = normalize(queryVector);
     const k = opts.k ?? 10;
     const srcFilter = this.sourceFilter(opts.sourceIds, 'kb_chunks');
+    // Scoped to the model that wrote the vectors. Without this a query
+    // embedded by one model scores rows another model has already replaced —
+    // different dimensionality, silently truncated by the cosine loop below,
+    // and a plausible number out the other end. The lexical stage needs no
+    // such filter: it reads TEXT, which is the same whoever embedded it.
     const rows = this.db
       .prepare(
         `SELECT chunk_id, source_id, ord, text, vector FROM kb_chunks
-         WHERE namespace = ? ${srcFilter.clause}`,
+         WHERE namespace = ? AND embed_model = ? ${srcFilter.clause}`,
       )
-      .all(opts.namespace, ...srcFilter.params) as ChunkRow[];
+      .all(opts.namespace, opts.embedModel, ...srcFilter.params) as ChunkRow[];
     const scored = rows.map((r) => {
       const v = fromBlob(r.vector);
       let dot = 0;

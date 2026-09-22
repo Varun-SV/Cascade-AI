@@ -942,15 +942,29 @@ const RAG_TOP_K = 8;
  * to the cross-provider minimum, which is the outcome pinning exists to avoid.
  */
 function pinnedModelWindow(pinned: string, providers: ProviderConfig[]): number | undefined {
-  const id = pinned.includes(':') ? pinned.split(':').slice(1).join(':') : pinned;
-  const direct = MODELS[id]?.contextWindow;
-  if (direct) return direct;
-  for (const p of providers) {
-    if (p.type !== 'azure' || p.deploymentName?.trim() !== id) continue;
-    const cw = azureModelForDeployment(p)?.contextWindow;
-    if (cw) return cw;
+  const sep = pinned.indexOf(':');
+  const providerType = sep > 0 ? pinned.slice(0, sep) : undefined;
+  const id = sep > 0 ? pinned.slice(sep + 1) : pinned;
+
+  // The PROVIDER first, the catalog second. An Azure deployment is named by
+  // whoever created it, so a deployment called `gpt-4.1` may be configured with
+  // any base model at all — and consulting the catalog first handed that
+  // deployment gpt-4.1's 1,047,576-token budget when the thing behind it was a
+  // 128k gpt-4o-mini. The run then finds out by failing on the provider's own
+  // limit. The pin names which provider it means; that provider is the only
+  // thing that knows what its deployment actually is.
+  //
+  // An unqualified pin checks Azure too, since a configured deployment with
+  // exactly that name is a better answer than a catalog entry that merely
+  // shares its id.
+  if (!providerType || providerType === 'azure') {
+    for (const p of providers) {
+      if (p.type !== 'azure' || p.deploymentName?.trim() !== id) continue;
+      const cw = azureModelForDeployment(p)?.contextWindow;
+      if (cw) return cw;
+    }
   }
-  return undefined;
+  return MODELS[id]?.contextWindow;
 }
 
 /**
@@ -1109,6 +1123,17 @@ export async function resolveDocuments(
   userId: string,
   conversationId: string,
   socket: RunSocket,
+  /**
+   * The run's abort signal (client "Stop", or socket disconnect).
+   *
+   * Indexing a newly attached document is the longest uninterruptible stretch
+   * in a run: near the 25M-character ceiling it is ~12,500 chunks and well over
+   * a hundred paid embedding requests. Without the signal, Stop bought none of
+   * them back — the run kept embedding to completion while the UI sat unable to
+   * finish a run the user had already cancelled. The signal reached
+   * `cascade.run()` and nothing before it.
+   */
+  signal?: AbortSignal,
 ): Promise<RunDocument[]> {
 
   // Adaptive decision: none / CAG (inject in full) / RAG (retrieve passages).
@@ -1176,10 +1201,10 @@ export async function resolveDocuments(
       // while holding the lock, which is the only place the answer is stable.
       // The chunking is passed as a thunk so the already-indexed case, which
       // is the common one, still does not re-chunk the document.
-      await retriever.index(userId, d.sourceId, () => chunkText(d.text));
+      await retriever.index(userId, d.sourceId, () => chunkText(d.text), { signal });
     }
     const hits = await retriever.search(payload.prompt, {
-      namespace: userId, sourceIds: docSources.map((d) => d.sourceId), k: RAG_TOP_K, candidates: 40,
+      namespace: userId, sourceIds: docSources.map((d) => d.sourceId), k: RAG_TOP_K, candidates: 40, signal,
     });
     // The index answered, with nothing. We are past the point where the corpus
     // was judged too large, so the whole of it is not an option.
@@ -1202,6 +1227,11 @@ export async function resolveDocuments(
       text: passages.join('\n\n[…]\n\n'),
     }));
   } catch {
+    // A cancelled run is not a degraded one. Returning documents here would
+    // announce a retrieval outcome for a turn the user has already stopped;
+    // returning none lets the run reach `cascade.run()`, which sees the same
+    // signal and settles through the ordinary cancellation path.
+    if (signal?.aborted) return [];
     // Embedding outage, indexing failure, a vector store that will not answer.
     // Falling back to the full corpus here was the same unbounded injection
     // wearing a different hat.
@@ -1638,7 +1668,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // by attachment + embed model, so re-runs are free) and inject only the most
   // relevant passages for this prompt. A fast answer skips docs entirely.
   const documents: RunDocument[] = await resolveDocuments(
-    docSources, payload, store, userId, conversation.id, socket,
+    docSources, payload, store, userId, conversation.id, socket, signal,
   );
 
   // Persist the user's ORIGINAL text (not the skill/memory-augmented prompt) as

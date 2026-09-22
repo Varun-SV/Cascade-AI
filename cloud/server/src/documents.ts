@@ -85,38 +85,53 @@ const LOCAL_FILE_SIGNATURE = 0x04034b50;
 const inflateRaw = promisify(zlib.inflateRaw);
 
 /**
- * How many uploads may be inflating at once, process-wide.
+ * How many uploads may be EXTRACTING at once, process-wide.
  *
  * A per-request cap bounds one request. It does not bound the server: moving
  * the work to libuv's threadpool let four run in parallel, so the 128 MB
  * ceiling became ~512 MB of simultaneous peak — enough to kill a modest box
  * that the per-request bound had just been written to protect. Fixing latency
- * created a concurrency problem, which is the shape these two rounds keep
- * taking: the guard moves and the exposure moves with it.
+ * created a concurrency problem, which is the shape these rounds keep taking:
+ * the guard moves and the exposure moves with it.
  *
  * Two, so the worst case is ~256 MB rather than ~512 MB, and the threadpool
  * keeps headroom for the filesystem and DNS work everything else depends on.
  * Uploads queue instead of competing; an upload is not a latency-critical
  * path, and a queued one is strictly better than a dead process.
+ *
+ * Held across the whole EXTRACTION, not just the preflight. The bounded
+ * inflate that vets the archive is the CHEAP half — mammoth then decompresses
+ * the same file again through JSZip, and that is where the 128 MB is actually
+ * allocated. A slot released between the two bounded only the duplicate check
+ * and left every concurrent upload free to materialize its own copy, which is
+ * the process-wide risk this constant exists to remove, restored in full.
+ *
+ * PDFs take a slot too. They have no equivalent preflight — pdf-parse's
+ * allocation is bounded only by MAX_DOCUMENT_BYTES on the way in and by
+ * EXPANSION_CEILING_CHARS after the fact — so there the slot bounds how many
+ * may be allocating at once rather than how large each may get. A smaller
+ * guarantee, and the one on offer until extraction itself is bounded; leaving
+ * PDFs out would make the bound decorative, since two DOCX uploads plus any
+ * number of PDFs is the same dead process.
  */
-export const MAX_CONCURRENT_INFLATIONS = 2;
+export const MAX_CONCURRENT_EXTRACTIONS = 2;
 
-let inflationsInFlight = 0;
-const inflationQueue: Array<() => void> = [];
+let extractionsInFlight = 0;
+const extractionQueue: Array<() => void> = [];
 
 /** Wait for a slot, run, and hand the slot to whoever is next. */
-export async function withInflationSlot<T>(fn: () => Promise<T>): Promise<T> {
-  if (inflationsInFlight >= MAX_CONCURRENT_INFLATIONS) {
-    await new Promise<void>((resolve) => inflationQueue.push(resolve));
+export async function withExtractionSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (extractionsInFlight >= MAX_CONCURRENT_EXTRACTIONS) {
+    await new Promise<void>((resolve) => extractionQueue.push(resolve));
   }
-  inflationsInFlight++;
+  extractionsInFlight++;
   try {
     return await fn();
   } finally {
-    inflationsInFlight--;
+    extractionsInFlight--;
     // Hand the slot on rather than letting every waiter wake and re-check,
     // so the bound holds exactly instead of approximately.
-    inflationQueue.shift()?.();
+    extractionQueue.shift()?.();
   }
 }
 /** A size of 0xFFFFFFFF means "see the Zip64 extra field" — i.e. >= 4 GB. */
@@ -400,11 +415,16 @@ export async function parseDocument(input: {
   const { bytes, mime } = input;
 
   if (PDF_MIME_TYPES.has(mime)) {
-    // Import the internal lib directly: pdf-parse's index.js runs test-file
-    // debug code when it thinks it's the entry module, which throws in a server.
-    const pdfParse = require('pdf-parse/lib/pdf-parse.js') as (b: Buffer) => Promise<{ text: string }>;
-    const parsed = await pdfParse(bytes);
-    return normalizeText(parsed.text ?? '');
+    // Under a slot for the same reason DOCX is: this allocates the whole
+    // extracted text, and N of them at once is how the process dies. It bounds
+    // how many extractions run together, not how large any one may get.
+    return await withExtractionSlot(async () => {
+      // Import the internal lib directly: pdf-parse's index.js runs test-file
+      // debug code when it thinks it's the entry module, which throws in a server.
+      const pdfParse = require('pdf-parse/lib/pdf-parse.js') as (b: Buffer) => Promise<{ text: string }>;
+      const parsed = await pdfParse(bytes);
+      return normalizeText(parsed.text ?? '');
+    });
   }
 
   if (DOCX_MIME_TYPES.has(mime)) {
@@ -415,11 +435,18 @@ export async function parseDocument(input: {
     // size the archive claims for itself. Fails closed on a container it
     // cannot walk, so a prepended byte or a miscounted directory refuses the
     // upload instead of waving it through. Bounded process-wide as well as
-    // per-request: see MAX_CONCURRENT_INFLATIONS.
-    await withInflationSlot(() => assertInflatesWithin(bytes, MAX_DECOMPRESSED_BYTES));
-    const mammoth = require('mammoth') as { extractRawText(o: { buffer: Buffer }): Promise<{ value: string }> };
-    const parsed = await mammoth.extractRawText({ buffer: bytes });
-    return normalizeText(parsed.value ?? '');
+    // per-request: see MAX_CONCURRENT_EXTRACTIONS.
+    //
+    // The slot spans mammoth, not just the preflight. Releasing it after the
+    // bounded inflate bounded the CHEAP half and left the expensive one —
+    // mammoth decompresses the same archive again through JSZip — running
+    // unbounded alongside every other upload that had passed its own check.
+    return await withExtractionSlot(async () => {
+      await assertInflatesWithin(bytes, MAX_DECOMPRESSED_BYTES);
+      const mammoth = require('mammoth') as { extractRawText(o: { buffer: Buffer }): Promise<{ value: string }> };
+      const parsed = await mammoth.extractRawText({ buffer: bytes });
+      return normalizeText(parsed.value ?? '');
+    });
   }
 
   if (PLAINTEXT_MIME_TYPES.has(mime)) {

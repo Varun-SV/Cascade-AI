@@ -1,11 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import {
-  DocumentTooLargeError, EXPANSION_CEILING_CHARS, MAX_CONCURRENT_INFLATIONS,
+  DocumentTooLargeError, EXPANSION_CEILING_CHARS, MAX_CONCURRENT_EXTRACTIONS,
   MAX_DECOMPRESSED_BYTES, MAX_DOCUMENT_BYTES,
   declaredUncompressedBytes, isDocumentMime, resolveDocumentMime, parseDocument,
-  withInflationSlot,
+  withExtractionSlot,
 } from './documents.js';
 
 import {
@@ -286,12 +287,12 @@ describe('extraction expansion ceiling', () => {
 // A per-request cap bounds ONE request. Moving inflation to the threadpool let
 // several run at once, so the 128 MB ceiling became ~512 MB of simultaneous
 // peak — the latency fix handing back the memory problem it was built on.
-describe('the process-wide inflation bound', () => {
+describe('the process-wide extraction bound', () => {
   it('never runs more than the limit at once, however many arrive together', async () => {
     let live = 0;
     let peak = 0;
     const release: Array<() => void> = [];
-    const task = () => withInflationSlot(async () => {
+    const task = () => withExtractionSlot(async () => {
       live++;
       peak = Math.max(peak, live);
       await new Promise<void>((resolve) => release.push(resolve));
@@ -303,7 +304,7 @@ describe('the process-wide inflation bound', () => {
     const all = Promise.all(Array.from({ length: 10 }, task));
     // Let the admitted ones reach their await.
     await new Promise((r) => setImmediate(r));
-    expect(live, 'only a slotful is admitted').toBe(MAX_CONCURRENT_INFLATIONS);
+    expect(live, 'only a slotful is admitted').toBe(MAX_CONCURRENT_EXTRACTIONS);
 
     // Drain: each release lets exactly one more in.
     while (release.length > 0) {
@@ -312,17 +313,95 @@ describe('the process-wide inflation bound', () => {
     }
     await all;
 
-    expect(peak, 'and the peak never exceeded the bound').toBeLessThanOrEqual(MAX_CONCURRENT_INFLATIONS);
+    expect(peak, 'and the peak never exceeded the bound').toBeLessThanOrEqual(MAX_CONCURRENT_EXTRACTIONS);
     expect(live, 'every slot is handed back').toBe(0);
+  });
+
+  // The slot used to be released the moment the bounded preflight returned,
+  // which bounded the CHEAP half: mammoth then decompresses the same archive
+  // again through JSZip, outside any slot, and that is where the 128 MB is
+  // actually allocated. Four uploads that had each passed their own preflight
+  // could therefore be inside mammoth together.
+  //
+  // Observed by patching the shared mammoth module object — `parseDocument`
+  // looks `extractRawText` up on it at call time — and counting how many calls
+  // are in flight at once.
+  it('holds the slot through the extractor, not just the preflight', async () => {
+    const mammoth = createRequire(import.meta.url)('mammoth') as {
+      extractRawText: (o: { buffer: Buffer }) => Promise<{ value: string }>;
+    };
+    const original = mammoth.extractRawText;
+    let live = 0;
+    let peak = 0;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    mammoth.extractRawText = async (o) => {
+      live++;
+      peak = Math.max(peak, live);
+      try {
+        await held;
+        return await original.call(mammoth, o);
+      } finally {
+        live--;
+      }
+    };
+    try {
+      const bytes = await expandingDocx({ runChars: 64, runs: 4 });
+      const uploads = Array.from({ length: 4 }, () =>
+        parseDocument({ bytes, mime: DOCX_MIME, filename: 'a.docx' }));
+      // Let everything that CAN reach the extractor reach it.
+      await vi.waitFor(() => expect(live).toBeGreaterThan(0));
+      await new Promise((r) => setTimeout(r, 25));
+
+      expect(peak, 'never more extractions in flight than there are slots')
+        .toBeLessThanOrEqual(MAX_CONCURRENT_EXTRACTIONS);
+
+      release();
+      await Promise.all(uploads);
+      expect(peak, 'and that held for the whole queue, not just the first pair')
+        .toBeLessThanOrEqual(MAX_CONCURRENT_EXTRACTIONS);
+    } finally {
+      mammoth.extractRawText = original;
+      release();
+    }
+  }, 30_000);
+
+  // PDFs were outside the bound entirely, which made it decorative: two DOCX
+  // uploads plus any number of PDFs is the same dead process. pdf-parse has no
+  // preflight to bound the size, so the slot bounds how many may be allocating
+  // at once — a smaller guarantee, and the one on offer until extraction itself
+  // is bounded.
+  it('puts PDF extraction under the same bound', async () => {
+    let releaseHolders!: () => void;
+    const held = new Promise<void>((resolve) => { releaseHolders = resolve; });
+    const holders = Array.from({ length: MAX_CONCURRENT_EXTRACTIONS }, () =>
+      withExtractionSlot(async () => { await held; }));
+    // Let both holders take their slots.
+    await new Promise((r) => setImmediate(r));
+
+    let done = false;
+    const pdf = parseDocument({ bytes: fixture('sample.pdf'), mime: 'application/pdf', filename: 'sample.pdf' })
+      .then((text) => { done = true; return text; });
+    try {
+      await new Promise((r) => setTimeout(r, 25));
+      expect(done, 'a PDF waits for a slot like everything else').toBe(false);
+    } finally {
+      // Released even when the assertion above fails, or the leaked slots
+      // would fail every later test in the file for the wrong reason.
+      releaseHolders();
+    }
+    await Promise.all(holders);
+    const text = await pdf;
+    expect(text.length, 'and still extracts once it has one').toBeGreaterThan(0);
   });
 
   it('hands the slot back when the work throws, rather than leaking it', async () => {
     // A slot lost on failure would shrink the pool one bomb at a time until
     // uploads stopped entirely — a denial of service built out of the guard.
-    for (let i = 0; i < MAX_CONCURRENT_INFLATIONS + 2; i++) {
-      await expect(withInflationSlot(async () => { throw new Error('boom'); })).rejects.toThrow('boom');
+    for (let i = 0; i < MAX_CONCURRENT_EXTRACTIONS + 2; i++) {
+      await expect(withExtractionSlot(async () => { throw new Error('boom'); })).rejects.toThrow('boom');
     }
     // Still admits work afterwards.
-    await expect(withInflationSlot(async () => 'ok')).resolves.toBe('ok');
+    await expect(withExtractionSlot(async () => 'ok')).resolves.toBe('ok');
   });
 });

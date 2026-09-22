@@ -356,11 +356,20 @@ describe('CloudStore', () => {
     expect(lex[0]!.id).toBe('u1:d1:0');
 
     // Dense finds the nearest vector.
-    const dense = vs.denseSearch([0.9, 0.1, 0], { namespace: 'u1', k: 1 });
+    const dense = vs.denseSearch([0.9, 0.1, 0], { namespace: 'u1', k: 1, embedModel: 'fake-model' });
     expect(dense[0]!.id).toBe('u1:d1:0');
 
     // Namespace isolation.
-    expect(vs.denseSearch([1, 0, 0], { namespace: 'other', k: 5 })).toHaveLength(0);
+    expect(vs.denseSearch([1, 0, 0], { namespace: 'other', k: 5, embedModel: 'fake-model' })).toHaveLength(0);
+
+    // Model isolation, for the same reason. These rows belong to 'fake-model';
+    // a query embedded by anything else must not be scored against them, or a
+    // 1,536-dimension query silently scores 768-dimension vectors over their
+    // shared prefix and returns a plausible number.
+    expect(
+      vs.denseSearch([1, 0, 0], { namespace: 'u1', k: 5, embedModel: 'other-model' }),
+      'another model sees none of them',
+    ).toHaveLength(0);
   });
 });
 

@@ -1234,3 +1234,48 @@ describe('documents another run is still indexing', () => {
     expect(notice?.mode, 'by the degraded door, which says so').toBe('degraded');
   });
 });
+
+// Indexing a newly attached document is the longest uninterruptible stretch in
+// a run: near the 25M-character ceiling it is ~12,500 chunks and well over a
+// hundred paid embedding requests. The run signal reached `cascade.run()` and
+// nothing before it, so Stop bought none of that back — the run kept embedding
+// to completion while the UI sat unable to finish a turn already cancelled.
+describe('documents when the run is stopped', () => {
+  const providers = [
+    { type: 'openai', apiKey: 'sk-test', baseUrl: 'http://127.0.0.1:1/v1' },
+  ] as ProviderConfig[];
+
+  it('indexes nothing and returns nothing once the run is cancelled', async () => {
+    const socket = new FakeSocket();
+    const controller = new AbortController();
+    controller.abort();
+
+    let embedded = false;
+    const store = {
+      getVectorStore: () => ({
+        upsert() { embedded = true; },
+        hasSource: () => false,
+        deleteSource() {},
+        lexicalSearch: (): ScoredChunk[] => [],
+        denseSearch: (): ScoredChunk[] => [],
+      }),
+    } as never;
+
+    const big = 'lorem ipsum dolor sit amet. '.repeat(75_000);
+    const out = await resolveDocuments(
+      [
+        { sourceId: 'a', filename: 'contract.pdf', text: big },
+        { sourceId: 'b', filename: 'appendix.pdf', text: big },
+      ],
+      parseChatRunPayload({ prompt: 'what does the contract say about termination?', providers }),
+      store, 'user-1', 'convo-1', socket as never, controller.signal,
+    );
+
+    expect(out, 'no documents for a turn the user stopped').toEqual([]);
+    expect(embedded, 'and nothing was embedded on the way out').toBe(false);
+    expect(
+      socket.events.find((e) => e.event === 'knowledge:retrieved'),
+      'no retrieval notice either — a cancelled run is not a degraded one',
+    ).toBeUndefined();
+  });
+});

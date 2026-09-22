@@ -22,6 +22,8 @@ export interface RetrieverSearchOptions {
   rrfK?: number;
   /** Rerank the fused candidates when a reranker is configured (default true). */
   rerank?: boolean;
+  /** Abort the query embedding when the run is cancelled. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -140,7 +142,9 @@ export class Retriever {
     namespace: string,
     sourceId: string,
     chunks: IndexChunks,
+    opts: { signal?: AbortSignal } = {},
   ): Promise<number> {
+    opts.signal?.throwIfAborted();
 
     // Wait out any attempt already running on this source, then re-check. The
     // loop matters: several callers can be waiting on the same promise, and
@@ -154,6 +158,9 @@ export class Retriever {
       // unindexed and this attempt may try.
       try { await inFlight; } catch { /* fall through and re-check */ }
     }
+    // The wait above can be long — a whole other document's indexing — so the
+    // caller may have given up in the meantime.
+    opts.signal?.throwIfAborted();
     if (this.isIndexed(namespace, sourceId)) return 0;
 
     // No await between the check above and the claim below, so the claim is
@@ -164,7 +171,7 @@ export class Retriever {
     try {
       const pieces = typeof chunks === 'function' ? chunks() : chunks;
       if (pieces.length === 0) return 0;
-      return await this.indexSlices(namespace, sourceId, pieces);
+      return await this.indexSlices(namespace, sourceId, pieces, opts.signal);
     } finally {
       indexLocks.delete(lockKey);
       release();
@@ -176,6 +183,7 @@ export class Retriever {
     namespace: string,
     sourceId: string,
     chunks: Array<{ text: string; ord: number }>,
+    signal?: AbortSignal,
   ): Promise<number> {
 
     // Embedded and written in slices, so peak memory is one slice rather than
@@ -204,8 +212,13 @@ export class Retriever {
     let indexed = 0;
     try {
       for (let i = 0; i < chunks.length; i += INDEX_SLICE) {
+        // Between slices as well as inside the embedder, so a cancelled run
+        // stops here and the rollback below takes the partial index with it —
+        // a half-written index that reports itself complete is exactly what
+        // the unwind exists to prevent, and a Stop must not create one.
+        signal?.throwIfAborted();
         const slice = chunks.slice(i, i + INDEX_SLICE);
-        const vectors = await this.embedder.embed(slice.map((c) => c.text));
+        const vectors = await this.embedder.embed(slice.map((c) => c.text), { signal });
         const records = slice.map((c, j) => ({
           chunk: { id: `${namespace}:${sourceId}:${c.ord}`, text: c.text, sourceId, ord: c.ord, meta: { namespace } },
           vector: vectors[j] ?? [],
@@ -224,16 +237,25 @@ export class Retriever {
 
   /** Hybrid search: lexical ∪ dense, fused with RRF, then optionally reranked. */
   async search(query: string, opts: RetrieverSearchOptions): Promise<ScoredChunk[]> {
+    opts.signal?.throwIfAborted();
     const candidates = opts.candidates ?? 30;
     const k = opts.k ?? 6;
     const base = { namespace: opts.namespace, k: candidates, sourceIds: opts.sourceIds };
     const lexical = this.store.lexicalSearch(query, base);
     let dense: ScoredChunk[] = [];
     try {
-      const [qvec] = await this.embedder.embed([query]);
-      if (qvec && qvec.length) dense = this.store.denseSearch(qvec, base);
+      const [qvec] = await this.embedder.embed([query], { signal: opts.signal });
+      // Named, so this query cannot score vectors another model has written
+      // over the rows underneath it. Serializing writers does not cover this:
+      // the writer's lock is released when `index()` returns, and the next
+      // model may begin replacing rows while this search is still running.
+      if (qvec && qvec.length) {
+        dense = this.store.denseSearch(qvec, { ...base, embedModel: this.embedder.model });
+      }
     } catch {
       // Embedding the query failed (provider hiccup) — degrade to lexical-only.
+      // An abort is not a hiccup: the caller asked to stop, so it propagates.
+      opts.signal?.throwIfAborted();
     }
     const fused = reciprocalRankFusion([lexical, dense], opts.rrfK ?? 60);
 

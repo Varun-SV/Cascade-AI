@@ -272,6 +272,136 @@ describe('Retriever + SqliteVectorStore', () => {
     expect(chunked, 'without re-chunking what it was never going to embed').toBe(1);
   });
 
+  it('names the model whose vectors it means when it searches', async () => {
+    // Serializing WRITERS does not cover this: the writer's lock is released
+    // when `index()` returns, so the next model may start replacing rows while
+    // this caller is still searching. The read has to carry the model too.
+    const db = new Database(':memory:');
+    const real = new SqliteVectorStore(db);
+    let askedFor: string | undefined;
+    const spying = {
+      upsert: real.upsert.bind(real),
+      hasSource: real.hasSource.bind(real),
+      deleteSource: real.deleteSource.bind(real),
+      lexicalSearch: real.lexicalSearch.bind(real),
+      denseSearch: (v: number[], o: { embedModel: string }) => {
+        askedFor = o.embedModel;
+        return [];
+      },
+    };
+    const r = new Retriever(new FakeEmbedder(), spying as never);
+    await r.index(NS, 'doc', [{ text: 'photosynthesis in green plants', ord: 0 }]);
+    await r.search('photosynthesis', { namespace: NS });
+    expect(askedFor, 'the search says which model embedded its query').toBe('fake-embed');
+  });
+
+  it('does not score a query against vectors a second model wrote over the rows', async () => {
+    // Chunk ids are `namespace:source:ord` with no model in them and `chunk_id`
+    // is the primary key, so a second model does not sit beside the first — it
+    // REPLACES it, slice by slice. A reader that does not filter by model then
+    // scores its own query against those rows, and because the cosine loop
+    // walks `Math.min(a.length, b.length)` it truncates to the shorter vector
+    // and returns a perfectly plausible number.
+    const db = new Database(':memory:');
+    const store = new SqliteVectorStore(db);
+    const text = 'photosynthesis in green plants';
+
+    const hosted = new FakeEmbedder();
+    await new Retriever(hosted, store).index(NS, 'doc', [{ text, ord: 0 }]);
+    expect(store.hasSource(NS, 'doc', 'fake-embed'), 'the first model owns the row').toBe(true);
+
+    // A local model, at a different dimensionality, indexes the same source.
+    const local: Embedder = {
+      model: 'other-embed', dims: 8,
+      async embed(texts: string[]) { return texts.map(() => new Array(8).fill(0.3)); },
+    };
+    await new Retriever(local, store).index(NS, 'doc', [{ text, ord: 0 }]);
+    expect(store.hasSource(NS, 'doc', 'fake-embed'), 'and then it does not').toBe(false);
+
+    const [qvec] = await hosted.embed([text]);
+    expect(
+      store.denseSearch(qvec!, { namespace: NS, k: 5, embedModel: 'fake-embed' }),
+      'the first model finds none of the second model\u2019s vectors',
+    ).toHaveLength(0);
+    expect(
+      store.denseSearch([...new Array(8).fill(0.3)], { namespace: NS, k: 5, embedModel: 'other-embed' }),
+      'while the model that wrote them still finds its own',
+    ).toHaveLength(1);
+  });
+
+  it('stops indexing when the run is cancelled, and leaves no partial index', async () => {
+    // Near the 25M-character ceiling a document is ~12,500 chunks and well over
+    // a hundred paid embedding requests. Stop used to buy none of them back.
+    const db = new Database(':memory:');
+    const store = new SqliteVectorStore(db);
+    const controller = new AbortController();
+    let embedCalls = 0;
+    const cancelling: Embedder = {
+      model: 'fake-embed', dims: 64,
+      async embed(texts: string[]) {
+        embedCalls++;
+        // The user presses Stop while the first slice is in flight.
+        controller.abort();
+        return texts.map(() => new Array(64).fill(0.01));
+      },
+    };
+    const chunks = Array.from({ length: 2048 }, (_, i) => ({ text: `chunk ${i}`, ord: i }));
+
+    await expect(
+      new Retriever(cancelling, store).index(NS, 'stopped', chunks, { signal: controller.signal }),
+    ).rejects.toThrow();
+
+    expect(embedCalls, 'it stopped at the next slice, not after all four').toBe(1);
+    expect(
+      store.hasSource(NS, 'stopped', 'fake-embed'),
+      'and the unwind took the partial index with it, so a retry still means something',
+    ).toBe(false);
+  });
+
+  it('gives up on a cancelled run instead of embedding after the wait', async () => {
+    // The wait for another attempt on the same source can be a whole other
+    // document's indexing, which is exactly long enough for the user to give
+    // up. Coming out of it and starting to embed anyway is the waste the
+    // signal exists to stop.
+    const db = new Database(':memory:');
+    const store = new SqliteVectorStore(db);
+    const chunks = [{ text: 'hello world', ord: 0 }];
+
+    let releaseWriter!: () => void;
+    const holding = new Promise<void>((resolve) => { releaseWriter = resolve; });
+    const writerEmbedder: Embedder = {
+      model: 'fake-embed', dims: 64,
+      async embed() { await holding; throw new Error('provider went away'); },
+    };
+    // Takes the lock synchronously, then stalls inside the embedder.
+    const writer = new Retriever(writerEmbedder, store).index(NS, 'shared', chunks)
+      .catch((e: unknown) => e);
+
+    const controller = new AbortController();
+    let embedCalls = 0;
+    const waiting: Embedder = {
+      model: 'fake-embed', dims: 64,
+      async embed(texts: string[]) { embedCalls++; return texts.map(() => new Array(64).fill(0.1)); },
+    };
+    // Queued behind the writer, not aborted yet.
+    let chunked = 0;
+    const lazily = () => { chunked++; return chunks; };
+    const second = new Retriever(waiting, store).index(NS, 'shared', lazily, { signal: controller.signal });
+
+    controller.abort();
+    releaseWriter();
+    await writer;
+
+    await expect(second, 'the queued attempt ends in the stop').rejects.toThrow();
+    expect(embedCalls, 'and the wait ended in a stop, not in an embed').toBe(0);
+    // The check has to be on THIS side of the wait. One taken only inside the
+    // slice loop still stops the embedding, but not before the document has
+    // been chunked — which near the ceiling is 25M characters of work for a
+    // run nobody is waiting on any more.
+    expect(chunked, 'not even chunking a document it was never going to embed').toBe(0);
+    expect(store.hasSource(NS, 'shared', 'fake-embed'), 'with nothing left behind by either').toBe(false);
+  });
+
   it('skips re-embedding an already-indexed source', async () => {
     const r = build();
     const first = await r.index(NS, 'doc1', [{ text: 'hello world', ord: 0 }]);

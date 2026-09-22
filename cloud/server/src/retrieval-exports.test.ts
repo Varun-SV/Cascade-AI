@@ -60,6 +60,21 @@ describe('vendored retrieval exports (Phase 2)', () => {
       ).toBe(1_047_576);
     });
 
+    it('resolves a provider-qualified pin by its provider, not by a catalog id it collides with', () => {
+      // A deployment is named by whoever created it, so `gpt-4.1` may be the
+      // NAME of a deployment configured as something else entirely. Consulting
+      // the catalog first handed that deployment gpt-4.1's 1,047,576-token
+      // budget when the thing behind it holds 128k — and the run finds out by
+      // failing on the provider's own limit.
+      const misleading: ProviderConfig = {
+        type: 'azure', deploymentName: 'gpt-4.1', model: 'gpt-4o-mini', apiKey: 'x', baseUrl: 'https://x.openai.azure.com',
+      };
+      expect(
+        runContextWindowTokens([misleading], { enabled: true, model: 'azure:gpt-4.1' }),
+        'the deployment behind the name is what the run will actually call',
+      ).toBe(128_000);
+    });
+
     it('stays conservative when the run is not a single pinned model', () => {
       // Without Fast Answer the router may reach any configured provider, so
       // the smallest window is the only one the corpus is safe against.
