@@ -4,7 +4,8 @@ import path from 'node:path';
 import fs from 'node:fs';
 import Database from 'better-sqlite3';
 import { glob } from 'glob';
-import type { EscalationDecision,
+import type { EscalationContext,
+  EscalationDecision,
   ApprovalRequest,
   ApprovalResponse,
   CascadeConfig,
@@ -580,7 +581,7 @@ export class Cascade extends EventEmitter {
   }
 
   private async requestEscalationDecision(
-    ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string },
+    ctx: EscalationContext,
     taskId: string,
     signal?: AbortSignal,
   ): Promise<EscalationDecision> {
@@ -670,6 +671,7 @@ export class Cascade extends EventEmitter {
           requestId,
           sectionId: ctx.sectionId,
           sectionTitle: ctx.sectionTitle,
+          ...(ctx.goal ? { goal: ctx.goal } : {}),
           issues: ctx.issues,
           summary: ctx.summary,
           timeoutMs: ESCALATION_DECISION_TIMEOUT_MS,
@@ -2410,7 +2412,9 @@ ${prompt}`
         });
       }
       
-      const result = await t1.execute(rootPrompt, options.images, undefined, options.signal);
+      // `taskId` — the same id `run:started` announced. See T1's `execute`:
+      // the hierarchy runs under the host's identity, not one of its own.
+      const result = await t1.execute(rootPrompt, taskId, options.images, undefined, options.signal);
       finalOutput = result.output;
       t2Results = result.t2Results;
     }

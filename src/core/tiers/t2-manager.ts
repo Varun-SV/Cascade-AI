@@ -15,6 +15,7 @@ import type {
   T2Result,
   T2ToT3Assignment,
   T3Result,
+  EscalationContext,
 } from '../../types.js';
 import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
@@ -89,7 +90,7 @@ export class T2Manager extends BaseTier {
    * that legitimately needed input just stopped there.
    */
   private escalationCallback?: (
-    ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string },
+    ctx: EscalationContext,
   ) => Promise<EscalationDecision>;
 
   /**
@@ -164,7 +165,7 @@ export class T2Manager extends BaseTier {
 
   /** Ask the user what to do when a section escalates. */
   setEscalationCallback(
-    cb: (ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string }) => Promise<EscalationDecision>,
+    cb: (ctx: EscalationContext) => Promise<EscalationDecision>,
   ): void {
     this.escalationCallback = cb;
   }
@@ -357,6 +358,12 @@ export class T2Manager extends BaseTier {
         const decision = await this.escalationCallback({
           sectionId: assignment.sectionId,
           sectionTitle: assignment.sectionTitle,
+          // What the section was ASKED to do. The prompt named the section and
+          // listed what went wrong, and a title like "Main Task" says neither
+          // what was wanted nor what "retry" would try again — so the person
+          // was being asked to choose between three outcomes with only the
+          // failure in front of them.
+          ...(assignment.description?.trim() ? { goal: assignment.description.trim() } : {}),
           issues,
           summary,
         });

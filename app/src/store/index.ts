@@ -211,6 +211,9 @@ export interface PendingEscalation {
   requestId?: string;
   sectionId: string;
   sectionTitle: string;
+  /** What this section was asked to do. A title alone ("Main Task") names the
+   *  work no better than its id does. Optional — an older server omits it. */
+  goal?: string;
   issues: string[];
   summary: string;
   timeoutMs: number;

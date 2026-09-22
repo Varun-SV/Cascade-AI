@@ -142,4 +142,63 @@ describe('EscalationModal', () => {
     expect(region, 'bounded and scrollable').not.toBeNull();
     expect(region?.className).toMatch(/max-h-/);
   });
+
+  // The prompt opened with a section TITLE and the failure, and nothing else.
+  // "Main Task" names the work no better than "Section 3" does, so the person
+  // was asked to choose between retrying, re-guiding and skipping without
+  // being told what any of the three would be doing.
+  it('says what the section was asked to do, not just what it is called', () => {
+    render(
+      <EscalationModal
+        requests={[parked({ goal: 'Log in and probe the chatbot for prompt leakage' })]}
+        onResolve={noop}
+        onDismiss={noop}
+        onExpire={noop}
+      />,
+    );
+    expect(screen.getByText(/what it was asked to do/i)).toBeInTheDocument();
+    expect(screen.getByText('Log in and probe the chatbot for prompt leakage')).toBeInTheDocument();
+  });
+
+  it('shows the work it already has, because that is what Skip keeps', () => {
+    // The server has always sent this and the web modal dropped it — so the
+    // one control that PRESERVES the partial output was offered without
+    // showing the person what they would be preserving.
+    render(
+      <EscalationModal
+        requests={[parked({ summary: 'Logged in; captured two responses.' })]}
+        onResolve={noop}
+        onDismiss={noop}
+        onExpire={noop}
+      />,
+    );
+    expect(screen.getByText('What it has so far')).toBeInTheDocument();
+    expect(screen.getByText('Logged in; captured two responses.')).toBeInTheDocument();
+  });
+
+  it('says what each choice does to the run', () => {
+    // Three bare verbs left the difference between them to be guessed — and
+    // the irreversible one (a retry replaces the partial work) read as the
+    // safest of the three.
+    render(<EscalationModal requests={[parked()]} onResolve={noop} onDismiss={noop} onExpire={noop} />);
+    expect(screen.getByRole('button', { name: /retry with guidance/i }))
+      .toHaveAccessibleName(/replaces the work above/i);
+    expect(screen.getByRole('button', { name: /retry as-is/i }))
+      .toHaveAccessibleName(/unchanged/i);
+    expect(screen.getByRole('button', { name: /skip this section/i }))
+      .toHaveAccessibleName(/keeps the work above/i);
+  });
+
+  it('omits a block it has nothing to put in, rather than showing an empty one', () => {
+    render(
+      <EscalationModal
+        requests={[parked({ goal: undefined, summary: '   ' })]}
+        onResolve={noop}
+        onDismiss={noop}
+        onExpire={noop}
+      />,
+    );
+    expect(screen.queryByText('What it was asked to do')).not.toBeInTheDocument();
+    expect(screen.queryByText('What it has so far')).not.toBeInTheDocument();
+  });
 });

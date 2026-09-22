@@ -395,3 +395,66 @@ describe('T1 planner prompt — file capability awareness', () => {
     expect(captured.prompt).not.toMatch(/NO file, shell, or code-execution tools/i);
   });
 });
+
+// T1 was the only tier that MINTED its own task id instead of adopting the
+// run's. Every id below it comes from that one, so a Complex run executed under
+// an identity the host had never been told about — while `Cascade.run`
+// announced a different id on `run:started`. Anything the host keys on that
+// announcement therefore addressed a run that did not exist: the remote browser
+// registers its live-view listener under the announced id and T3 asks for the
+// browser under this one, so a Complex run drove a real provider session no
+// client was ever shown. Simple and Standard runs were fine, because
+// `Cascade.run` hands its id straight to T2/T3 — the break needs a tier in
+// between.
+describe('T1Administrator runs under the id it is given', () => {
+  type Internals = {
+    taskId: string;
+    decomposeTask: (p: string, c?: string) => Promise<TaskPlan>;
+    dispatchT2Managers: (s: T1ToT2Assignment[]) => Promise<T2Result[]>;
+    reviewT2Outputs: (...a: unknown[]) => Promise<unknown>;
+    compileFinalOutput: (...a: unknown[]) => Promise<string>;
+  };
+
+  /** A T1 whose every LLM step is replaced, so only the identity is under test. */
+  function stubbed(): { admin: T1Administrator; seen: { dispatch?: string } } {
+    const router = { getModelForTier: () => null } as unknown as CascadeRouter;
+    const admin = new T1Administrator(router, {} as ToolRegistry, {} as CascadeConfig);
+    const inner = admin as unknown as Internals;
+    const seen: { dispatch?: string } = {};
+    inner.decomposeTask = async () => ({
+      complexity: 'Moderate', sections: [makeSection('s1')],
+    } as TaskPlan);
+    inner.dispatchT2Managers = async () => {
+      // Captured HERE because this is the moment that matters: the id T1 holds
+      // when it dispatches is the one that reaches T2, T3 and the browser.
+      seen.dispatch = inner.taskId;
+      return [{
+        sectionId: 's1', sectionTitle: 't', status: 'COMPLETED',
+        t3Results: [], sectionSummary: 'ok', issues: [],
+      } as T2Result];
+    };
+    inner.reviewT2Outputs = async () => ({ approved: true, reason: '', gaps: [] });
+    inner.compileFinalOutput = async () => 'done';
+    return { admin, seen };
+  }
+
+  it('adopts the run id for the work it dispatches, rather than minting one', async () => {
+    const { admin, seen } = stubbed();
+    const result = await admin.execute('do the thing', 'run-abc');
+
+    expect(seen.dispatch, 'the id T2/T3 — and the browser — will run under').toBe('run-abc');
+    expect(result.taskId, 'and the id it reports back').toBe('run-abc');
+  });
+
+  it('announces its plan under the run id, not a private one', async () => {
+    // The `plan` event is the first thing a host sees from T1, and it used to
+    // name an id nothing else in the system had heard of.
+    const { admin } = stubbed();
+    const planned: string[] = [];
+    admin.on('plan', (e: unknown) => planned.push((e as { taskId: string }).taskId));
+
+    await admin.execute('do the thing', 'run-xyz');
+
+    expect(planned, 'one plan, under the run id').toEqual(['run-xyz']);
+  });
+});

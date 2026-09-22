@@ -2,7 +2,6 @@
 //  Cascade AI — T1 Administrator
 // ─────────────────────────────────────────────
 
-import { randomUUID } from 'node:crypto';
 import { parseReviewResponse, reviewStatusLine, REVIEW_FORMAT_INSTRUCTIONS, type ReviewVerdict } from './review.js';
 import type {
   CascadeConfig,
@@ -15,6 +14,7 @@ import type {
   T1ToT2Assignment,
   T2Result,
   TaskComplexity,
+  EscalationContext,
 } from '../../types.js';
 import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
@@ -149,7 +149,7 @@ export class T1Administrator extends BaseTier {
   private store?: MemoryStore;
   private runBreaker?: RunBreaker;
   private escalationCallback?: (
-    ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string },
+    ctx: EscalationContext,
   ) => Promise<EscalationDecision>;
   private t2PeerBus: PeerBus = new PeerBus();
   private permissionEscalator?: PermissionEscalator;
@@ -169,7 +169,7 @@ export class T1Administrator extends BaseTier {
 
   /** Ask the user what to do when any section escalates. */
   setEscalationCallback(
-    cb: (ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string }) => Promise<EscalationDecision>,
+    cb: (ctx: EscalationContext) => Promise<EscalationDecision>,
   ): void {
     this.escalationCallback = cb;
   }
@@ -216,8 +216,28 @@ export class T1Administrator extends BaseTier {
     return this.decomposeTask(prompt);
   }
 
+  /**
+   * Run a task through the full T1 -> T2 -> T3 hierarchy.
+   *
+   * `taskId` is the RUN's id, given rather than minted — the parameter is
+   * second, and required, to match `T2Manager.execute` and `T3Worker.execute`.
+   *
+   * T1 used to mint its own here, and it was the only tier that did. Every id
+   * below it came from this one (see `runT2sWithDependencies`), so a Complex
+   * run executed under an identity the host had never heard of, while
+   * `Cascade.run` announced a different id on `run:started`. Anything the host
+   * keys on that announcement therefore addressed a run that did not exist:
+   * the remote browser registers its live-view listener under the announced id
+   * and T3 asks for the browser under this one, so a Complex run drove a real
+   * provider session that no client was ever told about — no panel, no Stop,
+   * no take-over, while the agent went on clicking. Simple and Standard runs
+   * were unaffected, because `Cascade.run` hands its id straight to T2/T3, and
+   * that is exactly why this survived: the path that breaks is the one where a
+   * tier sits in between.
+   */
   async execute(
     userPrompt: string,
+    taskId: string,
     images?: ImageAttachment[],
     systemContext?: string,
     signal?: AbortSignal,
@@ -228,7 +248,7 @@ export class T1Administrator extends BaseTier {
     complexity: TaskComplexity;
   }> {
     this.signal = signal;
-    this.taskId = randomUUID();
+    this.taskId = taskId;
     this.setLabel('Administrator');
     const m = this.router.getModelForTier('T1');
     if (m) this.setServingModel(`${m.provider}:${m.id}`);

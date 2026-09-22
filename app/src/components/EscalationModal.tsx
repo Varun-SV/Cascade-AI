@@ -82,12 +82,21 @@ export function EscalationModal({ socket }: { socket: Socket | null }) {
         </div>
         <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text)', marginBottom: 2 }}>{pending.sectionTitle}</div>
         <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 14, lineHeight: 1.5 }}>
-          A worker in this section couldn&apos;t decide something on its own. The run is paused here.
+          This part of the run has stopped and cannot finish without an answer from you.
         </div>
+
+        {pending.goal && (
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text-dim)', marginBottom: 5 }}>What it was asked to do</div>
+            <div style={{ background: 'var(--bg-base)', border: '1px solid var(--border)', borderRadius: 8, padding: '8px 11px', fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.45, whiteSpace: 'pre-wrap' }}>
+              {pending.goal}
+            </div>
+          </div>
+        )}
 
         {pending.issues.length > 0 && (
           <div style={{ marginBottom: 12 }}>
-            <div style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text-dim)', marginBottom: 5 }}>What it hit</div>
+            <div style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text-dim)', marginBottom: 5 }}>Where it stopped</div>
             <div style={{ background: 'var(--bg-base)', border: '1px solid var(--border)', borderRadius: 8, padding: '8px 11px', display: 'flex', flexDirection: 'column', gap: 4 }}>
               {pending.issues.slice(0, 6).map((issue, i) => (
                 <div key={i} style={{ fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.45 }}>· {issue}</div>
@@ -97,8 +106,11 @@ export function EscalationModal({ socket }: { socket: Socket | null }) {
         )}
 
         {pending.summary && (
-          <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginBottom: 12, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
-            {pending.summary}
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text-dim)', marginBottom: 5 }}>What it has so far</div>
+            <div style={{ maxHeight: 128, overflow: 'auto', fontSize: 11.5, color: 'var(--text-dim)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+              {pending.summary}
+            </div>
           </div>
         )}
 

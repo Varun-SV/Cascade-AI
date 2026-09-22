@@ -370,6 +370,39 @@ describe('T2Manager', () => {
       expect(result.userSkipped).toBe(true);
     });
 
+    it('tells the asker what the section was FOR, not just what went wrong', async () => {
+      // The prompt this reaches opened with a section title and the failure.
+      // "Main Task" names the work no better than its id does, so the person
+      // was choosing between retry, re-guide and skip with only the failure in
+      // front of them — and the goal is the one field that says what a retry
+      // would be retrying.
+      const router = {
+        generate: vi.fn(async (_tier, options) => {
+          const latest = options.messages[options.messages.length - 1];
+          const content = typeof latest?.content === 'string' ? latest.content : '';
+          if (content.startsWith('Self-test this output')) {
+            return makeResult('{"completeness":"fail","correctness":"fail","compliance":"fail","notes":"needs more"}');
+          }
+          return makeResult('draft output');
+        }),
+        getModelForTier: () => undefined,
+      } as unknown as CascadeRouter;
+
+      const assignment = makeAssignment();
+      assignment.t3Subtasks = [assignment.t3Subtasks[0]!];
+      assignment.t3Subtasks[0]!.dependsOn = [];
+      assignment.description = 'Log in and probe the chatbot for prompt leakage';
+
+      const manager = new T2Manager(router, makeToolRegistry(), 't1-root');
+      let asked: { goal?: string; summary?: string } | undefined;
+      manager.setEscalationCallback(async (ctx) => { asked = ctx; return { action: 'skip' }; });
+
+      await manager.execute(assignment, 'task-goal');
+
+      expect(asked?.goal, 'what the section was asked to do').toBe('Log in and probe the chatbot for prompt leakage');
+      expect(asked?.summary, 'and what it has to show for it').toBeTruthy();
+    });
+
     it('does NOT set userSkipped when the skip was automatic — nobody actually reviewed it', async () => {
       // Same escalating section as above, but the callback returns the shape
       // Cascade's own SDK produces when nobody is listening (autonomy: 'auto',

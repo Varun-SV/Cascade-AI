@@ -264,7 +264,19 @@ export interface EscalationRequest {
   requestId?: string;
   sectionId: string;
   sectionTitle: string;
+  /**
+   * What this section was asked to do.
+   *
+   * The prompt used to open with a section TITLE and nothing else — "Main
+   * Task" names the work no better than "Section 3" does — so the person was
+   * asked to choose between retrying, re-guiding and skipping without being
+   * told what any of those would be doing. Optional because an older server
+   * does not send it.
+   */
+  goal?: string;
   issues: string[];
+  /** What the section has produced so far: what "Skip" keeps, and what a
+   *  retry throws away. Shown, because it is half of the decision. */
   summary: string;
   timeoutMs: number;
   /** Client clock at arrival. The deadline is anchored here rather than to the
