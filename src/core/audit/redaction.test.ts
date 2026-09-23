@@ -164,6 +164,14 @@ describe('RedactionLayer', () => {
     expect(RedactionLayer.redactSecrets('-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg')).toBe('[REDACTED_PRIVATE_KEY]');
   });
 
+  it('redacts a private key cut off before its BEGIN line', () => {
+    // The tail of a long result can start inside a key.
+    expect(RedactionLayer.redactSecrets('MIIEpAIBAAKCAQEA\nq9Zx/+w=\n-----END RSA PRIVATE KEY-----\nafter'))
+      .toBe('[REDACTED_PRIVATE_KEY]\nafter');
+    expect(RedactionLayer.redactSecrets('config:\nMIIEpAIBAAKCAQEA\n-----END PRIVATE KEY-----'))
+      .toBe('config:\n[REDACTED_PRIVATE_KEY]');
+  });
+
   it('leaves ordinary words that look a little like tokens alone', () => {
     const prose = 'Use sk-learn-compatible-estimators with basic internationalization.';
     expect(RedactionLayer.redactSecrets(prose)).toBe(prose);

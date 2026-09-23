@@ -44,7 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answer now forbids that, including the correction and rewrite steps that
   used to run without the worker's rules. The worker's self-check now sees
   what each tool actually returned, so an output claiming a visit that the
-  browser refused fails the check. A revision made after that check has to
+  browser refused fails the check. It is shown the parts of each result that
+  the answer draws on, from anywhere the worker read, not just the start of
+  each one, so a correct answer taken from further down a long page is no
+  longer mistaken for an invented one. A revision made after that check has to
   pass it too, and a section summary is told which of its workers did not
   finish, so a half-done section no longer reads as complete.
 - **Secret redaction catches more, and no longer leaks part of what it
@@ -57,7 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names like `ANTHROPIC_API_KEY`, any value assigned to a password, secret,
   token or key however short (`DB_PASSWORD=hunter2`, `PGPASSWORD=…`), the
   keys a connection string names (`AccountKey`, `SharedAccessKey`,
-  `SECRET_KEY`), the signature on a signed URL, and the password in a
+  `SECRET_KEY`), a private key whose first line was cut off, the signature
+  on a signed URL, and the password in a
   connection URL (`postgres://user:…@host`). The
   self-check and the reflection critic, which can run on a different
   provider, get their evidence with credentials removed. The self-check

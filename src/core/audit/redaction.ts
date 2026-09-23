@@ -11,6 +11,9 @@ const SECRET_RULES: Rule[] = [
   // A private key, to its END line — or to the end of the text when that line
   // was cut off.
   { pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, replacement: '[REDACTED_PRIVATE_KEY]' },
+  // And one cut off before its BEGIN line — the tail of a long result — from
+  // the key's lines above its END line.
+  { pattern: /(?<=^|\n)(?:[A-Za-z0-9+/=]+\r?\n)*[A-Za-z0-9+/=]*-----END [A-Z ]*PRIVATE KEY-----/g, replacement: '[REDACTED_PRIVATE_KEY]' },
   // Tokens recognisable by their prefix, whatever labels them: OpenAI and
   // Anthropic (sk-, sk-ant-, sk-proj-), GitHub, Slack, Google, Stripe. An
   // `sk-` key has a digit somewhere; `sk-learn-compatible-estimators` does not.

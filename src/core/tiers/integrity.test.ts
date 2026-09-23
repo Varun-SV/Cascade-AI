@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import type { CascadeConfig, GenerateResult, T2ToT3Assignment, T2Result, ToolCall, ToolDefinition } from '../../types.js';
 import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
-import { ACTING_INTEGRITY_RULE, REPORTING_INTEGRITY_RULE, describeArgs, describeToolRecord, recordToolCall, toolReportedFailure } from './integrity.js';
+import { ACTING_INTEGRITY_RULE, REPORTING_INTEGRITY_RULE, appendToolRecord, describeArgs, describeToolRecord, recordToolCall, toolReportedFailure, type ToolRecordEntry } from './integrity.js';
 import { T3Worker, buildWorkerRules } from './t3-worker.js';
 import { T2Manager } from './t2-manager.js';
 import { T1Administrator, type TaskPlan } from './t1-administrator.js';
@@ -314,6 +314,87 @@ describe('describeToolRecord — what the worker actually did', () => {
     const entry = recordToolCall('file_read', `START ${'x'.repeat(1_000_000)}`);
     expect(entry.result.startsWith('START xxx')).toBe(true);
     expect(entry.result.length).toBeLessThanOrEqual(161);
+    expect(entry.evidence?.length, 'no more of it than the model was shown').toBeLessThanOrEqual(12_000);
+  });
+
+  describe('evidence for what the output says', () => {
+    const filler = (n: number) => 'Lorem ipsum dolor sit amet, consectetur adipiscing elit.\n'.repeat(n);
+    const REPORT = `Annual report\n${filler(40)}Revenue in 2025 was 4.2 billion across 31 markets.\n${filler(10)}`;
+    /** The passages section, or '' when there is none. */
+    const passagesIn = (text: string) => (text.includes('Passages from') ? text.slice(text.indexOf('Passages from')) : '');
+
+    it('shows the grader a fact from past the start of a result, where the output took it from', () => {
+      // Kept to 160 characters, a result could not show this: an accurate
+      // answer from further into the page read the same as an invented one.
+      const record = [recordToolCall('file_read', REPORT, { path: 'report.md' })];
+      const text = describeToolRecord(record, 'Revenue in 2025 was 4.2 billion, across 31 markets.');
+      expect(text).toContain('- file_read(path=report.md) → Annual report Lorem ipsum');
+      expect(passagesIn(text)).toMatch(/^Passages from what those calls returned.*\n- file_read\(path=report\.md\): ".*Revenue in 2025 was 4\.2 billion across 31 markets\./);
+    });
+
+    it('shows what the page really said beside a figure the output changed', () => {
+      const record = [recordToolCall('file_read', REPORT, { path: 'report.md' })];
+      expect(passagesIn(describeToolRecord(record, 'Revenue in 2025 was 9.9 billion across 77 markets.'))).toContain('4.2 billion across 31 markets');
+    });
+
+    it('shows no passage for a claim nothing returned', () => {
+      const record = [recordToolCall('file_read', REPORT, { path: 'report.md' })];
+      expect(describeToolRecord(record, 'The chief executive resigned in March.')).not.toContain('Passages');
+    });
+
+    it('draws on any call still holding evidence, not only the latest twelve', () => {
+      const record: ToolRecordEntry[] = [];
+      appendToolRecord(record, recordToolCall('file_read', REPORT, { path: 'report.md' }));
+      for (let i = 0; i < 30; i++) appendToolRecord(record, recordToolCall('web_search', `result ${i}`, { query: `q${i}` }));
+      expect(passagesIn(describeToolRecord(record, 'Revenue in 2025 was 4.2 billion across 31 markets.')))
+        .toMatch(/- file_read\(path=report\.md\): ".*Revenue in 2025 was 4\.2 billion/);
+    });
+
+    it('holds what the model was shown of a long result, and not the middle it never saw', () => {
+      const long = `Head fact: the bridge opened in 1932.\n${filler(300)}Middle fact: the tower rose in 1889.\n${filler(300)}Tail fact: the canal closed in 1974.`;
+      const record = [recordToolCall('web_fetch', long, { url: 'https://history.test' })];
+      const text = passagesIn(describeToolRecord(record, 'The bridge opened in 1932, the tower rose in 1889 and the canal closed in 1974.'));
+      expect(text).toContain('the bridge opened in 1932');
+      expect(text, 'whole, not its figure without what it is about').toContain('the canal closed in 1974');
+      expect(text, 'the model never saw the middle, so it is not evidence').not.toContain('the tower rose in 1889');
+    });
+
+    it('drops the record a cut went through, so half a credential cannot get past redaction', () => {
+      // `truncateForContext` keeps the first 9,000 characters and the last
+      // 3,000. Cut in two at either point, a key is not recognisable as one.
+      const key = 'sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789';
+      const cutAtHead = `${'w '.repeat(4_490)}${key}\n${'m '.repeat(3_000)}`;
+      const cutAtTail = `${'m '.repeat(6_000)}x${key}\n${'z '.repeat(1_480)}`;
+      expect(cutAtHead.indexOf(key)).toBeLessThan(9_000);
+      expect(cutAtHead.indexOf(key) + key.length, 'the head cut is inside the key').toBeGreaterThan(9_000);
+      const tailStart = cutAtTail.length - 3_000;
+      expect(cutAtTail.indexOf(key)).toBeLessThan(tailStart);
+      expect(cutAtTail.indexOf(key) + key.length, 'the tail cut is inside the key').toBeGreaterThan(tailStart);
+      for (const result of [cutAtHead, cutAtTail]) {
+        const evidence = recordToolCall('file_read', result).evidence ?? '';
+        expect(evidence.length, 'the rest is still kept').toBeGreaterThan(2_000);
+        expect(evidence).not.toMatch(/AbCd|IjKl|QrSt|Yz01|6789/);
+      }
+    });
+
+    it('keeps the record\u2019s evidence within a budget, the oldest calls giving theirs up first', () => {
+      const record: ToolRecordEntry[] = [];
+      for (let i = 0; i < 60; i++) appendToolRecord(record, recordToolCall('file_read', `file ${i} ${filler(400)}`, { path: `f${i}` }));
+      const held = record.reduce((sum, e) => sum + (e.evidence?.length ?? 0), 0);
+      expect(held).toBeLessThanOrEqual(256_000);
+      expect(record[59]!.evidence, 'the latest keeps its evidence').toBeDefined();
+      expect(record[0]!.evidence, 'the oldest gave its up').toBeUndefined();
+      expect(record[0]!.result, 'and still says what it returned').toMatch(/^file 0 Lorem/);
+    });
+
+    it('bounds the passages however much of the evidence bears on the output', () => {
+      const record: ToolRecordEntry[] = [];
+      const page = 'Revenue in 2025 was 4.2 billion across 31 markets. '.repeat(200);
+      for (let i = 0; i < 12; i++) appendToolRecord(record, recordToolCall('file_read', page, { path: `r${i}` }));
+      const passages = passagesIn(describeToolRecord(record, 'Revenue in 2025 was 4.2 billion across 31 markets.'));
+      expect(passages.length).toBeGreaterThan(1_000);
+      expect(passages.length).toBeLessThanOrEqual(6_200);
+    });
   });
 
   it('says what each call was asked to do, so a claim can be checked against more than the tool\u2019s name', () => {
@@ -537,9 +618,35 @@ describe('the rule reaches every prompt that can answer the user', () => {
       const execute = vi.fn().mockResolvedValue(`PAGE ${'x'.repeat(500_000)}`);
       const worker = new T3Worker(fabricatingRouter().router, browserRegistry(execute), 't2-1');
       await worker.execute(assignment(), 'task-big');
-      const record = (worker as unknown as { toolRecord: Array<{ result: string }> }).toolRecord;
+      const record = (worker as unknown as { toolRecord: Array<{ result: string; evidence?: string }> }).toolRecord;
       expect(record).toHaveLength(1);
       expect(record[0]!.result.length).toBeLessThanOrEqual(161);
+      expect(record[0]!.evidence?.length, 'no more than the model was shown').toBeLessThanOrEqual(12_000);
+    });
+
+    it('lets the self-test see the part of a long page the answer was taken from', async () => {
+      // The answer is on the page, 2,000 characters in. The grader used to see
+      // the first 160, and a true answer read the same as an invented one.
+      const page = `Chat widget loaded. ${'Welcome to our help centre. '.repeat(70)}The assistant replied: our refund window is 45 days.`;
+      const calls: Call[] = [];
+      let loop = 0;
+      const router = {
+        generate: vi.fn(async (tier: string, options: { messages: Array<{ content: unknown }>; systemPrompt?: string }) => {
+          const latest = options.messages[options.messages.length - 1];
+          const content = typeof latest?.content === 'string' ? latest.content : '';
+          calls.push({ tier, systemPrompt: options.systemPrompt ?? '', content });
+          if (content.startsWith('Self-test this output')) return makeResult(PASS);
+          loop += 1;
+          if (loop === 1) return makeResult('', [{ id: 'b1', name: 'browser_control', input: { action: 'extract' } }]);
+          return makeResult('The assistant replied that the refund window is 45 days.');
+        }),
+        getModelForTier: () => undefined,
+      } as unknown as CascadeRouter;
+      await new T3Worker(router, browserRegistry(vi.fn().mockResolvedValue(page)), 't2-1').execute(assignment(), 'task-long');
+
+      const graded = calls.find((c) => c.content.startsWith('Self-test this output'))?.content ?? '';
+      expect(graded).toMatch(/- browser_control\(action=extract\): ".*our refund window is 45 days\."/);
+      expect(graded, 'and the grader is told what the passages are').toContain('the passages are the parts of the results');
     });
 
     it('tells the self-test when nothing was called at all', async () => {

@@ -13,11 +13,18 @@
  * explicit marker so the model knows content was elided.
  */
 export function truncateForContext(text: string, maxChars = 12_000): string {
-  if (text.length <= maxChars) return text;
+  const kept = contextParts(text, maxChars);
+  if (!kept) return text;
+  const elided = text.length - kept.head.length - kept.tail.length;
+  return `${kept.head}\n\n[... ${elided.toLocaleString()} characters elided to keep context small — re-read the file with a line range if you need the middle ...]\n\n${kept.tail}`;
+}
+
+/**
+ * The two parts of `text` that `truncateForContext` keeps, or undefined when
+ * it keeps the whole. For whatever must know exactly what the model was shown.
+ */
+export function contextParts(text: string, maxChars = 12_000): { head: string; tail: string } | undefined {
+  if (text.length <= maxChars) return undefined;
   const headLen = Math.floor(maxChars * 0.75);
-  const tailLen = maxChars - headLen;
-  const head = text.slice(0, headLen);
-  const tail = text.slice(-tailLen);
-  const elided = text.length - headLen - tailLen;
-  return `${head}\n\n[... ${elided.toLocaleString()} characters elided to keep context small — re-read the file with a line range if you need the middle ...]\n\n${tail}`;
+  return { head: text.slice(0, headLen), tail: text.slice(-(maxChars - headLen)) };
 }

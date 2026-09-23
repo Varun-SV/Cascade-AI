@@ -18,6 +18,7 @@
 //  can turn their failure into a success while summarising it.
 
 import { RedactionLayer } from '../audit/redaction.js';
+import { contextParts } from '../../utils/truncate.js';
 
 // "Stop" is for when there is no way forward, not the first error. A tool
 // error can be the way forward: argument validation tells the model to "supply
@@ -42,6 +43,12 @@ export const REPORTING_INTEGRITY_RULE =
 export interface ToolRecordEntry {
   name: string;
   result: string;
+  /**
+   * What the model was shown of the result, redacted and flattened — when that
+   * is more than `result`. What an honest output can have taken from the call.
+   * See `recordToolCall`, and `appendToolRecord` for how long it is kept.
+   */
+  evidence?: string;
   /** A bounded, redacted summary of the call's arguments. See `describeArgs`. */
   args?: string;
   /**
@@ -57,7 +64,7 @@ const MAX_RECORD_ENTRIES = 12;
 const MAX_OUTLINE_ENTRIES = 48;
 const MAX_RESULT_CHARS = 160;
 /**
- * How much of a result is redacted before it is clipped. Enough that the
+ * How much of an argument is redacted before it is clipped. Enough that the
  * clipped part lies well inside it, without scanning a whole large file.
  */
 const MAX_SCAN_CHARS = 4096;
@@ -68,13 +75,56 @@ function clip(result: string): string {
 }
 
 /**
+ * How far from a cut to look for the end of the record it went through. See
+ * `dropCutRecord`.
+ */
+const CUT_SLACK = 256;
+/** What ends a record — a line, a list item, a header field, a query parameter. */
+const RECORD_BREAK = /[\n,;&]/g;
+
+/**
+ * Drop the record a cut went through, from the side of the cut that kept part
+ * of it: a credential split in two is not recognisable, and half of one
+ * still gives it away — `sk-ant-api03-Ab` or `api_key":"s3` read as nothing
+ * to the redaction rules. Looked for within CUT_SLACK of the cut; failing
+ * that, CUT_SLACK characters go.
+ */
+function dropCutRecord(text: string, side: 'end' | 'start'): string {
+  if (side === 'end') {
+    const near = text.slice(-CUT_SLACK);
+    let last = -1;
+    for (const m of near.matchAll(RECORD_BREAK)) last = m.index;
+    return text.slice(0, text.length - near.length + (last >= 0 ? last + 1 : 0));
+  }
+  const near = text.slice(0, CUT_SLACK);
+  const first = near.search(RECORD_BREAK);
+  return text.slice(first >= 0 ? first + 1 : near.length);
+}
+
+/**
+ * What the model was shown of a result — the whole, or the head and tail
+ * `truncateForContext` keeps — with its secrets out and its whitespace
+ * flattened. An output can only honestly contain what the model saw, so this
+ * is the evidence there is for it; the elided middle was never evidence.
+ */
+function shownEvidence(result: string): string {
+  const flat = (text: string) => RedactionLayer.redactSecrets(text).replace(/\s+/g, ' ').trim();
+  const parts = contextParts(result);
+  if (!parts) return flat(result);
+  return `${flat(dropCutRecord(parts.head, 'end'))} … ${flat(dropCutRecord(parts.tail, 'start'))}`;
+}
+
+/**
  * What is kept of one call: the start of its result, where the outcome and any
- * error are.
+ * error are — and, as evidence, what the model was shown of the rest.
  *
- * Clipped HERE, when the call is recorded, not when the record is shown. The
- * context already gets a bounded copy, but the record held every result whole
- * for the life of the worker — a few `file_read`s of large files is hundreds
- * of megabytes kept to show the grader 160 characters of each.
+ * Bounded HERE, when the call is recorded, not when the record is shown. The
+ * record used to hold every result whole for the life of the worker — a few
+ * `file_read`s of large files is hundreds of megabytes. It then kept only the
+ * first 160 characters, which left an accurate answer taken from further into
+ * a page indistinguishable from an invented one. What the model saw is at
+ * most `truncateForContext`'s bound per call, and `appendToolRecord` bounds
+ * the record as a whole.
  *
  * And with its secrets taken out, arguments included. The record goes to the
  * self-test grader, which can be a different model on a different provider
@@ -89,12 +139,39 @@ export function recordToolCall(
   ranAs?: string,
 ): ToolRecordEntry {
   const args = describeArgs(input);
+  const evidence = shownEvidence(result);
+  const head = clip(evidence);
   return {
     name,
-    result: clip(RedactionLayer.redactSecrets(result.slice(0, MAX_SCAN_CHARS))),
+    result: head,
+    // Only when it says more than the head does.
+    ...(evidence.length > MAX_RESULT_CHARS ? { evidence } : {}),
     ...(args ? { args } : {}),
     ...(ranAs && ranAs !== name ? { ranAs } : {}),
   };
+}
+
+/**
+ * The most evidence a record holds, across all its calls. Enough for a score
+ * of results as large as the model is ever shown one.
+ */
+const MAX_RECORD_EVIDENCE_CHARS = 256_000;
+
+/**
+ * Add a call to a worker's record, keeping the record's evidence within
+ * MAX_RECORD_EVIDENCE_CHARS: past it, the OLDEST calls give theirs up first.
+ * They keep the start of their result, so the record still says what each
+ * call did and whether it worked.
+ */
+export function appendToolRecord(record: ToolRecordEntry[], entry: ToolRecordEntry): void {
+  record.push(entry);
+  let held = record.reduce((sum, e) => sum + (e.evidence?.length ?? 0), 0);
+  for (let i = 0; i < record.length && held > MAX_RECORD_EVIDENCE_CHARS; i++) {
+    const { evidence, ...kept } = record[i]!;
+    if (!evidence) continue;
+    record[i] = kept;
+    held -= evidence.length;
+  }
 }
 
 const MAX_ARG_CHARS = 60;
@@ -248,8 +325,11 @@ function callName({ name, ranAs }: ToolRecordEntry): string {
  * whether it worked; anything older by tool and outcome. The middle tier is
  * there because a tally says a navigation happened but not WHERE — so an
  * output naming the site visited in call 1 of 13 could not be checked.
+ *
+ * Then, given the output, the passages of any call's evidence that bear on
+ * it. See `passagesFor`.
  */
-export function describeToolRecord(record: readonly ToolRecordEntry[]): string {
+export function describeToolRecord(record: readonly ToolRecordEntry[], output?: string): string {
   if (!record.length) return 'none — no tool was called';
   const recent = record.slice(-MAX_RECORD_ENTRIES);
   const before = record.slice(0, record.length - recent.length);
@@ -257,7 +337,11 @@ export function describeToolRecord(record: readonly ToolRecordEntry[]): string {
   const oldest = before.slice(0, before.length - outlined.length);
   const call = (entry: ToolRecordEntry) => `- ${entry.name}${entry.args ? `(${entry.args})` : ''}${entry.ranAs ? ` [ran as ${entry.ranAs}]` : ''}`;
   const detail = recent.map((entry) => `${call(entry)} → ${clip(entry.result) || '(empty result)'}`);
-  if (!before.length) return detail.join('\n');
+  const passages = output ? passagesFor(record, output, call) : [];
+  if (passages.length) {
+    passages.unshift('Passages from what those calls returned, chosen for the words they share with the output:');
+  }
+  if (!before.length) return [...detail, ...passages].join('\n');
 
   const lines: string[] = [];
   if (oldest.length) {
@@ -280,6 +364,121 @@ export function describeToolRecord(record: readonly ToolRecordEntry[]): string {
   for (const entry of outlined) {
     lines.push(`${call(entry)} → ${failedCall(entry) ? 'an error or refusal' : 'returned a result'}`);
   }
-  lines.push(`Most recent ${recent.length}:`, ...detail);
+  lines.push(`Most recent ${recent.length}:`, ...detail, ...passages);
   return lines.join('\n');
+}
+
+/** The most the passages take up in the self-test prompt, labels included. */
+const MAX_PASSAGES_CHARS = 6_000;
+const MAX_PASSAGE_CHARS = 280;
+/** Two words the output uses, or one of its figures. One shared word is chance. */
+const MIN_PASSAGE_SCORE = 2;
+/** Words too common to say a passage is about what the output says. */
+const COMMON_WORDS = new Set([
+  'about', 'after', 'also', 'been', 'before', 'being', 'both', 'could', 'does', 'each', 'from', 'have', 'here',
+  'into', 'just', 'like', 'more', 'most', 'only', 'other', 'over', 'should', 'some', 'such', 'than', 'that',
+  'their', 'them', 'then', 'there', 'these', 'they', 'this', 'those', 'through', 'very', 'were', 'what', 'when',
+  'where', 'which', 'while', 'will', 'with', 'would', 'your',
+]);
+
+function wordsIn(text: string): string[] {
+  return text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+}
+
+/**
+ * What the output says, as the words that could tie it to a source: its
+ * figures, which weigh most because a number is the easiest thing to invent,
+ * and its longer words other than the commonest.
+ */
+function claimTerms(output: string): Map<string, number> {
+  const terms = new Map<string, number>();
+  for (const word of wordsIn(output)) {
+    if (/\d/.test(word)) { if (word.length >= 2) terms.set(word, 2); }
+    else if (word.length >= 4 && !COMMON_WORDS.has(word)) terms.set(word, 1);
+  }
+  return terms;
+}
+
+/**
+ * Runs of whole words, each at most MAX_PASSAGE_CHARS, each starting halfway
+ * into the one before — so a statement up to half a window long lies whole in
+ * at least one, rather than split between two with its subject in the first
+ * and its figure in the second.
+ */
+function windowsOf(evidence: string): Array<{ start: number; end: number }> {
+  const starts: number[] = [];
+  for (let at = 0; at < evidence.length; at = evidence.indexOf(' ', at) + 1 || evidence.length) starts.push(at);
+  const wordEnd = (k: number) => (k + 1 < starts.length ? starts[k + 1]! - 1 : evidence.length);
+  const windows: Array<{ start: number; end: number }> = [];
+  for (let i = 0; i < starts.length;) {
+    const start = starts[i]!;
+    // The last word that ends inside the window. A single word longer than a
+    // window is sliced.
+    let j = i;
+    while (j + 1 < starts.length && wordEnd(j + 1) - start <= MAX_PASSAGE_CHARS) j++;
+    windows.push({ start, end: Math.min(wordEnd(j), start + MAX_PASSAGE_CHARS) });
+    if (wordEnd(j) >= evidence.length) break;
+    let next = i + 1;
+    while (next < j && starts[next]! - start < MAX_PASSAGE_CHARS / 2) next++;
+    i = next;
+  }
+  return windows;
+}
+
+/**
+ * The parts of what the calls returned that bear on the output, for the grader
+ * to check its claims against.
+ *
+ * The record keeps what the model was shown of each result, but a prompt that
+ * carried all of it would be most of a context window. So the evidence is
+ * searched for the output's own words and figures, and the passages that share
+ * the most with it are shown, within MAX_PASSAGES_CHARS. A figure the output
+ * took from a page is in a passage that has it; one it made up is in none.
+ * From any call still holding evidence, not only the latest: an output can
+ * draw on the first page it read.
+ */
+function passagesFor(
+  record: readonly ToolRecordEntry[],
+  output: string,
+  call: (entry: ToolRecordEntry) => string,
+): string[] {
+  const terms = claimTerms(output);
+  if (!terms.size) return [];
+  const candidates: Array<{ entry: number; start: number; end: number; score: number }> = [];
+  record.forEach((entry, i) => {
+    const evidence = entry.evidence;
+    if (!evidence) return;
+    for (const { start, end } of windowsOf(evidence)) {
+      let score = 0;
+      for (const word of new Set(wordsIn(evidence.slice(start, end)))) score += terms.get(word) ?? 0;
+      if (score >= MIN_PASSAGE_SCORE) candidates.push({ entry: i, start, end, score });
+    }
+  });
+  // The most in common first; on a tie, the later call, which the output was
+  // more likely written from.
+  candidates.sort((a, b) => b.score - a.score || b.entry - a.entry || a.start - b.start);
+  const chosen: typeof candidates = [];
+  const labelled = new Set<number>();
+  let used = 0;
+  for (const c of candidates) {
+    // Windows overlap, and the text they share is shown once: the best of them.
+    if (chosen.some((o) => o.entry === c.entry && o.start < c.end && c.start < o.end)) continue;
+    const cost = c.end - c.start + 5 + (labelled.has(c.entry) ? 0 : call(record[c.entry]!).length + 2);
+    if (used + cost > MAX_PASSAGES_CHARS) continue;
+    used += cost;
+    labelled.add(c.entry);
+    chosen.push(c);
+  }
+  // Back in the order they were read.
+  chosen.sort((a, b) => a.entry - b.entry || a.start - b.start);
+  const lines: string[] = [];
+  for (let i = 0; i < chosen.length;) {
+    const entry = chosen[i]!.entry;
+    const texts: string[] = [];
+    for (; i < chosen.length && chosen[i]!.entry === entry; i++) {
+      texts.push(`"${record[entry]!.evidence!.slice(chosen[i]!.start, chosen[i]!.end)}"`);
+    }
+    lines.push(`${call(record[entry]!)}: ${texts.join(' … ')}`);
+  }
+  return lines;
 }
