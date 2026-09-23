@@ -995,6 +995,28 @@ export class CloudStore {
     return this.getBrowserSessions(userId, date);
   }
 
+  /**
+   * Claim one browser session against `limit`, or report that none is left.
+   *
+   * One conditional UPDATE, so the check and the count cannot be separated: two
+   * runs claiming the last unit at once get one yes and one no, in this process
+   * or another sharing the database.
+   */
+  takeBrowserSession(userId: string, date: string, limit: number): boolean {
+    this.db.prepare('INSERT OR IGNORE INTO usage (user_id, date, runs, browser_sessions) VALUES (?, ?, 0, 0)').run(userId, date);
+    const res = this.db
+      .prepare('UPDATE usage SET browser_sessions = browser_sessions + 1 WHERE user_id = ? AND date = ? AND browser_sessions < ?')
+      .run(userId, date, limit);
+    return res.changes === 1;
+  }
+
+  /** Return a claimed session that was never opened. Never below zero. */
+  giveBackBrowserSession(userId: string, date: string): void {
+    this.db
+      .prepare('UPDATE usage SET browser_sessions = MAX(browser_sessions - 1, 0) WHERE user_id = ? AND date = ?')
+      .run(userId, date);
+  }
+
   getBrowserSessions(userId: string, date: string): number {
     const row = this.db.prepare('SELECT browser_sessions FROM usage WHERE user_id = ? AND date = ?').get(userId, date) as
       | { browser_sessions: number }

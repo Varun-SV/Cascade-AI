@@ -45,6 +45,29 @@ export interface ToolRecordEntry {
 const MAX_RECORD_ENTRIES = 12;
 const MAX_RESULT_CHARS = 160;
 
+function clip(result: string): string {
+  const flat = result.replace(/\s+/g, ' ').trim();
+  return flat.length > MAX_RESULT_CHARS ? `${flat.slice(0, MAX_RESULT_CHARS)}…` : flat;
+}
+
+/**
+ * What is kept of one call: the start of its result, where the outcome and any
+ * error are.
+ *
+ * Clipped HERE, when the call is recorded, not when the record is shown. The
+ * context already gets a bounded copy, but the record held every result whole
+ * for the life of the worker — a few `file_read`s of large files is hundreds
+ * of megabytes kept to show the grader 160 characters of each.
+ */
+export function recordToolCall(name: string, result: string): ToolRecordEntry {
+  return { name, result: clip(result) };
+}
+
+/** A result the tool itself reported as a failure or refusal (see T3Worker.executeTool). */
+function reportsFailure(result: string): boolean {
+  return /^(Tool error:|Error:|Tool \S+ was denied)/i.test(result);
+}
+
 /**
  * What the worker ACTUALLY did, for the self-test to grade the output against.
  *
@@ -54,18 +77,34 @@ const MAX_RESULT_CHARS = 160;
  * `browser_control` ("All 1 browser session are in use…") is the whole story
  * of that run, and the grader never saw it.
  *
- * Results are clipped to their start, where a tool's outcome and any error
- * text appear, and the list is bounded so a tool-heavy subtask cannot crowd out
- * the output under test. When it is cut, it says so: silently dropping calls
- * would make a claimed action look unperformed.
+ * Every call is accounted for, and the size stays bounded: the latest in full
+ * (clipped), the earlier ones by tool and outcome. Earlier calls used to be a
+ * bare count — while the grader is told to fail an action no listed call
+ * performed, so a correct output citing call 1 of 13 read as unperformed.
  */
 export function describeToolRecord(record: readonly ToolRecordEntry[]): string {
   if (!record.length) return 'none — no tool was called';
-  const shown = record.slice(-MAX_RECORD_ENTRIES).map(({ name, result }) => {
-    const flat = result.replace(/\s+/g, ' ').trim();
-    const clipped = flat.length > MAX_RESULT_CHARS ? `${flat.slice(0, MAX_RESULT_CHARS)}…` : flat;
-    return `- ${name} → ${clipped || '(empty result)'}`;
+  const recent = record.slice(-MAX_RECORD_ENTRIES);
+  const earlier = record.slice(0, record.length - recent.length);
+  const detail = recent.map(({ name, result }) => `- ${name} → ${clip(result) || '(empty result)'}`);
+  if (!earlier.length) return detail.join('\n');
+
+  // By tool, in the order each was first used. Bounded by the number of
+  // distinct tools, however many calls there were.
+  const byTool = new Map<string, { ok: number; failed: number }>();
+  for (const { name, result } of earlier) {
+    const tally = byTool.get(name) ?? { ok: 0, failed: 0 };
+    if (reportsFailure(result)) tally.failed++; else tally.ok++;
+    byTool.set(name, tally);
+  }
+  const summary = [...byTool].map(([name, { ok, failed }]) => {
+    const outcomes = [ok && `${ok} returned a result`, failed && `${failed} an error or refusal`].filter(Boolean).join(', ');
+    return `- ${name} ×${ok + failed} (${outcomes})`;
   });
-  const omitted = record.length - shown.length;
-  return (omitted > 0 ? `(${omitted} earlier call${omitted === 1 ? '' : 's'} not shown)\n` : '') + shown.join('\n');
+  return [
+    `Earlier calls, by tool (${earlier.length}):`,
+    ...summary,
+    `Most recent ${recent.length}:`,
+    ...detail,
+  ].join('\n');
 }

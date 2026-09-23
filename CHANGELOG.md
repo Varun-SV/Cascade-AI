@@ -20,9 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **A daily allowance of browser sessions: 5 a day on Free, 50 on Pro.** A
-  session is counted when one is actually opened, which is what the
-  provider bills for, so a Browser-chip run that never needs the browser
-  costs nothing. Once the day's sessions are gone the Browser chip switches
+  session is claimed the moment one is about to be opened, which is what the
+  provider bills for, and returned if none was, so a Browser-chip run that
+  never needs the browser costs nothing and concurrent runs cannot share the
+  last one. Once the day's sessions are gone the Browser chip switches
   off and says when they reset (midnight UTC), a run sent with it anyway is
   refused before anything is spent, and a run that runs out partway through
   is refused the next session with the same message shown in the chat. The

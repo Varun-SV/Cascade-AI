@@ -91,5 +91,32 @@ describe('the browser reaches every tier that shapes the run', () => {
     it('says nothing about a browser the run does not have', async () => {
       expect(await classifierPrompt(false)).not.toContain(BROWSER_ROUTING_RULE);
     });
+
+    async function withHint(hasBrowser: boolean): Promise<{ verdict: string; asked: boolean }> {
+      const cascade = new Cascade(config, process.cwd());
+      const generate = vi.fn().mockResolvedValue({
+        content: 'Simple — one site, one agent',
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimatedCostUsd: 0 },
+        finishReason: 'stop',
+      });
+      (cascade as unknown as { router: unknown }).router = { generate };
+      const registry = (cascade as unknown as { toolRegistry: { hasTool: (n: string) => boolean } }).toolRegistry;
+      vi.spyOn(registry, 'hasTool').mockImplementation((n) => hasBrowser && n === 'browser_control');
+      const verdict = await (cascade as unknown as {
+        determineComplexity: (p: string, w: string, h: unknown[], hint: string) => Promise<string>;
+      }).determineComplexity('go to https://chatgpt.com using browser control and bring back its answer', process.cwd(), [], 'Complex');
+      const asked = generate.mock.calls.some((c) => String((c[1] as { systemPrompt?: string }).systemPrompt).includes(BROWSER_ROUTING_RULE));
+      return { verdict, asked };
+    }
+
+    it('sets an on-device hint aside when there is a browser — the device cannot know about it', async () => {
+      // The opt-in local classifier returned before the browser-aware prompt
+      // was built, so a hinted browser errand was still planned as research.
+      expect(await withHint(true)).toEqual({ verdict: 'Simple', asked: true });
+    });
+
+    it('still takes the on-device hint when there is no browser to know about', async () => {
+      expect(await withHint(false)).toEqual({ verdict: 'Complex', asked: false });
+    });
   });
 });

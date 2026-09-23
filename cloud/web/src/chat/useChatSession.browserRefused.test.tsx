@@ -113,6 +113,20 @@ describe('useChatSession — the browser was busy', () => {
     expect(view.result.current.browserRefusedNotice).toBeNull();
   });
 
+  it('keeps every refused run\u2019s notice in one conversation, not just the latest', () => {
+    // One value per conversation: the second refusal overwrote the first, and
+    // the second run getting its browser then left the first — still refused —
+    // with no notice at all.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    act(() => { fake.fire('browser:busy', { taskId: 't1', limit: 1 }); });
+    act(() => { fake.fire('browser:limit', { taskId: 't2', detail: 'LIMIT FOR T2' }); });
+    expect(view.result.current.browserRefusedNotice, 'the latest is shown').toBe('LIMIT FOR T2');
+
+    act(() => { fake.fire('browser:live-view', { taskId: 't2', active: true }); });
+    expect(view.result.current.browserRefusedNotice, 't1 is still refused').toMatch(/The browser is busy/);
+  });
+
   it('clears when the next run starts, which may find the browser free', () => {
     const fake = fakeSocket();
     const view = renderHook(() => useChatSession(fake.socket, [], 'general'));

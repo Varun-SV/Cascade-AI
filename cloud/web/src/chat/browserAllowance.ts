@@ -51,12 +51,17 @@ export function browserChip(allowance: BrowserAllowance | null): { exhausted: bo
  * send the next message as a browser run, which the server refuses outright.
  */
 export function useBrowserAllowance(
-  enabled: boolean,
+  /** The signed-in user; none while signed out. */
+  userId: string | undefined,
   refreshSignal: unknown,
   browserMode: boolean,
   setBrowserMode: (on: boolean) => void,
 ): BrowserAllowance | null {
-  const [allowance, setAllowance] = useState<BrowserAllowance | null>(null);
+  // Remembered WITH the user it was read for. A signed-in boolean let the next
+  // account on the same page inherit this one's exhausted allowance — and keep
+  // it, since a failed first read deliberately leaves the last value in place.
+  const [read, setRead] = useState<{ userId: string; allowance: BrowserAllowance | null } | null>(null);
+  const allowance = read && read.userId === userId ? read.allowance : null;
   // Bumped at each UTC reset. Runs are not the only thing that changes the
   // allowance: the day does. An exhausted chip cannot START the run that
   // would have re-read it, so without this it stayed off all the next day.
@@ -64,20 +69,21 @@ export function useBrowserAllowance(
 
   useEffect(() => {
     // Signed out, there is no allowance to read and the request would only 401.
-    if (!enabled) return;
+    if (!userId) return;
     let live = true;
     // A failed read keeps the last known allowance rather than forgetting it:
-    // "unknown" would re-enable a chip the server will refuse.
-    fetchUsage().then((u) => { if (live) setAllowance(browserAllowanceFrom(u)); }).catch(() => {});
+    // "unknown" would re-enable a chip the server will refuse. The same user's
+    // only — see `read`.
+    fetchUsage().then((u) => { if (live) setRead({ userId, allowance: browserAllowanceFrom(u) }); }).catch(() => {});
     return () => { live = false; };
-  }, [enabled, refreshSignal, day]);
+  }, [userId, refreshSignal, day]);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!userId) return;
     // A second past midnight, so the server's clock has also crossed it.
     const timer = setTimeout(() => setDay((n) => n + 1), msUntilNextUtcMidnight(Date.now()) + 1000);
     return () => clearTimeout(timer);
-  }, [enabled, day]);
+  }, [userId, day]);
 
   const { exhausted } = browserChip(allowance);
   useEffect(() => {

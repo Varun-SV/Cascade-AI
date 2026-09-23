@@ -177,10 +177,32 @@ export function checkDailyLimit(store: CloudStore, userId: string, plan: string)
 export function browserSessionRefusal(store: CloudStore, userId: string, plan: string): string | undefined {
   const limit = limitsForPlan(plan).dailyBrowserSessions;
   if (store.getBrowserSessions(userId, todayKey()) < limit) return undefined;
+  return usedUpMessage(plan, limit);
+}
+
+function usedUpMessage(plan: string, limit: number): string {
   const pro = limitsForPlan('pro').dailyBrowserSessions;
   return `Today's browser sessions are used up (${limit} a day on the ${plan === 'pro' ? 'Pro' : 'free'} plan). `
     + 'They reset at midnight UTC.'
     + (plan === 'pro' ? '' : ` Pro includes ${pro} a day.`);
+}
+
+/**
+ * Claim one of today's browser sessions, the moment one is about to be opened.
+ *
+ * Claimed rather than checked: a check here and a count once the session
+ * existed let concurrent runs all see the same last session and each open
+ * one. The claim is atomic (see `CloudStore.takeBrowserSession`), and
+ * `giveBack` returns it — to the day it was taken from, even if midnight has
+ * passed since — when no session came of it.
+ */
+export function claimBrowserSession(
+  store: CloudStore, userId: string, plan: string,
+): { refusal: string } | { giveBack: () => void } {
+  const day = todayKey();
+  const limit = limitsForPlan(plan).dailyBrowserSessions;
+  if (!store.takeBrowserSession(userId, day, limit)) return { refusal: usedUpMessage(plan, limit) };
+  return { giveBack: () => store.giveBackBrowserSession(userId, day) };
 }
 
 /**

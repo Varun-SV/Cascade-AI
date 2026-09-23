@@ -54,12 +54,12 @@ describe('browserChip', () => {
 describe('useBrowserAllowance', () => {
   it('reads today’s allowance when signed in', async () => {
     mockedFetchUsage.mockResolvedValue(usage(1));
-    const view = renderHook(() => useBrowserAllowance(true, 'idle', false, vi.fn()));
+    const view = renderHook(() => useBrowserAllowance('user-1', 'idle', false, vi.fn()));
     await waitFor(() => expect(view.result.current).toEqual({ used: 1, limit: 5 }));
   });
 
   it('asks nothing while signed out', () => {
-    renderHook(() => useBrowserAllowance(false, 'idle', false, vi.fn()));
+    renderHook(() => useBrowserAllowance(undefined, 'idle', false, vi.fn()));
     expect(mockedFetchUsage).not.toHaveBeenCalled();
   });
 
@@ -68,21 +68,21 @@ describe('useBrowserAllowance', () => {
     // a browser run, and the server refuses those outright.
     mockedFetchUsage.mockResolvedValue(usage(5));
     const setBrowserMode = vi.fn();
-    renderHook(() => useBrowserAllowance(true, 'idle', true, setBrowserMode));
+    renderHook(() => useBrowserAllowance('user-1', 'idle', true, setBrowserMode));
     await waitFor(() => expect(setBrowserMode).toHaveBeenCalledWith(false));
   });
 
   it('leaves the chip alone while sessions remain', async () => {
     mockedFetchUsage.mockResolvedValue(usage(4));
     const setBrowserMode = vi.fn();
-    const view = renderHook(() => useBrowserAllowance(true, 'idle', true, setBrowserMode));
+    const view = renderHook(() => useBrowserAllowance('user-1', 'idle', true, setBrowserMode));
     await waitFor(() => expect(view.result.current).toEqual({ used: 4, limit: 5 }));
     expect(setBrowserMode).not.toHaveBeenCalled();
   });
 
   it('re-reads when a run starts or ends', async () => {
     mockedFetchUsage.mockResolvedValue(usage(1));
-    const view = renderHook(({ busy }) => useBrowserAllowance(true, busy, false, vi.fn()), { initialProps: { busy: false } });
+    const view = renderHook(({ busy }) => useBrowserAllowance('user-1', busy, false, vi.fn()), { initialProps: { busy: false } });
     await waitFor(() => expect(mockedFetchUsage).toHaveBeenCalledTimes(1));
 
     mockedFetchUsage.mockResolvedValue(usage(2));
@@ -92,7 +92,7 @@ describe('useBrowserAllowance', () => {
 
   it('keeps the last known allowance when a read fails, rather than re-enabling the chip', async () => {
     mockedFetchUsage.mockResolvedValue(usage(5));
-    const view = renderHook(({ busy }) => useBrowserAllowance(true, busy, false, vi.fn()), { initialProps: { busy: false } });
+    const view = renderHook(({ busy }) => useBrowserAllowance('user-1', busy, false, vi.fn()), { initialProps: { busy: false } });
     await waitFor(() => expect(view.result.current).toEqual({ used: 5, limit: 5 }));
 
     mockedFetchUsage.mockRejectedValue(new Error('offline'));
@@ -119,7 +119,7 @@ describe('useBrowserAllowance across the UTC reset', () => {
     vi.useFakeTimers({ shouldAdvanceTime: false });
     vi.setSystemTime(new Date('2026-09-23T23:59:00Z'));
     mockedFetchUsage.mockResolvedValue(usage(5));
-    const view = renderHook(() => useBrowserAllowance(true, 'idle', false, vi.fn()));
+    const view = renderHook(() => useBrowserAllowance('user-1', 'idle', false, vi.fn()));
     await act(async () => { await Promise.resolve(); });
     expect(view.result.current).toEqual({ used: 5, limit: 5 });
     expect(mockedFetchUsage).toHaveBeenCalledTimes(1);
@@ -135,8 +135,36 @@ describe('useBrowserAllowance across the UTC reset', () => {
     vi.useFakeTimers({ shouldAdvanceTime: false });
     vi.setSystemTime(new Date('2026-09-23T20:00:00Z'));
     mockedFetchUsage.mockResolvedValue(usage(5));
-    renderHook(() => useBrowserAllowance(true, 'idle', false, vi.fn()));
+    renderHook(() => useBrowserAllowance('user-1', 'idle', false, vi.fn()));
     await act(async () => { await vi.advanceTimersByTimeAsync(60 * 60 * 1000); });
     expect(mockedFetchUsage).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('useBrowserAllowance and who is signed in', () => {
+  it('does not hand one account\u2019s exhausted allowance to the next', async () => {
+    // Signed out and back in as someone else, on the same page. The second
+    // account's first read fails, and a failed read keeps the last value —
+    // which was the FIRST account's, so its chip stayed off.
+    mockedFetchUsage.mockResolvedValue(usage(5));
+    const view = renderHook(({ user }) => useBrowserAllowance(user, 'idle', false, vi.fn()), {
+      initialProps: { user: 'alice' as string | undefined },
+    });
+    await waitFor(() => expect(view.result.current).toEqual({ used: 5, limit: 5 }));
+
+    mockedFetchUsage.mockRejectedValue(new Error('offline'));
+    view.rerender({ user: 'bob' });
+    await waitFor(() => expect(mockedFetchUsage).toHaveBeenCalledTimes(2));
+    expect(view.result.current, 'nothing known about bob yet, so nothing is held against him').toBeNull();
+  });
+
+  it('forgets the allowance on sign-out', async () => {
+    mockedFetchUsage.mockResolvedValue(usage(5));
+    const view = renderHook(({ user }) => useBrowserAllowance(user, 'idle', false, vi.fn()), {
+      initialProps: { user: 'alice' as string | undefined },
+    });
+    await waitFor(() => expect(view.result.current).toEqual({ used: 5, limit: 5 }));
+    view.rerender({ user: undefined });
+    expect(view.result.current).toBeNull();
   });
 });

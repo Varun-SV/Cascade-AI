@@ -809,10 +809,26 @@ describe('the embedder\u2019s allowance of new sessions', () => {
   // allowance says whether this run may open one at all, and the provider
   // bills per session created, so that is where it has to be decided.
 
-  it('refuses a new session with the gate\u2019s own words, before one is created', async () => {
+  /** An allowance of `units`, claimed and returned the way the server's is. */
+  function allowanceOf(units: number) {
+    const state = { left: units, taken: 0, givenBack: 0 };
+    return {
+      state,
+      allowance: {
+        take: () => {
+          if (state.left <= 0) return 'Today\u2019s browser sessions are used up.';
+          state.left--; state.taken++;
+          return undefined;
+        },
+        giveBack: () => { state.left++; state.givenBack++; },
+      },
+    };
+  }
+
+  it('refuses a new session with the allowance\u2019s own words, before one is created', async () => {
     const { provider, created } = fakeProvider();
     const c = new RemoteBrowserController({ provider });
-    c.setAdmissionFor('run-A', () => 'Today\u2019s browser sessions are used up.');
+    c.setAllowanceFor('run-A', allowanceOf(0).allowance);
 
     const out = await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
 
@@ -821,10 +837,10 @@ describe('the embedder\u2019s allowance of new sessions', () => {
     expect(created, 'nothing was created, so nothing is billed').toEqual([]);
   });
 
-  it('refuses when the gate cannot answer — a check that failed has not said yes', async () => {
+  it('refuses when the allowance cannot answer — a claim that failed has not said yes', async () => {
     const { provider, created } = fakeProvider();
     const c = new RemoteBrowserController({ provider });
-    c.setAdmissionFor('run-A', () => { throw new Error('database is locked'); });
+    c.setAllowanceFor('run-A', { take: () => { throw new Error('database is locked'); }, giveBack: () => {} });
 
     const out = await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
 
@@ -833,57 +849,104 @@ describe('the embedder\u2019s allowance of new sessions', () => {
     expect(created).toEqual([]);
   });
 
+  it('gives two concurrent runs the last unit once, not twice', async () => {
+    // The reported overshoot: checking at admission and counting once the
+    // session existed let every concurrent open see the same last unit.
+    const { provider, created } = fakeProvider();
+    (provider as { isolatesSessions: boolean }).isolatesSessions = true;
+    const c = new RemoteBrowserController({ provider, maxSessions: 2 });
+    const shared = allowanceOf(1);
+    c.setAllowanceFor('run-A', shared.allowance);
+    c.setAllowanceFor('run-B', shared.allowance);
+
+    const [a, b] = await Promise.all([
+      c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1')),
+      c.controller({ kind: 'click', selector: '#b' }, ctx('run-B', 'w2')),
+    ]);
+
+    expect([a.ok, b.ok].filter(Boolean), 'one of them').toHaveLength(1);
+    expect(created, 'and one billed session').toHaveLength(1);
+  });
+
+  it('claims one unit per new session, and nothing for reusing one', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    const { state, allowance } = allowanceOf(5);
+    c.setAllowanceFor('run-A', allowance);
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await c.controller({ kind: 'click', selector: '#b' }, ctx('run-A', 'w1'));
+
+    expect(state.taken, 'one session, used twice').toBe(1);
+    expect(state.givenBack).toBe(0);
+  });
+
+  it('gives the unit back when the pool then refuses the run', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider, maxSessions: 1 });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    const { state, allowance } = allowanceOf(5);
+    c.setAllowanceFor('run-B', allowance);
+
+    const out = await c.controller({ kind: 'click', selector: '#b' }, ctx('run-B', 'w2'));
+
+    expect(out.ok, 'busy').toBe(false);
+    expect(state.left, 'the claim for a session it did not get is returned').toBe(5);
+  });
+
+  it('gives the unit back when no session could be created', async () => {
+    const { provider } = fakeProvider();
+    provider.createSession = async () => { throw new Error('provider down'); };
+    const c = new RemoteBrowserController({ provider });
+    const { state, allowance } = allowanceOf(5);
+    c.setAllowanceFor('run-A', allowance);
+
+    const out = await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    expect(out.ok).toBe(false);
+    expect(state.left).toBe(5);
+  });
+
+  it('keeps the unit spent once a session exists, even when connecting to it fails', async () => {
+    // The provider bills a session it created whether or not we could drive it.
+    const { provider, created } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    const { state, allowance } = allowanceOf(5);
+    c.setAllowanceFor('run-A', allowance);
+    const { chromium } = await import('playwright') as unknown as { chromium: { connectOverCDP: unknown } };
+    const original = chromium.connectOverCDP;
+    (chromium as { connectOverCDP: unknown }).connectOverCDP = async () => { throw new Error('cdp refused'); };
+    try {
+      const out = await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+      expect(out.ok).toBe(false);
+    } finally {
+      (chromium as { connectOverCDP: unknown }).connectOverCDP = original;
+    }
+    expect(created).toHaveLength(1);
+    expect(state.left, 'spent').toBe(4);
+  });
+
   it('holds no slot for a refused run, so the pool is not wedged by it', async () => {
     const { provider } = fakeProvider();
     const c = new RemoteBrowserController({ provider, maxSessions: 1 });
-    c.setAdmissionFor('run-A', () => 'used up');
+    c.setAllowanceFor('run-A', allowanceOf(0).allowance);
     await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
 
     const out = await c.controller({ kind: 'click', selector: '#b' }, ctx('run-B', 'w2'));
     expect(out.ok, 'the one slot is still free for a run with allowance').toBe(true);
   });
 
-  it('counts each session actually created, and nothing for reusing one', async () => {
+  it('forgets the allowance with the rest of the run', async () => {
+    // It closes over the embedder's store; the controller outlives every run.
     const { provider } = fakeProvider();
     const c = new RemoteBrowserController({ provider });
-    let asked = 0;
-    let counted = 0;
-    c.setAdmissionFor('run-A', () => { asked++; return undefined; });
-    c.onSessionCreatedFor('run-A', () => { counted++; });
-
-    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
-    await c.controller({ kind: 'click', selector: '#b' }, ctx('run-A', 'w1'));
-
-    expect(counted, 'one session, used twice').toBe(1);
-    expect(asked, 'and the allowance is only asked about a NEW session').toBe(1);
-  });
-
-  it('counts nothing for a refused run', async () => {
-    const { provider } = fakeProvider();
-    const c = new RemoteBrowserController({ provider });
-    let counted = 0;
-    c.setAdmissionFor('run-A', () => 'used up');
-    c.onSessionCreatedFor('run-A', () => { counted++; });
-
-    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
-    expect(counted).toBe(0);
-  });
-
-  it('forgets both with the rest of the run', async () => {
-    // Both close over the embedder's socket and store; the controller outlives
-    // every run on the deployment.
-    const { provider } = fakeProvider();
-    const c = new RemoteBrowserController({ provider });
-    let asked = 0;
-    let counted = 0;
-    c.setAdmissionFor('run-A', () => { asked++; return undefined; });
-    c.onSessionCreatedFor('run-A', () => { counted++; });
+    const { state, allowance } = allowanceOf(5);
+    c.setAllowanceFor('run-A', allowance);
     await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
     await c.endRun('run-A');
 
     await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w2'));
-    expect(asked, 'no longer consulted').toBe(1);
-    expect(counted, 'no longer told').toBe(1);
+    expect(state.taken, 'no longer consulted').toBe(1);
   });
 });
 

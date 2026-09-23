@@ -181,29 +181,24 @@ describe('the operator configures a browser for their deployment', () => {
       expect(result.output).toContain('Hello from the stub model.');
     }, 30_000);
 
-    it('checks the allowance again when the run would open a session, and counts the one it opens', async () => {
+    it('claims from the allowance when the run would open a session, and refuses once it is spent', async () => {
       // The start-of-run check cannot cover a run that began with one session
-      // left and needs a second, so the same allowance is wired to the moment
-      // a session would be opened.
-      const gate = vi.spyOn(RemoteBrowserController.prototype, 'setAdmissionFor');
-      const created = vi.spyOn(RemoteBrowserController.prototype, 'onSessionCreatedFor');
+      // left and needs a second, so the same allowance is claimed at the
+      // moment a session would be opened.
+      const set = vi.spyOn(RemoteBrowserController.prototype, 'setAllowanceFor');
       try {
         const { user, run } = await setup(true);
         for (let i = 0; i < 4; i++) store!.incrementBrowserSessions(user.id, today());
         const socket = new FakeSocket();
         await run(true, socket);
 
-        const admit = gate.mock.calls.at(-1)?.[1];
-        const onCreated = created.mock.calls.at(-1)?.[1];
-        expect(admit?.(), 'one left: admitted').toBeUndefined();
-
-        void onCreated?.();
-        expect(store!.getBrowserSessions(user.id, today()), 'the session it opened is counted').toBe(5);
-        expect(admit?.(), 'and the next one is refused').toMatch(/browser sessions are used up/);
+        const allowance = set.mock.calls.at(-1)?.[1];
+        expect(allowance?.take(), 'one left: claimed').toBeUndefined();
+        expect(store!.getBrowserSessions(user.id, today()), 'counted as it is claimed').toBe(5);
+        expect(allowance?.take(), 'and the next is refused').toMatch(/browser sessions are used up/);
         expect(socket.events.filter((e) => e.event === 'browser:limit'), 'the person is told').toHaveLength(1);
       } finally {
-        gate.mockRestore();
-        created.mockRestore();
+        set.mockRestore();
       }
     }, 30_000);
   });

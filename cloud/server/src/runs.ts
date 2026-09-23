@@ -23,7 +23,7 @@ import { z, type ZodError } from 'zod';
 import type { CloudEnv } from './env.js';
 import { resolveRunMcpServers } from './mcp-oauth.js';
 import type { CloudAttachment, CloudStore } from './db.js';
-import { beginRun, browserSessionRefusal, checkBrowserSessionLimit, checkDailyLimit, checkPendingMediaCap, PENDING_MEDIA_TTL_MS, todayKey } from './entitlements.js';
+import { beginRun, checkBrowserSessionLimit, checkDailyLimit, checkPendingMediaCap, claimBrowserSession, PENDING_MEDIA_TTL_MS, todayKey } from './entitlements.js';
 import { getSkill } from './skills.js';
 import { tenantScratchDir } from './paths.js';
 import { pendingMediaDir, sweepPendingMedia } from './pending-media.js';
@@ -1354,6 +1354,24 @@ export function buildMediaSink(deps: {
   };
 }
 
+/**
+ * A run's claim on its owner's daily browser sessions, in the controller's
+ * take/give-back shape. The unit a give-back returns is the one this run last
+ * claimed: the controller claims and settles one open at a time per run.
+ */
+export function browserAllowanceFor(store: CloudStore, userId: string): { take: () => string | undefined; giveBack: () => void } {
+  let unclaimed: (() => void) | undefined;
+  return {
+    take: () => {
+      const claim = claimBrowserSession(store, userId, store.getUserById(userId)?.plan ?? 'free');
+      if ('refusal' in claim) return claim.refusal;
+      unclaimed = claim.giveBack;
+      return undefined;
+    },
+    giveBack: () => { unclaimed?.(); unclaimed = undefined; },
+  };
+}
+
 export async function runChatTurn(payload: ChatRunPayload, deps: ChatRunDeps): Promise<ChatRunResult> {
   const { env, store, userId, socket } = deps;
 
@@ -1783,13 +1801,10 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     // queued old one.
     emitFrame: lossyEmitter(socket),
     warn: (message) => console.warn(`[run ${conversation.id}] remote browser: ${message}`),
-    // The plan's daily allowance, checked at the moment a session would be
-    // opened and counted when one is. The run-start check cannot cover a run
-    // that began with one session left and needs a second.
-    allowance: {
-      admit: () => browserSessionRefusal(store, userId, store.getUserById(userId)?.plan ?? 'free'),
-      created: () => { store.incrementBrowserSessions(userId, todayKey()); },
-    },
+    // The plan's daily allowance, claimed at the moment a session would be
+    // opened. The run-start check cannot cover a run that began with one
+    // session left and needs a second.
+    allowance: browserAllowanceFor(store, userId),
   });
   // The kill switch, alongside the live view that makes it meaningful. Scoped
   // to this run and removed with the run's other listeners below: a Stop is

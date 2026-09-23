@@ -1187,13 +1187,21 @@ export function useChatSession(
   // One slot carried conversation A's refusal into B when you switched, and
   // let a sibling run's browser opening in A clear the refusal of the run
   // that was still without one.
-  const [browserRefusals, setBrowserRefusals] = useState<Record<string, { taskId?: string; text: string }>>({});
-  const browserRefusedNotice = browserRefusals[activeConversationId() ?? '']?.text ?? null;
-  /** Forget one conversation's refusal, or only if it was about `taskId`. */
+  //
+  // A LIST per conversation, one entry per run: a conversation can hold
+  // several runs, and with one value per conversation a second refusal
+  // overwrote the first — then the second run getting its browser cleared
+  // the only entry, and the first run's refusal, still true, vanished.
+  const [browserRefusals, setBrowserRefusals] = useState<Record<string, Array<{ taskId?: string; text: string }>>>({});
+  const browserRefusedNotice = browserRefusals[activeConversationId() ?? '']?.at(-1)?.text ?? null;
+  /** Forget a conversation's refusals, or only the one about `taskId`. */
   const clearBrowserRefusal = (key: string, taskId?: string) => {
     setBrowserRefusals((prev) => {
-      const entry = prev[key];
-      if (!entry || (taskId !== undefined && entry.taskId !== taskId)) return prev;
+      const entries = prev[key];
+      if (!entries) return prev;
+      const kept = taskId === undefined ? [] : entries.filter((r) => r.taskId !== taskId);
+      if (kept.length === entries.length) return prev;
+      if (kept.length) return { ...prev, [key]: kept };
       const { [key]: _gone, ...rest } = prev;
       return rest;
     });
@@ -1509,7 +1517,12 @@ export function useChatSession(
       adoptConversationId(e?.conversationId, (e as { runId?: unknown })?.runId);
       const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
       const taskId = typeof e?.taskId === 'string' && e.taskId ? e.taskId : undefined;
-      setBrowserRefusals((prev) => ({ ...prev, [key]: { ...(taskId ? { taskId } : {}), text } }));
+      setBrowserRefusals((prev) => {
+        // Replaces this run's earlier refusal (a busy run can later hit the
+        // limit), and leaves every other run's alone.
+        const others = (prev[key] ?? []).filter((r) => taskId === undefined || r.taskId !== taskId);
+        return { ...prev, [key]: [...others, { ...(taskId ? { taskId } : {}), text }] };
+      });
     };
     const onBrowserBusy = (e: { conversationId?: string; taskId?: string; limit?: number }) => {
       const n = typeof e.limit === 'number' && e.limit > 0 ? e.limit : 1;

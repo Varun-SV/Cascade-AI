@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { ToolRegistry, CascadeConfigSchema, Retriever, embedderFromProviders } from '#cascade-ai';
 import type { Chunk, ProviderConfig, ScoredChunk } from '#cascade-ai';
-import { allowances, answersThisRun, buildCloudConfig, buildMediaSink, parseChatRunPayload, resolveDocuments, runChatTurn, sanitiseClarificationAnswers, sanitiseEscalationNote, tenantScratchDir } from './runs.js';
+import { allowances, answersThisRun, browserAllowanceFor, buildCloudConfig, buildMediaSink, parseChatRunPayload, resolveDocuments, runChatTurn, sanitiseClarificationAnswers, sanitiseEscalationNote, tenantScratchDir } from './runs.js';
 import { CloudStore } from './db.js';
 import { limitsForPlan, PENDING_MEDIA_TTL_MS } from './entitlements.js';
 import type { CloudEnv } from './env.js';
@@ -1277,5 +1277,27 @@ describe('documents when the run is stopped', () => {
       socket.events.find((e) => e.event === 'knowledge:retrieved'),
       'no retrieval notice either — a cancelled run is not a degraded one',
     ).toBeUndefined();
+  });
+});
+
+describe('browserAllowanceFor — a run\u2019s claim on its owner\u2019s browser sessions', () => {
+  let dir = '';
+  let store: CloudStore | undefined;
+  afterEach(async () => { store?.close(); store = undefined; if (dir) await fs.rm(dir, { recursive: true, force: true }); });
+
+  it('returns only the session it last claimed, and only once', async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-allowance-'));
+    store = new CloudStore(path.join(dir, 'cloud.db'));
+    const user = store.upsertUser({ provider: 'dev', providerId: 'allow', email: null, name: null, avatar: null });
+    const today = new Date().toISOString().slice(0, 10);
+    const allowance = browserAllowanceFor(store, user.id);
+
+    expect(allowance.take()).toBeUndefined();
+    expect(allowance.take()).toBeUndefined();
+    expect(store.getBrowserSessions(user.id, today)).toBe(2);
+
+    allowance.giveBack();
+    allowance.giveBack();
+    expect(store.getBrowserSessions(user.id, today), 'one claim returned, not two').toBe(1);
   });
 });

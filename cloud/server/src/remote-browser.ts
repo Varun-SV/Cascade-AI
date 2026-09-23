@@ -62,11 +62,11 @@ interface AttachOptions {
   /**
    * The run owner's allowance of NEW sessions — a plan's daily count.
    *
-   * `admit` says why no session may be opened, or nothing; its words reach
-   * the model as the refusal and the person as the notice. `created` is told
-   * when one actually was.
+   * `take` claims one, or says why not; its words reach the model as the
+   * refusal and the person as the notice. `giveBack` returns a claim no
+   * session came of. See `RemoteBrowserController.allowances`.
    */
-  allowance?: { admit: () => string | undefined; created: () => void };
+  allowance?: { take: () => string | undefined; giveBack: () => void };
 }
 
 /** Attached browser, or null when the deployment has no provider configured. */
@@ -304,18 +304,20 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
       const allowance = opts.allowance;
       // Once per run, like "busy": a refused worker may ask again.
       let limitAnnounced = false;
-      controller.setAdmissionFor(id, () => {
-        const refusal = allowance.admit();
-        if (refusal && !limitAnnounced) {
-          limitAnnounced = true;
-          // Guarded: telling the person must not change what the model is told.
-          try {
-            opts.emit('browser:limit', { conversationId: opts.conversationId, taskId: id, detail: refusal });
-          } catch { /* the socket's problem, not the run's */ }
-        }
-        return refusal;
+      controller.setAllowanceFor(id, {
+        take: () => {
+          const refusal = allowance.take();
+          if (refusal && !limitAnnounced) {
+            limitAnnounced = true;
+            // Guarded: telling the person must not change what the model is told.
+            try {
+              opts.emit('browser:limit', { conversationId: opts.conversationId, taskId: id, detail: refusal });
+            } catch { /* the socket's problem, not the run's */ }
+          }
+          return refusal;
+        },
+        giveBack: () => allowance.giveBack(),
       });
-      controller.onSessionCreatedFor(id, () => allowance.created());
     }
     // Once per run. A worker told "busy" may well ask again, and every refusal
     // after the first is the same news.

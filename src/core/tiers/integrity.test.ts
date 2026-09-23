@@ -10,7 +10,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { CascadeConfig, GenerateResult, T2ToT3Assignment, T2Result, ToolCall, ToolDefinition } from '../../types.js';
 import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
-import { ACTING_INTEGRITY_RULE, REPORTING_INTEGRITY_RULE, describeToolRecord } from './integrity.js';
+import { ACTING_INTEGRITY_RULE, REPORTING_INTEGRITY_RULE, describeToolRecord, recordToolCall } from './integrity.js';
 import { T3Worker, buildWorkerRules } from './t3-worker.js';
 import { T2Manager } from './t2-manager.js';
 import { T1Administrator, type TaskPlan } from './t1-administrator.js';
@@ -124,12 +124,38 @@ describe('describeToolRecord — what the worker actually did', () => {
     expect(text.length).toBeLessThan(200);
   });
 
-  it('keeps the latest calls and says how many it left out, rather than dropping them silently', () => {
-    const record = Array.from({ length: 15 }, (_, i) => ({ name: `t${i}`, result: 'ok' }));
+  it('accounts for every call: the latest in full, the earlier ones by tool and outcome', () => {
+    // A bare "(3 earlier calls not shown)" left the grader told to fail an
+    // action no LISTED call performed, while the call that performed it was
+    // one of the three. A correct output citing call 1 of 15 read as invented.
+    const record = [
+      { name: 'browser_control', result: 'navigated to https://example.test' },
+      { name: 'browser_control', result: `Tool error: ${REFUSAL}` },
+      { name: 'web_fetch', result: 'OK' },
+      ...Array.from({ length: 12 }, (_, i) => ({ name: `t${i}`, result: 'ok' })),
+    ];
     const text = describeToolRecord(record);
-    expect(text.split('\n')[0]).toBe('(3 earlier calls not shown)');
-    expect(text).toContain('- t14 → ok');
-    expect(text).not.toContain('- t2 → ok');
+    expect(text.split('\n').slice(0, 4)).toEqual([
+      'Earlier calls, by tool (3):',
+      '- browser_control ×2 (1 returned a result, 1 an error or refusal)',
+      '- web_fetch ×1 (1 returned a result)',
+      'Most recent 12:',
+    ]);
+    expect(text).toContain('- t0 → ok');
+    expect(text).toContain('- t11 → ok');
+  });
+
+  it('stays bounded however many calls there were', () => {
+    const record = Array.from({ length: 500 }, (_, i) => ({ name: i % 2 ? 'web_fetch' : 'web_search', result: 'x'.repeat(1000) }));
+    expect(describeToolRecord(record).length).toBeLessThan(12 * 200 + 300);
+  });
+
+  it('keeps only the start of a result when the call is recorded, not the whole of it', () => {
+    // Held for the life of the worker: a few file_reads of large files was
+    // hundreds of megabytes kept to show the grader 160 characters of each.
+    const entry = recordToolCall('file_read', `START ${'x'.repeat(1_000_000)}`);
+    expect(entry.result.startsWith('START xxx')).toBe(true);
+    expect(entry.result.length).toBeLessThanOrEqual(161);
   });
 
   it('marks an empty result rather than printing nothing after the arrow', () => {
@@ -198,6 +224,15 @@ describe('the rule reaches every prompt that can answer the user', () => {
       expect(graded).toContain('browser_control → navigated to https://example.test');
       expect(graded, 'and a retry that succeeded is said to count').toContain('a later retry that succeeded did');
       expect(graded).not.toContain('did not perform or that returned an error');
+    });
+
+    it('does not hold a tool\u2019s whole result for the life of the worker', async () => {
+      const execute = vi.fn().mockResolvedValue(`PAGE ${'x'.repeat(500_000)}`);
+      const worker = new T3Worker(fabricatingRouter().router, browserRegistry(execute), 't2-1');
+      await worker.execute(assignment(), 'task-big');
+      const record = (worker as unknown as { toolRecord: Array<{ result: string }> }).toolRecord;
+      expect(record).toHaveLength(1);
+      expect(record[0]!.result.length).toBeLessThanOrEqual(161);
     });
 
     it('tells the self-test when nothing was called at all', async () => {

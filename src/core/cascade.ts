@@ -1901,6 +1901,14 @@ export class Cascade extends EventEmitter {
           'complexity',
           `terse option reply — on-device hint "${hint}" ignored; classifying with conversation context`,
         );
+      } else if (this.toolRegistry.hasTool(BROWSER_TOOL)) {
+        // The on-device classifier cannot know this run has a browser, and
+        // without that a one-site errand reads as research — Complex, a plan,
+        // and no browser in it. Only the classifier below is told.
+        this.recordDecision(
+          'complexity',
+          `on-device hint "${hint}" set aside — a browser is available, which only the classifier is told about`,
+        );
       } else {
         return this.floorComplexity(prompt, hint, 'on-device hint');
       }

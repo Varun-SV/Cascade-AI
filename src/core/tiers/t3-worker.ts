@@ -36,7 +36,7 @@ import { classifyProviderError } from '../router/provider-errors.js';
 import {
   evaluateAcceptance, failures, undecided, type AcceptanceResult,
 } from '../verification/acceptance.js';
-import { ACTING_INTEGRITY_RULE, describeToolRecord, type ToolRecordEntry } from './integrity.js';
+import { ACTING_INTEGRITY_RULE, describeToolRecord, recordToolCall, type ToolRecordEntry } from './integrity.js';
 import { BROWSER_TOOL, BROWSER_WORKER_RULE } from './browser-planning.js';
 
 /**
@@ -969,7 +969,7 @@ export class T3Worker extends BaseTier {
       for (const tc of effectiveResult.toolCalls) {
         allToolCalls.push(tc);
         const toolResult = await this.executeTool(tc);
-        this.toolRecord.push({ name: tc.name, result: toolResult });
+        this.toolRecord.push(recordToolCall(tc.name, toolResult));
         // Bound what enters the context: the WHOLE history is re-sent on every
         // remaining iteration, so an unbounded tool result (big file read,
         // chatty command) multiplies into a token bomb across the loop.

@@ -401,9 +401,8 @@ describe('the run owner\u2019s allowance of new sessions', () => {
   const cdp = { tools: { remoteBrowser: { provider: 'cdp' as const, url: 'ws://browser.test:9222' } } };
 
   /** Attach a run with this allowance and announce it, capturing what the bridge registered. */
-  function attachedWith(allowance?: { admit: () => string | undefined; created: () => void }) {
-    const gate = vi.spyOn(RemoteBrowserController.prototype, 'setAdmissionFor');
-    const created = vi.spyOn(RemoteBrowserController.prototype, 'onSessionCreatedFor');
+  function attachedWith(allowance?: { take: () => string | undefined; giveBack: () => void }) {
+    const set = vi.spyOn(RemoteBrowserController.prototype, 'setAllowanceFor');
     const { cascade, config } = realCascade(cdp.tools.remoteBrowser);
     const handlers = new Map<string, (e: unknown) => void>();
     (cascade as unknown as { on: (ev: string, fn: (e: unknown) => void) => void }).on =
@@ -411,25 +410,24 @@ describe('the run owner\u2019s allowance of new sessions', () => {
     attachRemoteBrowser({ cascade, config, conversationId: 'c1', emit, ...(allowance ? { allowance } : {}) });
     handlers.get('run:started')?.({ taskId: 't1' });
     return {
-      gate: gate.mock.calls.find(([id]) => id === 't1')?.[1],
-      onCreated: created.mock.calls.find(([id]) => id === 't1')?.[1],
-      registered: gate.mock.calls.length,
-      restore: () => { gate.mockRestore(); created.mockRestore(); },
+      registered: set.mock.calls.find(([id]) => id === 't1')?.[1],
+      count: set.mock.calls.length,
+      restore: () => set.mockRestore(),
     };
   }
 
   it('hands the controller the allowance\u2019s answer, word for word', () => {
-    const { gate, restore } = attachedWith({ admit: () => 'used up for today', created: () => {} });
+    const { registered, restore } = attachedWith({ take: () => 'used up for today', giveBack: () => {} });
     try {
-      expect(gate, 'registered under the run id when the run starts').toBeTypeOf('function');
-      expect(gate!(), 'the model is refused in these words').toBe('used up for today');
+      expect(registered, 'registered under the run id when the run starts').toBeDefined();
+      expect(registered!.take(), 'the model is refused in these words').toBe('used up for today');
     } finally { restore(); }
   });
 
   it('tells the person once, in the same words, however often the run is refused', () => {
-    const { gate, restore } = attachedWith({ admit: () => 'used up for today', created: () => {} });
+    const { registered, restore } = attachedWith({ take: () => 'used up for today', giveBack: () => {} });
     try {
-      gate!(); gate!(); gate!();
+      registered!.take(); registered!.take(); registered!.take();
       expect(emits.filter((e) => e.event === 'browser:limit')).toEqual([
         { event: 'browser:limit', payload: { conversationId: 'c1', taskId: 't1', detail: 'used up for today' } },
       ]);
@@ -437,26 +435,26 @@ describe('the run owner\u2019s allowance of new sessions', () => {
   });
 
   it('says nothing while there is allowance left', () => {
-    const { gate, restore } = attachedWith({ admit: () => undefined, created: () => {} });
+    const { registered, restore } = attachedWith({ take: () => undefined, giveBack: () => {} });
     try {
-      expect(gate!()).toBeUndefined();
+      expect(registered!.take()).toBeUndefined();
       expect(emits.filter((e) => e.event === 'browser:limit')).toEqual([]);
     } finally { restore(); }
   });
 
-  it('counts a session when the controller says one was created', () => {
-    const created = vi.fn();
-    const { onCreated, restore } = attachedWith({ admit: () => undefined, created });
+  it('passes a give-back through to the allowance', () => {
+    const giveBack = vi.fn();
+    const { registered, restore } = attachedWith({ take: () => undefined, giveBack });
     try {
-      void onCreated!();
-      expect(created).toHaveBeenCalledOnce();
+      registered!.giveBack();
+      expect(giveBack).toHaveBeenCalledOnce();
     } finally { restore(); }
   });
 
-  it('registers no gate for a caller with no allowance to enforce', () => {
-    const { registered, restore } = attachedWith();
+  it('registers no allowance for a caller with none to enforce', () => {
+    const { count, restore } = attachedWith();
     try {
-      expect(registered).toBe(0);
+      expect(count).toBe(0);
     } finally { restore(); }
   });
 });

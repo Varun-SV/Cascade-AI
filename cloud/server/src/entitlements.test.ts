@@ -1,9 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import {
-  beginRun, browserSessionRefusal, checkBrowserSessionLimit, checkDailyLimit, checkPendingMediaCap, EntitlementError, limitsForPlan,
+  beginRun, browserSessionRefusal, checkBrowserSessionLimit, checkDailyLimit, checkPendingMediaCap, claimBrowserSession, EntitlementError, limitsForPlan,
   PENDING_MEDIA_TTL_MS, todayKey, _resetActiveRunsForTests,
 } from './entitlements.js';
 import { CloudStore } from './db.js';
@@ -202,6 +202,41 @@ describe('the daily browser allowance', () => {
     const { id } = user();
     for (let i = 0; i < 5; i++) store.incrementBrowserSessions(id, '2000-01-01');
     expect(browserSessionRefusal(store, id, 'free'), 'yesterday’s sessions are not today’s').toBeUndefined();
+  });
+
+  it('claims sessions one at a time up to the allowance, then refuses in the same words', () => {
+    const { id } = user();
+    for (let i = 0; i < 5; i++) expect('giveBack' in claimBrowserSession(store, id, 'free'), `claim ${i + 1}`).toBe(true);
+    const sixth = claimBrowserSession(store, id, 'free');
+    expect('refusal' in sixth && sixth.refusal).toBe(browserSessionRefusal(store, id, 'free'));
+    expect(store.getBrowserSessions(id, todayKey()), 'a refused claim takes nothing').toBe(5);
+  });
+
+  it('gives a claim back when no session came of it', () => {
+    const { id } = user();
+    const claim = claimBrowserSession(store, id, 'free');
+    if (!('giveBack' in claim)) throw new Error('expected a claim');
+    claim.giveBack();
+    expect(store.getBrowserSessions(id, todayKey())).toBe(0);
+  });
+
+  it('gives it back to the day it was taken from, even after midnight', () => {
+    // Otherwise a session claimed at 23:59 and abandoned at 00:01 would be
+    // refunded from the NEW day, handing out one more than the allowance.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-23T23:59:30Z'));
+      const { id } = user();
+      const claim = claimBrowserSession(store, id, 'free');
+      if (!('giveBack' in claim)) throw new Error('expected a claim');
+      vi.setSystemTime(new Date('2026-09-24T00:00:30Z'));
+      store.incrementBrowserSessions(id, '2026-09-24');
+      claim.giveBack();
+      expect(store.getBrowserSessions(id, '2026-09-23')).toBe(0);
+      expect(store.getBrowserSessions(id, '2026-09-24'), 'today untouched').toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('refuses a browser run up front as an entitlement, like the daily run limit', () => {
