@@ -207,6 +207,39 @@ describe('useBrowserAllowance and who is signed in', () => {
     expect(browserChip(view.result.current).exhausted).toBe(false);
   });
 
+  it('checks again after signing out and back in as the same account', async () => {
+    // The read was kept by user id, so the same account signing back in found
+    // it still matching and was shown it while the new read was on its way:
+    // sessions spent elsewhere in between looked unspent.
+    mockedFetchUsage.mockResolvedValue(usage(1));
+    const view = renderHook(({ user }) => useBrowserAllowance(user, true, 'idle', false, vi.fn()), {
+      initialProps: { user: 'alice' as string | undefined },
+    });
+    await waitFor(() => expect(view.result.current).toEqual({ used: 1, limit: 5 }));
+
+    view.rerender({ user: undefined });
+    let answer: (u: UsageInfo) => void = () => {};
+    mockedFetchUsage.mockReturnValue(new Promise<UsageInfo>((resolve) => { answer = resolve; }));
+    view.rerender({ user: 'alice' });
+    expect(view.result.current, 'a new session, so not known yet').toBe(CHECKING);
+
+    await act(async () => { answer(usage(5)); });
+    expect(view.result.current).toEqual({ used: 5, limit: 5 });
+  });
+
+  it('checks again when the deployment\u2019s browser goes away and comes back', async () => {
+    mockedFetchUsage.mockResolvedValue(usage(1));
+    const view = renderHook(({ available }) => useBrowserAllowance('alice', available, 'idle', false, vi.fn()), {
+      initialProps: { available: true },
+    });
+    await waitFor(() => expect(view.result.current).toEqual({ used: 1, limit: 5 }));
+
+    view.rerender({ available: false });
+    mockedFetchUsage.mockReturnValue(new Promise<UsageInfo>(() => {}));
+    view.rerender({ available: true });
+    expect(view.result.current).toBe(CHECKING);
+  });
+
   it('forgets the allowance on sign-out', async () => {
     mockedFetchUsage.mockResolvedValue(usage(5));
     const view = renderHook(({ user }) => useBrowserAllowance(user, true, 'idle', false, vi.fn()), {

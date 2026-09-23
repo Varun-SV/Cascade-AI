@@ -86,6 +86,13 @@ export function useBrowserAllowance(
   // account on the same page inherit this one's exhausted allowance — and keep
   // it, since a failed first read deliberately leaves the last value in place.
   const [read, setRead] = useState<{ userId: string; allowance: BrowserAllowance | null } | null>(null);
+  // And forgotten the moment there is no one signed in, or no browser. Keyed
+  // by user alone, a sign-out and back in as the SAME account found the old
+  // read still matching, and showed it while the new one was on its way — an
+  // allowance spent elsewhere in between looked unspent, and the run was
+  // refused. Cleared during render rather than in an effect, so no sign-in can
+  // land before it: each new session starts at CHECKING.
+  if (read !== null && (!userId || !available)) setRead(null);
   const known = read !== null && read.userId === userId;
   const allowance = known ? read.allowance : null;
   // Nothing read for this user yet — the first read is on its way, or failed
