@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { io as ioClient, type Socket as ClientSocket } from 'socket.io-client';
-import { attachSocket, RebindableTransport, rememberForReplay, replaySupervision, resumeAndReplay, type LiveRun } from './socket.js';
+import { attachSocket, RebindableTransport, rememberForReplay, replayAdopted, replaySupervision, resumeAndReplay, type LiveRun } from './socket.js';
 import { CloudStore } from './db.js';
 import type { CloudEnv } from './env.js';
 import { createSessionToken, SESSION_COOKIE_NAME } from './auth/session.js';
@@ -1459,6 +1459,42 @@ describe('rememberForReplay / replaySupervision — what a reload gets back', ()
     const { emitted, socket } = recorder();
     replaySupervision(run, socket);
     expect(emitted).toEqual([{ event: 'browser:limit', payload: { taskId: 't1', detail: 'used up' } }]);
+  });
+
+  it('replays refusals in the order they were said, across runs — the newest is the one shown', () => {
+    // The client shows the last refusal it hears. Replayed run by run, an
+    // older run's limit that changed AFTER a newer run went busy came out
+    // first, and the stale busy notice hid it.
+    const a = freshRun();
+    const b = freshRun();
+    rememberForReplay(a, 'browser:busy', { conversationId: 'c1', taskId: 'ta', limit: 1 });
+    rememberForReplay(b, 'browser:busy', { conversationId: 'c1', taskId: 'tb', limit: 1 });
+    rememberForReplay(a, 'browser:limit', { conversationId: 'c1', taskId: 'ta', detail: 'used up for today' });
+    const { emitted, socket } = recorder();
+    replayAdopted([a, b], socket);
+    expect(emitted.map((e) => (e.payload as { taskId: string }).taskId)).toEqual(['tb', 'ta']);
+    expect(emitted.at(-1)?.event, 'the newest, and the actionable one').toBe('browser:limit');
+  });
+
+  it('orders them the same way within one run', () => {
+    const run = freshRun();
+    rememberForReplay(run, 'browser:busy', { taskId: 't1', limit: 1 });
+    rememberForReplay(run, 'browser:busy', { taskId: 't2', limit: 1 });
+    rememberForReplay(run, 'browser:limit', { taskId: 't1', detail: 'used up' });
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+    expect(emitted.map((e) => e.event)).toEqual(['browser:busy', 'browser:limit']);
+  });
+
+  it('a resume replays across its runs in that order too', () => {
+    const a = freshRun();
+    const b = freshRun();
+    rememberForReplay(a, 'browser:busy', { taskId: 'ta', limit: 1 });
+    rememberForReplay(b, 'browser:busy', { taskId: 'tb', limit: 1 });
+    rememberForReplay(a, 'browser:limit', { taskId: 'ta', detail: 'used up' });
+    const { emitted, socket } = recorder();
+    resumeAndReplay(socket, { active: 2 }, [a, b]);
+    expect(emitted.map((e) => e.event)).toEqual(['run:resumed', 'browser:busy', 'browser:limit']);
   });
 
   it('stops replaying a refusal once that task gets its browser, and only that task', () => {

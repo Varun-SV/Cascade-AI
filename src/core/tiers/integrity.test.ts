@@ -206,6 +206,8 @@ describe('describeToolRecord — what the worker actually did', () => {
     const failures: Array<[string, string]> = [
       ['run_code', 'Execution failed (12ms):\nError: boom\nStderr: \nStdout: '],
       ['run_code', 'Execution timed out after 30s. Consider breaking the task into smaller pieces.'],
+      ['run_code', 'Error: Python interpreter not found.\nPlease install Python and ensure it is in your PATH.\nTried: python3, python'],
+      ['run_code', 'Error: Node.js interpreter not found.\nPlease install Node.js and ensure it is in your PATH.\nTried: node'],
       ['web_fetch', 'HTTP 404 Not Found from https://example.test/missing'],
       ['web_fetch', 'Refused to fetch http://10.0.0.1/: private address'],
       ['browser', 'Browser action "click" failed: element not found'],
@@ -235,6 +237,7 @@ describe('describeToolRecord — what the worker actually did', () => {
     // result, each of these was graded "an error or refusal", and an answer
     // built on the page or file was rejected as unsupported.
     const successes: Array<[string, string]> = [
+      ['run_code', 'Execution successful (8ms):\nStdout: Error: Python interpreter not found. (printed by the script)'],
       ['shell', '(no output)'], ['browser_control', 'Navigated to https://example.test'],
       ['file_read', 'Error handling in Go is explicit.'], ['file_read', 'Deployment notes: all green'],
       ['browser_control', 'Failed experiments in 2024 taught us three things'],
@@ -272,10 +275,19 @@ describe('describeToolRecord — what the worker actually did', () => {
     let checked = 0;
     for (const file of fs.readdirSync(toolsDir).filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))) {
       let tool = 'created_tool';
+      // A message built as lines — `return [\n 'Error: …',\n …].join('\n')` —
+      // starts on the line after the bracket. Missed at first: run_code's
+      // "interpreter not found" is written that way.
+      let arrayHead = false;
       for (const line of fs.readFileSync(path.join(toolsDir, file), 'utf8').split('\n')) {
         const named = /readonly name = '([a-z_]+)'/.exec(line);
         if (named) tool = named[1]!;
-        const returned = /(?:return|resolve\()\s*(['`])((?:(?!\1).)*)\1/.exec(line);
+        const opensArray = /(?:return|resolve\()\s*\[\s*$/.test(line);
+        const returned = arrayHead
+          ? /^\s*(['`])((?:(?!\1).)*)\1/.exec(line)
+          : /(?:return|resolve\()\s*(['`])((?:(?!\1).)*)\1/.exec(line);
+        if (arrayHead && line.trim() && !line.trim().startsWith('//')) arrayHead = false;
+        if (opensArray) { arrayHead = true; continue; }
         if (!returned) continue;
         const text = returned[2]!;
         if (!FAILURE_WORDS.test(text) || SPLICED.some((r) => r.test(text))) continue;
@@ -329,6 +341,26 @@ describe('describeToolRecord — what the worker actually did', () => {
     expect(entry.result).not.toContain(key);
     expect(entry.result).not.toContain('ghp_0123456789');
     expect(entry.result).toContain('OPENAI_API_KEY=[REDACTED_SECRET]');
+  });
+
+  it('names the tool that actually ran when the worker fell back, in every tier of the record', () => {
+    // file_remove was not registered, and the fallback answered with
+    // file_read. Once the call left the latest twelve it read as
+    // "file_remove(path=a.txt) → returned a result": a deletion that never
+    // happened, with nothing left to say so.
+    const fell = recordToolCall('file_remove', '[Fallback via file_read]: contents of a.txt', { path: 'a.txt' }, 'file_read');
+    const filler = (n: number) => Array.from({ length: n }, (_, i) => ({ name: `t${i}`, result: 'ok' }));
+    expect(describeToolRecord([fell])).toBe('- file_remove(path=a.txt) [ran as file_read] → [Fallback via file_read]: contents of a.txt');
+    expect(describeToolRecord([fell, ...filler(12)]).split('\n')[1])
+      .toBe('- file_remove(path=a.txt) [ran as file_read] → returned a result');
+    expect(describeToolRecord([fell, ...filler(60)]).split('\n')[1])
+      .toBe('- file_remove [ran as file_read] ×1 (1 returned a result)');
+  });
+
+  it('judges a fallback by the tool that ran, behind the marker', () => {
+    const failed = recordToolCall('fetch_page', '[Fallback via web_fetch]: HTTP 503 Service Unavailable from https://x.test', {}, 'web_fetch');
+    const lines = describeToolRecord([failed, ...Array.from({ length: 12 }, (_, i) => ({ name: `t${i}`, result: 'ok' }))]).split('\n');
+    expect(lines[1]).toBe('- fetch_page [ran as web_fetch] → an error or refusal');
   });
 
   it('takes out a short labelled password too, not only long token-shaped values', () => {
@@ -429,6 +461,42 @@ describe('the rule reaches every prompt that can answer the user', () => {
       expect(graded?.content).not.toContain('hunter2');
       expect(critic?.content).not.toContain('hunter2');
       expect(result.output, 'the deliverable itself is untouched here — T2 redacts at its boundary').toContain('hunter2');
+    });
+
+    it('tells the grader which tool really ran when a call fell back to a sibling', async () => {
+      // A registry that has no file_remove, so the worker's fallback answers
+      // it with file_read — the sibling whose name shares a word.
+      const defs: ToolDefinition[] = [
+        { name: 'file_remove', description: 'Delete a file', inputSchema: {} },
+        { name: 'file_read', description: 'Read a file', inputSchema: {} },
+      ];
+      const execute = vi.fn(async (name: string) => {
+        if (name === 'file_remove') throw new Error('Tool not found: file_remove');
+        return 'contents of a.txt';
+      });
+      const registry = {
+        getToolDefinitions: () => defs, requiresApproval: () => false, isDangerous: () => false,
+        hasTool: (n: string) => n === 'file_read', execute,
+      } as unknown as ToolRegistry;
+      let loop = 0;
+      const calls: Call[] = [];
+      const router = {
+        generate: vi.fn(async (tier: string, options: { messages: Array<{ content: unknown }>; systemPrompt?: string }) => {
+          const latest = options.messages[options.messages.length - 1];
+          const content = typeof latest?.content === 'string' ? latest.content : '';
+          calls.push({ tier, systemPrompt: options.systemPrompt ?? '', content });
+          if (content.startsWith('Self-test this output')) return makeResult(PASS);
+          loop += 1;
+          if (loop === 1) return makeResult('', [{ id: 'r1', name: 'file_remove', input: { path: 'a.txt' } }]);
+          return makeResult('Deleted a.txt.');
+        }),
+        getModelForTier: () => undefined,
+      } as unknown as CascadeRouter;
+      await new T3Worker(router, registry, 't2-1').execute(assignment({ subtaskId: 'rm' }), 'task-fallback');
+
+      const graded = calls.find((c) => c.content.startsWith('Self-test this output'));
+      expect(graded?.content).toContain('- file_remove(path=a.txt) [ran as file_read] → [Fallback via file_read]: contents of a.txt');
+      expect(graded?.content).toContain('"[ran as X]" means the tool asked for could not run');
     });
 
     it('does not fail an output whose first call errored and whose retry worked', async () => {

@@ -250,7 +250,7 @@ export interface LiveRun {
    * the run went on without a browser. Dropped when that task's browser opens
    * after all, the same moment the client drops its notice.
    */
-  browserRefusals?: Map<string, { event: string; payload: Record<string, unknown> }>;
+  browserRefusals?: Map<string, { event: string; payload: Record<string, unknown>; seq: number }>;
   /** Outstanding approval requests, by request id, in the order they arrived. */
   approvals?: Map<string, Record<string, unknown>>;
   /**
@@ -341,6 +341,14 @@ const TERMINAL_EVENTS = new Set(['session:complete', 'session:error']);
  * still relevant after human ownership ends: until the agent restores capture,
  * a reloaded client must keep every viewing surface dark too.
  */
+/**
+ * When each browser refusal was said, across every run in the process. A
+ * replay says them in this order: the client shows the last one it hears, so
+ * replaying by run left an older run's stale "busy" over a newer run's "used
+ * up for today".
+ */
+let refusalSeq = 0;
+
 export function rememberForReplay(run: LiveRun, event: string, payload: unknown): void {
   const p = (payload ?? {}) as Record<string, unknown>;
   if (event === 'browser:live-view') {
@@ -363,7 +371,7 @@ export function rememberForReplay(run: LiveRun, event: string, payload: unknown)
     const taskId = p['taskId'];
     if (typeof taskId !== 'string' || !taskId) return;
     // One per task, the latest: a busy run can go on to hit the limit.
-    (run.browserRefusals ??= new Map()).set(taskId, { event, payload: p });
+    (run.browserRefusals ??= new Map()).set(taskId, { event, payload: p, seq: ++refusalSeq });
     return;
   }
   if (event === 'browser:control') {
@@ -515,7 +523,7 @@ export function resumeAndReplay(
   adopted: readonly LiveRun[],
 ): void {
   socket.emit('run:resumed', resumed);
-  for (const run of adopted) replaySupervision(run, socket);
+  replayAdopted(adopted, socket);
 }
 
 /** Give a replacement connection back the state the reloaded page lost. */
@@ -544,7 +552,23 @@ function remainingDeadline(
 }
 
 export function replaySupervision(run: LiveRun, socket: Pick<Socket, 'emit'>): void {
-  if (run.done) return;
+  replayAdopted([run], socket);
+}
+
+/**
+ * Every adopted run's state, then the browser refusals of all of them in the
+ * order they were said. Refusals go last and together because the client
+ * keeps one notice per conversation, the last it heard: replayed run by run,
+ * the order was which run was adopted first, not which refusal was newest.
+ */
+export function replayAdopted(runs: readonly LiveRun[], socket: Pick<Socket, 'emit'>): void {
+  const live = runs.filter((run) => !run.done);
+  for (const run of live) replayRunState(run, socket);
+  const refusals = live.flatMap((run) => [...(run.browserRefusals?.values() ?? [])]).sort((a, b) => a.seq - b.seq);
+  for (const { event, payload } of refusals) socket.emit(event, payload);
+}
+
+function replayRunState(run: LiveRun, socket: Pick<Socket, 'emit'>): void {
   if (run.liveView) socket.emit('browser:live-view', run.liveView);
   // AFTER the live view, and that ordering is load-bearing rather than tidy:
   // the client files control state against the browser entry for the run, and
@@ -552,7 +576,6 @@ export function replaySupervision(run: LiveRun, socket: Pick<Socket, 'emit'>): v
   // would be discarded and the reloaded page would come back believing the
   // agent still had a browser the person was actually holding.
   if (run.control) socket.emit('browser:control', run.control);
-  for (const { event, payload } of run.browserRefusals?.values() ?? []) socket.emit(event, payload);
   for (const request of run.approvals?.values() ?? []) {
     socket.emit('permission:user-required', request);
   }
@@ -789,8 +812,7 @@ export function attachSocket(
       pendingReplay.push(run);
     };
     const flushReplay = (): void => {
-      const owed = pendingReplay.splice(0);
-      for (const run of owed) replaySupervision(run, socket);
+      replayAdopted(pendingReplay.splice(0), socket);
     };
 
     if (key) {

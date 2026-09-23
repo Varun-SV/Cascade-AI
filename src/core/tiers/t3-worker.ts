@@ -377,6 +377,13 @@ export class T3Worker extends BaseTier {
    * See describeToolRecord.
    */
   private toolRecord: ToolRecordEntry[] = [];
+  /**
+   * The tool that actually ran for a call `adaptiveFallback` recovered, by the
+   * call. Kept apart from the result text because the record's older entries
+   * show an outcome, not the text — and a requested `file_remove` answered by
+   * `file_read` must not read as a deletion.
+   */
+  private readonly ranAs = new WeakMap<ToolCall, string>();
   /** @deprecated — kept only as fallback when no escalator is attached */
   private sessionApprovals: Map<string, boolean> = new Map();
   private peerBus?: PeerBus;
@@ -981,7 +988,7 @@ export class T3Worker extends BaseTier {
       for (const tc of effectiveResult.toolCalls) {
         allToolCalls.push(tc);
         const toolResult = await this.executeTool(tc);
-        this.toolRecord.push(recordToolCall(tc.name, toolResult, tc.input));
+        this.toolRecord.push(recordToolCall(tc.name, toolResult, tc.input, this.ranAs.get(tc)));
         // Bound what enters the context: the WHOLE history is re-sent on every
         // remaining iteration, so an unbounded tool result (big file read,
         // chatty command) multiplies into a token bomb across the loop.
@@ -1239,6 +1246,7 @@ export class T3Worker extends BaseTier {
         });
         const str = typeof result === 'string' ? result : JSON.stringify(result);
         if (!str.startsWith('Tool error:') && !str.startsWith('Error:')) {
+          this.ranAs.set(tc, altTool);
           return `[Fallback via ${altTool}]: ${str}`;
         }
       } catch { /* fall through to next strategy */ }
@@ -1262,7 +1270,10 @@ export class T3Worker extends BaseTier {
             ...(this.signal ? { signal: this.signal } : {}),
           });
           const str = typeof result === 'string' ? result : JSON.stringify(result);
-          if (!str.startsWith('Tool error:')) return `[Synthesized ${newToolName}]: ${str}`;
+          if (!str.startsWith('Tool error:')) {
+            this.ranAs.set(tc, newToolName);
+            return `[Synthesized ${newToolName}]: ${str}`;
+          }
         }
       } catch { /* fall through */ }
     }
@@ -1626,7 +1637,7 @@ ${RedactionLayer.redactSecrets(output)}
 
 Tool calls actually made while producing it (tool and what it was asked to do → what it returned):
 ${describeToolRecord(this.toolRecord)}
-(A [REDACTED_…] marker is a credential taken out of this record, not missing from the tool's result.)
+(A [REDACTED_…] marker is a credential taken out of this record, not missing from the tool's result. "[ran as X]" means the tool asked for could not run and X ran in its place: only what X does happened.)
 
 "correctness" MUST be "fail" if the output presents simulated, hypothetical or invented results as real, or claims an action — visiting a site, logging in, running code, fetching a page, writing a file, sending something — that no tool call above actually performed — a call that returned an error or a refusal performed nothing, but a later retry that succeeded did. An output that plainly says it could not do something is honest: judge that on completeness, not correctness.
 

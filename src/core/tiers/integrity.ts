@@ -44,6 +44,12 @@ export interface ToolRecordEntry {
   result: string;
   /** A bounded, redacted summary of the call's arguments. See `describeArgs`. */
   args?: string;
+  /**
+   * The tool that actually ran, when it was not the one asked for: the
+   * worker's fallback answered a failed call with a sibling or a synthesized
+   * tool. What happened is what THIS tool does, not what `name` would have.
+   */
+  ranAs?: string;
 }
 
 const MAX_RECORD_ENTRIES = 12;
@@ -75,9 +81,20 @@ function clip(result: string): string {
  * from the worker that read the file or ran the command — one that never had
  * the credential it printed.
  */
-export function recordToolCall(name: string, result: string, input?: Record<string, unknown>): ToolRecordEntry {
+export function recordToolCall(
+  name: string,
+  result: string,
+  input?: Record<string, unknown>,
+  /** The tool that answered in `name`'s place, if the worker fell back. */
+  ranAs?: string,
+): ToolRecordEntry {
   const args = describeArgs(input);
-  return { name, result: clip(RedactionLayer.redactSecrets(result.slice(0, MAX_SCAN_CHARS))), ...(args ? { args } : {}) };
+  return {
+    name,
+    result: clip(RedactionLayer.redactSecrets(result.slice(0, MAX_SCAN_CHARS))),
+    ...(args ? { args } : {}),
+    ...(ranAs && ranAs !== name ? { ranAs } : {}),
+  };
 }
 
 const MAX_ARG_CHARS = 60;
@@ -171,7 +188,7 @@ const TOOL_FAILURE: Record<string, RegExp> = {
   generate_image: /^Provide a "prompt" describing the image/,
   generate_speech: /^Provide "text" to speak/,
   generate_video: /^Provide a "prompt" describing the video/,
-  run_code: /^Execution (?:failed \(\d+ms\):|timed out after )/,
+  run_code: /^(?:Execution (?:failed \(\d+ms\):|timed out after )|Error: [\w.]+ interpreter not found\.)/,
   // A non-zero exit, and the output that came with it.
   shell: /^Exit (?!0:)[^\s:]+:(?:\s|$)/,
   // A success starts "URL: …", so a failure's wording cannot be page text.
@@ -205,8 +222,16 @@ export function toolReportedFailure(name: string, result: string): boolean {
  * wordings above are prefixes and allow for the flattening, so the start of
  * the result is all they need.
  */
-function failedCall({ name, result }: ToolRecordEntry): boolean {
-  return toolReportedFailure(name, result);
+function failedCall({ name, result, ranAs }: ToolRecordEntry): boolean {
+  // A fallback's result is the tool that ran, behind the worker's marker.
+  return ranAs
+    ? toolReportedFailure(ranAs, result.replace(/^\[(?:Fallback via|Synthesized) [^\]]*\]: /, ''))
+    : toolReportedFailure(name, result);
+}
+
+/** How a call is named in the record — with the tool that stood in for it, if one did. */
+function callName({ name, ranAs }: ToolRecordEntry): string {
+  return ranAs ? `${name} [ran as ${ranAs}]` : name;
 }
 
 /**
@@ -230,7 +255,7 @@ export function describeToolRecord(record: readonly ToolRecordEntry[]): string {
   const before = record.slice(0, record.length - recent.length);
   const outlined = before.slice(-MAX_OUTLINE_ENTRIES);
   const oldest = before.slice(0, before.length - outlined.length);
-  const call = ({ name, args }: ToolRecordEntry) => `- ${name}${args ? `(${args})` : ''}`;
+  const call = (entry: ToolRecordEntry) => `- ${entry.name}${entry.args ? `(${entry.args})` : ''}${entry.ranAs ? ` [ran as ${entry.ranAs}]` : ''}`;
   const detail = recent.map((entry) => `${call(entry)} → ${clip(entry.result) || '(empty result)'}`);
   if (!before.length) return detail.join('\n');
 
@@ -240,9 +265,10 @@ export function describeToolRecord(record: readonly ToolRecordEntry[]): string {
     // distinct tools, however many calls there were.
     const byTool = new Map<string, { ok: number; failed: number }>();
     for (const entry of oldest) {
-      const tally = byTool.get(entry.name) ?? { ok: 0, failed: 0 };
+      const key = callName(entry);
+      const tally = byTool.get(key) ?? { ok: 0, failed: 0 };
       if (failedCall(entry)) tally.failed++; else tally.ok++;
-      byTool.set(entry.name, tally);
+      byTool.set(key, tally);
     }
     lines.push(`Earliest calls, by tool (${oldest.length}):`);
     for (const [name, { ok, failed }] of byTool) {

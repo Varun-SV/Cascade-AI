@@ -29,7 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is refused the next session with the same message shown in the chat. The
   chip's tooltip shows how many are left today, and it follows a plan change
   in either direction without a reload. A deployment without a browser
-  never asks for it. Only billed sessions are rationed:
+  never asks for it. After a reconnect, the newest browser refusal is the
+  one shown. Only billed sessions are rationed:
   a deployment driving its own browser over CDP opens none, so it has no
   daily limit.
 
@@ -61,7 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of counting it as a result, and only for the tool that uses that wording,
   so a page or file that happens to start "Failed…" or "Error:" still
   counts as what the tool returned. A failed MCP tool call now says so
-  instead of reading as its error text. The self-check sees what was written or
+  instead of reading as its error text, and a call the worker answered with
+  a stand-in tool says which tool actually ran. The self-check sees what was written or
   typed unless the field is a credential; `#author` is no longer mistaken
   for one.
 - **With the Browser chip on, a website errand is planned around the
