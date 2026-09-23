@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { attachRemoteBrowser, asWatchOnlyViewer, frameEmitter, formatCeiling, resetSharedBrowser, sharedBrowserGeneration } from './remote-browser.js';
-import { Cascade, RemoteBrowserController, type CascadeConfig } from '#cascade-ai';
+import { ALLOWANCE_UNAVAILABLE, Cascade, RemoteBrowserController, type CascadeConfig } from '#cascade-ai';
 
 /**
  * A REAL Cascade, because the fake below is what let a shipped bug through.
@@ -476,6 +476,35 @@ describe('the run owner\u2019s allowance of new sessions', () => {
       liveView!({ active: true, liveViewUrl: 'https://viewer.test/s1' });
       registered!.take(); registered!.take();
       expect(emits.filter((e) => e.event === 'browser:limit')).toHaveLength(2);
+    } finally { restore(); }
+  });
+
+  it('tells the person when the allowance could not be checked, as the model is told', () => {
+    // The controller refuses on a throw too, but only the model heard: the
+    // person saw a browser that never came and no reason why.
+    const { registered, restore } = attachedWith({ take: () => { throw new Error('store down'); }, giveBack: () => {} });
+    try {
+      expect(registered!.take()).toBe(ALLOWANCE_UNAVAILABLE);
+      expect(emits.filter((e) => e.event === 'browser:limit')).toEqual([
+        { event: 'browser:limit', payload: { conversationId: 'c1', taskId: 't1', detail: ALLOWANCE_UNAVAILABLE } },
+      ]);
+    } finally { restore(); }
+  });
+
+  it('tells the person of a different refusal, even inside one episode', () => {
+    // "Could not check, try again" and then, on the retry, "used up for
+    // today": the second is not the same news, and a flag that only knew a
+    // refusal had been shown kept it quiet.
+    const answers: Array<() => string | undefined> = [
+      () => { throw new Error('store down'); },
+      () => 'used up for today',
+      () => 'used up for today',
+    ];
+    const { registered, restore } = attachedWith({ take: () => answers.shift()!(), giveBack: () => {} });
+    try {
+      registered!.take(); registered!.take(); registered!.take();
+      expect(emits.filter((e) => e.event === 'browser:limit').map((e) => (e.payload as { detail: string }).detail))
+        .toEqual([ALLOWANCE_UNAVAILABLE, 'used up for today']);
     } finally { restore(); }
   });
 

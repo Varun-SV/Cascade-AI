@@ -69,7 +69,7 @@ export type {
   ClarificationOutcome,
 } from './tools/ask-user.js';
 // The remote-browser surface, for hosts with no browser of their own.
-export { RemoteBrowserController } from './browser/remote/controller.js';
+export { ALLOWANCE_UNAVAILABLE, RemoteBrowserController } from './browser/remote/controller.js';
 export type { BrowserFrame, BrowserInput, BrowserControlState, BrowserBusyInfo, BrowserAllowance } from './browser/remote/controller.js';
 export { GenericCdpProvider, isCdpEndpoint } from './browser/remote/generic-cdp.js';
 export { SteelProvider, isHostedSteel, isUsableSteelBase, isUsableSteelKey } from './browser/remote/steel.js';

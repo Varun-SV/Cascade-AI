@@ -131,6 +131,33 @@ describe('RedactionLayer', () => {
       .toBe('Authorization: Basic [REDACTED_SECRET]');
   });
 
+  it('redacts an Authorization header however short its credential', () => {
+    expect(RedactionLayer.redactSecrets('Authorization: Bearer short7')).toBe('Authorization: Bearer [REDACTED_SECRET]');
+    expect(RedactionLayer.redactSecrets('Authorization: Basic YTpi')).toBe('Authorization: Basic [REDACTED_SECRET]');
+    expect(RedactionLayer.redactSecrets('proxy-authorization: basic YTpi\nnext line'))
+      .toBe('proxy-authorization: basic [REDACTED_SECRET]\nnext line');
+    expect(RedactionLayer.redactSecrets("curl -H 'Authorization: token abc' https://api.test"))
+      .toBe("curl -H 'Authorization: token [REDACTED_SECRET]' https://api.test");
+    expect(RedactionLayer.redactSecrets('{"Authorization":"Bearer t","Accept":"*/*"}'))
+      .toBe('{"Authorization":"Bearer [REDACTED_SECRET]","Accept":"*/*"}');
+  });
+
+  it('redacts the whole value of an Authorization header whose scheme it does not know', () => {
+    expect(RedactionLayer.redactSecrets('Authorization: Digest username="bob", response="6629fae4"\nHost: api.test'))
+      .toBe('Authorization: [REDACTED_SECRET]"\nHost: api.test');
+    expect(RedactionLayer.redactSecrets('curl -H "Authorization: $KEY" https://api.test'))
+      .toBe('curl -H "Authorization: [REDACTED_SECRET]" https://api.test');
+    expect(RedactionLayer.redactSecrets('{"authorization":"SSWS 00ab"}')).toBe('{"authorization":[REDACTED_SECRET]}');
+  });
+
+  it('redacts cookies, sent and set', () => {
+    expect(RedactionLayer.redactSecrets('Cookie: sid=abc; theme=dark\nHost: api.test'))
+      .toBe('Cookie: [REDACTED_SECRET]\nHost: api.test');
+    expect(RedactionLayer.redactSecrets('Set-Cookie: sid=abc; Path=/; HttpOnly')).toBe('Set-Cookie: [REDACTED_SECRET]');
+    expect(RedactionLayer.redactSecrets('curl -H "Cookie: sid=abc" https://api.test'))
+      .toBe('curl -H "Cookie: [REDACTED_SECRET]" https://api.test');
+  });
+
   it('redacts a private key, even one cut off before its END line', () => {
     const pem = '-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----';
     expect(RedactionLayer.redactSecrets(`key:\n${pem}\nafter`)).toBe('key:\n[REDACTED_PRIVATE_KEY]\nafter');

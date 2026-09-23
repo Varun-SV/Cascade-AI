@@ -92,6 +92,13 @@ export interface BrowserAllowance {
   giveBack(): void;
 }
 
+/**
+ * What a run is told when its allowance could not be checked — `take` threw.
+ * Exported so an embedder that tells the person about refusals can say the
+ * same words the model was given.
+ */
+export const ALLOWANCE_UNAVAILABLE = 'The browser could not check this run\'s allowance. Try again.';
+
 /** A run asked for a browser and every session was taken. */
 export interface BrowserBusyInfo {
   /** The deployment's session limit — what "every session" meant. */
@@ -2457,7 +2464,7 @@ export class RemoteBrowserController {
     try {
       refusal = allowance?.take();
     } catch {
-      refusal = 'The browser could not check this run\'s allowance. Try again.';
+      refusal = ALLOWANCE_UNAVAILABLE;
     }
     if (refusal) throw new Error(refusal);
     /** Hand back a claimed unit that no session came of. Guarded like every callback here. */

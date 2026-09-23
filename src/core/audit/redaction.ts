@@ -18,9 +18,30 @@ const SECRET_RULES: Rule[] = [
     pattern: /\b(?:sk-(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|[rs]k_(?:live|test)_[A-Za-z0-9]{16,})/g,
     replacement: '[REDACTED_SECRET]',
   },
+  // What an Authorization header carries, at any length: `Bearer short7` and
+  // `Basic YTpi` are as good to whoever reads them as a long token. The scheme
+  // stays, since it says what kind of credential went; the value after it
+  // goes. A scheme this does not know — Digest, AWS4-HMAC-SHA256, a bare key —
+  // loses the whole value: to its closing quote, or unquoted to the end of the
+  // line, short of a quote that closes a string the header sat in
+  // (`-H "Authorization: $KEY" https://…`). It never runs on into the next line.
+  {
+    pattern: /((?:proxy-)?authorization["'`]?[ \t]*[:=][ \t]*["'`]?(?:bearer|basic|token|apikey|bot)[ \t]+)[^\s"'`,;]+/gi,
+    replacement: '$1[REDACTED_SECRET]',
+  },
+  {
+    pattern: /((?:proxy-)?authorization["'`]?[ \t]*[:=][ \t]*)(?!["'`]?(?:bearer|basic|token|apikey|bot)\s|["'`]?\[REDACTED)(?:"[^"\r\n]*"|'[^'\r\n]*'|`[^`\r\n]*`|[^\s"'`](?:[^\r\n"'`]|["'`](?=\S))*)/gi,
+    replacement: '$1[REDACTED_SECRET]',
+  },
+  // A session cookie is a credential too, in the request's Cookie header and
+  // the response's Set-Cookie alike.
+  {
+    pattern: /((?<![\w-])(?:set-)?cookie["'`]?[ \t]*[:=][ \t]*["'`]?)(?!\[REDACTED)[^"'`\r\n]+/gi,
+    replacement: '$1[REDACTED_SECRET]',
+  },
+  // A bearer token outside a header, where the word alone is not enough to go
+  // on — so only one long enough to be a token.
   { pattern: /\b(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}/gi, replacement: '$1[REDACTED_SECRET]' },
-  // Basic only as a header: on its own, "Basic" is an ordinary word.
-  { pattern: /(Authorization:\s*Basic\s+)[A-Za-z0-9+/=]{8,}/gi, replacement: '$1[REDACTED_SECRET]' },
   // The password in a URL's user-info — `postgres://dbuser:hunter2@db/prod`,
   // `redis://:s3cr3t@cache:6379` — which no label points at. The user name
   // stays: it is not the secret, and it says which account the URL was for.

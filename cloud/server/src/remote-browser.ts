@@ -20,6 +20,7 @@
 //      cleanup matched nothing, which cost a review round on the desktop.
 
 import {
+  ALLOWANCE_UNAVAILABLE,
   RemoteBrowserController,
   GenericCdpProvider,
   SteelProvider,
@@ -301,17 +302,30 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
       });
     });
     // Once per refusal EPISODE, not per call: a refused worker may ask again,
-    // and every refusal after the first is the same news. An episode ends when
-    // the browser opens — see onLiveViewFor below.
-    let limitAnnounced = false;
+    // and the same refusal after the first is the same news. An episode ends
+    // when the browser opens — see onLiveViewFor below.
+    //
+    // A DIFFERENT refusal is news, though. A check that could not be made
+    // says "try again", and the retry that then finds the day spent must not
+    // be kept quiet because a refusal was already shown — so the refusal is
+    // remembered by what it said, not only that there was one.
+    let lastLimit: string | undefined;
     let busyAnnounced = false;
     if (opts.allowance) {
       const allowance = opts.allowance;
       controller.setAllowanceFor(id, {
         take: () => {
-          const refusal = allowance.take();
-          if (refusal && !limitAnnounced) {
-            limitAnnounced = true;
+          let refusal: string | undefined;
+          // Caught HERE rather than left to the controller, which refuses on a
+          // throw just the same but has no one to tell: the model heard why,
+          // and the person, watching a browser that never came, did not.
+          try {
+            refusal = allowance.take();
+          } catch {
+            refusal = ALLOWANCE_UNAVAILABLE;
+          }
+          if (refusal && refusal !== lastLimit) {
+            lastLimit = refusal;
             // Guarded: telling the person must not change what the model is told.
             try {
               opts.emit('browser:limit', { conversationId: opts.conversationId, taskId: id, detail: refusal });
@@ -333,7 +347,7 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
       // is news again — flags held for the whole run kept that one silent.
       if (active) {
         busyAnnounced = false;
-        limitAnnounced = false;
+        lastLimit = undefined;
       }
       // To this socket only. See the file header.
       opts.emit('browser:live-view', {

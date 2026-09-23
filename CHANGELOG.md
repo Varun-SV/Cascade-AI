@@ -26,7 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   last one. Once the day's sessions are gone the Browser chip switches
   off and says when they reset (midnight UTC), a run sent with it anyway is
   refused before anything is spent, and a run that runs out partway through
-  is refused the next session with the same message shown in the chat. The
+  is refused the next session with the same message shown in the chat. If
+  the allowance cannot be checked, the chat says so too, and a later refusal
+  for a different reason is shown as well. The
   chip's tooltip shows how many are left today, and it follows a plan change
   in either direction without a reload. A deployment without a browser
   never asks for it. After a reconnect, the newest browser refusal is the
@@ -49,7 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matches.** A rule without a capture group replaced only one substring of
   its match, so an IP address could pass through with a single digit
   removed. It now also catches `sk-…`, GitHub, Slack, Google and Stripe
-  tokens, bearer and Basic credentials, private keys, values labelled by
+  tokens, bearer and Basic credentials, the value of any `Authorization` or
+  `Proxy-Authorization` header however short, cookies in `Cookie` and
+  `Set-Cookie`, private keys, values labelled by
   names like `ANTHROPIC_API_KEY`, any value assigned to a password, secret,
   token or key however short (`DB_PASSWORD=hunter2`, `PGPASSWORD=…`), the
   keys a connection string names (`AccountKey`, `SharedAccessKey`,

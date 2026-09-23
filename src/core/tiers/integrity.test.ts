@@ -379,6 +379,11 @@ describe('describeToolRecord — what the worker actually did', () => {
     expect(args).toContain('Bearer [REDACTED_SECRET]');
   });
 
+  it('takes a short header credential out of what a tool printed', () => {
+    const entry = recordToolCall('shell', '> GET /v1 HTTP/1.1\n> Authorization: Basic YTpi\n> Cookie: sid=abc');
+    expect(entry.result).toBe('> GET /v1 HTTP/1.1 > Authorization: Basic [REDACTED_SECRET] > Cookie: [REDACTED_SECRET]');
+  });
+
   it('keeps what a claim can be checked against: addresses and numbers are not credentials', () => {
     const entry = recordToolCall('web_fetch', 'Contact admin@example.com, server 10.0.0.7, call 555-123-4567');
     expect(entry.result).toBe('Contact admin@example.com, server 10.0.0.7, call 555-123-4567');
