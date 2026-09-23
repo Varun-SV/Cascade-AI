@@ -25,6 +25,7 @@ import { calculateCost } from '../utils/cost.js';
 import { T2Manager } from './tiers/t2-manager.js';
 import { composeRootSectionOutput, summaryLeadsRootAnswer } from './tiers/escalation-policy.js';
 import { ACTING_INTEGRITY_RULE } from './tiers/integrity.js';
+import { BROWSER_ROUTING_RULE, BROWSER_TOOL } from './tiers/browser-planning.js';
 import { MultimodalRegistry } from './multimodal/registry.js';
 import type { FeedbackSource } from './router/feedback-prior.js';
 import { DeadModelStore, fileDeadModelPersistence } from './router/dead-models.js';
@@ -1928,7 +1929,11 @@ Important rules:
 - If the earlier context is complex, keep the inherited complexity unless the user clearly narrows scope.
 - Reading, explaining, summarizing, or analyzing existing files/code and answering a question — WITHOUT creating files or implementing changes — is "Simple" (single agent), never "Complex".
 - If the task asks for a simple single-file artifact like hello.txt, it is usually Moderate.
-- If the task asks for a saved report, PDF, implementation, or deeper verification workflow, it is at least Moderate and often Complex.
+- If the task asks for a saved report, PDF, implementation, or deeper verification workflow, it is at least Moderate and often Complex.${
+  // Only when this run has one: a classifier that has never heard of the
+  // browser reads "go to this site and ask it…" as research, and research is
+  // Complex — which turned a one-agent errand into a plan with no browser in it.
+  this.toolRegistry.hasTool(BROWSER_TOOL) ? `\n${BROWSER_ROUTING_RULE}` : ''}
 
 Respond with the verdict word first, then a dash and a short reason (under 12 words).
 Format: <Simple|Moderate|Complex> — <reason>`;

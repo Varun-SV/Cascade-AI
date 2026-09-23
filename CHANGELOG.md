@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   used to run without the worker's rules. The worker's self-check now sees
   what each tool actually returned, so an output claiming a visit that the
   browser refused fails the check.
+- **With the Browser chip on, a website errand is planned around the
+  browser.** No tier above the worker was told the browser existed, so "go
+  to this site, ask it something, bring back the answer" was routed as a
+  multi-section plan whose workers wrote what the site might have said. The
+  complexity classifier, both planners and the worker now know the browser
+  is there, keep a website task on one worker that drives it end to end, and
+  never plan to invent a site's reply. A run whose only tool is the browser
+  also gets tool guidance again.
 - **The live browser view appears on Complex runs.** The top tier ran under
   a different id from the one the run announced, so the panel, Stop and
   take-over never showed while a real session was driven and billed.

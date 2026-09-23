@@ -37,6 +37,7 @@ import {
   evaluateAcceptance, failures, undecided, type AcceptanceResult,
 } from '../verification/acceptance.js';
 import { ACTING_INTEGRITY_RULE, describeToolRecord, type ToolRecordEntry } from './integrity.js';
+import { BROWSER_TOOL, BROWSER_WORKER_RULE } from './browser-planning.js';
 
 /**
  * Thrown by executeTool() when the underlying tool error indicates a condition
@@ -88,6 +89,10 @@ const KNOWN_TOOLS = [
   // then told nothing about using tools at all, and wrote the video as prose.
   'generate_image', 'generate_video', 'generate_speech', 'transcribe_audio',
   'generate_document',
+  // The same miss again. In browser mode the Web chip is off, so the browser
+  // is often a run's ONLY tool, and a run with just that "had no tools": the
+  // worker was told nothing about using one.
+  BROWSER_TOOL,
 ];
 
 /**
@@ -110,6 +115,7 @@ export function buildWorkerRules(has: (toolName: string) => boolean): string {
       '- If the task asks for a file or artifact, you must actually create it in the workspace, verify that it exists, and inspect it before claiming success.',
     has('web_search') &&
       '- Use the "web_search" tool to find current information, documentation, news, or general web data.',
+    has(BROWSER_TOOL) && BROWSER_WORKER_RULE,
     has('pdf_create') && '- Use the "pdf_create" tool for PDF requests.',
     // A .docx/.pptx/.xlsx is a ZIP of OOXML parts, not text with a suffix.
     // file_write does exactly what it promises — writes the model's characters

@@ -34,6 +34,7 @@ import { describeGenerationForPlanner } from '../multimodal/registry.js';
 import { canProduceFiles, canProduceNonDiskDeliverables, hasFileWritingTool } from './t3-worker.js';
 import { planSpecShape, quotedFieldRules } from './plan-spec.js';
 import { REPORTING_INTEGRITY_RULE } from './integrity.js';
+import { describeBrowserForPlanner } from './browser-planning.js';
 
 /** Case-insensitive shared keywords between two keyword lists. */
 export function sharedKeywords(a: string[] = [], b: string[] = []): string[] {
@@ -69,6 +70,9 @@ export function buildT1SystemPrompt(has: (toolName: string) => boolean): string 
   // has to terminate on, and without being told so T1 planned script/direction
   // sections and never a section that called the tool.
   const generation = describeGenerationForPlanner(has);
+  // The same kind of fact: without it, a task naming a website with no web
+  // tool in sight was planned as writing what the site would have said.
+  const browser = describeBrowserForPlanner(has);
   const rules: Array<string | false> = [
     '- Simple → 1 T3, Moderate → 2-3 T2s, Complex → 3-5 T2s, Highly Complex → 5+ T2s',
     '- Return ONLY valid JSON — no other text',
@@ -103,7 +107,7 @@ DEPENDENCY GUIDANCE:
 QUALITY RULES:
 - Each section must have a clear, testable "expectedOutput" so T2 knows when it is done.
 - Do NOT create trivial sections that only move files or print summaries — fold those into adjacent sections.
-- If the plan would naturally produce fewer than 2 independent sections, prefer Moderate routing (single T2).${generation ? `\n\n${generation}` : ''}`;
+- If the plan would naturally produce fewer than 2 independent sections, prefer Moderate routing (single T2).${generation ? `\n\n${generation}` : ''}${browser ? `\n\n${browser}` : ''}`;
 }
 
 export interface TaskPlan {

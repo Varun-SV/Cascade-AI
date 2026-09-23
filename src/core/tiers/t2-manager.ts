@@ -30,6 +30,7 @@ import type { EscalationDecision, TaskType } from '../../types.js';
 import { RedactionLayer } from '../audit/redaction.js';
 import { sectionNeedsDecision, settledEscalationStatus, summaryLeadsRootAnswer } from './escalation-policy.js';
 import { REPORTING_INTEGRITY_RULE } from './integrity.js';
+import { describeBrowserForPlanner } from './browser-planning.js';
 import { describeGenerationForPlanner } from '../multimodal/registry.js';
 import { compileSubtaskGraph } from '../orchestration/adapters.js';
 import { planSpecShape, typedFieldRules } from './plan-spec.js';
@@ -46,6 +47,7 @@ import { planSpecShape, typedFieldRules } from './plan-spec.js';
 // decomposed back into script-and-direction prose one level down.
 export function buildT2SystemPrompt(has: (toolName: string) => boolean): string {
   const generation = describeGenerationForPlanner(has);
+  const browser = describeBrowserForPlanner(has);
   return [
     'You are a T2 Manager agent in the Cascade AI system.',
     // Must agree with the decomposition prompt in decomposeSection(), which is
@@ -58,6 +60,9 @@ export function buildT2SystemPrompt(has: (toolName: string) => boolean): string 
     has('peer_message') && 'Provide "peerT3Ids" to subtasks so they can coordinate using the peer_message tool.',
     'Return ONLY valid JSON matching the T3 subtask array schema — no other text.',
     generation && `\n${generation}`,
+    // T1's one browser subtask is decomposed again here — the same fact has
+    // to hold one level down, or it is split back into parallel workers.
+    browser && `\n${browser}`,
   ]
     .filter((l): l is string => l !== false && l !== '')
     .join('\n');
