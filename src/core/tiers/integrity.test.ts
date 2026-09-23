@@ -7,10 +7,13 @@
 //  rule has an obvious place to be missed from.
 
 import { describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { CascadeConfig, GenerateResult, T2ToT3Assignment, T2Result, ToolCall, ToolDefinition } from '../../types.js';
 import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
-import { ACTING_INTEGRITY_RULE, REPORTING_INTEGRITY_RULE, describeArgs, describeToolRecord, recordToolCall } from './integrity.js';
+import { ACTING_INTEGRITY_RULE, REPORTING_INTEGRITY_RULE, describeArgs, describeToolRecord, recordToolCall, toolReportedFailure } from './integrity.js';
 import { T3Worker, buildWorkerRules } from './t3-worker.js';
 import { T2Manager } from './t2-manager.js';
 import { T1Administrator, type TaskPlan } from './t1-administrator.js';
@@ -217,6 +220,10 @@ describe('describeToolRecord — what the worker actually did', () => {
       ['github', 'gitlab request failed: ECONNRESET'],
       ['github', 'Rate limited by GitHub. Please wait a moment before trying again.'],
       ['transcribe_audio', 'Could not read the audio file at /tmp/a.wav.'],
+      ['code_search', 'Code search failed: index is not built'],
+      ['ask_user', 'They did not answer in time. Proceed on your best reading of the request, and say plainly which assumption you made.'],
+      ['ask_user', 'There is nobody watching this run to answer. Proceed on your best reading of the request, and say plainly which assumption you made.'],
+      ['mcp::docs::search', 'Tool error: rate limited'],
       ['file_read', 'Tool error: ENOENT: no such file'],
     ];
     const { ShellTool } = await import('../../tools/shell.js');
@@ -238,6 +245,8 @@ describe('describeToolRecord — what the worker actually did', () => {
       ['shell', 'Build failed: see above'],
       ['run_code', 'Execution successful (40ms):\nFailed: 0'],
       ['web_search', 'Error: messages in search results are still results'],
+      ['ask_user', 'They answered:\n\nQ: Which region?\n  → They did not answer in time'],
+      ['code_search', '# src/app.ts\nProvide a "query" to search the codebase — a comment in the code'],
     ];
     const filler = Array.from({ length: 12 }, (_, i) => ({ name: `t${i}`, result: 'ok' }));
     const outline = (entries: Array<[string, string]>) => describeToolRecord([
@@ -246,6 +255,37 @@ describe('describeToolRecord — what the worker actually did', () => {
 
     expect(outline(failures)).toEqual(failures.map(([name]) => `- ${name} → an error or refusal`));
     expect(outline(successes)).toEqual(successes.map(([name]) => `- ${name} → returned a result`));
+  });
+
+  it('knows every failure a built-in tool returns, read from the tools themselves', () => {
+    // Three review rounds each found a tool whose failure wording was missing
+    // from the table (run_code, github, code_search), because the table was
+    // kept by hand. This reads every tool source for a returned string that
+    // says it failed, and checks the table says so for THAT tool. A new tool,
+    // or a new failure message, that the table does not know fails here.
+    const toolsDir = fileURLToPath(new URL('../../tools/', import.meta.url));
+    const FAILURE_WORDS = /fail|error|could not|cannot|unable|denied|refus|timed? out|not found|invalid|^provide |missing|not (?:available|enabled|installed)|no page is open|is not one of those|did not answer|chose not to answer|nobody watching|stopped while/i;
+    // Checked by name in the tests above, where the wording is spliced from
+    // parts this scan cannot rebuild.
+    const SPLICED = [/^\$\{outcome\.ok/, /^\$\{why\}/];
+    const missed: string[] = [];
+    let checked = 0;
+    for (const file of fs.readdirSync(toolsDir).filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))) {
+      let tool = 'created_tool';
+      for (const line of fs.readFileSync(path.join(toolsDir, file), 'utf8').split('\n')) {
+        const named = /readonly name = '([a-z_]+)'/.exec(line);
+        if (named) tool = named[1]!;
+        const returned = /(?:return|resolve\()\s*(['`])((?:(?!\1).)*)\1/.exec(line);
+        if (!returned) continue;
+        const text = returned[2]!;
+        if (!FAILURE_WORDS.test(text) || SPLICED.some((r) => r.test(text))) continue;
+        const sample = text.replace(/\$\{[^}]*\}/g, '404');
+        checked++;
+        if (!toolReportedFailure(tool, sample)) missed.push(`${file} [${tool}]: ${sample.slice(0, 80)}`);
+      }
+    }
+    expect(checked, 'the scan found the tools').toBeGreaterThan(40);
+    expect(missed).toEqual([]);
   });
 
   it('stays bounded however many calls there were', () => {

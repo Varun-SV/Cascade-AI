@@ -215,7 +215,13 @@ export class McpClient {
 
     const result = await client.callTool({ name: toolName, arguments: input });
     const content = result.content as Array<{ type: string; text?: string }>;
-    return content.map((c) => c.text ?? '').join('\n');
+    const text = content.map((c) => c.text ?? '').join('\n');
+    // MCP reports a tool's failure as a flag beside its content, in whatever
+    // words the server chose. Joined as it was, a failed call read as a result
+    // — to the model, and to the self-test grading claims against the record.
+    // Said in the envelope the worker uses for any failed call. Returned rather
+    // than thrown, which would send it through the worker's fallback cascade.
+    return result.isError === true ? `Tool error: ${text || 'the MCP tool reported an error'}` : text;
   }
 
   getToolDefinitions(): ToolDefinition[] {

@@ -164,7 +164,13 @@ const TOOL_FAILURE: Record<string, RegExp> = {
   // `outcome.detail` is page content, so only the prefixes this tool adds.
   browser_control: /^(?:Failed: |Error: (?:browser control is not available|action is required|the run was cancelled|"[^"\n]*" needs |the browser could not perform ))/,
   browser: /^(?:Error: Playwright is not installed|Browser launch failed: |Browser action "[^"\n]*" failed: |Browser error \(page reset\): |Unknown browser action: )/,
-  read_current_page: /^Error: could not read the open page/,
+  read_current_page: /^(?:Error: could not read the open page|No page is open in the built-in browser)/,
+  code_search: /^(?:Code search failed: |Provide a "query" to search the codebase)/,
+  knowledge_graph_search: /^Provide a "query" naming the entities/,
+  generate_document: /^(?:Provide (?:a "path" for the document|"content" — )|generate_document renders \.docx, \.pptx and \.xlsx\. )/,
+  generate_image: /^Provide a "prompt" describing the image/,
+  generate_speech: /^Provide "text" to speak/,
+  generate_video: /^Provide a "prompt" describing the video/,
   run_code: /^Execution (?:failed \(\d+ms\):|timed out after )/,
   // A non-zero exit, and the output that came with it.
   shell: /^Exit (?!0:)[^\s:]+:(?:\s|$)/,
@@ -174,14 +180,17 @@ const TOOL_FAILURE: Record<string, RegExp> = {
   github: /^(?:Error: No \w+ token provided|Authentication failed: |Permission denied: |Not found: Repository |Validation error from |Rate limited by |\w+ API error \(\d{3}\): |\w+ request failed: )/,
   grep: /^Invalid regex pattern: /,
   peer_message: /^(?:Error: (?:toId is required|Peer communication is not enabled)|Unknown action: )/,
-  ask_user: /^Error: ask_user needs /,
-  transcribe_audio: /^Could not read the audio file at /,
+  // No answer came back, for whichever reason — the questions obtained nothing.
+  ask_user: /^(?:Error: ask_user needs |(?:There is nobody watching this run to answer|The run was stopped while the question was open|They saw the questions and chose not to answer|They did not answer in time)\. Proceed on your best reading)/,
+  transcribe_audio: /^(?:Could not read the audio file at |Provide a "path" to the audio file)/,
 };
 
 /**
  * A tool with no entry above: one created at run time, or an MCP tool. A
  * created tool's sandbox says these in its own words, and a created tool
- * commonly returns what its inner call returned.
+ * commonly returns what its inner call returned. An MCP tool's failure is a
+ * protocol flag, not a wording; `McpClient.callTool` turns it into the
+ * `Tool error:` envelope.
  */
 const OTHER_TOOL_FAILURE = /^(?:Dynamic tool "[^"\n]*" timed out |Error calling \S+: |Permission denied for )/;
 

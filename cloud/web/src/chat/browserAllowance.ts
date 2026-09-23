@@ -49,10 +49,17 @@ export function browserChip(allowance: BrowserAllowance | null): { exhausted: bo
  *
  * Off, not only disabled: a chip left on under a disabled button would still
  * send the next message as a browser run, which the server refuses outright.
+ *
+ * Nothing at all where the deployment has no browser: no read, no timers.
+ * And the clocks run only while the server reports an allowance — a
+ * deployment driving its own browser over CDP rations nothing, so re-reading
+ * it every minute would be requests for an answer that cannot change.
  */
 export function useBrowserAllowance(
   /** The signed-in user; none while signed out. */
   userId: string | undefined,
+  /** Whether this deployment has a browser (`/api/config`'s `remoteBrowserEnabled`). */
+  available: boolean,
   refreshSignal: unknown,
   browserMode: boolean,
   setBrowserMode: (on: boolean) => void,
@@ -71,21 +78,25 @@ export function useBrowserAllowance(
 
   useEffect(() => {
     // Signed out, there is no allowance to read and the request would only 401.
-    if (!userId) return;
+    if (!userId || !available) return;
     let live = true;
     // A failed read keeps the last known allowance rather than forgetting it:
     // "unknown" would re-enable a chip the server will refuse. The same user's
     // only — see `read`.
     fetchUsage().then((u) => { if (live) setRead({ userId, allowance: browserAllowanceFrom(u) }); }).catch(() => {});
     return () => { live = false; };
-  }, [userId, refreshSignal, day, recheck]);
+  }, [userId, available, refreshSignal, day, recheck]);
+
+  // Whether the server rations sessions here: it reported an allowance. Until
+  // a read says so — or after one said it does not — only a run re-reads it.
+  const rationed = available && allowance !== null;
 
   useEffect(() => {
-    if (!userId) return;
+    if (!userId || !rationed) return;
     // A second past midnight, so the server's clock has also crossed it.
     const timer = setTimeout(() => setDay((n) => n + 1), msUntilNextUtcMidnight(Date.now()) + 1000);
     return () => clearTimeout(timer);
-  }, [userId, day]);
+  }, [userId, rationed, day]);
 
   const { exhausted } = browserChip(allowance);
   useEffect(() => {
@@ -100,13 +111,13 @@ export function useBrowserAllowance(
   // on under the old limit until a send is refused. So re-read every minute
   // the tab is visible, and on coming back to it, whatever the last read said.
   useEffect(() => {
-    if (!userId) return;
+    if (!userId || !rationed) return;
     const visible = () => typeof document === 'undefined' || !document.hidden;
     const timer = setInterval(() => { if (visible()) setRecheck((n) => n + 1); }, 60_000);
     const onVisible = () => { if (visible()) setRecheck((n) => n + 1); };
     document.addEventListener('visibilitychange', onVisible);
     return () => { clearInterval(timer); document.removeEventListener('visibilitychange', onVisible); };
-  }, [userId]);
+  }, [userId, rationed]);
 
-  return allowance;
+  return available ? allowance : null;
 }

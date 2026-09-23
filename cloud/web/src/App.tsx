@@ -118,7 +118,7 @@ export default function App() {
   const socket = user ? getSocket() : null;
   const chat = useChatSession(socket, providers, skillId, webSearchPayload(webSearch), undefined, mode === 'advanced');
   // Re-read as each run starts and ends, which is when a session can be spent.
-  const browserAllowance = useBrowserAllowance(user?.id, chat.busy, chat.browserMode, chat.setBrowserMode);
+  const browserAllowance = useBrowserAllowance(user?.id, config?.remoteBrowserEnabled === true, chat.busy, chat.browserMode, chat.setBrowserMode);
   const [localModelOn, setLocalModelOn] = useState(() => localModelEnabled());
 
   // A run may have created a new conversation or renamed one — refresh the
