@@ -45,10 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its match, so an IP address could pass through with a single digit
   removed. It now also catches `sk-…`, GitHub, Slack, Google and Stripe
   tokens, bearer and Basic credentials, private keys, values labelled by
-  names like `ANTHROPIC_API_KEY`, and any value assigned to a password,
-  secret, token or key however short (`DB_PASSWORD=hunter2`). The self-check
-  and the reflection critic, which can run on a different provider, get
-  their evidence with credentials removed.
+  names like `ANTHROPIC_API_KEY`, any value assigned to a password, secret,
+  token or key however short (`DB_PASSWORD=hunter2`, `PGPASSWORD=…`), and
+  the password in a connection URL (`postgres://user:…@host`). The
+  self-check and the reflection critic, which can run on a different
+  provider, get their evidence with credentials removed. The self-check
+  also recognises each tool's own way of reporting a failure — a failed
+  `run_code`, a non-zero shell exit, an HTTP error — instead of counting it
+  as a result.
 - **With the Browser chip on, a website errand is planned around the
   browser.** No tier above the worker was told the browser existed, so "go
   to this site, ask it something, bring back the answer" was routed as a

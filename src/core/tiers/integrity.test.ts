@@ -196,6 +196,42 @@ describe('describeToolRecord — what the worker actually did', () => {
     ]);
   });
 
+  it('counts every tool\u2019s own failure wording as a failure, and a success as a result', async () => {
+    // Each tool words failure its own way. run_code's "Execution failed
+    // (12ms):" was read as a result, so once it scrolled past the latest
+    // twelve the grader was told code had run and produced output.
+    const failures: Array<[string, string]> = [
+      ['run_code', 'Execution failed (12ms):\nError: boom\nStderr: \nStdout: '],
+      ['run_code', 'Execution timed out after 30s. Consider breaking the task into smaller pieces.'],
+      ['web_fetch', 'HTTP 404 Not Found from https://example.test/missing'],
+      ['web_fetch', 'Refused to fetch http://10.0.0.1/: private address'],
+      ['browser', 'Browser action "click" failed: element not found'],
+      ['browser', 'Browser error (page reset): Target closed'],
+      ['dynamic', 'Dynamic tool "t" timed out after 5000ms and was terminated.'],
+      ['dynamic', 'Error calling web_fetch: nope'],
+      ['dynamic', 'Permission denied for "shell": dynamic tool "t" has no approver available (default-deny).'],
+      ['github', 'Validation error from GitHub: bad ref'],
+      ['github', 'Rate limited by GitHub. Please wait a moment before trying again.'],
+      ['generate_audio', 'Could not read the audio file at /tmp/a.wav.'],
+    ];
+    const { ShellTool } = await import('../../tools/shell.js');
+    const exited = await new ShellTool().execute({ command: 'exit 3' }, { tierId: 'T3', sessionId: 's' });
+    expect(exited.startsWith('Exit 3:'), 'the format this depends on').toBe(true);
+    failures.push(['shell', exited]);
+
+    const successes: Array<[string, string]> = [
+      ['shell', '(no output)'], ['browser_control', 'Navigated to https://example.test'],
+      ['file_read', 'Error handling in Go is explicit.'], ['file_read', 'Deployment notes: all green'],
+    ];
+    const filler = Array.from({ length: 12 }, (_, i) => ({ name: `t${i}`, result: 'ok' }));
+    const outline = (entries: Array<[string, string]>) => describeToolRecord([
+      ...entries.map(([name, result]) => recordToolCall(name, result)), ...filler,
+    ]).split('\n').slice(1, 1 + entries.length);
+
+    expect(outline(failures)).toEqual(failures.map(([name]) => `- ${name} → an error or refusal`));
+    expect(outline(successes)).toEqual(successes.map(([name]) => `- ${name} → returned a result`));
+  });
+
   it('stays bounded however many calls there were', () => {
     const record = Array.from({ length: 500 }, (_, i) => recordToolCall(
       i % 2 ? 'web_fetch' : 'web_search', 'x'.repeat(1000), { url: `https://x.test/${'y'.repeat(1000)}`, query: 'z'.repeat(1000) },
@@ -242,6 +278,11 @@ describe('describeToolRecord — what the worker actually did', () => {
   it('takes out a short labelled password too, not only long token-shaped values', () => {
     const entry = recordToolCall('shell', 'DB_PASSWORD=hunter2\nDB_HOST=db.internal');
     expect(entry.result).toBe('DB_PASSWORD=[REDACTED_SECRET] DB_HOST=db.internal');
+  });
+
+  it('takes the password out of a connection URL a tool printed', () => {
+    const entry = recordToolCall('file_read', 'DATABASE_URL=postgres://dbuser:hunter2@db.example.com/prod');
+    expect(entry.result).toBe('DATABASE_URL=postgres://dbuser:[REDACTED_SECRET]@db.example.com/prod');
   });
 
   it('takes credentials out of an argument whose name does not give them away', () => {

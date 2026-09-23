@@ -58,6 +58,33 @@ describe('RedactionLayer', () => {
     expect(RedactionLayer.redactSecrets('https://api.test/v1?token=abc&page=2')).toBe('https://api.test/v1?token=[REDACTED_SECRET]&page=2');
   });
 
+  it('redacts the password in a connection URL, which no label points at', () => {
+    expect(RedactionLayer.redactSecrets('DATABASE_URL=postgres://dbuser:hunter2@db.example.com/prod'))
+      .toBe('DATABASE_URL=postgres://dbuser:[REDACTED_SECRET]@db.example.com/prod');
+    expect(RedactionLayer.redactSecrets('REDIS_URL=redis://:s3cr3t@cache:6379/0'))
+      .toBe('REDIS_URL=redis://:[REDACTED_SECRET]@cache:6379/0');
+    expect(RedactionLayer.redactSecrets('mongodb+srv://app:p%40ss@cluster0.example.net/db'))
+      .toBe('mongodb+srv://app:[REDACTED_SECRET]@cluster0.example.net/db');
+  });
+
+  it('does not read its own marker as a label and redact what follows it', () => {
+    // [REDACTED_SECRET] contains SECRET, and the long-value rule took it for
+    // one: a host of 16+ characters after a redacted password went too.
+    expect(RedactionLayer.redactSecrets('https://app:pw@cluster0.example.net/db'))
+      .toBe('https://app:[REDACTED_SECRET]@cluster0.example.net/db');
+    expect(RedactionLayer.redactSecrets('[REDACTED_SECRET] - averyverylongidentifier'))
+      .toBe('[REDACTED_SECRET] - averyverylongidentifier');
+  });
+
+  it('leaves a URL with a port and no user-info alone', () => {
+    const text = 'see https://example.com:8080/path?q=1 and ssh://git@github.com/org/repo';
+    expect(RedactionLayer.redactSecrets(text)).toBe(text);
+  });
+
+  it('redacts a password whose label is glued to the name before it', () => {
+    expect(RedactionLayer.redactSecrets('PGPASSWORD=hunter2 psql')).toBe('PGPASSWORD=[REDACTED_SECRET] psql');
+  });
+
   it('leaves a label that assigns nothing alone', () => {
     const text = 'Enter your password below. tokens: 1234. DB_PASSWORD_FILE=/run/secrets/db';
     expect(RedactionLayer.redactSecrets(text)).toBe(text);

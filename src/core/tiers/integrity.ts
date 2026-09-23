@@ -125,11 +125,29 @@ export function describeArgs(input: Record<string, unknown> | undefined): string
  * browser action (the session cap among them) actually comes back. Missing
  * that one counted the reported run's refusal as a result. An empty but real
  * result ("No matches found for: …") is not a failure: the action happened.
+ *
+ * Each tool's own wording, listed rather than guessed at: a looser pattern
+ * ("anything that says failed") would also match a file or page that merely
+ * starts that way, and call a real read a failure.
  */
 const FAILURE_RESULT = new RegExp([
-  '^Tool error:', '^Error:', '^Tool \\S+ was denied', '^Tool not found:',
+  '^Tool error:', '^Error(?::| calling )', '^Tool \\S+ was denied', '^Tool not found:',
   '^Failed\\b', '^[A-Z][\\w ]* failed:', '^Unknown (browser )?action:',
-  '^Permission denied:', '^Not found:', '^Invalid ',
+  '^Permission denied\\b', '^Not found:', '^Invalid ',
+  // run_code
+  '^Execution (?:failed|timed out)\\b',
+  // shell: a non-zero exit (or a signal) — the command ran and did not succeed
+  '^Exit (?!0:)[^\\s:]+:',
+  // web_fetch
+  '^HTTP [45]\\d\\d ', '^Refused to fetch ',
+  // browser (the desktop tool)
+  '^Browser action "[^"\\n]*" failed:', '^Browser error \\(page reset\\):',
+  // dynamic tools
+  '^Dynamic tool "[^"\\n]*" timed out',
+  // github / gitlab
+  '^Validation error from ', '^Rate limited by ',
+  // generate_media
+  '^Could not read ',
 ].join('|'));
 
 function reportsFailure(result: string): boolean {

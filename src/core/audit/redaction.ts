@@ -21,20 +21,26 @@ const SECRET_RULES: Rule[] = [
   { pattern: /\b(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}/gi, replacement: '$1[REDACTED_SECRET]' },
   // Basic only as a header: on its own, "Basic" is an ordinary word.
   { pattern: /(Authorization:\s*Basic\s+)[A-Za-z0-9+/=]{8,}/gi, replacement: '$1[REDACTED_SECRET]' },
+  // The password in a URL's user-info — `postgres://dbuser:hunter2@db/prod`,
+  // `redis://:s3cr3t@cache:6379` — which no label points at. The user name
+  // stays: it is not the secret, and it says which account the URL was for.
+  { pattern: /\b([a-z][a-z0-9+.-]*:\/\/[^\s:/?#@]*:)[^\s/?#@]+@/gi, replacement: '$1[REDACTED_SECRET]@' },
   // A value ASSIGNED to a password, secret, token or key — `DB_PASSWORD=hunter2`,
   // `"password": "p@ss, w0rd!"`, `?token=abc&` — whatever its length or
   // characters. The label says what it is; a short or punctuated password is
-  // no less a password. Quoted, it runs to the closing quote; bare, to
+  // no less a password. The label may end a name with nothing between
+  // (`PGPASSWORD=`). Quoted, the value runs to the closing quote; bare, to
   // whitespace, a quote or the next query parameter.
   {
-    pattern: /((?<![A-Za-z0-9])(?:passw(?:or)?d|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s"'&]+)/gi,
+    pattern: /((?<![A-Za-z0-9_])(?!REDACTED_)[A-Za-z0-9_]*?(?:passw(?:or)?d|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s"'&]+)/gi,
     replacement: '$1[REDACTED_SECRET]',
   },
   // A long value labelled as a secret. The label may end a longer name —
   // `ANTHROPIC_API_KEY=`, `GITHUB_TOKEN:` — which a word boundary before it
-  // missed, since `_` is a word character.
+  // missed, since `_` is a word character. Never the SECRET of an earlier
+  // rule's own marker: `[REDACTED_SECRET]@cluster0.example.net` is a host.
   {
-    pattern: /((?<![A-Za-z0-9])(?:api[_-]?key|secret|token|password|bearer|auth|authorization)[^a-zA-Z0-9_]{1,4})[a-zA-Z0-9_\-.]{16,}/gi,
+    pattern: /((?<![A-Za-z0-9])(?<!REDACTED_)(?:api[_-]?key|secret|token|password|bearer|auth|authorization)[^a-zA-Z0-9_]{1,4})[a-zA-Z0-9_\-.]{16,}/gi,
     replacement: '$1[REDACTED_SECRET]',
   },
   // AWS Access Key ID
