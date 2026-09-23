@@ -15,7 +15,7 @@ import {
   azureModelForDeployment, DEFAULT_CONTEXT_LIMIT, MODELS,
 } from '#cascade-ai';
 import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ApprovalRequest, ProviderConfig, BrowserInput } from '#cascade-ai';
-import { attachRemoteBrowser } from './remote-browser.js';
+import { attachRemoteBrowser, providerRationsSessions } from './remote-browser.js';
 import type { ClarificationAnswer } from '#cascade-ai';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -1380,9 +1380,10 @@ export async function runChatTurn(payload: ChatRunPayload, deps: ChatRunDeps): P
   const user = store.getUserById(userId);
   const plan = user?.plan ?? 'free';
   checkDailyLimit(store, userId, plan);
-  // Only where a browser can exist: the allowance is for a capability, and a
-  // deployment with no provider has none to ration.
-  if (payload.browserMode === true && env.REMOTE_BROWSER_PROVIDER && deps.interactive !== false) {
+  // Only where there are sessions to ration: a deployment with no browser has
+  // none, and one pointed at a bare CDP endpoint opens none — it drives the
+  // operator's standing browser, which costs nothing more per run.
+  if (payload.browserMode === true && providerRationsSessions(remoteBrowserControls(env).remoteBrowser) && deps.interactive !== false) {
     checkBrowserSessionLimit(store, userId, plan);
   }
   const releaseRun = beginRun(userId, plan);

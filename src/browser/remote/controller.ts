@@ -2448,7 +2448,11 @@ export class RemoteBrowserController {
     //
     // An allowance that throws refuses rather than admits. It exists to bound
     // what is spent, and a claim that could not be made has not said yes.
-    const allowance = this.allowances.get(runId);
+    //
+    // And only where opening spends something. A provider that allocates
+    // nothing (a bare CDP endpoint) has no session to ration, so claiming here
+    // would count the operator's own browser against the person's day.
+    const allowance = this.provider.allocatesSessions === false ? undefined : this.allowances.get(runId);
     let refusal: string | undefined;
     try {
       refusal = allowance?.take();

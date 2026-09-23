@@ -136,14 +136,21 @@ describe('the operator configures a browser for their deployment', () => {
 
   describe('the plan\u2019s daily allowance of browser sessions', () => {
     const today = () => new Date().toISOString().slice(0, 10);
-    async function setup(withBrowser: boolean) {
+    /**
+     * `true` is a deployment whose sessions are billed — a self-hosted Steel,
+     * never dialled, since small talk opens no browser. `'cdp'` is one driving
+     * the operator's own standing browser, which allocates nothing.
+     */
+    async function setup(withBrowser: boolean | 'cdp') {
       dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-rb-allowance-'));
       store = new CloudStore(path.join(dir, 'cloud.db'));
       stub = await startStubOpenAIServer();
       await resetSharedBrowser();
       const env = loadEnv({
         ...baseEnv(dir),
-        ...(withBrowser ? { REMOTE_BROWSER_PROVIDER: 'cdp', REMOTE_BROWSER_URL: 'ws://127.0.0.1:9/devtools/browser/test' } : {}),
+        ...(withBrowser === 'cdp'
+          ? { REMOTE_BROWSER_PROVIDER: 'cdp', REMOTE_BROWSER_URL: 'ws://127.0.0.1:9/devtools/browser/test' }
+          : withBrowser ? { REMOTE_BROWSER_PROVIDER: 'steel', REMOTE_BROWSER_URL: 'https://steel.internal' } : {}),
       });
       const user = store.upsertUser({ provider: 'dev', providerId: 'tester', email: null, name: 'Tester', avatar: null });
       const run = (browserMode: boolean, socket = new FakeSocket()) => runChatTurn(
@@ -170,6 +177,17 @@ describe('the operator configures a browser for their deployment', () => {
       for (let i = 0; i < 5; i++) store!.incrementBrowserSessions(user.id, today());
 
       const result = await run(false);
+      expect(result.output).toContain('Hello from the stub model.');
+    }, 30_000);
+
+    it('does not ration a browser that opens no sessions — the operator\u2019s own CDP endpoint', async () => {
+      // GenericCdpProvider allocates nothing, so there is nothing a day's
+      // allowance could be spending. Five small-talk runs used to lock a Free
+      // user out of the operator's browser for the rest of the day.
+      const { user, run } = await setup('cdp');
+      for (let i = 0; i < 5; i++) store!.incrementBrowserSessions(user.id, today());
+
+      const result = await run(true);
       expect(result.output).toContain('Hello from the stub model.');
     }, 30_000);
 

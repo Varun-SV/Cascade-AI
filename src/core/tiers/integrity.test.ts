@@ -211,6 +211,8 @@ describe('describeToolRecord — what the worker actually did', () => {
       ['dynamic', 'Error calling web_fetch: nope'],
       ['dynamic', 'Permission denied for "shell": dynamic tool "t" has no approver available (default-deny).'],
       ['github', 'Validation error from GitHub: bad ref'],
+      ['github', 'github API error (500): Server Error'],
+      ['gitlab', 'gitlab request failed: ECONNRESET'],
       ['github', 'Rate limited by GitHub. Please wait a moment before trying again.'],
       ['generate_audio', 'Could not read the audio file at /tmp/a.wav.'],
     ];

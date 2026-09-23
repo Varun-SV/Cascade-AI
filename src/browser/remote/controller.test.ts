@@ -837,6 +837,30 @@ describe('the embedder\u2019s allowance of new sessions', () => {
     expect(created, 'nothing was created, so nothing is billed').toEqual([]);
   });
 
+  it('charges nothing for a provider that allocates nothing — a bare CDP endpoint', async () => {
+    // The endpoint is the operator's own standing browser: createSession
+    // returns it and endSession releases nothing. Counting it spent a Free
+    // user's five sessions on a browser that costs nothing more per run.
+    const { provider, created } = fakeProvider();
+    (provider as { allocatesSessions?: boolean }).allocatesSessions = false;
+    const c = new RemoteBrowserController({ provider });
+    const { state, allowance } = allowanceOf(0);
+    c.setAllowanceFor('run-A', allowance);
+
+    const out = await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    expect(out.ok, 'not refused for an allowance it does not draw on').toBe(true);
+    expect(state.taken, 'nothing claimed').toBe(0);
+    expect(created).toHaveLength(1);
+  });
+
+  it('says which of the real providers allocate a session', async () => {
+    const { GenericCdpProvider } = await import('./generic-cdp.js');
+    const { SteelProvider } = await import('./steel.js');
+    expect(new GenericCdpProvider('ws://browser.internal:9222').allocatesSessions).toBe(false);
+    expect(new SteelProvider({ apiKey: 'k' }).allocatesSessions).toBe(true);
+  });
+
   it('refuses when the allowance cannot answer — a claim that failed has not said yes', async () => {
     const { provider, created } = fakeProvider();
     const c = new RemoteBrowserController({ provider });

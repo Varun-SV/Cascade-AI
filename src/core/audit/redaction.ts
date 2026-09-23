@@ -31,10 +31,17 @@ const SECRET_RULES: Rule[] = [
   // no less a password. The label may end a name with nothing between
   // (`PGPASSWORD=`). Quoted, the value runs to the closing quote; bare, to
   // whitespace, a quote or the next query parameter.
+  //
+  // The keys a connection string names are credentials too: `AccountKey` and
+  // `SharedAccessKey`/`SharedAccessSignature` (Azure), and the `SECRET_KEY`,
+  // `SIGNING_KEY` family that ends in KEY after a qualifier.
   {
-    pattern: /((?<![A-Za-z0-9_])(?!REDACTED_)[A-Za-z0-9_]*?(?:passw(?:or)?d|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s"'&]+)/gi,
+    pattern: /((?<![A-Za-z0-9_])(?!REDACTED_)[A-Za-z0-9_]*?(?:passw(?:or)?d|pwd|secret|token|(?:api|access|account|private|secret|client|signing|encryption|master|shared[_-]?access)[_-]?key|shared[_-]?access[_-]?signature)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s"'&]+)/gi,
     replacement: '$1[REDACTED_SECRET]',
   },
+  // The signature on a signed URL — an Azure SAS `sig`, an S3 presigned
+  // `X-Amz-Signature` — which is the whole of what the URL's holder needs.
+  { pattern: /([?&;](?:sig|signature|x-amz-signature)=)[^\s"'&#]+/gi, replacement: '$1[REDACTED_SECRET]' },
   // A long value labelled as a secret. The label may end a longer name —
   // `ANTHROPIC_API_KEY=`, `GITHUB_TOKEN:` — which a word boundary before it
   // missed, since `_` is a word character. Never the SECRET of an earlier

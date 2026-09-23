@@ -88,6 +88,17 @@ export interface RemoteBrowserProvider {
    * concurrency the provider cannot actually deliver.
    */
   readonly isolatesSessions: boolean;
+  /**
+   * Whether `createSession` obtains a session of its own — something the
+   * provider bills for and a per-day allowance can therefore ration.
+   *
+   * False for a bare CDP endpoint: it hands back the operator's standing
+   * browser and `endSession` releases nothing, so counting its "sessions"
+   * spends an allowance on nothing and refuses runs against a browser that
+   * costs nothing more to use. Absent means true — a provider that does not
+   * say is assumed to be one that bills.
+   */
+  readonly allocatesSessions?: boolean;
   createSession(signal?: AbortSignal): Promise<RemoteBrowserSession>;
   endSession(id: string): Promise<void>;
 }

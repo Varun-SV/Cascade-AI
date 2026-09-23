@@ -66,7 +66,7 @@ export function useBrowserAllowance(
   // allowance: the day does. An exhausted chip cannot START the run that
   // would have re-read it, so without this it stayed off all the next day.
   const [day, setDay] = useState(0);
-  // Bumped to re-read while the chip is exhausted — see below.
+  // Bumped to re-read on a clock and on returning to the tab — see below.
   const [recheck, setRecheck] = useState(0);
 
   useEffect(() => {
@@ -92,19 +92,21 @@ export function useBrowserAllowance(
     if (exhausted && browserMode) setBrowserMode(false);
   }, [exhausted, browserMode, setBrowserMode]);
 
-  // An exhausted chip can change without a run or a new day: an upgrade to Pro
-  // raises the limit. Nothing else re-reads it — the chip cannot start the run
-  // that would — and Pro activates asynchronously after payment, so reading
-  // once when the upgrade closes could still see Free. So while exhausted, and
-  // only then, re-read every minute the tab is visible, and on coming back to it.
+  // The allowance can change without a run or a new day, in either direction.
+  // An upgrade to Pro raises the limit, and nothing else re-reads an exhausted
+  // chip — it cannot start the run that would — while Pro activates
+  // asynchronously after payment, so one read when the upgrade closes could
+  // still see Free. A downgrade or an expired Pro lowers it, and the chip stays
+  // on under the old limit until a send is refused. So re-read every minute
+  // the tab is visible, and on coming back to it, whatever the last read said.
   useEffect(() => {
-    if (!userId || !exhausted) return;
+    if (!userId) return;
     const visible = () => typeof document === 'undefined' || !document.hidden;
     const timer = setInterval(() => { if (visible()) setRecheck((n) => n + 1); }, 60_000);
     const onVisible = () => { if (visible()) setRecheck((n) => n + 1); };
     document.addEventListener('visibilitychange', onVisible);
     return () => { clearInterval(timer); document.removeEventListener('visibilitychange', onVisible); };
-  }, [userId, exhausted]);
+  }, [userId]);
 
   return allowance;
 }

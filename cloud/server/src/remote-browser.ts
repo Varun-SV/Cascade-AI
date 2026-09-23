@@ -455,6 +455,19 @@ export function providerIsUsable(settings: RemoteBrowserSettings | undefined): b
   return buildProvider(settings) !== null;
 }
 
+/**
+ * Whether these settings produce a browser whose sessions are worth rationing:
+ * one that can be built, from a provider that allocates a session per open.
+ *
+ * Asks the provider, like `providerIsUsable`, rather than naming providers
+ * here. A bare CDP endpoint is the operator's own standing browser, so a
+ * per-day allowance on it would refuse runs that cost nothing.
+ */
+export function providerRationsSessions(settings: RemoteBrowserSettings | undefined): boolean {
+  const provider = buildProvider(settings);
+  return provider !== null && provider.allocatesSessions !== false;
+}
+
 /** Which provider the operator asked for, or null when they asked for none. */
 function buildProvider(
   settings: RemoteBrowserSettings | undefined,

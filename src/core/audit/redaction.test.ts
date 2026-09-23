@@ -81,6 +81,26 @@ describe('RedactionLayer', () => {
     expect(RedactionLayer.redactSecrets(text)).toBe(text);
   });
 
+  it('redacts the credentials a connection string names', () => {
+    // No distinctive prefix and no password-like label: an Azure storage
+    // account key went through untouched.
+    const azure = 'DefaultEndpointsProtocol=https;AccountName=x;AccountKey=Zm9vYmFyYmF6cXV4MTIz==;EndpointSuffix=core.windows.net';
+    expect(RedactionLayer.redactSecrets(azure)).not.toContain('Zm9vYmFyYmF6cXV4MTIz');
+    expect(RedactionLayer.redactSecrets(azure)).toContain('AccountName=x;AccountKey=[REDACTED_SECRET]');
+    const bus = 'Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=Root;SharedAccessKey=c2VjcmV0';
+    expect(RedactionLayer.redactSecrets(bus)).toBe('Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=Root;SharedAccessKey=[REDACTED_SECRET]');
+    expect(RedactionLayer.redactSecrets("SECRET_KEY='django-insecure-abc'")).toBe('SECRET_KEY=[REDACTED_SECRET]');
+  });
+
+  it('redacts the signature on a signed URL, which is all its holder needs', () => {
+    expect(RedactionLayer.redactSecrets('https://a.blob.core.windows.net/c/b?sv=2021-08-06&se=2026-01-01&sig=AbC%2Bdef%3D'))
+      .toBe('https://a.blob.core.windows.net/c/b?sv=2021-08-06&se=2026-01-01&sig=[REDACTED_SECRET]');
+    expect(RedactionLayer.redactSecrets('SharedAccessSignature=sv=2021&sig=AbCdef'))
+      .not.toContain('AbCdef');
+    expect(RedactionLayer.redactSecrets('https://b.s3.amazonaws.com/k?X-Amz-Expires=60&X-Amz-Signature=deadbeef01'))
+      .toBe('https://b.s3.amazonaws.com/k?X-Amz-Expires=60&X-Amz-Signature=[REDACTED_SECRET]');
+  });
+
   it('redacts a password whose label is glued to the name before it', () => {
     expect(RedactionLayer.redactSecrets('PGPASSWORD=hunter2 psql')).toBe('PGPASSWORD=[REDACTED_SECRET] psql');
   });

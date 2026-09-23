@@ -301,6 +301,8 @@ export class SteelProvider implements RemoteBrowserProvider {
   // POST /v1/sessions allocates a browser per call, so concurrent runs are
   // genuinely separate.
   readonly isolatesSessions = true;
+  /** Every `createSession` is a new, billed Steel session. */
+  readonly allocatesSessions = true;
 
   private base: string;
   private apiKey: string | undefined;

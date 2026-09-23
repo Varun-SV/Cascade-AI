@@ -27,7 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   off and says when they reset (midnight UTC), a run sent with it anyway is
   refused before anything is spent, and a run that runs out partway through
   is refused the next session with the same message shown in the chat. The
-  chip's tooltip shows how many are left today.
+  chip's tooltip shows how many are left today, and it follows a plan change
+  in either direction without a reload. Only billed sessions are rationed:
+  a deployment driving its own browser over CDP opens none, so it has no
+  daily limit.
 
 ### Fixed
 - **A run that cannot do something now says so instead of inventing the
@@ -46,13 +49,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed. It now also catches `sk-…`, GitHub, Slack, Google and Stripe
   tokens, bearer and Basic credentials, private keys, values labelled by
   names like `ANTHROPIC_API_KEY`, any value assigned to a password, secret,
-  token or key however short (`DB_PASSWORD=hunter2`, `PGPASSWORD=…`), and
-  the password in a connection URL (`postgres://user:…@host`). The
+  token or key however short (`DB_PASSWORD=hunter2`, `PGPASSWORD=…`), the
+  keys a connection string names (`AccountKey`, `SharedAccessKey`,
+  `SECRET_KEY`), the signature on a signed URL, and the password in a
+  connection URL (`postgres://user:…@host`). The
   self-check and the reflection critic, which can run on a different
   provider, get their evidence with credentials removed. The self-check
   also recognises each tool's own way of reporting a failure — a failed
-  `run_code`, a non-zero shell exit, an HTTP error — instead of counting it
-  as a result.
+  `run_code`, a non-zero shell exit, an HTTP or GitHub API error — instead
+  of counting it as a result.
 - **With the Browser chip on, a website errand is planned around the
   browser.** No tier above the worker was told the browser existed, so "go
   to this site, ask it something, bring back the answer" was routed as a

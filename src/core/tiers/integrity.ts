@@ -132,7 +132,7 @@ export function describeArgs(input: Record<string, unknown> | undefined): string
  */
 const FAILURE_RESULT = new RegExp([
   '^Tool error:', '^Error(?::| calling )', '^Tool \\S+ was denied', '^Tool not found:',
-  '^Failed\\b', '^[A-Z][\\w ]* failed:', '^Unknown (browser )?action:',
+  '^Failed\\b', '^[A-Za-z][\\w ]* failed:', '^Unknown (browser )?action:',
   '^Permission denied\\b', '^Not found:', '^Invalid ',
   // run_code
   '^Execution (?:failed|timed out)\\b',
@@ -144,8 +144,9 @@ const FAILURE_RESULT = new RegExp([
   '^Browser action "[^"\\n]*" failed:', '^Browser error \\(page reset\\):',
   // dynamic tools
   '^Dynamic tool "[^"\\n]*" timed out',
-  // github / gitlab
-  '^Validation error from ', '^Rate limited by ',
+  // github / gitlab — named by the platform, in lower case: "github API error
+  // (500): …", "gitlab request failed: …" (the latter by the pattern above)
+  '^Validation error from ', '^Rate limited by ', '^\\w+ API error \\(\\d{3}\\):',
   // generate_media
   '^Could not read ',
 ].join('|'));

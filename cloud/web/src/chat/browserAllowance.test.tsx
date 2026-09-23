@@ -118,26 +118,40 @@ describe('useBrowserAllowance across the UTC reset', () => {
     // that would re-read it: it stayed off all the next day.
     vi.useFakeTimers({ shouldAdvanceTime: false });
     vi.setSystemTime(new Date('2026-09-23T23:59:00Z'));
-    mockedFetchUsage.mockResolvedValue(usage(5));
-    const view = renderHook(() => useBrowserAllowance('user-1', 'idle', false, vi.fn()));
-    await act(async () => { await Promise.resolve(); });
-    expect(view.result.current).toEqual({ used: 5, limit: 5 });
-    expect(mockedFetchUsage).toHaveBeenCalledTimes(1);
+    // Hidden, so the minute poll cannot be what re-reads it: the reset has to
+    // come back on its own, including for a tab left in the background.
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    try {
+      mockedFetchUsage.mockResolvedValue(usage(5));
+      const view = renderHook(() => useBrowserAllowance('user-1', 'idle', false, vi.fn()));
+      await act(async () => { await Promise.resolve(); });
+      expect(view.result.current).toEqual({ used: 5, limit: 5 });
+      expect(mockedFetchUsage).toHaveBeenCalledTimes(1);
 
-    mockedFetchUsage.mockResolvedValue(usage(0));
-    await act(async () => { await vi.advanceTimersByTimeAsync(61_000); });
+      mockedFetchUsage.mockResolvedValue(usage(0));
+      await act(async () => { await vi.advanceTimersByTimeAsync(61_000); });
 
-    expect(mockedFetchUsage, 're-read just after midnight').toHaveBeenCalledTimes(2);
-    expect(view.result.current).toEqual({ used: 0, limit: 5 });
+      expect(mockedFetchUsage, 're-read just after midnight').toHaveBeenCalledTimes(2);
+      expect(view.result.current).toEqual({ used: 0, limit: 5 });
+    } finally {
+      hidden.mockRestore();
+    }
   });
 
   it('does not re-read before the reset', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: false });
     vi.setSystemTime(new Date('2026-09-23T20:00:00Z'));
-    mockedFetchUsage.mockResolvedValue(usage(5));
-    renderHook(() => useBrowserAllowance('user-1', 'idle', false, vi.fn()));
-    await act(async () => { await vi.advanceTimersByTimeAsync(60 * 60 * 1000); });
-    expect(mockedFetchUsage).toHaveBeenCalledTimes(1);
+    // Hidden, so the minute poll stays quiet and only the day's timer is
+    // under test: it must not fire an hour early.
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    try {
+      mockedFetchUsage.mockResolvedValue(usage(5));
+      renderHook(() => useBrowserAllowance('user-1', 'idle', false, vi.fn()));
+      await act(async () => { await vi.advanceTimersByTimeAsync(60 * 60 * 1000); });
+      expect(mockedFetchUsage).toHaveBeenCalledTimes(1);
+    } finally {
+      hidden.mockRestore();
+    }
   });
 });
 
@@ -169,7 +183,7 @@ describe('useBrowserAllowance and who is signed in', () => {
   });
 });
 
-describe('useBrowserAllowance after an upgrade', () => {
+describe('useBrowserAllowance after a plan change', () => {
   afterEach(() => { vi.useRealTimers(); });
 
   it('notices a raised limit while the chip is exhausted, without a run or a new day', async () => {
@@ -201,12 +215,36 @@ describe('useBrowserAllowance after an upgrade', () => {
     await waitFor(() => expect(view.result.current).toEqual({ used: 5, limit: 50 }));
   });
 
-  it('does not poll while sessions remain', async () => {
+  it('notices a lowered limit while sessions remain, and switches the chip off before a send is refused', async () => {
+    // Pro, 6 of 50 used, and the subscription lapses to Free. Polling only
+    // while exhausted never re-read a chip with sessions left, so it stayed on
+    // under the old limit and the next browser message was refused.
     vi.useFakeTimers({ shouldAdvanceTime: false });
     vi.setSystemTime(new Date('2026-09-23T10:00:00Z'));
-    mockedFetchUsage.mockResolvedValue(usage(2));
-    renderHook(() => useBrowserAllowance('user-1', 'idle', false, vi.fn()));
-    await act(async () => { await vi.advanceTimersByTimeAsync(5 * 60_000); });
-    expect(mockedFetchUsage).toHaveBeenCalledTimes(1);
+    mockedFetchUsage.mockResolvedValue(usage(6, 50));
+    const setBrowserMode = vi.fn();
+    const view = renderHook(() => useBrowserAllowance('user-1', 'idle', true, setBrowserMode));
+    await act(async () => { await Promise.resolve(); });
+    expect(view.result.current).toEqual({ used: 6, limit: 50 });
+
+    mockedFetchUsage.mockResolvedValue(usage(6, 5));
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+
+    expect(view.result.current).toEqual({ used: 6, limit: 5 });
+    expect(setBrowserMode, 'switched off, not left on under a limit that no longer applies').toHaveBeenCalledWith(false);
+  });
+
+  it('does not poll a tab nobody is looking at', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    vi.setSystemTime(new Date('2026-09-23T10:00:00Z'));
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    try {
+      mockedFetchUsage.mockResolvedValue(usage(2));
+      renderHook(() => useBrowserAllowance('user-1', 'idle', false, vi.fn()));
+      await act(async () => { await vi.advanceTimersByTimeAsync(5 * 60_000); });
+      expect(mockedFetchUsage).toHaveBeenCalledTimes(1);
+    } finally {
+      hidden.mockRestore();
+    }
   });
 });
