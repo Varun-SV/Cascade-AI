@@ -13,7 +13,8 @@ import { fileURLToPath } from 'node:url';
 import type { CascadeConfig, GenerateResult, T2ToT3Assignment, T2Result, ToolCall, ToolDefinition } from '../../types.js';
 import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
-import { ACTING_INTEGRITY_RULE, REPORTING_INTEGRITY_RULE, appendToolRecord, describeArgs, describeToolRecord, recordToolCall, toolReportedFailure, type ToolRecordEntry } from './integrity.js';
+import { ACTING_INTEGRITY_RULE, REPORTING_INTEGRITY_RULE, appendToolRecord, describeArgs, describeHandedWork, describeToolRecord, recordToolCall, toolReportedFailure, type ToolRecordEntry } from './integrity.js';
+import { PeerBus } from '../peer/bus.js';
 import { T3Worker, buildWorkerRules } from './t3-worker.js';
 import { T2Manager } from './t2-manager.js';
 import { T1Administrator, type TaskPlan } from './t1-administrator.js';
@@ -377,6 +378,28 @@ describe('describeToolRecord — what the worker actually did', () => {
       }
     });
 
+    it('still shows a short result once its call is older than the latest twelve', () => {
+      // A short result has no evidence apart from itself, and the outline says
+      // only "returned a result": an order number read early was lost.
+      const record: ToolRecordEntry[] = [];
+      appendToolRecord(record, recordToolCall('shop_api', 'Order 48213 created for Ada', { action: 'create' }));
+      for (let i = 0; i < 20; i++) appendToolRecord(record, recordToolCall('web_search', `result ${i}`, { query: `q${i}` }));
+      const text = describeToolRecord(record, 'Created order 48213 for Ada.');
+      expect(text).toContain('- shop_api(action=create) → returned a result');
+      expect(passagesIn(text)).toContain('- shop_api(action=create): "Order 48213 created for Ada"');
+    });
+
+    it('does not repeat a short result the latest calls already show whole', () => {
+      const record = [recordToolCall('shop_api', 'Order 48213 created for Ada')];
+      expect(describeToolRecord(record, 'Created order 48213 for Ada.')).toBe('- shop_api → Order 48213 created for Ada');
+    });
+
+    it('takes a credential out of an XML file a tool read', () => {
+      const entry = recordToolCall('file_read', `<config>\n  <user>svc</user>\n  <password>hunter2</password>\n${'  <flag>on</flag>\n'.repeat(20)}</config>`);
+      expect(`${entry.result} ${entry.evidence}`).not.toContain('hunter2');
+      expect(entry.evidence).toContain('<password>[REDACTED_SECRET]</password>');
+    });
+
     it('keeps the record\u2019s evidence within a budget, the oldest calls giving theirs up first', () => {
       const record: ToolRecordEntry[] = [];
       for (let i = 0; i < 60; i++) appendToolRecord(record, recordToolCall('file_read', `file ${i} ${filler(400)}`, { path: `f${i}` }));
@@ -394,6 +417,21 @@ describe('describeToolRecord — what the worker actually did', () => {
       const passages = passagesIn(describeToolRecord(record, 'Revenue in 2025 was 4.2 billion across 31 markets.'));
       expect(passages.length).toBeGreaterThan(1_000);
       expect(passages.length).toBeLessThanOrEqual(6_200);
+    });
+  });
+
+  describe('work handed over by the subtasks this one depends on', () => {
+    it('is shown whole when it is short, with its credentials out', () => {
+      expect(describeHandedWork([
+        { from: 'visit', output: 'Visited https://shop.test and\n logged in with password: hunter2. The chatbot said "Yes".' },
+      ], 'The chatbot said yes.')).toBe('- visit: Visited https://shop.test and logged in with password: [REDACTED_SECRET] The chatbot said "Yes".');
+    });
+
+    it('is shown as the passages that bear on the output when it is long', () => {
+      const long = `${'Background notes on the shop and its catalogue. '.repeat(200)}The chatbot quoted a refund window of 45 days. ${'More notes. '.repeat(100)}`;
+      const text = describeHandedWork([{ from: 'visit', output: long }], 'The refund window is 45 days.');
+      expect(text.length).toBeLessThanOrEqual(4_200);
+      expect(text).toMatch(/^Too long to show whole;.*\n- visit: ".*The chatbot quoted a refund window of 45 days\./);
     });
   });
 
@@ -647,6 +685,29 @@ describe('the rule reaches every prompt that can answer the user', () => {
       const graded = calls.find((c) => c.content.startsWith('Self-test this output'))?.content ?? '';
       expect(graded).toMatch(/- browser_control\(action=extract\): ".*our refund window is 45 days\."/);
       expect(graded, 'and the grader is told what the passages are').toContain('the passages are the parts of the results');
+    });
+
+    it('shows the self-test what the subtasks it depends on did, which its own record cannot', async () => {
+      // A summary of a dependency that visited the site reads as a claimed
+      // visit with no call behind it: that subtask's calls are in ITS record.
+      const bus = new PeerBus();
+      bus.publish('t3-visit', 'visit', 'Opened https://shop.test with browser control. The chatbot answered "Yes".', 'COMPLETED');
+      const { router, calls } = recordingRouter('The site was visited and the chatbot answered "Yes".');
+      const worker = new T3Worker(router, noTools(), 't2-1');
+      worker.setPeerBus(bus);
+      await worker.execute(assignment({ subtaskId: 'summary', dependsOn: ['visit'] }), 'task-dep');
+
+      const graded = calls.find((c) => c.content.startsWith('Self-test this output'))?.content ?? '';
+      expect(graded).toContain('Work handed to this subtask by the subtasks it depends on, which made their own tool calls:\n- visit: Opened https://shop.test with browser control. The chatbot answered "Yes".');
+      expect(graded).toContain('An action or result that the handed work above reports is supported too');
+      expect(graded, 'its own record is still its own').toContain('none — no tool was called');
+
+      // The next subtask this worker takes was handed nothing.
+      calls.length = 0;
+      await worker.execute(assignment({ subtaskId: 'other' }), 'task-next');
+      const next = calls.find((c) => c.content.startsWith('Self-test this output'))?.content ?? '';
+      expect(next).not.toContain('Work handed to this subtask');
+      expect(next).not.toContain('handed work above');
     });
 
     it('tells the self-test when nothing was called at all', async () => {

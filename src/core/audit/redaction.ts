@@ -4,6 +4,14 @@ interface Rule {
   replacement: string;
 }
 
+/**
+ * What a name ends in when what it names is a credential: a password, secret or
+ * token, and the keys that are one — `API_KEY`, `AccountKey`, `SECRET_KEY` —
+ * as opposed to a key press or a map key. One definition, for every shape a
+ * name takes: an assignment, an XML element, a name/value pair.
+ */
+const SECRET_NAME = String.raw`(?:passw(?:or)?d|pwd|secret|token|(?:api|access|account|private|secret|client|signing|encryption|master|shared[_-]?access)[_-]?key|shared[_-]?access[_-]?signature)`;
+
 // Credentials. Kept apart from the PII rules below so evidence that must stay
 // checkable — the tool record the self-test grades against — can drop the
 // secrets without also losing the addresses and numbers a claim is about.
@@ -60,7 +68,23 @@ const SECRET_RULES: Rule[] = [
   // `SharedAccessKey`/`SharedAccessSignature` (Azure), and the `SECRET_KEY`,
   // `SIGNING_KEY` family that ends in KEY after a qualifier.
   {
-    pattern: /((?<![A-Za-z0-9_])(?!REDACTED_)[A-Za-z0-9_]*?(?:passw(?:or)?d|pwd|secret|token|(?:api|access|account|private|secret|client|signing|encryption|master|shared[_-]?access)[_-]?key|shared[_-]?access[_-]?signature)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s"'&]+)/gi,
+    pattern: new RegExp(String.raw`((?<![A-Za-z0-9_])(?!REDACTED_)[A-Za-z0-9_]*?${SECRET_NAME}["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s"'&]+)`, 'gi'),
+    replacement: '$1[REDACTED_SECRET]',
+  },
+  // The same names as an XML element — `<password>hunter2</password>`,
+  // `<apiKey>abc</apiKey>`, `<db:Token>…` — whose text is the value, however
+  // short; CDATA included. The name must END in one (`<passwordPolicy>` is a
+  // setting about passwords, not one).
+  {
+    pattern: new RegExp(String.raw`(<[\w.:-]*?${SECRET_NAME}(?:\s[^<>]*)?>)(?:\s*<!\[CDATA\[[\s\S]*?(?:\]\]>|$)|(?!\s*<)[^<]+)`, 'gi'),
+    replacement: '$1[REDACTED_SECRET]',
+  },
+  // And as the NAME in a name/value pair, where the value sits beside it rather
+  // than after it: a Kubernetes or ECS env entry (`- name: DB_PASSWORD` then
+  // `value: hunter2`, or `{"name": "DB_PASSWORD", "value": "hunter2"}`), a .NET
+  // `<add key="ApiKey" value="…"/>`. `valueFrom:` is a reference, not a value.
+  {
+    pattern: new RegExp(String.raw`((?<![\w-])(?:key|name)["']?\s*[:=]\s*["']?[\w.:-]*?${SECRET_NAME}["']?[\s,]*["']?value["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s"',}/>]+)`, 'gi'),
     replacement: '$1[REDACTED_SECRET]',
   },
   // The signature on a signed URL — an Azure SAS `sig`, an S3 presigned

@@ -101,6 +101,35 @@ describe('RedactionLayer', () => {
       .toBe('https://b.s3.amazonaws.com/k?X-Amz-Expires=60&X-Amz-Signature=[REDACTED_SECRET]');
   });
 
+  it('redacts a credential held in an XML element, however short', () => {
+    // The label rules wanted `:` or `=`, and the long-value one 16 characters.
+    expect(RedactionLayer.redactSecrets('<password>hunter2</password>')).toBe('<password>[REDACTED_SECRET]</password>');
+    expect(RedactionLayer.redactSecrets('<apiKey>abc</apiKey><user>bob</user>')).toBe('<apiKey>[REDACTED_SECRET]</apiKey><user>bob</user>');
+    expect(RedactionLayer.redactSecrets('<db:Token type="x">short7</db:Token>')).toBe('<db:Token type="x">[REDACTED_SECRET]</db:Token>');
+    expect(RedactionLayer.redactSecrets('<ClientSecret>\n  s3cr3t\n</ClientSecret>')).toBe('<ClientSecret>[REDACTED_SECRET]</ClientSecret>');
+    expect(RedactionLayer.redactSecrets('<password><![CDATA[p<ss]]></password>')).toBe('<password>[REDACTED_SECRET]</password>');
+  });
+
+  it('leaves an element that is about a credential, or holds only other elements, alone', () => {
+    const text = '<passwordPolicy>strict</passwordPolicy><tokens><count>3</count></tokens><password> <hash>x</hash></password>';
+    expect(RedactionLayer.redactSecrets(text)).toBe(text);
+  });
+
+  it('redacts the value beside a name that says it is a credential', () => {
+    // A Kubernetes env entry, its JSON form, and a .NET appSetting: the name is
+    // data, and the secret is the value next to it.
+    expect(RedactionLayer.redactSecrets('env:\n  - name: DB_PASSWORD\n    value: hunter2\n  - name: DB_HOST\n    value: db'))
+      .toBe('env:\n  - name: DB_PASSWORD\n    value: [REDACTED_SECRET]\n  - name: DB_HOST\n    value: db');
+    expect(RedactionLayer.redactSecrets('[{"name": "API_KEY", "value": "abc"}, {"name": "REGION", "value": "eu"}]'))
+      .toBe('[{"name": "API_KEY", "value": [REDACTED_SECRET]}, {"name": "REGION", "value": "eu"}]');
+    expect(RedactionLayer.redactSecrets('<add key="ApiKey" value="abc123" />')).toBe('<add key="ApiKey" value=[REDACTED_SECRET] />');
+  });
+
+  it('leaves a name/value pair alone when the name only mentions a credential, or the value is a reference', () => {
+    const text = '{"name": "password_reset_enabled", "value": true}\n- name: DB_PASSWORD\n  valueFrom:\n    secretKeyRef: {name: db}';
+    expect(RedactionLayer.redactSecrets(text)).toBe(text);
+  });
+
   it('redacts a password whose label is glued to the name before it', () => {
     expect(RedactionLayer.redactSecrets('PGPASSWORD=hunter2 psql')).toBe('PGPASSWORD=[REDACTED_SECRET] psql');
   });

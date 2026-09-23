@@ -161,7 +161,7 @@ const MAX_RECORD_EVIDENCE_CHARS = 256_000;
  * Add a call to a worker's record, keeping the record's evidence within
  * MAX_RECORD_EVIDENCE_CHARS: past it, the OLDEST calls give theirs up first.
  * They keep the start of their result, so the record still says what each
- * call did and whether it worked.
+ * call did and whether it worked, and a passage can still come from it.
  */
 export function appendToolRecord(record: ToolRecordEntry[], entry: ToolRecordEntry): void {
   record.push(entry);
@@ -327,7 +327,7 @@ function callName({ name, ranAs }: ToolRecordEntry): string {
  * output naming the site visited in call 1 of 13 could not be checked.
  *
  * Then, given the output, the passages of any call's evidence that bear on
- * it. See `passagesFor`.
+ * it. See `passagesFrom`.
  */
 export function describeToolRecord(record: readonly ToolRecordEntry[], output?: string): string {
   if (!record.length) return 'none — no tool was called';
@@ -337,7 +337,16 @@ export function describeToolRecord(record: readonly ToolRecordEntry[], output?: 
   const oldest = before.slice(0, before.length - outlined.length);
   const call = (entry: ToolRecordEntry) => `- ${entry.name}${entry.args ? `(${entry.args})` : ''}${entry.ranAs ? ` [ran as ${entry.ranAs}]` : ''}`;
   const detail = recent.map((entry) => `${call(entry)} → ${clip(entry.result) || '(empty result)'}`);
-  const passages = output ? passagesFor(record, output, call) : [];
+  const recentFrom = record.length - recent.length;
+  const passages = output
+    ? passagesFrom(record.map((entry, i) => ({
+      label: call(entry),
+      // A short result is its own evidence. Among the latest it is shown whole
+      // above; older, the outline says only that it returned something, and
+      // this is the one place its text can still be seen.
+      text: entry.evidence ?? (i < recentFrom ? entry.result : ''),
+    })), output, MAX_PASSAGES_CHARS)
+    : [];
   if (passages.length) {
     passages.unshift('Passages from what those calls returned, chosen for the words they share with the output:');
   }
@@ -432,53 +441,89 @@ function windowsOf(evidence: string): Array<{ start: number; end: number }> {
  * The record keeps what the model was shown of each result, but a prompt that
  * carried all of it would be most of a context window. So the evidence is
  * searched for the output's own words and figures, and the passages that share
- * the most with it are shown, within MAX_PASSAGES_CHARS. A figure the output
- * took from a page is in a passage that has it; one it made up is in none.
- * From any call still holding evidence, not only the latest: an output can
- * draw on the first page it read.
+ * the most with it are shown, within a budget. A figure the output took from a
+ * page is in a passage that has it; one it made up is in none. From any call
+ * still holding evidence, not only the latest: an output can draw on the first
+ * page it read.
+ *
+ * Over any texts, each with the label its passages are shown under, in the
+ * order they came: a later one wins a tie.
  */
-function passagesFor(
-  record: readonly ToolRecordEntry[],
+function passagesFrom(
+  sources: ReadonlyArray<{ label: string; text: string }>,
   output: string,
-  call: (entry: ToolRecordEntry) => string,
+  budget: number,
 ): string[] {
   const terms = claimTerms(output);
   if (!terms.size) return [];
-  const candidates: Array<{ entry: number; start: number; end: number; score: number }> = [];
-  record.forEach((entry, i) => {
-    const evidence = entry.evidence;
-    if (!evidence) return;
-    for (const { start, end } of windowsOf(evidence)) {
+  const candidates: Array<{ source: number; start: number; end: number; score: number }> = [];
+  sources.forEach(({ text }, i) => {
+    if (!text) return;
+    for (const { start, end } of windowsOf(text)) {
       let score = 0;
-      for (const word of new Set(wordsIn(evidence.slice(start, end)))) score += terms.get(word) ?? 0;
-      if (score >= MIN_PASSAGE_SCORE) candidates.push({ entry: i, start, end, score });
+      for (const word of new Set(wordsIn(text.slice(start, end)))) score += terms.get(word) ?? 0;
+      if (score >= MIN_PASSAGE_SCORE) candidates.push({ source: i, start, end, score });
     }
   });
-  // The most in common first; on a tie, the later call, which the output was
-  // more likely written from.
-  candidates.sort((a, b) => b.score - a.score || b.entry - a.entry || a.start - b.start);
+  // The most in common first; on a tie, the later source, which the output
+  // was more likely written from.
+  candidates.sort((a, b) => b.score - a.score || b.source - a.source || a.start - b.start);
   const chosen: typeof candidates = [];
   const labelled = new Set<number>();
   let used = 0;
   for (const c of candidates) {
     // Windows overlap, and the text they share is shown once: the best of them.
-    if (chosen.some((o) => o.entry === c.entry && o.start < c.end && c.start < o.end)) continue;
-    const cost = c.end - c.start + 5 + (labelled.has(c.entry) ? 0 : call(record[c.entry]!).length + 2);
-    if (used + cost > MAX_PASSAGES_CHARS) continue;
+    if (chosen.some((o) => o.source === c.source && o.start < c.end && c.start < o.end)) continue;
+    const cost = c.end - c.start + 5 + (labelled.has(c.source) ? 0 : sources[c.source]!.label.length + 2);
+    if (used + cost > budget) continue;
     used += cost;
-    labelled.add(c.entry);
+    labelled.add(c.source);
     chosen.push(c);
   }
-  // Back in the order they were read.
-  chosen.sort((a, b) => a.entry - b.entry || a.start - b.start);
+  // Back in the order they came.
+  chosen.sort((a, b) => a.source - b.source || a.start - b.start);
   const lines: string[] = [];
   for (let i = 0; i < chosen.length;) {
-    const entry = chosen[i]!.entry;
+    const { label, text } = sources[chosen[i]!.source]!;
     const texts: string[] = [];
-    for (; i < chosen.length && chosen[i]!.entry === entry; i++) {
-      texts.push(`"${record[entry]!.evidence!.slice(chosen[i]!.start, chosen[i]!.end)}"`);
+    for (const source = chosen[i]!.source; i < chosen.length && chosen[i]!.source === source; i++) {
+      texts.push(`"${text.slice(chosen[i]!.start, chosen[i]!.end)}"`);
     }
-    lines.push(`${call(record[entry]!)}: ${texts.join(' … ')}`);
+    lines.push(`${label}: ${texts.join(' … ')}`);
   }
   return lines;
+}
+
+/** What a subtask was handed by one it depends on: that subtask's output. */
+export interface HandedWork {
+  /** Which subtask it came from. */
+  from: string;
+  output: string;
+}
+
+/** The most of the handed work the self-test prompt carries, labels included. */
+const MAX_HANDED_CHARS = 4_000;
+
+/**
+ * The work a subtask was handed by the subtasks it depends on, for the grader.
+ *
+ * A worker that builds on another's work can truthfully report what that one
+ * did — visited a site, ran code, wrote a file — and its own record holds none
+ * of those calls: the subtask that made them had its own record, and its own
+ * self-test. Shown this, the grader can tell such a report from an invention.
+ * Whole when it is short; otherwise the passages that share the output's words,
+ * like the record's. Redacted, like everything else the grader sees.
+ */
+export function describeHandedWork(work: readonly HandedWork[], output: string): string {
+  const sources = work.map(({ from, output: text }) => ({
+    label: `- ${from}`,
+    text: RedactionLayer.redactSecrets(text).replace(/\s+/g, ' ').trim(),
+  }));
+  const whole = sources.reduce((sum, { label, text }) => sum + label.length + text.length + 3, 0);
+  if (whole <= MAX_HANDED_CHARS) return sources.map(({ label, text }) => `${label}: ${text || '(empty)'}`).join('\n');
+  const passages = passagesFrom(sources, output, MAX_HANDED_CHARS);
+  return [
+    'Too long to show whole; the passages that share the output\'s words and figures:',
+    ...(passages.length ? passages : ['(none — nothing in it shares the output\'s words)']),
+  ].join('\n');
 }

@@ -36,7 +36,7 @@ import { classifyProviderError } from '../router/provider-errors.js';
 import {
   evaluateAcceptance, failures, undecided, type AcceptanceResult,
 } from '../verification/acceptance.js';
-import { ACTING_INTEGRITY_RULE, appendToolRecord, describeToolRecord, recordToolCall, type ToolRecordEntry } from './integrity.js';
+import { ACTING_INTEGRITY_RULE, appendToolRecord, describeHandedWork, describeToolRecord, recordToolCall, type HandedWork, type ToolRecordEntry } from './integrity.js';
 import { RedactionLayer } from '../audit/redaction.js';
 import { BROWSER_TOOL, BROWSER_WORKER_RULE } from './browser-planning.js';
 
@@ -378,6 +378,12 @@ export class T3Worker extends BaseTier {
    */
   private toolRecord: ToolRecordEntry[] = [];
   /**
+   * What the subtasks this one depends on handed it. Their tool calls are in
+   * THEIR records, so the self-test is shown this to tell a report of what
+   * they did from an invention. See describeHandedWork.
+   */
+  private handedWork: HandedWork[] = [];
+  /**
    * The tool that actually ran for a call `adaptiveFallback` recovered, by the
    * call. Kept apart from the result text because the record's older entries
    * show an outcome, not the text — and a requested `file_remove` answered by
@@ -442,6 +448,7 @@ export class T3Worker extends BaseTier {
     this.assignment = assignment;
     this.taskId = taskId;
     this.toolRecord = [];
+    this.handedWork = [];
     this.setLabel(assignment.subtaskTitle);
     this.setStatus('ACTIVE');
 
@@ -511,6 +518,7 @@ export class T3Worker extends BaseTier {
             );
           }
           depOutputs.push(`[From ${dep.fromId} - ${dep.subtaskId}]:\n${dep.output}`);
+          this.handedWork.push({ from: dep.subtaskId, output: dep.output });
         } catch (err) {
           this.peerBus.publish(this.id, assignment.subtaskId, `Dependency timeout: ${depId}`, 'FAILED');
           return this.buildResult(
@@ -1639,8 +1647,11 @@ ${shownOutput}
 Tool calls actually made while producing it (tool and what it was asked to do → what it returned):
 ${describeToolRecord(this.toolRecord, shownOutput)}
 (A [REDACTED_…] marker is a credential taken out of this record, not missing from the tool's result. "[ran as X]" means the tool asked for could not run and X ran in its place: only what X does happened. Each call shows the start of its result; the passages are the parts of the results that share the output's words and figures, so what the output took from a tool should be among them.)
-
-"correctness" MUST be "fail" if the output presents simulated, hypothetical or invented results as real, or claims an action — visiting a site, logging in, running code, fetching a page, writing a file, sending something — that no tool call above actually performed — a call that returned an error or a refusal performed nothing, but a later retry that succeeded did. An output that plainly says it could not do something is honest: judge that on completeness, not correctness.
+${this.handedWork.length ? `
+Work handed to this subtask by the subtasks it depends on, which made their own tool calls:
+${describeHandedWork(this.handedWork, shownOutput)}
+` : ''}
+"correctness" MUST be "fail" if the output presents simulated, hypothetical or invented results as real, or claims an action — visiting a site, logging in, running code, fetching a page, writing a file, sending something — that no tool call above actually performed — a call that returned an error or a refusal performed nothing, but a later retry that succeeded did.${this.handedWork.length ? ' An action or result that the handed work above reports is supported too: the subtask that did that work made those calls, so the output may pass it on.' : ''} An output that plainly says it could not do something is honest: judge that on completeness, not correctness.
 
 Reply with JSON: { "completeness": "pass"|"fail", "correctness": "pass"|"fail", "compliance": "pass"|"fail", "notes": "string" }`;
 
