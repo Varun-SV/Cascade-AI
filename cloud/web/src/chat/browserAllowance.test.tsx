@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { browserAllowanceFrom, browserChip, msUntilNextUtcMidnight, useBrowserAllowance } from './browserAllowance.js';
+import { CHECKING, browserAllowanceFrom, browserChip, msUntilNextUtcMidnight, useBrowserAllowance } from './browserAllowance.js';
 import { fetchUsage, type UsageInfo } from '../lib/api.js';
 
 vi.mock('../lib/api.js', () => ({ fetchUsage: vi.fn() }));
@@ -46,8 +46,19 @@ describe('browserChip', () => {
   it('leaves the chip as it was when there is no allowance to show', () => {
     expect(browserChip(null)).toEqual({
       exhausted: false,
+      disabled: false,
       title: 'Give this run a real browser — for pages that are images, or need signing in. Off means Cascade cannot open one.',
     });
+  });
+
+  it('cannot be pressed while the allowance is still being read, and says so', () => {
+    expect(browserChip(CHECKING)).toEqual({
+      exhausted: false,
+      disabled: true,
+      title: 'Checking how many browser sessions are left today…',
+    });
+    expect(browserChip({ used: 5, limit: 5 }).disabled, 'nor once it is used up').toBe(true);
+    expect(browserChip({ used: 4, limit: 5 }).disabled).toBe(false);
   });
 });
 
@@ -75,9 +86,32 @@ describe('useBrowserAllowance', () => {
   it('leaves the chip alone while sessions remain', async () => {
     mockedFetchUsage.mockResolvedValue(usage(4));
     const setBrowserMode = vi.fn();
-    const view = renderHook(() => useBrowserAllowance('user-1', true, 'idle', true, setBrowserMode));
+    const view = renderHook(({ on }) => useBrowserAllowance('user-1', true, 'idle', on, setBrowserMode), { initialProps: { on: false } });
     await waitFor(() => expect(view.result.current).toEqual({ used: 4, limit: 5 }));
+    view.rerender({ on: true });
     expect(setBrowserMode).not.toHaveBeenCalled();
+  });
+
+  it('keeps the chip off until the first read says whether there is an allowance', async () => {
+    // It looked available while /api/usage was on its way, so an exhausted
+    // user could turn it on and send, and the server refused the whole run.
+    let answer: (u: UsageInfo) => void = () => {};
+    mockedFetchUsage.mockReturnValue(new Promise<UsageInfo>((resolve) => { answer = resolve; }));
+    const setBrowserMode = vi.fn();
+    const view = renderHook(() => useBrowserAllowance('user-1', true, 'idle', true, setBrowserMode));
+    expect(view.result.current).toBe(CHECKING);
+    expect(browserChip(view.result.current).disabled).toBe(true);
+    expect(setBrowserMode, 'and not left on under a disabled chip').toHaveBeenCalledWith(false);
+
+    await act(async () => { answer(usage(5)); });
+    expect(view.result.current).toEqual({ used: 5, limit: 5 });
+  });
+
+  it('shows an answer that there is no allowance as none, not as still checking', async () => {
+    mockedFetchUsage.mockResolvedValue({ plan: 'free', dailyRuns: 0, dailyRunLimit: 20, maxConcurrentRuns: 1 });
+    const view = renderHook(() => useBrowserAllowance('user-1', true, 'idle', false, vi.fn()));
+    expect(view.result.current).toBe(CHECKING);
+    await waitFor(() => expect(view.result.current).toBeNull());
   });
 
   it('re-reads when a run starts or ends', async () => {
@@ -169,7 +203,8 @@ describe('useBrowserAllowance and who is signed in', () => {
     mockedFetchUsage.mockRejectedValue(new Error('offline'));
     view.rerender({ user: 'bob' });
     await waitFor(() => expect(mockedFetchUsage).toHaveBeenCalledTimes(2));
-    expect(view.result.current, 'nothing known about bob yet, so nothing is held against him').toBeNull();
+    expect(view.result.current, 'nothing known about bob yet, so nothing of alice\u2019s is held against him').toBe(CHECKING);
+    expect(browserChip(view.result.current).exhausted).toBe(false);
   });
 
   it('forgets the allowance on sign-out', async () => {
@@ -202,6 +237,17 @@ describe('useBrowserAllowance after a plan change', () => {
 
     expect(view.result.current).toEqual({ used: 5, limit: 50 });
     expect(browserChip(view.result.current).exhausted, 'the chip is back').toBe(false);
+  });
+
+  it('asks again when the first read fails, rather than leaving the chip off for good', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    vi.setSystemTime(new Date('2026-09-23T10:00:00Z'));
+    mockedFetchUsage.mockRejectedValueOnce(new Error('offline')).mockResolvedValue(usage(1));
+    const view = renderHook(() => useBrowserAllowance('user-1', true, 'idle', false, vi.fn()));
+    await act(async () => { await Promise.resolve(); });
+    expect(view.result.current).toBe(CHECKING);
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(view.result.current).toEqual({ used: 1, limit: 5 });
   });
 
   it('re-reads on coming back to the tab while exhausted', async () => {

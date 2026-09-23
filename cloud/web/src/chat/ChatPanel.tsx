@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { BrowserAllowance } from './browserAllowance.js';
+import type { BrowserAllowanceView } from './browserAllowance.js';
 import { AnimatePresence, motion } from 'framer-motion';
 import { AlertTriangle, KeyRound, Sparkles, Layers, ChevronDown, Search } from 'lucide-react';
 import CascadeMark from '../components/CascadeMark.js';
@@ -55,7 +55,7 @@ interface Props {
   /** This run was refused the browser: every session was in use, or today's were spent. */
   browserRefusedNotice?: string | null;
   /** Today's browser sessions against the plan's allowance, when the server reports it. */
-  browserAllowance?: BrowserAllowance | null;
+  browserAllowance?: BrowserAllowanceView;
   activity: ActivityNode[];
   /** Where the agent's browser can be watched, while it has one. */
   browserLiveView?: string | undefined;

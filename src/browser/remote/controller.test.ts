@@ -809,18 +809,28 @@ describe('the embedder\u2019s allowance of new sessions', () => {
   // allowance says whether this run may open one at all, and the provider
   // bills per session created, so that is where it has to be decided.
 
-  /** An allowance of `units`, claimed and returned the way the server's is. */
+  /**
+   * An allowance of `units`, claimed and returned the way the server's is: each
+   * claim returns only itself, and only once.
+   */
   function allowanceOf(units: number) {
-    const state = { left: units, taken: 0, givenBack: 0 };
+    const state = { left: units, taken: 0, givenBack: 0, returned: [] as number[] };
     return {
       state,
       allowance: {
         take: () => {
-          if (state.left <= 0) return 'Today\u2019s browser sessions are used up.';
+          if (state.left <= 0) return { refusal: 'Today\u2019s browser sessions are used up.' };
           state.left--; state.taken++;
-          return undefined;
+          const id = state.taken;
+          let back = false;
+          return {
+            giveBack: () => {
+              if (back) return;
+              back = true;
+              state.left++; state.givenBack++; state.returned.push(id);
+            },
+          };
         },
-        giveBack: () => { state.left++; state.givenBack++; },
       },
     };
   }
@@ -864,13 +874,51 @@ describe('the embedder\u2019s allowance of new sessions', () => {
   it('refuses when the allowance cannot answer — a claim that failed has not said yes', async () => {
     const { provider, created } = fakeProvider();
     const c = new RemoteBrowserController({ provider });
-    c.setAllowanceFor('run-A', { take: () => { throw new Error('database is locked'); }, giveBack: () => {} });
+    c.setAllowanceFor('run-A', { take: () => { throw new Error('database is locked'); } });
 
     const out = await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
 
     expect(out.ok).toBe(false);
     expect(out.detail).toMatch(/could not check this run's allowance/);
     expect(created).toEqual([]);
+  });
+
+  it('refuses an answer from the allowance that is neither a claim nor a refusal', async () => {
+    const { provider, created } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    for (const answer of ['yes', {}, { refusal: '' }]) {
+      c.setAllowanceFor('run-A', { take: () => answer as unknown as { refusal: string } });
+      const out = await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+      expect(out.ok, JSON.stringify(answer)).toBe(false);
+      expect(out.detail).toMatch(/could not check this run's allowance/);
+    }
+    expect(created).toEqual([]);
+  });
+
+  it('returns each open\u2019s own claim, when two runs sharing an allowance open at once', async () => {
+    // Two runs, one allowance, one slot: B is refused by the pool while A is
+    // still opening, and A's session then fails to be created. Both claims
+    // come back, each exactly once — a single "last claimed" slot returned B's
+    // twice and A's never, and a session that never opened stayed charged.
+    const { provider, created } = fakeProvider();
+    (provider as { isolatesSessions: boolean }).isolatesSessions = true;
+    let failA: (err: Error) => void = () => {};
+    provider.createSession = () => new Promise((_, reject) => { failA = reject; });
+    const c = new RemoteBrowserController({ provider, maxSessions: 1 });
+    const shared = allowanceOf(5);
+    c.setAllowanceFor('run-A', shared.allowance);
+    c.setAllowanceFor('run-B', shared.allowance);
+
+    const a = c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await vi.waitFor(() => expect(shared.state.taken).toBe(1));
+    const b = await c.controller({ kind: 'click', selector: '#b' }, ctx('run-B', 'w2'));
+    expect(b.ok, 'the pool refused B').toBe(false);
+    failA(new Error('provider down'));
+    expect((await a).ok).toBe(false);
+
+    expect(created).toEqual([]);
+    expect(shared.state.returned.sort(), 'each claim returned, once').toEqual([1, 2]);
+    expect(shared.state.left).toBe(5);
   });
 
   it('gives two concurrent runs the last unit once, not twice', async () => {

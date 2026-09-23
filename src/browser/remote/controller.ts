@@ -86,10 +86,16 @@ export interface BrowserViewInfo {
 
 /** An embedder's per-run allowance of new sessions. See `RemoteBrowserController.allowances`. */
 export interface BrowserAllowance {
-  /** Claim one new session, or say why not. Synchronous: see where it is called. */
-  take(): string | undefined;
-  /** Return a claimed unit that no session came of. */
-  giveBack(): void;
+  /**
+   * Claim one new session: why it cannot be had, or the way to return THIS
+   * claim if no session comes of it. Synchronous: see where it is called.
+   *
+   * Per claim, not one `giveBack` for the allowance. Runs sharing an allowance
+   * open at once, and a single "last claimed" slot lets the second claim
+   * overwrite the first — whose give-back then returned the wrong one, or
+   * nothing, and a session that never opened stayed charged.
+   */
+  take(): { refusal: string } | { giveBack(): void };
 }
 
 /**
@@ -569,7 +575,8 @@ export class RemoteBrowserController {
    * pool check, so nothing suspends between the claim and the reservation it
    * guards. Checking here and COUNTING after the session was created let
    * concurrent opens all see the same last unit, and each then created a
-   * billed session. `giveBack` returns the unit when no session came of it.
+   * billed session. The claim's own `giveBack` returns that unit when no
+   * session came of it.
    */
   private allowances = new Map<string, BrowserAllowance>();
   /** An embedder that wants every run's live view, told which run each is. */
@@ -2461,14 +2468,25 @@ export class RemoteBrowserController {
     // would count the operator's own browser against the person's day.
     const allowance = this.provider.allocatesSessions === false ? undefined : this.allowances.get(runId);
     let refusal: string | undefined;
+    let claimed: { giveBack(): void } | undefined;
     try {
-      refusal = allowance?.take();
+      const claim = allowance?.take();
+      if (claim && 'giveBack' in claim && typeof claim.giveBack === 'function') claimed = claim;
+      // Anything else refuses, an answer that is not one included.
+      else if (claim) refusal = ('refusal' in claim && claim.refusal) || ALLOWANCE_UNAVAILABLE;
     } catch {
       refusal = ALLOWANCE_UNAVAILABLE;
     }
     if (refusal) throw new Error(refusal);
-    /** Hand back a claimed unit that no session came of. Guarded like every callback here. */
-    const unclaim = () => { if (allowance) notify(() => allowance.giveBack()); };
+    /**
+     * Hand back THIS open's claim, when no session came of it — once, however
+     * many paths below reach it. Guarded like every callback here.
+     */
+    const unclaim = () => {
+      const claim = claimed;
+      claimed = undefined;
+      if (claim) notify(() => claim.giveBack());
+    };
 
     // Counted WITH the open runs, and taken before the first await.
     //

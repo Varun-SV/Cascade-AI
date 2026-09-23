@@ -1,5 +1,5 @@
 import { useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react';
-import { browserChip, type BrowserAllowance } from './browserAllowance.js';
+import { browserChip, type BrowserAllowanceView } from './browserAllowance.js';
 import clsx from 'clsx';
 import { motion } from 'framer-motion';
 import { Send, Paperclip, X, Loader2, Globe, Square, Zap, FileText, MonitorPlay } from 'lucide-react';
@@ -69,7 +69,7 @@ interface Props {
   onBrowserModeChange: (on: boolean) => void;
   browserAvailable: boolean;
   /** Today's browser sessions against the plan's allowance. See `browserChip`. */
-  browserAllowance?: BrowserAllowance | null;
+  browserAllowance?: BrowserAllowanceView;
   onWebSearchChange: (on: boolean) => void;
   uiMode: UiMode;
 }
@@ -384,7 +384,7 @@ export default function Composer({
               <button
                 type="button"
                 title={chip.title}
-                disabled={disabled || chip.exhausted}
+                disabled={disabled || chip.disabled}
                 aria-pressed={browserMode}
                 onClick={() => onBrowserModeChange(!browserMode)}
                 className={clsx(

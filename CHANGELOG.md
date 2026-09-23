@@ -23,9 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session is claimed the moment one is about to be opened, which is what the
   provider bills for, and returned if none was, so a Browser-chip run that
   never needs the browser costs nothing and concurrent runs cannot share the
-  last one. Once the day's sessions are gone the Browser chip switches
-  off and says when they reset (midnight UTC), a run sent with it anyway is
-  refused before anything is spent, and a run that runs out partway through
+  last one. Each claim is returned on its own, so two opens at once never
+  leave a session that did not open counted. Once the day's sessions are gone the Browser chip switches
+  off and says when they reset (midnight UTC), and it stays off until
+  today's count has been read, so it cannot be turned on for a run that
+  will be refused. A run sent with it anyway is refused before anything is
+  spent, and a run that runs out partway through
   is refused the next session with the same message shown in the chat. If
   the allowance cannot be checked, the chat says so too, and a later refusal
   for a different reason is shown as well. The

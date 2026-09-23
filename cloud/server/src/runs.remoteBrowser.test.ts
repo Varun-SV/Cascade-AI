@@ -211,9 +211,9 @@ describe('the operator configures a browser for their deployment', () => {
         await run(true, socket);
 
         const allowance = set.mock.calls.at(-1)?.[1];
-        expect(allowance?.take(), 'one left: claimed').toBeUndefined();
+        expect(allowance?.take(), 'one left: claimed').toHaveProperty('giveBack');
         expect(store!.getBrowserSessions(user.id, today()), 'counted as it is claimed').toBe(5);
-        expect(allowance?.take(), 'and the next is refused').toMatch(/browser sessions are used up/);
+        expect(allowance?.take(), 'and the next is refused').toEqual({ refusal: expect.stringMatching(/browser sessions are used up/) });
         expect(socket.events.filter((e) => e.event === 'browser:limit'), 'the person is told').toHaveLength(1);
       } finally {
         set.mockRestore();

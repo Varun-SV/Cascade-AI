@@ -14,7 +14,7 @@ import {
   distillSessionFacts, buildSessionTranscript, sessionWorthRemembering,
   azureModelForDeployment, DEFAULT_CONTEXT_LIMIT, MODELS,
 } from '#cascade-ai';
-import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ApprovalRequest, ProviderConfig, BrowserInput } from '#cascade-ai';
+import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ApprovalRequest, ProviderConfig, BrowserAllowance, BrowserInput } from '#cascade-ai';
 import { attachRemoteBrowser, providerRationsSessions } from './remote-browser.js';
 import type { ClarificationAnswer } from '#cascade-ai';
 import fs from 'node:fs/promises';
@@ -1356,20 +1356,15 @@ export function buildMediaSink(deps: {
 
 /**
  * A run's claim on its owner's daily browser sessions, in the controller's
- * take/give-back shape. The unit a give-back returns is the one this run last
- * claimed: the controller claims and settles one open at a time per run.
+ * shape: each claim carries its own give-back, for the day it was claimed on.
+ *
+ * It kept one "last claimed" give-back for the whole run, which was right only
+ * while every open waited for the one before. Two at once and the second claim
+ * overwrote the first: returning one returned the other's, and the second
+ * return found nothing — a session that never opened stayed charged.
  */
-export function browserAllowanceFor(store: CloudStore, userId: string): { take: () => string | undefined; giveBack: () => void } {
-  let unclaimed: (() => void) | undefined;
-  return {
-    take: () => {
-      const claim = claimBrowserSession(store, userId, store.getUserById(userId)?.plan ?? 'free');
-      if ('refusal' in claim) return claim.refusal;
-      unclaimed = claim.giveBack;
-      return undefined;
-    },
-    giveBack: () => { unclaimed?.(); unclaimed = undefined; },
-  };
+export function browserAllowanceFor(store: CloudStore, userId: string): BrowserAllowance {
+  return { take: () => claimBrowserSession(store, userId, store.getUserById(userId)?.plan ?? 'free') };
 }
 
 export async function runChatTurn(payload: ChatRunPayload, deps: ChatRunDeps): Promise<ChatRunResult> {

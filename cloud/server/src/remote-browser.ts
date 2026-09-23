@@ -28,6 +28,7 @@ import {
   isUsableSteelBase,
   isUsableSteelKey,
   isCdpEndpoint,
+  type BrowserAllowance,
   type BrowserInput,
   type Cascade,
   type CascadeConfig,
@@ -64,10 +65,10 @@ interface AttachOptions {
    * The run owner's allowance of NEW sessions — a plan's daily count.
    *
    * `take` claims one, or says why not; its words reach the model as the
-   * refusal and the person as the notice. `giveBack` returns a claim no
-   * session came of. See `RemoteBrowserController.allowances`.
+   * refusal and the person as the notice. Each claim's own `giveBack` returns
+   * it when no session came of it. See `RemoteBrowserController.allowances`.
    */
-  allowance?: { take: () => string | undefined; giveBack: () => void };
+  allowance?: BrowserAllowance;
 }
 
 /** Attached browser, or null when the deployment has no provider configured. */
@@ -315,25 +316,25 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
       const allowance = opts.allowance;
       controller.setAllowanceFor(id, {
         take: () => {
-          let refusal: string | undefined;
+          let claim: ReturnType<BrowserAllowance['take']>;
           // Caught HERE rather than left to the controller, which refuses on a
           // throw just the same but has no one to tell: the model heard why,
           // and the person, watching a browser that never came, did not.
           try {
-            refusal = allowance.take();
+            claim = allowance.take();
           } catch {
-            refusal = ALLOWANCE_UNAVAILABLE;
+            claim = { refusal: ALLOWANCE_UNAVAILABLE };
           }
-          if (refusal && refusal !== lastLimit) {
-            lastLimit = refusal;
+          // The claim itself goes back as it came: its give-back is its own.
+          if ('refusal' in claim && claim.refusal !== lastLimit) {
+            lastLimit = claim.refusal;
             // Guarded: telling the person must not change what the model is told.
             try {
-              opts.emit('browser:limit', { conversationId: opts.conversationId, taskId: id, detail: refusal });
+              opts.emit('browser:limit', { conversationId: opts.conversationId, taskId: id, detail: claim.refusal });
             } catch { /* the socket's problem, not the run's */ }
           }
-          return refusal;
+          return claim;
         },
-        giveBack: () => allowance.giveBack(),
       });
     }
     controller.onBusyFor(id, ({ limit }) => {

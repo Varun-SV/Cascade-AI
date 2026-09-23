@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { attachRemoteBrowser, asWatchOnlyViewer, frameEmitter, formatCeiling, resetSharedBrowser, sharedBrowserGeneration } from './remote-browser.js';
-import { ALLOWANCE_UNAVAILABLE, Cascade, RemoteBrowserController, type CascadeConfig } from '#cascade-ai';
+import { ALLOWANCE_UNAVAILABLE, Cascade, RemoteBrowserController, type BrowserAllowance, type CascadeConfig } from '#cascade-ai';
 
 /**
  * A REAL Cascade, because the fake below is what let a shipped bug through.
@@ -432,7 +432,7 @@ describe('the run owner\u2019s allowance of new sessions', () => {
   const cdp = { tools: { remoteBrowser: { provider: 'cdp' as const, url: 'ws://browser.test:9222' } } };
 
   /** Attach a run with this allowance and announce it, capturing what the bridge registered. */
-  function attachedWith(allowance?: { take: () => string | undefined; giveBack: () => void }) {
+  function attachedWith(allowance?: BrowserAllowance) {
     const set = vi.spyOn(RemoteBrowserController.prototype, 'setAllowanceFor');
     const onLiveView = vi.spyOn(RemoteBrowserController.prototype, 'onLiveViewFor');
     const { cascade, config } = realCascade(cdp.tools.remoteBrowser);
@@ -450,15 +450,15 @@ describe('the run owner\u2019s allowance of new sessions', () => {
   }
 
   it('hands the controller the allowance\u2019s answer, word for word', () => {
-    const { registered, restore } = attachedWith({ take: () => 'used up for today', giveBack: () => {} });
+    const { registered, restore } = attachedWith({ take: () => ({ refusal: 'used up for today' }) });
     try {
       expect(registered, 'registered under the run id when the run starts').toBeDefined();
-      expect(registered!.take(), 'the model is refused in these words').toBe('used up for today');
+      expect(registered!.take(), 'the model is refused in these words').toEqual({ refusal: 'used up for today' });
     } finally { restore(); }
   });
 
   it('tells the person once, in the same words, however often the run is refused', () => {
-    const { registered, restore } = attachedWith({ take: () => 'used up for today', giveBack: () => {} });
+    const { registered, restore } = attachedWith({ take: () => ({ refusal: 'used up for today' }) });
     try {
       registered!.take(); registered!.take(); registered!.take();
       expect(emits.filter((e) => e.event === 'browser:limit')).toEqual([
@@ -470,7 +470,7 @@ describe('the run owner\u2019s allowance of new sessions', () => {
   it('tells the person again when a run is refused after its browser opened', () => {
     // An open session is not counted twice, but a run that loses its page
     // needs a new one — and if that is refused, it is news again.
-    const { registered, liveView, restore } = attachedWith({ take: () => 'used up for today', giveBack: () => {} });
+    const { registered, liveView, restore } = attachedWith({ take: () => ({ refusal: 'used up for today' }) });
     try {
       registered!.take();
       liveView!({ active: true, liveViewUrl: 'https://viewer.test/s1' });
@@ -482,9 +482,9 @@ describe('the run owner\u2019s allowance of new sessions', () => {
   it('tells the person when the allowance could not be checked, as the model is told', () => {
     // The controller refuses on a throw too, but only the model heard: the
     // person saw a browser that never came and no reason why.
-    const { registered, restore } = attachedWith({ take: () => { throw new Error('store down'); }, giveBack: () => {} });
+    const { registered, restore } = attachedWith({ take: () => { throw new Error('store down'); } });
     try {
-      expect(registered!.take()).toBe(ALLOWANCE_UNAVAILABLE);
+      expect(registered!.take()).toEqual({ refusal: ALLOWANCE_UNAVAILABLE });
       expect(emits.filter((e) => e.event === 'browser:limit')).toEqual([
         { event: 'browser:limit', payload: { conversationId: 'c1', taskId: 't1', detail: ALLOWANCE_UNAVAILABLE } },
       ]);
@@ -495,12 +495,12 @@ describe('the run owner\u2019s allowance of new sessions', () => {
     // "Could not check, try again" and then, on the retry, "used up for
     // today": the second is not the same news, and a flag that only knew a
     // refusal had been shown kept it quiet.
-    const answers: Array<() => string | undefined> = [
+    const answers: Array<() => ReturnType<BrowserAllowance['take']>> = [
       () => { throw new Error('store down'); },
-      () => 'used up for today',
-      () => 'used up for today',
+      () => ({ refusal: 'used up for today' }),
+      () => ({ refusal: 'used up for today' }),
     ];
-    const { registered, restore } = attachedWith({ take: () => answers.shift()!(), giveBack: () => {} });
+    const { registered, restore } = attachedWith({ take: () => answers.shift()!() });
     try {
       registered!.take(); registered!.take(); registered!.take();
       expect(emits.filter((e) => e.event === 'browser:limit').map((e) => (e.payload as { detail: string }).detail))
@@ -509,19 +509,19 @@ describe('the run owner\u2019s allowance of new sessions', () => {
   });
 
   it('says nothing while there is allowance left', () => {
-    const { registered, restore } = attachedWith({ take: () => undefined, giveBack: () => {} });
+    const { registered, restore } = attachedWith({ take: () => ({ giveBack: () => {} }) });
     try {
-      expect(registered!.take()).toBeUndefined();
+      expect(registered!.take()).toHaveProperty('giveBack');
       expect(emits.filter((e) => e.event === 'browser:limit')).toEqual([]);
     } finally { restore(); }
   });
 
-  it('passes a give-back through to the allowance', () => {
+  it('hands the controller the claim itself, with its own give-back', () => {
     const giveBack = vi.fn();
-    const { registered, restore } = attachedWith({ take: () => undefined, giveBack });
+    const { registered, restore } = attachedWith({ take: () => ({ giveBack }) });
     try {
-      registered!.giveBack();
-      expect(giveBack).toHaveBeenCalledOnce();
+      const claim = registered!.take();
+      expect('giveBack' in claim && claim.giveBack).toBe(giveBack);
     } finally { restore(); }
   });
 

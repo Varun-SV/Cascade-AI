@@ -202,7 +202,16 @@ export function claimBrowserSession(
   const day = todayKey();
   const limit = limitsForPlan(plan).dailyBrowserSessions;
   if (!store.takeBrowserSession(userId, day, limit)) return { refusal: usedUpMessage(plan, limit) };
-  return { giveBack: () => store.giveBackBrowserSession(userId, day) };
+  // Once: a second give-back of the same claim would refund a session some
+  // other claim is still holding.
+  let returned = false;
+  return {
+    giveBack: () => {
+      if (returned) return;
+      returned = true;
+      store.giveBackBrowserSession(userId, day);
+    },
+  };
 }
 
 /**
