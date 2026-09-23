@@ -545,6 +545,17 @@ export class RemoteBrowserController {
    * act on it, by waiting for the other run, saw nothing.
    */
   private busyListeners = new Map<string, (info: BrowserBusyInfo) => void | Promise<void>>();
+  /**
+   * The embedder's own limit on a run opening a NEW session, such as a plan's
+   * daily allowance. The deployment's pool (`maxSessions`) says how many may
+   * be open at once; this says whether this run may open one at all.
+   *
+   * Returns why not, or nothing. Asked synchronously, alongside the pool check,
+   * so nothing can suspend between the answer and the reservation it guards.
+   */
+  private admissionGates = new Map<string, () => string | undefined>();
+  /** Told each time a provider session is actually created for a run: the thing that is billed. */
+  private sessionCreatedListeners = new Map<string, () => void | Promise<void>>();
   /** An embedder that wants every run's live view, told which run each is. */
   private onLiveViewAll: ((runId: string, liveViewUrl: string | undefined) => void | Promise<void>) | undefined;
   /** Told when a provider session could not be handed back. See `disposeRun`. */
@@ -722,6 +733,16 @@ export class RemoteBrowserController {
 
   offBusyFor(runKey: string): void {
     this.busyListeners.delete(runKey);
+  }
+
+  /** See `admissionGates`. Forgotten with the run. */
+  setAdmissionFor(runKey: string, gate: () => string | undefined): void {
+    this.admissionGates.set(runKey, gate);
+  }
+
+  /** See `sessionCreatedListeners`. Forgotten with the run. */
+  onSessionCreatedFor(runKey: string, listener: () => void | Promise<void>): void {
+    this.sessionCreatedListeners.set(runKey, listener);
   }
 
   /**
@@ -2004,6 +2025,8 @@ export class RemoteBrowserController {
     this.liveViewListeners.delete(runId);
     this.offControlFor(runId);
     this.offBusyFor(runId);
+    this.admissionGates.delete(runId);
+    this.sessionCreatedListeners.delete(runId);
   }
 
   /**
@@ -2417,6 +2440,19 @@ export class RemoteBrowserController {
       throw new Error('The browser settings changed while this action was waiting. Try again.');
     }
 
+    // Before the pool: a run with no allowance left will not get one by waiting
+    // for another run to finish, so that is the reason worth giving.
+    //
+    // A gate that throws refuses rather than admits. It exists to bound what
+    // is spent, and a check that could not be made has not said yes.
+    let refusal: string | undefined;
+    try {
+      refusal = this.admissionGates.get(runId)?.();
+    } catch {
+      refusal = 'The browser could not check this run\'s allowance. Try again.';
+    }
+    if (refusal) throw new Error(refusal);
+
     // Counted WITH the open runs, and taken before the first await.
     //
     // The check used to sit above a run of awaits — loadPlaywright,
@@ -2483,6 +2519,12 @@ export class RemoteBrowserController {
     const abort = this.aborts.get(runId)?.signal;
     const creationSignal = signal && abort ? AbortSignal.any([signal, abort]) : (signal ?? abort);
     const session = await this.provider.createSession(creationSignal);
+    // Counted here, the moment a session exists and is billed, whatever
+    // happens to the connection after. Admission was checked before the
+    // awaits above, so concurrent opens can each pass it on the same last
+    // unit of allowance. That overshoot is bounded by the pool, and is zero at
+    // the default `maxSessions` of one.
+    notify(() => this.sessionCreatedListeners.get(runId)?.());
 
     // Everything past createSession is rolled back on failure. Without this a
     // CDP connection that dies leaves an allocated, billed session with nothing

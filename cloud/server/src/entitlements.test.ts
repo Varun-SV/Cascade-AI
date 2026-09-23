@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import {
-  beginRun, checkDailyLimit, checkPendingMediaCap, EntitlementError, limitsForPlan,
+  beginRun, browserSessionRefusal, checkBrowserSessionLimit, checkDailyLimit, checkPendingMediaCap, EntitlementError, limitsForPlan,
   PENDING_MEDIA_TTL_MS, todayKey, _resetActiveRunsForTests,
 } from './entitlements.js';
 import { CloudStore } from './db.js';
@@ -136,5 +136,77 @@ describe('beginRun (in-memory concurrency gate)', () => {
   it('respects a higher concurrency limit on the pro plan', () => {
     beginRun('user-1', 'pro');
     expect(() => beginRun('user-1', 'pro')).not.toThrow();
+  });
+});
+
+describe('the daily browser allowance', () => {
+  // Sessions, because a session is what the provider bills for: Free 5, Pro 50.
+  let dir: string;
+  let store: CloudStore;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-browser-allowance-'));
+    store = new CloudStore(path.join(dir, 'cloud.db'));
+  });
+
+  afterEach(async () => {
+    store.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  const user = () => store.upsertUser({ provider: 'dev', providerId: 'browser-user', email: null, name: null, avatar: null });
+
+  it('is 5 sessions a day on Free and 50 on Pro', () => {
+    expect(limitsForPlan('free').dailyBrowserSessions).toBe(5);
+    expect(limitsForPlan('pro').dailyBrowserSessions).toBe(50);
+  });
+
+  it('lets sessions open until the plan’s allowance is spent', () => {
+    const { id } = user();
+    for (let i = 0; i < 4; i++) store.incrementBrowserSessions(id, todayKey());
+    expect(browserSessionRefusal(store, id, 'free'), 'four of five used').toBeUndefined();
+
+    store.incrementBrowserSessions(id, todayKey());
+    expect(browserSessionRefusal(store, id, 'free'), 'the fifth was the last').toBeTruthy();
+  });
+
+  it('says how many, on which plan, when it resets, and where more is', () => {
+    const { id } = user();
+    for (let i = 0; i < 5; i++) store.incrementBrowserSessions(id, todayKey());
+    expect(browserSessionRefusal(store, id, 'free')).toBe(
+      'Today’s browser sessions are used up (5 a day on the free plan). They reset at midnight UTC. Pro includes 50 a day.'.replace('’', "'"),
+    );
+  });
+
+  it('does not offer Pro to someone already on it', () => {
+    const { id } = user();
+    for (let i = 0; i < 50; i++) store.incrementBrowserSessions(id, todayKey());
+    const refusal = browserSessionRefusal(store, id, 'pro');
+    expect(refusal).toContain('50 a day on the Pro plan');
+    expect(refusal).not.toContain('Pro includes');
+  });
+
+  it('counts browser sessions apart from runs', () => {
+    // One row per user per day carries both. A run is not a session: a
+    // browser run that never opens the browser costs no allowance.
+    const { id } = user();
+    for (let i = 0; i < 20; i++) store.incrementUsage(id, todayKey());
+    expect(store.getBrowserSessions(id, todayKey())).toBe(0);
+
+    store.incrementBrowserSessions(id, todayKey());
+    expect(store.getUsage(id, todayKey()), 'and a session is not a run').toBe(20);
+    expect(store.getBrowserSessions(id, todayKey())).toBe(1);
+  });
+
+  it('is a fresh allowance each day', () => {
+    const { id } = user();
+    for (let i = 0; i < 5; i++) store.incrementBrowserSessions(id, '2000-01-01');
+    expect(browserSessionRefusal(store, id, 'free'), 'yesterday’s sessions are not today’s').toBeUndefined();
+  });
+
+  it('refuses a browser run up front as an entitlement, like the daily run limit', () => {
+    const { id } = user();
+    for (let i = 0; i < 5; i++) store.incrementBrowserSessions(id, todayKey());
+    expect(() => checkBrowserSessionLimit(store, id, 'free')).toThrow(EntitlementError);
   });
 });

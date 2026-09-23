@@ -475,6 +475,10 @@ export interface UsageInfo {
   dailyRuns: number;
   dailyRunLimit: number;
   maxConcurrentRuns: number;
+  /** Browser sessions opened today. Absent from a server that does not count them. */
+  browserSessions?: number;
+  /** The plan's daily allowance of browser sessions. */
+  browserSessionLimit?: number;
 }
 
 export function fetchUsage(): Promise<UsageInfo> {

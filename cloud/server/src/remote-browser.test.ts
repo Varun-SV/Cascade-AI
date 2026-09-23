@@ -397,6 +397,70 @@ describe('a run refused the browser because every session is taken', () => {
   });
 });
 
+describe('the run owner\u2019s allowance of new sessions', () => {
+  const cdp = { tools: { remoteBrowser: { provider: 'cdp' as const, url: 'ws://browser.test:9222' } } };
+
+  /** Attach a run with this allowance and announce it, capturing what the bridge registered. */
+  function attachedWith(allowance?: { admit: () => string | undefined; created: () => void }) {
+    const gate = vi.spyOn(RemoteBrowserController.prototype, 'setAdmissionFor');
+    const created = vi.spyOn(RemoteBrowserController.prototype, 'onSessionCreatedFor');
+    const { cascade, config } = realCascade(cdp.tools.remoteBrowser);
+    const handlers = new Map<string, (e: unknown) => void>();
+    (cascade as unknown as { on: (ev: string, fn: (e: unknown) => void) => void }).on =
+      (ev, fn) => { handlers.set(ev, fn); };
+    attachRemoteBrowser({ cascade, config, conversationId: 'c1', emit, ...(allowance ? { allowance } : {}) });
+    handlers.get('run:started')?.({ taskId: 't1' });
+    return {
+      gate: gate.mock.calls.find(([id]) => id === 't1')?.[1],
+      onCreated: created.mock.calls.find(([id]) => id === 't1')?.[1],
+      registered: gate.mock.calls.length,
+      restore: () => { gate.mockRestore(); created.mockRestore(); },
+    };
+  }
+
+  it('hands the controller the allowance\u2019s answer, word for word', () => {
+    const { gate, restore } = attachedWith({ admit: () => 'used up for today', created: () => {} });
+    try {
+      expect(gate, 'registered under the run id when the run starts').toBeTypeOf('function');
+      expect(gate!(), 'the model is refused in these words').toBe('used up for today');
+    } finally { restore(); }
+  });
+
+  it('tells the person once, in the same words, however often the run is refused', () => {
+    const { gate, restore } = attachedWith({ admit: () => 'used up for today', created: () => {} });
+    try {
+      gate!(); gate!(); gate!();
+      expect(emits.filter((e) => e.event === 'browser:limit')).toEqual([
+        { event: 'browser:limit', payload: { conversationId: 'c1', taskId: 't1', detail: 'used up for today' } },
+      ]);
+    } finally { restore(); }
+  });
+
+  it('says nothing while there is allowance left', () => {
+    const { gate, restore } = attachedWith({ admit: () => undefined, created: () => {} });
+    try {
+      expect(gate!()).toBeUndefined();
+      expect(emits.filter((e) => e.event === 'browser:limit')).toEqual([]);
+    } finally { restore(); }
+  });
+
+  it('counts a session when the controller says one was created', () => {
+    const created = vi.fn();
+    const { onCreated, restore } = attachedWith({ admit: () => undefined, created });
+    try {
+      void onCreated!();
+      expect(created).toHaveBeenCalledOnce();
+    } finally { restore(); }
+  });
+
+  it('registers no gate for a caller with no allowance to enforce', () => {
+    const { registered, restore } = attachedWith();
+    try {
+      expect(registered).toBe(0);
+    } finally { restore(); }
+  });
+});
+
 describe('the ceiling in a release-failure report', () => {
   it('keeps the seconds it was given', () => {
     // Rounding to the nearest minute was my own shortcut in the previous round

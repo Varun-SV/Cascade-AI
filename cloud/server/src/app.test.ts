@@ -336,7 +336,29 @@ describe('cloud/server app', () => {
 
     const res = await fetch(`${baseUrl}/api/usage`, { headers: { Cookie: cookie } });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ plan: 'free', dailyRuns: 0, dailyRunLimit: 20, maxConcurrentRuns: 1 });
+    // Browser sessions too, so the chip can be off BEFORE a run is refused.
+    expect(await res.json()).toEqual({
+      plan: 'free', dailyRuns: 0, dailyRunLimit: 20, maxConcurrentRuns: 1,
+      browserSessions: 0, browserSessionLimit: 5,
+    });
+  });
+
+  it('GET /api/usage counts the browser sessions this user opened today', async () => {
+    const loginRes = await fetch(`${baseUrl}/auth/dev-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Browser User' }),
+    });
+    const cookie = extractCookie(loginRes, SESSION_COOKIE_NAME)!;
+    const me = (await (await fetch(`${baseUrl}/api/me`, { headers: { Cookie: cookie } })).json()) as { user: { id: string } };
+    const today = new Date().toISOString().slice(0, 10);
+    store.incrementBrowserSessions(me.user.id, today);
+    store.incrementBrowserSessions(me.user.id, today);
+
+    const res = await fetch(`${baseUrl}/api/usage`, { headers: { Cookie: cookie } });
+    const body = (await res.json()) as { browserSessions: number; browserSessionLimit: number };
+    expect(body.browserSessions).toBe(2);
+    expect(body.browserSessionLimit).toBe(5);
   });
 
   it('dev-login sets a session cookie and /api/me resolves the logged-in user', async () => {

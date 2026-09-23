@@ -1176,12 +1176,13 @@ export function useChatSession(
   // the most relevant passages (vs. read in full), so grounding is visible.
   const [knowledgeNotice, setKnowledgeNotice] = useState<string | null>(null);
   /**
-   * This run asked for the browser and every session was in use by another.
+   * This run asked for the browser and was refused one: every session was in
+   * use by another run, or today's allowance was spent.
    *
    * The model was told and nobody else was, so the run's answer was the only
    * sign, and a run that narrated or papered over the refusal left none.
    */
-  const [browserBusyNotice, setBrowserBusyNotice] = useState<string | null>(null);
+  const [browserRefusedNotice, setBrowserRefusedNotice] = useState<string | null>(null);
   // Live run activity — the T1→T2→T3 tree with each tier's model + current
   // subtask, built from tier:status events. Powers the click-to-expand drawer.
   const [activity, setActivity] = useState<ActivityNode[]>([]);
@@ -1492,10 +1493,17 @@ export function useChatSession(
       adoptConversationId(e?.conversationId, (e as { runId?: unknown })?.runId);
       if (e.conversationId && e.conversationId !== activeConversationId()) return;
       const n = typeof e.limit === 'number' && e.limit > 0 ? e.limit : 1;
-      setBrowserBusyNotice(
+      setBrowserRefusedNotice(
         `The browser is busy: ${n === 1 ? 'its one session is' : `all ${n} sessions are`} in use by another run, `
         + 'so this run could not open it. Try again when that run finishes.',
       );
+    };
+    const onBrowserLimit = (e: { conversationId?: string; detail?: string }) => {
+      adoptConversationId(e?.conversationId, (e as { runId?: unknown })?.runId);
+      if (e.conversationId && e.conversationId !== activeConversationId()) return;
+      // The server's words, which are also what the model was told: the two
+      // must not describe the same refusal differently.
+      if (typeof e.detail === 'string' && e.detail) setBrowserRefusedNotice(e.detail);
     };
     const onProviderExhausted = (e: {
       conversationId?: string; provider?: string; kind?: string; message?: string; failedOverTo?: string;
@@ -1637,7 +1645,7 @@ export function useChatSession(
       if (!taskId) return;
       // The other run finished and a retry got the browser after all, so
       // "could not open it" is no longer true of this run.
-      if (e?.active === true && key === (activeConversationId() ?? '')) setBrowserBusyNotice(null);
+      if (e?.active === true && key === (activeConversationId() ?? '')) setBrowserRefusedNotice(null);
       setBrowserViews((prev) => {
         const views = prev[key] ?? [];
         if (e?.active !== true) {
@@ -1792,6 +1800,7 @@ export function useChatSession(
     socket.on('knowledge:retrieved', onKnowledge);
     socket.on('file:created', onFileCreated);
     socket.on('browser:busy', onBrowserBusy);
+    socket.on('browser:limit', onBrowserLimit);
     return () => {
       socket.off('stream:token', onToken);
       socket.off('tier:status', onStatus);
@@ -1816,6 +1825,7 @@ export function useChatSession(
       socket.off('browser:watching', onBrowserWatching);
       socket.off('browser:live-view', onLiveView);
       socket.off('browser:busy', onBrowserBusy);
+      socket.off('browser:limit', onBrowserLimit);
     };
   }, [socket]);
 
@@ -2657,7 +2667,7 @@ export function useChatSession(
       // user their spend is on a different account after it has moved back.
       setProviderNotice(null);
       // Also "for this run": the next one may find the browser free.
-      setBrowserBusyNotice(null);
+      setBrowserRefusedNotice(null);
       setActivity([]);
       streamingRef.current = '';
       // Id kept so the rejection path below can take this turn back out. It is
@@ -3150,7 +3160,7 @@ export function useChatSession(
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, browserMode, setBrowserMode, approval,
     escalation, escalations, escalationQueued: escalations.length, resolveEscalation, clearEscalation,
     skipAllEscalations,
-    contextApproval, contextApprovals, resolveContextApproval, compactionNotice, providerNotice, knowledgeNotice, browserBusyNotice, activity,
+    contextApproval, contextApprovals, resolveContextApproval, compactionNotice, providerNotice, knowledgeNotice, browserRefusedNotice, activity,
     browserLiveView, browserActive, browserTaskId, browserFrame, browserStreaming,
     browserHuman, browserCapturing, browserConfirmed, browserNotice, stopBrowser,
     takeOverBrowser, handBackBrowser, sendBrowserInput, setBrowserCapture,

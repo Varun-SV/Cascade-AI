@@ -18,6 +18,7 @@ import ContextApprovalDialog from './chat/ContextApprovalDialog.js';
 import KeyVault from './keys/KeyVault.js';
 import { useChatSession, toChatMessage } from './chat/useChatSession.js';
 import { useAutoTitler } from './chat/useAutoTitler.js';
+import { useBrowserAllowance } from './chat/browserAllowance.js';
 import { loadKeys, saveKeys, takeRetiredProviderNotice } from './keys/store.js';
 import { loadWebSearch, saveWebSearch, webSearchPayload } from './keys/webSearch.js';
 import {
@@ -116,6 +117,8 @@ export default function App() {
 
   const socket = user ? getSocket() : null;
   const chat = useChatSession(socket, providers, skillId, webSearchPayload(webSearch), undefined, mode === 'advanced');
+  // Re-read as each run starts and ends, which is when a session can be spent.
+  const browserAllowance = useBrowserAllowance(!!user, chat.busy, chat.browserMode, chat.setBrowserMode);
   const [localModelOn, setLocalModelOn] = useState(() => localModelEnabled());
 
   // A run may have created a new conversation or renamed one — refresh the
@@ -338,7 +341,8 @@ export default function App() {
             compactionNotice={chat.compactionNotice}
             providerNotice={chat.providerNotice}
             knowledgeNotice={chat.knowledgeNotice}
-            browserBusyNotice={chat.browserBusyNotice}
+            browserRefusedNotice={chat.browserRefusedNotice}
+            browserAllowance={browserAllowance}
             activity={chat.activity}
           />
         </div>

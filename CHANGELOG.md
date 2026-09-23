@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+### Added
+- **A daily allowance of browser sessions: 5 a day on Free, 50 on Pro.** A
+  session is counted when one is actually opened, which is what the
+  provider bills for, so a Browser-chip run that never needs the browser
+  costs nothing. Once the day's sessions are gone the Browser chip switches
+  off and says when they reset (midnight UTC), a run sent with it anyway is
+  refused before anything is spent, and a run that runs out partway through
+  is refused the next session with the same message shown in the chat. The
+  chip's tooltip shows how many are left today.
+
 ### Fixed
 - **A run that cannot do something now says so instead of inventing the
   result.** Asked to open a site with browser control and return its

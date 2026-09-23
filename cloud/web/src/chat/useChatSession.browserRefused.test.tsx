@@ -48,7 +48,7 @@ describe('useChatSession — the browser was busy', () => {
 
     act(() => { fake.fire('browser:busy', { taskId: 't1', limit: 1 }); });
 
-    expect(view.result.current.browserBusyNotice).toBe(
+    expect(view.result.current.browserRefusedNotice).toBe(
       'The browser is busy: its one session is in use by another run, so this run could not open it. Try again when that run finishes.',
     );
   });
@@ -59,7 +59,7 @@ describe('useChatSession — the browser was busy', () => {
 
     act(() => { fake.fire('browser:busy', { taskId: 't1', limit: 3 }); });
 
-    expect(view.result.current.browserBusyNotice).toContain('all 3 sessions are in use by another run');
+    expect(view.result.current.browserRefusedNotice).toContain('all 3 sessions are in use by another run');
   });
 
   it('ignores a refusal belonging to a different conversation', () => {
@@ -68,7 +68,7 @@ describe('useChatSession — the browser was busy', () => {
 
     act(() => { fake.fire('browser:busy', { conversationId: 'some-other-conversation', taskId: 't9', limit: 1 }); });
 
-    expect(view.result.current.browserBusyNotice).toBeNull();
+    expect(view.result.current.browserRefusedNotice).toBeNull();
   });
 
   it('withdraws it when the run gets the browser after all', () => {
@@ -78,10 +78,10 @@ describe('useChatSession — the browser was busy', () => {
     const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
 
     act(() => { fake.fire('browser:busy', { taskId: 't1', limit: 1 }); });
-    expect(view.result.current.browserBusyNotice).toBeTruthy();
+    expect(view.result.current.browserRefusedNotice).toBeTruthy();
 
     act(() => { fake.fire('browser:live-view', { taskId: 't1', active: true }); });
-    expect(view.result.current.browserBusyNotice).toBeNull();
+    expect(view.result.current.browserRefusedNotice).toBeNull();
   });
 
   it('clears when the next run starts, which may find the browser free', () => {
@@ -91,7 +91,7 @@ describe('useChatSession — the browser was busy', () => {
     act(() => { fake.fire('browser:busy', { taskId: 't1', limit: 1 }); });
     act(() => { view.result.current.send({ prompt: 'try again' }); });
 
-    expect(view.result.current.browserBusyNotice).toBeNull();
+    expect(view.result.current.browserRefusedNotice).toBeNull();
   });
 
   it('unsubscribes on teardown', () => {
@@ -99,5 +99,45 @@ describe('useChatSession — the browser was busy', () => {
     const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
     view.unmount();
     expect(fake.subscribed('browser:busy')).toBe(false);
+  });
+});
+
+describe('useChatSession — today\u2019s browser sessions were used up', () => {
+  const detail = "Today's browser sessions are used up (5 a day on the free plan). They reset at midnight UTC. Pro includes 50 a day.";
+
+  it('shows the server\u2019s own words, which are also what the model was told', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    expect(fake.subscribed('browser:limit')).toBe(true);
+
+    act(() => { fake.fire('browser:limit', { taskId: 't1', detail }); });
+
+    expect(view.result.current.browserRefusedNotice).toBe(detail);
+  });
+
+  it('ignores a refusal belonging to a different conversation', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { fake.fire('browser:limit', { conversationId: 'some-other-conversation', taskId: 't9', detail }); });
+
+    expect(view.result.current.browserRefusedNotice).toBeNull();
+  });
+
+  it('clears when the next run starts', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { fake.fire('browser:limit', { taskId: 't1', detail }); });
+    act(() => { view.result.current.send({ prompt: 'without the browser, then' }); });
+
+    expect(view.result.current.browserRefusedNotice).toBeNull();
+  });
+
+  it('unsubscribes on teardown', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    view.unmount();
+    expect(fake.subscribed('browser:limit')).toBe(false);
   });
 });

@@ -804,6 +804,89 @@ describe('the session pool', () => {
   });
 });
 
+describe('the embedder\u2019s allowance of new sessions', () => {
+  // The deployment's pool says how many may be open at once. A plan's daily
+  // allowance says whether this run may open one at all, and the provider
+  // bills per session created, so that is where it has to be decided.
+
+  it('refuses a new session with the gate\u2019s own words, before one is created', async () => {
+    const { provider, created } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    c.setAdmissionFor('run-A', () => 'Today\u2019s browser sessions are used up.');
+
+    const out = await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    expect(out.ok).toBe(false);
+    expect(out.detail, 'the model hears the same words the person will').toContain('Today\u2019s browser sessions are used up.');
+    expect(created, 'nothing was created, so nothing is billed').toEqual([]);
+  });
+
+  it('refuses when the gate cannot answer — a check that failed has not said yes', async () => {
+    const { provider, created } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    c.setAdmissionFor('run-A', () => { throw new Error('database is locked'); });
+
+    const out = await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/could not check this run's allowance/);
+    expect(created).toEqual([]);
+  });
+
+  it('holds no slot for a refused run, so the pool is not wedged by it', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider, maxSessions: 1 });
+    c.setAdmissionFor('run-A', () => 'used up');
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const out = await c.controller({ kind: 'click', selector: '#b' }, ctx('run-B', 'w2'));
+    expect(out.ok, 'the one slot is still free for a run with allowance').toBe(true);
+  });
+
+  it('counts each session actually created, and nothing for reusing one', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    let asked = 0;
+    let counted = 0;
+    c.setAdmissionFor('run-A', () => { asked++; return undefined; });
+    c.onSessionCreatedFor('run-A', () => { counted++; });
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await c.controller({ kind: 'click', selector: '#b' }, ctx('run-A', 'w1'));
+
+    expect(counted, 'one session, used twice').toBe(1);
+    expect(asked, 'and the allowance is only asked about a NEW session').toBe(1);
+  });
+
+  it('counts nothing for a refused run', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    let counted = 0;
+    c.setAdmissionFor('run-A', () => 'used up');
+    c.onSessionCreatedFor('run-A', () => { counted++; });
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    expect(counted).toBe(0);
+  });
+
+  it('forgets both with the rest of the run', async () => {
+    // Both close over the embedder's socket and store; the controller outlives
+    // every run on the deployment.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    let asked = 0;
+    let counted = 0;
+    c.setAdmissionFor('run-A', () => { asked++; return undefined; });
+    c.onSessionCreatedFor('run-A', () => { counted++; });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await c.endRun('run-A');
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w2'));
+    expect(asked, 'no longer consulted').toBe(1);
+    expect(counted, 'no longer told').toBe(1);
+  });
+});
+
 describe('a provider that cannot isolate sessions', () => {
   it('is held to one run however high the limit is set', async () => {
     // A bare CDP endpoint IS one browser: two "sessions" against it are the

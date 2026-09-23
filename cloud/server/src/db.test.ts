@@ -852,3 +852,33 @@ describe('CloudStore — stored document text', () => {
     expect(store.totalAttachmentChars(alice.id), 'and its text no longer counts').toBe(0);
   });
 });
+
+describe('CloudStore — browser sessions on a database from before they were counted', () => {
+  let dir: string;
+  afterEach(async () => { await fs.rm(dir, { recursive: true, force: true }); });
+
+  it('adds the column on boot and keeps the runs already counted', async () => {
+    // Every deployed database predates the column, and `usage` has a row per
+    // user per day that must survive: the runs counted today are still today's.
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-db-browser-'));
+    const file = path.join(dir, 'cloud.db');
+    const first = new CloudStore(file);
+    const user = first.upsertUser({ provider: 'dev', providerId: 'old', email: null, name: null, avatar: null });
+    first.close();
+
+    const raw = new Database(file);
+    raw.exec('ALTER TABLE usage DROP COLUMN browser_sessions');
+    raw.prepare('INSERT INTO usage (user_id, date, runs) VALUES (?, ?, 3)').run(user.id, '2026-09-23');
+    raw.close();
+
+    const store = new CloudStore(file);
+    try {
+      expect(store.getUsage(user.id, '2026-09-23')).toBe(3);
+      expect(store.getBrowserSessions(user.id, '2026-09-23')).toBe(0);
+      expect(store.incrementBrowserSessions(user.id, '2026-09-23')).toBe(1);
+      expect(store.getUsage(user.id, '2026-09-23'), 'the runs row was updated, not replaced').toBe(3);
+    } finally {
+      store.close();
+    }
+  });
+});

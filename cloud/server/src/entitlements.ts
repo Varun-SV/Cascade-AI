@@ -60,12 +60,25 @@ export interface PlanLimits {
    * crafted ones — a 1,000-page PDF is about 3M characters.
    */
   documentTextChars: number;
+  /**
+   * Browser sessions this plan may open per UTC day.
+   *
+   * Sessions, not runs or minutes: a session is the unit the provider bills
+   * for, and the one thing that exists only because someone turned the
+   * Browser chip on. Counted when a session is created (see
+   * `RemoteBrowserController.onSessionCreatedFor`), so a browser-mode run that
+   * never needed one costs nothing here.
+   *
+   * Separate from `maxConcurrentRuns` and the deployment's `maxSessions`,
+   * which bound how many at ONCE. This bounds how many in a day.
+   */
+  dailyBrowserSessions: number;
 }
 
 const MB = 1024 * 1024;
 const PLAN_LIMITS: Record<string, PlanLimits> = {
-  free: { dailyRuns: 20, maxConcurrentRuns: 1, storageBytes: 10 * MB, pendingMediaBytes: 64 * MB, documentBytes: 5 * MB, documentTextChars: 25_000_000 },
-  pro: { dailyRuns: 200, maxConcurrentRuns: 3, storageBytes: 1024 * MB, pendingMediaBytes: 512 * MB, documentBytes: 10 * MB, documentTextChars: 250_000_000 },
+  free: { dailyRuns: 20, maxConcurrentRuns: 1, storageBytes: 10 * MB, pendingMediaBytes: 64 * MB, documentBytes: 5 * MB, documentTextChars: 25_000_000, dailyBrowserSessions: 5 },
+  pro: { dailyRuns: 200, maxConcurrentRuns: 3, storageBytes: 1024 * MB, pendingMediaBytes: 512 * MB, documentBytes: 10 * MB, documentTextChars: 250_000_000, dailyBrowserSessions: 50 },
 };
 
 /**
@@ -153,6 +166,34 @@ export function checkDailyLimit(store: CloudStore, userId: string, plan: string)
       `Daily run limit reached (${limits.dailyRuns} for the ${plan} plan). Resets at midnight UTC.`,
     );
   }
+}
+
+/**
+ * Why this user may not open another browser session today, or nothing.
+ *
+ * A message rather than a boolean, because the same words go to the model (as
+ * the tool's refusal) and to the person (as the notice), and they must agree.
+ */
+export function browserSessionRefusal(store: CloudStore, userId: string, plan: string): string | undefined {
+  const limit = limitsForPlan(plan).dailyBrowserSessions;
+  if (store.getBrowserSessions(userId, todayKey()) < limit) return undefined;
+  const pro = limitsForPlan('pro').dailyBrowserSessions;
+  return `Today's browser sessions are used up (${limit} a day on the ${plan === 'pro' ? 'Pro' : 'free'} plan). `
+    + 'They reset at midnight UTC.'
+    + (plan === 'pro' ? '' : ` Pro includes ${pro} a day.`);
+}
+
+/**
+ * Refuse a browser-mode run up front when today's sessions are already gone.
+ *
+ * A run that cannot open a browser should not start as though it could: the
+ * chip is the user asking for one, and a run without it is the run that
+ * wrote a site's answer itself. Refused before anything is persisted or spent,
+ * like the daily run limit.
+ */
+export function checkBrowserSessionLimit(store: CloudStore, userId: string, plan: string): void {
+  const refusal = browserSessionRefusal(store, userId, plan);
+  if (refusal) throw new EntitlementError(refusal);
 }
 
 // In-memory per-user concurrency tracking. Correct for a single server

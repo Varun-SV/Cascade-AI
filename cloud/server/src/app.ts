@@ -1307,7 +1307,12 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     const plan = user?.plan ?? 'free';
     const limits = limitsForPlan(plan);
     const used = store.getUsage(req.session!.userId, todayKey());
-    res.json({ plan, dailyRuns: used, dailyRunLimit: limits.dailyRuns, maxConcurrentRuns: limits.maxConcurrentRuns });
+    res.json({
+      plan, dailyRuns: used, dailyRunLimit: limits.dailyRuns, maxConcurrentRuns: limits.maxConcurrentRuns,
+      // So the Browser chip can be off BEFORE a run is refused, not after.
+      browserSessions: store.getBrowserSessions(req.session!.userId, todayKey()),
+      browserSessionLimit: limits.dailyBrowserSessions,
+    });
   });
 
   // ── Billing (Razorpay recurring subscriptions) ──

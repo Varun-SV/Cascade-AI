@@ -485,6 +485,10 @@ export class CloudStore {
     const hasCol = (table: string, col: string) =>
       (this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === col);
     if (!hasCol('conversations', 'skill_id')) this.db.exec('ALTER TABLE conversations ADD COLUMN skill_id TEXT');
+    // Browser sessions opened per day, beside the runs counted on the same row.
+    if (!hasCol('usage', 'browser_sessions')) {
+      this.db.exec('ALTER TABLE usage ADD COLUMN browser_sessions INTEGER NOT NULL DEFAULT 0');
+    }
     // Run-explorer: which tier answered + the JSON /why report.
     if (!hasCol('messages', 'tier')) this.db.exec('ALTER TABLE messages ADD COLUMN tier TEXT');
     if (!hasCol('messages', 'why_json')) this.db.exec('ALTER TABLE messages ADD COLUMN why_json TEXT');
@@ -978,6 +982,24 @@ export class CloudStore {
       | { runs: number }
       | undefined;
     return row?.runs ?? 0;
+  }
+
+  /** Count one provider browser session opened for this user today. */
+  incrementBrowserSessions(userId: string, date: string): number {
+    this.db
+      .prepare(
+        `INSERT INTO usage (user_id, date, runs, browser_sessions) VALUES (?, ?, 0, 1)
+         ON CONFLICT(user_id, date) DO UPDATE SET browser_sessions = browser_sessions + 1`,
+      )
+      .run(userId, date);
+    return this.getBrowserSessions(userId, date);
+  }
+
+  getBrowserSessions(userId: string, date: string): number {
+    const row = this.db.prepare('SELECT browser_sessions FROM usage WHERE user_id = ? AND date = ?').get(userId, date) as
+      | { browser_sessions: number }
+      | undefined;
+    return row?.browser_sessions ?? 0;
   }
 
   // ── Memories (per-user persistent facts) ──────

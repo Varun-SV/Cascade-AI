@@ -59,6 +59,14 @@ interface AttachOptions {
   emitFrame?: (event: string, payload: unknown) => void;
   /** Somewhere to record a misconfiguration without failing the run. */
   warn?: (message: string) => void;
+  /**
+   * The run owner's allowance of NEW sessions — a plan's daily count.
+   *
+   * `admit` says why no session may be opened, or nothing; its words reach
+   * the model as the refusal and the person as the notice. `created` is told
+   * when one actually was.
+   */
+  allowance?: { admit: () => string | undefined; created: () => void };
 }
 
 /** Attached browser, or null when the deployment has no provider configured. */
@@ -292,6 +300,23 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
         confirmed,
       });
     });
+    if (opts.allowance) {
+      const allowance = opts.allowance;
+      // Once per run, like "busy": a refused worker may ask again.
+      let limitAnnounced = false;
+      controller.setAdmissionFor(id, () => {
+        const refusal = allowance.admit();
+        if (refusal && !limitAnnounced) {
+          limitAnnounced = true;
+          // Guarded: telling the person must not change what the model is told.
+          try {
+            opts.emit('browser:limit', { conversationId: opts.conversationId, taskId: id, detail: refusal });
+          } catch { /* the socket's problem, not the run's */ }
+        }
+        return refusal;
+      });
+      controller.onSessionCreatedFor(id, () => allowance.created());
+    }
     // Once per run. A worker told "busy" may well ask again, and every refusal
     // after the first is the same news.
     let busyAnnounced = false;

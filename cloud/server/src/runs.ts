@@ -23,7 +23,7 @@ import { z, type ZodError } from 'zod';
 import type { CloudEnv } from './env.js';
 import { resolveRunMcpServers } from './mcp-oauth.js';
 import type { CloudAttachment, CloudStore } from './db.js';
-import { beginRun, checkDailyLimit, checkPendingMediaCap, PENDING_MEDIA_TTL_MS, todayKey } from './entitlements.js';
+import { beginRun, browserSessionRefusal, checkBrowserSessionLimit, checkDailyLimit, checkPendingMediaCap, PENDING_MEDIA_TTL_MS, todayKey } from './entitlements.js';
 import { getSkill } from './skills.js';
 import { tenantScratchDir } from './paths.js';
 import { pendingMediaDir, sweepPendingMedia } from './pending-media.js';
@@ -1362,6 +1362,11 @@ export async function runChatTurn(payload: ChatRunPayload, deps: ChatRunDeps): P
   const user = store.getUserById(userId);
   const plan = user?.plan ?? 'free';
   checkDailyLimit(store, userId, plan);
+  // Only where a browser can exist: the allowance is for a capability, and a
+  // deployment with no provider has none to ration.
+  if (payload.browserMode === true && env.REMOTE_BROWSER_PROVIDER && deps.interactive !== false) {
+    checkBrowserSessionLimit(store, userId, plan);
+  }
   const releaseRun = beginRun(userId, plan);
 
   try {
@@ -1778,6 +1783,13 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     // queued old one.
     emitFrame: lossyEmitter(socket),
     warn: (message) => console.warn(`[run ${conversation.id}] remote browser: ${message}`),
+    // The plan's daily allowance, checked at the moment a session would be
+    // opened and counted when one is. The run-start check cannot cover a run
+    // that began with one session left and needs a second.
+    allowance: {
+      admit: () => browserSessionRefusal(store, userId, store.getUserById(userId)?.plan ?? 'free'),
+      created: () => { store.incrementBrowserSessions(userId, todayKey()); },
+    },
   });
   // The kill switch, alongside the live view that makes it meaningful. Scoped
   // to this run and removed with the run's other listeners below: a Stop is
