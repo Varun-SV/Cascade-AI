@@ -1611,7 +1611,7 @@ ${output}
 Tool calls actually made while producing it (tool → what it returned):
 ${describeToolRecord(this.toolRecord)}
 
-"correctness" MUST be "fail" if the output presents simulated, hypothetical or invented results as real, or claims an action — visiting a site, logging in, running code, fetching a page, writing a file, sending something — that the tool calls above did not perform or that returned an error. An output that plainly says it could not do something is honest: judge that on completeness, not correctness.
+"correctness" MUST be "fail" if the output presents simulated, hypothetical or invented results as real, or claims an action — visiting a site, logging in, running code, fetching a page, writing a file, sending something — that no tool call above actually performed — a call that returned an error or a refusal performed nothing, but a later retry that succeeded did. An output that plainly says it could not do something is honest: judge that on completeness, not correctness.
 
 Reply with JSON: { "completeness": "pass"|"fail", "correctness": "pass"|"fail", "compliance": "pass"|"fail", "notes": "string" }`;
 
@@ -1700,7 +1700,7 @@ ${output.slice(0, 4000)}`;
 Original output:
 ${originalOutput}
 
-Correct the issues and provide an improved version that addresses all failures. If an issue cannot be fixed because a tool is missing, returns an error or is refused, say so plainly instead — never invent the missing result.`;
+Correct the issues and provide an improved version that addresses all failures. If an issue cannot be fixed because a tool is missing, or keeps failing or refusing, say so plainly instead — never invent the missing result.`;
 
     await this.context.addMessage({ role: 'user', content: correctionPrompt });
 

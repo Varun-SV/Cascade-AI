@@ -137,6 +137,22 @@ describe('describeToolRecord — what the worker actually did', () => {
   });
 });
 
+describe('what the acting rule asks for', () => {
+  it('lets a worker fix a call the tool told it how to fix, instead of stopping at the first error', () => {
+    // executeTool's own validation says "supply them and call the tool
+    // again", and a busy browser says to try again. A rule that stopped at
+    // any error contradicted both.
+    expect(ACTING_INTEGRITY_RULE).toContain('A tool error you can act on');
+    expect(ACTING_INTEGRITY_RULE).toContain('correct the call and retry');
+    expect(ACTING_INTEGRITY_RULE, 'stopping is for when there is no way forward').toMatch(/If you still cannot do what was asked .* keeps failing or refusing .* and stop\./);
+  });
+
+  it('still forbids inventing what could not be obtained', () => {
+    expect(ACTING_INTEGRITY_RULE).toMatch(/^- Never present simulated, hypothetical or invented results as real\./);
+    expect(ACTING_INTEGRITY_RULE).toContain('do not fill in plausible-looking results');
+  });
+});
+
 describe('the rule reaches every prompt that can answer the user', () => {
   describe('T3 — the worker that does the work', () => {
     it('carries it whatever tools are registered, including none', () => {
@@ -153,6 +169,35 @@ describe('the rule reaches every prompt that can answer the user', () => {
       const graded = calls.find((c) => c.content.startsWith('Self-test this output'));
       expect(graded?.content, 'the refusal is in front of the grader').toContain(`browser_control → Tool error: ${REFUSAL}`);
       expect(graded?.content, 'and it is told what to do with it').toMatch(/"correctness" MUST be "fail" if the output presents simulated/);
+    });
+
+    it('does not fail an output whose first call errored and whose retry worked', async () => {
+      // The grader was told to fail any claimed action whose call "returned an
+      // error", which also caught the retry that went on to succeed.
+      const execute = vi.fn()
+        .mockRejectedValueOnce(new Error(REFUSAL))
+        .mockResolvedValueOnce('navigated to https://example.test');
+      let loop = 0;
+      const calls: Call[] = [];
+      const router = {
+        generate: vi.fn(async (tier: string, options: { messages: Array<{ content: unknown }>; systemPrompt?: string }) => {
+          const latest = options.messages[options.messages.length - 1];
+          const content = typeof latest?.content === 'string' ? latest.content : '';
+          calls.push({ tier, systemPrompt: options.systemPrompt ?? '', content });
+          if (content.startsWith('Self-test this output')) return makeResult(PASS);
+          loop += 1;
+          if (loop <= 2) return makeResult('', [{ id: `b${loop}`, name: 'browser_control', input: { action: 'navigate', url: 'https://example.test' } }]);
+          return makeResult('Opened https://example.test.');
+        }),
+        getModelForTier: () => undefined,
+      } as unknown as CascadeRouter;
+      await new T3Worker(router, browserRegistry(execute), 't2-1').execute(assignment(), 'task-retried');
+
+      const graded = calls.find((c) => c.content.startsWith('Self-test this output'))?.content ?? '';
+      expect(graded, 'both attempts are in the record').toContain(`browser_control → Tool error: ${REFUSAL}`);
+      expect(graded).toContain('browser_control → navigated to https://example.test');
+      expect(graded, 'and a retry that succeeded is said to count').toContain('a later retry that succeeded did');
+      expect(graded).not.toContain('did not perform or that returned an error');
     });
 
     it('tells the self-test when nothing was called at all', async () => {
@@ -192,6 +237,7 @@ describe('the rule reaches every prompt that can answer the user', () => {
       expect(correction, 'a correction round ran').toBeDefined();
       expect(correction?.systemPrompt).toContain(ACTING_INTEGRITY_RULE);
       expect(correction?.content, 'and the ask itself allows "I could not"').toContain('never invent the missing result');
+      expect(correction?.content, 'once the tool keeps failing, not at its first error').toContain('keeps failing or refusing');
     });
 
     it('carries it into the tool-less rewrite, which can only close a gap in real work by inventing it', async () => {

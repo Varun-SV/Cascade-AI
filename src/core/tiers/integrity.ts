@@ -17,12 +17,18 @@
 //  to do the thing and cover the gap. A tier that REPORTS on other tiers' work
 //  can turn their failure into a success while summarising it.
 
+// "Stop" is for when there is no way forward, not the first error. A tool
+// error can be the way forward: argument validation tells the model to "supply
+// them and call the tool again", and a busy browser says to try again. A rule
+// that ended the subtask at any error contradicted both.
+
 /** For a tier that does the work: T3's agent loop, its correction and rewrite steps, a fast answer. */
 export const ACTING_INTEGRITY_RULE =
-  '- Never present simulated, hypothetical or invented results as real. If you cannot do what was asked — '
-  + 'the tool you need is missing, returns an error or is refused — say so plainly, report what you did manage, '
-  + 'and stop. Do not role-play performing the action, and do not fill in plausible-looking results, quotes, '
-  + 'data or page contents you did not actually obtain.';
+  '- Never present simulated, hypothetical or invented results as real. A tool error you can act on — a missing or '
+  + 'invalid argument, or a message telling you to try again — is not the end: correct the call and retry. If you '
+  + 'still cannot do what was asked — the tool you need is missing, or it keeps failing or refusing — say so '
+  + 'plainly, report what you did manage, and stop. Do not role-play performing the action, and do not fill in '
+  + 'plausible-looking results, quotes, data or page contents you did not actually obtain.';
 
 /** For a tier that reports on others' work: T2's section summary, T1's final compile. */
 export const REPORTING_INTEGRITY_RULE =

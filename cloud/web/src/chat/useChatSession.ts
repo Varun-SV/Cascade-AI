@@ -1182,7 +1182,22 @@ export function useChatSession(
    * The model was told and nobody else was, so the run's answer was the only
    * sign, and a run that narrated or papered over the refusal left none.
    */
-  const [browserRefusedNotice, setBrowserRefusedNotice] = useState<string | null>(null);
+  //
+  // Kept per conversation, with the run it was about, like `browserViews`.
+  // One slot carried conversation A's refusal into B when you switched, and
+  // let a sibling run's browser opening in A clear the refusal of the run
+  // that was still without one.
+  const [browserRefusals, setBrowserRefusals] = useState<Record<string, { taskId?: string; text: string }>>({});
+  const browserRefusedNotice = browserRefusals[activeConversationId() ?? '']?.text ?? null;
+  /** Forget one conversation's refusal, or only if it was about `taskId`. */
+  const clearBrowserRefusal = (key: string, taskId?: string) => {
+    setBrowserRefusals((prev) => {
+      const entry = prev[key];
+      if (!entry || (taskId !== undefined && entry.taskId !== taskId)) return prev;
+      const { [key]: _gone, ...rest } = prev;
+      return rest;
+    });
+  };
   // Live run activity — the T1→T2→T3 tree with each tier's model + current
   // subtask, built from tier:status events. Powers the click-to-expand drawer.
   const [activity, setActivity] = useState<ActivityNode[]>([]);
@@ -1487,23 +1502,26 @@ export function useChatSession(
         setCompactionNotice(`Folded ${e.foldedTurns ?? 'earlier'} turns into a summary to fit the context window.`);
       }
     };
-    const onBrowserBusy = (e: { conversationId?: string; limit?: number }) => {
-      // Adopt before filtering, for the reason onProviderExhausted gives: a
-      // first turn is exactly when the pane has not been told its id yet.
+    /** Record a refusal against the conversation and run it belongs to. */
+    const recordBrowserRefusal = (e: { conversationId?: string; taskId?: string }, text: string) => {
+      // Adopt first, for the reason onProviderExhausted gives: a first turn is
+      // exactly when the pane has not been told its id yet.
       adoptConversationId(e?.conversationId, (e as { runId?: unknown })?.runId);
-      if (e.conversationId && e.conversationId !== activeConversationId()) return;
+      const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
+      const taskId = typeof e?.taskId === 'string' && e.taskId ? e.taskId : undefined;
+      setBrowserRefusals((prev) => ({ ...prev, [key]: { ...(taskId ? { taskId } : {}), text } }));
+    };
+    const onBrowserBusy = (e: { conversationId?: string; taskId?: string; limit?: number }) => {
       const n = typeof e.limit === 'number' && e.limit > 0 ? e.limit : 1;
-      setBrowserRefusedNotice(
+      recordBrowserRefusal(e,
         `The browser is busy: ${n === 1 ? 'its one session is' : `all ${n} sessions are`} in use by another run, `
         + 'so this run could not open it. Try again when that run finishes.',
       );
     };
-    const onBrowserLimit = (e: { conversationId?: string; detail?: string }) => {
-      adoptConversationId(e?.conversationId, (e as { runId?: unknown })?.runId);
-      if (e.conversationId && e.conversationId !== activeConversationId()) return;
+    const onBrowserLimit = (e: { conversationId?: string; taskId?: string; detail?: string }) => {
       // The server's words, which are also what the model was told: the two
       // must not describe the same refusal differently.
-      if (typeof e.detail === 'string' && e.detail) setBrowserRefusedNotice(e.detail);
+      if (typeof e.detail === 'string' && e.detail) recordBrowserRefusal(e, e.detail);
     };
     const onProviderExhausted = (e: {
       conversationId?: string; provider?: string; kind?: string; message?: string; failedOverTo?: string;
@@ -1644,8 +1662,8 @@ export function useChatSession(
       // cannot safely create, replace or withdraw any browser in a conversation.
       if (!taskId) return;
       // The other run finished and a retry got the browser after all, so
-      // "could not open it" is no longer true of this run.
-      if (e?.active === true && key === (activeConversationId() ?? '')) setBrowserRefusedNotice(null);
+      // "could not open it" is no longer true of THIS run — and only this one.
+      if (e?.active === true) clearBrowserRefusal(key, taskId);
       setBrowserViews((prev) => {
         const views = prev[key] ?? [];
         if (e?.active !== true) {
@@ -2666,8 +2684,9 @@ export function useChatSession(
       // run boundary, so carrying it into the next run would keep telling the
       // user their spend is on a different account after it has moved back.
       setProviderNotice(null);
-      // Also "for this run": the next one may find the browser free.
-      setBrowserRefusedNotice(null);
+      // Also "for this run": the next one may find the browser free. This
+      // conversation's only; another chat's refusal is still true of its run.
+      clearBrowserRefusal(activeConversationId() ?? '');
       setActivity([]);
       streamingRef.current = '';
       // Id kept so the rejection path below can take this turn back out. It is

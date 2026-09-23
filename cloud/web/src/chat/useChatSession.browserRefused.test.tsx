@@ -84,6 +84,35 @@ describe('useChatSession — the browser was busy', () => {
     expect(view.result.current.browserRefusedNotice).toBeNull();
   });
 
+  it('stays with the conversation it happened in', () => {
+    // One slot carried conversation A's refusal into B when you switched.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    act(() => { view.result.current.setConversationId('conv-A'); });
+    act(() => { fake.fire('browser:busy', { conversationId: 'conv-A', taskId: 't1', limit: 1 }); });
+    expect(view.result.current.browserRefusedNotice).toBeTruthy();
+
+    act(() => { view.result.current.setConversationId('conv-B'); });
+    expect(view.result.current.browserRefusedNotice, 'not in the chat you moved to').toBeNull();
+
+    act(() => { view.result.current.setConversationId('conv-A'); });
+    expect(view.result.current.browserRefusedNotice, 'and still there when you come back').toBeTruthy();
+  });
+
+  it('is withdrawn only by the refused run getting the browser, not by a sibling run', () => {
+    // Two runs in one conversation: the other one opening a browser says
+    // nothing about the run that was refused.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    act(() => { fake.fire('browser:busy', { taskId: 't1', limit: 1 }); });
+
+    act(() => { fake.fire('browser:live-view', { taskId: 't2', active: true }); });
+    expect(view.result.current.browserRefusedNotice, 'still true of t1').toBeTruthy();
+
+    act(() => { fake.fire('browser:live-view', { taskId: 't1', active: true }); });
+    expect(view.result.current.browserRefusedNotice).toBeNull();
+  });
+
   it('clears when the next run starts, which may find the browser free', () => {
     const fake = fakeSocket();
     const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
@@ -122,6 +151,19 @@ describe('useChatSession — today\u2019s browser sessions were used up', () => 
     act(() => { fake.fire('browser:limit', { conversationId: 'some-other-conversation', taskId: 't9', detail }); });
 
     expect(view.result.current.browserRefusedNotice).toBeNull();
+  });
+
+  it('keeps another chat\u2019s refusal when this chat starts a run', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    act(() => { view.result.current.setConversationId('conv-A'); });
+    act(() => { fake.fire('browser:limit', { conversationId: 'conv-A', taskId: 't1', detail }); });
+
+    act(() => { view.result.current.setConversationId('conv-B'); });
+    act(() => { view.result.current.send({ prompt: 'something else' }); });
+    act(() => { view.result.current.setConversationId('conv-A'); });
+
+    expect(view.result.current.browserRefusedNotice, 'B\u2019s run says nothing about A\u2019s').toBe(detail);
   });
 
   it('clears when the next run starts', () => {

@@ -13,6 +13,15 @@ export function browserAllowanceFrom(usage: UsageInfo | null): BrowserAllowance 
   return { used: usage.browserSessions, limit: usage.browserSessionLimit };
 }
 
+/**
+ * How long until the allowance resets: the next midnight UTC, the boundary the
+ * server's `todayKey()` counts days by.
+ */
+export function msUntilNextUtcMidnight(now: number): number {
+  const d = new Date(now);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) - now;
+}
+
 const CHIP_TITLE = 'Give this run a real browser — for pages that are images, or need signing in. Off means Cascade cannot open one.';
 
 /**
@@ -48,6 +57,10 @@ export function useBrowserAllowance(
   setBrowserMode: (on: boolean) => void,
 ): BrowserAllowance | null {
   const [allowance, setAllowance] = useState<BrowserAllowance | null>(null);
+  // Bumped at each UTC reset. Runs are not the only thing that changes the
+  // allowance: the day does. An exhausted chip cannot START the run that
+  // would have re-read it, so without this it stayed off all the next day.
+  const [day, setDay] = useState(0);
 
   useEffect(() => {
     // Signed out, there is no allowance to read and the request would only 401.
@@ -57,7 +70,14 @@ export function useBrowserAllowance(
     // "unknown" would re-enable a chip the server will refuse.
     fetchUsage().then((u) => { if (live) setAllowance(browserAllowanceFrom(u)); }).catch(() => {});
     return () => { live = false; };
-  }, [enabled, refreshSignal]);
+  }, [enabled, refreshSignal, day]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    // A second past midnight, so the server's clock has also crossed it.
+    const timer = setTimeout(() => setDay((n) => n + 1), msUntilNextUtcMidnight(Date.now()) + 1000);
+    return () => clearTimeout(timer);
+  }, [enabled, day]);
 
   const { exhausted } = browserChip(allowance);
   useEffect(() => {
