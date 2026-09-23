@@ -66,6 +66,8 @@ export function useBrowserAllowance(
   // allowance: the day does. An exhausted chip cannot START the run that
   // would have re-read it, so without this it stayed off all the next day.
   const [day, setDay] = useState(0);
+  // Bumped to re-read while the chip is exhausted — see below.
+  const [recheck, setRecheck] = useState(0);
 
   useEffect(() => {
     // Signed out, there is no allowance to read and the request would only 401.
@@ -76,7 +78,7 @@ export function useBrowserAllowance(
     // only — see `read`.
     fetchUsage().then((u) => { if (live) setRead({ userId, allowance: browserAllowanceFrom(u) }); }).catch(() => {});
     return () => { live = false; };
-  }, [userId, refreshSignal, day]);
+  }, [userId, refreshSignal, day, recheck]);
 
   useEffect(() => {
     if (!userId) return;
@@ -89,6 +91,20 @@ export function useBrowserAllowance(
   useEffect(() => {
     if (exhausted && browserMode) setBrowserMode(false);
   }, [exhausted, browserMode, setBrowserMode]);
+
+  // An exhausted chip can change without a run or a new day: an upgrade to Pro
+  // raises the limit. Nothing else re-reads it — the chip cannot start the run
+  // that would — and Pro activates asynchronously after payment, so reading
+  // once when the upgrade closes could still see Free. So while exhausted, and
+  // only then, re-read every minute the tab is visible, and on coming back to it.
+  useEffect(() => {
+    if (!userId || !exhausted) return;
+    const visible = () => typeof document === 'undefined' || !document.hidden;
+    const timer = setInterval(() => { if (visible()) setRecheck((n) => n + 1); }, 60_000);
+    const onVisible = () => { if (visible()) setRecheck((n) => n + 1); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', onVisible); };
+  }, [userId, exhausted]);
 
   return allowance;
 }

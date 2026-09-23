@@ -145,6 +145,28 @@ describe('describeToolRecord — what the worker actually did', () => {
     expect(text).toContain('- t11 → ok');
   });
 
+  it('counts a browser action the tool refused as a failure, in the words the tool really uses', async () => {
+    // browser_control does not throw on a refused action: it returns
+    // "Failed: …". That is how the session cap actually reaches the record,
+    // and the summary counted it as a result.
+    const { BrowserControlTool } = await import('../../tools/browser-control.js');
+    const tool = new BrowserControlTool(async () => ({ ok: false, detail: REFUSAL }));
+    const refused = await tool.execute({ action: 'navigate', url: 'https://example.test' }, { sessionId: 'run-1', tierId: 'w1' } as never);
+    expect(refused.startsWith('Failed: '), 'the format this depends on').toBe(true);
+
+    const record = [
+      recordToolCall('browser_control', refused),
+      recordToolCall('web_fetch', 'Failed to fetch https://example.test: ECONNREFUSED'),
+      recordToolCall('grep', 'No matches found for: needle'),
+      ...Array.from({ length: 12 }, (_, i) => ({ name: `t${i}`, result: 'ok' })),
+    ];
+    expect(describeToolRecord(record).split('\n').slice(1, 4)).toEqual([
+      '- browser_control ×1 (1 an error or refusal)',
+      '- web_fetch ×1 (1 an error or refusal)',
+      '- grep ×1 (1 returned a result)',
+    ]);
+  });
+
   it('stays bounded however many calls there were', () => {
     const record = Array.from({ length: 500 }, (_, i) => ({ name: i % 2 ? 'web_fetch' : 'web_search', result: 'x'.repeat(1000) }));
     expect(describeToolRecord(record).length).toBeLessThan(12 * 200 + 300);

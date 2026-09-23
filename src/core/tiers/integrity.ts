@@ -63,9 +63,24 @@ export function recordToolCall(name: string, result: string): ToolRecordEntry {
   return { name, result: clip(result) };
 }
 
-/** A result the tool itself reported as a failure or refusal (see T3Worker.executeTool). */
+/**
+ * A result the tool itself reported as a failure or refusal.
+ *
+ * Several conventions, because tools report failure in their own words rather
+ * than by throwing: T3Worker.executeTool's `Tool error:` and denials, `Error:`
+ * from most tools — and `browser_control`'s `Failed: …`, which is how a refused
+ * browser action (the session cap among them) actually comes back. Missing
+ * that one counted the reported run's refusal as a result. An empty but real
+ * result ("No matches found for: …") is not a failure: the action happened.
+ */
+const FAILURE_RESULT = new RegExp([
+  '^Tool error:', '^Error:', '^Tool \\S+ was denied', '^Tool not found:',
+  '^Failed\\b', '^[A-Z][\\w ]* failed:', '^Unknown (browser )?action:',
+  '^Permission denied:', '^Not found:', '^Invalid ',
+].join('|'));
+
 function reportsFailure(result: string): boolean {
-  return /^(Tool error:|Error:|Tool \S+ was denied)/i.test(result);
+  return FAILURE_RESULT.test(result);
 }
 
 /**

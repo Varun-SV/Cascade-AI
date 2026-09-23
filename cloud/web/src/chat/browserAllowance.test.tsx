@@ -168,3 +168,45 @@ describe('useBrowserAllowance and who is signed in', () => {
     expect(view.result.current).toBeNull();
   });
 });
+
+describe('useBrowserAllowance after an upgrade', () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('notices a raised limit while the chip is exhausted, without a run or a new day', async () => {
+    // Free user, 5 of 5 used, upgrades to Pro. The upgrade dialog refreshed
+    // only its own copy, and an exhausted chip cannot start the run that
+    // would re-read this one — it stayed off until reload or midnight.
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    vi.setSystemTime(new Date('2026-09-23T10:00:00Z'));
+    mockedFetchUsage.mockResolvedValue(usage(5));
+    const view = renderHook(() => useBrowserAllowance('user-1', 'idle', false, vi.fn()));
+    await act(async () => { await Promise.resolve(); });
+    expect(view.result.current).toEqual({ used: 5, limit: 5 });
+
+    mockedFetchUsage.mockResolvedValue(usage(5, 50));
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+
+    expect(view.result.current).toEqual({ used: 5, limit: 50 });
+    expect(browserChip(view.result.current).exhausted, 'the chip is back').toBe(false);
+  });
+
+  it('re-reads on coming back to the tab while exhausted', async () => {
+    mockedFetchUsage.mockResolvedValue(usage(5));
+    const view = renderHook(() => useBrowserAllowance('user-1', 'idle', false, vi.fn()));
+    await waitFor(() => expect(view.result.current).toEqual({ used: 5, limit: 5 }));
+
+    mockedFetchUsage.mockResolvedValue(usage(5, 50));
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+
+    await waitFor(() => expect(view.result.current).toEqual({ used: 5, limit: 50 }));
+  });
+
+  it('does not poll while sessions remain', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    vi.setSystemTime(new Date('2026-09-23T10:00:00Z'));
+    mockedFetchUsage.mockResolvedValue(usage(2));
+    renderHook(() => useBrowserAllowance('user-1', 'idle', false, vi.fn()));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5 * 60_000); });
+    expect(mockedFetchUsage).toHaveBeenCalledTimes(1);
+  });
+});
