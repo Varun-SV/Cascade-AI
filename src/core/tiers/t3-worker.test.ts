@@ -12,6 +12,7 @@ import type { ToolRegistry } from '../../tools/registry.js';
 import { PeerBus } from '../peer/bus.js';
 import { PermissionEscalator } from '../permissions/escalator.js';
 import { T3Worker, buildWorkerRules, canProduceFiles, canProduceNonDiskDeliverables, hasFileWritingTool, missingVisualEvidence, shouldRequireArtifact } from './t3-worker.js';
+import { ACTING_INTEGRITY_RULE } from './integrity.js';
 
 function makeResult(
   content: string,
@@ -263,6 +264,7 @@ Rules:
 - No image-generation model is available on this run, so there is NO tool that can draw a picture. Do not emit a Markdown image reference, a bracketed placeholder such as [image: a cat], or any claim that an illustration is included. If the request needs a data visualization use a \`\`\`chart: block, which needs no image model; otherwise describe the visual in words and say plainly that no image could be generated.
 - Use the "run_code" tool for data processing, archives, and file formats not covered by a dedicated tool. Do NOT use it to build a PDF — "pdf_create" does that. Always cleanup after code execution.
 - If you are not making meaningful progress, stop and escalate rather than looping or padding the response.
+${ACTING_INTEGRITY_RULE}
 - Use the "peer_message" tool to communicate with other T3 workers if your tasks have dependencies or shared state. You can send updates or wait for signals.
 - Only use tools directly relevant to THIS subtask. Do not reach for an unrelated connected-service action (e.g. creating, deleting, or modifying a repository, issue, or PR; sending a message) unless the subtask explicitly calls for it.
 - Return structured output that directly addresses the expected output specification.`);

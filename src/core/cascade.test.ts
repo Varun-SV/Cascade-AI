@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Cascade, buildContextualPrompt } from './cascade.js';
 import type { CascadeConfig, ConversationMessage } from '../types.js';
+import { ACTING_INTEGRITY_RULE } from './tiers/integrity.js';
 
 const baseConfig: CascadeConfig = {
   version: '1.0',
@@ -571,6 +572,19 @@ describe('Fast answer (direct single-model path)', () => {
     expect(result.t2Results).toEqual([]);
     expect(tokens.join('')).toBe('Fast reply.');
     expect((cascade as any).decisionLog?.some((d: { detail: string }) => /Fast answer/.test(d.detail))).toBe(true);
+  });
+
+  it('forbids passing off an action it cannot take as one it took', async () => {
+    // "You have no tools … do not claim to" was already here, and a model
+    // still "simulated" the browse it could not do and presented the result.
+    const cascade = new Cascade(baseConfig, process.cwd());
+    let systemPrompt = '';
+    const generate = vi.fn(async (_t: string, opts: any) => { systemPrompt = opts.systemPrompt; return { content: 'ok', usage: {}, finishReason: 'stop' }; });
+    (cascade as any).router = mockRouter(generate);
+
+    await (cascade as any).runFastAnswer({ prompt: 'open the site and ask its chatbot' }, Date.now(), 'task-fast-honest');
+
+    expect(systemPrompt).toContain(ACTING_INTEGRITY_RULE);
   });
 
   it('passes recent conversation history into the single call', async () => {

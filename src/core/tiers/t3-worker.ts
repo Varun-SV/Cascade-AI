@@ -36,6 +36,7 @@ import { classifyProviderError } from '../router/provider-errors.js';
 import {
   evaluateAcceptance, failures, undecided, type AcceptanceResult,
 } from '../verification/acceptance.js';
+import { ACTING_INTEGRITY_RULE, describeToolRecord, type ToolRecordEntry } from './integrity.js';
 
 /**
  * Thrown by executeTool() when the underlying tool error indicates a condition
@@ -168,6 +169,9 @@ export function buildWorkerRules(has: (toolName: string) => boolean): string {
         has('generate_document') ? 'Do NOT use it to build a .docx, .pptx or .xlsx — "generate_document" already produces those correctly. ' : ''
       }${has('pdf_create') ? 'Do NOT use it to build a PDF — "pdf_create" does that. ' : ''}Always cleanup after code execution.`,
     '- If you are not making meaningful progress, stop and escalate rather than looping or padding the response.',
+    // Every capability, not only the ones with a rule of their own — see
+    // integrity.ts for the run that had none.
+    ACTING_INTEGRITY_RULE,
     has('peer_message') &&
       '- Use the "peer_message" tool to communicate with other T3 workers if your tasks have dependencies or shared state. You can send updates or wait for signals.',
     hasAnyTool &&
@@ -360,6 +364,12 @@ export class T3Worker extends BaseTier {
   private reinforcementDepth = 0;
   /** Sibling-worker requests this worker made via request_workers (T3→T2). */
   private pendingReinforcements: T2ToT3Assignment[] = [];
+  /**
+   * Every tool this subtask called and what it returned, across the first pass
+   * AND every correction round — the self-test grades the output against it.
+   * See describeToolRecord.
+   */
+  private toolRecord: ToolRecordEntry[] = [];
   /** @deprecated — kept only as fallback when no escalator is attached */
   private sessionApprovals: Map<string, boolean> = new Map();
   private peerBus?: PeerBus;
@@ -417,6 +427,7 @@ export class T3Worker extends BaseTier {
     this.signal = signal;
     this.assignment = assignment;
     this.taskId = taskId;
+    this.toolRecord = [];
     this.setLabel(assignment.subtaskTitle);
     this.setStatus('ACTIVE');
 
@@ -952,6 +963,7 @@ export class T3Worker extends BaseTier {
       for (const tc of effectiveResult.toolCalls) {
         allToolCalls.push(tc);
         const toolResult = await this.executeTool(tc);
+        this.toolRecord.push({ name: tc.name, result: toolResult });
         // Bound what enters the context: the WHOLE history is re-sent on every
         // remaining iteration, so an unbounded tool result (big file read,
         // chatty command) multiplies into a token bomb across the loop.
@@ -1509,13 +1521,16 @@ Is this output sufficient and correct? Respond with ONLY a JSON object:
             role: 'user',
             content: `Improve the following so it fully achieves the goal. Address specifically: ${parsed.notes ?? 'gaps vs the goal'}.
 Output ONLY the improved result — no preamble, no commentary.
+You have no tools in this step: improve only what the current output already supports. Where the gap is work that was never done, say so rather than supplying it.
 
 Goal / expected: ${assignment.expectedOutput}
 
 Current output:
 ${current}`,
           }],
-          systemPrompt: this.systemPromptOverride + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
+          // A tool-less rewrite told to "fully achieve the goal" can only close a
+          // gap in real work by making it up.
+          systemPrompt: this.systemPromptOverride + ACTING_INTEGRITY_RULE + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
           maxTokens: 4096,
           featureTag: assignment.sectionTitle,
           ...(this.signal ? { signal: this.signal } : {}),
@@ -1586,6 +1601,11 @@ ${acceptance.map((a) => `- ${a}`).join('\n')}
 ` : ''}
 Output to test:
 ${output}
+
+Tool calls actually made while producing it (tool → what it returned):
+${describeToolRecord(this.toolRecord)}
+
+"correctness" MUST be "fail" if the output presents simulated, hypothetical or invented results as real, or claims an action — visiting a site, logging in, running code, fetching a page, writing a file, sending something — that the tool calls above did not perform or that returned an error. An output that plainly says it could not do something is honest: judge that on completeness, not correctness.
 
 Reply with JSON: { "completeness": "pass"|"fail", "correctness": "pass"|"fail", "compliance": "pass"|"fail", "notes": "string" }`;
 
@@ -1674,12 +1694,16 @@ ${output.slice(0, 4000)}`;
 Original output:
 ${originalOutput}
 
-Correct the issues and provide an improved version that addresses all failures.`;
+Correct the issues and provide an improved version that addresses all failures. If an issue cannot be fixed because a tool is missing, returns an error or is refused, say so plainly instead — never invent the missing result.`;
 
     await this.context.addMessage({ role: 'user', content: correctionPrompt });
 
     const result = await this.runAgentLoop(
-      "You are in a correction phase. Fix the identified issues using your tools." + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
+      // This REPLACES the worker's system prompt for the round, so the rule
+      // has to travel with it — and a round that exists to make a failed check
+      // pass is where covering a gap is most tempting.
+      `You are in a correction phase. Fix the identified issues using your tools.\n\n${ACTING_INTEGRITY_RULE}`
+        + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
       this.tools
     );
     return result.output;

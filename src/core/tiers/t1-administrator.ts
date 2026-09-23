@@ -33,6 +33,7 @@ import { parseFirstJsonObject } from '../../utils/json-extract.js';
 import { describeGenerationForPlanner } from '../multimodal/registry.js';
 import { canProduceFiles, canProduceNonDiskDeliverables, hasFileWritingTool } from './t3-worker.js';
 import { planSpecShape, quotedFieldRules } from './plan-spec.js';
+import { REPORTING_INTEGRITY_RULE } from './integrity.js';
 
 /** Case-insensitive shared keywords between two keyword lists. */
 export function sharedKeywords(a: string[] = [], b: string[] = []): string[] {
@@ -1135,7 +1136,9 @@ Instructions:
     const messages: ConversationMessage[] = [{ role: 'user', content: compilePrompt }];
     const result = await this.generateTracked('T1', {
       messages,
-      systemPrompt: this.systemPromptOverride + 'You are a final output compiler. Summarize and format the task results clearly.',
+      // Streams as the answer on a Complex run — the last place a failed
+      // section can be quietly rewritten as a finished one.
+      systemPrompt: this.systemPromptOverride + 'You are a final output compiler. Summarize and format the task results clearly.\n' + REPORTING_INTEGRITY_RULE,
       maxTokens: 8000
     }, (chunk) => {
       this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: this.isPresenter });

@@ -29,6 +29,7 @@ import { RunBreaker } from '../run-breaker.js';
 import type { EscalationDecision, TaskType } from '../../types.js';
 import { RedactionLayer } from '../audit/redaction.js';
 import { sectionNeedsDecision, settledEscalationStatus, summaryLeadsRootAnswer } from './escalation-policy.js';
+import { REPORTING_INTEGRITY_RULE } from './integrity.js';
 import { describeGenerationForPlanner } from '../multimodal/registry.js';
 import { compileSubtaskGraph } from '../orchestration/adapters.js';
 import { planSpecShape, typedFieldRules } from './plan-spec.js';
@@ -1113,7 +1114,9 @@ Return ONLY the JSON array.`;
           : undefined;
         const result = await this.generateTracked('T2', {
           messages,
-          systemPrompt: this.systemPromptOverride + 'You are a T2 Manager. Summarize the work of your T3 workers succinctly.' + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
+          // On a Moderate run this summary IS the answer (it streams as one), so
+          // a failure smoothed over here reaches the user as a success.
+          systemPrompt: this.systemPromptOverride + 'You are a T2 Manager. Summarize the work of your T3 workers succinctly.\n' + REPORTING_INTEGRITY_RULE + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
           maxTokens: 500,
           ...(this.sectionModel
           ? { model: this.sectionModel, selectionTaskType: this.sectionTaskType }

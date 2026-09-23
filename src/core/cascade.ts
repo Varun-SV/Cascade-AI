@@ -24,6 +24,7 @@ import { T1Administrator, type PlanApprovalDecision, type TaskPlan } from './tie
 import { calculateCost } from '../utils/cost.js';
 import { T2Manager } from './tiers/t2-manager.js';
 import { composeRootSectionOutput, summaryLeadsRootAnswer } from './tiers/escalation-policy.js';
+import { ACTING_INTEGRITY_RULE } from './tiers/integrity.js';
 import { MultimodalRegistry } from './multimodal/registry.js';
 import type { FeedbackSource } from './router/feedback-prior.js';
 import { DeadModelStore, fileDeadModelPersistence } from './router/dead-models.js';
@@ -2675,7 +2676,10 @@ ${prompt}`
     const systemPrompt =
       identityPrompt +
       'You are Cascade in fast mode. Answer the user directly, accurately and concisely. ' +
-      'You have no tools and cannot run code, browse, or create files — do not claim to.';
+      'You have no tools and cannot run code, browse, or create files — do not claim to.\n' +
+      // "Do not claim to" did not stop a model from "simulating" the browse it
+      // could not do and presenting the result. The shared rule names that.
+      ACTING_INTEGRITY_RULE;
 
     let streamed = '';
     // With an image, let the router pick a vision-capable model instead of pinning.
