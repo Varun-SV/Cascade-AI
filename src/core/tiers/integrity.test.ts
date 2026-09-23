@@ -124,25 +124,54 @@ describe('describeToolRecord — what the worker actually did', () => {
     expect(text.length).toBeLessThan(200);
   });
 
-  it('accounts for every call: the latest in full, the earlier ones by tool and outcome', () => {
+  it('accounts for every call: the latest in full, the ones before with what each was asked and how it went', () => {
     // A bare "(3 earlier calls not shown)" left the grader told to fail an
     // action no LISTED call performed, while the call that performed it was
     // one of the three. A correct output citing call 1 of 15 read as invented.
     const record = [
-      { name: 'browser_control', result: 'navigated to https://example.test' },
+      recordToolCall('browser_control', 'navigated to https://example.test', { action: 'navigate', url: 'https://example.test' }),
       { name: 'browser_control', result: `Tool error: ${REFUSAL}` },
       { name: 'web_fetch', result: 'OK' },
       ...Array.from({ length: 12 }, (_, i) => ({ name: `t${i}`, result: 'ok' })),
     ];
     const text = describeToolRecord(record);
-    expect(text.split('\n').slice(0, 4)).toEqual([
-      'Earlier calls, by tool (3):',
-      '- browser_control ×2 (1 returned a result, 1 an error or refusal)',
-      '- web_fetch ×1 (1 returned a result)',
+    expect(text.split('\n').slice(0, 5)).toEqual([
+      'Earlier calls (3):',
+      '- browser_control(action=navigate, url=https://example.test) → returned a result',
+      '- browser_control → an error or refusal',
+      '- web_fetch → returned a result',
       'Most recent 12:',
     ]);
     expect(text).toContain('- t0 → ok');
     expect(text).toContain('- t11 → ok');
+  });
+
+  it('keeps which site an early navigation went to — a tally by tool could not say', () => {
+    // "browser_control ×1 (1 returned a result)" was all the grader saw of
+    // call 1 of 13, so an output naming the site it visited could not be
+    // checked against anything.
+    const record = [
+      recordToolCall('browser_control', 'navigated', { action: 'navigate', url: 'https://first.test' }),
+      ...Array.from({ length: 12 }, (_, i) => ({ name: `t${i}`, result: 'ok' })),
+    ];
+    expect(describeToolRecord(record)).toContain('- browser_control(action=navigate, url=https://first.test) → returned a result');
+  });
+
+  it('tallies by tool only the calls older than those, so the record stays bounded', () => {
+    const record = [
+      { name: 'web_search', result: 'ok' },
+      { name: 'web_search', result: 'Error: rate limited' },
+      ...Array.from({ length: 48 }, (_, i) => ({ name: `o${i}`, result: 'ok' })),
+      ...Array.from({ length: 12 }, (_, i) => ({ name: `t${i}`, result: 'ok' })),
+    ];
+    const lines = describeToolRecord(record).split('\n');
+    expect(lines.slice(0, 3)).toEqual([
+      'Earliest calls, by tool (2):',
+      '- web_search ×2 (1 returned a result, 1 an error or refusal)',
+      'Earlier calls (48):',
+    ]);
+    expect(lines).toContain('- o0 → returned a result');
+    expect(lines).toContain('Most recent 12:');
   });
 
   it('counts a browser action the tool refused as a failure, in the words the tool really uses', async () => {
@@ -161,15 +190,18 @@ describe('describeToolRecord — what the worker actually did', () => {
       ...Array.from({ length: 12 }, (_, i) => ({ name: `t${i}`, result: 'ok' })),
     ];
     expect(describeToolRecord(record).split('\n').slice(1, 4)).toEqual([
-      '- browser_control ×1 (1 an error or refusal)',
-      '- web_fetch ×1 (1 an error or refusal)',
-      '- grep ×1 (1 returned a result)',
+      '- browser_control → an error or refusal',
+      '- web_fetch → an error or refusal',
+      '- grep → returned a result',
     ]);
   });
 
   it('stays bounded however many calls there were', () => {
-    const record = Array.from({ length: 500 }, (_, i) => ({ name: i % 2 ? 'web_fetch' : 'web_search', result: 'x'.repeat(1000) }));
-    expect(describeToolRecord(record).length).toBeLessThan(12 * 200 + 300);
+    const record = Array.from({ length: 500 }, (_, i) => recordToolCall(
+      i % 2 ? 'web_fetch' : 'web_search', 'x'.repeat(1000), { url: `https://x.test/${'y'.repeat(1000)}`, query: 'z'.repeat(1000) },
+    ));
+    // Twelve in full, 48 outlined, two tallied tools.
+    expect(describeToolRecord(record).length).toBeLessThan(12 * 360 + 48 * 200 + 300);
   });
 
   it('keeps only the start of a result when the call is recorded, not the whole of it', () => {
@@ -195,6 +227,27 @@ describe('describeToolRecord — what the worker actually did', () => {
     expect(describeArgs({ action: 'fill', selector: 'input[type=password]', value: 'hunter2' }))
       .toBe('action=fill, selector=input[type=password], value=[redacted]');
     expect(describeArgs({ action: 'fill', selector: '#password', value: 'hunter2' })).not.toContain('hunter2');
+  });
+
+  it('takes credentials out of what a tool returned — the grader may be another provider', () => {
+    // file_read of a .env, or a shell command that echoes a token: the worker
+    // saw it, but the self-test can run on a model that never did.
+    const key = 'sk-proj-4f9a2b7c1d8e3f6a0b5c9d2e7f1a4b8c';
+    const entry = recordToolCall('file_read', `OPENAI_API_KEY=${key}\nGITHUB_TOKEN=ghp_0123456789abcdefghijABCDEFGHIJ`);
+    expect(entry.result).not.toContain(key);
+    expect(entry.result).not.toContain('ghp_0123456789');
+    expect(entry.result).toContain('OPENAI_API_KEY=[REDACTED_SECRET]');
+  });
+
+  it('takes credentials out of an argument whose name does not give them away', () => {
+    const args = describeArgs({ command: "curl -H 'Authorization: Bearer abcdefghijklmnop1234' https://api.test" });
+    expect(args).not.toContain('abcdefghijklmnop1234');
+    expect(args).toContain('Bearer [REDACTED_SECRET]');
+  });
+
+  it('keeps what a claim can be checked against: addresses and numbers are not credentials', () => {
+    const entry = recordToolCall('web_fetch', 'Contact admin@example.com, server 10.0.0.7, call 555-123-4567');
+    expect(entry.result).toBe('Contact admin@example.com, server 10.0.0.7, call 555-123-4567');
   });
 
   it('keeps the argument summary bounded', () => {
@@ -320,6 +373,32 @@ describe('the rule reaches every prompt that can answer the user', () => {
       expect(correction?.content, 'once the tool keeps failing, not at its first error').toContain('keeps failing or refusing');
     });
 
+    it('grades the rewrite against the tool record, and keeps the verified output when it fails', async () => {
+      // The rewrite ran after the self-test and went straight to COMPLETED:
+      // filling the critic's gap with results it never obtained was checked
+      // by nothing.
+      const { router, calls } = fabricatingRouter({
+        reflection: true,
+        selfTest: (prompt) => prompt.includes('Output to test:\nImproved output')
+          ? '{"completeness":"pass","correctness":"fail","compliance":"pass","notes":"answers no tool obtained"}'
+          : PASS,
+      });
+      const result = await new T3Worker(router, browserRegistry(), 't2-1').execute(assignment(), 'task-reflect-graded');
+
+      const graded = calls.filter((c) => c.content.startsWith('Self-test this output'));
+      expect(graded.map((c) => c.content.includes('Output to test:\nImproved output'))).toEqual([false, true]);
+      expect(graded[1]?.content).toContain(`→ Tool error: ${REFUSAL}`);
+      expect(result.status).toBe('COMPLETED');
+      expect(result.output, 'the output that passed').not.toBe('Improved output');
+      expect(result.issues.join(' ')).toContain('Reflection\'s revision failed the self-test (correctness)');
+    });
+
+    it('uses the rewrite when it passes the same test', async () => {
+      const { router } = fabricatingRouter({ reflection: true });
+      const result = await new T3Worker(router, browserRegistry(), 't2-1').execute(assignment(), 'task-reflect-passed');
+      expect(result.output).toBe('Improved output');
+    });
+
     it('carries it into the tool-less rewrite, which can only close a gap in real work by inventing it', async () => {
       const { router, calls } = fabricatingRouter({ reflection: true });
       await new T3Worker(router, browserRegistry(), 't2-1').execute(assignment(), 'task-reflect');
@@ -343,6 +422,34 @@ describe('the rule reaches every prompt that can answer the user', () => {
     const summary = calls.find((c) => c.content.startsWith('Summarize these T3 worker outputs'));
     expect(summary, 'the section was summarised').toBeDefined();
     expect(summary?.systemPrompt).toContain(REPORTING_INTEGRITY_RULE);
+  });
+
+  it('T2 — is shown the workers that did not finish, so a partial section cannot read as complete', async () => {
+    // Failed workers were filtered out before the prompt was built: one of
+    // two workers failing left a summary of the other alone, and the section
+    // — PARTIAL, whose output adds no note of its own — looked finished.
+    const { router, calls } = recordingRouter('summary');
+    const t2 = new T2Manager(router, noTools(), 't1-root');
+    const worker = (subtaskId: string, status: T2Result['t3Results'][number]['status'], output: string, issues: string[]) => ({
+      subtaskId, status, output, issues, testResults: { checksRun: [], passed: [], failed: [] }, peerSyncsUsed: [], correctionAttempts: 0,
+    });
+    const aggregate = (results: T2Result['t3Results'], fail = false) => {
+      if (fail) (router.generate as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('provider down'));
+      return (t2 as unknown as { aggregateResults: (a: unknown, r: T2Result['t3Results'], o: object) => Promise<string> })
+        .aggregateResults({ sectionTitle: 'Probe' }, results, {});
+    };
+    const results = [
+      worker('ask-site', 'COMPLETED', 'The site answered "Yes".', []),
+      worker('ask-follow-up', 'FAILED', '', [`Tool error: ${REFUSAL}`]),
+    ];
+
+    await aggregate(results);
+    const summary = calls.find((c) => c.content.startsWith('Summarize these T3 worker outputs'));
+    expect(summary?.content).toContain('NOT COMPLETED');
+    expect(summary?.content).toContain(`[ask-follow-up — FAILED]: Tool error: ${REFUSAL}`);
+
+    // And when the summary call itself fails, the raw fallback keeps it too.
+    expect(await aggregate(results, true)).toContain(`[ask-follow-up — FAILED]: Tool error: ${REFUSAL}`);
   });
 
   it('T1 — the final compile, which on a Complex run is the answer', async () => {

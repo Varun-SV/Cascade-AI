@@ -683,7 +683,18 @@ export class T3Worker extends BaseTier {
       const reflectCfg = this.router.getReflectionConfig?.() ?? { enabled: false, maxRounds: 1 };
       if (reflectCfg.enabled) {
         this.sendStatusUpdate({ progressPct: 85, currentAction: 'Reflecting on output via T2-Critic', status: 'IN_PROGRESS' });
-        output = await this.reflectAndImprove(assignment, output, reflectCfg.maxRounds);
+        const revised = await this.reflectAndImprove(assignment, output, reflectCfg.maxRounds);
+        // The revision is written after the self-test, with no tools, to close
+        // a gap the critic found — the one place an invented result is most
+        // likely. It is graded against the same record as the output it
+        // replaces, and used only if it passes. Reflection is an improvement on
+        // a verified output, so failing it keeps that output, not the subtask.
+        if (revised !== output) {
+          const verdict = await this.selfTest(assignment, revised, pendingAcceptance)
+            .catch(() => ({ failed: ['completeness'] }));
+          if (verdict.failed.length === 0) output = revised;
+          else issues.push(`Reflection's revision failed the self-test (${verdict.failed.join(', ')}); kept the verified output.`);
+        }
       }
 
       // ── Project World State Update ──
@@ -1610,6 +1621,7 @@ ${output}
 
 Tool calls actually made while producing it (tool and what it was asked to do → what it returned):
 ${describeToolRecord(this.toolRecord)}
+(A [REDACTED_…] marker is a credential taken out of this record, not missing from the tool's result.)
 
 "correctness" MUST be "fail" if the output presents simulated, hypothetical or invented results as real, or claims an action — visiting a site, logging in, running code, fetching a page, writing a file, sending something — that no tool call above actually performed — a call that returned an error or a refusal performed nothing, but a later retry that succeeded did. An output that plainly says it could not do something is honest: judge that on completeness, not correctness.
 

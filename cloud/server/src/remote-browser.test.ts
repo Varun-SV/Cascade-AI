@@ -350,6 +350,7 @@ describe('a run refused the browser because every session is taken', () => {
   function refusedRun() {
     const onBusy = vi.spyOn(RemoteBrowserController.prototype, 'onBusyFor');
     const offBusy = vi.spyOn(RemoteBrowserController.prototype, 'offBusyFor');
+    const onLiveView = vi.spyOn(RemoteBrowserController.prototype, 'onLiveViewFor');
     const { cascade, config } = realCascade(cdp.tools.remoteBrowser);
     const handlers = new Map<string, (e: unknown) => void>();
     (cascade as unknown as { on: (ev: string, fn: (e: unknown) => void) => void }).on =
@@ -357,7 +358,13 @@ describe('a run refused the browser because every session is taken', () => {
     const attached = attachRemoteBrowser({ cascade, config, conversationId: 'c1', emit });
     handlers.get('run:started')?.({ taskId: 't1' });
     const registered = onBusy.mock.calls.find(([id]) => id === 't1');
-    return { attached: attached!, busy: registered?.[1], offBusy, restore: () => { onBusy.mockRestore(); offBusy.mockRestore(); } };
+    return {
+      attached: attached!,
+      busy: registered?.[1],
+      liveView: onLiveView.mock.calls.find(([id]) => id === 't1')?.[1],
+      offBusy,
+      restore: () => { onBusy.mockRestore(); offBusy.mockRestore(); onLiveView.mockRestore(); },
+    };
   }
 
   it('tells the run\u2019s own socket, naming the run and the limit it hit', () => {
@@ -385,6 +392,30 @@ describe('a run refused the browser because every session is taken', () => {
     } finally { restore(); }
   });
 
+  it('says it again when the run is refused after its browser opened', () => {
+    // The client and the replay drop the notice once the browser opens. A run
+    // that then loses its page and is refused again got nothing: the flag was
+    // held for the whole run.
+    const { busy, liveView, restore } = refusedRun();
+    try {
+      void busy!({ limit: 1 });
+      liveView!({ active: true, liveViewUrl: 'https://viewer.test/s1' });
+      void busy!({ limit: 1 });
+      void busy!({ limit: 1 });
+      expect(emits.filter((e) => e.event === 'browser:busy')).toHaveLength(2);
+    } finally { restore(); }
+  });
+
+  it('does not count a withdrawn browser as an opened one', () => {
+    const { busy, liveView, restore } = refusedRun();
+    try {
+      void busy!({ limit: 1 });
+      liveView!({ active: false });
+      void busy!({ limit: 1 });
+      expect(emits.filter((e) => e.event === 'browser:busy')).toHaveLength(1);
+    } finally { restore(); }
+  });
+
   it('stops listening when the run ends', async () => {
     // The listener closes over this run's socket; the controller outlives it.
     // Detached by the controller's own run cleanup (forgetRun), which the
@@ -403,6 +434,7 @@ describe('the run owner\u2019s allowance of new sessions', () => {
   /** Attach a run with this allowance and announce it, capturing what the bridge registered. */
   function attachedWith(allowance?: { take: () => string | undefined; giveBack: () => void }) {
     const set = vi.spyOn(RemoteBrowserController.prototype, 'setAllowanceFor');
+    const onLiveView = vi.spyOn(RemoteBrowserController.prototype, 'onLiveViewFor');
     const { cascade, config } = realCascade(cdp.tools.remoteBrowser);
     const handlers = new Map<string, (e: unknown) => void>();
     (cascade as unknown as { on: (ev: string, fn: (e: unknown) => void) => void }).on =
@@ -411,8 +443,9 @@ describe('the run owner\u2019s allowance of new sessions', () => {
     handlers.get('run:started')?.({ taskId: 't1' });
     return {
       registered: set.mock.calls.find(([id]) => id === 't1')?.[1],
+      liveView: onLiveView.mock.calls.find(([id]) => id === 't1')?.[1],
       count: set.mock.calls.length,
-      restore: () => set.mockRestore(),
+      restore: () => { set.mockRestore(); onLiveView.mockRestore(); },
     };
   }
 
@@ -431,6 +464,18 @@ describe('the run owner\u2019s allowance of new sessions', () => {
       expect(emits.filter((e) => e.event === 'browser:limit')).toEqual([
         { event: 'browser:limit', payload: { conversationId: 'c1', taskId: 't1', detail: 'used up for today' } },
       ]);
+    } finally { restore(); }
+  });
+
+  it('tells the person again when a run is refused after its browser opened', () => {
+    // An open session is not counted twice, but a run that loses its page
+    // needs a new one — and if that is refused, it is news again.
+    const { registered, liveView, restore } = attachedWith({ take: () => 'used up for today', giveBack: () => {} });
+    try {
+      registered!.take();
+      liveView!({ active: true, liveViewUrl: 'https://viewer.test/s1' });
+      registered!.take(); registered!.take();
+      expect(emits.filter((e) => e.event === 'browser:limit')).toHaveLength(2);
     } finally { restore(); }
   });
 

@@ -37,7 +37,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answer now forbids that, including the correction and rewrite steps that
   used to run without the worker's rules. The worker's self-check now sees
   what each tool actually returned, so an output claiming a visit that the
-  browser refused fails the check.
+  browser refused fails the check. A revision made after that check has to
+  pass it too, and a section summary is told which of its workers did not
+  finish, so a half-done section no longer reads as complete.
+- **Secret redaction catches more, and no longer leaks part of what it
+  matches.** A rule without a capture group replaced only one substring of
+  its match, so an IP address could pass through with a single digit
+  removed. It now also catches `sk-…`, GitHub, Slack, Google and Stripe
+  tokens, bearer and Basic credentials, private keys, and values labelled
+  by names like `ANTHROPIC_API_KEY`. The tool record the self-check grades
+  against has its credentials removed before it reaches the grader, which
+  can run on a different provider.
 - **With the Browser chip on, a website errand is planned around the
   browser.** No tier above the worker was told the browser existed, so "go
   to this site, ask it something, bring back the answer" was routed as a

@@ -17,6 +17,8 @@
 //  to do the thing and cover the gap. A tier that REPORTS on other tiers' work
 //  can turn their failure into a success while summarising it.
 
+import { RedactionLayer } from '../audit/redaction.js';
+
 // "Stop" is for when there is no way forward, not the first error. A tool
 // error can be the way forward: argument validation tells the model to "supply
 // them and call the tool again", and a busy browser says to try again. A rule
@@ -45,7 +47,14 @@ export interface ToolRecordEntry {
 }
 
 const MAX_RECORD_ENTRIES = 12;
+/** Calls before those that keep what they were asked, with the outcome only. */
+const MAX_OUTLINE_ENTRIES = 48;
 const MAX_RESULT_CHARS = 160;
+/**
+ * How much of a result is redacted before it is clipped. Enough that the
+ * clipped part lies well inside it, without scanning a whole large file.
+ */
+const MAX_SCAN_CHARS = 4096;
 
 function clip(result: string): string {
   const flat = result.replace(/\s+/g, ' ').trim();
@@ -60,10 +69,15 @@ function clip(result: string): string {
  * context already gets a bounded copy, but the record held every result whole
  * for the life of the worker — a few `file_read`s of large files is hundreds
  * of megabytes kept to show the grader 160 characters of each.
+ *
+ * And with its secrets taken out, arguments included. The record goes to the
+ * self-test grader, which can be a different model on a different provider
+ * from the worker that read the file or ran the command — one that never had
+ * the credential it printed.
  */
 export function recordToolCall(name: string, result: string, input?: Record<string, unknown>): ToolRecordEntry {
   const args = describeArgs(input);
-  return { name, result: clip(result), ...(args ? { args } : {}) };
+  return { name, result: clip(RedactionLayer.redactSecrets(result.slice(0, MAX_SCAN_CHARS))), ...(args ? { args } : {}) };
 }
 
 const MAX_ARG_CHARS = 60;
@@ -94,7 +108,8 @@ export function describeArgs(input: Record<string, unknown> | undefined): string
   const parts = entries.map(([k, v]) => {
     if (SECRETIVE.test(k) || (intoSecret && TYPED_VALUE.test(k))) return `${k}=[redacted]`;
     const raw = typeof v === 'string' ? v : (JSON.stringify(v) ?? String(v));
-    const flat = raw.replace(/\s+/g, ' ').trim();
+    // A command or a URL can carry a credential under an innocent key.
+    const flat = RedactionLayer.redactSecrets(raw.slice(0, MAX_SCAN_CHARS)).replace(/\s+/g, ' ').trim();
     return `${k}=${flat.length > MAX_ARG_CHARS ? `${flat.slice(0, MAX_ARG_CHARS)}…` : flat}`;
   });
   const joined = parts.join(', ');
@@ -130,35 +145,42 @@ function reportsFailure(result: string): boolean {
  * `browser_control` ("All 1 browser session are in use…") is the whole story
  * of that run, and the grader never saw it.
  *
- * Every call is accounted for, and the size stays bounded: the latest in full
- * (clipped), the earlier ones by tool and outcome. Earlier calls used to be a
- * bare count — while the grader is told to fail an action no listed call
- * performed, so a correct output citing call 1 of 13 read as unperformed.
+ * Every call is accounted for, and the size stays bounded, in three tiers: the
+ * latest in full (clipped); the ones before them with what each was asked and
+ * whether it worked; anything older by tool and outcome. The middle tier is
+ * there because a tally says a navigation happened but not WHERE — so an
+ * output naming the site visited in call 1 of 13 could not be checked.
  */
 export function describeToolRecord(record: readonly ToolRecordEntry[]): string {
   if (!record.length) return 'none — no tool was called';
   const recent = record.slice(-MAX_RECORD_ENTRIES);
-  const earlier = record.slice(0, record.length - recent.length);
-  const detail = recent.map(({ name, result, args }) =>
-    `- ${name}${args ? `(${args})` : ''} → ${clip(result) || '(empty result)'}`);
-  if (!earlier.length) return detail.join('\n');
+  const before = record.slice(0, record.length - recent.length);
+  const outlined = before.slice(-MAX_OUTLINE_ENTRIES);
+  const oldest = before.slice(0, before.length - outlined.length);
+  const call = ({ name, args }: ToolRecordEntry) => `- ${name}${args ? `(${args})` : ''}`;
+  const detail = recent.map((entry) => `${call(entry)} → ${clip(entry.result) || '(empty result)'}`);
+  if (!before.length) return detail.join('\n');
 
-  // By tool, in the order each was first used. Bounded by the number of
-  // distinct tools, however many calls there were.
-  const byTool = new Map<string, { ok: number; failed: number }>();
-  for (const { name, result } of earlier) {
-    const tally = byTool.get(name) ?? { ok: 0, failed: 0 };
-    if (reportsFailure(result)) tally.failed++; else tally.ok++;
-    byTool.set(name, tally);
+  const lines: string[] = [];
+  if (oldest.length) {
+    // By tool, in the order each was first used. Bounded by the number of
+    // distinct tools, however many calls there were.
+    const byTool = new Map<string, { ok: number; failed: number }>();
+    for (const { name, result } of oldest) {
+      const tally = byTool.get(name) ?? { ok: 0, failed: 0 };
+      if (reportsFailure(result)) tally.failed++; else tally.ok++;
+      byTool.set(name, tally);
+    }
+    lines.push(`Earliest calls, by tool (${oldest.length}):`);
+    for (const [name, { ok, failed }] of byTool) {
+      const outcomes = [ok && `${ok} returned a result`, failed && `${failed} an error or refusal`].filter(Boolean).join(', ');
+      lines.push(`- ${name} ×${ok + failed} (${outcomes})`);
+    }
   }
-  const summary = [...byTool].map(([name, { ok, failed }]) => {
-    const outcomes = [ok && `${ok} returned a result`, failed && `${failed} an error or refusal`].filter(Boolean).join(', ');
-    return `- ${name} ×${ok + failed} (${outcomes})`;
-  });
-  return [
-    `Earlier calls, by tool (${earlier.length}):`,
-    ...summary,
-    `Most recent ${recent.length}:`,
-    ...detail,
-  ].join('\n');
+  lines.push(`Earlier calls (${outlined.length}):`);
+  for (const entry of outlined) {
+    lines.push(`${call(entry)} → ${reportsFailure(entry.result) ? 'an error or refusal' : 'returned a result'}`);
+  }
+  lines.push(`Most recent ${recent.length}:`, ...detail);
+  return lines.join('\n');
 }

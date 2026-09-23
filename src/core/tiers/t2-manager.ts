@@ -1079,6 +1079,20 @@ Return ONLY the JSON array.`;
     );
     if (!completed.length) return `Section ${assignment.sectionTitle} failed — no T3 workers completed.`;
 
+    // The workers that did not finish, and why. Filtered out above, a section
+    // where one of two workers failed was summarised from the other alone — a
+    // summary that on a Moderate run IS the answer, and read as complete. The
+    // reporting rule cannot keep a failure it was never shown.
+    const unfinished = results
+      .filter((r) => !completed.includes(r))
+      .map((r) => {
+        const why = (r.issues ?? []).join('; ').replace(/\s+/g, ' ').trim() || 'no reason given';
+        return `[${r.subtaskId} — ${r.status}]: ${why.length > 300 ? `${why.slice(0, 300)}…` : why}`;
+      });
+    const unfinishedText = unfinished.length
+      ? `\n\nNOT COMPLETED — these subtasks did not finish. Say so in the summary, and what is missing as a result:\n${unfinished.join('\n')}`
+      : '';
+
     const peerOutputs = this.peerSyncBuffer
       .filter(p => (p.content as any)?.type === 'T2_SECTION_OUTPUT')
       .map(p => `[Peer ${p.fromId} Output]: ${(p.content as any).output}`)
@@ -1108,7 +1122,7 @@ Return ONLY the JSON array.`;
       const isLastChunk = chunkEnd >= completed.length;
 
       const prompt = `Summarize these T3 worker outputs for section "${assignment.sectionTitle}" in 2-3 sentences.
-  ${currentSummary ? `\nPREVIOUS SUMMARY SO FAR:\n${currentSummary}\n\nNEW OUTPUTS TO INTEGRATE:\n` : '\nOUTPUTS:\n'}${chunkText}${peerContext}`;
+  ${currentSummary ? `\nPREVIOUS SUMMARY SO FAR:\n${currentSummary}\n\nNEW OUTPUTS TO INTEGRATE:\n` : '\nOUTPUTS:\n'}${chunkText}${isLastChunk ? unfinishedText : ''}${peerContext}`;
 
       const messages: ConversationMessage[] = [{ role: 'user', content: prompt }];
       try {
@@ -1130,7 +1144,7 @@ Return ONLY the JSON array.`;
         currentSummary = result.content;
       } catch (err) {
         this.log(`aggregateResults: LLM summarization failed at chunk — returning raw T3 outputs. Error: ${err instanceof Error ? err.message : String(err)}`);
-        return currentSummary + '\n\n' + chunkText; // Best effort fallback
+        return currentSummary + '\n\n' + chunkText + unfinishedText; // Best effort fallback
       }
     }
 

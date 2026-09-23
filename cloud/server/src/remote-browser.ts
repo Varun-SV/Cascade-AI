@@ -300,10 +300,13 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
         confirmed,
       });
     });
+    // Once per refusal EPISODE, not per call: a refused worker may ask again,
+    // and every refusal after the first is the same news. An episode ends when
+    // the browser opens — see onLiveViewFor below.
+    let limitAnnounced = false;
+    let busyAnnounced = false;
     if (opts.allowance) {
       const allowance = opts.allowance;
-      // Once per run, like "busy": a refused worker may ask again.
-      let limitAnnounced = false;
       controller.setAllowanceFor(id, {
         take: () => {
           const refusal = allowance.take();
@@ -319,15 +322,19 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
         giveBack: () => allowance.giveBack(),
       });
     }
-    // Once per run. A worker told "busy" may well ask again, and every refusal
-    // after the first is the same news.
-    let busyAnnounced = false;
     controller.onBusyFor(id, ({ limit }) => {
       if (busyAnnounced) return;
       busyAnnounced = true;
       opts.emit('browser:busy', { conversationId: opts.conversationId, taskId: id, limit });
     });
     controller.onLiveViewFor(id, ({ active, liveViewUrl }) => {
+      // The browser opened, and the client and the replay both drop their
+      // notice on this. A run that later loses the page and is refused again
+      // is news again — flags held for the whole run kept that one silent.
+      if (active) {
+        busyAnnounced = false;
+        limitAnnounced = false;
+      }
       // To this socket only. See the file header.
       opts.emit('browser:live-view', {
         conversationId: opts.conversationId,
