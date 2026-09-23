@@ -84,6 +84,12 @@ export interface BrowserViewInfo {
   liveViewUrl?: string;
 }
 
+/** A run asked for a browser and every session was taken. */
+export interface BrowserBusyInfo {
+  /** The deployment's session limit — what "every session" meant. */
+  limit: number;
+}
+
 /**
  * One rendered frame of a run's browser, on its way to whoever is watching.
  *
@@ -530,6 +536,15 @@ export class RemoteBrowserController {
   private controlListeners = new Map<string, (state: BrowserControlState) => void | Promise<void>>();
   /** What each run's listener was last told, so unchanged states stay quiet. */
   private controlAnnounced = new Map<string, string>();
+  /**
+   * Told when a run asks for a browser and every session is taken.
+   *
+   * The refusal used to be a tool error and nothing else, so the model was
+   * the only one who heard about it. It could retry, narrate it, or, as a
+   * real run did, write the answer it could not fetch. The person who could
+   * act on it, by waiting for the other run, saw nothing.
+   */
+  private busyListeners = new Map<string, (info: BrowserBusyInfo) => void | Promise<void>>();
   /** An embedder that wants every run's live view, told which run each is. */
   private onLiveViewAll: ((runId: string, liveViewUrl: string | undefined) => void | Promise<void>) | undefined;
   /** Told when a provider session could not be handed back. See `disposeRun`. */
@@ -699,6 +714,14 @@ export class RemoteBrowserController {
   offControlFor(runKey: string): void {
     this.controlListeners.delete(runKey);
     this.controlAnnounced.delete(runKey);
+  }
+
+  onBusyFor(runKey: string, listener: (info: BrowserBusyInfo) => void | Promise<void>): void {
+    this.busyListeners.set(runKey, listener);
+  }
+
+  offBusyFor(runKey: string): void {
+    this.busyListeners.delete(runKey);
   }
 
   /**
@@ -1980,6 +2003,7 @@ export class RemoteBrowserController {
     // makes it, and teardown completes before this runs.
     this.liveViewListeners.delete(runId);
     this.offControlFor(runId);
+    this.offBusyFor(runId);
   }
 
   /**
@@ -2408,6 +2432,10 @@ export class RemoteBrowserController {
     // provider session back, so leaving it out of this sum would reopen the
     // exact race this comment describes, just via release instead of open.
     if (this.runs.size + this.opening.size + this.closing.size >= this.maxSessions) {
+      // Guarded, like every notification here: telling the user must not change
+      // what the model is told. And nothing may suspend before the check above
+      // and the reservation below, so this is fire-and-forget.
+      notify(() => this.busyListeners.get(runId)?.({ limit: this.maxSessions }));
       throw new Error(
         `All ${this.maxSessions} browser session${this.maxSessions === 1 ? '' : 's'} are in use by other runs. ` +
         'Try again when one finishes, or raise the session limit in settings.',

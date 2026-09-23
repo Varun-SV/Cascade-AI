@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { attachRemoteBrowser, asWatchOnlyViewer, frameEmitter, formatCeiling, resetSharedBrowser, sharedBrowserGeneration } from './remote-browser.js';
-import { Cascade, type CascadeConfig } from '#cascade-ai';
+import { Cascade, RemoteBrowserController, type CascadeConfig } from '#cascade-ai';
 
 /**
  * A REAL Cascade, because the fake below is what let a shipped bug through.
@@ -340,6 +340,60 @@ describe('asking to watch a run', () => {
     expect((await attached!.input({ kind: 'click', x: 0.5, y: 0.5 })).ok).toBe(false);
     expect(attached!.handBack()).toBe(false);
     expect(await attached!.setCapture(true)).toBe(false);
+  });
+});
+
+describe('a run refused the browser because every session is taken', () => {
+  const cdp = { tools: { remoteBrowser: { provider: 'cdp' as const, url: 'ws://browser.test:9222' } } };
+
+  /** Attach a run and announce it, capturing the busy listener the bridge registers. */
+  function refusedRun() {
+    const onBusy = vi.spyOn(RemoteBrowserController.prototype, 'onBusyFor');
+    const offBusy = vi.spyOn(RemoteBrowserController.prototype, 'offBusyFor');
+    const { cascade, config } = realCascade(cdp.tools.remoteBrowser);
+    const handlers = new Map<string, (e: unknown) => void>();
+    (cascade as unknown as { on: (ev: string, fn: (e: unknown) => void) => void }).on =
+      (ev, fn) => { handlers.set(ev, fn); };
+    const attached = attachRemoteBrowser({ cascade, config, conversationId: 'c1', emit });
+    handlers.get('run:started')?.({ taskId: 't1' });
+    const registered = onBusy.mock.calls.find(([id]) => id === 't1');
+    return { attached: attached!, busy: registered?.[1], offBusy, restore: () => { onBusy.mockRestore(); offBusy.mockRestore(); } };
+  }
+
+  it('tells the run\u2019s own socket, naming the run and the limit it hit', () => {
+    // The model heard about the refusal and nobody else did, so the person who
+    // could act on it — by waiting for the other run — never knew.
+    const { busy, restore } = refusedRun();
+    try {
+      expect(busy, 'registered under the run id when the run starts').toBeTypeOf('function');
+      void busy!({ limit: 1 });
+      expect(emits.filter((e) => e.event === 'browser:busy')).toEqual([
+        { event: 'browser:busy', payload: { conversationId: 'c1', taskId: 't1', limit: 1 } },
+      ]);
+    } finally { restore(); }
+  });
+
+  it('says it once, however many times the run is refused', () => {
+    // A worker told "busy" may well ask again; every refusal after the first
+    // is the same news, and a banner per retry is noise.
+    const { busy, restore } = refusedRun();
+    try {
+      void busy!({ limit: 1 });
+      void busy!({ limit: 1 });
+      void busy!({ limit: 1 });
+      expect(emits.filter((e) => e.event === 'browser:busy')).toHaveLength(1);
+    } finally { restore(); }
+  });
+
+  it('stops listening when the run ends', async () => {
+    // The listener closes over this run's socket; the controller outlives it.
+    // Detached by the controller's own run cleanup (forgetRun), which the
+    // run's end reaches whether or not the run ever held a browser.
+    const { attached, offBusy, restore } = refusedRun();
+    try {
+      await attached.endRun();
+      expect(offBusy).toHaveBeenCalledWith('t1');
+    } finally { restore(); }
   });
 });
 

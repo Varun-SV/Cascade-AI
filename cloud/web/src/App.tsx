@@ -338,6 +338,7 @@ export default function App() {
             compactionNotice={chat.compactionNotice}
             providerNotice={chat.providerNotice}
             knowledgeNotice={chat.knowledgeNotice}
+            browserBusyNotice={chat.browserBusyNotice}
             activity={chat.activity}
           />
         </div>

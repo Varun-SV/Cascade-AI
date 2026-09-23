@@ -51,6 +51,8 @@ interface Props {
   compactionNotice: string | null;
   providerNotice: string | null;
   knowledgeNotice: string | null;
+  /** This run was refused the browser because every session was in use. */
+  browserBusyNotice?: string | null;
   activity: ActivityNode[];
   /** Where the agent's browser can be watched, while it has one. */
   browserLiveView?: string | undefined;
@@ -90,7 +92,7 @@ export default function ChatPanel({
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
   clarifications, onAnswerClarification,
   browserMode, onBrowserModeChange, browserAvailable, uiMode, approval,
-  compactionNotice, providerNotice, knowledgeNotice, activity, browserLiveView, browserActive,
+  compactionNotice, providerNotice, knowledgeNotice, browserBusyNotice, activity, browserLiveView, browserActive,
   browserFrame, browserTaskId, browserStreaming, browserHuman, browserCapturing, browserConfirmed, browserNotice,
   onStopBrowser, onTakeOverBrowser, onHandBackBrowser, onBrowserInput, onBrowserCapture,
   onBrowserFrameShown,
@@ -174,6 +176,17 @@ export default function ChatPanel({
             >
               <AlertTriangle size={13} className="text-amber-300" />
               <span>{providerNotice}</span>
+            </motion.div>
+          )}
+          {browserBusyNotice && (
+            <motion.div
+              role="status"
+              className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/[0.08] px-3 py-2 text-xs text-ink-200"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+            >
+              <AlertTriangle size={13} className="text-amber-300" />
+              <span>{browserBusyNotice}</span>
             </motion.div>
           )}
           {knowledgeNotice && (

@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is there, keep a website task on one worker that drives it end to end, and
   never plan to invent a site's reply. A run whose only tool is the browser
   also gets tool guidance again.
+- **You are told when the browser is busy.** When every browser session is
+  in use by another run, the refused run now shows "The browser is busy…"
+  in the chat instead of leaving the model as the only one who knew. The
+  notice clears if a retry gets the browser, and at the next run.
 - **The live browser view appears on Complex runs.** The top tier ran under
   a different id from the one the run announced, so the panel, Stop and
   take-over never showed while a real session was driven and billed.

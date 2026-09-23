@@ -735,6 +735,64 @@ describe('the session pool', () => {
     expect(out.detail).toMatch(/session.*in use|raise the session limit/i);
   });
 
+  it('tells the refused run, and only that run, that the browser is busy', async () => {
+    // The refusal used to reach the model and nobody else, so the person who
+    // could act on it (by waiting for the other run) never heard of it.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider, maxSessions: 1 });
+    const busyA: number[] = [];
+    const busyB: number[] = [];
+    c.onBusyFor('run-A', ({ limit }) => busyA.push(limit));
+    c.onBusyFor('run-B', ({ limit }) => busyB.push(limit));
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const out = await c.controller({ kind: 'click', selector: '#b' }, ctx('run-B', 'w2'));
+    expect(out.ok, 'still refused').toBe(false);
+    expect(busyB, 'the refused run hears the limit it hit').toEqual([1]);
+    expect(busyA, 'the run holding the browser was not refused anything').toEqual([]);
+  });
+
+  it('refuses the same way when the busy listener throws — telling the user must not change what the model is told', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider, maxSessions: 1 });
+    c.onBusyFor('run-B', () => { throw new Error('socket gone'); });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const out = await c.controller({ kind: 'click', selector: '#b' }, ctx('run-B', 'w2'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/session.*in use|raise the session limit/i);
+    expect(out.detail).not.toMatch(/socket gone/);
+  });
+
+  it('stops telling a run once it detaches', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider, maxSessions: 1 });
+    const busy: number[] = [];
+    c.onBusyFor('run-B', ({ limit }) => busy.push(limit));
+    c.offBusyFor('run-B');
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    await c.controller({ kind: 'click', selector: '#b' }, ctx('run-B', 'w2'));
+    expect(busy).toEqual([]);
+  });
+
+  it('forgets a refused run\u2019s listener when the run ends, like the rest of its state', async () => {
+    // The listener closes over the embedder's socket, and the controller
+    // outlives every run on the deployment. A refused run never held a
+    // browser, which is exactly the run whose state is easiest to leave behind.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider, maxSessions: 1 });
+    const busy: number[] = [];
+    c.onBusyFor('run-B', ({ limit }) => busy.push(limit));
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await c.controller({ kind: 'click', selector: '#b' }, ctx('run-B', 'w2'));
+    expect(busy, 'refused once, while it was running').toEqual([1]);
+
+    await c.endRun('run-B');
+    await c.controller({ kind: 'click', selector: '#b' }, ctx('run-B', 'w3'));
+    expect(busy, 'nothing more once it has ended').toEqual([1]);
+  });
+
   it('frees a slot when the run that held it ends', async () => {
     const { provider } = fakeProvider();
     const c = new RemoteBrowserController({ provider, maxSessions: 1 });

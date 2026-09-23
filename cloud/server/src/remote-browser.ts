@@ -292,6 +292,14 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
         confirmed,
       });
     });
+    // Once per run. A worker told "busy" may well ask again, and every refusal
+    // after the first is the same news.
+    let busyAnnounced = false;
+    controller.onBusyFor(id, ({ limit }) => {
+      if (busyAnnounced) return;
+      busyAnnounced = true;
+      opts.emit('browser:busy', { conversationId: opts.conversationId, taskId: id, limit });
+    });
     controller.onLiveViewFor(id, ({ active, liveViewUrl }) => {
       // To this socket only. See the file header.
       opts.emit('browser:live-view', {
