@@ -124,75 +124,157 @@ function ParkedSection({
 
   return (
     <div className={`flex flex-col gap-3 p-4 text-sm text-ink-100 ${separated ? 'border-b border-elev/10 last:border-b-0' : ''}`}>
-      <div className="flex items-start gap-2">
-        <AlertTriangle size={16} className="mt-0.5 shrink-0 text-warn-400" />
-        <div>
-          <p className="font-semibold">{request.sectionTitle}</p>
-          <p className="text-xs text-ink-300">
-            A worker in this section couldn&apos;t decide something on its own.
-          </p>
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-2">
+          <AlertTriangle size={16} className="mt-0.5 shrink-0 text-warn-400" />
+          <div>
+            <p className="font-semibold">{request.sectionTitle}</p>
+            <p className="text-xs text-ink-300">
+              This part of the run has stopped and cannot finish without an answer from you.
+            </p>
+          </div>
         </div>
+        {/* Beside the section it belongs to, not only in the sentence at the
+            bottom. With several sections parked at once, each one's deadline
+            is its own and the one that matters is the one running out. */}
+        <span
+          className={`shrink-0 rounded-md px-2 py-0.5 font-mono text-xs tabular-nums ${
+            urgent ? 'bg-danger-500/15 text-danger-300' : 'bg-elev/10 text-ink-300'
+          }`}
+          aria-label={`Time left for ${request.sectionTitle}`}
+        >
+          {seconds > 0 ? `${mm}:${ss}` : '0:00'}
+        </span>
       </div>
 
+      {request.goal && (
+        <Field label="What it was asked to do">
+          <p className="whitespace-pre-wrap text-xs leading-relaxed text-ink-200">{request.goal}</p>
+        </Field>
+      )}
+
       {request.issues.length > 0 && (
-        <div className="rounded-md bg-elev/[0.05] px-3 py-2">
-          <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-300">What it hit</p>
+        <Field label="Where it stopped">
           <ul className="flex flex-col gap-1 text-xs text-ink-200">
             {request.issues.slice(0, 6).map((issue, i) => (
               <li key={i}>· {issue}</li>
             ))}
           </ul>
-        </div>
+        </Field>
       )}
 
-      <label className="flex flex-col gap-1">
-        <span className="text-xs text-ink-300">
-          Optional: tell it what to do differently, then choose “Retry with guidance”.
-        </span>
-        <textarea
-          className="resize-none rounded-md border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-400"
-          rows={3}
-          placeholder="e.g. skip the private repos and only summarise the public ones"
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-          // Focused only when it is the only one. With several open, stealing
-          // focus into whichever rendered last would move the cursor out from
-          // under somebody already typing.
-          autoFocus={!separated}
-          aria-label={`Guidance for ${request.sectionTitle}`}
-        />
-      </label>
+      {request.summary?.trim() && (
+        // Bounded and scrollable rather than clamped: this is the work "Skip"
+        // KEEPS and a retry throws away, so the decision is being made about
+        // it — hiding it behind a fade would be asking about something the
+        // person cannot read.
+        <Field label="What it has so far">
+          <div className="max-h-32 overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed text-ink-200">
+            {request.summary.trim()}
+          </div>
+        </Field>
+      )}
 
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={() => onResolve('guidance', note.trim(), key)}
+      <div className="flex flex-col gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wide text-ink-300">Your choice</span>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-ink-300">
+            Tell it what to do differently — then choose “Retry with guidance”.
+          </span>
+          <textarea
+            className="resize-none rounded-md border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-400"
+            rows={3}
+            placeholder="e.g. skip the private repos and only summarise the public ones"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            // Focused only when it is the only one. With several open, stealing
+            // focus into whichever rendered last would move the cursor out from
+            // under somebody already typing.
+            autoFocus={!separated}
+            aria-label={`Guidance for ${request.sectionTitle}`}
+          />
+        </label>
+
+        {/* Each choice says what it DOES to the run. Three bare verbs left the
+            difference between them to be guessed, and the one that is not
+            reversible — a retry discards the partial work above — read as the
+            safest of the three. */}
+        <Choice
+          icon={<Send size={14} />}
+          label="Retry with guidance"
+          detail="Runs this section again with your instructions. Replaces the work above."
+          primary
           disabled={!note.trim()}
-          className="flex items-center gap-1.5 rounded-md bg-accent-500/20 px-3 py-1.5 text-sm font-semibold text-accent-200 hover:bg-accent-500/30 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          <Send size={14} /> Retry with guidance
-        </button>
-        <button
-          type="button"
+          onClick={() => onResolve('guidance', note.trim(), key)}
+        />
+        <Choice
+          icon={<RefreshCw size={14} />}
+          label="Retry as-is"
+          detail="Runs it again unchanged, replacing the work above. Worth it if this looked like a one-off."
           onClick={() => onResolve('retry', undefined, key)}
-          className="flex items-center gap-1.5 rounded-md bg-elev/10 px-3 py-1.5 text-sm text-ink-100 hover:bg-elev/20"
-        >
-          <RefreshCw size={14} /> Retry as-is
-        </button>
-        <button
-          type="button"
+        />
+        <Choice
+          icon={<SkipForward size={14} />}
+          label="Skip this section"
+          detail="Keeps the work above and carries on with the rest of the run."
           onClick={() => onResolve('skip', undefined, key)}
-          className="flex items-center gap-1.5 rounded-md bg-elev/10 px-3 py-1.5 text-sm text-ink-100 hover:bg-elev/20"
-        >
-          <SkipForward size={14} /> Skip this section
-        </button>
+        />
       </div>
 
       <p className={`text-xs ${urgent ? 'text-danger-300' : 'text-ink-400'}`}>
         {seconds > 0
-          ? `Waiting ${mm}:${ss} — if nobody answers, this section fails and the rest of the run continues.`
+          ? `If nobody answers within ${mm}:${ss}, this section is marked failed and the rest of the run carries on without it.`
           : 'Timed out — this section has been failed.'}
       </p>
     </div>
+  );
+}
+
+/** A labelled block of evidence. Same shape for each, so they read as a list. */
+function Field({ label, children }: { label: string; children: React.ReactNode }): React.ReactElement {
+  return (
+    <div className="rounded-md bg-elev/[0.05] px-3 py-2">
+      <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-300">{label}</p>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * One answer, with what it does to the run underneath it.
+ *
+ * A button rather than a row with a button in it, so the whole thing is the
+ * target and the consequence is part of the accessible name — a screen reader
+ * reaching "Skip this section" hears what skipping does, which is exactly the
+ * part that was missing on screen too.
+ */
+function Choice({
+  icon, label, detail, onClick, disabled, primary,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  detail: string;
+  onClick: () => void;
+  disabled?: boolean;
+  primary?: boolean;
+}): React.ReactElement {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`flex w-full items-start gap-2 rounded-md px-3 py-2 text-left disabled:cursor-not-allowed disabled:opacity-40 ${
+        primary
+          ? 'bg-accent-500/20 text-accent-200 hover:bg-accent-500/30'
+          : 'bg-elev/10 text-ink-100 hover:bg-elev/20'
+      }`}
+    >
+      <span className="mt-0.5 shrink-0">{icon}</span>
+      <span className="flex flex-col gap-0.5">
+        <span className="text-sm font-semibold">{label}</span>
+        <span className={`text-xs ${primary ? 'text-accent-200/80' : 'text-ink-300'}`}>{detail}</span>
+      </span>
+    </button>
   );
 }

@@ -63,9 +63,11 @@ export function EscalationModal({ socket }: { socket: Socket | null }) {
     dispatch(dequeueEscalation(pending));
   };
 
-  const btn = (bg: string, color: string): React.CSSProperties => ({
-    display: 'flex', alignItems: 'center', gap: 6, padding: '7px 14px', fontSize: 12.5,
-    borderRadius: 7, cursor: 'pointer', border: 'none', background: bg, color, fontWeight: 600,
+  /** A full-width choice: the label, and underneath it what the choice does. */
+  const choice = (bg: string, color: string): React.CSSProperties => ({
+    display: 'flex', alignItems: 'flex-start', gap: 8, padding: '8px 12px', fontSize: 12.5,
+    borderRadius: 7, cursor: 'pointer', border: 'none', background: bg, color,
+    textAlign: 'left', width: '100%',
   });
 
   return (
@@ -82,12 +84,21 @@ export function EscalationModal({ socket }: { socket: Socket | null }) {
         </div>
         <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text)', marginBottom: 2 }}>{pending.sectionTitle}</div>
         <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 14, lineHeight: 1.5 }}>
-          A worker in this section couldn&apos;t decide something on its own. The run is paused here.
+          This part of the run has stopped and cannot finish without an answer from you.
         </div>
+
+        {pending.goal && (
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text-dim)', marginBottom: 5 }}>What it was asked to do</div>
+            <div style={{ background: 'var(--bg-base)', border: '1px solid var(--border)', borderRadius: 8, padding: '8px 11px', fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.45, whiteSpace: 'pre-wrap' }}>
+              {pending.goal}
+            </div>
+          </div>
+        )}
 
         {pending.issues.length > 0 && (
           <div style={{ marginBottom: 12 }}>
-            <div style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text-dim)', marginBottom: 5 }}>What it hit</div>
+            <div style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text-dim)', marginBottom: 5 }}>Where it stopped</div>
             <div style={{ background: 'var(--bg-base)', border: '1px solid var(--border)', borderRadius: 8, padding: '8px 11px', display: 'flex', flexDirection: 'column', gap: 4 }}>
               {pending.issues.slice(0, 6).map((issue, i) => (
                 <div key={i} style={{ fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.45 }}>· {issue}</div>
@@ -97,8 +108,11 @@ export function EscalationModal({ socket }: { socket: Socket | null }) {
         )}
 
         {pending.summary && (
-          <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginBottom: 12, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
-            {pending.summary}
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text-dim)', marginBottom: 5 }}>What it has so far</div>
+            <div style={{ maxHeight: 128, overflow: 'auto', fontSize: 11.5, color: 'var(--text-dim)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+              {pending.summary}
+            </div>
           </div>
         )}
 
@@ -124,19 +138,37 @@ export function EscalationModal({ socket }: { socket: Socket | null }) {
           }}
         />
 
-        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', flexWrap: 'wrap', marginBottom: 12 }}>
-          <button style={btn('var(--bg-raised)', 'var(--text-muted)')} onClick={() => decide('skip')} title="Keep whatever this section produced and move on">
-            <SkipForward size={14} /> Skip this section
-          </button>
-          <button style={btn('var(--bg-raised)', 'var(--text)')} onClick={() => decide('retry')} title="Run the section again unchanged">
-            <RefreshCw size={14} /> Retry as-is
-          </button>
+        {/* Each choice says what it DOES to the run, on the face of the button
+            rather than in a tooltip. The two retries both REPLACE the work shown
+            above and that was stated nowhere — "Retry as-is" said only that it
+            runs unchanged — so the irreversible choices read as the safe ones.
+            Same wording as the web modal, deliberately: one decision, one
+            description, whichever surface asks it. */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
           <button
-            style={{ ...btn('linear-gradient(135deg, var(--accent), var(--accent-2))', '#fff'), opacity: note.trim() ? 1 : 0.5 }}
+            style={{ ...choice('linear-gradient(135deg, var(--accent), var(--accent-2))', '#fff'), opacity: note.trim() ? 1 : 0.5 }}
             disabled={!note.trim()}
             onClick={() => decide('guidance', note.trim())}
           >
-            <Send size={14} /> Retry with guidance
+            <Send size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+            <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <span style={{ fontWeight: 600 }}>Retry with guidance</span>
+              <span style={{ fontSize: 11, opacity: 0.85 }}>Runs this section again with your instructions. Replaces the work above.</span>
+            </span>
+          </button>
+          <button style={choice('var(--bg-raised)', 'var(--text)')} onClick={() => decide('retry')}>
+            <RefreshCw size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+            <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <span style={{ fontWeight: 600 }}>Retry as-is</span>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Runs it again unchanged, replacing the work above. Worth it if this looked like a one-off.</span>
+            </span>
+          </button>
+          <button style={choice('var(--bg-raised)', 'var(--text)')} onClick={() => decide('skip')}>
+            <SkipForward size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+            <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <span style={{ fontWeight: 600 }}>Skip this section</span>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Keeps the work above and carries on with the rest of the run.</span>
+            </span>
           </button>
         </div>
 

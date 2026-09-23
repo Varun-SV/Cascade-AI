@@ -508,6 +508,26 @@ export interface T3ResultPayload {
 
 export interface T3Result extends T3ResultPayload { }
 
+/**
+ * What a parked section tells the person who has to decide about it.
+ *
+ * `goal` and `summary` are the two that make the prompt answerable. Without
+ * the goal the modal names a section and nothing else — "Main Task" is a
+ * label, not a question — and without the summary the person is asked whether
+ * to keep work they have not been shown. The issues alone say where it
+ * stopped, which is the least useful third of the story on its own.
+ */
+export interface EscalationContext {
+  sectionId: string;
+  sectionTitle: string;
+  /** What this section was asked to do, verbatim from its assignment. */
+  goal?: string;
+  /** Where it stopped — the failing workers' own reasons. */
+  issues: string[];
+  /** What it has produced so far, which "Skip" keeps and "Retry" discards. */
+  summary: string;
+}
+
 export interface EscalationPayload {
   raisedBy: string;
   sectionId?: string;

@@ -15,6 +15,7 @@ import type {
   T2Result,
   T2ToT3Assignment,
   T3Result,
+  EscalationContext,
 } from '../../types.js';
 import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
@@ -27,7 +28,7 @@ import type { ToolCreator } from '../../tools/tool-creator.js';
 import { RunBreaker } from '../run-breaker.js';
 import type { EscalationDecision, TaskType } from '../../types.js';
 import { RedactionLayer } from '../audit/redaction.js';
-import { sectionNeedsDecision, settledEscalationStatus } from './escalation-policy.js';
+import { sectionNeedsDecision, settledEscalationStatus, summaryLeadsRootAnswer } from './escalation-policy.js';
 import { describeGenerationForPlanner } from '../multimodal/registry.js';
 import { compileSubtaskGraph } from '../orchestration/adapters.js';
 import { planSpecShape, typedFieldRules } from './plan-spec.js';
@@ -89,7 +90,7 @@ export class T2Manager extends BaseTier {
    * that legitimately needed input just stopped there.
    */
   private escalationCallback?: (
-    ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string },
+    ctx: EscalationContext,
   ) => Promise<EscalationDecision>;
 
   /**
@@ -164,7 +165,7 @@ export class T2Manager extends BaseTier {
 
   /** Ask the user what to do when a section escalates. */
   setEscalationCallback(
-    cb: (ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string }) => Promise<EscalationDecision>,
+    cb: (ctx: EscalationContext) => Promise<EscalationDecision>,
   ): void {
     this.escalationCallback = cb;
   }
@@ -302,8 +303,38 @@ export class T2Manager extends BaseTier {
         status: 'IN_PROGRESS',
       });
 
+      // Ask whenever ANY worker escalated — not only when the whole section
+      // came back ESCALATED. determineStatus checks `some(COMPLETED)` first, so
+      // a section with one finished worker and one that stopped on a question
+      // reports PARTIAL, and gating on the aggregate status skipped the prompt
+      // entirely: the question was never asked, and the escalated worker's
+      // output was dropped by the COMPLETED-only aggregation on the way past.
+      //
+      // Known BEFORE the first aggregation, because it decides whether that
+      // aggregation is the answer or only a draft of one.
+      const hasEscalated = sectionNeedsDecision(t3Results);
+
+      // A summary is the run's ANSWER only once nothing can replace it. On a
+      // presenter T2 (a Moderate root run) every aggregation streams itself as
+      // the primary answer, and a section waiting on a decision has not got
+      // one yet: a retry replaces this text wholesale. Streaming it anyway
+      // left the transcript holding the abandoned draft with the retry's
+      // answer appended after it — clients append streamed tokens and do not
+      // replace non-empty streamed content on finalize — while the run's own
+      // returned output held only the retry. So a pending section aggregates
+      // silently and says it with `present` at the moment it becomes final.
+      //
+      // And only when the run's answer is built on it at all: with no worker
+      // COMPLETED the answer is the worker's partial output and the reason,
+      // and a streamed summary would be the text the transcript keeps in its
+      // place (see summaryLeadsRootAnswer).
+      const streamsAnswer = summaryLeadsRootAnswer(t3Results);
+      const present = (text: string) => {
+        if (this.isPresenter && streamsAnswer && text) this.emit('stream:token', { tierId: this.id, text, primary: true });
+      };
+
       // `let`: a skipped escalation re-aggregates to keep the escalated output.
-      let summary = await this.aggregateResults(assignment, t3Results);
+      let summary = await this.aggregateResults(assignment, t3Results, { stream: !hasEscalated });
       const issues = t3Results
         .filter((r) => r.status !== 'COMPLETED')
         .flatMap((r) => r.issues);
@@ -318,21 +349,13 @@ export class T2Manager extends BaseTier {
       // the section, so it must stay eligible for T1's corrective pass.
       let userSkipped = false;
 
-      // Ask whenever ANY worker escalated — not only when the whole section
-      // came back ESCALATED. determineStatus checks `some(COMPLETED)` first, so
-      // a section with one finished worker and one that stopped on a question
-      // reports PARTIAL, and gating on the aggregate status skipped the prompt
-      // entirely: the question was never asked, and the escalated worker's
-      // output was dropped by the COMPLETED-only aggregation on the way past.
-      const hasEscalated = sectionNeedsDecision(t3Results);
-
       // Keep the work and settle on a status T1 will act on correctly. Its
       // compile filter is `status !== 'FAILED'`, so leaving a section ESCALATED
       // lets it through as if it were finished — the exact dead end this
       // feature exists to remove.
       const settleEscalated = async (reason?: string) => {
         if (reason) issues.push(reason);
-        summary = await this.aggregateResults(assignment, t3Results, { includeEscalated: true });
+        summary = await this.aggregateResults(assignment, t3Results, { includeEscalated: true, stream: streamsAnswer });
         overallStatus = settledEscalationStatus(t3Results);
       };
 
@@ -354,11 +377,28 @@ export class T2Manager extends BaseTier {
           currentAction: 'Escalated — waiting for your decision',
           status: 'ESCALATING',
         });
+        // What the person is deciding ABOUT, so it has to be the work Skip
+        // would keep — escalated outputs included. The default aggregation
+        // drops ESCALATED results, so for a one-worker section (the common
+        // shape) the prompt read "no T3 workers completed" while Skip went on
+        // to keep real work the person had never been shown, and either retry
+        // could throw it away unseen. Computed once and reused by Skip below,
+        // which used to aggregate the very same results a second time.
+        //
+        // Silent: see `present` above. Until the person answers, this is a
+        // draft a retry will throw away, not the section's answer.
+        const decisionSummary = await this.aggregateResults(assignment, t3Results, { includeEscalated: true, stream: false });
         const decision = await this.escalationCallback({
           sectionId: assignment.sectionId,
           sectionTitle: assignment.sectionTitle,
+          // What the section was ASKED to do. The prompt named the section and
+          // listed what went wrong, and a title like "Main Task" says neither
+          // what was wanted nor what "retry" would try again — so the person
+          // was being asked to choose between three outcomes with only the
+          // failure in front of them.
+          ...(assignment.description?.trim() ? { goal: assignment.description.trim() } : {}),
           issues,
-          summary,
+          summary: decisionSummary,
         });
         this.log(`Escalation decision for "${assignment.sectionTitle}": ${decision.action}`);
 
@@ -374,7 +414,14 @@ export class T2Manager extends BaseTier {
           // even when nothing reached COMPLETED: PARTIAL is what carries the
           // section past T1's filter, and it is also the honest status — work
           // exists, it just is not finished.
-          summary = await this.aggregateResults(assignment, t3Results, { includeEscalated: true });
+          //
+          // And it is exactly what the person was shown: nothing has changed
+          // `t3Results` while the decision was pending, so what Skip keeps and
+          // what the prompt displayed are one value, not two aggregations that
+          // could disagree.
+          summary = decisionSummary;
+          // Final now, so it becomes the answer now — once.
+          present(summary);
           overallStatus = settledEscalationStatus(t3Results);
           userSkipped = decision.automatic !== true;
         } else if (decision.action === 'retry' || decision.action === 'guidance') {
@@ -407,6 +454,11 @@ export class T2Manager extends BaseTier {
           // silent stall is indistinguishable from a crash.
           issues.push('Escalated, but no decision was received in time.');
           overallStatus = 'FAILED';
+          // The silent first aggregation is this section's output after all —
+          // when it summarises finished work. With none, it is the "no T3
+          // workers completed" placeholder, and `present` keeps it off the
+          // transcript so the worker's work and this reason fill the answer.
+          present(summary);
         }
       }
 
@@ -1004,7 +1056,13 @@ Return ONLY the JSON array.`;
   private async aggregateResults(
     assignment: T1ToT2Assignment,
     results: T3Result[],
-    opts: { includeEscalated?: boolean } = {},
+    opts: {
+      includeEscalated?: boolean;
+      /** Stream the final synthesis as the primary answer when this T2 is the
+       *  presenter. Default true; false for a summary a decision can still
+       *  replace — see `present` in `execute`. */
+      stream?: boolean;
+    } = {},
   ): Promise<string> {
     // Escalated workers usually DID produce something — they stopped on a
     // decision, not on a failure. Normally that output is excluded because the
@@ -1050,7 +1108,7 @@ Return ONLY the JSON array.`;
       try {
         // When this T2 is the run's presenter (a Moderate root run), stream the
         // FINAL synthesis as the primary answer so the desktop shows it live.
-        const streamFinal = isLastChunk && this.isPresenter
+        const streamFinal = isLastChunk && this.isPresenter && opts.stream !== false
           ? (chunk: { text: string }) => this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: true })
           : undefined;
         const result = await this.generateTracked('T2', {
