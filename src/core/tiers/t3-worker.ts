@@ -969,7 +969,7 @@ export class T3Worker extends BaseTier {
       for (const tc of effectiveResult.toolCalls) {
         allToolCalls.push(tc);
         const toolResult = await this.executeTool(tc);
-        this.toolRecord.push(recordToolCall(tc.name, toolResult));
+        this.toolRecord.push(recordToolCall(tc.name, toolResult, tc.input));
         // Bound what enters the context: the WHOLE history is re-sent on every
         // remaining iteration, so an unbounded tool result (big file read,
         // chatty command) multiplies into a token bomb across the loop.
@@ -1608,7 +1608,7 @@ ${acceptance.map((a) => `- ${a}`).join('\n')}
 Output to test:
 ${output}
 
-Tool calls actually made while producing it (tool → what it returned):
+Tool calls actually made while producing it (tool and what it was asked to do → what it returned):
 ${describeToolRecord(this.toolRecord)}
 
 "correctness" MUST be "fail" if the output presents simulated, hypothetical or invented results as real, or claims an action — visiting a site, logging in, running code, fetching a page, writing a file, sending something — that no tool call above actually performed — a call that returned an error or a refusal performed nothing, but a later retry that succeeded did. An output that plainly says it could not do something is honest: judge that on completeness, not correctness.

@@ -10,7 +10,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { CascadeConfig, GenerateResult, T2ToT3Assignment, T2Result, ToolCall, ToolDefinition } from '../../types.js';
 import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
-import { ACTING_INTEGRITY_RULE, REPORTING_INTEGRITY_RULE, describeToolRecord, recordToolCall } from './integrity.js';
+import { ACTING_INTEGRITY_RULE, REPORTING_INTEGRITY_RULE, describeArgs, describeToolRecord, recordToolCall } from './integrity.js';
 import { T3Worker, buildWorkerRules } from './t3-worker.js';
 import { T2Manager } from './t2-manager.js';
 import { T1Administrator, type TaskPlan } from './t1-administrator.js';
@@ -180,6 +180,29 @@ describe('describeToolRecord — what the worker actually did', () => {
     expect(entry.result.length).toBeLessThanOrEqual(161);
   });
 
+  it('says what each call was asked to do, so a claim can be checked against more than the tool\u2019s name', () => {
+    // "Filled #q" never says what was typed, and a successful shell command
+    // may print nothing: an output claiming other text or another command
+    // looked supported by the name and result alone.
+    const entry = recordToolCall('browser_control', 'Filled #q', { action: 'fill', selector: '#q', value: 'what is dark matter?' });
+    expect(describeToolRecord([entry])).toBe('- browser_control(action=fill, selector=#q, value=what is dark matter?) → Filled #q');
+  });
+
+  it('keeps secrets out of the record: secret-named arguments, and anything typed into a password field', () => {
+    expect(describeArgs({ url: 'https://x.test', apiKey: 'sk-live-123', authorization: 'Bearer abc' }))
+      .toBe('url=https://x.test, apiKey=[redacted], authorization=[redacted]');
+    // The password arrives under a plain `value`; the selector gives it away.
+    expect(describeArgs({ action: 'fill', selector: 'input[type=password]', value: 'hunter2' }))
+      .toBe('action=fill, selector=input[type=password], value=[redacted]');
+    expect(describeArgs({ action: 'fill', selector: '#password', value: 'hunter2' })).not.toContain('hunter2');
+  });
+
+  it('keeps the argument summary bounded', () => {
+    const args = describeArgs({ command: 'x'.repeat(10_000), cwd: '/tmp', env: { A: 'y'.repeat(500) } });
+    expect(args.length).toBeLessThanOrEqual(161);
+    expect(args.startsWith('command=xxx')).toBe(true);
+  });
+
   it('marks an empty result rather than printing nothing after the arrow', () => {
     expect(describeToolRecord([{ name: 'shell', result: '  ' }])).toBe('- shell → (empty result)');
   });
@@ -215,7 +238,7 @@ describe('the rule reaches every prompt that can answer the user', () => {
       await new T3Worker(router, browserRegistry(), 't2-1').execute(assignment(), 'task-refused');
 
       const graded = calls.find((c) => c.content.startsWith('Self-test this output'));
-      expect(graded?.content, 'the refusal is in front of the grader').toContain(`browser_control → Tool error: ${REFUSAL}`);
+      expect(graded?.content, 'the refusal is in front of the grader').toContain(`browser_control(action=navigate, url=https://example.test) → Tool error: ${REFUSAL}`);
       expect(graded?.content, 'and it is told what to do with it').toMatch(/"correctness" MUST be "fail" if the output presents simulated/);
     });
 
@@ -242,8 +265,8 @@ describe('the rule reaches every prompt that can answer the user', () => {
       await new T3Worker(router, browserRegistry(execute), 't2-1').execute(assignment(), 'task-retried');
 
       const graded = calls.find((c) => c.content.startsWith('Self-test this output'))?.content ?? '';
-      expect(graded, 'both attempts are in the record').toContain(`browser_control → Tool error: ${REFUSAL}`);
-      expect(graded).toContain('browser_control → navigated to https://example.test');
+      expect(graded, 'both attempts are in the record').toContain(`browser_control(action=navigate, url=https://example.test) → Tool error: ${REFUSAL}`);
+      expect(graded).toContain('browser_control(action=navigate, url=https://example.test) → navigated to https://example.test');
       expect(graded, 'and a retry that succeeded is said to count').toContain('a later retry that succeeded did');
       expect(graded).not.toContain('did not perform or that returned an error');
     });
@@ -278,7 +301,7 @@ describe('the rule reaches every prompt that can answer the user', () => {
       await worker.execute(assignment({ subtaskId: 'probe-2' }), 'task-2');
 
       const graded = second.calls.find((c) => c.content.startsWith('Self-test this output'));
-      expect(graded?.content).toContain('browser_control → navigated to https://example.test');
+      expect(graded?.content).toContain('browser_control(action=navigate, url=https://example.test) → navigated to https://example.test');
       expect(graded?.content, 'the first subtask’s refusal is not this one’s').not.toContain(REFUSAL);
     });
 

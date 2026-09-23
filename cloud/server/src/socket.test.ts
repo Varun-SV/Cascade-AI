@@ -1438,6 +1438,41 @@ describe('rememberForReplay / replaySupervision — what a reload gets back', ()
     };
   }
 
+  it('replays a browser refusal the reconnecting page missed', () => {
+    // Said once per run — the bridge suppresses repeats — so a page that
+    // reconnected across it never saw that the run was going on without one.
+    const run = freshRun();
+    rememberForReplay(run, 'browser:busy', { conversationId: 'c1', taskId: 't1', limit: 1 });
+    rememberForReplay(run, 'browser:limit', { conversationId: 'c1', taskId: 't2', detail: 'used up' });
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+    expect(emitted).toEqual([
+      { event: 'browser:busy', payload: { conversationId: 'c1', taskId: 't1', limit: 1 } },
+      { event: 'browser:limit', payload: { conversationId: 'c1', taskId: 't2', detail: 'used up' } },
+    ]);
+  });
+
+  it('keeps one refusal per task, the latest', () => {
+    const run = freshRun();
+    rememberForReplay(run, 'browser:busy', { taskId: 't1', limit: 1 });
+    rememberForReplay(run, 'browser:limit', { taskId: 't1', detail: 'used up' });
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+    expect(emitted).toEqual([{ event: 'browser:limit', payload: { taskId: 't1', detail: 'used up' } }]);
+  });
+
+  it('stops replaying a refusal once that task gets its browser, and only that task', () => {
+    const run = freshRun();
+    rememberForReplay(run, 'browser:busy', { taskId: 't1', limit: 1 });
+    rememberForReplay(run, 'browser:busy', { taskId: 't2', limit: 1 });
+    rememberForReplay(run, 'browser:live-view', { active: true, taskId: 't2' });
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+    expect(emitted.filter((e) => e.event === 'browser:busy')).toEqual([
+      { event: 'browser:busy', payload: { taskId: 't1', limit: 1 } },
+    ]);
+  });
+
   it('retains a live view while the browser is active, and drops it the instant the run gives it up', () => {
     const run = freshRun();
     rememberForReplay(run, 'browser:live-view', {

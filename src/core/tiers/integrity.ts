@@ -36,10 +36,12 @@ export const REPORTING_INTEGRITY_RULE =
   + 'failed or is incomplete, say that too — never turn a failure into a success, and never add results, quotes, '
   + 'data or findings that are not in it.';
 
-/** One tool call a worker made, and what came back. */
+/** One tool call a worker made, what it was asked to do, and what came back. */
 export interface ToolRecordEntry {
   name: string;
   result: string;
+  /** A bounded, redacted summary of the call's arguments. See `describeArgs`. */
+  args?: string;
 }
 
 const MAX_RECORD_ENTRIES = 12;
@@ -59,8 +61,44 @@ function clip(result: string): string {
  * for the life of the worker — a few `file_read`s of large files is hundreds
  * of megabytes kept to show the grader 160 characters of each.
  */
-export function recordToolCall(name: string, result: string): ToolRecordEntry {
-  return { name, result: clip(result) };
+export function recordToolCall(name: string, result: string, input?: Record<string, unknown>): ToolRecordEntry {
+  const args = describeArgs(input);
+  return { name, result: clip(result), ...(args ? { args } : {}) };
+}
+
+const MAX_ARG_CHARS = 60;
+const MAX_ARGS_CHARS = 160;
+/** A key, or a field a value is being typed into, that names a secret. */
+const SECRETIVE = /pass(word)?|pwd|secret|token|api[-_]?key|auth|cookie|credential|otp|\bpin\b/i;
+/** The argument that carries what is typed or written, rather than where. */
+const TYPED_VALUE = /^(value|text|content|input)$/i;
+
+/**
+ * What a call was asked to do, so the grader can check the claim and not just
+ * the tool.
+ *
+ * A result alone does not say what was done: `browser_control` answers a fill
+ * with "Filled #q" and never the text, and a successful shell command may
+ * print nothing. An output could claim to have typed or run something else
+ * entirely and still look supported by the tool's name and result.
+ *
+ * Bounded like the result, and redacted: any argument whose name looks like a
+ * secret, and — since the value typed into a password field arrives under a
+ * plain `value` key — the typed value whenever another argument (the
+ * selector, the field name) points at a secret.
+ */
+export function describeArgs(input: Record<string, unknown> | undefined): string {
+  if (!input) return '';
+  const entries = Object.entries(input).filter(([, v]) => v !== undefined && v !== null && v !== '');
+  const intoSecret = entries.some(([k, v]) => !TYPED_VALUE.test(k) && typeof v === 'string' && SECRETIVE.test(v));
+  const parts = entries.map(([k, v]) => {
+    if (SECRETIVE.test(k) || (intoSecret && TYPED_VALUE.test(k))) return `${k}=[redacted]`;
+    const raw = typeof v === 'string' ? v : (JSON.stringify(v) ?? String(v));
+    const flat = raw.replace(/\s+/g, ' ').trim();
+    return `${k}=${flat.length > MAX_ARG_CHARS ? `${flat.slice(0, MAX_ARG_CHARS)}…` : flat}`;
+  });
+  const joined = parts.join(', ');
+  return joined.length > MAX_ARGS_CHARS ? `${joined.slice(0, MAX_ARGS_CHARS)}…` : joined;
 }
 
 /**
@@ -101,7 +139,8 @@ export function describeToolRecord(record: readonly ToolRecordEntry[]): string {
   if (!record.length) return 'none — no tool was called';
   const recent = record.slice(-MAX_RECORD_ENTRIES);
   const earlier = record.slice(0, record.length - recent.length);
-  const detail = recent.map(({ name, result }) => `- ${name} → ${clip(result) || '(empty result)'}`);
+  const detail = recent.map(({ name, result, args }) =>
+    `- ${name}${args ? `(${args})` : ''} → ${clip(result) || '(empty result)'}`);
   if (!earlier.length) return detail.join('\n');
 
   // By tool, in the order each was first used. Bounded by the number of

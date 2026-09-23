@@ -241,6 +241,16 @@ export interface LiveRun {
    * went away.
    */
   liveView?: Record<string, unknown>;
+  /**
+   * Browser refusals still true of this run, by task: every session busy, or
+   * the day's allowance spent.
+   *
+   * Said ONCE per run — the bridge suppresses the repeats a retrying worker
+   * would cause — so a page that reconnected across one never heard it, while
+   * the run went on without a browser. Dropped when that task's browser opens
+   * after all, the same moment the client drops its notice.
+   */
+  browserRefusals?: Map<string, { event: string; payload: Record<string, unknown> }>;
   /** Outstanding approval requests, by request id, in the order they arrived. */
   approvals?: Map<string, Record<string, unknown>>;
   /**
@@ -339,12 +349,21 @@ export function rememberForReplay(run: LiveRun, event: string, payload: unknown)
     // capability and has no business outliving the session it opens.
     if (p['active'] === true) {
       run.liveView = p;
+      // This task got its browser after all, so its refusal is no longer true.
+      if (typeof p['taskId'] === 'string') run.browserRefusals?.delete(p['taskId']);
     } else {
       delete run.liveView;
       // And with it every control state. Neither a takeover nor a hidden
       // handback can outlive the browser they refer to.
       delete run.control;
     }
+    return;
+  }
+  if (event === 'browser:busy' || event === 'browser:limit') {
+    const taskId = p['taskId'];
+    if (typeof taskId !== 'string' || !taskId) return;
+    // One per task, the latest: a busy run can go on to hit the limit.
+    (run.browserRefusals ??= new Map()).set(taskId, { event, payload: p });
     return;
   }
   if (event === 'browser:control') {
@@ -533,6 +552,7 @@ export function replaySupervision(run: LiveRun, socket: Pick<Socket, 'emit'>): v
   // would be discarded and the reloaded page would come back believing the
   // agent still had a browser the person was actually holding.
   if (run.control) socket.emit('browser:control', run.control);
+  for (const { event, payload } of run.browserRefusals?.values() ?? []) socket.emit(event, payload);
   for (const request of run.approvals?.values() ?? []) {
     socket.emit('permission:user-required', request);
   }
