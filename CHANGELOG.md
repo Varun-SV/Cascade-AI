@@ -18,6 +18,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+### Fixed
+- **A run that cannot do something now says so instead of inventing the
+  result.** Asked to open a site with browser control and return its
+  chatbot's answers, a run that could not reach a browser "simulated" the
+  answers and presented them as results. Every prompt that can hand you an
+  answer now forbids that, including the correction and rewrite steps that
+  used to run without the worker's rules. The worker's self-check now sees
+  what each tool actually returned, so an output claiming a visit that the
+  browser refused fails the check.
+- **The live browser view appears on Complex runs.** The top tier ran under
+  a different id from the one the run announced, so the panel, Stop and
+  take-over never showed while a real session was driven and billed.
+- **The "section needs your decision" prompt says what you are deciding.**
+  It shows what the section was asked to do, what it has so far, and what
+  each choice does to that work — on the web and in the desktop app.
+
 ## 0.82.0 - 2026-09-22
 
 ### Added
