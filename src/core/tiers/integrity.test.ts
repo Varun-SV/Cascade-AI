@@ -160,7 +160,7 @@ describe('describeToolRecord — what the worker actually did', () => {
   it('tallies by tool only the calls older than those, so the record stays bounded', () => {
     const record = [
       { name: 'web_search', result: 'ok' },
-      { name: 'web_search', result: 'Error: rate limited' },
+      { name: 'web_search', result: 'Tool error: 429 rate limited' },
       ...Array.from({ length: 48 }, (_, i) => ({ name: `o${i}`, result: 'ok' })),
       ...Array.from({ length: 12 }, (_, i) => ({ name: `t${i}`, result: 'ok' })),
     ];
@@ -207,23 +207,37 @@ describe('describeToolRecord — what the worker actually did', () => {
       ['web_fetch', 'Refused to fetch http://10.0.0.1/: private address'],
       ['browser', 'Browser action "click" failed: element not found'],
       ['browser', 'Browser error (page reset): Target closed'],
-      ['dynamic', 'Dynamic tool "t" timed out after 5000ms and was terminated.'],
-      ['dynamic', 'Error calling web_fetch: nope'],
-      ['dynamic', 'Permission denied for "shell": dynamic tool "t" has no approver available (default-deny).'],
+      ['browser_control', 'Failed: All 1 browser session are in use.'],
+      ['browser_control', 'Error: the browser could not perform "click" — detached'],
+      ['summarise_csv', 'Dynamic tool "summarise_csv" timed out after 5000ms and was terminated.'],
+      ['summarise_csv', 'Error calling web_fetch: nope'],
+      ['summarise_csv', 'Permission denied for "shell": dynamic tool "summarise_csv" has no approver available (default-deny).'],
       ['github', 'Validation error from GitHub: bad ref'],
       ['github', 'github API error (500): Server Error'],
-      ['gitlab', 'gitlab request failed: ECONNRESET'],
+      ['github', 'gitlab request failed: ECONNRESET'],
       ['github', 'Rate limited by GitHub. Please wait a moment before trying again.'],
-      ['generate_audio', 'Could not read the audio file at /tmp/a.wav.'],
+      ['transcribe_audio', 'Could not read the audio file at /tmp/a.wav.'],
+      ['file_read', 'Tool error: ENOENT: no such file'],
     ];
     const { ShellTool } = await import('../../tools/shell.js');
     const exited = await new ShellTool().execute({ command: 'exit 3' }, { tierId: 'T3', sessionId: 's' });
     expect(exited.startsWith('Exit 3:'), 'the format this depends on').toBe(true);
     failures.push(['shell', exited]);
 
+    // Content that merely starts like a failure. Matched against every
+    // result, each of these was graded "an error or refusal", and an answer
+    // built on the page or file was rejected as unsupported.
     const successes: Array<[string, string]> = [
       ['shell', '(no output)'], ['browser_control', 'Navigated to https://example.test'],
       ['file_read', 'Error handling in Go is explicit.'], ['file_read', 'Deployment notes: all green'],
+      ['browser_control', 'Failed experiments in 2024 taught us three things'],
+      ['browser_control', 'Error: 404 — the page you asked for is not here'],
+      ['file_read', 'Build failed: 3 errors in src/app.ts'],
+      ['file_read', 'Execution failed (12ms): copied from a CI log'],
+      ['file_read', 'Error: this line is in the log file being read'],
+      ['shell', 'Build failed: see above'],
+      ['run_code', 'Execution successful (40ms):\nFailed: 0'],
+      ['web_search', 'Error: messages in search results are still results'],
     ];
     const filler = Array.from({ length: 12 }, (_, i) => ({ name: `t${i}`, result: 'ok' }));
     const outline = (entries: Array<[string, string]>) => describeToolRecord([
@@ -296,6 +310,26 @@ describe('describeToolRecord — what the worker actually did', () => {
   it('keeps what a claim can be checked against: addresses and numbers are not credentials', () => {
     const entry = recordToolCall('web_fetch', 'Contact admin@example.com, server 10.0.0.7, call 555-123-4567');
     expect(entry.result).toBe('Contact admin@example.com, server 10.0.0.7, call 555-123-4567');
+  });
+
+  it('does not take a secret word inside an ordinary one as a secret', () => {
+    // `auth` matched inside `author`, so a write to authors.txt or a fill
+    // into #author recorded the text as [redacted] and the grader could not
+    // check what was written.
+    expect(describeArgs({ path: 'authors.txt', content: 'public biography' }))
+      .toBe('path=authors.txt, content=public biography');
+    expect(describeArgs({ action: 'fill', selector: '#author', value: 'Ada Lovelace' }))
+      .toBe('action=fill, selector=#author, value=Ada Lovelace');
+    expect(describeArgs({ selector: '#passage', text: 'Call me Ishmael', tokenizer: 'bpe' }))
+      .toBe('selector=#passage, text=Call me Ishmael, tokenizer=bpe');
+    expect(describeArgs({ action: 'press', key: 'Enter' }), 'a key press is not a credential').toBe('action=press, key=Enter');
+  });
+
+  it('still takes out what is typed into a secret field, however the field is spelled', () => {
+    for (const selector of ['#login-password', 'input[name="apiKey"]', '#auth-token', '[data-field=pin]', '#otp']) {
+      expect(describeArgs({ action: 'fill', selector, value: 'hunter2' }), selector).not.toContain('hunter2');
+    }
+    expect(describeArgs({ privateKey: 'abc', clientSecret: 'def' })).toBe('privateKey=[redacted], clientSecret=[redacted]');
   });
 
   it('keeps the argument summary bounded', () => {

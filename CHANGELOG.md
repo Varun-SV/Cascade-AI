@@ -57,7 +57,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider, get their evidence with credentials removed. The self-check
   also recognises each tool's own way of reporting a failure — a failed
   `run_code`, a non-zero shell exit, an HTTP or GitHub API error — instead
-  of counting it as a result.
+  of counting it as a result, and only for the tool that uses that wording,
+  so a page or file that happens to start "Failed…" or "Error:" still
+  counts as what the tool returned. The self-check sees what was written or
+  typed unless the field is a credential; `#author` is no longer mistaken
+  for one.
 - **With the Browser chip on, a website errand is planned around the
   browser.** No tier above the worker was told the browser existed, so "go
   to this site, ask it something, bring back the answer" was routed as a

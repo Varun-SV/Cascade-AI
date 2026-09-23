@@ -82,8 +82,35 @@ export function recordToolCall(name: string, result: string, input?: Record<stri
 
 const MAX_ARG_CHARS = 60;
 const MAX_ARGS_CHARS = 160;
-/** A key, or a field a value is being typed into, that names a secret. */
-const SECRETIVE = /pass(word)?|pwd|secret|token|api[-_]?key|auth|cookie|credential|otp|\bpin\b/i;
+/**
+ * The words that mark a secret, matched as WHOLE words of an identifier or a
+ * selector — `#author`, `authors.txt` and `passage` are not `auth` or `pass`.
+ * A substring match hid the text of ordinary writes and fills, which is the
+ * evidence this record exists to show. `key` alone is not one: a key press is
+ * `key=Enter`. It counts after a word that makes it a credential.
+ */
+const SECRET_WORDS = new Set([
+  'password', 'passwords', 'passwd', 'passphrase', 'passcode', 'pass', 'pwd',
+  'secret', 'secrets', 'token', 'tokens', 'auth', 'authorization', 'cookie', 'cookies',
+  'credential', 'credentials', 'otp', 'pin', 'cvv', 'cvc', 'apikey',
+]);
+const KEY_QUALIFIERS = new Set(['api', 'access', 'private', 'secret', 'client', 'signing', 'account']);
+
+function wordsOf(text: string): string[] {
+  return text
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z])([A-Z][a-z])/g, '$1 $2')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+/** Whether an identifier or selector names a secret. See SECRET_WORDS. */
+function namesSecret(text: string): boolean {
+  const words = wordsOf(text);
+  return words.some((w, i) => SECRET_WORDS.has(w) || (w === 'key' && i > 0 && KEY_QUALIFIERS.has(words[i - 1]!)));
+}
+
 /** The argument that carries what is typed or written, rather than where. */
 const TYPED_VALUE = /^(value|text|content|input)$/i;
 
@@ -104,9 +131,9 @@ const TYPED_VALUE = /^(value|text|content|input)$/i;
 export function describeArgs(input: Record<string, unknown> | undefined): string {
   if (!input) return '';
   const entries = Object.entries(input).filter(([, v]) => v !== undefined && v !== null && v !== '');
-  const intoSecret = entries.some(([k, v]) => !TYPED_VALUE.test(k) && typeof v === 'string' && SECRETIVE.test(v));
+  const intoSecret = entries.some(([k, v]) => !TYPED_VALUE.test(k) && typeof v === 'string' && namesSecret(v));
   const parts = entries.map(([k, v]) => {
-    if (SECRETIVE.test(k) || (intoSecret && TYPED_VALUE.test(k))) return `${k}=[redacted]`;
+    if (namesSecret(k) || (intoSecret && TYPED_VALUE.test(k))) return `${k}=[redacted]`;
     const raw = typeof v === 'string' ? v : (JSON.stringify(v) ?? String(v));
     // A command or a URL can carry a credential under an innocent key.
     const flat = RedactionLayer.redactSecrets(raw.slice(0, MAX_SCAN_CHARS)).replace(/\s+/g, ' ').trim();
@@ -117,42 +144,60 @@ export function describeArgs(input: Record<string, unknown> | undefined): string
 }
 
 /**
- * A result the tool itself reported as a failure or refusal.
- *
- * Several conventions, because tools report failure in their own words rather
- * than by throwing: T3Worker.executeTool's `Tool error:` and denials, `Error:`
- * from most tools — and `browser_control`'s `Failed: …`, which is how a refused
- * browser action (the session cap among them) actually comes back. Missing
- * that one counted the reported run's refusal as a result. An empty but real
- * result ("No matches found for: …") is not a failure: the action happened.
- *
- * Each tool's own wording, listed rather than guessed at: a looser pattern
- * ("anything that says failed") would also match a file or page that merely
- * starts that way, and call a real read a failure.
+ * The wrappers T3Worker and the registry put around a call — a throw, a
+ * denial, a refused argument. They are never a tool's own content, so they
+ * mean failure whichever tool was called.
  */
-const FAILURE_RESULT = new RegExp([
-  '^Tool error:', '^Error(?::| calling )', '^Tool \\S+ was denied', '^Tool not found:',
-  '^Failed\\b', '^[A-Za-z][\\w ]* failed:', '^Unknown (browser )?action:',
-  '^Permission denied\\b', '^Not found:', '^Invalid ',
-  // run_code
-  '^Execution (?:failed|timed out)\\b',
-  // shell: a non-zero exit (or a signal) — the command ran and did not succeed
-  '^Exit (?!0:)[^\\s:]+:',
-  // web_fetch
-  '^HTTP [45]\\d\\d ', '^Refused to fetch ',
-  // browser (the desktop tool)
-  '^Browser action "[^"\\n]*" failed:', '^Browser error \\(page reset\\):',
-  // dynamic tools
-  '^Dynamic tool "[^"\\n]*" timed out',
-  // github / gitlab — named by the platform, in lower case: "github API error
-  // (500): …", "gitlab request failed: …" (the latter by the pattern above)
-  '^Validation error from ', '^Rate limited by ', '^\\w+ API error \\(\\d{3}\\):',
-  // generate_media
-  '^Could not read ',
-].join('|'));
+const ENVELOPE_FAILURE = /^(?:Tool error:|Tool \S+ was denied|Tool not found:)/;
 
-function reportsFailure(result: string): boolean {
-  return FAILURE_RESULT.test(result);
+/**
+ * Each built-in tool's own way of saying it failed, keyed by the tool's name.
+ *
+ * Keyed, because a tool that returns content can return content that begins
+ * like a failure: a page that starts "Failed experiments…", a log file that
+ * starts "Build failed: …", a script that prints "Error: …". Matched against
+ * every result, those read as failures, and an answer built on them was
+ * graded unsupported. So each wording counts only for the tool that emits it,
+ * and only in the exact form it emits it.
+ */
+const TOOL_FAILURE: Record<string, RegExp> = {
+  // `outcome.detail` is page content, so only the prefixes this tool adds.
+  browser_control: /^(?:Failed: |Error: (?:browser control is not available|action is required|the run was cancelled|"[^"\n]*" needs |the browser could not perform ))/,
+  browser: /^(?:Error: Playwright is not installed|Browser launch failed: |Browser action "[^"\n]*" failed: |Browser error \(page reset\): |Unknown browser action: )/,
+  read_current_page: /^Error: could not read the open page/,
+  run_code: /^Execution (?:failed \(\d+ms\):|timed out after )/,
+  // A non-zero exit, and the output that came with it.
+  shell: /^Exit (?!0:)[^\s:]+:(?:\s|$)/,
+  // A success starts "URL: …", so a failure's wording cannot be page text.
+  web_fetch: /^(?:HTTP [45]\d\d |Refused to fetch |Failed to fetch |Failed to read response body: )/,
+  web_search: /^Error: query is required/,
+  github: /^(?:Error: No \w+ token provided|Authentication failed: |Permission denied: |Not found: Repository |Validation error from |Rate limited by |\w+ API error \(\d{3}\): |\w+ request failed: )/,
+  grep: /^Invalid regex pattern: /,
+  peer_message: /^(?:Error: (?:toId is required|Peer communication is not enabled)|Unknown action: )/,
+  ask_user: /^Error: ask_user needs /,
+  transcribe_audio: /^Could not read the audio file at /,
+};
+
+/**
+ * A tool with no entry above: one created at run time, or an MCP tool. A
+ * created tool's sandbox says these in its own words, and a created tool
+ * commonly returns what its inner call returned.
+ */
+const OTHER_TOOL_FAILURE = /^(?:Dynamic tool "[^"\n]*" timed out |Error calling \S+: |Permission denied for )/;
+
+/** Whether this tool's result says the call failed or was refused. */
+export function toolReportedFailure(name: string, result: string): boolean {
+  if (ENVELOPE_FAILURE.test(result)) return true;
+  return (TOOL_FAILURE[name] ?? OTHER_TOOL_FAILURE).test(result);
+}
+
+/**
+ * Read from the record as kept: clipped, redacted, whitespace flattened. The
+ * wordings above are prefixes and allow for the flattening, so the start of
+ * the result is all they need.
+ */
+function failedCall({ name, result }: ToolRecordEntry): boolean {
+  return toolReportedFailure(name, result);
 }
 
 /**
@@ -185,10 +230,10 @@ export function describeToolRecord(record: readonly ToolRecordEntry[]): string {
     // By tool, in the order each was first used. Bounded by the number of
     // distinct tools, however many calls there were.
     const byTool = new Map<string, { ok: number; failed: number }>();
-    for (const { name, result } of oldest) {
-      const tally = byTool.get(name) ?? { ok: 0, failed: 0 };
-      if (reportsFailure(result)) tally.failed++; else tally.ok++;
-      byTool.set(name, tally);
+    for (const entry of oldest) {
+      const tally = byTool.get(entry.name) ?? { ok: 0, failed: 0 };
+      if (failedCall(entry)) tally.failed++; else tally.ok++;
+      byTool.set(entry.name, tally);
     }
     lines.push(`Earliest calls, by tool (${oldest.length}):`);
     for (const [name, { ok, failed }] of byTool) {
@@ -198,7 +243,7 @@ export function describeToolRecord(record: readonly ToolRecordEntry[]): string {
   }
   lines.push(`Earlier calls (${outlined.length}):`);
   for (const entry of outlined) {
-    lines.push(`${call(entry)} → ${reportsFailure(entry.result) ? 'an error or refusal' : 'returned a result'}`);
+    lines.push(`${call(entry)} → ${failedCall(entry) ? 'an error or refusal' : 'returned a result'}`);
   }
   lines.push(`Most recent ${recent.length}:`, ...detail);
   return lines.join('\n');
