@@ -37,6 +37,7 @@ import {
   evaluateAcceptance, failures, undecided, type AcceptanceResult,
 } from '../verification/acceptance.js';
 import { ACTING_INTEGRITY_RULE, describeToolRecord, recordToolCall, type ToolRecordEntry } from './integrity.js';
+import { RedactionLayer } from '../audit/redaction.js';
 import { BROWSER_TOOL, BROWSER_WORKER_RULE } from './browser-planning.js';
 
 /**
@@ -1503,6 +1504,8 @@ ${assignment.expectedOutput}`;
         // manager decomposes the critique into its own T3 subtasks (costing
         // more than the work under review), and those critic-spawned workers
         // would hit this very reflection step again — unbounded recursion.
+        // Secrets out of what the critic reads: it is another model by design,
+        // one that never handled the tool results the output may quote.
         const verdictResult = await this.generateAuxiliary('T2', {
           messages: [{
             role: 'user',
@@ -1511,7 +1514,7 @@ ${assignment.expectedOutput}`;
 Goal: ${assignment.expectedOutput}
 Subtask: ${assignment.description}
 Current Output:
-${current}
+${RedactionLayer.redactSecrets(current)}
 
 Is this output sufficient and correct? Respond with ONLY a JSON object:
 {"sufficient": true|false, "notes": "what is wrong or missing if false"}`,
@@ -1608,6 +1611,8 @@ ${current}`,
     pendingAcceptance?: readonly string[],
   ): Promise<{ checksRun: string[]; passed: string[]; failed: string[] }> {
     const acceptance = pendingAcceptance ?? assignment.acceptance ?? [];
+    // Secrets out of the output as well as the record: the grader can be a
+    // different provider, and an output can quote what a tool returned.
     const prompt = `Self-test this output against the assignment requirements.
 
 Assignment: ${assignment.description}
@@ -1617,7 +1622,7 @@ ${acceptance.length ? `Acceptance criteria — ALL must be satisfied for "comple
 ${acceptance.map((a) => `- ${a}`).join('\n')}
 ` : ''}
 Output to test:
-${output}
+${RedactionLayer.redactSecrets(output)}
 
 Tool calls actually made while producing it (tool and what it was asked to do → what it returned):
 ${describeToolRecord(this.toolRecord)}

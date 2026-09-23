@@ -47,6 +47,22 @@ describe('RedactionLayer', () => {
     expect(out).toBe('ANTHROPIC_API_KEY=[REDACTED_SECRET]');
   });
 
+  it('redacts a value assigned to a password, secret or token, however short or punctuated', () => {
+    // Only 16+ token-shaped characters used to count, so the commonest
+    // credential in a tool result — a short password in a .env — went through.
+    expect(RedactionLayer.redactSecrets('DB_PASSWORD=hunter2\nDB_HOST=db')).toBe('DB_PASSWORD=[REDACTED_SECRET]\nDB_HOST=db');
+    expect(RedactionLayer.redactSecrets('DB_PASSWORD=p@ss!w0rd#1')).toBe('DB_PASSWORD=[REDACTED_SECRET]');
+    expect(RedactionLayer.redactSecrets('{"password": "p@ss, w0rd!", "user": "bob"}')).toBe('{"password": [REDACTED_SECRET], "user": "bob"}');
+    expect(RedactionLayer.redactSecrets('password: hunter2')).toBe('password: [REDACTED_SECRET]');
+    expect(RedactionLayer.redactSecrets('CLIENT_SECRET=x')).toBe('CLIENT_SECRET=[REDACTED_SECRET]');
+    expect(RedactionLayer.redactSecrets('https://api.test/v1?token=abc&page=2')).toBe('https://api.test/v1?token=[REDACTED_SECRET]&page=2');
+  });
+
+  it('leaves a label that assigns nothing alone', () => {
+    const text = 'Enter your password below. tokens: 1234. DB_PASSWORD_FILE=/run/secrets/db';
+    expect(RedactionLayer.redactSecrets(text)).toBe(text);
+  });
+
   it('redacts tokens by their prefix, whatever labels them', () => {
     for (const token of [
       'sk-ant-api03-AbCdEf0123456789AbCdEf0123456789',

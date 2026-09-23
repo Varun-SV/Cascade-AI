@@ -239,6 +239,11 @@ describe('describeToolRecord — what the worker actually did', () => {
     expect(entry.result).toContain('OPENAI_API_KEY=[REDACTED_SECRET]');
   });
 
+  it('takes out a short labelled password too, not only long token-shaped values', () => {
+    const entry = recordToolCall('shell', 'DB_PASSWORD=hunter2\nDB_HOST=db.internal');
+    expect(entry.result).toBe('DB_PASSWORD=[REDACTED_SECRET] DB_HOST=db.internal');
+  });
+
   it('takes credentials out of an argument whose name does not give them away', () => {
     const args = describeArgs({ command: "curl -H 'Authorization: Bearer abcdefghijklmnop1234' https://api.test" });
     expect(args).not.toContain('abcdefghijklmnop1234');
@@ -293,6 +298,20 @@ describe('the rule reaches every prompt that can answer the user', () => {
       const graded = calls.find((c) => c.content.startsWith('Self-test this output'));
       expect(graded?.content, 'the refusal is in front of the grader').toContain(`browser_control(action=navigate, url=https://example.test) → Tool error: ${REFUSAL}`);
       expect(graded?.content, 'and it is told what to do with it').toMatch(/"correctness" MUST be "fail" if the output presents simulated/);
+    });
+
+    it('keeps secrets the output quotes away from the grader and the critic, which can be other models', async () => {
+      const { router, calls } = recordingRouter('Read .env: DB_PASSWORD=hunter2', {
+        getReflectionConfig: () => ({ enabled: true, maxRounds: 1 }),
+      });
+      const result = await new T3Worker(router, noTools(), 't2-1').execute(assignment(), 'task-secret-output');
+
+      const graded = calls.find((c) => c.content.startsWith('Self-test this output'));
+      const critic = calls.find((c) => c.content.includes('independent critic'));
+      expect(graded?.content).toContain('DB_PASSWORD=[REDACTED_SECRET]');
+      expect(graded?.content).not.toContain('hunter2');
+      expect(critic?.content).not.toContain('hunter2');
+      expect(result.output, 'the deliverable itself is untouched here — T2 redacts at its boundary').toContain('hunter2');
     });
 
     it('does not fail an output whose first call errored and whose retry worked', async () => {
