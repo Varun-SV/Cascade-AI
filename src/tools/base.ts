@@ -2,7 +2,7 @@
 //  Cascade AI — Abstract Tool Base
 // ─────────────────────────────────────────────
 
-import type { ToolDefinition, ToolExecuteOptions } from '../types.js';
+import type { ReadDestination, ToolDefinition, ToolExecuteOptions } from '../types.js';
 import type { ProcessJail } from './jail/process-jail.js';
 
 export abstract class BaseTool {
@@ -40,7 +40,7 @@ export abstract class BaseTool {
    * `options.mayRead` for this call, asked at most once per file: whether the
    * call may read that file's contents to `to`. Always true when nothing asks.
    */
-  protected readGate(options: ToolExecuteOptions, to: 'model' | 'service' = 'model'): (absPath: string) => boolean {
+  protected readGate(options: ToolExecuteOptions, to: ReadDestination = 'model'): (absPath: string) => boolean {
     const ask = options.mayRead;
     if (!ask) return () => true;
     const answers = new Map<string, boolean>();

@@ -182,15 +182,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workers or have a replacement tool written for it; web, browser, GitHub,
   media, `code_search` and MCP tools are refused to it; and a tool the
   agent wrote cannot `fetch` once it has read a local-only file. Local-only
-  files are kept out of the code index and never sent for transcription.
+  files are kept out of the code index, never sent for transcription, and
+  not embedded by `generate_document` in a document that is not local-only.
 - **`shell`, `run_code` and `git` run in a process jail.** An approved
   command could `cat .cascade/config.json`, read a local-only file, or read
   Cascade's own environment from `/proc` — and approval can come from a
   tier above rather than a person. On Linux they now run in bubblewrap:
   Cascade's own files, the built-in secrets, `~/.cascade-ai` and local-only
-  paths (for a worker that is not local-only) are mounted over, each command
-  gets its own process namespace, and a local-only worker's commands get no
-  network. On macOS, `sandbox-exec` denies the same paths and, for a
+  paths (for a worker that is not local-only) are mounted over — and the
+  git store too, while its history holds any of them, since a blob is as
+  readable as the file; the `git` tool keeps working and leaves them out of
+  its diffs — each command gets its own process namespace and no
+  capabilities, and a local-only worker's commands get no network and no
+  Unix sockets, which would reach host daemons such as Docker's. On macOS, `sandbox-exec` denies the same paths and, for a
   local-only worker, outbound connections. Where neither works, a local-only
   worker cannot run commands. `tools.processJail`: `auto` (default),
   `bwrap`, `sandbox-exec` — that jailer or no commands — or `off`.
@@ -198,8 +202,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   any model marked `isLocal` — which means it costs $0 — so an
   OpenAI-compatible server on a public host configured with `local: true`,
   or an Ollama pointed at someone else's machine, was sent local-only
-  subtasks. It is now judged by the endpoint's host: this machine, a
-  private network range or a `.local` name.
+  subtasks. It is now judged by the endpoint's host: this machine, an IPv4
+  or IPv6 private range, a `.local` name or a single-label LAN name.
 
 ## 0.82.0 - 2026-09-22
 

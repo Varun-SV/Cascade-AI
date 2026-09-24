@@ -9,6 +9,7 @@ import type {
   GenerateOptions,
   ModelInfo,
   PermissionRequest,
+  ReadDestination,
   T2ToT3Assignment,
   T3Result,
   TaskType,
@@ -1422,15 +1423,21 @@ export class T3Worker extends BaseTier {
    * local-only from then on — every call after it goes to a private model,
    * and its raw output is withheld from the tiers above — or, when no private
    * model is available, is refused. Contents bound for an outside service
-   * are refused either way.
+   * are refused either way, and so is a copy into a file that is not itself
+   * local-only: anything could read that file later.
    */
-  private readonly mayRead = (absPath: string, to: 'model' | 'service'): boolean => {
+  private readonly mayRead = (absPath: string, to: ReadDestination): boolean => {
     const privacy = this.router.getPrivacyPaths?.();
     const root = this.artifactRoot();
     if (!privacy?.hasPolicies() || !privacy.coversFile(absPath, root)) return true;
     const rel = path.relative(root, absPath) || absPath;
     if (to === 'service') {
       this.log(`Privacy: ${rel} is local-only — not sent to an outside service.`);
+      return false;
+    }
+    if (typeof to === 'object') {
+      if (privacy.coversFile(to.file, root)) return true;
+      this.log(`Privacy: ${rel} is local-only — not copied into ${path.relative(root, to.file) || to.file}, which is not.`);
       return false;
     }
     if (this.localOnlyMatch) return true;

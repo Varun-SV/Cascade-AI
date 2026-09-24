@@ -22,10 +22,14 @@ WebAssembly sandbox.
 'sandbox-exec' | 'off'`), on top of approvals:
 
 - **Linux — bubblewrap.** The host filesystem as it is, with Cascade's own
-  files, the built-in secrets, `~/.cascade-ai` and — for a caller that is not
-  local-only — local-only paths mounted over; its own PID namespace, so no
-  other process's `/proc/<pid>/environ` is readable; `--unshare-net` for a
-  local-only caller. Not a read-only root: builds and package managers write
+  folder (bar its scratch), the built-in secrets, `~/.cascade-ai` and — for a
+  caller that is not local-only — local-only paths mounted over, directories
+  whole where a pattern covers them, so files created mid-command are hidden
+  too; the git store as well while its history holds any of them; its own
+  PID namespace, so no other process's `/proc/<pid>/environ` is readable; no
+  capabilities; and for a local-only caller `--unshare-net` plus a seccomp
+  filter refusing `socket(AF_UNIX)` and io_uring, so host daemons behind
+  socket files are out of reach. Not a read-only root: builds and package managers write
   outside the workspace, and the aim is keeping secrets and private files out
   of reach, not freezing the machine.
 - **macOS — sandbox-exec**, a generated profile denying the same paths and,

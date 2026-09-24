@@ -306,6 +306,9 @@ export interface EscalationDecision {
   automatic?: boolean;
 }
 
+/** Where a file's contents go when a tool reads them; see `ToolExecuteOptions.mayRead`. */
+export type ReadDestination = 'model' | 'service' | { file: string };
+
 export interface ToolExecuteOptions {
   tierId: string;
   sessionId: string;
@@ -324,13 +327,14 @@ export interface ToolExecuteOptions {
   onProgress?: (note: string) => void;
   /**
    * Asked before a tool reads a workspace file's contents into what it
-   * returns ('model': the result goes to the model running the call) or sends
-   * them to an outside service it calls itself ('service'). False withholds
-   * that file. The tier running the call answers from privacy.paths, and a
-   * 'model' question it answers yes may move it onto a private model first.
-   * Absent, every read is allowed.
+   * returns ('model': the result goes to the model running the call), sends
+   * them to an outside service it calls itself ('service'), or copies them
+   * into another file (`{ file }`, absolute). False withholds that file. The
+   * tier running the call answers from privacy.paths, and a 'model' question
+   * it answers yes may move it onto a private model first. Absent, every read
+   * is allowed.
    */
-  mayRead?: (absPath: string, to: 'model' | 'service') => boolean;
+  mayRead?: (absPath: string, to: ReadDestination) => boolean;
   /**
    * True once the tier running the call is local-only (privacy.paths):
    * nothing it knows may leave this machine, so tools that send what they are

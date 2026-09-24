@@ -121,6 +121,38 @@ describe('generate_document — image embedding and reporting', () => {
     expect(await zipSignature('deck.pptx')).toBe('PK\x03\x04');
   }, 30_000);
 
+  // An embedded file is copied into the document, which anything can read
+  // later: a worker on a cloud model could copy a private image into an
+  // ordinary deck, then pull it back out with a command.
+  it('does not copy a protected file, or a local-only one into a document that is not local-only', async () => {
+    await fs.mkdir(path.join(workspace, 'secret'), { recursive: true });
+    await fs.writeFile(path.join(workspace, 'secret/diagram.png'), png(32, 32));
+    await fs.writeFile(path.join(workspace, 'key.png'), png(8, 8));
+    const t = tool();
+    t.setPathGuard((abs) => abs === path.join(workspace, 'key.png'));
+    const asked: Array<[string, unknown]> = [];
+    const mayRead = (abs: string, to: unknown) => {
+      asked.push([abs, to]);
+      // As a worker answers: a local-only file only into a local-only file.
+      return !abs.includes('/secret/') || (typeof to === 'object' && String((to as { file: string }).file).includes('/secret/'));
+    };
+
+    const out = await t.execute(
+      { path: 'deck.pptx', content: '# S\n\n![d](secret/diagram.png)\n\n![k](key.png)\n' },
+      { mayRead } as never,
+    );
+    expect(out).toContain('Could NOT embed 2 image');
+    expect(out).toContain('secret/diagram.png (local-only');
+    expect(out).toContain('key.png (protected');
+    expect(asked).toContainEqual([path.join(workspace, 'secret/diagram.png'), { file: path.join(workspace, 'deck.pptx') }]);
+
+    const inside = await t.execute(
+      { path: 'secret/deck.pptx', content: '# S\n\n![d](secret/diagram.png)\n' },
+      { mayRead } as never,
+    );
+    expect(inside).toContain('Embedded 1 image');
+  }, 30_000);
+
   it('explains that a remote URL has to be downloaded first', async () => {
     const out = await tool().execute(
       { path: 'deck.pptx', content: '# Slide\n\n![web](https://example.com/a.png)\n' },

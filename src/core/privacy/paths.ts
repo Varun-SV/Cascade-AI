@@ -26,12 +26,18 @@ export interface PrivacyPathPolicy {
 export class PrivacyPaths {
   private localOnly: Ignore;
   private hasRules: boolean;
+  private patterns: string[];
 
   constructor(policies: PrivacyPathPolicy[] = []) {
     this.localOnly = ignore();
-    const patterns = policies.filter((p) => p.policy === 'local-only').map((p) => p.pattern);
-    if (patterns.length) this.localOnly.add(patterns);
-    this.hasRules = patterns.length > 0;
+    this.patterns = policies.filter((p) => p.policy === 'local-only').map((p) => p.pattern);
+    if (this.patterns.length) this.localOnly.add(this.patterns);
+    this.hasRules = this.patterns.length > 0;
+  }
+
+  /** The local-only patterns as configured, gitignore-style. */
+  localOnlyPatterns(): string[] {
+    return [...this.patterns];
   }
 
   /** True when any privacy rules are configured at all (cheap short-circuit). */

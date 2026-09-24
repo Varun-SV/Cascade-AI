@@ -37,3 +37,25 @@ describe('isPrivateEndpoint — where the call goes, not what it costs', () => {
     expect(isPrivateEndpoint(model('openai-compatible', true), configs)).toBe(false);
   });
 });
+
+describe('isPrivateEndpoint — the private networks there are', () => {
+  const at = (baseUrl: string) => isPrivateEndpoint(model('ollama', true), [{ type: 'ollama', baseUrl }]);
+
+  // An Ollama on one of these counted as private before, through isLocal;
+  // judged by host, IPv6 and LAN names were left out.
+  it('counts IPv6 unique-local and link-local addresses, IPv4 carried in IPv6, and single-label LAN names', () => {
+    expect(at('http://[fd00::1]:11434')).toBe(true);
+    expect(at('http://[fc12:3456::9]:11434')).toBe(true);
+    expect(at('http://[fe80::1]:11434')).toBe(true);
+    expect(at('http://[::ffff:10.0.0.7]:11434')).toBe(true);
+    expect(at('http://[::1]:11434')).toBe(true);
+    expect(at('http://gpu-box:11434')).toBe(true);
+  });
+
+  it('still does not count a public address or name', () => {
+    expect(at('http://[2001:db8::1]:11434')).toBe(false);
+    expect(at('http://[::ffff:8.8.8.8]:11434')).toBe(false);
+    expect(at('https://ollama.example.com')).toBe(false);
+    expect(at('http://8.8.8.8:11434')).toBe(false);
+  });
+});

@@ -109,11 +109,24 @@ export class GenerateDocumentTool extends BaseTool {
     // was dropped rather than silently shipping a picture-less deck.
     const embedded: string[] = [];
     const skipped: string[] = [];
+    // An embedded file is copied into the document, which outlives this call
+    // and is readable by anything that can read it: a protected file is not
+    // copied, nor a local-only one into a document that is not local-only.
+    const mayCopy = this.readGate(options, { file: absPath });
     const loadImageBytes = async (url: string): Promise<Uint8Array | null> => {
       if (/^(https?|ftp):\/\//i.test(url)) { skipped.push(`${url} (remote URL — download it into the workspace first)`); return null; }
       const local = url.replace(/^file:\/\//i, '').split('?')[0]!.split('#')[0]!;
+      let source: string;
       try {
-        const bytes = await this.readFile(resolveInWorkspace(this.workspaceRoot, decodeURIComponent(local)));
+        source = resolveInWorkspace(this.workspaceRoot, decodeURIComponent(local));
+      } catch {
+        skipped.push(`${local} (outside the workspace)`);
+        return null;
+      }
+      if (this.isProtectedPath(source)) { skipped.push(`${local} (protected — not copied into the document)`); return null; }
+      if (!mayCopy(source)) { skipped.push(`${local} (local-only — not copied into a document that is not)`); return null; }
+      try {
+        const bytes = await this.readFile(source);
         embedded.push(local);
         return bytes;
       } catch {

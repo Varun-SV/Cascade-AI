@@ -8,8 +8,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { ToolRegistry } from '../registry.js';
 import { PrivacyPaths } from '../../core/privacy/paths.js';
+import { execFileSync } from 'node:child_process';
+import { BUILT_IN_PROTECTED } from '../../config/ignore.js';
 import {
-  ProcessJail, bwrapArgs, collectHidden, detectJail, scrubEnv, seatbeltProfile,
+  ProcessJail, bwrapArgs, collectHidden, detectJail, scrubEnv, seatbeltProfile, toPathspecs, unixSocketFilter,
   type JailKind, type JailPolicy,
 } from './process-jail.js';
 
@@ -41,6 +43,7 @@ function policy(over: Partial<JailPolicy> = {}): JailPolicy {
     workspaceRoot: ws,
     isProtected: (rel) => builtIns.isProtected(path.join(ws, rel)),
     isLocalOnly: (rel) => privacy.isLocalOnly(rel),
+    hiddenPatterns: (offline) => [...BUILT_IN_PROTECTED, ...(offline ? [] : privacy.localOnlyPatterns())],
     hiddenDirs: [],
     secretValues: () => [SECRET],
     log: () => {},
@@ -59,24 +62,49 @@ describe('scrubEnv', () => {
 });
 
 describe('collectHidden', () => {
-  it('hides Cascade\'s files, the secrets and local-only paths — not package fixtures, not the scratch folder', () => {
-    const hidden = collectHidden(policy(), false).map((h) => path.relative(ws, h.path)).sort();
-    expect(hidden).toEqual(['.cascade/audit_log.db-wal', '.cascade/config.json', '.env', 'keys/server.pem', 'secret/plan.md']);
+  // Directories are hidden whole where they can be — Cascade's folder, and one
+  // whose every child a pattern names — so a file created in one while a
+  // command runs is hidden too, not only the files there when it started.
+  it('hides Cascade\'s folder but its scratch, the secrets, and a local-only folder whole — not package fixtures', async () => {
+    const hidden = (await collectHidden(policy(), false)).sort((a, b) => a.path.localeCompare(b.path));
+    expect(hidden.map((h) => [path.relative(ws, h.path), h.dir])).toEqual([
+      ['.cascade', true], ['.env', false], ['keys/server.pem', false], ['secret', true],
+    ]);
+    expect(hidden[0]!.keep).toEqual([path.join(ws, '.cascade', 'tmp')]);
   });
 
-  it('leaves local-only paths in view of a caller that is local-only itself', () => {
-    const hidden = collectHidden(policy(), true).map((h) => path.relative(ws, h.path));
-    expect(hidden).not.toContain('secret/plan.md');
-    expect(hidden).toContain('.cascade/config.json');
+  it('leaves local-only paths in view of a caller that is local-only itself', async () => {
+    const hidden = (await collectHidden(policy(), true)).map((h) => path.relative(ws, h.path));
+    expect(hidden).not.toContain('secret');
+    expect(hidden).toContain('.cascade');
   });
 
   it('hides a directory matched whole as a directory, and the directories outside it is given', async () => {
     const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-global-'));
-    const hidden = collectHidden(policy({ isLocalOnly: (rel) => rel === 'secret/', hiddenDirs: [outside, '/nonexistent/x'] }), false);
+    const hidden = await collectHidden(policy({ isLocalOnly: (rel) => rel === 'secret/', hiddenDirs: [outside, '/nonexistent/x'] }), false);
     expect(hidden).toContainEqual({ path: path.join(ws, 'secret'), dir: true });
     expect(hidden).toContainEqual({ path: await fs.realpath(outside), dir: true });
     expect(hidden.some((h) => h.path.startsWith('/nonexistent'))).toBe(false);
     await fs.rm(outside, { recursive: true, force: true });
+  });
+});
+
+describe('toPathspecs', () => {
+  it('turns gitignore patterns into git pathspecs, anchored where the pattern is', () => {
+    expect(toPathspecs(['.env', '.cascade/config.json', 'secret/**', 'build/', '!keep.md', '# note'])).toEqual([
+      ':(glob)**/.env', ':(glob)**/.env/**',
+      ':(glob).cascade/config.json', ':(glob).cascade/config.json/**',
+      ':(glob)secret/**',
+      ':(glob)**/build', ':(glob)**/build/**',
+    ]);
+  });
+});
+
+describe('unixSocketFilter', () => {
+  it('is a cBPF program for x64 and arm64, and nothing elsewhere', () => {
+    expect(unixSocketFilter('x64')?.length).toBe(13 * 8);
+    expect(unixSocketFilter('arm64')?.length).toBe(13 * 8);
+    expect(unixSocketFilter('ia32')).toBeNull();
   });
 });
 
@@ -91,7 +119,14 @@ describe('the launch each jailer is given', () => {
     expect(bwrapArgs(hidden, false, '/w', 'sh', [])).not.toContain('--unshare-net');
   });
 
+  it('bubblewrap: a hidden directory\'s kept parts mounted back', () => {
+    const args = bwrapArgs([{ path: '/w/.cascade', dir: true, keep: ['/w/.cascade/tmp'] }], false, '/w', 'sh', []);
+    expect(args.join(' ')).toContain('--tmpfs /w/.cascade --bind /w/.cascade/tmp /w/.cascade/tmp');
+  });
+
   it('sandbox-exec: the same paths denied, outbound connections too for a local-only caller', () => {
+    expect(seatbeltProfile([{ path: '/w/.cascade', dir: true, keep: ['/w/.cascade/tmp'] }], false))
+      .toMatch(/\(deny file-read\* file-write\* \(subpath "\/w\/.cascade"\)\)\n\(allow file-read\* file-write\* \(subpath "\/w\/.cascade\/tmp"\)\)/);
     const profile = seatbeltProfile([...hidden, { path: '/w/a "b".txt', dir: false }], true);
     expect(profile).toContain('(literal "/w/.env")');
     expect(profile).toContain('(subpath "/home/u/.cascade-ai")');
@@ -138,7 +173,14 @@ describe('ProcessJail.prepare — which way a command runs', () => {
   it('wraps it in the jailer there is', async () => {
     const r = await new ProcessJail(policy({ detect: bwrap })).prepare('sh', ['-c', 'ls'], { cwd: ws, offline: false });
     expect(r.ok && r.launch.file).toBe('bwrap');
-    expect(r.ok && r.launch.args).toEqual(expect.arrayContaining(['--ro-bind', '/dev/null', path.join(ws, '.cascade', 'config.json')]));
+    expect(r.ok && r.launch.args).toEqual(expect.arrayContaining(['--tmpfs', path.join(ws, '.cascade'), '--ro-bind', '/dev/null', path.join(ws, '.env')]));
+  });
+
+  it('loads the socket filter for a local-only caller, through a shell that opens it', async () => {
+    const r = await new ProcessJail(policy({ detect: bwrap })).prepare('sh', ['-c', 'ls'], { cwd: ws, offline: true });
+    expect(r.ok && r.launch.file).toBe('/bin/sh');
+    expect(r.ok && r.launch.args.slice(0, 2)).toEqual(['-c', 'exec bwrap --seccomp 9 "$@" 9<"$0"']);
+    expect(r.ok && r.launch.args).toContain('--unshare-net');
   });
 });
 
@@ -223,11 +265,15 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: what shell, run_code and git can re
   it('git runs in the same jail', async () => {
     let out: string;
     try {
-      out = await registry().execute('git', { operation: 'diff', args: ['--no-index', '/dev/null', '.cascade/config.json'] }, exec);
+      out = await registry().execute('git', { operation: 'diff', args: ['--no-index', '/dev/null', '.env'] }, exec);
     } catch (err) {
       out = String(err);
     }
     expect(out).not.toContain(SECRET);
+    // It ran, and was refused the file by the jail — not by simple-git, which
+    // rejects an environment handed to it that holds EDITOR or the like.
+    expect(out).not.toMatch(/not permitted/);
+    expect(out).toMatch(/Permission denied|unsupported file type|could not|unable/i);
   });
 
   it('hides Cascade\'s global folder whole', async () => {
@@ -240,5 +286,107 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: what shell, run_code and git can re
     const out = execFileSync(r.launch.file, r.launch.args, { env: r.launch.env, encoding: 'utf8' });
     expect(out).not.toContain(SECRET);
     await fs.rm(home, { recursive: true, force: true });
+  });
+});
+
+describe.skipIf(!bwrapWorks)('in bubblewrap: what changes while a command runs, and what it can reach through a socket', () => {
+  const exec = { tierId: 't3', sessionId: 's', requireApproval: false };
+  const registry = () => {
+    const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {} } as never, ws);
+    reg.setPrivacyPaths(new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]));
+    reg.setSecretValues(() => [SECRET]);
+    return reg;
+  };
+
+  // The masks were a snapshot of the files there when the command started:
+  // a journal Cascade wrote, or a local-only file another worker wrote, while
+  // it ran appeared unmasked.
+  it('hides a file created in Cascade\'s folder or a local-only folder after the command started', async () => {
+    const running = registry().execute('shell', {
+      command: 'sleep 0.6; cat .cascade/memory.db-wal secret/new.md 2>&1; true',
+    }, exec);
+    await new Promise((r) => setTimeout(r, 200));
+    await fs.writeFile(path.join(ws, '.cascade', 'memory.db-wal'), `wal ${SECRET}`);
+    await fs.writeFile(path.join(ws, 'secret', 'new.md'), `new ${LOCAL}`);
+    const out = await running;
+    expect(out).not.toContain(SECRET);
+    expect(out).not.toContain(LOCAL);
+  });
+
+  // A network namespace leaves loopback only, but a socket file on the host
+  // reaches a daemon outside it — Docker's, say — that can do the sending.
+  it('keeps a local-only caller off host Unix sockets, and leaves its own child processes working', async () => {
+    const sock = path.join(os.tmpdir(), `cascade-jail-${process.pid}.sock`);
+    await fs.rm(sock, { force: true });
+    const server = net.createServer((s) => s.end('daemon'));
+    await new Promise<void>((r) => server.listen(sock, r));
+    const probe = `node -e "require('net').connect('${sock}').on('data',d=>{console.log('unix:'+d);process.exit(0)}).on('error',e=>{console.log('unix:'+e.code);process.exit(0)})"`;
+    try {
+      expect(await registry().execute('shell', { command: probe }, exec)).toContain('unix:daemon');
+      const offline = await registry().execute('shell', { command: `${probe}; node -e "require('child_process').exec('echo child-ok',(e,o)=>console.log(o.trim()))"` }, { ...exec, isOffline: () => true });
+      expect(offline).toContain('unix:EACCES');
+      expect(offline).toContain('child-ok');
+    } finally {
+      server.close();
+      await fs.rm(sock, { force: true });
+    }
+  });
+});
+
+describe.skipIf(!bwrapWorks)('in bubblewrap: what git history gives away', () => {
+  let repo: string;
+  const exec = { tierId: 't3', sessionId: 's', requireApproval: false };
+  const g = (...args: string[]) => execFileSync('git', ['-C', repo, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' });
+  const registry = () => {
+    const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {} } as never, repo);
+    reg.setPrivacyPaths(new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]));
+    return reg;
+  };
+
+  beforeAll(async () => {
+    repo = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-git-')));
+    g('init', '-q');
+    await fs.writeFile(path.join(repo, 'notes.md'), 'public notes\n');
+    g('add', '.'); g('commit', '-qm', 'notes');
+    await fs.mkdir(path.join(repo, 'secret'));
+    await fs.writeFile(path.join(repo, 'secret', 'plan.md'), `${LOCAL}\n`);
+    await fs.writeFile(path.join(repo, 'notes.md'), 'public notes, revised\n');
+    g('add', '.'); g('commit', '-qm', 'plan');
+  });
+  afterAll(async () => { await fs.rm(repo, { recursive: true, force: true }); });
+
+  // The working-tree file was hidden; its blob was not.
+  it('hides the git store from a cloud worker\'s commands once it holds a local-only file', async () => {
+    const out = await registry().execute('shell', { command: 'git show HEAD:secret/plan.md 2>&1; git log -p 2>&1; true' }, exec);
+    expect(out).not.toContain(LOCAL);
+    expect(out).toMatch(/not a git repository/);
+  });
+
+  it('leaves it to a local-only worker, whose commands have no network', async () => {
+    const out = await registry().execute('shell', { command: 'git show HEAD:secret/plan.md' }, { ...exec, isOffline: () => true });
+    expect(out).toContain(LOCAL);
+  });
+
+  it('keeps the git tool working for a cloud worker, with the hidden paths left out of what it shows', async () => {
+    const reg = registry();
+    const status = await reg.execute('git', { operation: 'status' }, exec);
+    expect(status).toMatch(/Branch:|Working tree clean/);
+    const diff = await reg.execute('git', { operation: 'diff', args: ['HEAD~1', 'HEAD'] }, exec);
+    expect(diff).toContain('public notes, revised');
+    expect(diff).not.toContain(LOCAL);
+    const local = await reg.execute('git', { operation: 'diff', args: ['HEAD~1', 'HEAD'] }, { ...exec, isOffline: () => true });
+    expect(local).toContain(LOCAL);
+  });
+
+  it('leaves a repository with nothing to hide alone', async () => {
+    const clean = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-clean-')));
+    execFileSync('git', ['-C', clean, 'init', '-q']);
+    await fs.writeFile(path.join(clean, 'a.md'), 'a\n');
+    execFileSync('git', ['-C', clean, '-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '.']);
+    execFileSync('git', ['-C', clean, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'a']);
+    const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {} } as never, clean);
+    reg.setPrivacyPaths(new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]));
+    expect(await reg.execute('shell', { command: 'git log --oneline' }, exec)).toMatch(/\ba\b/);
+    await fs.rm(clean, { recursive: true, force: true });
   });
 });

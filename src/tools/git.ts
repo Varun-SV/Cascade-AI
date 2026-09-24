@@ -37,7 +37,12 @@ export class GitTool extends BaseTool {
     const args = (input['args'] as string[] | undefined) ?? [];
     const cwd = (input['cwd'] as string | undefined) ?? this.workspaceRoot;
 
-    const { git, done } = await this.gitFor(cwd, options.isOffline?.() === true);
+    const offline = options.isOffline?.() === true;
+    const { git, done } = await this.gitFor(cwd, offline);
+    // The git store stays in view of this tool (gitFor), so what it shows
+    // leaves out the paths the jail hides from commands: a protected or
+    // local-only file's blob is as readable as the file itself.
+    const exclusions = this.jail?.gitExclusions(offline) ?? [];
 
     try {
       switch (operation) {
@@ -46,7 +51,12 @@ export class GitTool extends BaseTool {
           return this.formatStatus(status);
         }
         case 'diff': {
-          const diff = await git.diff(args);
+          // --no-index compares two files, which the jail itself hides when
+          // they are hidden; git takes no pathspecs alongside them.
+          const scoped = exclusions.length && !args.includes('--no-index')
+            ? [...args, ...(args.includes('--') ? [] : ['--']), ...exclusions]
+            : args;
+          const diff = await git.diff(scoped);
           return diff || '(no changes)';
         }
         case 'log': {
@@ -94,22 +104,34 @@ export class GitTool extends BaseTool {
 
   /**
    * simple-git, launching git in the jail (jail/process-jail.ts). It spawns
-   * the binary it is given with git's arguments, so the jail is a one-line
+   * the binary it is given with git's arguments, so the jail is a short
    * script that execs the jailer with git as its command — simple-git's own
-   * guards against unsafe arguments still apply. `done` removes the script.
+   * guards against unsafe arguments still apply. The script also unsets the
+   * variables the jail scrubs: simple-git refuses an environment handed to it
+   * that holds EDITOR, PAGER or the like, which most shells set. Windows has
+   * no jail and no /bin/sh, and runs git as it always did. `done` removes
+   * the script.
    */
   private async gitFor(cwd: string, offline: boolean): Promise<{ git: SimpleGit; done: () => void }> {
-    if (!this.jail) return { git: simpleGit(cwd), done: () => {} };
-    const prepared = await this.jail.prepare('git', [], { cwd, offline });
+    const plain = { git: simpleGit(cwd), done: () => {} };
+    if (!this.jail) return plain;
+    const prepared = await this.jail.prepare('git', [], { cwd, offline, keepGit: true });
     if (!prepared.ok) throw new Error(prepared.reason);
+    if (process.platform === 'win32') return plain;
     const { launch } = prepared;
-    if (!launch.jail) return { git: simpleGit(cwd).env(launch.env), done: () => {} };
+    const unset = Object.keys(process.env).filter((name) => !(name in launch.env) && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name));
+    if (!launch.jail && unset.length === 0) return plain;
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-git-'));
     const script = path.join(dir, 'git');
     const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
-    fs.writeFileSync(script, `#!/bin/sh\nexec ${[launch.file, ...launch.args].map(quote).join(' ')} "$@"\n`, { mode: 0o700 });
-    const git = simpleGit({ baseDir: cwd, binary: script, unsafe: { allowUnsafeCustomBinary: true } }).env(launch.env);
+    fs.writeFileSync(script, [
+      '#!/bin/sh',
+      ...(unset.length ? [`unset ${unset.join(' ')}`] : []),
+      `exec ${[launch.file, ...launch.args].map(quote).join(' ')} "$@"`,
+      '',
+    ].join('\n'), { mode: 0o700 });
+    const git = simpleGit({ baseDir: cwd, binary: script, unsafe: { allowUnsafeCustomBinary: true } });
     return { git, done: () => fs.rmSync(dir, { recursive: true, force: true }) };
   }
 

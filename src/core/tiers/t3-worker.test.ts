@@ -981,6 +981,56 @@ describe('privacy.paths, enforced when a file is read', () => {
     expect(seen.join('\n')).toContain('web_fetch is unavailable to a local-only subtask');
   });
 
+  // Copying is not reading: the private bytes would land in a file anything
+  // can read later, whatever model the worker is on.
+  it('copies a local-only image only into a document that is itself local-only', async () => {
+    const { ToolRegistry } = await import('../../tools/registry.js');
+    const { GenerateDocumentTool } = await import('../../tools/generate-document.js');
+    const { PrivacyPaths } = await import('../privacy/paths.js');
+    const { writeFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const root = await workspace();
+    const png = Buffer.alloc(33);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    png.writeUInt32BE(13, 8); png.write('IHDR', 12, 'latin1'); png.writeUInt32BE(8, 16); png.writeUInt32BE(8, 20); png[24] = 8; png[25] = 6;
+    await writeFile(join(root, 'secret', 'diagram.png'), png);
+    const registry = new ToolRegistry(
+      { shellAllowlist: [], shellBlocklist: [], webSearch: {}, browserEnabled: false, requireApprovalFor: [] } as never,
+      root,
+    );
+    const doc = new GenerateDocumentTool();
+    doc.setWorkspaceRoot(root);
+    registry.register(doc);
+    const seen: string[] = [];
+    let turns = 0;
+    const router = {
+      getModelForTier: () => undefined,
+      getPrivacyPaths: () => new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]),
+      hasPrivateModel: () => true,
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> }) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        seen.push(content);
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        turns += 1;
+        if (turns === 1) return makeResult('', [{ id: 'tc-1', name: 'generate_document', input: { path: 'deck.pptx', content: '# S\n\n![d](secret/diagram.png)\n' } }], 'tool_use');
+        if (turns === 2) return makeResult('', [{ id: 'tc-2', name: 'generate_document', input: { path: 'secret/deck.pptx', content: '# S\n\n![d](secret/diagram.png)\n' } }], 'tool_use');
+        return makeResult('Done.');
+      }),
+    } as unknown as CascadeRouter;
+    const worker = new T3Worker(router, registry, 't2-parent');
+    // generate_document writes files, so it asks first.
+    worker.setPermissionEscalator({ requestPermission: async () => ({ requestId: 'r', approved: true, decidedBy: 'test' }) } as never);
+    const result = await worker.execute(makeAssignment(), 'task-copy');
+    const log = seen.join('\n');
+    expect(log).toContain('secret/diagram.png (local-only');
+    expect(log).toContain('Embedded 1 image');
+    // Nothing was read into the conversation, so the subtask stayed where it was.
+    expect(result.localOnly).toBeFalsy();
+  }, 30_000);
+
   it('lets a local-only subtask neither message its peers nor ask for more workers', async () => {
     const bus = new PeerBus();
     const send = vi.spyOn(bus, 'send');

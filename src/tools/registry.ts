@@ -118,6 +118,10 @@ export class ToolRegistry extends EventEmitter {
       // build directories commands have to read.
       isProtected: (rel) => this.builtInMatcher.ignores(rel),
       isLocalOnly: (rel) => !!this.privacyPaths?.isLocalOnly(rel),
+      hiddenPatterns: (offline) => [
+        ...BUILT_IN_PROTECTED,
+        ...(offline ? [] : this.privacyPaths?.localOnlyPatterns() ?? []),
+      ],
       hiddenDirs: [path.join(os.homedir(), GLOBAL_CONFIG_DIR)],
       secretValues: () => this.secretValues(),
       log: (msg) => { this.emit('log', msg); },
