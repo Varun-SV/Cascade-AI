@@ -179,9 +179,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`privacy.paths` is enforced when a file is read.** It applied only to a
   subtask whose assignment named a matching path, so a worker that came
   across the file by search read it on a cloud model. Reading a local-only
-  file with `file_read`, `grep` or `image_analyze` now moves the subtask to
-  a private model before the contents reach any model, or refuses the read
-  when there is none. Nothing a local-only subtask knows leaves the machine
+  file with `file_read`, `file_edit`, `image_analyze` or a `grep` of that
+  file now moves the subtask to a private model before the contents reach
+  any model, or refuses the read when there is none; so does grading an
+  acceptance criterion against one. A `grep` across folders leaves
+  local-only files out for a subtask that is not local-only, so that
+  whether they matched says nothing about them. Nothing a local-only subtask knows leaves the machine
   through Cascade's tools: it cannot message its peers, ask for more
   workers or have a replacement tool written for it; web, browser, GitHub,
   media, `code_search` and MCP tools are refused to it; and a tool the
@@ -191,7 +194,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   What a local-only subtask writes is local-only too — a file tool's
   destination before it writes, whatever its commands changed in the
   workspace once they end — and stays so in later runs, recorded in
-  `.cascade/privacy-derived.json`. Its commands write nowhere else (their
+  `.cascade/privacy-derived.json` even when a configured pattern covers it,
+  so narrowing the pattern later does not release it; a write that leaves
+  the file as it was takes its record back off. Its commands write nowhere else (their
   `/tmp` is private, the rest of the machine and the git store read-only)
   and run alone meanwhile. Nor does it write through a file with other
   names — hard links, whose names outside the workspace could be neither

@@ -89,25 +89,37 @@ export class PrivacyPaths {
 
   /**
    * Record files a local-only subtask wrote (workspace-relative), so they are
-   * local-only from now on, in this run and the next. Returns the ones that
-   * were not local-only already.
+   * local-only from now on, in this run and the next. Recorded even when a
+   * configured pattern covers them now: the pattern may be narrowed later,
+   * and what they hold came from private inputs all the same. Returns the
+   * ones newly recorded.
    */
   addDerived(relativePaths: string[]): string[] {
     const added: string[] = [];
     for (const raw of relativePaths) {
       const rel = raw.split(path.sep).join('/').replace(/^\.?\//, '');
-      if (!rel || rel.startsWith('../') || this.isLocalOnly(rel)) continue;
+      if (!rel || rel.startsWith('../') || this.derived.has(rel)) continue;
       this.derived.add(rel);
       added.push(rel);
     }
-    if (added.length) this.aliases.clear();
-    if (added.length && this.derivedFile) {
-      fs.mkdirSync(path.dirname(this.derivedFile), { recursive: true });
-      const tmp = `${this.derivedFile}.${process.pid}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({ version: 1, paths: [...this.derived].sort() }, null, 2));
-      fs.renameSync(tmp, this.derivedFile);
-    }
+    if (added.length) this.saveDerived();
     return added;
+  }
+
+  /** Forget records made for a write that did not happen. */
+  removeDerived(relativePaths: string[]): void {
+    let removed = false;
+    for (const rel of relativePaths) removed = this.derived.delete(rel) || removed;
+    if (removed) this.saveDerived();
+  }
+
+  private saveDerived(): void {
+    this.aliases.clear();
+    if (!this.derivedFile) return;
+    fs.mkdirSync(path.dirname(this.derivedFile), { recursive: true });
+    const tmp = `${this.derivedFile}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ version: 1, paths: [...this.derived].sort() }, null, 2));
+    fs.renameSync(tmp, this.derivedFile);
   }
 
   /**

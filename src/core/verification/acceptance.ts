@@ -35,6 +35,13 @@ export interface AcceptanceProbe {
   stat(path: string): Promise<{ size: number } | null>;
   /** utf-8 contents, or null when unreadable (missing, binary, too large). */
   read(path: string): Promise<string | null>;
+  /**
+   * False when the caller may not look at this file at all — a local-only
+   * one (privacy.paths) with nothing private to read it: whether it exists,
+   * is empty or holds a string is then left to the model, like anything
+   * else this rung cannot see.
+   */
+  allowed?(path: string): boolean;
 }
 
 export interface AcceptanceOptions {
@@ -157,6 +164,11 @@ export async function evaluateAcceptance(
         verdict: 'undecidable',
         detail: `no tool on this run can create ${file} — deferred to output review`,
       });
+      continue;
+    }
+
+    if (probe.allowed && !probe.allowed(file)) {
+      results.push({ criterion, verdict: 'undecidable', detail: `${file} is local-only — deferred to output review` });
       continue;
     }
 

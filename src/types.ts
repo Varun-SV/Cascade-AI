@@ -313,8 +313,13 @@ export interface EscalationDecision {
   automatic?: boolean;
 }
 
-/** Where a file's contents go when a tool reads them; see `ToolExecuteOptions.mayRead`. */
-export type ReadDestination = 'model' | 'service' | { file: string };
+/**
+ * Where a file's contents go when a tool reads them; see `ToolExecuteOptions.mayRead`.
+ * `'scan'` is a search across files the caller did not name: a local-only
+ * one is searched only by a caller that is local-only already, and never
+ * makes it so — whether it matched would be something learnt about it.
+ */
+export type ReadDestination = 'model' | 'scan' | 'service' | { file: string };
 
 export interface ToolExecuteOptions {
   tierId: string;

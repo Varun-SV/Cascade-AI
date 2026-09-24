@@ -938,13 +938,49 @@ describe('privacy.paths, enforced when a file is read', () => {
     expect(calls.some((c) => c.text.includes(SECRET))).toBe(false);
   });
 
-  it('still lets a grep show a local-only file once the subtask can go private', async () => {
+  it('lets a grep of a local-only file show it once the subtask can go private', async () => {
     const { calls, result } = await run({
       privateModel: true,
-      call: { id: 'tc-1', name: 'grep', input: { pattern: 'PLAN', output_mode: 'content' } },
+      call: { id: 'tc-1', name: 'grep', input: { pattern: 'PLAN', path: 'secret/plan.md', output_mode: 'content' } },
     });
     expect(calls.filter((c) => c.text.includes(SECRET)).every((c) => c.forceLocal)).toBe(true);
     expect(result.localOnly).toBe(true);
+  });
+
+  // A search moved the subtask only when a local-only file matched, so the
+  // cloud model was told "No matches found" whenever one did not — a fact
+  // about the file, learnt without ever leaving the cloud.
+  // The criterion was graded by reading the file directly — whether it
+  // exists, is empty, holds a string — for a worker still on a cloud model.
+  it('treats a local-only file an acceptance criterion checks as one the assignment names', async () => {
+    const { calls, result } = await run({
+      privateModel: true,
+      call: { id: 'tc-1', name: 'file_read', input: { path: 'notes.md' } },
+      assignment: { acceptance: ['secret/plan.md contains "LAUNCH"'] },
+    });
+    expect(calls[0]?.forceLocal).toBe(true);
+    expect(result.localOnly).toBe(true);
+  });
+
+  it('asks about a file the grep names before searching it, match or not', async () => {
+    const { calls, result } = await run({
+      privateModel: true,
+      call: { id: 'tc-1', name: 'grep', input: { pattern: 'NOT-IN-THE-PLAN', path: 'secret/plan.md' } },
+    });
+    expect(result.localOnly).toBe(true);
+    const answer = calls.find((c) => c.text.includes('No matches found'));
+    expect(answer?.forceLocal).toBe(true);
+  });
+
+  it('leaves local-only files out of a search across the workspace, whether or not they would match', async () => {
+    for (const pattern of ['PLAN', 'NOT-IN-THE-PLAN']) {
+      const { calls, result } = await run({
+        privateModel: true,
+        call: { id: 'tc-1', name: 'grep', input: { pattern, output_mode: 'content' } },
+      });
+      expect(result.localOnly, pattern).toBeFalsy();
+      expect(calls.some((c) => c.text.includes(SECRET)), pattern).toBe(false);
+    }
   });
 
   // Reading the file moved the worker onto a private model — and its next

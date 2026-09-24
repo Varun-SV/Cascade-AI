@@ -288,6 +288,9 @@ describe('ToolRegistry — protected paths hold for every tool that takes one', 
     const grep = await reg.execute('grep', { pattern: 'SECRET-', output_mode: 'content' }, opts);
     expect(grep).toContain('SECRET-code');
     expect(grep).not.toContain('SECRET-index');
+    // …and a hard link to it, under a name nothing protects.
+    await fs.link(path.join(workspace, 'data', 'idx.db'), path.join(workspace, 'src', 'cache.txt'));
+    await expect(reg.execute('file_read', { path: 'src/cache.txt' }, opts)).rejects.toThrow(/cascadeignore/);
   });
 
   it('keeps the built-ins protected against a negation in .cascadeignore', async () => {
@@ -415,3 +418,22 @@ describe('ToolRegistry — nothing leaves the machine for a local-only caller', 
   });
 });
 
+// The destination was marked local-only before the write, and stayed so
+// when the write never happened — a public file lost to cloud workers for good.
+describe('ToolRegistry — a local-only write that does not happen', () => {
+  it('takes the mark off a file the tool left as it was, and keeps it on one it wrote', async () => {
+    const { PrivacyPaths } = await import('../core/privacy/paths.js');
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-unmark-')));
+    await fs.writeFile(path.join(ws, 'readme.md'), 'public\n');
+    const privacy = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }], { workspaceRoot: ws });
+    const reg = new ToolRegistry(toolsConfig, ws);
+    reg.setPrivacyPaths(privacy);
+    const offline = { ...opts, isOffline: () => true };
+    await expect(reg.execute('file_edit', { path: 'readme.md', old_string: 'absent', new_string: 'x' }, offline)).rejects.toThrow(/not found/);
+    expect(privacy.isLocalOnly('readme.md')).toBe(false);
+    expect(new PrivacyPaths([], { workspaceRoot: ws }).isLocalOnly('readme.md')).toBe(false);
+    await reg.execute('file_edit', { path: 'readme.md', old_string: 'public', new_string: 'private summary' }, offline);
+    expect(privacy.isLocalOnly('readme.md')).toBe(true);
+    await fs.rm(ws, { recursive: true, force: true });
+  });
+});

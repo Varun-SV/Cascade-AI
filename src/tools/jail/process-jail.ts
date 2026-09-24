@@ -179,6 +179,11 @@ export class ProcessJail {
       return { ok: true, launch: { file, args, env, cwd: opts.cwd, jail: null } };
     }
 
+    // Its temporary files go to a folder in Cascade's scratch, which has to
+    // exist before the paths to hide are collected, or it is hidden too.
+    if (opts.offline && kind === 'sandbox-exec') {
+      fs.mkdirSync(path.join(this.policy.workspaceRoot, '.cascade', 'tmp'), { recursive: true });
+    }
     const hidden = await collectHidden(this.policy, opts.offline);
     if (!opts.keepGit) {
       for (const dir of await this.gitDirsToHide(opts.offline)) hidden.push({ path: dir, dir: true });
@@ -225,7 +230,6 @@ export class ProcessJail {
     if (kind === 'sandbox-exec') {
       // No private /tmp here: the command's temporary files go to a folder in
       // the workspace instead, removed when it ends.
-      fs.mkdirSync(path.join(root, '.cascade', 'tmp'), { recursive: true });
       scratchTmp = fs.mkdtempSync(path.join(root, '.cascade', 'tmp', 'local-only-'));
       return {
         ok: true,
@@ -408,6 +412,9 @@ export async function collectHidden(policy: JailPolicy, offline: boolean): Promi
         if (rel === '.cascade') {
           const keep = CASCADE_DIR_KEPT.map((k) => path.join(abs, k)).filter((k) => fs.existsSync(k));
           out.push({ path: abs, dir: true, keep });
+          // The kept parts are mounted back whole; what in them is hidden
+          // is masked again after (a local-only subtask's file in tmp).
+          for (const k of keep) await walk(k, `${rel}/${path.basename(k)}`);
           continue;
         }
         if (hide(`${rel}/`) || hide(`${rel}/${PROBE}`)) { out.push({ path: abs, dir: true }); continue; }
@@ -560,7 +567,14 @@ export function seatbeltProfile(hidden: Hidden[], offline: boolean, layout?: Wri
     lines.push(`(deny file-read* file-write* ${filters.join(' ')})`);
     // A later rule wins: the kept parts of a hidden directory are allowed again.
     const kept = hidden.flatMap((h) => h.keep ?? []);
-    if (kept.length) lines.push(`(allow file-read* file-write* ${kept.map((k) => `(subpath ${quote(k)})`).join(' ')})`);
+    if (kept.length) {
+      lines.push(`(allow file-read* file-write* ${kept.map((k) => `(subpath ${quote(k)})`).join(' ')})`);
+      // …and what is hidden inside them denied once more, after.
+      const within = hidden.filter((h) => kept.some((k) => h.path.startsWith(`${k}/`)));
+      if (within.length) {
+        lines.push(`(deny file-read* file-write* ${within.map((h) => (h.dir ? `(subpath ${quote(h.path)})` : `(literal ${quote(h.path)})`)).join(' ')})`);
+      }
+    }
   }
   if (offline) lines.push('(deny network-outbound)');
   return lines.join('\n');

@@ -347,15 +347,17 @@ export class ToolRegistry extends EventEmitter {
     // local-only too: a file tool's destination is marked before the write,
     // a command's changes when it ends (the jail finds them).
     const offline = options.isOffline?.() === true;
+    let unmark: (() => void) | undefined;
     if (offline && WRITE_TOOLS.has(toolName) && typeof input['path'] === 'string') {
       this.refuseLinkedDestination(input['path']);
-      this.markWritten(input['path']);
+      unmark = this.markWritten(input['path']);
     }
     if (tool.delegatesToTools) return tool.execute(input, options);
     const leave = await this.gate.enter(offline && (COMMAND_TOOLS.has(toolName) || WRITE_TOOLS.has(toolName)));
     try {
       return await tool.execute(input, options);
     } finally {
+      unmark?.();
       leave();
     }
   }
@@ -385,18 +387,34 @@ export class ToolRegistry extends EventEmitter {
     }
   }
 
-  /** Mark the file a write tool is about to write local-only: under its name, and where it lands. */
-  private markWritten(filePath: string): void {
+  /**
+   * Mark the file a write tool is about to write local-only: under its name,
+   * and where it lands. Marked before the write, so nothing reads it between
+   * the two; the function returned takes the mark off again if the tool left
+   * the file as it was — a failed edit, a refused document.
+   */
+  private markWritten(filePath: string): () => void {
     const abs = path.resolve(this.workspaceRoot, filePath);
     const rels = [path.relative(this.workspaceRoot, abs), path.relative(realPathOf(this.workspaceRoot), realPathOf(abs))];
-    this.markLocalOnly(rels.filter((rel) => rel && !rel.startsWith('..') && !path.isAbsolute(rel)));
+    const stamp = (): string => {
+      try {
+        const st = fs.statSync(abs);
+        return `${st.ino}:${st.size}:${st.mtimeMs}:${st.ctimeMs}`;
+      } catch { return 'absent'; }
+    };
+    const before = stamp();
+    const added = this.markLocalOnly(rels.filter((rel) => rel && !rel.startsWith('..') && !path.isAbsolute(rel)));
+    return () => {
+      if (added.length && stamp() === before) this.privacyPaths?.removeDerived(added);
+    };
   }
 
-  private markLocalOnly(rels: string[]): void {
+  private markLocalOnly(rels: string[]): string[] {
     const added = this.privacyPaths?.addDerived(rels) ?? [];
     if (added.length) {
       this.emit('log', `[privacy] Written by a local-only subtask, so local-only from now on: ${added.join(', ')}`);
     }
+    return added;
   }
 
   private registerDefaults(): void {
@@ -457,7 +475,22 @@ export class ToolRegistry extends EventEmitter {
     const real = realPathOf(absPath);
     if (real !== absPath && this.protectedByName(real, realPathOf(this.workspaceRoot))) return true;
     if (this.protectedFiles.has(path.resolve(absPath)) || this.protectedFiles.has(real)) return true;
-    return this.aliases.isAlias(absPath);
+    return this.aliases.isAlias(absPath) || this.linksToProtectedFile(absPath);
+  }
+
+  /** Whether a file with several names is one of the files protected by place under another. */
+  private linksToProtectedFile(absPath: string): boolean {
+    if (this.protectedFiles.size === 0) return false;
+    let st: fs.Stats;
+    try { st = fs.statSync(absPath); } catch { return false; }
+    if (!st.isFile() || st.nlink < 2) return false;
+    for (const file of this.protectedFiles) {
+      try {
+        const other = fs.statSync(file);
+        if (other.dev === st.dev && other.ino === st.ino) return true;
+      } catch { /* not there */ }
+    }
+    return false;
   }
 
   /**

@@ -457,7 +457,7 @@ export class T3Worker extends BaseTier {
     // A subtask touching a local-only path runs on private models only and
     // its raw output is withheld from the tiers above (see privacy/paths.ts).
     const privacy = this.router.getPrivacyPaths?.();
-    this.localOnlyMatch = !!privacy?.hasPolicies() && privacy.anyLocalOnly(this.extractArtifactPaths(assignment));
+    this.localOnlyMatch = !!privacy?.hasPolicies() && privacy.anyLocalOnly(this.privacyTargets(assignment));
     if (this.localOnlyMatch) {
       this.log('Privacy: subtask touches a local-only path — forcing a private model; raw output will be withheld upstream.');
     }
@@ -1490,6 +1490,8 @@ export class T3Worker extends BaseTier {
       return false;
     }
     if (this.localOnlyMatch) return true;
+    // A search that did not name the file: skipped, not a reason to move.
+    if (to === 'scan') return false;
     if (!this.router.hasPrivateModel?.()) {
       this.log(`Privacy: ${rel} is local-only and no private model is available — the read was refused.`);
       return false;
@@ -1501,6 +1503,17 @@ export class T3Worker extends BaseTier {
 
   /** Whether nothing this worker knows may leave the machine; see `ToolExecuteOptions.isOffline`. */
   private readonly isOffline = (): boolean => this.localOnlyMatch;
+
+  /**
+   * The paths an assignment names, for the privacy decision made before any
+   * work: its files and prose, and the files its acceptance criteria check,
+   * which the worker reads to grade itself.
+   */
+  private privacyTargets(assignment: T2ToT3Assignment): string[] {
+    const criteria = (assignment.acceptance ?? []).join('\n');
+    const named = criteria.match(new RegExp(ARTIFACT_FILE_RE.source, 'gi')) ?? [];
+    return [...new Set([...this.extractArtifactPaths(assignment), ...named.map((m) => m.trim())])];
+  }
 
   private extractArtifactPaths(assignment: T2ToT3Assignment): string[] {
     // Spec-declared files verify deterministically; regex over the prose is
@@ -1701,6 +1714,9 @@ ${current}`,
     // canProduceFiles() above for why that ends as a failed node.
     const workerCanWriteFiles = canProduceFiles(this.tools.map((t) => t.name));
     return evaluateAcceptance(criteria, assignment.files ?? [], {
+      // Reading a file to grade it is reading it: the privacy gate decides,
+      // as for any tool, so a criterion cannot probe a local-only file.
+      allowed: (target) => this.mayRead(resolve(target), 'model'),
       stat: async (target) => {
         try {
           const stat = await fs.stat(resolve(target));

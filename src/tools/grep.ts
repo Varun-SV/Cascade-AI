@@ -9,6 +9,7 @@ import path from 'node:path';
 import { glob } from 'glob';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
+import { WithheldError } from './file.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -58,9 +59,23 @@ export class GrepTool extends BaseTool {
     const outputMode = (input['output_mode'] as string | undefined) ?? 'content';
     const context = (input['context'] as number | undefined) ?? 0;
     const caseInsensitive = (input['case_insensitive'] as boolean | undefined) ?? false;
-    // Asked only of a file that matched: whether this call may show what it
-    // holds — its lines, or even that it contains the pattern.
-    const mayRead = this.readGate(options);
+    // Searching a file is reading it: whether it matched says something
+    // about what it holds. A file the search names is asked about before the
+    // search, as a read would be; files it comes across in a folder are
+    // searched only where that changes nothing about the caller ('scan') —
+    // a local-only one is left out for a caller that is not local-only.
+    let mayRead = this.readGate(options, 'scan');
+    try {
+      if ((input['path'] as string | undefined) && (await fs.stat(searchPath)).isFile()) {
+        const named = this.readGate(options, 'model');
+        if (!this.isProtectedPath(searchPath) && !named(searchPath)) {
+          throw new WithheldError(input['path'] as string);
+        }
+        mayRead = named;
+      }
+    } catch (err) {
+      if (err instanceof WithheldError) throw err;
+    }
 
     // Try ripgrep first
     try {
@@ -173,7 +188,7 @@ export class GrepTool extends BaseTool {
 
     for (const rel of files) {
       const abs = path.join(searchPath, rel);
-      if (this.isProtectedPath(abs)) continue;
+      if (this.isProtectedPath(abs) || !mayRead(abs)) continue;
       let content: string;
       try {
         content = await fs.readFile(abs, 'utf-8');
@@ -188,7 +203,7 @@ export class GrepTool extends BaseTool {
         regex.lastIndex = 0;
       }
 
-      if (matchingLines.length === 0 || !mayRead(abs)) continue;
+      if (matchingLines.length === 0) continue;
       totalCount += matchingLines.length;
 
       if (outputMode === 'files_with_matches') {

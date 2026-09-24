@@ -149,6 +149,18 @@ describe('the launch each jailer is given', () => {
     expect(bwrapArgs(hidden, true, '/tmp/other', 'sh', [], layout).join(' ')).toContain('--ro-bind /tmp/other /tmp/other');
   });
 
+  it('sandbox-exec: what is hidden inside a kept folder denied again after the folder is allowed', () => {
+    const profile = seatbeltProfile([
+      { path: '/w/.cascade', dir: true, keep: ['/w/.cascade/tmp'] },
+      { path: '/w/.cascade/tmp/notes.txt', dir: false },
+    ], false);
+    const lines = profile.split('\n');
+    const allow = lines.findIndex((l) => l.startsWith('(allow file-read* file-write* (subpath "/w/.cascade/tmp")'));
+    const again = lines.findIndex((l, i) => i > allow && l.includes('(literal "/w/.cascade/tmp/notes.txt")') && l.startsWith('(deny'));
+    expect(allow).toBeGreaterThan(0);
+    expect(again).toBeGreaterThan(allow);
+  });
+
   it('sandbox-exec, for a local-only caller: no writes but to the workspace and the devices, none to its git store', () => {
     const profile = seatbeltProfile(hidden, true, layout);
     const lines = profile.split('\n');
@@ -203,6 +215,21 @@ describe('ProcessJail.prepare — which way a command runs', () => {
     const r = await new ProcessJail(policy({ detect: bwrap })).prepare('sh', ['-c', 'ls'], { cwd: ws, offline: false });
     expect(r.ok && r.launch.file).toBe('bwrap');
     expect(r.ok && r.launch.args).toEqual(expect.arrayContaining(['--tmpfs', path.join(ws, '.cascade'), '--ro-bind', '/dev/null', path.join(ws, '.env')]));
+  });
+
+  // Created after the paths to hide were collected, the scratch folder was
+  // hidden with the rest of Cascade's, and every temporary file failed.
+  it('sandbox-exec: gives a local-only caller a scratch folder its profile allows', async () => {
+    const w = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-seatbelt-')));
+    await fs.mkdir(path.join(w, '.cascade'));
+    const jail = new ProcessJail(policy({ workspaceRoot: w, detect: async () => 'sandbox-exec' }));
+    const prepared = await jail.prepare('/bin/sh', ['-c', 'true'], { cwd: w, offline: true });
+    if (!prepared.ok) throw new Error(prepared.reason);
+    const tmp = prepared.launch.env['TMPDIR']!;
+    expect(tmp.startsWith(path.join(w, '.cascade', 'tmp', 'local-only-'))).toBe(true);
+    expect(prepared.launch.args[1]).toContain(`(allow file-read* file-write* (subpath "${path.join(w, '.cascade', 'tmp')}"))`);
+    await prepared.launch.done?.();
+    await fs.rm(w, { recursive: true, force: true });
   });
 
   it('loads the socket filter for a local-only caller, through a shell that opens it', async () => {
@@ -594,6 +621,18 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: where a local-only caller\'s writes
     expect(g('rev-parse', 'HEAD')).toBe(head);
     // It can still read the history.
     expect(await registry().execute('git', { operation: 'log' }, offline)).toContain('notes');
+  });
+
+  // Cascade's scratch is mounted back whole over its hidden folder, and a
+  // local-only file written there came back with it.
+  it('keeps a local-only file in Cascade\'s scratch hidden from a cloud worker\'s commands', async () => {
+    const reg = registry();
+    await reg.execute('file_write', { path: '.cascade/tmp/notes.txt', content: LOCAL }, offline);
+    expect(privacy.isLocalOnly('.cascade/tmp/notes.txt')).toBe(true);
+    await fs.writeFile(path.join(dir, '.cascade', 'tmp', 'scratch.txt'), 'scratch\n');
+    const seen = await reg.execute('shell', { command: 'cat .cascade/tmp/notes.txt .cascade/tmp/scratch.txt 2>&1; true' }, exec);
+    expect(seen).not.toContain(LOCAL);
+    expect(seen).toContain('scratch');
   });
 
   it('marks a file tool\'s destination local-only before it writes', async () => {

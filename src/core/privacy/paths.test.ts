@@ -88,7 +88,9 @@ describe('PrivacyPaths — what a local-only subtask wrote', () => {
     const policy = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }], { workspaceRoot: root });
     expect(PrivacyPaths.hasDerived(root)).toBe(false);
 
-    expect(policy.addDerived(['summary.md', 'secret/notes.md', 'odd [draft]*.md'])).toEqual(['summary.md', 'odd [draft]*.md']);
+    // Recorded even where a pattern covers it now: the pattern may go.
+    expect(policy.addDerived(['summary.md', 'secret/notes.md', 'odd [draft]*.md'])).toEqual(['summary.md', 'secret/notes.md', 'odd [draft]*.md']);
+    expect(policy.addDerived(['summary.md'])).toEqual([]);
     expect(policy.isLocalOnly('summary.md')).toBe(true);
     expect(policy.isLocalOnly('summary.md.bak')).toBe(false);
     expect(policy.coversFile(path.join(root, 'summary.md'), root)).toBe(true);
@@ -100,6 +102,7 @@ describe('PrivacyPaths — what a local-only subtask wrote', () => {
     expect(next.isLocalOnly('summary.md')).toBe(true);
     expect(next.isLocalOnly('odd [draft]*.md')).toBe(true);
     expect(next.isLocalOnly('odd d.md')).toBe(false);
+    expect(next.isLocalOnly('secret/notes.md'), 'with the pattern that covered it gone').toBe(true);
 
     // As patterns — for git — each names that one file and no other.
     const ignore = (await import('ignore')).default();
@@ -108,6 +111,9 @@ describe('PrivacyPaths — what a local-only subtask wrote', () => {
     expect(ignore.ignores('odd [draft]*.md')).toBe(true);
     expect(ignore.ignores('odd d.md')).toBe(false);
     expect(ignore.ignores('sub/summary.md')).toBe(false);
+    // A record made for a write that did not happen comes off, for good.
+    next.removeDerived(['odd [draft]*.md']);
+    expect(new PrivacyPaths([], { workspaceRoot: root }).isLocalOnly('odd [draft]*.md')).toBe(false);
     await fs.rm(root, { recursive: true, force: true });
   });
 });
