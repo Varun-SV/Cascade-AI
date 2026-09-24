@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────
 
 import type { ToolDefinition, ToolExecuteOptions } from '../types.js';
+import type { ProcessJail } from './jail/process-jail.js';
 
 export abstract class BaseTool {
   abstract readonly name: string;
@@ -23,6 +24,16 @@ export abstract class BaseTool {
 
   setPathGuard(guard: (absPath: string) => boolean): void {
     this.isProtectedPath = guard;
+  }
+
+  /**
+   * The jail a tool that runs real programs launches them in — set by the
+   * registry. Unset (a tool used outside one), programs run as they are.
+   */
+  protected jail?: ProcessJail;
+
+  setProcessJail(jail: ProcessJail): void {
+    this.jail = jail;
   }
 
   /**

@@ -48,6 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ran agent-written tools in a bare thread that confined nothing. A config
   that still names it gets the new WebAssembly sandbox, and Settings →
   Advanced offers `auto`, `wasm` and `isolate`.
+- **Commands no longer see provider keys in their environment.** `shell`,
+  `run_code` and `git` launch with the model and search providers' keys,
+  and any variable holding a configured secret, taken out. A project
+  script that needs one of them in a command it is asked to run no longer
+  gets it; `tools.processJail: "off"` restores the old behaviour.
 - **A workspace's `.cascadeignore` takes effect.** Nothing passed it to the
   tools, so it protected nothing. The template `cascade init` writes lists
   `node_modules/`, `dist/` and `build/`, so in such a workspace agents can
@@ -178,6 +183,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   media, `code_search` and MCP tools are refused to it; and a tool the
   agent wrote cannot `fetch` once it has read a local-only file. Local-only
   files are kept out of the code index and never sent for transcription.
+- **`shell`, `run_code` and `git` run in a process jail.** An approved
+  command could `cat .cascade/config.json`, read a local-only file, or read
+  Cascade's own environment from `/proc` — and approval can come from a
+  tier above rather than a person. On Linux they now run in bubblewrap:
+  Cascade's own files, the built-in secrets, `~/.cascade-ai` and local-only
+  paths (for a worker that is not local-only) are mounted over, each command
+  gets its own process namespace, and a local-only worker's commands get no
+  network. On macOS, `sandbox-exec` denies the same paths and, for a
+  local-only worker, outbound connections. Where neither works, a local-only
+  worker cannot run commands. `tools.processJail`: `auto` (default),
+  `bwrap`, `sandbox-exec` — that jailer or no commands — or `off`.
 - **A private model is one whose endpoint is private.** `forceLocal` chose
   any model marked `isLocal` — which means it costs $0 — so an
   OpenAI-compatible server on a public host configured with `local: true`,

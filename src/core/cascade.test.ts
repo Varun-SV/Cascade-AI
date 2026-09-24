@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Cascade, buildContextualPrompt } from './cascade.js';
+import { Cascade, buildContextualPrompt, secretValuesIn } from './cascade.js';
 import type { CascadeConfig, ConversationMessage } from '../types.js';
 import { ACTING_INTEGRITY_RULE } from './tiers/integrity.js';
 
@@ -904,5 +904,20 @@ describe('provider:exhausted reaches consumers', () => {
     expect(entry).toBeDefined();
     expect(entry!.detail).toContain('gemini:gemini-2.5-flash');
     expect(entry!.detail).toContain('azure:prod-gpt5');
+  });
+});
+
+describe('secretValuesIn — what the process jail keeps out of a command\'s environment', () => {
+  it('finds every credential by its field name, wherever it sits in the config', () => {
+    const found = secretValuesIn({
+      providers: [
+        { type: 'anthropic', apiKey: 'sk-ant-1' },
+        { type: 'azure', apiKey: 'az-2', baseUrl: 'https://x.openai.azure.com' },
+        { type: 'anthropic', authToken: 'oauth-3' },
+      ],
+      tools: { webSearch: { tavilyApiKey: 'tvly-4', searxngUrl: 'http://searx' }, remoteBrowser: { apiKey: 'steel-5' } },
+      models: { t1: 'claude-opus' },
+    });
+    expect(found.sort()).toEqual(['az-2', 'oauth-3', 'sk-ant-1', 'steel-5', 'tvly-4']);
   });
 });

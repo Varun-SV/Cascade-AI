@@ -2,6 +2,9 @@
 //  Cascade AI — Git Tool
 // ─────────────────────────────────────────────
 
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { simpleGit, type SimpleGit } from 'simple-git';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
@@ -29,12 +32,12 @@ export class GitTool extends BaseTool {
 
   isDangerous(): boolean { return true; }
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const operation = input['operation'] as string;
     const args = (input['args'] as string[] | undefined) ?? [];
     const cwd = (input['cwd'] as string | undefined) ?? this.workspaceRoot;
 
-    const git: SimpleGit = simpleGit(cwd);
+    const { git, done } = await this.gitFor(cwd, options.isOffline?.() === true);
 
     try {
       switch (operation) {
@@ -84,7 +87,30 @@ export class GitTool extends BaseTool {
       }
     } catch (err) {
       throw new Error(`git ${operation} failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      done();
     }
+  }
+
+  /**
+   * simple-git, launching git in the jail (jail/process-jail.ts). It spawns
+   * the binary it is given with git's arguments, so the jail is a one-line
+   * script that execs the jailer with git as its command — simple-git's own
+   * guards against unsafe arguments still apply. `done` removes the script.
+   */
+  private async gitFor(cwd: string, offline: boolean): Promise<{ git: SimpleGit; done: () => void }> {
+    if (!this.jail) return { git: simpleGit(cwd), done: () => {} };
+    const prepared = await this.jail.prepare('git', [], { cwd, offline });
+    if (!prepared.ok) throw new Error(prepared.reason);
+    const { launch } = prepared;
+    if (!launch.jail) return { git: simpleGit(cwd).env(launch.env), done: () => {} };
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-git-'));
+    const script = path.join(dir, 'git');
+    const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+    fs.writeFileSync(script, `#!/bin/sh\nexec ${[launch.file, ...launch.args].map(quote).join(' ')} "$@"\n`, { mode: 0o700 });
+    const git = simpleGit({ baseDir: cwd, binary: script, unsafe: { allowUnsafeCustomBinary: true } }).env(launch.env);
+    return { git, done: () => fs.rmSync(dir, { recursive: true, force: true }) };
   }
 
   private formatStatus(status: Awaited<ReturnType<SimpleGit['status']>>): string {

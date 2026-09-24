@@ -857,6 +857,13 @@ export interface ToolsConfig {
    */
   dynamicToolSandbox?: 'isolate' | 'wasm' | 'auto' | 'worker';
   /**
+   * Confinement for `shell`, `run_code` and `git`, on top of approvals: 'auto'
+   * (default) = bubblewrap on Linux or sandbox-exec on macOS where it works,
+   * else commands run with provider keys removed from their environment;
+   * 'bwrap' / 'sandbox-exec' = that jailer or no command at all; 'off' = none.
+   */
+  processJail?: 'auto' | 'bwrap' | 'sandbox-exec' | 'off';
+  /**
    * When set, ONLY these tool names are registered — every other built-in tool
    * (including shell/file/git, which have no other off-switch) is omitted
    * entirely rather than merely approval-gated. Built for embedding Cascade in

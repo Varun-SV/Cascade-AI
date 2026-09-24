@@ -16,30 +16,29 @@ deadline (`src/tools/sandbox/`). The bare
 worker fallback, which confined nothing, is gone; a config naming it gets the
 WebAssembly sandbox.
 
-**Still open — OS-level jail for real-process execution (own PR).** `shell`
-(`child_process.exec`, `src/tools/shell.ts`) and the `run_code` interpreter
-(real Python/Node, `src/tools/interpreter.ts`) remain approval-gated but
-unconfined at the OS level. A WASM/V8 isolate can't run those — they need real
-runtimes — so the jail is per-platform process confinement:
+**OS-level jail for real-process execution — ✅ shipped for Linux and macOS.**
+`shell`, `run_code` and `git` launch through `ProcessJail`
+(`src/tools/jail/process-jail.ts`, `tools.processJail: 'auto' | 'bwrap' |
+'sandbox-exec' | 'off'`), on top of approvals:
 
-- **Linux — bubblewrap (`bwrap`)**, first target. Unprivileged user-namespace
-  jail, no daemon, no setuid: bind the workspace read-write, `/` read-only,
-  tmpfs `/tmp`, no network by default (opt-in per approval). The command line
-  wraps the existing spawn, so the approval gate and allow/blocklists are
-  unchanged.
-- **macOS — `sandbox-exec`** Seatbelt profiles (deprecated-but-working; what
-  Bazel/Chromium use): a generated profile allowing workspace writes + read-only
-  system paths, network denied by default.
-- **Anywhere — Docker/Podman fallback** when a daemon is available: a slim
-  python+node image, workspace bind-mount, `--network=none` by default.
-  Heaviest but fully cross-platform.
-- **Windows — off-with-warning** initially (Job Objects/AppContainer are
-  hard mode; WSL2 + bwrap is the pragmatic route for developers who want it).
+- **Linux — bubblewrap.** The host filesystem as it is, with Cascade's own
+  files, the built-in secrets, `~/.cascade-ai` and — for a caller that is not
+  local-only — local-only paths mounted over; its own PID namespace, so no
+  other process's `/proc/<pid>/environ` is readable; `--unshare-net` for a
+  local-only caller. Not a read-only root: builds and package managers write
+  outside the workspace, and the aim is keeping secrets and private files out
+  of reach, not freezing the machine.
+- **macOS — sandbox-exec**, a generated profile denying the same paths and,
+  for a local-only caller, outbound connections. Checked at startup with a
+  profile of the same shape; not exercised in CI.
+- **Everywhere** — provider keys are taken out of every command's
+  environment. With no jailer, `auto` runs commands that way and refuses them
+  to a local-only caller.
 
-Config sketch: `tools.processJail: 'auto' | 'bwrap' | 'sandbox-exec' |
-'docker' | 'off'` — `auto` probes for an available jailer at startup and logs
-which one is active; `off` keeps today's behavior. The jail is confinement ON
-TOP of approvals, never a replacement for them.
+**Still open:** Windows (Job Objects/AppContainer, or WSL2 + bubblewrap), and
+a Docker/Podman fallback where no jailer works. On macOS a command can still
+read another same-user process's startup environment; Linux's PID namespace
+closes that there.
 
 ## Project knowledge graph (world-state v2) — ✅ shipped in v0.14.0
 

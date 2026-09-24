@@ -2,12 +2,13 @@
 //  Cascade AI — Shell Tool
 // ─────────────────────────────────────────────
 
-import { exec } from 'node:child_process';
+import { exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export class ShellTool extends BaseTool {
   readonly name = 'shell';
@@ -42,11 +43,22 @@ export class ShellTool extends BaseTool {
 
     this.validateCommand(command);
 
+    // `sh -c` is what exec runs on POSIX; spelled out, it can be launched in
+    // the jail. Windows has no jail, and keeps exec with a scrubbed environment.
+    const posix = process.platform !== 'win32';
+    const prepared = this.jail
+      ? await this.jail.prepare(posix ? '/bin/sh' : command, posix ? ['-c', command] : [], { cwd, offline: options.isOffline?.() === true })
+      : undefined;
+    if (prepared && !prepared.ok) throw new Error(prepared.reason);
+    const launch = prepared?.launch;
+
     try {
       // windowsHide: prevent a console window flash per command on Windows.
       // Output is piped (exec default), never inherited — it cannot write
       // over the live TUI.
-      const { stdout, stderr } = await execAsync(command, { cwd, timeout, windowsHide: true });
+      const { stdout, stderr } = launch && posix
+        ? await execFileAsync(launch.file, launch.args, { cwd: launch.cwd, env: launch.env, timeout, windowsHide: true })
+        : await execAsync(command, { cwd, timeout, windowsHide: true, ...(launch ? { env: launch.env } : {}) });
       const out = [stdout, stderr].filter(Boolean).join('\n').trim();
       return out || '(no output)';
     } catch (err) {

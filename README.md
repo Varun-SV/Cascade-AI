@@ -822,7 +822,8 @@ Cascade also has an encrypted keystore — the OS keychain (macOS Keychain, Wind
 - **Permission escalation** — a worker that needs more than it was given asks up the chain, T3 → T2 → T1 → you.
 - **SSRF-guarded fetching** — `web_fetch`, dynamic tools and hosted search backends cannot reach private or link-local addresses, checked again at connect time.
 - **Secret redaction** — secrets and PII are stripped from a worker's output before it travels up the hierarchy.
-- **Privacy paths** — `privacy.paths` keeps sensitive folders on private models: ones whose endpoint is on this machine or your private network, whatever their pricing says. A worker whose assignment names a matching path runs on one from the start. One that reads a matching file on the way — with `file_read`, `grep` or `image_analyze` — moves to one at that moment, before what it read reaches any model, or is refused the read when no private model is configured. Either way its output is withheld from the tiers above, and nothing it knows leaves the machine through Cascade's tools: it cannot message its peers or ask for more workers, the tools that send their arguments elsewhere are refused to it — web and browser, GitHub, media generation and transcription, `code_search`, MCP — and a tool the agent wrote cannot `fetch` once it has read such a file. Local-only files are never put in the code index or shown to its reranker. `shell`, `run_code` and `git` are not checked: they ask for approval, and an OS-level jail for them is on the [Roadmap](#roadmap).
+- **Privacy paths** — `privacy.paths` keeps sensitive folders on private models: ones whose endpoint is on this machine or your private network, whatever their pricing says. A worker whose assignment names a matching path runs on one from the start. One that reads a matching file on the way — with `file_read`, `grep` or `image_analyze` — moves to one at that moment, before what it read reaches any model, or is refused the read when no private model is configured. Either way its output is withheld from the tiers above, and nothing it knows leaves the machine through Cascade's tools: it cannot message its peers or ask for more workers, the tools that send their arguments elsewhere are refused to it — web and browser, GitHub, media generation and transcription, `code_search`, MCP — and a tool the agent wrote cannot `fetch` once it has read such a file. Local-only files are never put in the code index or shown to its reranker. `shell`, `run_code` and `git` run in the process jail below, which hides local-only paths from a worker that is not local-only, and cuts the network for one that is.
+- **Process jail** — `shell`, `run_code` and `git` run in bubblewrap on Linux, or `sandbox-exec` on macOS, wherever it works. Cascade's own files, the built-in secrets, `~/.cascade-ai` and — for a worker that is not local-only — local-only paths are hidden from them; each command gets its own process namespace, so Cascade's environment is not there to read; and a local-only worker's commands have no network. Every command's environment has the provider keys taken out. Without a jailer — Windows, or a Linux where bubblewrap is missing or cannot create user namespaces — commands run with the keys taken out and nothing hidden, and a local-only worker cannot run them. Set `tools.processJail` to `bwrap` or `sandbox-exec` to require one, or to `off` for neither jail nor scrubbing.
 - **Hash-chained audit log** — entries are encrypted and chained with SHA-256; `/audit` checks the chain. That catches an edited or removed entry in the middle, but not a removed tail, a chain recomputed by someone with write access, or a deleted database: the chain has no key and no anchor outside the log.
 - **Budget kill-switch** — a run stops at its token budget, and `/continue` resumes it with a raised one. A session spending cap set with `/budget set` stops runs too; `/continue` does not lift it, so raise it or `/budget clear` first.
 
@@ -836,7 +837,7 @@ Always protected, whatever `.cascadeignore` says — a `!` line cannot undo thes
 - `.env`, `.env.*`
 - `*.pem`, `*.key`, `id_rsa`, `id_ed25519`
 
-The file and the built-ins apply to every file, search and listing tool (`file_*`, `grep`, `glob`, `image_analyze`, …), to the code index and `code_search`, and to paths reached through a symlink. `shell`, `run_code` and `git` can still read any file once you approve them.
+The file and the built-ins apply to every file, search and listing tool (`file_*`, `grep`, `glob`, `image_analyze`, …), to the code index and `code_search`, and to paths reached through a symlink. The [process jail](#what-else-keeps-a-run-contained) hides the built-ins from `shell`, `run_code` and `git` too, but not `.cascadeignore`'s own entries: that list commonly names `node_modules/` and `dist/`, which builds and tests have to read.
 
 ### Approval prompts
 
@@ -944,6 +945,7 @@ web/                    Local dashboard SPA (ReactFlow agent graph)
 | ✓ | Project knowledge graph (world-state v2) — queryable facts T1 plans from; `knowledge_graph_search` (v0.14) |
 | ✓ | Hard sandbox for agent-written tools — a V8 isolate via the optional `isolated-vm` addon (v0.14), and a WebAssembly sandbox on every install, so they never run unconfined |
 | ✓ | `.cascadeignore` enforced for every file and search tool and the code index, with Cascade's own files — `.cascade/config.json` among them — always protected |
+| ✓ | Process jail for `shell`, `run_code` and `git` — bubblewrap on Linux, sandbox-exec on macOS — on top of approvals |
 | ✓ | Cascade Cloud (hosted chat — GitHub/Google login, bring-your-own-key, [cascadeai.in](https://cascadeai.in)) |
 | ✓ | Cascade Cloud billing — Razorpay subscriptions, Free and Pro plans |
 | ✓ | Desktop app — chat, Cockpit, code editor + terminal, browser; downloads from the site |
@@ -964,7 +966,7 @@ web/                    Local dashboard SPA (ReactFlow agent graph)
 | 🔜 | Provider keys in the encrypted keystore — it exists but runs do not use it; keys are written as plain JSON |
 | 🔜 | A tamper-evident audit log — a keyed or externally anchored chain head, so a truncated or rewritten log fails verification |
 | 🔜 | Task-completion notifications and webhooks (Slack / Discord / custom URL) — a `NotificationManager` exists but nothing sends through it |
-| 🔜 | OS-level jail for `shell` and `run_code` — bubblewrap / sandbox-exec / Docker, on top of approvals — see [docs/ROADMAP.md](docs/ROADMAP.md) |
+| 🔜 | The process jail on Windows, and a Docker fallback where no jailer works — see [docs/ROADMAP.md](docs/ROADMAP.md) |
 | 🔜 | Cross-session history research — a prior-work brief before T1 plans — see [docs/ROADMAP.md](docs/ROADMAP.md) |
 | 🔜 | VSCode extension (`cascade-vscode`) — see [docs/ROADMAP.md](docs/ROADMAP.md) |
 | 🔜 | JetBrains extension (`cascade-jetbrains`) — see [docs/ROADMAP.md](docs/ROADMAP.md) |

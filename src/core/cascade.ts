@@ -253,6 +253,16 @@ export class Cascade extends EventEmitter {
     const privacyPolicies = this.config.privacy?.paths ?? [];
     if (privacyPolicies.length) this.router.setPrivacyPaths(new PrivacyPaths(privacyPolicies));
 
+    // The process jail (tools/jail/process-jail.ts) hides local-only paths
+    // from commands, and keeps every configured secret out of their
+    // environment — read when a command launches, so a key added in Settings
+    // mid-session is covered too.
+    this.toolRegistry.setPrivacyPaths(this.router.getPrivacyPaths());
+    this.toolRegistry.setSecretValues(() => secretValuesIn(this.config));
+    this.toolRegistry.on('log', (message: string) => {
+      if (this.listenerCount('log') > 0) this.emit('log', { level: 'warn', message });
+    });
+
     // Live steering: user guidance injected mid-run reaches T3 agent loops
     // through this queue (carried on the router like the world-state DB).
     this.guidanceQueue = new GuidanceQueue();
@@ -2828,3 +2838,26 @@ ${prompt}`
     } catch { /* non-critical */ }
   }
 }
+
+/**
+ * Every credential in a config — provider keys and tokens, search and
+ * browser keys — found by field name wherever it sits, so a new provider's
+ * key is covered without being listed here.
+ */
+export function secretValuesIn(config: unknown): string[] {
+  const out: string[] = [];
+  const walk = (value: unknown, key: string, depth: number): void => {
+    if (depth > 6 || value == null) return;
+    if (typeof value === 'string') {
+      if (/(api_?key|auth_?token|secret|password|token)$/i.test(key)) out.push(value);
+      return;
+    }
+    if (Array.isArray(value)) { for (const item of value) walk(item, key, depth + 1); return; }
+    if (typeof value === 'object') {
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) walk(v, k, depth + 1);
+    }
+  };
+  walk(config, '', 0);
+  return out;
+}
+

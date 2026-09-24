@@ -135,6 +135,18 @@ export const ToolsConfigSchema = z.object({
     .transform((mode) => (mode === 'worker' ? 'wasm' : mode))
     .default('auto'),
   /**
+   * Confinement for `shell`, `run_code` and `git`, on top of approvals. The
+   * jail hides Cascade's own files, the built-in secrets and — from a caller
+   * that is not local-only — local-only paths; gives each command its own
+   * process namespace; and cuts the network for a local-only caller.
+   * - 'auto' (default): bubblewrap on Linux, sandbox-exec on macOS, where it
+   *   works; elsewhere commands run with provider keys removed from their
+   *   environment, and a local-only caller cannot run them.
+   * - 'bwrap' / 'sandbox-exec': that jailer, or no commands.
+   * - 'off': no jail and no scrubbing.
+   */
+  processJail: z.enum(['auto', 'bwrap', 'sandbox-exec', 'off']).default('auto'),
+  /**
    * When set, ONLY these tool names are registered — the sole way to omit a
    * built-in tool (shell/file/git/…) from existing at all, rather than just
    * gating it behind approval. Omitted = full default set (unchanged).

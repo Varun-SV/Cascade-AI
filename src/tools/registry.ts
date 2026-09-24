@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────
 
 import EventEmitter from 'node:events';
+import os from 'node:os';
 import path from 'node:path';
 import ignoreFactory, { type Ignore } from 'ignore';
 
@@ -13,7 +14,9 @@ const ignore: (opts?: unknown) => Ignore =
   (ignoreFactory as unknown as { default?: (opts?: unknown) => Ignore }).default ??
   (ignoreFactory as unknown as (opts?: unknown) => Ignore);
 import type { ToolDefinition, ToolExecuteOptions, ToolsConfig } from '../types.js';
-import { DEFAULT_APPROVAL_REQUIRED } from '../constants.js';
+import { DEFAULT_APPROVAL_REQUIRED, GLOBAL_CONFIG_DIR } from '../constants.js';
+import type { PrivacyPaths } from '../core/privacy/paths.js';
+import { ProcessJail } from './jail/process-jail.js';
 import { BUILT_IN_PROTECTED } from '../config/ignore.js';
 import { realPathOf } from '../utils/real-path.js';
 import type { BaseTool } from './base.js';
@@ -97,16 +100,44 @@ export class ToolRegistry extends EventEmitter {
   private workspaceRoot: string;
   /** Loaded plugins, keyed by plugin name */
   private plugins: Map<string, ToolPlugin> = new Map();
+  /** The workspace's privacy policies, for the jail to hide local-only paths by. */
+  private privacyPaths?: PrivacyPaths;
+  /** Every configured secret value, for the jail to keep out of a command's environment. */
+  private secretValues: () => string[] = () => [];
+  /** Where shell, run_code and git launch what they run. */
+  private readonly processJail: ProcessJail;
 
   constructor(config: ToolsConfig, workspaceRoot: string = process.cwd()) {
     super();
     this.config = config;
     this.workspaceRoot = workspaceRoot;
+    this.processJail = new ProcessJail({
+      mode: config.processJail ?? 'auto',
+      workspaceRoot,
+      // The built-ins only: a workspace's .cascadeignore commonly lists the
+      // build directories commands have to read.
+      isProtected: (rel) => this.builtInMatcher.ignores(rel),
+      isLocalOnly: (rel) => !!this.privacyPaths?.isLocalOnly(rel),
+      hiddenDirs: [path.join(os.homedir(), GLOBAL_CONFIG_DIR)],
+      secretValues: () => this.secretValues(),
+      log: (msg) => { this.emit('log', msg); },
+    });
     this.registerDefaults();
+  }
+
+  /** The privacy policies the process jail hides local-only paths by. */
+  setPrivacyPaths(paths: PrivacyPaths | undefined): void {
+    this.privacyPaths = paths;
+  }
+
+  /** Where the configured secrets are read from when a command is launched. */
+  setSecretValues(read: () => string[]): void {
+    this.secretValues = read;
   }
 
   register(tool: BaseTool): void {
     tool.setPathGuard((absPath) => this.isProtected(absPath));
+    tool.setProcessJail(this.processJail);
     this.tools.set(tool.name, tool);
     this.emit('tool:added', tool.name);
   }
