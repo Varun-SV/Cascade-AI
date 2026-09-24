@@ -86,7 +86,8 @@ const PATH_TOOLS = new Set([
  * page or search engine, GitHub, a media or transcription provider, or the
  * embedder and reranker behind the code index. A local-only subtask may not
  * use them: its arguments can carry what it read. MCP and plugin tools count
- * too; where one sends things is not known here.
+ * too, and so does any tool registered from outside that does not say it
+ * keeps to the machine (`BaseTool.localOnlySafe`).
  */
 const OFF_MACHINE_TOOLS = new Set([
   'web_fetch', 'web_search', 'browser', 'browser_control', 'github',
@@ -114,6 +115,8 @@ export class ToolRegistry extends EventEmitter {
    * arguments is not known here, so a local-only subtask may not call one.
    */
   private readonly pluginTools = new Set<string>();
+  /** The built-ins registerDefaults made: what each does with its arguments is known here. */
+  private readonly builtIns = new WeakSet<BaseTool>();
   /** The workspace's privacy policies, for the jail to hide local-only paths by. */
   private privacyPaths?: PrivacyPaths;
   /** Every configured secret value, for the jail to keep out of a command's environment. */
@@ -326,7 +329,7 @@ export class ToolRegistry extends EventEmitter {
     const tool = this.tools.get(toolName);
     if (!tool) throw new Error(`Tool not found: ${toolName}`);
 
-    if (options.isOffline?.() && (OFF_MACHINE_TOOLS.has(toolName) || tool instanceof McpToolWrapper || this.pluginTools.has(toolName))) {
+    if (options.isOffline?.() && !this.keepsToMachine(toolName, tool)) {
       throw new Error(`${toolName} is unavailable to a local-only subtask (privacy.paths): it would send what the subtask knows off this machine.`);
     }
 
@@ -355,6 +358,18 @@ export class ToolRegistry extends EventEmitter {
     } finally {
       leave();
     }
+  }
+
+  /**
+   * Whether a local-only subtask may call this tool: one of the built-ins
+   * that keep what they are given on this machine, or a tool that says it
+   * does — never an MCP or plugin tool, whose server or author decides where
+   * its arguments go. An agent-written tool reaches out only through
+   * `fetch`, which it asks about when it sends.
+   */
+  private keepsToMachine(name: string, tool: BaseTool): boolean {
+    if (OFF_MACHINE_TOOLS.has(name) || tool instanceof McpToolWrapper || this.pluginTools.has(name)) return false;
+    return this.builtIns.has(tool) || tool.localOnlySafe || tool.delegatesToTools;
   }
 
   /**
@@ -416,12 +431,14 @@ export class ToolRegistry extends EventEmitter {
     for (const tool of tools) {
       tool.setWorkspaceRoot(this.workspaceRoot);
       this.register(tool);
+      this.builtIns.add(tool);
     }
 
     if (this.config.browserEnabled && enabled('browser')) {
       const browser = new BrowserTool();
       browser.setWorkspaceRoot(this.workspaceRoot);
       this.register(browser);
+      this.builtIns.add(browser);
     }
   }
 

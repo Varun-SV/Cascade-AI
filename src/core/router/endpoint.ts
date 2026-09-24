@@ -30,5 +30,9 @@ export function providerConfigFor(model: ModelInfo, configs: ProviderConfig[]): 
 export function isPrivateEndpoint(model: ModelInfo, configs: ProviderConfig[]): boolean {
   if (model.provider !== 'ollama' && model.provider !== 'openai-compatible') return false;
   const cfg = providerConfigFor(model, configs);
+  // An address the name alone cannot prove private — a bare LAN name like
+  // `ollama` in a compose file, or one a private DNS zone serves — is
+  // declared so by the user.
+  if (cfg.privateNetwork === true) return true;
   return isLoopbackOrPrivateHost(cfg.baseUrl ?? (model.provider === 'ollama' ? OLLAMA_BASE_URL : undefined));
 }

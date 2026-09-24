@@ -733,8 +733,8 @@ export class T3Worker extends BaseTier {
         }
       }
 
-      this.setStatus('COMPLETED', output);
-      this.sendStatusUpdate({ progressPct: 100, currentAction: 'Subtask complete', status: 'IN_PROGRESS', output });
+      this.setStatus('COMPLETED', this.shareable(output, 'COMPLETED'));
+      this.sendStatusUpdate({ progressPct: 100, currentAction: 'Subtask complete', status: 'IN_PROGRESS', output: this.shareable(output, 'COMPLETED') });
 
       // ── Publish success to peers ─────────────
       this.publishOutcome(assignment.subtaskId, output, 'COMPLETED');
@@ -748,14 +748,14 @@ export class T3Worker extends BaseTier {
       if (err instanceof WorkerStallError) {
         issues.push(`Stalled: ${errMsg}`);
         const finalOutput = err.partialOutput || output || errMsg;
-        this.setStatus('FAILED', finalOutput);
+        this.setStatus('FAILED', this.shareable(finalOutput, 'FAILED'));
         this.publishOutcome(assignment.subtaskId, finalOutput, 'FAILED');
         return this.buildResult('ESCALATED', finalOutput, { checksRun, passed, failed }, issues, correctionAttempts);
       }
       if (err instanceof CriticalToolError) {
         issues.push(`[CRITICAL_TOOL_ERROR] ${err.toolName}: ${errMsg}`);
         const finalOutput = output || `Tool "${err.toolName}" failed unrecoverably: ${errMsg}`;
-        this.setStatus('FAILED', finalOutput);
+        this.setStatus('FAILED', this.shareable(finalOutput, 'FAILED'));
         this.publishOutcome(assignment.subtaskId, finalOutput, 'FAILED');
         return this.buildResult('ESCALATED', finalOutput, { checksRun, passed, failed }, issues, correctionAttempts);
       }
@@ -767,13 +767,13 @@ export class T3Worker extends BaseTier {
       if (err instanceof Error && err.name === 'BudgetExceededError') {
         issues.push(errMsg);
         const stopped = output || errMsg;
-        this.setStatus('FAILED', stopped);
+        this.setStatus('FAILED', this.shareable(stopped, 'FAILED'));
         this.publishOutcome(assignment.subtaskId, stopped, 'FAILED');
         return this.buildResult('FAILED', stopped, { checksRun, passed, failed }, issues, correctionAttempts);
       }
       issues.push(`Execution error: ${errMsg}`);
       const finalOutput = output || errMsg;
-      this.setStatus('FAILED', finalOutput);
+      this.setStatus('FAILED', this.shareable(finalOutput, 'FAILED'));
       this.publishOutcome(assignment.subtaskId, finalOutput, 'FAILED');
       return this.buildResult('ESCALATED', finalOutput, { checksRun, passed, failed }, issues, correctionAttempts);
     } finally {
@@ -819,14 +819,22 @@ export class T3Worker extends BaseTier {
   /**
    * Tell the siblings how this subtask ended. A dependent sibling puts what
    * arrives here into its own context, and may be on a cloud model — so a
-   * local-only subtask publishes only that it ran, the same line the tiers
-   * above get at the T3→T2 boundary.
+   * local-only subtask publishes only that it ran.
    */
   private publishOutcome(subtaskId: string, output: string, status: 'COMPLETED' | 'FAILED' | 'ESCALATED'): void {
-    const shared = this.localOnlyMatch
+    this.peerBus?.publish(this.id, subtaskId, this.shareable(output, status), status);
+  }
+
+  /**
+   * What this subtask's output may be shown as outside it — to siblings, and
+   * in the status, stream and tool events that reach the dashboard, its
+   * socket clients and the audit log: for a local-only subtask, only that it
+   * ran, the line the tiers above get at the T3→T2 boundary.
+   */
+  private shareable(output: string, status: string): string {
+    return this.localOnlyMatch
       ? `[local-only path — output withheld by privacy policy; status: ${status}]`
       : output;
-    this.peerBus?.publish(this.id, subtaskId, shared, status);
   }
 
   async requestFromPeer(peerId: string, subtaskId: string): Promise<string> {
@@ -977,7 +985,8 @@ export class T3Worker extends BaseTier {
         'T3',
         options,
         (chunk) => {
-          this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: this.isPresenter });
+          // A local-only subtask's words stay out of the event stream.
+          if (!this.localOnlyMatch) this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: this.isPresenter });
         },
       );
 
@@ -1177,7 +1186,7 @@ export class T3Worker extends BaseTier {
       });
     }
 
-    this.emit('tool:call', { id: tc.id, tierId: this.id, toolName: tc.name, input: tc.input });
+    this.emit('tool:call', { id: tc.id, tierId: this.id, toolName: tc.name, input: this.localOnlyMatch ? {} : tc.input });
     const toolStartMs = Date.now();
 
     try {
@@ -1213,12 +1222,12 @@ export class T3Worker extends BaseTier {
         }
       }
       const durationMs = Date.now() - toolStartMs;
-      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: tc.name, output: typeof result === 'string' ? result : JSON.stringify(result), durationMs });
+      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: tc.name, output: this.shareable(typeof result === 'string' ? result : JSON.stringify(result), 'tool result'), durationMs });
       return typeof result === 'string' ? result : JSON.stringify(result);
     } catch (err) {
       const durationMs = Date.now() - toolStartMs;
       const errMsg = err instanceof Error ? err.message : String(err);
-      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: tc.name, error: errMsg, durationMs });
+      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: tc.name, error: this.shareable(errMsg, 'tool error'), durationMs });
       // Unrecoverable/systemic conditions (rate-limit, auth, quota, AND a 404
       // "model not found" — the shared classifier this reuses is the same one
       // `router/index.ts` uses for chat-tier failover, so a dead image model
@@ -1644,7 +1653,7 @@ Is this output sufficient and correct? Respond with ONLY a JSON object:
           break; // sufficient
         }
 
-        this.log(`T2-Critic rejected output: ${parsed.notes}`);
+        this.log(this.localOnlyMatch ? 'T2-Critic rejected output (notes withheld: local-only subtask).' : `T2-Critic rejected output: ${parsed.notes}`);
         
         const improved = await this.generateTracked('T3', {
           messages: [{

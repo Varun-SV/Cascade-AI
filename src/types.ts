@@ -92,6 +92,13 @@ export interface ProviderConfig {
    */
   local?: boolean;
   /**
+   * "This endpoint is on my machine or my private network", for one whose
+   * address cannot show it (a bare name like `ollama`, a private DNS zone). A
+   * local-only subtask may then run on it. See `isPrivateEndpoint` in
+   * core/router/endpoint.ts.
+   */
+  privateNetwork?: boolean;
+  /**
    * Deployment region for providers whose price varies by region (Azure lists
    * different rates for `global`, `us` and `eu` deployments of the same model).
    * Matched against the pricing dataset's per-region entries.

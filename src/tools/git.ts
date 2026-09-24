@@ -2,6 +2,7 @@
 //  Cascade AI — Git Tool
 // ─────────────────────────────────────────────
 
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -118,12 +119,15 @@ export class GitTool extends BaseTool {
   private async gitFor(cwd: string, offline: boolean): Promise<{ git: SimpleGit; done: () => Promise<void> }> {
     const plain = { git: simpleGit(cwd), done: async () => {} };
     if (!this.jail) return plain;
-    const prepared = await this.jail.prepare('git', [], { cwd, offline, keepGit: true });
+    const hermetic = process.platform !== 'win32' && await this.jail.gitStoreHidden(offline)
+      ? await hermeticSettings(cwd)
+      : undefined;
+    const prepared = await this.jail.prepare('git', hermetic?.args ?? [], { cwd, offline, keepGit: true });
     if (!prepared.ok) throw new Error(prepared.reason);
     const { launch } = prepared;
     if (process.platform === 'win32') return { git: gitWithEnv(cwd, launch.env), done: async () => { await launch.done?.(); } };
     const unset = Object.keys(process.env).filter((name) => !(name in launch.env) && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name));
-    if (!launch.jail && unset.length === 0) return plain;
+    if (!launch.jail && unset.length === 0 && !hermetic) return plain;
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-git-'));
     const script = path.join(dir, 'git');
@@ -131,6 +135,7 @@ export class GitTool extends BaseTool {
     fs.writeFileSync(script, [
       '#!/bin/sh',
       ...(unset.length ? [`unset ${unset.join(' ')}`] : []),
+      ...Object.entries(hermetic?.env ?? {}).map(([name, value]) => `export ${name}=${quote(value)}`),
       `exec ${[launch.file, ...launch.args].map(quote).join(' ')} "$@"`,
       '',
     ].join('\n'), { mode: 0o700 });
@@ -154,6 +159,44 @@ export class GitTool extends BaseTool {
     if (status.conflicted.length) lines.push(`Conflicts: ${status.conflicted.join(', ')}`);
     return lines.join('\n') || 'Working tree clean';
   }
+}
+
+/**
+ * How git runs where its store holds what commands may not see. The tool
+ * keeps that store in view, and so does every program git starts — a hook,
+ * a filter, a pager, an ssh ProxyCommand — with the network there. So git
+ * runs only what the repository's own configuration names, which sits in
+ * the store the commands cannot reach: no hooks, and none of the global or
+ * system git configuration, global attributes or ssh configuration, which
+ * a command can rewrite. The name and email in them carry over; they are
+ * words, not programs.
+ */
+async function hermeticSettings(cwd: string): Promise<{ args: string[]; env: Record<string, string> }> {
+  const args = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.attributesFile=/dev/null', '-c', 'core.fsmonitor=false'];
+  for (const key of ['user.name', 'user.email']) {
+    if (await gitConfigValue(cwd, ['--local', '--get', key])) continue;
+    const value = await gitConfigValue(cwd, ['--get', key]);
+    if (value) args.push('-c', `${key}=${value}`);
+  }
+  return {
+    args,
+    env: {
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_ATTR_NOSYSTEM: '1',
+      // Cascade's own environment is not a command's to change; ~/.ssh/config is.
+      GIT_SSH_COMMAND: process.env['GIT_SSH_COMMAND'] ?? 'ssh -F /dev/null',
+    },
+  };
+}
+
+/** One `git config` value in `cwd`, or '' when there is none. */
+function gitConfigValue(cwd: string, args: string[]): Promise<string> {
+  return new Promise((resolve) => {
+    execFile('git', ['-C', cwd, 'config', ...args], { timeout: 5_000, windowsHide: true }, (err, stdout) => {
+      resolve(err ? '' : stdout.trim());
+    });
+  });
 }
 
 /**

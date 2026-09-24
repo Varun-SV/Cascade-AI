@@ -336,7 +336,10 @@ export function isLoopbackOrPrivateHost(url?: string): boolean {
     if (/^10\./.test(host)) return true;
     if (/^192\.168\./.test(host)) return true;
     if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true;
-    return isIP(host) === 0 && !host.includes('.');
+    // Not a bare name like `ollama` either: a resolver's search domain or a
+    // hosts entry can take it anywhere. Such an endpoint is declared private
+    // with `privateNetwork: true` (router/endpoint.ts).
+    return false;
   } catch {
     return false;
   }

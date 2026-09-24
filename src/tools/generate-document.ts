@@ -42,6 +42,8 @@ const SOURCE_HINT: Record<DocumentFormat, string> = {
 
 export class GenerateDocumentTool extends BaseTool {
   readonly name = 'generate_document';
+  // Keeps what it is given on this machine: a local-only subtask may call it.
+  override readonly localOnlySafe = true;
   readonly description =
     'Create a REAL Microsoft Office file (.docx Word, .pptx PowerPoint, .xlsx Excel) in the workspace. '
     + 'You write the SOURCE and this tool renders the actual binary: Markdown for .docx, Markdown slides '

@@ -6,6 +6,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import * as _ignoreModule from 'ignore';
 import type { Ignore } from 'ignore';
+import { LinkAliases } from '../utils/link-aliases.js';
 // ignore is a CJS package — access .default under NodeNext ESM interop
 const ignore = (_ignoreModule as unknown as { default: () => Ignore }).default ?? (_ignoreModule as unknown as () => Ignore);
 
@@ -48,6 +49,8 @@ export class CascadeIgnore {
   // TypeError. What the caller wants is what we put in, and we know that
   // without asking the library.
   private readonly patterns: string[] = [];
+  /** Other names — hard links — for the files matched, per workspace asked about. */
+  private readonly aliases = new Map<string, LinkAliases>();
 
   constructor() {
     this.ig = ignore();
@@ -57,6 +60,7 @@ export class CascadeIgnore {
   private add(patterns: string[]): void {
     this.patterns.push(...patterns);
     this.ig.add(patterns);
+    this.aliases.clear();
   }
 
   async load(workspacePath: string): Promise<void> {
@@ -80,7 +84,16 @@ export class CascadeIgnore {
       // separators itself, but only by sniffing the platform; the registry
       // hands it POSIX paths explicitly, and so does this.
       const relative = native.split(path.sep).join('/');
-      return this.builtIn.ignores(relative) || this.ig.ignores(relative);
+      if (this.builtIn.ignores(relative) || this.ig.ignores(relative)) return true;
+      // A hard link to a matched file is that file under another name — the
+      // code index would otherwise read `.env` as `src/config.ts`.
+      if (!workspacePath) return false;
+      let aliases = this.aliases.get(workspacePath);
+      if (!aliases) {
+        aliases = new LinkAliases(workspacePath, (rel) => this.builtIn.ignores(rel) || this.ig.ignores(rel));
+        this.aliases.set(workspacePath, aliases);
+      }
+      return aliases.isAlias(path.isAbsolute(filePath) ? filePath : path.join(workspacePath, filePath));
     } catch {
       return false;
     }

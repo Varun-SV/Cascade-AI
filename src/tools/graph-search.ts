@@ -16,6 +16,8 @@ const MAX_CHARS = 8_000;
  */
 export class GraphSearchTool extends BaseTool {
   readonly name = 'knowledge_graph_search';
+  // Keeps what it is given on this machine: a local-only subtask may call it.
+  override readonly localOnlySafe = true;
   readonly description =
     'Search the project knowledge graph (learned entity→relation→value facts) for information related to a query, expanding a couple of hops across relationships. Use for relational or multi-hop questions about the project.';
   readonly inputSchema = {

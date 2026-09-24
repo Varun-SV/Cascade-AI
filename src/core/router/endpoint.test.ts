@@ -43,13 +43,24 @@ describe('isPrivateEndpoint — the private networks there are', () => {
 
   // An Ollama on one of these counted as private before, through isLocal;
   // judged by host, IPv6 and LAN names were left out.
-  it('counts IPv6 unique-local and link-local addresses, IPv4 carried in IPv6, and single-label LAN names', () => {
+  it('counts IPv6 unique-local and link-local addresses, and IPv4 carried in IPv6', () => {
     expect(at('http://[fd00::1]:11434')).toBe(true);
     expect(at('http://[fc12:3456::9]:11434')).toBe(true);
     expect(at('http://[fe80::1]:11434')).toBe(true);
     expect(at('http://[::ffff:10.0.0.7]:11434')).toBe(true);
     expect(at('http://[::1]:11434')).toBe(true);
-    expect(at('http://gpu-box:11434')).toBe(true);
+  });
+
+  // A bare name is only as private as whatever resolves it: a resolver's
+  // search domain or a hosts entry can send `gpu-box` to a public address,
+  // and local-only files with it.
+  it('counts a bare name only when the provider is declared on a private network', () => {
+    expect(at('http://gpu-box:11434')).toBe(false);
+    expect(at('http://ollama:11434')).toBe(false);
+    expect(isPrivateEndpoint(model('ollama', true), [{ type: 'ollama', baseUrl: 'http://ollama:11434', privateNetwork: true }])).toBe(true);
+    expect(isPrivateEndpoint(model('openai-compatible', true), [{ type: 'openai-compatible', baseUrl: 'http://vllm:8000/v1', privateNetwork: true }])).toBe(true);
+    // Not a key to the cloud providers.
+    expect(isPrivateEndpoint(model('openai', false), [{ type: 'openai', privateNetwork: true }])).toBe(false);
   });
 
   it('still does not count a public address or name', () => {

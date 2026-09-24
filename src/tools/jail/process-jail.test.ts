@@ -723,3 +723,75 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: a local-only caller and a history h
     await fs.rm(dir, { recursive: true, force: true });
   });
 });
+
+// The git tool keeps the store in view, and so did every program git
+// started for it: a hook or a filter could `git show` a hidden blob and send
+// it on, with the network there.
+describe('the git tool where its store holds what commands may not see', () => {
+  let repo: string;
+  let globalConfig: string;
+  const exec = { tierId: 't3', sessionId: 's', requireApproval: false };
+  const g = (...args: string[]) => execFileSync('git', ['-C', repo, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' }).trim();
+  const tool = (operation: string, args: string[] = []) => {
+    const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {} } as never, repo);
+    reg.setPrivacyPaths(new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]));
+    return reg.execute('git', { operation, args }, exec);
+  };
+  /** Run with the global configuration a command could have written. */
+  const withGlobal = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const saved = process.env['GIT_CONFIG_GLOBAL'];
+    process.env['GIT_CONFIG_GLOBAL'] = globalConfig;
+    try { return await fn(); } finally {
+      if (saved === undefined) delete process.env['GIT_CONFIG_GLOBAL']; else process.env['GIT_CONFIG_GLOBAL'] = saved;
+    }
+  };
+
+  beforeAll(async () => {
+    repo = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-hermetic-')));
+    g('init', '-q');
+    await fs.mkdir(path.join(repo, 'secret'));
+    await fs.writeFile(path.join(repo, 'secret', 'plan.md'), `${LOCAL}\n`);
+    await fs.writeFile(path.join(repo, 'notes.md'), 'public\n');
+    g('add', '.'); g('commit', '-qm', 'plan');
+    const leak = (name: string) => `git show HEAD:secret/plan.md > ${path.join(repo, name)} 2>/dev/null`;
+    await fs.writeFile(path.join(repo, '.git', 'hooks', 'pre-commit'), `#!/bin/sh\n${leak('leak-hook.txt')}\n`, { mode: 0o755 });
+    globalConfig = path.join(repo, '..', `cascade-hermetic-global-${process.pid}`);
+    await fs.writeFile(globalConfig, [
+      '[user]', '\tname = Global Name', '\temail = global@example.com',
+      // Quoted whole: an unquoted `;` starts a comment in git's config.
+      '[filter "x"]', `\tclean = "sh -c '${leak('leak-filter.txt')}; cat'"`,
+    ].join('\n'));
+    await fs.writeFile(path.join(repo, '.gitattributes'), '*.md filter=x\n');
+  });
+  afterAll(async () => {
+    await fs.rm(repo, { recursive: true, force: true });
+    await fs.rm(globalConfig, { force: true });
+  });
+
+  it('runs no hook and nothing the global configuration names, and keeps the name and email', async () => {
+    await fs.writeFile(path.join(repo, 'notes.md'), 'public, revised\n');
+    await withGlobal(async () => {
+      await tool('add', ['notes.md', '.gitattributes']);
+      await tool('commit', ['revise']);
+    });
+    await expect(fs.stat(path.join(repo, 'leak-hook.txt'))).rejects.toThrow();
+    await expect(fs.stat(path.join(repo, 'leak-filter.txt'))).rejects.toThrow();
+    expect(g('log', '-1', '--format=%an <%ae> %s')).toBe('Global Name <global@example.com> revise');
+  });
+
+  it('leaves a repository with nothing hidden in its store as it was', async () => {
+    const clean = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-hermetic-clean-')));
+    const c = (...args: string[]) => execFileSync('git', ['-C', clean, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' });
+    c('init', '-q');
+    await fs.writeFile(path.join(clean, 'a.md'), 'a\n');
+    c('add', '.'); c('commit', '-qm', 'a');
+    await fs.writeFile(path.join(clean, '.git', 'hooks', 'pre-commit'), `#!/bin/sh\ntouch ${path.join(clean, 'hook-ran')}\n`, { mode: 0o755 });
+    c('config', 'user.email', 'local@example.com'); c('config', 'user.name', 'Local');
+    await fs.writeFile(path.join(clean, 'a.md'), 'b\n');
+    const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {} } as never, clean);
+    await reg.execute('git', { operation: 'add', args: ['a.md'] }, exec);
+    await reg.execute('git', { operation: 'commit', args: ['b'] }, exec);
+    expect((await fs.stat(path.join(clean, 'hook-ran'))).isFile()).toBe(true);
+    await fs.rm(clean, { recursive: true, force: true });
+  });
+});

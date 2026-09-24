@@ -25,6 +25,14 @@ export abstract class BaseTool {
    */
   readonly delegatesToTools: boolean = false;
 
+  /**
+   * True for a tool that sends nothing it is given off this machine, so a
+   * local-only subtask (privacy.paths) may call it. The registry's own
+   * built-ins are judged by the registry; any other tool is refused to such
+   * a subtask unless it says this — its arguments can carry what it read.
+   */
+  readonly localOnlySafe: boolean = false;
+
   setWorkspaceRoot(root: string): void {
     this.workspaceRoot = root;
   }

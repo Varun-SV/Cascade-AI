@@ -256,6 +256,15 @@ export class ProcessJail {
   }
 
   /**
+   * Whether the repository's git store is hidden from this caller's
+   * commands: its index or history holds a path they may not see.
+   */
+  async gitStoreHidden(offline: boolean): Promise<boolean> {
+    if (this.policy.mode === 'off') return false;
+    return (await this.gitDirsToHide(offline)).length > 0;
+  }
+
+  /**
    * Why `git push <args>` from `cwd` would send a hidden path's blob off the
    * machine, or null when it would not. The git tool keeps the object store
    * in view, and a push packs whatever the pushed commits hold.

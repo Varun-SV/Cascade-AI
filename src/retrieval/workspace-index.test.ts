@@ -84,6 +84,29 @@ describe('WorkspaceIndex', () => {
     expect(await idx.search('willBeDeleted', 5)).toHaveLength(0);
   });
 
+  // CascadeIgnore judged a file by its name, so `src/config.ts` hard-linked
+  // to `.env` was read and sent to the embedder as ordinary source.
+  it('keeps a hard link to a protected file out, under the predicate Cascade indexes with', async () => {
+    const { CascadeIgnore } = await import('../config/ignore.js');
+    const SECRET = 'sk-live-HARDLINKED-0123456789';
+    await fs.writeFile(path.join(root, '.env'), `export const KEY = "${SECRET}";\n`);
+    await fs.mkdir(path.join(root, 'src'));
+    await fs.link(path.join(root, '.env'), path.join(root, 'src', 'config.ts'));
+    await fs.writeFile(path.join(root, 'src', 'app.ts'), 'export const app = 1;\n');
+    const ignore = new CascadeIgnore();
+    await ignore.load(root);
+    const embedded: string[] = [];
+    const embedder = new FakeEmbedder();
+    const idx = new WorkspaceIndex({
+      root, db,
+      embedder: { model: embedder.model, dims: embedder.dims, embed: async (t: string[]) => { embedded.push(...t); return embedder.embed(t); } },
+      isIgnored: (abs) => ignore.isIgnored(abs, root),
+    });
+    await idx.refresh();
+    expect(embedded.join('\n')).toContain('export const app');
+    expect(embedded.join('\n')).not.toContain(SECRET);
+  });
+
   it('respects an isIgnored predicate and skips non-code files', async () => {
     await fs.writeFile(path.join(root, 'keep.ts'), 'function keep() { return 1; }');
     await fs.writeFile(path.join(root, 'secret.ts'), 'function secret() { return 2; }');

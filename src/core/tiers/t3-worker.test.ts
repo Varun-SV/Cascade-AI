@@ -982,6 +982,48 @@ describe('privacy.paths, enforced when a file is read', () => {
     expect(seen.join('\n')).toContain('web_fetch is unavailable to a local-only subtask');
   });
 
+  // Peers and the tiers above got a placeholder, while the status, stream and
+  // tool events — which the dashboard broadcasts to its socket clients and
+  // the audit log records — carried the output itself.
+  it('keeps what it read out of the events its work emits', async () => {
+    const { ToolRegistry } = await import('../../tools/registry.js');
+    const { PrivacyPaths } = await import('../privacy/paths.js');
+    const root = await workspace();
+    const registry = new ToolRegistry(
+      { shellAllowlist: [], shellBlocklist: [], webSearch: {}, browserEnabled: false, requireApprovalFor: [] } as never,
+      root,
+    );
+    let turns = 0;
+    const router = {
+      getModelForTier: () => undefined,
+      getPrivacyPaths: () => new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]),
+      hasPrivateModel: () => true,
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> }, onChunk?: (c: { text: string }) => void) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        turns += 1;
+        if (turns === 1) return makeResult('', [{ id: 'tc-1', name: 'file_read', input: { path: 'secret/plan.md' } }], 'tool_use');
+        if (turns === 2) return makeResult('', [{ id: 'tc-2', name: 'file_read', input: { path: 'notes.md', note: SECRET } }], 'tool_use');
+        onChunk?.({ text: `The plan: ${SECRET}` });
+        return makeResult(`The plan: ${SECRET}`);
+      }),
+    } as unknown as CascadeRouter;
+    const worker = new T3Worker(router, registry, 't2-parent');
+    const events: string[] = [];
+    for (const name of ['tier:status', 'status', 'stream:token', 'tool:call', 'tool:result', 'log', 'message']) {
+      worker.on(name, (e: unknown) => { events.push(`${name} ${JSON.stringify(e)}`); });
+    }
+    const result = await worker.execute(makeAssignment({ description: 'Summarize the plan' }), 'task-events');
+    expect(result.localOnly).toBe(true);
+    expect(result.output).toContain(SECRET);
+    expect(events.filter((e) => e.includes(SECRET))).toEqual([]);
+    expect(events.some((e) => e.startsWith('tier:status') && e.includes('output withheld by privacy policy'))).toBe(true);
+    expect(events.some((e) => e.startsWith('tool:result'))).toBe(true);
+  });
+
   // The request was still shaped for the cloud model it started on: native
   // tool definitions and no text-tool contract, handed to a local model that
   // cannot use either once the router swapped it in.

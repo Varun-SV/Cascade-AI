@@ -389,5 +389,29 @@ describe('ToolRegistry — nothing leaves the machine for a local-only caller', 
     expect(direct.calls + hooked.calls).toBe(0);
     expect(await reg.execute('upload_notes', {}, { ...opts, isOffline: () => false })).toBe('uploaded');
   });
+
+  // An embedder's own tool, registered straight through register(), was
+  // neither named nor MCP nor a plugin's — and so was let through.
+  it('refuses a tool registered from outside unless it says it keeps to the machine', async () => {
+    class Custom extends BaseTool {
+      readonly inputSchema = { type: 'object', properties: {} };
+      readonly description = 'custom';
+      calls = 0;
+      constructor(readonly name: string, readonly localOnlySafe = false) { super(); }
+      async execute(): Promise<string> { this.calls += 1; return 'ran'; }
+    }
+    const reg = new ToolRegistry(toolsConfig);
+    const sender = new Custom('post_summary');
+    const local = new Custom('word_count', true);
+    reg.register(sender);
+    reg.register(local);
+    const offline = { ...opts, isOffline: () => true };
+    await expect(reg.execute('post_summary', {}, offline)).rejects.toThrow(/unavailable to a local-only subtask/);
+    expect(sender.calls).toBe(0);
+    expect(await reg.execute('word_count', {}, offline)).toBe('ran');
+    // Replacing a built-in under its name does not inherit its standing.
+    reg.register(new Custom('file_read'));
+    await expect(reg.execute('file_read', { path: 'x' }, offline)).rejects.toThrow(/unavailable to a local-only subtask/);
+  });
 });
 

@@ -23,6 +23,14 @@ export const ProviderConfigSchema = z.object({
    * hostname.
    */
   local: z.boolean().optional(),
+  /**
+   * "This endpoint is on my machine or my private network", for one whose
+   * address cannot show it — a bare name like `ollama` in a compose file, or
+   * a name a private DNS zone serves. A `privacy.paths` local-only subtask
+   * may then run on it. Loopback, private-range and `.local` addresses need
+   * no flag. Only meaningful for `ollama` and `openai-compatible`.
+   */
+  privateNetwork: z.boolean().optional(),
   /** Region for providers whose price varies by region (Azure: global | us | eu | …). */
   region: z.string().optional(),
 });

@@ -199,7 +199,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the package folders pnpm links them into, are read-only. Siblings waiting on it get a status line, not its
   output, and no facts are taken from it into the knowledge graph.
   `file_edit` asks like a read does, and plugin tools are refused to it like
-  MCP ones. A subtask that turns local-only mid-run moves to the private
+  MCP ones, as is any tool registered from outside that does not declare
+  `localOnlySafe`. Its output, tool calls and results, and streamed text are
+  kept out of the status and tool events the dashboard broadcasts and the
+  audit log records: those carry the same withheld line. A subtask that
+  turns local-only mid-run moves to the private
   model, and that model's tool protocol, before its next call; only private
   endpoints still usable count, not ones in backoff or out for the run.
 - **`shell`, `run_code` and `git` run in a process jail.** An approved
@@ -210,7 +214,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   paths (for a worker that is not local-only) are mounted over — and the
   git store too, while its history holds any of them, since a blob is as
   readable as the file; the `git` tool keeps working, leaves them out of its
-  diffs and refuses a push that would send a commit holding one — and so is
+  diffs and refuses a push that would send a commit holding one, and runs
+  no hook and none of the global or system git or ssh configuration there,
+  since a command could rewrite those and git would run what they name with
+  the history in view — and so is
   a hard link to any of them, under whatever name. Each command gets its own process namespace and no
   capabilities, and a local-only worker's commands get no network and no
   Unix sockets, which would reach host daemons such as Docker's. On macOS, `sandbox-exec` denies the same paths and, for a
@@ -222,13 +229,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default place was, so with `codeIndex.dbPath` set the file tools and
   commands could read the indexed text, deleted chunks included. The
   configured file and its journals are now protected too, and a hard link
-  to any protected file is protected like the file.
+  to any protected file is protected like the file — by the file tools,
+  commands and the code index alike.
 - **A private model is one whose endpoint is private.** `forceLocal` chose
   any model marked `isLocal` — which means it costs $0 — so an
   OpenAI-compatible server on a public host configured with `local: true`,
   or an Ollama pointed at someone else's machine, was sent local-only
   subtasks. It is now judged by the endpoint's host: this machine, an IPv4
-  or IPv6 private range, a `.local` name or a single-label LAN name.
+  or IPv6 private range, or a `.local` name. A bare name like `ollama` does
+  not count by itself — a resolver's search domain or a hosts entry can send
+  it anywhere — so a provider reached that way (a compose service, a private
+  DNS zone) is declared with `privateNetwork: true`.
 
 ## 0.82.0 - 2026-09-22
 
