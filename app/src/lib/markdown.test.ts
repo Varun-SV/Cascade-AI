@@ -14,16 +14,14 @@ function render(answer: string): string {
   }, prepareAnswer(answer)));
 }
 
-/** Visible text: tags dropped, and KaTeX's MathML source annotation with them. */
-function visibleText(html: string): string {
-  return html.replace(/<annotation[^>]*>[^<]*<\/annotation>/g, '').replace(/<[^>]+>/g, '');
-}
-
 describe('desktop chat maths', () => {
   it('typesets \\[…\\] as display maths', () => {
     const html = render('The rank is given by\n\\[ r = \\operatorname{rank} E(\\mathbb{Q}) \\]\nwhere r is finite.');
     expect(html).toContain('katex-display');
-    expect(visibleText(html)).not.toContain('\\operatorname');
+    // The TeX reached KaTeX (it keeps the source as a MathML annotation), and
+    // the paragraph no longer shows the bracketed string it used to.
+    expect(html).toContain('<annotation encoding="application/x-tex">r = \\operatorname{rank}');
+    expect(html).not.toContain('[ r =');
   });
 
   it('typesets \\(…\\) and $…$ inline', () => {
@@ -33,8 +31,7 @@ describe('desktop chat maths', () => {
 
   it('leaves prices as prices', () => {
     const html = render('It costs $5 and $10 per month.');
-    expect(html).not.toContain('katex');
-    expect(visibleText(html)).toBe('It costs $5 and $10 per month.');
+    expect(html).toBe('<p>It costs $5 and $10 per month.</p>');
   });
 
   it('still renders GFM tables', () => {
