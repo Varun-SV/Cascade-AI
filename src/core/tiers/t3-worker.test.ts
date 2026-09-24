@@ -841,3 +841,152 @@ describe('tool status display', () => {
     expect(statuses).toContain('Using tool: file_write');
   });
 });
+
+describe('privacy.paths, enforced when a file is read', () => {
+  // The subtask's description said nothing about the private file, so the
+  // worker started on a cloud model — and used to stay there, carrying what
+  // it read into its next call.
+  const SECRET = 'TOP-SECRET-LAUNCH-PLAN';
+
+  async function workspace(): Promise<string> {
+    const { mkdtemp, mkdir, writeFile } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const root = await mkdtemp(join(tmpdir(), 'cascade-privacy-'));
+    await mkdir(join(root, 'secret'));
+    await writeFile(join(root, 'secret', 'plan.md'), `${SECRET}\n`);
+    await writeFile(join(root, 'notes.md'), `public notes, not the ${'launch'} plan\n`);
+    return root;
+  }
+
+  async function run(opts: { privateModel: boolean; call: ToolCall; assignment?: Partial<T2ToT3Assignment> }) {
+    const { ToolRegistry } = await import('../../tools/registry.js');
+    const { PrivacyPaths } = await import('../privacy/paths.js');
+    const root = await workspace();
+    const registry = new ToolRegistry(
+      { shellAllowlist: [], shellBlocklist: [], webSearch: {}, browserEnabled: false, requireApprovalFor: [] } as never,
+      root,
+    );
+    const calls: Array<{ forceLocal: boolean; text: string }> = [];
+    let turns = 0;
+    const router = {
+      getModelForTier: () => undefined,
+      getPrivacyPaths: () => new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]),
+      hasPrivateModel: () => opts.privateModel,
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }>; forceLocal?: boolean }) => {
+        calls.push({ forceLocal: options.forceLocal === true, text: JSON.stringify(options.messages) });
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        turns += 1;
+        return turns === 1 ? makeResult('', [opts.call], 'tool_use') : makeResult('Summary written.');
+      }),
+    } as unknown as CascadeRouter;
+    const worker = new T3Worker(router, registry, 't2-parent');
+    const logs: string[] = [];
+    worker.on('log', (e: { message?: string }) => { if (e?.message) logs.push(e.message); });
+    const result = await worker.execute(makeAssignment({
+      subtaskTitle: 'Summarize', description: 'Summarize what the team is planning', expectedOutput: 'A short summary',
+      ...opts.assignment,
+    }), 'task-privacy');
+    return { calls, result, logs };
+  }
+
+  it('moves the subtask to a private model before what it read reaches any model', async () => {
+    const { calls, result } = await run({
+      privateModel: true,
+      call: { id: 'tc-1', name: 'file_read', input: { path: 'secret/plan.md' } },
+    });
+    expect(calls[0]?.forceLocal, 'nothing private was read yet').toBe(false);
+    const carrying = calls.filter((c) => c.text.includes(SECRET));
+    expect(carrying.length).toBeGreaterThan(0);
+    expect(carrying.every((c) => c.forceLocal)).toBe(true);
+    // …and the tiers above are told only that it ran, not what it said.
+    expect(result.localOnly).toBe(true);
+  });
+
+  it('refuses the read when no private model could take the subtask on', async () => {
+    const { calls, result } = await run({
+      privateModel: false,
+      call: { id: 'tc-1', name: 'file_read', input: { path: 'secret/plan.md' } },
+    });
+    expect(calls.some((c) => c.text.includes(SECRET))).toBe(false);
+    expect(calls.some((c) => c.text.includes('is local-only (privacy.paths)'))).toBe(true);
+    expect(result.localOnly).toBeFalsy();
+  });
+
+  it('keeps a local-only file out of a grep across the workspace, and the rest in', async () => {
+    const { calls } = await run({
+      privateModel: false,
+      call: { id: 'tc-1', name: 'grep', input: { pattern: 'plan', output_mode: 'content' } },
+    });
+    const seen = calls.map((c) => c.text).join('\n');
+    expect(seen).toContain('public notes');
+    expect(seen).not.toContain(SECRET);
+  });
+
+  // Given one file, rg prints its lines without naming it — so nothing
+  // told them from anyone else's, and they went through unchecked.
+  it('keeps a local-only file out of a grep of that one file', async () => {
+    const { calls } = await run({
+      privateModel: false,
+      call: { id: 'tc-1', name: 'grep', input: { pattern: 'PLAN', path: 'secret/plan.md', output_mode: 'content' } },
+    });
+    expect(calls.some((c) => c.text.includes(SECRET))).toBe(false);
+  });
+
+  it('still lets a grep show a local-only file once the subtask can go private', async () => {
+    const { calls, result } = await run({
+      privateModel: true,
+      call: { id: 'tc-1', name: 'grep', input: { pattern: 'PLAN', output_mode: 'content' } },
+    });
+    expect(calls.filter((c) => c.text.includes(SECRET)).every((c) => c.forceLocal)).toBe(true);
+    expect(result.localOnly).toBe(true);
+  });
+
+  it('lets a local-only subtask neither message its peers nor ask for more workers', async () => {
+    const bus = new PeerBus();
+    const send = vi.spyOn(bus, 'send');
+    const registry = makeToolRegistry({
+      getToolDefinitions: () => [{ name: 'peer_message', description: 'Message a peer', inputSchema: {} }],
+      execute: vi.fn(async (_name: string, _input: unknown, options: { sendPeerSync?: (...a: unknown[]) => void }) => {
+        options.sendPeerSync?.('t3-other', 'info', SECRET);
+        return 'sent';
+      }),
+    } as unknown as Partial<ToolRegistry>);
+    let turns = 0;
+    const seen: string[] = [];
+    const router = {
+      getModelForTier: () => undefined,
+      getPrivacyPaths: () => ({ hasPolicies: () => true, anyLocalOnly: () => true, coversFile: () => true }),
+      getReinforcementsConfig: () => ({ enabled: true, maxPerSection: 4 }),
+      hasPrivateModel: () => true,
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> }) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        seen.push(content);
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        turns += 1;
+        if (turns === 1) {
+          return makeResult('', [
+            { id: 'tc-1', name: 'peer_message', input: { to: 't3-other', content: SECRET } },
+            { id: 'tc-2', name: 'request_workers', input: { subtasks: [{ title: 'more', description: SECRET }] } },
+          ], 'tool_use');
+        }
+        return makeResult('Done.');
+      }),
+    } as unknown as CascadeRouter;
+    const worker = new T3Worker(router, registry, 't2-parent');
+    worker.setPeerBus(bus);
+    const result = await worker.execute(makeAssignment({ description: 'Summarize secret/plan.md' }), 'task-local');
+
+    expect(send).not.toHaveBeenCalled();
+    expect(result.reinforcements ?? []).toEqual([]);
+    expect(seen.join('\n')).toContain('cannot message its peers');
+    expect(seen.join('\n')).toContain('request_workers is unavailable to a local-only subtask');
+  });
+});

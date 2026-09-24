@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import Database from 'better-sqlite3';
 import { ConfigManager } from '../../config/index.js';
 import { CascadeIgnore } from '../../config/ignore.js';
+import { PrivacyPaths } from '../../core/privacy/paths.js';
 import { WorkspaceIndex } from '../../retrieval/workspace-index.js';
 import { embedderFromProviders } from '../../retrieval/embedder.js';
 import { LLMReranker, chatCompleterFromProviders } from '../../retrieval/rerank.js';
@@ -40,13 +41,15 @@ export async function indexCommand(dirPath?: string): Promise<void> {
 
   const ignore = new CascadeIgnore();
   await ignore.load(workspace);
+  const privacy = new PrivacyPaths(config.privacy?.paths ?? []);
 
   const index = new WorkspaceIndex({
     root: workspace,
     db,
     embedder,
     reranker,
-    isIgnored: (abs) => ignore.isIgnored(abs, workspace),
+    // Local-only files stay out: indexing would send them to the embedder.
+    isIgnored: (abs) => ignore.isIgnored(abs, workspace) || privacy.coversFile(abs, workspace),
   });
 
   console.log(chalk.magenta(`\n  ◈ Indexing ${workspace}\n`));

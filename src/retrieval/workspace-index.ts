@@ -170,6 +170,11 @@ export class WorkspaceIndex {
     };
   }
 
+  /** The directory indexed; every hit's `sourceId` is relative to it. */
+  getRoot(): string {
+    return this.root;
+  }
+
   /** Hybrid + reranked search over the indexed codebase. */
   async search(query: string, k = 8): Promise<ScoredChunk[]> {
     return this.retriever.search(query, { namespace: this.namespace, k, candidates: 40 });

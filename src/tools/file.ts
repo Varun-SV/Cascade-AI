@@ -8,6 +8,14 @@ import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
 import { resolveInWorkspace } from './utils/workspace-path.js';
 
+/** A read refused under privacy.paths: the file is local-only, and nothing private can take it. */
+export class WithheldError extends Error {
+  constructor(filePath: string) {
+    super(`Access denied: ${filePath} is local-only (privacy.paths), and nothing private is available to read it with.`);
+    this.name = 'WithheldError';
+  }
+}
+
 // ── File Read ─────────────────────────────────
 
 export class FileReadTool extends BaseTool {
@@ -23,9 +31,10 @@ export class FileReadTool extends BaseTool {
     required: ['path'],
   };
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const filePath = input['path'] as string;
     const absPath = resolveInWorkspace(this.workspaceRoot, filePath);
+    if (!this.readGate(options)(absPath)) throw new WithheldError(filePath);
     const offset = (input['offset'] as number | undefined) ?? 1;
     const limit = input['limit'] as number | undefined;
 
@@ -177,7 +186,8 @@ export class FileListTool extends BaseTool {
     const inputPath = (input['path'] as string) || '.';
     const absPath = resolveInWorkspace(this.workspaceRoot, inputPath);
 
-    const entries = await fs.readdir(absPath, { withFileTypes: true });
+    const entries = (await fs.readdir(absPath, { withFileTypes: true }))
+      .filter((e) => !this.isProtectedPath(path.join(absPath, e.name)));
     return entries.map(e => `${e.isDirectory() ? '[DIR] ' : '      '}${e.name}`).join('\n') || '(empty directory)';
   }
 }

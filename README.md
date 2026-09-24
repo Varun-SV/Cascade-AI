@@ -199,12 +199,12 @@ Models are discovered from each provider at startup, so new releases compete in 
 - **Media** — analyze images; generate images, speech and video; transcribe audio
 - **Documents** — real `.docx` / `.pptx` / `.xlsx` and PDFs, with charts and embedded images
 - **Collaboration** — `peer_message` between workers, `knowledge_graph_search` over project facts once the project has learned some, and on Cascade Cloud `ask_user` for a structured question
-- **Your own** — MCP servers' tools, plugins, and tools the agent writes for itself — on by default, off with `"enableToolCreation": false`. Those run in a hard V8 isolate when the optional `isolated-vm` addon is installed. Without it they fall back to a worker thread, which contains crashes and runaway loops but is **not** a security boundary: the code can reach the filesystem and processes directly
+- **Your own** — MCP servers' tools, plugins, and tools the agent writes for itself — on by default, off with `"enableToolCreation": false`. Those always run confined: in a hard V8 isolate when the optional `isolated-vm` addon is installed, and otherwise in a WebAssembly sandbox that ships with Cascade. Either way the code sees no filesystem, network or processes, only `callTool` (which asks before anything dangerous) and an SSRF-guarded `fetch`
 
 ### Developer Experience
 - **6 color themes** — midnight (default), aurora, daybreak, bloom, tide, ember
 - **`CASCADE.md`** — project-level instructions for agents
-- **`.cascadeignore`** — files agents cannot touch
+- **`.cascadeignore`** — files agents' file and search tools cannot read or change
 - **MCP support** — connect any Model Context Protocol server
 - **Hooks** — shell scripts on pre/post tool use *(configured, not yet run by the engine — see [Hooks](#hooks))*
 - **Session history** — searchable, exportable (markdown / JSON)
@@ -404,7 +404,7 @@ Create a `CASCADE.md` in your project root to give agents project-specific instr
 
 ### .cascadeignore
 
-List files and directories agents cannot read or modify. Syntax is identical to `.gitignore`. Secrets (`.env`, `*.pem`, `*.key`) and Cascade internals (`.cascade/keystore.enc`) are protected by default.
+List files and directories agents cannot read or modify. Syntax is identical to `.gitignore`. Cascade's own files — `.cascade/config.json`, which holds your provider keys, among them — and secrets (`.env`, `*.pem`, `*.key`) are protected always, whatever the file says. See [Security](#cascadeignore-1) for what it covers.
 
 ---
 
@@ -822,19 +822,20 @@ Cascade also has an encrypted keystore — the OS keychain (macOS Keychain, Wind
 - **Permission escalation** — a worker that needs more than it was given asks up the chain, T3 → T2 → T1 → you.
 - **SSRF-guarded fetching** — `web_fetch`, dynamic tools and hosted search backends cannot reach private or link-local addresses, checked again at connect time.
 - **Secret redaction** — secrets and PII are stripped from a worker's output before it travels up the hierarchy.
-- **Privacy paths** — `privacy.paths` forces local models for sensitive folders and withholds their output from upstream tiers, for a worker whose assignment names a matching path. A file a worker only finds later, by search or listing, is not checked — enforcing the rule at file access is on the [Roadmap](#roadmap).
+- **Privacy paths** — `privacy.paths` keeps sensitive folders on local models. A worker whose assignment names a matching path runs on a private model from the start. One that reads a matching file on the way — with `file_read`, `grep`, `image_analyze` or `code_search` — moves to a private model at that moment, before what it read reaches any model, or is refused the read when no private model is configured. Either way its output is withheld from the tiers above, and it can no longer message its peers or ask for more workers. Local-only files are never put in the code index or sent to a transcription service. `shell`, `run_code` and `git` are not checked: they ask for approval, and an OS-level jail for them is on the [Roadmap](#roadmap).
 - **Hash-chained audit log** — entries are encrypted and chained with SHA-256; `/audit` checks the chain. That catches an edited or removed entry in the middle, but not a removed tail, a chain recomputed by someone with write access, or a deleted database: the chain has no key and no anchor outside the log.
 - **Budget kill-switch** — a run stops at its token budget, and `/continue` resumes it with a raised one. A session spending cap set with `/budget set` stops runs too; `/continue` does not lift it, so raise it or `/budget clear` first.
 
-> Agent-written tools are confined only when the optional `isolated-vm` addon is installed; without it they run in a worker that can reach the filesystem and processes. Set `"enableToolCreation": false` if that matters to you.
+> Agent-written tools always run confined — in the `isolated-vm` isolate where the addon is installed, and otherwise in a WebAssembly sandbox (QuickJS) that every install has, the desktop app included. It runs on a thread of its own, capped in memory and terminated at its deadline, and its code reaches the machine only through `callTool` and `fetch`. There is no unconfined fallback: if the sandbox cannot start, the tool does not run.
 
 ### .cascadeignore
 
-Always-protected by default (cannot be overridden):
+Always protected, whatever `.cascadeignore` says — a `!` line cannot undo these:
+- `.cascade/config.json` (provider keys), `.cascade/dashboard-secret`, `.cascade/keystore.enc`, `.cascade/memory.db*`, `.cascade/audit.log`
 - `.env`, `.env.*`
 - `*.pem`, `*.key`, `id_rsa`, `id_ed25519`
-- `.cascade/keystore.enc`
-- `.cascade/memory.db`
+
+The file and the built-ins apply to every file, search and listing tool (`file_*`, `grep`, `glob`, `image_analyze`, …), to the code index and `code_search`, and to paths reached through a symlink. `shell`, `run_code` and `git` can still read any file once you approve them.
 
 ### Approval prompts
 
@@ -932,7 +933,7 @@ web/                    Local dashboard SPA (ReactFlow agent graph)
 | ✓ | Peer communication visualization in dashboard |
 | ✓ | Conversational fast-path (bypass T1 for simple prompts) |
 | ✓ | Redaction layer — secrets/PII stripped from T3 output before it travels upstream |
-| ✓ | Per-path privacy tiers (`privacy.paths` — force local models + withhold output, for work whose assignment names a sensitive path) |
+| ✓ | Per-path privacy tiers (`privacy.paths` — local models only, output withheld upstream — for work whose assignment names a sensitive path, and from the moment a worker reads one) |
 | ✓ | Hash-chained audit log (encrypted entries; `/audit`, `GET /api/audit/verify` check the chain) |
 | ✓ | Independent T2-critic reflection loop (`reflection.enabled`) |
 | ✓ | Live steering — `/steer` / desktop Steer bar injects corrections into running workers |
@@ -940,7 +941,8 @@ web/                    Local dashboard SPA (ReactFlow agent graph)
 | ✓ | Cost-per-feature attribution (`costByFeature` in results, CLI cost panel, desktop chat) |
 | ✓ | Project world state (encrypted local log feeding T1 planning) |
 | ✓ | Project knowledge graph (world-state v2) — queryable facts T1 plans from; `knowledge_graph_search` (v0.14) |
-| ✓ | Hard sandbox for agent-written tools — a V8 isolate via the optional `isolated-vm` addon (v0.14) |
+| ✓ | Hard sandbox for agent-written tools — a V8 isolate via the optional `isolated-vm` addon (v0.14), and a WebAssembly sandbox on every install, so they never run unconfined |
+| ✓ | `.cascadeignore` enforced for every file and search tool and the code index, with Cascade's own files — `.cascade/config.json` among them — always protected |
 | ✓ | Cascade Cloud (hosted chat — GitHub/Google login, bring-your-own-key, [cascadeai.in](https://cascadeai.in)) |
 | ✓ | Cascade Cloud billing — Razorpay subscriptions, Free and Pro plans |
 | ✓ | Desktop app — chat, Cockpit, code editor + terminal, browser; downloads from the site |
@@ -959,8 +961,6 @@ web/                    Local dashboard SPA (ReactFlow agent graph)
 |--------|---------|
 | 🔜 | Hooks — the config and `HooksRunner` exist; runs do not call them yet |
 | 🔜 | Provider keys in the encrypted keystore — it exists but runs do not use it; keys are written as plain JSON |
-| 🔜 | Agent-written tools that refuse to run without the isolate — today they fall back to a worker that is not a security boundary |
-| 🔜 | Privacy paths enforced when a file is read, not only when an assignment names it |
 | 🔜 | A tamper-evident audit log — a keyed or externally anchored chain head, so a truncated or rewritten log fails verification |
 | 🔜 | Task-completion notifications and webhooks (Slack / Discord / custom URL) — a `NotificationManager` exists but nothing sends through it |
 | 🔜 | OS-level jail for `shell` and `run_code` — bubblewrap / sandbox-exec / Docker, on top of approvals — see [docs/ROADMAP.md](docs/ROADMAP.md) |

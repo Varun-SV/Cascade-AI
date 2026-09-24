@@ -36,3 +36,26 @@ describe('PrivacyPaths', () => {
     expect(empty.isLocalOnly('src/core/crypto/keys.ts')).toBe(false);
   });
 });
+
+describe('PrivacyPaths.coversFile — a file on disk, under any name it has', () => {
+  it('covers a file by its path in the workspace, and one reached through a symlink', async () => {
+    const fs = await import('node:fs/promises');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-covers-'));
+    await fs.mkdir(path.join(root, 'secret'));
+    await fs.writeFile(path.join(root, 'secret', 'plan.md'), 'x');
+    await fs.symlink(path.join(root, 'secret', 'plan.md'), path.join(root, 'innocent.md'));
+    await fs.symlink(path.join(root, 'secret'), path.join(root, 'docs'));
+    const policy = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]);
+
+    expect(policy.coversFile(path.join(root, 'secret', 'plan.md'), root)).toBe(true);
+    expect(policy.coversFile(path.join(root, 'innocent.md'), root)).toBe(true);
+    expect(policy.coversFile(path.join(root, 'docs', 'plan.md'), root)).toBe(true);
+    expect(policy.coversFile(path.join(root, 'docs', 'not-yet-written.md'), root)).toBe(true);
+    expect(policy.coversFile(path.join(root, 'README.md'), root)).toBe(false);
+    // Outside the workspace no pattern speaks to it; the file tools refuse it anyway.
+    expect(policy.coversFile(path.join(os.tmpdir(), 'elsewhere.md'), root)).toBe(false);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+});

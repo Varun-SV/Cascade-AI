@@ -1147,10 +1147,15 @@ export class T3Worker extends BaseTier {
         // Media generation can run for a minute; without this a cancelled run
         // still pays for an image nobody will see.
         ...(this.signal ? { signal: this.signal } : {}),
+        mayRead: this.mayRead,
         saveSnapshot: async (path, content) => {
           this.store?.addFileSnapshot(this.taskId, path, content);
         },
         sendPeerSync: (to, syncType, content) => {
+          // Peers may run on cloud models: what a local-only subtask knows stays here.
+          if (this.localOnlyMatch) {
+            throw new Error('A local-only subtask (privacy.paths) cannot message its peers.');
+          }
           this.peerBus?.send(this.id, to, syncType, this.assignment?.subtaskId ?? '', content);
         },
         getPeerMessages: () => {
@@ -1251,6 +1256,7 @@ export class T3Worker extends BaseTier {
           sessionId: this.taskId,
           requireApproval: false,
           ...(this.signal ? { signal: this.signal } : {}),
+          mayRead: this.mayRead,
         });
         const str = typeof result === 'string' ? result : JSON.stringify(result);
         if (!str.startsWith('Tool error:') && !str.startsWith('Error:')) {
@@ -1260,8 +1266,10 @@ export class T3Worker extends BaseTier {
       } catch { /* fall through to next strategy */ }
     }
 
-    // Strategy 2: synthesize a new tool via ToolCreator
-    if (this.toolCreator) {
+    // Strategy 2: synthesize a new tool via ToolCreator. Not for a local-only
+    // subtask: the request, error text and all, goes to a model this worker
+    // does not choose.
+    if (this.toolCreator && !this.localOnlyMatch) {
       this.log(`Adaptive fallback: requesting dynamic tool synthesis for "${tc.name}"`);
       this.sendStatusUpdate({ progressPct: 55, currentAction: `Synthesizing fallback tool for: ${tc.name}`, status: 'IN_PROGRESS' });
       try {
@@ -1276,6 +1284,7 @@ export class T3Worker extends BaseTier {
             sessionId: this.taskId,
             requireApproval: false,
             ...(this.signal ? { signal: this.signal } : {}),
+            mayRead: this.mayRead,
           });
           const str = typeof result === 'string' ? result : JSON.stringify(result);
           if (!str.startsWith('Tool error:')) {
@@ -1401,6 +1410,35 @@ export class T3Worker extends BaseTier {
     // than throwing inside verification.
     return this.toolRegistry.getWorkspaceRoot?.() ?? process.cwd();
   }
+
+  /**
+   * Whether a tool this worker runs may read a workspace file's contents —
+   * privacy.paths, enforced at the read itself. The subtask's own description
+   * decides at the start whether it is local-only; a file it reads on the way
+   * can decide it later. Reading a local-only file makes the subtask
+   * local-only from then on — every call after it goes to a private model,
+   * and its raw output is withheld from the tiers above — or, when no private
+   * model is available, is refused. Contents bound for an outside service
+   * are refused either way.
+   */
+  private readonly mayRead = (absPath: string, to: 'model' | 'service'): boolean => {
+    const privacy = this.router.getPrivacyPaths?.();
+    const root = this.artifactRoot();
+    if (!privacy?.hasPolicies() || !privacy.coversFile(absPath, root)) return true;
+    const rel = path.relative(root, absPath) || absPath;
+    if (to === 'service') {
+      this.log(`Privacy: ${rel} is local-only — not sent to an outside service.`);
+      return false;
+    }
+    if (this.localOnlyMatch) return true;
+    if (!this.router.hasPrivateModel?.()) {
+      this.log(`Privacy: ${rel} is local-only and no private model is available — the read was refused.`);
+      return false;
+    }
+    this.localOnlyMatch = true;
+    this.log(`Privacy: read ${rel}, a local-only path — this subtask now runs on a private model only, and its raw output will be withheld upstream.`);
+    return true;
+  };
 
   private extractArtifactPaths(assignment: T2ToT3Assignment): string[] {
     // Spec-declared files verify deterministically; regex over the prose is
@@ -1801,6 +1839,10 @@ Begin execution now.`;
   private recordReinforcements(input: Record<string, unknown>): string {
     if (this.reinforcementDepth !== 0) {
       return 'request_workers is unavailable to reinforcement workers — complete your assigned subtask.';
+    }
+    // The new workers' descriptions go up to the manager, above the privacy line.
+    if (this.localOnlyMatch) {
+      return 'request_workers is unavailable to a local-only subtask (privacy.paths) — complete your assigned subtask.';
     }
     const max = this.router.getReinforcementsConfig?.()?.maxPerSection ?? 4;
     const raw = Array.isArray((input as { subtasks?: unknown }).subtasks)

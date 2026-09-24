@@ -1682,6 +1682,16 @@ export class CascadeRouter extends EventEmitter {
     return this.privacyPaths;
   }
 
+  /**
+   * Whether a `forceLocal` call could be served: some available model runs on
+   * this machine or a private network. A subtask about to read a local-only
+   * file asks first, and is refused the read when nothing private could take
+   * it on from there.
+   */
+  hasPrivateModel(): boolean {
+    return this.selector.getAllAvailableModels().some((m) => this.isPrivateModel(m));
+  }
+
   setGuidanceQueue(queue: GuidanceQueue | undefined): void {
     this.guidanceQueue = queue;
   }

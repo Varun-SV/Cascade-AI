@@ -25,7 +25,7 @@ interface AdvancedSettings {
   cascadeAuto: boolean;
   forceTier: 'auto' | 'T1' | 'T2' | 'T3';
   benchmarksLive: boolean;
-  dynamicToolSandbox: 'isolate' | 'worker' | 'auto';
+  dynamicToolSandbox: 'isolate' | 'wasm' | 'auto';
   agentBrowserControl: boolean;
   factsExtraction: boolean;
   rememberSessions: boolean;
@@ -868,7 +868,7 @@ export function SettingsView({ socket }: Props) {
                 <AdvToggle label="Live benchmarks" hint="Refresh public benchmark scores + prices from the network" value={adv.benchmarksLive} onChange={(v) => setAdvField('benchmarksLive', v)} />
               </AdvGroup>
               <AdvGroup title="Sandbox & knowledge">
-                <AdvSelect label="Dynamic-tool sandbox" hint="isolate = hard V8 isolate (no Node globals); worker = thread sandbox; auto = isolate when available" value={adv.dynamicToolSandbox} options={['auto', 'isolate', 'worker']} onChange={(v) => setAdvField('dynamicToolSandbox', v as AdvancedSettings['dynamicToolSandbox'])} />
+                <AdvSelect label="Dynamic-tool sandbox" hint="Every choice confines agent-written tools. wasm = WebAssembly sandbox (always available); isolate = hard V8 isolate where installed, else wasm; auto = isolate when available" value={adv.dynamicToolSandbox} options={['auto', 'wasm', 'isolate']} onChange={(v) => setAdvField('dynamicToolSandbox', v as AdvancedSettings['dynamicToolSandbox'])} />
                 <AdvToggle label="Facts extraction" hint="Distill worker outputs into the queryable project knowledge graph" value={adv.factsExtraction} onChange={(v) => setAdvField('factsExtraction', v)} />
                 <AdvToggle label="Remember sessions" hint="Opt-in: after a run, distill the whole conversation into durable project knowledge (undoable from Insights → Knowledge). Off by default." value={adv.rememberSessions} onChange={(v) => setAdvField('rememberSessions', v)} />
                 <AdvToggle label="Agent browser control" hint="Let a run click, type and submit in the built-in browser — the session you are signed into, not a throwaway one. Every run still asks first, and the Browser tab has a Stop control while it acts. Off by default." value={adv.agentBrowserControl} onChange={(v) => setAdvField('agentBrowserControl', v)} />

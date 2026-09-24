@@ -43,6 +43,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a deployment driving its own browser over CDP opens none, so it has no
   daily limit.
 
+### Changed
+- **`tools.dynamicToolSandbox` offers `wasm` in place of `worker`.** `worker`
+  ran agent-written tools in a bare thread that confined nothing. A config
+  that still names it gets the new WebAssembly sandbox, and Settings →
+  Advanced offers `auto`, `wasm` and `isolate`.
+- **A workspace's `.cascadeignore` takes effect.** Nothing passed it to the
+  tools, so it protected nothing. The template `cascade init` writes lists
+  `node_modules/`, `dist/` and `build/`, so in such a workspace agents can
+  no longer read or change those through the file and search tools; delete
+  the lines to allow it.
+
 ### Fixed
 - **Maths in an answer is typeset, whichever way the model wrote it.** GPT
   and Gemini write `\(…\)` and `\[…\]`, which Markdown reads as escaped
@@ -131,6 +142,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The "section needs your decision" prompt says what you are deciding.**
   It shows what the section was asked to do, what it has so far, and what
   each choice does to that work — on the web and in the desktop app.
+
+### Security
+- **Agents can no longer read `.cascade/config.json`.** It holds your
+  provider keys in plain JSON, and nothing protected it: `file_read`
+  returned it, `grep` printed its lines, and the code index could embed it
+  and hand it back through `code_search`. It is now always protected, with
+  the dashboard secret, the session database and the audit log, and no
+  `.cascadeignore` line can undo that. Protection covers every tool that
+  takes a path — `grep`, `glob` and `file_list` among them, which used to
+  see everything, and could search outside the workspace — and follows
+  symlinks.
+- **Agent-written tools always run confined.** Without the optional
+  `isolated-vm` addon — and the desktop app never ships it — they ran in a
+  worker thread whose code could reach `process`, and through it the
+  files, network and processes of the machine. They now run in a
+  WebAssembly sandbox (QuickJS) that ships with Cascade, on a thread of its
+  own with a memory cap and a hard kill at the deadline, reaching the
+  machine only through `callTool` and `fetch`. There is no unconfined
+  fallback left.
+- **`privacy.paths` is enforced when a file is read.** It applied only to a
+  subtask whose assignment named a matching path, so a worker that came
+  across the file by search read it on a cloud model. Reading a local-only
+  file with `file_read`, `grep`, `image_analyze` or `code_search` now moves
+  the subtask to a private model before the contents reach any model, or
+  refuses the read when there is none. A local-only subtask can no longer
+  message its peers, ask for more workers or have a replacement tool
+  written for it, and local-only files are kept out of the code index and
+  never sent for transcription.
 
 ## 0.82.0 - 2026-09-22
 

@@ -6,7 +6,7 @@ import type { ScoredChunk } from '../retrieval/types.js';
 // A stub WorkspaceIndex — the real one is covered in workspace-index.test.ts;
 // here we just check the tool's contract (input handling + formatting).
 function stubIndex(hits: ScoredChunk[]): WorkspaceIndex {
-  return { search: async () => hits } as unknown as WorkspaceIndex;
+  return { search: async () => hits, getRoot: () => '/w' } as unknown as WorkspaceIndex;
 }
 const hit = (sourceId: string, text: string): ScoredChunk => ({ id: sourceId, sourceId, text, ord: 0, score: 1 });
 const opts = {} as never;
@@ -34,5 +34,25 @@ describe('CodeSearchTool', () => {
     const bad = { search: async () => { throw new Error('index locked'); } } as unknown as WorkspaceIndex;
     const tool = new CodeSearchTool(bad);
     expect(await tool.execute({ query: 'x' }, opts)).toMatch(/search failed/i);
+  });
+
+  // The index leaves these files out now, but one built before it did — or
+  // not refreshed since — still holds them: `.cascade/config.json` is JSON,
+  // and JSON is indexed.
+  it('shows nothing from a protected file, or one whose contents are withheld', async () => {
+    const tool = new CodeSearchTool(stubIndex([
+      hit('.cascade/config.json', '"apiKey": "sk-live"'),
+      hit('secret/plan.md', 'the launch plan'),
+      hit('src/a.ts', 'function a() {}'),
+    ]));
+    tool.setPathGuard((abs) => abs === '/w/.cascade/config.json');
+    const asked: Array<[string, string]> = [];
+    const out = await tool.execute({ query: 'key' }, {
+      mayRead: (abs: string, to: 'model' | 'service') => { asked.push([abs, to]); return abs !== '/w/secret/plan.md'; },
+    } as never);
+    expect(out).toContain('function a()');
+    expect(out).not.toContain('sk-live');
+    expect(out).not.toContain('launch plan');
+    expect(asked).toContainEqual(['/w/secret/plan.md', 'model']);
   });
 });

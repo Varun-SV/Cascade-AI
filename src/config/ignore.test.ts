@@ -25,6 +25,17 @@ describe('CascadeIgnore', () => {
     expect(ig.isIgnored('src/index.ts')).toBe(false);
   });
 
+  it("protects Cascade's own secrets, and no .cascadeignore line can undo a built-in", async () => {
+    await fs.writeFile(path.join(dir, '.cascadeignore'), '!.env\n!.cascade/config.json\nvendor/\n', 'utf-8');
+    const ig = new CascadeIgnore();
+    await ig.load(dir);
+    for (const file of ['.env', '.cascade/config.json', '.cascade/dashboard-secret', '.cascade/memory.db-wal']) {
+      expect(ig.isIgnored(file), file).toBe(true);
+    }
+    expect(ig.isIgnored('vendor/lib.js')).toBe(true);
+    expect(ig.getUserPatterns()).toEqual(['!.env', '!.cascade/config.json', 'vendor/']);
+  });
+
   it('adds the workspace file\'s patterns and skips comments and blank lines', async () => {
     await fs.writeFile(
       path.join(dir, '.cascadeignore'),

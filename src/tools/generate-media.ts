@@ -15,6 +15,7 @@
 
 import type { ToolExecuteOptions, ProviderConfig } from '../types.js';
 import { BaseTool } from './base.js';
+import { resolveInWorkspace } from './utils/workspace-path.js';
 import type {
   GenerationCapability,
   GenerationModality,
@@ -387,9 +388,21 @@ export class TranscribeAudioTool extends BaseTool {
     const r = resolve(this.deps, 'transcription', input['model'] ? String(input['model']) : undefined);
     if (!r.ok) return r.error;
 
+    // The recording goes to the transcription service, not to the model: a
+    // local-only file must not leave this machine that way either.
+    let absPath: string;
+    try {
+      absPath = resolveInWorkspace(this.workspaceRoot, filePath);
+    } catch {
+      return `Could not read the audio file at ${filePath}.`;
+    }
+    if (!this.readGate(options, 'service')(absPath)) {
+      return `Refused: ${filePath} is local-only (privacy.paths), so it is not sent to a transcription service.`;
+    }
+
     let audio: Buffer;
     try {
-      audio = await this.readFile(filePath);
+      audio = await this.readFile(absPath);
     } catch {
       return `Could not read the audio file at ${filePath}.`;
     }

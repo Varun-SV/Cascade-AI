@@ -10,8 +10,10 @@
 //  LOCAL models (never cloud), and its raw output is withheld from the tiers
 //  above — T2/T1 receive only a success/fail signal, not the content.
 
+import path from 'node:path';
 import * as _ignoreModule from 'ignore';
 import type { Ignore } from 'ignore';
+import { realPathOf } from '../../utils/real-path.js';
 // Same gitignore-style matcher used by .cascadeignore (src/config/ignore.ts),
 // so privacy patterns behave exactly like ignore patterns users already know.
 const ignore = (_ignoreModule as unknown as { default: () => Ignore }).default ?? (_ignoreModule as unknown as () => Ignore);
@@ -48,8 +50,27 @@ export class PrivacyPaths {
     }
   }
 
+  /**
+   * True when the file at `absPath` falls under a local-only policy — under
+   * its own name or, through a symlink, under the name of what it points to.
+   * A path outside `root` is judged by the name it has inside it only.
+   */
+  coversFile(absPath: string, root: string): boolean {
+    if (!this.hasRules) return false;
+    if (this.isLocalOnly(relativeWithin(root, absPath))) return true;
+    const real = realPathOf(absPath);
+    return real !== absPath && this.isLocalOnly(relativeWithin(realPathOf(root), real));
+  }
+
   /** True when ANY of the given paths falls under a local-only policy. */
   anyLocalOnly(relativePaths: string[]): boolean {
     return relativePaths.some((p) => this.isLocalOnly(p));
   }
+}
+
+/** `absPath` relative to `root` in POSIX form, or '' when it is not inside. */
+function relativeWithin(root: string, absPath: string): string {
+  const rel = path.relative(root, absPath);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return '';
+  return rel.split(path.sep).join('/');
 }

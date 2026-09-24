@@ -63,7 +63,7 @@ import { Telemetry, noopTelemetry } from '../telemetry/index.js';
 import { TaskAnalyzer } from './router/task-analyzer.js';
 import { ModelPerformanceTracker } from './router/model-performance-tracker.js';
 import { benchmarkScore01 } from './router/benchmarks.js';
-import { ToolCreator } from '../tools/tool-creator.js';
+import { ToolCreator, sandboxModeOf } from '../tools/tool-creator.js';
 import { CascadeCancelledError } from '../utils/retry.js';
 import { WorldStateDB } from './knowledge/world-state.js';
 import { ResumeStore, summarizeCompleted, type CompletedNode, type ResumeReason } from './orchestration/resume-store.js';
@@ -287,7 +287,7 @@ export class Cascade extends EventEmitter {
     }
     const cfg = this.config as unknown as Record<string, unknown>;
     if (cfg['enableToolCreation'] === true) {
-      const sandboxMode = (this.config.tools?.dynamicToolSandbox ?? 'auto');
+      const sandboxMode = sandboxModeOf(this.config.tools?.dynamicToolSandbox);
       this.toolCreator = new ToolCreator(this.router, this.toolRegistry, this.workspacePath, cfg['persistDynamicTools'] !== false, sandboxMode);
       this.toolCreator.setLogger((m) => {
         if (this.listenerCount('log') > 0) this.emit('log', { level: 'info', message: m });
@@ -352,13 +352,18 @@ export class Cascade extends EventEmitter {
 
     const ignore = new CascadeIgnore();
     await ignore.load(this.workspacePath);
+    const privacy = this.router.getPrivacyPaths();
 
     const index = new WorkspaceIndex({
       root: this.workspacePath,
       db,
       embedder,
       reranker,
-      isIgnored: (abs) => ignore.isIgnored(abs, this.workspacePath),
+      // A local-only file is never indexed: indexing sends it to the
+      // embedder, which may be a cloud one, and code_search would hand its
+      // text to any subtask.
+      isIgnored: (abs) => ignore.isIgnored(abs, this.workspacePath)
+        || !!privacy?.coversFile(abs, this.workspacePath),
     });
 
     if (ci.autoRefresh) {
@@ -1548,6 +1553,13 @@ export class Cascade extends EventEmitter {
 
     this.initPromise = (async () => {
       await this.router.init(this.config);
+
+      // The workspace's .cascadeignore reaches the tools here; the built-in
+      // protected paths are in force from construction. Nothing used to pass
+      // the file on, so a .cascadeignore protected nothing at all.
+      const cascadeIgnore = new CascadeIgnore();
+      await cascadeIgnore.load(this.workspacePath);
+      this.toolRegistry.setIgnoredPaths(cascadeIgnore.getUserPatterns());
 
       // Bubble budget:warning events from the router up to Cascade consumers
       this.router.on('budget:warning', (payload: {

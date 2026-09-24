@@ -221,3 +221,99 @@ describe('ToolRegistry.requiresApproval — gated on isDangerous(), not just the
     expect(reg.requiresApproval('web_search')).toBe(false);
   });
 });
+
+describe('ToolRegistry — protected paths hold for every tool that takes one', () => {
+  let workspace: string;
+  let outside: string;
+
+  beforeEach(async () => {
+    workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-protect-'));
+    outside = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-outside-'));
+    await fs.mkdir(path.join(workspace, '.cascade'));
+    await fs.writeFile(path.join(workspace, '.cascade', 'config.json'), '{"apiKey":"SECRET-config"}', 'utf-8');
+    await fs.writeFile(path.join(workspace, '.cascade', 'dashboard-secret'), 'SECRET-dash', 'utf-8');
+    await fs.writeFile(path.join(workspace, '.cascade', 'notes.md'), 'visible', 'utf-8');
+    await fs.writeFile(path.join(workspace, '.env'), 'SECRET-env', 'utf-8');
+    await fs.mkdir(path.join(workspace, 'keys'));
+    await fs.writeFile(path.join(workspace, 'keys', 'server.pem'), 'SECRET-pem', 'utf-8');
+    await fs.mkdir(path.join(workspace, 'private'));
+    await fs.writeFile(path.join(workspace, 'private', 'plan.txt'), 'SECRET-private', 'utf-8');
+    await fs.mkdir(path.join(workspace, 'src'));
+    await fs.writeFile(path.join(workspace, 'src', 'a.ts'), 'const x = "SECRET-code";', 'utf-8');
+    await fs.writeFile(path.join(outside, 'far.txt'), 'SECRET-outside', 'utf-8');
+  });
+
+  afterEach(async () => {
+    await fs.rm(workspace, { recursive: true, force: true });
+    await fs.rm(outside, { recursive: true, force: true });
+  });
+
+  it("refuses Cascade's own secret files with no .cascadeignore at all", async () => {
+    // `.cascade/config.json` holds provider keys in plain JSON; nothing
+    // protected it, and nothing passed a workspace .cascadeignore on either.
+    const reg = new ToolRegistry(toolsConfig, workspace);
+    for (const file of ['.cascade/config.json', '.cascade/dashboard-secret', '.env', 'keys/server.pem']) {
+      await expect(reg.execute('file_read', { path: file }, opts)).rejects.toThrow(/cascadeignore/);
+    }
+    await expect(reg.execute('file_write', { path: '.cascade/config.json', content: '{}' }, opts)).rejects.toThrow(/cascadeignore/);
+    expect(await reg.execute('file_read', { path: '.cascade/notes.md' }, opts)).toContain('visible');
+  });
+
+  it('keeps the built-ins protected against a negation in .cascadeignore', async () => {
+    const reg = new ToolRegistry(toolsConfig, workspace);
+    reg.setIgnoredPaths(['!.env', '!.cascade/config.json']);
+    await expect(reg.execute('file_read', { path: '.env' }, opts)).rejects.toThrow(/cascadeignore/);
+    await expect(reg.execute('file_read', { path: '.cascade/config.json' }, opts)).rejects.toThrow(/cascadeignore/);
+  });
+
+  it('leaves protected files out of grep, glob and file_list', async () => {
+    const reg = new ToolRegistry(toolsConfig, workspace);
+    reg.setIgnoredPaths(['private/']);
+
+    for (const outputMode of ['content', 'files_with_matches', 'count']) {
+      const found = await reg.execute('grep', { pattern: 'SECRET', output_mode: outputMode }, opts);
+      expect(found).toContain('a.ts');
+      expect(found).not.toMatch(/server\.pem|plan\.txt|SECRET-pem|SECRET-private/);
+    }
+    // Searching a protected file or folder directly is refused outright.
+    await expect(reg.execute('grep', { pattern: 'SECRET', path: 'keys/server.pem' }, opts)).rejects.toThrow(/cascadeignore/);
+    await expect(reg.execute('grep', { pattern: 'SECRET', path: '.cascade' }, opts)).resolves.not.toContain('SECRET-config');
+
+    const listed = await reg.execute('glob', { pattern: '**/*' }, opts);
+    expect(listed).toContain('a.ts');
+    expect(listed).not.toMatch(/server\.pem|plan\.txt/);
+    const dotfiles = await reg.execute('file_list', { path: '.cascade' }, opts);
+    expect(dotfiles).toContain('notes.md');
+    expect(dotfiles).not.toMatch(/config\.json|dashboard-secret/);
+    expect(await reg.execute('file_list', { path: '.' }, opts)).not.toContain('.env');
+  });
+
+  it('leaves protected files out of the Node scan too, when ripgrep is missing', async () => {
+    const reg = new ToolRegistry(toolsConfig, workspace);
+    reg.setIgnoredPaths(['private/']);
+    const pathBefore = process.env['PATH'];
+    process.env['PATH'] = '';
+    try {
+      const found = await reg.execute('grep', { pattern: 'SECRET', glob: '**/*' }, opts);
+      expect(found).toContain('a.ts');
+      expect(found).not.toMatch(/SECRET-pem|SECRET-private/);
+    } finally {
+      process.env['PATH'] = pathBefore;
+    }
+  });
+
+  it('does not let grep or glob reach outside the workspace', async () => {
+    const reg = new ToolRegistry(toolsConfig, workspace);
+    await expect(reg.execute('grep', { pattern: 'SECRET', path: outside }, opts)).rejects.toThrow(/cascadeignore/);
+    const escaped = await reg.execute('glob', { pattern: `../${path.basename(outside)}/*` }, opts);
+    expect(escaped).not.toContain('far.txt');
+  });
+
+  it('judges a symlink by what it points to, even for a file not written yet', async () => {
+    await fs.symlink(path.join(workspace, '.env'), path.join(workspace, 'innocent.txt'));
+    await fs.symlink(outside, path.join(workspace, 'out'));
+    const reg = new ToolRegistry(toolsConfig, workspace);
+    await expect(reg.execute('file_read', { path: 'innocent.txt' }, opts)).rejects.toThrow(/cascadeignore/);
+    await expect(reg.execute('file_write', { path: 'out/new.txt', content: 'x' }, opts)).rejects.toThrow(/cascadeignore/);
+  });
+});

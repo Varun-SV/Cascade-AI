@@ -2,6 +2,7 @@
 //  Cascade AI — Code Search Tool (Phase 3)
 // ─────────────────────────────────────────────
 
+import path from 'node:path';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
 import type { WorkspaceIndex } from '../retrieval/workspace-index.js';
@@ -31,7 +32,7 @@ export class CodeSearchTool extends BaseTool {
     super();
   }
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const query = String(input['query'] ?? '').trim();
     if (!query) return 'Provide a "query" to search the codebase.';
     const k = typeof input['k'] === 'number' ? Math.max(1, Math.min(20, input['k'])) : 6;
@@ -44,8 +45,17 @@ export class CodeSearchTool extends BaseTool {
     }
     if (hits.length === 0) return 'No relevant code found in the workspace index.';
 
+    // The index leaves out protected and local-only files, but one built
+    // before they were — or not refreshed since — can still hold them.
+    const mayRead = this.readGate(options);
+    const shown = hits.filter((h) => {
+      const abs = path.resolve(this.index.getRoot(), h.sourceId);
+      return !this.isProtectedPath(abs) && mayRead(abs);
+    });
+    if (shown.length === 0) return 'No relevant code found in the workspace index.';
+
     let out = '';
-    for (const h of hits) {
+    for (const h of shown) {
       const block = `# ${h.sourceId}\n${h.text}\n`;
       if (out.length + block.length > MAX_CHARS) break;
       out += (out ? '\n---\n\n' : '') + block;

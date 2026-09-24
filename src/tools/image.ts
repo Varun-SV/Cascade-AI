@@ -6,6 +6,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { ImageAttachment, ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
+import { WithheldError } from './file.js';
+import { resolveInWorkspace } from './utils/workspace-path.js';
 
 export class ImageAnalyzeTool extends BaseTool {
   readonly name = 'image_analyze';
@@ -19,11 +21,16 @@ export class ImageAnalyzeTool extends BaseTool {
     required: ['path'],
   };
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const filePath = input['path'] as string;
     const prompt = (input['prompt'] as string | undefined) ?? 'Describe this image in detail.';
+    // In the workspace, like every file tool: a bare relative path used to
+    // resolve against the process's directory, so the file checked against
+    // the protected paths and the file read could be two different files.
+    const absPath = resolveInWorkspace(this.workspaceRoot, filePath);
+    if (!this.readGate(options)(absPath)) throw new WithheldError(filePath);
 
-    const attachment = await fileToImageAttachment(filePath);
+    const attachment = await fileToImageAttachment(absPath);
 
     // Return the image as base64 + prompt — the calling T3 worker will
     // include this in its next message to the vision-capable model

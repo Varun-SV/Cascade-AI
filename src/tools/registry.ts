@@ -14,6 +14,8 @@ const ignore: (opts?: unknown) => Ignore =
   (ignoreFactory as unknown as (opts?: unknown) => Ignore);
 import type { ToolDefinition, ToolExecuteOptions, ToolsConfig } from '../types.js';
 import { DEFAULT_APPROVAL_REQUIRED } from '../constants.js';
+import { BUILT_IN_PROTECTED } from '../config/ignore.js';
+import { realPathOf } from '../utils/real-path.js';
 import type { BaseTool } from './base.js';
 import { assignMcpToolNames } from './tool-name.js';
 import { ShellTool } from './shell.js';
@@ -62,9 +64,23 @@ export interface ToolPlugin {
   onRegister?: (registry: ToolRegistry) => void;
 }
 
+/**
+ * Built-in tools whose `path` input names a file or directory they read or
+ * write, checked against the protected paths before they run. MCP and
+ * agent-written tools are not in it: a server's `path` lives in the server's
+ * own namespace, which need not be this workspace.
+ */
+const PATH_TOOLS = new Set([
+  'file_read', 'file_write', 'file_edit', 'file_delete', 'file_list',
+  'glob', 'grep', 'image_analyze', 'pdf_create', 'generate_document', 'transcribe_audio',
+]);
+
 export class ToolRegistry extends EventEmitter {
   private tools: Map<string, BaseTool> = new Map();
   private config: ToolsConfig;
+  /** The built-in protected paths, kept apart so no `.cascadeignore` line can undo them. */
+  private readonly builtInMatcher: Ignore = ignore().add([...BUILT_IN_PROTECTED]);
+  /** The workspace's `.cascadeignore`. */
   private ignoreMatcher: Ignore = ignore();
   private workspaceRoot: string;
   /** Loaded plugins, keyed by plugin name */
@@ -78,6 +94,7 @@ export class ToolRegistry extends EventEmitter {
   }
 
   register(tool: BaseTool): void {
+    tool.setPathGuard((absPath) => this.isProtected(absPath));
     this.tools.set(tool.name, tool);
     this.emit('tool:added', tool.name);
   }
@@ -228,11 +245,13 @@ export class ToolRegistry extends EventEmitter {
     const tool = this.tools.get(toolName);
     if (!tool) throw new Error(`Tool not found: ${toolName}`);
 
-    // Enforce .cascadeignore for file operations
-    if (this.isFileOperation(toolName)) {
-      const filePath = (input['path'] as string | undefined) ?? '';
-      if (this.isIgnored(filePath)) {
-        throw new Error(`Access denied: ${filePath} is in .cascadeignore`);
+    // Enforce .cascadeignore and the built-in protected paths for every tool
+    // that takes a path. It used to cover the four file_* tools only, so grep
+    // printed a protected file's contents and glob listed it.
+    if (PATH_TOOLS.has(toolName)) {
+      const filePath = input['path'];
+      if (typeof filePath === 'string' && this.isIgnored(filePath)) {
+        throw new Error(`Access denied: ${filePath} is protected (.cascadeignore)`);
       }
     }
 
@@ -280,19 +299,31 @@ export class ToolRegistry extends EventEmitter {
     }
   }
 
-  private isFileOperation(toolName: string): boolean {
-    return ['file_read', 'file_write', 'file_edit', 'file_delete'].includes(toolName);
-  }
-
   private isIgnored(filePath: string): boolean {
     if (!filePath) return false;
-    const abs = path.resolve(this.workspaceRoot, filePath);
-    const rel = path.relative(this.workspaceRoot, abs);
-    // Any path outside the workspace is treated as ignored (defence in depth;
-    // the dedicated path-sandbox guards in each file tool also reject these).
-    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return true;
+    return this.isProtected(path.resolve(this.workspaceRoot, filePath));
+  }
+
+  /**
+   * True for an absolute path no tool may touch: outside the workspace, or
+   * protected by the built-ins or `.cascadeignore` — under its own name or,
+   * through a symlink, under the name of what it points to.
+   */
+  isProtected(absPath: string): boolean {
+    if (this.protectedByName(absPath, this.workspaceRoot)) return true;
+    const real = realPathOf(absPath);
+    return real !== absPath && this.protectedByName(real, realPathOf(this.workspaceRoot));
+  }
+
+  private protectedByName(absPath: string, root: string): boolean {
+    const rel = path.relative(root, absPath);
+    // The workspace itself: listing or searching it is how work starts.
+    if (rel === '') return false;
+    // Outside the workspace (defence in depth; the file tools' own
+    // path-sandbox guards reject these too).
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return true;
     // `ignore` requires POSIX-style separators.
     const posixRel = rel.split(path.sep).join('/');
-    return this.ignoreMatcher.ignores(posixRel);
+    return this.builtInMatcher.ignores(posixRel) || this.ignoreMatcher.ignores(posixRel);
   }
 }

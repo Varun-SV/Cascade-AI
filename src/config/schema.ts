@@ -122,13 +122,18 @@ export const ToolsConfigSchema = z.object({
   /** Web search backends — at least one should be configured for best results */
   webSearch: WebSearchConfigSchema.optional(),
   /**
-   * Sandbox runtime for LLM-authored dynamic tools:
-   * - 'isolate': hard V8 isolate (isolated-vm) — no Node globals, true capability
-   *   confinement. Requires the optional native `isolated-vm` dependency.
-   * - 'worker': node:worker_threads (resource/kill limits, but not capability-confined).
-   * - 'auto' (default): use the isolate when `isolated-vm` loads, else fall back to worker.
+   * Sandbox runtime for LLM-authored dynamic tools. Every choice confines the
+   * code — no Node globals, only the gated callTool and fetch bridges:
+   * - 'isolate': hard V8 isolate (isolated-vm), an optional native dependency;
+   *   the WebAssembly sandbox runs the tool when it isn't installed.
+   * - 'wasm': QuickJS compiled to WebAssembly, on a thread of its own. Ships
+   *   with Cascade, so it is there on every platform, the desktop app included.
+   * - 'auto' (default): the isolate when `isolated-vm` loads, else 'wasm'.
+   * 'worker', a bare thread that confined nothing, is retired: it reads as 'wasm'.
    */
-  dynamicToolSandbox: z.enum(['isolate', 'worker', 'auto']).default('auto'),
+  dynamicToolSandbox: z.enum(['isolate', 'wasm', 'auto', 'worker'])
+    .transform((mode) => (mode === 'worker' ? 'wasm' : mode))
+    .default('auto'),
   /**
    * When set, ONLY these tool names are registered — the sole way to omit a
    * built-in tool (shell/file/git/…) from existing at all, rather than just

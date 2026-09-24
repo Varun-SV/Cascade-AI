@@ -33,12 +33,15 @@ export class GlobTool extends BaseTool {
       ? path.resolve(this.workspaceRoot, input['path'] as string)
       : this.workspaceRoot;
 
-    const matches = await glob(pattern, {
+    const found = await glob(pattern, {
       cwd: searchPath,
       ignore: ['node_modules/**', '.git/**', 'dist/**', 'build/**'],
       nodir: true,
       dot: false,
     });
+    // Protected files are not listed, and nor is anything a `../` pattern
+    // reached outside the workspace.
+    const matches = found.filter((rel) => !this.isProtectedPath(path.resolve(searchPath, rel)));
 
     if (matches.length === 0) {
       return `No files matched pattern: ${pattern}`;

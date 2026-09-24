@@ -322,6 +322,15 @@ export interface ToolExecuteOptions {
    * which is the most likely reason someone kills one.
    */
   onProgress?: (note: string) => void;
+  /**
+   * Asked before a tool reads a workspace file's contents into what it
+   * returns ('model': the result goes to the model running the call) or sends
+   * them to an outside service it calls itself ('service'). False withholds
+   * that file. The tier running the call answers from privacy.paths, and a
+   * 'model' question it answers yes may move it onto a private model first.
+   * Absent, every read is allowed.
+   */
+  mayRead?: (absPath: string, to: 'model' | 'service') => boolean;
   saveSnapshot?: (filePath: string, content: string) => Promise<void>;
   sendPeerSync?: (
     to: string,
@@ -834,11 +843,12 @@ export interface ToolsConfig {
   /** Web search backends — at least one should be configured for best results */
   webSearch?: WebSearchConfig;
   /**
-   * Sandbox runtime for LLM-authored dynamic tools. 'isolate' = hard V8 isolate
-   * (isolated-vm, capability-confined), 'worker' = node:worker_threads,
-   * 'auto' (default) = isolate when available else worker.
+   * Sandbox runtime for LLM-authored dynamic tools; every choice confines the
+   * code. 'isolate' = hard V8 isolate (optional isolated-vm), 'wasm' = QuickJS
+   * compiled to WebAssembly (always available), 'auto' (default) = the isolate
+   * when available, else 'wasm'. 'worker' is retired and reads as 'wasm'.
    */
-  dynamicToolSandbox?: 'isolate' | 'worker' | 'auto';
+  dynamicToolSandbox?: 'isolate' | 'wasm' | 'auto' | 'worker';
   /**
    * When set, ONLY these tool names are registered — every other built-in tool
    * (including shell/file/git, which have no other off-switch) is omitted

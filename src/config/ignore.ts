@@ -9,7 +9,29 @@ import type { Ignore } from 'ignore';
 // ignore is a CJS package — access .default under NodeNext ESM interop
 const ignore = (_ignoreModule as unknown as { default: () => Ignore }).default ?? (_ignoreModule as unknown as () => Ignore);
 
+/**
+ * Paths no agent tool may read or write, whatever `.cascadeignore` says.
+ * Cascade's own files come first: `.cascade/config.json` holds provider keys
+ * in plain JSON, `dashboard-secret` signs dashboard sessions, and the SQLite
+ * store's `-wal`/`-shm` files hold the same data as the database itself.
+ */
+export const BUILT_IN_PROTECTED: readonly string[] = [
+  '.cascade/config.json',
+  '.cascade/dashboard-secret',
+  '.cascade/keystore.enc',
+  '.cascade/memory.db*',
+  '.cascade/audit.log',
+  '.env',
+  '.env.*',
+  '*.pem',
+  '*.key',
+  'id_rsa',
+  'id_ed25519',
+];
+
 export class CascadeIgnore {
+  /** The built-ins, apart: a `!.env` line in `.cascadeignore` must not undo them. */
+  private readonly builtIn: Ignore = ignore().add([...BUILT_IN_PROTECTED]);
   private ig: Ignore;
   private loaded = false;
   // Every pattern this matcher was given, in the order it was given them.
@@ -21,17 +43,6 @@ export class CascadeIgnore {
 
   constructor() {
     this.ig = ignore();
-    // Built-in defaults — always protected
-    this.add([
-      '.cascade/keystore.enc',
-      '.cascade/memory.db',
-      '.env',
-      '.env.*',
-      '*.pem',
-      '*.key',
-      'id_rsa',
-      'id_ed25519',
-    ]);
   }
 
   /** The one place a pattern enters the matcher, so the record cannot drift. */
@@ -57,13 +68,19 @@ export class CascadeIgnore {
       const relative = workspacePath
         ? path.relative(workspacePath, filePath)
         : filePath;
-      return this.ig.ignores(relative);
+      return this.builtIn.ignores(relative) || this.ig.ignores(relative);
     } catch {
       return false;
     }
   }
 
+  /** Every pattern in force: the built-ins, then the workspace file's. */
   getPatterns(): string[] {
+    return [...BUILT_IN_PROTECTED, ...this.patterns];
+  }
+
+  /** The workspace `.cascadeignore`'s own patterns, without the built-ins. */
+  getUserPatterns(): string[] {
     return [...this.patterns];
   }
 }
@@ -82,9 +99,11 @@ export async function createDefaultIgnoreFile(workspacePath: string): Promise<vo
 id_rsa
 id_ed25519
 
-# Cascade internals
+# Cascade internals (always protected, listed here for reference)
+.cascade/config.json
+.cascade/dashboard-secret
 .cascade/keystore.enc
-.cascade/memory.db
+.cascade/memory.db*
 
 # Build artifacts
 node_modules/

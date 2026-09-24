@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { ToolRegistry } from './registry.js';
-import { ToolCreator, normalizeToolSchema, type GeneratedToolSpec } from './tool-creator.js';
+import { ToolCreator, normalizeToolSchema, sandboxModeOf, type GeneratedToolSpec } from './tool-creator.js';
 import { generateDiff, diffSummary } from './diff.js';
 import { PermissionEscalator } from '../core/permissions/escalator.js';
 
@@ -47,7 +47,7 @@ describe('ToolCreator — runtime tool generation', () => {
     expect(normalizeToolSchema(already)).toBe(already);
   });
 
-  it('generates a pure-compute tool and executes it in the vm sandbox', async () => {
+  it('generates a pure-compute tool and executes it in the sandbox', async () => {
     const reg = makeRegistry();
     const spec: GeneratedToolSpec = {
       name: 'dynamic_add', description: 'add two numbers',
@@ -133,45 +133,116 @@ describe('ToolCreator — runtime tool generation', () => {
   });
 });
 
-describe('ToolCreator — worker sandbox (v0.9.6 item 1)', () => {
-  it('runs a pure-compute tool in the worker thread', async () => {
+describe('ToolCreator — the WebAssembly sandbox', () => {
+  async function withTimeout<T>(ms: string, fn: () => Promise<T>): Promise<T> {
+    const prev = process.env.CASCADE_DYNAMIC_TOOL_TIMEOUT_MS;
+    process.env.CASCADE_DYNAMIC_TOOL_TIMEOUT_MS = ms;
+    try {
+      return await fn();
+    } finally {
+      if (prev === undefined) delete process.env.CASCADE_DYNAMIC_TOOL_TIMEOUT_MS;
+      else process.env.CASCADE_DYNAMIC_TOOL_TIMEOUT_MS = prev;
+    }
+  }
+
+  async function wasmTool(name: string, executeCode: string, isDangerous = false) {
+    const reg = makeRegistry();
+    const creator = new ToolCreator(mockRouter({
+      name, description: name, inputSchema: { type: 'object', properties: {} }, executeCode, isDangerous,
+    }), reg, ws, true, 'wasm');
+    await creator.createTool(name, name);
+    return { reg, creator };
+  }
+
+  it('runs a pure-compute tool', async () => {
     const reg = makeRegistry();
     const spec: GeneratedToolSpec = {
       name: 'dynamic_w_add', description: 'add',
       inputSchema: { a: { type: 'number' }, b: { type: 'number' } },
       executeCode: 'return String(Number(input.a) + Number(input.b));', isDangerous: false,
     };
-    // Pin to the worker executor so this exercises the fallback path regardless
-    // of whether isolated-vm is installed.
-    await new ToolCreator(mockRouter(spec), reg, ws, true, 'worker').createTool('add in worker', 'math');
+    await new ToolCreator(mockRouter(spec), reg, ws, true, 'wasm').createTool('add in wasm', 'math');
     expect(await reg.execute('dynamic_w_add', { a: 3, b: 4 }, opts)).toBe('7');
   });
 
-  it('terminates an infinite-loop tool at the kill timeout (does not hang)', async () => {
-    const reg = makeRegistry();
-    const spec: GeneratedToolSpec = {
-      name: 'dynamic_loop', description: 'spin forever',
-      inputSchema: { type: 'object', properties: {} },
-      executeCode: 'while (true) {} return "never";', isDangerous: false,
-    };
-    await new ToolCreator(mockRouter(spec), reg, ws, true, 'worker').createTool('spin', 'x');
-    const prev = process.env.CASCADE_DYNAMIC_TOOL_TIMEOUT_MS;
-    process.env.CASCADE_DYNAMIC_TOOL_TIMEOUT_MS = '600';
+  // The worker this replaced ran the same probe and answered
+  // 'process=object require=undefined gt=object': the code could reach the
+  // machine through `process`.
+  it('CONFINES the code: no process, require, timers or WebAssembly to reach for', async () => {
+    const { reg } = await wasmTool('dynamic_w_probe',
+      "return [typeof process, typeof require, typeof globalThis.process, typeof setTimeout, typeof WebAssembly, typeof __host, typeof new Function('return this')().process].join(' ');");
+    expect(await reg.execute('dynamic_w_probe', {}, opts))
+      .toBe('undefined undefined undefined undefined undefined undefined undefined');
+  });
+
+  it('no sandbox setting runs a tool unconfined — including a config still naming the retired worker', async () => {
+    for (const configured of ['auto', 'isolate', 'wasm', 'worker', undefined]) {
+      const reg = makeRegistry();
+      const name = `dynamic_mode_${String(configured)}`;
+      await new ToolCreator(mockRouter({
+        name, description: name, inputSchema: { type: 'object', properties: {} },
+        executeCode: "return typeof process + ' ' + typeof require;", isDangerous: false,
+      }), reg, ws, true, sandboxModeOf(configured)).createTool(name, name);
+      expect(await reg.execute(name, {}, opts), String(configured)).toBe('undefined undefined');
+    }
+    expect(sandboxModeOf('worker')).toBe('wasm');
+  });
+
+  it('reaches a registered tool through callTool', async () => {
+    await fs.writeFile(path.join(ws, 'wasm-seed.txt'), 'wasm-seed-content', 'utf-8');
+    const { reg } = await wasmTool('dynamic_w_read', "return await callTool('file_read', { path: 'wasm-seed.txt' });");
+    expect(await reg.execute('dynamic_w_read', {}, opts)).toContain('wasm-seed-content');
+  });
+
+  it('still routes a dangerous callTool through the escalator', async () => {
+    let asked = false;
+    const { reg, creator } = await wasmTool('dynamic_w_danger', "return await callTool('file_delete', { path: 'x.txt' });", true);
+    creator.setPermissionEscalator({ requestPermission: async () => { asked = true; return { approved: false, decidedBy: 'test' }; } } as any);
+    const out = await reg.execute('dynamic_w_danger', {}, opts);
+    expect(asked).toBe(true);
+    expect(out).toMatch(/Permission denied/);
+  });
+
+  it('keeps fetch behind the SSRF guard', async () => {
+    const { reg } = await wasmTool('dynamic_w_ssrf', "const r = await fetch('http://169.254.169.254/'); return await r.text();");
+    expect(await reg.execute('dynamic_w_ssrf', {}, opts)).toMatch(/Tool error:.*(non-public address|Blocked)/);
+  });
+
+  it('reports what the tool threw', async () => {
+    const { reg } = await wasmTool('dynamic_w_throw', "throw new TypeError('boom');");
+    expect(await reg.execute('dynamic_w_throw', {}, opts)).toBe('Tool error: TypeError: boom');
+  });
+
+  // Each of these once held a thread past the deadline in some way: a loop,
+  // a wait nothing will end, and an allocation the engine cannot interrupt.
+  it.each([
+    ['a loop', 'while (true) {} return "never";'],
+    ['a wait that never ends', 'await new Promise(() => {}); return "never";'],
+    ['a runaway allocation', 'const a = []; while (true) a.push(new Array(1e6).fill(1));'],
+  ])('terminates %s at the timeout, without stalling the main thread', async (what, code) => {
+    const name = `dynamic_w_${what.replace(/\W+/g, '_')}`;
+    const { reg } = await wasmTool(name, code);
+    let ticks = 0;
+    const ticker = setInterval(() => { ticks++; }, 25);
     try {
-      const t0 = Date.now();
-      const out = await reg.execute('dynamic_loop', {}, opts);
-      expect(Date.now() - t0).toBeLessThan(4000);
-      expect(out).toMatch(/timed out|terminated/);
+      const out = await withTimeout('600', async () => {
+        const t0 = Date.now();
+        const result = await reg.execute(name, {}, opts);
+        expect(Date.now() - t0).toBeLessThan(4000);
+        return result;
+      });
+      expect(out).toMatch(/timed out after 600ms and was terminated/);
+      // 600 ms at 25 ms a tick: a guest on the main thread would allow ~none.
+      expect(ticks).toBeGreaterThan(10);
     } finally {
-      if (prev === undefined) delete process.env.CASCADE_DYNAMIC_TOOL_TIMEOUT_MS;
-      else process.env.CASCADE_DYNAMIC_TOOL_TIMEOUT_MS = prev;
+      clearInterval(ticker);
     }
   });
 });
 
 // ── Hard isolate (isolated-vm) — v0.14.0 ──
 // Skipped gracefully when the optional native addon isn't installed/built, so CI
-// without it stays green (the 'auto' path there simply falls back to the worker).
+// without it stays green (the 'auto' path there runs the WebAssembly sandbox).
 const ivmAvailable: boolean = await (async () => {
   try { await import('isolated-vm'); return true; } catch { return false; }
 })();

@@ -49,7 +49,7 @@ export class GrepTool extends BaseTool {
     required: ['pattern'],
   };
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const pattern = input['pattern'] as string;
     const searchPath = (input['path'] as string | undefined)
       ? path.resolve(this.workspaceRoot, input['path'] as string)
@@ -58,6 +58,9 @@ export class GrepTool extends BaseTool {
     const outputMode = (input['output_mode'] as string | undefined) ?? 'content';
     const context = (input['context'] as number | undefined) ?? 0;
     const caseInsensitive = (input['case_insensitive'] as boolean | undefined) ?? false;
+    // Asked only of a file that matched: whether this call may show what it
+    // holds — its lines, or even that it contains the pattern.
+    const mayRead = this.readGate(options);
 
     // Try ripgrep first
     try {
@@ -68,13 +71,14 @@ export class GrepTool extends BaseTool {
         outputMode,
         context,
         caseInsensitive,
+        mayRead,
       );
       return result;
     } catch {
       // ripgrep not available — fall back to Node.js scan
     }
 
-    return this.nodeScan(pattern, searchPath, globPattern, outputMode, context, caseInsensitive);
+    return this.nodeScan(pattern, searchPath, globPattern, outputMode, context, caseInsensitive, mayRead);
   }
 
   private async runRipgrep(
@@ -84,6 +88,7 @@ export class GrepTool extends BaseTool {
     outputMode: string,
     context: number,
     caseInsensitive: boolean,
+    mayRead: (absPath: string) => boolean,
   ): Promise<string> {
     const args: string[] = ['--no-heading'];
     if (caseInsensitive) args.push('-i');
@@ -94,14 +99,42 @@ export class GrepTool extends BaseTool {
       if (context > 0) args.push(`-C${context}`);
     }
     if (globPattern) args.push('--glob', globPattern);
-    args.push('--', pattern, searchPath);
+    // Every line names its file — even when the search is one file, which rg
+    // would otherwise leave unnamed — with a NUL after it, so a path can be
+    // told from what follows it even when it contains a colon, and a file's
+    // lines dropped when it is protected or its contents are withheld.
+    args.push('--with-filename', '--null', '--', pattern, searchPath);
 
     const { stdout } = await execFileAsync('rg', args, {
       timeout: 15_000,
       maxBuffer: 2 * 1024 * 1024,
     });
 
-    const trimmed = stdout.trim();
+    const allowed = (file: string): boolean => {
+      const abs = path.resolve(searchPath, file);
+      return !this.isProtectedPath(abs) && mayRead(abs);
+    };
+    let lines: string[];
+    if (outputMode === 'files_with_matches') {
+      lines = stdout.split('\0').map((file) => file.trim()).filter((file) => file && allowed(file));
+    } else {
+      lines = [];
+      for (const line of stdout.split('\n')) {
+        const nul = line.indexOf('\0');
+        // A `--` between context groups, or a trailing blank.
+        if (nul === -1) {
+          if (line.trim()) lines.push(line);
+          continue;
+        }
+        const file = line.slice(0, nul);
+        if (!allowed(file)) continue;
+        const rest = line.slice(nul + 1);
+        // rg's own layout: `file:12:match`, `file-13-context`, `file:3` for a count.
+        lines.push(`${file}${/^\d+-/.test(rest) ? '-' : ':'}${rest}`);
+      }
+    }
+
+    const trimmed = lines.join('\n').trim();
     return trimmed || `No matches found for: ${pattern}`;
   }
 
@@ -112,6 +145,7 @@ export class GrepTool extends BaseTool {
     outputMode: string,
     context: number,
     caseInsensitive: boolean,
+    mayRead: (absPath: string) => boolean,
   ): Promise<string> {
     const flags = caseInsensitive ? 'gi' : 'g';
     let regex: RegExp;
@@ -139,6 +173,7 @@ export class GrepTool extends BaseTool {
 
     for (const rel of files) {
       const abs = path.join(searchPath, rel);
+      if (this.isProtectedPath(abs)) continue;
       let content: string;
       try {
         content = await fs.readFile(abs, 'utf-8');
@@ -153,7 +188,7 @@ export class GrepTool extends BaseTool {
         regex.lastIndex = 0;
       }
 
-      if (matchingLines.length === 0) continue;
+      if (matchingLines.length === 0 || !mayRead(abs)) continue;
       totalCount += matchingLines.length;
 
       if (outputMode === 'files_with_matches') {

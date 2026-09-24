@@ -8,9 +8,13 @@ without re-discovery.
 
 Dynamic tools now run in an `isolated-vm` hard V8 isolate (no Node globals),
 reaching the host only through the escalator-gated `callTool` / SSRF-guarded
-`fetch` bridges, with a graceful fall back to the worker sandbox when the
-optional native addon is unavailable (`tools.dynamicToolSandbox`,
-`src/tools/tool-creator.ts`).
+`fetch` bridges (`tools.dynamicToolSandbox`, `src/tools/tool-creator.ts`).
+Where the optional native addon is unavailable — the desktop app never ships
+it — they run in a WebAssembly sandbox instead: QuickJS on a worker thread of
+its own, with the same two bridges, a memory cap and a hard kill at the
+deadline (`src/tools/sandbox/`). The bare
+worker fallback, which confined nothing, is gone; a config naming it gets the
+WebAssembly sandbox.
 
 **Still open — OS-level jail for real-process execution (own PR).** `shell`
 (`child_process.exec`, `src/tools/shell.ts`) and the `run_code` interpreter

@@ -821,6 +821,39 @@ describe('Extended context (compaction integration)', () => {
   });
 });
 
+describe('.cascadeignore reaches the tools', () => {
+  it("applies the workspace's .cascadeignore once init() runs", async () => {
+    // Nothing used to hand the file's patterns to the tool registry, so a
+    // .cascadeignore protected nothing: file_read opened what it listed.
+    const fsp = await import('node:fs/promises');
+    const os = await import('node:os');
+    const nodePath = await import('node:path');
+    const workspace = await fsp.mkdtemp(nodePath.join(os.tmpdir(), 'cascade-ignore-init-'));
+    try {
+      await fsp.mkdir(nodePath.join(workspace, 'private'));
+      await fsp.writeFile(nodePath.join(workspace, 'private', 'plan.txt'), 'secret plan', 'utf-8');
+      await fsp.writeFile(nodePath.join(workspace, '.cascadeignore'), 'private/\n', 'utf-8');
+      const cascade = new Cascade(baseConfig, workspace);
+      const { EventEmitter } = await import('node:events');
+      const emitter = new EventEmitter();
+      (cascade as any).router = new Proxy(emitter, {
+        get(target, prop, receiver) {
+          const existing = Reflect.get(target, prop, receiver);
+          if (typeof existing === 'function') return existing.bind(target);
+          if (existing !== undefined) return existing;
+          return () => Promise.resolve();
+        },
+      });
+      await cascade.init();
+      await expect(
+        cascade.getToolRegistry().execute('file_read', { path: 'private/plan.txt' }, { tierId: 'T3', sessionId: 's' }),
+      ).rejects.toThrow(/cascadeignore/);
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('provider:exhausted reaches consumers', () => {
   it('forwards the router event to Cascade listeners and records it in /why', async () => {
     // The policy this PR settled on is "continue on another provider, but say
