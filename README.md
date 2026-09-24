@@ -31,8 +31,8 @@ The CLI, desktop app and Cascade Cloud share one account and one set of end-to-e
 ## ✨ Highlights
 
 - 🧠 **Live benchmark Auto-routing** — set a tier to `Auto` and Cascade fuses *live* public benchmark scores with *live* pricing to pick the best-**value** model for each task, then learns from how each model actually did.
-- 🌐 **Browser control** — the agent drives a real browser (local Chrome over CDP, or a hosted Steel session), you watch it live, and you can take the wheel and hand it back.
-- 🙋 **Asks instead of guessing** — when a request is genuinely ambiguous, Cascade asks one structured question rather than inventing an answer.
+- 🌐 **Browser control** (desktop app and web) — the agent drives a real browser: the desktop's own, or on the web your Chrome over CDP or a hosted Steel session. You watch it live and can take the wheel and hand it back.
+- 🙋 **Asks instead of guessing** (Cascade Cloud and self-hosted web) — when a request is genuinely ambiguous, Cascade asks one structured question rather than inventing an answer.
 - 🤖 **Autonomous mode** (`/auto`) — hands-off runs: safe tools run silently, dangerous ones still ask, budget caps stay the hard stop.
 - 📋 **Boardroom plan review** — pause to review, **edit**, or steer T1's plan (with an AI reviewer's critique) before any worker spawns.
 - ⏯️ **Run resumability** (`/continue`) — hit the budget cap on a big task? Resume from the partial state instead of redoing it.
@@ -83,8 +83,8 @@ Other AI CLIs run a single agent. Cascade runs a visible **organization** — an
 Cascade has shipped roughly 70 releases since v0.13.2 and is now at **v0.82.0**. Grouped by theme rather than listed one-by-one; [CHANGELOG.md](CHANGELOG.md) has every change.
 
 ### v0.69 – v0.82 — the agent gets a browser, and every surface gets an API
-- **Browser control, on every surface.** The agent can drive a real browser — your own Chrome over CDP, or a hosted [Steel](https://steel.dev) session — act on the page you already have open, and show it to you live. You can take the browser off the agent, use it yourself, and hand it back (v0.78 – v0.81). A Browser chip beside Web in the composer turns it on per message.
-- **Asks instead of guessing.** A run that needs a decision only you can make asks one structured question and waits, rather than guessing (v0.81). A run that *cannot* do something now says so instead of simulating the result (unreleased).
+- **Browser control, in the desktop app and on the web.** The agent can drive a real browser — the desktop's own, where it can also act on the page you already have open, or on the web your Chrome over CDP or a hosted [Steel](https://steel.dev) session — and show it to you live. You can take the browser off the agent, use it yourself, and hand it back (v0.78 – v0.81). A Browser chip beside Web in the composer turns it on per message. The CLI does not have it.
+- **Asks instead of guessing.** On Cascade Cloud and self-hosted web, a run that needs a decision only you can make asks one structured question and waits, rather than guessing (v0.81). A run that *cannot* do something now says so instead of simulating the result (unreleased).
 - **An OpenAI-compatible API** — `POST /v1/chat/completions` and `GET /v1/models`, so any OpenAI SDK can call Cascade (v0.70) — and **one-command self-hosting** with `docker compose up` (v0.69).
 - **Routing that learns carefully.** Every model a tier used records the run's outcome, only models that actually ran are rated, one bad moment no longer writes a model off, and the router occasionally tries a plausible alternative so it can learn (v0.76). Benchmark data now covers every modality, not just text (v0.82).
 - **Failover that tells failures apart.** An exhausted quota, a rate limit, a model your key cannot use and a dead account are each handled as what they are — one Azure deployment's failure no longer disables the others, and a failed-over answer is credited to the model that actually ran (v0.76).
@@ -195,11 +195,11 @@ Models are discovered from each provider at startup, so new releases compete in 
 - **Files and search** — read, write, edit, delete, list, glob, grep, and `code_search` over a local code index (`cascade index`)
 - **Git / GitHub / GitLab** — status, diff, commit, push; open PRs, list and comment on issues
 - **Web** — `web_search` and SSRF-guarded `web_fetch`
-- **Browser** — Playwright automation, plus `browser_control` of a real browser (CDP or Steel) and `read_current_page`
+- **Browser** — Playwright automation; in the desktop app and on the web, `browser_control` of a real browser, and in the desktop app `read_current_page`
 - **Media** — analyze images; generate images, speech and video; transcribe audio
 - **Documents** — real `.docx` / `.pptx` / `.xlsx` and PDFs, with charts and embedded images
-- **Collaboration** — `ask_user` for a structured question, `peer_message` between workers, `knowledge_graph_search` over project facts
-- **Your own** — MCP servers' tools, plugins, and (opt-in) tools the agent writes for itself, sandboxed in a V8 isolate where the optional `isolated-vm` addon is installed, a worker otherwise
+- **Collaboration** — `peer_message` between workers, `knowledge_graph_search` over project facts, and on Cascade Cloud `ask_user` for a structured question
+- **Your own** — MCP servers' tools, plugins, and tools the agent writes for itself — on by default, off with `"enableToolCreation": false` — sandboxed in a V8 isolate where the optional `isolated-vm` addon is installed, a worker otherwise
 
 ### Developer Experience
 - **6 color themes** — midnight (default), aurora, daybreak, bloom, tide, ember
@@ -319,8 +319,7 @@ Cascade loads config from `.cascade/config.json` in your project directory.
 > with an Auto option at every step). The picker writes `.cascade/config.json`
 > for you and hot-swaps the running router — no restart needed.
 
-```jsonc
-// .cascade/config.json
+```json
 {
   "version": "1.0",
   "providers": [
@@ -330,9 +329,9 @@ Cascade loads config from `.cascade/config.json` in your project directory.
     { "type": "ollama"                          }
   ],
   "models": {
-    "t3": "llama3.2:3b"          // pin a tier; leave it out to keep that tier on Auto
+    "t3": "llama3.2:3b"
   },
-  "autoBias": "balanced",        // Auto's trade-off: "balanced" | "quality" | "cost"
+  "autoBias": "balanced",
   "tools": {
     "shellAllowlist":     [],
     "shellBlocklist":     ["sudo rm", "rm -rf", "mkfs"],
@@ -356,6 +355,10 @@ Cascade loads config from `.cascade/config.json` in your project directory.
 }
 ```
 
+The file is strict JSON — no comments.
+
+- `models` pins a tier to a model; a tier left out stays on Auto.
+- `autoBias` sets Auto's trade-off: `"balanced"`, `"quality"` or `"cost"`.
 - `planApproval: "always"` pauses Complex runs in the **boardroom**: approve T1's proposed sections, worker counts, and estimated cost before any T2 manager spawns. Headless/SDK runs auto-approve.
 - `altScreen: true` (or the `--alt-screen` flag) renders the TUI in the terminal's alternate screen buffer — vim-style, flicker-proof, shell restored on exit. History scrolls in-app with PgUp/PgDn since the alt screen has no native scrollback.
 
@@ -366,7 +369,7 @@ API keys are also read from environment variables:
 | Anthropic | `ANTHROPIC_API_KEY` — or a gateway's `ANTHROPIC_AUTH_TOKEN` with its `ANTHROPIC_BASE_URL` |
 | OpenAI    | `OPENAI_API_KEY`     |
 | Gemini    | `GOOGLE_API_KEY` (`GEMINI_API_KEY` via `cascade link`) |
-| Azure     | `AZURE_OPENAI_API_KEY` or `AZURE_OPENAI_KEY`, with `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_DEPLOYMENT` |
+| Azure     | `AZURE_OPENAI_KEY`, with `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_DEPLOYMENT` (`AZURE_OPENAI_API_KEY` via `cascade link azure`) |
 
 ### Linking credentials from other AI CLIs
 
@@ -497,16 +500,16 @@ T3 workers have access to the following tools. All destructive operations requir
 | `web_search` | Search the web (SearXNG, Brave or Tavily) | |
 | `web_fetch` | Fetch a page, SSRF-guarded | |
 | `browser` | Headless Playwright automation (off unless `tools.browserEnabled`) | ✓ |
-| `browser_control` | Drive a real browser over CDP or a Steel session | ✓ |
-| `read_current_page` | Read the page you have open in the browser | |
+| `browser_control` | Drive a real browser — desktop app and web (CDP or Steel) | ✓ |
+| `read_current_page` | Read the page you have open — desktop app | |
 | `image_analyze` | Describe an image (vision-capable models) | |
-| `generate_image` · `generate_speech` · `generate_video` | Generate media | |
+| `generate_image` · `generate_speech` · `generate_video` | Generate media, with a provider key that supports it | |
 | `transcribe_audio` | Speech-to-text for an audio file | |
 | `generate_document` | Render a REAL `.docx` / `.pptx` / `.xlsx` from Markdown or CSV | ✓ |
 | `pdf_create` | Render a PDF | ✓ |
 | `knowledge_graph_search` | Query the project's knowledge graph of facts | |
 | `peer_message` | Message a sibling worker | |
-| `ask_user` | Ask you one structured question instead of guessing | |
+| `ask_user` | Ask you one structured question instead of guessing — Cascade Cloud and self-hosted web | |
 
 MCP servers' tools, plugins and dynamic tools join this list at runtime.
 
@@ -552,12 +555,12 @@ cascade update                       Update to the latest version
 ```
 cascade login | logout | whoami      Sign in to Cascade Cloud on this machine
 cascade sync push | pull             Encrypt and upload / download your settings (keys, prefs)
-cascade sessions                     List your cloud chats
-cascade show <id>                    Print a chat transcript with branch markers
-cascade branch <chat> <message>      Switch a chat to another branch
-cascade rename <chat> <title>        Rename a chat
-cascade rm <chat> <message>          Delete a message and its subtree
-cascade delete <chat>                Delete a chat
+cascade sessions                              List your cloud chats
+cascade sessions show <id>                    Print a chat transcript with branch markers
+cascade sessions branch <chat> <message>      Switch a chat to another branch
+cascade sessions rename <chat> <title>        Rename a chat
+cascade sessions rm <chat> <message>          Delete a message and its subtree
+cascade sessions delete <chat>                Delete a chat
 ```
 
 **Options:**
@@ -770,7 +773,7 @@ Run shell scripts before or after tool use. Defined in `.cascade/config.json`:
 }
 ```
 
-`preTask` runs before a task starts, like `postTask` after it. Environment variables injected: `CASCADE_TOOL`, `CASCADE_INPUT`, `CASCADE_OUTPUT`.
+Once wired in, `preTask` will run before a task starts and `postTask` after it, and `HooksRunner` sets `CASCADE_TOOL`, `CASCADE_INPUT`, `CASCADE_OUTPUT` (and `CASCADE_PROMPT` for `preTask`) in the hook's environment.
 
 ---
 
@@ -800,9 +803,16 @@ cascade -i reviewer            # run as one identity for this session
 
 ## Security
 
-### Keystore
+### Where your keys are stored
 
-API keys go to your OS keychain (macOS Keychain, Windows Credential Vault, libsecret) when one is available. Otherwise they are kept in `.cascade/keystore.enc`, encrypted with **AES-256-GCM** under a PBKDF2-derived key (100,000 iterations) — useless without your master password. Keys get there through `cascade link`, the `/model` picker, desktop Settings, or `cascade sync pull`; synced settings are end-to-end encrypted, so the server holds only ciphertext.
+Provider keys you add — through `cascade link`, the `/model` picker, desktop Settings or `cascade sync pull` — are written as **plain JSON** to two files:
+
+- `~/.cascade-ai/credentials.json`, readable only by your user (mode `0600`), so a key entered once works in every workspace;
+- the workspace's `.cascade/config.json`, with ordinary file permissions — keep `.cascade/` out of version control.
+
+Keys in your environment (`ANTHROPIC_API_KEY`, …) are read at startup; `cascade link` is what copies one into these files. Settings synced through your Cascade account are end-to-end encrypted, so the server holds only ciphertext.
+
+Cascade also has an encrypted keystore — the OS keychain (macOS Keychain, Windows Credential Vault, libsecret), or `~/.cascade-ai/keystore.enc` under AES-256-GCM with a PBKDF2-derived key — and reads a provider key from it when one is there. Nothing writes provider keys to it yet; moving them there is on the [Roadmap](#roadmap).
 
 ### What else keeps a run contained
 
@@ -907,7 +917,6 @@ web/                    Local dashboard SPA (ReactFlow agent graph)
 | ✓ | Provider failover with automatic recovery |
 | ✓ | Streaming REPL (ink) |
 | ✓ | Live agent tree visualization |
-| ✓ | Encrypted keystore (OS keychain, AES-256-GCM fallback) |
 | ✓ | Web dashboard + WebSocket |
 | ✓ | MCP client, with OAuth for remote servers (`cascade mcp connect`) |
 | ✓ | Scheduled tasks (run by the dashboard server) |
@@ -934,8 +943,8 @@ web/                    Local dashboard SPA (ReactFlow agent graph)
 | ✓ | Typed task graph with durable resume after a crash, cancel or budget cap (v0.68) |
 | ✓ | Self-host with `docker compose up` (v0.69) |
 | ✓ | OpenAI-compatible API — `/v1/chat/completions`, `/v1/models` (v0.70) |
-| ✓ | Browser control — CDP or Steel, live view, take over and hand back (v0.78 – v0.81) |
-| ✓ | Ask-before-guessing — one structured question instead of an invented answer (v0.81) |
+| ✓ | Browser control in the desktop app and on the web — live view, take over and hand back (v0.78 – v0.81) |
+| ✓ | Ask-before-guessing on Cascade Cloud — one structured question instead of an invented answer (v0.81) |
 | ✓ | Code index and `code_search` (`cascade index`) |
 | ✓ | Media generation (image, speech, video) and audio transcription |
 
@@ -944,6 +953,7 @@ web/                    Local dashboard SPA (ReactFlow agent graph)
 | Status | Feature |
 |--------|---------|
 | 🔜 | Hooks — the config and `HooksRunner` exist; runs do not call them yet |
+| 🔜 | Provider keys in the encrypted keystore — it exists and is read, but keys are still written as plain JSON |
 | 🔜 | Task-completion notifications and webhooks (Slack / Discord / custom URL) — a `NotificationManager` exists but nothing sends through it |
 | 🔜 | OS-level jail for `shell` and `run_code` — bubblewrap / sandbox-exec / Docker, on top of approvals — see [docs/ROADMAP.md](docs/ROADMAP.md) |
 | 🔜 | Cross-session history research — a prior-work brief before T1 plans — see [docs/ROADMAP.md](docs/ROADMAP.md) |
