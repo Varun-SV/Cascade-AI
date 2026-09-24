@@ -68,15 +68,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keys a connection string names (`AccountKey`, `SharedAccessKey`,
   `SECRET_KEY`), a credential in an XML element (`<password>…</password>`)
   or beside the name of one (a Kubernetes `name: DB_PASSWORD` / `value: …`
-  entry, a .NET `<add key="ApiKey" value="…"/>`), a private key whose first
-  line was cut off, the signature
+  entry, a .NET `<add key="ApiKey" value="…"/>`), a YAML block scalar under
+  a secret name (`password: |` and the lines below it), a quoted value that
+  runs over lines or holds an escaped quote, a private key whose first line
+  was cut off, the signature
   on a signed URL, and the password in a
   connection URL (`postgres://user:…@host`). The
   self-check and the reflection critic, which can run on a different
   provider, get their evidence with credentials removed. The self-check
   also recognises each tool's own way of reporting a failure — a failed
   `run_code`, a non-zero shell exit, an HTTP or GitHub API error — instead
-  of counting it as a result, and only for the tool that uses that wording,
+  of counting it as a result — an empty transcription and a media tool with
+  no model configured included — and only for the tool that uses that wording,
   so a page or file that happens to start "Failed…" or "Error:" still
   counts as what the tool returned. A failed MCP tool call now says so
   instead of reading as its error text, and a call the worker answered with

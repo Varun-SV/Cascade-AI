@@ -223,6 +223,11 @@ describe('describeToolRecord — what the worker actually did', () => {
       ['github', 'gitlab request failed: ECONNRESET'],
       ['github', 'Rate limited by GitHub. Please wait a moment before trying again.'],
       ['transcribe_audio', 'Could not read the audio file at /tmp/a.wav.'],
+      // No transcript is no evidence of what the audio said.
+      ['transcribe_audio', 'whisper-1 returned an empty transcript — the file may be silent or in an unsupported format.'],
+      ['transcribe_audio', 'No transcription model is available on your configured providers.'],
+      ['generate_image', 'dall-e-3 needs the openai provider, which is not configured.'],
+      ['generate_video', 'No video model is available on your configured providers.'],
       ['code_search', 'Code search failed: index is not built'],
       ['ask_user', 'They did not answer in time. Proceed on your best reading of the request, and say plainly which assumption you made.'],
       ['ask_user', 'There is nobody watching this run to answer. Proceed on your best reading of the request, and say plainly which assumption you made.'],
@@ -268,33 +273,63 @@ describe('describeToolRecord — what the worker actually did', () => {
     // says it failed, and checks the table says so for THAT tool. A new tool,
     // or a new failure message, that the table does not know fails here.
     const toolsDir = fileURLToPath(new URL('../../tools/', import.meta.url));
-    const FAILURE_WORDS = /fail|error|could not|cannot|unable|denied|refus|timed? out|not found|invalid|^provide |missing|not (?:available|enabled|installed)|no page is open|is not one of those|did not answer|chose not to answer|nobody watching|stopped while/i;
+    const FAILURE_WORDS = /fail|error|could not|cannot|unable|denied|refus|timed? out|not found|invalid|^provide |missing|not (?:available|enabled|installed|configured)|empty|unsupported|^no \w+ model|no page is open|is not one of those|did not answer|chose not to answer|nobody watching|stopped while/i;
     // Checked by name in the tests above, where the wording is spliced from
     // parts this scan cannot rebuild.
     const SPLICED = [/^\$\{outcome\.ok/, /^\$\{why\}/];
     const missed: string[] = [];
     let checked = 0;
+    const STRING = String.raw`(['\`])((?:(?!\1).)*)\1`;
     for (const file of fs.readdirSync(toolsDir).filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))) {
-      let tool = 'created_tool';
+      // Null until the first tool class: a module-level helper, whose words
+      // any tool in the file may return — generate-media's `resolve` answers
+      // for all four media tools. Checked against every one of them.
+      let tool: string | null = null;
+      const tools: string[] = [];
+      const found: Array<{ text: string; tool: string | null }> = [];
       // A message built as lines — `return [\n 'Error: …',\n …].join('\n')` —
       // starts on the line after the bracket. Missed at first: run_code's
       // "interpreter not found" is written that way.
       let arrayHead = false;
+      // A `return` that runs on over lines — `return text\n ? … \n : '…';` —
+      // returns whichever branch it takes. transcribe_audio's empty transcript
+      // was the second branch of one, and nothing read it.
+      let returnOpen = false;
       for (const line of fs.readFileSync(path.join(toolsDir, file), 'utf8').split('\n')) {
         const named = /readonly name = '([a-z_]+)'/.exec(line);
-        if (named) tool = named[1]!;
+        if (named) { tool = named[1]!; tools.push(tool); }
+        const texts: string[] = [];
         const opensArray = /(?:return|resolve\()\s*\[\s*$/.test(line);
-        const returned = arrayHead
-          ? /^\s*(['`])((?:(?!\1).)*)\1/.exec(line)
-          : /(?:return|resolve\()\s*(['`])((?:(?!\1).)*)\1/.exec(line);
-        if (arrayHead && line.trim() && !line.trim().startsWith('//')) arrayHead = false;
+        if (arrayHead) {
+          const head = new RegExp(String.raw`^\s*${STRING}`).exec(line);
+          if (head) texts.push(head[2]!);
+          if (line.trim() && !line.trim().startsWith('//')) arrayHead = false;
+        }
+        const direct = new RegExp(String.raw`(?:return|resolve\()\s*${STRING}`).exec(line);
+        if (direct) texts.push(direct[2]!);
+        // A ternary's branches, on the return line or the lines it runs on to —
+        // not a `??` fallback, and not a string inside a `${…}`, which is a
+        // piece of the message rather than its start.
+        const isReturn = /\breturn\b/.test(line);
+        if (isReturn || returnOpen) {
+          const outer = line.replace(/\$\{[^{}]*\}/g, '${x}');
+          for (const m of outer.matchAll(new RegExp(String.raw`(?<!\?)[?:]\s*${STRING}`, 'g'))) texts.push(m[2]!);
+        }
+        // An error a shared helper hands back for a tool to return.
+        const errorProp = new RegExp(String.raw`(?<![\w.])error:\s*${STRING}`).exec(line);
+        if (errorProp) texts.push(errorProp[2]!);
+        if (isReturn && !/^\s*return\s*\[\s*$/.test(line)) returnOpen = !/;\s*(?:\/\/.*)?$/.test(line);
+        else if (returnOpen && /;\s*(?:\/\/.*)?$/.test(line)) returnOpen = false;
         if (opensArray) { arrayHead = true; continue; }
-        if (!returned) continue;
-        const text = returned[2]!;
+        for (const text of texts) found.push({ text, tool });
+      }
+      for (const { text, tool: owner } of found) {
         if (!FAILURE_WORDS.test(text) || SPLICED.some((r) => r.test(text))) continue;
         const sample = text.replace(/\$\{[^}]*\}/g, '404');
-        checked++;
-        if (!toolReportedFailure(tool, sample)) missed.push(`${file} [${tool}]: ${sample.slice(0, 80)}`);
+        for (const name of owner ? [owner] : tools.length ? tools : ['created_tool']) {
+          checked++;
+          if (!toolReportedFailure(name, sample)) missed.push(`${file} [${name}]: ${sample.slice(0, 80)}`);
+        }
       }
     }
     expect(checked, 'the scan found the tools').toBeGreaterThan(40);

@@ -67,8 +67,22 @@ const SECRET_RULES: Rule[] = [
   // The keys a connection string names are credentials too: `AccountKey` and
   // `SharedAccessKey`/`SharedAccessSignature` (Azure), and the `SECRET_KEY`,
   // `SIGNING_KEY` family that ends in KEY after a qualifier.
+  //
+  // A YAML block scalar first: `password: |` puts the value on the indented
+  // lines BELOW, and the rule after this one took the `|` for the value and
+  // left the secret itself. Every line indented past the key goes, blank ones
+  // between included.
   {
-    pattern: new RegExp(String.raw`((?<![A-Za-z0-9_])(?!REDACTED_)[A-Za-z0-9_]*?${SECRET_NAME}["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s"'&]+)`, 'gi'),
+    pattern: new RegExp(String.raw`^([ \t]*)((?:-[ \t]+)?["']?[\w.-]*?${SECRET_NAME}["']?[ \t]*:[ \t]*[|>][1-9+-]{0,2}[ \t]*(?:#.*)?)(?:\r?\n(?:\1[ \t]+\S.*|[ \t]*(?=\r?\n)))+`, 'gim'),
+    replacement: '$1$2\n$1  [REDACTED_SECRET]',
+  },
+  // Quoted, the value may run over lines — a dotenv `KEY="first\nsecond"` — and
+  // hold an escaped quote (`"a\"b"`), which ended it early and left the rest.
+  // To its closing quote, up to a bound; and a quote not closed on its line at
+  // all takes the rest of that line rather than leaving the whole value. A
+  // block scalar's `|` is left for the rule above, which took what it heads.
+  {
+    pattern: new RegExp(String.raw`((?<![A-Za-z0-9_])(?!REDACTED_)[A-Za-z0-9_]*?${SECRET_NAME}["']?\s*[:=]\s*)(?![|>][1-9+-]{0,2}[ \t]*(?:#.*)?\r?\n)(?:"(?:\\.|[^"\\]){0,4096}"|'[^']{0,4096}'|"[^"\r\n]*|'[^'\r\n]*|[^\s"'&]+)`, 'gi'),
     replacement: '$1[REDACTED_SECRET]',
   },
   // The same names as an XML element — `<password>hunter2</password>`,

@@ -254,6 +254,13 @@ const ENVELOPE_FAILURE = /^(?:Tool error:|Tool \S+ was denied|Tool not found:)/;
  * graded unsupported. So each wording counts only for the tool that emits it,
  * and only in the exact form it emits it.
  */
+/**
+ * The media tools' shared refusal, from `resolve` in generate-media.ts: no
+ * configured provider can serve the modality, or the model it picked needs one
+ * that is not configured.
+ */
+const MEDIA_UNAVAILABLE = String.raw`No \w+ model is available on your configured providers\.|\S+ needs the \S+ provider, which is not configured\.`;
+
 const TOOL_FAILURE: Record<string, RegExp> = {
   // `outcome.detail` is page content, so only the prefixes this tool adds.
   browser_control: /^(?:Failed: |Error: (?:browser control is not available|action is required|the run was cancelled|"[^"\n]*" needs |the browser could not perform ))/,
@@ -262,9 +269,9 @@ const TOOL_FAILURE: Record<string, RegExp> = {
   code_search: /^(?:Code search failed: |Provide a "query" to search the codebase)/,
   knowledge_graph_search: /^Provide a "query" naming the entities/,
   generate_document: /^(?:Provide (?:a "path" for the document|"content" — )|generate_document renders \.docx, \.pptx and \.xlsx\. )/,
-  generate_image: /^Provide a "prompt" describing the image/,
-  generate_speech: /^Provide "text" to speak/,
-  generate_video: /^Provide a "prompt" describing the video/,
+  generate_image: new RegExp(String.raw`^(?:Provide a "prompt" describing the image|${MEDIA_UNAVAILABLE})`),
+  generate_speech: new RegExp(String.raw`^(?:Provide "text" to speak|${MEDIA_UNAVAILABLE})`),
+  generate_video: new RegExp(String.raw`^(?:Provide a "prompt" describing the video|${MEDIA_UNAVAILABLE})`),
   run_code: /^(?:Execution (?:failed \(\d+ms\):|timed out after )|Error: [\w.]+ interpreter not found\.)/,
   // A non-zero exit, and the output that came with it.
   shell: /^Exit (?!0:)[^\s:]+:(?:\s|$)/,
@@ -276,7 +283,9 @@ const TOOL_FAILURE: Record<string, RegExp> = {
   peer_message: /^(?:Error: (?:toId is required|Peer communication is not enabled)|Unknown action: )/,
   // No answer came back, for whichever reason — the questions obtained nothing.
   ask_user: /^(?:Error: ask_user needs |(?:There is nobody watching this run to answer|The run was stopped while the question was open|They saw the questions and chose not to answer|They did not answer in time)\. Proceed on your best reading)/,
-  transcribe_audio: /^(?:Could not read the audio file at |Provide a "path" to the audio file)/,
+  // An empty transcript is no transcript: whatever the output says was in the
+  // audio, this call did not hear it.
+  transcribe_audio: new RegExp(String.raw`^(?:Could not read the audio file at |Provide a "path" to the audio file|\S+ returned an empty transcript — |${MEDIA_UNAVAILABLE})`),
 };
 
 /**

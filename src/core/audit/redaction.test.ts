@@ -101,6 +101,26 @@ describe('RedactionLayer', () => {
       .toBe('https://b.s3.amazonaws.com/k?X-Amz-Expires=60&X-Amz-Signature=[REDACTED_SECRET]');
   });
 
+  it('redacts a YAML block scalar under a secret name, not just its | marker', () => {
+    // The assignment rule took the `|` for the value and left the lines below.
+    const yaml = 'db:\n  password: |\n    hunter2\n    second-line\n\n  host: db.internal';
+    expect(RedactionLayer.redactSecrets(yaml)).toBe('db:\n  password: |\n    [REDACTED_SECRET]\n  host: db.internal');
+    expect(RedactionLayer.redactSecrets('creds:\n  - api_key: >-  # rotated monthly\n      abc\n      def\nnext: 1'))
+      .toBe('creds:\n  - api_key: >-  # rotated monthly\n    [REDACTED_SECRET]\nnext: 1');
+    expect(RedactionLayer.redactSecrets('"client_secret": |+\n  s3cr3t')).toBe('"client_secret": |+\n  [REDACTED_SECRET]');
+  });
+
+  it('leaves a block scalar under a name that only mentions a credential alone', () => {
+    const yaml = 'passwordPolicy: |\n  at least twelve characters\nhost: db';
+    expect(RedactionLayer.redactSecrets(yaml)).toBe(yaml);
+  });
+
+  it('redacts a quoted value that runs over lines, or holds an escaped quote', () => {
+    expect(RedactionLayer.redactSecrets('PRIVATE_TOKEN="first\nsecond"\nREGION=eu')).toBe('PRIVATE_TOKEN=[REDACTED_SECRET]\nREGION=eu');
+    expect(RedactionLayer.redactSecrets('{"password": "a\\"b", "user": "bob"}')).toBe('{"password": [REDACTED_SECRET], "user": "bob"}');
+    expect(RedactionLayer.redactSecrets('password: "never closed\nnext: line')).toBe('password: [REDACTED_SECRET]\nnext: line');
+  });
+
   it('redacts a credential held in an XML element, however short', () => {
     // The label rules wanted `:` or `=`, and the long-value one 16 characters.
     expect(RedactionLayer.redactSecrets('<password>hunter2</password>')).toBe('<password>[REDACTED_SECRET]</password>');
