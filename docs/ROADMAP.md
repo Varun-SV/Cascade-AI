@@ -29,15 +29,24 @@ WebAssembly sandbox.
   PID namespace, so no other process's `/proc/<pid>/environ` is readable; no
   capabilities; and for a local-only caller `--unshare-net` plus a seccomp
   filter refusing `socket(AF_UNIX)` and io_uring, so host daemons behind
-  socket files are out of reach. Not a read-only root: builds and package managers write
-  outside the workspace, and the aim is keeping secrets and private files out
-  of reach, not freezing the machine.
+  socket files are out of reach. Hard links to hidden files are found by
+  inode and mounted over too. A cloud caller's root stays writable: builds
+  and package managers write outside the workspace, and the aim there is
+  keeping secrets and private files out of reach, not freezing the machine.
+  A local-only caller's is read-only — the workspace writable, `/tmp` and
+  `~/.cache` private tmpfs, the git store read-only — because whatever it
+  writes may carry what it read: its changes in the workspace are found by
+  stamping files before and after, and marked local-only
+  (`.cascade/privacy-derived.json`), with other tool calls held until it
+  ends (`src/tools/workspace-gate.ts`).
 - **macOS — sandbox-exec**, a generated profile denying the same paths and,
-  for a local-only caller, outbound connections. Checked at startup with a
+  for a local-only caller, outbound connections and writes outside the
+  workspace (its temporary files go to a folder there, removed after). Checked at startup with a
   profile of the same shape; not exercised in CI.
 - **Everywhere** — provider keys are taken out of every command's
-  environment. With no jailer, `auto` runs commands that way and refuses them
-  to a local-only caller.
+  environment, `git`'s on Windows included. With no jailer, `auto` runs
+  commands that way and refuses them to a local-only caller. The `git` tool
+  refuses a push that would send a commit holding a hidden path.
 
 **Still open:** Windows (Job Objects/AppContainer, or WSL2 + bubblewrap), and
 a Docker/Podman fallback where no jailer works. On macOS a command can still

@@ -610,7 +610,7 @@ export class T3Worker extends BaseTier {
           issues.push(...retryArtifactCheck.issues);
           this.setStatus('FAILED');
           // ── Publish failure to peers ──
-          this.peerBus?.publish(this.id, assignment.subtaskId, output, 'ESCALATED');
+          this.publishOutcome(assignment.subtaskId, output, 'ESCALATED');
           return this.buildResult('ESCALATED', output, { checksRun, passed, failed }, issues, correctionAttempts);
         }
       }
@@ -657,7 +657,7 @@ export class T3Worker extends BaseTier {
           checksRun.push(...acceptanceResults.map((r) => r.criterion));
           failed.push(...recheck);
           this.setStatus('FAILED');
-          this.peerBus?.publish(this.id, assignment.subtaskId, output, 'ESCALATED');
+          this.publishOutcome(assignment.subtaskId, output, 'ESCALATED');
           return this.buildResult('ESCALATED', output, { checksRun, passed, failed }, issues, correctionAttempts);
         }
       }
@@ -691,7 +691,7 @@ export class T3Worker extends BaseTier {
         if (retest.failed.length > 0) {
           failed.push(...retest.failed);
           this.setStatus('FAILED');
-          this.peerBus?.publish(this.id, assignment.subtaskId, output, 'ESCALATED');
+          this.publishOutcome(assignment.subtaskId, output, 'ESCALATED');
           return this.buildResult('ESCALATED', output, { checksRun, passed, failed }, issues, correctionAttempts);
         }
       }
@@ -726,7 +726,9 @@ export class T3Worker extends BaseTier {
         }
         // world-state v2: distill the output into queryable facts (best-effort,
         // never blocks or fails the subtask). Skipped when disabled in config.
-        if (this.router.getKnowledgeConfig?.().factsExtraction !== false) {
+        // Facts land in the knowledge graph, which any later worker can
+        // search, whatever model it is on — so none from a local-only output.
+        if (this.router.getKnowledgeConfig?.().factsExtraction !== false && !this.localOnlyMatch) {
           await this.extractAndStoreFacts(db, assignment, output);
         }
       }
@@ -735,7 +737,7 @@ export class T3Worker extends BaseTier {
       this.sendStatusUpdate({ progressPct: 100, currentAction: 'Subtask complete', status: 'IN_PROGRESS', output });
 
       // ── Publish success to peers ─────────────
-      this.peerBus?.publish(this.id, assignment.subtaskId, output, 'COMPLETED');
+      this.publishOutcome(assignment.subtaskId, output, 'COMPLETED');
 
       return this.buildResult('COMPLETED', output, { checksRun, passed, failed }, issues, correctionAttempts);
     } catch (err) {
@@ -747,14 +749,14 @@ export class T3Worker extends BaseTier {
         issues.push(`Stalled: ${errMsg}`);
         const finalOutput = err.partialOutput || output || errMsg;
         this.setStatus('FAILED', finalOutput);
-        this.peerBus?.publish(this.id, assignment.subtaskId, finalOutput, 'FAILED');
+        this.publishOutcome(assignment.subtaskId, finalOutput, 'FAILED');
         return this.buildResult('ESCALATED', finalOutput, { checksRun, passed, failed }, issues, correctionAttempts);
       }
       if (err instanceof CriticalToolError) {
         issues.push(`[CRITICAL_TOOL_ERROR] ${err.toolName}: ${errMsg}`);
         const finalOutput = output || `Tool "${err.toolName}" failed unrecoverably: ${errMsg}`;
         this.setStatus('FAILED', finalOutput);
-        this.peerBus?.publish(this.id, assignment.subtaskId, finalOutput, 'FAILED');
+        this.publishOutcome(assignment.subtaskId, finalOutput, 'FAILED');
         return this.buildResult('ESCALATED', finalOutput, { checksRun, passed, failed }, issues, correctionAttempts);
       }
       // A budget stop is FAILED, never ESCALATED. The router has permanently
@@ -766,13 +768,13 @@ export class T3Worker extends BaseTier {
         issues.push(errMsg);
         const stopped = output || errMsg;
         this.setStatus('FAILED', stopped);
-        this.peerBus?.publish(this.id, assignment.subtaskId, stopped, 'FAILED');
+        this.publishOutcome(assignment.subtaskId, stopped, 'FAILED');
         return this.buildResult('FAILED', stopped, { checksRun, passed, failed }, issues, correctionAttempts);
       }
       issues.push(`Execution error: ${errMsg}`);
       const finalOutput = output || errMsg;
       this.setStatus('FAILED', finalOutput);
-      this.peerBus?.publish(this.id, assignment.subtaskId, finalOutput, 'FAILED');
+      this.publishOutcome(assignment.subtaskId, finalOutput, 'FAILED');
       return this.buildResult('ESCALATED', finalOutput, { checksRun, passed, failed }, issues, correctionAttempts);
     } finally {
       // This worker will never ask for the browser again, whether it completed,
@@ -810,7 +812,21 @@ export class T3Worker extends BaseTier {
   }
 
   sendToPeer(toId: string, content: unknown): void {
+    if (this.localOnlyMatch) throw new Error('A local-only subtask (privacy.paths) cannot share its output with peers.');
     this.peerBus?.send(this.id, toId, 'SHARE_OUTPUT', this.assignment?.subtaskId ?? '', content);
+  }
+
+  /**
+   * Tell the siblings how this subtask ended. A dependent sibling puts what
+   * arrives here into its own context, and may be on a cloud model — so a
+   * local-only subtask publishes only that it ran, the same line the tiers
+   * above get at the T3→T2 boundary.
+   */
+  private publishOutcome(subtaskId: string, output: string, status: 'COMPLETED' | 'FAILED' | 'ESCALATED'): void {
+    const shared = this.localOnlyMatch
+      ? `[local-only path — output withheld by privacy policy; status: ${status}]`
+      : output;
+    this.peerBus?.publish(this.id, subtaskId, shared, status);
   }
 
   async requestFromPeer(peerId: string, subtaskId: string): Promise<string> {
@@ -871,11 +887,33 @@ export class T3Worker extends BaseTier {
 
     // Detect tool-use mode against the EFFECTIVE model (per-subtask override if
     // any, else the tier default).
-    const effectiveModel = subtaskModel ?? this.router.getModelForTier('T3');
+    let effectiveModel = subtaskModel ?? this.router.getModelForTier('T3');
     // Tag this node with the model actually serving it — including a Cascade
     // Auto per-subtask override — so the desktop can show model-per-task.
     if (effectiveModel) this.setServingModel(`${effectiveModel.provider}:${effectiveModel.id}`);
-    const useTextTools = effectiveModel?.supportsToolUse === false && tools.length > 0;
+    let useTextTools = effectiveModel?.supportsToolUse === false && tools.length > 0;
+    // Once local-only (from the start, or when a read flips it mid-loop), the
+    // subtask is served by a private model, which may speak a different tool
+    // protocol from the one chosen above. Resolved here rather than left to
+    // the router's swap, which happens after the request is already shaped for
+    // the cloud model: a tool-less local model would be handed native tool
+    // definitions and no text-tool contract.
+    let resolvedPrivately = false;
+    const servePrivately = (): void => {
+      resolvedPrivately = true;
+      const privateModel = this.router.getPrivateModel?.({ current: effectiveModel, tools: tools.length > 0 });
+      // None: leave the request as it is, and forceLocal makes the router refuse it.
+      if (!privateModel) return;
+      subtaskModel = privateModel;
+      subtaskTaskType = undefined;
+      effectiveModel = privateModel;
+      this.setServingModel(`${privateModel.provider}:${privateModel.id}`);
+      const textTools = privateModel.supportsToolUse === false && tools.length > 0;
+      if (textTools !== useTextTools) {
+        useTextTools = textTools;
+        sentFullTextContract = false;
+      }
+    };
     // Token economy for text-tool models: the FULL per-parameter contract goes
     // out only on the first call (and again whenever the tool list changes,
     // e.g. a dynamic tool was created mid-run — the system prompt is rebuilt
@@ -901,6 +939,8 @@ export class T3Worker extends BaseTier {
           content: `USER INTERVENTION (mid-run steering — follow this over prior instructions where they conflict):\n${g.text}`,
         });
       }
+
+      if (this.localOnlyMatch && !resolvedPrivately) servePrivately();
 
       let textToolSuffix = '';
       if (useTextTools) {

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type {
   GenerateResult,
+  ModelInfo,
   PermissionDecision,
   PermissionRequest,
   T2ToT3Assignment,
@@ -981,6 +982,48 @@ describe('privacy.paths, enforced when a file is read', () => {
     expect(seen.join('\n')).toContain('web_fetch is unavailable to a local-only subtask');
   });
 
+  // The request was still shaped for the cloud model it started on: native
+  // tool definitions and no text-tool contract, handed to a local model that
+  // cannot use either once the router swapped it in.
+  it('speaks the private model\'s tool protocol once a read moves the subtask to it', async () => {
+    const { ToolRegistry } = await import('../../tools/registry.js');
+    const { PrivacyPaths } = await import('../privacy/paths.js');
+    const root = await workspace();
+    const registry = new ToolRegistry(
+      { shellAllowlist: [], shellBlocklist: [], webSearch: {}, browserEnabled: false, requireApprovalFor: [] } as never,
+      root,
+    );
+    const cloud = { id: 'cloud-1', provider: 'anthropic', supportsToolUse: true } as unknown as ModelInfo;
+    const local = { id: 'llama-local', provider: 'ollama', supportsToolUse: false } as unknown as ModelInfo;
+    const requests: Array<{ model?: ModelInfo; tools?: unknown; systemPrompt?: string }> = [];
+    let turns = 0;
+    const router = {
+      getModelForTier: () => cloud,
+      getPrivacyPaths: () => new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]),
+      hasPrivateModel: () => true,
+      getPrivateModel: () => local,
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }>; model?: ModelInfo; tools?: unknown; systemPrompt?: string }) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        requests.push({ model: options.model, tools: options.tools, systemPrompt: options.systemPrompt });
+        turns += 1;
+        if (turns === 1) return makeResult('', [{ id: 'tc-1', name: 'file_read', input: { path: 'secret/plan.md' } }], 'tool_use');
+        return makeResult('Summary written.');
+      }),
+    } as unknown as CascadeRouter;
+    const worker = new T3Worker(router, registry, 't2-parent');
+    const result = await worker.execute(makeAssignment({ description: 'Summarize the plan' }), 'task-protocol');
+    expect(result.localOnly).toBe(true);
+    expect(requests[0]?.tools, 'the cloud model is sent native tools').toBeDefined();
+    const after = requests[1]!;
+    expect(after.model?.id).toBe('llama-local');
+    expect(after.tools).toBeUndefined();
+    expect(after.systemPrompt).toContain('TOOL USE INSTRUCTIONS');
+  });
+
   // Copying is not reading: the private bytes would land in a file anything
   // can read later, whatever model the worker is on.
   it('copies a local-only image only into a document that is itself local-only', async () => {
@@ -1073,5 +1116,48 @@ describe('privacy.paths, enforced when a file is read', () => {
     expect(result.reinforcements ?? []).toEqual([]);
     expect(seen.join('\n')).toContain('cannot message its peers');
     expect(seen.join('\n')).toContain('request_workers is unavailable to a local-only subtask');
+  });
+
+  // Blocking peer_message left the automatic publication at the end of every
+  // subtask: a dependent sibling waiting on this one got its raw output, and
+  // put it in front of whatever model it was on. The knowledge graph was the
+  // same leak with a delay — facts distilled from the output, searchable by
+  // any later worker.
+  it('tells siblings and the knowledge graph only that a local-only subtask ran', async () => {
+    const bus = new PeerBus();
+    const registry = makeToolRegistry({ getToolDefinitions: () => [] } as unknown as Partial<ToolRegistry>);
+    const prompts: string[] = [];
+    const db = { addEntry: vi.fn(), addFacts: vi.fn(), addFact: vi.fn() };
+    const router = {
+      getModelForTier: () => undefined,
+      getPrivacyPaths: () => ({ hasPolicies: () => true, anyLocalOnly: () => true, coversFile: () => true }),
+      hasPrivateModel: () => true,
+      getWorldStateDB: () => db,
+      getKnowledgeConfig: () => ({ factsExtraction: true }),
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> }) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        prompts.push(content);
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        if (content.includes('Extract durable project facts')) {
+          return makeResult(`[{"entity":"launch","relation":"is","value":"${SECRET}"}]`);
+        }
+        return makeResult(`The plan says ${SECRET}.`);
+      }),
+    } as unknown as CascadeRouter;
+    const worker = new T3Worker(router, registry, 't2-parent');
+    worker.setPeerBus(bus);
+    const published = bus.waitFor('subtask-1', 30_000);
+    const result = await worker.execute(makeAssignment({ description: 'Summarize secret/plan.md' }), 'task-local-publish');
+
+    expect(result.localOnly).toBe(true);
+    const peer = await published;
+    expect(peer.status).toBe('COMPLETED');
+    expect(peer.output).not.toContain(SECRET);
+    expect(peer.output).toContain('output withheld by privacy policy');
+    expect(prompts.some((p) => p.includes('Extract durable project facts'))).toBe(false);
+    expect(JSON.stringify(db.addEntry.mock.calls)).not.toContain(SECRET);
   });
 });

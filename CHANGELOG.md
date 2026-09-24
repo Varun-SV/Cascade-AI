@@ -184,6 +184,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agent wrote cannot `fetch` once it has read a local-only file. Local-only
   files are kept out of the code index, never sent for transcription, and
   not embedded by `generate_document` in a document that is not local-only.
+  What a local-only subtask writes is local-only too — a file tool's
+  destination before it writes, whatever its commands changed in the
+  workspace once they end — and stays so in later runs, recorded in
+  `.cascade/privacy-derived.json`. Its commands write nowhere else (their
+  `/tmp` is private, the rest of the machine and the git store read-only)
+  and run alone meanwhile. Siblings waiting on it get a status line, not its
+  output, and no facts are taken from it into the knowledge graph.
+  `file_edit` asks like a read does, and plugin tools are refused to it like
+  MCP ones. A subtask that turns local-only mid-run moves to the private
+  model, and that model's tool protocol, before its next call; only private
+  endpoints still usable count, not ones in backoff or out for the run.
 - **`shell`, `run_code` and `git` run in a process jail.** An approved
   command could `cat .cascade/config.json`, read a local-only file, or read
   Cascade's own environment from `/proc` — and approval can come from a
@@ -191,13 +202,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Cascade's own files, the built-in secrets, `~/.cascade-ai` and local-only
   paths (for a worker that is not local-only) are mounted over — and the
   git store too, while its history holds any of them, since a blob is as
-  readable as the file; the `git` tool keeps working and leaves them out of
-  its diffs — each command gets its own process namespace and no
+  readable as the file; the `git` tool keeps working, leaves them out of its
+  diffs and refuses a push that would send a commit holding one — and so is
+  a hard link to any of them, under whatever name. Each command gets its own process namespace and no
   capabilities, and a local-only worker's commands get no network and no
   Unix sockets, which would reach host daemons such as Docker's. On macOS, `sandbox-exec` denies the same paths and, for a
   local-only worker, outbound connections. Where neither works, a local-only
-  worker cannot run commands. `tools.processJail`: `auto` (default),
+  worker cannot run commands. On Windows, `git` gets the provider keys taken
+  out of its environment too. `tools.processJail`: `auto` (default),
   `bwrap`, `sandbox-exec` — that jailer or no commands — or `off`.
+- **The code index's database is protected wherever it is.** Only its
+  default place was, so with `codeIndex.dbPath` set the file tools and
+  commands could read the indexed text, deleted chunks included. The
+  configured file and its journals are now protected too, and a hard link
+  to any protected file is protected like the file.
 - **A private model is one whose endpoint is private.** `forceLocal` chose
   any model marked `isLocal` — which means it costs $0 — so an
   OpenAI-compatible server on a public host configured with `local: true`,

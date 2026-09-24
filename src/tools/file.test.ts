@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { FileReadTool, FileWriteTool, FileDeleteTool } from './file.js';
+import { FileReadTool, FileWriteTool, FileDeleteTool, FileEditTool } from './file.js';
 
 const opts = { tierId: 'T3', sessionId: 's' };
 
@@ -78,6 +78,22 @@ describe('File tools — reading only what the running tier allows', () => {
     expect(asked).toEqual([[path.join(workspace, 'plan.md'), 'model']]);
     const allow = { ...opts, mayRead: () => true };
     expect(await tool.execute({ path: 'plan.md' }, allow as never)).toContain('the launch plan');
+  });
+
+  // An edit's answer — "not found", or how many it replaced — says what the
+  // file holds, so a no-op edit was a way to probe one a read may not see.
+  it('file_edit asks before reading, and a refusal says nothing about the file', async () => {
+    const tool = new FileEditTool();
+    tool.setWorkspaceRoot(workspace);
+    const refuse = { ...opts, mayRead: () => false };
+    for (const probe of ['launch', 'no such text']) {
+      await expect(
+        tool.execute({ path: 'plan.md', old_string: probe, new_string: probe }, refuse as never),
+      ).rejects.toThrow(/local-only \(privacy\.paths\)/);
+    }
+    const allow = { ...opts, mayRead: () => true };
+    expect(await tool.execute({ path: 'plan.md', old_string: 'launch', new_string: 'launch' }, allow as never))
+      .toContain('Replaced 1');
   });
 
   it('image_analyze asks about the workspace file it reads — not one beside the process', async () => {

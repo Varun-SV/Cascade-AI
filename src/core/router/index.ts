@@ -1040,7 +1040,7 @@ export class CascadeRouter extends EventEmitter {
     // Swap to a private model when the resolved one isn't; hard-error rather
     // than silently falling back to cloud when no private model exists.
     if (options.forceLocal && model && !this.isPrivateModel(model)) {
-      const localModel = this.selector.getAllAvailableModels().find((m) => this.isPrivateModel(m));
+      const localModel = this.getPrivateModel({ tools: !!options.tools?.length });
       if (!localModel) {
         throw new Error(
           'privacy.paths: this subtask touches a local-only path but no LOCAL model is available. ' +
@@ -1690,7 +1690,22 @@ export class CascadeRouter extends EventEmitter {
    * it on from there.
    */
   hasPrivateModel(): boolean {
-    return this.selector.getAllAvailableModels().some((m) => this.isPrivateModel(m));
+    return this.getPrivateModel() !== undefined;
+  }
+
+  /**
+   * The private model a local-only call would be served by: `current` when it
+   * is private and still usable, otherwise the first usable private model —
+   * one with native tool support first when the call carries tools.
+   *
+   * "Usable" is the selector's own test, so an endpoint in backoff or out for
+   * the run does not count: answering "yes" for one would let a subtask read a
+   * local-only file and then find nothing able to take it on.
+   */
+  getPrivateModel(opts: { current?: ModelInfo | null; tools?: boolean } = {}): ModelInfo | undefined {
+    const usable = this.selector.getUsableModels().filter((m) => this.isPrivateModel(m));
+    if (opts.current && usable.some((m) => m.id === opts.current!.id)) return opts.current;
+    return (opts.tools ? usable.find((m) => m.supportsToolUse !== false) : undefined) ?? usable[0];
   }
 
   setGuidanceQueue(queue: GuidanceQueue | undefined): void {

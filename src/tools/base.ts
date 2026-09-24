@@ -18,6 +18,13 @@ export abstract class BaseTool {
    */
   protected isProtectedPath: (absPath: string) => boolean = () => false;
 
+  /**
+   * True for a tool that touches files only by calling other tools through
+   * the registry, never itself — an agent-written tool. The registry's
+   * workspace gate is taken by those calls, so not by this one.
+   */
+  readonly delegatesToTools: boolean = false;
+
   setWorkspaceRoot(root: string): void {
     this.workspaceRoot = root;
   }

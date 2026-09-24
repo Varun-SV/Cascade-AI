@@ -67,6 +67,8 @@ export class ShellTool extends BaseTool {
         return `Exit ${e.code ?? 1}:\n${[e.stdout, e.stderr].filter(Boolean).join('\n').trim()}`;
       }
       throw err;
+    } finally {
+      await launch?.done?.();
     }
   }
 

@@ -134,6 +134,32 @@ describe('the launch each jailer is given', () => {
     expect(profile).toContain('(deny network-outbound)');
     expect(seatbeltProfile(hidden, false)).not.toContain('network');
   });
+
+  const layout = { writable: ['/tmp/w'], readOnly: ['/tmp/w/.git'], scratch: ['/tmp', '/home/u/.cache'] };
+
+  it('bubblewrap, for a local-only caller: the host read-only, private scratch, the workspace writable but its git store', () => {
+    const args = bwrapArgs(hidden, true, '/tmp/w', 'sh', [], layout).join(' ');
+    expect(args).toContain('--ro-bind / / --tmpfs /tmp --tmpfs /home/u/.cache --bind /tmp/w /tmp/w --dev /dev');
+    expect(args).not.toContain('--bind / /');
+    expect(args).toMatch(/--ro-bind \/tmp\/w\/.git \/tmp\/w\/.git --chdir \/tmp\/w/);
+    // A working directory the scratch would hide is mounted back, read-only.
+    expect(bwrapArgs(hidden, true, '/tmp/other', 'sh', [], layout).join(' ')).toContain('--ro-bind /tmp/other /tmp/other');
+  });
+
+  it('sandbox-exec, for a local-only caller: no writes but to the workspace and the devices, none to its git store', () => {
+    const profile = seatbeltProfile(hidden, true, layout);
+    const lines = profile.split('\n');
+    const denyAll = lines.indexOf('(deny file-write* (subpath "/"))');
+    const allow = lines.findIndex((l) => l.startsWith('(allow file-write* (subpath "/tmp/w")'));
+    const gitDir = lines.indexOf('(deny file-write* (subpath "/tmp/w/.git"))');
+    expect(denyAll).toBeGreaterThan(0);
+    expect(allow).toBeGreaterThan(denyAll);
+    expect(lines[allow]).toContain('(literal "/dev/null")');
+    expect(gitDir).toBeGreaterThan(allow);
+    // The hidden paths stay denied after the workspace is allowed.
+    expect(lines.findIndex((l) => l.includes('(literal "/w/.env")'))).toBeGreaterThan(allow);
+    expect(seatbeltProfile(hidden, true)).not.toContain('(deny file-write* (subpath "/"))');
+  });
 });
 
 describe('ProcessJail.prepare — which way a command runs', () => {
@@ -388,5 +414,237 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: what git history gives away', () =>
     reg.setPrivacyPaths(new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]));
     expect(await reg.execute('shell', { command: 'git log --oneline' }, exec)).toMatch(/\ba\b/);
     await fs.rm(clean, { recursive: true, force: true });
+  });
+});
+
+// The git tool keeps the object store in view, so a push packs whatever the
+// pushed commits hold — a local-only file committed once went to the remote
+// with them, with no read to move the worker local-only on the way.
+describe('what git push may send', () => {
+  let repo: string;
+  let bare: string;
+  const exec = { tierId: 't3', sessionId: 's', requireApproval: false };
+  const g = (dir: string, ...args: string[]) => execFileSync('git', ['-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' }).trim();
+  const push = (...args: string[]) => {
+    const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {} } as never, repo);
+    reg.setPrivacyPaths(new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]));
+    return reg.execute('git', { operation: 'push', args }, exec);
+  };
+  const remoteHas = (ref: string) => {
+    try { g(bare, 'rev-parse', '--verify', '--quiet', ref); return true; } catch { return false; }
+  };
+
+  beforeAll(async () => {
+    repo = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-push-')));
+    bare = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-push-remote-')));
+    g(bare, 'init', '-q', '--bare');
+    g(repo, 'init', '-q', '-b', 'main');
+    g(repo, 'remote', 'add', 'origin', bare);
+    await fs.writeFile(path.join(repo, 'notes.md'), 'public notes\n');
+    g(repo, 'add', '.'); g(repo, 'commit', '-qm', 'notes');
+    await fs.mkdir(path.join(repo, 'secret'));
+    await fs.writeFile(path.join(repo, 'secret', 'plan.md'), `${LOCAL}\n`);
+    g(repo, 'add', '.'); g(repo, 'commit', '-qm', 'plan');
+  });
+  afterAll(async () => {
+    await fs.rm(repo, { recursive: true, force: true });
+    await fs.rm(bare, { recursive: true, force: true });
+  });
+
+  it('refuses a push that would send a commit holding a local-only file', async () => {
+    await expect(push('origin', 'main')).rejects.toThrow(/refused: a commit "origin" does not have yet .* plan/);
+    await expect(push()).rejects.toThrow(/refused/);
+    await expect(push('origin', `${g(repo, 'rev-parse', 'HEAD')}:refs/heads/leak`)).rejects.toThrow(/refused/);
+    expect(remoteHas('refs/heads/main') || remoteHas('refs/heads/leak')).toBe(false);
+  });
+
+  it('refuses one to somewhere that is not a configured remote', async () => {
+    await expect(push(bare, 'main')).rejects.toThrow(/not a configured remote/);
+    await expect(push('--repo', bare, 'main')).rejects.toThrow(/not a configured remote/);
+    expect(remoteHas('refs/heads/main')).toBe(false);
+  });
+
+  it('lets the rest through: history without the file, and deleting', async () => {
+    await push('origin', 'HEAD~1:refs/heads/public');
+    expect(remoteHas('refs/heads/public')).toBe(true);
+    await push('origin', '--delete', 'public');
+    expect(remoteHas('refs/heads/public')).toBe(false);
+  });
+
+  it('lets a push through once the remote already has what it holds', async () => {
+    // Sent some other way (the user, outside Cascade), and fetched since.
+    g(repo, 'push', '-q', 'origin', 'main');
+    g(repo, 'fetch', '-q', 'origin');
+    await fs.writeFile(path.join(repo, 'notes.md'), 'public notes, revised\n');
+    g(repo, 'commit', '-qam', 'revise');
+    await push('origin', 'main');
+    expect(g(bare, 'rev-parse', 'refs/heads/main')).toBe(g(repo, 'rev-parse', 'HEAD'));
+  });
+});
+
+// Windows has no jail and no /bin/sh to unset variables in, so the git tool
+// ran git with Cascade's whole environment — provider keys included — for
+// its hooks and credential helpers to read.
+describe('git on Windows gets the scrubbed environment', () => {
+  it('hands git the environment with the keys taken out, and keeps the user\'s own git settings', async () => {
+    const { GitTool } = await import('../git.js');
+    const repo = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-wingit-')));
+    const g = (...args: string[]) => execFileSync('git', ['-C', repo, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' });
+    g('init', '-q');
+    await fs.writeFile(path.join(repo, 'a.md'), 'a\n');
+    g('add', '.'); g('commit', '-qm', 'a');
+    await fs.writeFile(path.join(repo, 'a.md'), 'b\n');
+    // git runs the external diff with its own environment: a window onto it.
+    const dump = path.join(repo, 'env.out');
+    const script = path.join(os.tmpdir(), `cascade-dump-env-${process.pid}.sh`);
+    await fs.writeFile(script, `#!/bin/sh\nenv > '${dump}'\n`, { mode: 0o755 });
+    g('config', 'diff.external', script);
+
+    const tool = new GitTool();
+    tool.setWorkspaceRoot(repo);
+    tool.setProcessJail(new ProcessJail(policy({ workspaceRoot: repo, detect: async () => null })));
+    const platform = process.platform;
+    const savedEnv = { ...process.env };
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    process.env['OPENAI_API_KEY'] = SECRET;
+    process.env['EDITOR'] = 'vi';
+    process.env['GIT_CONFIG_COUNT'] = '1';
+    process.env['GIT_CONFIG_KEY_0'] = 'core.pager';
+    process.env['GIT_CONFIG_VALUE_0'] = 'cat';
+    try {
+      await tool.execute({ operation: 'diff' }, { tierId: 't3', sessionId: 's' });
+    } finally {
+      Object.defineProperty(process, 'platform', { value: platform });
+      for (const name of Object.keys(process.env)) if (!(name in savedEnv)) delete process.env[name];
+      Object.assign(process.env, savedEnv);
+    }
+    const seen = await fs.readFile(dump, 'utf8');
+    expect(seen).not.toContain(SECRET);
+    expect(seen).toMatch(/^EDITOR=vi$/m);
+    expect(seen).not.toMatch(/^GIT_CONFIG_COUNT=/m);
+    await fs.rm(repo, { recursive: true, force: true });
+    await fs.rm(script, { force: true });
+  });
+});
+
+// A local-only worker's command could write what it read anywhere — a file
+// in the workspace, /tmp, the home folder, a commit — for a cloud worker's
+// command to read later. Now it writes only into the workspace, and what it
+// changed there is local-only from then on.
+describe.skipIf(!bwrapWorks)('in bubblewrap: where a local-only caller\'s writes go', () => {
+  let dir: string;
+  let privacy: PrivacyPaths;
+  const exec = { tierId: 't3', sessionId: 's', requireApproval: false };
+  const offline = { ...exec, isOffline: () => true };
+  const g = (...args: string[]) => execFileSync('git', ['-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' }).trim();
+  const registry = () => {
+    const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {} } as never, dir);
+    reg.setPrivacyPaths(privacy);
+    return reg;
+  };
+  const probe = `cascade-offline-probe-${process.pid}`;
+
+  beforeAll(async () => {
+    dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-writes-')));
+    g('init', '-q');
+    await fs.mkdir(path.join(dir, 'secret'));
+    await fs.writeFile(path.join(dir, 'secret', 'plan.md'), `${LOCAL}\n`);
+    await fs.writeFile(path.join(dir, 'notes.md'), 'public notes\n');
+    g('add', 'notes.md'); g('commit', '-qm', 'notes');
+    privacy = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }], { workspaceRoot: dir });
+  });
+  afterAll(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(path.join(os.tmpdir(), probe), { force: true });
+    await fs.rm(path.join(os.homedir(), probe), { force: true });
+  });
+
+  it('marks what the command wrote in the workspace local-only, and hides it from a cloud worker\'s commands', async () => {
+    const reg = registry();
+    await reg.execute('shell', { command: 'cat secret/plan.md > summary.txt; mkdir -p out && cp summary.txt out/copy.txt' }, offline);
+    expect(privacy.isLocalOnly('summary.txt')).toBe(true);
+    expect(privacy.isLocalOnly('out/copy.txt')).toBe(true);
+    expect(privacy.isLocalOnly('notes.md'), 'nothing it left alone').toBe(false);
+    const seen = await reg.execute('shell', { command: 'cat summary.txt out/copy.txt notes.md 2>&1; true' }, exec);
+    expect(seen).not.toContain(LOCAL);
+    expect(seen).toContain('public notes');
+    // …and in a later run, from the record.
+    expect(new PrivacyPaths([], { workspaceRoot: dir }).isLocalOnly('summary.txt')).toBe(true);
+  });
+
+  it('gives the command a private /tmp, and nowhere else to write outside the workspace', async () => {
+    const out = await registry().execute('shell', {
+      command: `echo x > /tmp/${probe} && cat /tmp/${probe}; echo y > "$HOME/${probe}" 2>&1; true`,
+    }, offline);
+    expect(out).toMatch(/^x$/m);
+    expect(out).toMatch(/Read-only file system/);
+    await expect(fs.stat(path.join(os.tmpdir(), probe))).rejects.toThrow();
+    await expect(fs.stat(path.join(os.homedir(), probe))).rejects.toThrow();
+  });
+
+  it('keeps the command from recording anything in the repository', async () => {
+    const head = g('rev-parse', 'HEAD');
+    const out = await registry().execute('shell', {
+      command: 'git -c user.email=t@t -c user.name=t commit -q --allow-empty -m "$(cat secret/plan.md)" 2>&1; true',
+    }, offline);
+    expect(out).toMatch(/Read-only file system|unable to|could not/i);
+    expect(g('rev-parse', 'HEAD')).toBe(head);
+    // It can still read the history.
+    expect(await registry().execute('git', { operation: 'log' }, offline)).toContain('notes');
+  });
+
+  it('marks a file tool\'s destination local-only before it writes', async () => {
+    const reg = registry();
+    await reg.execute('file_write', { path: 'report.md', content: LOCAL }, offline);
+    expect(privacy.isLocalOnly('report.md')).toBe(true);
+    await reg.execute('file_write', { path: 'public.md', content: 'hello' }, exec);
+    expect(privacy.isLocalOnly('public.md'), 'a cloud worker\'s write is its own').toBe(false);
+  });
+
+  it('runs the command alone: a cloud worker\'s read waits for it, and then finds what it wrote marked', async () => {
+    const reg = registry();
+    const order: string[] = [];
+    const command = reg.execute('shell', { command: 'sleep 0.5; cat secret/plan.md > late.txt' }, offline)
+      .then(() => { order.push('command'); });
+    await new Promise((r) => setTimeout(r, 150));
+    const read = reg.execute('file_read', { path: 'notes.md' }, exec).then(() => { order.push('read'); });
+    await Promise.all([command, read]);
+    expect(order).toEqual(['command', 'read']);
+    expect(privacy.isLocalOnly('late.txt')).toBe(true);
+  });
+});
+
+// Masks go on by name, and a hard link is the file under another name.
+describe.skipIf(!bwrapWorks)('in bubblewrap: other names for a hidden file, and files hidden where they are', () => {
+  let dir: string;
+  const exec = { tierId: 't3', sessionId: 's', requireApproval: false };
+
+  beforeAll(async () => {
+    dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-links-')));
+    await fs.writeFile(path.join(dir, '.env'), `KEY=${SECRET}\n`);
+    await fs.link(path.join(dir, '.env'), path.join(dir, 'notes.txt'));
+    await fs.mkdir(path.join(dir, 'secret'));
+    await fs.writeFile(path.join(dir, 'secret', 'plan.md'), `${LOCAL}\n`);
+    await fs.mkdir(path.join(dir, 'docs'));
+    await fs.link(path.join(dir, 'secret', 'plan.md'), path.join(dir, 'docs', 'plan.md'));
+    await fs.mkdir(path.join(dir, 'data'));
+    await fs.writeFile(path.join(dir, 'data', 'idx.db'), 'INDEXED-CHUNK-TEXT');
+    await fs.writeFile(path.join(dir, 'readme.md'), 'public\n');
+  });
+  afterAll(async () => { await fs.rm(dir, { recursive: true, force: true }); });
+
+  it('hides a hard link to a protected or local-only file, and a file protected where it is', async () => {
+    const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {} } as never, dir);
+    reg.setPrivacyPaths(new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]));
+    reg.protectFiles([path.join(dir, 'data', 'idx.db')]);
+    const out = await reg.execute('shell', { command: 'cat notes.txt docs/plan.md data/idx.db readme.md 2>&1; true' }, exec);
+    expect(out).not.toContain(SECRET);
+    expect(out).not.toContain(LOCAL);
+    expect(out).not.toContain('INDEXED-CHUNK-TEXT');
+    expect(out).toContain('public');
+    // A local-only caller may see the local-only one, under either name.
+    const local = await reg.execute('shell', { command: 'cat docs/plan.md notes.txt 2>&1; true' }, { ...exec, isOffline: () => true });
+    expect(local).toContain(LOCAL);
+    expect(local).not.toContain(SECRET);
   });
 });

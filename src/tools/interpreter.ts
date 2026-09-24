@@ -102,7 +102,7 @@ export class CodeInterpreterTool extends BaseTool {
     const launch = prepared?.launch ?? { file: cmdPrefix, args: execArgs, cwd: this.workspaceRoot, env: process.env };
 
     // 3. Execute
-    return new Promise((resolve) => {
+    const output = await new Promise<string>((resolve) => {
       const startMs = Date.now();
       execFile(launch.file, launch.args, { cwd: launch.cwd, env: launch.env, timeout: 30000 }, (error, stdout, stderr) => {
         const duration = Date.now() - startMs;
@@ -128,5 +128,7 @@ export class CodeInterpreterTool extends BaseTool {
         }
       });
     });
+    await prepared?.launch.done?.();
+    return output;
   }
 }

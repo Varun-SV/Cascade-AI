@@ -41,7 +41,7 @@ export async function indexCommand(dirPath?: string): Promise<void> {
 
   const ignore = new CascadeIgnore();
   await ignore.load(workspace);
-  const privacy = new PrivacyPaths(config.privacy?.paths ?? []);
+  const privacy = new PrivacyPaths(config.privacy?.paths ?? [], { workspaceRoot: workspace });
 
   const index = new WorkspaceIndex({
     root: workspace,

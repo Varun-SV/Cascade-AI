@@ -250,8 +250,12 @@ export class Cascade extends EventEmitter {
 
     // Per-path privacy tiers: subtasks touching local-only paths are forced
     // onto private models and their raw output is withheld from upper tiers.
+    // What such subtasks wrote stays local-only, recorded in the workspace —
+    // so the record applies even once the policies that caused it are gone.
     const privacyPolicies = this.config.privacy?.paths ?? [];
-    if (privacyPolicies.length) this.router.setPrivacyPaths(new PrivacyPaths(privacyPolicies));
+    if (privacyPolicies.length || PrivacyPaths.hasDerived(this.workspacePath)) {
+      this.router.setPrivacyPaths(new PrivacyPaths(privacyPolicies, { workspaceRoot: this.workspacePath }));
+    }
 
     // The process jail (tools/jail/process-jail.ts) hides local-only paths
     // from commands, and keeps every configured secret out of their
@@ -354,6 +358,10 @@ export class Cascade extends EventEmitter {
     }
     const dbPath = ci.dbPath || path.join(this.workspacePath, '.cascade', 'code-index.db');
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    // The default place is protected by name; a configured one is not, and
+    // holds the indexed text — deleted chunks too, until SQLite reuses them.
+    const dbFile = path.resolve(this.workspacePath, dbPath);
+    this.toolRegistry.protectFiles(['', '-wal', '-shm', '-journal'].map((suffix) => `${dbFile}${suffix}`));
     const db = new Database(dbPath);
     db.pragma('journal_mode = WAL');
 

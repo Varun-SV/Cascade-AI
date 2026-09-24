@@ -109,6 +109,9 @@ export class FileEditTool extends BaseTool {
     const oldString = input['old_string'] as string;
     const newString = input['new_string'] as string;
     const replaceAll = (input['replace_all'] as boolean | undefined) ?? false;
+    // An edit reads before it writes, and its answer says whether old_string
+    // was there and how often — enough to probe a file a read may not see.
+    if (!this.readGate(options)(absPath)) throw new WithheldError(filePath);
 
     const rawContent = await fs.readFile(absPath, 'utf-8');
 

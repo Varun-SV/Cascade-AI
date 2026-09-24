@@ -259,6 +259,37 @@ describe('ToolRegistry — protected paths hold for every tool that takes one', 
     expect(await reg.execute('file_read', { path: '.cascade/notes.md' }, opts)).toContain('visible');
   });
 
+  // realpath gives a hard link back as itself, so `notes.txt` linked to
+  // `.env` was judged as `notes.txt` — and read out.
+  it('refuses a hard link to a protected file, including one made after the last look', async () => {
+    const reg = new ToolRegistry(toolsConfig, workspace);
+    await fs.link(path.join(workspace, '.env'), path.join(workspace, 'notes.txt'));
+    await expect(reg.execute('file_read', { path: 'notes.txt' }, opts)).rejects.toThrow(/cascadeignore/);
+    await fs.link(path.join(workspace, 'keys', 'server.pem'), path.join(workspace, 'src', 'b.ts'));
+    await expect(reg.execute('file_read', { path: 'src/b.ts' }, opts)).rejects.toThrow(/cascadeignore/);
+    // Two names for an ordinary file are two names for an ordinary file.
+    await fs.link(path.join(workspace, 'src', 'a.ts'), path.join(workspace, 'src', 'a-copy.ts'));
+    expect(await reg.execute('file_read', { path: 'src/a-copy.ts' }, opts)).toContain('SECRET-code');
+    const grep = await reg.execute('grep', { pattern: 'SECRET', output_mode: 'content' }, opts);
+    expect(grep).not.toMatch(/SECRET-env|SECRET-pem/);
+  });
+
+  // The code index's database holds the indexed text; a configured place for
+  // it is not one any built-in pattern names.
+  it('refuses a file protected where it is, and its journals', async () => {
+    const reg = new ToolRegistry(toolsConfig, workspace);
+    await fs.mkdir(path.join(workspace, 'data'));
+    for (const suffix of ['', '-wal']) await fs.writeFile(path.join(workspace, 'data', `idx.db${suffix}`), 'SECRET-index', 'utf-8');
+    reg.protectFiles(['', '-wal', '-shm'].map((suffix) => path.join(workspace, 'data', `idx.db${suffix}`)));
+    for (const file of ['data/idx.db', 'data/idx.db-wal']) {
+      await expect(reg.execute('file_read', { path: file }, opts)).rejects.toThrow(/cascadeignore/);
+    }
+    await expect(reg.execute('file_write', { path: 'data/idx.db-shm', content: 'x' }, opts)).rejects.toThrow(/cascadeignore/);
+    const grep = await reg.execute('grep', { pattern: 'SECRET-', output_mode: 'content' }, opts);
+    expect(grep).toContain('SECRET-code');
+    expect(grep).not.toContain('SECRET-index');
+  });
+
   it('keeps the built-ins protected against a negation in .cascadeignore', async () => {
     const reg = new ToolRegistry(toolsConfig, workspace);
     reg.setIgnoredPaths(['!.env', '!.cascade/config.json']);
@@ -335,6 +366,28 @@ describe('ToolRegistry — nothing leaves the machine for a local-only caller', 
     // Work on this machine carries on.
     expect(await reg.execute('file_read', { path: 'a.txt' }, offline)).toContain('local');
     await fs.rm(ws, { recursive: true, force: true });
+  });
+
+  // A plugin tool is an ordinary BaseTool, so neither the name list nor the
+  // MCP check caught one — and a plugin can post its arguments anywhere.
+  it('refuses a plugin\'s tools too, including ones its hook registers', async () => {
+    class Upload extends BaseTool {
+      readonly inputSchema = { type: 'object', properties: {} };
+      readonly description = 'Upload notes';
+      calls = 0;
+      constructor(readonly name: string) { super(); }
+      async execute(): Promise<string> { this.calls += 1; return 'uploaded'; }
+    }
+    const reg = new ToolRegistry(toolsConfig);
+    const direct = new Upload('upload_notes');
+    const hooked = new Upload('post_webhook');
+    reg.registerPlugin({ name: 'uploader', version: '1.0.0', tools: [direct], onRegister: (r) => r.register(hooked) });
+    const offline = { ...opts, isOffline: () => true };
+    for (const name of ['upload_notes', 'post_webhook']) {
+      await expect(reg.execute(name, {}, offline), name).rejects.toThrow(/unavailable to a local-only subtask/);
+    }
+    expect(direct.calls + hooked.calls).toBe(0);
+    expect(await reg.execute('upload_notes', {}, { ...opts, isOffline: () => false })).toBe('uploaded');
   });
 });
 

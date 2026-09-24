@@ -81,6 +81,8 @@ export class GitTool extends BaseTool {
           return `Checked out ${args.join(' ')}`;
         }
         case 'push': {
+          const refused = await this.jail?.pushRefusal(cwd, args, offline);
+          if (refused) throw new Error(refused);
           await git.push(args);
           return 'Pushed';
         }
@@ -98,7 +100,7 @@ export class GitTool extends BaseTool {
     } catch (err) {
       throw new Error(`git ${operation} failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
-      done();
+      await done();
     }
   }
 
@@ -109,16 +111,17 @@ export class GitTool extends BaseTool {
    * guards against unsafe arguments still apply. The script also unsets the
    * variables the jail scrubs: simple-git refuses an environment handed to it
    * that holds EDITOR, PAGER or the like, which most shells set. Windows has
-   * no jail and no /bin/sh, and runs git as it always did. `done` removes
-   * the script.
+   * no jail and no /bin/sh, so git gets the scrubbed environment directly
+   * (gitWithEnv). `done` removes the script, and marks what a local-only
+   * caller's git changed local-only (Launch.done).
    */
-  private async gitFor(cwd: string, offline: boolean): Promise<{ git: SimpleGit; done: () => void }> {
-    const plain = { git: simpleGit(cwd), done: () => {} };
+  private async gitFor(cwd: string, offline: boolean): Promise<{ git: SimpleGit; done: () => Promise<void> }> {
+    const plain = { git: simpleGit(cwd), done: async () => {} };
     if (!this.jail) return plain;
     const prepared = await this.jail.prepare('git', [], { cwd, offline, keepGit: true });
     if (!prepared.ok) throw new Error(prepared.reason);
-    if (process.platform === 'win32') return plain;
     const { launch } = prepared;
+    if (process.platform === 'win32') return { git: gitWithEnv(cwd, launch.env), done: async () => { await launch.done?.(); } };
     const unset = Object.keys(process.env).filter((name) => !(name in launch.env) && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name));
     if (!launch.jail && unset.length === 0) return plain;
 
@@ -132,7 +135,13 @@ export class GitTool extends BaseTool {
       '',
     ].join('\n'), { mode: 0o700 });
     const git = simpleGit({ baseDir: cwd, binary: script, unsafe: { allowUnsafeCustomBinary: true } });
-    return { git, done: () => fs.rmSync(dir, { recursive: true, force: true }) };
+    return {
+      git,
+      done: async () => {
+        fs.rmSync(dir, { recursive: true, force: true });
+        await launch.done?.();
+      },
+    };
   }
 
   private formatStatus(status: Awaited<ReturnType<SimpleGit['status']>>): string {
@@ -145,6 +154,54 @@ export class GitTool extends BaseTool {
     if (status.conflicted.length) lines.push(`Conflicts: ${status.conflicted.join(', ')}`);
     return lines.join('\n') || 'Working tree clean';
   }
+}
+
+/**
+ * The variables simple-git (3.36) refuses in an environment handed to it,
+ * each with the `unsafe` option that lets it through.
+ */
+const GUARDED_ENV: Record<string, string> = {
+  editor: 'allowUnsafeEditor',
+  git_askpass: 'allowUnsafeAskPass',
+  git_config_global: 'allowUnsafeConfigPaths',
+  git_config_system: 'allowUnsafeConfigPaths',
+  git_config: 'allowUnsafeConfigPaths',
+  git_editor: 'allowUnsafeEditor',
+  git_exec_path: 'allowUnsafeConfigPaths',
+  git_external_diff: 'allowUnsafeDiffExternal',
+  git_pager: 'allowUnsafePager',
+  git_proxy_command: 'allowUnsafeGitProxy',
+  git_template_dir: 'allowUnsafeTemplateDir',
+  git_sequence_editor: 'allowUnsafeEditor',
+  git_ssh: 'allowUnsafeSshCommand',
+  git_ssh_command: 'allowUnsafeSshCommand',
+  pager: 'allowUnsafePager',
+  prefix: 'allowUnsafeConfigPaths',
+  ssh_askpass: 'allowUnsafeAskPass',
+};
+
+/**
+ * simple-git running git with `env` as its whole environment — the scrubbed
+ * one, where there is no /bin/sh to unset variables in (Windows).
+ *
+ * simple-git refuses an environment holding settings such as EDITOR or
+ * GIT_SSH unless told it may. Those come from the user's own environment,
+ * which git reads when Cascade is not involved, so each one present is let
+ * through — and only those. Configuration injected through GIT_CONFIG_COUNT
+ * is dropped instead: which settings it carries is not checked here.
+ */
+export function gitWithEnv(cwd: string, env: NodeJS.ProcessEnv): SimpleGit {
+  const kept: Record<string, string> = {};
+  const unsafe: Record<string, boolean> = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (value === undefined) continue;
+    const key = name.toLowerCase().trim();
+    if (/^git_config_(count|key_\d+|value_\d+)$/.test(key)) continue;
+    const category = GUARDED_ENV[key];
+    if (category) unsafe[category] = true;
+    kept[name] = value;
+  }
+  return simpleGit({ baseDir: cwd, unsafe }).env(kept);
 }
 
 // ── Git Context Helper (injected into T1 system prompt) ──

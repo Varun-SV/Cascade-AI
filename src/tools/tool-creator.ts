@@ -201,6 +201,8 @@ class DynamicTool extends BaseTool {
   readonly name: string;
   readonly description: string;
   readonly inputSchema: Record<string, unknown>;
+  // The guest has no filesystem; it reaches files only through callTool.
+  override readonly delegatesToTools = true;
   private executeCode: string;
   private _isDangerous: boolean;
   private registry: ToolRegistry;

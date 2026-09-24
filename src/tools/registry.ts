@@ -20,6 +20,8 @@ import { ProcessJail } from './jail/process-jail.js';
 import { BUILT_IN_PROTECTED } from '../config/ignore.js';
 import { realPathOf } from '../utils/real-path.js';
 import type { BaseTool } from './base.js';
+import { WorkspaceGate } from './workspace-gate.js';
+import { LinkAliases } from '../utils/link-aliases.js';
 import { assignMcpToolNames } from './tool-name.js';
 import { ShellTool } from './shell.js';
 import { FileReadTool, FileWriteTool, FileEditTool, FileDeleteTool, FileListTool } from './file.js';
@@ -82,13 +84,19 @@ const PATH_TOOLS = new Set([
  * Built-in tools that send what they are given off this machine — to a web
  * page or search engine, GitHub, a media or transcription provider, or the
  * embedder and reranker behind the code index. A local-only subtask may not
- * use them: its arguments can carry what it read. MCP tools count too; which
- * server is behind one, and where it sends things, is not known here.
+ * use them: its arguments can carry what it read. MCP and plugin tools count
+ * too; where one sends things is not known here.
  */
 const OFF_MACHINE_TOOLS = new Set([
   'web_fetch', 'web_search', 'browser', 'browser_control', 'github',
   'generate_image', 'generate_speech', 'generate_video', 'transcribe_audio', 'code_search',
 ]);
+
+/** Built-in tools that write the file their `path` input names. */
+const WRITE_TOOLS = new Set(['file_write', 'file_edit', 'generate_document', 'pdf_create']);
+
+/** Built-in tools that run programs, in the process jail. */
+const COMMAND_TOOLS = new Set(['shell', 'run_code', 'git']);
 
 export class ToolRegistry extends EventEmitter {
   private tools: Map<string, BaseTool> = new Map();
@@ -100,17 +108,29 @@ export class ToolRegistry extends EventEmitter {
   private workspaceRoot: string;
   /** Loaded plugins, keyed by plugin name */
   private plugins: Map<string, ToolPlugin> = new Map();
+  /**
+   * The tools plugins put here. Like an MCP tool, what one does with its
+   * arguments is not known here, so a local-only subtask may not call one.
+   */
+  private readonly pluginTools = new Set<string>();
   /** The workspace's privacy policies, for the jail to hide local-only paths by. */
   private privacyPaths?: PrivacyPaths;
   /** Every configured secret value, for the jail to keep out of a command's environment. */
   private secretValues: () => string[] = () => [];
   /** Where shell, run_code and git launch what they run. */
   private readonly processJail: ProcessJail;
+  /** Lets a local-only subtask's command or write run alone (workspace-gate.ts). */
+  private readonly gate = new WorkspaceGate();
+  /** Files protected where they are configured to be, not by name: the code index's database. */
+  private readonly protectedFiles = new Set<string>();
+  /** Other names — hard links — for the protected files in the workspace. */
+  private aliases: LinkAliases;
 
   constructor(config: ToolsConfig, workspaceRoot: string = process.cwd()) {
     super();
     this.config = config;
     this.workspaceRoot = workspaceRoot;
+    this.aliases = this.newAliases();
     this.processJail = new ProcessJail({
       mode: config.processJail ?? 'auto',
       workspaceRoot,
@@ -123,7 +143,9 @@ export class ToolRegistry extends EventEmitter {
         ...(offline ? [] : this.privacyPaths?.localOnlyPatterns() ?? []),
       ],
       hiddenDirs: [path.join(os.homedir(), GLOBAL_CONFIG_DIR)],
+      hiddenFiles: () => [...this.protectedFiles],
       secretValues: () => this.secretValues(),
+      taint: (rels) => this.markLocalOnly(rels),
       log: (msg) => { this.emit('log', msg); },
     });
     this.registerDefaults();
@@ -194,11 +216,17 @@ export class ToolRegistry extends EventEmitter {
   registerPlugin(plugin: ToolPlugin): void {
     if (this.plugins.has(plugin.name)) return;
     this.plugins.set(plugin.name, plugin);
+    const before = new Map(this.tools);
     for (const tool of plugin.tools) {
       tool.setWorkspaceRoot(this.workspaceRoot);
       this.register(tool);
     }
     plugin.onRegister?.(this);
+    // Everything the plugin added or replaced, including what its onRegister
+    // hook registered directly.
+    for (const [name, tool] of this.tools) {
+      if (before.get(name) !== tool) this.pluginTools.add(name);
+    }
   }
 
   /** Returns the names of all registered plugins */
@@ -250,6 +278,11 @@ export class ToolRegistry extends EventEmitter {
     // Using the library eliminates the old substring bug where `node_modules`
     // would also match `mynodemodules.js`.
     this.ignoreMatcher = ignore().add(patterns);
+    this.aliases = this.newAliases();
+  }
+
+  private newAliases(): LinkAliases {
+    return new LinkAliases(this.workspaceRoot, (rel) => this.builtInMatcher.ignores(rel) || this.ignoreMatcher.ignores(rel));
   }
 
   getToolDefinitions(): ToolDefinition[] {
@@ -292,7 +325,7 @@ export class ToolRegistry extends EventEmitter {
     const tool = this.tools.get(toolName);
     if (!tool) throw new Error(`Tool not found: ${toolName}`);
 
-    if (options.isOffline?.() && (OFF_MACHINE_TOOLS.has(toolName) || tool instanceof McpToolWrapper)) {
+    if (options.isOffline?.() && (OFF_MACHINE_TOOLS.has(toolName) || tool instanceof McpToolWrapper || this.pluginTools.has(toolName))) {
       throw new Error(`${toolName} is unavailable to a local-only subtask (privacy.paths): it would send what the subtask knows off this machine.`);
     }
 
@@ -306,7 +339,34 @@ export class ToolRegistry extends EventEmitter {
       }
     }
 
-    return tool.execute(input, options);
+    // What a local-only subtask writes may carry what it read, so it is
+    // local-only too: a file tool's destination is marked before the write,
+    // a command's changes when it ends (the jail finds them).
+    const offline = options.isOffline?.() === true;
+    if (offline && WRITE_TOOLS.has(toolName) && typeof input['path'] === 'string') {
+      this.markWritten(input['path']);
+    }
+    if (tool.delegatesToTools) return tool.execute(input, options);
+    const leave = await this.gate.enter(offline && (COMMAND_TOOLS.has(toolName) || WRITE_TOOLS.has(toolName)));
+    try {
+      return await tool.execute(input, options);
+    } finally {
+      leave();
+    }
+  }
+
+  /** Mark the file a write tool is about to write local-only: under its name, and where it lands. */
+  private markWritten(filePath: string): void {
+    const abs = path.resolve(this.workspaceRoot, filePath);
+    const rels = [path.relative(this.workspaceRoot, abs), path.relative(realPathOf(this.workspaceRoot), realPathOf(abs))];
+    this.markLocalOnly(rels.filter((rel) => rel && !rel.startsWith('..') && !path.isAbsolute(rel)));
+  }
+
+  private markLocalOnly(rels: string[]): void {
+    const added = this.privacyPaths?.addDerived(rels) ?? [];
+    if (added.length) {
+      this.emit('log', `[privacy] Written by a local-only subtask, so local-only from now on: ${added.join(', ')}`);
+    }
   }
 
   private registerDefaults(): void {
@@ -363,7 +423,22 @@ export class ToolRegistry extends EventEmitter {
   isProtected(absPath: string): boolean {
     if (this.protectedByName(absPath, this.workspaceRoot)) return true;
     const real = realPathOf(absPath);
-    return real !== absPath && this.protectedByName(real, realPathOf(this.workspaceRoot));
+    if (real !== absPath && this.protectedByName(real, realPathOf(this.workspaceRoot))) return true;
+    if (this.protectedFiles.has(path.resolve(absPath)) || this.protectedFiles.has(real)) return true;
+    return this.aliases.isAlias(absPath);
+  }
+
+  /**
+   * Protect files by where they are, wherever that is — for a file whose
+   * place is configured, which no built-in pattern names: the code index's
+   * database when `codeIndex.dbPath` moves it, and its journals. Commands do
+   * not see them either.
+   */
+  protectFiles(absPaths: string[]): void {
+    for (const p of absPaths) {
+      this.protectedFiles.add(path.resolve(p));
+      this.protectedFiles.add(realPathOf(path.resolve(p)));
+    }
   }
 
   private protectedByName(absPath: string, root: string): boolean {

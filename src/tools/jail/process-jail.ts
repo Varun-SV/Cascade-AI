@@ -34,6 +34,7 @@
 //  `node_modules/` and `dist/`, which builds and tests have to read.
 
 import { execFile } from 'node:child_process';
+import { fileIdentity } from '../../utils/link-aliases.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -83,8 +84,15 @@ export interface JailPolicy {
   hiddenPatterns: (offline: boolean) => string[];
   /** Directories outside the workspace to hide whole — Cascade's global one. */
   hiddenDirs: string[];
+  /** Files to hide wherever they are: protected by place, not name (a configured database). */
+  hiddenFiles?: () => string[];
   /** Values no command's environment may carry, under whatever name. */
   secretValues: () => string[];
+  /**
+   * Mark files a local-only caller's command changed (workspace-relative,
+   * POSIX) as local-only: they may carry what it read.
+   */
+  taint?: (rels: string[]) => void;
   log: (msg: string) => void;
   /** Which jailer this machine has; injectable for tests. */
   detect?: () => Promise<JailKind | null>;
@@ -97,6 +105,21 @@ export interface Launch {
   cwd: string;
   /** The jailer the launch is wrapped in, or null when it runs as it is. */
   jail: JailKind | null;
+  /**
+   * To call once the command has ended, whatever its outcome: for a
+   * local-only caller, marks what it changed in the workspace local-only.
+   */
+  done?: () => Promise<void>;
+}
+
+/** Where a local-only caller's command may write: nowhere but these. */
+export interface WriteLayout {
+  /** The workspace, writable. */
+  writable: string[];
+  /** Inside it, read-only all the same: the repository's git store. */
+  readOnly: string[];
+  /** Private, empty and discarded: /tmp, and the home cache. */
+  scratch: string[];
 }
 
 export type Prepared = { ok: true; launch: Launch } | { ok: false; reason: string };
@@ -157,15 +180,44 @@ export class ProcessJail {
       for (const dir of await this.gitDirsToHide(opts.offline)) hidden.push({ path: dir, dir: true });
     }
 
+    if (!opts.offline) {
+      if (kind === 'sandbox-exec') {
+        return { ok: true, launch: { file: 'sandbox-exec', args: ['-p', seatbeltProfile(hidden, false), file, ...args], env, cwd: opts.cwd, jail: kind } };
+      }
+      return { ok: true, launch: { file: 'bwrap', args: bwrapArgs(hidden, false, opts.cwd, file, args), env, cwd: opts.cwd, jail: kind } };
+    }
+
+    // A local-only caller's command writes only into the workspace, where
+    // what it changed is found when it ends and marked local-only (`done`) —
+    // anywhere else, a later command of a cloud worker could read it. Its
+    // git store is read-only: a commit message or a staged blob is a write
+    // no file shows. The command runs alone meanwhile (tools/workspace-gate.ts).
+    let root: string;
+    try { root = fs.realpathSync(this.policy.workspaceRoot); } catch { root = path.resolve(this.policy.workspaceRoot); }
+    const inside = (p: string) => { const rel = path.relative(root, p); return !rel.startsWith('..') && !path.isAbsolute(rel); };
+    const layout: WriteLayout = {
+      writable: [root],
+      readOnly: (await gitDirsOf(root)).filter(inside),
+      scratch: ['/tmp', path.join(os.homedir(), '.cache')].filter((d) => !inside(d) && fs.existsSync(d)),
+    };
+    const startedAt = Date.now();
+    const before = await stampFiles(root, layout.readOnly);
+    let scratchTmp: string | undefined;
+    const done = async (): Promise<void> => {
+      if (scratchTmp) fs.rmSync(scratchTmp, { recursive: true, force: true });
+      const changed = changedFiles(before, await stampFiles(root, layout.readOnly), startedAt);
+      if (changed.length) this.policy.taint?.(changed);
+    };
+
     if (kind === 'sandbox-exec') {
+      // No private /tmp here: the command's temporary files go to a folder in
+      // the workspace instead, removed when it ends.
+      fs.mkdirSync(path.join(root, '.cascade', 'tmp'), { recursive: true });
+      scratchTmp = fs.mkdtempSync(path.join(root, '.cascade', 'tmp', 'local-only-'));
       return {
         ok: true,
-        launch: { file: 'sandbox-exec', args: ['-p', seatbeltProfile(hidden, opts.offline), file, ...args], env, cwd: opts.cwd, jail: kind },
+        launch: { file: 'sandbox-exec', args: ['-p', seatbeltProfile(hidden, true, layout), file, ...args], env: { ...env, TMPDIR: scratchTmp }, cwd: opts.cwd, jail: kind, done },
       };
-    }
-    const jailArgs = bwrapArgs(hidden, opts.offline, opts.cwd, file, args);
-    if (!opts.offline) {
-      return { ok: true, launch: { file: 'bwrap', args: jailArgs, env, cwd: opts.cwd, jail: kind } };
     }
     // bubblewrap reads a seccomp filter from a file descriptor; the shell
     // opens the filter's file as fd 9 and execs bubblewrap with it.
@@ -173,9 +225,10 @@ export class ProcessJail {
     if (!filter) {
       return { ok: false, reason: `A local-only subtask (privacy.paths) cannot run commands on ${process.arch}: the filter that keeps them off host sockets is built for x64 and arm64 only.` };
     }
+    const jailArgs = bwrapArgs(hidden, true, opts.cwd, file, args, layout);
     return {
       ok: true,
-      launch: { file: '/bin/sh', args: ['-c', 'exec bwrap --seccomp 9 "$@" 9<"$0"', filter, ...jailArgs], env, cwd: opts.cwd, jail: kind },
+      launch: { file: '/bin/sh', args: ['-c', 'exec bwrap --seccomp 9 "$@" 9<"$0"', filter, ...jailArgs], env, cwd: opts.cwd, jail: kind, done },
     };
   }
 
@@ -187,6 +240,83 @@ export class ProcessJail {
   gitExclusions(offline: boolean): string[] {
     if (this.policy.mode === 'off') return [];
     return toPathspecs(this.policy.hiddenPatterns(offline)).map((spec) => spec.replace(':(glob)', ':(exclude,glob)'));
+  }
+
+  /**
+   * Why `git push <args>` from `cwd` would send a hidden path's blob off the
+   * machine, or null when it would not. The git tool keeps the object store
+   * in view, and a push packs whatever the pushed commits hold.
+   *
+   * A push to a configured remote is refused when any commit that remote
+   * does not have yet, among those the push would send, touches a hidden
+   * path: the history of each refspec's source, or of every local ref when
+   * the push names none or pushes refs wholesale. The remote's tracking refs are what "has" means, so a
+   * remote never fetched from has nothing. A push to anything else (a URL, a
+   * path, `--repo`) is refused whenever the history holds a hidden path at
+   * all: what it already has is not known. When git cannot tell, it is
+   * refused.
+   */
+  async pushRefusal(cwd: string, args: string[], offline: boolean): Promise<string | null> {
+    if (this.policy.mode === 'off') return null;
+    const unverified = 'git push was refused: could not check that it sends no protected or local-only (privacy.paths) file.';
+    const rootSpecs = toPathspecs(this.policy.hiddenPatterns(offline));
+    if (rootSpecs.length === 0) return null;
+    // The hidden paths are relative to the workspace root, so the check runs
+    // there when `cwd` is the same repository. Another repository — nested in
+    // the workspace, or outside it — gets every pattern at any depth, which
+    // finds more than is hidden rather than less.
+    const root = this.policy.workspaceRoot;
+    const common = (dir: string) => git(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+    const [here, there] = path.resolve(cwd) === path.resolve(root)
+      ? ['same', 'same']
+      : await Promise.all([common(cwd), common(root)]);
+    if (here === null) return unverified;
+    const sameRepo = here === there;
+    const where = sameRepo ? root : cwd;
+    const specs = sameRepo
+      ? rootSpecs
+      : rootSpecs.map((spec) => `:(top,glob)**/${spec.slice(':(glob)'.length).replace(/^\*\*\//, '')}`);
+
+    let target: string | undefined;
+    let deleting = false;
+    let bulk = false;
+    const positional: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i]!;
+      if (arg === '--') { positional.push(...args.slice(i + 1)); break; }
+      if (arg === '--repo') { target = args[++i]; continue; }
+      if (arg.startsWith('--repo=')) { target = arg.slice('--repo='.length); continue; }
+      if (arg === '-d' || arg === '--delete') { deleting = true; continue; }
+      if (PUSH_BULK_OPTIONS.has(arg)) { bulk = true; continue; }
+      if (PUSH_OPTIONS_WITH_VALUE.has(arg)) { i++; continue; }
+      if (arg.startsWith('-')) continue;
+      positional.push(arg);
+    }
+    if (target === undefined) target = positional.shift();
+    // Deleting sends no objects. A refspec sends its source's history; with
+    // none, or a flag that pushes refs wholesale, what goes depends on
+    // configuration, so every local ref is checked.
+    const sources = deleting ? [] : positional
+      .map((spec) => spec.replace(/^\+/, '').split(':')[0] ?? '')
+      .filter((src) => src !== '');
+    if (sources.some((src) => src.startsWith('-'))) return unverified;
+    const every = bulk || (!deleting && positional.length === 0);
+
+    const remotes = await git(where, ['remote']);
+    if (remotes === null) return unverified;
+    if (target === undefined) target = await defaultPushRemote(where);
+    if (!every && sources.length === 0) return null;
+    const configured = remotes.split('\n').map((r) => r.trim()).filter(Boolean).includes(target);
+    const found = await git(where, [
+      'log', '-n', '1', '--format=%h %s', ...(every ? ['--all'] : []),
+      ...(configured ? ['--not', `--remotes=${target}`, '--not'] : []),
+      '--end-of-options', ...sources, '--', ...specs,
+    ]);
+    if (found === null) return unverified;
+    if (!found) return null;
+    return configured
+      ? `git push was refused: a commit "${target}" does not have yet (${found}) touches a protected or local-only (privacy.paths) file, and pushing would send it.`
+      : `git push was refused: what it would send holds a protected or local-only (privacy.paths) file (${found}), and "${target}" is not a configured remote, so what it already has is not known.`;
   }
 
   /**
@@ -273,7 +403,65 @@ export async function collectHidden(policy: JailPolicy, offline: boolean): Promi
   for (const dir of policy.hiddenDirs) {
     try { if (fs.statSync(dir).isDirectory()) out.push({ path: fs.realpathSync(dir), dir: true }); } catch { /* not there */ }
   }
+  for (const file of policy.hiddenFiles?.() ?? []) {
+    try { if (fs.lstatSync(file).isFile()) out.push({ path: file, dir: false }); } catch { /* not there */ }
+  }
+  out.push(...await linkAliasesOf(out, root));
   return out;
+}
+
+/**
+ * The workspace's other names — hard links — for the hidden files, which a
+ * mask by name leaves in view. Only a file with more than one name has any,
+ * so the workspace is searched only when a hidden one does.
+ */
+async function linkAliasesOf(hidden: Hidden[], root: string): Promise<Hidden[]> {
+  const ids = new Set<string>();
+  const note = async (abs: string) => {
+    try {
+      const st = await fs.promises.lstat(abs);
+      if (st.isFile() && st.nlink > 1) ids.add(fileIdentity(st));
+    } catch { /* gone meanwhile */ }
+  };
+  const everything = async (dir: string, keep: Set<string>): Promise<void> => {
+    let entries: fs.Dirent[];
+    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const abs = path.join(dir, e.name);
+      if (keep.has(abs)) continue;
+      if (e.isDirectory()) await everything(abs, keep);
+      else if (e.isFile()) await note(abs);
+    }
+  };
+  for (const h of hidden) {
+    if (h.dir) await everything(h.path, new Set(h.keep ?? []));
+    else await note(h.path);
+  }
+  if (ids.size === 0) return [];
+
+  const masked = new Set(hidden.map((h) => h.path));
+  const aliases: Hidden[] = [];
+  const search = async (dir: string): Promise<void> => {
+    let entries: fs.Dirent[];
+    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const abs = path.join(dir, e.name);
+      if (masked.has(abs)) continue;
+      if (e.isDirectory()) {
+        if (e.name !== '.git') await search(abs);
+        continue;
+      }
+      if (!e.isFile()) continue;
+      try {
+        const st = await fs.promises.lstat(abs);
+        if (st.nlink > 1 && ids.has(fileIdentity(st))) aliases.push({ path: abs, dir: false });
+      } catch { /* gone meanwhile */ }
+    }
+  };
+  await search(root);
+  // A hidden directory's kept parts are in view, so searched too.
+  for (const h of hidden) for (const k of h.keep ?? []) await search(k);
+  return aliases;
 }
 
 /**
@@ -305,25 +493,46 @@ export function toPathspecs(patterns: string[]): string[] {
  * root, in a container say: bubblewrap then keeps every capability, and a
  * command could simply unmount what hides a file.
  */
-export function bwrapArgs(hidden: Hidden[], offline: boolean, cwd: string, file: string, args: string[]): string[] {
-  const out = [
-    '--die-with-parent', '--new-session', '--unshare-pid', '--cap-drop', 'ALL',
-    '--bind', '/', '/', '--dev', '/dev', '--proc', '/proc',
-  ];
+export function bwrapArgs(hidden: Hidden[], offline: boolean, cwd: string, file: string, args: string[], layout?: WriteLayout): string[] {
+  const out = ['--die-with-parent', '--new-session', '--unshare-pid', '--cap-drop', 'ALL'];
+  if (layout) {
+    // The host read-only, the scratch folders private; then the workspace
+    // writable again — after them, as it may lie under /tmp.
+    out.push('--ro-bind', '/', '/');
+    for (const dir of layout.scratch) out.push('--tmpfs', dir);
+    for (const dir of layout.writable) out.push('--bind', dir, dir);
+    // A working directory the scratch folders would have hidden.
+    const underScratch = layout.scratch.some((dir) => cwd === dir || cwd.startsWith(`${dir}${path.sep}`));
+    if (underScratch && !layout.writable.some((dir) => cwd === dir || cwd.startsWith(`${dir}${path.sep}`))) {
+      out.push('--ro-bind', cwd, cwd);
+    }
+  } else {
+    out.push('--bind', '/', '/');
+  }
+  out.push('--dev', '/dev', '--proc', '/proc');
   if (offline) out.push('--unshare-net');
   for (const h of hidden) {
     if (!h.dir) { out.push('--ro-bind', '/dev/null', h.path); continue; }
     out.push('--tmpfs', h.path);
     for (const k of h.keep ?? []) out.push('--bind', k, k);
   }
+  for (const dir of layout?.readOnly ?? []) out.push('--ro-bind', dir, dir);
   out.push('--chdir', cwd, '--', file, ...args);
   return out;
 }
 
 /** A sandbox-exec profile: everything allowed but the hidden paths, and the network for a local-only caller. */
-export function seatbeltProfile(hidden: Hidden[], offline: boolean): string {
+export function seatbeltProfile(hidden: Hidden[], offline: boolean, layout?: WriteLayout): string {
   const quote = (p: string) => `"${p.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
   const lines = ['(version 1)', '(allow default)'];
+  if (layout) {
+    // Writes nowhere but the workspace and the devices every program uses;
+    // not to its git store. A later rule wins.
+    lines.push('(deny file-write* (subpath "/"))');
+    const writable = [...layout.writable.map((d) => `(subpath ${quote(d)})`), ...SEATBELT_WRITABLE_DEVICES];
+    lines.push(`(allow file-write* ${writable.join(' ')})`);
+    if (layout.readOnly.length) lines.push(`(deny file-write* ${layout.readOnly.map((d) => `(subpath ${quote(d)})`).join(' ')})`);
+  }
   if (hidden.length) {
     const filters = hidden.map((h) => (h.dir ? `(subpath ${quote(h.path)})` : `(literal ${quote(h.path)})`));
     lines.push(`(deny file-read* file-write* ${filters.join(' ')})`);
@@ -429,6 +638,88 @@ function runs(file: string, args: string[]): Promise<boolean> {
   return new Promise((resolve) => {
     execFile(file, args, { timeout: 5_000, windowsHide: true }, (err) => resolve(!err));
   });
+}
+
+/** The devices a program writes to wherever it runs. */
+const SEATBELT_WRITABLE_DEVICES = [
+  '(literal "/dev/null")', '(literal "/dev/zero")', '(literal "/dev/tty")', '(literal "/dev/dtracehelper")', '(subpath "/dev/fd")',
+];
+
+/** A file's identity and last change, to tell whether a command changed it. */
+interface Stamp { ctime: number; mtime: number; size: number; ino: number }
+
+/**
+ * Every file in the workspace, stamped — bar Cascade's folder (other than
+ * the parts commands use) and the directories given, which the command
+ * cannot write. Symlinks are stamped as themselves, never followed.
+ */
+async function stampFiles(root: string, skip: string[]): Promise<Map<string, Stamp>> {
+  const out = new Map<string, Stamp>();
+  const skipped = new Set(skip);
+  const walk = async (dir: string, relDir: string): Promise<void> => {
+    let entries: fs.Dirent[];
+    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (skipped.has(abs)) continue;
+        if (rel === '.cascade') {
+          for (const kept of CASCADE_DIR_KEPT) await walk(path.join(abs, kept), `${rel}/${kept}`);
+          continue;
+        }
+        await walk(abs, rel);
+        continue;
+      }
+      try {
+        const st = await fs.promises.lstat(abs);
+        out.set(rel, { ctime: st.ctimeMs, mtime: st.mtimeMs, size: st.size, ino: st.ino });
+      } catch { /* gone meanwhile */ }
+    }
+  };
+  await walk(root, '');
+  return out;
+}
+
+/**
+ * The files that are new or changed. A filesystem that keeps whole seconds
+ * cannot tell a change made in the second the command started from one made
+ * just before it, so such a file counts as changed.
+ */
+function changedFiles(before: Map<string, Stamp>, after: Map<string, Stamp>, startedAt: number): string[] {
+  const second = Math.floor(startedAt / 1000) * 1000;
+  const out: string[] = [];
+  for (const [rel, now] of after) {
+    const was = before.get(rel);
+    const differs = !was || now.ctime !== was.ctime || now.mtime !== was.mtime || now.size !== was.size || now.ino !== was.ino;
+    if (differs || (now.ctime % 1000 === 0 && now.ctime >= second)) out.push(rel);
+  }
+  return out;
+}
+
+/** The repository's git directories — its own and, for a linked worktree, the common one. */
+async function gitDirsOf(root: string): Promise<string[]> {
+  const located = await git(root, ['rev-parse', '--absolute-git-dir', '--git-common-dir']);
+  if (located === null) return [];
+  const [gitDir = '', common = ''] = located.split('\n').map((line) => line.trim());
+  if (!gitDir) return [];
+  return [...new Set([gitDir, path.resolve(root, common || gitDir)])];
+}
+
+/** `git push` options that push refs wholesale rather than the ones named. */
+const PUSH_BULK_OPTIONS = new Set(['--all', '--branches', '--mirror', '--tags']);
+
+/** `git push` options that take their value as the next argument. */
+const PUSH_OPTIONS_WITH_VALUE = new Set(['-o', '--push-option', '--receive-pack', '--exec']);
+
+/** The remote a bare `git push` goes to: the branch's push remote, the default one, its upstream's, or origin. */
+async function defaultPushRemote(cwd: string): Promise<string> {
+  const branch = await git(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
+  const read = (key: string) => git(cwd, ['config', '--get', key]);
+  return (branch ? await read(`branch.${branch}.pushRemote`) : null)
+    || await read('remote.pushDefault')
+    || (branch ? await read(`branch.${branch}.remote`) : null)
+    || 'origin';
 }
 
 /** git's output in `cwd`, or null when it failed — not a repository, or git missing. */
