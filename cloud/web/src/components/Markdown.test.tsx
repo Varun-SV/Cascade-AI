@@ -16,6 +16,47 @@ describe('Markdown', () => {
     expect(container.querySelector('.katex')).toBeInTheDocument();
   });
 
+  it('renders \\[…\\] display maths as an equation, not as a bracketed string', () => {
+    // As Gemini wrote it. Before, Markdown read `\[` as an escaped bracket and
+    // the reader saw "[ r = \operatorname{rank} E(\mathbb{Q}) ]".
+    const { container } = render(
+      <Markdown>{'The rank is given by\n\\[ r = \\operatorname{rank} E(\\mathbb{Q}) \\]\nwhere r is finite.'}</Markdown>,
+    );
+    expect(container.querySelector('.katex-display')).toBeInTheDocument();
+    // KaTeX keeps the TeX in a MathML annotation for screen readers, so look
+    // at what is left outside the rendered equation: no raw source there.
+    const prose = container.cloneNode(true) as HTMLElement;
+    prose.querySelectorAll('.katex').forEach((el) => el.remove());
+    expect(prose.textContent).not.toContain('\\operatorname');
+    expect(prose.textContent).not.toContain('[ r =');
+  });
+
+  it('renders \\(…\\) inline maths', () => {
+    const { container } = render(<Markdown>{'where \\(n^2\\) is even'}</Markdown>);
+    expect(container.querySelector('.katex')).toBeInTheDocument();
+    expect(container.querySelector('.katex-display')).not.toBeInTheDocument();
+    expect(container.textContent).not.toContain('\\(');
+  });
+
+  it('leaves prices as prices', () => {
+    // remark-math pairs any two dollars: this rendered "5 and " as maths.
+    const { container } = render(<Markdown>{'It costs $5 and $10 per month.'}</Markdown>);
+    expect(container.querySelector('.katex')).not.toBeInTheDocument();
+    expect(container.textContent).toBe('It costs $5 and $10 per month.');
+  });
+
+  it('keeps maths and a price apart in one sentence', () => {
+    const { container } = render(<Markdown>{'Between $5 and $10, i.e. $x$ dollars.'}</Markdown>);
+    expect(container.querySelectorAll('.katex')).toHaveLength(1);
+    expect(container.textContent).toContain('Between $5 and $10, i.e.');
+  });
+
+  it('leaves maths delimiters in a code block alone', () => {
+    const { container } = render(<Markdown>{'```latex\n\\[ x^2 \\]\n```'}</Markdown>);
+    expect(container.querySelector('.katex')).not.toBeInTheDocument();
+    expect(container.querySelector('pre code')?.textContent).toContain('\\[ x^2 \\]');
+  });
+
   it('highlights a fenced code block and adds a copy button', () => {
     const { container, getByLabelText } = render(<Markdown>{'```ts\nconst x: number = 1;\n```'}</Markdown>);
     expect(container.querySelector('pre code')).toBeInTheDocument();

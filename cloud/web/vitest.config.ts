@@ -9,11 +9,15 @@ const documents = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '../../src/core/documents/index.ts',
 );
+const markdown = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../src/core/markdown/index.ts',
+);
 
 export default defineConfig({
   plugins: [react()],
   resolve: {
-    alias: { '@cascade/documents': documents },
+    alias: { '@cascade/documents': documents, '@cascade/markdown': markdown },
   },
   test: {
     globals: true,

@@ -2,10 +2,11 @@ import { useState, useRef, useEffect } from 'react';
 import type { Socket } from 'socket.io-client';
 import { Send, Bot, User, ChevronRight, ChevronDown, Square } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import 'katex/dist/katex.min.css';
 import { MermaidBlock } from './MermaidBlock.js';
+import { CHAT_REHYPE_PLUGINS, CHAT_REMARK_PLUGINS, prepareAnswer } from '../lib/markdown.js';
 import { SessionRating } from './SessionRating.js';
 import { useAppDispatch, useAppSelector, appendMessage, finalizeLastMessage, setSessionId, loadTranscript, runStarted } from '../store/index.js';
 import { fetchSessionTranscript } from '../utils/sessionLoad.js';
@@ -134,7 +135,7 @@ function MessageBubble({ message, compact }: { message: { role: string; content:
         {hasAnswer ? (
           isUser
             ? <span style={{ whiteSpace: 'pre-wrap' }}>{message.content}</span>
-            : <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{answer}</ReactMarkdown>
+            : <ReactMarkdown remarkPlugins={CHAT_REMARK_PLUGINS} rehypePlugins={CHAT_REHYPE_PLUGINS} components={markdownComponents}>{prepareAnswer(answer)}</ReactMarkdown>
         ) : (
           !hasThinking && message.streaming ? <BlinkCursor /> : null
         )}

@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from 'react';
+import { useMemo, useRef, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -6,6 +6,7 @@ import rehypeHighlight from 'rehype-highlight';
 import rehypeKatex from 'rehype-katex';
 import { Copy, Check } from 'lucide-react';
 import 'katex/dist/katex.min.css';
+import { normalizeMath } from '@cascade/markdown';
 import Mermaid from './Mermaid.js';
 
 // Extract the plain-text content of a react-markdown code node, whatever the
@@ -42,13 +43,19 @@ function useCopied(): [boolean, () => void] {
 /**
  * The one place chat + the file viewer turn markdown into rich output:
  *   - GFM tables/task-lists/strikethrough (remark-gfm)
- *   - LaTeX math, $inline$ and $$block$$ (remark-math + rehype-katex)
+ *   - LaTeX math (remark-math + rehype-katex). Models also write \(…\),
+ *     \[…\] and bare \begin{align*}; normalizeMath rewrites those into the
+ *     $…$ / $$…$$ remark-math reads, and escapes prices like "$5 and $10" that
+ *     it would otherwise pair into an equation.
  *   - syntax-highlighted code with a copy button (rehype-highlight)
  *   - ```mermaid fenced blocks rendered as diagrams (lazy-loaded)
  * Raw HTML in the markdown is NOT rendered (no rehype-raw) — untrusted model
  * output must not inject markup.
  */
 export default function Markdown({ children }: { children: string }) {
+  // Streamed answers re-render on every token; the normalisation is linear,
+  // and memoised so an unrelated re-render does not repeat it.
+  const source = useMemo(() => normalizeMath(children), [children]);
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm, remarkMath]}
@@ -60,7 +67,7 @@ export default function Markdown({ children }: { children: string }) {
         pre: PreBlock,
       }}
     >
-      {children}
+      {source}
     </ReactMarkdown>
   );
 }

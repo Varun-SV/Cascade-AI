@@ -10,7 +10,8 @@
     "resolveJsonModule": true,
     "outDir": "dist",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@cascade/markdown": ["../src/core/markdown/index.ts"]
     }
   },
   "include": ["src"],

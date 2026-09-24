@@ -44,6 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   daily limit.
 
 ### Fixed
+- **Maths in an answer is typeset, whichever way the model wrote it.** GPT
+  and Gemini write `\(…\)` and `\[…\]`, which Markdown reads as escaped
+  brackets, so an equation reached the web chat as
+  `[ r = \operatorname{rank} E(\mathbb{Q}) ]`. Those, and bare
+  `\begin{align*}` blocks, now render as maths. The desktop chat rendered no
+  maths at all and now matches the web. Prices are no longer read as maths
+  either: "costs $5 and $10" used to show "5 and " as an equation. Code
+  blocks and code spans are left exactly as written.
 - **A run that cannot do something now says so instead of inventing the
   result.** Asked to open a site with browser control and return its
   chatbot's answers, a run that could not reach a browser "simulated" the
