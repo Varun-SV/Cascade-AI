@@ -38,6 +38,12 @@ describe('desktop chat maths', () => {
     expect(render('| a | b |\n|---|---|\n| 1 | 2 |')).toContain('<table>');
   });
 
+  it('closes a $$ block the punctuation follows, and typesets what comes after', () => {
+    const html = render('$$\nx^2\n$$.\n\nNext, $y$ here.');
+    expect(html.match(/katex-display/g)).toHaveLength(1);
+    expect(html.match(/class="katex"/g)).toHaveLength(2);
+  });
+
   it('prepares a streamed answer exactly as the finished one', () => {
     // ChatPanel keeps one preparer per message and feeds it every token.
     const answer = 'It costs $5 and $10.\n\nThe rank is \\(r\\).\n\n\\[ x^2 + y^2 \\]\n\n- item $x$\n- costs $3';

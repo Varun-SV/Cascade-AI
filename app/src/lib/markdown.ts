@@ -28,3 +28,6 @@ export function prepareAnswer(answer: string): string {
 export function createAnswerPreparer(): (answer: string) => string {
   return createMathNormalizer();
 }
+
+/** Renders a streamed answer as often as its cost allows; see src/core/markdown/pace.ts. */
+export { usePacedText } from '@cascade/markdown';

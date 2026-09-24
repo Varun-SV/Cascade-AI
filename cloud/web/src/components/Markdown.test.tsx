@@ -1,7 +1,24 @@
-import { describe, it, expect } from 'vitest';
-import { render } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
+import { render, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import Markdown from './Markdown.js';
+
+// The real normaliser, recording each text a render normalises — how often
+// the component re-parses a streamed answer.
+const normalised = vi.hoisted(() => [] as number[]);
+vi.mock('@cascade/markdown', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@cascade/markdown')>();
+  return {
+    ...actual,
+    createMathNormalizer: () => {
+      const normalize = actual.createMathNormalizer();
+      return (text: string) => {
+        normalised.push(text.length);
+        return normalize(text);
+      };
+    },
+  };
+});
 
 describe('Markdown', () => {
   it('renders GFM tables and headings', () => {
@@ -81,23 +98,49 @@ describe('Markdown', () => {
     expect(container.querySelector('pre code')?.textContent).toContain('\\[ x^2 \\]');
   });
 
-  it('renders a streamed answer exactly as the finished one', () => {
-    // The component keeps one normaliser per message and feeds it every
-    // re-render; what the reader sees at the end must not depend on that.
+  it('renders a streamed answer exactly as the finished one', async () => {
+    // The component keeps one normaliser per message and feeds it the text it
+    // shows; what the reader sees at the end must not depend on that.
     const answer = 'It costs $5 and $10.\n\nThe rank is \\(r\\).\n\n\\[ x^2 + y^2 \\]\n\n- item $x$\n- costs $3';
     const streamed = render(<Markdown>{answer.slice(0, 1)}</Markdown>);
     for (let n = 1; n <= answer.length; n += 3) streamed.rerender(<Markdown>{answer.slice(0, n)}</Markdown>);
     streamed.rerender(<Markdown>{answer}</Markdown>);
     const fresh = render(<Markdown>{answer}</Markdown>);
-    expect(streamed.container.innerHTML).toBe(fresh.container.innerHTML);
+    await waitFor(() => expect(streamed.container.innerHTML).toBe(fresh.container.innerHTML));
     expect(streamed.container.querySelectorAll('.katex-display')).toHaveLength(1);
   });
 
-  it('renders a different answer in full when the component is reused', () => {
+  it('renders a different answer in full when the component is reused', async () => {
     const { container, rerender } = render(<Markdown>{'First answer, $x$ and more.\n\nA second paragraph.'}</Markdown>);
     rerender(<Markdown>{'It costs $5 and $10 per month.'}</Markdown>);
+    await waitFor(() => expect(container.textContent).toBe('It costs $5 and $10 per month.'));
     expect(container.querySelector('.katex')).not.toBeInTheDocument();
-    expect(container.textContent).toBe('It costs $5 and $10 per month.');
+  });
+
+  it('re-renders a long streamed answer as often as its cost allows, not on every token', async () => {
+    // One long paragraph: no block of it is final until it ends, so each
+    // render parses all of it. Rendering on every token was quadratic.
+    const answer = 'The rank is \\(r\\), it costs $5, and $x^2$ holds for every n. '.repeat(200);
+    const steps = 60;
+    const streamed = render(<Markdown>{answer.slice(0, 64)}</Markdown>);
+    normalised.length = 0;
+    for (let k = 1; k <= steps; k++) {
+      streamed.rerender(<Markdown>{answer.slice(0, Math.ceil((answer.length * k) / steps))}</Markdown>);
+    }
+    expect(normalised.length).toBeLessThan(steps / 4);
+    // And the finished answer is what it ends on.
+    const fresh = render(<Markdown>{answer}</Markdown>);
+    await waitFor(() => expect(streamed.container.innerHTML).toBe(fresh.container.innerHTML), { timeout: 5_000 });
+  });
+
+  it('typesets display maths that the sentence punctuation follows', () => {
+    const { container } = render(
+      <Markdown>{'The identity\n\\begin{align*}\na &= b\n\\end{align*}.\nholds, and so does\n$$\nx^2\n$$.\n\nNext, $y$ here.'}</Markdown>,
+    );
+    // Both displays, and the inline maths after the `$$.` that used to be
+    // swallowed by a block remark-math never closed.
+    expect(container.querySelectorAll('.katex-display')).toHaveLength(2);
+    expect(container.querySelectorAll('.katex')).toHaveLength(3);
   });
 
   it('highlights a fenced code block and adds a copy button', () => {

@@ -160,6 +160,39 @@ describe('normalizeMath — review round 2', () => {
   });
 });
 
+describe('normalizeMath — review round 3', () => {
+  it('typesets display maths the sentence punctuation follows, the punctuation inside', () => {
+    // Left as raw TeX: the closer's line was not blank.
+    expect(normalizeMath('\\begin{align*}\na &= b\n\\end{align*}.')).toBe('$$\n\\begin{align*}\na &= b\n\\end{align*}.\n$$');
+    // Collapsed to inline maths.
+    expect(normalizeMath('\\[ x^2 + y^2 \\].')).toBe('$$\nx^2 + y^2.\n$$');
+    expect(normalizeMath('\\[\nx^2\n\\],')).toBe('$$\nx^2,\n$$');
+    // Inside the container it was in.
+    expect(normalizeMath('> \\[\n> x^2\n> \\].')).toBe('> $$\n> x^2.\n> $$');
+    expect(normalizeMath('- \\begin{align*}\n  a &= b\n  \\end{align*};')).toBe('- $$\n  \\begin{align*}\n  a &= b\n  \\end{align*};\n  $$');
+  });
+
+  it('closes a $$ block the punctuation follows, which remark-math would leave open', () => {
+    // `$$.` is no closing fence: the rest of the answer was read as maths.
+    expect(normalizeMath('$$\nx^2\n$$.\n\nNext $x$ here.')).toBe('$$\nx^2.\n$$\n\nNext $x$ here.');
+    expect(normalizeMath('$$\nx^2\n$$\n\nNext')).toBe('$$\nx^2\n$$\n\nNext');
+  });
+
+  it('still reads a closer that prose follows as it did', () => {
+    expect(normalizeMath('\\[x^2\\]. Then more')).toBe('$x^2$. Then more');
+    expect(normalizeMath('\\begin{align*}\na &= b\n\\end{align*} holds')).toBe('\\begin{align*}\na &= b\n\\end{align*} holds');
+  });
+
+  it('recognises prose in any script, not only English', () => {
+    // Was `$任意选项$`, typeset as maths, while `\(optional\)` stayed text.
+    expect(normalizeMath('\\(任意选项\\) and \\(optional\\)')).toBe('\\(任意选项\\) and \\(optional\\)');
+    expect(normalizeMath('\\[引用所需\\]')).toBe('\\[引用所需\\]');
+    expect(normalizeMath('\\(是\\), \\(opción\\), \\(пример\\)')).toBe('\\(是\\), \\(opción\\), \\(пример\\)');
+    // Maths is still maths: short symbols, and words beside a maths sign.
+    expect(normalizeMath('\\(x\\), \\(αβ\\), \\(速度 = d/t\\)')).toBe('$x$, $αβ$, $速度 = d/t$');
+  });
+});
+
 /** mulberry32: a small seeded generator, so a failing case is reproducible. */
 function prng(seed: number): () => number {
   let a = seed >>> 0;
@@ -204,6 +237,10 @@ const FRAGMENTS = [
   'Between $5 and $10, i.e. $x$ dollars.',
   '   \\[\n   x^2\n   \\]',
   ' - item \\(x\\)\n - item $y$\n   \\[\n   z\n   \\]',
+  '\\begin{align*}\na &= b\n\\end{align*}.',
+  '$$\nx^2\n$$.',
+  '> \\[ x^2 \\],',
+  '\\(任意选项\\) and \\(x\\)',
 ];
 const SEPARATORS = ['\n', '\n\n', '\n\n\n', ' '];
 
@@ -232,7 +269,7 @@ describe('createMathNormalizer — a streamed answer', () => {
     // part-way to becoming something else when a boundary is chosen.
     const tokens = ['a', 'b', ' ', '\n', '\n\n', '$', '$5', '$x$', '$$', '\\(', '\\)', '\\[', '\\]', '`', '```',
       '    ', '  ', '- ', '-', '1. ', '2.', '> ', '>', '=', '*', '|', 'x^2', '\\begin{align*}', '\\end{align*}', '# ',
-      'https://a.co/?$t=1'];
+      'https://a.co/?$t=1', '.', '任意'];
     const random = prng(7);
     for (let doc = 0; doc < 150; doc++) {
       let text = '';

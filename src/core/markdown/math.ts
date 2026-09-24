@@ -57,8 +57,12 @@ const MAX_DISPLAY = 20_000;
 
 /** A character only maths uses. Its presence settles an ambiguous `\[x\]`. */
 const MATH_SIGN = /[\\^_=<>{}+*/|]/;
-/** A word of four or more letters with no maths sign: prose, not maths. */
-const PROSE_WORD = /[A-Za-z]{4,}/;
+/**
+ * With no maths sign, prose rather than maths: a word of four or more letters
+ * in any script, or any Chinese, Japanese or Korean character, which is a
+ * word or syllable on its own. `\(optional\)` and `\(任意选项\)` alike.
+ */
+const PROSE_WORD = /\p{L}{4,}|[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 
 /**
  * Rewrite `\(…\)`, `\[…\]` and bare display environments as `$…$` / `$$…$$`,
@@ -358,6 +362,16 @@ function longestRun(text: string, char: string): number {
   return longest;
 }
 
+/**
+ * What follows a display closer on its line, when it may still close a
+ * display block: nothing, or the sentence's punctuation — `\end{align*}.` —
+ * which is moved inside the maths, where TeX puts it. Null for anything else.
+ */
+function closingPunctuation(rest: string): string | null {
+  const tail = rest.trim();
+  return /^[.,;:!?]*$/.test(tail) ? tail : null;
+}
+
 /** `$…$` around `content`, lengthened past any dollars inside it. */
 function inlineMath(content: string, depth: number): string {
   let body = content
@@ -377,14 +391,15 @@ function inlineMath(content: string, depth: number): string {
 /**
  * A `$$` block that stays inside the list item or blockquote it was in: the
  * first line keeps the markup it had, the rest are written with that
- * markup's continuation.
+ * markup's continuation. `punctuation` ends the maths' last line.
  */
-function displayMath(first: string, markup: Markup, content: string): string {
+function displayMath(first: string, markup: Markup, content: string, punctuation = ''): string {
   const lines = content
     .split('\n')
     .map((line, n) => (n === 0 ? line : stripContainer(line, markup.depth)).trimStart());
   while (lines.length > 0 && isBlank(lines[0])) lines.shift();
   while (lines.length > 0 && isBlank(lines[lines.length - 1])) lines.pop();
+  if (punctuation && lines.length > 0) lines[lines.length - 1] = lines[lines.length - 1].trimEnd() + punctuation;
   const fence = '$'.repeat(Math.max(2, longestRun(content, '$') + 1));
   const next = markup.continuation;
   return [first + fence, ...lines.map((line) => next + line), next + fence].join('\n');
@@ -453,7 +468,9 @@ class ProseScanner {
       }
       if (ch === '$') {
         const r = this.dollars(i);
-        if (r.escape) {
+        if (r.replacement) {
+          replace(r.replacement.start ?? i, r.replacement);
+        } else if (r.escape) {
           replace(i, { end: r.end, text: '\\$'.repeat(r.end - i) });
         } else {
           if (r.paired) this.constructs.push({ start: i, end: r.end });
@@ -533,10 +550,15 @@ class ProseScanner {
     if (body === '') return null;
 
     const lineEnd = s.indexOf('\n', close + 2);
-    const rest = s.slice(close + 2, lineEnd === -1 ? s.length : lineEnd);
-    if (markup && isBlank(rest)) {
+    const restEnd = lineEnd === -1 ? s.length : lineEnd;
+    const punctuation = closingPunctuation(s.slice(close + 2, restEnd));
+    if (markup && punctuation !== null) {
       if (!MATH_SIGN.test(body) && PROSE_WORD.test(body)) return null;
-      return { start: open - before.length, end: close + 2, text: displayMath(before, markup, content) };
+      return {
+        start: open - before.length,
+        end: punctuation ? restEnd : close + 2,
+        text: displayMath(before, markup, content, punctuation),
+      };
     }
 
     if (close - open > MAX_INLINE || close >= this.inlineEnd(open)) return null;
@@ -568,8 +590,14 @@ class ProseScanner {
     const end = close + endToken.length;
     if (this.crossesVerbatim(open, end)) return null;
     const lineEnd = s.indexOf('\n', end);
-    if (!isBlank(s.slice(end, lineEnd === -1 ? s.length : lineEnd))) return null;
-    return { start: open - before.length, end, text: displayMath(before, markup, s.slice(open, end)) };
+    const restEnd = lineEnd === -1 ? s.length : lineEnd;
+    const punctuation = closingPunctuation(s.slice(end, restEnd));
+    if (punctuation === null) return null;
+    return {
+      start: open - before.length,
+      end: punctuation ? restEnd : end,
+      text: displayMath(before, markup, s.slice(open, end), punctuation),
+    };
   }
 
   /**
@@ -584,15 +612,21 @@ class ProseScanner {
    *
    * A `$$` run inside a sentence must hold maths too: "A: $$, B: $$" is two
    * price tiers, not an equation reading ", B: ".
+   *
+   * A `$$` block is kept as written, unless punctuation follows its closer:
+   * remark-math does not read `$$.` as a closing fence, and would take the
+   * rest of the answer for maths. It is rewritten with the punctuation inside.
    */
-  private dollars(open: number): { end: number; escape: boolean; paired?: boolean } {
+  private dollars(open: number): { end: number; escape: boolean; paired?: boolean; replacement?: Replacement } {
     const s = this.s;
     let run = 0;
     while (s[open + run] === '$') run++;
 
     if (run >= 2) {
       const lineEnd = s.indexOf('\n', open + run);
-      const block = readMarkup(this.lineBefore(open)) !== null
+      const before = this.lineBefore(open);
+      const markup = readMarkup(before);
+      const block = markup !== null
         && isBlank(s.slice(open + run, lineEnd === -1 ? s.length : lineEnd));
       const close = this.find(`dollars:${run}`, open + run, (from) => this.dollarRun(from, run));
       const keep = { end: open + run, escape: false };
@@ -605,7 +639,14 @@ class ProseScanner {
       }
       // Closed only across code the renderer will not pair through: as written.
       if (close - open > MAX_DISPLAY || this.crossesVerbatim(open, close + run)) return keep;
-      if (block) return { end: close + run, escape: false, paired: true };
+      if (block) {
+        const closeLineEnd = s.indexOf('\n', close + run);
+        const restEnd = closeLineEnd === -1 ? s.length : closeLineEnd;
+        const punctuation = closingPunctuation(s.slice(close + run, restEnd));
+        if (!punctuation) return { end: close + run, escape: false, paired: true };
+        const text = displayMath(before, markup, s.slice(open + run, close), punctuation);
+        return { end: restEnd, escape: false, replacement: { start: open - before.length, end: restEnd, text } };
+      }
       if (close >= this.inlineEnd(open)) return keep;
       const body = s.slice(open + run, close).trim();
       if (body === '' || (!MATH_SIGN.test(body) && PROSE_WORD.test(body))) return { end: open + run, escape: true };

@@ -6,7 +6,7 @@ import rehypeHighlight from 'rehype-highlight';
 import rehypeKatex from 'rehype-katex';
 import { Copy, Check } from 'lucide-react';
 import 'katex/dist/katex.min.css';
-import { createMathNormalizer } from '@cascade/markdown';
+import { createMathNormalizer, usePacedText } from '@cascade/markdown';
 import Mermaid from './Mermaid.js';
 
 // Extract the plain-text content of a react-markdown code node, whatever the
@@ -53,12 +53,14 @@ function useCopied(): [boolean, () => void] {
  * output must not inject markup.
  */
 export default function Markdown({ children }: { children: string }) {
-  // A streamed answer re-renders on every token and only ever grows. One
-  // normaliser per message re-reads just the text after its last final block,
-  // where normalising the whole answer each time was quadratic over a stream.
+  // A streamed answer re-renders on every token, and each render parses all of
+  // it: quadratic over a long answer. usePacedText renders the newest text as
+  // often as its cost allows; the renders between reuse the memoised element.
+  // One normaliser per message re-reads just the text after its last final
+  // block, which makes each render cheaper still.
+  const shown = usePacedText(children);
   const [normalize] = useState(createMathNormalizer);
-  const source = useMemo(() => normalize(children), [normalize, children]);
-  return (
+  return useMemo(() => (
     <ReactMarkdown
       remarkPlugins={[remarkGfm, remarkMath]}
       rehypePlugins={[
@@ -69,9 +71,9 @@ export default function Markdown({ children }: { children: string }) {
         pre: PreBlock,
       }}
     >
-      {source}
+      {normalize(shown)}
     </ReactMarkdown>
-  );
+  ), [normalize, shown]);
 }
 
 // A fenced block. If it's ```mermaid, render a diagram (no code chrome);
