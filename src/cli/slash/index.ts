@@ -2,7 +2,7 @@
 //  Cascade AI — Slash Command Registry
 // ─────────────────────────────────────────────
 
-import { THEME_ALIASES, listThemes } from '../themes/index.js';
+import { isThemeName, listThemes } from '../themes/index.js';
 
 export interface SlashCommand {
   command: string;
@@ -148,7 +148,7 @@ export class SlashCommandRegistry {
           ctx.onOutput(`Available themes: ${themes.join(', ')}`);
           return { handled: true };
         }
-        if (!themes.includes(name) && !(name in THEME_ALIASES)) {
+        if (!isThemeName(name)) {
           return { output: `Unknown theme: ${name}. Available: ${themes.join(', ')}`, handled: true };
         }
         ctx.onThemeChange(name);

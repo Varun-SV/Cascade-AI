@@ -63,7 +63,16 @@ export const THEME_ALIASES: Record<string, CascadeThemeName> = {
 };
 
 export function resolveThemeName(name: ThemeName | string): CascadeThemeName {
-  return (name in canonicalThemes ? name : THEME_ALIASES[name]) as CascadeThemeName || 'midnight';
+  // Own properties only: `toString` and `__proto__` are "in" every object, and
+  // resolving to one handed the renderer a function instead of a theme.
+  if (Object.hasOwn(canonicalThemes, name)) return name as CascadeThemeName;
+  if (Object.hasOwn(THEME_ALIASES, name)) return THEME_ALIASES[name];
+  return 'midnight';
+}
+
+/** True for a theme's current name or its former one. */
+export function isThemeName(name: string): boolean {
+  return Object.hasOwn(canonicalThemes, name) || Object.hasOwn(THEME_ALIASES, name);
 }
 
 export function getTheme(name: ThemeName | string): Theme {

@@ -35,7 +35,7 @@ The CLI, desktop app and Cascade Cloud share one account and one set of end-to-e
 - 🙋 **Asks instead of guessing** (Cascade Cloud and self-hosted web) — when a request is genuinely ambiguous, Cascade asks one structured question rather than inventing an answer.
 - 🤖 **Autonomous mode** (`/auto`) — hands-off runs: safe tools run silently, dangerous ones still ask, budget caps stay the hard stop.
 - 📋 **Boardroom plan review** — pause to review, **edit**, or steer T1's plan (with an AI reviewer's critique) before any worker spawns.
-- ⏯️ **Run resumability** (`/continue`) — hit the budget cap on a big task? Resume from the partial state instead of redoing it.
+- ⏯️ **Run resumability** (`/continue`) — hit the token budget on a big task? Resume from the partial state instead of redoing it.
 - 👥 **Workers recruit help** — a worker can ask its manager to spawn bounded sibling workers when the work fans out — dynamic parallelism, no rigid plan.
 - 💸 **Delegation savings** — every run shows what the hierarchy saved you (`saved $5.63 — 90% vs. all-T1`); no flat-agent tool can show this number.
 - 🛡️ **Safe by default** — permission escalation (T3→T2→T1→you), SSRF-guarded fetch, loopback-only dashboard, and a budget kill-switch.
@@ -199,7 +199,7 @@ Models are discovered from each provider at startup, so new releases compete in 
 - **Media** — analyze images; generate images, speech and video; transcribe audio
 - **Documents** — real `.docx` / `.pptx` / `.xlsx` and PDFs, with charts and embedded images
 - **Collaboration** — `peer_message` between workers, `knowledge_graph_search` over project facts, and on Cascade Cloud `ask_user` for a structured question
-- **Your own** — MCP servers' tools, plugins, and tools the agent writes for itself — on by default, off with `"enableToolCreation": false` — sandboxed in a V8 isolate where the optional `isolated-vm` addon is installed, a worker otherwise
+- **Your own** — MCP servers' tools, plugins, and tools the agent writes for itself — on by default, off with `"enableToolCreation": false`. Those run in a hard V8 isolate when the optional `isolated-vm` addon is installed. Without it they fall back to a worker thread, which contains crashes and runaway loops but is **not** a security boundary: the code can reach the filesystem and processes directly
 
 ### Developer Experience
 - **6 color themes** — midnight (default), aurora, daybreak, bloom, tide, ember
@@ -339,7 +339,8 @@ Cascade loads config from `.cascade/config.json` in your project directory.
     "browserEnabled":     false,
     "mcpServers": [
       { "name": "filesystem", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] }
-    ]
+    ],
+    "mcpTrusted": ["filesystem"]
   },
   "dashboard": {
     "host":     "127.0.0.1",
@@ -358,6 +359,7 @@ Cascade loads config from `.cascade/config.json` in your project directory.
 The file is strict JSON — no comments.
 
 - `models` pins a tier to a model; a tier left out stays on Auto.
+- `tools.mcpTrusted` names the MCP servers allowed to start; an untrusted one is refused.
 - `autoBias` sets Auto's trade-off: `"balanced"`, `"quality"` or `"cost"`.
 - `planApproval: "always"` pauses Complex runs in the **boardroom**: approve T1's proposed sections, worker counts, and estimated cost before any T2 manager spawns. Headless/SDK runs auto-approve.
 - `altScreen: true` (or the `--alt-screen` flag) renders the TUI in the terminal's alternate screen buffer — vim-style, flicker-proof, shell restored on exit. History scrolls in-app with PgUp/PgDn since the alt screen has no native scrollback.
@@ -596,7 +598,7 @@ Type any of these inside the REPL:
 | `/replan [guidance]` | One corrective re-plan pass on the last task |
 | `/steer <correction>` | Steer the workers of a running task |
 | `/auto [on\|off\|status]` | Autonomous mode: safe tools run silently, dangerous ones still ask |
-| `/continue [tokens]` | Resume the last task that hit the budget cap, with a raised budget |
+| `/continue [tokens]` | Resume the last task that hit its token budget, with a raised one (a `/budget` session cap must be raised or cleared first) |
 | `/budget [set <$> \| clear]` | Session budget cap |
 | **Seeing inside** | |
 | `/status` · `/tree` | Live agent tree; execution timeline panel |
@@ -731,7 +733,7 @@ cascade mcp list
 cascade mcp remove <name>
 ```
 
-Local (stdio) servers go in config, under `tools.mcpServers` — see [Configuration](#configuration). Or connect one programmatically:
+Local (stdio) servers go in config, under `tools.mcpServers` — see [Configuration](#configuration). List each one's name in `tools.mcpTrusted` too: a server that is not trusted is refused before it starts. `cascade mcp connect` trusts the servers it adds. Or connect one programmatically:
 
 ```typescript
 import { McpClient } from 'cascade-ai';
@@ -821,7 +823,9 @@ Cascade also has an encrypted keystore — the OS keychain (macOS Keychain, Wind
 - **Secret redaction** — secrets and PII are stripped from a worker's output before it travels up the hierarchy.
 - **Privacy paths** — `privacy.paths` forces local models for sensitive folders and can withhold their content from upstream tiers.
 - **Tamper-evident audit log** — encrypted and hash-chained; `/audit` verifies it.
-- **Budget kill-switch** — a run stops at its budget cap (`/budget`), resumable with `/continue`.
+- **Budget kill-switch** — a run stops at its token budget, and `/continue` resumes it with a raised one. A session spending cap set with `/budget set` stops runs too; `/continue` does not lift it, so raise it or `/budget clear` first.
+
+> Agent-written tools are confined only when the optional `isolated-vm` addon is installed; without it they run in a worker that can reach the filesystem and processes. Set `"enableToolCreation": false` if that matters to you.
 
 ### .cascadeignore
 
@@ -935,7 +939,7 @@ web/                    Local dashboard SPA (ReactFlow agent graph)
 | ✓ | Cost-per-feature attribution (`costByFeature` in results, CLI cost panel, desktop chat) |
 | ✓ | Project world state (encrypted local log feeding T1 planning) |
 | ✓ | Project knowledge graph (world-state v2) — queryable facts T1 plans from; `knowledge_graph_search` (v0.14) |
-| ✓ | Hard sandbox for agent-written tools — a V8 isolate via `isolated-vm`, worker fallback (v0.14) |
+| ✓ | Hard sandbox for agent-written tools — a V8 isolate via the optional `isolated-vm` addon (v0.14) |
 | ✓ | Cascade Cloud (hosted chat — GitHub/Google login, bring-your-own-key, [cascadeai.in](https://cascadeai.in)) |
 | ✓ | Cascade Cloud billing — Razorpay subscriptions, Free and Pro plans |
 | ✓ | Desktop app — chat, Cockpit, code editor + terminal, browser; downloads from the site |
@@ -954,6 +958,7 @@ web/                    Local dashboard SPA (ReactFlow agent graph)
 |--------|---------|
 | 🔜 | Hooks — the config and `HooksRunner` exist; runs do not call them yet |
 | 🔜 | Provider keys in the encrypted keystore — it exists and is read, but keys are still written as plain JSON |
+| 🔜 | Agent-written tools that refuse to run without the isolate — today they fall back to a worker that is not a security boundary |
 | 🔜 | Task-completion notifications and webhooks (Slack / Discord / custom URL) — a `NotificationManager` exists but nothing sends through it |
 | 🔜 | OS-level jail for `shell` and `run_code` — bubblewrap / sandbox-exec / Docker, on top of approvals — see [docs/ROADMAP.md](docs/ROADMAP.md) |
 | 🔜 | Cross-session history research — a prior-work brief before T1 plans — see [docs/ROADMAP.md](docs/ROADMAP.md) |
