@@ -249,6 +249,9 @@
       @media (prefers-reduced-motion: reduce) {
         .cascade-mark > * { animation: pulse 1.8s ease-in-out infinite; }
       }
+      /* KaTeX sets a display equation nowrap, so a long one would push its
+         bubble past the panel edge. It scrolls inside the bubble instead. */
+      .katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
     </style>
   </head>
   <body>

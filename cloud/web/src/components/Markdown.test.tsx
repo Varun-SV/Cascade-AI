@@ -1,7 +1,24 @@
-import { describe, it, expect } from 'vitest';
-import { render } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
+import { render, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import Markdown from './Markdown.js';
+
+// The real normaliser, recording each text a render normalises — how often
+// the component re-parses a streamed answer.
+const normalised = vi.hoisted(() => [] as number[]);
+vi.mock('@cascade/markdown', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@cascade/markdown')>();
+  return {
+    ...actual,
+    createMathNormalizer: () => {
+      const normalize = actual.createMathNormalizer();
+      return (text: string) => {
+        normalised.push(text.length);
+        return normalize(text);
+      };
+    },
+  };
+});
 
 describe('Markdown', () => {
   it('renders GFM tables and headings', () => {
@@ -14,6 +31,116 @@ describe('Markdown', () => {
     const { container } = render(<Markdown>{'The mass–energy relation is $E = mc^2$.'}</Markdown>);
     // rehype-katex emits .katex spans for math.
     expect(container.querySelector('.katex')).toBeInTheDocument();
+  });
+
+  it('renders \\[…\\] display maths as an equation, not as a bracketed string', () => {
+    // As Gemini wrote it. Before, Markdown read `\[` as an escaped bracket and
+    // the reader saw "[ r = \operatorname{rank} E(\mathbb{Q}) ]".
+    const { container } = render(
+      <Markdown>{'The rank is given by\n\\[ r = \\operatorname{rank} E(\\mathbb{Q}) \\]\nwhere r is finite.'}</Markdown>,
+    );
+    expect(container.querySelector('.katex-display')).toBeInTheDocument();
+    // KaTeX keeps the TeX in a MathML annotation for screen readers, so look
+    // at what is left outside the rendered equation: no raw source there.
+    const prose = container.cloneNode(true) as HTMLElement;
+    prose.querySelectorAll('.katex').forEach((el) => el.remove());
+    expect(prose.textContent).not.toContain('\\operatorname');
+    expect(prose.textContent).not.toContain('[ r =');
+  });
+
+  it('renders \\(…\\) inline maths', () => {
+    const { container } = render(<Markdown>{'where \\(n^2\\) is even'}</Markdown>);
+    expect(container.querySelector('.katex')).toBeInTheDocument();
+    expect(container.querySelector('.katex-display')).not.toBeInTheDocument();
+    expect(container.textContent).not.toContain('\\(');
+  });
+
+  it('leaves prices as prices', () => {
+    // remark-math pairs any two dollars: this rendered "5 and " as maths.
+    const { container } = render(<Markdown>{'It costs $5 and $10 per month.'}</Markdown>);
+    expect(container.querySelector('.katex')).not.toBeInTheDocument();
+    expect(container.textContent).toBe('It costs $5 and $10 per month.');
+  });
+
+  it('keeps maths and a price apart in one sentence', () => {
+    const { container } = render(<Markdown>{'Between $5 and $10, i.e. $x$ dollars.'}</Markdown>);
+    expect(container.querySelectorAll('.katex')).toHaveLength(1);
+    expect(container.textContent).toContain('Between $5 and $10, i.e.');
+  });
+
+  it('typesets display maths inside a blockquote, inside the quote', () => {
+    const { container } = render(<Markdown>{'> \\[\n> x^2\n> \\]'}</Markdown>);
+    expect(container.querySelector('blockquote .katex-display')).toBeInTheDocument();
+  });
+
+  it('shows an indented code block exactly as written', () => {
+    const code = '    const price = "$5"\n    const m = "\\(x\\)"';
+    const { container } = render(<Markdown>{`Example:\n\n${code}`}</Markdown>);
+    expect(container.querySelector('pre code')?.textContent).toBe('const price = "$5"\nconst m = "\\(x\\)"\n');
+  });
+
+  it('keeps a code span intact beside prices', () => {
+    const { container } = render(<Markdown>{'It costs $5; write `$x$` for value; another costs $10.'}</Markdown>);
+    expect(container.querySelector('.katex')).not.toBeInTheDocument();
+    expect(container.querySelector('code')?.textContent).toBe('$x$');
+    expect(container.textContent).toBe('It costs $5; write $x$ for value; another costs $10.');
+  });
+
+  it('shows price tiers as price tiers', () => {
+    const { container } = render(<Markdown>{'Restaurant A: $$, restaurant B: $$.'}</Markdown>);
+    expect(container.querySelector('.katex')).not.toBeInTheDocument();
+    expect(container.textContent).toBe('Restaurant A: $$, restaurant B: $$.');
+  });
+
+  it('leaves maths delimiters in a code block alone', () => {
+    const { container } = render(<Markdown>{'```latex\n\\[ x^2 \\]\n```'}</Markdown>);
+    expect(container.querySelector('.katex')).not.toBeInTheDocument();
+    expect(container.querySelector('pre code')?.textContent).toContain('\\[ x^2 \\]');
+  });
+
+  it('renders a streamed answer exactly as the finished one', async () => {
+    // The component keeps one normaliser per message and feeds it the text it
+    // shows; what the reader sees at the end must not depend on that.
+    const answer = 'It costs $5 and $10.\n\nThe rank is \\(r\\).\n\n\\[ x^2 + y^2 \\]\n\n- item $x$\n- costs $3';
+    const streamed = render(<Markdown>{answer.slice(0, 1)}</Markdown>);
+    for (let n = 1; n <= answer.length; n += 3) streamed.rerender(<Markdown>{answer.slice(0, n)}</Markdown>);
+    streamed.rerender(<Markdown>{answer}</Markdown>);
+    const fresh = render(<Markdown>{answer}</Markdown>);
+    await waitFor(() => expect(streamed.container.innerHTML).toBe(fresh.container.innerHTML));
+    expect(streamed.container.querySelectorAll('.katex-display')).toHaveLength(1);
+  });
+
+  it('renders a different answer in full when the component is reused', async () => {
+    const { container, rerender } = render(<Markdown>{'First answer, $x$ and more.\n\nA second paragraph.'}</Markdown>);
+    rerender(<Markdown>{'It costs $5 and $10 per month.'}</Markdown>);
+    await waitFor(() => expect(container.textContent).toBe('It costs $5 and $10 per month.'));
+    expect(container.querySelector('.katex')).not.toBeInTheDocument();
+  });
+
+  it('re-renders a long streamed answer as often as its cost allows, not on every token', async () => {
+    // One long paragraph: no block of it is final until it ends, so each
+    // render parses all of it. Rendering on every token was quadratic.
+    const answer = 'The rank is \\(r\\), it costs $5, and $x^2$ holds for every n. '.repeat(200);
+    const steps = 60;
+    const streamed = render(<Markdown>{answer.slice(0, 64)}</Markdown>);
+    normalised.length = 0;
+    for (let k = 1; k <= steps; k++) {
+      streamed.rerender(<Markdown>{answer.slice(0, Math.ceil((answer.length * k) / steps))}</Markdown>);
+    }
+    expect(normalised.length).toBeLessThan(steps / 4);
+    // And the finished answer is what it ends on.
+    const fresh = render(<Markdown>{answer}</Markdown>);
+    await waitFor(() => expect(streamed.container.innerHTML).toBe(fresh.container.innerHTML), { timeout: 5_000 });
+  });
+
+  it('typesets display maths that the sentence punctuation follows', () => {
+    const { container } = render(
+      <Markdown>{'The identity\n\\begin{align*}\na &= b\n\\end{align*}.\nholds, and so does\n$$\nx^2\n$$.\n\nNext, $y$ here.'}</Markdown>,
+    );
+    // Both displays, and the inline maths after the `$$.` that used to be
+    // swallowed by a block remark-math never closed.
+    expect(container.querySelectorAll('.katex-display')).toHaveLength(2);
+    expect(container.querySelectorAll('.katex')).toHaveLength(3);
   });
 
   it('highlights a fenced code block and adds a copy button', () => {

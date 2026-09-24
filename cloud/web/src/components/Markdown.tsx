@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from 'react';
+import { useMemo, useRef, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -6,6 +6,7 @@ import rehypeHighlight from 'rehype-highlight';
 import rehypeKatex from 'rehype-katex';
 import { Copy, Check } from 'lucide-react';
 import 'katex/dist/katex.min.css';
+import { createMathNormalizer, usePacedText } from '@cascade/markdown';
 import Mermaid from './Mermaid.js';
 
 // Extract the plain-text content of a react-markdown code node, whatever the
@@ -42,14 +43,24 @@ function useCopied(): [boolean, () => void] {
 /**
  * The one place chat + the file viewer turn markdown into rich output:
  *   - GFM tables/task-lists/strikethrough (remark-gfm)
- *   - LaTeX math, $inline$ and $$block$$ (remark-math + rehype-katex)
+ *   - LaTeX math (remark-math + rehype-katex). Models also write \(…\),
+ *     \[…\] and bare \begin{align*}; normalizeMath rewrites those into the
+ *     $…$ / $$…$$ remark-math reads, and escapes prices like "$5 and $10" that
+ *     it would otherwise pair into an equation (src/core/markdown/math.ts).
  *   - syntax-highlighted code with a copy button (rehype-highlight)
  *   - ```mermaid fenced blocks rendered as diagrams (lazy-loaded)
  * Raw HTML in the markdown is NOT rendered (no rehype-raw) — untrusted model
  * output must not inject markup.
  */
 export default function Markdown({ children }: { children: string }) {
-  return (
+  // A streamed answer re-renders on every token, and each render parses all of
+  // it: quadratic over a long answer. usePacedText renders the newest text as
+  // often as its cost allows; the renders between reuse the memoised element.
+  // One normaliser per message re-reads just the text after its last final
+  // block, which makes each render cheaper still.
+  const shown = usePacedText(children);
+  const [normalize] = useState(createMathNormalizer);
+  return useMemo(() => (
     <ReactMarkdown
       remarkPlugins={[remarkGfm, remarkMath]}
       rehypePlugins={[
@@ -60,9 +71,9 @@ export default function Markdown({ children }: { children: string }) {
         pre: PreBlock,
       }}
     >
-      {children}
+      {normalize(shown)}
     </ReactMarkdown>
-  );
+  ), [normalize, shown]);
 }
 
 // A fenced block. If it's ```mermaid, render a diagram (no code chrome);

@@ -15,7 +15,8 @@
     "forceConsistentCasingInFileNames": true,
     "baseUrl": ".",
     "paths": {
-      "@cascade/documents": ["../../src/core/documents/index.ts"]
+      "@cascade/documents": ["../../src/core/documents/index.ts"],
+      "@cascade/markdown": ["../../src/core/markdown/index.ts"]
     }
   },
   "include": ["src"],

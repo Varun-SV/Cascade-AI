@@ -276,3 +276,7 @@ body {
 }
 .prose :where(code):not(:where(pre code))::before,
 .prose :where(code):not(:where(pre code))::after { content: none; }
+
+/* KaTeX sets a display equation nowrap, so a long one would push its message
+   past the edge of the screen. It scrolls inside the message instead. */
+.katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; }

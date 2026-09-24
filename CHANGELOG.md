@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
 ### Added
+- **The MIT License text, in `LICENSE`.** Cascade AI was already declared
+  MIT in its package metadata and README, but the licence itself was not in
+  the repository, so the README's licence link went nowhere. It now ships at
+  the root and in the npm package.
 - **A daily allowance of browser sessions: 5 a day on Free, 50 on Pro.** A
   session is claimed the moment one is about to be opened, which is what the
   provider bills for, and returned if none was, so a Browser-chip run that
@@ -40,6 +44,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   daily limit.
 
 ### Fixed
+- **Maths in an answer is typeset, whichever way the model wrote it.** GPT
+  and Gemini write `\(…\)` and `\[…\]`, which Markdown reads as escaped
+  brackets, so an equation reached the web chat as
+  `[ r = \operatorname{rank} E(\mathbb{Q}) ]`. Those, and bare
+  `\begin{align*}` blocks, now render as maths. The desktop chat rendered no
+  maths at all and now matches the web. Prices are no longer read as maths
+  either: "costs $5 and $10" used to show "5 and " as an equation. Code
+  blocks and code spans are left exactly as written.
+- **A long answer no longer slows the chat down as it streams in.** Each
+  token re-rendered the whole answer, so the work grew with the square of
+  its length. Both chats now re-render as often as the answer's size
+  allows, and show the finished answer in full once it is done.
 - **A run that cannot do something now says so instead of inventing the
   result.** Asked to open a site with browser control and return its
   chatbot's answers, a run that could not reach a browser "simulated" the

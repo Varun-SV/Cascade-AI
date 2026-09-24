@@ -40,6 +40,9 @@ export default defineConfig({
     alias: {
       // Allow importing .js extensions in tests (ESM compat)
       '#cascade': new URL('./src', import.meta.url).pathname,
+      // app/src/lib imports the shared Markdown step under the name the
+      // desktop and cloud bundlers give it.
+      '@cascade/markdown': new URL('./src/core/markdown/index.ts', import.meta.url).pathname,
     },
   },
 });

@@ -1,11 +1,12 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import type { Socket } from 'socket.io-client';
 import { Send, Bot, User, ChevronRight, ChevronDown, Square } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import 'katex/dist/katex.min.css';
 import { MermaidBlock } from './MermaidBlock.js';
+import { CHAT_REHYPE_PLUGINS, CHAT_REMARK_PLUGINS, createAnswerPreparer, usePacedText } from '../lib/markdown.js';
 import { SessionRating } from './SessionRating.js';
 import { useAppDispatch, useAppSelector, appendMessage, finalizeLastMessage, setSessionId, loadTranscript, runStarted } from '../store/index.js';
 import { fetchSessionTranscript } from '../utils/sessionLoad.js';
@@ -110,6 +111,15 @@ function MessageBubble({ message, compact }: { message: { role: string; content:
     : splitThinking(message.content);
   const hasThinking = !isUser && thinking.length > 0;
   const hasAnswer = answer.trim().length > 0;
+  // A streamed answer re-renders on every token, and each render parses all of
+  // it: quadratic over a long answer. usePacedText renders the newest text as
+  // often as its cost allows; the renders between reuse the memoised element.
+  // One preparer per message re-reads just what follows its last final block.
+  const shown = usePacedText(isUser ? '' : answer);
+  const [prepare] = useState(createAnswerPreparer);
+  const rendered = useMemo(() => (isUser ? null : (
+    <ReactMarkdown remarkPlugins={CHAT_REMARK_PLUGINS} rehypePlugins={CHAT_REHYPE_PLUGINS} components={markdownComponents}>{prepare(shown)}</ReactMarkdown>
+  )), [isUser, prepare, shown]);
 
   return (
     <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', flexDirection: isUser ? 'row-reverse' : 'row', animation: 'fadeIn 0.25s var(--ease)' }}>
@@ -134,7 +144,7 @@ function MessageBubble({ message, compact }: { message: { role: string; content:
         {hasAnswer ? (
           isUser
             ? <span style={{ whiteSpace: 'pre-wrap' }}>{message.content}</span>
-            : <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{answer}</ReactMarkdown>
+            : rendered
         ) : (
           !hasThinking && message.streaming ? <BlinkCursor /> : null
         )}

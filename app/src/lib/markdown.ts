@@ -1,0 +1,33 @@
+import type { Options } from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import { createMathNormalizer, normalizeMath } from '@cascade/markdown';
+
+/**
+ * The chat's Markdown pipeline, kept here so ChatPanel and its test render
+ * with the same plugins. The web chat has used the same set since 0.x; the
+ * desktop rendered GFM only, so every equation reached the reader as raw TeX.
+ */
+export const CHAT_REMARK_PLUGINS: Options['remarkPlugins'] = [remarkGfm, remarkMath];
+export const CHAT_REHYPE_PLUGINS: Options['rehypePlugins'] = [rehypeKatex];
+
+/**
+ * An answer as the pipeline should read it: `\(…\)`, `\[…\]` and bare
+ * environments rewritten as dollars, prices escaped. See src/core/markdown.
+ */
+export function prepareAnswer(answer: string): string {
+  return normalizeMath(answer);
+}
+
+/**
+ * prepareAnswer for one message whose answer is still streaming in. It gives
+ * the same result, but re-reads only what follows the last final block rather
+ * than the whole answer on every token — quadratic over a long stream.
+ */
+export function createAnswerPreparer(): (answer: string) => string {
+  return createMathNormalizer();
+}
+
+/** Renders a streamed answer as often as its cost allows; see src/core/markdown/pace.ts. */
+export { usePacedText } from '@cascade/markdown';

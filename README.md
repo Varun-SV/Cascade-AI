@@ -941,4 +941,4 @@ tool name to `DEFAULT_APPROVAL_REQUIRED` in `src/constants.ts`.
 
 ## License
 
-MIT © Cascade AI Contributors
+Cascade AI is released under the [MIT License](LICENSE). Copyright © 2026 Varun SV.
