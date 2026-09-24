@@ -51,6 +51,30 @@ describe('Markdown', () => {
     expect(container.textContent).toContain('Between $5 and $10, i.e.');
   });
 
+  it('typesets display maths inside a blockquote, inside the quote', () => {
+    const { container } = render(<Markdown>{'> \\[\n> x^2\n> \\]'}</Markdown>);
+    expect(container.querySelector('blockquote .katex-display')).toBeInTheDocument();
+  });
+
+  it('shows an indented code block exactly as written', () => {
+    const code = '    const price = "$5"\n    const m = "\\(x\\)"';
+    const { container } = render(<Markdown>{`Example:\n\n${code}`}</Markdown>);
+    expect(container.querySelector('pre code')?.textContent).toBe('const price = "$5"\nconst m = "\\(x\\)"\n');
+  });
+
+  it('keeps a code span intact beside prices', () => {
+    const { container } = render(<Markdown>{'It costs $5; write `$x$` for value; another costs $10.'}</Markdown>);
+    expect(container.querySelector('.katex')).not.toBeInTheDocument();
+    expect(container.querySelector('code')?.textContent).toBe('$x$');
+    expect(container.textContent).toBe('It costs $5; write $x$ for value; another costs $10.');
+  });
+
+  it('shows price tiers as price tiers', () => {
+    const { container } = render(<Markdown>{'Restaurant A: $$, restaurant B: $$.'}</Markdown>);
+    expect(container.querySelector('.katex')).not.toBeInTheDocument();
+    expect(container.textContent).toBe('Restaurant A: $$, restaurant B: $$.');
+  });
+
   it('leaves maths delimiters in a code block alone', () => {
     const { container } = render(<Markdown>{'```latex\n\\[ x^2 \\]\n```'}</Markdown>);
     expect(container.querySelector('.katex')).not.toBeInTheDocument();
