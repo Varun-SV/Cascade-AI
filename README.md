@@ -26,7 +26,7 @@ cascade "Refactor the auth module to use JWT, add tests, and open a PR"
 | **OpenAI-compatible API** | `POST /v1/chat/completions` for any OpenAI SDK | [OpenAI-compatible API](#openai-compatible-api) |
 | **SDK** | `runCascade()` / `createCascade()` from Node | [SDK](#sdk--programmatic-use) |
 
-The CLI, desktop app and Cascade Cloud share one account and one set of end-to-end-encrypted settings.
+The CLI, desktop app and Cascade Cloud share one account. Settings can follow you between them through opt-in, end-to-end-encrypted sync: you push and pull by hand, with a passphrase.
 
 ## ✨ Highlights
 
@@ -102,7 +102,7 @@ Cascade has shipped roughly 70 releases since v0.13.2 and is now at **v0.82.0**.
 ### Cascade Cloud, native login, and one identity across CLI, desktop, and web (v0.20 – v0.45)
 - **Cascade Cloud** launched as a hosted, bring-your-own-key chat surface (now at [cascadeai.in](https://cascadeai.in)) — multimodal input, persistent memory, and file generation that now produces real, editable Office documents and charts (`.docx`/`.pptx`/`.xlsx`), not markdown text saved under the wrong extension.
 - **Native login**, rolled out server → CLI → desktop, so `cascade login`, the desktop app, and the web app all authenticate against one account with no OAuth secret shipped in a native client.
-- **Key sync** — provider keys, MCP tokens, and preferences now sync end-to-end encrypted across web, desktop, and CLI; the server holds only ciphertext it cannot read.
+- **Key sync** — provider keys, MCP servers and preferences can be pushed and pulled end-to-end encrypted between web, desktop and CLI, on request and with a passphrase; the server holds only ciphertext it cannot read. The web app carries provider keys and web-search settings only.
 - **MCP connectors gained OAuth** — connecting a server can run a real login-and-authorize flow instead of pasting a token, across cloud web, desktop, and CLI alike.
 - **One visual identity** — a single azure → sky → teal system, matching T1 → T2 → T3, now runs through the CLI banner, the desktop theme, and the web app instead of three different palettes.
 
@@ -556,7 +556,7 @@ cascade update                       Update to the latest version
 
 ```
 cascade login | logout | whoami      Sign in to Cascade Cloud on this machine
-cascade sync push | pull             Encrypt and upload / download your settings (keys, prefs)
+cascade sync push | pull             Encrypt and upload / download your settings, with a passphrase
 cascade sessions                              List your cloud chats
 cascade sessions show <id>                    Print a chat transcript with branch markers
 cascade sessions branch <chat> <message>      Switch a chat to another branch
@@ -605,8 +605,8 @@ Type any of these inside the REPL:
 | `/comms` | Live agent-to-agent comms feed |
 | `/why` | How the last run was routed: complexity, models, failovers |
 | `/cost` | Session cost, tokens and delegation savings |
-| `/logs` · `/diagnose` | Recent runtime logs; provider/model/config health checks |
-| `/audit` | Verify the tamper-evident audit log |
+| `/logs` · `/diagnose` | Recent runtime logs; a summary of configured providers, models and sessions (it does not test keys or connections) |
+| `/audit` | Check the audit log's hash chain |
 | **Models and setup** | |
 | `/model` | Pick a provider and model for a tier (or Auto) |
 | `/model-info` · `/models` · `/providers` | Active models per tier; available models; configured providers |
@@ -812,17 +812,17 @@ Provider keys you add — through `cascade link`, the `/model` picker, desktop S
 - `~/.cascade-ai/credentials.json`, readable only by your user (mode `0600`), so a key entered once works in every workspace;
 - the workspace's `.cascade/config.json`, with ordinary file permissions — keep `.cascade/` out of version control.
 
-Keys in your environment (`ANTHROPIC_API_KEY`, …) are read at startup; `cascade link` is what copies one into these files. Settings synced through your Cascade account are end-to-end encrypted, so the server holds only ciphertext.
+Keys in your environment (`ANTHROPIC_API_KEY`, …) are read at startup; `cascade link` is what copies one into these files. Settings you choose to sync through your Cascade account are end-to-end encrypted, so the server holds only ciphertext.
 
-Cascade also has an encrypted keystore — the OS keychain (macOS Keychain, Windows Credential Vault, libsecret), or `~/.cascade-ai/keystore.enc` under AES-256-GCM with a PBKDF2-derived key — and reads a provider key from it when one is there. Nothing writes provider keys to it yet; moving them there is on the [Roadmap](#roadmap).
+Cascade also has an encrypted keystore — the OS keychain (macOS Keychain, Windows Credential Vault, libsecret), or `~/.cascade-ai/keystore.enc` under AES-256-GCM with a PBKDF2-derived key — but it is not wired in: runs neither write provider keys to it nor read them from it. Moving keys there is on the [Roadmap](#roadmap).
 
 ### What else keeps a run contained
 
 - **Permission escalation** — a worker that needs more than it was given asks up the chain, T3 → T2 → T1 → you.
 - **SSRF-guarded fetching** — `web_fetch`, dynamic tools and hosted search backends cannot reach private or link-local addresses, checked again at connect time.
 - **Secret redaction** — secrets and PII are stripped from a worker's output before it travels up the hierarchy.
-- **Privacy paths** — `privacy.paths` forces local models for sensitive folders and can withhold their content from upstream tiers.
-- **Tamper-evident audit log** — encrypted and hash-chained; `/audit` verifies it.
+- **Privacy paths** — `privacy.paths` forces local models for sensitive folders and withholds their output from upstream tiers, for a worker whose assignment names a matching path. A file a worker only finds later, by search or listing, is not checked — enforcing the rule at file access is on the [Roadmap](#roadmap).
+- **Hash-chained audit log** — entries are encrypted and chained with SHA-256; `/audit` checks the chain. That catches an edited or removed entry in the middle, but not a removed tail, a chain recomputed by someone with write access, or a deleted database: the chain has no key and no anchor outside the log.
 - **Budget kill-switch** — a run stops at its token budget, and `/continue` resumes it with a raised one. A session spending cap set with `/budget set` stops runs too; `/continue` does not lift it, so raise it or `/budget clear` first.
 
 > Agent-written tools are confined only when the optional `isolated-vm` addon is installed; without it they run in a worker that can reach the filesystem and processes. Set `"enableToolCreation": false` if that matters to you.
@@ -882,7 +882,7 @@ src/                    The engine — published to npm as `cascade-ai`
 │   ├── verification/   Acceptance checks — mechanical first, a model only when needed
 │   ├── knowledge/      Project knowledge graph (world state) and session memory
 │   ├── privacy/        Per-path privacy tiers
-│   ├── audit/          Secret redaction and the tamper-evident audit log
+│   ├── audit/          Secret redaction and the hash-chained audit log
 │   ├── permissions/    Escalation T3 → T2 → T1 → you
 │   ├── steering/ peer/ Live steering; worker-to-worker messages
 │   ├── documents/      Shared Office/PDF renderers (also used by the web app)
@@ -931,8 +931,8 @@ web/                    Local dashboard SPA (ReactFlow agent graph)
 | ✓ | Peer communication visualization in dashboard |
 | ✓ | Conversational fast-path (bypass T1 for simple prompts) |
 | ✓ | Redaction layer — secrets/PII stripped from T3 output before it travels upstream |
-| ✓ | Per-path privacy tiers (`privacy.paths` — force local models + withhold output for sensitive folders) |
-| ✓ | Tamper-evident audit log (encrypted + hash-chained; `/audit`, `GET /api/audit/verify`) |
+| ✓ | Per-path privacy tiers (`privacy.paths` — force local models + withhold output, for work whose assignment names a sensitive path) |
+| ✓ | Hash-chained audit log (encrypted entries; `/audit`, `GET /api/audit/verify` check the chain) |
 | ✓ | Independent T2-critic reflection loop (`reflection.enabled`) |
 | ✓ | Live steering — `/steer` / desktop Steer bar injects corrections into running workers |
 | ✓ | Session rollback button (desktop) + `/rollback` (CLI) |
@@ -943,7 +943,7 @@ web/                    Local dashboard SPA (ReactFlow agent graph)
 | ✓ | Cascade Cloud (hosted chat — GitHub/Google login, bring-your-own-key, [cascadeai.in](https://cascadeai.in)) |
 | ✓ | Cascade Cloud billing — Razorpay subscriptions, Free and Pro plans |
 | ✓ | Desktop app — chat, Cockpit, code editor + terminal, browser; downloads from the site |
-| ✓ | End-to-end-encrypted settings sync across CLI, desktop and web |
+| ✓ | End-to-end-encrypted settings sync across CLI, desktop and web — manual push and pull, with a passphrase |
 | ✓ | Typed task graph with durable resume after a crash, cancel or budget cap (v0.68) |
 | ✓ | Self-host with `docker compose up` (v0.69) |
 | ✓ | OpenAI-compatible API — `/v1/chat/completions`, `/v1/models` (v0.70) |
@@ -957,8 +957,10 @@ web/                    Local dashboard SPA (ReactFlow agent graph)
 | Status | Feature |
 |--------|---------|
 | 🔜 | Hooks — the config and `HooksRunner` exist; runs do not call them yet |
-| 🔜 | Provider keys in the encrypted keystore — it exists and is read, but keys are still written as plain JSON |
+| 🔜 | Provider keys in the encrypted keystore — it exists but runs do not use it; keys are written as plain JSON |
 | 🔜 | Agent-written tools that refuse to run without the isolate — today they fall back to a worker that is not a security boundary |
+| 🔜 | Privacy paths enforced when a file is read, not only when an assignment names it |
+| 🔜 | A tamper-evident audit log — a keyed or externally anchored chain head, so a truncated or rewritten log fails verification |
 | 🔜 | Task-completion notifications and webhooks (Slack / Discord / custom URL) — a `NotificationManager` exists but nothing sends through it |
 | 🔜 | OS-level jail for `shell` and `run_code` — bubblewrap / sandbox-exec / Docker, on top of approvals — see [docs/ROADMAP.md](docs/ROADMAP.md) |
 | 🔜 | Cross-session history research — a prior-work brief before T1 plans — see [docs/ROADMAP.md](docs/ROADMAP.md) |
