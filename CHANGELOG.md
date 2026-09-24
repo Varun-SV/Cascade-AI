@@ -52,6 +52,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   maths at all and now matches the web. Prices are no longer read as maths
   either: "costs $5 and $10" used to show "5 and " as an equation. Code
   blocks and code spans are left exactly as written.
+- **`/mcp` lists your MCP servers instead of crashing.** MCP tools are
+  registered as `mcp__server__tool`, but the command still split their names
+  on the old `::`, so with any MCP tool connected it threw. It now reads each
+  tool's server from the tool itself.
+- **`/theme` accepts the theme names Cascade uses now.** The themes were
+  renamed (`midnight`, `aurora`, `daybreak`, `bloom`, `tide`, `ember`), and
+  config and `--theme` took the new names, but `/theme` still checked the old
+  list: `/theme midnight` answered "Unknown theme". It now takes either name
+  and lists the current ones. A name every object inherits, such as
+  `toString`, is no longer taken for a theme by `/theme`, `--theme` or the
+  config, where it used to hand the renderer a function and break it.
 - **A long answer no longer slows the chat down as it streams in.** Each
   token re-rendered the whole answer, so the work grew with the square of
   its length. Both chats now re-render as often as the answer's size

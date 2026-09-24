@@ -2,7 +2,7 @@
 //  Cascade AI — Slash Command Registry
 // ─────────────────────────────────────────────
 
-import { THEME_NAMES } from '../../constants.js';
+import { isThemeName, listThemes } from '../themes/index.js';
 
 export interface SlashCommand {
   command: string;
@@ -142,12 +142,14 @@ export class SlashCommandRegistry {
       description: 'Switch color theme',
       handler: (args, ctx) => {
         const name = args[0];
+        // The themes as they are named now; the former names still resolve.
+        const themes: string[] = listThemes().map((theme) => theme.name);
         if (!name) {
-          ctx.onOutput(`Available themes: ${THEME_NAMES.join(', ')}`);
+          ctx.onOutput(`Available themes: ${themes.join(', ')}`);
           return { handled: true };
         }
-        if (!THEME_NAMES.includes(name as never)) {
-          return { output: `Unknown theme: ${name}. Available: ${THEME_NAMES.join(', ')}`, handled: true };
+        if (!isThemeName(name)) {
+          return { output: `Unknown theme: ${name}. Available: ${themes.join(', ')}`, handled: true };
         }
         ctx.onThemeChange(name);
         return { output: `Theme switched to: ${name}`, handled: true };

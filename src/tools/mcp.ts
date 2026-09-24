@@ -7,6 +7,29 @@ import { BaseTool } from './base.js';
 import { McpClient } from '../mcp/client.js';
 import { isReadOnlyMcpToolName, mcpToolName } from './tool-name.js';
 
+/** One connected MCP server and the tools it serves, as registered. */
+export interface McpServerTools {
+  server: string;
+  tools: Array<{ name: string; description: string }>;
+}
+
+/**
+ * The MCP servers behind `tools`, each with its tools. Read from the wrappers
+ * rather than parsed out of the registered names: those are
+ * `mcp__server__tool` after sanitising and de-duplication, which cannot be
+ * split back into the server a tool came from.
+ */
+export function mcpServersIn(tools: Iterable<BaseTool | undefined>): McpServerTools[] {
+  const servers = new Map<string, McpServerTools['tools']>();
+  for (const tool of tools) {
+    if (!(tool instanceof McpToolWrapper)) continue;
+    const list = servers.get(tool.serverName) ?? [];
+    list.push({ name: tool.toolName, description: tool.description.replace(`[MCP:${tool.serverName}] `, '') });
+    servers.set(tool.serverName, list);
+  }
+  return Array.from(servers, ([server, list]) => ({ server, tools: list }));
+}
+
 /**
  * A wrapper for a single tool exposed by an MCP server.
  */
@@ -16,8 +39,9 @@ export class McpToolWrapper extends BaseTool {
   public readonly inputSchema: Record<string, unknown>;
 
   private mcpClient: McpClient;
-  private serverName: string;
-  private toolName: string;
+  /** The server that serves this tool, and the tool's own name there. */
+  readonly serverName: string;
+  readonly toolName: string;
 
   constructor(
     mcpClient: McpClient,
