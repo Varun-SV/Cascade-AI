@@ -60,6 +60,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the lines to allow it.
 
 ### Fixed
+- **`pdf_create` wrote relative to the process, not the workspace.** In the
+  desktop app and the server those differ, so a PDF landed outside the
+  workspace, where no file check looked. It resolves its path in the
+  workspace like every other file tool.
 - **File tools work in a workspace opened through a symlink.** Each file's
   real path was checked against the workspace's name rather than its real
   path, so every file looked like an escape — which on macOS includes any
@@ -189,7 +193,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workspace once they end — and stays so in later runs, recorded in
   `.cascade/privacy-derived.json`. Its commands write nowhere else (their
   `/tmp` is private, the rest of the machine and the git store read-only)
-  and run alone meanwhile. Siblings waiting on it get a status line, not its
+  and run alone meanwhile. Nor does it write through a file with other
+  names — hard links, whose names outside the workspace could be neither
+  marked nor hidden: a file tool refuses, and to its commands such files,
+  and the package folders pnpm links them into, are read-only. Siblings waiting on it get a status line, not its
   output, and no facts are taken from it into the knowledge graph.
   `file_edit` asks like a read does, and plugin tools are refused to it like
   MCP ones. A subtask that turns local-only mid-run moves to the private

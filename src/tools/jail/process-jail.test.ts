@@ -139,9 +139,12 @@ describe('the launch each jailer is given', () => {
 
   it('bubblewrap, for a local-only caller: the host read-only, private scratch, the workspace writable but its git store', () => {
     const args = bwrapArgs(hidden, true, '/tmp/w', 'sh', [], layout).join(' ');
-    expect(args).toContain('--ro-bind / / --tmpfs /tmp --tmpfs /home/u/.cache --bind /tmp/w /tmp/w --dev /dev');
+    expect(args).toContain('--ro-bind / / --tmpfs /tmp --tmpfs /home/u/.cache --bind /tmp/w /tmp/w --ro-bind /tmp/w/.git /tmp/w/.git --dev /dev');
     expect(args).not.toContain('--bind / /');
-    expect(args).toMatch(/--ro-bind \/tmp\/w\/.git \/tmp\/w\/.git --chdir \/tmp\/w/);
+    // The read-only parts go on before the masks, so a mask over one stays on.
+    const masked = bwrapArgs([{ path: '/tmp/w/.git', dir: true }], true, '/tmp/w', 'sh', [], layout);
+    expect(masked.lastIndexOf('--tmpfs')).toBeGreaterThan(masked.indexOf('/tmp/w/.git'));
+    expect(masked.slice(masked.lastIndexOf('--tmpfs'), masked.lastIndexOf('--tmpfs') + 2)).toEqual(['--tmpfs', '/tmp/w/.git']);
     // A working directory the scratch would hide is mounted back, read-only.
     expect(bwrapArgs(hidden, true, '/tmp/other', 'sh', [], layout).join(' ')).toContain('--ro-bind /tmp/other /tmp/other');
   });
@@ -646,5 +649,77 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: other names for a hidden file, and 
     const local = await reg.execute('shell', { command: 'cat docs/plan.md notes.txt 2>&1; true' }, { ...exec, isOffline: () => true });
     expect(local).toContain(LOCAL);
     expect(local).not.toContain(SECRET);
+  });
+});
+
+// A file with another name outside the workspace shares every write with it,
+// and that name can be neither marked local-only nor hidden.
+describe.skipIf(!bwrapWorks)('in bubblewrap: a local-only caller and files with other names', () => {
+  let dir: string;
+  let outside: string;
+  const exec = { tierId: 't3', sessionId: 's', requireApproval: false };
+  const offline = { ...exec, isOffline: () => true };
+  const registry = () => {
+    const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {} } as never, dir);
+    reg.setPrivacyPaths(new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }], { workspaceRoot: dir }));
+    return reg;
+  };
+
+  beforeAll(async () => {
+    dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-linked-')));
+    outside = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-store-')));
+    await fs.mkdir(path.join(dir, 'secret'));
+    await fs.writeFile(path.join(dir, 'secret', 'plan.md'), `${LOCAL}\n`);
+    await fs.writeFile(path.join(outside, 'shared.txt'), 'shared\n');
+    await fs.link(path.join(outside, 'shared.txt'), path.join(dir, 'shared.txt'));
+    // As pnpm installs a package: linked in from a store outside.
+    await fs.mkdir(path.join(dir, 'node_modules', 'pkg'), { recursive: true });
+    await fs.writeFile(path.join(outside, 'index.js'), 'module.exports = 1;\n');
+    await fs.link(path.join(outside, 'index.js'), path.join(dir, 'node_modules', 'pkg', 'index.js'));
+    await fs.writeFile(path.join(dir, 'notes.md'), 'public\n');
+  });
+  afterAll(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(outside, { recursive: true, force: true });
+  });
+
+  it('refuses a file tool\'s write to one, and leaves an ordinary file writable', async () => {
+    const reg = registry();
+    await expect(reg.execute('file_write', { path: 'shared.txt', content: LOCAL }, offline)).rejects.toThrow(/other names \(hard links\)/);
+    await expect(reg.execute('file_edit', { path: 'shared.txt', old_string: 'shared', new_string: LOCAL }, offline)).rejects.toThrow(/other names/);
+    expect(await fs.readFile(path.join(outside, 'shared.txt'), 'utf8')).toBe('shared\n');
+    await reg.execute('file_write', { path: 'notes.md', content: 'still writable' }, offline);
+    // A cloud worker's write is its own business.
+    await reg.execute('file_write', { path: 'shared.txt', content: 'shared, edited\n' }, exec);
+    expect(await fs.readFile(path.join(outside, 'shared.txt'), 'utf8')).toBe('shared, edited\n');
+  });
+
+  it('keeps a command from writing through one, or into the packages it is installed with', async () => {
+    const out = await registry().execute('shell', {
+      command: 'cat secret/plan.md >> shared.txt 2>&1; cat secret/plan.md > node_modules/pkg/index.js 2>&1; touch node_modules/new.js 2>&1; echo ok > made.txt; true',
+    }, offline);
+    expect(out).toMatch(/Read-only file system/);
+    expect(await fs.readFile(path.join(outside, 'shared.txt'), 'utf8')).not.toContain(LOCAL);
+    expect(await fs.readFile(path.join(outside, 'index.js'), 'utf8')).toBe('module.exports = 1;\n');
+    await expect(fs.stat(path.join(dir, 'node_modules', 'new.js'))).rejects.toThrow();
+    expect(await fs.readFile(path.join(dir, 'made.txt'), 'utf8')).toBe('ok\n');
+  });
+});
+
+// The read-only mounts went on after the masks, so one over the git store
+// took the mask back off for a local-only caller.
+describe.skipIf(!bwrapWorks)('in bubblewrap: a local-only caller and a history holding a protected file', () => {
+  it('keeps the git store hidden', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-envrepo-')));
+    const g = (...args: string[]) => execFileSync('git', ['-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' });
+    g('init', '-q');
+    await fs.writeFile(path.join(dir, '.env'), `KEY=${SECRET}\n`);
+    g('add', '-f', '.env'); g('commit', '-qm', 'oops');
+    const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {} } as never, dir);
+    reg.setPrivacyPaths(new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }], { workspaceRoot: dir }));
+    const out = await reg.execute('shell', { command: 'git show HEAD:.env 2>&1; true' }, { tierId: 't3', sessionId: 's', requireApproval: false, isOffline: () => true });
+    expect(out).not.toContain(SECRET);
+    expect(out).toMatch(/not a git repository/);
+    await fs.rm(dir, { recursive: true, force: true });
   });
 });

@@ -116,7 +116,11 @@ export interface Launch {
 export interface WriteLayout {
   /** The workspace, writable. */
   writable: string[];
-  /** Inside it, read-only all the same: the repository's git store. */
+  /**
+   * Inside it, read-only all the same: the repository's git store, and
+   * files with other names (hard links). Mounted before the hidden paths,
+   * so a mask over one of them stays on.
+   */
   readOnly: string[];
   /** Private, empty and discarded: /tmp, and the home cache. */
   scratch: string[];
@@ -195,17 +199,26 @@ export class ProcessJail {
     let root: string;
     try { root = fs.realpathSync(this.policy.workspaceRoot); } catch { root = path.resolve(this.policy.workspaceRoot); }
     const inside = (p: string) => { const rel = path.relative(root, p); return !rel.startsWith('..') && !path.isAbsolute(rel); };
+    const gitDirs = (await gitDirsOf(root)).filter(inside);
+    const startedAt = Date.now();
+    const before = await stampFiles(root, gitDirs);
+    // A file with other names shares what is written to it with all of
+    // them, and one outside the workspace can be neither marked nor hidden:
+    // such files are read-only to the command (installed packages, where
+    // pnpm links them from its store, a folder at a time).
+    const pins = linkPins(before, root);
+    if (pins.length > MAX_LINK_PINS) {
+      return { ok: false, reason: `A local-only subtask (privacy.paths) cannot run commands in this workspace: ${pins.length} places in it hold files with other names (hard links), more than can be kept read-only.` };
+    }
     const layout: WriteLayout = {
       writable: [root],
-      readOnly: (await gitDirsOf(root)).filter(inside),
+      readOnly: [...gitDirs, ...pins],
       scratch: ['/tmp', path.join(os.homedir(), '.cache')].filter((d) => !inside(d) && fs.existsSync(d)),
     };
-    const startedAt = Date.now();
-    const before = await stampFiles(root, layout.readOnly);
     let scratchTmp: string | undefined;
     const done = async (): Promise<void> => {
       if (scratchTmp) fs.rmSync(scratchTmp, { recursive: true, force: true });
-      const changed = changedFiles(before, await stampFiles(root, layout.readOnly), startedAt);
+      const changed = changedFiles(before, await stampFiles(root, gitDirs), startedAt);
       if (changed.length) this.policy.taint?.(changed);
     };
 
@@ -501,6 +514,7 @@ export function bwrapArgs(hidden: Hidden[], offline: boolean, cwd: string, file:
     out.push('--ro-bind', '/', '/');
     for (const dir of layout.scratch) out.push('--tmpfs', dir);
     for (const dir of layout.writable) out.push('--bind', dir, dir);
+    for (const p of layout.readOnly) out.push('--ro-bind', p, p);
     // A working directory the scratch folders would have hidden.
     const underScratch = layout.scratch.some((dir) => cwd === dir || cwd.startsWith(`${dir}${path.sep}`));
     if (underScratch && !layout.writable.some((dir) => cwd === dir || cwd.startsWith(`${dir}${path.sep}`))) {
@@ -516,7 +530,6 @@ export function bwrapArgs(hidden: Hidden[], offline: boolean, cwd: string, file:
     out.push('--tmpfs', h.path);
     for (const k of h.keep ?? []) out.push('--bind', k, k);
   }
-  for (const dir of layout?.readOnly ?? []) out.push('--ro-bind', dir, dir);
   out.push('--chdir', cwd, '--', file, ...args);
   return out;
 }
@@ -640,13 +653,31 @@ function runs(file: string, args: string[]): Promise<boolean> {
   });
 }
 
+/** More places with hard-linked files than a command's mounts should hold. */
+const MAX_LINK_PINS = 1000;
+
+/**
+ * Where the workspace's files with other names are, to mount read-only:
+ * each file, or the whole `node_modules` folder it is installed in.
+ */
+function linkPins(stamps: Map<string, Stamp>, root: string): string[] {
+  const out = new Set<string>();
+  for (const [rel, stamp] of stamps) {
+    if (stamp.nlink < 2) continue;
+    const parts = rel.split('/');
+    const packages = parts.indexOf('node_modules');
+    out.add(path.join(root, ...(packages >= 0 ? parts.slice(0, packages + 1) : parts)));
+  }
+  return [...out];
+}
+
 /** The devices a program writes to wherever it runs. */
 const SEATBELT_WRITABLE_DEVICES = [
   '(literal "/dev/null")', '(literal "/dev/zero")', '(literal "/dev/tty")', '(literal "/dev/dtracehelper")', '(subpath "/dev/fd")',
 ];
 
 /** A file's identity and last change, to tell whether a command changed it. */
-interface Stamp { ctime: number; mtime: number; size: number; ino: number }
+interface Stamp { ctime: number; mtime: number; size: number; ino: number; nlink: number }
 
 /**
  * Every file in the workspace, stamped — bar Cascade's folder (other than
@@ -673,7 +704,7 @@ async function stampFiles(root: string, skip: string[]): Promise<Map<string, Sta
       }
       try {
         const st = await fs.promises.lstat(abs);
-        out.set(rel, { ctime: st.ctimeMs, mtime: st.mtimeMs, size: st.size, ino: st.ino });
+        out.set(rel, { ctime: st.ctimeMs, mtime: st.mtimeMs, size: st.size, ino: st.ino, nlink: st.nlink });
       } catch { /* gone meanwhile */ }
     }
   };

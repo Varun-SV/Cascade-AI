@@ -49,6 +49,19 @@ describe('File tools — path sandbox', () => {
     ).rejects.toThrow(/workspace/i);
   });
 
+  // The desktop app and the server do not run in the workspace, so a PDF
+  // written relative to the process landed somewhere no check was looking.
+  it('pdf_create writes into the workspace, not where the process runs', async () => {
+    const { PDFCreateTool } = await import('./pdf.js');
+    const tool = new PDFCreateTool();
+    tool.setWorkspaceRoot(workspace);
+    const name = `cascade-pdf-${process.pid}.pdf`;
+    await tool.execute({ path: `out/${name}`, content: 'hello' }, opts);
+    expect((await fs.stat(path.join(workspace, 'out', name))).size).toBeGreaterThan(0);
+    await expect(fs.stat(path.join(process.cwd(), 'out', name))).rejects.toThrow();
+    await expect(tool.execute({ path: '../escape.pdf', content: 'x' }, opts)).rejects.toThrow(/workspace/i);
+  });
+
   it('FileDeleteTool refuses escapes', async () => {
     const tool = new FileDeleteTool();
     tool.setWorkspaceRoot(workspace);

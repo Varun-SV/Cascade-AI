@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────
 
 import EventEmitter from 'node:events';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import ignoreFactory, { type Ignore } from 'ignore';
@@ -344,6 +345,7 @@ export class ToolRegistry extends EventEmitter {
     // a command's changes when it ends (the jail finds them).
     const offline = options.isOffline?.() === true;
     if (offline && WRITE_TOOLS.has(toolName) && typeof input['path'] === 'string') {
+      this.refuseLinkedDestination(input['path']);
       this.markWritten(input['path']);
     }
     if (tool.delegatesToTools) return tool.execute(input, options);
@@ -352,6 +354,19 @@ export class ToolRegistry extends EventEmitter {
       return await tool.execute(input, options);
     } finally {
       leave();
+    }
+  }
+
+  /**
+   * A file with other names — hard links — shares what is written to it
+   * with all of them, and those outside the workspace can be neither marked
+   * nor hidden. A local-only subtask writes a new file instead.
+   */
+  private refuseLinkedDestination(filePath: string): void {
+    let st: fs.Stats;
+    try { st = fs.statSync(path.resolve(this.workspaceRoot, filePath)); } catch { return; }
+    if (st.isFile() && st.nlink > 1) {
+      throw new Error(`${filePath} has other names (hard links), which would carry what a local-only subtask (privacy.paths) writes; write a new file instead.`);
     }
   }
 
