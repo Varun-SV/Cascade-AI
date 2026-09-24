@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import ReactMarkdown from 'react-markdown';
-import { CHAT_REHYPE_PLUGINS, CHAT_REMARK_PLUGINS, prepareAnswer } from './markdown.js';
+import { CHAT_REHYPE_PLUGINS, CHAT_REMARK_PLUGINS, createAnswerPreparer, prepareAnswer } from './markdown.js';
 
 // Renders exactly as the desktop chat does: the same plugins, the same
 // preparation. There is no React test harness in app/src, and none is needed
@@ -36,5 +36,14 @@ describe('desktop chat maths', () => {
 
   it('still renders GFM tables', () => {
     expect(render('| a | b |\n|---|---|\n| 1 | 2 |')).toContain('<table>');
+  });
+
+  it('prepares a streamed answer exactly as the finished one', () => {
+    // ChatPanel keeps one preparer per message and feeds it every token.
+    const answer = 'It costs $5 and $10.\n\nThe rank is \\(r\\).\n\n\\[ x^2 + y^2 \\]\n\n- item $x$\n- costs $3';
+    const prepare = createAnswerPreparer();
+    for (let n = 1; n <= answer.length; n++) {
+      expect(prepare(answer.slice(0, n)), `${n} chars`).toBe(prepareAnswer(answer.slice(0, n)));
+    }
   });
 });

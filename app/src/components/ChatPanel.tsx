@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import type { Socket } from 'socket.io-client';
 import { Send, Bot, User, ChevronRight, ChevronDown, Square } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
@@ -6,7 +6,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import 'katex/dist/katex.min.css';
 import { MermaidBlock } from './MermaidBlock.js';
-import { CHAT_REHYPE_PLUGINS, CHAT_REMARK_PLUGINS, prepareAnswer } from '../lib/markdown.js';
+import { CHAT_REHYPE_PLUGINS, CHAT_REMARK_PLUGINS, createAnswerPreparer } from '../lib/markdown.js';
 import { SessionRating } from './SessionRating.js';
 import { useAppDispatch, useAppSelector, appendMessage, finalizeLastMessage, setSessionId, loadTranscript, runStarted } from '../store/index.js';
 import { fetchSessionTranscript } from '../utils/sessionLoad.js';
@@ -111,6 +111,10 @@ function MessageBubble({ message, compact }: { message: { role: string; content:
     : splitThinking(message.content);
   const hasThinking = !isUser && thinking.length > 0;
   const hasAnswer = answer.trim().length > 0;
+  // One preparer per message: a streamed answer only grows, and it re-reads
+  // just what follows its last final block instead of the whole answer.
+  const [prepare] = useState(createAnswerPreparer);
+  const prepared = useMemo(() => (isUser ? '' : prepare(answer)), [isUser, prepare, answer]);
 
   return (
     <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', flexDirection: isUser ? 'row-reverse' : 'row', animation: 'fadeIn 0.25s var(--ease)' }}>
@@ -135,7 +139,7 @@ function MessageBubble({ message, compact }: { message: { role: string; content:
         {hasAnswer ? (
           isUser
             ? <span style={{ whiteSpace: 'pre-wrap' }}>{message.content}</span>
-            : <ReactMarkdown remarkPlugins={CHAT_REMARK_PLUGINS} rehypePlugins={CHAT_REHYPE_PLUGINS} components={markdownComponents}>{prepareAnswer(answer)}</ReactMarkdown>
+            : <ReactMarkdown remarkPlugins={CHAT_REMARK_PLUGINS} rehypePlugins={CHAT_REHYPE_PLUGINS} components={markdownComponents}>{prepared}</ReactMarkdown>
         ) : (
           !hasThinking && message.streaming ? <BlinkCursor /> : null
         )}

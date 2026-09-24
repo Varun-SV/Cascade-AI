@@ -81,6 +81,25 @@ describe('Markdown', () => {
     expect(container.querySelector('pre code')?.textContent).toContain('\\[ x^2 \\]');
   });
 
+  it('renders a streamed answer exactly as the finished one', () => {
+    // The component keeps one normaliser per message and feeds it every
+    // re-render; what the reader sees at the end must not depend on that.
+    const answer = 'It costs $5 and $10.\n\nThe rank is \\(r\\).\n\n\\[ x^2 + y^2 \\]\n\n- item $x$\n- costs $3';
+    const streamed = render(<Markdown>{answer.slice(0, 1)}</Markdown>);
+    for (let n = 1; n <= answer.length; n += 3) streamed.rerender(<Markdown>{answer.slice(0, n)}</Markdown>);
+    streamed.rerender(<Markdown>{answer}</Markdown>);
+    const fresh = render(<Markdown>{answer}</Markdown>);
+    expect(streamed.container.innerHTML).toBe(fresh.container.innerHTML);
+    expect(streamed.container.querySelectorAll('.katex-display')).toHaveLength(1);
+  });
+
+  it('renders a different answer in full when the component is reused', () => {
+    const { container, rerender } = render(<Markdown>{'First answer, $x$ and more.\n\nA second paragraph.'}</Markdown>);
+    rerender(<Markdown>{'It costs $5 and $10 per month.'}</Markdown>);
+    expect(container.querySelector('.katex')).not.toBeInTheDocument();
+    expect(container.textContent).toBe('It costs $5 and $10 per month.');
+  });
+
   it('highlights a fenced code block and adds a copy button', () => {
     const { container, getByLabelText } = render(<Markdown>{'```ts\nconst x: number = 1;\n```'}</Markdown>);
     expect(container.querySelector('pre code')).toBeInTheDocument();

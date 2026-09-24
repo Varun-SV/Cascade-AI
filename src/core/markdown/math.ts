@@ -23,18 +23,22 @@
 //  verbatim. The structure now comes from micromark, the parser react-markdown
 //  itself runs, so the two cannot disagree about which text is prose.
 //
+//  A STREAMED ANSWER IS NORMALISED INCREMENTALLY (createMathNormalizer). An
+//  answer grows a token at a time and is rendered after each one; parsing the
+//  whole of it every time is quadratic over the stream — 12 s of main-thread
+//  work for an 8 KB answer. Markdown already written is final once a later
+//  top-level block has begun, so only the text after the last such boundary
+//  is parsed again. Which boundaries are safe is decided from the same parse,
+//  and a property test holds the incremental result equal to the full one.
+//
 //  cloud/web and the desktop renderer both import it through the
 //  `@cascade/markdown` alias, so the two chat surfaces cannot disagree about
 //  what counts as maths either.
-//
-//  It runs on every streamed token, so each scan is linear. Every forward
-//  search is memoised (see ProseScanner.find), because an answer can hold
-//  thousands of unmatched delimiters and must not re-read a paragraph for each.
 
 import { fromMarkdown } from 'mdast-util-from-markdown';
 import { gfm } from 'micromark-extension-gfm';
 import { gfmFromMarkdown } from 'mdast-util-gfm';
-import type { Nodes } from 'mdast';
+import type { Nodes, RootContent } from 'mdast';
 
 /** Environments KaTeX renders in display mode. Checked against KaTeX 0.16:
  *  multline, eqnarray and flalign are absent on purpose — wrapping one would
@@ -63,7 +67,47 @@ const PROSE_WORD = /[A-Za-z]{4,}/;
  * addresses and raw HTML are left exactly as written.
  */
 export function normalizeMath(markdown: string): string {
-  if (!markdown.includes('\\') && !markdown.includes('$')) return markdown;
+  return normalize(markdown).output;
+}
+
+/**
+ * normalizeMath for text that grows: each call's result equals
+ * `normalizeMath(markdown)`, but when `markdown` extends the previous call's
+ * text only what follows the last final boundary is parsed again. Anything
+ * else — an edit, a regeneration — is simply normalised whole.
+ */
+export function createMathNormalizer(): (markdown: string) => string {
+  let prev: (Normalized & { input: string }) | null = null;
+  return (markdown) => {
+    if (prev && markdown === prev.input) return prev.output;
+    if (prev && prev.stableIn > 0 && markdown.startsWith(prev.input)) {
+      const tail = normalize(markdown.slice(prev.stableIn));
+      const output = prev.output.slice(0, prev.stableOut) + tail.output;
+      prev = {
+        input: markdown,
+        output,
+        stableIn: prev.stableIn + tail.stableIn,
+        stableOut: prev.stableOut + tail.stableOut,
+      };
+      return output;
+    }
+    prev = { input: markdown, ...normalize(markdown) };
+    return prev.output;
+  };
+}
+
+interface Normalized {
+  output: string;
+  /** input[0, stableIn) normalises to output[0, stableOut) however the text
+   *  continues. 0 when nothing is known to be final. */
+  stableIn: number;
+  stableOut: number;
+}
+
+function normalize(markdown: string): Normalized {
+  if (!markdown.includes('\\') && !markdown.includes('$')) {
+    return { output: markdown, stableIn: 0, stableOut: 0 };
+  }
   return new ProseScanner(markdown, readStructure(markdown)).run();
 }
 
@@ -77,6 +121,12 @@ interface Structure {
   /** Where inline constructs live: paragraphs, headings, table cells. A `$`
    *  or `\(` cannot pair across one's edge. Sorted and disjoint. */
   inline: Span[];
+  /**
+   * Offsets where a top-level block — or an item of a top-level list — begins
+   * after an earlier one, with its first line complete. Everything before one
+   * is final: appending text cannot reach back past a block that has started.
+   */
+  boundaries: number[];
 }
 
 /**
@@ -92,6 +142,43 @@ function readStructure(markdown: string): Structure {
   });
   const verbatim: Span[] = [];
   const inline: Span[] = [];
+  const boundaries: number[] = [];
+
+  // A boundary is the START OF THE LINE a block begins on, not the block's own
+  // start, which mdast places after any indentation: the text after a boundary
+  // is parsed again on its own, and a list item parsed without its indentation
+  // is a different item.
+  //
+  // The line must also be complete. A line still being written can stop being
+  // a block and reach back: "```" opens a fence until a later backtick on the
+  // same line disqualifies it, and then it is text whose backticks close a
+  // code span the line above opened. Found by the token fuzz, not foreseen.
+  const boundaryAt = (start: number | undefined): void => {
+    if (start === undefined) return;
+    const lineStart = markdown.lastIndexOf('\n', start - 1) + 1;
+    // The first line is no boundary: nothing precedes it to be final.
+    if (lineStart === 0 || !isBlank(markdown.slice(lineStart, start))) return;
+    if (markdown.indexOf('\n', start) === -1) return;
+    // And the line before must be blank. A block that follows another directly
+    // does not parse the same on its own: micromark carries the interruption
+    // state across, so `- 2) ~~~` after an indented code block is a list item
+    // holding text, and on its own a nested list holding a fence. After a
+    // blank line the parser starts clean. Also found by the fuzz.
+    const previous = markdown.slice(markdown.lastIndexOf('\n', lineStart - 2) + 1, lineStart - 1);
+    if (!isBlank(previous)) return;
+    boundaries.push(lineStart);
+  };
+  let previous: RootContent | undefined;
+  for (const block of tree.children) {
+    // Except after indented code, which is still open across the blank lines
+    // that follow it — it waits to see whether more indented lines come — so
+    // the next block is read as interrupting it: `2) a` there is a paragraph,
+    // and on its own a list. Also found by the fuzz.
+    if (!(previous && isIndentedCode(markdown, previous))) boundaryAt(block.position?.start.offset);
+    // Items after the first: the first begins where its list does.
+    if (block.type === 'list') for (const item of block.children.slice(1)) boundaryAt(item.position?.start.offset);
+    previous = block;
+  }
 
   const visit = (node: Nodes): void => {
     const start = node.position?.start.offset;
@@ -129,7 +216,18 @@ function readStructure(markdown: string): Structure {
   };
   visit(tree);
 
-  return { verbatim: disjoint(verbatim), inline: disjoint(inline) };
+  boundaries.sort((a, b) => a - b);
+  return { verbatim: disjoint(verbatim), inline: disjoint(inline), boundaries };
+}
+
+/** True for an indented code block; a fenced one opens with its fence, after
+ *  at most three spaces. `node` is a top-level block, so its line has no
+ *  container markup in front. */
+function isIndentedCode(markdown: string, node: RootContent): boolean {
+  const start = node.position?.start.offset;
+  if (node.type !== 'code' || start === undefined) return false;
+  const lineStart = markdown.lastIndexOf('\n', start - 1) + 1;
+  return !/^ {0,3}(```|~~~)/.test(markdown.slice(lineStart, lineStart + 6));
 }
 
 function disjoint(spans: Span[]): Span[] {
@@ -175,16 +273,61 @@ function isBlank(text: string): boolean {
   return true;
 }
 
-/** Only container markup — indentation and blockquote `>` markers. */
-function isContainerMarkup(text: string): boolean {
-  for (const ch of text) if (ch !== '>' && !isSpace(ch)) return false;
-  return true;
+/** The container markup that opens a line: what it is, and what its
+ *  continuation lines are written with. */
+interface Markup {
+  /** How many blockquotes deep the line is. */
+  depth: number;
+  /** The prefix for the lines after the first: the same markup with each list
+   *  marker turned into spaces of its width, i.e. the item's content column. */
+  continuation: string;
 }
 
-/** How many blockquotes deep a line's container markup puts it. */
-function quoteDepth(markup: string): number {
+/**
+ * Read `text` — what precedes a delimiter on its line — as container markup:
+ * indentation, blockquote `>` markers and list markers (`-`, `*`, `+`, `1.`,
+ * `1)` followed by a space). Null when it holds anything else, i.e. the
+ * delimiter is inside a sentence.
+ */
+function readMarkup(text: string): Markup | null {
   let depth = 0;
-  for (const ch of markup) if (ch === '>') depth++;
+  let continuation = '';
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === ' ' || ch === '\t') {
+      continuation += ch;
+      i++;
+      continue;
+    }
+    if (ch === '>') {
+      depth++;
+      continuation += ch;
+      i++;
+      continue;
+    }
+    let j = i;
+    if (ch === '-' || ch === '*' || ch === '+') {
+      j = i + 1;
+    } else {
+      while (j < text.length && j - i < 9 && isDigit(text[j])) j++;
+      if (j === i || (text[j] !== '.' && text[j] !== ')')) return null;
+      j++;
+    }
+    if (text[j] !== ' ' && text[j] !== '\t') return null;
+    continuation += ' '.repeat(j - i);
+    i = j;
+  }
+  return { depth, continuation };
+}
+
+/** How many blockquotes deep the container markup at the start of `line` is. */
+function leadingDepth(line: string): number {
+  let depth = 0;
+  for (const ch of line) {
+    if (ch === '>') depth++;
+    else if (!isSpace(ch)) break;
+  }
   return depth;
 }
 
@@ -232,22 +375,24 @@ function inlineMath(content: string, depth: number): string {
 }
 
 /**
- * A `$$` block written with `prefix` — the indentation or `>` markers of the
- * line it replaces — on every line, so it stays inside the list item or
- * blockquote it was in.
+ * A `$$` block that stays inside the list item or blockquote it was in: the
+ * first line keeps the markup it had, the rest are written with that
+ * markup's continuation.
  */
-function displayMath(prefix: string, content: string): string {
-  const depth = quoteDepth(prefix);
-  const lines = content.split('\n').map((line, n) => (n === 0 ? line : stripContainer(line, depth)).trimStart());
+function displayMath(first: string, markup: Markup, content: string): string {
+  const lines = content
+    .split('\n')
+    .map((line, n) => (n === 0 ? line : stripContainer(line, markup.depth)).trimStart());
   while (lines.length > 0 && isBlank(lines[0])) lines.shift();
   while (lines.length > 0 && isBlank(lines[lines.length - 1])) lines.pop();
   const fence = '$'.repeat(Math.max(2, longestRun(content, '$') + 1));
-  return [prefix + fence, ...lines.map((line) => prefix + line), prefix + fence].join('\n');
+  const next = markup.continuation;
+  return [first + fence, ...lines.map((line) => next + line), next + fence].join('\n');
 }
 
 interface Replacement {
   /** Where the replaced text begins, when that is before the opener: a display
-   *  block replaces its line's container markup, then writes it on every line. */
+   *  block replaces its line's container markup, then writes it back. */
   start?: number;
   end: number;
   text: string;
@@ -261,10 +406,18 @@ interface Replacement {
 class ProseScanner {
   private readonly out: string[] = [];
   private readonly memo = new Map<string, { from: number; at: number }>();
+  /** Every rewrite, in order: where it was and how long its text is. */
+  private readonly edits: Array<{ start: number; end: number; length: number }> = [];
+  /** Every construct a boundary may not split — rewrites, and maths kept as
+   *  written — in order of start. */
+  private readonly constructs: Span[] = [];
+  /** The first opener that could still pair across blocks with text not yet
+   *  written: a display delimiter with no partner so far. */
+  private pendingFrom = Infinity;
 
   constructor(private readonly s: string, private readonly structure: Structure) {}
 
-  run(): string {
+  run(): Normalized {
     const s = this.s;
     const verbatim = this.structure.verbatim;
     let next = 0;          // the first verbatim span not yet passed
@@ -272,6 +425,8 @@ class ProseScanner {
     let emitted = 0;
     const replace = (start: number, r: Replacement): void => {
       this.out.push(s.slice(emitted, start), r.text);
+      this.edits.push({ start, end: r.end, length: r.text.length });
+      this.constructs.push({ start, end: r.end });
       emitted = r.end;
       i = r.end;
     };
@@ -298,14 +453,49 @@ class ProseScanner {
       }
       if (ch === '$') {
         const r = this.dollars(i);
-        if (r.escape) replace(i, { end: r.end, text: '\\$'.repeat(r.end - i) });
-        else i = r.end;
+        if (r.escape) {
+          replace(i, { end: r.end, text: '\\$'.repeat(r.end - i) });
+        } else {
+          if (r.paired) this.constructs.push({ start: i, end: r.end });
+          i = r.end;
+        }
         continue;
       }
       i++;
     }
     this.out.push(s.slice(emitted));
-    return this.out.join('');
+    const output = this.out.join('');
+    const stableIn = this.stableBoundary();
+    return { output, stableIn, stableOut: this.outputOffset(stableIn) };
+  }
+
+  /** The last boundary nothing pending or unfinished reaches across. */
+  private stableBoundary(): number {
+    const { boundaries } = this.structure;
+    const constructs = this.constructs;
+    // The furthest end among constructs starting before each boundary.
+    let c = 0;
+    let reach = 0;
+    let best = 0;
+    for (const at of boundaries) {
+      if (at > this.pendingFrom) break;
+      while (c < constructs.length && constructs[c].start < at) {
+        reach = Math.max(reach, constructs[c].end);
+        c++;
+      }
+      if (reach <= at) best = at;
+    }
+    return best;
+  }
+
+  /** Where input offset `at` — outside every rewrite — lands in the output. */
+  private outputOffset(at: number): number {
+    let shift = 0;
+    for (const edit of this.edits) {
+      if (edit.end > at) break;
+      shift += edit.length - (edit.end - edit.start);
+    }
+    return at + shift;
   }
 
   /** `\(…\)` as inline maths, unless it is prose that escaped its parentheses. */
@@ -316,35 +506,42 @@ class ProseScanner {
     const content = this.s.slice(open + 2, close);
     const body = content.trim();
     if (body === '' || (!MATH_SIGN.test(body) && PROSE_WORD.test(body))) return null;
-    return { end: close + 2, text: inlineMath(content, quoteDepth(this.markupBefore(open))) };
+    return { end: close + 2, text: inlineMath(content, leadingDepth(this.lineBefore(open))) };
   }
 
   /**
-   * `\[…\]` on lines of its own is display maths. Inside a sentence it is only
-   * maths when it holds a maths sign: `\[1\]` and `\[link\]` are how Markdown
-   * writes a literal bracket, and must still read as one.
+   * `\[…\]` on lines of its own is display maths — at the start of a list
+   * item or inside a blockquote too. Inside a sentence it is only maths when
+   * it holds a maths sign: `\[1\]` and `\[link\]` are how Markdown writes a
+   * literal bracket, and must still read as one.
    */
   private bracket(open: number): Replacement | null {
     const s = this.s;
+    const before = this.lineBefore(open);
+    const markup = readMarkup(before);
     const close = this.closer('\\]', open + 2);
-    if (close === Infinity || close - open > MAX_DISPLAY) return null;
+    if (close === Infinity) {
+      // On a line of its own it may yet close as a display block reaching
+      // across paragraphs; inside a sentence its paragraph bounds it.
+      if (markup) this.pendingFrom = Math.min(this.pendingFrom, open);
+      return null;
+    }
+    if (close - open > MAX_DISPLAY) return null;
     if (this.crossesVerbatim(open, close + 2)) return null;
     const content = s.slice(open + 2, close);
     const body = content.trim();
     if (body === '') return null;
 
-    const lineStart = s.lastIndexOf('\n', open - 1) + 1;
-    const prefix = s.slice(lineStart, open);
     const lineEnd = s.indexOf('\n', close + 2);
     const rest = s.slice(close + 2, lineEnd === -1 ? s.length : lineEnd);
-    if (isContainerMarkup(prefix) && isBlank(rest)) {
+    if (markup && isBlank(rest)) {
       if (!MATH_SIGN.test(body) && PROSE_WORD.test(body)) return null;
-      return { start: lineStart, end: close + 2, text: displayMath(prefix, content) };
+      return { start: open - before.length, end: close + 2, text: displayMath(before, markup, content) };
     }
 
     if (close - open > MAX_INLINE || close >= this.inlineEnd(open)) return null;
     if (!MATH_SIGN.test(body)) return null;
-    return { end: close + 2, text: inlineMath(content, quoteDepth(this.markupBefore(open))) };
+    return { end: close + 2, text: inlineMath(content, leadingDepth(before)) };
   }
 
   /** A bare `\begin{align*}…\end{align*}` on lines of its own, as display maths. */
@@ -357,23 +554,27 @@ class ProseScanner {
     const name = s.slice(nameStart, nameEnd);
     if (!DISPLAY_ENVIRONMENTS.has(name)) return null;
 
-    const lineStart = s.lastIndexOf('\n', open - 1) + 1;
-    const prefix = s.slice(lineStart, open);
-    if (!isContainerMarkup(prefix)) return null;
+    const before = this.lineBefore(open);
+    const markup = readMarkup(before);
+    if (!markup) return null;
 
     const endToken = `\\end{${name}}`;
     const close = this.find(`end:${name}`, nameEnd, (from) => s.indexOf(endToken, from));
-    if (close === Infinity || close - open > MAX_DISPLAY) return null;
+    if (close === Infinity) {
+      this.pendingFrom = Math.min(this.pendingFrom, open);
+      return null;
+    }
+    if (close - open > MAX_DISPLAY) return null;
     const end = close + endToken.length;
     if (this.crossesVerbatim(open, end)) return null;
     const lineEnd = s.indexOf('\n', end);
     if (!isBlank(s.slice(end, lineEnd === -1 ? s.length : lineEnd))) return null;
-    return { start: lineStart, end, text: displayMath(prefix, s.slice(open, end)) };
+    return { start: open - before.length, end, text: displayMath(before, markup, s.slice(open, end)) };
   }
 
   /**
-   * What to do with the `$` run at `open`: keep it (scanning resumes at `end`)
-   * or escape every dollar up to `end`.
+   * What to do with the `$` run at `open`: keep it (scanning resumes at `end`;
+   * `paired` when it was kept as maths) or escape every dollar up to `end`.
    *
    * A single `$` pairs with the NEXT unescaped `$` only — which is what
    * remark-math does, code span or not — and only under Pandoc's rules: the
@@ -384,36 +585,62 @@ class ProseScanner {
    * A `$$` run inside a sentence must hold maths too: "A: $$, B: $$" is two
    * price tiers, not an equation reading ", B: ".
    */
-  private dollars(open: number): { end: number; escape: boolean } {
+  private dollars(open: number): { end: number; escape: boolean; paired?: boolean } {
     const s = this.s;
     let run = 0;
     while (s[open + run] === '$') run++;
 
     if (run >= 2) {
+      const lineEnd = s.indexOf('\n', open + run);
+      const block = readMarkup(this.lineBefore(open)) !== null
+        && isBlank(s.slice(open + run, lineEnd === -1 ? s.length : lineEnd));
       const close = this.find(`dollars:${run}`, open + run, (from) => this.dollarRun(from, run));
       const keep = { end: open + run, escape: false };
-      // Unclosed, or closed only across code the renderer will not pair
-      // through: left as written. An unclosed one is most often the block the
-      // model is still streaming.
-      if (close === Infinity || close - open > MAX_DISPLAY || this.crossesVerbatim(open, close + run)) return keep;
-      const lineStart = s.lastIndexOf('\n', open - 1) + 1;
-      const lineEnd = s.indexOf('\n', open + run);
-      const block = isContainerMarkup(s.slice(lineStart, open))
-        && isBlank(s.slice(open + run, lineEnd === -1 ? s.length : lineEnd));
-      if (block) return { end: close + run, escape: false };
+      if (close === Infinity) {
+        // Left as written. A block opener is most often the block the model is
+        // still streaming, and may yet close across paragraphs; inside a
+        // sentence its paragraph bounds it.
+        if (block) this.pendingFrom = Math.min(this.pendingFrom, open);
+        return keep;
+      }
+      // Closed only across code the renderer will not pair through: as written.
+      if (close - open > MAX_DISPLAY || this.crossesVerbatim(open, close + run)) return keep;
+      if (block) return { end: close + run, escape: false, paired: true };
       if (close >= this.inlineEnd(open)) return keep;
       const body = s.slice(open + run, close).trim();
       if (body === '' || (!MATH_SIGN.test(body) && PROSE_WORD.test(body))) return { end: open + run, escape: true };
-      return { end: close + run, escape: false };
+      return { end: close + run, escape: false, paired: true };
     }
 
     const escape = { end: open + 1, escape: true };
-    if (open + 1 >= s.length || isSpace(s[open + 1])) return escape;
+    const close = this.singlePair(open);
+    if (close === null) return escape;
+    // A price met by the opening dollar of maths right after it — "$5 ($x$" —
+    // must not take that dollar as its closer. When the would-be closer opens
+    // a valid pair of its own and what lies between holds no maths, it is the
+    // price that gives way.
+    if (isDigit(s[open + 1]) && !MATH_SIGN.test(s.slice(open + 1, close)) && this.singlePair(close) !== null) {
+      return escape;
+    }
+    return { end: close + 1, escape: false, paired: true };
+  }
+
+  /**
+   * Where the single `$` at `open` closes under Pandoc's rules, or null. The
+   * closer is the next unescaped `$`, which must not open a run of its own,
+   * follow a space or an opening bracket, or precede a digit.
+   */
+  private singlePair(open: number): number | null {
+    const s = this.s;
+    if (open + 1 >= s.length || isSpace(s[open + 1]) || s[open + 1] === '$') return null;
     const close = this.find('dollar', open + 1, (from) => this.unescapedDollar(from));
-    if (close === Infinity || close - open > MAX_INLINE || close >= this.inlineEnd(open)) return escape;
-    if (this.crossesVerbatim(open, close + 1)) return escape;
-    if (s[close + 1] === '$' || isSpace(s[close - 1]) || isDigit(s[close + 1])) return escape;
-    return { end: close + 1, escape: false };
+    if (close === Infinity || close - open > MAX_INLINE || close >= this.inlineEnd(open)) return null;
+    if (this.crossesVerbatim(open, close + 1)) return null;
+    const before = s[close - 1];
+    if (s[close + 1] === '$' || isSpace(before) || isDigit(s[close + 1])) return null;
+    // Maths does not end on an opening bracket: `$5 ($` is not "5 (".
+    if ((before === '(' || before === '[' || before === '{') && !isEscaped(s, close - 1)) return null;
+    return close;
   }
 
   private dollarRun(from: number, length: number): number {
@@ -445,12 +672,9 @@ class ProseScanner {
     });
   }
 
-  /** The container markup — indentation, `>` markers — before `pos` on its line. */
-  private markupBefore(pos: number): string {
-    const lineStart = this.s.lastIndexOf('\n', pos - 1) + 1;
-    let end = lineStart;
-    while (end < pos && (this.s[end] === '>' || isSpace(this.s[end]))) end++;
-    return this.s.slice(lineStart, end);
+  /** The text before `pos` on its line. */
+  private lineBefore(pos: number): string {
+    return this.s.slice(this.s.lastIndexOf('\n', pos - 1) + 1, pos);
   }
 
   /**

@@ -3,7 +3,8 @@
 // ─────────────────────────────────────────────
 //
 //  Imported by cloud/web and the desktop renderer through the
-//  `@cascade/markdown` alias. Kept free of DOM, Node and third-party imports so
-//  it bundles into either unchanged.
+//  `@cascade/markdown` alias. Kept free of DOM and Node imports so it bundles
+//  into either unchanged; its one dependency, micromark with the GFM
+//  extension, is the parser react-markdown and remark-gfm already bring.
 
-export { normalizeMath } from './math.js';
+export { createMathNormalizer, normalizeMath } from './math.js';

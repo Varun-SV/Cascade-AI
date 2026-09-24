@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeMath } from './math.js';
+import { createMathNormalizer, normalizeMath } from './math.js';
 
 describe('normalizeMath — the delimiters GPT and Gemini write', () => {
   it('turns a \\[…\\] line into a display block (the reported answer)', () => {
@@ -132,6 +132,159 @@ describe('normalizeMath — structure comes from the parser (review round 1)', (
       expect(out).toContain(url);
     }
     expect(normalizeMath(`See [the report](${url}) for $5`)).toBe(`See [the report](${url}) for \\$5`);
+  });
+});
+
+describe('normalizeMath — review round 2', () => {
+  it('does not let a price take the opening dollar of maths beside it', () => {
+    // Rendered "5 (" as maths and left the real equation broken.
+    expect(normalizeMath('It costs $5 ($x$ after conversion).')).toBe('It costs \\$5 ($x$ after conversion).');
+    expect(normalizeMath('It costs $5,$x$ more')).toBe('It costs \\$5,$x$ more');
+    // Maths does not end on an opening bracket, price or not.
+    expect(normalizeMath('Let $a ($x$ here')).toBe('Let \\$a ($x$ here');
+  });
+
+  it('still pairs maths that happens to start with a digit, or ends on an escaped brace', () => {
+    expect(normalizeMath('$2^n$,$x$')).toBe('$2^n$,$x$');
+    expect(normalizeMath('$2$ and $3$')).toBe('$2$ and $3$');
+    expect(normalizeMath('the set $\\{$')).toBe('the set $\\{$');
+  });
+
+  it('typesets display maths that opens a list item', () => {
+    expect(normalizeMath('- \\begin{align*}\n  a &= b\n  \\end{align*}')).toBe(
+      '- $$\n  \\begin{align*}\n  a &= b\n  \\end{align*}\n  $$',
+    );
+    // The same for \[…\], which collapsed to inline maths.
+    expect(normalizeMath('- \\[\n  x^2\n  \\]')).toBe('- $$\n  x^2\n  $$');
+    expect(normalizeMath('> 1. \\[\n>    x^2\n>    \\]')).toBe('> 1. $$\n>    x^2\n>    $$');
+  });
+});
+
+/** mulberry32: a small seeded generator, so a failing case is reproducible. */
+function prng(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Every construct the normaliser treats specially, and the Markdown around
+// it that decides what is prose: code of each kind, quotes, lists, tables,
+// headings, HTML, and openers that never close.
+const FRAGMENTS = [
+  'The rank is given by\n\\[ r = \\operatorname{rank} E(\\mathbb{Q}) \\]\nwhere r is finite.',
+  'where \\(n\\) is prime and $x^2$ is even',
+  'It costs $5 and $10 per month.',
+  'It costs $5 ($x$ after conversion).',
+  'Restaurant A: $$, restaurant B: $$.',
+  '$$\ny = mx + b\n$$',
+  '\\[\na &= b \\\\\n\nc &= d\n\\]',
+  '\\begin{align*}\na &= b\n\\end{align*}',
+  '```latex\n\\[ x^2 \\]\n$5 and $10\n```',
+  '    const price = "$5"\n    const m = "\\(x\\)"',
+  '> \\[\n> x^2\n> \\]',
+  '> where \\(a\n> = b\\) holds',
+  '1. Area:\n   \\[\n   A = \\pi r^2\n   \\]\n2. Cost $5 and \\(c\\)\n3. Done',
+  '- \\begin{align*}\n  a &= b\n  \\end{align*}\n- next $x$',
+  '| a | b |\n|---|---|\n| $5 | $x$ |',
+  'Use `$x$` and `\\(y\\)` in code.',
+  'See https://graph.microsoft.com/v1.0/users?$top=5 now.',
+  '# Heading with \\(h\\)',
+  'Title $x$\n===',
+  '<!-- $5 \\(x\\) -->',
+  'A stray \\[ opener with no closer',
+  'A lone $$ tier',
+  '$$\nunclosed block',
+  '\\[\nunclosed display',
+  'Plain text with no maths.',
+  'Between $5 and $10, i.e. $x$ dollars.',
+  '   \\[\n   x^2\n   \\]',
+  ' - item \\(x\\)\n - item $y$\n   \\[\n   z\n   \\]',
+];
+const SEPARATORS = ['\n', '\n\n', '\n\n\n', ' '];
+
+describe('createMathNormalizer — a streamed answer', () => {
+  it('equals normalizeMath at every step of a stream, whatever the answer', () => {
+    // The property the incremental path rests on. Each generated answer is
+    // streamed in random steps; after every step the incremental result must
+    // be exactly what normalising the whole text gives.
+    const random = prng(20260924);
+    for (let doc = 0; doc < 120; doc++) {
+      const parts = Array.from({ length: 3 + Math.floor(random() * 7) }, () => FRAGMENTS[Math.floor(random() * FRAGMENTS.length)]);
+      let text = parts[0];
+      for (const part of parts.slice(1)) text += SEPARATORS[Math.floor(random() * SEPARATORS.length)] + part;
+      const stream = createMathNormalizer();
+      for (let n = 1 + Math.floor(random() * 20); ; n += 1 + Math.floor(random() * 40)) {
+        const prefix = text.slice(0, Math.min(n, text.length));
+        expect(stream(prefix), `doc ${doc}, ${prefix.length} of ${text.length} chars`).toBe(normalizeMath(prefix));
+        if (n >= text.length) break;
+      }
+    }
+  }, 60_000);
+
+  it('equals normalizeMath on raw Markdown tokens, where half-written lines change the structure', () => {
+    // Fragments are whole constructs; this is the opposite — list markers,
+    // underlines, fences and delimiters thrown together, so a line is often
+    // part-way to becoming something else when a boundary is chosen.
+    const tokens = ['a', 'b', ' ', '\n', '\n\n', '$', '$5', '$x$', '$$', '\\(', '\\)', '\\[', '\\]', '`', '```',
+      '    ', '  ', '- ', '-', '1. ', '2.', '> ', '>', '=', '*', '|', 'x^2', '\\begin{align*}', '\\end{align*}', '# ',
+      'https://a.co/?$t=1'];
+    const random = prng(7);
+    for (let doc = 0; doc < 150; doc++) {
+      let text = '';
+      const length = 30 + Math.floor(random() * 60);
+      for (let t = 0; t < length; t++) text += tokens[Math.floor(random() * tokens.length)];
+      const stream = createMathNormalizer();
+      for (let n = 1; ; n += 1 + Math.floor(random() * 8)) {
+        const prefix = text.slice(0, Math.min(n, text.length));
+        expect(stream(prefix), `doc ${doc}: ${JSON.stringify(prefix)}`).toBe(normalizeMath(prefix));
+        if (n >= text.length) break;
+      }
+    }
+  }, 60_000);
+
+  it('equals normalizeMath one character at a time', () => {
+    const text = FRAGMENTS.join('\n\n');
+    const stream = createMathNormalizer();
+    for (let n = 1; n <= text.length; n++) {
+      const prefix = text.slice(0, n);
+      expect(stream(prefix), `${n} chars`).toBe(normalizeMath(prefix));
+    }
+  }, 60_000);
+
+  it('does not start afresh after indented code, which the next block interrupts', () => {
+    // After indented code — blank line or not — the parser reads `2)` as
+    // interrupting it, and a list numbered from 2 cannot: the line is a
+    // paragraph, and its `$5` a price. On its own it is a list item holding
+    // code. Found by the token fuzz.
+    const text = '    code\n\n2)     costs $5\nand more';
+    const stream = createMathNormalizer();
+    for (let n = 1; n <= text.length; n++) {
+      const prefix = text.slice(0, n);
+      expect(stream(prefix), `${n} chars`).toBe(normalizeMath(prefix));
+    }
+    expect(normalizeMath(text)).toBe('    code\n\n2)     costs \\$5\nand more');
+  });
+
+  it('starts again from scratch when the text is not an extension', () => {
+    const stream = createMathNormalizer();
+    stream('First answer with \\(x\\).\n\nAnd $5.\n\nMore');
+    expect(stream('A different answer, $y$.')).toBe(normalizeMath('A different answer, $y$.'));
+  });
+
+  it('does not re-read what is final: a long answer streams in linear time', () => {
+    // Normalising the whole answer at every token took 12 s here.
+    const answer = 'The rank is \\(r\\) and\n\\[ x^2 + y^2 = z^2 \\]\nIt costs $5 and $10.\n\n'.repeat(120);
+    const stream = createMathNormalizer();
+    const started = performance.now();
+    let last = '';
+    for (let n = 8; n <= answer.length; n += 8) last = stream(answer.slice(0, n));
+    expect(performance.now() - started).toBeLessThan(3_000);
+    expect(last).toBe(normalizeMath(answer.slice(0, answer.length - (answer.length % 8))));
   });
 });
 
