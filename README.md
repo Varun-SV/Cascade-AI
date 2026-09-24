@@ -192,13 +192,13 @@ Models are discovered from each provider at startup, so new releases compete in 
 
 ### Tools (T3 Workers)
 - **Shell and code** — shell commands with allowlist/blocklist, and a `run_code` interpreter (Python/Node)
-- **Files and search** — read, write, edit, delete, list, glob, grep, and `code_search` over a local code index (`cascade index`)
+- **Files and search** — read, write, edit, delete, list, glob, grep, and — opt-in, with `"codeIndex": { "enabled": true }` and `cascade index` — `code_search` over a local code index
 - **Git / GitHub / GitLab** — status, diff, commit, push; open PRs, list and comment on issues
 - **Web** — `web_search` and SSRF-guarded `web_fetch`
 - **Browser** — Playwright automation; in the desktop app and on the web, `browser_control` of a real browser, and in the desktop app `read_current_page`
 - **Media** — analyze images; generate images, speech and video; transcribe audio
 - **Documents** — real `.docx` / `.pptx` / `.xlsx` and PDFs, with charts and embedded images
-- **Collaboration** — `peer_message` between workers, `knowledge_graph_search` over project facts, and on Cascade Cloud `ask_user` for a structured question
+- **Collaboration** — `peer_message` between workers, `knowledge_graph_search` over project facts once the project has learned some, and on Cascade Cloud `ask_user` for a structured question
 - **Your own** — MCP servers' tools, plugins, and tools the agent writes for itself — on by default, off with `"enableToolCreation": false`. Those run in a hard V8 isolate when the optional `isolated-vm` addon is installed. Without it they fall back to a worker thread, which contains crashes and runaway loops but is **not** a security boundary: the code can reach the filesystem and processes directly
 
 ### Developer Experience
@@ -360,6 +360,7 @@ The file is strict JSON — no comments.
 
 - `models` pins a tier to a model; a tier left out stays on Auto.
 - `tools.mcpTrusted` names the MCP servers allowed to start; an untrusted one is refused.
+- `"codeIndex": { "enabled": true }` turns on the `code_search` tool; build its index with `cascade index`.
 - `autoBias` sets Auto's trade-off: `"balanced"`, `"quality"` or `"cost"`.
 - `planApproval: "always"` pauses Complex runs in the **boardroom**: approve T1's proposed sections, worker counts, and estimated cost before any T2 manager spawns. Headless/SDK runs auto-approve.
 - `altScreen: true` (or the `--alt-screen` flag) renders the TUI in the terminal's alternate screen buffer — vim-style, flicker-proof, shell restored on exit. History scrolls in-app with PgUp/PgDn since the alt screen has no native scrollback.
@@ -496,7 +497,7 @@ T3 workers have access to the following tools. All destructive operations requir
 | `file_read` · `file_list` | Read a file (optional line range); list a directory | |
 | `file_write` · `file_edit` · `file_delete` | Write, exact-string edit, delete | ✓ |
 | `glob` · `grep` | Find files by pattern; search their contents | |
-| `code_search` | Search the workspace code index built by `cascade index` | |
+| `code_search` | Search the workspace code index — needs `"codeIndex": { "enabled": true }` in config and `cascade index` | |
 | `git` | status, diff, log, add, commit, push, pull, … | ✓ |
 | `github` | Open PRs, list and comment on issues (GitHub / GitLab) | ✓ |
 | `web_search` | Search the web (SearXNG, Brave or Tavily) | |
@@ -509,7 +510,7 @@ T3 workers have access to the following tools. All destructive operations requir
 | `transcribe_audio` | Speech-to-text for an audio file | |
 | `generate_document` | Render a REAL `.docx` / `.pptx` / `.xlsx` from Markdown or CSV | ✓ |
 | `pdf_create` | Render a PDF | ✓ |
-| `knowledge_graph_search` | Query the project's knowledge graph of facts | |
+| `knowledge_graph_search` | Query the project's knowledge graph of facts — appears once the project has learned some | |
 | `peer_message` | Message a sibling worker | |
 | `ask_user` | Ask you one structured question instead of guessing — Cascade Cloud and self-hosted web | |
 
@@ -543,7 +544,7 @@ cascade doctor                       Diagnose API keys, Ollama, config
 cascade link [provider]              Reuse credentials from Claude Code / Codex / Gemini / Copilot
 cascade models [action] [tier] [v]   List models per tier, or set/unset a tier's model
 cascade stats                        Auto-routing history: which models work best per task type
-cascade index [path]                 Build or refresh the code index (powers code_search)
+cascade index [path]                 Build or refresh the code index (code_search also needs codeIndex.enabled)
 cascade export                       Export a session to Markdown or JSON
 cascade identity list|create|set-default   Manage identities
 cascade mcp connect <url>|list|remove      Connect remote MCP servers over OAuth
@@ -949,7 +950,7 @@ web/                    Local dashboard SPA (ReactFlow agent graph)
 | ✓ | OpenAI-compatible API — `/v1/chat/completions`, `/v1/models` (v0.70) |
 | ✓ | Browser control in the desktop app and on the web — live view, take over and hand back (v0.78 – v0.81) |
 | ✓ | Ask-before-guessing on Cascade Cloud — one structured question instead of an invented answer (v0.81) |
-| ✓ | Code index and `code_search` (`cascade index`) |
+| ✓ | Code index and `code_search` — opt-in: `codeIndex.enabled`, then `cascade index` |
 | ✓ | Media generation (image, speech, video) and audio transcription |
 
 **Next**
