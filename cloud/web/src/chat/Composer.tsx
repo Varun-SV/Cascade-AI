@@ -1,4 +1,5 @@
 import { useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react';
+import { browserChip, type BrowserAllowanceView } from './browserAllowance.js';
 import clsx from 'clsx';
 import { motion } from 'framer-motion';
 import { Send, Paperclip, X, Loader2, Globe, Square, Zap, FileText, MonitorPlay } from 'lucide-react';
@@ -67,6 +68,8 @@ interface Props {
   browserMode: boolean;
   onBrowserModeChange: (on: boolean) => void;
   browserAvailable: boolean;
+  /** Today's browser sessions against the plan's allowance. See `browserChip`. */
+  browserAllowance?: BrowserAllowanceView;
   onWebSearchChange: (on: boolean) => void;
   uiMode: UiMode;
 }
@@ -74,8 +77,9 @@ interface Props {
 export default function Composer({
   skills, skillId, onSkillChange, hasProviders, busy, onSend, onStop,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
-  browserMode, onBrowserModeChange, browserAvailable, uiMode,
+  browserMode, onBrowserModeChange, browserAvailable, browserAllowance, uiMode,
 }: Props) {
+  const chip = browserChip(browserAllowance ?? null);
   const [input, setInput] = useState('');
   const [pending, setPending] = useState<Pending[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -379,8 +383,8 @@ export default function Composer({
             {browserAvailable && (
               <button
                 type="button"
-                title="Give this run a real browser — for pages that are images, or need signing in. Off means Cascade cannot open one."
-                disabled={disabled}
+                title={chip.title}
+                disabled={disabled || chip.disabled}
                 aria-pressed={browserMode}
                 onClick={() => onBrowserModeChange(!browserMode)}
                 className={clsx(

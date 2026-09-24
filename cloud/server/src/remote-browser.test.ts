@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { attachRemoteBrowser, asWatchOnlyViewer, frameEmitter, formatCeiling, resetSharedBrowser, sharedBrowserGeneration } from './remote-browser.js';
-import { Cascade, type CascadeConfig } from '#cascade-ai';
+import { ALLOWANCE_UNAVAILABLE, Cascade, RemoteBrowserController, type BrowserAllowance, type CascadeConfig } from '#cascade-ai';
 
 /**
  * A REAL Cascade, because the fake below is what let a shipped bug through.
@@ -340,6 +340,196 @@ describe('asking to watch a run', () => {
     expect((await attached!.input({ kind: 'click', x: 0.5, y: 0.5 })).ok).toBe(false);
     expect(attached!.handBack()).toBe(false);
     expect(await attached!.setCapture(true)).toBe(false);
+  });
+});
+
+describe('a run refused the browser because every session is taken', () => {
+  const cdp = { tools: { remoteBrowser: { provider: 'cdp' as const, url: 'ws://browser.test:9222' } } };
+
+  /** Attach a run and announce it, capturing the busy listener the bridge registers. */
+  function refusedRun() {
+    const onBusy = vi.spyOn(RemoteBrowserController.prototype, 'onBusyFor');
+    const offBusy = vi.spyOn(RemoteBrowserController.prototype, 'offBusyFor');
+    const onLiveView = vi.spyOn(RemoteBrowserController.prototype, 'onLiveViewFor');
+    const { cascade, config } = realCascade(cdp.tools.remoteBrowser);
+    const handlers = new Map<string, (e: unknown) => void>();
+    (cascade as unknown as { on: (ev: string, fn: (e: unknown) => void) => void }).on =
+      (ev, fn) => { handlers.set(ev, fn); };
+    const attached = attachRemoteBrowser({ cascade, config, conversationId: 'c1', emit });
+    handlers.get('run:started')?.({ taskId: 't1' });
+    const registered = onBusy.mock.calls.find(([id]) => id === 't1');
+    return {
+      attached: attached!,
+      busy: registered?.[1],
+      liveView: onLiveView.mock.calls.find(([id]) => id === 't1')?.[1],
+      offBusy,
+      restore: () => { onBusy.mockRestore(); offBusy.mockRestore(); onLiveView.mockRestore(); },
+    };
+  }
+
+  it('tells the run\u2019s own socket, naming the run and the limit it hit', () => {
+    // The model heard about the refusal and nobody else did, so the person who
+    // could act on it — by waiting for the other run — never knew.
+    const { busy, restore } = refusedRun();
+    try {
+      expect(busy, 'registered under the run id when the run starts').toBeTypeOf('function');
+      void busy!({ limit: 1 });
+      expect(emits.filter((e) => e.event === 'browser:busy')).toEqual([
+        { event: 'browser:busy', payload: { conversationId: 'c1', taskId: 't1', limit: 1 } },
+      ]);
+    } finally { restore(); }
+  });
+
+  it('says it once, however many times the run is refused', () => {
+    // A worker told "busy" may well ask again; every refusal after the first
+    // is the same news, and a banner per retry is noise.
+    const { busy, restore } = refusedRun();
+    try {
+      void busy!({ limit: 1 });
+      void busy!({ limit: 1 });
+      void busy!({ limit: 1 });
+      expect(emits.filter((e) => e.event === 'browser:busy')).toHaveLength(1);
+    } finally { restore(); }
+  });
+
+  it('says it again when the run is refused after its browser opened', () => {
+    // The client and the replay drop the notice once the browser opens. A run
+    // that then loses its page and is refused again got nothing: the flag was
+    // held for the whole run.
+    const { busy, liveView, restore } = refusedRun();
+    try {
+      void busy!({ limit: 1 });
+      liveView!({ active: true, liveViewUrl: 'https://viewer.test/s1' });
+      void busy!({ limit: 1 });
+      void busy!({ limit: 1 });
+      expect(emits.filter((e) => e.event === 'browser:busy')).toHaveLength(2);
+    } finally { restore(); }
+  });
+
+  it('does not count a withdrawn browser as an opened one', () => {
+    const { busy, liveView, restore } = refusedRun();
+    try {
+      void busy!({ limit: 1 });
+      liveView!({ active: false });
+      void busy!({ limit: 1 });
+      expect(emits.filter((e) => e.event === 'browser:busy')).toHaveLength(1);
+    } finally { restore(); }
+  });
+
+  it('stops listening when the run ends', async () => {
+    // The listener closes over this run's socket; the controller outlives it.
+    // Detached by the controller's own run cleanup (forgetRun), which the
+    // run's end reaches whether or not the run ever held a browser.
+    const { attached, offBusy, restore } = refusedRun();
+    try {
+      await attached.endRun();
+      expect(offBusy).toHaveBeenCalledWith('t1');
+    } finally { restore(); }
+  });
+});
+
+describe('the run owner\u2019s allowance of new sessions', () => {
+  const cdp = { tools: { remoteBrowser: { provider: 'cdp' as const, url: 'ws://browser.test:9222' } } };
+
+  /** Attach a run with this allowance and announce it, capturing what the bridge registered. */
+  function attachedWith(allowance?: BrowserAllowance) {
+    const set = vi.spyOn(RemoteBrowserController.prototype, 'setAllowanceFor');
+    const onLiveView = vi.spyOn(RemoteBrowserController.prototype, 'onLiveViewFor');
+    const { cascade, config } = realCascade(cdp.tools.remoteBrowser);
+    const handlers = new Map<string, (e: unknown) => void>();
+    (cascade as unknown as { on: (ev: string, fn: (e: unknown) => void) => void }).on =
+      (ev, fn) => { handlers.set(ev, fn); };
+    attachRemoteBrowser({ cascade, config, conversationId: 'c1', emit, ...(allowance ? { allowance } : {}) });
+    handlers.get('run:started')?.({ taskId: 't1' });
+    return {
+      registered: set.mock.calls.find(([id]) => id === 't1')?.[1],
+      liveView: onLiveView.mock.calls.find(([id]) => id === 't1')?.[1],
+      count: set.mock.calls.length,
+      restore: () => { set.mockRestore(); onLiveView.mockRestore(); },
+    };
+  }
+
+  it('hands the controller the allowance\u2019s answer, word for word', () => {
+    const { registered, restore } = attachedWith({ take: () => ({ refusal: 'used up for today' }) });
+    try {
+      expect(registered, 'registered under the run id when the run starts').toBeDefined();
+      expect(registered!.take(), 'the model is refused in these words').toEqual({ refusal: 'used up for today' });
+    } finally { restore(); }
+  });
+
+  it('tells the person once, in the same words, however often the run is refused', () => {
+    const { registered, restore } = attachedWith({ take: () => ({ refusal: 'used up for today' }) });
+    try {
+      registered!.take(); registered!.take(); registered!.take();
+      expect(emits.filter((e) => e.event === 'browser:limit')).toEqual([
+        { event: 'browser:limit', payload: { conversationId: 'c1', taskId: 't1', detail: 'used up for today' } },
+      ]);
+    } finally { restore(); }
+  });
+
+  it('tells the person again when a run is refused after its browser opened', () => {
+    // An open session is not counted twice, but a run that loses its page
+    // needs a new one — and if that is refused, it is news again.
+    const { registered, liveView, restore } = attachedWith({ take: () => ({ refusal: 'used up for today' }) });
+    try {
+      registered!.take();
+      liveView!({ active: true, liveViewUrl: 'https://viewer.test/s1' });
+      registered!.take(); registered!.take();
+      expect(emits.filter((e) => e.event === 'browser:limit')).toHaveLength(2);
+    } finally { restore(); }
+  });
+
+  it('tells the person when the allowance could not be checked, as the model is told', () => {
+    // The controller refuses on a throw too, but only the model heard: the
+    // person saw a browser that never came and no reason why.
+    const { registered, restore } = attachedWith({ take: () => { throw new Error('store down'); } });
+    try {
+      expect(registered!.take()).toEqual({ refusal: ALLOWANCE_UNAVAILABLE });
+      expect(emits.filter((e) => e.event === 'browser:limit')).toEqual([
+        { event: 'browser:limit', payload: { conversationId: 'c1', taskId: 't1', detail: ALLOWANCE_UNAVAILABLE } },
+      ]);
+    } finally { restore(); }
+  });
+
+  it('tells the person of a different refusal, even inside one episode', () => {
+    // "Could not check, try again" and then, on the retry, "used up for
+    // today": the second is not the same news, and a flag that only knew a
+    // refusal had been shown kept it quiet.
+    const answers: Array<() => ReturnType<BrowserAllowance['take']>> = [
+      () => { throw new Error('store down'); },
+      () => ({ refusal: 'used up for today' }),
+      () => ({ refusal: 'used up for today' }),
+    ];
+    const { registered, restore } = attachedWith({ take: () => answers.shift()!() });
+    try {
+      registered!.take(); registered!.take(); registered!.take();
+      expect(emits.filter((e) => e.event === 'browser:limit').map((e) => (e.payload as { detail: string }).detail))
+        .toEqual([ALLOWANCE_UNAVAILABLE, 'used up for today']);
+    } finally { restore(); }
+  });
+
+  it('says nothing while there is allowance left', () => {
+    const { registered, restore } = attachedWith({ take: () => ({ giveBack: () => {} }) });
+    try {
+      expect(registered!.take()).toHaveProperty('giveBack');
+      expect(emits.filter((e) => e.event === 'browser:limit')).toEqual([]);
+    } finally { restore(); }
+  });
+
+  it('hands the controller the claim itself, with its own give-back', () => {
+    const giveBack = vi.fn();
+    const { registered, restore } = attachedWith({ take: () => ({ giveBack }) });
+    try {
+      const claim = registered!.take();
+      expect('giveBack' in claim && claim.giveBack).toBe(giveBack);
+    } finally { restore(); }
+  });
+
+  it('registers no allowance for a caller with none to enforce', () => {
+    const { count, restore } = attachedWith();
+    try {
+      expect(count).toBe(0);
+    } finally { restore(); }
   });
 });
 

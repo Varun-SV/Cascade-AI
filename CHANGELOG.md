@@ -18,6 +18,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+### Added
+- **A daily allowance of browser sessions: 5 a day on Free, 50 on Pro.** A
+  session is claimed the moment one is about to be opened, which is what the
+  provider bills for, and returned if none was, so a Browser-chip run that
+  never needs the browser costs nothing and concurrent runs cannot share the
+  last one. Each claim is returned on its own, so two opens at once never
+  leave a session that did not open counted. Once the day's sessions are gone the Browser chip switches
+  off and says when they reset (midnight UTC), and it stays off until
+  today's count has been read for this sign-in, so it cannot be turned on
+  for a run that will be refused. A run sent with it anyway is refused before anything is
+  spent, and a run that runs out partway through
+  is refused the next session with the same message shown in the chat. If
+  the allowance cannot be checked, the chat says so too, and a later refusal
+  for a different reason is shown as well. The
+  chip's tooltip shows how many are left today, and it follows a plan change
+  in either direction without a reload. A deployment without a browser
+  never asks for it. After a reconnect, the newest browser refusal is the
+  one shown. Only billed sessions are rationed:
+  a deployment driving its own browser over CDP opens none, so it has no
+  daily limit.
+
+### Fixed
+- **A run that cannot do something now says so instead of inventing the
+  result.** Asked to open a site with browser control and return its
+  chatbot's answers, a run that could not reach a browser "simulated" the
+  answers and presented them as results. Every prompt that can hand you an
+  answer now forbids that, including the correction and rewrite steps that
+  used to run without the worker's rules. The worker's self-check now sees
+  what each tool actually returned, so an output claiming a visit that the
+  browser refused fails the check. It is shown the parts of each result that
+  the answer draws on, from anywhere the worker read, not just the start of
+  each one, so a correct answer taken from further down a long page is no
+  longer mistaken for an invented one. That includes a short result read
+  early in a long run, and the work handed over by the steps a step depends
+  on, so a summary of what an earlier step did is no longer failed for
+  describing calls that step made. A revision made after that check has to
+  pass it too, and a section summary is told which of its workers did not
+  finish, so a half-done section no longer reads as complete.
+- **Secret redaction catches more, and no longer leaks part of what it
+  matches.** A rule without a capture group replaced only one substring of
+  its match, so an IP address could pass through with a single digit
+  removed. It now also catches `sk-…`, GitHub, Slack, Google and Stripe
+  tokens, bearer and Basic credentials, the value of any `Authorization` or
+  `Proxy-Authorization` header however short, cookies in `Cookie` and
+  `Set-Cookie`, private keys, values labelled by
+  names like `ANTHROPIC_API_KEY`, any value assigned to a password, secret,
+  token or key however short (`DB_PASSWORD=hunter2`, `PGPASSWORD=…`), the
+  keys a connection string names (`AccountKey`, `SharedAccessKey`,
+  `SECRET_KEY`), a credential in an XML element (`<password>…</password>`)
+  or beside the name of one (a Kubernetes `name: DB_PASSWORD` / `value: …`
+  entry, a .NET `<add key="ApiKey" value="…"/>`), a YAML block scalar under
+  a secret name (`password: |` and the lines below it), a quoted value that
+  runs over lines or holds an escaped quote, a private key whose first line
+  was cut off, the signature
+  on a signed URL, and the password in a
+  connection URL (`postgres://user:…@host`). The
+  self-check and the reflection critic, which can run on a different
+  provider, get their evidence with credentials removed. The self-check
+  also recognises each tool's own way of reporting a failure — a failed
+  `run_code`, a non-zero shell exit, an HTTP or GitHub API error — instead
+  of counting it as a result — an empty transcription and a media tool with
+  no model configured included — and only for the tool that uses that wording,
+  so a page or file that happens to start "Failed…" or "Error:" still
+  counts as what the tool returned. A failed MCP tool call now says so
+  instead of reading as its error text, and a call the worker answered with
+  a stand-in tool says which tool actually ran. The self-check sees what was written or
+  typed unless the field is a credential; `#author` is no longer mistaken
+  for one.
+- **With the Browser chip on, a website errand is planned around the
+  browser.** No tier above the worker was told the browser existed, so "go
+  to this site, ask it something, bring back the answer" was routed as a
+  multi-section plan whose workers wrote what the site might have said. The
+  complexity classifier, both planners and the worker now know the browser
+  is there, keep a website task on one worker that drives it end to end, and
+  never plan to invent a site's reply. A run whose only tool is the browser
+  also gets tool guidance again.
+- **You are told when the browser is busy.** When every browser session is
+  in use by another run, the refused run now shows "The browser is busy…"
+  in the chat instead of leaving the model as the only one who knew. The
+  notice clears if a retry gets the browser, and at the next run.
+- **The live browser view appears on Complex runs.** The top tier ran under
+  a different id from the one the run announced, so the panel, Stop and
+  take-over never showed while a real session was driven and billed.
+- **The "section needs your decision" prompt says what you are deciding.**
+  It shows what the section was asked to do, what it has so far, and what
+  each choice does to that work — on the web and in the desktop app.
+
 ## 0.82.0 - 2026-09-22
 
 ### Added

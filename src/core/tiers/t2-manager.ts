@@ -29,6 +29,8 @@ import { RunBreaker } from '../run-breaker.js';
 import type { EscalationDecision, TaskType } from '../../types.js';
 import { RedactionLayer } from '../audit/redaction.js';
 import { sectionNeedsDecision, settledEscalationStatus, summaryLeadsRootAnswer } from './escalation-policy.js';
+import { REPORTING_INTEGRITY_RULE } from './integrity.js';
+import { describeBrowserForPlanner } from './browser-planning.js';
 import { describeGenerationForPlanner } from '../multimodal/registry.js';
 import { compileSubtaskGraph } from '../orchestration/adapters.js';
 import { planSpecShape, typedFieldRules } from './plan-spec.js';
@@ -45,6 +47,7 @@ import { planSpecShape, typedFieldRules } from './plan-spec.js';
 // decomposed back into script-and-direction prose one level down.
 export function buildT2SystemPrompt(has: (toolName: string) => boolean): string {
   const generation = describeGenerationForPlanner(has);
+  const browser = describeBrowserForPlanner(has);
   return [
     'You are a T2 Manager agent in the Cascade AI system.',
     // Must agree with the decomposition prompt in decomposeSection(), which is
@@ -57,6 +60,9 @@ export function buildT2SystemPrompt(has: (toolName: string) => boolean): string 
     has('peer_message') && 'Provide "peerT3Ids" to subtasks so they can coordinate using the peer_message tool.',
     'Return ONLY valid JSON matching the T3 subtask array schema — no other text.',
     generation && `\n${generation}`,
+    // T1's one browser subtask is decomposed again here — the same fact has
+    // to hold one level down, or it is split back into parallel workers.
+    browser && `\n${browser}`,
   ]
     .filter((l): l is string => l !== false && l !== '')
     .join('\n');
@@ -1073,6 +1079,20 @@ Return ONLY the JSON array.`;
     );
     if (!completed.length) return `Section ${assignment.sectionTitle} failed — no T3 workers completed.`;
 
+    // The workers that did not finish, and why. Filtered out above, a section
+    // where one of two workers failed was summarised from the other alone — a
+    // summary that on a Moderate run IS the answer, and read as complete. The
+    // reporting rule cannot keep a failure it was never shown.
+    const unfinished = results
+      .filter((r) => !completed.includes(r))
+      .map((r) => {
+        const why = (r.issues ?? []).join('; ').replace(/\s+/g, ' ').trim() || 'no reason given';
+        return `[${r.subtaskId} — ${r.status}]: ${why.length > 300 ? `${why.slice(0, 300)}…` : why}`;
+      });
+    const unfinishedText = unfinished.length
+      ? `\n\nNOT COMPLETED — these subtasks did not finish. Say so in the summary, and what is missing as a result:\n${unfinished.join('\n')}`
+      : '';
+
     const peerOutputs = this.peerSyncBuffer
       .filter(p => (p.content as any)?.type === 'T2_SECTION_OUTPUT')
       .map(p => `[Peer ${p.fromId} Output]: ${(p.content as any).output}`)
@@ -1102,7 +1122,7 @@ Return ONLY the JSON array.`;
       const isLastChunk = chunkEnd >= completed.length;
 
       const prompt = `Summarize these T3 worker outputs for section "${assignment.sectionTitle}" in 2-3 sentences.
-  ${currentSummary ? `\nPREVIOUS SUMMARY SO FAR:\n${currentSummary}\n\nNEW OUTPUTS TO INTEGRATE:\n` : '\nOUTPUTS:\n'}${chunkText}${peerContext}`;
+  ${currentSummary ? `\nPREVIOUS SUMMARY SO FAR:\n${currentSummary}\n\nNEW OUTPUTS TO INTEGRATE:\n` : '\nOUTPUTS:\n'}${chunkText}${isLastChunk ? unfinishedText : ''}${peerContext}`;
 
       const messages: ConversationMessage[] = [{ role: 'user', content: prompt }];
       try {
@@ -1113,7 +1133,9 @@ Return ONLY the JSON array.`;
           : undefined;
         const result = await this.generateTracked('T2', {
           messages,
-          systemPrompt: this.systemPromptOverride + 'You are a T2 Manager. Summarize the work of your T3 workers succinctly.' + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
+          // On a Moderate run this summary IS the answer (it streams as one), so
+          // a failure smoothed over here reaches the user as a success.
+          systemPrompt: this.systemPromptOverride + 'You are a T2 Manager. Summarize the work of your T3 workers succinctly.\n' + REPORTING_INTEGRITY_RULE + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
           maxTokens: 500,
           ...(this.sectionModel
           ? { model: this.sectionModel, selectionTaskType: this.sectionTaskType }
@@ -1122,7 +1144,7 @@ Return ONLY the JSON array.`;
         currentSummary = result.content;
       } catch (err) {
         this.log(`aggregateResults: LLM summarization failed at chunk — returning raw T3 outputs. Error: ${err instanceof Error ? err.message : String(err)}`);
-        return currentSummary + '\n\n' + chunkText; // Best effort fallback
+        return currentSummary + '\n\n' + chunkText + unfinishedText; // Best effort fallback
       }
     }
 

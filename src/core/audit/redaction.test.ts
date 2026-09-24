@@ -33,6 +33,204 @@ describe('RedactionLayer', () => {
     expect(out).not.toContain('bob@corp.io');
   });
 
+  it('redacts the whole of a match wherever it falls in the text', () => {
+    // A rule without a capture group got the match's OFFSET where the
+    // callback expected the group, and swapped out only that substring: at
+    // offset 7, the "7" of an address that contained one.
+    expect(RedactionLayer.redact('server 10.0.0.7')).toBe('server [REDACTED_IP]');
+    expect(RedactionLayer.redact('mail: a5@corp.io')).toBe('mail: [REDACTED_EMAIL]');
+  });
+
+  it('redacts a secret labelled by the end of a longer name', () => {
+    // `_` is a word character, so `\bapi_key` never matched ANTHROPIC_API_KEY.
+    const out = RedactionLayer.redact('ANTHROPIC_API_KEY=abcdefghijklmnopqrstuvwx1234');
+    expect(out).toBe('ANTHROPIC_API_KEY=[REDACTED_SECRET]');
+  });
+
+  it('redacts a value assigned to a password, secret or token, however short or punctuated', () => {
+    // Only 16+ token-shaped characters used to count, so the commonest
+    // credential in a tool result — a short password in a .env — went through.
+    expect(RedactionLayer.redactSecrets('DB_PASSWORD=hunter2\nDB_HOST=db')).toBe('DB_PASSWORD=[REDACTED_SECRET]\nDB_HOST=db');
+    expect(RedactionLayer.redactSecrets('DB_PASSWORD=p@ss!w0rd#1')).toBe('DB_PASSWORD=[REDACTED_SECRET]');
+    expect(RedactionLayer.redactSecrets('{"password": "p@ss, w0rd!", "user": "bob"}')).toBe('{"password": [REDACTED_SECRET], "user": "bob"}');
+    expect(RedactionLayer.redactSecrets('password: hunter2')).toBe('password: [REDACTED_SECRET]');
+    expect(RedactionLayer.redactSecrets('CLIENT_SECRET=x')).toBe('CLIENT_SECRET=[REDACTED_SECRET]');
+    expect(RedactionLayer.redactSecrets('https://api.test/v1?token=abc&page=2')).toBe('https://api.test/v1?token=[REDACTED_SECRET]&page=2');
+  });
+
+  it('redacts the password in a connection URL, which no label points at', () => {
+    expect(RedactionLayer.redactSecrets('DATABASE_URL=postgres://dbuser:hunter2@db.example.com/prod'))
+      .toBe('DATABASE_URL=postgres://dbuser:[REDACTED_SECRET]@db.example.com/prod');
+    expect(RedactionLayer.redactSecrets('REDIS_URL=redis://:s3cr3t@cache:6379/0'))
+      .toBe('REDIS_URL=redis://:[REDACTED_SECRET]@cache:6379/0');
+    expect(RedactionLayer.redactSecrets('mongodb+srv://app:p%40ss@cluster0.example.net/db'))
+      .toBe('mongodb+srv://app:[REDACTED_SECRET]@cluster0.example.net/db');
+  });
+
+  it('does not read its own marker as a label and redact what follows it', () => {
+    // [REDACTED_SECRET] contains SECRET, and the long-value rule took it for
+    // one: a host of 16+ characters after a redacted password went too.
+    expect(RedactionLayer.redactSecrets('https://app:pw@cluster0.example.net/db'))
+      .toBe('https://app:[REDACTED_SECRET]@cluster0.example.net/db');
+    expect(RedactionLayer.redactSecrets('[REDACTED_SECRET] - averyverylongidentifier'))
+      .toBe('[REDACTED_SECRET] - averyverylongidentifier');
+  });
+
+  it('leaves a URL with a port and no user-info alone', () => {
+    const text = 'see https://example.com:8080/path?q=1 and ssh://git@github.com/org/repo';
+    expect(RedactionLayer.redactSecrets(text)).toBe(text);
+  });
+
+  it('redacts the credentials a connection string names', () => {
+    // No distinctive prefix and no password-like label: an Azure storage
+    // account key went through untouched.
+    const azure = 'DefaultEndpointsProtocol=https;AccountName=x;AccountKey=Zm9vYmFyYmF6cXV4MTIz==;EndpointSuffix=core.windows.net';
+    expect(RedactionLayer.redactSecrets(azure)).not.toContain('Zm9vYmFyYmF6cXV4MTIz');
+    expect(RedactionLayer.redactSecrets(azure)).toContain('AccountName=x;AccountKey=[REDACTED_SECRET]');
+    const bus = 'Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=Root;SharedAccessKey=c2VjcmV0';
+    expect(RedactionLayer.redactSecrets(bus)).toBe('Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=Root;SharedAccessKey=[REDACTED_SECRET]');
+    expect(RedactionLayer.redactSecrets("SECRET_KEY='django-insecure-abc'")).toBe('SECRET_KEY=[REDACTED_SECRET]');
+  });
+
+  it('redacts the signature on a signed URL, which is all its holder needs', () => {
+    expect(RedactionLayer.redactSecrets('https://a.blob.core.windows.net/c/b?sv=2021-08-06&se=2026-01-01&sig=AbC%2Bdef%3D'))
+      .toBe('https://a.blob.core.windows.net/c/b?sv=2021-08-06&se=2026-01-01&sig=[REDACTED_SECRET]');
+    expect(RedactionLayer.redactSecrets('SharedAccessSignature=sv=2021&sig=AbCdef'))
+      .not.toContain('AbCdef');
+    expect(RedactionLayer.redactSecrets('https://b.s3.amazonaws.com/k?X-Amz-Expires=60&X-Amz-Signature=deadbeef01'))
+      .toBe('https://b.s3.amazonaws.com/k?X-Amz-Expires=60&X-Amz-Signature=[REDACTED_SECRET]');
+  });
+
+  it('redacts a YAML block scalar under a secret name, not just its | marker', () => {
+    // The assignment rule took the `|` for the value and left the lines below.
+    const yaml = 'db:\n  password: |\n    hunter2\n    second-line\n\n  host: db.internal';
+    expect(RedactionLayer.redactSecrets(yaml)).toBe('db:\n  password: |\n    [REDACTED_SECRET]\n  host: db.internal');
+    expect(RedactionLayer.redactSecrets('creds:\n  - api_key: >-  # rotated monthly\n      abc\n      def\nnext: 1'))
+      .toBe('creds:\n  - api_key: >-  # rotated monthly\n    [REDACTED_SECRET]\nnext: 1');
+    expect(RedactionLayer.redactSecrets('"client_secret": |+\n  s3cr3t')).toBe('"client_secret": |+\n  [REDACTED_SECRET]');
+  });
+
+  it('leaves a block scalar under a name that only mentions a credential alone', () => {
+    const yaml = 'passwordPolicy: |\n  at least twelve characters\nhost: db';
+    expect(RedactionLayer.redactSecrets(yaml)).toBe(yaml);
+  });
+
+  it('redacts a quoted value that runs over lines, or holds an escaped quote', () => {
+    expect(RedactionLayer.redactSecrets('PRIVATE_TOKEN="first\nsecond"\nREGION=eu')).toBe('PRIVATE_TOKEN=[REDACTED_SECRET]\nREGION=eu');
+    expect(RedactionLayer.redactSecrets('{"password": "a\\"b", "user": "bob"}')).toBe('{"password": [REDACTED_SECRET], "user": "bob"}');
+    expect(RedactionLayer.redactSecrets('password: "never closed\nnext: line')).toBe('password: [REDACTED_SECRET]\nnext: line');
+  });
+
+  it('redacts a credential held in an XML element, however short', () => {
+    // The label rules wanted `:` or `=`, and the long-value one 16 characters.
+    expect(RedactionLayer.redactSecrets('<password>hunter2</password>')).toBe('<password>[REDACTED_SECRET]</password>');
+    expect(RedactionLayer.redactSecrets('<apiKey>abc</apiKey><user>bob</user>')).toBe('<apiKey>[REDACTED_SECRET]</apiKey><user>bob</user>');
+    expect(RedactionLayer.redactSecrets('<db:Token type="x">short7</db:Token>')).toBe('<db:Token type="x">[REDACTED_SECRET]</db:Token>');
+    expect(RedactionLayer.redactSecrets('<ClientSecret>\n  s3cr3t\n</ClientSecret>')).toBe('<ClientSecret>[REDACTED_SECRET]</ClientSecret>');
+    expect(RedactionLayer.redactSecrets('<password><![CDATA[p<ss]]></password>')).toBe('<password>[REDACTED_SECRET]</password>');
+  });
+
+  it('leaves an element that is about a credential, or holds only other elements, alone', () => {
+    const text = '<passwordPolicy>strict</passwordPolicy><tokens><count>3</count></tokens><password> <hash>x</hash></password>';
+    expect(RedactionLayer.redactSecrets(text)).toBe(text);
+  });
+
+  it('redacts the value beside a name that says it is a credential', () => {
+    // A Kubernetes env entry, its JSON form, and a .NET appSetting: the name is
+    // data, and the secret is the value next to it.
+    expect(RedactionLayer.redactSecrets('env:\n  - name: DB_PASSWORD\n    value: hunter2\n  - name: DB_HOST\n    value: db'))
+      .toBe('env:\n  - name: DB_PASSWORD\n    value: [REDACTED_SECRET]\n  - name: DB_HOST\n    value: db');
+    expect(RedactionLayer.redactSecrets('[{"name": "API_KEY", "value": "abc"}, {"name": "REGION", "value": "eu"}]'))
+      .toBe('[{"name": "API_KEY", "value": [REDACTED_SECRET]}, {"name": "REGION", "value": "eu"}]');
+    expect(RedactionLayer.redactSecrets('<add key="ApiKey" value="abc123" />')).toBe('<add key="ApiKey" value=[REDACTED_SECRET] />');
+  });
+
+  it('leaves a name/value pair alone when the name only mentions a credential, or the value is a reference', () => {
+    const text = '{"name": "password_reset_enabled", "value": true}\n- name: DB_PASSWORD\n  valueFrom:\n    secretKeyRef: {name: db}';
+    expect(RedactionLayer.redactSecrets(text)).toBe(text);
+  });
+
+  it('redacts a password whose label is glued to the name before it', () => {
+    expect(RedactionLayer.redactSecrets('PGPASSWORD=hunter2 psql')).toBe('PGPASSWORD=[REDACTED_SECRET] psql');
+  });
+
+  it('leaves a label that assigns nothing alone', () => {
+    const text = 'Enter your password below. tokens: 1234. DB_PASSWORD_FILE=/run/secrets/db';
+    expect(RedactionLayer.redactSecrets(text)).toBe(text);
+  });
+
+  it('redacts tokens by their prefix, whatever labels them', () => {
+    for (const token of [
+      'sk-ant-api03-AbCdEf0123456789AbCdEf0123456789',
+      'sk-proj-4f9a2b7c1d8e3f6a0b5c9d2e7f1a4b8c',
+      'ghp_0123456789abcdefghijABCDEFGHIJ',
+      'github_pat_11ABCDEFG0123456789_abcdefghij',
+      'xoxb-1234567890-abcdefghij',
+      `AIza${'A1b2C3d4E5'.repeat(3)}12345`,
+      'sk_live_0123456789abcdefXYZ',
+    ]) {
+      expect(RedactionLayer.redactSecrets(`found ${token} here`), token).toBe('found [REDACTED_SECRET] here');
+    }
+  });
+
+  it('redacts bearer tokens and Basic credentials in a header', () => {
+    expect(RedactionLayer.redactSecrets('Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig'))
+      .toBe('Authorization: Bearer [REDACTED_SECRET]');
+    expect(RedactionLayer.redactSecrets('Authorization: Basic dXNlcjpwYXNzd29yZA=='))
+      .toBe('Authorization: Basic [REDACTED_SECRET]');
+  });
+
+  it('redacts an Authorization header however short its credential', () => {
+    expect(RedactionLayer.redactSecrets('Authorization: Bearer short7')).toBe('Authorization: Bearer [REDACTED_SECRET]');
+    expect(RedactionLayer.redactSecrets('Authorization: Basic YTpi')).toBe('Authorization: Basic [REDACTED_SECRET]');
+    expect(RedactionLayer.redactSecrets('proxy-authorization: basic YTpi\nnext line'))
+      .toBe('proxy-authorization: basic [REDACTED_SECRET]\nnext line');
+    expect(RedactionLayer.redactSecrets("curl -H 'Authorization: token abc' https://api.test"))
+      .toBe("curl -H 'Authorization: token [REDACTED_SECRET]' https://api.test");
+    expect(RedactionLayer.redactSecrets('{"Authorization":"Bearer t","Accept":"*/*"}'))
+      .toBe('{"Authorization":"Bearer [REDACTED_SECRET]","Accept":"*/*"}');
+  });
+
+  it('redacts the whole value of an Authorization header whose scheme it does not know', () => {
+    expect(RedactionLayer.redactSecrets('Authorization: Digest username="bob", response="6629fae4"\nHost: api.test'))
+      .toBe('Authorization: [REDACTED_SECRET]"\nHost: api.test');
+    expect(RedactionLayer.redactSecrets('curl -H "Authorization: $KEY" https://api.test'))
+      .toBe('curl -H "Authorization: [REDACTED_SECRET]" https://api.test');
+    expect(RedactionLayer.redactSecrets('{"authorization":"SSWS 00ab"}')).toBe('{"authorization":[REDACTED_SECRET]}');
+  });
+
+  it('redacts cookies, sent and set', () => {
+    expect(RedactionLayer.redactSecrets('Cookie: sid=abc; theme=dark\nHost: api.test'))
+      .toBe('Cookie: [REDACTED_SECRET]\nHost: api.test');
+    expect(RedactionLayer.redactSecrets('Set-Cookie: sid=abc; Path=/; HttpOnly')).toBe('Set-Cookie: [REDACTED_SECRET]');
+    expect(RedactionLayer.redactSecrets('curl -H "Cookie: sid=abc" https://api.test'))
+      .toBe('curl -H "Cookie: [REDACTED_SECRET]" https://api.test');
+  });
+
+  it('redacts a private key, even one cut off before its END line', () => {
+    const pem = '-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----';
+    expect(RedactionLayer.redactSecrets(`key:\n${pem}\nafter`)).toBe('key:\n[REDACTED_PRIVATE_KEY]\nafter');
+    expect(RedactionLayer.redactSecrets('-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg')).toBe('[REDACTED_PRIVATE_KEY]');
+  });
+
+  it('redacts a private key cut off before its BEGIN line', () => {
+    // The tail of a long result can start inside a key.
+    expect(RedactionLayer.redactSecrets('MIIEpAIBAAKCAQEA\nq9Zx/+w=\n-----END RSA PRIVATE KEY-----\nafter'))
+      .toBe('[REDACTED_PRIVATE_KEY]\nafter');
+    expect(RedactionLayer.redactSecrets('config:\nMIIEpAIBAAKCAQEA\n-----END PRIVATE KEY-----'))
+      .toBe('config:\n[REDACTED_PRIVATE_KEY]');
+  });
+
+  it('leaves ordinary words that look a little like tokens alone', () => {
+    const prose = 'Use sk-learn-compatible-estimators with basic internationalization.';
+    expect(RedactionLayer.redactSecrets(prose)).toBe(prose);
+  });
+
+  it('redactSecrets keeps addresses and numbers, which are not credentials', () => {
+    const text = 'admin@example.com at 10.0.0.7, call 555-123-4567';
+    expect(RedactionLayer.redactSecrets(text)).toBe(text);
+  });
+
   it('leaves clean text untouched', () => {
     const clean = 'The function returns a sorted list of user names.';
     expect(RedactionLayer.redact(clean)).toBe(clean);

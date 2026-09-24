@@ -24,6 +24,8 @@ import { T1Administrator, type PlanApprovalDecision, type TaskPlan } from './tie
 import { calculateCost } from '../utils/cost.js';
 import { T2Manager } from './tiers/t2-manager.js';
 import { composeRootSectionOutput, summaryLeadsRootAnswer } from './tiers/escalation-policy.js';
+import { ACTING_INTEGRITY_RULE } from './tiers/integrity.js';
+import { BROWSER_ROUTING_RULE, BROWSER_TOOL } from './tiers/browser-planning.js';
 import { MultimodalRegistry } from './multimodal/registry.js';
 import type { FeedbackSource } from './router/feedback-prior.js';
 import { DeadModelStore, fileDeadModelPersistence } from './router/dead-models.js';
@@ -1899,6 +1901,14 @@ export class Cascade extends EventEmitter {
           'complexity',
           `terse option reply — on-device hint "${hint}" ignored; classifying with conversation context`,
         );
+      } else if (this.toolRegistry.hasTool(BROWSER_TOOL)) {
+        // The on-device classifier cannot know this run has a browser, and
+        // without that a one-site errand reads as research — Complex, a plan,
+        // and no browser in it. Only the classifier below is told.
+        this.recordDecision(
+          'complexity',
+          `on-device hint "${hint}" set aside — a browser is available, which only the classifier is told about`,
+        );
       } else {
         return this.floorComplexity(prompt, hint, 'on-device hint');
       }
@@ -1927,7 +1937,11 @@ Important rules:
 - If the earlier context is complex, keep the inherited complexity unless the user clearly narrows scope.
 - Reading, explaining, summarizing, or analyzing existing files/code and answering a question — WITHOUT creating files or implementing changes — is "Simple" (single agent), never "Complex".
 - If the task asks for a simple single-file artifact like hello.txt, it is usually Moderate.
-- If the task asks for a saved report, PDF, implementation, or deeper verification workflow, it is at least Moderate and often Complex.
+- If the task asks for a saved report, PDF, implementation, or deeper verification workflow, it is at least Moderate and often Complex.${
+  // Only when this run has one: a classifier that has never heard of the
+  // browser reads "go to this site and ask it…" as research, and research is
+  // Complex — which turned a one-agent errand into a plan with no browser in it.
+  this.toolRegistry.hasTool(BROWSER_TOOL) ? `\n${BROWSER_ROUTING_RULE}` : ''}
 
 Respond with the verdict word first, then a dash and a short reason (under 12 words).
 Format: <Simple|Moderate|Complex> — <reason>`;
@@ -2675,7 +2689,10 @@ ${prompt}`
     const systemPrompt =
       identityPrompt +
       'You are Cascade in fast mode. Answer the user directly, accurately and concisely. ' +
-      'You have no tools and cannot run code, browse, or create files — do not claim to.';
+      'You have no tools and cannot run code, browse, or create files — do not claim to.\n' +
+      // "Do not claim to" did not stop a model from "simulating" the browse it
+      // could not do and presenting the result. The shared rule names that.
+      ACTING_INTEGRITY_RULE;
 
     let streamed = '';
     // With an image, let the router pick a vision-capable model instead of pinning.

@@ -1175,6 +1175,37 @@ export function useChatSession(
   // Document RAG: a transient note when a large attached doc was searched for
   // the most relevant passages (vs. read in full), so grounding is visible.
   const [knowledgeNotice, setKnowledgeNotice] = useState<string | null>(null);
+  /**
+   * This run asked for the browser and was refused one: every session was in
+   * use by another run, or today's allowance was spent.
+   *
+   * The model was told and nobody else was, so the run's answer was the only
+   * sign, and a run that narrated or papered over the refusal left none.
+   */
+  //
+  // Kept per conversation, with the run it was about, like `browserViews`.
+  // One slot carried conversation A's refusal into B when you switched, and
+  // let a sibling run's browser opening in A clear the refusal of the run
+  // that was still without one.
+  //
+  // A LIST per conversation, one entry per run: a conversation can hold
+  // several runs, and with one value per conversation a second refusal
+  // overwrote the first — then the second run getting its browser cleared
+  // the only entry, and the first run's refusal, still true, vanished.
+  const [browserRefusals, setBrowserRefusals] = useState<Record<string, Array<{ taskId?: string; text: string }>>>({});
+  const browserRefusedNotice = browserRefusals[activeConversationId() ?? '']?.at(-1)?.text ?? null;
+  /** Forget a conversation's refusals, or only the one about `taskId`. */
+  const clearBrowserRefusal = (key: string, taskId?: string) => {
+    setBrowserRefusals((prev) => {
+      const entries = prev[key];
+      if (!entries) return prev;
+      const kept = taskId === undefined ? [] : entries.filter((r) => r.taskId !== taskId);
+      if (kept.length === entries.length) return prev;
+      if (kept.length) return { ...prev, [key]: kept };
+      const { [key]: _gone, ...rest } = prev;
+      return rest;
+    });
+  };
   // Live run activity — the T1→T2→T3 tree with each tier's model + current
   // subtask, built from tier:status events. Powers the click-to-expand drawer.
   const [activity, setActivity] = useState<ActivityNode[]>([]);
@@ -1479,6 +1510,32 @@ export function useChatSession(
         setCompactionNotice(`Folded ${e.foldedTurns ?? 'earlier'} turns into a summary to fit the context window.`);
       }
     };
+    /** Record a refusal against the conversation and run it belongs to. */
+    const recordBrowserRefusal = (e: { conversationId?: string; taskId?: string }, text: string) => {
+      // Adopt first, for the reason onProviderExhausted gives: a first turn is
+      // exactly when the pane has not been told its id yet.
+      adoptConversationId(e?.conversationId, (e as { runId?: unknown })?.runId);
+      const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
+      const taskId = typeof e?.taskId === 'string' && e.taskId ? e.taskId : undefined;
+      setBrowserRefusals((prev) => {
+        // Replaces this run's earlier refusal (a busy run can later hit the
+        // limit), and leaves every other run's alone.
+        const others = (prev[key] ?? []).filter((r) => taskId === undefined || r.taskId !== taskId);
+        return { ...prev, [key]: [...others, { ...(taskId ? { taskId } : {}), text }] };
+      });
+    };
+    const onBrowserBusy = (e: { conversationId?: string; taskId?: string; limit?: number }) => {
+      const n = typeof e.limit === 'number' && e.limit > 0 ? e.limit : 1;
+      recordBrowserRefusal(e,
+        `The browser is busy: ${n === 1 ? 'its one session is' : `all ${n} sessions are`} in use by another run, `
+        + 'so this run could not open it. Try again when that run finishes.',
+      );
+    };
+    const onBrowserLimit = (e: { conversationId?: string; taskId?: string; detail?: string }) => {
+      // The server's words, which are also what the model was told: the two
+      // must not describe the same refusal differently.
+      if (typeof e.detail === 'string' && e.detail) recordBrowserRefusal(e, e.detail);
+    };
     const onProviderExhausted = (e: {
       conversationId?: string; provider?: string; kind?: string; message?: string; failedOverTo?: string;
     }) => {
@@ -1617,6 +1674,9 @@ export function useChatSession(
       // Every server live-view message is task-addressed. An untagged message
       // cannot safely create, replace or withdraw any browser in a conversation.
       if (!taskId) return;
+      // The other run finished and a retry got the browser after all, so
+      // "could not open it" is no longer true of THIS run — and only this one.
+      if (e?.active === true) clearBrowserRefusal(key, taskId);
       setBrowserViews((prev) => {
         const views = prev[key] ?? [];
         if (e?.active !== true) {
@@ -1770,6 +1830,8 @@ export function useChatSession(
     socket.on('provider:exhausted', onProviderExhausted);
     socket.on('knowledge:retrieved', onKnowledge);
     socket.on('file:created', onFileCreated);
+    socket.on('browser:busy', onBrowserBusy);
+    socket.on('browser:limit', onBrowserLimit);
     return () => {
       socket.off('stream:token', onToken);
       socket.off('tier:status', onStatus);
@@ -1793,6 +1855,8 @@ export function useChatSession(
       socket.off('browser:frame', onBrowserFrame);
       socket.off('browser:watching', onBrowserWatching);
       socket.off('browser:live-view', onLiveView);
+      socket.off('browser:busy', onBrowserBusy);
+      socket.off('browser:limit', onBrowserLimit);
     };
   }, [socket]);
 
@@ -2633,6 +2697,9 @@ export function useChatSession(
       // run boundary, so carrying it into the next run would keep telling the
       // user their spend is on a different account after it has moved back.
       setProviderNotice(null);
+      // Also "for this run": the next one may find the browser free. This
+      // conversation's only; another chat's refusal is still true of its run.
+      clearBrowserRefusal(activeConversationId() ?? '');
       setActivity([]);
       streamingRef.current = '';
       // Id kept so the rejection path below can take this turn back out. It is
@@ -3125,7 +3192,7 @@ export function useChatSession(
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, browserMode, setBrowserMode, approval,
     escalation, escalations, escalationQueued: escalations.length, resolveEscalation, clearEscalation,
     skipAllEscalations,
-    contextApproval, contextApprovals, resolveContextApproval, compactionNotice, providerNotice, knowledgeNotice, activity,
+    contextApproval, contextApprovals, resolveContextApproval, compactionNotice, providerNotice, knowledgeNotice, browserRefusedNotice, activity,
     browserLiveView, browserActive, browserTaskId, browserFrame, browserStreaming,
     browserHuman, browserCapturing, browserConfirmed, browserNotice, stopBrowser,
     takeOverBrowser, handBackBrowser, sendBrowserInput, setBrowserCapture,

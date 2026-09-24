@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { BrowserAllowanceView } from './browserAllowance.js';
 import { AnimatePresence, motion } from 'framer-motion';
 import { AlertTriangle, KeyRound, Sparkles, Layers, ChevronDown, Search } from 'lucide-react';
 import CascadeMark from '../components/CascadeMark.js';
@@ -51,6 +52,10 @@ interface Props {
   compactionNotice: string | null;
   providerNotice: string | null;
   knowledgeNotice: string | null;
+  /** This run was refused the browser: every session was in use, or today's were spent. */
+  browserRefusedNotice?: string | null;
+  /** Today's browser sessions against the plan's allowance, when the server reports it. */
+  browserAllowance?: BrowserAllowanceView;
   activity: ActivityNode[];
   /** Where the agent's browser can be watched, while it has one. */
   browserLiveView?: string | undefined;
@@ -90,7 +95,7 @@ export default function ChatPanel({
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
   clarifications, onAnswerClarification,
   browserMode, onBrowserModeChange, browserAvailable, uiMode, approval,
-  compactionNotice, providerNotice, knowledgeNotice, activity, browserLiveView, browserActive,
+  compactionNotice, providerNotice, knowledgeNotice, browserRefusedNotice, browserAllowance, activity, browserLiveView, browserActive,
   browserFrame, browserTaskId, browserStreaming, browserHuman, browserCapturing, browserConfirmed, browserNotice,
   onStopBrowser, onTakeOverBrowser, onHandBackBrowser, onBrowserInput, onBrowserCapture,
   onBrowserFrameShown,
@@ -174,6 +179,17 @@ export default function ChatPanel({
             >
               <AlertTriangle size={13} className="text-amber-300" />
               <span>{providerNotice}</span>
+            </motion.div>
+          )}
+          {browserRefusedNotice && (
+            <motion.div
+              role="status"
+              className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/[0.08] px-3 py-2 text-xs text-ink-200"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+            >
+              <AlertTriangle size={13} className="text-amber-300" />
+              <span>{browserRefusedNotice}</span>
             </motion.div>
           )}
           {knowledgeNotice && (
@@ -291,6 +307,7 @@ export default function ChatPanel({
         browserMode={browserMode}
         onBrowserModeChange={onBrowserModeChange}
         browserAvailable={browserAvailable}
+        browserAllowance={browserAllowance ?? null}
         onWebSearchChange={onWebSearchChange}
         uiMode={uiMode}
       />

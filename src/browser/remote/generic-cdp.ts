@@ -22,6 +22,8 @@ export class GenericCdpProvider implements RemoteBrowserProvider {
   // The endpoint is a single browser. There is no session to allocate, so two
   // runs against it share a page — see the seam.
   readonly isolatesSessions = false;
+  /** The endpoint is the operator's own standing browser; opening it allocates nothing. */
+  readonly allocatesSessions = false;
 
   private endpoint: string;
 

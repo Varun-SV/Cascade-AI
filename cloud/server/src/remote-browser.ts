@@ -20,6 +20,7 @@
 //      cleanup matched nothing, which cost a review round on the desktop.
 
 import {
+  ALLOWANCE_UNAVAILABLE,
   RemoteBrowserController,
   GenericCdpProvider,
   SteelProvider,
@@ -27,6 +28,7 @@ import {
   isUsableSteelBase,
   isUsableSteelKey,
   isCdpEndpoint,
+  type BrowserAllowance,
   type BrowserInput,
   type Cascade,
   type CascadeConfig,
@@ -59,6 +61,14 @@ interface AttachOptions {
   emitFrame?: (event: string, payload: unknown) => void;
   /** Somewhere to record a misconfiguration without failing the run. */
   warn?: (message: string) => void;
+  /**
+   * The run owner's allowance of NEW sessions — a plan's daily count.
+   *
+   * `take` claims one, or says why not; its words reach the model as the
+   * refusal and the person as the notice. Each claim's own `giveBack` returns
+   * it when no session came of it. See `RemoteBrowserController.allowances`.
+   */
+  allowance?: BrowserAllowance;
 }
 
 /** Attached browser, or null when the deployment has no provider configured. */
@@ -292,7 +302,54 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
         confirmed,
       });
     });
+    // Once per refusal EPISODE, not per call: a refused worker may ask again,
+    // and the same refusal after the first is the same news. An episode ends
+    // when the browser opens — see onLiveViewFor below.
+    //
+    // A DIFFERENT refusal is news, though. A check that could not be made
+    // says "try again", and the retry that then finds the day spent must not
+    // be kept quiet because a refusal was already shown — so the refusal is
+    // remembered by what it said, not only that there was one.
+    let lastLimit: string | undefined;
+    let busyAnnounced = false;
+    if (opts.allowance) {
+      const allowance = opts.allowance;
+      controller.setAllowanceFor(id, {
+        take: () => {
+          let claim: ReturnType<BrowserAllowance['take']>;
+          // Caught HERE rather than left to the controller, which refuses on a
+          // throw just the same but has no one to tell: the model heard why,
+          // and the person, watching a browser that never came, did not.
+          try {
+            claim = allowance.take();
+          } catch {
+            claim = { refusal: ALLOWANCE_UNAVAILABLE };
+          }
+          // The claim itself goes back as it came: its give-back is its own.
+          if ('refusal' in claim && claim.refusal !== lastLimit) {
+            lastLimit = claim.refusal;
+            // Guarded: telling the person must not change what the model is told.
+            try {
+              opts.emit('browser:limit', { conversationId: opts.conversationId, taskId: id, detail: claim.refusal });
+            } catch { /* the socket's problem, not the run's */ }
+          }
+          return claim;
+        },
+      });
+    }
+    controller.onBusyFor(id, ({ limit }) => {
+      if (busyAnnounced) return;
+      busyAnnounced = true;
+      opts.emit('browser:busy', { conversationId: opts.conversationId, taskId: id, limit });
+    });
     controller.onLiveViewFor(id, ({ active, liveViewUrl }) => {
+      // The browser opened, and the client and the replay both drop their
+      // notice on this. A run that later loses the page and is refused again
+      // is news again — flags held for the whole run kept that one silent.
+      if (active) {
+        busyAnnounced = false;
+        lastLimit = undefined;
+      }
       // To this socket only. See the file header.
       opts.emit('browser:live-view', {
         conversationId: opts.conversationId,
@@ -411,6 +468,19 @@ export function formatCeiling(ms: number): string {
  */
 export function providerIsUsable(settings: RemoteBrowserSettings | undefined): boolean {
   return buildProvider(settings) !== null;
+}
+
+/**
+ * Whether these settings produce a browser whose sessions are worth rationing:
+ * one that can be built, from a provider that allocates a session per open.
+ *
+ * Asks the provider, like `providerIsUsable`, rather than naming providers
+ * here. A bare CDP endpoint is the operator's own standing browser, so a
+ * per-day allowance on it would refuse runs that cost nothing.
+ */
+export function providerRationsSessions(settings: RemoteBrowserSettings | undefined): boolean {
+  const provider = buildProvider(settings);
+  return provider !== null && provider.allocatesSessions !== false;
 }
 
 /** Which provider the operator asked for, or null when they asked for none. */

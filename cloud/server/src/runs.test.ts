@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { ToolRegistry, CascadeConfigSchema, Retriever, embedderFromProviders } from '#cascade-ai';
 import type { Chunk, ProviderConfig, ScoredChunk } from '#cascade-ai';
-import { allowances, answersThisRun, buildCloudConfig, buildMediaSink, parseChatRunPayload, resolveDocuments, runChatTurn, sanitiseClarificationAnswers, sanitiseEscalationNote, tenantScratchDir } from './runs.js';
+import { allowances, answersThisRun, browserAllowanceFor, buildCloudConfig, buildMediaSink, parseChatRunPayload, resolveDocuments, runChatTurn, sanitiseClarificationAnswers, sanitiseEscalationNote, tenantScratchDir } from './runs.js';
 import { CloudStore } from './db.js';
 import { limitsForPlan, PENDING_MEDIA_TTL_MS } from './entitlements.js';
 import type { CloudEnv } from './env.js';
@@ -1277,5 +1277,42 @@ describe('documents when the run is stopped', () => {
       socket.events.find((e) => e.event === 'knowledge:retrieved'),
       'no retrieval notice either — a cancelled run is not a degraded one',
     ).toBeUndefined();
+  });
+});
+
+describe('browserAllowanceFor — a run\u2019s claim on its owner\u2019s browser sessions', () => {
+  let dir = '';
+  let store: CloudStore | undefined;
+  afterEach(async () => { store?.close(); store = undefined; if (dir) await fs.rm(dir, { recursive: true, force: true }); });
+
+  it('gives each claim its own give-back, which returns that claim once', async () => {
+    // Two opens at once, as runs sharing an allowance can: a single "last
+    // claimed" give-back let the second claim overwrite the first, so the
+    // second return found nothing and a session that never opened stayed spent.
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-allowance-'));
+    store = new CloudStore(path.join(dir, 'cloud.db'));
+    const user = store.upsertUser({ provider: 'dev', providerId: 'allow', email: null, name: null, avatar: null });
+    const today = new Date().toISOString().slice(0, 10);
+    const allowance = browserAllowanceFor(store, user.id);
+
+    const first = allowance.take();
+    const second = allowance.take();
+    expect(store.getBrowserSessions(user.id, today)).toBe(2);
+    if (!('giveBack' in first) || !('giveBack' in second)) throw new Error('both should be claims');
+
+    first.giveBack();
+    first.giveBack();
+    expect(store.getBrowserSessions(user.id, today), 'the first, once').toBe(1);
+    second.giveBack();
+    expect(store.getBrowserSessions(user.id, today), 'and the second, which was not lost').toBe(0);
+  });
+
+  it('refuses in the plan\u2019s words once the day\u2019s sessions are gone', async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-allowance-'));
+    store = new CloudStore(path.join(dir, 'cloud.db'));
+    const user = store.upsertUser({ provider: 'dev', providerId: 'allow', email: null, name: null, avatar: null });
+    const allowance = browserAllowanceFor(store, user.id);
+    for (let i = 0; i < 5; i++) expect(allowance.take()).toHaveProperty('giveBack');
+    expect(allowance.take()).toEqual({ refusal: expect.stringContaining('browser sessions') });
   });
 });

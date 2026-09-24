@@ -14,8 +14,8 @@ import {
   distillSessionFacts, buildSessionTranscript, sessionWorthRemembering,
   azureModelForDeployment, DEFAULT_CONTEXT_LIMIT, MODELS,
 } from '#cascade-ai';
-import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ApprovalRequest, ProviderConfig, BrowserInput } from '#cascade-ai';
-import { attachRemoteBrowser } from './remote-browser.js';
+import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ApprovalRequest, ProviderConfig, BrowserAllowance, BrowserInput } from '#cascade-ai';
+import { attachRemoteBrowser, providerRationsSessions } from './remote-browser.js';
 import type { ClarificationAnswer } from '#cascade-ai';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -23,7 +23,7 @@ import { z, type ZodError } from 'zod';
 import type { CloudEnv } from './env.js';
 import { resolveRunMcpServers } from './mcp-oauth.js';
 import type { CloudAttachment, CloudStore } from './db.js';
-import { beginRun, checkDailyLimit, checkPendingMediaCap, PENDING_MEDIA_TTL_MS, todayKey } from './entitlements.js';
+import { beginRun, checkBrowserSessionLimit, checkDailyLimit, checkPendingMediaCap, claimBrowserSession, PENDING_MEDIA_TTL_MS, todayKey } from './entitlements.js';
 import { getSkill } from './skills.js';
 import { tenantScratchDir } from './paths.js';
 import { pendingMediaDir, sweepPendingMedia } from './pending-media.js';
@@ -1354,6 +1354,19 @@ export function buildMediaSink(deps: {
   };
 }
 
+/**
+ * A run's claim on its owner's daily browser sessions, in the controller's
+ * shape: each claim carries its own give-back, for the day it was claimed on.
+ *
+ * It kept one "last claimed" give-back for the whole run, which was right only
+ * while every open waited for the one before. Two at once and the second claim
+ * overwrote the first: returning one returned the other's, and the second
+ * return found nothing — a session that never opened stayed charged.
+ */
+export function browserAllowanceFor(store: CloudStore, userId: string): BrowserAllowance {
+  return { take: () => claimBrowserSession(store, userId, store.getUserById(userId)?.plan ?? 'free') };
+}
+
 export async function runChatTurn(payload: ChatRunPayload, deps: ChatRunDeps): Promise<ChatRunResult> {
   const { env, store, userId, socket } = deps;
 
@@ -1362,6 +1375,12 @@ export async function runChatTurn(payload: ChatRunPayload, deps: ChatRunDeps): P
   const user = store.getUserById(userId);
   const plan = user?.plan ?? 'free';
   checkDailyLimit(store, userId, plan);
+  // Only where there are sessions to ration: a deployment with no browser has
+  // none, and one pointed at a bare CDP endpoint opens none — it drives the
+  // operator's standing browser, which costs nothing more per run.
+  if (payload.browserMode === true && providerRationsSessions(remoteBrowserControls(env).remoteBrowser) && deps.interactive !== false) {
+    checkBrowserSessionLimit(store, userId, plan);
+  }
   const releaseRun = beginRun(userId, plan);
 
   try {
@@ -1778,6 +1797,10 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     // queued old one.
     emitFrame: lossyEmitter(socket),
     warn: (message) => console.warn(`[run ${conversation.id}] remote browser: ${message}`),
+    // The plan's daily allowance, claimed at the moment a session would be
+    // opened. The run-start check cannot cover a run that began with one
+    // session left and needs a second.
+    allowance: browserAllowanceFor(store, userId),
   });
   // The kill switch, alongside the live view that makes it meaningful. Scoped
   // to this run and removed with the run's other listeners below: a Stop is

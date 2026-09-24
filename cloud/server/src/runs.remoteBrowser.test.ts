@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -6,6 +6,7 @@ import { buildCloudConfig, parseChatRunPayload, remoteBrowserControls, runChatTu
 import { CloudStore } from './db.js';
 import { loadEnv } from './env.js';
 import { providerIsUsable, sharedBrowserGeneration, resetSharedBrowser } from './remote-browser.js';
+import { RemoteBrowserController } from '#cascade-ai';
 import { startStubOpenAIServer, type StubOpenAIServer } from './test-support/stub-openai-server.js';
 
 class FakeSocket {
@@ -132,6 +133,93 @@ describe('the operator configures a browser for their deployment', () => {
     // succeeded would pass either way — it did before, with the feature inert.
     expect(sharedBrowserGeneration()).toBe(before + 1);
   }, 30_000);
+
+  describe('the plan\u2019s daily allowance of browser sessions', () => {
+    const today = () => new Date().toISOString().slice(0, 10);
+    /**
+     * `true` is a deployment whose sessions are billed — a self-hosted Steel,
+     * never dialled, since small talk opens no browser. `'cdp'` is one driving
+     * the operator's own standing browser, which allocates nothing.
+     */
+    async function setup(withBrowser: boolean | 'cdp') {
+      dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-rb-allowance-'));
+      store = new CloudStore(path.join(dir, 'cloud.db'));
+      stub = await startStubOpenAIServer();
+      await resetSharedBrowser();
+      const env = loadEnv({
+        ...baseEnv(dir),
+        ...(withBrowser === 'cdp'
+          ? { REMOTE_BROWSER_PROVIDER: 'cdp', REMOTE_BROWSER_URL: 'ws://127.0.0.1:9/devtools/browser/test' }
+          : withBrowser ? { REMOTE_BROWSER_PROVIDER: 'steel', REMOTE_BROWSER_URL: 'https://steel.internal' } : {}),
+      });
+      const user = store.upsertUser({ provider: 'dev', providerId: 'tester', email: null, name: 'Tester', avatar: null });
+      const run = (browserMode: boolean, socket = new FakeSocket()) => runChatTurn(
+        parseChatRunPayload({
+          prompt: 'hello',
+          providers: [{ type: 'openai-compatible', baseUrl: stub!.url, apiKey: 'test-key', model: 'stub-model' }],
+          browserMode,
+        }),
+        { env, store: store!, userId: user.id, socket: socket as unknown as import('socket.io').Socket },
+      );
+      return { user, run };
+    }
+
+    it('refuses a browser run once today\u2019s sessions are gone, before creating anything', async () => {
+      const { user, run } = await setup(true);
+      for (let i = 0; i < 5; i++) store!.incrementBrowserSessions(user.id, today());
+
+      await expect(run(true)).rejects.toThrow(/browser sessions are used up \(5 a day on the free plan\)/);
+      expect(store!.listConversations(user.id), 'nothing persisted for a refused run').toEqual([]);
+    }, 30_000);
+
+    it('still lets the same person run without the browser', async () => {
+      const { user, run } = await setup(true);
+      for (let i = 0; i < 5; i++) store!.incrementBrowserSessions(user.id, today());
+
+      const result = await run(false);
+      expect(result.output).toContain('Hello from the stub model.');
+    }, 30_000);
+
+    it('does not ration a browser that opens no sessions — the operator\u2019s own CDP endpoint', async () => {
+      // GenericCdpProvider allocates nothing, so there is nothing a day's
+      // allowance could be spending. Five small-talk runs used to lock a Free
+      // user out of the operator's browser for the rest of the day.
+      const { user, run } = await setup('cdp');
+      for (let i = 0; i < 5; i++) store!.incrementBrowserSessions(user.id, today());
+
+      const result = await run(true);
+      expect(result.output).toContain('Hello from the stub model.');
+    }, 30_000);
+
+    it('does not ration a browser the deployment does not have', async () => {
+      const { user, run } = await setup(false);
+      for (let i = 0; i < 5; i++) store!.incrementBrowserSessions(user.id, today());
+
+      const result = await run(true);
+      expect(result.output).toContain('Hello from the stub model.');
+    }, 30_000);
+
+    it('claims from the allowance when the run would open a session, and refuses once it is spent', async () => {
+      // The start-of-run check cannot cover a run that began with one session
+      // left and needs a second, so the same allowance is claimed at the
+      // moment a session would be opened.
+      const set = vi.spyOn(RemoteBrowserController.prototype, 'setAllowanceFor');
+      try {
+        const { user, run } = await setup(true);
+        for (let i = 0; i < 4; i++) store!.incrementBrowserSessions(user.id, today());
+        const socket = new FakeSocket();
+        await run(true, socket);
+
+        const allowance = set.mock.calls.at(-1)?.[1];
+        expect(allowance?.take(), 'one left: claimed').toHaveProperty('giveBack');
+        expect(store!.getBrowserSessions(user.id, today()), 'counted as it is claimed').toBe(5);
+        expect(allowance?.take(), 'and the next is refused').toEqual({ refusal: expect.stringMatching(/browser sessions are used up/) });
+        expect(socket.events.filter((e) => e.event === 'browser:limit'), 'the person is told').toHaveLength(1);
+      } finally {
+        set.mockRestore();
+      }
+    }, 30_000);
+  });
 
   it('builds nothing when the operator configured no provider', async () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-rb-run-off-'));

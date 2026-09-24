@@ -84,6 +84,33 @@ export interface BrowserViewInfo {
   liveViewUrl?: string;
 }
 
+/** An embedder's per-run allowance of new sessions. See `RemoteBrowserController.allowances`. */
+export interface BrowserAllowance {
+  /**
+   * Claim one new session: why it cannot be had, or the way to return THIS
+   * claim if no session comes of it. Synchronous: see where it is called.
+   *
+   * Per claim, not one `giveBack` for the allowance. Runs sharing an allowance
+   * open at once, and a single "last claimed" slot lets the second claim
+   * overwrite the first — whose give-back then returned the wrong one, or
+   * nothing, and a session that never opened stayed charged.
+   */
+  take(): { refusal: string } | { giveBack(): void };
+}
+
+/**
+ * What a run is told when its allowance could not be checked — `take` threw.
+ * Exported so an embedder that tells the person about refusals can say the
+ * same words the model was given.
+ */
+export const ALLOWANCE_UNAVAILABLE = 'The browser could not check this run\'s allowance. Try again.';
+
+/** A run asked for a browser and every session was taken. */
+export interface BrowserBusyInfo {
+  /** The deployment's session limit — what "every session" meant. */
+  limit: number;
+}
+
 /**
  * One rendered frame of a run's browser, on its way to whoever is watching.
  *
@@ -530,6 +557,28 @@ export class RemoteBrowserController {
   private controlListeners = new Map<string, (state: BrowserControlState) => void | Promise<void>>();
   /** What each run's listener was last told, so unchanged states stay quiet. */
   private controlAnnounced = new Map<string, string>();
+  /**
+   * Told when a run asks for a browser and every session is taken.
+   *
+   * The refusal used to be a tool error and nothing else, so the model was
+   * the only one who heard about it. It could retry, narrate it, or, as a
+   * real run did, write the answer it could not fetch. The person who could
+   * act on it, by waiting for the other run, saw nothing.
+   */
+  private busyListeners = new Map<string, (info: BrowserBusyInfo) => void | Promise<void>>();
+  /**
+   * The embedder's own limit on a run opening a NEW session, such as a plan's
+   * daily allowance. The deployment's pool (`maxSessions`) says how many may
+   * be open at once; this says whether this run may open one at all.
+   *
+   * `take` claims one unit, or says why it cannot — synchronously, beside the
+   * pool check, so nothing suspends between the claim and the reservation it
+   * guards. Checking here and COUNTING after the session was created let
+   * concurrent opens all see the same last unit, and each then created a
+   * billed session. The claim's own `giveBack` returns that unit when no
+   * session came of it.
+   */
+  private allowances = new Map<string, BrowserAllowance>();
   /** An embedder that wants every run's live view, told which run each is. */
   private onLiveViewAll: ((runId: string, liveViewUrl: string | undefined) => void | Promise<void>) | undefined;
   /** Told when a provider session could not be handed back. See `disposeRun`. */
@@ -699,6 +748,19 @@ export class RemoteBrowserController {
   offControlFor(runKey: string): void {
     this.controlListeners.delete(runKey);
     this.controlAnnounced.delete(runKey);
+  }
+
+  onBusyFor(runKey: string, listener: (info: BrowserBusyInfo) => void | Promise<void>): void {
+    this.busyListeners.set(runKey, listener);
+  }
+
+  offBusyFor(runKey: string): void {
+    this.busyListeners.delete(runKey);
+  }
+
+  /** See `allowances`. Forgotten with the run. */
+  setAllowanceFor(runKey: string, allowance: BrowserAllowance): void {
+    this.allowances.set(runKey, allowance);
   }
 
   /**
@@ -1980,6 +2042,8 @@ export class RemoteBrowserController {
     // makes it, and teardown completes before this runs.
     this.liveViewListeners.delete(runId);
     this.offControlFor(runId);
+    this.offBusyFor(runId);
+    this.allowances.delete(runId);
   }
 
   /**
@@ -2393,6 +2457,37 @@ export class RemoteBrowserController {
       throw new Error('The browser settings changed while this action was waiting. Try again.');
     }
 
+    // Before the pool: a run with no allowance left will not get one by waiting
+    // for another run to finish, so that is the reason worth giving.
+    //
+    // An allowance that throws refuses rather than admits. It exists to bound
+    // what is spent, and a claim that could not be made has not said yes.
+    //
+    // And only where opening spends something. A provider that allocates
+    // nothing (a bare CDP endpoint) has no session to ration, so claiming here
+    // would count the operator's own browser against the person's day.
+    const allowance = this.provider.allocatesSessions === false ? undefined : this.allowances.get(runId);
+    let refusal: string | undefined;
+    let claimed: { giveBack(): void } | undefined;
+    try {
+      const claim = allowance?.take();
+      if (claim && 'giveBack' in claim && typeof claim.giveBack === 'function') claimed = claim;
+      // Anything else refuses, an answer that is not one included.
+      else if (claim) refusal = ('refusal' in claim && claim.refusal) || ALLOWANCE_UNAVAILABLE;
+    } catch {
+      refusal = ALLOWANCE_UNAVAILABLE;
+    }
+    if (refusal) throw new Error(refusal);
+    /**
+     * Hand back THIS open's claim, when no session came of it — once, however
+     * many paths below reach it. Guarded like every callback here.
+     */
+    const unclaim = () => {
+      const claim = claimed;
+      claimed = undefined;
+      if (claim) notify(() => claim.giveBack());
+    };
+
     // Counted WITH the open runs, and taken before the first await.
     //
     // The check used to sit above a run of awaits — loadPlaywright,
@@ -2408,6 +2503,12 @@ export class RemoteBrowserController {
     // provider session back, so leaving it out of this sum would reopen the
     // exact race this comment describes, just via release instead of open.
     if (this.runs.size + this.opening.size + this.closing.size >= this.maxSessions) {
+      // The unit was claimed for a session this run is not going to get.
+      unclaim();
+      // Guarded, like every notification here: telling the user must not change
+      // what the model is told. And nothing may suspend before the check above
+      // and the reservation below, so this is fire-and-forget.
+      notify(() => this.busyListeners.get(runId)?.({ limit: this.maxSessions }));
       throw new Error(
         `All ${this.maxSessions} browser session${this.maxSessions === 1 ? '' : 's'} are in use by other runs. ` +
         'Try again when one finishes, or raise the session limit in settings.',
@@ -2423,11 +2524,17 @@ export class RemoteBrowserController {
     // statements are synchronous with respect to each other — `openReserved`
     // suspends at its first await and returns here before anything else can
     // run — so the slot is still reserved before any interleaving is possible.
-    const opening = this.openReserved(runId, signal);
+    const claim = { sessionCreated: false };
+    const opening = this.openReserved(runId, signal, claim);
     this.opening.set(runId, opening);
 
     try {
       return await opening;
+    } catch (err) {
+      // Only when nothing was created. A session that exists is billed whether
+      // or not the connection to it then failed, so its unit stays spent.
+      if (!claim.sessionCreated) unclaim();
+      throw err;
     } finally {
       // Released on every path. A reservation that leaked would count against
       // the cap forever and wedge the deployment.
@@ -2436,7 +2543,7 @@ export class RemoteBrowserController {
   }
 
   /** The part that may fail, with the pool slot already reserved. */
-  private async openReserved(runId: string, signal?: AbortSignal): Promise<RunBrowser> {
+  private async openReserved(runId: string, signal?: AbortSignal, claim?: { sessionCreated: boolean }): Promise<RunBrowser> {
     const playwright = await loadPlaywright();
     // `signal` alone is the CASCADE RUN's cancellation, passed down from
     // `act()` — NOT the per-run browser abort `stopRun` fires, which lives in
@@ -2455,6 +2562,9 @@ export class RemoteBrowserController {
     const abort = this.aborts.get(runId)?.signal;
     const creationSignal = signal && abort ? AbortSignal.any([signal, abort]) : (signal ?? abort);
     const session = await this.provider.createSession(creationSignal);
+    // From here the session exists and is billed: the allowance unit claimed
+    // at admission stays spent, whatever happens to the connection after.
+    if (claim) claim.sessionCreated = true;
 
     // Everything past createSession is rolled back on failure. Without this a
     // CDP connection that dies leaves an allocated, billed session with nothing

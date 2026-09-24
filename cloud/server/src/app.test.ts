@@ -327,6 +327,8 @@ describe('cloud/server app', () => {
   });
 
   it('GET /api/usage reports plan and today\'s usage for a signed-in user', async () => {
+    // A deployment whose browser sessions are billed, so they are rationed.
+    await restartWith({ REMOTE_BROWSER_PROVIDER: 'steel', REMOTE_BROWSER_URL: 'https://steel.internal' });
     const loginRes = await fetch(`${baseUrl}/auth/dev-login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -336,7 +338,47 @@ describe('cloud/server app', () => {
 
     const res = await fetch(`${baseUrl}/api/usage`, { headers: { Cookie: cookie } });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ plan: 'free', dailyRuns: 0, dailyRunLimit: 20, maxConcurrentRuns: 1 });
+    // Browser sessions too, so the chip can be off BEFORE a run is refused.
+    expect(await res.json()).toEqual({
+      plan: 'free', dailyRuns: 0, dailyRunLimit: 20, maxConcurrentRuns: 1,
+      browserSessions: 0, browserSessionLimit: 5,
+    });
+  });
+
+  it('GET /api/usage counts the browser sessions this user opened today', async () => {
+    await restartWith({ REMOTE_BROWSER_PROVIDER: 'steel', REMOTE_BROWSER_URL: 'https://steel.internal' });
+    const loginRes = await fetch(`${baseUrl}/auth/dev-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Browser User' }),
+    });
+    const cookie = extractCookie(loginRes, SESSION_COOKIE_NAME)!;
+    const me = (await (await fetch(`${baseUrl}/api/me`, { headers: { Cookie: cookie } })).json()) as { user: { id: string } };
+    const today = new Date().toISOString().slice(0, 10);
+    store.incrementBrowserSessions(me.user.id, today);
+    store.incrementBrowserSessions(me.user.id, today);
+
+    const res = await fetch(`${baseUrl}/api/usage`, { headers: { Cookie: cookie } });
+    const body = (await res.json()) as { browserSessions: number; browserSessionLimit: number };
+    expect(body.browserSessions).toBe(2);
+    expect(body.browserSessionLimit).toBe(5);
+  });
+
+  it('GET /api/usage reports no browser allowance where nothing rations one', async () => {
+    // No browser, or the operator's own CDP endpoint, which opens no session:
+    // a limit reported there is one nothing enforces, and the chip would show
+    // it counting down.
+    const fields = async () => {
+      const loginRes = await fetch(`${baseUrl}/auth/dev-login`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'No Ration' }),
+      });
+      const cookie = extractCookie(loginRes, SESSION_COOKIE_NAME)!;
+      const body = await (await fetch(`${baseUrl}/api/usage`, { headers: { Cookie: cookie } })).json() as Record<string, unknown>;
+      return ['browserSessions', 'browserSessionLimit'].filter((k) => k in body);
+    };
+    expect(await fields(), 'no browser at all').toEqual([]);
+    await restartWith({ REMOTE_BROWSER_PROVIDER: 'cdp', REMOTE_BROWSER_URL: 'ws://browser.internal:3000' });
+    expect(await fields(), 'a CDP endpoint').toEqual([]);
   });
 
   it('dev-login sets a session cookie and /api/me resolves the logged-in user', async () => {

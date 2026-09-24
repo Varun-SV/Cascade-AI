@@ -36,6 +36,9 @@ import { classifyProviderError } from '../router/provider-errors.js';
 import {
   evaluateAcceptance, failures, undecided, type AcceptanceResult,
 } from '../verification/acceptance.js';
+import { ACTING_INTEGRITY_RULE, appendToolRecord, describeHandedWork, describeToolRecord, recordToolCall, type HandedWork, type ToolRecordEntry } from './integrity.js';
+import { RedactionLayer } from '../audit/redaction.js';
+import { BROWSER_TOOL, BROWSER_WORKER_RULE } from './browser-planning.js';
 
 /**
  * Thrown by executeTool() when the underlying tool error indicates a condition
@@ -87,6 +90,10 @@ const KNOWN_TOOLS = [
   // then told nothing about using tools at all, and wrote the video as prose.
   'generate_image', 'generate_video', 'generate_speech', 'transcribe_audio',
   'generate_document',
+  // The same miss again. In browser mode the Web chip is off, so the browser
+  // is often a run's ONLY tool, and a run with just that "had no tools": the
+  // worker was told nothing about using one.
+  BROWSER_TOOL,
 ];
 
 /**
@@ -109,6 +116,7 @@ export function buildWorkerRules(has: (toolName: string) => boolean): string {
       '- If the task asks for a file or artifact, you must actually create it in the workspace, verify that it exists, and inspect it before claiming success.',
     has('web_search') &&
       '- Use the "web_search" tool to find current information, documentation, news, or general web data.',
+    has(BROWSER_TOOL) && BROWSER_WORKER_RULE,
     has('pdf_create') && '- Use the "pdf_create" tool for PDF requests.',
     // A .docx/.pptx/.xlsx is a ZIP of OOXML parts, not text with a suffix.
     // file_write does exactly what it promises — writes the model's characters
@@ -168,6 +176,9 @@ export function buildWorkerRules(has: (toolName: string) => boolean): string {
         has('generate_document') ? 'Do NOT use it to build a .docx, .pptx or .xlsx — "generate_document" already produces those correctly. ' : ''
       }${has('pdf_create') ? 'Do NOT use it to build a PDF — "pdf_create" does that. ' : ''}Always cleanup after code execution.`,
     '- If you are not making meaningful progress, stop and escalate rather than looping or padding the response.',
+    // Every capability, not only the ones with a rule of their own — see
+    // integrity.ts for the run that had none.
+    ACTING_INTEGRITY_RULE,
     has('peer_message') &&
       '- Use the "peer_message" tool to communicate with other T3 workers if your tasks have dependencies or shared state. You can send updates or wait for signals.',
     hasAnyTool &&
@@ -360,6 +371,25 @@ export class T3Worker extends BaseTier {
   private reinforcementDepth = 0;
   /** Sibling-worker requests this worker made via request_workers (T3→T2). */
   private pendingReinforcements: T2ToT3Assignment[] = [];
+  /**
+   * Every tool this subtask called and what it returned, across the first pass
+   * AND every correction round — the self-test grades the output against it.
+   * See describeToolRecord.
+   */
+  private toolRecord: ToolRecordEntry[] = [];
+  /**
+   * What the subtasks this one depends on handed it. Their tool calls are in
+   * THEIR records, so the self-test is shown this to tell a report of what
+   * they did from an invention. See describeHandedWork.
+   */
+  private handedWork: HandedWork[] = [];
+  /**
+   * The tool that actually ran for a call `adaptiveFallback` recovered, by the
+   * call. Kept apart from the result text because the record's older entries
+   * show an outcome, not the text — and a requested `file_remove` answered by
+   * `file_read` must not read as a deletion.
+   */
+  private readonly ranAs = new WeakMap<ToolCall, string>();
   /** @deprecated — kept only as fallback when no escalator is attached */
   private sessionApprovals: Map<string, boolean> = new Map();
   private peerBus?: PeerBus;
@@ -417,6 +447,8 @@ export class T3Worker extends BaseTier {
     this.signal = signal;
     this.assignment = assignment;
     this.taskId = taskId;
+    this.toolRecord = [];
+    this.handedWork = [];
     this.setLabel(assignment.subtaskTitle);
     this.setStatus('ACTIVE');
 
@@ -486,6 +518,7 @@ export class T3Worker extends BaseTier {
             );
           }
           depOutputs.push(`[From ${dep.fromId} - ${dep.subtaskId}]:\n${dep.output}`);
+          this.handedWork.push({ from: dep.subtaskId, output: dep.output });
         } catch (err) {
           this.peerBus.publish(this.id, assignment.subtaskId, `Dependency timeout: ${depId}`, 'FAILED');
           return this.buildResult(
@@ -666,7 +699,18 @@ export class T3Worker extends BaseTier {
       const reflectCfg = this.router.getReflectionConfig?.() ?? { enabled: false, maxRounds: 1 };
       if (reflectCfg.enabled) {
         this.sendStatusUpdate({ progressPct: 85, currentAction: 'Reflecting on output via T2-Critic', status: 'IN_PROGRESS' });
-        output = await this.reflectAndImprove(assignment, output, reflectCfg.maxRounds);
+        const revised = await this.reflectAndImprove(assignment, output, reflectCfg.maxRounds);
+        // The revision is written after the self-test, with no tools, to close
+        // a gap the critic found — the one place an invented result is most
+        // likely. It is graded against the same record as the output it
+        // replaces, and used only if it passes. Reflection is an improvement on
+        // a verified output, so failing it keeps that output, not the subtask.
+        if (revised !== output) {
+          const verdict = await this.selfTest(assignment, revised, pendingAcceptance)
+            .catch(() => ({ failed: ['completeness'] }));
+          if (verdict.failed.length === 0) output = revised;
+          else issues.push(`Reflection's revision failed the self-test (${verdict.failed.join(', ')}); kept the verified output.`);
+        }
       }
 
       // ── Project World State Update ──
@@ -952,6 +996,7 @@ export class T3Worker extends BaseTier {
       for (const tc of effectiveResult.toolCalls) {
         allToolCalls.push(tc);
         const toolResult = await this.executeTool(tc);
+        appendToolRecord(this.toolRecord, recordToolCall(tc.name, toolResult, tc.input, this.ranAs.get(tc)));
         // Bound what enters the context: the WHOLE history is re-sent on every
         // remaining iteration, so an unbounded tool result (big file read,
         // chatty command) multiplies into a token bomb across the loop.
@@ -1209,6 +1254,7 @@ export class T3Worker extends BaseTier {
         });
         const str = typeof result === 'string' ? result : JSON.stringify(result);
         if (!str.startsWith('Tool error:') && !str.startsWith('Error:')) {
+          this.ranAs.set(tc, altTool);
           return `[Fallback via ${altTool}]: ${str}`;
         }
       } catch { /* fall through to next strategy */ }
@@ -1232,7 +1278,10 @@ export class T3Worker extends BaseTier {
             ...(this.signal ? { signal: this.signal } : {}),
           });
           const str = typeof result === 'string' ? result : JSON.stringify(result);
-          if (!str.startsWith('Tool error:')) return `[Synthesized ${newToolName}]: ${str}`;
+          if (!str.startsWith('Tool error:')) {
+            this.ranAs.set(tc, newToolName);
+            return `[Synthesized ${newToolName}]: ${str}`;
+          }
         }
       } catch { /* fall through */ }
     }
@@ -1474,6 +1523,8 @@ ${assignment.expectedOutput}`;
         // manager decomposes the critique into its own T3 subtasks (costing
         // more than the work under review), and those critic-spawned workers
         // would hit this very reflection step again — unbounded recursion.
+        // Secrets out of what the critic reads: it is another model by design,
+        // one that never handled the tool results the output may quote.
         const verdictResult = await this.generateAuxiliary('T2', {
           messages: [{
             role: 'user',
@@ -1482,7 +1533,7 @@ ${assignment.expectedOutput}`;
 Goal: ${assignment.expectedOutput}
 Subtask: ${assignment.description}
 Current Output:
-${current}
+${RedactionLayer.redactSecrets(current)}
 
 Is this output sufficient and correct? Respond with ONLY a JSON object:
 {"sufficient": true|false, "notes": "what is wrong or missing if false"}`,
@@ -1509,13 +1560,16 @@ Is this output sufficient and correct? Respond with ONLY a JSON object:
             role: 'user',
             content: `Improve the following so it fully achieves the goal. Address specifically: ${parsed.notes ?? 'gaps vs the goal'}.
 Output ONLY the improved result — no preamble, no commentary.
+You have no tools in this step: improve only what the current output already supports. Where the gap is work that was never done, say so rather than supplying it.
 
 Goal / expected: ${assignment.expectedOutput}
 
 Current output:
 ${current}`,
           }],
-          systemPrompt: this.systemPromptOverride + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
+          // A tool-less rewrite told to "fully achieve the goal" can only close a
+          // gap in real work by making it up.
+          systemPrompt: this.systemPromptOverride + ACTING_INTEGRITY_RULE + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
           maxTokens: 4096,
           featureTag: assignment.sectionTitle,
           ...(this.signal ? { signal: this.signal } : {}),
@@ -1576,6 +1630,9 @@ ${current}`,
     pendingAcceptance?: readonly string[],
   ): Promise<{ checksRun: string[]; passed: string[]; failed: string[] }> {
     const acceptance = pendingAcceptance ?? assignment.acceptance ?? [];
+    // Secrets out of the output as well as the record: the grader can be a
+    // different provider, and an output can quote what a tool returned.
+    const shownOutput = RedactionLayer.redactSecrets(output);
     const prompt = `Self-test this output against the assignment requirements.
 
 Assignment: ${assignment.description}
@@ -1585,7 +1642,16 @@ ${acceptance.length ? `Acceptance criteria — ALL must be satisfied for "comple
 ${acceptance.map((a) => `- ${a}`).join('\n')}
 ` : ''}
 Output to test:
-${output}
+${shownOutput}
+
+Tool calls actually made while producing it (tool and what it was asked to do → what it returned):
+${describeToolRecord(this.toolRecord, shownOutput)}
+(A [REDACTED_…] marker is a credential taken out of this record, not missing from the tool's result. "[ran as X]" means the tool asked for could not run and X ran in its place: only what X does happened. Each call shows the start of its result; the passages are the parts of the results that share the output's words and figures, so what the output took from a tool should be among them.)
+${this.handedWork.length ? `
+Work handed to this subtask by the subtasks it depends on, which made their own tool calls:
+${describeHandedWork(this.handedWork, shownOutput)}
+` : ''}
+"correctness" MUST be "fail" if the output presents simulated, hypothetical or invented results as real, or claims an action — visiting a site, logging in, running code, fetching a page, writing a file, sending something — that no tool call above actually performed — a call that returned an error or a refusal performed nothing, but a later retry that succeeded did.${this.handedWork.length ? ' An action or result that the handed work above reports is supported too: the subtask that did that work made those calls, so the output may pass it on.' : ''} An output that plainly says it could not do something is honest: judge that on completeness, not correctness.
 
 Reply with JSON: { "completeness": "pass"|"fail", "correctness": "pass"|"fail", "compliance": "pass"|"fail", "notes": "string" }`;
 
@@ -1674,12 +1740,16 @@ ${output.slice(0, 4000)}`;
 Original output:
 ${originalOutput}
 
-Correct the issues and provide an improved version that addresses all failures.`;
+Correct the issues and provide an improved version that addresses all failures. If an issue cannot be fixed because a tool is missing, or keeps failing or refusing, say so plainly instead — never invent the missing result.`;
 
     await this.context.addMessage({ role: 'user', content: correctionPrompt });
 
     const result = await this.runAgentLoop(
-      "You are in a correction phase. Fix the identified issues using your tools." + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
+      // This REPLACES the worker's system prompt for the round, so the rule
+      // has to travel with it — and a round that exists to make a failed check
+      // pass is where covering a gap is most tempting.
+      `You are in a correction phase. Fix the identified issues using your tools.\n\n${ACTING_INTEGRITY_RULE}`
+        + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
       this.tools
     );
     return result.output;

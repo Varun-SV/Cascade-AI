@@ -20,7 +20,7 @@ import {
   parseCookies,
   type AuthedRequest,
 } from './auth/session.js';
-import { providerIsUsable } from './remote-browser.js';
+import { providerIsUsable, providerRationsSessions } from './remote-browser.js';
 import { remoteBrowserControls } from './runs.js';
 import { NativeAuthStore, isLoopbackRedirect, hashRefreshToken } from './native-auth.js';
 import { githubAuthUrl, exchangeGithubCode, googleAuthUrl, exchangeGoogleCode, type OAuthProfile } from './auth/oauth.js';
@@ -1307,7 +1307,18 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     const plan = user?.plan ?? 'free';
     const limits = limitsForPlan(plan);
     const used = store.getUsage(req.session!.userId, todayKey());
-    res.json({ plan, dailyRuns: used, dailyRunLimit: limits.dailyRuns, maxConcurrentRuns: limits.maxConcurrentRuns });
+    res.json({
+      plan, dailyRuns: used, dailyRunLimit: limits.dailyRuns, maxConcurrentRuns: limits.maxConcurrentRuns,
+      // So the Browser chip can be off BEFORE a run is refused, not after —
+      // and only where sessions are rationed. Reported for a deployment that
+      // does not count them, the chip would show a limit nothing enforces.
+      ...(providerRationsSessions(remoteBrowserControls(env).remoteBrowser)
+        ? {
+          browserSessions: store.getBrowserSessions(req.session!.userId, todayKey()),
+          browserSessionLimit: limits.dailyBrowserSessions,
+        }
+        : {}),
+    });
   });
 
   // ── Billing (Razorpay recurring subscriptions) ──

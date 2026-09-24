@@ -852,3 +852,65 @@ describe('CloudStore — stored document text', () => {
     expect(store.totalAttachmentChars(alice.id), 'and its text no longer counts').toBe(0);
   });
 });
+
+describe('CloudStore — browser sessions on a database from before they were counted', () => {
+  let dir: string;
+  afterEach(async () => { await fs.rm(dir, { recursive: true, force: true }); });
+
+  it('adds the column on boot and keeps the runs already counted', async () => {
+    // Every deployed database predates the column, and `usage` has a row per
+    // user per day that must survive: the runs counted today are still today's.
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-db-browser-'));
+    const file = path.join(dir, 'cloud.db');
+    const first = new CloudStore(file);
+    const user = first.upsertUser({ provider: 'dev', providerId: 'old', email: null, name: null, avatar: null });
+    first.close();
+
+    const raw = new Database(file);
+    raw.exec('ALTER TABLE usage DROP COLUMN browser_sessions');
+    raw.prepare('INSERT INTO usage (user_id, date, runs) VALUES (?, ?, 3)').run(user.id, '2026-09-23');
+    raw.close();
+
+    const store = new CloudStore(file);
+    try {
+      expect(store.getUsage(user.id, '2026-09-23')).toBe(3);
+      expect(store.getBrowserSessions(user.id, '2026-09-23')).toBe(0);
+      expect(store.incrementBrowserSessions(user.id, '2026-09-23')).toBe(1);
+      expect(store.getUsage(user.id, '2026-09-23'), 'the runs row was updated, not replaced').toBe(3);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('CloudStore — claiming a browser session', () => {
+  let dir: string;
+  let store: CloudStore;
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-db-claim-'));
+    store = new CloudStore(path.join(dir, 'cloud.db'));
+  });
+  afterEach(async () => { store.close(); await fs.rm(dir, { recursive: true, force: true }); });
+
+  it('claims only while the count is under the limit — the check and the count are one statement', () => {
+    const user = store.upsertUser({ provider: 'dev', providerId: 'claimer', email: null, name: null, avatar: null });
+    expect(store.takeBrowserSession(user.id, '2026-09-23', 2)).toBe(true);
+    expect(store.takeBrowserSession(user.id, '2026-09-23', 2)).toBe(true);
+    expect(store.takeBrowserSession(user.id, '2026-09-23', 2), 'the third is refused').toBe(false);
+    expect(store.getBrowserSessions(user.id, '2026-09-23')).toBe(2);
+  });
+
+  it('claims against a day that has no row yet, and leaves its runs at zero', () => {
+    const user = store.upsertUser({ provider: 'dev', providerId: 'fresh', email: null, name: null, avatar: null });
+    expect(store.takeBrowserSession(user.id, '2026-09-23', 5)).toBe(true);
+    expect(store.getUsage(user.id, '2026-09-23')).toBe(0);
+  });
+
+  it('never gives back below zero', () => {
+    const user = store.upsertUser({ provider: 'dev', providerId: 'refund', email: null, name: null, avatar: null });
+    store.takeBrowserSession(user.id, '2026-09-23', 5);
+    store.giveBackBrowserSession(user.id, '2026-09-23');
+    store.giveBackBrowserSession(user.id, '2026-09-23');
+    expect(store.getBrowserSessions(user.id, '2026-09-23')).toBe(0);
+  });
+});
