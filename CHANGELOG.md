@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
 ### Added
+- **The MIT License text, in `LICENSE`.** Cascade AI was already declared
+  MIT in its package metadata and README, but the licence itself was not in
+  the repository, so the README's licence link went nowhere. It now ships at
+  the root and in the npm package.
 - **A daily allowance of browser sessions: 5 a day on Free, 50 on Pro.** A
   session is claimed the moment one is about to be opened, which is what the
   provider bills for, and returned if none was, so a Browser-chip run that
