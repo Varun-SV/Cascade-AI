@@ -75,6 +75,18 @@ const PATH_TOOLS = new Set([
   'glob', 'grep', 'image_analyze', 'pdf_create', 'generate_document', 'transcribe_audio',
 ]);
 
+/**
+ * Built-in tools that send what they are given off this machine — to a web
+ * page or search engine, GitHub, a media or transcription provider, or the
+ * embedder and reranker behind the code index. A local-only subtask may not
+ * use them: its arguments can carry what it read. MCP tools count too; which
+ * server is behind one, and where it sends things, is not known here.
+ */
+const OFF_MACHINE_TOOLS = new Set([
+  'web_fetch', 'web_search', 'browser', 'browser_control', 'github',
+  'generate_image', 'generate_speech', 'generate_video', 'transcribe_audio', 'code_search',
+]);
+
 export class ToolRegistry extends EventEmitter {
   private tools: Map<string, BaseTool> = new Map();
   private config: ToolsConfig;
@@ -244,6 +256,10 @@ export class ToolRegistry extends EventEmitter {
   ): Promise<string> {
     const tool = this.tools.get(toolName);
     if (!tool) throw new Error(`Tool not found: ${toolName}`);
+
+    if (options.isOffline?.() && (OFF_MACHINE_TOOLS.has(toolName) || tool instanceof McpToolWrapper)) {
+      throw new Error(`${toolName} is unavailable to a local-only subtask (privacy.paths): it would send what the subtask knows off this machine.`);
+    }
 
     // Enforce .cascadeignore and the built-in protected paths for every tool
     // that takes a path. It used to cover the four file_* tools only, so grep

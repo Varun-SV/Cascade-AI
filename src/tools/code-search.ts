@@ -37,21 +37,24 @@ export class CodeSearchTool extends BaseTool {
     if (!query) return 'Provide a "query" to search the codebase.';
     const k = typeof input['k'] === 'number' ? Math.max(1, Math.min(20, input['k'])) : 6;
 
+    // The index leaves out protected and local-only files, but one built
+    // before they were can still hold them. They are dropped before the
+    // reranker sees them — it sends each candidate to a model, which counts
+    // as an outside service for a local-only file.
+    const root = this.index.getRoot();
+    const toService = this.readGate(options, 'service');
+    const excluded = (sourceId: string): boolean => {
+      const abs = path.resolve(root, sourceId);
+      return this.isProtectedPath(abs) || !toService(abs);
+    };
+
     let hits;
     try {
-      hits = await this.index.search(query, k);
+      hits = await this.index.search(query, k, excluded);
     } catch (err) {
       return `Code search failed: ${err instanceof Error ? err.message : String(err)}`;
     }
-    if (hits.length === 0) return 'No relevant code found in the workspace index.';
-
-    // The index leaves out protected and local-only files, but one built
-    // before they were — or not refreshed since — can still hold them.
-    const mayRead = this.readGate(options);
-    const shown = hits.filter((h) => {
-      const abs = path.resolve(this.index.getRoot(), h.sourceId);
-      return !this.isProtectedPath(abs) && mayRead(abs);
-    });
+    const shown = hits.filter((h) => !excluded(h.sourceId));
     if (shown.length === 0) return 'No relevant code found in the workspace index.';
 
     let out = '';

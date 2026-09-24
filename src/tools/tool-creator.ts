@@ -278,19 +278,26 @@ class DynamicTool extends BaseTool {
       }
     };
 
+    // fetch is the guest's way off the machine. Asked at the moment of sending:
+    // a local-only file read through callTool earlier in this same run makes
+    // the caller local-only, and what the guest read must then stay here.
+    const sendOut: typeof bridgeFetch = async (url, init) => (options.isOffline?.()
+      ? { __error: 'fetch is unavailable to a local-only subtask (privacy.paths).' }
+      : bridgeFetch(url, init));
+
     // Choose the executor. 'isolate'/'auto' prefer the hard V8 isolate, and run
     // in the WebAssembly sandbox when isolated-vm isn't loadable ('isolate' says
     // so once); 'wasm' always uses the WebAssembly sandbox. Both confine the code.
     const mode = this.getSandboxMode();
     if (mode !== 'wasm') {
       const ivm = await loadIsolatedVm();
-      if (ivm) return this.runInIsolate(ivm, input, callTool);
+      if (ivm) return this.runInIsolate(ivm, input, callTool, sendOut);
       if (mode === 'isolate' && !ivmWarned) {
         ivmWarned = true;
         this.log('[tool-creator] isolated-vm is not available (not installed or failed to build) — dynamic tools run in the WebAssembly sandbox instead, which confines them the same way.');
       }
     }
-    return this.runInWasm(input, callTool);
+    return this.runInWasm(input, callTool, sendOut);
   }
 
   /**
@@ -306,6 +313,7 @@ class DynamicTool extends BaseTool {
     ivm: IvmModule,
     input: Record<string, unknown>,
     callTool: (name: string, input: Record<string, unknown>) => Promise<string>,
+    sendOut: typeof bridgeFetch,
   ): Promise<string> {
     const timeoutMs = Math.max(200, Number(process.env['CASCADE_DYNAMIC_TOOL_TIMEOUT_MS']) || DYNAMIC_TOOL_TIMEOUT_MS);
     const isolate = new ivm.Isolate({ memoryLimit: 128 });
@@ -323,7 +331,7 @@ class DynamicTool extends BaseTool {
         return String(out);
       }));
       await jail.set('_fetch', new ivm.Reference(async (url: string, initJson: string) => {
-        const r = await bridgeFetch(String(url), safeJsonParse(initJson));
+        const r = await sendOut(String(url), safeJsonParse(initJson));
         return JSON.stringify(r);
       }));
       await jail.set('_input', new ivm.ExternalCopy(input).copyInto());
@@ -383,12 +391,13 @@ class DynamicTool extends BaseTool {
   private async runInWasm(
     input: Record<string, unknown>,
     callTool: (name: string, input: Record<string, unknown>) => Promise<string>,
+    sendOut: typeof bridgeFetch,
   ): Promise<string> {
     const timeoutMs = Math.max(200, Number(process.env['CASCADE_DYNAMIC_TOOL_TIMEOUT_MS']) || DYNAMIC_TOOL_TIMEOUT_MS);
     const outcome = await runInWasmSandbox(this.executeCode, input, {
       callTool,
       fetch: async (url, init) => {
-        const r = await bridgeFetch(url, init);
+        const r = await sendOut(url, init);
         if ('__error' in r) throw new Error(r.__error);
         return JSON.stringify(r);
       },

@@ -331,6 +331,13 @@ export interface ToolExecuteOptions {
    * Absent, every read is allowed.
    */
   mayRead?: (absPath: string, to: 'model' | 'service') => boolean;
+  /**
+   * True once the tier running the call is local-only (privacy.paths):
+   * nothing it knows may leave this machine, so tools that send what they are
+   * given elsewhere are refused. A function, asked at the moment of sending:
+   * a read earlier in the same call can be what makes it so.
+   */
+  isOffline?: () => boolean;
   saveSnapshot?: (filePath: string, content: string) => Promise<void>;
   sendPeerSync?: (
     to: string,

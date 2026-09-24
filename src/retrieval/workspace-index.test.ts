@@ -98,4 +98,43 @@ describe('WorkspaceIndex', () => {
     expect(hits.some((h) => h.sourceId === 'secret.ts')).toBe(false);
     expect(hits.every((h) => h.sourceId === 'keep.ts')).toBe(true);
   });
+
+  // An index built before a file was protected still holds its text. The
+  // reranker sends each candidate's text to a model, so leaving the file out
+  // of what is returned was not enough: it had to be gone before reranking.
+  describe('a file protected after it was indexed', () => {
+    const SECRET = 'sk-live-0123456789';
+    const seed = async () => {
+      await fs.mkdir(path.join(root, '.cascade'), { recursive: true });
+      await fs.writeFile(path.join(root, '.cascade', 'config.json'), `{ "apiKey": "${SECRET}" }`);
+      await fs.writeFile(path.join(root, 'keys.ts'), 'export function loadApiKey() { return process.env.KEY; }');
+      await fs.writeFile(path.join(root, 'rotate.ts'), 'export function rotateApiKey(key: string) { return key; }');
+      await make().refresh(); // indexed while nothing protected it
+    };
+    const isIgnored = (abs: string) => abs.endsWith(path.join('.cascade', 'config.json'));
+
+    it('never reaches the reranker when the caller excludes it', async () => {
+      await seed();
+      const seen: string[] = [];
+      const idx = new WorkspaceIndex({
+        root, db, embedder: new FakeEmbedder(), isIgnored,
+        reranker: { rerank: async (_q, candidates, k) => { seen.push(...candidates.map((c) => c.text)); return candidates.slice(0, k); } },
+      });
+      const hits = await idx.search('api key', 5, (sourceId) => sourceId === '.cascade/config.json');
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen.join('\n')).not.toContain(SECRET);
+      expect(hits.map((h) => h.sourceId)).not.toContain('.cascade/config.json');
+    });
+
+    it('is dropped by prune(), without a refresh', async () => {
+      await seed();
+      const idx = new WorkspaceIndex({ root, db, embedder: new FakeEmbedder(), isIgnored });
+      expect((await idx.search('apiKey sk live', 5)).some((h) => h.text.includes(SECRET))).toBe(true);
+      expect(idx.prune()).toBe(1);
+      expect((await idx.search('apiKey sk live', 5)).some((h) => h.text.includes(SECRET))).toBe(false);
+      expect(idx.prune()).toBe(0);
+      // …and a later refresh does not bring it back.
+      expect((await idx.refresh()).filesIndexed).toBe(0);
+    });
+  });
 });

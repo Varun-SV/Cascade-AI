@@ -317,3 +317,24 @@ describe('ToolRegistry — protected paths hold for every tool that takes one', 
     await expect(reg.execute('file_write', { path: 'out/new.txt', content: 'x' }, opts)).rejects.toThrow(/cascadeignore/);
   });
 });
+
+describe('ToolRegistry — nothing leaves the machine for a local-only caller', () => {
+  it('refuses the tools that send their arguments elsewhere, and only while the caller is local-only', async () => {
+    const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-offline-'));
+    const reg = new ToolRegistry(
+      { shellAllowlist: [], shellBlocklist: [], webSearch: {}, browserEnabled: false, requireApprovalFor: [] } as never,
+      ws,
+    );
+    await fs.writeFile(path.join(ws, 'a.txt'), 'local', 'utf-8');
+    const offline = { tierId: 't3', sessionId: 's', requireApproval: false, isOffline: () => true };
+    for (const name of ['web_fetch', 'web_search'].filter((n) => reg.hasTool(n))) {
+      await expect(reg.execute(name, { url: 'https://example.com', query: 'x' }, offline), name)
+        .rejects.toThrow(/unavailable to a local-only subtask/);
+    }
+    expect(reg.hasTool('web_fetch')).toBe(true);
+    // Work on this machine carries on.
+    expect(await reg.execute('file_read', { path: 'a.txt' }, offline)).toContain('local');
+    await fs.rm(ws, { recursive: true, force: true });
+  });
+});
+

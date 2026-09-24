@@ -93,3 +93,43 @@ describe('File tools — reading only what the running tier allows', () => {
     expect(out.attachment.data).toBe(Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString('base64'));
   });
 });
+
+describe('File tools — a workspace opened through a symlink', () => {
+  // The real paths of its files all lie under the root's real path, which the
+  // check compared against the name the workspace was opened by — so every
+  // file in it looked like an escape.
+  let real: string;
+  let link: string;
+
+  beforeEach(async () => {
+    real = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-real-'));
+    link = `${real}-link`;
+    await fs.symlink(real, link);
+    await fs.writeFile(path.join(real, 'hello.txt'), 'hi through a link\n', 'utf-8');
+    await fs.writeFile(path.join(real, 'shot.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  });
+
+  afterEach(async () => {
+    await fs.rm(link, { force: true });
+    await fs.rm(real, { recursive: true, force: true });
+  });
+
+  it('reads its files, and still refuses a way out of it', async () => {
+    const tool = new FileReadTool();
+    tool.setWorkspaceRoot(link);
+    expect(await tool.execute({ path: 'hello.txt' }, opts)).toContain('hi through a link');
+    const outside = path.join(os.tmpdir(), `cascade-outside-${path.basename(real)}.txt`);
+    await fs.writeFile(outside, 'not yours', 'utf-8');
+    await fs.symlink(outside, path.join(real, 'out'));
+    await expect(tool.execute({ path: 'out' }, opts)).rejects.toThrow(/workspace/i);
+    await fs.rm(outside, { force: true });
+  });
+
+  it('lets image_analyze read an image in it', async () => {
+    const { ImageAnalyzeTool } = await import('./image.js');
+    const tool = new ImageAnalyzeTool();
+    tool.setWorkspaceRoot(link);
+    const out = JSON.parse(await tool.execute({ path: 'shot.png' }, opts as never)) as { attachment: { data: string } };
+    expect(out.attachment.data).toBe(Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString('base64'));
+  });
+});

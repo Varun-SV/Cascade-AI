@@ -12,15 +12,22 @@ const ignore = (_ignoreModule as unknown as { default: () => Ignore }).default ?
 /**
  * Paths no agent tool may read or write, whatever `.cascadeignore` says.
  * Cascade's own files come first: `.cascade/config.json` holds provider keys
- * in plain JSON, `dashboard-secret` signs dashboard sessions, and the SQLite
- * store's `-wal`/`-shm` files hold the same data as the database itself.
+ * in plain JSON, `dashboard-secret` signs dashboard sessions, the audit trail
+ * and the project's world state are databases with their keys beside them,
+ * and the code index holds the text of every file it embedded. A SQLite
+ * database's `-wal`/`-shm` files hold the same data as the database itself.
  */
 export const BUILT_IN_PROTECTED: readonly string[] = [
   '.cascade/config.json',
   '.cascade/dashboard-secret',
   '.cascade/keystore.enc',
   '.cascade/memory.db*',
+  '.cascade/audit_log.db*',
+  '.cascade/audit_log.key',
   '.cascade/audit.log',
+  '.cascade/world_state.db*',
+  '.cascade/world_state.key',
+  '.cascade/code-index.db*',
   '.env',
   '.env.*',
   '*.pem',
@@ -65,9 +72,13 @@ export class CascadeIgnore {
 
   isIgnored(filePath: string, workspacePath?: string): boolean {
     try {
-      const relative = workspacePath
+      const native = workspacePath
         ? path.relative(workspacePath, filePath)
         : filePath;
+      // gitignore paths are slash-separated. `ignore` converts Windows
+      // separators itself, but only by sniffing the platform; the registry
+      // hands it POSIX paths explicitly, and so does this.
+      const relative = native.split(path.sep).join('/');
       return this.builtIn.ignores(relative) || this.ig.ignores(relative);
     } catch {
       return false;
@@ -104,6 +115,11 @@ id_ed25519
 .cascade/dashboard-secret
 .cascade/keystore.enc
 .cascade/memory.db*
+.cascade/audit_log.db*
+.cascade/audit_log.key
+.cascade/world_state.db*
+.cascade/world_state.key
+.cascade/code-index.db*
 
 # Build artifacts
 node_modules/

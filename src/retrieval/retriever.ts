@@ -22,6 +22,12 @@ export interface RetrieverSearchOptions {
   rrfK?: number;
   /** Rerank the fused candidates when a reranker is configured (default true). */
   rerank?: boolean;
+  /**
+   * Sources to leave out. Applied before the reranker, which sends each
+   * candidate's text to a model: a source that must not be shown must not be
+   * sent there either.
+   */
+  exclude?: (sourceId: string) => boolean;
   /** Abort the query embedding when the run is cancelled. */
   signal?: AbortSignal;
 }
@@ -257,7 +263,9 @@ export class Retriever {
       // An abort is not a hiccup: the caller asked to stop, so it propagates.
       opts.signal?.throwIfAborted();
     }
-    const fused = reciprocalRankFusion([lexical, dense], opts.rrfK ?? 60);
+    const exclude = opts.exclude;
+    const fused = reciprocalRankFusion([lexical, dense], opts.rrfK ?? 60)
+      .filter((c) => !exclude?.(c.sourceId));
 
     // Second stage: rerank the fused survivors when a reranker is configured.
     // The reranker itself falls back to input order on any failure, so this

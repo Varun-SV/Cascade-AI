@@ -822,7 +822,7 @@ Cascade also has an encrypted keystore — the OS keychain (macOS Keychain, Wind
 - **Permission escalation** — a worker that needs more than it was given asks up the chain, T3 → T2 → T1 → you.
 - **SSRF-guarded fetching** — `web_fetch`, dynamic tools and hosted search backends cannot reach private or link-local addresses, checked again at connect time.
 - **Secret redaction** — secrets and PII are stripped from a worker's output before it travels up the hierarchy.
-- **Privacy paths** — `privacy.paths` keeps sensitive folders on local models. A worker whose assignment names a matching path runs on a private model from the start. One that reads a matching file on the way — with `file_read`, `grep`, `image_analyze` or `code_search` — moves to a private model at that moment, before what it read reaches any model, or is refused the read when no private model is configured. Either way its output is withheld from the tiers above, and it can no longer message its peers or ask for more workers. Local-only files are never put in the code index or sent to a transcription service. `shell`, `run_code` and `git` are not checked: they ask for approval, and an OS-level jail for them is on the [Roadmap](#roadmap).
+- **Privacy paths** — `privacy.paths` keeps sensitive folders on private models: ones whose endpoint is on this machine or your private network, whatever their pricing says. A worker whose assignment names a matching path runs on one from the start. One that reads a matching file on the way — with `file_read`, `grep` or `image_analyze` — moves to one at that moment, before what it read reaches any model, or is refused the read when no private model is configured. Either way its output is withheld from the tiers above, and nothing it knows leaves the machine through Cascade's tools: it cannot message its peers or ask for more workers, the tools that send their arguments elsewhere are refused to it — web and browser, GitHub, media generation and transcription, `code_search`, MCP — and a tool the agent wrote cannot `fetch` once it has read such a file. Local-only files are never put in the code index or shown to its reranker. `shell`, `run_code` and `git` are not checked: they ask for approval, and an OS-level jail for them is on the [Roadmap](#roadmap).
 - **Hash-chained audit log** — entries are encrypted and chained with SHA-256; `/audit` checks the chain. That catches an edited or removed entry in the middle, but not a removed tail, a chain recomputed by someone with write access, or a deleted database: the chain has no key and no anchor outside the log.
 - **Budget kill-switch** — a run stops at its token budget, and `/continue` resumes it with a raised one. A session spending cap set with `/budget set` stops runs too; `/continue` does not lift it, so raise it or `/budget clear` first.
 
@@ -831,7 +831,8 @@ Cascade also has an encrypted keystore — the OS keychain (macOS Keychain, Wind
 ### .cascadeignore
 
 Always protected, whatever `.cascadeignore` says — a `!` line cannot undo these:
-- `.cascade/config.json` (provider keys), `.cascade/dashboard-secret`, `.cascade/keystore.enc`, `.cascade/memory.db*`, `.cascade/audit.log`
+- `.cascade/config.json` (provider keys), `.cascade/dashboard-secret`, `.cascade/keystore.enc`, `.cascade/memory.db*`
+- the audit trail and the project's world state — `.cascade/audit_log.db*`, `.cascade/world_state.db*` and their `.key` files — and the code index, `.cascade/code-index.db*`
 - `.env`, `.env.*`
 - `*.pem`, `*.key`, `id_rsa`, `id_ed25519`
 

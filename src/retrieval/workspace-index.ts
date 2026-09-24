@@ -175,9 +175,30 @@ export class WorkspaceIndex {
     return this.root;
   }
 
-  /** Hybrid + reranked search over the indexed codebase. */
-  async search(query: string, k = 8): Promise<ScoredChunk[]> {
-    return this.retriever.search(query, { namespace: this.namespace, k, candidates: 40 });
+  /**
+   * Hybrid + reranked search over the indexed codebase. `exclude` drops a
+   * file's chunks before they are reranked — the reranker sends their text to
+   * a model — as well as from what is returned.
+   */
+  async search(query: string, k = 8, exclude?: (sourceId: string) => boolean): Promise<ScoredChunk[]> {
+    return this.retriever.search(query, { namespace: this.namespace, k, candidates: 40, exclude });
+  }
+
+  /**
+   * Drop every indexed file the ignore predicate now covers, without reading
+   * or embedding anything. A refresh does this too, as part of a full scan;
+   * this is for an index that is searched without one, which would otherwise
+   * keep the text of a file protected since it was indexed.
+   */
+  prune(): number {
+    const stored = this.loadStoredManifest();
+    if (!stored) return 0;
+    const dropped = Object.keys(stored.files).filter((rel) => this.isIgnored(path.join(this.root, rel)));
+    if (dropped.length === 0) return 0;
+    for (const rel of dropped) this.store.deleteSource(this.namespace, rel);
+    const del = this.db.prepare('DELETE FROM code_manifest WHERE namespace = ? AND path = ?');
+    for (const rel of dropped) del.run(this.namespace, rel);
+    return dropped.length;
   }
 }
 

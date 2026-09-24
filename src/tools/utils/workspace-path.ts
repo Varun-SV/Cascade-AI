@@ -36,9 +36,14 @@ export function resolveInWorkspace(workspaceRoot: string, input: string): string
   }
 
   // Dereference symlinks so a link inside the workspace pointing outside is caught.
+  // The root is dereferenced too: a workspace opened through a symlink (or
+  // under macOS's /tmp and /var) has files whose real paths all lie under the
+  // root's real path, not under the name it was opened by.
   try {
     const real = fs.realpathSync(abs);
-    const realRel = path.relative(root, real);
+    let realRoot = root;
+    try { realRoot = fs.realpathSync(root); } catch { /* compare against the name given */ }
+    const realRel = path.relative(realRoot, real);
     if (realRel !== '' && realRel !== '.' && (realRel.startsWith('..') || path.isAbsolute(realRel))) {
       throw new WorkspaceSandboxError(input, root);
     }

@@ -1148,6 +1148,7 @@ export class T3Worker extends BaseTier {
         // still pays for an image nobody will see.
         ...(this.signal ? { signal: this.signal } : {}),
         mayRead: this.mayRead,
+        isOffline: this.isOffline,
         saveSnapshot: async (path, content) => {
           this.store?.addFileSnapshot(this.taskId, path, content);
         },
@@ -1257,6 +1258,7 @@ export class T3Worker extends BaseTier {
           requireApproval: false,
           ...(this.signal ? { signal: this.signal } : {}),
           mayRead: this.mayRead,
+          isOffline: this.isOffline,
         });
         const str = typeof result === 'string' ? result : JSON.stringify(result);
         if (!str.startsWith('Tool error:') && !str.startsWith('Error:')) {
@@ -1285,6 +1287,7 @@ export class T3Worker extends BaseTier {
             requireApproval: false,
             ...(this.signal ? { signal: this.signal } : {}),
             mayRead: this.mayRead,
+            isOffline: this.isOffline,
           });
           const str = typeof result === 'string' ? result : JSON.stringify(result);
           if (!str.startsWith('Tool error:')) {
@@ -1439,6 +1442,9 @@ export class T3Worker extends BaseTier {
     this.log(`Privacy: read ${rel}, a local-only path — this subtask now runs on a private model only, and its raw output will be withheld upstream.`);
     return true;
   };
+
+  /** Whether nothing this worker knows may leave the machine; see `ToolExecuteOptions.isOffline`. */
+  private readonly isOffline = (): boolean => this.localOnlyMatch;
 
   private extractArtifactPaths(assignment: T2ToT3Assignment): string[] {
     // Spec-declared files verify deterministically; regex over the prose is

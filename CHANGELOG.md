@@ -55,6 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the lines to allow it.
 
 ### Fixed
+- **File tools work in a workspace opened through a symlink.** Each file's
+  real path was checked against the workspace's name rather than its real
+  path, so every file looked like an escape — which on macOS includes any
+  workspace under `/tmp` or `/var`.
 - **Maths in an answer is typeset, whichever way the model wrote it.** GPT
   and Gemini write `\(…\)` and `\[…\]`, which Markdown reads as escaped
   brackets, so an equation reached the web chat as
@@ -148,8 +152,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider keys in plain JSON, and nothing protected it: `file_read`
   returned it, `grep` printed its lines, and the code index could embed it
   and hand it back through `code_search`. It is now always protected, with
-  the dashboard secret, the session database and the audit log, and no
-  `.cascadeignore` line can undo that. Protection covers every tool that
+  the dashboard secret, the session database, the audit trail and the
+  project's world state (with their keys) and the code index, and no
+  `.cascadeignore` line can undo that. An index built before is pruned of
+  such files, and nothing is shown to its reranker that could not be shown. Protection covers every tool that
   takes a path — `grep`, `glob` and `file_list` among them, which used to
   see everything, and could search outside the workspace — and follows
   symlinks.
@@ -164,12 +170,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`privacy.paths` is enforced when a file is read.** It applied only to a
   subtask whose assignment named a matching path, so a worker that came
   across the file by search read it on a cloud model. Reading a local-only
-  file with `file_read`, `grep`, `image_analyze` or `code_search` now moves
-  the subtask to a private model before the contents reach any model, or
-  refuses the read when there is none. A local-only subtask can no longer
-  message its peers, ask for more workers or have a replacement tool
-  written for it, and local-only files are kept out of the code index and
-  never sent for transcription.
+  file with `file_read`, `grep` or `image_analyze` now moves the subtask to
+  a private model before the contents reach any model, or refuses the read
+  when there is none. Nothing a local-only subtask knows leaves the machine
+  through Cascade's tools: it cannot message its peers, ask for more
+  workers or have a replacement tool written for it; web, browser, GitHub,
+  media, `code_search` and MCP tools are refused to it; and a tool the
+  agent wrote cannot `fetch` once it has read a local-only file. Local-only
+  files are kept out of the code index and never sent for transcription.
+- **A private model is one whose endpoint is private.** `forceLocal` chose
+  any model marked `isLocal` — which means it costs $0 — so an
+  OpenAI-compatible server on a public host configured with `local: true`,
+  or an Ollama pointed at someone else's machine, was sent local-only
+  subtasks. It is now judged by the endpoint's host: this machine, a
+  private network range or a `.local` name.
 
 ## 0.82.0 - 2026-09-22
 

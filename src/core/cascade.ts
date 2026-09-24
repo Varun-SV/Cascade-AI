@@ -369,6 +369,11 @@ export class Cascade extends EventEmitter {
     if (ci.autoRefresh) {
       const res = await index.refresh();
       this.emit('log', { level: 'info', message: `Code index refreshed: ${res.filesIndexed} indexed, ${res.filesUnchanged} unchanged, ${res.chunks} chunks.` });
+    } else {
+      // No refresh to drop them, so drop them here: files protected or made
+      // local-only since they were indexed.
+      const pruned = index.prune();
+      if (pruned) this.emit('log', { level: 'info', message: `Code index: dropped ${pruned} file(s) that are now protected or local-only.` });
     }
     this.codeIndex = index;
     this.toolRegistry.register(new CodeSearchTool(index));
