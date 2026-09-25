@@ -355,9 +355,9 @@ describe('cloud/server app', () => {
 
   it('GET /api/usage counts the browser sessions this user opened today', async () => {
     await restartWith({
+      CASCADE_DEPLOYMENT_MODE: 'hosted',
       REMOTE_BROWSER_PROVIDER: 'steel',
-      REMOTE_BROWSER_URL: 'https://api.steel.dev',
-      REMOTE_BROWSER_API_KEY: 'sk-test',
+      REMOTE_BROWSER_URL: 'https://steel.internal',
     });
     const loginRes = await fetch(`${baseUrl}/auth/dev-login`, {
       method: 'POST',
