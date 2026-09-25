@@ -118,7 +118,11 @@ export function projectStateDir(workspacePath: string): string {
         recordIdentity(root, dir);
         moveOwnKeys(dir);
       }
-    } catch { /* left to whatever opens it to report */ }
+    } catch {
+      // Left to whatever opens it to report — and tried again on the next
+      // ask, rather than taken as done for the rest of the process.
+      prepared.delete(dir);
+    }
   }
   return dir;
 }

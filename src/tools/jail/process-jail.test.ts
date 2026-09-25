@@ -634,6 +634,28 @@ describe('what git push may send', () => {
     await fs.rm(bare, { recursive: true, force: true });
   });
 
+  // The destination was asked by a raw git outside the jail, with Cascade's
+  // whole environment: a remote whose URL runs a program ran it there.
+  it('asks the destination as the push would, inside the jail', async () => {
+    const seen = path.join(repo, 'helper-env.txt');
+    const before = process.env['ANTHROPIC_API_KEY'];
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-helper-probe-0123456789';
+    g(repo, 'config', 'protocol.ext.allow', 'always');
+    g(repo, 'remote', 'add', 'helper', `ext::sh -c env>${seen}`);
+    try {
+      await expect(push('helper', 'main')).rejects.toThrow(/refused/);
+      const env = await fs.readFile(seen, 'utf8');
+      expect(env, 'the helper ran').toContain('PATH=');
+      expect(env).not.toContain('sk-ant-helper-probe');
+    } finally {
+      if (before === undefined) delete process.env['ANTHROPIC_API_KEY'];
+      else process.env['ANTHROPIC_API_KEY'] = before;
+      g(repo, 'remote', 'remove', 'helper');
+      g(repo, 'config', '--unset', 'protocol.ext.allow');
+      await fs.rm(seen, { force: true });
+    }
+  });
+
   it('refuses a push that would send a commit holding a local-only file', async () => {
     await expect(push('origin', 'main')).rejects.toThrow(/refused: a commit "origin" does not have yet .* plan/);
     await expect(push()).rejects.toThrow(/refused/);

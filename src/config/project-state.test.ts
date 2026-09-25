@@ -58,6 +58,27 @@ describe('a project\'s state folder', () => {
     expect(projectStateDir(ws).startsWith(path.join(globalDir(), 'projects'))).toBe(true);
   });
 
+  // A first preparation that failed — the global folder unwritable for a
+  // moment — was taken as done for the rest of the process.
+  it('is prepared again after a preparation that failed', () => {
+    const ws = tempDir('cascade-state-retry-');
+    const identity = (dir: string) => path.join(dir, 'project.json');
+    const real = fs.writeFileSync;
+    const spy = vi.spyOn(fs, 'writeFileSync').mockImplementation((file, ...rest) => {
+      if (String(file).endsWith('project.json')) throw Object.assign(new Error('EROFS'), { code: 'EROFS' });
+      return real(file, ...(rest as [never]));
+    });
+    let dir: string;
+    try {
+      dir = projectStateDir(ws);
+      expect(fs.existsSync(identity(dir))).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(projectStateDir(ws)).toBe(dir);
+    expect(fs.existsSync(identity(dir))).toBe(true);
+  });
+
   it('is where @private/ and @screenshots/ tool paths lead, and nothing else is', () => {
     const ws = tempDir('cascade-state-prefix-');
     expect(statePathFor(ws, '@private/notes/a.md')).toBe(path.join(projectStateDir(ws), 'private', 'notes', 'a.md'));

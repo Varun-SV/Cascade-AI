@@ -23,6 +23,8 @@ const h = vi.hoisted(() => ({
   made: [] as Array<{ gateListenersAtRun: Record<string, number> }>,
   /** Runs holding each workspace's state folder, by `useProjectStateDir`. */
   held: new Map<string, number>(),
+  /** Make the next run fail as it sets up, before its own cleanup is in place. */
+  failSetup: false,
 }));
 
 vi.mock('#cascade-ai', async (importOriginal) => {
@@ -86,12 +88,19 @@ vi.mock('#cascade-ai', async (importOriginal) => {
     useProjectStateDir: (workspace: string, dir: string) => {
       const release = (actual['useProjectStateDir'] as (w: string, d: string) => () => void)(workspace, dir);
       h.held.set(workspace, (h.held.get(workspace) ?? 0) + 1);
+      // Counted once, as the real one counts: calling it again is allowed.
+      let released = false;
       return () => {
-        h.held.set(workspace, (h.held.get(workspace) ?? 0) - 1);
+        if (!released) h.held.set(workspace, (h.held.get(workspace) ?? 0) - 1);
+        released = true;
         release();
       };
     },
     createCascade: () => {
+      if (h.failSetup) {
+        h.failSetup = false;
+        throw new Error('could not start');
+      }
       const c = new FakeCascade();
       h.made.push(c);
       return c;
@@ -584,6 +593,17 @@ describe('/v1 routes', () => {
       { env: makeEnv(), store, userId, socket },
     );
     expect(h.held.size).toBe(1);
+    expect([...h.held.values()]).toEqual([0]);
+  });
+
+  it('lets go of it when the run fails before it starts', async () => {
+    h.held.clear();
+    h.failSetup = true;
+    const socket = { emit: () => true, on: () => undefined, off: () => undefined };
+    await expect(runChatTurn(
+      parseChatRunPayload({ prompt: 'hi', providers: [{ type: 'openai', apiKey: 'k' }] }),
+      { env: makeEnv(), store, userId, socket },
+    )).rejects.toThrow(/could not start/);
     expect([...h.held.values()]).toEqual([0]);
   });
 

@@ -107,7 +107,9 @@ export class GitTool extends BaseTool {
           return `Checked out ${args.join(' ')}`;
         }
         case 'push': {
-          const refused = await this.jail?.pushRefusal(cwd, args, offline);
+          // The destination is asked what it has by this same jailed git.
+          const lsRemote = (target: string) => git.raw(['ls-remote', '--end-of-options', target]).then((out) => out.trim(), () => null);
+          const refused = await this.jail?.pushRefusal(cwd, args, offline, lsRemote);
           if (refused) throw new Error(refused);
           await git.push(args);
           return 'Pushed';

@@ -1383,9 +1383,13 @@ export async function runChatTurn(payload: ChatRunPayload, deps: ChatRunDeps): P
   }
   const releaseRun = beginRun(userId, plan);
 
+  // What the run holds that must be let go however it ends — setup that
+  // throws included, before the run's own cleanup is in place.
+  const holds: Array<() => void> = [];
   try {
-    return await runChatTurnInner(payload, deps);
+    return await runChatTurnInner(payload, deps, holds);
   } finally {
+    for (const release of holds) release();
     releaseRun();
   }
 }
@@ -1620,7 +1624,7 @@ export function sanitiseClarificationAnswers(raw: unknown[]): ClarificationAnswe
   });
 }
 
-async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Promise<ChatRunResult> {
+async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, holds: Array<() => void>): Promise<ChatRunResult> {
   const { env, store, userId, socket, signal } = deps;
   const interactive = deps.interactive !== false;
 
@@ -1774,6 +1778,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // writes the machine-global ~/.cascade-ai, where a project's state
   // otherwise goes (see db.ts).
   const releaseState = useProjectStateDir(scratchDir, tenantStateDir(env, userId));
+  holds.push(releaseState);
   const cascade: Cascade = createCascade(config, scratchDir);
 
   cascade.setMediaSink(buildMediaSink({ env, store, userId, conversationId: conversation.id, socket }));

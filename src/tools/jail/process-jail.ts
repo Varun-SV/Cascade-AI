@@ -364,7 +364,10 @@ export class ProcessJail {
    * all: what it already has is not known. When git cannot tell, it is
    * refused.
    */
-  async pushRefusal(cwd: string, args: string[], offline: boolean): Promise<string | null> {
+  async pushRefusal(
+    cwd: string, args: string[], offline: boolean,
+    lsRemote: (target: string) => Promise<string | null>,
+  ): Promise<string | null> {
     if (this.policy.mode === 'off') return null;
     const unverified = 'git push was refused: could not check that it sends no protected or local-only (privacy.paths) file.';
     const rootSpecs = toPathspecs(this.policy.hiddenPatterns(offline));
@@ -418,8 +421,11 @@ export class ProcessJail {
     // refs say what a remote of that name had when last fetched — from
     // another server, if it has since been pointed elsewhere. Of what it
     // advertises, only commits this repository has count (--ignore-missing).
+    // Asked as the push itself will be (`lsRemote`, the caller's jailed
+    // git): reaching a remote can run a program — a remote helper, an
+    // `ext::` URL — which must not have what a raw git here has.
     if (target.startsWith('-')) return unverified;
-    const advertised = await git(where, ['ls-remote', '--end-of-options', target]);
+    const advertised = await lsRemote(target);
     if (advertised === null) return unverified;
     const has = [...new Set(advertised.split('\n').map((line) => line.split('\t')[0]?.trim() ?? '').filter((sha) => /^[0-9a-f]{40,64}$/.test(sha)))];
     const found = await git(where, [

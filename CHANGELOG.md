@@ -63,9 +63,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   project's config is. A hosted server names a state folder of its own
   (`useProjectStateDir`), outside the workspace — which a folder inside it
   is refused — and never writes the machine-global one. `useProjectStateDir`
-  returns a function a host calls when the run ends: once the last run
-  holding a workspace has, the process forgets it, so what it keeps follows
-  the runs going on, not every tenant that ever ran.
+  returns a function a host calls when the run ends — one that fails as it
+  starts included: once the last run holding a workspace has, the process
+  forgets it, so what it keeps follows the runs going on, not every tenant
+  that ever ran. A state folder whose preparation fails is prepared again
+  the next time it is asked for.
 - **Provider keys are kept once, for the machine.** They lived in both
   `~/.cascade-ai/credentials.json` and each project's config; a project's
   config now holds its providers without their keys, and every project uses
@@ -75,7 +77,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   take turns under a lock, and each writes only the providers it changed,
   so neither drops or brings back the other's change — nor does a save
   taken back, when the config could not be written after it, undo what
-  another process saved in between.
+  another process saved in between. `cascade init` and the first-run
+  wizard add the providers chosen there to the machine's, removing none of
+  the others.
 - **Browser screenshots are named `@screenshots/<file>`,** a path
   `image_analyze`, the file tools and `generate_document`'s images read
   from the project's state folder, rather than an absolute path in the
@@ -281,6 +285,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `file_delete`, `pdf_create`, `generate_document` — which moves it to a
   private model first, or is refused. Every file the assignment declares
   counts at the start, one without an extension (`Dockerfile`) too.
+  `read_current_page`, which takes no input, stays open to it.
   Plugin tools are refused to it like
   MCP ones, as is any tool registered from outside that does not declare
   `localOnlySafe`. Its output, tool calls and results, and streamed text are
@@ -307,7 +312,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never runs a hook — git's configuration files are read-only to commands,
   so none can name a program for it to run with the credentials it keeps —
   and refuses a push that would send a commit holding one — asking the
-  destination what it has, not trusting tracking refs — and runs
+  destination what it has, not trusting tracking refs, through the same
+  jailed git the push uses, since reaching a remote can run a program —
+  and runs
   no hook and none of the global or system git or ssh configuration there,
   since a command could rewrite those and git would run what they name with
   the history in view — and so is

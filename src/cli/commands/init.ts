@@ -10,7 +10,7 @@ import { createDefaultCascadeMd } from '../../config/cascade-md.js';
 import { createDefaultIgnoreFile } from '../../config/ignore.js';
 import { ConfigManager } from '../../config/index.js';
 import { projectStateDir, statePath, STATE } from '../../config/project-state.js';
-import { runSetupWizard } from '../setup/index.js';
+import { applySetup, runSetupWizard } from '../setup/index.js';
 
 export async function initCommand(workspacePath = process.cwd()): Promise<void> {
   const spin = ora({ text: 'Initializing Cascade project…', color: 'magenta' }).start();
@@ -48,9 +48,7 @@ export async function initCommand(workspacePath = process.cwd()): Promise<void> 
     const config = await runSetupWizard(workspacePath);
 
     // Persist config via ConfigManager so all schema defaults are applied
-    const cm = new ConfigManager(workspacePath);
-    await cm.load();
-    await cm.updateConfig(config);
+    await applySetup(new ConfigManager(workspacePath), config);
 
     console.log();
     console.log(chalk.green('  ◈ Setup complete! Run `cascade` to start.'));
