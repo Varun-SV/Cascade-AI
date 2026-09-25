@@ -3,7 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { attachRemoteBrowser, asWatchOnlyViewer, frameEmitter, formatCeiling, resetSharedBrowser, sharedBrowserGeneration } from './remote-browser.js';
+import { attachRemoteBrowser, asWatchOnlyViewer, frameEmitter, formatCeiling, providerRationsSessions, resetSharedBrowser, sharedBrowserGeneration } from './remote-browser.js';
 import { ALLOWANCE_UNAVAILABLE, Cascade, RemoteBrowserController, type BrowserAllowance, type CascadeConfig } from '#cascade-ai';
 
 /**
@@ -115,6 +115,35 @@ describe('a deployment with no provider configured', () => {
       config: { tools: { remoteBrowser: { provider: 'steel', url: 'https://steel.internal' } } },
     });
     expect(attached).not.toBeNull();
+  });
+});
+
+describe('browser session rationing', () => {
+  it('does not apply the hosted daily allowance to self-hosted Steel', () => {
+    expect(providerRationsSessions({
+      provider: 'steel',
+      url: 'http://steel-browser.railway.internal:3000',
+      apiKey: 'ignored-by-self-hosted-steel',
+    })).toBe(false);
+  });
+
+  it('still applies the daily allowance to hosted Steel', () => {
+    expect(providerRationsSessions({
+      provider: 'steel',
+      apiKey: 'hosted-secret',
+    })).toBe(true);
+    expect(providerRationsSessions({
+      provider: 'steel',
+      url: 'https://api.steel.dev',
+      apiKey: 'hosted-secret',
+    })).toBe(true);
+  });
+
+  it('does not ration a standing CDP endpoint', () => {
+    expect(providerRationsSessions({
+      provider: 'cdp',
+      url: 'ws://browser.internal:9222',
+    })).toBe(false);
   });
 });
 
