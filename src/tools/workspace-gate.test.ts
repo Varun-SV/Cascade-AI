@@ -3,11 +3,30 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { WorkspaceGate } from './workspace-gate.js';
-import { statePath } from '../config/project-state.js';
+import { statePath, useProjectStateDir } from '../config/project-state.js';
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 describe('WorkspaceGate', () => {
+  // Kept for every workspace a host ever ran in, after the runs ended.
+  it('is forgotten with a host\'s workspace when no one is in it', async () => {
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-gate-held-')));
+    const own = `${ws}-state`;
+    try {
+      const first = useProjectStateDir(ws, own);
+      const busy = WorkspaceGate.for(ws);
+      const leave = await busy.enter('tools');
+      first();
+      expect(WorkspaceGate.for(ws), 'still in use').toBe(busy);
+      leave();
+      useProjectStateDir(ws, own)();
+      expect(WorkspaceGate.for(ws)).not.toBe(busy);
+    } finally {
+      await fs.rm(ws, { recursive: true, force: true });
+      await fs.rm(own, { recursive: true, force: true });
+    }
+  });
+
   it('lets shared callers in together, and one alone only once they have left', async () => {
     const gate = new WorkspaceGate();
     const events: string[] = [];

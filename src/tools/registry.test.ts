@@ -668,3 +668,27 @@ describe('ToolRegistry — where a write lands', () => {
     await fs.rm(ws, { recursive: true, force: true });
   });
 });
+
+// A cloud model's call could overwrite or delete a local-only file, and
+// learn from the answer whether it was there.
+describe('ToolRegistry — a cloud caller changing a local-only file', () => {
+  it('asks as a read does, and records the change once the caller has moved', async () => {
+    const { PrivacyPaths } = await import('../core/privacy/paths.js');
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-change-')));
+    await fs.mkdir(path.join(ws, 'secret'));
+    await fs.writeFile(path.join(ws, 'secret', 'plan.md'), 'plan\n');
+    const privacy = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }], { workspaceRoot: ws });
+    const reg = new ToolRegistry(toolsConfig, ws);
+    reg.setPrivacyPaths(privacy);
+    const refused = { ...opts, isOffline: () => false, mayRead: () => false };
+    await expect(reg.execute('file_delete', { path: 'secret/plan.md' }, refused)).rejects.toThrow(/local-only/);
+    expect(await fs.readFile(path.join(ws, 'secret', 'plan.md'), 'utf8')).toBe('plan\n');
+    let local = false;
+    const moves = { ...opts, isOffline: () => local, mayRead: (abs: string) => { local = privacy.coversFile(abs, ws); return true; } };
+    await reg.execute('file_write', { path: 'secret/plan.md', content: 'new plan\n' }, moves);
+    expect(local).toBe(true);
+    // Written by a local-only subtask, so recorded: local-only without the pattern too.
+    expect(new PrivacyPaths([], { workspaceRoot: ws }).isLocalOnly('secret/plan.md')).toBe(true);
+    await fs.rm(ws, { recursive: true, force: true });
+  });
+});

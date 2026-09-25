@@ -840,6 +840,16 @@ export class T3Worker extends BaseTier {
    * socket clients and the audit log: for a local-only subtask, only that it
    * ran, the line the tiers above get at the T3→T2 boundary.
    */
+  /**
+   * A tool's name as events show it. A local-only subtask's model may name
+   * one it was never given, and such a name could carry what it read: that
+   * shows as a placeholder, a name from the fixed list it was given as is.
+   */
+  private shownToolName(name: string): string {
+    if (!this.localOnlyMatch || this.tools.some((t) => t.name === name) || this.toolRegistry.hasTool?.(name) === true) return name;
+    return '[unknown tool — name withheld]';
+  }
+
   private shareable(output: string, status: string): string {
     return this.localOnlyMatch
       ? `[local-only path — output withheld by privacy policy; status: ${status}]`
@@ -1119,7 +1129,7 @@ export class T3Worker extends BaseTier {
     // pass an out-of-range enum value, which otherwise fails opaquely at run time.
     const validationError = this.validateToolInput(tc);
     if (validationError) {
-      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: tc.name, error: validationError, durationMs: 0 });
+      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), error: this.shareable(validationError, 'tool error'), durationMs: 0 });
       return validationError;
     }
 
@@ -1191,12 +1201,12 @@ export class T3Worker extends BaseTier {
     if (this.toolRegistry.hasTool?.(tc.name) !== false) {
       this.sendStatusUpdate({
         progressPct: 50,
-        currentAction: `Using tool: ${tc.name}`,
+        currentAction: `Using tool: ${this.shownToolName(tc.name)}`,
         status: 'IN_PROGRESS',
       });
     }
 
-    this.emit('tool:call', { id: tc.id, tierId: this.id, toolName: tc.name, input: this.localOnlyMatch ? {} : tc.input });
+    this.emit('tool:call', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), input: this.localOnlyMatch ? {} : tc.input });
     const toolStartMs = Date.now();
 
     try {
@@ -1232,12 +1242,12 @@ export class T3Worker extends BaseTier {
         }
       }
       const durationMs = Date.now() - toolStartMs;
-      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: tc.name, output: this.shareable(typeof result === 'string' ? result : JSON.stringify(result), 'tool result'), durationMs });
+      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), output: this.shareable(typeof result === 'string' ? result : JSON.stringify(result), 'tool result'), durationMs });
       return typeof result === 'string' ? result : JSON.stringify(result);
     } catch (err) {
       const durationMs = Date.now() - toolStartMs;
       const errMsg = err instanceof Error ? err.message : String(err);
-      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: tc.name, error: this.shareable(errMsg, 'tool error'), durationMs });
+      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), error: this.shareable(errMsg, 'tool error'), durationMs });
       // Unrecoverable/systemic conditions (rate-limit, auth, quota, AND a 404
       // "model not found" — the shared classifier this reuses is the same one
       // `router/index.ts` uses for chat-tier failover, so a dead image model
@@ -1309,7 +1319,7 @@ export class T3Worker extends BaseTier {
     // Strategy 1: alternative tool with overlapping purpose
     const altTool = this.findAlternativeTool(tc.name);
     if (altTool) {
-      this.log(`Adaptive fallback: trying alternative tool "${altTool}" for failed "${tc.name}"`);
+      this.log(`Adaptive fallback: trying alternative tool "${altTool}" for failed "${this.shownToolName(tc.name)}"`);
       this.sendStatusUpdate({ progressPct: 50, currentAction: `Fallback: trying ${altTool}`, status: 'IN_PROGRESS' });
       try {
         const result = await this.toolRegistry.execute(altTool, tc.input, {
@@ -1539,7 +1549,10 @@ export class T3Worker extends BaseTier {
   private privacyTargets(assignment: T2ToT3Assignment): string[] {
     const criteria = (assignment.acceptance ?? []).join('\n');
     const named = criteria.match(new RegExp(ARTIFACT_FILE_RE.source, 'gi')) ?? [];
-    return [...new Set([...this.extractArtifactPaths(assignment), ...named.map((m) => m.trim())])];
+    // Every file it declares, with an extension or not (`Dockerfile`,
+    // `secrets/token`) — not only those artifact checks would verify.
+    const declared = (assignment.files ?? []).map((f) => f.trim()).filter(Boolean);
+    return [...new Set([...declared, ...this.extractArtifactPaths(assignment), ...named.map((m) => m.trim())])];
   }
 
   private extractArtifactPaths(assignment: T2ToT3Assignment): string[] {

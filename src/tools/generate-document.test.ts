@@ -153,6 +153,39 @@ describe('generate_document — image embedding and reporting', () => {
     expect(inside).toContain('Embedded 1 image');
   }, 30_000);
 
+  // The state folder is protected whole, so `@screenshots/…`, and a
+  // local-only subtask's own `@private/…`, were always dropped.
+  it('embeds a screenshot, and its own private image for a local-only subtask', async () => {
+    const { projectStateDir, statePath, STATE } = await import('../config/project-state.js');
+    const before = process.env['CASCADE_GLOBAL_DIR'];
+    const global = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-doc-global-'));
+    process.env['CASCADE_GLOBAL_DIR'] = global;
+    try {
+      const shot = statePath(workspace, STATE.screenshots, 'shot.png');
+      const mine = statePath(workspace, STATE.private, 'chart.png');
+      for (const f of [shot, mine]) {
+        await fs.mkdir(path.dirname(f), { recursive: true });
+        await fs.writeFile(f, png(16, 16));
+      }
+      const t = tool();
+      const state = projectStateDir(workspace);
+      t.setPathGuard((abs) => abs === state || abs.startsWith(state + path.sep));
+      const content = '# S\n\n![s](@screenshots/shot.png)\n\n![c](@private/chart.png)\n';
+      const cloud = await t.execute({ path: 'deck.pptx', content }, { isOffline: () => false } as never);
+      expect(cloud).toContain('Embedded 1 image');
+      expect(cloud).toContain("@private/chart.png (a local-only subtask's");
+      const local = await t.execute({ path: 'mine.pptx', content }, { isOffline: () => true } as never);
+      expect(local).toContain('Embedded 2 image');
+      // The state folder by its own path is still not a source.
+      const raw = await t.execute({ path: 'raw.pptx', content: `# S\n\n![s](${shot})\n` }, { isOffline: () => true } as never);
+      expect(raw).toContain('Could NOT embed 1 image');
+    } finally {
+      if (before === undefined) delete process.env['CASCADE_GLOBAL_DIR'];
+      else process.env['CASCADE_GLOBAL_DIR'] = before;
+      await fs.rm(global, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it('explains that a remote URL has to be downloaded first', async () => {
     const out = await tool().execute(
       { path: 'deck.pptx', content: '# Slide\n\n![web](https://example.com/a.png)\n' },

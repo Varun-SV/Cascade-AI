@@ -38,8 +38,11 @@ export function globalDir(): string {
 }
 
 const named = new Map<string, string>();
+/** How many of a host's runs hold each named workspace: the last to end forgets it. */
+const holds = new Map<string, number>();
 const prepared = new Set<string>();
 const movedIn = new Map<string, string[]>();
+const releasedHooks = new Set<(root: string) => void>();
 
 /** The workspace's real path, the key its state is found by. */
 function realRoot(workspacePath: string): string {
@@ -48,9 +51,12 @@ function realRoot(workspacePath: string): string {
 
 /**
  * Keep this workspace's state in `dir` rather than under the global folder —
- * for a host that must not write there. Applies to this process.
+ * for a host that must not write there. Applies to this process until the
+ * function returned is called, once for each call here: a host calls it
+ * when a run ends, so what the process keeps for each workspace follows the
+ * runs in progress, not every tenant that ever ran.
  */
-export function useProjectStateDir(workspacePath: string, dir: string): void {
+export function useProjectStateDir(workspacePath: string, dir: string): () => void {
   // Apart from the workspace, either way: inside it, its tools would read
   // the state folder, which holds what only a local-only subtask may see;
   // around it, the whole workspace would be taken for state and hidden.
@@ -60,6 +66,30 @@ export function useProjectStateDir(workspacePath: string, dir: string): void {
     throw new Error(`A project's state folder must be apart from it: ${dir} and ${workspacePath} overlap.`);
   }
   named.set(root, path.resolve(dir));
+  holds.set(root, (holds.get(root) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const left = (holds.get(root) ?? 1) - 1;
+    if (left > 0) {
+      holds.set(root, left);
+      return;
+    }
+    holds.delete(root);
+    const state = named.get(root);
+    named.delete(root);
+    if (state) {
+      prepared.delete(state);
+      movedIn.delete(state);
+    }
+    for (const hook of releasedHooks) hook(root);
+  };
+}
+
+/** Called with a workspace's real path when a host's last run there ends — for what is kept per workspace elsewhere. */
+export function onProjectReleased(hook: (root: string) => void): void {
+  releasedHooks.add(hook);
 }
 
 /**

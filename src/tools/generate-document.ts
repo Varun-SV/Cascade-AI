@@ -23,6 +23,7 @@ import path from 'node:path';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
 import { resolveInWorkspace } from './utils/workspace-path.js';
+import { statePathFor } from '../config/project-state.js';
 import {
   fileExt,
   isDocumentFormat,
@@ -119,13 +120,23 @@ export class GenerateDocumentTool extends BaseTool {
       if (/^(https?|ftp):\/\//i.test(url)) { skipped.push(`${url} (remote URL — download it into the workspace first)`); return null; }
       const local = url.replace(/^file:\/\//i, '').split('?')[0]!.split('#')[0]!;
       let source: string;
+      const named = decodeURIComponent(local);
       try {
-        source = resolveInWorkspace(this.workspaceRoot, decodeURIComponent(local));
+        source = resolveInWorkspace(this.workspaceRoot, named);
       } catch {
         skipped.push(`${local} (outside the workspace)`);
         return null;
       }
-      if (this.isProtectedPath(source)) { skipped.push(`${local} (protected — not copied into the document)`); return null; }
+      // `@screenshots/…` and `@private/…` are in the project's state folder,
+      // which is protected whole, and are taken as the registry takes them:
+      // the screenshots for anyone, the private folder for a local-only
+      // subtask alone. A path to the state folder by any other name is not.
+      const alias = statePathFor(this.workspaceRoot, named) !== null;
+      if (alias && named.split(/[\\/]/)[0] === '@private' && !options.isOffline?.()) {
+        skipped.push(`${local} (a local-only subtask's — not copied into the document)`);
+        return null;
+      }
+      if (!alias && this.isProtectedPath(source)) { skipped.push(`${local} (protected — not copied into the document)`); return null; }
       if (!mayCopy(source)) { skipped.push(`${local} (local-only — not copied into a document that is not)`); return null; }
       try {
         const bytes = await this.readFile(source);

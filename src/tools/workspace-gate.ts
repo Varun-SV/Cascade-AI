@@ -29,7 +29,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { statePath, STATE } from '../config/project-state.js';
+import { onProjectReleased, statePath, STATE } from '../config/project-state.js';
 import { withLock } from '../utils/file-lock.js';
 
 /** How often a held marker is touched, and how long one untouched counts as left by a process that ended. */
@@ -40,6 +40,13 @@ const POLL_MS = 25;
 
 
 const gates = new Map<string, WorkspaceGate>();
+
+// A host's workspace whose last run ended: its gate goes, unless something
+// is still in it — the next caller makes a new one, with the state folder
+// named for it then.
+onProjectReleased((root) => {
+  if (gates.get(root)?.idle()) gates.delete(root);
+});
 
 /** This process's name in marker files: a process ID alone repeats across PID namespaces sharing a volume. */
 const INSTANCE = `${process.pid}.${crypto.randomBytes(6).toString('hex')}`;
@@ -95,6 +102,11 @@ export class WorkspaceGate {
       release();
       leave();
     };
+  }
+
+  /** Whether no one is in the gate or waiting for it. */
+  idle(): boolean {
+    return this.queue.length === 0 && Object.values(this.running).every((n) => n === 0);
   }
 
   private leaver(mode: GateMode): () => void {

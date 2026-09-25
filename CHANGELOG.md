@@ -62,7 +62,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own keys, and has what the earlier one did and knew set aside. `cascade doctor` prints where a
   project's config is. A hosted server names a state folder of its own
   (`useProjectStateDir`), outside the workspace — which a folder inside it
-  is refused — and never writes the machine-global one.
+  is refused — and never writes the machine-global one. `useProjectStateDir`
+  returns a function a host calls when the run ends: once the last run
+  holding a workspace has, the process forgets it, so what it keeps follows
+  the runs going on, not every tenant that ever ran.
 - **Provider keys are kept once, for the machine.** They lived in both
   `~/.cascade-ai/credentials.json` and each project's config; a project's
   config now holds its providers without their keys, and every project uses
@@ -70,10 +73,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one when it moved keeps it, in the same file under that project, and goes
   on using it ahead of the environment, as before. Processes saving at once
   take turns under a lock, and each writes only the providers it changed,
-  so neither drops or brings back the other's change.
+  so neither drops or brings back the other's change — nor does a save
+  taken back, when the config could not be written after it, undo what
+  another process saved in between.
 - **Browser screenshots are named `@screenshots/<file>`,** a path
-  `image_analyze` and the file tools read from the project's state folder,
-  rather than an absolute path in the project.
+  `image_analyze`, the file tools and `generate_document`'s images read
+  from the project's state folder, rather than an absolute path in the
+  project.
 - **`tools.dynamicToolSandbox` offers `wasm` in place of `worker`.** `worker`
   ran agent-written tools in a bare thread that confined nothing. A config
   that still names it gets the new WebAssembly sandbox, and Settings →
@@ -266,11 +272,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   An approval it needs goes to you, not to the T2 and T1 models, which may
   be cloud ones and would see the call's input — nor does an "always" one of
   them gave earlier answer it.
-  `file_edit` asks like a read does, and plugin tools are refused to it like
+  `file_edit` asks like a read does, and so does any change or deletion of a
+  local-only file by a subtask that is not local-only yet — `file_write`,
+  `file_delete`, `pdf_create`, `generate_document` — which moves it to a
+  private model first, or is refused. Every file the assignment declares
+  counts at the start, one without an extension (`Dockerfile`) too.
+  Plugin tools are refused to it like
   MCP ones, as is any tool registered from outside that does not declare
   `localOnlySafe`. Its output, tool calls and results, and streamed text are
   kept out of the status and tool events the dashboard broadcasts and the
-  audit log records: those carry the same withheld line. A subtask that
+  audit log records: those carry the same withheld line, a malformed call's
+  error included, and a tool name its model made up shows as a placeholder. A subtask that
   turns local-only mid-run moves to the private
   model, and that model's tool protocol, before its next call; only private
   endpoints still usable count, not ones in backoff or out for the run.

@@ -974,6 +974,43 @@ describe('privacy.paths, enforced when a file is read', () => {
     expect(result.localOnly).toBe(true);
   });
 
+  // Only a declared file with an extension counted, as artifact checks
+  // go, so one named `secret/token` started the subtask on a cloud model.
+  it('counts every file the assignment declares, one without an extension too', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const { calls, result } = await run({
+      privateModel: true,
+      call: { id: 'tc-1', name: 'file_read', input: { path: 'notes.md' } },
+      assignment: { files: ['secret/token'] },
+      setup: (root) => writeFile(join(root, 'secret', 'token'), 'tok\n'),
+    });
+    expect(calls[0]?.forceLocal).toBe(true);
+    expect(result.localOnly).toBe(true);
+  });
+
+  // A change went through for a cloud model's call: it could overwrite or
+  // delete a local-only file unseen, and learn from the answer whether it
+  // was there.
+  it('asks about a change to a local-only file as it does a read', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const escalator = { requestPermission: async (req: { id: string }) => ({ requestId: req.id, approved: true, decidedBy: 'USER' }) };
+    for (const call of [
+      { id: 'tc-1', name: 'file_write', input: { path: 'secret/plan.md', content: 'overwritten' } },
+      { id: 'tc-1', name: 'file_delete', input: { path: 'secret/plan.md' } },
+    ]) {
+      let root = '';
+      const refused = await run({ privateModel: false, call, escalator, setup: async (r) => { root = r; } });
+      expect(await readFile(join(root, 'secret', 'plan.md'), 'utf8'), call.name).toBe(`${SECRET}\n`);
+      expect(refused.calls.some((c) => c.text.includes('is local-only (privacy.paths)')), call.name).toBe(true);
+      expect(refused.result.localOnly, call.name).toBeFalsy();
+      const moved = await run({ privateModel: true, call, escalator });
+      expect(moved.result.localOnly, call.name).toBe(true);
+      expect(moved.calls.slice(1).every((c) => c.forceLocal), call.name).toBe(true);
+    }
+  });
+
   // file_list and glob checked only the protected paths, so a local-only
   // file's name — which a local-only subtask could have chosen to carry
   // what it read — was listed to any worker.
@@ -1148,6 +1185,10 @@ describe('privacy.paths, enforced when a file is read', () => {
         turns += 1;
         if (turns === 1) return makeResult('', [{ id: 'tc-1', name: 'file_read', input: { path: 'secret/plan.md' } }], 'tool_use');
         if (turns === 2) return makeResult('', [{ id: 'tc-2', name: 'file_read', input: { path: 'notes.md', note: SECRET } }], 'tool_use');
+        // A name it was never given, and a value the schema refuses, each
+        // chosen to carry what it read.
+        if (turns === 3) return makeResult('', [{ id: 'tc-3', name: `read_${SECRET}`, input: {} }], 'tool_use');
+        if (turns === 4) return makeResult('', [{ id: 'tc-4', name: 'grep', input: { pattern: 'x', output_mode: SECRET } }], 'tool_use');
         onChunk?.({ text: `The plan: ${SECRET}` });
         return makeResult(`The plan: ${SECRET}`);
       }),
@@ -1163,6 +1204,9 @@ describe('privacy.paths, enforced when a file is read', () => {
     expect(events.filter((e) => e.includes(SECRET))).toEqual([]);
     expect(events.some((e) => e.startsWith('tier:status') && e.includes('output withheld by privacy policy'))).toBe(true);
     expect(events.some((e) => e.startsWith('tool:result'))).toBe(true);
+    // Once local-only, a name from the list it was given still shows.
+    expect(events.some((e) => e.startsWith('tool:call') && e.includes('"id":"tc-2"') && e.includes('"toolName":"file_read"')), 'a name it was given shows').toBe(true);
+    expect(events.some((e) => e.includes('name withheld'))).toBe(true);
   });
 
   // The request was still shaped for the cloud model it started on: native
@@ -1253,8 +1297,8 @@ describe('privacy.paths, enforced when a file is read', () => {
     const log = seen.join('\n');
     expect(log).toContain('secret/diagram.png (local-only');
     expect(log).toContain('Embedded 1 image');
-    // Nothing was read into the conversation, so the subtask stayed where it was.
-    expect(result.localOnly).toBeFalsy();
+    // Writing into a local-only path moves the subtask, as reading one would.
+    expect(result.localOnly).toBe(true);
   }, 30_000);
 
   it('lets a local-only subtask neither message its peers nor ask for more workers', async () => {

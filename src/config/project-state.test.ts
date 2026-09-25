@@ -43,6 +43,21 @@ describe('a project\'s state folder', () => {
     expect(statePath(b, STATE.config)).toBe(path.join(own, 'config.json'));
   });
 
+  // The hosted server named a state folder for every tenant that ever ran,
+  // and never forgot one.
+  it('is forgotten once the last run a host holds it for ends', () => {
+    const ws = tempDir('cascade-state-held-');
+    const own = `${ws}-state`;
+    made.push(own);
+    const one = useProjectStateDir(ws, own);
+    const two = useProjectStateDir(ws, own);
+    one();
+    one();
+    expect(projectStateDir(ws), 'another run still holds it').toBe(own);
+    two();
+    expect(projectStateDir(ws).startsWith(path.join(globalDir(), 'projects'))).toBe(true);
+  });
+
   it('is where @private/ and @screenshots/ tool paths lead, and nothing else is', () => {
     const ws = tempDir('cascade-state-prefix-');
     expect(statePathFor(ws, '@private/notes/a.md')).toBe(path.join(projectStateDir(ws), 'private', 'notes', 'a.md'));

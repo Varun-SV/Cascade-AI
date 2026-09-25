@@ -1773,7 +1773,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // not in it, where the run's tools could read it: a hosted server never
   // writes the machine-global ~/.cascade-ai, where a project's state
   // otherwise goes (see db.ts).
-  useProjectStateDir(scratchDir, tenantStateDir(env, userId));
+  const releaseState = useProjectStateDir(scratchDir, tenantStateDir(env, userId));
   const cascade: Cascade = createCascade(config, scratchDir);
 
   cascade.setMediaSink(buildMediaSink({ env, store, userId, conversationId: conversation.id, socket }));
@@ -2308,5 +2308,8 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     });
     try { await remoteBrowser?.endRun(); } catch { /* non-critical */ }
     try { await cascade.close(); } catch { /* non-critical */ }
+    // Last: the run's tools are done with the state folder. When no other
+    // run of this tenant's is going, the process forgets it.
+    releaseState();
   }
 }

@@ -215,7 +215,9 @@ function sameEntryIn(rows: ProviderConfig[], p: ProviderConfig): ProviderConfig 
 export function saveProjectCredentials(
   globalDir: string, project: string, providers: ProviderConfig[], base?: ProviderConfig[],
 ): () => void {
-  let before: { shared: ProviderConfig[]; own: ProviderConfig[] } | undefined;
+  type Lists = { shared: ProviderConfig[]; own: ProviderConfig[] };
+  let before: Lists | undefined;
+  let after: Lists | undefined;
   updateCredentialsFile(globalDir, (file) => {
     before = { shared: file.providers, own: file.projects?.[project] ?? [] };
     const own = (file.projects?.[project] ?? []).flatMap((mine) => {
@@ -224,13 +226,49 @@ export function saveProjectCredentials(
     });
     const ours = providers.filter(isPersistable);
     const shared = base ? mergeShared(file.providers, ours, base.filter(isPersistable)) : ours;
+    after = { shared, own };
     return withProject(file, project, own, shared);
   });
   // Puts back what this save changed, for a caller whose other half — the
-  // project's config — could not be written after it.
+  // project's config — could not be written after it: only where what it
+  // wrote is still there, so a change another process saved since stands.
   return () => {
-    if (before) updateCredentialsFile(globalDir, (file) => withProject(file, project, before!.own, before!.shared));
+    if (!before || !after) return;
+    const [was, now] = [before, after];
+    updateCredentialsFile(globalDir, (file) => withProject(
+      file, project,
+      revertChanges(file.projects?.[project] ?? [], was.own, now.own),
+      revertChanges(file.providers, was.shared, now.shared),
+    ));
   };
+}
+
+/**
+ * `current` with a save that turned `was` into `now` taken back, entry by
+ * entry, where the entry is still as that save left it: what it changed or
+ * added goes back to how it was, or goes, and what it removed returns unless
+ * something of that name has been saved since.
+ */
+function revertChanges(current: ProviderConfig[], was: ProviderConfig[], now: ProviderConfig[]): ProviderConfig[] {
+  const same = (a: ProviderConfig, b: ProviderConfig) => JSON.stringify(a) === JSON.stringify(b);
+  const at = (list: ProviderConfig[], p: ProviderConfig) => list.findIndex((q) => sameEntryIn([q], p) !== undefined);
+  const out = current.map((p) => ({ ...p }));
+  for (const old of was) {
+    const saved = sameEntryIn(now, old);
+    if (saved && same(saved, old)) continue;
+    const i = at(out, old);
+    if (!saved) {
+      if (i < 0) out.push({ ...old });
+    } else if (i >= 0 && same(out[i]!, saved)) {
+      out[i] = { ...old };
+    }
+  }
+  for (const added of now) {
+    if (sameEntryIn(was, added)) continue;
+    const i = at(out, added);
+    if (i >= 0 && same(out[i]!, added)) out.splice(i, 1);
+  }
+  return out;
 }
 
 /**

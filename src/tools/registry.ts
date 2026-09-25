@@ -26,7 +26,7 @@ import { WorkspaceGate } from './workspace-gate.js';
 import { LinkAliases, PROBE } from '../utils/link-aliases.js';
 import { assignMcpToolNames } from './tool-name.js';
 import { ShellTool } from './shell.js';
-import { FileReadTool, FileWriteTool, FileEditTool, FileDeleteTool, FileListTool } from './file.js';
+import { FileReadTool, FileWriteTool, FileEditTool, FileDeleteTool, FileListTool, WithheldError } from './file.js';
 import { GitTool } from './git.js';
 import { GitHubTool } from './github.js';
 import { BrowserTool } from './browser.js';
@@ -130,8 +130,14 @@ export class ToolRegistry extends EventEmitter {
   private secretValues: () => string[] = () => [];
   /** Where shell, run_code and git launch what they run. */
   private readonly processJail: ProcessJail;
-  /** Lets a local-only subtask's command or write run alone (workspace-gate.ts); one per workspace. */
-  private readonly gate: WorkspaceGate;
+  /**
+   * Lets a local-only subtask's command or write run alone
+   * (workspace-gate.ts); one per workspace, looked up when entered, since a
+   * host forgets an idle one when its last run there ends.
+   */
+  private get gate(): WorkspaceGate {
+    return WorkspaceGate.for(this.workspaceRoot);
+  }
   /** Files protected where they are configured to be, not by name: the code index's database. */
   private readonly protectedFiles = new Set<string>();
   /** Other names — hard links — for the protected files in the workspace. */
@@ -141,7 +147,6 @@ export class ToolRegistry extends EventEmitter {
     super();
     this.config = config;
     this.workspaceRoot = workspaceRoot;
-    this.gate = WorkspaceGate.for(workspaceRoot);
     this.aliases = this.newAliases();
     this.processJail = new ProcessJail({
       mode: config.processJail ?? 'auto',
@@ -352,7 +357,7 @@ export class ToolRegistry extends EventEmitter {
       throw new Error(`${toolName} is unavailable to a local-only subtask (privacy.paths): it would send what the subtask knows off this machine.`);
     }
 
-    const offline = options.isOffline?.() === true;
+    let offline = options.isOffline?.() === true;
     const given = PATH_TOOLS.has(toolName) && typeof input['path'] === 'string' ? input['path'] : undefined;
     // `@private/…` and `@screenshots/…` name folders in the project's state
     // folder, outside it (config/project-state.ts): a local-only subtask's
@@ -372,6 +377,15 @@ export class ToolRegistry extends EventEmitter {
       if (CHANGE_TOOLS.has(toolName) && this.isPolicyFile(path.resolve(this.workspaceRoot, given))) {
         throw new Error(`Access denied: ${given} decides what Cascade protects, and agents may read it but not change it.`);
       }
+      // A change to a local-only file is asked about as a read is: a cloud
+      // model's call must not overwrite or delete it unseen, nor learn from
+      // the answer whether it was there. The subtask moves to a private
+      // model first, or is refused.
+      if (!offline && CHANGE_TOOLS.has(toolName) && options.mayRead
+        && !options.mayRead(path.resolve(this.workspaceRoot, given), 'model')) {
+        throw new WithheldError(given);
+      }
+      offline = options.isOffline?.() === true;
     }
 
     // What a local-only subtask writes may carry what it read, so it is
