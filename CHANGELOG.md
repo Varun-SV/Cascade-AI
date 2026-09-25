@@ -67,7 +67,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   starts included: once the last run holding a workspace has, the process
   forgets it, so what it keeps follows the runs going on, not every tenant
   that ever ran. A state folder whose preparation fails is prepared again
-  the next time it is asked for.
+  the next time it is asked for. A host's folder is judged by where it will
+  be — through a symlinked parent, for one not made yet — and kept by that
+  path. A state folder others can read, which Cascade cannot tighten — one
+  owned by another account — is refused rather than used.
 - **Provider keys are kept once, for the machine.** They lived in both
   `~/.cascade-ai/credentials.json` and each project's config; a project's
   config now holds its providers without their keys, and every project uses

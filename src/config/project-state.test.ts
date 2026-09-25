@@ -79,6 +79,62 @@ describe('a project\'s state folder', () => {
     expect(fs.existsSync(identity(dir))).toBe(true);
   });
 
+  // Judged by its lexical path while not made yet, a host's state folder
+  // under a symlink into the workspace was taken for apart from it — and
+  // then made inside it.
+  it('is judged by where it will be when a host names one not made yet', () => {
+    const ws = tempDir('cascade-state-ws-');
+    const link = `${ws}-link`;
+    made.push(link);
+    fs.symlinkSync(ws, link);
+    expect(() => useProjectStateDir(ws, path.join(link, 'run-123'))).toThrow(/must be apart/);
+    const dangling = `${ws}-dangling`;
+    made.push(dangling);
+    fs.symlinkSync(path.join(ws, 'later'), dangling);
+    expect(() => useProjectStateDir(ws, dangling)).toThrow(/must be apart/);
+    // Apart, it is kept by its real path.
+    const outside = tempDir('cascade-state-out-');
+    const outLink = `${outside}-link`;
+    made.push(outLink);
+    fs.symlinkSync(outside, outLink);
+    const release = useProjectStateDir(ws, path.join(outLink, 'run-1'));
+    try {
+      expect(projectStateDir(ws)).toBe(path.join(outside, 'run-1'));
+    } finally {
+      release();
+    }
+  });
+
+  // A folder others could read was taken as it was when it was not this
+  // user's own: what went into it was open to them.
+  it('refuses a state folder it cannot make private, and tightens its own', () => {
+    if (process.platform === 'win32') return;
+    const ws = tempDir('cascade-state-open-');
+    const own = `${ws}-state`;
+    made.push(own);
+    fs.mkdirSync(own);
+    fs.chmodSync(own, 0o770);
+    const release = useProjectStateDir(ws, own);
+    try {
+      const real = fs.statSync;
+      const spy = vi.spyOn(fs, 'statSync').mockImplementation(((p: fs.PathLike, o?: never) => {
+        const st = real(p, o) as fs.Stats;
+        return String(p) === own ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: 4242 }) : st;
+      }) as never);
+      try {
+        expect(() => projectStateDir(ws)).toThrow(/could not be made private/);
+        expect(() => statePath(ws, STATE.config), 'every use, not only the first').toThrow(/could not be made private/);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(fs.statSync(own).mode & 0o777, 'another account\'s folder is left as it was').toBe(0o770);
+      expect(projectStateDir(ws)).toBe(own);
+      expect(fs.statSync(own).mode & 0o777).toBe(0o700);
+    } finally {
+      release();
+    }
+  });
+
   it('is where @private/ and @screenshots/ tool paths lead, and nothing else is', () => {
     const ws = tempDir('cascade-state-prefix-');
     expect(statePathFor(ws, '@private/notes/a.md')).toBe(path.join(projectStateDir(ws), 'private', 'notes', 'a.md'));

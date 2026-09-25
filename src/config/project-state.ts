@@ -26,7 +26,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { GLOBAL_CONFIG_DIR } from '../constants.js';
 import { renameProjectCredentials } from './global-credentials.js';
-import { isWithin } from '../utils/real-path.js';
+import { isWithin, realPathOf } from '../utils/real-path.js';
 
 /** The folder a project kept its state in before; moved out on first use (`projectStateDir`). */
 export const LEGACY_STATE_DIR = '.cascade';
@@ -60,12 +60,15 @@ export function useProjectStateDir(workspacePath: string, dir: string): () => vo
   // Apart from the workspace, either way: inside it, its tools would read
   // the state folder, which holds what only a local-only subtask may see;
   // around it, the whole workspace would be taken for state and hidden.
+  // Judged, and kept, by where it will be: a folder not made yet through
+  // its nearest one there is, whose symlinked parent could lead into the
+  // workspace, where making it would then put it.
   const root = realRoot(workspacePath);
-  const at = realRoot(dir);
+  const at = realPathOf(path.resolve(dir));
   if (isWithin(at, root) || isWithin(root, at)) {
     throw new Error(`A project's state folder must be apart from it: ${dir} and ${workspacePath} overlap.`);
   }
-  named.set(root, path.resolve(dir));
+  named.set(root, at);
   holds.set(root, (holds.get(root) ?? 0) + 1);
   let released = false;
   return () => {
@@ -118,10 +121,12 @@ export function projectStateDir(workspacePath: string): string {
         recordIdentity(root, dir);
         moveOwnKeys(dir);
       }
-    } catch {
+    } catch (err) {
       // Left to whatever opens it to report — and tried again on the next
-      // ask, rather than taken as done for the rest of the process.
+      // ask, rather than taken as done for the rest of the process. A
+      // folder others can read is not left for later: nothing is kept there.
       prepared.delete(dir);
+      if (err instanceof StateNotPrivateError) throw err;
     }
   }
   return dir;
@@ -277,7 +282,27 @@ function makePrivate(dirs: string[]): void {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     if (process.platform === 'win32') continue;
     const st = fs.statSync(dir);
-    if ((st.mode & 0o077) !== 0 && st.uid === process.getuid?.()) fs.chmodSync(dir, st.mode & 0o700);
+    if ((st.mode & 0o077) === 0) continue;
+    // Tightened where it is this user's own. Another account's folder is
+    // not changed, but refused: what is kept in it would be open to others.
+    const own = st.uid === process.getuid?.();
+    if (own) {
+      try { fs.chmodSync(dir, st.mode & 0o700); } catch { /* checked below */ }
+    }
+    if ((fs.statSync(dir).mode & 0o077) !== 0) {
+      throw new StateNotPrivateError(
+        `Cascade's state folder ${dir} is open to other users (mode ${(st.mode & 0o777).toString(8)}${own ? '' : ', owned by another account'}) and could not be made private. `
+        + 'Make it this user\'s own, with no group or other access (chmod 700), and try again.',
+      );
+    }
+  }
+}
+
+/** A state folder that cannot be made readable by this user alone. */
+export class StateNotPrivateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StateNotPrivateError';
   }
 }
 
