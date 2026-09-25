@@ -137,11 +137,12 @@ describe('the operator configures a browser for their deployment', () => {
   describe('the plan\u2019s daily allowance of browser sessions', () => {
     const today = () => new Date().toISOString().slice(0, 10);
     /**
-     * `true` is a deployment whose sessions are billed — a self-hosted Steel,
-     * never dialled, since small talk opens no browser. `'cdp'` is one driving
-     * the operator's own standing browser, which allocates nothing.
+     * `true` is hosted Steel, whose allocated sessions are externally
+     * metered; it is never dialled here because small talk opens no browser.
+     * `'self-hosted'` is the deployment's own Steel and has no provider-side
+     * daily quota. `'cdp'` drives a standing browser and allocates nothing.
      */
-    async function setup(withBrowser: boolean | 'cdp') {
+    async function setup(withBrowser: boolean | 'cdp' | 'self-hosted') {
       dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-rb-allowance-'));
       store = new CloudStore(path.join(dir, 'cloud.db'));
       stub = await startStubOpenAIServer();
@@ -150,7 +151,15 @@ describe('the operator configures a browser for their deployment', () => {
         ...baseEnv(dir),
         ...(withBrowser === 'cdp'
           ? { REMOTE_BROWSER_PROVIDER: 'cdp', REMOTE_BROWSER_URL: 'ws://127.0.0.1:9/devtools/browser/test' }
-          : withBrowser ? { REMOTE_BROWSER_PROVIDER: 'steel', REMOTE_BROWSER_URL: 'https://steel.internal' } : {}),
+          : withBrowser === 'self-hosted'
+            ? { REMOTE_BROWSER_PROVIDER: 'steel', REMOTE_BROWSER_URL: 'https://steel.internal' }
+            : withBrowser
+              ? {
+                REMOTE_BROWSER_PROVIDER: 'steel',
+                REMOTE_BROWSER_URL: 'https://api.steel.dev',
+                REMOTE_BROWSER_API_KEY: 'sk-test',
+              }
+              : {}),
       });
       const user = store.upsertUser({ provider: 'dev', providerId: 'tester', email: null, name: 'Tester', avatar: null });
       const run = (browserMode: boolean, socket = new FakeSocket()) => runChatTurn(
@@ -185,6 +194,14 @@ describe('the operator configures a browser for their deployment', () => {
       // allowance could be spending. Five small-talk runs used to lock a Free
       // user out of the operator's browser for the rest of the day.
       const { user, run } = await setup('cdp');
+      for (let i = 0; i < 5; i++) store!.incrementBrowserSessions(user.id, today());
+
+      const result = await run(true);
+      expect(result.output).toContain('Hello from the stub model.');
+    }, 30_000);
+
+    it('does not apply Steel Cloud’s daily allowance to self-hosted Steel', async () => {
+      const { user, run } = await setup('self-hosted');
       for (let i = 0; i < 5; i++) store!.incrementBrowserSessions(user.id, today());
 
       const result = await run(true);
