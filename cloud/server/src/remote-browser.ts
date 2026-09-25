@@ -471,14 +471,23 @@ export function providerIsUsable(settings: RemoteBrowserSettings | undefined): b
 }
 
 /**
- * Whether these settings produce a browser whose sessions are worth rationing:
- * one that can be built, from a provider that allocates a session per open.
+ * Whether THIS CASCADE DEPLOYMENT should apply its Free/Pro daily browser
+ * entitlement to these browser settings.
  *
- * Asks the provider, like `providerIsUsable`, rather than naming providers
- * here. A bare CDP endpoint is the operator's own standing browser, so a
- * per-day allowance on it would refuse runs that cost nothing.
+ * This is product policy, not provider policy. Our managed Cascade Cloud pays
+ * for the browser infrastructure even when that infrastructure is our own
+ * private Steel deployment, so those sessions are rationed by plan. A user who
+ * self-hosts Cascade pays for and controls their own infrastructure, so the OSS
+ * default imposes no artificial Cascade daily quota.
+ *
+ * The provider still has to allocate sessions. A standing CDP endpoint reuses
+ * one operator-owned browser and therefore has nothing meaningful to count.
  */
-export function providerRationsSessions(settings: RemoteBrowserSettings | undefined): boolean {
+export function providerRationsSessions(
+  settings: RemoteBrowserSettings | undefined,
+  deploymentMode: 'self-hosted' | 'hosted' | undefined = 'self-hosted',
+): boolean {
+  if (deploymentMode !== 'hosted') return false;
   const provider = buildProvider(settings);
   return provider !== null && provider.allocatesSessions !== false;
 }

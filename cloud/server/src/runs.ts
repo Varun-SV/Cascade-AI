@@ -23,7 +23,7 @@ import { z, type ZodError } from 'zod';
 import type { CloudEnv } from './env.js';
 import { resolveRunMcpServers } from './mcp-oauth.js';
 import type { CloudAttachment, CloudStore } from './db.js';
-import { beginRun, checkBrowserSessionLimit, checkDailyLimit, checkPendingMediaCap, claimBrowserSession, PENDING_MEDIA_TTL_MS, todayKey } from './entitlements.js';
+import { beginRun, checkDailyLimit, checkPendingMediaCap, claimBrowserSession, PENDING_MEDIA_TTL_MS, todayKey } from './entitlements.js';
 import { getSkill } from './skills.js';
 import { tenantScratchDir, tenantStateDir } from './paths.js';
 import { pendingMediaDir, sweepPendingMedia } from './pending-media.js';
@@ -1375,12 +1375,11 @@ export async function runChatTurn(payload: ChatRunPayload, deps: ChatRunDeps): P
   const user = store.getUserById(userId);
   const plan = user?.plan ?? 'free';
   checkDailyLimit(store, userId, plan);
-  // Only where there are sessions to ration: a deployment with no browser has
-  // none, and one pointed at a bare CDP endpoint opens none — it drives the
-  // operator's standing browser, which costs nothing more per run.
-  if (payload.browserMode === true && providerRationsSessions(remoteBrowserControls(env).remoteBrowser) && deps.interactive !== false) {
-    checkBrowserSessionLimit(store, userId, plan);
-  }
+  // Browser quota is intentionally NOT checked here. Browser Mode only grants
+  // the model permission to use the capability; many runs never open a page.
+  // Charging/refusing at run admission made an exhausted user unable to ask an
+  // unrelated question merely because Browser was left enabled. The hosted
+  // Free/Pro allowance is claimed later, atomically, at actual session creation.
   const releaseRun = beginRun(userId, plan);
 
   // What the run holds that must be let go however it ends — setup that
@@ -1807,10 +1806,14 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
     // queued old one.
     emitFrame: lossyEmitter(socket),
     warn: (message) => console.warn(`[run ${conversation.id}] remote browser: ${message}`),
-    // The plan's daily allowance, claimed at the moment a session would be
-    // opened. The run-start check cannot cover a run that began with one
-    // session left and needs a second.
-    allowance: browserAllowanceFor(store, userId),
+    // Only managed Cascade Cloud attaches the Free/Pro daily allowance.
+    // Self-hosted operators pay for/control their own browser infrastructure,
+    // so their deployment does not inherit our SaaS monetization gate.
+    // The claim still happens at actual session creation because a run that
+    // starts with one session left may need a second later.
+    allowance: providerRationsSessions(config.tools?.remoteBrowser, env.CASCADE_DEPLOYMENT_MODE)
+      ? browserAllowanceFor(store, userId)
+      : undefined,
   });
   // The kill switch, alongside the live view that makes it meaningful. Scoped
   // to this run and removed with the run's other listeners below: a Stop is

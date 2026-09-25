@@ -3,7 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { attachRemoteBrowser, asWatchOnlyViewer, frameEmitter, formatCeiling, resetSharedBrowser, sharedBrowserGeneration } from './remote-browser.js';
+import { attachRemoteBrowser, asWatchOnlyViewer, frameEmitter, formatCeiling, providerRationsSessions, resetSharedBrowser, sharedBrowserGeneration } from './remote-browser.js';
 import { ALLOWANCE_UNAVAILABLE, Cascade, RemoteBrowserController, type BrowserAllowance, type CascadeConfig } from '#cascade-ai';
 
 /**
@@ -115,6 +115,38 @@ describe('a deployment with no provider configured', () => {
       config: { tools: { remoteBrowser: { provider: 'steel', url: 'https://steel.internal' } } },
     });
     expect(attached).not.toBeNull();
+  });
+});
+
+describe('browser session rationing', () => {
+  const privateSteel = {
+    provider: 'steel' as const,
+    url: 'http://steel-browser.railway.internal:3000',
+    apiKey: 'deployment-secret',
+  };
+
+  it('does not impose Cascade SaaS quotas on the self-hosted default', () => {
+    expect(providerRationsSessions(privateSteel)).toBe(false);
+    expect(providerRationsSessions(privateSteel, 'self-hosted')).toBe(false);
+  });
+
+  it('meters our managed hosted deployment even when Steel itself is private/self-hosted', () => {
+    expect(providerRationsSessions(privateSteel, 'hosted')).toBe(true);
+  });
+
+  it('also meters hosted Cascade when it uses Steel Cloud', () => {
+    expect(providerRationsSessions({
+      provider: 'steel',
+      url: 'https://api.steel.dev',
+      apiKey: 'hosted-secret',
+    }, 'hosted')).toBe(true);
+  });
+
+  it('does not ration a standing CDP endpoint even in hosted mode', () => {
+    expect(providerRationsSessions({
+      provider: 'cdp',
+      url: 'ws://browser.internal:9222',
+    }, 'hosted')).toBe(false);
   });
 });
 

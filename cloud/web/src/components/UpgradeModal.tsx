@@ -5,6 +5,8 @@ import { openSubscriptionCheckout } from '../lib/razorpay.js';
 
 const FREE_FEATURES = ['1 run at a time', '20 runs / day', 'Chat + web search/fetch tools'];
 const PRO_FEATURES = ['3 runs at a time', '200 runs / day', 'Priority routing', 'Everything in Free'];
+const HOSTED_BROWSER_FREE = '5 browser sessions / day';
+const HOSTED_BROWSER_PRO = '50 browser sessions / day';
 
 // Statuses that mean the paid plan is currently active.
 const ACTIVE = new Set(['active', 'authenticated', 'charged', 'cancel_scheduled']);
@@ -32,6 +34,11 @@ export default function UpgradeModal() {
   const isPro = billing ? (billing.plan === 'pro' || (billing.hasSubscription && !!billing.status && ACTIVE.has(billing.status))) : false;
   const cancelScheduled = billing?.status === 'cancel_scheduled';
   const renews = formatDate(billing?.currentEnd ?? null);
+  // Self-hosted deployments deliberately omit browserSessionLimit from /api/usage.
+  // Only advertise the SaaS browser upsell where the SaaS quota actually exists.
+  const hostedBrowserQuota = typeof usage?.browserSessionLimit === 'number';
+  const freeFeatures = hostedBrowserQuota ? [...FREE_FEATURES, HOSTED_BROWSER_FREE] : FREE_FEATURES;
+  const proFeatures = hostedBrowserQuota ? [...PRO_FEATURES, HOSTED_BROWSER_PRO] : PRO_FEATURES;
 
   async function subscribe() {
     if (busy) return;
@@ -77,7 +84,7 @@ export default function UpgradeModal() {
         <div className="rounded-lg border border-elev/10 p-3">
           <h3 className="mb-2 text-sm font-semibold text-ink-100">Free</h3>
           <ul className="flex flex-col gap-1.5 text-xs text-ink-300">
-            {FREE_FEATURES.map((f) => (
+            {freeFeatures.map((f) => (
               <li key={f} className="flex items-start gap-1.5"><Check size={12} className="mt-0.5 shrink-0 text-ink-400" /> {f}</li>
             ))}
           </ul>
@@ -91,7 +98,7 @@ export default function UpgradeModal() {
             {billing?.priceLabel && <span className="text-[11px] font-medium text-accent-300">{billing.priceLabel}</span>}
           </div>
           <ul className="flex flex-col gap-1.5 text-xs text-ink-300">
-            {PRO_FEATURES.map((f) => (
+            {proFeatures.map((f) => (
               <li key={f} className="flex items-start gap-1.5"><Check size={12} className="mt-0.5 shrink-0 text-accent-400" /> {f}</li>
             ))}
           </ul>

@@ -137,11 +137,12 @@ describe('the operator configures a browser for their deployment', () => {
   describe('the plan\u2019s daily allowance of browser sessions', () => {
     const today = () => new Date().toISOString().slice(0, 10);
     /**
-     * `true` is a deployment whose sessions are billed — a self-hosted Steel,
-     * never dialled, since small talk opens no browser. `'cdp'` is one driving
-     * the operator's own standing browser, which allocates nothing.
+     * `true` is OUR hosted Cascade deployment backed by private Steel, so its
+     * browser spend is monetized by plan. `'self-hosted'` uses the same Steel
+     * topology but represents an OSS operator paying for their own infrastructure.
+     * `'cdp'` is a standing browser and allocates no sessions.
      */
-    async function setup(withBrowser: boolean | 'cdp') {
+    async function setup(withBrowser: boolean | 'cdp' | 'self-hosted') {
       dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-rb-allowance-'));
       store = new CloudStore(path.join(dir, 'cloud.db'));
       stub = await startStubOpenAIServer();
@@ -149,8 +150,24 @@ describe('the operator configures a browser for their deployment', () => {
       const env = loadEnv({
         ...baseEnv(dir),
         ...(withBrowser === 'cdp'
-          ? { REMOTE_BROWSER_PROVIDER: 'cdp', REMOTE_BROWSER_URL: 'ws://127.0.0.1:9/devtools/browser/test' }
-          : withBrowser ? { REMOTE_BROWSER_PROVIDER: 'steel', REMOTE_BROWSER_URL: 'https://steel.internal' } : {}),
+          ? {
+            CASCADE_DEPLOYMENT_MODE: 'hosted',
+            REMOTE_BROWSER_PROVIDER: 'cdp',
+            REMOTE_BROWSER_URL: 'ws://127.0.0.1:9/devtools/browser/test',
+          }
+          : withBrowser === 'self-hosted'
+            ? {
+              CASCADE_DEPLOYMENT_MODE: 'self-hosted',
+              REMOTE_BROWSER_PROVIDER: 'steel',
+              REMOTE_BROWSER_URL: 'https://steel.internal',
+            }
+            : withBrowser
+              ? {
+                CASCADE_DEPLOYMENT_MODE: 'hosted',
+                REMOTE_BROWSER_PROVIDER: 'steel',
+                REMOTE_BROWSER_URL: 'https://steel.internal',
+              }
+              : {}),
       });
       const user = store.upsertUser({ provider: 'dev', providerId: 'tester', email: null, name: 'Tester', avatar: null });
       const run = (browserMode: boolean, socket = new FakeSocket()) => runChatTurn(
@@ -164,12 +181,14 @@ describe('the operator configures a browser for their deployment', () => {
       return { user, run };
     }
 
-    it('refuses a browser run once today\u2019s sessions are gone, before creating anything', async () => {
+    it('lets an exhausted user start a Browser-mode run that never opens a browser', async () => {
       const { user, run } = await setup(true);
       for (let i = 0; i < 5; i++) store!.incrementBrowserSessions(user.id, today());
 
-      await expect(run(true)).rejects.toThrow(/browser sessions are used up \(5 a day on the free plan\)/);
-      expect(store!.listConversations(user.id), 'nothing persisted for a refused run').toEqual([]);
+      const result = await run(true);
+      expect(result.output).toContain('Hello from the stub model.');
+      expect(store!.listConversations(user.id), 'the ordinary run is allowed to exist').toHaveLength(1);
+      expect(store!.getBrowserSessions(user.id, today()), 'no browser opened, so nothing new was charged').toBe(5);
     }, 30_000);
 
     it('still lets the same person run without the browser', async () => {
@@ -191,6 +210,20 @@ describe('the operator configures a browser for their deployment', () => {
       expect(result.output).toContain('Hello from the stub model.');
     }, 30_000);
 
+    it('does not apply Cascade Cloud’s daily allowance to a self-hosted deployment', async () => {
+      const { user, run } = await setup('self-hosted');
+      for (let i = 0; i < 5; i++) store!.incrementBrowserSessions(user.id, today());
+
+      const set = vi.spyOn(RemoteBrowserController.prototype, 'setAllowanceFor');
+      try {
+        const result = await run(true);
+        expect(result.output).toContain('Hello from the stub model.');
+        expect(set.mock.calls.at(-1)?.[1], 'self-hosted runs get no SaaS browser allowance').toBeUndefined();
+      } finally {
+        set.mockRestore();
+      }
+    }, 30_000);
+
     it('does not ration a browser the deployment does not have', async () => {
       const { user, run } = await setup(false);
       for (let i = 0; i < 5; i++) store!.incrementBrowserSessions(user.id, today());
@@ -200,9 +233,9 @@ describe('the operator configures a browser for their deployment', () => {
     }, 30_000);
 
     it('claims from the allowance when the run would open a session, and refuses once it is spent', async () => {
-      // The start-of-run check cannot cover a run that began with one session
-      // left and needs a second, so the same allowance is claimed at the
-      // moment a session would be opened.
+      // The allowance lives at the only boundary that costs browser capacity:
+      // actual session creation. A Browser-mode run can exist with zero sessions,
+      // while every new session still consumes exactly one plan allowance.
       const set = vi.spyOn(RemoteBrowserController.prototype, 'setAllowanceFor');
       try {
         const { user, run } = await setup(true);
