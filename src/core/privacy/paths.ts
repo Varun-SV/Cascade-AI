@@ -23,6 +23,7 @@ import * as _ignoreModule from 'ignore';
 import type { Ignore } from 'ignore';
 import { realPathOf } from '../../utils/real-path.js';
 import { LinkAliases } from '../../utils/link-aliases.js';
+import { stripTrailingSlashes } from '../../utils/net.js';
 // Same gitignore-style matcher used by .cascadeignore (src/config/ignore.ts),
 // so privacy patterns behave exactly like ignore patterns users already know.
 const ignore = (_ignoreModule as unknown as { default: () => Ignore }).default ?? (_ignoreModule as unknown as () => Ignore);
@@ -48,6 +49,8 @@ export class PrivacyPaths {
   private patterns: string[];
   /** Workspace-relative POSIX paths a local-only subtask wrote: files, and the directories it made. */
   private derived = new Set<string>();
+  /** The same paths as a tree of their segments, to find one a path is or lies in with one walk. */
+  private derivedTree: SegmentNode = treeOf([]);
   private readonly derivedFile?: string;
   /** Recorded here but not yet on disk: a save that could not take the lock. */
   private unsaved = new Set<string>();
@@ -97,9 +100,12 @@ export class PrivacyPaths {
     const rel = relativePath.replace(/^\.?\//, '');
     this.sync();
     if (this.derived.size) {
-      const parts = rel.replace(/\/+$/, '').split('/');
-      for (let i = 1; i <= parts.length; i++) {
-        if (this.derived.has(parts.slice(0, i).join('/'))) return true;
+      let node = this.derivedTree;
+      for (const segment of stripTrailingSlashes(rel).split('/')) {
+        const next = node.children.get(segment);
+        if (!next) break;
+        if (next.recorded) return true;
+        node = next;
       }
     }
     if (this.patterns.length === 0) return false;
@@ -122,7 +128,7 @@ export class PrivacyPaths {
     this.sync();
     const added: string[] = [];
     for (const raw of relativePaths) {
-      const rel = raw.split(path.sep).join('/').replace(/^\.?\//, '').replace(/\/+$/, '');
+      const rel = stripTrailingSlashes(raw.split(path.sep).join('/').replace(/^\.?\//, ''));
       if (!rel || rel.startsWith('../') || this.derived.has(rel) || added.includes(rel)) continue;
       added.push(rel);
     }
@@ -145,10 +151,10 @@ export class PrivacyPaths {
    * write tool asking fails then, and the write with it.
    */
   private saveDerived(added: string[], removed: string[]): void {
-    this.aliases.clear();
     for (const rel of added) this.derived.add(rel);
     for (const rel of removed) this.derived.delete(rel);
     for (const rel of removed) this.unsaved.delete(rel);
+    this.setDerived(this.derived);
     const file = this.derivedFile;
     if (!file) return;
     try {
@@ -162,7 +168,7 @@ export class PrivacyPaths {
         fs.renameSync(tmp, file);
         saves++;
         this.unsaved.clear();
-        this.derived = next;
+        this.setDerived(next);
         this.seen = stampOf(file);
       });
     } catch (err) {
@@ -185,7 +191,12 @@ export class PrivacyPaths {
     const now = stampOf(file);
     if (now === this.seen) return;
     this.seen = now;
-    this.derived = new Set([...readDerived(file), ...this.unsaved]);
+    this.setDerived(new Set([...readDerived(file), ...this.unsaved]));
+  }
+
+  private setDerived(paths: Set<string>): void {
+    this.derived = paths;
+    this.derivedTree = treeOf(paths);
     this.aliases.clear();
   }
 
@@ -210,6 +221,23 @@ export class PrivacyPaths {
   anyLocalOnly(relativePaths: string[]): boolean {
     return relativePaths.some((p) => this.isLocalOnly(p));
   }
+}
+
+interface SegmentNode { recorded: boolean; children: Map<string, SegmentNode> }
+
+/** Paths as a tree of their segments; a recorded path's last node is marked. */
+function treeOf(paths: Iterable<string>): SegmentNode {
+  const root: SegmentNode = { recorded: false, children: new Map() };
+  for (const p of paths) {
+    let node = root;
+    for (const segment of p.split('/')) {
+      let next = node.children.get(segment);
+      if (!next) node.children.set(segment, next = { recorded: false, children: new Map() });
+      node = next;
+    }
+    node.recorded = true;
+  }
+  return root;
 }
 
 /** The file's identity and last change, or '' when there is none. */

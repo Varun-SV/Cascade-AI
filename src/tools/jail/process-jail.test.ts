@@ -98,6 +98,13 @@ describe('toPathspecs', () => {
       ':(glob)**/build', ':(glob)**/build/**',
     ]);
   });
+
+  it('takes trailing slashes off in linear time', () => {
+    const started = Date.now();
+    expect(toPathspecs([`x${'/'.repeat(100_000)}y`]).length).toBeGreaterThan(0);
+    expect(toPathspecs([`${'/'.repeat(100_000)}x`]).length).toBeGreaterThan(0);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
 });
 
 describe('unixSocketFilter', () => {

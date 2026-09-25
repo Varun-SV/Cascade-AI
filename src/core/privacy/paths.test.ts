@@ -133,6 +133,18 @@ describe('PrivacyPaths — what a local-only subtask wrote', () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
+  // Trailing slashes came off with /\/+$/, which retries from every slash:
+  // quadratic on a path made of them, and paths come from agents.
+  it('reads a path of many slashes in linear time', () => {
+    const policy = new PrivacyPaths();
+    policy.addDerived(['made']);
+    const nasty = `${'/'.repeat(100_000)}x`;
+    const started = Date.now();
+    expect(policy.isLocalOnly(nasty)).toBe(false);
+    expect(policy.addDerived([nasty])).toHaveLength(1);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
   // Two runs in one workspace each held their own copy of the record, and
   // the last to save replaced the other's additions with its own.
   it('keeps every run\'s records when runs share a workspace', async () => {

@@ -35,6 +35,7 @@
 
 import { execFile } from 'node:child_process';
 import { fileIdentity, PROBE } from '../../utils/link-aliases.js';
+import { stripTrailingSlashes } from '../../utils/net.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -520,7 +521,7 @@ export function toPathspecs(patterns: string[]): string[] {
   for (const raw of patterns) {
     let p = raw.trim();
     if (!p || p.startsWith('#') || p.startsWith('!')) continue;
-    p = p.replace(/\/+$/, '');
+    p = stripTrailingSlashes(p);
     const anchored = p.startsWith('/') || p.includes('/');
     p = p.replace(/^\/+/, '');
     if (!p) continue;
