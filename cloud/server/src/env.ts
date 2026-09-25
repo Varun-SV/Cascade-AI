@@ -52,6 +52,11 @@ const EnvSchema = z.object({
   // (src/core/router — maxCostPerRunUsd). A safety rail on the shared server
   // ahead of real per-plan entitlements (task #29).
   MAX_COST_PER_RUN_USD: z.coerce.number().positive().default(0.5),
+  // Product/deployment policy boundary. The open-source default is self-hosted:
+  // no artificial SaaS plan gates are imposed on an operator running their own
+  // infrastructure. Our managed Cascade Cloud deployment sets this to "hosted",
+  // which enables Free/Pro resource entitlements such as daily browser sessions.
+  CASCADE_DEPLOYMENT_MODE: z.enum(['self-hosted', 'hosted']).optional(),
   // Razorpay recurring subscriptions. All optional — billing is simply disabled
   // (the Upgrade page shows "not configured") until KEY_ID/KEY_SECRET/PLAN_ID
   // are set. WEBHOOK_SECRET verifies the /api/billing/webhook signature.
