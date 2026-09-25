@@ -196,6 +196,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each choice does to that work — on the web and in the desktop app.
 
 ### Security
+- **Reading a provider's error no longer slows down on a crafted message.**
+  Two patterns for "model … not found" were tried again from every
+  "model " in the message, so one made of them took time growing with its
+  length squared; they now read it in one pass.
 - **Agents can no longer read `.cascade/config.json`.** It holds your
   provider keys in plain JSON, and nothing protected it: `file_read`
   returned it, `grep` printed its lines, and the code index could embed it
