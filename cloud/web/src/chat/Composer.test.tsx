@@ -34,20 +34,20 @@ function renderWith(browserAllowance: BrowserAllowanceView) {
 afterEach(cleanup);
 
 describe('the Browser chip', () => {
-  it('cannot be pressed while today’s allowance is still being read', () => {
-    // It looked available until /api/usage answered, so an exhausted user
-    // could turn it on and send a run the server then refused.
+  it('can be pressed while today’s allowance is still being read', () => {
     const chip = renderWith(CHECKING);
-    expect(chip.disabled).toBe(true);
-    expect(chip.getAttribute('title')).toBe('Checking how many browser sessions are left today…');
+    expect(chip.disabled).toBe(false);
+    expect(chip.getAttribute('title')).toContain('Checking how many browser sessions are left today');
   });
 
   it('can be pressed once the read says sessions remain', () => {
     expect(renderWith({ used: 1, limit: 5 }).disabled).toBe(false);
   });
 
-  it('cannot be pressed once they are used up', () => {
-    expect(renderWith({ used: 5, limit: 5 }).disabled).toBe(true);
+  it('can stay enabled once they are used up because the quota is checked on session open', () => {
+    const chip = renderWith({ used: 5, limit: 5 });
+    expect(chip.disabled).toBe(false);
+    expect(chip.getAttribute('title')).toContain("you'll be asked to upgrade");
   });
 
   it('can be pressed where the deployment rations nothing', () => {

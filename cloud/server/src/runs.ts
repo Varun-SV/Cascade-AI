@@ -23,7 +23,7 @@ import { z, type ZodError } from 'zod';
 import type { CloudEnv } from './env.js';
 import { resolveRunMcpServers } from './mcp-oauth.js';
 import type { CloudAttachment, CloudStore } from './db.js';
-import { beginRun, checkBrowserSessionLimit, checkDailyLimit, checkPendingMediaCap, claimBrowserSession, PENDING_MEDIA_TTL_MS, todayKey } from './entitlements.js';
+import { beginRun, checkDailyLimit, checkPendingMediaCap, claimBrowserSession, PENDING_MEDIA_TTL_MS, todayKey } from './entitlements.js';
 import { getSkill } from './skills.js';
 import { tenantScratchDir } from './paths.js';
 import { pendingMediaDir, sweepPendingMedia } from './pending-media.js';
@@ -1375,14 +1375,11 @@ export async function runChatTurn(payload: ChatRunPayload, deps: ChatRunDeps): P
   const user = store.getUserById(userId);
   const plan = user?.plan ?? 'free';
   checkDailyLimit(store, userId, plan);
-  // Only where there are sessions to ration: a deployment with no browser has
-  // none, and one pointed at a bare CDP endpoint opens none — it drives the
-  // operator's standing browser, which costs nothing more per run.
-  if (payload.browserMode === true
-    && providerRationsSessions(remoteBrowserControls(env).remoteBrowser, env.CASCADE_DEPLOYMENT_MODE)
-    && deps.interactive !== false) {
-    checkBrowserSessionLimit(store, userId, plan);
-  }
+  // Browser quota is intentionally NOT checked here. Browser Mode only grants
+  // the model permission to use the capability; many runs never open a page.
+  // Charging/refusing at run admission made an exhausted user unable to ask an
+  // unrelated question merely because Browser was left enabled. The hosted
+  // Free/Pro allowance is claimed later, atomically, at actual session creation.
   const releaseRun = beginRun(userId, plan);
 
   try {
