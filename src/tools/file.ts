@@ -7,6 +7,7 @@ import path from 'node:path';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
 import { resolveInWorkspace } from './utils/workspace-path.js';
+import { statePathFor } from '../config/project-state.js';
 
 /** A read refused under privacy.paths: the file is local-only, and nothing private can take it. */
 export class WithheldError extends Error {
@@ -190,8 +191,12 @@ export class FileListTool extends BaseTool {
     const absPath = resolveInWorkspace(this.workspaceRoot, inputPath);
     const shown = this.listGate(options);
 
+    // A folder in the project's state folder (`@private/…`): the registry has
+    // already decided this caller may list it, and all of it lies outside the
+    // workspace, which the path guard would otherwise refuse entry by entry.
+    const inState = statePathFor(this.workspaceRoot, inputPath) !== null;
     const entries = (await fs.readdir(absPath, { withFileTypes: true }))
-      .filter((e) => !this.isProtectedPath(path.join(absPath, e.name)) && shown(path.join(absPath, e.name), e.isDirectory()));
+      .filter((e) => inState || (!this.isProtectedPath(path.join(absPath, e.name)) && shown(path.join(absPath, e.name), e.isDirectory())));
     return entries.map(e => `${e.isDirectory() ? '[DIR] ' : '      '}${e.name}`).join('\n') || '(empty directory)';
   }
 }

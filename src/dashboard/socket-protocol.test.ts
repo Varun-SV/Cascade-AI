@@ -72,13 +72,13 @@ describe('the save acknowledgement means durable, not merely handled', () => {
     // from the helper whose failure path `write-config.test.ts` exercises for
     // real rather than by inspection.
     expect(source).toMatch(/private persistConfig\([^)]*\): \{ ok: true \} \| \{ ok: false; error: string \}/);
-    expect(source).toMatch(/const result = writeConfigFile\(/);
+    expect(source).toMatch(/const result = writeProjectConfig\(this\.workspacePath, /);
     expect(source).toMatch(/return result;/);
     // The save is TRANSACTIONAL — staged, validated, adopted, written, rolled
     // back on failure — and the transaction itself now lives in
     // `commitSettings()`, shared with the desktop IPC writer, whose behaviour
     // `settings-payload.test.ts` exercises directly. What this handler owes is
-    // to USE it, and to sync globals only on success.
+    // to USE it.
     // The writer is HANDED the validated config and must persist THAT: during
     // the write the live object is still the old configuration, so a writer
     // reaching for it would save what is being replaced.
@@ -87,23 +87,21 @@ describe('the save acknowledgement means durable, not merely handled', () => {
     expect(source).not.toMatch(/private persistConfig\([^)]*= this\.config/);
     expect(source).not.toMatch(/applySettingsPayload\(\s*this\.config/);
     expect(source).toMatch(/if \(!result\.ok\) \{/);
-    expect(source).toMatch(/\}\s*\n\s*this\.syncGlobalCredentials\(\);/);
-    // The sync is not back inside the writer, where a failed write still ran it.
-    expect(source).not.toMatch(/saveGlobalCredentials\([^)]*\);\s*\n\s*\}\s*catch[\s\S]{0,80}return result;/);
     // …and the handler puts it in the ack. Now as an EARLY RETURN, because a
     // failed write must also abandon the staged change rather than adopt it
     // with an error attached.
     expect(source).toMatch(/if \(!result\.ok\) \{/);
   });
 
-  it('keeps the global-credential sync best-effort, which it genuinely is', async () => {
+  // The keys are no longer copied from the project's config to the global
+  // store after the save: the global store is the only place they are kept,
+  // so storing them is the save (write-config.test.ts exercises its failure).
+  it('stores the keys as part of the save, not as a copy after it', async () => {
     const fs = await import('node:fs/promises');
     const url = await import('node:url');
     const nodePath = await import('node:path');
     const here = nodePath.dirname(url.fileURLToPath(import.meta.url));
     const source = await fs.readFile(nodePath.join(here, 'server.ts'), 'utf-8');
-    // Failing the convenience copy does not lose what the user just typed, so
-    // it must not fail the save.
-    expect(source).toMatch(/Failed to sync global credentials/);
+    expect(source).not.toMatch(/syncGlobalCredentials|saveGlobalCredentials\(/);
   });
 });

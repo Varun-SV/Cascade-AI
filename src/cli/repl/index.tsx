@@ -24,7 +24,9 @@ import type {
   Theme,
   Message,
 } from '../../types.js';
-import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE } from '../../constants.js';
+import { GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE } from '../../constants.js';
+import { statePath, STATE } from '../../config/project-state.js';
+import { writeProjectConfig } from '../../config/write-config.js';
 import { Cascade, type DecisionLogEntry } from '../../core/cascade.js';
 import { MemoryStore } from '../../memory/store.js';
 import { CloudClient } from '../../cloud/client.js';
@@ -411,13 +413,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       /* hot-swap is best effort; persisted config will take effect next start */
     }
 
-    // Persist .cascade/config.json
-    const configPath = path.join(workspacePath, '.cascade', 'config.json');
-    try {
-      await fs.mkdir(path.dirname(configPath), { recursive: true });
-      await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8');
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+    // Persist the project's config — its keys go to the global store.
+    const written = writeProjectConfig(workspacePath, config as never);
+    if (!written.ok) {
+      const msg = written.error;
       dispatch({
         type: 'ADD_MESSAGE',
         message: { id: randomUUID(), role: 'error', content: `Failed to persist model selection: ${msg}`, timestamp: new Date().toISOString() },
@@ -477,7 +476,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       originalLog(...args);
     };
 
-    const store = new MemoryStore(path.join(workspacePath, CASCADE_DB_FILE));
+    const store = new MemoryStore(statePath(workspacePath, STATE.memoryDb));
     storeRef.current = store;
     globalStoreRef.current = new MemoryStore(path.join(os.homedir(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE));
     const identityRows = store.listIdentities().map(i => ({ id: i.id, name: i.name, isDefault: i.isDefault }));
@@ -1588,7 +1587,7 @@ function formatConfigSummary(config: CascadeConfig): string {
 function stringifySlashOutput(val: unknown): string { return typeof val === 'string' ? val : JSON.stringify(val); }
 async function searchSessionsAndMessages(query: string, workspacePath: string): Promise<string> {
   if (!query) return 'Usage: /search <query>';
-  const dbPath = path.join(workspacePath, CASCADE_DB_FILE);
+  const dbPath = statePath(workspacePath, STATE.memoryDb);
   
   // Check if DB exists
   try {
@@ -1626,7 +1625,7 @@ async function searchSessionsAndMessages(query: string, workspacePath: string): 
 async function diagnoseRuntime(config: CascadeConfig, workspacePath: string): Promise<string> {
   const providers = config.providers.map((p) => `${p.type}${p.apiKey ? ' (key set)' : ' (no key)'}`).join('\n');
   const models = [`T1: ${config.models.t1 ?? 'default'}`, `T2: ${config.models.t2 ?? 'default'}`, `T3: ${config.models.t3 ?? 'default'}`].join('\n');
-  const store = new MemoryStore(path.join(workspacePath, CASCADE_DB_FILE));
+  const store = new MemoryStore(statePath(workspacePath, STATE.memoryDb));
   try {
     const sessions = store.listSessions(undefined, 3);
     return [
@@ -1640,7 +1639,7 @@ async function diagnoseRuntime(config: CascadeConfig, workspacePath: string): Pr
 
 async function showRecentLogs(args: string[], workspacePath: string): Promise<string> {
   const limit = Number.parseInt(args[0] ?? '10', 10) || 10;
-  const store = new MemoryStore(path.join(workspacePath, CASCADE_DB_FILE));
+  const store = new MemoryStore(statePath(workspacePath, STATE.memoryDb));
   try {
     const logs = store.listRuntimeNodeLogs(undefined, undefined, limit);
     if (!logs.length) return 'No recent runtime logs.';
@@ -1658,7 +1657,7 @@ interface SessionResumeSnapshot {
 async function loadSessionSnapshot(args: string[], workspacePath: string): Promise<SessionResumeSnapshot | string> {
   const sessionId = args[0];
   if (!sessionId) return 'Usage: /resume <sessionId>';
-  const store = new MemoryStore(path.join(workspacePath, CASCADE_DB_FILE));
+  const store = new MemoryStore(statePath(workspacePath, STATE.memoryDb));
   try {
     const session = store.getSession(sessionId);
     if (!session) return `Session not found: ${sessionId}`;

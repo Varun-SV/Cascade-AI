@@ -35,12 +35,13 @@ WebAssembly sandbox.
   keeping secrets and private files out of reach, not freezing the machine.
   A local-only caller's is read-only — the workspace writable, `/tmp` and
   `~/.cache` private tmpfs, the git store read-only — because whatever it
-  writes may carry what it read: its changes in the workspace are found by
-  stamping files before and after, and marked local-only
-  (`.cascade/privacy-derived.json`) — a directory it made whole — with
-  other tool calls held until it ends (`src/tools/workspace-gate.ts`), in
-  every run in the workspace: one gate per workspace in a process, and
-  marker files in `.cascade/gate/` between processes.
+  writes may carry what it read: what it made in the workspace, found by
+  stamping files before and after, is moved to its private folder in the
+  project's state folder (outside the project, mounted writable for it
+  alone), and what it changed is marked local-only — with other tool calls
+  held until it ends (`src/tools/workspace-gate.ts`), in every run in the
+  workspace: one gate per workspace in a process, and marker files in the
+  project's state folder between processes.
   `.cascadeignore` is mounted over itself read-only for every caller.
 - **macOS — sandbox-exec**, a generated profile denying the same paths.
   A local-only caller runs no commands there: with no mount boundary a
@@ -58,10 +59,9 @@ a Docker/Podman fallback where no jailer works — which would also give
 macOS local-only commands. On macOS a command can still
 read another same-user process's startup environment; Linux's PID namespace
 closes that there. A mask hides what a path holds, not that it is there: a
-cloud worker's command can list a local-only file's name, including one a
-local-only worker chose (the file tools leave such names out). Hiding names
-from commands would mean mounting over the parent directory, and losing the
-command's own writes there.
+cloud worker's command can list the name of a file a local-only pattern
+matches — one you named, since what a local-only worker makes is kept out of
+the project.
 
 ## Project knowledge graph (world-state v2) — ✅ shipped in v0.14.0
 

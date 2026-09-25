@@ -170,7 +170,8 @@ describe('PrivacyPaths — what a local-only subtask wrote', () => {
     expect(new PrivacyPaths([], { workspaceRoot: root }).isLocalOnly('b.txt')).toBe(true);
 
     // Another process's change is seen from the next job on.
-    const file = path.join(root, '.cascade', 'privacy-derived.json');
+    const { statePath } = await import('../../config/project-state.js');
+    const file = statePath(root, 'privacy-derived.json');
     await fs.writeFile(file, JSON.stringify({ version: 1, paths: ['b.txt', 'other.txt'] }));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(c.isLocalOnly('other.txt')).toBe(true);

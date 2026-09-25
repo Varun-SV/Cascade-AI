@@ -13,6 +13,7 @@ import Database from 'better-sqlite3';
 import { ConfigManager } from '../../config/index.js';
 import { CascadeIgnore } from '../../config/ignore.js';
 import { PrivacyPaths } from '../../core/privacy/paths.js';
+import { statePath, STATE } from '../../config/project-state.js';
 import { WorkspaceIndex } from '../../retrieval/workspace-index.js';
 import { embedderFromProviders } from '../../retrieval/embedder.js';
 import { LLMReranker, chatCompleterFromProviders } from '../../retrieval/rerank.js';
@@ -32,7 +33,7 @@ export async function indexCommand(dirPath?: string): Promise<void> {
   }
 
   // Resolved against the workspace, as a run resolves it: both must open one file.
-  const dbPath = path.resolve(workspace, config.codeIndex?.dbPath || path.join('.cascade', 'code-index.db'));
+  const dbPath = config.codeIndex?.dbPath ? path.resolve(workspace, config.codeIndex.dbPath) : statePath(workspace, STATE.codeIndex);
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');

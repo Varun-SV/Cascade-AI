@@ -44,6 +44,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   daily limit.
 
 ### Changed
+- **Cascade keeps a project's state outside the project.** Its settings,
+  sessions, audit trail, world state, code index, run checkpoints and the
+  record of what local-only subtasks wrote used to sit in the project's own
+  `.cascade/`, where every tool and command in the project had to be kept
+  from them and where they could be committed by accident. They now live in
+  `~/.cascade-ai/projects/<folder name>-<hash>/`, and the project holds only
+  `CASCADE.md` and `.cascadeignore`. An existing `.cascade/` is moved there
+  the first time Cascade opens the project, and removed; if it was tracked
+  in git, that shows as its deletion. `cascade doctor` prints where a
+  project's config is. A hosted server names a state folder of its own
+  (`useProjectStateDir`), and never writes the machine-global one.
+- **Provider keys are kept once, for the machine.** They lived in both
+  `~/.cascade-ai/credentials.json` and each project's config; a project's
+  config now holds its providers without their keys, and every project uses
+  the machine-wide ones. A project whose key differed from the machine-wide
+  one when it moved keeps it, in the same file under that project, and goes
+  on using it ahead of the environment, as before.
+- **Browser screenshots are named `@screenshots/<file>`,** a path
+  `image_analyze` and the file tools read from the project's state folder,
+  rather than an absolute path in the project.
 - **`tools.dynamicToolSandbox` offers `wasm` in place of `worker`.** `worker`
   ran agent-written tools in a bare thread that confined nothing. A config
   that still names it gets the new WebAssembly sandbox, and Settings →
@@ -200,13 +220,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agent wrote cannot `fetch` once it has read a local-only file. Local-only
   files are kept out of the code index, never sent for transcription, and
   not embedded by `generate_document` in a document that is not local-only.
-  What a local-only subtask writes is local-only too — a file tool's
-  destination before it writes, whatever its commands changed in the
-  workspace once they end — and stays so in later runs, recorded in
-  `.cascade/privacy-derived.json` even when a configured pattern covers it,
+  What a local-only subtask makes goes to its private folder, outside the
+  project — `@private/…` to the file tools, `$CASCADE_PRIVATE_DIR` to its
+  commands, whose new files are moved there when they end — so a name it
+  chose, which could carry what it read, shows to no one else, and only a
+  local-only subtask reaches it; a new file in a folder a local-only pattern
+  covers whole stays there, with that folder's names hidden. What it changes
+  is local-only too — a file tool's destination before it writes, whatever
+  its commands changed once they end — and stays so in later runs, recorded
+  in the project's state folder even when a configured pattern covers it,
   so narrowing the pattern later does not release it; a write that leaves
-  the file as it was takes its record back off. A directory it made is
-  recorded whole, with what lies in it. Runs sharing a workspace share the
+  the file as it was takes its record back off. Runs sharing a workspace share the
   record: each merges its changes in under a lock, and sees another's as
   they are made. Its commands write nowhere else (their
   `/tmp` is private, the rest of the machine and the git store read-only)

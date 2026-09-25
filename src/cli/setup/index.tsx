@@ -15,7 +15,8 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { CascadeConfigSchema } from '../../config/schema.js';
-import { CASCADE_CONFIG_FILE, GLOBAL_CONFIG_DIR } from '../../constants.js';
+import { GLOBAL_CONFIG_DIR } from '../../constants.js';
+import { writeProjectConfig } from '../../config/write-config.js';
 import type { CascadeConfig } from '../../types.js';
 import { SafeTextInput } from '../components/SafeTextInput.js';
 import { getTheme } from '../themes/index.js';
@@ -343,10 +344,10 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
         };
         const config = CascadeConfigSchema.parse(rawConfig);
 
-        const configDir = path.join(workspacePath, '.cascade');
-        await fs.mkdir(configDir, { recursive: true });
-        const configPath = path.join(workspacePath, CASCADE_CONFIG_FILE);
-        await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8');
+        // The project's config, in its state folder; the keys go to the
+        // global store, where every project finds them.
+        const written = writeProjectConfig(workspacePath, config as never);
+        if (!written.ok) throw new Error(written.error);
 
         savedConfigRef.current = config as CascadeConfig;
         dispatchRef.current({ type: 'GO_DONE' });

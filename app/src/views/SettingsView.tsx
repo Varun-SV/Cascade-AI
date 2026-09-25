@@ -848,7 +848,7 @@ export function SettingsView({ socket }: Props) {
           {tab === 'advanced' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxHeight: 340, overflowY: 'auto', paddingRight: 4 }}>
               <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: 0 }}>
-                Power knobs, written to the same .cascade/config.json the CLI uses. Hover a label for what it does.
+                Power knobs, written to the same project config the CLI uses. Hover a label for what it does.
               </p>
               <AdvGroup title="Autonomy & approvals">
                 <AdvSelect label="Autonomy" hint="auto = hands-off: plan gate and non-dangerous tools auto-approve; dangerous tools still ask" value={adv.autonomy} options={['manual', 'auto']} onChange={(v) => setAdvField('autonomy', v as AdvancedSettings['autonomy'])} />

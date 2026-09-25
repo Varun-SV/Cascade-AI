@@ -39,16 +39,21 @@ describe('CascadeIgnore', () => {
   // The list once named `.cascade/audit.log`, which nothing writes, and so
   // left the audit trail's real database open. These names come from the
   // classes that write the files, so the list cannot drift from them again.
-  it('protects the files Cascade actually writes: the audit trail, the world state, their keys', async () => {
+  // Cascade keeps them outside the project now (config/project-state.ts);
+  // the names are still protected where an older version wrote them.
+  it('protects the files Cascade writes: kept outside the project, and protected under .cascade/ where they were', async () => {
     const { AuditLogger } = await import('../core/audit/audit-logger.js');
     const { WorldStateDB } = await import('../core/knowledge/world-state.js');
+    const { projectStateDir } = await import('./project-state.js');
     const audit = new AuditLogger(dir) as unknown as { dbPath: string; keyPath: string };
     const world = new WorldStateDB(dir) as unknown as { dbPath: string; keyPath: string };
     const ig = new CascadeIgnore();
     await ig.load(dir);
     for (const file of [audit.dbPath, `${audit.dbPath}-wal`, `${audit.dbPath}-shm`, audit.keyPath,
-      world.dbPath, `${world.dbPath}-wal`, world.keyPath, path.join(dir, '.cascade', 'code-index.db-wal')]) {
-      expect(ig.isIgnored(file, dir), path.relative(dir, file)).toBe(true);
+      world.dbPath, `${world.dbPath}-wal`, world.keyPath, path.join(projectStateDir(dir), 'code-index.db-wal')]) {
+      expect(file.startsWith(`${projectStateDir(dir)}${path.sep}`), file).toBe(true);
+      const legacy = path.join(dir, '.cascade', path.basename(file));
+      expect(ig.isIgnored(legacy, dir), path.relative(dir, legacy)).toBe(true);
     }
   });
 

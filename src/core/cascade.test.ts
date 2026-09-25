@@ -874,6 +874,27 @@ describe('what local-only subtasks wrote reaches every run in the workspace', ()
   });
 });
 
+// An embedder builds a Cascade without a ConfigManager; the project's state
+// still moves out of its .cascade/ the first time.
+describe('a project opened by an embedder', () => {
+  it('has its state moved out of .cascade/', async () => {
+    const fsp = await import('node:fs/promises');
+    const os = await import('node:os');
+    const nodePath = await import('node:path');
+    const { statePath } = await import('../config/project-state.js');
+    const workspace = await fsp.realpath(await fsp.mkdtemp(nodePath.join(os.tmpdir(), 'cascade-embed-')));
+    try {
+      await fsp.mkdir(nodePath.join(workspace, '.cascade'));
+      await fsp.writeFile(nodePath.join(workspace, '.cascade', 'dead-models.json'), '{}');
+      new Cascade(baseConfig, workspace);
+      await expect(fsp.stat(nodePath.join(workspace, '.cascade'))).rejects.toThrow();
+      expect(await fsp.readFile(statePath(workspace, 'dead-models.json'), 'utf8')).toBe('{}');
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+});
+
 // A relative codeIndex.dbPath was protected under the workspace but opened
 // under the process's directory — elsewhere on desktop and the server.
 describe('the code index opens the database it protects', () => {

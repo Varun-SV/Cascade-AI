@@ -48,7 +48,9 @@ export class GitTool extends BaseTool {
     try {
       switch (operation) {
         case 'status': {
-          const status = await git.status();
+          // Hidden paths left out here too: an untracked file's name is
+          // one a local-only subtask may have chosen.
+          const status = await git.status(exclusions.length ? ['--', ...exclusions] : []);
           return this.formatStatus(status);
         }
         case 'diff': {

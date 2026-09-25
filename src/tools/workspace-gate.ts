@@ -15,13 +15,14 @@
 //  One gate per workspace in a process, however many registries use it; and,
 //  where local-only work can happen, one across processes too — two runs in
 //  one workspace are as likely in two windows as in one. That part is kept
-//  in marker files in `.cascade/gate/`, hidden from commands and protected
-//  from the file tools: each shared caller leaves one while it runs, and the
+//  in marker files in the project's state folder (`gate/`), out of reach of
+//  commands and file tools: each shared caller leaves one while it runs, and the
 //  caller going alone holds the lock file. Each side writes its own before
 //  looking for the other's, so one of any two sees the other and waits.
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { statePath, STATE } from '../config/project-state.js';
 
 /** How often a held marker is touched, and how long one untouched counts as left by a process that ended. */
 const HEARTBEAT_MS = 5_000;
@@ -29,8 +30,6 @@ const STALE_MS = 30_000;
 /** How often a waiting caller looks again. */
 const POLL_MS = 25;
 
-/** Where the markers live, relative to the workspace. */
-export const GATE_DIR = '.cascade/gate';
 
 const gates = new Map<string, WorkspaceGate>();
 
@@ -51,7 +50,7 @@ export class WorkspaceGate {
 
   /** @param workspaceRoot where the markers for other processes go; without it, this process only. */
   constructor(workspaceRoot?: string) {
-    if (workspaceRoot) this.markers = new Markers(path.join(workspaceRoot, GATE_DIR));
+    if (workspaceRoot) this.markers = new Markers(statePath(workspaceRoot, STATE.gate));
   }
 
   /**

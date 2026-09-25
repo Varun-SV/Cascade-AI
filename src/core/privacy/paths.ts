@@ -13,7 +13,8 @@
 //  What such a subtask writes is local-only too: it may carry what the
 //  subtask read. Those files — and the directories it made, whose names can
 //  carry as much — are recorded as they are written, in
-//  .cascade/privacy-derived.json, so they stay local-only across runs. Runs
+//  the project's state folder (privacy-derived.json, config/project-state.ts),
+//  so they stay local-only across runs. Runs
 //  sharing a workspace share the record: each merges into it under a lock,
 //  and looks at it again when another has changed it.
 
@@ -23,6 +24,7 @@ import * as _ignoreModule from 'ignore';
 import type { Ignore } from 'ignore';
 import { realPathOf } from '../../utils/real-path.js';
 import { LinkAliases } from '../../utils/link-aliases.js';
+import { statePath, STATE } from '../../config/project-state.js';
 import { stripTrailingSlashes } from '../../utils/net.js';
 // Same gitignore-style matcher used by .cascadeignore (src/config/ignore.ts),
 // so privacy patterns behave exactly like ignore patterns users already know.
@@ -33,8 +35,6 @@ export interface PrivacyPathPolicy {
   policy: 'local-only';
 }
 
-/** Where the files a local-only subtask wrote are recorded, relative to the workspace. */
-export const DERIVED_FILE = '.cascade/privacy-derived.json';
 
 /** Saves of any record made in this process, for `PrivacyPaths.sync`. */
 let saves = 0;
@@ -71,7 +71,7 @@ export class PrivacyPaths {
     this.patterns = policies.filter((p) => p.policy === 'local-only').map((p) => p.pattern);
     if (this.patterns.length) this.localOnly.add(this.patterns);
     if (opts.workspaceRoot) {
-      this.derivedFile = path.join(opts.workspaceRoot, DERIVED_FILE);
+      this.derivedFile = statePath(opts.workspaceRoot, STATE.privacyDerived);
       this.sync();
     }
   }

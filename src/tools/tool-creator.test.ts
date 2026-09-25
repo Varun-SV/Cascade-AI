@@ -12,6 +12,7 @@ import { ToolRegistry } from './registry.js';
 import { ToolCreator, normalizeToolSchema, sandboxModeOf, type GeneratedToolSpec } from './tool-creator.js';
 import { generateDiff, diffSummary } from './diff.js';
 import { PermissionEscalator } from '../core/permissions/escalator.js';
+import { projectStateDir } from '../config/project-state.js';
 
 const opts: any = { tierId: 't3-test' };
 let ws: string;
@@ -408,12 +409,12 @@ describe('ToolCreator — default-deny + lazy escalator (v0.9.6 item 2)', () => 
 describe('ToolCreator — hardened persistence (v0.9.6 item 3)', () => {
   it('re-validates on load: skips a broken persisted spec, marks the rest untrusted', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-persist-'));
-    await fs.mkdir(path.join(dir, '.cascade'), { recursive: true });
+    await fs.mkdir(projectStateDir(dir), { recursive: true });
     const persisted = [
       { name: 'dynamic_good', description: 'ok', inputSchema: { type: 'object', properties: {} }, executeCode: "return 'ok';", isDangerous: false, trusted: true },
       { name: 'dynamic_bad', description: 'broken', inputSchema: { type: 'object', properties: {} }, executeCode: 'return (((;', isDangerous: false, trusted: true },
     ];
-    await fs.writeFile(path.join(dir, '.cascade', 'dynamic-tools.json'), JSON.stringify(persisted), 'utf-8');
+    await fs.writeFile(path.join(projectStateDir(dir), 'dynamic-tools.json'), JSON.stringify(persisted), 'utf-8');
     const reg = makeRegistry();
     const creator = new ToolCreator(mockRouter({}), reg, dir);
     await creator.loadPersistedTools();
@@ -425,8 +426,8 @@ describe('ToolCreator — hardened persistence (v0.9.6 item 3)', () => {
 
   it('persistDynamicTools=false disables loading entirely', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-persist-off-'));
-    await fs.mkdir(path.join(dir, '.cascade'), { recursive: true });
-    await fs.writeFile(path.join(dir, '.cascade', 'dynamic-tools.json'),
+    await fs.mkdir(projectStateDir(dir), { recursive: true });
+    await fs.writeFile(path.join(projectStateDir(dir), 'dynamic-tools.json'),
       JSON.stringify([{ name: 'dynamic_x', description: 'x', inputSchema: { type: 'object', properties: {} }, executeCode: "return 'x';", isDangerous: false }]), 'utf-8');
     const reg = makeRegistry();
     const creator = new ToolCreator(mockRouter({}), reg, dir, false); // persistEnabled = false

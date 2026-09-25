@@ -312,11 +312,12 @@ Anything else returns `404 model_not_found` rather than quietly running somethin
 
 ## Configuration
 
-Cascade loads config from `.cascade/config.json` in your project directory.
+Cascade keeps what it knows about a project outside the project, in a folder of its own:
+`~/.cascade-ai/projects/<folder name>-<hash>/` — its settings (`config.json`), sessions, audit trail, world state, code index and run checkpoints. Your provider keys are kept once for the machine, in `~/.cascade-ai/credentials.json`, and every project uses them; no project's config holds a key. The project itself holds only what is meant to be shared: `CASCADE.md` and `.cascadeignore`. A project that still has a `.cascade/` folder from an earlier version has it moved there the first time Cascade opens it, keys included — a project whose key differed from the machine-wide one keeps using its own. `cascade doctor` prints where a project's config is.
 
 > **Prefer the picker over hand-editing config.** Inside the REPL, run `/model`
 > to walk through a three-step interactive picker (provider → tier → model,
-> with an Auto option at every step). The picker writes `.cascade/config.json`
+> with an Auto option at every step). The picker writes the project's config
 > for you and hot-swaps the running router — no restart needed.
 
 ```json
@@ -404,7 +405,7 @@ Create a `CASCADE.md` in your project root to give agents project-specific instr
 
 ### .cascadeignore
 
-List files and directories agents cannot read or modify. Syntax is identical to `.gitignore`. Cascade's own files — `.cascade/config.json`, which holds your provider keys, among them — and secrets (`.env`, `*.pem`, `*.key`) are protected always, whatever the file says. See [Security](#cascadeignore-1) for what it covers.
+List files and directories agents cannot read or modify. Syntax is identical to `.gitignore`. Secrets (`.env`, `*.pem`, `*.key`) are protected always, whatever the file says, and Cascade's own files are outside the project, where no agent reaches. See [Security](#cascadeignore-1) for what it covers.
 
 ---
 
@@ -753,13 +754,13 @@ await mcp.connect({
 
 > **Not active yet.** The `hooks` config below is validated, and the runner is exported from the SDK as `HooksRunner`, but runs do not call it yet — so these scripts do not fire today. Wiring it in is on the [Roadmap](#roadmap).
 
-Run shell scripts before or after tool use. Defined in `.cascade/config.json`:
+Run shell scripts before or after tool use. Defined in the project's config:
 
 ```jsonc
 "hooks": {
   "preToolUse": [
     {
-      "command": "echo 'Tool: $CASCADE_TOOL' >> .cascade/audit.log",
+      "command": "echo 'Tool: $CASCADE_TOOL' >> tool-calls.log",
       "tools":   ["shell", "file_write"]
     }
   ],
@@ -782,7 +783,7 @@ Once wired in, `preTask` will run before a task starts and `postTask` after it, 
 
 ## Memory & Identity
 
-Cascade stores session history, identities, and audit logs in `.cascade/memory.db` (SQLite).
+Cascade stores session history, identities, and audit logs in the project's `memory.db` (SQLite), in its folder under `~/.cascade-ai/projects/`.
 
 ### Identities
 
@@ -808,10 +809,7 @@ cascade -i reviewer            # run as one identity for this session
 
 ### Where your keys are stored
 
-Provider keys you add — through `cascade link`, the `/model` picker, desktop Settings or `cascade sync pull` — are written as **plain JSON** to two files:
-
-- `~/.cascade-ai/credentials.json`, readable only by your user (mode `0600`), so a key entered once works in every workspace;
-- the workspace's `.cascade/config.json`, with ordinary file permissions — keep `.cascade/` out of version control.
+Provider keys you add — through `cascade link`, the `/model` picker, desktop Settings or `cascade sync pull` — are written as **plain JSON** to one file, `~/.cascade-ai/credentials.json`, readable only by your user (mode `0600`), so a key entered once works in every project. A project's own config holds no key. A project that had its own key, different from the machine-wide one, when keys moved here keeps it — in the same file, under that project — and goes on using it.
 
 Keys in your environment (`ANTHROPIC_API_KEY`, …) are read at startup; `cascade link` is what copies one into these files. Settings you choose to sync through your Cascade account are end-to-end encrypted, so the server holds only ciphertext.
 
@@ -822,8 +820,8 @@ Cascade also has an encrypted keystore — the OS keychain (macOS Keychain, Wind
 - **Permission escalation** — a worker that needs more than it was given asks up the chain, T3 → T2 → T1 → you.
 - **SSRF-guarded fetching** — `web_fetch`, dynamic tools and hosted search backends cannot reach private or link-local addresses, checked again at connect time.
 - **Secret redaction** — secrets and PII are stripped from a worker's output before it travels up the hierarchy.
-- **Privacy paths** — `privacy.paths` keeps sensitive folders on private models: ones whose endpoint is on this machine or your private network, whatever their pricing says. That is read from the address — loopback, a private range, a `.local` name; a provider reached by a bare name like `http://ollama:11434` is declared with `"privateNetwork": true`. A worker whose assignment names a matching path — in its files, its description or the acceptance criteria it is graded against — runs on one from the start. One that reads a matching file on the way — with `file_read`, `file_edit`, `image_analyze`, or a `grep` of that file — moves to one at that moment, before what it read reaches any model, or is refused the read when no private model is configured. A `grep` across folders leaves local-only files out for a worker that is not local-only already, rather than let whether they matched say anything, and `file_list` and `glob` leave out their names — a name can carry what a local-only worker read. A file the assignment names is judged by what it is, so an artifact that links to a local-only file counts, and one that is protected is not read to check it. Either way its output is withheld from the tiers above, its approval requests go to you rather than to the T2 and T1 models, and nothing it knows leaves the machine through Cascade's tools: it cannot message its peers or ask for more workers, the tools that send their arguments elsewhere are refused to it — web and browser, GitHub, media generation and transcription, `code_search`, MCP, plugins, and any tool an embedder registers that does not declare `localOnlySafe` — and a tool the agent wrote cannot `fetch` once it has read such a file. Its output, tool results and streamed text stay out of the status and tool events the dashboard and audit log receive. Local-only files are never put in the code index or shown to its reranker, nor copied into a document that is not itself local-only. What a local-only worker writes becomes local-only too — a directory it makes, with everything in it — and stays so in later runs, even if the pattern it fell under is removed (recorded in `.cascade/privacy-derived.json`, which runs sharing a workspace share; a write that fails leaves no record); siblings waiting on it are told it finished, not what it said, and nothing it said goes into the knowledge graph. `shell`, `run_code` and `git` run in the process jail below, which hides local-only paths from a worker that is not local-only, and cuts the network for one that is.
-- **Process jail** — `shell`, `run_code` and `git` run in bubblewrap on Linux, or `sandbox-exec` on macOS, wherever it works. Cascade's own folder, the built-in secrets, `~/.cascade-ai` and — for a worker that is not local-only — local-only paths are hidden from them, and so is the repository's git store while its history holds any of those files (the `git` tool keeps working, leaves them out of its diffs, refuses a push that would send one, and there runs no hooks and none of your global git or ssh configuration, which a command could rewrite); a hard link to a hidden file is hidden too; each command gets its own process namespace, so Cascade's environment is not there to read; a symlink whose name is hidden hides what it leads to; and a local-only worker's commands have no network, cannot reach host services through Unix sockets, and write only into the workspace — with a private `/tmp`, the git store and hard-linked files read-only, and every other tool call in the workspace, from any run or process, waiting until they end, when whatever they changed is marked local-only. On macOS a local-only worker cannot run commands: `sandbox-exec` cannot stop one from hard-linking a file from outside the workspace in and writing to it, or from leaving a child running that writes after it ends. Every command's environment has the provider keys taken out. Without a jailer — Windows, or a Linux where bubblewrap is missing or cannot create user namespaces — commands run with the keys taken out and nothing hidden, and a local-only worker cannot run them. Set `tools.processJail` to `bwrap` or `sandbox-exec` to require one, or to `off` for neither jail nor scrubbing.
+- **Privacy paths** — `privacy.paths` keeps sensitive folders on private models: ones whose endpoint is on this machine or your private network, whatever their pricing says. That is read from the address — loopback, a private range, a `.local` name; a provider reached by a bare name like `http://ollama:11434` is declared with `"privateNetwork": true`. A worker whose assignment names a matching path — in its files, its description or the acceptance criteria it is graded against — runs on one from the start. One that reads a matching file on the way — with `file_read`, `file_edit`, `image_analyze`, or a `grep` of that file — moves to one at that moment, before what it read reaches any model, or is refused the read when no private model is configured. A `grep` across folders leaves local-only files out for a worker that is not local-only already, rather than let whether they matched say anything, and `file_list` and `glob` leave out their names — a name can carry what a local-only worker read. A file the assignment names is judged by what it is, so an artifact that links to a local-only file counts, and one that is protected is not read to check it. Either way its output is withheld from the tiers above, its approval requests go to you rather than to the T2 and T1 models, and nothing it knows leaves the machine through Cascade's tools: it cannot message its peers or ask for more workers, the tools that send their arguments elsewhere are refused to it — web and browser, GitHub, media generation and transcription, `code_search`, MCP, plugins, and any tool an embedder registers that does not declare `localOnlySafe` — and a tool the agent wrote cannot `fetch` once it has read such a file. Its output, tool results and streamed text stay out of the status and tool events the dashboard and audit log receive. Local-only files are never put in the code index or shown to its reranker, nor copied into a document that is not itself local-only. What a local-only worker makes goes to its **private folder**, outside the project (`@private/…` to the file tools, `$CASCADE_PRIVATE_DIR` to its commands), where a name it chose — which could carry what it read — shows to no one else; only a local-only worker reaches that folder. A new file in a folder a local-only pattern covers whole stays there, since that folder's names are hidden with it. A file it changes stays where it is and becomes local-only, for later runs too, even if the pattern it fell under is removed (recorded in the project's folder, shared by every run in it; a write that fails leaves no record); siblings waiting on it are told it finished, not what it said, and nothing it said goes into the knowledge graph. `shell`, `run_code` and `git` run in the process jail below, which hides local-only paths from a worker that is not local-only, and cuts the network for one that is.
+- **Process jail** — `shell`, `run_code` and `git` run in bubblewrap on Linux, or `sandbox-exec` on macOS, wherever it works. Cascade's own folder, the built-in secrets, `~/.cascade-ai` and — for a worker that is not local-only — local-only paths are hidden from them, and so is the repository's git store while its history holds any of those files (the `git` tool keeps working, leaves them out of its diffs, refuses a push that would send one, and there runs no hooks and none of your global git or ssh configuration, which a command could rewrite); a hard link to a hidden file is hidden too; each command gets its own process namespace, so Cascade's environment is not there to read; a symlink whose name is hidden hides what it leads to; and a local-only worker's commands have no network, cannot reach host services through Unix sockets, and write only into the workspace and its private folder — with a private `/tmp`, the git store and hard-linked files read-only, and every other tool call in the workspace, from any run or process, waiting until they end, when what they made is moved to the private folder and what they changed is marked local-only. On macOS a local-only worker cannot run commands: `sandbox-exec` cannot stop one from hard-linking a file from outside the workspace in and writing to it, or from leaving a child running that writes after it ends. Every command's environment has the provider keys taken out. Without a jailer — Windows, or a Linux where bubblewrap is missing or cannot create user namespaces — commands run with the keys taken out and nothing hidden, and a local-only worker cannot run them. Set `tools.processJail` to `bwrap` or `sandbox-exec` to require one, or to `off` for neither jail nor scrubbing.
 - **Hash-chained audit log** — entries are encrypted and chained with SHA-256; `/audit` checks the chain. That catches an edited or removed entry in the middle, but not a removed tail, a chain recomputed by someone with write access, or a deleted database: the chain has no key and no anchor outside the log.
 - **Budget kill-switch** — a run stops at its token budget, and `/continue` resumes it with a raised one. A session spending cap set with `/budget set` stops runs too; `/continue` does not lift it, so raise it or `/budget clear` first.
 
@@ -832,11 +830,12 @@ Cascade also has an encrypted keystore — the OS keychain (macOS Keychain, Wind
 ### .cascadeignore
 
 Always protected, whatever `.cascadeignore` says — a `!` line cannot undo these:
-- `.cascade/config.json` (provider keys), `.cascade/dashboard-secret`, `.cascade/keystore.enc`, `.cascade/memory.db*`
-- the audit trail and the project's world state — `.cascade/audit_log.db*`, `.cascade/world_state.db*` and their `.key` files — and the code index, `.cascade/code-index.db*` (or wherever `codeIndex.dbPath` puts it)
-- the record of what local-only workers wrote, `.cascade/privacy-derived.json`, and the run checkpoints in `.cascade/resume/`, which hold earlier prompts and outputs
 - `.env`, `.env.*`
 - `*.pem`, `*.key`, `id_rsa`, `id_ed25519`
+- the code index's database where `codeIndex.dbPath` puts it in the project
+- Cascade's own files under `.cascade/`, where an earlier version kept them
+
+Cascade's own files — settings, sessions, the audit trail, world state, the code index, run checkpoints — are outside the project, where no file tool reaches and no command sees them.
 
 The file and the built-ins apply to every file, search and listing tool (`file_*`, `grep`, `glob`, `image_analyze`, …), to the code index and `code_search`, and to paths reached through a symlink or a hard link. The [process jail](#what-else-keeps-a-run-contained) hides the built-ins from `shell`, `run_code` and `git` too, but not `.cascadeignore`'s own entries: that list commonly names `node_modules/` and `dist/`, which builds and tests have to read.
 
@@ -844,7 +843,7 @@ Agents may read `.cascadeignore` but not change or remove it: the file tools ref
 
 ### Approval prompts
 
-Any tool marked as dangerous requires explicit `y` / `n` before execution. Configure which tools require approval in `.cascade/config.json → tools.requireApprovalFor`.
+Any tool marked as dangerous requires explicit `y` / `n` before execution. Configure which tools require approval in the project's config, `tools.requireApprovalFor`.
 
 ### Command allowlist/blocklist
 
@@ -947,7 +946,7 @@ web/                    Local dashboard SPA (ReactFlow agent graph)
 | ✓ | Project world state (encrypted local log feeding T1 planning) |
 | ✓ | Project knowledge graph (world-state v2) — queryable facts T1 plans from; `knowledge_graph_search` (v0.14) |
 | ✓ | Hard sandbox for agent-written tools — a V8 isolate via the optional `isolated-vm` addon (v0.14), and a WebAssembly sandbox on every install, so they never run unconfined |
-| ✓ | `.cascadeignore` enforced for every file and search tool and the code index, with Cascade's own files — `.cascade/config.json` among them — always protected |
+| ✓ | `.cascadeignore` enforced for every file and search tool and the code index; Cascade's own files and your keys kept outside the project |
 | ✓ | Process jail for `shell`, `run_code` and `git` — bubblewrap on Linux, sandbox-exec on macOS — on top of approvals |
 | ✓ | Cascade Cloud (hosted chat — GitHub/Google login, bring-your-own-key, [cascadeai.in](https://cascadeai.in)) |
 | ✓ | Cascade Cloud billing — Razorpay subscriptions, Free and Pro plans |

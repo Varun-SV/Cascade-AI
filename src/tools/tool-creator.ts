@@ -18,6 +18,7 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { statePath, STATE } from '../config/project-state.js';
 import { BaseTool } from './base.js';
 import { safeFetch } from './utils/safe-fetch.js';
 import { runInWasmSandbox } from './sandbox/wasm-sandbox.js';
@@ -115,9 +116,6 @@ export interface GeneratedToolSpec {
    */
   trusted?: boolean;
 }
-
-/** File (under .cascade/) where created tools persist between runs. */
-const DYNAMIC_TOOLS_FILE = 'dynamic-tools.json';
 
 /**
  * Wrap a generated `inputSchema` into a valid JSON Schema object. LLMs commonly
@@ -599,7 +597,7 @@ Required capability: ${description.slice(0, 300)}`;
    *  any dangerous action, so a silently-reloaded tool can't act without approval. */
   async loadPersistedTools(): Promise<void> {
     if (!this.workspacePath || !this.persistEnabled) return;
-    const file = path.join(this.workspacePath, '.cascade', DYNAMIC_TOOLS_FILE);
+    const file = statePath(this.workspacePath, STATE.dynamicTools);
     try {
       const raw = await fs.readFile(file, 'utf-8');
       const specs = JSON.parse(raw) as GeneratedToolSpec[];
@@ -626,8 +624,8 @@ Required capability: ${description.slice(0, 300)}`;
 
   private async persist(): Promise<void> {
     if (!this.workspacePath || !this.persistEnabled) return;
-    const dir = path.join(this.workspacePath, '.cascade');
-    const file = path.join(dir, DYNAMIC_TOOLS_FILE);
+    const file = statePath(this.workspacePath, STATE.dynamicTools);
+    const dir = path.dirname(file);
     try {
       await fs.mkdir(dir, { recursive: true });
       await fs.writeFile(file, JSON.stringify(Array.from(this.specs.values()), null, 2), 'utf-8');

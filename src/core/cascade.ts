@@ -69,6 +69,7 @@ import { WorldStateDB } from './knowledge/world-state.js';
 import { ResumeStore, summarizeCompleted, type CompletedNode, type ResumeReason } from './orchestration/resume-store.js';
 import { PrivacyPaths } from './privacy/paths.js';
 import { CascadeIgnore } from '../config/ignore.js';
+import { migrateProjectState, statePath, STATE } from '../config/project-state.js';
 import { WorkspaceIndex } from '../retrieval/workspace-index.js';
 import { embedderFromProviders } from '../retrieval/embedder.js';
 import { LLMReranker, chatCompleterFromProviders } from '../retrieval/rerank.js';
@@ -182,6 +183,10 @@ export class Cascade extends EventEmitter {
     // Validate config eagerly so users get a clear error at startup, not at run time
     this.config = validateConfig(config) as CascadeConfig;
     this.workspacePath = workspacePath;
+    // A project's state moves out of its own `.cascade/` once, whoever opens
+    // it first — an embedder need not load a ConfigManager (which also moves
+    // the keys out of its config).
+    migrateProjectState(workspacePath);
     this.store = store;
     this.router = new CascadeRouter();
     this.mcpClient = new McpClient({
@@ -208,18 +213,17 @@ export class Cascade extends EventEmitter {
     // rediscovers a 404'd id every session — and because a T3 wave fires
     // concurrently, "rediscovers" means one wasted call per worker.
     //
-    // Scoped to the WORKSPACE, never the machine-global config dir. On a hosted
-    // server the workspace is the per-user scratch dir, so one tenant's dead
-    // model cannot suppress another's — which matters because the verdict is
+    // Scoped to the PROJECT — its state folder (config/project-state.ts) — never
+    // shared across projects. On a hosted server that folder is the per-user
+    // scratch dir's own (the server names it), so one tenant's dead model
+    // cannot suppress another's — which matters because the verdict is
     // key-specific: a model that 404s for one account is often perfectly live
     // for another whose key has access to it. A shared file would let one user
-    // silently poison everyone else's routing. (The global dir is single-tenant
-    // by design and a hosted server must never write it — see cloud db.ts.)
-    // On desktop this makes verdicts per-project, which is also right: provider
-    // config is per-project too.
+    // silently poison everyone else's routing. On desktop this makes verdicts
+    // per-project, which is also right: provider config is per-project too.
     try {
       this.router.setDeadModelStore(new DeadModelStore(
-        fileDeadModelPersistence(path.join(workspacePath, '.cascade', 'dead-models.json')),
+        fileDeadModelPersistence(statePath(workspacePath, STATE.deadModels)),
       ));
     } catch { /* memory-only fallback; the router already has a default store */ }
 
@@ -228,7 +232,7 @@ export class Cascade extends EventEmitter {
     // run history, not of the machine.
     try {
       this.resumeStore = new ResumeStore({
-        dir: path.join(workspacePath, '.cascade', 'resume'),
+        dir: statePath(workspacePath, STATE.resume),
       });
     } catch { /* resume is a convenience; never block construction on it */ }
 
@@ -357,7 +361,7 @@ export class Cascade extends EventEmitter {
     }
     // A relative dbPath is the workspace's, not the process's: on desktop and
     // the server those differ, and the file opened must be the one protected.
-    const dbFile = path.resolve(this.workspacePath, ci.dbPath || path.join('.cascade', 'code-index.db'));
+    const dbFile = ci.dbPath ? path.resolve(this.workspacePath, ci.dbPath) : statePath(this.workspacePath, STATE.codeIndex);
     fs.mkdirSync(path.dirname(dbFile), { recursive: true });
     // The default place is protected by name; a configured one is not, and
     // holds the indexed text — deleted chunks too, until SQLite reuses them.

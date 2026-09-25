@@ -135,16 +135,9 @@ export async function createDefaultIgnoreFile(workspacePath: string): Promise<vo
 id_rsa
 id_ed25519
 
-# Cascade internals (always protected, listed here for reference)
-.cascade/config.json
-.cascade/dashboard-secret
-.cascade/keystore.enc
-.cascade/memory.db*
-.cascade/audit_log.db*
-.cascade/audit_log.key
-.cascade/world_state.db*
-.cascade/world_state.key
-.cascade/code-index.db*
+# Cascade keeps its own files — settings, sessions, the audit trail, the
+# code index — outside the project, in ~/.cascade-ai/projects/, and your
+# provider keys in ~/.cascade-ai/credentials.json. Agents never reach either.
 
 # Build artifacts
 node_modules/

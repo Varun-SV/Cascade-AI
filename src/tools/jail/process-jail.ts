@@ -83,6 +83,13 @@ export interface JailPolicy {
   hiddenPatterns: (offline: boolean) => string[];
   /** Directories outside the workspace to hide whole — Cascade's global one. */
   hiddenDirs: string[];
+  /**
+   * In them, the parts of this project's state folder commands use: its
+   * scratch folder, where run_code's scripts are — read-only to a local-only
+   * caller, whose writes there nothing would mark — and, for a local-only
+   * caller only, its private folder, where its outputs go.
+   */
+  stateDirs?: () => { tmp: string; private: string };
   /** Files to hide wherever they are: protected by place, not name (a configured database). */
   hiddenFiles?: () => string[];
   /** Files commands may read but not change: what decides what is protected (`.cascadeignore`). */
@@ -110,7 +117,7 @@ export interface Launch {
    * To call once the command has ended, whatever its outcome: for a
    * local-only caller, marks what it changed in the workspace local-only.
    */
-  done?: () => Promise<void>;
+  done?: () => Promise<string | void>;
 }
 
 /** Where a local-only caller's command may write: nowhere but these. */
@@ -133,7 +140,10 @@ export type Prepared = { ok: true; launch: Launch } | { ok: false; reason: strin
 export interface Hidden {
   path: string;
   dir: boolean;
+  /** Inside a hidden directory, what is mounted back as it is. */
   keep?: string[];
+  /** …and what is mounted back read-only. */
+  keepReadOnly?: string[];
 }
 
 export interface PrepareOptions {
@@ -223,15 +233,36 @@ export class ProcessJail {
       readOnly: [...gitDirs, ...pins],
       scratch: ['/tmp', path.join(os.homedir(), '.cache')].filter((d) => !inside(d) && fs.existsSync(d)),
     };
-    const done = async (): Promise<void> => {
+    const own = this.policy.stateDirs?.().private;
+    const done = async (): Promise<string | void> => {
       const dirsAfter = new Set<string>();
       const after = await stampFiles(root, gitDirs, dirsAfter);
       const changed = changedFiles(before, after, startedAt);
-      // A directory it made is marked whole — its name can carry as much as
-      // a file's — and covers what lies in it.
+      // What it made — files, and the outermost folders — may carry what it
+      // read in its names as well as its contents: it goes to the private
+      // folder, where its names show to no one else, unless it lies in a
+      // folder a local-only pattern covers whole, whose names are hidden with
+      // it. Without a private folder, it is marked where it is, a folder
+      // whole. What it changed is marked local-only.
       const made = madeDirs(dirsBefore, dirsAfter);
-      const marked = [...made, ...changed.filter((rel) => !made.some((dir) => rel.startsWith(`${dir}/`)))];
+      const inMade = (rel: string) => made.some((dir) => rel.startsWith(`${dir}/`));
+      const createdFiles = changed.filter((rel) => !before.has(rel) && !inMade(rel));
+      const created = [...made, ...createdFiles];
+      const coveredWhole = (rel: string, isDir: boolean) => {
+        const parts = rel.split('/');
+        for (let i = isDir ? parts.length : parts.length - 1; i > 0; i--) {
+          if (this.policy.isLocalOnly?.(`${parts.slice(0, i).join('/')}/${PROBE}`)) return true;
+        }
+        return false;
+      };
+      const toMove = own ? created.filter((rel) => !coveredWhole(rel, made.includes(rel))) : [];
+      const moved = toMove.filter((rel) => moveInto(path.join(root, rel), path.join(own!, rel)));
+      const marked = [...changed.filter((rel) => before.has(rel) || !inMade(rel)), ...made].filter((rel) => !moved.includes(rel));
       if (marked.length) this.policy.taint?.(marked);
+      if (moved.length) {
+        const shown = moved.slice(0, 10).map((rel) => `@private/${rel}`).join(', ');
+        return `A local-only subtask (privacy.paths) keeps what it makes in its private folder, outside the project: this command's new files were moved there (${shown}${moved.length > 10 ? `, and ${moved.length - 10} more` : ''}).`;
+      }
     };
 
     // bubblewrap reads a seccomp filter from a file descriptor; the shell
@@ -243,7 +274,12 @@ export class ProcessJail {
     const jailArgs = bwrapArgs(hidden, true, opts.cwd, file, args, layout, frozen);
     return {
       ok: true,
-      launch: { file: '/bin/sh', args: ['-c', 'exec bwrap --seccomp 9 "$@" 9<"$0"', filter, ...jailArgs], env, cwd: opts.cwd, jail: kind, done },
+      launch: {
+        file: '/bin/sh', args: ['-c', 'exec bwrap --seccomp 9 "$@" 9<"$0"', filter, ...jailArgs],
+        // Where to write outputs directly, for a command that knows to.
+        env: own ? { ...env, CASCADE_PRIVATE_DIR: own } : env,
+        cwd: opts.cwd, jail: kind, done,
+      },
     };
   }
 
@@ -442,8 +478,17 @@ export async function collectHidden(policy: JailPolicy, offline: boolean): Promi
   };
   await walk(root, '');
 
+  const state = policy.stateDirs?.();
+  const real = (p: string): string | undefined => { try { return fs.realpathSync(p); } catch { return undefined; } };
   for (const dir of policy.hiddenDirs) {
-    try { if (fs.statSync(dir).isDirectory()) out.push({ path: fs.realpathSync(dir), dir: true }); } catch { /* not there */ }
+    const at = real(dir);
+    if (!at || !fs.statSync(at).isDirectory()) continue;
+    const within = (p: string | undefined): p is string => !!p && p.startsWith(`${at}${path.sep}`);
+    const tmp = real(state?.tmp ?? '');
+    const own = offline ? real(state?.private ?? '') : undefined;
+    const keep = [...(!offline && within(tmp) ? [tmp] : []), ...(within(own) ? [own] : [])];
+    const keepReadOnly = offline && within(tmp) ? [tmp] : [];
+    out.push({ path: at, dir: true, ...(keep.length ? { keep } : {}), ...(keepReadOnly.length ? { keepReadOnly } : {}) });
   }
   for (const file of policy.hiddenFiles?.() ?? []) {
     try { if (fs.lstatSync(file).isFile()) out.push({ path: file, dir: false }); } catch { /* not there */ }
@@ -561,6 +606,7 @@ export function bwrapArgs(hidden: Hidden[], offline: boolean, cwd: string, file:
     if (!h.dir) { out.push('--ro-bind', '/dev/null', h.path); continue; }
     out.push('--tmpfs', h.path);
     for (const k of h.keep ?? []) out.push('--bind', k, k);
+    for (const k of h.keepReadOnly ?? []) out.push('--ro-bind', k, k);
   }
   out.push('--chdir', cwd, '--', file, ...args);
   return out;
@@ -579,6 +625,8 @@ export function seatbeltProfile(hidden: Hidden[], readOnly: string[] = []): stri
     const filters = hidden.map((h) => (h.dir ? `(subpath ${quote(h.path)})` : `(literal ${quote(h.path)})`));
     lines.push(`(deny file-read* file-write* ${filters.join(' ')})`);
     // A later rule wins: the kept parts of a hidden directory are allowed again.
+    const keptReadOnly = hidden.flatMap((h) => h.keepReadOnly ?? []);
+    if (keptReadOnly.length) lines.push(`(allow file-read* ${keptReadOnly.map((k) => `(subpath ${quote(k)})`).join(' ')})`);
     const kept = hidden.flatMap((h) => h.keep ?? []);
     if (kept.length) {
       lines.push(`(allow file-read* file-write* ${kept.map((k) => `(subpath ${quote(k)})`).join(' ')})`);
@@ -758,6 +806,28 @@ function changedFiles(before: Map<string, Stamp>, after: Map<string, Stamp>, sta
     if (differs || (now.ctime % 1000 === 0 && now.ctime >= second)) out.push(rel);
   }
   return out;
+}
+
+/**
+ * Move a file or folder, replacing what is at `to` — across filesystems by
+ * copying. False when it could not be moved: it stays where it is, and is
+ * marked there instead.
+ */
+function moveInto(from: string, to: string): boolean {
+  try {
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    fs.rmSync(to, { recursive: true, force: true });
+    try {
+      fs.renameSync(from, to);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err;
+      fs.cpSync(from, to, { recursive: true, preserveTimestamps: true, verbatimSymlinks: true });
+      fs.rmSync(from, { recursive: true, force: true });
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** The directories that are new, outermost only: each covers those it holds. */

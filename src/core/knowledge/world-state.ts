@@ -1,5 +1,6 @@
 import Database, { type Database as SQLiteDatabase } from 'better-sqlite3';
 import path from 'node:path';
+import { projectStateDir } from '../../config/project-state.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -37,9 +38,10 @@ export class WorldStateDB {
   private encryptionKey!: Buffer;
   
   constructor(private workspacePath: string, private debugMode = false) {
-    const cascadeDir = path.join(workspacePath, '.cascade');
+    // In the project's state folder, outside the project (config/project-state.ts).
+    const cascadeDir = projectStateDir(workspacePath);
     if (!fs.existsSync(cascadeDir)) {
-      fs.mkdirSync(cascadeDir, { recursive: true });
+      fs.mkdirSync(cascadeDir, { recursive: true, mode: 0o700 });
     }
     this.keyPath = path.join(cascadeDir, 'world_state.key');
     this.dbPath = path.join(cascadeDir, 'world_state.db');

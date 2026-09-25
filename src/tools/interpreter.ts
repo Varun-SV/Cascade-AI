@@ -4,6 +4,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { statePath, STATE } from '../config/project-state.js';
 import { execFile, execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type { ToolExecuteOptions } from '../types.js';
@@ -70,8 +71,9 @@ export class CodeInterpreterTool extends BaseTool {
       cmdPrefix = NODE_CMD;
     }
 
-    // Setup temporary directory structure in .cascade/tmp
-    const tmpDir = path.join(this.workspaceRoot, '.cascade', 'tmp');
+    // The script goes in the project's scratch folder, outside the project;
+    // the jail mounts it back for the command (jail/process-jail.ts).
+    const tmpDir = statePath(this.workspaceRoot, STATE.tmp);
     if (!fs.existsSync(tmpDir)) {
       fs.mkdirSync(tmpDir, { recursive: true });
     }
@@ -128,7 +130,7 @@ export class CodeInterpreterTool extends BaseTool {
         }
       });
     });
-    await prepared?.launch.done?.();
-    return output;
+    const note = await prepared?.launch.done?.();
+    return note ? `${output}\n\n[note] ${note}` : output;
   }
 }

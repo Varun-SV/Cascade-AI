@@ -9,7 +9,7 @@
 // into another user's run.
 
 import {
-  createCascade, Retriever, chunkText, embedderFromProviders,
+  createCascade, useProjectStateDir, Retriever, chunkText, embedderFromProviders,
   LLMReranker, chatCompleterFromProviders, planRetrieval, cagCharBudget,
   distillSessionFacts, buildSessionTranscript, sessionWorthRemembering,
   azureModelForDeployment, DEFAULT_CONTEXT_LIMIT, MODELS,
@@ -1769,6 +1769,10 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     disabledTools: payload.fastAnswer ? [] : store.listDisabledMcpTools(userId),
     ...remoteBrowserControls(env),
   });
+  // The run's state stays in the tenant's scratch folder: a hosted server
+  // never writes the machine-global ~/.cascade-ai, where a project's state
+  // otherwise goes (see db.ts).
+  useProjectStateDir(scratchDir, path.join(scratchDir, '.cascade'));
   const cascade: Cascade = createCascade(config, scratchDir);
 
   cascade.setMediaSink(buildMediaSink({ env, store, userId, conversationId: conversation.id, socket }));

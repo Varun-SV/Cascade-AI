@@ -15,14 +15,15 @@ const ignore: (opts?: unknown) => Ignore =
   (ignoreFactory as unknown as { default?: (opts?: unknown) => Ignore }).default ??
   (ignoreFactory as unknown as (opts?: unknown) => Ignore);
 import type { ToolDefinition, ToolExecuteOptions, ToolsConfig } from '../types.js';
-import { DEFAULT_APPROVAL_REQUIRED, GLOBAL_CONFIG_DIR } from '../constants.js';
+import { DEFAULT_APPROVAL_REQUIRED } from '../constants.js';
+import { globalDir, statePath, statePathFor, STATE } from '../config/project-state.js';
 import { literalPattern, type PrivacyPaths } from '../core/privacy/paths.js';
 import { ProcessJail } from './jail/process-jail.js';
 import { BUILT_IN_PROTECTED, READ_ONLY_POLICY } from '../config/ignore.js';
 import { realPathOf } from '../utils/real-path.js';
 import type { BaseTool } from './base.js';
 import { WorkspaceGate } from './workspace-gate.js';
-import { LinkAliases } from '../utils/link-aliases.js';
+import { LinkAliases, PROBE } from '../utils/link-aliases.js';
 import { assignMcpToolNames } from './tool-name.js';
 import { ShellTool } from './shell.js';
 import { FileReadTool, FileWriteTool, FileEditTool, FileDeleteTool, FileListTool } from './file.js';
@@ -97,6 +98,9 @@ const OFF_MACHINE_TOOLS = new Set([
 /** Built-in tools that write the file their `path` input names. */
 const WRITE_TOOLS = new Set(['file_write', 'file_edit', 'generate_document', 'pdf_create']);
 
+/** Built-in tools that make the file their `path` input names, when it is not there. */
+const CREATE_TOOLS = new Set(['file_write', 'generate_document', 'pdf_create']);
+
 /** Built-in tools that change or remove the file their `path` input names. */
 const CHANGE_TOOLS = new Set([...WRITE_TOOLS, 'file_delete']);
 
@@ -151,7 +155,12 @@ export class ToolRegistry extends EventEmitter {
         ...this.protectedFilePatterns(),
         ...(offline ? [] : this.privacyPaths?.localOnlyPatterns() ?? []),
       ],
-      hiddenDirs: [path.join(os.homedir(), GLOBAL_CONFIG_DIR)],
+      hiddenDirs: [globalDir()],
+      stateDirs: () => {
+        const dirs = { tmp: statePath(workspaceRoot, STATE.tmp), private: statePath(workspaceRoot, STATE.private) };
+        fs.mkdirSync(dirs.private, { recursive: true, mode: 0o700 });
+        return dirs;
+      },
       hiddenFiles: () => [...this.protectedFiles],
       readOnlyFiles: () => READ_ONLY_POLICY.map((rel) => path.join(workspaceRoot, rel)),
       secretValues: () => this.secretValues(),
@@ -339,23 +348,33 @@ export class ToolRegistry extends EventEmitter {
       throw new Error(`${toolName} is unavailable to a local-only subtask (privacy.paths): it would send what the subtask knows off this machine.`);
     }
 
-    // Enforce .cascadeignore and the built-in protected paths for every tool
-    // that takes a path. It used to cover the four file_* tools only, so grep
-    // printed a protected file's contents and glob listed it.
-    if (PATH_TOOLS.has(toolName)) {
-      const filePath = input['path'];
-      if (typeof filePath === 'string' && this.isIgnored(filePath)) {
-        throw new Error(`Access denied: ${filePath} is protected (.cascadeignore)`);
+    const offline = options.isOffline?.() === true;
+    const given = PATH_TOOLS.has(toolName) && typeof input['path'] === 'string' ? input['path'] : undefined;
+    // `@private/…` and `@screenshots/…` name folders in the project's state
+    // folder, outside it (config/project-state.ts): a local-only subtask's
+    // own outputs, for it alone, and the browser's screenshots, to read.
+    const inState = given !== undefined && statePathFor(this.workspaceRoot, given) !== null;
+    if (inState) {
+      const privateOne = given.split(/[\\/]/)[0] === '@private';
+      if (privateOne && !offline) {
+        throw new Error(`Access denied: ${given} is where a local-only subtask (privacy.paths) keeps what it makes, and this subtask is not local-only.`);
       }
-    }
-    if (CHANGE_TOOLS.has(toolName) && typeof input['path'] === 'string' && this.isPolicyFile(path.resolve(this.workspaceRoot, input['path']))) {
-      throw new Error(`Access denied: ${input['path']} decides what Cascade protects, and agents may read it but not change it.`);
+      if (!privateOne && CHANGE_TOOLS.has(toolName)) throw new Error(`Access denied: ${given} is read-only.`);
+    } else if (given !== undefined) {
+      // Enforce .cascadeignore and the built-in protected paths for every tool
+      // that takes a path. It used to cover the four file_* tools only, so grep
+      // printed a protected file's contents and glob listed it.
+      if (this.isIgnored(given)) throw new Error(`Access denied: ${given} is protected (.cascadeignore)`);
+      if (CHANGE_TOOLS.has(toolName) && this.isPolicyFile(path.resolve(this.workspaceRoot, given))) {
+        throw new Error(`Access denied: ${given} decides what Cascade protects, and agents may read it but not change it.`);
+      }
     }
 
     // What a local-only subtask writes may carry what it read, so it is
-    // local-only too: a file tool's destination is marked before the write
-    // (below, alone), a command's changes when it ends (the jail finds them).
-    const offline = options.isOffline?.() === true;
+    // local-only too: a new file goes to its private folder, outside the
+    // project, where a name it chose shows to no one else; a file it changes
+    // is marked before the write (below, alone), a command's changes when it
+    // ends (the jail finds them, and moves what it made).
     if (tool.delegatesToTools) return tool.execute(input, options);
     const leave = await this.gate.enter(offline && (COMMAND_TOOLS.has(toolName) || WRITE_TOOLS.has(toolName)), this.acrossProcesses());
     // Checked, marked and unmarked while the write runs alone: another
@@ -363,11 +382,16 @@ export class ToolRegistry extends EventEmitter {
     // mark, and no command can link the file elsewhere in between.
     let unmark: (() => void) | undefined;
     try {
-      if (offline && WRITE_TOOLS.has(toolName) && typeof input['path'] === 'string') {
-        this.refuseLinkedDestination(input['path']);
-        unmark = this.markWritten(input['path']);
+      const moved = offline && given !== undefined && !inState ? this.privateOutput(toolName, given) : null;
+      if (moved) input = { ...input, path: moved };
+      else if (offline && WRITE_TOOLS.has(toolName) && given !== undefined && !inState) {
+        this.refuseLinkedDestination(given);
+        unmark = this.markWritten(given);
       }
-      return await tool.execute(input, options);
+      const out = await tool.execute(input, options);
+      return moved && CREATE_TOOLS.has(toolName)
+        ? `${out}\n\n[note] A local-only subtask (privacy.paths) makes new files in its private folder, outside the project: this one is ${moved}.`
+        : out;
     } finally {
       unmark?.();
       leave();
@@ -395,6 +419,25 @@ export class ToolRegistry extends EventEmitter {
    */
   private acrossProcesses(): boolean {
     return this.privacyPaths?.hasPolicies() === true;
+  }
+
+  /**
+   * Where a local-only subtask's call on `given` goes instead: a new file to
+   * its private folder — a name it chose, which could carry what it read,
+   * shows in the project to no one — unless it lies in a folder a
+   * local-only pattern covers whole, whose names are hidden with it; and a
+   * path the project does not have, to the private file of that name when
+   * there is one. Null to leave the call as it is.
+   */
+  private privateOutput(toolName: string, given: string): string | null {
+    const abs = path.resolve(this.workspaceRoot, given);
+    const rel = path.relative(this.workspaceRoot, abs);
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || fs.existsSync(abs)) return null;
+    const posixRel = posix(rel);
+    const moved = `@private/${posixRel}`;
+    if (!CREATE_TOOLS.has(toolName)) return fs.existsSync(statePath(this.workspaceRoot, STATE.private, rel)) ? moved : null;
+    const dir = path.posix.dirname(posixRel);
+    return dir !== '.' && this.privacyPaths?.isLocalOnly(`${dir}/${PROBE}`) ? null : moved;
   }
 
   /**

@@ -409,7 +409,7 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
         console.log(chalk.yellow('\n  The configured Azure deployments have no endpoint.'));
         console.log(chalk.gray('  A deployment needs its resource URL before a key can reach it —'));
         console.log(chalk.gray('  set AZURE_OPENAI_ENDPOINT, or add `baseUrl` to the entries in'));
-        console.log(chalk.gray('  .cascade/config.json, then run this again.\n'));
+        console.log(chalk.gray(`  ${cm.getConfigPath()}, then run this again.\n`));
         return false;
       }
       if (target && !onTarget) {

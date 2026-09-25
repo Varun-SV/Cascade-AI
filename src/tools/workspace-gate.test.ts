@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { WorkspaceGate } from './workspace-gate.js';
+import { statePath } from '../config/project-state.js';
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -65,10 +66,10 @@ describe('WorkspaceGate', () => {
   });
 
   // Another process — the CLI beside the desktop app — is seen through the
-  // markers it leaves in .cascade/gate/.
+  // markers it leaves in the project's state folder (gate/).
   it('waits for another process going alone, and holds back one that wants to, while running shared', async () => {
     const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-gate-')));
-    const markers = path.join(dir, '.cascade', 'gate');
+    const markers = statePath(dir, 'gate');
     await fs.mkdir(markers, { recursive: true });
     const other = String(process.ppid);
     try {

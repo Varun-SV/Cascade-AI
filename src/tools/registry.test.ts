@@ -458,30 +458,44 @@ describe('ToolRegistry — a local-only write that does not happen', () => {
   });
 });
 
-// A directory's name can carry what a local-only subtask read as well as a
-// file's, and a cloud worker's listing showed it.
-describe('ToolRegistry — a directory a local-only write makes', () => {
-  it('is local-only whole, left out of a cloud worker\'s listing, and unmarked when nothing was made', async () => {
+// A name a local-only subtask chose can carry what it read, and a cloud
+// worker's listing — or command — showed it. What it makes now goes to its
+// private folder, outside the project.
+describe('ToolRegistry — what a local-only subtask makes', () => {
+  it('goes to its private folder, out of the project, where only a local-only subtask reaches it', async () => {
     const { PrivacyPaths } = await import('../core/privacy/paths.js');
-    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-made-dir-')));
+    const { statePath } = await import('../config/project-state.js');
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-private-')));
     await fs.writeFile(path.join(ws, 'readme.md'), 'public\n');
-    const privacy = new PrivacyPaths([], { workspaceRoot: ws });
+    await fs.mkdir(path.join(ws, 'secret'));
+    const privacy = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }], { workspaceRoot: ws });
     const reg = new ToolRegistry(toolsConfig, ws);
     reg.setPrivacyPaths(privacy);
     const offline = { ...opts, isOffline: () => true };
-    await reg.execute('file_write', { path: 'LEAK-NAME/deep/x.txt', content: 'x' }, offline);
-    expect(privacy.isLocalOnly('LEAK-NAME')).toBe(true);
-    expect(privacy.isLocalOnly('LEAK-NAME/later.txt')).toBe(true);
-    // A cloud worker's read gate, as T3Worker.mayRead answers a search.
-    const cloud = { ...opts, mayRead: (abs: string, to: unknown) => !(to === 'scan' && privacy.coversFile(abs, ws)) };
-    const listed = await reg.execute('file_list', { path: '.' }, cloud);
-    expect(listed).toContain('readme.md');
-    expect(listed).not.toContain('LEAK-NAME');
-    expect(await reg.execute('glob', { pattern: '**/*' }, cloud)).not.toContain('LEAK-NAME');
-    // An edit that found nothing made nothing: no mark on the file or the directory.
-    await expect(reg.execute('file_edit', { path: 'NEW-DIR/x.txt', old_string: 'a', new_string: 'b' }, offline)).rejects.toThrow();
-    expect(privacy.isLocalOnly('NEW-DIR')).toBe(false);
-    expect(privacy.isLocalOnly('NEW-DIR/x.txt')).toBe(false);
+
+    const written = await reg.execute('file_write', { path: 'LEAK-NAME/deep/x.txt', content: 'PRIVATE' }, offline);
+    expect(written).toContain('@private/LEAK-NAME/deep/x.txt');
+    await expect(fs.stat(path.join(ws, 'LEAK-NAME'))).rejects.toThrow();
+    expect(await fs.readFile(statePath(ws, 'private', 'LEAK-NAME', 'deep', 'x.txt'), 'utf8')).toBe('PRIVATE');
+    // Read back under the name it gave, or the private one…
+    expect(await reg.execute('file_read', { path: 'LEAK-NAME/deep/x.txt' }, offline)).toContain('PRIVATE');
+    expect(await reg.execute('file_read', { path: '@private/LEAK-NAME/deep/x.txt' }, offline)).toContain('PRIVATE');
+    expect(await reg.execute('file_list', { path: '@private/LEAK-NAME' }, offline)).toContain('deep');
+    // …but by no one else.
+    await expect(reg.execute('file_read', { path: '@private/LEAK-NAME/deep/x.txt' }, opts)).rejects.toThrow(/not local-only/);
+    await expect(reg.execute('file_read', { path: 'LEAK-NAME/deep/x.txt' }, opts)).rejects.toThrow();
+    expect(await reg.execute('file_list', { path: '.' }, opts)).not.toContain('LEAK-NAME');
+    // A new file in a folder a local-only pattern covers whole stays there:
+    // the folder's names are hidden with it.
+    expect(await reg.execute('file_write', { path: 'secret/draft.md', content: 'x' }, offline)).not.toContain('@private');
+    expect(await fs.readFile(path.join(ws, 'secret', 'draft.md'), 'utf8')).toBe('x');
+    // A file the project has is written where it is, and marked.
+    await reg.execute('file_write', { path: 'readme.md', content: 'PRIVATE summary' }, offline);
+    expect(privacy.isLocalOnly('readme.md')).toBe(true);
+    // A path out of the private folder is refused, and the screenshots are
+    // there to read, not to write.
+    await expect(reg.execute('file_read', { path: '@private/../config.json' }, offline)).rejects.toThrow(/outside/);
+    await expect(reg.execute('file_write', { path: '@screenshots/x.png', content: 'x' }, opts)).rejects.toThrow(/read-only/);
     await fs.rm(ws, { recursive: true, force: true });
   });
 });
@@ -494,15 +508,17 @@ describe('ToolRegistry — another process using the workspace', () => {
     const { PrivacyPaths } = await import('../core/privacy/paths.js');
     const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-other-process-')));
     await fs.writeFile(path.join(ws, 'notes.md'), 'public\n');
-    await fs.mkdir(path.join(ws, '.cascade', 'gate'), { recursive: true });
-    await fs.writeFile(path.join(ws, '.cascade', 'gate', 'alone'), String(process.ppid));
+    const { statePath } = await import('../config/project-state.js');
+    const gate = statePath(ws, 'gate');
+    await fs.mkdir(gate, { recursive: true });
+    await fs.writeFile(path.join(gate, 'alone'), String(process.ppid));
     const reg = new ToolRegistry(toolsConfig, ws);
     reg.setPrivacyPaths(new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }], { workspaceRoot: ws }));
     let done = false;
     const read = reg.execute('file_read', { path: 'notes.md' }, opts).then(() => { done = true; });
     await new Promise((r) => setTimeout(r, 150));
     expect(done).toBe(false);
-    await fs.rm(path.join(ws, '.cascade', 'gate', 'alone'));
+    await fs.rm(path.join(gate, 'alone'));
     await read;
     expect(done).toBe(true);
     await fs.rm(ws, { recursive: true, force: true });

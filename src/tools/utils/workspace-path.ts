@@ -5,6 +5,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { realPathOf } from '../../utils/real-path.js';
+import { statePathFor } from '../../config/project-state.js';
 
 export class WorkspaceSandboxError extends Error {
   constructor(attempted: string, workspaceRoot: string) {
@@ -24,6 +25,18 @@ export class WorkspaceSandboxError extends Error {
 export function resolveInWorkspace(workspaceRoot: string, input: string): string {
   if (typeof input !== 'string' || input.length === 0) {
     throw new WorkspaceSandboxError(String(input), workspaceRoot);
+  }
+  // `@private/…` and `@screenshots/…` name folders in the project's state
+  // folder, outside it (config/project-state.ts); the registry decides who
+  // may use them. They stay inside the folder they name.
+  const inState = statePathFor(workspaceRoot, input);
+  if (inState !== null) {
+    const folder = statePathFor(workspaceRoot, input.split(/[\\/]/)[0]!)!;
+    const escapes = (p: string, base: string) => { const r = path.relative(base, p); return r.startsWith('..') || path.isAbsolute(r); };
+    if (escapes(inState, folder) || escapes(realPathOf(inState), realPathOf(folder))) {
+      throw new WorkspaceSandboxError(input, folder);
+    }
+    return inState;
   }
 
   const root = path.resolve(workspaceRoot);

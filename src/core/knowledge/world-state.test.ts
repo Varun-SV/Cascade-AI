@@ -9,6 +9,7 @@ import { T1Administrator } from '../tiers/t1-administrator.js';
 import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import type { CascadeConfig, GenerateResult } from '../../types.js';
+import { projectStateDir } from '../../config/project-state.js';
 
 let ws: string;
 let db: WorldStateDB;
@@ -153,7 +154,7 @@ describe('WorldStateDB v3 — history-preserving writes + undo', () => {
     db.upsertFact('secret', 'token', 'ROTATED', 't3');
     db.close();
     // Read the raw SQLite bytes — the archived value must not appear in plaintext.
-    const raw = readFileSync(path.join(ws, '.cascade', 'world_state.db'));
+    const raw = readFileSync(path.join(projectStateDir(ws), 'world_state.db'));
     expect(raw.includes(Buffer.from('HUNTER2'))).toBe(false);
     // Re-open for afterEach's close() to succeed.
     db = new WorldStateDB(ws);

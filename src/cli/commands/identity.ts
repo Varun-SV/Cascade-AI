@@ -1,9 +1,8 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
-import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { MemoryStore } from '../../memory/store.js';
-import { CASCADE_DB_FILE } from '../../constants.js';
+import { statePath, STATE } from '../../config/project-state.js';
 
 export function makeIdentityCommand(workspacePath = process.cwd()): Command {
   const identity = new Command('identity')
@@ -14,7 +13,7 @@ export function makeIdentityCommand(workspacePath = process.cwd()): Command {
     .command('list')
     .description('List all available identities')
     .action(() => {
-      const store = new MemoryStore(path.join(workspacePath, CASCADE_DB_FILE));
+      const store = new MemoryStore(statePath(workspacePath, STATE.memoryDb));
       try {
         const identities = store.listIdentities();
         console.log(chalk.bold('\n  Identities:'));
@@ -41,7 +40,7 @@ export function makeIdentityCommand(workspacePath = process.cwd()): Command {
     .option('-s, --system <text>', 'System prompt')
     .option('--default', 'Set as default identity')
     .action((name, options) => {
-      const store = new MemoryStore(path.join(workspacePath, CASCADE_DB_FILE));
+      const store = new MemoryStore(statePath(workspacePath, STATE.memoryDb));
       try {
         if (options.default) {
           const existingDefault = store.getDefaultIdentity();
@@ -72,7 +71,7 @@ export function makeIdentityCommand(workspacePath = process.cwd()): Command {
     .command('set-default <name>')
     .description('Set an identity as default by name or ID')
     .action((query) => {
-      const store = new MemoryStore(path.join(workspacePath, CASCADE_DB_FILE));
+      const store = new MemoryStore(statePath(workspacePath, STATE.memoryDb));
       try {
         const identities = store.listIdentities();
         const match = identities.find(i => i.id === query || i.name.toLowerCase() === query.toLowerCase());

@@ -3,6 +3,7 @@
 // works (Linux with unprivileged user namespaces, or as root).
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,6 +11,7 @@ import { ToolRegistry } from '../registry.js';
 import { PrivacyPaths } from '../../core/privacy/paths.js';
 import { execFileSync } from 'node:child_process';
 import { BUILT_IN_PROTECTED } from '../../config/ignore.js';
+import { statePath } from '../../config/project-state.js';
 import {
   ProcessJail, bwrapArgs, collectHidden, detectJail, scrubEnv, seatbeltProfile, toPathspecs, unixSocketFilter,
   type JailKind, type JailPolicy,
@@ -691,27 +693,31 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: where a local-only caller\'s writes
     await fs.rm(path.join(os.homedir(), probe), { force: true });
   });
 
-  it('marks what the command wrote in the workspace local-only, and hides it from a cloud worker\'s commands', async () => {
+  // What it makes may carry what it read in its names as well as its
+  // contents: it goes to its private folder, outside the project. What it
+  // changes stays, and is marked local-only.
+  it('moves what the command made to its private folder, and marks what it changed', async () => {
     const reg = registry();
-    await reg.execute('shell', { command: 'cat secret/plan.md > summary.txt; mkdir -p out && cp summary.txt out/copy.txt' }, offline);
-    expect(privacy.isLocalOnly('summary.txt')).toBe(true);
-    expect(privacy.isLocalOnly('out/copy.txt')).toBe(true);
+    await fs.writeFile(path.join(dir, 'draft.md'), 'public draft\n');
+    const out = await reg.execute('shell', {
+      command: 'cat secret/plan.md > summary.txt; mkdir -p "made-$(head -c 5 secret/plan.md)/sub" out && cp summary.txt out/copy.txt; cat secret/plan.md >> draft.md',
+    }, offline);
+    expect(out).toContain('@private/summary.txt');
+    for (const made of ['summary.txt', 'out', 'made-LOCAL']) {
+      await expect(fs.stat(path.join(dir, made)), made).rejects.toThrow();
+      expect(fsSync.existsSync(statePath(dir, 'private', made)), made).toBe(true);
+    }
+    expect(fsSync.existsSync(statePath(dir, 'private', 'made-LOCAL', 'sub'))).toBe(true);
+    expect(privacy.isLocalOnly('draft.md')).toBe(true);
     expect(privacy.isLocalOnly('notes.md'), 'nothing it left alone').toBe(false);
-    const seen = await reg.execute('shell', { command: 'cat summary.txt out/copy.txt notes.md 2>&1; true' }, exec);
+    const seen = await reg.execute('shell', { command: 'ls; cat draft.md notes.md 2>&1; true' }, exec);
     expect(seen).not.toContain(LOCAL);
+    expect(seen).not.toMatch(/summary|made-/);
     expect(seen).toContain('public notes');
     // …and in a later run, from the record.
-    expect(new PrivacyPaths([], { workspaceRoot: dir }).isLocalOnly('summary.txt')).toBe(true);
-  });
-
-  // A directory's name can carry what it read as well as a file's.
-  it('marks a directory it made, whole, and not each one inside it', async () => {
-    await registry().execute('shell', { command: 'mkdir -p "made-$(head -c 5 secret/plan.md)/sub"' }, offline);
-    expect(privacy.isLocalOnly('made-LOCAL')).toBe(true);
-    expect(privacy.isLocalOnly('made-LOCAL/sub/later.txt')).toBe(true);
-    const recorded = new PrivacyPaths([], { workspaceRoot: dir }).localOnlyPatterns();
-    expect(recorded).toContain('/made-LOCAL');
-    expect(recorded).not.toContain('/made-LOCAL/sub');
+    expect(new PrivacyPaths([], { workspaceRoot: dir }).isLocalOnly('draft.md')).toBe(true);
+    // A command of its own finds the folder by name.
+    expect(await reg.execute('shell', { command: 'cat "$CASCADE_PRIVATE_DIR/summary.txt"' }, offline)).toContain(LOCAL);
   });
 
   it('gives the command a private /tmp, and nowhere else to write outside the workspace', async () => {
@@ -735,24 +741,30 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: where a local-only caller\'s writes
     expect(await registry().execute('git', { operation: 'log' }, offline)).toContain('notes');
   });
 
-  // Cascade's scratch is mounted back whole over its hidden folder, and a
-  // local-only file written there came back with it.
-  it('keeps a local-only file in Cascade\'s scratch hidden from a cloud worker\'s commands', async () => {
+  // Of the global folder, only this project's scratch is in view — where
+  // run_code's scripts are — and its private folder, for a local-only caller.
+  it('shows a cloud worker\'s command the scratch folder but not the private one, and a local-only one\'s the reverse to write', async () => {
     const reg = registry();
-    await reg.execute('file_write', { path: '.cascade/tmp/notes.txt', content: LOCAL }, offline);
-    expect(privacy.isLocalOnly('.cascade/tmp/notes.txt')).toBe(true);
-    await fs.writeFile(path.join(dir, '.cascade', 'tmp', 'scratch.txt'), 'scratch\n');
-    const seen = await reg.execute('shell', { command: 'cat .cascade/tmp/notes.txt .cascade/tmp/scratch.txt 2>&1; true' }, exec);
-    expect(seen).not.toContain(LOCAL);
+    await reg.execute('file_write', { path: 'fresh-private.md', content: LOCAL }, offline);
+    fsSync.mkdirSync(statePath(dir, 'tmp'), { recursive: true });
+    await fs.writeFile(statePath(dir, 'tmp', 'scratch.txt'), 'scratch\n');
+    const seen = await reg.execute('shell', { command: `cat "${statePath(dir, 'tmp', 'scratch.txt')}" "${statePath(dir, 'private', 'fresh-private.md')}" 2>&1; true` }, exec);
     expect(seen).toContain('scratch');
+    expect(seen).not.toContain(LOCAL);
+    const theirs = await reg.execute('shell', { command: `echo x > "${statePath(dir, 'tmp', 'w.txt')}" 2>&1; echo y > "$CASCADE_PRIVATE_DIR/y.txt"; true` }, offline);
+    expect(theirs).toMatch(/Read-only file system/);
+    expect(fsSync.existsSync(statePath(dir, 'private', 'y.txt'))).toBe(true);
   });
 
-  it('marks a file tool\'s destination local-only before it writes', async () => {
+  it('writes a file tool\'s new file to the private folder, and marks a file it changes before it writes', async () => {
     const reg = registry();
     await reg.execute('file_write', { path: 'report.md', content: LOCAL }, offline);
-    expect(privacy.isLocalOnly('report.md')).toBe(true);
+    await expect(fs.stat(path.join(dir, 'report.md'))).rejects.toThrow();
+    expect(fsSync.readFileSync(statePath(dir, 'private', 'report.md'), 'utf8')).toBe(LOCAL);
     await reg.execute('file_write', { path: 'public.md', content: 'hello' }, exec);
     expect(privacy.isLocalOnly('public.md'), 'a cloud worker\'s write is its own').toBe(false);
+    await reg.execute('file_write', { path: 'public.md', content: LOCAL }, offline);
+    expect(privacy.isLocalOnly('public.md')).toBe(true);
   });
 
   it('runs the command alone: a cloud worker\'s read waits for it, and then finds what it wrote marked', async () => {
@@ -764,7 +776,7 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: where a local-only caller\'s writes
     const read = reg.execute('file_read', { path: 'notes.md' }, exec).then(() => { order.push('read'); });
     await Promise.all([command, read]);
     expect(order).toEqual(['command', 'read']);
-    expect(privacy.isLocalOnly('late.txt')).toBe(true);
+    await expect(fs.stat(path.join(dir, 'late.txt'))).rejects.toThrow();
   });
 
   // Each registry had a gate of its own: a second run in the workspace read
@@ -780,7 +792,7 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: where a local-only caller\'s writes
     const read = other.execute('file_read', { path: 'notes.md' }, exec).then(() => { order.push('read'); });
     await Promise.all([command, read]);
     expect(order).toEqual(['command', 'read']);
-    expect(theirs.isLocalOnly('later.txt')).toBe(true);
+    await expect(fs.stat(path.join(dir, 'later.txt'))).rejects.toThrow();
   });
 });
 
@@ -886,7 +898,7 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: a local-only caller and files with 
     expect(await fs.readFile(path.join(outside, 'shared.txt'), 'utf8')).not.toContain(LOCAL);
     expect(await fs.readFile(path.join(outside, 'index.js'), 'utf8')).toBe('module.exports = 1;\n');
     await expect(fs.stat(path.join(dir, 'node_modules', 'new.js'))).rejects.toThrow();
-    expect(await fs.readFile(path.join(dir, 'made.txt'), 'utf8')).toBe('ok\n');
+    expect(await fs.readFile(statePath(dir, 'private', 'made.txt'), 'utf8')).toBe('ok\n');
   });
 });
 

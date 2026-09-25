@@ -52,6 +52,8 @@ export class ShellTool extends BaseTool {
     if (prepared && !prepared.ok) throw new Error(prepared.reason);
     const launch = prepared?.launch;
 
+    let output: string;
+    let note: string | void;
     try {
       // windowsHide: prevent a console window flash per command on Windows.
       // Output is piped (exec default), never inherited — it cannot write
@@ -59,17 +61,15 @@ export class ShellTool extends BaseTool {
       const { stdout, stderr } = launch && posix
         ? await execFileAsync(launch.file, launch.args, { cwd: launch.cwd, env: launch.env, timeout, windowsHide: true })
         : await execAsync(command, { cwd, timeout, windowsHide: true, ...(launch ? { env: launch.env } : {}) });
-      const out = [stdout, stderr].filter(Boolean).join('\n').trim();
-      return out || '(no output)';
+      output = [stdout, stderr].filter(Boolean).join('\n').trim() || '(no output)';
     } catch (err) {
-      if (err instanceof Error && 'stdout' in err && 'stderr' in err) {
-        const e = err as Error & { stdout: string; stderr: string; code: number };
-        return `Exit ${e.code ?? 1}:\n${[e.stdout, e.stderr].filter(Boolean).join('\n').trim()}`;
-      }
-      throw err;
+      if (!(err instanceof Error && 'stdout' in err && 'stderr' in err)) throw err;
+      const e = err as Error & { stdout: string; stderr: string; code: number };
+      output = `Exit ${e.code ?? 1}:\n${[e.stdout, e.stderr].filter(Boolean).join('\n').trim()}`;
     } finally {
-      await launch?.done?.();
+      note = await launch?.done?.();
     }
+    return note ? `${output}\n\n[note] ${note}` : output;
   }
 
   private validateCommand(command: string): void {
