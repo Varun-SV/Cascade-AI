@@ -121,7 +121,7 @@ describe('useBrowserAllowance', () => {
     await waitFor(() => expect(view.result.current).toEqual({ used: 2, limit: 5 }));
   });
 
-  it('keeps the last known allowance when a read fails, rather than re-enabling the chip', async () => {
+  it('keeps the last known allowance when a refresh fails', async () => {
     mockedFetchUsage.mockResolvedValue(usage(5));
     const view = renderHook(({ busy }) => useBrowserAllowance('user-1', true, busy, false, vi.fn()), { initialProps: { busy: false } });
     await waitFor(() => expect(view.result.current).toEqual({ used: 5, limit: 5 }));
@@ -145,8 +145,8 @@ describe('useBrowserAllowance across the UTC reset', () => {
   afterEach(() => { vi.useRealTimers(); });
 
   it('re-reads the allowance when the day turns over, so an exhausted chip comes back', async () => {
-    // Runs were the only refresh, and an exhausted chip cannot start the run
-    // that would re-read it: it stayed off all the next day.
+    // Runs are not the only refresh boundary: the displayed allowance should
+    // reset just after midnight even if the user sends nothing.
     vi.useFakeTimers({ shouldAdvanceTime: false });
     vi.setSystemTime(new Date('2026-09-23T23:59:00Z'));
     // Hidden, so the minute poll cannot be what re-reads it: the reset has to
@@ -252,9 +252,8 @@ describe('useBrowserAllowance after a plan change', () => {
   afterEach(() => { vi.useRealTimers(); });
 
   it('notices a raised limit while the chip is exhausted, without a run or a new day', async () => {
-    // Free user, 5 of 5 used, upgrades to Pro. The upgrade dialog refreshed
-    // only its own copy, and an exhausted chip cannot start the run that
-    // would re-read this one — it stayed off until reload or midnight.
+    // Free user, 5 of 5 used, upgrades to Pro. The usage badge should reflect
+    // the raised allowance without needing a reload or another run.
     vi.useFakeTimers({ shouldAdvanceTime: false });
     vi.setSystemTime(new Date('2026-09-23T10:00:00Z'));
     mockedFetchUsage.mockResolvedValue(usage(5));
