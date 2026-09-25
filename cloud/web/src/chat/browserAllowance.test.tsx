@@ -32,10 +32,12 @@ describe('browserChip', () => {
     expect(chip.title).toContain('3 of 5 browser sessions left today.');
   });
 
-  it('is off once the day’s sessions are gone, and says when they come back', () => {
+  it('shows exhaustion without disabling Browser mode', () => {
     const chip = browserChip({ used: 5, limit: 5 });
     expect(chip.exhausted).toBe(true);
-    expect(chip.title).toBe("Today's 5 browser sessions are used up. They reset at midnight UTC.");
+    expect(chip.disabled).toBe(false);
+    expect(chip.title).toContain("Today's 5 browser sessions are used up.");
+    expect(chip.title).toContain("if this run needs to open a browser, you'll be asked to upgrade");
   });
 
   it('treats an overshoot as used up, not as a negative number left', () => {
@@ -51,13 +53,10 @@ describe('browserChip', () => {
     });
   });
 
-  it('cannot be pressed while the allowance is still being read, and says so', () => {
-    expect(browserChip(CHECKING)).toEqual({
-      exhausted: false,
-      disabled: true,
-      title: 'Checking how many browser sessions are left today…',
-    });
-    expect(browserChip({ used: 5, limit: 5 }).disabled, 'nor once it is used up').toBe(true);
+  it('never disables Browser mode just because quota state is checking or exhausted', () => {
+    expect(browserChip(CHECKING).disabled).toBe(false);
+    expect(browserChip(CHECKING).title).toContain('Checking how many browser sessions are left today');
+    expect(browserChip({ used: 5, limit: 5 }).disabled).toBe(false);
     expect(browserChip({ used: 4, limit: 5 }).disabled).toBe(false);
   });
 });
@@ -74,13 +73,12 @@ describe('useBrowserAllowance', () => {
     expect(mockedFetchUsage).not.toHaveBeenCalled();
   });
 
-  it('switches the chip OFF when the allowance runs out, not just greys it', async () => {
-    // Left on under a disabled button, the next message would still go out as
-    // a browser run, and the server refuses those outright.
+  it('leaves Browser mode on when the allowance runs out', async () => {
     mockedFetchUsage.mockResolvedValue(usage(5));
     const setBrowserMode = vi.fn();
-    renderHook(() => useBrowserAllowance('user-1', true, 'idle', true, setBrowserMode));
-    await waitFor(() => expect(setBrowserMode).toHaveBeenCalledWith(false));
+    const view = renderHook(() => useBrowserAllowance('user-1', true, 'idle', true, setBrowserMode));
+    await waitFor(() => expect(view.result.current).toEqual({ used: 5, limit: 5 }));
+    expect(setBrowserMode).not.toHaveBeenCalled();
   });
 
   it('leaves the chip alone while sessions remain', async () => {
@@ -92,19 +90,18 @@ describe('useBrowserAllowance', () => {
     expect(setBrowserMode).not.toHaveBeenCalled();
   });
 
-  it('keeps the chip off until the first read says whether there is an allowance', async () => {
-    // It looked available while /api/usage was on its way, so an exhausted
-    // user could turn it on and send, and the server refused the whole run.
+  it('allows Browser mode while the first allowance read is still pending', async () => {
     let answer: (u: UsageInfo) => void = () => {};
     mockedFetchUsage.mockReturnValue(new Promise<UsageInfo>((resolve) => { answer = resolve; }));
     const setBrowserMode = vi.fn();
     const view = renderHook(() => useBrowserAllowance('user-1', true, 'idle', true, setBrowserMode));
     expect(view.result.current).toBe(CHECKING);
-    expect(browserChip(view.result.current).disabled).toBe(true);
-    expect(setBrowserMode, 'and not left on under a disabled chip').toHaveBeenCalledWith(false);
+    expect(browserChip(view.result.current).disabled).toBe(false);
+    expect(setBrowserMode).not.toHaveBeenCalled();
 
     await act(async () => { answer(usage(5)); });
     expect(view.result.current).toEqual({ used: 5, limit: 5 });
+    expect(setBrowserMode).not.toHaveBeenCalled();
   });
 
   it('shows an answer that there is no allowance as none, not as still checking', async () => {
@@ -294,7 +291,7 @@ describe('useBrowserAllowance after a plan change', () => {
     await waitFor(() => expect(view.result.current).toEqual({ used: 5, limit: 50 }));
   });
 
-  it('notices a lowered limit while sessions remain, and switches the chip off before a send is refused', async () => {
+  it('notices a lowered limit while sessions remain without switching Browser mode off', async () => {
     // Pro, 6 of 50 used, and the subscription lapses to Free. Polling only
     // while exhausted never re-read a chip with sessions left, so it stayed on
     // under the old limit and the next browser message was refused.
@@ -310,7 +307,7 @@ describe('useBrowserAllowance after a plan change', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
 
     expect(view.result.current).toEqual({ used: 6, limit: 5 });
-    expect(setBrowserMode, 'switched off, not left on under a limit that no longer applies').toHaveBeenCalledWith(false);
+    expect(setBrowserMode, 'Browser mode stays a permission; quota is enforced only on session open').not.toHaveBeenCalled();
   });
 
   it('does not poll a tab nobody is looking at', async () => {
