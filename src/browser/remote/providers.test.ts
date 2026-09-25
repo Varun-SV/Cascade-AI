@@ -92,6 +92,17 @@ describe('Steel', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('does not replay hosted Steel session creation on a 502', async () => {
+    vi.useFakeTimers();
+    const calls = stubFetch([
+      { ok: false, status: 502, text: 'hosted gateway error' },
+      { body: { id: 'would-be-second', websocketUrl: 'wss://s/cdp' } },
+    ]);
+
+    await expect(new SteelProvider().createSession()).rejects.toThrow(/502/);
+    expect(calls).toHaveLength(1);
+  });
+
   it('refuses a session with nothing to drive', async () => {
     // Failing here names the problem; passing undefined to connectOverCDP
     // fails later and somewhere else.
