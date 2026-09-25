@@ -125,7 +125,9 @@ describe('File tools — reading only what the running tier allows', () => {
     expect(out).not.toContain('MARK one');
     expect(out.trim().startsWith('--')).toBe(false);
     expect(out.trim().endsWith('--')).toBe(false);
-    expect(out.split('\n').filter((l) => l === '--')).toHaveLength(1);
+    // One between public.md's two groups where ripgrep prints them; none
+    // where the Node fallback searches, which prints no separators at all.
+    expect(out.split('\n').filter((l) => l === '--').length).toBeLessThanOrEqual(1);
   });
 
   it('image_analyze asks about the workspace file it reads — not one beside the process', async () => {
