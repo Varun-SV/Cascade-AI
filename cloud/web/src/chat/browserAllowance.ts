@@ -35,15 +35,13 @@ export function msUntilNextUtcMidnight(now: number): number {
 const CHIP_TITLE = 'Give this run a real browser — for pages that are images, or need signing in. Off means Cascade cannot open one.';
 
 /**
- * What the Browser chip says, and whether it can be pressed.
+ * What the Browser chip says.
  *
- * Off once the day's sessions are gone, and saying why on the chip itself: a
- * run sent with it on would be refused before it starts, and a control that
- * looks available until you use it is the thing this replaces.
- *
- * And off until the first read says whether there is an allowance at all. A
- * chip that looked available while `/api/usage` was still on its way let an
- * exhausted user turn it on and send, and the server refused the whole run.
+ * Quota state is informational here. Browser Mode is permission for the model
+ * to try the capability, not a reservation of a browser session, so neither an
+ * exhausted allowance nor a usage read in flight disables the switch. If the
+ * model actually opens a browser, the server atomically claims the allowance
+ * and returns the upgrade refusal at that point when none remains.
  */
 export function browserChip(allowance: BrowserAllowanceView): { exhausted: boolean; disabled: boolean; title: string } {
   if (allowance === CHECKING) {
@@ -104,8 +102,8 @@ export function useBrowserAllowance(
   // and is being retried. Not "no allowance": that is what a read SAYS.
   const checking = !!userId && available && !known;
   // Bumped at each UTC reset. Runs are not the only thing that changes the
-  // allowance: the day does. An exhausted chip cannot START the run that
-  // would have re-read it, so without this it stayed off all the next day.
+  // allowance: the day does, and the displayed count should recover without a
+  // reload even when no run happens to start around midnight.
   const [day, setDay] = useState(0);
   // Bumped to re-read on a clock and on returning to the tab — see below.
   const [recheck, setRecheck] = useState(0);
@@ -121,8 +119,7 @@ export function useBrowserAllowance(
     return () => { live = false; };
   }, [userId, available, refreshSignal, day, recheck]);
 
-  // Whether the server rations sessions here: it reported an allowance. Until
-  // a read says so — or after one said it does not — only a run re-reads it.
+  // Whether the server rations sessions here: it reported an allowance.
   const rationed = available && allowance !== null;
 
   useEffect(() => {
@@ -133,11 +130,8 @@ export function useBrowserAllowance(
   }, [userId, rationed, day]);
 
   // The allowance can change without a run or a new day, in either direction.
-  // An upgrade to Pro raises the limit, and nothing else re-reads an exhausted
-  // chip — it cannot start the run that would — while Pro activates
-  // asynchronously after payment, so one read when the upgrade closes could
-  // still see Free. A downgrade or an expired Pro lowers it, and the chip stays
-  // on under the old limit until a send is refused. So re-read every minute
+  // An upgrade to Pro raises the limit asynchronously after payment; a downgrade
+  // or expired Pro lowers it. Re-read every minute
   // the tab is visible, and on coming back to it, whatever the last read said.
   //
   // And while the first read has not answered: a failed one leaves the chip
