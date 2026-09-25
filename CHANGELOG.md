@@ -210,11 +210,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   record: each merges its changes in under a lock, and sees another's as
   they are made. Its commands write nowhere else (their
   `/tmp` is private, the rest of the machine and the git store read-only)
-  and run alone meanwhile. Nor does it write through a file with other
+  and run alone meanwhile — against every run in the workspace, in other
+  windows and processes too, and against a worker checking its own
+  artifacts. Nor does it write through a file with other
   names — hard links, whose names outside the workspace could be neither
   marked nor hidden: a file tool refuses, and to its commands such files,
   and the package folders pnpm links them into, are read-only. Siblings waiting on it get a status line, not its
   output, and no facts are taken from it into the knowledge graph.
+  An approval it needs goes to you, not to the T2 and T1 models, which may
+  be cloud ones and would see the call's input.
   `file_edit` asks like a read does, and plugin tools are refused to it like
   MCP ones, as is any tool registered from outside that does not declare
   `localOnlySafe`. Its output, tool calls and results, and streamed text are
@@ -237,15 +241,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the history in view — and so is
   a hard link to any of them, under whatever name. Each command gets its own process namespace and no
   capabilities, and a local-only worker's commands get no network and no
-  Unix sockets, which would reach host daemons such as Docker's. On macOS, `sandbox-exec` denies the same paths and, for a
-  local-only worker, outbound connections. Where neither works, a local-only
-  worker cannot run commands. On Windows, `git` gets the provider keys taken
+  Unix sockets, which would reach host daemons such as Docker's. A symlink
+  whose name is covered hides what it leads to, a whole directory included.
+  On macOS, `sandbox-exec` denies the same paths, and a local-only worker
+  cannot run commands: nothing there stops such a command from
+  hard-linking a file from outside the workspace in and writing to it, or
+  from leaving a child running that writes after it ends. Where neither
+  jailer works, a local-only worker cannot run commands either. On Windows, `git` gets the provider keys taken
   out of its environment too. `tools.processJail`: `auto` (default),
   `bwrap`, `sandbox-exec` — that jailer or no commands — or `off`.
 - **The code index's database is protected wherever it is.** Only its
   default place was, so with `codeIndex.dbPath` set the file tools and
   commands could read the indexed text, deleted chunks included. The
-  configured file and its journals are now protected too — in git as well:
+  configured file and its journals are now protected too — a relative
+  `dbPath` is the workspace's, where it was opened relative to the process —
+  in git as well:
   its blob hides the git store from commands, and a push that would send
   it is refused — and a hard link
   to any protected file is protected like the file — by the file tools,

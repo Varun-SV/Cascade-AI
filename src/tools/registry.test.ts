@@ -486,6 +486,29 @@ describe('ToolRegistry — a directory a local-only write makes', () => {
   });
 });
 
+// Another process — the CLI beside the desktop app — running a local-only
+// command in the workspace holds .cascade/gate/alone; a tool call here waits
+// for it, where there is local-only work at all.
+describe('ToolRegistry — another process using the workspace', () => {
+  it('waits for its local-only command before touching the workspace', async () => {
+    const { PrivacyPaths } = await import('../core/privacy/paths.js');
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-other-process-')));
+    await fs.writeFile(path.join(ws, 'notes.md'), 'public\n');
+    await fs.mkdir(path.join(ws, '.cascade', 'gate'), { recursive: true });
+    await fs.writeFile(path.join(ws, '.cascade', 'gate', 'alone'), String(process.ppid));
+    const reg = new ToolRegistry(toolsConfig, ws);
+    reg.setPrivacyPaths(new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }], { workspaceRoot: ws }));
+    let done = false;
+    const read = reg.execute('file_read', { path: 'notes.md' }, opts).then(() => { done = true; });
+    await new Promise((r) => setTimeout(r, 150));
+    expect(done).toBe(false);
+    await fs.rm(path.join(ws, '.cascade', 'gate', 'alone'));
+    await read;
+    expect(done).toBe(true);
+    await fs.rm(ws, { recursive: true, force: true });
+  });
+});
+
 // An approved write could take a rule out of `.cascadeignore`, and the next
 // run — which reads it at start — would no longer protect that path.
 describe('ToolRegistry — the files that decide what is protected', () => {

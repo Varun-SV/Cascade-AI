@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { WorkspaceGate } from './workspace-gate.js';
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -44,5 +47,60 @@ describe('WorkspaceGate', () => {
     expect(shared).toBe(false);
     alone(); await tick();
     expect(shared).toBe(true);
+  });
+
+  // Each registry had a gate of its own, so a second run in the same
+  // workspace — another window, another conversation — was not held back.
+  it('is one gate per workspace in a process, whatever name the workspace goes by', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-gate-')));
+    const link = `${dir}-link`;
+    await fs.symlink(dir, link);
+    try {
+      expect(WorkspaceGate.for(dir)).toBe(WorkspaceGate.for(link));
+      expect(WorkspaceGate.for(dir)).not.toBe(WorkspaceGate.for(os.tmpdir()));
+    } finally {
+      await fs.rm(link, { force: true });
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Another process — the CLI beside the desktop app — is seen through the
+  // markers it leaves in .cascade/gate/.
+  it('waits for another process going alone, and holds back one that wants to, while running shared', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-gate-')));
+    const markers = path.join(dir, '.cascade', 'gate');
+    await fs.mkdir(markers, { recursive: true });
+    const other = String(process.ppid);
+    try {
+      const gate = new WorkspaceGate(dir);
+      // Another process is alone: a shared caller waits for it to finish.
+      await fs.writeFile(path.join(markers, 'alone'), other);
+      let entered = false;
+      const shared = gate.enter(false, true).then((leave) => { entered = true; return leave; });
+      await new Promise((r) => setTimeout(r, 100));
+      expect(entered).toBe(false);
+      await fs.rm(path.join(markers, 'alone'));
+      (await shared)();
+      expect(entered).toBe(true);
+      // Another process has a shared caller running: going alone waits for it.
+      await fs.writeFile(path.join(markers, `shared-${other}-1`), '');
+      let alone = false;
+      const lone = gate.enter(true, true).then((leave) => { alone = true; return leave; });
+      await new Promise((r) => setTimeout(r, 100));
+      expect(alone).toBe(false);
+      expect(await fs.readFile(path.join(markers, 'alone'), 'utf8'), 'holding the lock while it waits').toBe(String(process.pid));
+      await fs.rm(path.join(markers, `shared-${other}-1`));
+      const leave = await lone;
+      leave();
+      await expect(fs.stat(path.join(markers, 'alone'))).rejects.toThrow();
+      // Markers left by a process that ended are not waited on.
+      await fs.writeFile(path.join(markers, 'alone'), other);
+      const old = new Date(Date.now() - 60_000);
+      await fs.utimes(path.join(markers, 'alone'), old, old);
+      (await gate.enter(false, true))();
+      expect((await fs.readdir(markers)).filter((n) => n.startsWith('shared-'))).toEqual([]);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });

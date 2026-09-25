@@ -1132,6 +1132,7 @@ export class T3Worker extends BaseTier {
           isDangerous: this.toolRegistry.isDangerous(tc.name),
           subtaskContext: this.assignment?.subtaskTitle ?? 'Unknown subtask',
           sectionContext: this.assignment?.subtaskTitle ?? 'Unknown section',
+          localOnly: this.localOnlyMatch,
         };
         const decision = await this.permissionEscalator.requestPermission(req);
         if (!decision.approved) return `Tool ${tc.name} was denied (decided by ${decision.decidedBy}).`;
@@ -1543,7 +1544,16 @@ ${assignment.expectedOutput}`;
     return [...new Set([...declared, ...matches.map((m) => m.trim())])];
   }
 
+  /**
+   * Its reads hold the workspace gate like a tool call's: a local-only
+   * command may be writing one of these files, not yet marked.
+   */
   private async verifyArtifacts(assignment: T2ToT3Assignment): Promise<{ ok: boolean; issues: string[] }> {
+    const check = () => this.checkArtifacts(assignment);
+    return this.toolRegistry.whileShared ? this.toolRegistry.whileShared(check) : check();
+  }
+
+  private async checkArtifacts(assignment: T2ToT3Assignment): Promise<{ ok: boolean; issues: string[] }> {
     const artifactPaths = this.extractArtifactPaths(assignment);
     if (!artifactPaths.length) return { ok: true, issues: [] };
 
@@ -1734,7 +1744,9 @@ ${current}`,
     // a hosted worker on a filesystem it had no way to touch — see
     // canProduceFiles() above for why that ends as a failed node.
     const workerCanWriteFiles = canProduceFiles(this.tools.map((t) => t.name));
-    return evaluateAcceptance(criteria, assignment.files ?? [], {
+    // Under the workspace gate, like verifyArtifacts: a local-only command
+    // may be writing one of these files, not yet marked.
+    const grade = () => evaluateAcceptance(criteria, assignment.files ?? [], {
       // Reading a file to grade it is reading it: the protected paths and
       // the privacy gate decide, as for any tool, so a criterion cannot probe
       // `.env` or a local-only file.
@@ -1756,6 +1768,7 @@ ${current}`,
         } catch { return null; }
       },
     }, { workerCanWriteFiles });
+    return this.toolRegistry.whileShared ? this.toolRegistry.whileShared(grade) : grade();
   }
 
   private async selfTest(

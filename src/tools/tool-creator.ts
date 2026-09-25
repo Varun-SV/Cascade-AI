@@ -265,6 +265,7 @@ class DynamicTool extends BaseTool {
           subtaskContext: `Dynamic tool "${this.name}" (${this.trusted ? 'trusted' : 'UNTRUSTED'}) requesting access to "${toolName}"`,
           sectionContext: `Dynamic tool "${this.name}"`,
           forceReprompt: !this.trusted,
+          localOnly: options.isOffline?.() === true,
         };
         const decision = await escalator.requestPermission(req);
         if (!decision.approved) {

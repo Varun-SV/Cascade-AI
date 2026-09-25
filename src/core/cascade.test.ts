@@ -874,6 +874,32 @@ describe('what local-only subtasks wrote reaches every run in the workspace', ()
   });
 });
 
+// A relative codeIndex.dbPath was protected under the workspace but opened
+// under the process's directory — elsewhere on desktop and the server.
+describe('the code index opens the database it protects', () => {
+  it('resolves a relative dbPath against the workspace, not the process', async () => {
+    const fsp = await import('node:fs/promises');
+    const os = await import('node:os');
+    const nodePath = await import('node:path');
+    const workspace = await fsp.realpath(await fsp.mkdtemp(nodePath.join(os.tmpdir(), 'cascade-index-path-')));
+    const rel = `idx-${process.pid}/code.db`;
+    try {
+      const cascade = new Cascade({
+        ...baseConfig,
+        providers: [{ type: 'openai', apiKey: 'sk-test' }],
+        codeIndex: { enabled: true, dbPath: rel, autoRefresh: false },
+      } as CascadeConfig, workspace);
+      await (cascade as any).initCodeIndex();
+      await expect(fsp.stat(nodePath.join(workspace, rel))).resolves.toBeTruthy();
+      await expect(fsp.stat(nodePath.resolve(rel))).rejects.toThrow();
+      expect(cascade.getToolRegistry().isProtected(nodePath.join(workspace, rel))).toBe(true);
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+      await fsp.rm(nodePath.resolve(`idx-${process.pid}`), { recursive: true, force: true });
+    }
+  });
+});
+
 describe('provider:exhausted reaches consumers', () => {
   it('forwards the router event to Cascade listeners and records it in /why', async () => {
     // The policy this PR settled on is "continue on another provider, but say

@@ -21,7 +21,11 @@
 //             keeps it from reaching a host daemon (Docker, say) through a
 //             socket file.
 //    macOS  — sandbox-exec, with a generated profile that denies the same
-//             paths, and all outbound connections for a local-only caller.
+//             paths. A local-only caller runs no commands there: with no
+//             mount boundary a command can hard-link a file from outside the
+//             workspace in and write what it read into it, and with no
+//             process namespace a child it leaves behind can write after it
+//             ends — either way, somewhere Cascade cannot mark local-only.
 //
 //  Every launch, jailed or not, gets an environment with the provider keys
 //  taken out. Where there is no jailer (Windows, or a Linux without a
@@ -176,10 +180,8 @@ export class ProcessJail {
       return { ok: true, launch: { file, args, env, cwd: opts.cwd, jail: null } };
     }
 
-    // Its temporary files go to a folder in Cascade's scratch, which has to
-    // exist before the paths to hide are collected, or it is hidden too.
     if (opts.offline && kind === 'sandbox-exec') {
-      fs.mkdirSync(path.join(this.policy.workspaceRoot, '.cascade', 'tmp'), { recursive: true });
+      return { ok: false, reason: 'A local-only subtask (privacy.paths) cannot run commands on macOS: sandbox-exec cannot stop a command from hard-linking a file outside the workspace in and writing to it, nor end a child it leaves running, so what it writes could not all be marked local-only.' };
     }
     const hidden = await collectHidden(this.policy, opts.offline);
     if (!opts.keepGit) {
@@ -191,7 +193,7 @@ export class ProcessJail {
 
     if (!opts.offline) {
       if (kind === 'sandbox-exec') {
-        return { ok: true, launch: { file: 'sandbox-exec', args: ['-p', seatbeltProfile(hidden, false, undefined, frozen), file, ...args], env, cwd: opts.cwd, jail: kind } };
+        return { ok: true, launch: { file: 'sandbox-exec', args: ['-p', seatbeltProfile(hidden, frozen), file, ...args], env, cwd: opts.cwd, jail: kind } };
       }
       return { ok: true, launch: { file: 'bwrap', args: bwrapArgs(hidden, false, opts.cwd, file, args, undefined, frozen), env, cwd: opts.cwd, jail: kind } };
     }
@@ -221,9 +223,7 @@ export class ProcessJail {
       readOnly: [...gitDirs, ...pins],
       scratch: ['/tmp', path.join(os.homedir(), '.cache')].filter((d) => !inside(d) && fs.existsSync(d)),
     };
-    let scratchTmp: string | undefined;
     const done = async (): Promise<void> => {
-      if (scratchTmp) fs.rmSync(scratchTmp, { recursive: true, force: true });
       const dirsAfter = new Set<string>();
       const after = await stampFiles(root, gitDirs, dirsAfter);
       const changed = changedFiles(before, after, startedAt);
@@ -232,24 +232,8 @@ export class ProcessJail {
       const made = madeDirs(dirsBefore, dirsAfter);
       const marked = [...made, ...changed.filter((rel) => !made.some((dir) => rel.startsWith(`${dir}/`)))];
       if (marked.length) this.policy.taint?.(marked);
-      // On Linux the workspace is a mount of its own, so a link to a file
-      // outside it cannot be made. sandbox-exec has no such boundary: say so
-      // when the command made one, since that other name is out of reach.
-      const linked = changed.filter((rel) => (after.get(rel)?.nlink ?? 1) > 1 && (before.get(rel)?.nlink ?? 1) < 2);
-      if (kind === 'sandbox-exec' && linked.length) {
-        this.policy.log(`[jail] A local-only command made hard links in the workspace (${linked.join(', ')}); their other names, if outside it, were not marked local-only.`);
-      }
     };
 
-    if (kind === 'sandbox-exec') {
-      // No private /tmp here: the command's temporary files go to a folder in
-      // the workspace instead, removed when it ends.
-      scratchTmp = fs.mkdtempSync(path.join(root, '.cascade', 'tmp', 'local-only-'));
-      return {
-        ok: true,
-        launch: { file: 'sandbox-exec', args: ['-p', seatbeltProfile(hidden, true, layout, frozen), file, ...args], env: { ...env, TMPDIR: scratchTmp }, cwd: opts.cwd, jail: kind, done },
-      };
-    }
     // bubblewrap reads a seccomp filter from a file descriptor; the shell
     // opens the filter's file as fd 9 and execs bubblewrap with it.
     const filter = unixSocketFilterFile();
@@ -436,9 +420,22 @@ export async function collectHidden(policy: JailPolicy, offline: boolean): Promi
         if (hide(`${rel}/`) || hide(`${rel}/${PROBE}`)) { out.push({ path: abs, dir: true }); continue; }
         if (UNWALKED_DIRS.has(entry.name)) continue;
         await walk(abs, rel);
+      } else if (entry.isSymbolicLink()) {
+        // A command follows a symlink, so what it leads to is hidden with
+        // it: a directory whole when the link's name covers every child —
+        // readdir calls the link a link, not a directory — and a file under
+        // its own path too, which is the one sandbox-exec sees.
+        let target: { real: string; dir: boolean } | undefined;
+        try {
+          target = { real: await fs.promises.realpath(abs), dir: (await fs.promises.stat(abs)).isDirectory() };
+        } catch { /* dangling: only the name is there */ }
+        if (target?.dir) {
+          if (hide(`${rel}/`) || hide(`${rel}/${PROBE}`)) out.push({ path: target.real, dir: true });
+        } else if (hide(rel)) {
+          out.push({ path: abs, dir: false });
+          if (target) out.push({ path: target.real, dir: false });
+        }
       } else if (hide(rel)) {
-        // A symlink is hidden under its own name; what it points to inside
-        // the workspace is judged, and hidden, where it lies.
         out.push({ path: abs, dir: false });
       }
     }
@@ -570,20 +567,13 @@ export function bwrapArgs(hidden: Hidden[], offline: boolean, cwd: string, file:
 }
 
 /**
- * A sandbox-exec profile: everything allowed but the hidden paths, writes
- * to the `readOnly` files, and the network for a local-only caller.
+ * A sandbox-exec profile: everything allowed but the hidden paths, and
+ * writes to the `readOnly` files. Only a caller that is not local-only
+ * gets one (see the top of this file).
  */
-export function seatbeltProfile(hidden: Hidden[], offline: boolean, layout?: WriteLayout, readOnly: string[] = []): string {
+export function seatbeltProfile(hidden: Hidden[], readOnly: string[] = []): string {
   const quote = (p: string) => `"${p.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
   const lines = ['(version 1)', '(allow default)'];
-  if (layout) {
-    // Writes nowhere but the workspace and the devices every program uses;
-    // not to its git store. A later rule wins.
-    lines.push('(deny file-write* (subpath "/"))');
-    const writable = [...layout.writable.map((d) => `(subpath ${quote(d)})`), ...SEATBELT_WRITABLE_DEVICES];
-    lines.push(`(allow file-write* ${writable.join(' ')})`);
-    if (layout.readOnly.length) lines.push(`(deny file-write* ${layout.readOnly.map((d) => `(subpath ${quote(d)})`).join(' ')})`);
-  }
   if (readOnly.length) lines.push(`(deny file-write* ${readOnly.map((f) => `(literal ${quote(f)})`).join(' ')})`);
   if (hidden.length) {
     const filters = hidden.map((h) => (h.dir ? `(subpath ${quote(h.path)})` : `(literal ${quote(h.path)})`));
@@ -599,7 +589,6 @@ export function seatbeltProfile(hidden: Hidden[], offline: boolean, layout?: Wri
       }
     }
   }
-  if (offline) lines.push('(deny network-outbound)');
   return lines.join('\n');
 }
 
@@ -684,7 +673,7 @@ export function detectJail(): Promise<JailKind | null> {
       const probe = seatbeltProfile([
         { path: '/nonexistent/cascade-probe', dir: false },
         { path: '/nonexistent/cascade-dir', dir: true, keep: ['/nonexistent/cascade-dir/tmp'] },
-      ], true);
+      ], ['/nonexistent/cascade-read-only']);
       const ok = await runs('sandbox-exec', ['-p', probe, '/usr/bin/true']);
       return ok ? 'sandbox-exec' : null;
     }
@@ -716,11 +705,6 @@ function linkPins(stamps: Map<string, Stamp>, root: string): string[] {
   }
   return [...out];
 }
-
-/** The devices a program writes to wherever it runs. */
-const SEATBELT_WRITABLE_DEVICES = [
-  '(literal "/dev/null")', '(literal "/dev/zero")', '(literal "/dev/tty")', '(literal "/dev/dtracehelper")', '(subpath "/dev/fd")',
-];
 
 /** A file's identity and last change, to tell whether a command changed it. */
 interface Stamp { ctime: number; mtime: number; size: number; ino: number; nlink: number }

@@ -355,13 +355,14 @@ export class Cascade extends EventEmitter {
       this.emit('log', { level: 'warn', message: 'Code index enabled but no embeddings-capable provider is configured — skipping.' });
       return;
     }
-    const dbPath = ci.dbPath || path.join(this.workspacePath, '.cascade', 'code-index.db');
-    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    // A relative dbPath is the workspace's, not the process's: on desktop and
+    // the server those differ, and the file opened must be the one protected.
+    const dbFile = path.resolve(this.workspacePath, ci.dbPath || path.join('.cascade', 'code-index.db'));
+    fs.mkdirSync(path.dirname(dbFile), { recursive: true });
     // The default place is protected by name; a configured one is not, and
     // holds the indexed text — deleted chunks too, until SQLite reuses them.
-    const dbFile = path.resolve(this.workspacePath, dbPath);
     this.toolRegistry.protectFiles(['', '-wal', '-shm', '-journal'].map((suffix) => `${dbFile}${suffix}`));
-    const db = new Database(dbPath);
+    const db = new Database(dbFile);
     db.pragma('journal_mode = WAL');
 
     const complete = chatCompleterFromProviders(this.config.providers);

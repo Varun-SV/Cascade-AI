@@ -126,8 +126,8 @@ export class ToolRegistry extends EventEmitter {
   private secretValues: () => string[] = () => [];
   /** Where shell, run_code and git launch what they run. */
   private readonly processJail: ProcessJail;
-  /** Lets a local-only subtask's command or write run alone (workspace-gate.ts). */
-  private readonly gate = new WorkspaceGate();
+  /** Lets a local-only subtask's command or write run alone (workspace-gate.ts); one per workspace. */
+  private readonly gate: WorkspaceGate;
   /** Files protected where they are configured to be, not by name: the code index's database. */
   private readonly protectedFiles = new Set<string>();
   /** Other names — hard links — for the protected files in the workspace. */
@@ -137,6 +137,7 @@ export class ToolRegistry extends EventEmitter {
     super();
     this.config = config;
     this.workspaceRoot = workspaceRoot;
+    this.gate = WorkspaceGate.for(workspaceRoot);
     this.aliases = this.newAliases();
     this.processJail = new ProcessJail({
       mode: config.processJail ?? 'auto',
@@ -356,7 +357,7 @@ export class ToolRegistry extends EventEmitter {
     // (below, alone), a command's changes when it ends (the jail finds them).
     const offline = options.isOffline?.() === true;
     if (tool.delegatesToTools) return tool.execute(input, options);
-    const leave = await this.gate.enter(offline && (COMMAND_TOOLS.has(toolName) || WRITE_TOOLS.has(toolName)));
+    const leave = await this.gate.enter(offline && (COMMAND_TOOLS.has(toolName) || WRITE_TOOLS.has(toolName)), this.acrossProcesses());
     // Checked, marked and unmarked while the write runs alone: another
     // local-only write to the same file cannot share — and then lose — a
     // mark, and no command can link the file elsewhere in between.
@@ -371,6 +372,29 @@ export class ToolRegistry extends EventEmitter {
       unmark?.();
       leave();
     }
+  }
+
+  /**
+   * Run `fn` holding the workspace gate shared, as a tool call does — for a
+   * caller that reads workspace files itself (a worker checking its
+   * artifacts), which must not see what a local-only command is writing
+   * before it is marked.
+   */
+  async whileShared<T>(fn: () => Promise<T>): Promise<T> {
+    const leave = await this.gate.enter(false, this.acrossProcesses());
+    try {
+      return await fn();
+    } finally {
+      leave();
+    }
+  }
+
+  /**
+   * Whether the gate is taken against other processes too: where there is
+   * local-only work — configured or recorded — to keep their reads from.
+   */
+  private acrossProcesses(): boolean {
+    return this.privacyPaths?.hasPolicies() === true;
   }
 
   /**

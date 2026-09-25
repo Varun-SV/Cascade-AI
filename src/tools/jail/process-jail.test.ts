@@ -89,6 +89,33 @@ describe('collectHidden', () => {
   });
 });
 
+// readdir calls a symlink a symlink, so one to a directory covered whole —
+// `secret/**` with `secret` a link — was judged by its bare name, and left
+// in view for a command to follow.
+describe('collectHidden — symlinks', () => {
+  it('hides what a covered symlink leads to: a directory whole, and a file where it lies', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-links-')));
+    try {
+      await fs.mkdir(path.join(dir, 'plans'));
+      await fs.writeFile(path.join(dir, 'plans', 'q3.md'), LOCAL);
+      await fs.symlink(path.join(dir, 'plans'), path.join(dir, 'secret'));
+      await fs.writeFile(path.join(dir, 'real.env'), 'KEY=1');
+      await fs.symlink(path.join(dir, 'real.env'), path.join(dir, '.env'));
+      await fs.symlink(path.join(dir, 'missing'), path.join(dir, 'secret-dangling'));
+      const privacy = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]);
+      const hidden = await collectHidden(policy({ workspaceRoot: dir, isLocalOnly: (rel) => privacy.isLocalOnly(rel) }), false);
+      expect(hidden).toContainEqual({ path: path.join(dir, 'plans'), dir: true });
+      expect(hidden).toContainEqual({ path: path.join(dir, '.env'), dir: false });
+      expect(hidden).toContainEqual({ path: path.join(dir, 'real.env'), dir: false });
+      // A local-only caller sees its own paths.
+      const own = await collectHidden(policy({ workspaceRoot: dir, isLocalOnly: (rel) => privacy.isLocalOnly(rel) }), true);
+      expect(own.some((h) => h.path === path.join(dir, 'plans'))).toBe(false);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('toPathspecs', () => {
   it('turns gitignore patterns into git pathspecs, anchored where the pattern is', () => {
     expect(toPathspecs(['.env', '.cascade/config.json', 'secret/**', 'build/', '!keep.md', '# note'])).toEqual([
@@ -131,15 +158,15 @@ describe('the launch each jailer is given', () => {
     expect(args.join(' ')).toContain('--tmpfs /w/.cascade --bind /w/.cascade/tmp /w/.cascade/tmp');
   });
 
-  it('sandbox-exec: the same paths denied, outbound connections too for a local-only caller', () => {
-    expect(seatbeltProfile([{ path: '/w/.cascade', dir: true, keep: ['/w/.cascade/tmp'] }], false))
+  it('sandbox-exec: the same paths denied, and writes to the read-only files', () => {
+    expect(seatbeltProfile([{ path: '/w/.cascade', dir: true, keep: ['/w/.cascade/tmp'] }]))
       .toMatch(/\(deny file-read\* file-write\* \(subpath "\/w\/.cascade"\)\)\n\(allow file-read\* file-write\* \(subpath "\/w\/.cascade\/tmp"\)\)/);
-    const profile = seatbeltProfile([...hidden, { path: '/w/a "b".txt', dir: false }], true);
+    const profile = seatbeltProfile([...hidden, { path: '/w/a "b".txt', dir: false }], ['/w/.cascadeignore']);
     expect(profile).toContain('(literal "/w/.env")');
     expect(profile).toContain('(subpath "/home/u/.cascade-ai")');
     expect(profile).toContain('(literal "/w/a \\"b\\".txt")');
-    expect(profile).toContain('(deny network-outbound)');
-    expect(seatbeltProfile(hidden, false)).not.toContain('network');
+    expect(profile).toContain('(deny file-write* (literal "/w/.cascadeignore"))');
+    expect(profile).not.toContain('network');
   });
 
   const layout = { writable: ['/tmp/w'], readOnly: ['/tmp/w/.git'], scratch: ['/tmp', '/home/u/.cache'] };
@@ -160,27 +187,12 @@ describe('the launch each jailer is given', () => {
     const profile = seatbeltProfile([
       { path: '/w/.cascade', dir: true, keep: ['/w/.cascade/tmp'] },
       { path: '/w/.cascade/tmp/notes.txt', dir: false },
-    ], false);
+    ]);
     const lines = profile.split('\n');
     const allow = lines.findIndex((l) => l.startsWith('(allow file-read* file-write* (subpath "/w/.cascade/tmp")'));
     const again = lines.findIndex((l, i) => i > allow && l.includes('(literal "/w/.cascade/tmp/notes.txt")') && l.startsWith('(deny'));
     expect(allow).toBeGreaterThan(0);
     expect(again).toBeGreaterThan(allow);
-  });
-
-  it('sandbox-exec, for a local-only caller: no writes but to the workspace and the devices, none to its git store', () => {
-    const profile = seatbeltProfile(hidden, true, layout);
-    const lines = profile.split('\n');
-    const denyAll = lines.indexOf('(deny file-write* (subpath "/"))');
-    const allow = lines.findIndex((l) => l.startsWith('(allow file-write* (subpath "/tmp/w")'));
-    const gitDir = lines.indexOf('(deny file-write* (subpath "/tmp/w/.git"))');
-    expect(denyAll).toBeGreaterThan(0);
-    expect(allow).toBeGreaterThan(denyAll);
-    expect(lines[allow]).toContain('(literal "/dev/null")');
-    expect(gitDir).toBeGreaterThan(allow);
-    // The hidden paths stay denied after the workspace is allowed.
-    expect(lines.findIndex((l) => l.includes('(literal "/w/.env")'))).toBeGreaterThan(allow);
-    expect(seatbeltProfile(hidden, true)).not.toContain('(deny file-write* (subpath "/"))');
   });
 });
 
@@ -224,19 +236,16 @@ describe('ProcessJail.prepare — which way a command runs', () => {
     expect(r.ok && r.launch.args).toEqual(expect.arrayContaining(['--tmpfs', path.join(ws, '.cascade'), '--ro-bind', '/dev/null', path.join(ws, '.env')]));
   });
 
-  // Created after the paths to hide were collected, the scratch folder was
-  // hidden with the rest of Cascade's, and every temporary file failed.
-  it('sandbox-exec: gives a local-only caller a scratch folder its profile allows', async () => {
-    const w = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-seatbelt-')));
-    await fs.mkdir(path.join(w, '.cascade'));
-    const jail = new ProcessJail(policy({ workspaceRoot: w, detect: async () => 'sandbox-exec' }));
-    const prepared = await jail.prepare('/bin/sh', ['-c', 'true'], { cwd: w, offline: true });
-    if (!prepared.ok) throw new Error(prepared.reason);
-    const tmp = prepared.launch.env['TMPDIR']!;
-    expect(tmp.startsWith(path.join(w, '.cascade', 'tmp', 'local-only-'))).toBe(true);
-    expect(prepared.launch.args[1]).toContain(`(allow file-read* file-write* (subpath "${path.join(w, '.cascade', 'tmp')}"))`);
-    await prepared.launch.done?.();
-    await fs.rm(w, { recursive: true, force: true });
+  // sandbox-exec has no mount boundary to stop a hard link from outside the
+  // workspace, nor a process namespace to end a child left running: what a
+  // local-only command writes could land where it cannot be marked.
+  it('sandbox-exec: refuses a local-only caller, and wraps a cloud one', async () => {
+    const jail = new ProcessJail(policy({ detect: async () => 'sandbox-exec' }));
+    const offline = await jail.prepare('/bin/sh', ['-c', 'true'], { cwd: ws, offline: true });
+    expect(offline.ok).toBe(false);
+    expect(!offline.ok && offline.reason).toMatch(/cannot run commands on macOS/);
+    const online = await jail.prepare('/bin/sh', ['-c', 'true'], { cwd: ws, offline: false });
+    expect(online.ok && online.launch.file).toBe('sandbox-exec');
   });
 
   it('loads the socket filter for a local-only caller, through a shell that opens it', async () => {
@@ -273,6 +282,22 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: what shell, run_code and git can re
       command: 'umount .cascade/config.json 2>/dev/null; umount -l .cascade/config.json 2>/dev/null; cat .cascade/config.json 2>&1; true',
     }, exec);
     expect(out).not.toContain(SECRET);
+  });
+
+  it('keeps a command from following a local-only symlink to the directory it names', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-symdir-')));
+    try {
+      await fs.mkdir(path.join(dir, 'plans'));
+      await fs.writeFile(path.join(dir, 'plans', 'q3.md'), LOCAL);
+      await fs.symlink(path.join(dir, 'plans'), path.join(dir, 'secret'));
+      const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {} } as never, dir);
+      reg.setPrivacyPaths(new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]));
+      const out = await reg.execute('shell', { command: 'cat secret/q3.md 2>/dev/null; ls secret/ 2>/dev/null; true' }, exec);
+      expect(out).not.toContain(LOCAL);
+      expect(out).not.toContain('q3.md');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 
   // A command could take a rule out of `.cascadeignore`, for the next run.
@@ -740,6 +765,22 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: where a local-only caller\'s writes
     await Promise.all([command, read]);
     expect(order).toEqual(['command', 'read']);
     expect(privacy.isLocalOnly('late.txt')).toBe(true);
+  });
+
+  // Each registry had a gate of its own: a second run in the workspace read
+  // what the command wrote before it was marked.
+  it('holds back another run in the same workspace too', async () => {
+    const other = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {} } as never, dir);
+    const theirs = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }], { workspaceRoot: dir });
+    other.setPrivacyPaths(theirs);
+    const order: string[] = [];
+    const command = registry().execute('shell', { command: 'sleep 0.5; cat secret/plan.md > later.txt' }, offline)
+      .then(() => { order.push('command'); });
+    await new Promise((r) => setTimeout(r, 150));
+    const read = other.execute('file_read', { path: 'notes.md' }, exec).then(() => { order.push('read'); });
+    await Promise.all([command, read]);
+    expect(order).toEqual(['command', 'read']);
+    expect(theirs.isLocalOnly('later.txt')).toBe(true);
   });
 });
 

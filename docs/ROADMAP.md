@@ -38,22 +38,24 @@ WebAssembly sandbox.
   writes may carry what it read: its changes in the workspace are found by
   stamping files before and after, and marked local-only
   (`.cascade/privacy-derived.json`) — a directory it made whole — with
-  other tool calls held until it ends (`src/tools/workspace-gate.ts`).
+  other tool calls held until it ends (`src/tools/workspace-gate.ts`), in
+  every run in the workspace: one gate per workspace in a process, and
+  marker files in `.cascade/gate/` between processes.
   `.cascadeignore` is mounted over itself read-only for every caller.
-- **macOS — sandbox-exec**, a generated profile denying the same paths and,
-  for a local-only caller, outbound connections and writes outside the
-  workspace (its temporary files go to a folder there, removed after). Unlike
-  Linux, where the workspace is a mount of its own and a hard link to a file
-  outside it cannot be made, a local-only command there could link one in
-  and write through it; Cascade says so when a command made new links. Checked at startup with a
-  profile of the same shape; not exercised in CI.
+- **macOS — sandbox-exec**, a generated profile denying the same paths.
+  A local-only caller runs no commands there: with no mount boundary a
+  command could hard-link a file from outside the workspace in and write
+  through it, and with no process namespace a child it left running could
+  write after it ended — either way where Cascade cannot mark it. Checked at
+  startup with a profile of the same shape; not exercised in CI.
 - **Everywhere** — provider keys are taken out of every command's
   environment, `git`'s on Windows included. With no jailer, `auto` runs
   commands that way and refuses them to a local-only caller. The `git` tool
   refuses a push that would send a commit holding a hidden path.
 
 **Still open:** Windows (Job Objects/AppContainer, or WSL2 + bubblewrap), and
-a Docker/Podman fallback where no jailer works. On macOS a command can still
+a Docker/Podman fallback where no jailer works — which would also give
+macOS local-only commands. On macOS a command can still
 read another same-user process's startup environment; Linux's PID namespace
 closes that there. A mask hides what a path holds, not that it is there: a
 cloud worker's command can list a local-only file's name, including one a

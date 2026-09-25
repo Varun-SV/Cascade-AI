@@ -862,9 +862,10 @@ describe('privacy.paths, enforced when a file is read', () => {
 
   async function run(opts: {
     privateModel: boolean;
-    call: ToolCall;
+    call: ToolCall | ToolCall[];
     assignment?: Partial<T2ToT3Assignment>;
     setup?: (root: string) => Promise<void>;
+    escalator?: unknown;
   }) {
     const { ToolRegistry } = await import('../../tools/registry.js');
     const { PrivacyPaths } = await import('../privacy/paths.js');
@@ -888,10 +889,12 @@ describe('privacy.paths, enforced when a file is read', () => {
           return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
         }
         turns += 1;
-        return turns === 1 ? makeResult('', [opts.call], 'tool_use') : makeResult('Summary written.');
+        const sequence = Array.isArray(opts.call) ? opts.call : [opts.call];
+        return turns <= sequence.length ? makeResult('', [sequence[turns - 1]!], 'tool_use') : makeResult('Summary written.');
       }),
     } as unknown as CascadeRouter;
     const worker = new T3Worker(router, registry, 't2-parent');
+    if (opts.escalator) worker.setPermissionEscalator(opts.escalator as never);
     const logs: string[] = [];
     worker.on('log', (e: { message?: string }) => { if (e?.message) logs.push(e.message); });
     const result = await worker.execute(makeAssignment({
@@ -1017,6 +1020,48 @@ describe('privacy.paths, enforced when a file is read', () => {
     expect(seen).not.toContain('sk-leak-0123456789');
     // …nor graded by reading it: whether `.env` holds a string is its contents.
     expect(result.testResults.checksRun).not.toContain('.env contains "sk-leak"');
+  });
+
+  // verifyArtifacts read the files itself, outside the workspace gate, so it
+  // could read what a local-only command was writing before it was marked.
+  it('checks its artifacts only while no local-only command runs', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const { WorkspaceGate } = await import('../../tools/workspace-gate.js');
+    // Checked by artifact, then by acceptance criterion, each on its own.
+    for (const assignment of [{ files: ['out.md'] }, { acceptance: ['out.md exists'] }]) {
+      let released = false;
+      const { result } = await run({
+        privateModel: true,
+        call: [],
+        assignment,
+        setup: async (root) => {
+          await writeFile(join(root, 'out.md'), 'done\n');
+          const leave = await WorkspaceGate.for(root).enter(true);
+          setTimeout(() => { released = true; leave(); }, 300);
+        },
+      });
+      expect(released, JSON.stringify(assignment)).toBe(true);
+      if (assignment.acceptance) expect(result.testResults.checksRun).toContain('out.md exists');
+    }
+  });
+
+  // The approval request carried the call's input to the T2 and T1
+  // evaluators, whose models may be cloud ones.
+  it('marks a local-only subtask\'s approval request, so no tier model is asked about it', async () => {
+    const asked: Array<{ toolName: string; localOnly?: boolean }> = [];
+    const escalator = {
+      requestPermission: async (req: { id: string; toolName: string; localOnly?: boolean }) => {
+        asked.push(req);
+        return { requestId: req.id, approved: false, decidedBy: 'USER' };
+      },
+    };
+    const write = { id: 'tc-2', name: 'file_write', input: { path: 'summary.md', content: 'x' } };
+    await run({ privateModel: true, call: write, escalator });
+    expect(asked.find((r) => r.toolName === 'file_write')?.localOnly).toBe(false);
+    asked.length = 0;
+    await run({ privateModel: true, call: [{ id: 'tc-1', name: 'file_read', input: { path: 'secret/plan.md' } }, write], escalator });
+    expect(asked.find((r) => r.toolName === 'file_write')?.localOnly).toBe(true);
   });
 
   it('asks about a file the grep names before searching it, match or not', async () => {

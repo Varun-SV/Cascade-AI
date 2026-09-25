@@ -145,7 +145,9 @@ export class PermissionEscalator extends EventEmitter {
     }
 
     // ── 3. Ask T2 evaluator ───────────────────
-    if (this.t2Evaluator) {
+    // Not for a local-only caller: the evaluators put the input in a prompt
+    // for a model that may be a cloud one.
+    if (this.t2Evaluator && !req.localOnly) {
       try {
         const t2Decision = await this.t2Evaluator(req);
         if (t2Decision !== null) {
@@ -158,7 +160,7 @@ export class PermissionEscalator extends EventEmitter {
     }
 
     // ── 4. Ask T1 evaluator ───────────────────
-    if (this.t1Evaluator) {
+    if (this.t1Evaluator && !req.localOnly) {
       try {
         const t1Decision = await this.t1Evaluator(req);
         if (t1Decision !== null) {

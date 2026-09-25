@@ -1097,6 +1097,12 @@ export interface PermissionRequest {
    */
   forceReprompt?: boolean;
   /**
+   * The caller is local-only (privacy.paths): its input may carry what it
+   * read, so no tier's model is asked about it — T2 and T1 may run on cloud
+   * models. It is decided by rule or by the user.
+   */
+  localOnly?: boolean;
+  /**
    * Escalation trail — each engaged tier's non-binding recommendation as the
    * request rose toward the user. Dangerous tools never get a terminal
    * decision from a tier; the tier records its advice here instead, so the

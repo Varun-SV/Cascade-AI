@@ -148,6 +148,22 @@ describe('PermissionEscalator', () => {
     expect(decision.approved).toBe(true);
   });
 
+  // The evaluators put the input in a prompt for T2's and T1's models, which
+  // may be cloud ones; a local-only caller's input may carry what it read.
+  it('asks no tier model about a local-only caller\'s request, only the user', async () => {
+    const t2 = vi.fn().mockResolvedValue(makeDecision(true, 'T2'));
+    const t1 = vi.fn().mockResolvedValue(makeDecision(true, 'T1'));
+    escalator.setT2Evaluator(t2 as any);
+    escalator.setT1Evaluator(t1 as any);
+    const req = makeRequest({ toolName: 'shell', isDangerous: true, localOnly: true, input: { command: 'echo PRIVATE' } });
+    const promise = escalator.requestPermission(req);
+    await flushPromises();
+    expect(t2).not.toHaveBeenCalled();
+    expect(t1).not.toHaveBeenCalled();
+    escalator.resolveUserDecision(req.id, true, false);
+    expect((await promise).decidedBy).toBe('USER');
+  });
+
   // ── User denies ────────────────────────────
 
   it('returns denied decision when user resolves with false', async () => {

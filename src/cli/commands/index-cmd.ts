@@ -31,7 +31,8 @@ export async function indexCommand(dirPath?: string): Promise<void> {
     return;
   }
 
-  const dbPath = config.codeIndex?.dbPath || path.join(workspace, '.cascade', 'code-index.db');
+  // Resolved against the workspace, as a run resolves it: both must open one file.
+  const dbPath = path.resolve(workspace, config.codeIndex?.dbPath || path.join('.cascade', 'code-index.db'));
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');

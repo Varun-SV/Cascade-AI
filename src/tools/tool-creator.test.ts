@@ -398,6 +398,10 @@ describe('ToolCreator — default-deny + lazy escalator (v0.9.6 item 2)', () => 
     await reg.execute('dynamic_trust_u', { path: 'k' }, opts);
     expect(captured.find((r) => r.requestedBy === 'dynamic_tool:dynamic_trust')?.forceReprompt).toBe(false);
     expect(captured.find((r) => r.requestedBy === 'dynamic_tool:dynamic_trust_u')?.forceReprompt).toBe(true);
+    // A local-only caller's request says so, and no tier's model is asked about it.
+    expect(captured.every((r) => r.localOnly === false)).toBe(true);
+    await reg.execute('dynamic_trust', { path: 'k' }, { ...opts, isOffline: () => true });
+    expect(captured.at(-1)?.localOnly).toBe(true);
   });
 });
 
