@@ -23,7 +23,10 @@ function stubFetch(responses: Array<{ ok?: boolean; status?: number; body?: unkn
   return calls;
 }
 
-afterEach(() => { vi.unstubAllGlobals(); });
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
 describe('the generic CDP endpoint', () => {
   it('hands back the endpoint it was given', async () => {
@@ -66,6 +69,27 @@ describe('Steel', () => {
     expect(calls[0]?.url).toBe('https://steel.test/v1/sessions');
     expect(calls[0]?.init.method).toBe('POST');
     expect(session).toEqual({ id: 'sess-1', cdpUrl: 'wss://s/cdp', liveViewUrl: 'https://s/debug' });
+  });
+
+  it('retries only Railway-style 502 cold starts before creating a session', async () => {
+    vi.useFakeTimers();
+    const calls = stubFetch([
+      { ok: false, status: 502, text: 'service waking' },
+      { body: { id: 'sess-1', websocketUrl: 'wss://s/cdp' } },
+    ]);
+
+    const pending = new SteelProvider({ url: 'http://steel.internal:3000' }).createSession();
+    await vi.advanceTimersByTimeAsync(750);
+    await expect(pending).resolves.toMatchObject({ id: 'sess-1', cdpUrl: 'wss://s/cdp' });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('does not retry non-cold-start Steel errors', async () => {
+    vi.useFakeTimers();
+    const calls = stubFetch([{ ok: false, status: 503, text: 'provider unavailable' }]);
+
+    await expect(new SteelProvider().createSession()).rejects.toThrow(/503/);
+    expect(calls).toHaveLength(1);
   });
 
   it('refuses a session with nothing to drive', async () => {
