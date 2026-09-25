@@ -480,7 +480,16 @@ export function providerIsUsable(settings: RemoteBrowserSettings | undefined): b
  */
 export function providerRationsSessions(settings: RemoteBrowserSettings | undefined): boolean {
   const provider = buildProvider(settings);
-  return provider !== null && provider.allocatesSessions !== false;
+  if (provider === null || provider.allocatesSessions === false) return false;
+
+  // The per-day entitlement exists to mirror an external provider's metered
+  // session allowance. A self-hosted Steel deployment has no provider-side
+  // daily session quota; its cost is bounded by deployment concurrency and the
+  // host's own compute controls instead. Treating it like Steel Cloud turns an
+  // arbitrary product limit into an outage after five otherwise-valid sessions.
+  if (settings?.provider === 'steel' && !isHostedSteel(settings.url)) return false;
+
+  return true;
 }
 
 /** Which provider the operator asked for, or null when they asked for none. */
