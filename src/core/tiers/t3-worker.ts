@@ -456,8 +456,12 @@ export class T3Worker extends BaseTier {
     // ── Per-path privacy tier ──────────────────
     // A subtask touching a local-only path runs on private models only and
     // its raw output is withheld from the tiers above (see privacy/paths.ts).
+    // Judged by what each target is, not only its name: an artifact that is
+    // a symlink or hard link to a local-only file is that file.
     const privacy = this.router.getPrivacyPaths?.();
-    this.localOnlyMatch = !!privacy?.hasPolicies() && privacy.anyLocalOnly(this.privacyTargets(assignment));
+    const root = this.artifactRoot();
+    this.localOnlyMatch = !!privacy?.hasPolicies()
+      && this.privacyTargets(assignment).some((target) => privacy.coversFile(path.resolve(root, target), root));
     if (this.localOnlyMatch) {
       this.log('Privacy: subtask touches a local-only path — forcing a private model; raw output will be withheld upstream.');
     }
@@ -1501,6 +1505,20 @@ export class T3Worker extends BaseTier {
     return true;
   };
 
+  /**
+   * Whether this worker may look into a workspace file itself — to verify
+   * or grade it — rather than through a tool: what it finds goes into its
+   * next prompt, so the file must be one a tool could read. A protected
+   * file is not; a local-only one decides as for `file_read`.
+   */
+  private mayInspect(absPath: string): boolean {
+    if (this.toolRegistry.isProtected?.(absPath)) {
+      this.log(`Verification: ${path.relative(this.artifactRoot(), absPath) || absPath} is protected — not read to check it.`);
+      return false;
+    }
+    return this.mayRead(absPath, 'model');
+  }
+
   /** Whether nothing this worker knows may leave the machine; see `ToolExecuteOptions.isOffline`. */
   private readonly isOffline = (): boolean => this.localOnlyMatch;
 
@@ -1536,6 +1554,9 @@ ${assignment.expectedOutput}`;
 
     for (const artifactPath of artifactPaths) {
       const absolutePath = path.resolve(this.artifactRoot(), artifactPath);
+      // Checked before anything touches it: a compiler's diagnostics quote
+      // the source, and they go into the correction prompt.
+      if (!this.mayInspect(absolutePath)) continue;
       try {
         const stat = await fs.stat(absolutePath);
         if (!stat.isFile()) {
@@ -1714,9 +1735,10 @@ ${current}`,
     // canProduceFiles() above for why that ends as a failed node.
     const workerCanWriteFiles = canProduceFiles(this.tools.map((t) => t.name));
     return evaluateAcceptance(criteria, assignment.files ?? [], {
-      // Reading a file to grade it is reading it: the privacy gate decides,
-      // as for any tool, so a criterion cannot probe a local-only file.
-      allowed: (target) => this.mayRead(resolve(target), 'model'),
+      // Reading a file to grade it is reading it: the protected paths and
+      // the privacy gate decide, as for any tool, so a criterion cannot probe
+      // `.env` or a local-only file.
+      allowed: (target) => this.mayInspect(resolve(target)),
       stat: async (target) => {
         try {
           const stat = await fs.stat(resolve(target));

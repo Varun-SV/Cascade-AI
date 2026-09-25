@@ -63,6 +63,17 @@ describe('Retriever + SqliteVectorStore', () => {
     expect(hits[0]!.text).toContain('Photosynthesis');
   });
 
+  // Each stage returned its top `candidates` before left-out sources were
+  // dropped, so where a stale index's excluded source held them all, a
+  // search came back empty with allowed matches just below the cut.
+  it('fills the results from sources allowed when excluded ones hold the top places', async () => {
+    const r = build();
+    await r.index(NS, 'private', Array.from({ length: 12 }, (_, i) => ({ text: `launch plan budget figures part ${i}`, ord: i })));
+    await r.index(NS, 'public', [{ text: 'launch plan overview for everyone', ord: 0 }, { text: 'launch plan timeline', ord: 1 }]);
+    const hits = await r.search('launch plan budget figures', { namespace: NS, k: 2, candidates: 4, exclude: (id) => id === 'private' });
+    expect(hits.map((h) => h.sourceId)).toEqual(['public', 'public']);
+  });
+
   it('matches exact keywords via the lexical stage', async () => {
     const r = build();
     await r.index(NS, 'doc1', [

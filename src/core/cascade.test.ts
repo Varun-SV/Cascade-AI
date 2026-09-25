@@ -854,6 +854,26 @@ describe('.cascadeignore reaches the tools', () => {
   });
 });
 
+// The record of what local-only subtasks wrote was read only when one
+// existed at start: a run begun before another wrote its first entry never
+// saw it, and its cloud workers read those files.
+describe('what local-only subtasks wrote reaches every run in the workspace', () => {
+  it('is read by a run that started before the record existed', async () => {
+    const fsp = await import('node:fs/promises');
+    const os = await import('node:os');
+    const nodePath = await import('node:path');
+    const { PrivacyPaths } = await import('./privacy/paths.js');
+    const workspace = await fsp.mkdtemp(nodePath.join(os.tmpdir(), 'cascade-derived-init-'));
+    try {
+      const cascade = new Cascade(baseConfig, workspace);
+      new PrivacyPaths([], { workspaceRoot: workspace }).addDerived(['summary.md']);
+      expect((cascade as any).router.getPrivacyPaths()?.isLocalOnly('summary.md')).toBe(true);
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('provider:exhausted reaches consumers', () => {
   it('forwards the router event to Cascade listeners and records it in /why', async () => {
     // The policy this PR settled on is "continue on another provider, but say

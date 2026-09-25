@@ -37,8 +37,9 @@ WebAssembly sandbox.
   `~/.cache` private tmpfs, the git store read-only — because whatever it
   writes may carry what it read: its changes in the workspace are found by
   stamping files before and after, and marked local-only
-  (`.cascade/privacy-derived.json`), with other tool calls held until it
-  ends (`src/tools/workspace-gate.ts`).
+  (`.cascade/privacy-derived.json`) — a directory it made whole — with
+  other tool calls held until it ends (`src/tools/workspace-gate.ts`).
+  `.cascadeignore` is mounted over itself read-only for every caller.
 - **macOS — sandbox-exec**, a generated profile denying the same paths and,
   for a local-only caller, outbound connections and writes outside the
   workspace (its temporary files go to a folder there, removed after). Unlike
@@ -54,7 +55,11 @@ WebAssembly sandbox.
 **Still open:** Windows (Job Objects/AppContainer, or WSL2 + bubblewrap), and
 a Docker/Podman fallback where no jailer works. On macOS a command can still
 read another same-user process's startup environment; Linux's PID namespace
-closes that there.
+closes that there. A mask hides what a path holds, not that it is there: a
+cloud worker's command can list a local-only file's name, including one a
+local-only worker chose (the file tools leave such names out). Hiding names
+from commands would mean mounting over the parent directory, and losing the
+command's own writes there.
 
 ## Project knowledge graph (world-state v2) — ✅ shipped in v0.14.0
 

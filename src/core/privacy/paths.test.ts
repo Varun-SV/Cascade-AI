@@ -86,7 +86,7 @@ describe('PrivacyPaths — what a local-only subtask wrote', () => {
     const path = await import('node:path');
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-derived-'));
     const policy = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }], { workspaceRoot: root });
-    expect(PrivacyPaths.hasDerived(root)).toBe(false);
+    expect(new PrivacyPaths([], { workspaceRoot: root }).hasPolicies()).toBe(false);
 
     // Recorded even where a pattern covers it now: the pattern may go.
     expect(policy.addDerived(['summary.md', 'secret/notes.md', 'odd [draft]*.md'])).toEqual(['summary.md', 'secret/notes.md', 'odd [draft]*.md']);
@@ -96,7 +96,6 @@ describe('PrivacyPaths — what a local-only subtask wrote', () => {
     expect(policy.coversFile(path.join(root, 'summary.md'), root)).toBe(true);
 
     // A later run reads the record, even with no policy configured any more.
-    expect(PrivacyPaths.hasDerived(root)).toBe(true);
     const next = new PrivacyPaths([], { workspaceRoot: root });
     expect(next.hasPolicies()).toBe(true);
     expect(next.isLocalOnly('summary.md')).toBe(true);
@@ -114,6 +113,73 @@ describe('PrivacyPaths — what a local-only subtask wrote', () => {
     // A record made for a write that did not happen comes off, for good.
     next.removeDerived(['odd [draft]*.md']);
     expect(new PrivacyPaths([], { workspaceRoot: root }).isLocalOnly('odd [draft]*.md')).toBe(false);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  // A directory's name can carry as much as a file's: one a local-only
+  // subtask made is recorded, and everything in it is local-only.
+  it('covers what lies in a directory it made', async () => {
+    const fs = await import('node:fs/promises');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-derived-'));
+    const policy = new PrivacyPaths([], { workspaceRoot: root });
+    expect(policy.addDerived(['made/'])).toEqual(['made']);
+    expect(policy.isLocalOnly('made')).toBe(true);
+    expect(policy.isLocalOnly('made/')).toBe(true);
+    expect(policy.isLocalOnly('made/deep/x.txt')).toBe(true);
+    expect(policy.isLocalOnly('made-not/x.txt')).toBe(false);
+    expect(policy.coversFile(path.join(root, 'made', 'later.txt'), root)).toBe(true);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  // Two runs in one workspace each held their own copy of the record, and
+  // the last to save replaced the other's additions with its own.
+  it('keeps every run\'s records when runs share a workspace', async () => {
+    const fs = await import('node:fs/promises');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-derived-'));
+    const a = new PrivacyPaths([], { workspaceRoot: root });
+    const b = new PrivacyPaths([], { workspaceRoot: root });
+    const c = new PrivacyPaths([], { workspaceRoot: root });
+    expect(c.isLocalOnly('a.txt')).toBe(false);
+    a.addDerived(['a.txt']);
+    b.addDerived(['b.txt']);
+    const later = new PrivacyPaths([], { workspaceRoot: root });
+    expect(later.isLocalOnly('a.txt')).toBe(true);
+    expect(later.isLocalOnly('b.txt')).toBe(true);
+    // A run that started before sees another's records as they are made.
+    expect(c.isLocalOnly('a.txt')).toBe(true);
+    expect(c.localOnlyPatterns()).toEqual(['/a.txt', '/b.txt']);
+    // Taking back one run's record leaves the other's.
+    a.removeDerived(['a.txt']);
+    expect(b.isLocalOnly('b.txt')).toBe(true);
+    expect(new PrivacyPaths([], { workspaceRoot: root }).isLocalOnly('b.txt')).toBe(true);
+
+    // Another process's change is seen from the next job on.
+    const file = path.join(root, '.cascade', 'privacy-derived.json');
+    await fs.writeFile(file, JSON.stringify({ version: 1, paths: ['b.txt', 'other.txt'] }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(c.isLocalOnly('other.txt')).toBe(true);
+    // …and one made after this run last looked is kept when it saves.
+    const { writeFileSync } = await import('node:fs');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(b.isLocalOnly('meanwhile.txt')).toBe(false);
+    writeFileSync(file, JSON.stringify({ version: 1, paths: ['b.txt', 'meanwhile.txt', 'other.txt'] }));
+    b.addDerived(['b2.txt']);
+    expect(new PrivacyPaths([], { workspaceRoot: root }).isLocalOnly('meanwhile.txt')).toBe(true);
+    b.removeDerived(['b2.txt']);
+
+    // A lock left by a run that ended holding it is taken over once stale,
+    // and each save lets go of its own.
+    const lock = `${file}.lock`;
+    await fs.writeFile(lock, '1');
+    const old = new Date(Date.now() - 60_000);
+    await fs.utimes(lock, old, old);
+    c.addDerived(['c.txt']);
+    await expect(fs.stat(lock)).rejects.toThrow();
+    expect(new PrivacyPaths([], { workspaceRoot: root }).localOnlyPatterns()).toEqual(['/b.txt', '/c.txt', '/meanwhile.txt', '/other.txt']);
     await fs.rm(root, { recursive: true, force: true });
   });
 });

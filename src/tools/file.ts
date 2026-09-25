@@ -185,12 +185,13 @@ export class FileListTool extends BaseTool {
     required: ['path'],
   };
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const inputPath = (input['path'] as string) || '.';
     const absPath = resolveInWorkspace(this.workspaceRoot, inputPath);
+    const shown = this.listGate(options);
 
     const entries = (await fs.readdir(absPath, { withFileTypes: true }))
-      .filter((e) => !this.isProtectedPath(path.join(absPath, e.name)));
+      .filter((e) => !this.isProtectedPath(path.join(absPath, e.name)) && shown(path.join(absPath, e.name), e.isDirectory()));
     return entries.map(e => `${e.isDirectory() ? '[DIR] ' : '      '}${e.name}`).join('\n') || '(empty directory)';
   }
 }

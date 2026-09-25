@@ -27,7 +27,7 @@ export class GlobTool extends BaseTool {
     required: ['pattern'],
   };
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const pattern = input['pattern'] as string;
     const searchPath = (input['path'] as string | undefined)
       ? path.resolve(this.workspaceRoot, input['path'] as string)
@@ -39,9 +39,14 @@ export class GlobTool extends BaseTool {
       nodir: true,
       dot: false,
     });
-    // Protected files are not listed, and nor is anything a `../` pattern
-    // reached outside the workspace.
-    const matches = found.filter((rel) => !this.isProtectedPath(path.resolve(searchPath, rel)));
+    // Protected files are not listed, nor is anything a `../` pattern
+    // reached outside the workspace — and nor, for a worker that may not
+    // read it, is a local-only file.
+    const shown = this.listGate(options);
+    const matches = found.filter((rel) => {
+      const abs = path.resolve(searchPath, rel);
+      return !this.isProtectedPath(abs) && shown(abs, false);
+    });
 
     if (matches.length === 0) {
       return `No files matched pattern: ${pattern}`;

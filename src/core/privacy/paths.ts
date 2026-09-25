@@ -11,8 +11,11 @@
 //  above — T2/T1 receive only a success/fail signal, not the content.
 //
 //  What such a subtask writes is local-only too: it may carry what the
-//  subtask read. Those files are recorded as they are written, in
-//  .cascade/privacy-derived.json, so they stay local-only across runs.
+//  subtask read. Those files — and the directories it made, whose names can
+//  carry as much — are recorded as they are written, in
+//  .cascade/privacy-derived.json, so they stay local-only across runs. Runs
+//  sharing a workspace share the record: each merges into it under a lock,
+//  and looks at it again when another has changed it.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -32,12 +35,27 @@ export interface PrivacyPathPolicy {
 /** Where the files a local-only subtask wrote are recorded, relative to the workspace. */
 export const DERIVED_FILE = '.cascade/privacy-derived.json';
 
+/** Saves of any record made in this process, for `PrivacyPaths.sync`. */
+let saves = 0;
+
+/** How long a save waits for another run's to finish before giving up. */
+const LOCK_WAIT_MS = 5_000;
+/** A lock older than this was left by a run that ended holding it. */
+const STALE_LOCK_MS = 30_000;
+
 export class PrivacyPaths {
   private localOnly: Ignore;
   private patterns: string[];
-  /** Workspace-relative POSIX paths a local-only subtask wrote. */
+  /** Workspace-relative POSIX paths a local-only subtask wrote: files, and the directories it made. */
   private derived = new Set<string>();
   private readonly derivedFile?: string;
+  /** Recorded here but not yet on disk: a save that could not take the lock. */
+  private unsaved = new Set<string>();
+  /** The record's file as last read or written here, to tell when another run changed it. */
+  private seen = '';
+  /** Whether the record was looked at in the current job, and how many saves this process had made then (see `sync`). */
+  private synced = false;
+  private savesSeen = 0;
   /** Other names — hard links — for the local-only files, per workspace root asked about. */
   private aliases = new Map<string, LinkAliases>();
 
@@ -51,13 +69,8 @@ export class PrivacyPaths {
     if (this.patterns.length) this.localOnly.add(this.patterns);
     if (opts.workspaceRoot) {
       this.derivedFile = path.join(opts.workspaceRoot, DERIVED_FILE);
-      for (const rel of readDerived(this.derivedFile)) this.derived.add(rel);
+      this.sync();
     }
-  }
-
-  /** Whether a workspace holds a record of files local-only subtasks wrote. */
-  static hasDerived(workspaceRoot: string): boolean {
-    return readDerived(path.join(workspaceRoot, DERIVED_FILE)).length > 0;
   }
 
   /**
@@ -65,19 +78,30 @@ export class PrivacyPaths {
    * for each file a local-only subtask wrote.
    */
   localOnlyPatterns(): string[] {
+    this.sync();
     return [...this.patterns, ...[...this.derived].map(literalPattern)];
   }
 
   /** True when any privacy rules are configured, or a local-only subtask has written anything. */
   hasPolicies(): boolean {
+    this.sync();
     return this.patterns.length > 0 || this.derived.size > 0;
   }
 
-  /** True when the given workspace-relative path falls under a local-only policy. */
+  /**
+   * True when the given workspace-relative path falls under a local-only
+   * policy — or is, or lies in, something a local-only subtask wrote.
+   */
   isLocalOnly(relativePath: string): boolean {
     if (!relativePath) return false;
     const rel = relativePath.replace(/^\.?\//, '');
-    if (this.derived.has(rel)) return true;
+    this.sync();
+    if (this.derived.size) {
+      const parts = rel.replace(/\/+$/, '').split('/');
+      for (let i = 1; i <= parts.length; i++) {
+        if (this.derived.has(parts.slice(0, i).join('/'))) return true;
+      }
+    }
     if (this.patterns.length === 0) return false;
     try {
       // The ignore matcher requires relative paths; strip any leading ./ or /.
@@ -95,31 +119,74 @@ export class PrivacyPaths {
    * ones newly recorded.
    */
   addDerived(relativePaths: string[]): string[] {
+    this.sync();
     const added: string[] = [];
     for (const raw of relativePaths) {
-      const rel = raw.split(path.sep).join('/').replace(/^\.?\//, '');
-      if (!rel || rel.startsWith('../') || this.derived.has(rel)) continue;
-      this.derived.add(rel);
+      const rel = raw.split(path.sep).join('/').replace(/^\.?\//, '').replace(/\/+$/, '');
+      if (!rel || rel.startsWith('../') || this.derived.has(rel) || added.includes(rel)) continue;
       added.push(rel);
     }
-    if (added.length) this.saveDerived();
+    if (added.length) this.saveDerived(added, []);
     return added;
   }
 
   /** Forget records made for a write that did not happen. */
   removeDerived(relativePaths: string[]): void {
-    let removed = false;
-    for (const rel of relativePaths) removed = this.derived.delete(rel) || removed;
-    if (removed) this.saveDerived();
+    this.sync();
+    const removed = relativePaths.filter((rel) => this.derived.has(rel));
+    if (removed.length) this.saveDerived([], removed);
   }
 
-  private saveDerived(): void {
+  /**
+   * Apply a change to the record: to what is on disk now, not to what this
+   * run read earlier — another run may have added to it since — under a
+   * lock, so two runs' changes cannot overwrite each other. Kept here as
+   * well when the record cannot be written, for this run at least; the
+   * write tool asking fails then, and the write with it.
+   */
+  private saveDerived(added: string[], removed: string[]): void {
     this.aliases.clear();
-    if (!this.derivedFile) return;
-    fs.mkdirSync(path.dirname(this.derivedFile), { recursive: true });
-    const tmp = `${this.derivedFile}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ version: 1, paths: [...this.derived].sort() }, null, 2));
-    fs.renameSync(tmp, this.derivedFile);
+    for (const rel of added) this.derived.add(rel);
+    for (const rel of removed) this.derived.delete(rel);
+    for (const rel of removed) this.unsaved.delete(rel);
+    const file = this.derivedFile;
+    if (!file) return;
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      withLock(`${file}.lock`, () => {
+        const next = new Set(readDerived(file));
+        for (const rel of [...this.unsaved, ...added]) next.add(rel);
+        for (const rel of removed) next.delete(rel);
+        const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify({ version: 1, paths: [...next].sort() }, null, 2));
+        fs.renameSync(tmp, file);
+        saves++;
+        this.unsaved.clear();
+        this.derived = next;
+        this.seen = stampOf(file);
+      });
+    } catch (err) {
+      for (const rel of added) this.unsaved.add(rel);
+      throw err;
+    }
+  }
+
+  /**
+   * Read the record again when another run has changed it. Looked at once
+   * per job, and again after a save in this process: a walk over the
+   * workspace costs one look, not one per file.
+   */
+  private sync(): void {
+    const file = this.derivedFile;
+    if (!file || (this.synced && this.savesSeen === saves)) return;
+    if (!this.synced) queueMicrotask(() => { this.synced = false; });
+    this.synced = true;
+    this.savesSeen = saves;
+    const now = stampOf(file);
+    if (now === this.seen) return;
+    this.seen = now;
+    this.derived = new Set([...readDerived(file), ...this.unsaved]);
+    this.aliases.clear();
   }
 
   /**
@@ -145,6 +212,35 @@ export class PrivacyPaths {
   }
 }
 
+/** The file's identity and last change, or '' when there is none. */
+function stampOf(file: string): string {
+  const st = fs.statSync(file, { throwIfNoEntry: false });
+  return st ? `${st.ino}:${st.mtimeMs}:${st.ctimeMs}:${st.size}` : '';
+}
+
+/**
+ * Run `fn` holding a lock file other processes respect. A lock left by a
+ * process that ended holding it is taken over once stale; waiting longer
+ * than `LOCK_WAIT_MS` throws.
+ */
+function withLock<T>(lock: string, fn: () => T): T {
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    try {
+      fs.writeFileSync(lock, String(process.pid), { flag: 'wx' });
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      const st = fs.statSync(lock, { throwIfNoEntry: false });
+      if (st && Date.now() - st.mtimeMs > STALE_LOCK_MS) { fs.rmSync(lock, { force: true }); continue; }
+      if (Date.now() > deadline) throw new Error(`Could not record a local-only file: ${lock} has been held for over ${LOCK_WAIT_MS / 1000}s.`);
+      Atomics.wait(pause, 0, 0, 10);
+    }
+  }
+  try { return fn(); } finally { fs.rmSync(lock, { force: true }); }
+}
+
 /** The recorded paths, or none when there is no record or it cannot be read. */
 function readDerived(file: string): string[] {
   try {
@@ -159,7 +255,7 @@ function readDerived(file: string): string[] {
  * A gitignore pattern (and git glob) naming exactly this path: anchored, with
  * each wildcard character, and a trailing space, in a class of its own.
  */
-function literalPattern(rel: string): string {
+export function literalPattern(rel: string): string {
   return `/${rel.replace(/[*?[\\]/g, (c) => `[${c}]`).replace(/ $/, '[ ]')}`;
 }
 

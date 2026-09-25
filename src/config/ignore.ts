@@ -39,6 +39,15 @@ export const BUILT_IN_PROTECTED: readonly string[] = [
   'id_ed25519',
 ];
 
+/**
+ * Files agents may read but not change, workspace-relative: what they say
+ * decides what is protected in the next run, and a line taken out of one
+ * would unprotect a path then. Not hidden: `.cascadeignore` is commonly
+ * committed, and a protected file in git's history hides the git store from
+ * commands (tools/jail/process-jail.ts).
+ */
+export const READ_ONLY_POLICY: readonly string[] = ['.cascadeignore'];
+
 export class CascadeIgnore {
   /** The built-ins, apart: a `!.env` line in `.cascadeignore` must not undo them. */
   private readonly builtIn: Ignore = ignore().add([...BUILT_IN_PROTECTED]);

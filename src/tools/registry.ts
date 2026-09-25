@@ -16,9 +16,9 @@ const ignore: (opts?: unknown) => Ignore =
   (ignoreFactory as unknown as (opts?: unknown) => Ignore);
 import type { ToolDefinition, ToolExecuteOptions, ToolsConfig } from '../types.js';
 import { DEFAULT_APPROVAL_REQUIRED, GLOBAL_CONFIG_DIR } from '../constants.js';
-import type { PrivacyPaths } from '../core/privacy/paths.js';
+import { literalPattern, type PrivacyPaths } from '../core/privacy/paths.js';
 import { ProcessJail } from './jail/process-jail.js';
-import { BUILT_IN_PROTECTED } from '../config/ignore.js';
+import { BUILT_IN_PROTECTED, READ_ONLY_POLICY } from '../config/ignore.js';
 import { realPathOf } from '../utils/real-path.js';
 import type { BaseTool } from './base.js';
 import { WorkspaceGate } from './workspace-gate.js';
@@ -97,6 +97,9 @@ const OFF_MACHINE_TOOLS = new Set([
 /** Built-in tools that write the file their `path` input names. */
 const WRITE_TOOLS = new Set(['file_write', 'file_edit', 'generate_document', 'pdf_create']);
 
+/** Built-in tools that change or remove the file their `path` input names. */
+const CHANGE_TOOLS = new Set([...WRITE_TOOLS, 'file_delete']);
+
 /** Built-in tools that run programs, in the process jail. */
 const COMMAND_TOOLS = new Set(['shell', 'run_code', 'git']);
 
@@ -144,10 +147,12 @@ export class ToolRegistry extends EventEmitter {
       isLocalOnly: (rel) => !!this.privacyPaths?.isLocalOnly(rel),
       hiddenPatterns: (offline) => [
         ...BUILT_IN_PROTECTED,
+        ...this.protectedFilePatterns(),
         ...(offline ? [] : this.privacyPaths?.localOnlyPatterns() ?? []),
       ],
       hiddenDirs: [path.join(os.homedir(), GLOBAL_CONFIG_DIR)],
       hiddenFiles: () => [...this.protectedFiles],
+      readOnlyFiles: () => READ_ONLY_POLICY.map((rel) => path.join(workspaceRoot, rel)),
       secretValues: () => this.secretValues(),
       taint: (rels) => this.markLocalOnly(rels),
       log: (msg) => { this.emit('log', msg); },
@@ -342,6 +347,9 @@ export class ToolRegistry extends EventEmitter {
         throw new Error(`Access denied: ${filePath} is protected (.cascadeignore)`);
       }
     }
+    if (CHANGE_TOOLS.has(toolName) && typeof input['path'] === 'string' && this.isPolicyFile(path.resolve(this.workspaceRoot, input['path']))) {
+      throw new Error(`Access denied: ${input['path']} decides what Cascade protects, and agents may read it but not change it.`);
+    }
 
     // What a local-only subtask writes may carry what it read, so it is
     // local-only too: a file tool's destination is marked before the write
@@ -392,24 +400,60 @@ export class ToolRegistry extends EventEmitter {
 
   /**
    * Mark the file a write tool is about to write local-only: under its name,
-   * and where it lands. Marked before the write, so nothing reads it between
-   * the two; the function returned takes the mark off again if the tool left
-   * the file as it was — a failed edit, a refused document.
+   * and where it lands — and the first directory the write would make, whose
+   * name can carry as much. Marked before the write, so nothing reads it
+   * between the two; the function returned takes a mark off again if the
+   * tool left its path as it was — a failed edit, a refused document.
    */
   private markWritten(filePath: string): () => void {
     const abs = path.resolve(this.workspaceRoot, filePath);
-    const rels = [path.relative(this.workspaceRoot, abs), path.relative(realPathOf(this.workspaceRoot), realPathOf(abs))];
-    const stamp = (): string => {
-      try {
-        const st = fs.statSync(abs);
-        return `${st.ino}:${st.size}:${st.mtimeMs}:${st.ctimeMs}`;
-      } catch { return 'absent'; }
-    };
-    const before = stamp();
-    const added = this.markLocalOnly(rels.filter((rel) => rel && !rel.startsWith('..') && !path.isAbsolute(rel)));
+    let made: string | undefined;
+    for (let dir = path.dirname(abs); dir !== path.dirname(dir) && !fs.existsSync(dir); dir = path.dirname(dir)) made = dir;
+    const realRoot = realPathOf(this.workspaceRoot);
+    const marks = [abs, made].filter((p): p is string => p !== undefined).map((p) => ({
+      stamp: stampOf(p),
+      rels: [path.relative(this.workspaceRoot, p), path.relative(realRoot, realPathOf(p))]
+        .filter((rel) => rel && !rel.startsWith('..') && !path.isAbsolute(rel)),
+      path: p,
+    }));
+    const added = this.markLocalOnly(marks.flatMap((m) => m.rels));
     return () => {
-      if (added.length && stamp() === before) this.privacyPaths?.removeDerived(added);
+      const unchanged = marks.filter((m) => stampOf(m.path) === m.stamp).flatMap((m) => m.rels.map(posix));
+      const undo = added.filter((rel) => unchanged.includes(rel));
+      if (undo.length) this.privacyPaths?.removeDerived(undo);
     };
+  }
+
+  /**
+   * Whether an absolute path is one of the files agents may read but not
+   * change (`READ_ONLY_POLICY`): by name, through a symlink, or as the same
+   * file under another name — a hard link, or other letter case.
+   */
+  private isPolicyFile(absPath: string): boolean {
+    const real = realPathOf(absPath);
+    const st = fs.statSync(absPath, { throwIfNoEntry: false });
+    return READ_ONLY_POLICY.some((rel) => {
+      const policy = path.join(this.workspaceRoot, rel);
+      if (path.resolve(absPath) === policy || real === realPathOf(policy)) return true;
+      const other = st && fs.statSync(policy, { throwIfNoEntry: false });
+      return !!other && other.dev === st.dev && other.ino === st.ino;
+    });
+  }
+
+  /**
+   * The files protected by place, as patterns for git — which can hold one
+   * in a commit — relative to the workspace, under its name and its real one.
+   */
+  private protectedFilePatterns(): string[] {
+    const roots = [this.workspaceRoot, realPathOf(this.workspaceRoot)];
+    const out = new Set<string>();
+    for (const file of this.protectedFiles) {
+      for (const root of roots) {
+        const rel = path.relative(root, file);
+        if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) out.add(literalPattern(posix(rel)));
+      }
+    }
+    return [...out];
   }
 
   private markLocalOnly(rels: string[]): string[] {
@@ -520,4 +564,15 @@ export class ToolRegistry extends EventEmitter {
     const posixRel = rel.split(path.sep).join('/');
     return this.builtInMatcher.ignores(posixRel) || this.ignoreMatcher.ignores(posixRel);
   }
+}
+
+/** A path's identity and last change, or 'absent' — to tell whether a tool changed it. */
+function stampOf(p: string): string {
+  const st = fs.statSync(p, { throwIfNoEntry: false });
+  return st ? `${st.ino}:${st.size}:${st.mtimeMs}:${st.ctimeMs}` : 'absent';
+}
+
+/** A relative path in the slash-separated form the privacy record keeps. */
+function posix(rel: string): string {
+  return rel.split(path.sep).join('/');
 }

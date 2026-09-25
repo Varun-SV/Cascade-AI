@@ -268,6 +268,24 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: what shell, run_code and git can re
     expect(out).not.toContain(SECRET);
   });
 
+  // A command could take a rule out of `.cascadeignore`, for the next run.
+  it('lets a command read .cascadeignore, but not change, remove or unmount it', async () => {
+    const file = path.join(ws, '.cascadeignore');
+    await fs.writeFile(file, 'private/\n');
+    try {
+      for (const caller of [exec, { ...exec, isOffline: () => true }]) {
+        const out = await registry().execute('shell', {
+          command: 'cat .cascadeignore; umount .cascadeignore 2>/dev/null; echo > .cascadeignore; rm -f .cascadeignore; mv .cascadeignore moved; true',
+        }, caller);
+        expect(out).toContain('private/');
+        expect(await fs.readFile(file, 'utf8')).toBe('private/\n');
+      }
+    } finally {
+      await fs.rm(file, { force: true });
+      await fs.rm(path.join(ws, 'moved'), { force: true });
+    }
+  });
+
   // Scrubbing the child's environment is not enough on its own: a key
   // exported in the shell Cascade was started from is in Cascade's
   // /proc/<pid>/environ — the environment a process started with — for
@@ -519,6 +537,51 @@ describe('what git push may send', () => {
   });
 });
 
+// A configured code-index database is protected where it is, not by any
+// pattern — and git's checks went by patterns only: a commit holding it
+// could be pushed, and diffed, and the git store stayed in commands' view.
+describe('a file protected where it is, in git', () => {
+  let repo: string;
+  let bare: string;
+  const INDEX = 'SECRET-INDEX-ROWS';
+  const exec = { tierId: 't3', sessionId: 's', requireApproval: false };
+  const g = (dir: string, ...args: string[]) => execFileSync('git', ['-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' }).trim();
+  const registry = () => {
+    const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {} } as never, repo);
+    reg.protectFiles(['', '-wal'].map((suffix) => path.join(repo, 'data', `idx.db${suffix}`)));
+    return reg;
+  };
+
+  beforeAll(async () => {
+    repo = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-placed-')));
+    bare = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-placed-remote-')));
+    g(bare, 'init', '-q', '--bare');
+    g(repo, 'init', '-q', '-b', 'main');
+    g(repo, 'remote', 'add', 'origin', bare);
+    await fs.writeFile(path.join(repo, 'notes.md'), 'public notes\n');
+    g(repo, 'add', '.'); g(repo, 'commit', '-qm', 'notes');
+    await fs.mkdir(path.join(repo, 'data'));
+    await fs.writeFile(path.join(repo, 'data', 'idx.db'), `${INDEX}\n`);
+    g(repo, 'add', '.'); g(repo, 'commit', '-qm', 'index');
+  });
+  afterAll(async () => {
+    await fs.rm(repo, { recursive: true, force: true });
+    await fs.rm(bare, { recursive: true, force: true });
+  });
+
+  it('refuses a push that would send it, and leaves it out of a diff', async () => {
+    await expect(registry().execute('git', { operation: 'push', args: ['origin', 'main'] }, exec)).rejects.toThrow(/refused/);
+    expect(() => g(bare, 'rev-parse', '--verify', '--quiet', 'refs/heads/main')).toThrow();
+    const diff = await registry().execute('git', { operation: 'diff', args: ['HEAD~1', 'HEAD'] }, exec);
+    expect(diff).not.toContain(INDEX);
+  });
+
+  it.skipIf(!bwrapWorks)('hides the git store from commands', async () => {
+    const out = await registry().execute('shell', { command: 'git show HEAD:data/idx.db 2>&1; true' }, exec);
+    expect(out).not.toContain(INDEX);
+  });
+});
+
 // Windows has no jail and no /bin/sh to unset variables in, so the git tool
 // ran git with Cascade's whole environment — provider keys included — for
 // its hooks and credential helpers to read.
@@ -607,6 +670,16 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: where a local-only caller\'s writes
     expect(seen).toContain('public notes');
     // …and in a later run, from the record.
     expect(new PrivacyPaths([], { workspaceRoot: dir }).isLocalOnly('summary.txt')).toBe(true);
+  });
+
+  // A directory's name can carry what it read as well as a file's.
+  it('marks a directory it made, whole, and not each one inside it', async () => {
+    await registry().execute('shell', { command: 'mkdir -p "made-$(head -c 5 secret/plan.md)/sub"' }, offline);
+    expect(privacy.isLocalOnly('made-LOCAL')).toBe(true);
+    expect(privacy.isLocalOnly('made-LOCAL/sub/later.txt')).toBe(true);
+    const recorded = new PrivacyPaths([], { workspaceRoot: dir }).localOnlyPatterns();
+    expect(recorded).toContain('/made-LOCAL');
+    expect(recorded).not.toContain('/made-LOCAL/sub');
   });
 
   it('gives the command a private /tmp, and nowhere else to write outside the workspace', async () => {

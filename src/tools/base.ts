@@ -2,8 +2,10 @@
 //  Cascade AI — Abstract Tool Base
 // ─────────────────────────────────────────────
 
+import path from 'node:path';
 import type { ReadDestination, ToolDefinition, ToolExecuteOptions } from '../types.js';
 import type { ProcessJail } from './jail/process-jail.js';
+import { PROBE } from '../utils/link-aliases.js';
 
 export abstract class BaseTool {
   abstract readonly name: string;
@@ -67,6 +69,18 @@ export abstract class BaseTool {
       }
       return answer;
     };
+  }
+
+  /**
+   * For a tool that lists what it finds (file_list, glob): whether this call
+   * may show a path's name. A name can carry what a local-only file holds —
+   * it is where a local-only subtask could have put it — so the read gate
+   * decides, for a search that did not name the file. A directory shows when
+   * it is not covered whole.
+   */
+  protected listGate(options: ToolExecuteOptions): (absPath: string, dir: boolean) => boolean {
+    const mayRead = this.readGate(options, 'scan');
+    return (absPath, dir) => mayRead(absPath) && (!dir || mayRead(path.join(absPath, PROBE)));
   }
 
   abstract execute(

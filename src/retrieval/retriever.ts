@@ -246,8 +246,20 @@ export class Retriever {
     opts.signal?.throwIfAborted();
     const candidates = opts.candidates ?? 30;
     const k = opts.k ?? 6;
-    const base = { namespace: opts.namespace, k: candidates, sourceIds: opts.sourceIds };
-    const lexical = this.store.lexicalSearch(query, base);
+    const base = { namespace: opts.namespace, sourceIds: opts.sourceIds };
+    const exclude = opts.exclude;
+    // Each stage's best `candidates` among the sources allowed. Left-out
+    // sources take places in what the store returns — every one of them, in
+    // an index built before a file became local-only — so the search widens
+    // until enough allowed ones remain or the store has no more.
+    const allowedTop = (search: (n: number) => ScoredChunk[]): ScoredChunk[] => {
+      for (let n = candidates; ; n *= 4) {
+        const found = search(n);
+        const kept = exclude ? found.filter((c) => !exclude(c.sourceId)) : found;
+        if (kept.length >= candidates || found.length < n) return kept.slice(0, candidates);
+      }
+    };
+    const lexical = allowedTop((n) => this.store.lexicalSearch(query, { ...base, k: n }));
     let dense: ScoredChunk[] = [];
     try {
       const [qvec] = await this.embedder.embed([query], { signal: opts.signal });
@@ -256,16 +268,14 @@ export class Retriever {
       // the writer's lock is released when `index()` returns, and the next
       // model may begin replacing rows while this search is still running.
       if (qvec && qvec.length) {
-        dense = this.store.denseSearch(qvec, { ...base, embedModel: this.embedder.model });
+        dense = allowedTop((n) => this.store.denseSearch(qvec, { ...base, k: n, embedModel: this.embedder.model }));
       }
     } catch {
       // Embedding the query failed (provider hiccup) — degrade to lexical-only.
       // An abort is not a hiccup: the caller asked to stop, so it propagates.
       opts.signal?.throwIfAborted();
     }
-    const exclude = opts.exclude;
-    const fused = reciprocalRankFusion([lexical, dense], opts.rrfK ?? 60)
-      .filter((c) => !exclude?.(c.sourceId));
+    const fused = reciprocalRankFusion([lexical, dense], opts.rrfK ?? 60);
 
     // Second stage: rerank the fused survivors when a reranker is configured.
     // The reranker itself falls back to input order on any failure, so this

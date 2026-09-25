@@ -57,7 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tools, so it protected nothing. The template `cascade init` writes lists
   `node_modules/`, `dist/` and `build/`, so in such a workspace agents can
   no longer read or change those through the file and search tools; delete
-  the lines to allow it.
+  the lines to allow it. Agents may read `.cascadeignore` itself but not
+  change or remove it — the file tools refuse, and commands see it
+  read-only — since a line taken out would unprotect a path in the next run.
 
 ### Fixed
 - **`pdf_create` wrote relative to the process, not the workspace.** In the
@@ -164,7 +166,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the dashboard secret, the session database, the audit trail and the
   project's world state (with their keys) and the code index, and no
   `.cascadeignore` line can undo that. An index built before is pruned of
-  such files, and nothing is shown to its reranker that could not be shown. Protection covers every tool that
+  such files, and nothing is shown to its reranker that could not be shown;
+  where left-out files hold a search's best matches, it looks further for
+  ones it may show. Protection covers every tool that
   takes a path — `grep`, `glob` and `file_list` among them, which used to
   see everything, and could search outside the workspace — and follows
   symlinks.
@@ -184,7 +188,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   any model, or refuses the read when there is none; so does grading an
   acceptance criterion against one. A `grep` across folders leaves
   local-only files out for a subtask that is not local-only, so that
-  whether they matched says nothing about them. Nothing a local-only subtask knows leaves the machine
+  whether they matched says nothing about them, and `file_list` and `glob`
+  leave out their names — and directories covered whole — since a name can
+  carry what a local-only subtask read. A file an assignment names, as an
+  artifact or in an acceptance criterion, is judged by what it is, so a
+  link to a local-only file counts; a protected one is not read to check
+  it. Nothing a local-only subtask knows leaves the machine
   through Cascade's tools: it cannot message its peers, ask for more
   workers or have a replacement tool written for it; web, browser, GitHub,
   media, `code_search` and MCP tools are refused to it; and a tool the
@@ -196,7 +205,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workspace once they end — and stays so in later runs, recorded in
   `.cascade/privacy-derived.json` even when a configured pattern covers it,
   so narrowing the pattern later does not release it; a write that leaves
-  the file as it was takes its record back off. Its commands write nowhere else (their
+  the file as it was takes its record back off. A directory it made is
+  recorded whole, with what lies in it. Runs sharing a workspace share the
+  record: each merges its changes in under a lock, and sees another's as
+  they are made. Its commands write nowhere else (their
   `/tmp` is private, the rest of the machine and the git store read-only)
   and run alone meanwhile. Nor does it write through a file with other
   names — hard links, whose names outside the workspace could be neither
@@ -233,7 +245,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The code index's database is protected wherever it is.** Only its
   default place was, so with `codeIndex.dbPath` set the file tools and
   commands could read the indexed text, deleted chunks included. The
-  configured file and its journals are now protected too, and a hard link
+  configured file and its journals are now protected too — in git as well:
+  its blob hides the git store from commands, and a push that would send
+  it is refused — and a hard link
   to any protected file is protected like the file — by the file tools,
   commands and the code index alike. So are the run checkpoints in
   `.cascade/resume/`, which hold earlier prompts and outputs, and a write

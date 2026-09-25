@@ -34,7 +34,7 @@
 //  `node_modules/` and `dist/`, which builds and tests have to read.
 
 import { execFile } from 'node:child_process';
-import { fileIdentity } from '../../utils/link-aliases.js';
+import { fileIdentity, PROBE } from '../../utils/link-aliases.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -62,12 +62,6 @@ const UNWALKED_DIRS = new Set(['.git', 'node_modules']);
  */
 const CASCADE_DIR_KEPT = ['tmp', 'screenshots'];
 
-/**
- * A name no pattern is likely to name: when a directory's hypothetical child
- * by this name would be hidden, every child would be — `secret/**` — and the
- * directory is hidden whole, files created in it later included.
- */
-const PROBE = '.cascade-jail-probe';
 
 export interface JailPolicy {
   mode: ProcessJailMode;
@@ -86,6 +80,8 @@ export interface JailPolicy {
   hiddenDirs: string[];
   /** Files to hide wherever they are: protected by place, not name (a configured database). */
   hiddenFiles?: () => string[];
+  /** Files commands may read but not change: what decides what is protected (`.cascadeignore`). */
+  readOnlyFiles?: () => string[];
   /** Values no command's environment may carry, under whatever name. */
   secretValues: () => string[];
   /**
@@ -188,12 +184,15 @@ export class ProcessJail {
     if (!opts.keepGit) {
       for (const dir of await this.gitDirsToHide(opts.offline)) hidden.push({ path: dir, dir: true });
     }
+    const frozen = (this.policy.readOnlyFiles?.() ?? []).flatMap((f) => {
+      try { return fs.lstatSync(f).isFile() ? [fs.realpathSync(f)] : []; } catch { return []; }
+    });
 
     if (!opts.offline) {
       if (kind === 'sandbox-exec') {
-        return { ok: true, launch: { file: 'sandbox-exec', args: ['-p', seatbeltProfile(hidden, false), file, ...args], env, cwd: opts.cwd, jail: kind } };
+        return { ok: true, launch: { file: 'sandbox-exec', args: ['-p', seatbeltProfile(hidden, false, undefined, frozen), file, ...args], env, cwd: opts.cwd, jail: kind } };
       }
-      return { ok: true, launch: { file: 'bwrap', args: bwrapArgs(hidden, false, opts.cwd, file, args), env, cwd: opts.cwd, jail: kind } };
+      return { ok: true, launch: { file: 'bwrap', args: bwrapArgs(hidden, false, opts.cwd, file, args, undefined, frozen), env, cwd: opts.cwd, jail: kind } };
     }
 
     // A local-only caller's command writes only into the workspace, where
@@ -206,7 +205,8 @@ export class ProcessJail {
     const inside = (p: string) => { const rel = path.relative(root, p); return !rel.startsWith('..') && !path.isAbsolute(rel); };
     const gitDirs = (await gitDirsOf(root)).filter(inside);
     const startedAt = Date.now();
-    const before = await stampFiles(root, gitDirs);
+    const dirsBefore = new Set<string>();
+    const before = await stampFiles(root, gitDirs, dirsBefore);
     // A file with other names shares what is written to it with all of
     // them, and one outside the workspace can be neither marked nor hidden:
     // such files are read-only to the command (installed packages, where
@@ -223,9 +223,14 @@ export class ProcessJail {
     let scratchTmp: string | undefined;
     const done = async (): Promise<void> => {
       if (scratchTmp) fs.rmSync(scratchTmp, { recursive: true, force: true });
-      const after = await stampFiles(root, gitDirs);
+      const dirsAfter = new Set<string>();
+      const after = await stampFiles(root, gitDirs, dirsAfter);
       const changed = changedFiles(before, after, startedAt);
-      if (changed.length) this.policy.taint?.(changed);
+      // A directory it made is marked whole — its name can carry as much as
+      // a file's — and covers what lies in it.
+      const made = madeDirs(dirsBefore, dirsAfter);
+      const marked = [...made, ...changed.filter((rel) => !made.some((dir) => rel.startsWith(`${dir}/`)))];
+      if (marked.length) this.policy.taint?.(marked);
       // On Linux the workspace is a mount of its own, so a link to a file
       // outside it cannot be made. sandbox-exec has no such boundary: say so
       // when the command made one, since that other name is out of reach.
@@ -241,7 +246,7 @@ export class ProcessJail {
       scratchTmp = fs.mkdtempSync(path.join(root, '.cascade', 'tmp', 'local-only-'));
       return {
         ok: true,
-        launch: { file: 'sandbox-exec', args: ['-p', seatbeltProfile(hidden, true, layout), file, ...args], env: { ...env, TMPDIR: scratchTmp }, cwd: opts.cwd, jail: kind, done },
+        launch: { file: 'sandbox-exec', args: ['-p', seatbeltProfile(hidden, true, layout, frozen), file, ...args], env: { ...env, TMPDIR: scratchTmp }, cwd: opts.cwd, jail: kind, done },
       };
     }
     // bubblewrap reads a seccomp filter from a file descriptor; the shell
@@ -250,7 +255,7 @@ export class ProcessJail {
     if (!filter) {
       return { ok: false, reason: `A local-only subtask (privacy.paths) cannot run commands on ${process.arch}: the filter that keeps them off host sockets is built for x64 and arm64 only.` };
     }
-    const jailArgs = bwrapArgs(hidden, true, opts.cwd, file, args, layout);
+    const jailArgs = bwrapArgs(hidden, true, opts.cwd, file, args, layout, frozen);
     return {
       ok: true,
       launch: { file: '/bin/sh', args: ['-c', 'exec bwrap --seccomp 9 "$@" 9<"$0"', filter, ...jailArgs], env, cwd: opts.cwd, jail: kind, done },
@@ -530,9 +535,11 @@ export function toPathspecs(patterns: string[]): string[] {
  * bubblewrap's arguments: the host as it is, the hidden paths mounted over,
  * the command's own processes. `--cap-drop ALL` matters when Cascade runs as
  * root, in a container say: bubblewrap then keeps every capability, and a
- * command could simply unmount what hides a file.
+ * command could simply unmount what hides a file. `readOnly` files are
+ * mounted over themselves read-only, which also keeps them from being
+ * removed, renamed or linked.
  */
-export function bwrapArgs(hidden: Hidden[], offline: boolean, cwd: string, file: string, args: string[], layout?: WriteLayout): string[] {
+export function bwrapArgs(hidden: Hidden[], offline: boolean, cwd: string, file: string, args: string[], layout?: WriteLayout, readOnly: string[] = []): string[] {
   const out = ['--die-with-parent', '--new-session', '--unshare-pid', '--cap-drop', 'ALL'];
   if (layout) {
     // The host read-only, the scratch folders private; then the workspace
@@ -549,6 +556,7 @@ export function bwrapArgs(hidden: Hidden[], offline: boolean, cwd: string, file:
   } else {
     out.push('--bind', '/', '/');
   }
+  for (const p of readOnly) out.push('--ro-bind', p, p);
   out.push('--dev', '/dev', '--proc', '/proc');
   if (offline) out.push('--unshare-net');
   for (const h of hidden) {
@@ -560,8 +568,11 @@ export function bwrapArgs(hidden: Hidden[], offline: boolean, cwd: string, file:
   return out;
 }
 
-/** A sandbox-exec profile: everything allowed but the hidden paths, and the network for a local-only caller. */
-export function seatbeltProfile(hidden: Hidden[], offline: boolean, layout?: WriteLayout): string {
+/**
+ * A sandbox-exec profile: everything allowed but the hidden paths, writes
+ * to the `readOnly` files, and the network for a local-only caller.
+ */
+export function seatbeltProfile(hidden: Hidden[], offline: boolean, layout?: WriteLayout, readOnly: string[] = []): string {
   const quote = (p: string) => `"${p.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
   const lines = ['(version 1)', '(allow default)'];
   if (layout) {
@@ -572,6 +583,7 @@ export function seatbeltProfile(hidden: Hidden[], offline: boolean, layout?: Wri
     lines.push(`(allow file-write* ${writable.join(' ')})`);
     if (layout.readOnly.length) lines.push(`(deny file-write* ${layout.readOnly.map((d) => `(subpath ${quote(d)})`).join(' ')})`);
   }
+  if (readOnly.length) lines.push(`(deny file-write* ${readOnly.map((f) => `(literal ${quote(f)})`).join(' ')})`);
   if (hidden.length) {
     const filters = hidden.map((h) => (h.dir ? `(subpath ${quote(h.path)})` : `(literal ${quote(h.path)})`));
     lines.push(`(deny file-read* file-write* ${filters.join(' ')})`);
@@ -715,9 +727,10 @@ interface Stamp { ctime: number; mtime: number; size: number; ino: number; nlink
 /**
  * Every file in the workspace, stamped — bar Cascade's folder (other than
  * the parts commands use) and the directories given, which the command
- * cannot write. Symlinks are stamped as themselves, never followed.
+ * cannot write. Symlinks are stamped as themselves, never followed. The
+ * directories walked go in `dirs`.
  */
-async function stampFiles(root: string, skip: string[]): Promise<Map<string, Stamp>> {
+async function stampFiles(root: string, skip: string[], dirs?: Set<string>): Promise<Map<string, Stamp>> {
   const out = new Map<string, Stamp>();
   const skipped = new Set(skip);
   const walk = async (dir: string, relDir: string): Promise<void> => {
@@ -732,6 +745,7 @@ async function stampFiles(root: string, skip: string[]): Promise<Map<string, Sta
           for (const kept of CASCADE_DIR_KEPT) await walk(path.join(abs, kept), `${rel}/${kept}`);
           continue;
         }
+        dirs?.add(rel);
         await walk(abs, rel);
         continue;
       }
@@ -759,6 +773,12 @@ function changedFiles(before: Map<string, Stamp>, after: Map<string, Stamp>, sta
     if (differs || (now.ctime % 1000 === 0 && now.ctime >= second)) out.push(rel);
   }
   return out;
+}
+
+/** The directories that are new, outermost only: each covers those it holds. */
+function madeDirs(before: Set<string>, after: Set<string>): string[] {
+  const made = (dir: string) => after.has(dir) && !before.has(dir);
+  return [...after].filter((dir) => made(dir) && !made(dir.slice(0, Math.max(0, dir.lastIndexOf('/')))));
 }
 
 /** The repository's git directories — its own and, for a linked worktree, the common one. */

@@ -168,7 +168,7 @@ export async function evaluateAcceptance(
     }
 
     if (probe.allowed && !probe.allowed(file)) {
-      results.push({ criterion, verdict: 'undecidable', detail: `${file} is local-only — deferred to output review` });
+      results.push({ criterion, verdict: 'undecidable', detail: `${file} may not be read here (protected, or local-only) — deferred to output review` });
       continue;
     }
 

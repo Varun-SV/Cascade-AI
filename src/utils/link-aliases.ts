@@ -14,8 +14,12 @@ import path from 'node:path';
 /** Directories not searched for covered files: git's own store, and installed packages. */
 const UNSEARCHED = new Set(['.git', 'node_modules']);
 
-/** A child name no pattern names, to tell a directory covered whole (see process-jail.ts). */
-const PROBE = '.cascade-jail-probe';
+/**
+ * A name no pattern is likely to name: when a directory's hypothetical child
+ * by this name is covered, every child is — `secret/**` — and the directory
+ * is covered whole, files made in it later included.
+ */
+export const PROBE = '.cascade-jail-probe';
 
 /** A file's identity: the same for all its names. */
 export function fileIdentity(st: fs.Stats): string {

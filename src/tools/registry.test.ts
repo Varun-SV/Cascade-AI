@@ -458,6 +458,56 @@ describe('ToolRegistry — a local-only write that does not happen', () => {
   });
 });
 
+// A directory's name can carry what a local-only subtask read as well as a
+// file's, and a cloud worker's listing showed it.
+describe('ToolRegistry — a directory a local-only write makes', () => {
+  it('is local-only whole, left out of a cloud worker\'s listing, and unmarked when nothing was made', async () => {
+    const { PrivacyPaths } = await import('../core/privacy/paths.js');
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-made-dir-')));
+    await fs.writeFile(path.join(ws, 'readme.md'), 'public\n');
+    const privacy = new PrivacyPaths([], { workspaceRoot: ws });
+    const reg = new ToolRegistry(toolsConfig, ws);
+    reg.setPrivacyPaths(privacy);
+    const offline = { ...opts, isOffline: () => true };
+    await reg.execute('file_write', { path: 'LEAK-NAME/deep/x.txt', content: 'x' }, offline);
+    expect(privacy.isLocalOnly('LEAK-NAME')).toBe(true);
+    expect(privacy.isLocalOnly('LEAK-NAME/later.txt')).toBe(true);
+    // A cloud worker's read gate, as T3Worker.mayRead answers a search.
+    const cloud = { ...opts, mayRead: (abs: string, to: unknown) => !(to === 'scan' && privacy.coversFile(abs, ws)) };
+    const listed = await reg.execute('file_list', { path: '.' }, cloud);
+    expect(listed).toContain('readme.md');
+    expect(listed).not.toContain('LEAK-NAME');
+    expect(await reg.execute('glob', { pattern: '**/*' }, cloud)).not.toContain('LEAK-NAME');
+    // An edit that found nothing made nothing: no mark on the file or the directory.
+    await expect(reg.execute('file_edit', { path: 'NEW-DIR/x.txt', old_string: 'a', new_string: 'b' }, offline)).rejects.toThrow();
+    expect(privacy.isLocalOnly('NEW-DIR')).toBe(false);
+    expect(privacy.isLocalOnly('NEW-DIR/x.txt')).toBe(false);
+    await fs.rm(ws, { recursive: true, force: true });
+  });
+});
+
+// An approved write could take a rule out of `.cascadeignore`, and the next
+// run — which reads it at start — would no longer protect that path.
+describe('ToolRegistry — the files that decide what is protected', () => {
+  it('lets agents read .cascadeignore, under any name, but not change or remove it', async () => {
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-policy-')));
+    await fs.writeFile(path.join(ws, '.cascadeignore'), 'private/\n');
+    await fs.symlink(path.join(ws, '.cascadeignore'), path.join(ws, 'rules.txt'));
+    await fs.link(path.join(ws, '.cascadeignore'), path.join(ws, 'rules-copy.txt'));
+    const reg = new ToolRegistry(toolsConfig, ws);
+    expect(await reg.execute('file_read', { path: '.cascadeignore' }, opts)).toContain('private/');
+    for (const name of ['.cascadeignore', './.cascadeignore', 'rules.txt', 'rules-copy.txt']) {
+      await expect(reg.execute('file_write', { path: name, content: '' }, opts), name).rejects.toThrow(/may read it but not change it/);
+      await expect(reg.execute('file_edit', { path: name, old_string: 'private/', new_string: '' }, opts), name).rejects.toThrow(/may read it but not change it/);
+      await expect(reg.execute('file_delete', { path: name }, opts), name).rejects.toThrow(/may read it but not change it/);
+    }
+    expect(await fs.readFile(path.join(ws, '.cascadeignore'), 'utf8')).toBe('private/\n');
+    // Somewhere it would be new is not where Cascade reads it from.
+    await reg.execute('file_write', { path: 'sub/.cascadeignore', content: 'x' }, opts);
+    await fs.rm(ws, { recursive: true, force: true });
+  });
+});
+
 describe('ToolRegistry — where a write lands', () => {
   // realpath fails on a symlink whose target is missing, and its name stood
   // in for where the write would go: outside the workspace.

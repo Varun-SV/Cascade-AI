@@ -251,11 +251,10 @@ export class Cascade extends EventEmitter {
     // Per-path privacy tiers: subtasks touching local-only paths are forced
     // onto private models and their raw output is withheld from upper tiers.
     // What such subtasks wrote stays local-only, recorded in the workspace —
-    // so the record applies even once the policies that caused it are gone.
+    // so the record applies even once the policies that caused it are gone,
+    // and to a run that started before another run made it.
     const privacyPolicies = this.config.privacy?.paths ?? [];
-    if (privacyPolicies.length || PrivacyPaths.hasDerived(this.workspacePath)) {
-      this.router.setPrivacyPaths(new PrivacyPaths(privacyPolicies, { workspaceRoot: this.workspacePath }));
-    }
+    this.router.setPrivacyPaths(new PrivacyPaths(privacyPolicies, { workspaceRoot: this.workspacePath }));
 
     // The process jail (tools/jail/process-jail.ts) hides local-only paths
     // from commands, and keeps every configured secret out of their

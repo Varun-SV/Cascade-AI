@@ -860,10 +860,16 @@ describe('privacy.paths, enforced when a file is read', () => {
     return root;
   }
 
-  async function run(opts: { privateModel: boolean; call: ToolCall; assignment?: Partial<T2ToT3Assignment> }) {
+  async function run(opts: {
+    privateModel: boolean;
+    call: ToolCall;
+    assignment?: Partial<T2ToT3Assignment>;
+    setup?: (root: string) => Promise<void>;
+  }) {
     const { ToolRegistry } = await import('../../tools/registry.js');
     const { PrivacyPaths } = await import('../privacy/paths.js');
     const root = await workspace();
+    await opts.setup?.(root);
     const registry = new ToolRegistry(
       { shellAllowlist: [], shellBlocklist: [], webSearch: {}, browserEnabled: false, requireApprovalFor: [] } as never,
       root,
@@ -960,6 +966,57 @@ describe('privacy.paths, enforced when a file is read', () => {
     });
     expect(calls[0]?.forceLocal).toBe(true);
     expect(result.localOnly).toBe(true);
+  });
+
+  // file_list and glob checked only the protected paths, so a local-only
+  // file's name — which a local-only subtask could have chosen to carry
+  // what it read — was listed to any worker.
+  it('leaves local-only files out of file_list and glob, directories covered whole included', async () => {
+    for (const call of [
+      { id: 'tc-1', name: 'file_list', input: { path: '.' } },
+      { id: 'tc-1', name: 'file_list', input: { path: 'secret' } },
+      { id: 'tc-1', name: 'glob', input: { pattern: '**/*.md' } },
+    ]) {
+      const { calls, result } = await run({ privateModel: true, call });
+      const answer = calls[1]?.text ?? '';
+      expect(answer, call.name).not.toMatch(/\[DIR\] secret|plan\.md/);
+      expect(result.localOnly, 'a listing does not move the subtask').toBeFalsy();
+      if (call.input.path !== 'secret') expect(answer, call.name).toContain('notes.md');
+    }
+  });
+
+  // The decision at the start went by the names the assignment gave, and
+  // verification then ran `node --check` on what the name led to — its
+  // diagnostics, quoting the source, went into the next prompt.
+  it('judges an artifact by what it is: a link to a local-only file makes the subtask local-only', async () => {
+    const { link } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const { calls, result } = await run({
+      privateModel: true,
+      call: { id: 'tc-1', name: 'file_read', input: { path: 'notes.md' } },
+      assignment: { files: ['out.js'] },
+      setup: (root) => link(join(root, 'secret', 'plan.md'), join(root, 'out.js')),
+    });
+    expect(calls[0]?.forceLocal).toBe(true);
+    expect(result.localOnly).toBe(true);
+  });
+
+  it('does not check an artifact that is a protected file under another name', async () => {
+    const { symlink, writeFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const { calls, result } = await run({
+      privateModel: true,
+      call: { id: 'tc-1', name: 'file_read', input: { path: 'notes.md' } },
+      assignment: { files: ['out.js'], acceptance: ['.env contains "sk-leak"'] },
+      setup: async (root) => {
+        await writeFile(join(root, '.env'), 'API_KEY sk-leak-0123456789 !!\n');
+        await symlink(join(root, '.env'), join(root, 'out.js'));
+      },
+    });
+    const seen = calls.map((c) => c.text).join('\n');
+    expect(seen).not.toContain('sk-leak-0123456789');
+    // …nor graded by reading it: whether `.env` holds a string is its contents.
+    expect(result.testResults.checksRun).not.toContain('.env contains "sk-leak"');
   });
 
   it('asks about a file the grep names before searching it, match or not', async () => {
