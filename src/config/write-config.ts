@@ -43,12 +43,12 @@ export function writeProjectConfig(
   globalDirPath: string = globalDir(),
 ): { ok: true } | { ok: false; error: string } {
   const providers = config.providers ?? [];
-  const written = writeConfigFile(statePath(workspacePath, STATE.config), { ...config, providers: withoutCredentials(providers) });
-  if (!written.ok) return written;
+  // The keys first: with the config written and the keys not, a key just
+  // entered would be gone on the next load.
   try {
     saveProjectCredentials(globalDirPath, path.basename(projectStateDir(workspacePath)), providers);
   } catch (err) {
     return { ok: false, error: `the provider keys could not be saved: ${err instanceof Error ? err.message : String(err)}` };
   }
-  return { ok: true };
+  return writeConfigFile(statePath(workspacePath, STATE.config), { ...config, providers: withoutCredentials(providers) });
 }

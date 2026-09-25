@@ -313,7 +313,7 @@ Anything else returns `404 model_not_found` rather than quietly running somethin
 ## Configuration
 
 Cascade keeps what it knows about a project outside the project, in a folder of its own:
-`~/.cascade-ai/projects/<folder name>-<hash>/` — its settings (`config.json`), sessions, audit trail, world state, code index and run checkpoints. Your provider keys are kept once for the machine, in `~/.cascade-ai/credentials.json`, and every project uses them; no project's config holds a key. The project itself holds only what is meant to be shared: `CASCADE.md` and `.cascadeignore`. A project that still has a `.cascade/` folder from an earlier version has it moved there the first time Cascade opens it, keys included — a project whose key differed from the machine-wide one keeps using its own. `cascade doctor` prints where a project's config is.
+`~/.cascade-ai/projects/<folder name>-<hash>/` — its settings (`config.json`), sessions, audit trail, world state, code index and run checkpoints. Your provider keys are kept once for the machine, in `~/.cascade-ai/credentials.json`, and every project uses them; no project's config holds a key. The project itself holds only what is meant to be shared: `CASCADE.md` and `.cascadeignore`. These folders are readable by you alone. A project that still has a `.cascade/` folder from an earlier version has it moved there the first time Cascade opens it, keys included (a `.cascade` that is a symlink is left alone) — a project whose key differed from the machine-wide one keeps using its own. `cascade doctor` prints where a project's config is.
 
 > **Prefer the picker over hand-editing config.** Inside the REPL, run `/model`
 > to walk through a three-step interactive picker (provider → tier → model,

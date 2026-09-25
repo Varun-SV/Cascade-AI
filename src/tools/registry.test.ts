@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { ToolRegistry } from './registry.js';
+import { projectStateDir } from '../config/project-state.js';
 import { BaseTool } from './base.js';
 import type { ToolExecuteOptions } from '../types.js';
 
@@ -229,6 +230,8 @@ describe('ToolRegistry — protected paths hold for every tool that takes one', 
   beforeEach(async () => {
     workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-protect-'));
     outside = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-outside-'));
+    // A `.cascade/` left in the project, after the state folder is made.
+    projectStateDir(workspace);
     await fs.mkdir(path.join(workspace, '.cascade'));
     await fs.writeFile(path.join(workspace, '.cascade', 'config.json'), '{"apiKey":"SECRET-config"}', 'utf-8');
     await fs.writeFile(path.join(workspace, '.cascade', 'dashboard-secret'), 'SECRET-dash', 'utf-8');

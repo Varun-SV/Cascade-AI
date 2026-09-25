@@ -809,12 +809,22 @@ function changedFiles(before: Map<string, Stamp>, after: Map<string, Stamp>, sta
 }
 
 /**
- * Move a file or folder, replacing what is at `to` — across filesystems by
- * copying. False when it could not be moved: it stays where it is, and is
- * marked there instead.
+ * Move a file or folder to `to`. A folder already there is merged into —
+ * what an earlier command left in it stays, as it does when a file tool
+ * writes beside it — and anything else there is replaced, across filesystems
+ * by copying. False when something could not be moved: it stays where it is,
+ * and is marked there instead.
  */
 function moveInto(from: string, to: string): boolean {
   try {
+    if (fs.lstatSync(from).isDirectory() && isRealDir(to)) {
+      let all = true;
+      for (const name of fs.readdirSync(from)) {
+        if (!moveInto(path.join(from, name), path.join(to, name))) all = false;
+      }
+      if (all) fs.rmdirSync(from);
+      return all;
+    }
     fs.mkdirSync(path.dirname(to), { recursive: true });
     fs.rmSync(to, { recursive: true, force: true });
     try {
@@ -828,6 +838,11 @@ function moveInto(from: string, to: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** A directory itself — not a symlink to one, which is replaced rather than written through. */
+function isRealDir(p: string): boolean {
+  try { return fs.lstatSync(p).isDirectory(); } catch { return false; }
 }
 
 /** The directories that are new, outermost only: each covers those it holds. */

@@ -1704,7 +1704,11 @@ export class CascadeRouter extends EventEmitter {
    */
   getPrivateModel(opts: { current?: ModelInfo | null; tools?: boolean } = {}): ModelInfo | undefined {
     const usable = this.selector.getUsableModels().filter((m) => this.isPrivateModel(m));
-    if (opts.current && usable.some((m) => m.id === opts.current!.id)) return opts.current;
+    // The same model, not just the same ID: a cloud model and a private one
+    // can share an ID, and the cloud one would bring the wrong tool protocol.
+    const current = opts.current;
+    const same = current ? usable.find((m) => m.id === current.id && m.provider === current.provider) : undefined;
+    if (same) return same;
     return (opts.tools ? usable.find((m) => m.supportsToolUse !== false) : undefined) ?? usable[0];
   }
 

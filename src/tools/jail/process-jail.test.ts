@@ -11,7 +11,7 @@ import { ToolRegistry } from '../registry.js';
 import { PrivacyPaths } from '../../core/privacy/paths.js';
 import { execFileSync } from 'node:child_process';
 import { BUILT_IN_PROTECTED } from '../../config/ignore.js';
-import { statePath } from '../../config/project-state.js';
+import { projectStateDir, statePath } from '../../config/project-state.js';
 import {
   ProcessJail, bwrapArgs, collectHidden, detectJail, scrubEnv, seatbeltProfile, toPathspecs, unixSocketFilter,
   type JailKind, type JailPolicy,
@@ -23,6 +23,9 @@ const LOCAL = 'LOCAL-ONLY-LAUNCH-PLAN';
 let ws: string;
 beforeAll(async () => {
   ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-')));
+  // A `.cascade/` left in the project — one an older Cascade wrote, or whose
+  // entries the state folder already had — after the state folder is made.
+  projectStateDir(ws);
   await fs.mkdir(path.join(ws, '.cascade', 'tmp'), { recursive: true });
   await fs.writeFile(path.join(ws, '.cascade', 'config.json'), `{ "apiKey": "${SECRET}" }`);
   await fs.writeFile(path.join(ws, '.cascade', 'audit_log.db-wal'), 'journal');
@@ -718,6 +721,19 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: where a local-only caller\'s writes
     expect(new PrivacyPaths([], { workspaceRoot: dir }).isLocalOnly('draft.md')).toBe(true);
     // A command of its own finds the folder by name.
     expect(await reg.execute('shell', { command: 'cat "$CASCADE_PRIVATE_DIR/summary.txt"' }, offline)).toContain(LOCAL);
+  });
+
+  // A later command that makes the same folder again finds none in the
+  // workspace — the first was moved — and its folder joins the moved one.
+  it('merges a folder a later command makes again into the one already moved', async () => {
+    const reg = registry();
+    await reg.execute('shell', { command: 'mkdir -p results/deep && echo a > results/a.txt && echo d > results/deep/d.txt' }, offline);
+    const out = await reg.execute('shell', { command: 'mkdir -p results/deep && echo b > results/b.txt && echo e > results/deep/e.txt' }, offline);
+    expect(out).toContain('@private/results');
+    await expect(fs.stat(path.join(dir, 'results'))).rejects.toThrow();
+    for (const kept of ['a.txt', 'b.txt', 'deep/d.txt', 'deep/e.txt']) {
+      expect(fsSync.existsSync(statePath(dir, 'private', 'results', kept)), kept).toBe(true);
+    }
   });
 
   it('gives the command a private /tmp, and nowhere else to write outside the workspace', async () => {

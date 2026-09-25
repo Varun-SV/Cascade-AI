@@ -50,9 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.cascade/`, where every tool and command in the project had to be kept
   from them and where they could be committed by accident. They now live in
   `~/.cascade-ai/projects/<folder name>-<hash>/`, and the project holds only
-  `CASCADE.md` and `.cascadeignore`. An existing `.cascade/` is moved there
-  the first time Cascade opens the project, and removed; if it was tracked
-  in git, that shows as its deletion. `cascade doctor` prints where a
+  `CASCADE.md` and `.cascadeignore`. The folder, and those above it, are
+  readable by you alone. An existing `.cascade/` is moved there the first
+  time anything in Cascade opens the project, and removed; if it was tracked
+  in git, that shows as its deletion. A `.cascade` that is a symlink is left
+  where it is, and what it points at untouched. `cascade doctor` prints where a
   project's config is. A hosted server names a state folder of its own
   (`useProjectStateDir`), and never writes the machine-global one.
 - **Provider keys are kept once, for the machine.** They lived in both

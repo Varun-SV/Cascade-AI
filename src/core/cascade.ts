@@ -69,7 +69,7 @@ import { WorldStateDB } from './knowledge/world-state.js';
 import { ResumeStore, summarizeCompleted, type CompletedNode, type ResumeReason } from './orchestration/resume-store.js';
 import { PrivacyPaths } from './privacy/paths.js';
 import { CascadeIgnore } from '../config/ignore.js';
-import { migrateProjectState, statePath, STATE } from '../config/project-state.js';
+import { statePath, STATE } from '../config/project-state.js';
 import { WorkspaceIndex } from '../retrieval/workspace-index.js';
 import { embedderFromProviders } from '../retrieval/embedder.js';
 import { LLMReranker, chatCompleterFromProviders } from '../retrieval/rerank.js';
@@ -183,10 +183,6 @@ export class Cascade extends EventEmitter {
     // Validate config eagerly so users get a clear error at startup, not at run time
     this.config = validateConfig(config) as CascadeConfig;
     this.workspacePath = workspacePath;
-    // A project's state moves out of its own `.cascade/` once, whoever opens
-    // it first — an embedder need not load a ConfigManager (which also moves
-    // the keys out of its config).
-    migrateProjectState(workspacePath);
     this.store = store;
     this.router = new CascadeRouter();
     this.mcpClient = new McpClient({

@@ -67,6 +67,16 @@ describe('the private model a local-only call gets', () => {
     expect(router.getPrivateModel({ current: localModel('llama-b', false), tools: true })?.id).toBe('llama-b');
   });
 
+  it('does not take a cloud model for the private one that shares its ID', async () => {
+    const { router } = await makeRouter();
+    const cloudTwin = { ...localModel('llama-b', true), provider: 'openai', isLocal: false } as ModelInfo;
+    const chosen = router.getPrivateModel({ current: cloudTwin, tools: true });
+    expect(chosen?.provider).toBe('ollama');
+    // The private model's own tool protocol, not the cloud twin's.
+    expect(chosen?.id).toBe('llama-a');
+    expect(chosen?.supportsToolUse).toBe(true);
+  });
+
   it('does not count a private model the selector has ruled out', async () => {
     const { router, veto } = await makeRouter();
     veto.add('llama-a');
