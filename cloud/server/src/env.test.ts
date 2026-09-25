@@ -45,7 +45,7 @@ describe('loadEnv — DATA_DIR / Railway volume resolution', () => {
 
 describe('loadEnv — deployment mode', () => {
   it('defaults to self-hosted policy when the operator does not opt into SaaS mode', () => {
-    expect(loadEnv({ ...BASE }).CASCADE_DEPLOYMENT_MODE).toBeUndefined();
+    expect(loadEnv({ ...BASE }).CASCADE_DEPLOYMENT_MODE).toBe('self-hosted');
   });
 
   it('accepts hosted mode explicitly for the managed Cascade service', () => {
