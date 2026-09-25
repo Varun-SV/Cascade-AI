@@ -25,6 +25,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { GLOBAL_CONFIG_DIR } from '../constants.js';
+import { renameProjectCredentials } from './global-credentials.js';
 
 /** The folder a project kept its state in before; moved out on first use (`projectStateDir`). */
 export const LEGACY_STATE_DIR = '.cascade';
@@ -49,7 +50,15 @@ function realRoot(workspacePath: string): string {
  * for a host that must not write there. Applies to this process.
  */
 export function useProjectStateDir(workspacePath: string, dir: string): void {
-  named.set(realRoot(workspacePath), path.resolve(dir));
+  // Never inside the workspace: its tools read the workspace by any path,
+  // and the state folder holds what only a local-only subtask may see.
+  const root = realRoot(workspacePath);
+  const at = realRoot(dir);
+  const rel = path.relative(root, at);
+  if (!rel || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
+    throw new Error(`A project's state folder must be outside it: ${dir} is inside ${workspacePath}.`);
+  }
+  named.set(root, path.resolve(dir));
 }
 
 /**
@@ -70,11 +79,97 @@ export function projectStateDir(workspacePath: string): string {
   if (!prepared.has(dir)) {
     prepared.add(dir);
     try {
+      if (!chosen && !fs.existsSync(dir)) followMove(root, dir);
       makePrivate(chosen ? [dir] : [globalDir(), path.join(globalDir(), 'projects'), dir]);
       movedIn.set(dir, moveLegacyState(workspacePath, dir));
+      if (!chosen) recordIdentity(root, dir);
     } catch { /* left to whatever opens it to report */ }
   }
   return dir;
+}
+
+/** What each state folder was made for: its project's path, and what that folder is on disk. */
+const IDENTITY_FILE = 'project.json';
+
+interface ProjectIdentity { path: string; dev: string; ino: string; born: string }
+
+/** The folder's identity on disk: device and inode, which a rename or `mv` on one disk keeps, and when it was made. */
+function identityOf(root: string): Omit<ProjectIdentity, 'path'> | undefined {
+  try {
+    const st = fs.statSync(root, { bigint: true });
+    return { dev: String(st.dev), ino: String(st.ino), born: String(st.birthtimeNs) };
+  } catch {
+    return undefined;
+  }
+}
+
+function readIdentity(dir: string): ProjectIdentity | undefined {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(dir, IDENTITY_FILE), 'utf-8')) as Partial<ProjectIdentity>;
+    return typeof parsed.path === 'string' && typeof parsed.dev === 'string' && typeof parsed.ino === 'string'
+      ? { path: parsed.path, dev: parsed.dev, ino: parsed.ino, born: String(parsed.born ?? '0') }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function sameFolder(a: Omit<ProjectIdentity, 'path'>, b: Omit<ProjectIdentity, 'path'>): boolean {
+  // An inode is reused once its folder is gone: when it was made tells a new
+  // folder from the old one, where the filesystem keeps that.
+  return a.dev === b.dev && a.ino === b.ino && (a.born === '0' || b.born === '0' || a.born === b.born);
+}
+
+function recordIdentity(root: string, dir: string): void {
+  const now = identityOf(root);
+  if (!now) return;
+  const was = readIdentity(dir);
+  if (was && was.path === root && sameFolder(was, now)) return;
+  fs.writeFileSync(path.join(dir, IDENTITY_FILE), JSON.stringify({ path: root, ...now }, null, 2), { mode: 0o600 });
+}
+
+/**
+ * A project renamed or moved on its disk is still the same folder, and its
+ * state follows it: the state folder made for a path that no longer holds
+ * that folder, and whose folder this is, is renamed for the new path — its
+ * own keys with it. A copy, or a move to another disk, is a new folder and
+ * starts afresh; when state for a project of the same name is left without
+ * its project, a notice says where.
+ */
+function followMove(root: string, dir: string): void {
+  const now = identityOf(root);
+  if (!now) return;
+  const projects = path.dirname(dir);
+  let names: string[];
+  try { names = fs.readdirSync(projects); } catch { return; }
+  const orphans: string[] = [];
+  for (const name of names) {
+    const other = path.join(projects, name);
+    const was = readIdentity(other);
+    if (!was || was.path === root) continue;
+    const there = identityOf(was.path);
+    if (there && sameFolder(there, was)) continue; // still where it was
+    if (sameFolder(was, now)) {
+      fs.renameSync(other, dir);
+      try { renameProjectCredentials(globalDir(), name, path.basename(dir)); } catch { /* the keys stay under the old name */ }
+      notices.set(dir, [...(notices.get(dir) ?? []), `Cascade found this project's state from ${was.path}, where it was before it moved, and uses it here.`]);
+      return;
+    }
+    if (path.basename(was.path) === path.basename(root)) orphans.push(`${was.path} (${other})`);
+  }
+  if (orphans.length) {
+    notices.set(dir, [...(notices.get(dir) ?? []), `Cascade keeps no state for this folder yet. State for a project of the same name at ${orphans.join(', ')} — which is gone — was not taken as this one's: this is not the folder that was there (a copy, or on another disk). Move that folder's contents to ${dir} to keep using it.`]);
+  }
+}
+
+const notices = new Map<string, string[]>();
+
+/** What Cascade found when it first opened this workspace's state folder, to tell the user once. */
+export function stateNotices(workspacePath: string): string[] {
+  const dir = projectStateDir(workspacePath);
+  const found = notices.get(dir) ?? [];
+  notices.delete(dir);
+  return found;
 }
 
 /**
@@ -188,7 +283,18 @@ function moveEntry(from: string, to: string): void {
     fs.renameSync(from, to);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err;
-    fs.cpSync(from, to, { recursive: true, preserveTimestamps: true, verbatimSymlinks: true });
+    // Across filesystems: copied under a name of its own and renamed into
+    // place whole, so a copy cut short — the process ended, the disk filled —
+    // leaves no half-copied entry for the next attempt to take as moved.
+    const partial = `${to}.partial-${process.pid}`;
+    fs.rmSync(partial, { recursive: true, force: true });
+    try {
+      fs.cpSync(from, partial, { recursive: true, preserveTimestamps: true, verbatimSymlinks: true });
+      fs.renameSync(partial, to);
+    } catch (copyErr) {
+      fs.rmSync(partial, { recursive: true, force: true });
+      throw copyErr;
+    }
     fs.rmSync(from, { recursive: true, force: true });
   }
 }

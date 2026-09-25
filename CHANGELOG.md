@@ -54,9 +54,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   readable by you alone. An existing `.cascade/` is moved there the first
   time anything in Cascade opens the project, and removed; if it was tracked
   in git, that shows as its deletion. A `.cascade` that is a symlink is left
-  where it is, and what it points at untouched. `cascade doctor` prints where a
+  where it is, and what it points at untouched. A project renamed or moved
+  on its disk takes its state with it, found by the folder's identity on
+  disk; a copy, or a move to another disk, starts afresh, with a notice of
+  where the old state is. `cascade doctor` prints where a
   project's config is. A hosted server names a state folder of its own
-  (`useProjectStateDir`), and never writes the machine-global one.
+  (`useProjectStateDir`), outside the workspace — which a folder inside it
+  is refused — and never writes the machine-global one.
 - **Provider keys are kept once, for the machine.** They lived in both
   `~/.cascade-ai/credentials.json` and each project's config; a project's
   config now holds its providers without their keys, and every project uses
@@ -266,11 +270,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command could `cat .cascade/config.json`, read a local-only file, or read
   Cascade's own environment from `/proc` — and approval can come from a
   tier above rather than a person. On Linux they now run in bubblewrap:
-  Cascade's own files, the built-in secrets, `~/.cascade-ai` and local-only
-  paths (for a worker that is not local-only) are mounted over — and the
-  git store too, while its history holds any of them, since a blob is as
-  readable as the file; the `git` tool keeps working, leaves them out of its
-  diffs and refuses a push that would send a commit holding one, and runs
+  Cascade's own files, the built-in secrets, `~/.cascade-ai`, the usual
+  credential locations in the home folder (`~/.ssh`, `~/.aws`,
+  `~/.config/gcloud`, `~/.kube`, `~/.netrc`, `~/.npmrc` and the like, which
+  the `git` tool alone keeps, to push and pull with) and local-only paths
+  (for a worker that is not local-only) are mounted over — and the git
+  store too, while its history holds any of them, since a blob is as
+  readable as the file, or while git keeps anything no branch reaches — a
+  deleted branch, an amended commit, a file staged and unstaged — whose
+  contents no name tells; the `git` tool keeps working, leaves them out of
+  its diffs and of what it stages or stashes (where they read as empty),
+  and refuses a push that would send a commit holding one, and runs
   no hook and none of the global or system git or ssh configuration there,
   since a command could rewrite those and git would run what they name with
   the history in view — and so is

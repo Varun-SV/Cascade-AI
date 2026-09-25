@@ -130,6 +130,23 @@ describe('File tools — reading only what the running tier allows', () => {
     expect(out.split('\n').filter((l) => l === '--').length).toBeLessThanOrEqual(1);
   });
 
+  // A path can hold a newline. Split into lines first, the part after it
+  // passed for the path — a public one — and the file's lines came back.
+  it.skipIf(process.platform === 'win32')('grep reads each path whole, a newline in it included', async () => {
+    const { GrepTool } = await import('./grep.js');
+    await fs.mkdir(path.join(workspace, 'secret'), { recursive: true });
+    await fs.writeFile(path.join(workspace, 'secret', 'a\nb.md'), 'SECRET-LOCAL line\n');
+    await fs.writeFile(path.join(workspace, 'b.md'), 'public\n');
+    const tool = new GrepTool();
+    tool.setWorkspaceRoot(workspace);
+    const scan = { ...opts, mayRead: (abs: string) => !abs.includes(`${path.sep}secret${path.sep}`) };
+    for (const mode of ['content', 'count']) {
+      const out = await tool.execute({ pattern: 'SECRET', output_mode: mode }, scan as never);
+      expect(out).not.toContain('SECRET-LOCAL');
+      expect(out).not.toMatch(/b\.md:1/);
+    }
+  });
+
   it('image_analyze asks about the workspace file it reads — not one beside the process', async () => {
     const { ImageAnalyzeTool } = await import('./image.js');
     const tool = new ImageAnalyzeTool();

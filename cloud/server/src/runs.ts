@@ -25,7 +25,7 @@ import { resolveRunMcpServers } from './mcp-oauth.js';
 import type { CloudAttachment, CloudStore } from './db.js';
 import { beginRun, checkBrowserSessionLimit, checkDailyLimit, checkPendingMediaCap, claimBrowserSession, PENDING_MEDIA_TTL_MS, todayKey } from './entitlements.js';
 import { getSkill } from './skills.js';
-import { tenantScratchDir } from './paths.js';
+import { tenantScratchDir, tenantStateDir } from './paths.js';
 import { pendingMediaDir, sweepPendingMedia } from './pending-media.js';
 
 export { tenantScratchDir };
@@ -1769,10 +1769,11 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     disabledTools: payload.fastAnswer ? [] : store.listDisabledMcpTools(userId),
     ...remoteBrowserControls(env),
   });
-  // The run's state stays in the tenant's scratch folder: a hosted server
-  // never writes the machine-global ~/.cascade-ai, where a project's state
+  // The run's state stays with the tenant's data, beside its scratch folder —
+  // not in it, where the run's tools could read it: a hosted server never
+  // writes the machine-global ~/.cascade-ai, where a project's state
   // otherwise goes (see db.ts).
-  useProjectStateDir(scratchDir, path.join(scratchDir, '.cascade'));
+  useProjectStateDir(scratchDir, tenantStateDir(env, userId));
   const cascade: Cascade = createCascade(config, scratchDir);
 
   cascade.setMediaSink(buildMediaSink({ env, store, userId, conversationId: conversation.id, socket }));

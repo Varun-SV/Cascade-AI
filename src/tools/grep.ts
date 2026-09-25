@@ -118,7 +118,8 @@ export class GrepTool extends BaseTool {
     // would otherwise leave unnamed — with a NUL after it, so a path can be
     // told from what follows it even when it contains a colon, and a file's
     // lines dropped when it is protected or its contents are withheld.
-    args.push('--with-filename', '--null', '--', pattern, searchPath);
+    // An absolute path, so no name printed can begin like a `--` separator.
+    args.push('--with-filename', '--null', '--', pattern, path.resolve(searchPath));
 
     const { stdout } = await execFileAsync('rg', args, {
       timeout: 15_000,
@@ -137,19 +138,27 @@ export class GrepTool extends BaseTool {
       // A `--` between context groups is kept only between two groups that
       // are shown: one beside a file left out would say it had matches.
       let separate = false;
-      for (const line of stdout.split('\n')) {
-        const nul = line.indexOf('\0');
-        if (nul === -1) {
-          if (line.trim() === '--') separate = lines.length > 0;
+      // Each record is a path, a NUL, and the rest of its line. A path may
+      // hold a newline itself, so it is read up to its NUL — not split off
+      // a line — or the part after the newline would pass for the path.
+      let at = 0;
+      while (at < stdout.length) {
+        if (stdout.startsWith('--\n', at) || stdout.slice(at) === '--') {
+          separate = lines.length > 0;
+          at += 3;
           continue;
         }
-        const file = line.slice(0, nul);
+        const nul = stdout.indexOf('\0', at);
+        if (nul === -1) break;
+        const file = stdout.slice(at, nul);
+        const end = stdout.indexOf('\n', nul);
+        const rest = stdout.slice(nul + 1, end === -1 ? stdout.length : end);
+        at = end === -1 ? stdout.length : end + 1;
         if (!allowed(file)) continue;
         if (separate) {
           lines.push('--');
           separate = false;
         }
-        const rest = line.slice(nul + 1);
         // rg's own layout: `file:12:match`, `file-13-context`, `file:3` for a count.
         lines.push(`${file}${/^\d+-/.test(rest) ? '-' : ':'}${rest}`);
       }

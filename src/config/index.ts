@@ -16,7 +16,7 @@ import {
   adoptProjectCredentials, loadGlobalCredentials, loadProjectCredentials, mergeGlobalCredentials,
   saveGlobalCredentials, saveProjectCredentials, withoutCredentials,
 } from './global-credentials.js';
-import { globalDir, LEGACY_STATE_DIR, legacyStateIsLink, migrateProjectState, projectStateDir, statePath, STATE } from './project-state.js';
+import { globalDir, LEGACY_STATE_DIR, legacyStateIsLink, migrateProjectState, projectStateDir, stateNotices, statePath, STATE } from './project-state.js';
 import { normalizeAzureEndpoint, sameAzureEndpoint } from './azure-endpoint.js';
 import { resolveAzureRouting } from './azure-routing.js';
 import { hasDefaultEndpoint, sameCredentialEndpoint } from './endpoint-identity.js';
@@ -219,6 +219,7 @@ export class ConfigManager {
     } else if (legacyStateIsLink(this.workspacePath)) {
       console.warn(`Cascade left ${legacy} where it is: it is a symlink, and is not followed. Move what it holds to ${projectStateDir(this.workspacePath)} to keep using it.`);
     }
+    for (const notice of stateNotices(this.workspacePath)) console.warn(notice);
   }
 
   async load(): Promise<void> {

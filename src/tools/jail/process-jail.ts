@@ -92,6 +92,12 @@ export interface JailPolicy {
   stateDirs?: () => { tmp: string; private: string };
   /** Files to hide wherever they are: protected by place, not name (a configured database). */
   hiddenFiles?: () => string[];
+  /**
+   * Credentials outside the workspace — `homeSecrets()`: ssh and signing
+   * keys, cloud and registry logins — hidden from every command but the git
+   * tool's, which pushes and pulls with them.
+   */
+  hiddenSecrets?: () => string[];
   /** Files commands may read but not change: what decides what is protected (`.cascadeignore`). */
   readOnlyFiles?: () => string[];
   /** Values no command's environment may carry, under whatever name. */
@@ -154,7 +160,8 @@ export interface PrepareOptions {
   offline: boolean;
   /**
    * Leave the git store in view even when its history holds hidden paths —
-   * for the git tool, which leaves them out of what it shows instead.
+   * for the git tool, which leaves them out of what it shows instead — and
+   * the credentials git pushes and pulls with (`hiddenSecrets`).
    */
   keepGit?: boolean;
 }
@@ -198,6 +205,7 @@ export class ProcessJail {
     const hidden = await collectHidden(this.policy, opts.offline);
     if (!opts.keepGit) {
       for (const dir of await this.gitDirsToHide(opts.offline)) hidden.push({ path: dir, dir: true });
+      hidden.push(...secretsToHide(this.policy.hiddenSecrets?.() ?? []));
     }
     const frozen = (this.policy.readOnlyFiles?.() ?? []).flatMap((f) => {
       try { return fs.lstatSync(f).isFile() ? [fs.realpathSync(f)] : []; } catch { return []; }
@@ -271,7 +279,11 @@ export class ProcessJail {
         notes.push(`A local-only subtask (privacy.paths) keeps what it makes in its private folder, outside the project: this command's new files were moved there (${listed(moved)}).`);
       }
       if (marked.length) {
-        const setAside = await recordMarks(this.policy, marked, changed.filter((rel) => before.has(rel)), root, own);
+        // Everything marked that is still in the project may be set aside:
+        // what it changed, and what it made that could not be moved — bar
+        // what a local-only pattern covers whole, local-only by its own rule.
+        const inProject = marked.filter((rel) => fs.existsSync(path.join(root, rel)) && !coveredWhole(rel, made.includes(rel)));
+        const setAside = await recordMarks(this.policy, marked, inProject, root, own);
         if (setAside) notes.push(setAside);
       }
       if (notes.length) return notes.join('\n');
@@ -396,8 +408,12 @@ export class ProcessJail {
   /**
    * The repository's git directories, when its index or any commit on any
    * ref holds a path hidden from this caller — the blob is as readable as
-   * the file (`git show HEAD:secret/plan.md`). Found with git itself, and
-   * remembered until the index, HEAD's reflog, the packed refs or the last
+   * the file (`git show HEAD:secret/plan.md`) — or when git keeps anything
+   * no ref reaches: a deleted branch's commits, an amended or rebased one,
+   * a file staged and then unstaged. Those stay in the store until it is
+   * pruned, and what they hold cannot be told from their names — a blob
+   * alone has none — so any at all hides it. Found with git itself, and
+   * remembered until the index, the refs, a reflog, the packs or the last
    * fetch change. When git cannot tell, they are hidden.
    */
   private async gitDirsToHide(offline: boolean): Promise<string[]> {
@@ -410,14 +426,17 @@ export class ProcessJail {
     if (!gitDir) return [];
     const dirs = [...new Set([gitDir, path.resolve(root, common || gitDir)])];
 
-    const key = [offline, ...['index', 'HEAD', 'logs/HEAD', 'packed-refs', 'FETCH_HEAD']
-      .map((f) => { try { return fs.statSync(path.join(gitDir, f)).mtimeMs; } catch { return 0; } })].join('|');
+    const key = [offline, specs.join('\0'), storeStamp(dirs)].join('|');
     const cached = this.gitChecks.get(`${gitDir}|${offline}`);
     if (cached?.key === key) return cached.dirs;
 
     const tracked = await git(root, ['ls-files', '-z', '--', ...specs]);
     const history = tracked ? '' : await git(root, ['log', '--all', '-n', '1', '--format=%H', '--', ...specs]);
-    const holds = tracked === null || history === null || Boolean(tracked) || Boolean(history);
+    // Reflogs are not counted as reaching anything: an amended commit is
+    // reachable from one alone, and a command can read it there too.
+    const leftovers = tracked || history ? '' : await git(root, ['fsck', '--unreachable', '--no-reflogs', '--connectivity-only', '--no-progress']);
+    const holds = tracked === null || history === null || leftovers === null
+      || Boolean(tracked) || Boolean(history) || /^unreachable /m.test(leftovers);
     const result = holds ? dirs : [];
     this.gitChecks.set(`${gitDir}|${offline}`, { key, dirs: result });
     return result;
@@ -506,6 +525,38 @@ export async function collectHidden(policy: JailPolicy, offline: boolean): Promi
     try { if (fs.lstatSync(file).isFile()) out.push({ path: file, dir: false }); } catch { /* not there */ }
   }
   out.push(...await linkAliasesOf(out, root));
+  return out;
+}
+
+/**
+ * Where credentials are kept outside a project, under the home folder (and
+ * `$XDG_CONFIG_HOME`): ssh and signing keys, cloud, cluster and container
+ * logins, git and package-registry credentials, password stores. A command
+ * reading one hands it to the model that asked for it.
+ */
+export function homeSecrets(home = os.homedir(), configHome = process.env['XDG_CONFIG_HOME']): string[] {
+  const config = [path.join(home, '.config'), ...(configHome && path.resolve(configHome) !== path.join(home, '.config') ? [path.resolve(configHome)] : [])];
+  return [
+    ...[
+      '.ssh', '.gnupg', '.aws', '.azure', '.kube', '.oci', '.password-store', '.docker/config.json',
+      '.netrc', '.git-credentials', '.npmrc', '.yarnrc.yml', '.pypirc', '.gem/credentials',
+      '.cargo/credentials', '.cargo/credentials.toml', '.terraform.d/credentials.tfrc.json',
+      '.vault-token', '.pgpass', '.my.cnf', '.s3cfg', '.boto', '.databrickscfg', '.env',
+      '.local/share/keyrings', '.m2/settings-security.xml',
+    ].map((rel) => path.join(home, rel)),
+    ...config.flatMap((dir) => ['gcloud', 'gh', 'hub', 'git/credentials', 'doctl', 'op', 'containers/auth.json'].map((rel) => path.join(dir, rel))),
+  ];
+}
+
+/** Those of `paths` that are there, as masks: a folder whole, and what a symlink among them leads to. */
+function secretsToHide(paths: string[]): Hidden[] {
+  const out: Hidden[] = [];
+  for (const p of paths) {
+    try {
+      const real = fs.realpathSync(p);
+      out.push({ path: real, dir: fs.statSync(real).isDirectory() });
+    } catch { /* not there */ }
+  }
   return out;
 }
 
@@ -827,13 +878,14 @@ const MARK_RETRY_MS = 30_000;
  * Record a local-only command's marks while the workspace is still held —
  * the caller holds the gate, in this process and across processes, until
  * this returns. A save that fails — another process holding the record's
- * lock, a full disk — is tried again for a while. If it still fails, the
- * files the command changed would look public to any other process, so they
- * are set aside in its private folder, where no cloud worker can read them;
- * the note says where. Throws when even that is not possible.
+ * lock, a full disk — is tried again for a while. If it still fails, what
+ * it left in the project (`remaining`: what it changed, and what it made
+ * that could not be moved) would look public to any other process, so it
+ * is set aside in its private folder, where no cloud worker can read it;
+ * the note says where. Throws, naming the files, when even that fails.
  */
 async function recordMarks(
-  policy: JailPolicy, marked: string[], changed: string[], root: string, own: string | undefined,
+  policy: JailPolicy, marked: string[], remaining: string[], root: string, own: string | undefined,
 ): Promise<string | void> {
   const deadline = Date.now() + (Number(process.env['CASCADE_MARK_RETRY_MS']) || MARK_RETRY_MS);
   let failure: unknown;
@@ -851,13 +903,13 @@ async function recordMarks(
     }
   }
   const why = failure instanceof Error ? failure.message : String(failure);
-  const stuck = own ? changed.filter((rel) => !moveInto(path.join(root, rel), path.join(own, rel))) : changed;
+  const stuck = own ? remaining.filter((rel) => !moveInto(path.join(root, rel), path.join(own, rel))) : remaining;
   if (stuck.length) {
-    throw new Error(`Could not record the files a local-only command changed as local-only (${why}), nor set them aside: ${stuck.join(', ')}. Keep other Cascade runs out of this project until privacy-derived.json can be written.`);
+    throw new Error(`Could not record what a local-only command wrote as local-only (${why}), nor set it aside: ${stuck.join(', ')}. Keep other Cascade runs out of this project until privacy-derived.json can be written.`);
   }
-  if (changed.length === 0) return;
-  policy.log(`[privacy] Could not record a local-only command's changes (${why}); set aside: ${changed.join(', ')}`);
-  return `Cascade could not record which files this local-only command changed (${why}), so they were moved to its private folder, outside the project, where no cloud worker can read them: ${listed(changed)}.`;
+  if (remaining.length === 0) return;
+  policy.log(`[privacy] Could not record a local-only command's changes (${why}); set aside: ${remaining.join(', ')}`);
+  return `Cascade could not record what this local-only command wrote (${why}), so it was moved to its private folder, outside the project, where no cloud worker can read it: ${listed(remaining)}.`;
 }
 
 /** Up to ten `@private/` paths, and how many more. */
@@ -909,6 +961,30 @@ function madeDirs(before: Set<string>, after: Set<string>): string[] {
 }
 
 /** The repository's git directories — its own and, for a linked worktree, the common one. */
+/**
+ * When the store last changed in a way that could change what it holds: the
+ * index, HEAD, each ref and reflog folder (a deleted ref changes its folder),
+ * the packed refs, each object folder and the last fetch — of the worktree's
+ * own git directory and the common one.
+ */
+function storeStamp(dirs: string[]): string {
+  const stamps: number[] = [];
+  const at = (p: string) => { try { stamps.push(fs.statSync(p).mtimeMs); } catch { stamps.push(0); } };
+  const folders = (dir: string): void => {
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    at(dir);
+    for (const e of entries) if (e.isDirectory()) folders(path.join(dir, e.name));
+  };
+  for (const dir of dirs) {
+    for (const f of ['index', 'HEAD', 'logs/HEAD', 'packed-refs', 'FETCH_HEAD']) at(path.join(dir, f));
+    folders(path.join(dir, 'refs'));
+    folders(path.join(dir, 'logs'));
+    folders(path.join(dir, 'objects'));
+  }
+  return stamps.join(',');
+}
+
 async function gitDirsOf(root: string): Promise<string[]> {
   const located = await git(root, ['rev-parse', '--absolute-git-dir', '--git-common-dir']);
   if (located === null) return [];

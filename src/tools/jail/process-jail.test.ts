@@ -13,7 +13,7 @@ import { execFileSync } from 'node:child_process';
 import { BUILT_IN_PROTECTED } from '../../config/ignore.js';
 import { projectStateDir, statePath } from '../../config/project-state.js';
 import {
-  ProcessJail, bwrapArgs, collectHidden, detectJail, scrubEnv, seatbeltProfile, toPathspecs, unixSocketFilter,
+  ProcessJail, bwrapArgs, collectHidden, detectJail, homeSecrets, scrubEnv, seatbeltProfile, toPathspecs, unixSocketFilter,
   type JailKind, type JailPolicy,
 } from './process-jail.js';
 
@@ -233,6 +233,25 @@ describe('ProcessJail.prepare — which way a command runs', () => {
   it('refuses outright when the jailer named is not there', async () => {
     const r = await new ProcessJail(policy({ mode: 'bwrap', detect: none })).prepare('sh', [], { cwd: ws, offline: false });
     expect(!r.ok && r.reason).toMatch(/"bwrap", which is not available/);
+  });
+
+  // Only the workspace's secrets and Cascade's own were hidden: an approved
+  // `cat ~/.ssh/id_rsa` handed the key to the model that asked for it.
+  it('hides credentials in the home folder from commands, but not from the git tool', async () => {
+    const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-home-secrets-')));
+    try {
+      await fs.mkdir(path.join(home, '.ssh'));
+      await fs.writeFile(path.join(home, '.ssh', 'id_rsa'), 'KEY');
+      await fs.writeFile(path.join(home, '.netrc'), 'machine x password y');
+      const jail = new ProcessJail(policy({ detect: bwrap, hiddenSecrets: () => homeSecrets(home, undefined) }));
+      const shell = await jail.prepare('sh', ['-c', 'ls'], { cwd: ws, offline: false });
+      expect(shell.ok && shell.launch.args).toEqual(expect.arrayContaining(['--tmpfs', path.join(home, '.ssh'), '--ro-bind', '/dev/null', path.join(home, '.netrc')]));
+      const git = await jail.prepare('git', [], { cwd: ws, offline: false, keepGit: true });
+      expect(git.ok && git.launch.args).not.toContain(path.join(home, '.ssh'));
+    } finally {
+      await fs.rm(home, { recursive: true, force: true });
+    }
+    expect(homeSecrets('/h', '/xdg')).toEqual(expect.arrayContaining(['/h/.ssh', '/h/.aws', '/h/.config/gh', '/xdg/gh', '/h/.docker/config.json']));
   });
 
   it('wraps it in the jailer there is', async () => {
@@ -500,6 +519,58 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: what git history gives away', () =>
     expect(await reg.execute('shell', { command: 'git log --oneline' }, exec)).toMatch(/\ba\b/);
     await fs.rm(clean, { recursive: true, force: true });
   });
+
+  // No ref reaches a deleted branch's commits, nor a file staged and then
+  // unstaged — but git keeps them until it prunes, and `git fsck` lists them.
+  it('hides the git store while git keeps what no ref reaches', async () => {
+    const left = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-leftover-')));
+    const lg = (...args: string[]) => execFileSync('git', ['-C', left, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' });
+    try {
+      lg('init', '-q', '-b', 'main');
+      await fs.writeFile(path.join(left, 'a.md'), 'a\n');
+      lg('add', '.'); lg('commit', '-qm', 'a');
+      const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {} } as never, left);
+      reg.setPrivacyPaths(new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]));
+      const look = 'git fsck --unreachable --no-reflogs 2>&1; git cat-file -p $(git fsck --unreachable --no-reflogs 2>/dev/null | awk \'/blob/ {print $3}\') 2>&1; true';
+      expect(await reg.execute('shell', { command: look }, exec)).not.toMatch(/not a git repository/);
+      // A branch that once held a local-only file, deleted.
+      lg('checkout', '-q', '-b', 'draft');
+      await fs.mkdir(path.join(left, 'secret'));
+      await fs.writeFile(path.join(left, 'secret', 'plan.md'), `${LOCAL}\n`);
+      lg('add', '.'); lg('commit', '-qm', 'plan');
+      lg('checkout', '-q', 'main'); lg('branch', '-q', '-D', 'draft');
+      const out = await reg.execute('shell', { command: look }, exec);
+      expect(out).not.toContain(LOCAL);
+      expect(out).toMatch(/not a git repository/);
+      // A branch deleted without HEAD, the index or any object changing —
+      // one made beside the checkout and seen once — is noticed too.
+      lg('reflog', 'expire', '--expire=now', '--all'); lg('gc', '-q', '--prune=now');
+      const extra = lg('commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'extra').trim();
+      lg('update-ref', 'refs/heads/extra', extra);
+      // A look that writes nothing to the store: `git status` refreshes the index.
+      const peek = 'git log -1 --format=%h 2>&1; true';
+      expect(await reg.execute('shell', { command: peek }, exec)).not.toMatch(/not a git repository/);
+      lg('update-ref', '-d', 'refs/heads/extra');
+      expect(await reg.execute('shell', { command: peek }, exec)).toMatch(/not a git repository/);
+      // …and a file staged, then unstaged, whose blob has no name at all.
+      lg('reflog', 'expire', '--expire=now', '--all'); lg('gc', '-q', '--prune=now');
+      expect(await reg.execute('shell', { command: 'git status --short 2>&1; true' }, exec)).not.toMatch(/not a git repository/);
+      await fs.writeFile(path.join(left, '.env'), `KEY=${SECRET}\n`);
+      lg('add', '-f', '.env'); lg('reset', '-q');
+      await fs.rm(path.join(left, '.env'));
+      const staged = await reg.execute('shell', { command: look }, exec);
+      expect(staged).not.toContain(SECRET);
+      expect(staged).toMatch(/not a git repository/);
+      // What is hidden changing — a file made local-only mid-run — is a new
+      // question too, whatever the store did.
+      lg('reflog', 'expire', '--expire=now', '--all'); lg('gc', '-q', '--prune=now');
+      expect(await reg.execute('shell', { command: 'git log -1 --format=%h 2>&1; true' }, exec)).not.toMatch(/not a git repository/);
+      reg.setPrivacyPaths(new PrivacyPaths([{ pattern: 'a.md', policy: 'local-only' }]));
+      expect(await reg.execute('shell', { command: 'git log -1 --format=%h 2>&1; true' }, exec)).toMatch(/not a git repository/);
+    } finally {
+      await fs.rm(left, { recursive: true, force: true });
+    }
+  });
 });
 
 // The git tool keeps the object store in view, so a push packs whatever the
@@ -616,6 +687,23 @@ describe('a file protected where it is, in git', () => {
   it.skipIf(!bwrapWorks)('hides the git store from commands', async () => {
     const out = await registry().execute('shell', { command: 'git show HEAD:data/idx.db 2>&1; true' }, exec);
     expect(out).not.toContain(INDEX);
+  });
+
+  // In the jail the hidden file reads as empty: `git add .` staged it so,
+  // and `git stash` recorded it so, and a commit put that in the history.
+  it.skipIf(!bwrapWorks)('leaves a hidden file out of what the git tool stages or stashes', async () => {
+    await fs.writeFile(path.join(repo, 'notes.md'), 'public notes, edited\n');
+    try {
+      await registry().execute('git', { operation: 'add', args: ['.'] }, exec);
+      expect(g(repo, 'diff', '--cached', '--name-only').split('\n')).toEqual(['notes.md']);
+      g(repo, 'reset', '-q');
+      await registry().execute('git', { operation: 'stash' }, exec);
+      expect(g(repo, 'stash', 'show', '--name-only', 'stash@{0}').split('\n')).toEqual(['notes.md']);
+      expect(await fs.readFile(path.join(repo, 'data', 'idx.db'), 'utf8')).toBe(`${INDEX}\n`);
+    } finally {
+      g(repo, 'stash', 'clear');
+      g(repo, 'reset', '-q', '--hard', 'HEAD');
+    }
   });
 });
 
@@ -1044,5 +1132,26 @@ describe('the git tool where its store holds what commands may not see', () => {
     await reg.execute('git', { operation: 'commit', args: ['b'] }, exec);
     expect((await fs.stat(path.join(clean, 'hook-ran'))).isFile()).toBe(true);
     await fs.rm(clean, { recursive: true, force: true });
+  });
+});
+
+// When the record cannot be saved, what a command made that could not be
+// moved out of the project was left there, unmarked for every other process:
+// only what it changed was set aside.
+describe.skipIf(!bwrapWorks)('in bubblewrap: a local-only command\'s marks that cannot be saved', () => {
+  it('names a new file it could neither record nor set aside, rather than leave it in place', async () => {
+    const failing = () => { throw new Error('disk full'); };
+    const made = path.join(ws, 'fresh-output.txt');
+    process.env['CASCADE_MARK_RETRY_MS'] = '100';
+    try {
+      const r = await new ProcessJail(policy({ taint: failing, saveMarks: failing })).prepare('/bin/sh', ['-c', `echo x > ${made}`], { cwd: ws, offline: true });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      execFileSync(r.launch.file, r.launch.args, { env: r.launch.env });
+      await expect(r.launch.done!()).rejects.toThrow(/fresh-output\.txt/);
+    } finally {
+      delete process.env['CASCADE_MARK_RETRY_MS'];
+      await fs.rm(made, { force: true });
+    }
   });
 });

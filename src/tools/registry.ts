@@ -16,9 +16,9 @@ const ignore: (opts?: unknown) => Ignore =
   (ignoreFactory as unknown as (opts?: unknown) => Ignore);
 import type { ToolDefinition, ToolExecuteOptions, ToolsConfig } from '../types.js';
 import { DEFAULT_APPROVAL_REQUIRED } from '../constants.js';
-import { globalDir, statePath, statePathFor, STATE } from '../config/project-state.js';
+import { globalDir, projectStateDir, statePath, statePathFor, STATE } from '../config/project-state.js';
 import { literalPattern, type PrivacyPaths } from '../core/privacy/paths.js';
-import { ProcessJail } from './jail/process-jail.js';
+import { homeSecrets, ProcessJail } from './jail/process-jail.js';
 import { BUILT_IN_PROTECTED, READ_ONLY_POLICY } from '../config/ignore.js';
 import { realPathOf } from '../utils/real-path.js';
 import type { BaseTool } from './base.js';
@@ -155,13 +155,16 @@ export class ToolRegistry extends EventEmitter {
         ...this.protectedFilePatterns(),
         ...(offline ? [] : this.privacyPaths?.localOnlyPatterns() ?? []),
       ],
-      hiddenDirs: [globalDir()],
+      // The global folder, and the project's state folder where a host keeps
+      // it elsewhere (useProjectStateDir).
+      hiddenDirs: [globalDir(), ...(isWithin(projectStateDir(workspaceRoot), globalDir()) ? [] : [projectStateDir(workspaceRoot)])],
       stateDirs: () => {
         const dirs = { tmp: statePath(workspaceRoot, STATE.tmp), private: statePath(workspaceRoot, STATE.private) };
         fs.mkdirSync(dirs.private, { recursive: true, mode: 0o700 });
         return dirs;
       },
       hiddenFiles: () => [...this.protectedFiles],
+      hiddenSecrets: () => homeSecrets(),
       readOnlyFiles: () => READ_ONLY_POLICY.map((rel) => path.join(workspaceRoot, rel)),
       secretValues: () => this.secretValues(),
       taint: (rels) => this.markLocalOnly(rels),
@@ -646,4 +649,10 @@ function stampOf(p: string): string {
 /** A relative path in the slash-separated form the privacy record keeps. */
 function posix(rel: string): string {
   return rel.split(path.sep).join('/');
+}
+
+/** Whether `p` is `dir` or inside it. */
+function isWithin(p: string, dir: string): boolean {
+  const rel = path.relative(dir, p);
+  return !rel.startsWith('..') && !path.isAbsolute(rel);
 }

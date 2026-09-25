@@ -51,7 +51,10 @@ WebAssembly sandbox.
   write after it ended — either way where Cascade cannot mark it. Checked at
   startup with a profile of the same shape; not exercised in CI.
 - **Everywhere** — provider keys are taken out of every command's
-  environment, `git`'s on Windows included. With no jailer, `auto` runs
+  environment, `git`'s on Windows included; the usual credential locations
+  in the home folder (`~/.ssh`, `~/.aws`, …) are hidden from every command
+  but the `git` tool's, and the git store while git keeps objects no ref
+  reaches. With no jailer, `auto` runs
   commands that way and refuses them to a local-only caller. The `git` tool
   refuses a push that would send a commit holding a hidden path.
 

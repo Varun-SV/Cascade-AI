@@ -67,7 +67,10 @@ export class GitTool extends BaseTool {
           return log.all.map((c) => `${c.hash.slice(0, 8)} ${c.date.slice(0, 10)} ${c.message}`).join('\n');
         }
         case 'add': {
-          await git.add(args.length ? args : ['.']);
+          // A hidden file shows to git here as the jail shows it — empty, or
+          // a folder with nothing in it — so staging it would record that in
+          // place of what it holds. Hidden paths are left out.
+          await git.add([...(args.length ? args : ['.']), ...(exclusions.length && !args.includes('--') ? ['--'] : []), ...exclusions]);
           return 'Staged files';
         }
         case 'commit': {
@@ -94,7 +97,14 @@ export class GitTool extends BaseTool {
           return `Pulled: ${result.summary.changes} changes`;
         }
         case 'stash': {
-          await git.stash(args);
+          // A stash records the working tree as this call sees it, hidden
+          // files emptied, then resets them: stashing leaves them out, as
+          // staging does. Other subcommands take no paths.
+          const pushing = args.length === 0 || args[0] === 'push' || args[0]!.startsWith('-');
+          const stashArgs = pushing && exclusions.length
+            ? [...(args[0] === 'push' ? args : ['push', ...args]), ...(args.includes('--') ? [] : ['--']), ...exclusions]
+            : args;
+          await git.stash(stashArgs);
           return 'Stashed';
         }
         default:

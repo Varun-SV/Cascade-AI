@@ -1,9 +1,9 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ConfigManager } from './index.js';
-import { globalDir, migrateProjectState, projectStateDir, statePath, statePathFor, STATE, useProjectStateDir } from './project-state.js';
+import { globalDir, migrateProjectState, projectStateDir, stateNotices, statePath, statePathFor, STATE, useProjectStateDir } from './project-state.js';
 import { writeProjectConfig } from './write-config.js';
 
 const made: string[] = [];
@@ -29,9 +29,14 @@ describe('a project\'s state folder', () => {
     expect(projectStateDir(a).startsWith(path.join(globalDir(), 'projects', path.basename(a)))).toBe(true);
     expect(projectStateDir(link)).toBe(projectStateDir(a));
     expect(projectStateDir(b)).not.toBe(projectStateDir(a));
-    // A host that must not write the global folder names its own.
-    useProjectStateDir(b, path.join(b, 'state'));
-    expect(statePath(b, STATE.config)).toBe(path.join(b, 'state', 'config.json'));
+    // A host that must not write the global folder names its own — outside
+    // the workspace, whose tools would read it there.
+    expect(() => useProjectStateDir(b, path.join(b, '.cascade'))).toThrow(/must be outside/);
+    expect(() => useProjectStateDir(b, b)).toThrow(/must be outside/);
+    const own = `${b}-state`;
+    made.push(own);
+    useProjectStateDir(b, own);
+    expect(statePath(b, STATE.config)).toBe(path.join(own, 'config.json'));
   });
 
   it('is where @private/ and @screenshots/ tool paths lead, and nothing else is', () => {
@@ -112,6 +117,33 @@ describe('moving it on first use', () => {
     expect(migrateProjectState(ws)).toEqual([]);
   });
 
+  // Across filesystems the move is a copy; one cut short left a partial
+  // entry that every later attempt took as moved, stranding the real one.
+  it('retries a cross-device move that was cut short, never taking the partial copy as moved', () => {
+    const ws = tempDir('cascade-legacy-exdev-');
+    fs.mkdirSync(path.join(ws, '.cascade'));
+    fs.writeFileSync(path.join(ws, '.cascade', 'memory.db'), 'sessions');
+    const rename = fs.renameSync;
+    const crossDevice = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (String(from).endsWith(path.join('.cascade', 'memory.db'))) throw Object.assign(new Error('EXDEV'), { code: 'EXDEV' });
+      return rename(from, to);
+    });
+    const cutShort = vi.spyOn(fs, 'cpSync').mockImplementationOnce((_from, to) => {
+      fs.writeFileSync(String(to), 'sess');
+      throw new Error('ENOSPC');
+    });
+    try {
+      expect(fs.existsSync(statePath(ws, STATE.memoryDb))).toBe(false);
+      expect(fs.readFileSync(path.join(ws, '.cascade', 'memory.db'), 'utf-8')).toBe('sessions');
+      expect(migrateProjectState(ws)).toEqual(['memory.db']);
+      expect(fs.readFileSync(statePath(ws, STATE.memoryDb), 'utf-8')).toBe('sessions');
+      expect(fs.readdirSync(projectStateDir(ws)).filter((f) => f.includes('partial'))).toEqual([]);
+    } finally {
+      crossDevice.mockRestore();
+      cutShort.mockRestore();
+    }
+  });
+
   it('leaves a .cascade that is a symlink, and what it points at, alone', () => {
     const ws = tempDir('cascade-legacy-link-');
     const elsewhere = tempDir('cascade-legacy-target-');
@@ -129,6 +161,72 @@ describe('moving it on first use', () => {
     for (const d of [globalDir(), path.join(globalDir(), 'projects'), dir]) {
       expect(fs.statSync(d).mode & 0o777, d).toBe(0o700);
     }
+  });
+});
+
+// A project's state is found by its path: renamed or moved, it started
+// afresh — its local-only rules and the record of what local-only subtasks
+// wrote left behind, and the files that record covered readable again.
+describe('a project that moves', () => {
+  it('takes its state along when renamed or moved on its disk, its own keys included', async () => {
+    const before = tempDir('cascade-moving-');
+    fs.writeFileSync(path.join(before, 'notes.md'), 'x');
+    fs.writeFileSync(statePath(before, STATE.privacyDerived), JSON.stringify({ version: 1, paths: ['notes.md'] }));
+    fs.mkdirSync(path.join(before, '.cascade'));
+    fs.writeFileSync(path.join(before, '.cascade', 'config.json'), JSON.stringify({ providers: [{ type: 'anthropic', apiKey: 'sk-own' }] }));
+    await new ConfigManager(before).load();
+    const oldDir = projectStateDir(before);
+    const after = `${before}-renamed`;
+    fs.renameSync(before, after);
+    made.push(after);
+
+    expect(fs.readFileSync(statePath(after, STATE.privacyDerived), 'utf-8')).toContain('notes.md');
+    expect(fs.existsSync(oldDir)).toBe(false);
+    expect(credentials().projects?.[path.basename(projectStateDir(after))]?.[0]?.apiKey).toBe('sk-own');
+    expect(stateNotices(after).join(' ')).toMatch(/where it was before it moved/);
+    const mgr = new ConfigManager(after);
+    await mgr.load();
+    expect(mgr.getConfig().providers.find((p) => p.type === 'anthropic')?.apiKey).toBe('sk-own');
+  });
+
+  it('starts a copy afresh, saying where the state of the one that is gone is', () => {
+    const parent = tempDir('cascade-copying-');
+    const original = path.join(parent, 'app');
+    fs.mkdirSync(original);
+    fs.writeFileSync(statePath(original, STATE.privacyDerived), JSON.stringify({ version: 1, paths: ['a.md'] }));
+    const elsewhere = tempDir('cascade-copied-');
+    const copy = path.join(elsewhere, 'app');
+    fs.cpSync(original, copy, { recursive: true });
+    fs.rmSync(original, { recursive: true });
+
+    expect(fs.existsSync(statePath(copy, STATE.privacyDerived))).toBe(false);
+    expect(stateNotices(copy).join(' ')).toMatch(/was not taken as this one's/);
+  });
+
+  // The same folder seen at a second path — a bind mount — while it is
+  // still at the first: each keeps its own state, and neither takes the other's.
+  it('leaves the state of a folder still at its own path where it is', () => {
+    const first = tempDir('cascade-bound-');
+    const firstDir = projectStateDir(first);
+    const second = tempDir('cascade-bound-');
+    const stat = fs.statSync;
+    const same = vi.spyOn(fs, 'statSync').mockImplementation(((p: fs.PathLike, opts?: fs.StatSyncOptions) =>
+      stat(String(p) === second ? first : p, opts)) as typeof fs.statSync);
+    try {
+      expect(projectStateDir(second)).not.toBe(firstDir);
+      expect(fs.existsSync(firstDir)).toBe(true);
+    } finally {
+      same.mockRestore();
+    }
+  });
+
+  it('leaves a project that is still where it was alone', () => {
+    const one = tempDir('cascade-staying-');
+    const oneDir = projectStateDir(one);
+    const two = tempDir('cascade-staying-');
+    expect(projectStateDir(two)).not.toBe(oneDir);
+    expect(fs.existsSync(oneDir)).toBe(true);
+    expect(stateNotices(two)).toEqual([]);
   });
 });
 

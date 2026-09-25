@@ -234,6 +234,19 @@ export function adoptProjectCredentials(globalDir: string, project: string, prov
   });
 }
 
+/** A project's own keys, under the name its state folder has now — after the project moved. */
+export function renameProjectCredentials(globalDir: string, from: string, to: string): void {
+  if (!readCredentialsFile(globalDir).projects?.[from]) return;
+  updateCredentialsFile(globalDir, (file) => {
+    const projects = { ...(file.projects ?? {}) };
+    const own = projects[from];
+    if (!own) return file;
+    delete projects[from];
+    projects[to] = own;
+    return { ...file, projects };
+  });
+}
+
 function withProject(file: CredentialsFile, project: string, own: ProviderConfig[], shared: ProviderConfig[]): CredentialsFile {
   const projects = { ...(file.projects ?? {}) };
   if (own.length) projects[project] = own;
