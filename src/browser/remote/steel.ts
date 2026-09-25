@@ -288,6 +288,37 @@ function hostKey(hostname: string): string {
 /** How long to wait for the provider to hand back a session. */
 const CREATE_TIMEOUT_MS = 60_000;
 
+/**
+ * Railway Serverless can answer the first request to a sleeping service with
+ * 502 while the container is waking. Retry only that documented gateway status:
+ * widening this to arbitrary transport/server failures would make POST retry
+ * semantics ambiguous and could create a second browser after a response was
+ * lost from an already-successful allocation.
+ */
+const COLD_START_RETRY_DELAYS_MS = [750, 1_500, 3_000] as const;
+
+class SteelHttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'SteelHttpError';
+  }
+}
+
+function waitForColdStart(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    if (!signal) return;
+    signal.addEventListener('abort', () => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+    }, { once: true });
+  });
+}
+
 interface SteelSessionDetails {
   id?: string;
   websocketUrl?: string;
@@ -317,7 +348,17 @@ export class SteelProvider implements RemoteBrowserProvider {
   }
 
   async createSession(signal?: AbortSignal): Promise<RemoteBrowserSession> {
-    const details = await this.call<SteelSessionDetails>('POST', '/v1/sessions', signal, {});
+    let details: SteelSessionDetails | undefined;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        details = await this.call<SteelSessionDetails>('POST', '/v1/sessions', signal, {});
+        break;
+      } catch (err) {
+        const delay = COLD_START_RETRY_DELAYS_MS[attempt];
+        if (!(err instanceof SteelHttpError) || err.status !== 502 || delay === undefined) throw err;
+        await waitForColdStart(delay, signal);
+      }
+    }
 
     // Checked rather than assumed: without a websocketUrl there is nothing to
     // drive, and failing here names the problem instead of letting Playwright
@@ -374,7 +415,10 @@ export class SteelProvider implements RemoteBrowserProvider {
       // without it every failure reads as an unexplained number. Bounded,
       // because an error page can be a megabyte of HTML.
       const detail = await res.text().then((t) => t.slice(0, 300)).catch(() => '');
-      throw new Error(`Steel ${method} ${path} failed: ${res.status}${detail ? ` — ${detail}` : ''}`);
+      throw new SteelHttpError(
+        res.status,
+        `Steel ${method} ${path} failed: ${res.status}${detail ? ` — ${detail}` : ''}`,
+      );
     }
     return await res.json() as T;
   }
