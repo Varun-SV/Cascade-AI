@@ -382,6 +382,9 @@ export class Cascade extends EventEmitter {
       // text to any subtask.
       isIgnored: (abs) => ignore.isIgnored(abs, this.workspacePath)
         || !!privacy?.coversFile(abs, this.workspacePath),
+      // Nor what a local-only command — this run's or another's — is
+      // writing while the index reads.
+      whileReading: (read) => this.toolRegistry.whileShared(read),
     });
 
     if (ci.autoRefresh) {

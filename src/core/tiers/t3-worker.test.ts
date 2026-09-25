@@ -14,6 +14,9 @@ import { PeerBus } from '../peer/bus.js';
 import { PermissionEscalator } from '../permissions/escalator.js';
 import { T3Worker, buildWorkerRules, canProduceFiles, canProduceNonDiskDeliverables, hasFileWritingTool, missingVisualEvidence, shouldRequireArtifact } from './t3-worker.js';
 import { ACTING_INTEGRITY_RULE } from './integrity.js';
+import os from 'node:os';
+import path from 'node:path';
+import { statePath, STATE } from '../../config/project-state.js';
 
 function makeResult(
   content: string,
@@ -1339,5 +1342,26 @@ describe('privacy.paths, enforced when a file is read', () => {
     expect(peer.output).toContain('output withheld by privacy policy');
     expect(prompts.some((p) => p.includes('Extract durable project facts'))).toBe(false);
     expect(JSON.stringify(db.addEntry.mock.calls)).not.toContain(SECRET);
+    // Nor its length, which a planner on a cloud model reads.
+    expect(JSON.stringify(db.addEntry.mock.calls)).not.toMatch(/length|\d+ chars/i);
+    expect(JSON.stringify(db.addEntry.mock.calls)).toContain('Output withheld (local-only)');
+  });
+});
+
+// A local-only subtask's new document is written to its private folder,
+// outside the project, where no pattern covers it: a local-only image was
+// refused a place in it, as though it were a public file.
+describe('T3Worker — copying into its private folder', () => {
+  it('lets a local-only file into a document in the private folder, and not into a public one', () => {
+    const ws = path.join(os.tmpdir(), 'cascade-copy-private');
+    const privacy = { hasPolicies: () => true, anyLocalOnly: () => true, coversFile: (abs: string) => abs.includes(`${path.sep}secret${path.sep}`) };
+    const router = { getPrivacyPaths: () => privacy, hasPrivateModel: () => true } as unknown as CascadeRouter;
+    const registry = makeToolRegistry({ getToolDefinitions: () => [], getWorkspaceRoot: () => ws } as unknown as Partial<ToolRegistry>);
+    const worker = new T3Worker(router, registry, 't2-parent');
+    const mayRead = (worker as unknown as { mayRead: (abs: string, to: unknown) => boolean }).mayRead;
+    const image = path.join(ws, 'secret', 'diagram.png');
+    expect(mayRead(image, { file: statePath(ws, STATE.private, 'deck.pptx') })).toBe(true);
+    expect(mayRead(image, { file: path.join(ws, 'deck.pptx') })).toBe(false);
+    expect(mayRead(image, { file: `${statePath(ws, STATE.private)}-elsewhere${path.sep}deck.pptx` })).toBe(false);
   });
 });

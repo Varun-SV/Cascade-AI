@@ -62,7 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   config now holds its providers without their keys, and every project uses
   the machine-wide ones. A project whose key differed from the machine-wide
   one when it moved keeps it, in the same file under that project, and goes
-  on using it ahead of the environment, as before.
+  on using it ahead of the environment, as before. Processes saving at once
+  take turns under a lock, so neither drops the other's change.
 - **Browser screenshots are named `@screenshots/<file>`,** a path
   `image_analyze` and the file tools read from the project's state folder,
   rather than an absolute path in the project.
@@ -232,9 +233,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its commands changed once they end — and stays so in later runs, recorded
   in the project's state folder even when a configured pattern covers it,
   so narrowing the pattern later does not release it; a write that leaves
-  the file as it was takes its record back off. Runs sharing a workspace share the
-  record: each merges its changes in under a lock, and sees another's as
-  they are made. Its commands write nowhere else (their
+  the file as it was takes its record back off. What it deletes is marked
+  the same way — which files it chose to delete could say what it read —
+  so the rest sees the path as local-only, not as missing. When a command's
+  marks cannot be saved, they are tried again with the workspace still held,
+  and failing that, the files it changed are moved to its private folder
+  rather than left where another process could read them. Runs sharing a
+  workspace share the record: each merges its changes in under a lock, and
+  sees another's as they are made. The code index reads each file while no
+  local-only command can write, in any run or process, so it never embeds
+  what one is writing before it is marked. A planner reads nothing of a
+  local-only result from the project's world state, not even its length. Its commands write nowhere else (their
   `/tmp` is private, the rest of the machine and the git store read-only)
   and run alone meanwhile — against every run in the workspace, in other
   windows and processes too, and against a worker checking its own

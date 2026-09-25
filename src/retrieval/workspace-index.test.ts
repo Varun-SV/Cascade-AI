@@ -4,6 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import Database from 'better-sqlite3';
 import { WorkspaceIndex } from './workspace-index.js';
+import { WorkspaceGate } from '../tools/workspace-gate.js';
 import type { Embedder } from './types.js';
 
 // Bag-of-words embedder (shared idea with the retriever test) so dense search
@@ -36,6 +37,32 @@ describe('WorkspaceIndex', () => {
   afterEach(async () => {
     db.close();
     await fs.rm(root, { recursive: true, force: true });
+  });
+
+  // A local-only command's writes are marked when it ends: an index reading
+  // meanwhile sent them to the embedder while they still looked public.
+  it('reads nothing while a local-only command runs, and skips what it marked', async () => {
+    const file = path.join(root, 'notes.ts');
+    await fs.writeFile(file, 'export const notes = "public";');
+    const marked = new Set<string>();
+    const gate = WorkspaceGate.for(root);
+    const command = await gate.enter(true);
+    const idx = new WorkspaceIndex({
+      root, db, embedder: new FakeEmbedder(),
+      isIgnored: (abs) => marked.has(abs),
+      whileReading: async (read) => {
+        const leave = await gate.enter(false);
+        try { return await read(); } finally { leave(); }
+      },
+    });
+    const refreshing = idx.refresh();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await fs.writeFile(file, 'export const notes = "LOCAL-SECRET";');
+    marked.add(file);
+    command();
+    const res = await refreshing;
+    expect(res.filesIndexed).toBe(0);
+    expect(JSON.stringify(await idx.search('notes', 5))).not.toContain('LOCAL-SECRET');
   });
 
   it('indexes source files and finds relevant code', async () => {

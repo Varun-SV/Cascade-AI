@@ -165,6 +165,7 @@ export class ToolRegistry extends EventEmitter {
       readOnlyFiles: () => READ_ONLY_POLICY.map((rel) => path.join(workspaceRoot, rel)),
       secretValues: () => this.secretValues(),
       taint: (rels) => this.markLocalOnly(rels),
+      saveMarks: () => this.privacyPaths?.saveUnsaved(),
       log: (msg) => { this.emit('log', msg); },
     });
     this.registerDefaults();
@@ -376,7 +377,7 @@ export class ToolRegistry extends EventEmitter {
     // is marked before the write (below, alone), a command's changes when it
     // ends (the jail finds them, and moves what it made).
     if (tool.delegatesToTools) return tool.execute(input, options);
-    const leave = await this.gate.enter(offline && (COMMAND_TOOLS.has(toolName) || WRITE_TOOLS.has(toolName)), this.acrossProcesses());
+    const leave = await this.gate.enter(offline && (COMMAND_TOOLS.has(toolName) || CHANGE_TOOLS.has(toolName)), this.acrossProcesses());
     // Checked, marked and unmarked while the write runs alone: another
     // local-only write to the same file cannot share — and then lose — a
     // mark, and no command can link the file elsewhere in between.
@@ -384,8 +385,11 @@ export class ToolRegistry extends EventEmitter {
     try {
       const moved = offline && given !== undefined && !inState ? this.privateOutput(toolName, given) : null;
       if (moved) input = { ...input, path: moved };
-      else if (offline && WRITE_TOOLS.has(toolName) && given !== undefined && !inState) {
-        this.refuseLinkedDestination(given);
+      else if (offline && CHANGE_TOOLS.has(toolName) && given !== undefined && !inState) {
+        // A deletion is marked as a write is: which file a local-only subtask
+        // chose to delete could say what it read, and a path marked
+        // local-only shows as that to the rest, not as missing.
+        if (WRITE_TOOLS.has(toolName)) this.refuseLinkedDestination(given);
         unmark = this.markWritten(given);
       }
       const out = await tool.execute(input, options);

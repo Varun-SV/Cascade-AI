@@ -736,6 +736,45 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: where a local-only caller\'s writes
     }
   });
 
+  // Which files it chose to delete could say what it read; a cloud worker
+  // saw them gone. What it deletes is marked, a folder gone whole as one.
+  it('marks what the command deleted', async () => {
+    const reg = registry();
+    await fs.writeFile(path.join(dir, 'old.md'), 'public old\n');
+    await fs.mkdir(path.join(dir, 'drafts', 'deep'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'drafts', 'deep', 'd.md'), 'public draft\n');
+    await reg.execute('shell', { command: 'rm old.md && rm -r drafts' }, offline);
+    expect(privacy.isLocalOnly('old.md')).toBe(true);
+    expect(privacy.isLocalOnly('drafts/deep/d.md')).toBe(true);
+    expect(new PrivacyPaths([], { workspaceRoot: dir }).isLocalOnly('drafts/')).toBe(true);
+    // A cloud worker's read is refused as local-only, not answered "not found".
+    const cloud = { ...exec, mayRead: (abs: string) => !privacy.coversFile(abs, dir) };
+    await expect(reg.execute('file_read', { path: 'old.md' }, cloud)).rejects.toThrow(/is local-only/);
+  });
+
+  // Marked only in this process when the record cannot be saved, what it
+  // changed looked public to every other one.
+  it('sets aside what the command changed when the record of it cannot be saved', async () => {
+    const reg = registry();
+    await fs.writeFile(path.join(dir, 'report.md'), 'public report\n');
+    const record = statePath(dir, 'privacy-derived.json');
+    const kept = await fs.readFile(record).catch(() => undefined);
+    await fs.rm(record, { force: true });
+    await fs.mkdir(record);
+    process.env['CASCADE_MARK_RETRY_MS'] = '200';
+    let out: string;
+    try {
+      out = await reg.execute('shell', { command: 'cat secret/plan.md >> report.md' }, offline);
+    } finally {
+      delete process.env['CASCADE_MARK_RETRY_MS'];
+      await fs.rm(record, { recursive: true, force: true });
+      if (kept) await fs.writeFile(record, kept);
+    }
+    expect(out).toContain('@private/report.md');
+    await expect(fs.stat(path.join(dir, 'report.md'))).rejects.toThrow();
+    expect(fsSync.readFileSync(statePath(dir, 'private', 'report.md'), 'utf8')).toContain(LOCAL);
+  });
+
   it('gives the command a private /tmp, and nowhere else to write outside the workspace', async () => {
     const out = await registry().execute('shell', {
       command: `echo x > /tmp/${probe} && cat /tmp/${probe}; echo y > "$HOME/${probe}" 2>&1; true`,

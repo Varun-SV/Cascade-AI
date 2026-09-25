@@ -101,6 +101,8 @@ export interface JailPolicy {
    * POSIX) as local-only: they may carry what it read.
    */
   taint?: (rels: string[]) => void;
+  /** Write marks `taint` could hold only in memory — its save failed — to the record; throws if it still cannot. */
+  saveMarks?: () => void;
   log: (msg: string) => void;
   /** Which jailer this machine has; injectable for tests. */
   detect?: () => Promise<JailKind | null>;
@@ -257,12 +259,22 @@ export class ProcessJail {
       };
       const toMove = own ? created.filter((rel) => !coveredWhole(rel, made.includes(rel))) : [];
       const moved = toMove.filter((rel) => moveInto(path.join(root, rel), path.join(own!, rel)));
-      const marked = [...changed.filter((rel) => before.has(rel) || !inMade(rel)), ...made].filter((rel) => !moved.includes(rel));
-      if (marked.length) this.policy.taint?.(marked);
+      // What it deleted is marked too: which files it chose to delete could
+      // say what it read, and a path marked local-only shows to the rest as
+      // that, not as missing. A folder gone whole is marked as one.
+      const goneDirs = madeDirs(dirsAfter, dirsBefore);
+      const inGone = (rel: string) => goneDirs.some((dir) => rel.startsWith(`${dir}/`));
+      const deleted = [...goneDirs, ...[...before.keys()].filter((rel) => !after.has(rel) && !inGone(rel))];
+      const marked = [...changed.filter((rel) => before.has(rel) || !inMade(rel)), ...made, ...deleted].filter((rel) => !moved.includes(rel));
+      const notes: string[] = [];
       if (moved.length) {
-        const shown = moved.slice(0, 10).map((rel) => `@private/${rel}`).join(', ');
-        return `A local-only subtask (privacy.paths) keeps what it makes in its private folder, outside the project: this command's new files were moved there (${shown}${moved.length > 10 ? `, and ${moved.length - 10} more` : ''}).`;
+        notes.push(`A local-only subtask (privacy.paths) keeps what it makes in its private folder, outside the project: this command's new files were moved there (${listed(moved)}).`);
       }
+      if (marked.length) {
+        const setAside = await recordMarks(this.policy, marked, changed.filter((rel) => before.has(rel)), root, own);
+        if (setAside) notes.push(setAside);
+      }
+      if (notes.length) return notes.join('\n');
     };
 
     // bubblewrap reads a seccomp filter from a file descriptor; the shell
@@ -806,6 +818,51 @@ function changedFiles(before: Map<string, Stamp>, after: Map<string, Stamp>, sta
     if (differs || (now.ctime % 1000 === 0 && now.ctime >= second)) out.push(rel);
   }
   return out;
+}
+
+/** How long a command's marks are tried again when they cannot be saved; `CASCADE_MARK_RETRY_MS` in tests. */
+const MARK_RETRY_MS = 30_000;
+
+/**
+ * Record a local-only command's marks while the workspace is still held —
+ * the caller holds the gate, in this process and across processes, until
+ * this returns. A save that fails — another process holding the record's
+ * lock, a full disk — is tried again for a while. If it still fails, the
+ * files the command changed would look public to any other process, so they
+ * are set aside in its private folder, where no cloud worker can read them;
+ * the note says where. Throws when even that is not possible.
+ */
+async function recordMarks(
+  policy: JailPolicy, marked: string[], changed: string[], root: string, own: string | undefined,
+): Promise<string | void> {
+  const deadline = Date.now() + (Number(process.env['CASCADE_MARK_RETRY_MS']) || MARK_RETRY_MS);
+  let failure: unknown;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      // After a failed save the marks are held in memory: the next attempts
+      // save those.
+      if (attempt === 0 || !policy.saveMarks) policy.taint?.(marked);
+      else policy.saveMarks();
+      return;
+    } catch (err) {
+      failure = err;
+      if (Date.now() >= deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(500, Math.max(0, deadline - Date.now()))));
+    }
+  }
+  const why = failure instanceof Error ? failure.message : String(failure);
+  const stuck = own ? changed.filter((rel) => !moveInto(path.join(root, rel), path.join(own, rel))) : changed;
+  if (stuck.length) {
+    throw new Error(`Could not record the files a local-only command changed as local-only (${why}), nor set them aside: ${stuck.join(', ')}. Keep other Cascade runs out of this project until privacy-derived.json can be written.`);
+  }
+  if (changed.length === 0) return;
+  policy.log(`[privacy] Could not record a local-only command's changes (${why}); set aside: ${changed.join(', ')}`);
+  return `Cascade could not record which files this local-only command changed (${why}), so they were moved to its private folder, outside the project, where no cloud worker can read them: ${listed(changed)}.`;
+}
+
+/** Up to ten `@private/` paths, and how many more. */
+function listed(rels: string[]): string {
+  return `${rels.slice(0, 10).map((rel) => `@private/${rel}`).join(', ')}${rels.length > 10 ? `, and ${rels.length - 10} more` : ''}`;
 }
 
 /**

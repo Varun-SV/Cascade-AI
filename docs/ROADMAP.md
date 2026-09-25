@@ -38,7 +38,8 @@ WebAssembly sandbox.
   writes may carry what it read: what it made in the workspace, found by
   stamping files before and after, is moved to its private folder in the
   project's state folder (outside the project, mounted writable for it
-  alone), and what it changed is marked local-only — with other tool calls
+  alone), and what it changed or deleted is marked local-only — set aside
+  there too if the mark cannot be saved — with other tool calls
   held until it ends (`src/tools/workspace-gate.ts`), in every run in the
   workspace: one gate per workspace in a process, and marker files in the
   project's state folder between processes.

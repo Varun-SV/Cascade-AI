@@ -461,6 +461,28 @@ describe('ToolRegistry — a local-only write that does not happen', () => {
   });
 });
 
+// Which file a local-only subtask chose to delete could say what it read,
+// and a cloud worker saw it was gone: the deletion was not marked.
+describe('ToolRegistry — a local-only deletion', () => {
+  it('marks what it deleted, so the rest sees it as local-only rather than missing', async () => {
+    const { PrivacyPaths } = await import('../core/privacy/paths.js');
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-delete-')));
+    await fs.writeFile(path.join(ws, 'a.md'), 'public a\n');
+    const privacy = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }], { workspaceRoot: ws });
+    const reg = new ToolRegistry(toolsConfig, ws);
+    reg.setPrivacyPaths(privacy);
+    const offline = { ...opts, isOffline: () => true };
+    await reg.execute('file_delete', { path: 'a.md' }, offline);
+    await expect(fs.stat(path.join(ws, 'a.md'))).rejects.toThrow();
+    expect(privacy.isLocalOnly('a.md')).toBe(true);
+    expect(new PrivacyPaths([], { workspaceRoot: ws }).isLocalOnly('a.md')).toBe(true);
+    // A deletion that did not happen leaves no mark.
+    await reg.execute('file_delete', { path: 'never-there.md' }, offline).catch(() => {});
+    expect(privacy.isLocalOnly('never-there.md')).toBe(false);
+    await fs.rm(ws, { recursive: true, force: true });
+  });
+});
+
 // A name a local-only subtask chose can carry what it read, and a cloud
 // worker's listing — or command — showed it. What it makes now goes to its
 // private folder, outside the project.

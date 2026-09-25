@@ -464,3 +464,29 @@ describe('ConfigManager + global credentials (the "AppImage forgets my keys" bug
     });
   });
 });
+
+// Two processes saving at once — two projects' keys moving out of their
+// configs, the desktop and the CLI — each read the whole file and replaced
+// it: the last writer dropped the other's project.
+describe('the credential store, written by two processes at once', () => {
+  it('keeps every change, whichever process made it', async () => {
+    const { execFile } = await import('node:child_process');
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-creds-race-')));
+    const module = path.resolve('src/config/global-credentials.ts');
+    const script = (who: string) => [
+      `const { adoptProjectCredentials } = await import(${JSON.stringify(module)});`,
+      `for (let i = 0; i < 25; i++) adoptProjectCredentials(${JSON.stringify(dir)}, '${who}-' + i, [{ type: 'openai', apiKey: 'sk-${who}-' + i }]);`,
+    ].join('\n');
+    const run = (who: string) => new Promise<void>((resolve, reject) => {
+      execFile(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script(who)], { cwd: process.cwd() }, (err) => (err ? reject(err) : resolve()));
+    });
+    try {
+      await Promise.all([run('a'), run('b')]);
+      const file = JSON.parse(fs.readFileSync(path.join(dir, 'credentials.json'), 'utf-8')) as { projects: Record<string, unknown> };
+      expect(Object.keys(file.projects).sort()).toEqual([...['a', 'b'].flatMap((w) => Array.from({ length: 25 }, (_, i) => `${w}-${i}`))].sort());
+      expect(fs.readdirSync(dir).filter((f) => f !== 'credentials.json')).toEqual([]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+});

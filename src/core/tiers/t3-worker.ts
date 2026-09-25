@@ -40,6 +40,7 @@ import {
 import { ACTING_INTEGRITY_RULE, appendToolRecord, describeHandedWork, describeToolRecord, recordToolCall, type HandedWork, type ToolRecordEntry } from './integrity.js';
 import { RedactionLayer } from '../audit/redaction.js';
 import { BROWSER_TOOL, BROWSER_WORKER_RULE } from './browser-planning.js';
+import { statePath, STATE } from '../../config/project-state.js';
 
 /**
  * Thrown by executeTool() when the underlying tool error indicates a condition
@@ -724,7 +725,11 @@ export class T3Worker extends BaseTier {
       const db = this.router.getWorldStateDB?.();
       if (db) {
         try {
-          db.addEntry(this.id, `Completed: ${assignment.subtaskTitle}. Output length: ${output.length} chars.`);
+          // Nothing about a local-only output, its length included: a planner
+          // on a cloud model reads these entries.
+          db.addEntry(this.id, this.localOnlyMatch
+            ? `Completed: ${assignment.subtaskTitle}. Output withheld (local-only).`
+            : `Completed: ${assignment.subtaskTitle}. Output length: ${output.length} chars.`);
         } catch (e) {
           this.log('Failed to write to World State DB');
         }
@@ -1490,7 +1495,10 @@ export class T3Worker extends BaseTier {
       return false;
     }
     if (typeof to === 'object') {
-      if (privacy.coversFile(to.file, root)) return true;
+      // Its private folder is local-only whole: nothing but a local-only
+      // subtask can reach what is there.
+      const own = statePath(root, STATE.private);
+      if (privacy.coversFile(to.file, root) || to.file.startsWith(own + path.sep)) return true;
       this.log(`Privacy: ${rel} is local-only — not copied into ${path.relative(root, to.file) || to.file}, which is not.`);
       return false;
     }

@@ -26,6 +26,7 @@ import { realPathOf } from '../../utils/real-path.js';
 import { LinkAliases } from '../../utils/link-aliases.js';
 import { statePath, STATE } from '../../config/project-state.js';
 import { stripTrailingSlashes } from '../../utils/net.js';
+import { withLock } from '../../utils/file-lock.js';
 // Same gitignore-style matcher used by .cascadeignore (src/config/ignore.ts),
 // so privacy patterns behave exactly like ignore patterns users already know.
 const ignore = (_ignoreModule as unknown as { default: () => Ignore }).default ?? (_ignoreModule as unknown as () => Ignore);
@@ -39,10 +40,6 @@ export interface PrivacyPathPolicy {
 /** Saves of any record made in this process, for `PrivacyPaths.sync`. */
 let saves = 0;
 
-/** How long a save waits for another run's to finish before giving up. */
-const LOCK_WAIT_MS = 5_000;
-/** A lock older than this was left by a run that ended holding it. */
-const STALE_LOCK_MS = 30_000;
 
 export class PrivacyPaths {
   private localOnly: Ignore;
@@ -136,6 +133,14 @@ export class PrivacyPaths {
     return added;
   }
 
+  /**
+   * Write the marks this run holds but the record does not — a save that
+   * failed — to the record. Throws if it still cannot.
+   */
+  saveUnsaved(): void {
+    if (this.unsaved.size > 0) this.saveDerived([], []);
+  }
+
   /** Forget records made for a write that did not happen. */
   removeDerived(relativePaths: string[]): void {
     this.sync();
@@ -159,7 +164,7 @@ export class PrivacyPaths {
     if (!file) return;
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      withLock(`${file}.lock`, () => {
+      withLock(`${file}.lock`, 'record a local-only file', () => {
         const next = new Set(readDerived(file));
         for (const rel of [...this.unsaved, ...added]) next.add(rel);
         for (const rel of removed) next.delete(rel);
@@ -244,29 +249,6 @@ function treeOf(paths: Iterable<string>): SegmentNode {
 function stampOf(file: string): string {
   const st = fs.statSync(file, { throwIfNoEntry: false });
   return st ? `${st.ino}:${st.mtimeMs}:${st.ctimeMs}:${st.size}` : '';
-}
-
-/**
- * Run `fn` holding a lock file other processes respect. A lock left by a
- * process that ended holding it is taken over once stale; waiting longer
- * than `LOCK_WAIT_MS` throws.
- */
-function withLock<T>(lock: string, fn: () => T): T {
-  const deadline = Date.now() + LOCK_WAIT_MS;
-  const pause = new Int32Array(new SharedArrayBuffer(4));
-  for (;;) {
-    try {
-      fs.writeFileSync(lock, String(process.pid), { flag: 'wx' });
-      break;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      const st = fs.statSync(lock, { throwIfNoEntry: false });
-      if (st && Date.now() - st.mtimeMs > STALE_LOCK_MS) { fs.rmSync(lock, { force: true }); continue; }
-      if (Date.now() > deadline) throw new Error(`Could not record a local-only file: ${lock} has been held for over ${LOCK_WAIT_MS / 1000}s.`);
-      Atomics.wait(pause, 0, 0, 10);
-    }
-  }
-  try { return fn(); } finally { fs.rmSync(lock, { force: true }); }
 }
 
 /** The recorded paths, or none when there is no record or it cannot be read. */

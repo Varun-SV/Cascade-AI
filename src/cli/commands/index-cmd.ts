@@ -14,6 +14,7 @@ import { ConfigManager } from '../../config/index.js';
 import { CascadeIgnore } from '../../config/ignore.js';
 import { PrivacyPaths } from '../../core/privacy/paths.js';
 import { statePath, STATE } from '../../config/project-state.js';
+import { WorkspaceGate } from '../../tools/workspace-gate.js';
 import { WorkspaceIndex } from '../../retrieval/workspace-index.js';
 import { embedderFromProviders } from '../../retrieval/embedder.js';
 import { LLMReranker, chatCompleterFromProviders } from '../../retrieval/rerank.js';
@@ -52,6 +53,11 @@ export async function indexCommand(dirPath?: string): Promise<void> {
     reranker,
     // Local-only files stay out: indexing would send them to the embedder.
     isIgnored: (abs) => ignore.isIgnored(abs, workspace) || privacy.coversFile(abs, workspace),
+    // …and so does what a local-only command in a run is writing meanwhile.
+    whileReading: async (read) => {
+      const leave = await WorkspaceGate.for(workspace).enter(false, privacy.hasPolicies());
+      try { return await read(); } finally { leave(); }
+    },
   });
 
   console.log(chalk.magenta(`\n  ◈ Indexing ${workspace}\n`));

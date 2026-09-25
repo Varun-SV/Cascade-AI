@@ -18,12 +18,14 @@
 //  goes on using them ahead of the machine-wide ones and of the environment,
 //  as it did when they were in its config.
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ProviderConfig } from '../types.js';
 import { GLOBAL_CREDENTIALS_FILE } from '../constants.js';
 import { normalizeAzureEndpoint } from './azure-endpoint.js';
 import { credentialEndpointsConflict } from './endpoint-identity.js';
+import { withLock } from '../utils/file-lock.js';
 
 interface CredentialsFile {
   version: 1;
@@ -138,15 +140,30 @@ function readCredentialsFile(globalDir: string): CredentialsFile {
   }
 }
 
-function writeCredentialsFile(globalDir: string, body: CredentialsFile): void {
-  const filePath = credentialsPath(globalDir);
+/**
+ * Change the file: read it and write it back holding its lock, so two
+ * processes saving at once — two projects, or the desktop and the CLI — each
+ * start from what the other wrote, rather than the last one dropping the
+ * other's change. The write goes through a file of this writer's own and a
+ * rename, so a reader never sees half of it.
+ */
+function updateCredentialsFile(globalDir: string, change: (file: CredentialsFile) => CredentialsFile): void {
   fs.mkdirSync(globalDir, { recursive: true, mode: 0o700 });
-  const tmp = `${filePath}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(body, null, 2), { encoding: 'utf-8', mode: 0o600 });
-  fs.renameSync(tmp, filePath);
-  // rename preserves the tmp file's 0600; chmod again defensively in case an
-  // older file existed with looser permissions.
-  try { fs.chmodSync(filePath, 0o600); } catch { /* best-effort */ }
+  const filePath = credentialsPath(globalDir);
+  withLock(`${filePath}.lock`, 'save the provider keys', () => {
+    const body = change(readCredentialsFile(globalDir));
+    const tmp = `${filePath}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(body, null, 2), { encoding: 'utf-8', mode: 0o600 });
+      fs.renameSync(tmp, filePath);
+    } catch (err) {
+      fs.rmSync(tmp, { force: true });
+      throw err;
+    }
+    // rename preserves the tmp file's 0600; chmod again defensively in case an
+    // older file existed with looser permissions.
+    try { fs.chmodSync(filePath, 0o600); } catch { /* best-effort */ }
+  });
 }
 
 /** Read the global credentials file. Missing or corrupt → empty list (never throws). */
@@ -186,12 +203,13 @@ function sameEntryIn(rows: ProviderConfig[], p: ProviderConfig): ProviderConfig 
  * this project's own keeps up with it, or goes when its key is removed.
  */
 export function saveProjectCredentials(globalDir: string, project: string, providers: ProviderConfig[]): void {
-  const file = readCredentialsFile(globalDir);
-  const own = (file.projects?.[project] ?? []).flatMap((mine) => {
-    const now = sameEntryIn(providers, mine);
-    return now && credentialled(now) ? [{ ...now }] : [];
+  updateCredentialsFile(globalDir, (file) => {
+    const own = (file.projects?.[project] ?? []).flatMap((mine) => {
+      const now = sameEntryIn(providers, mine);
+      return now && credentialled(now) ? [{ ...now }] : [];
+    });
+    return withProject(file, project, own, providers.filter(isPersistable));
   });
-  writeCredentialsFile(globalDir, withProject(file, project, own, providers.filter(isPersistable)));
 }
 
 /**
@@ -201,18 +219,19 @@ export function saveProjectCredentials(globalDir: string, project: string, provi
 export function adoptProjectCredentials(globalDir: string, project: string, providers: ProviderConfig[]): void {
   const withKeys = providers.filter(credentialled);
   if (withKeys.length === 0) return;
-  const file = readCredentialsFile(globalDir);
-  const shared = [...file.providers];
-  const own = [...(file.projects?.[project] ?? [])];
-  for (const p of withKeys) {
-    const mine = sameEntryIn(own, p);
-    if (mine) Object.assign(mine, { ...p });
-    else own.push({ ...p });
-    const there = sameEntryIn(shared, p);
-    if (!there) shared.push({ ...p });
-    else if (!credentialled(there)) Object.assign(there, { ...p });
-  }
-  writeCredentialsFile(globalDir, withProject(file, project, own, shared));
+  updateCredentialsFile(globalDir, (file) => {
+    const shared = [...file.providers];
+    const own = [...(file.projects?.[project] ?? [])];
+    for (const p of withKeys) {
+      const mine = sameEntryIn(own, p);
+      if (mine) Object.assign(mine, { ...p });
+      else own.push({ ...p });
+      const there = sameEntryIn(shared, p);
+      if (!there) shared.push({ ...p });
+      else if (!credentialled(there)) Object.assign(there, { ...p });
+    }
+    return withProject(file, project, own, shared);
+  });
 }
 
 function withProject(file: CredentialsFile, project: string, own: ProviderConfig[], shared: ProviderConfig[]): CredentialsFile {
@@ -230,8 +249,7 @@ function withProject(file: CredentialsFile, project: string, own: ProviderConfig
  * anything the user explicitly removed — meaning removal sticks too.
  */
 export function saveGlobalCredentials(globalDir: string, providers: ProviderConfig[]): void {
-  const file = readCredentialsFile(globalDir);
-  writeCredentialsFile(globalDir, { ...file, providers: providers.filter(isPersistable) });
+  updateCredentialsFile(globalDir, (file) => ({ ...file, providers: providers.filter(isPersistable) }));
 }
 
 /**
