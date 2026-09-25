@@ -7,6 +7,9 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
+import { resolveInWorkspace } from './utils/workspace-path.js';
+import { statePathFor } from '../config/project-state.js';
+import { realPathOf } from '../utils/real-path.js';
 
 export class GlobTool extends BaseTool {
   readonly name = 'glob';
@@ -29,9 +32,11 @@ export class GlobTool extends BaseTool {
 
   async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const pattern = input['pattern'] as string;
-    const searchPath = (input['path'] as string | undefined)
-      ? path.resolve(this.workspaceRoot, input['path'] as string)
-      : this.workspaceRoot;
+    const given = input['path'] as string | undefined;
+    // `@private/…` and `@screenshots/…` lead into the project's state folder,
+    // where the registry has let this call in; what is listed stays inside it.
+    const searchPath = given ? resolveInWorkspace(this.workspaceRoot, given) : this.workspaceRoot;
+    const stateRoot = given ? statePathFor(this.workspaceRoot, given.split(/[\\/]/)[0]!) : null;
 
     const found = await glob(pattern, {
       cwd: searchPath,
@@ -45,6 +50,7 @@ export class GlobTool extends BaseTool {
     const shown = this.listGate(options);
     const matches = found.filter((rel) => {
       const abs = path.resolve(searchPath, rel);
+      if (stateRoot) return isWithin(realPathOf(abs), realPathOf(stateRoot));
       return !this.isProtectedPath(abs) && shown(abs, false);
     });
 
@@ -68,4 +74,10 @@ export class GlobTool extends BaseTool {
     const lines = withMtime.map((f) => f.rel);
     return lines.join('\n');
   }
+}
+
+/** Whether `p` is `dir` or inside it. */
+function isWithin(p: string, dir: string): boolean {
+  const rel = path.relative(dir, p);
+  return !rel.startsWith('..') && !path.isAbsolute(rel);
 }

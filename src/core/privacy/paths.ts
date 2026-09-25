@@ -56,6 +56,8 @@ export class PrivacyPaths {
   /** Whether the record was looked at in the current job, and how many saves this process had made then (see `sync`). */
   private synced = false;
   private savesSeen = 0;
+  /** Whether the record has been read once. */
+  private loaded = false;
   /** Other names — hard links — for the local-only files, per workspace root asked about. */
   private aliases = new Map<string, LinkAliases>();
 
@@ -194,9 +196,24 @@ export class PrivacyPaths {
     this.synced = true;
     this.savesSeen = saves;
     const now = stampOf(file);
-    if (now === this.seen) return;
+    if (now === this.seen) {
+      // As it was when last read or written here — or not there, as at first.
+      this.loaded = true;
+      return;
+    }
     this.seen = now;
-    this.setDerived(new Set([...readDerived(file), ...this.unsaved]));
+    let recorded: string[];
+    try {
+      recorded = readDerived(file);
+    } catch (err) {
+      // Unreadable when first read: nothing to go on, so nothing goes on.
+      // Later: what was read before still holds, and a save — which would
+      // write over it — fails.
+      if (!this.loaded) throw err;
+      return;
+    }
+    this.loaded = true;
+    this.setDerived(new Set([...recorded, ...this.unsaved]));
   }
 
   private setDerived(paths: Set<string>): void {
@@ -251,14 +268,29 @@ function stampOf(file: string): string {
   return st ? `${st.ino}:${st.mtimeMs}:${st.ctimeMs}:${st.size}` : '';
 }
 
-/** The recorded paths, or none when there is no record or it cannot be read. */
+/**
+ * The recorded paths; none when there is no record. A record that is there
+ * but cannot be read — cut short, edited by hand — throws: taking it for
+ * none would make every file it lists readable to cloud models again.
+ */
 function readDerived(file: string): string[] {
+  let raw: string;
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as { paths?: unknown };
-    return Array.isArray(parsed.paths) ? parsed.paths.filter((p): p is string => typeof p === 'string' && p !== '') : [];
-  } catch {
-    return [];
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw unreadable(file, err);
   }
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch (err) { throw unreadable(file, err); }
+  const paths = (parsed as { paths?: unknown } | null)?.paths;
+  if (!Array.isArray(paths) || paths.some((p) => typeof p !== 'string')) throw unreadable(file, 'it is not a list of paths');
+  return (paths as string[]).filter((p) => p !== '');
+}
+
+function unreadable(file: string, why: unknown): Error {
+  const reason = why instanceof Error ? why.message : String(why);
+  return new Error(`Cascade cannot read ${file}, its record of the files local-only subtasks wrote (${reason}). Until it can, those files cannot be told from others: fix the file, or remove it to forget what it recorded.`);
 }
 
 /**

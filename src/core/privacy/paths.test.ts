@@ -196,3 +196,36 @@ describe('PrivacyPaths — what a local-only subtask wrote', () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 });
+
+// A record cut short or edited by hand was read as no record at all: every
+// file it listed was readable to cloud models again, and the next save wrote
+// over it.
+describe('PrivacyPaths — a record that cannot be read', () => {
+  it('refuses to start from it, keeps what it read before, and saves nothing over it', async () => {
+    const fs = await import('node:fs/promises');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { statePath, STATE } = await import('../../config/project-state.js');
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-derived-bad-')));
+    const record = statePath(root, STATE.privacyDerived);
+    try {
+      const policy = new PrivacyPaths([], { workspaceRoot: root });
+      policy.addDerived(['summary.md']);
+
+      for (const bad of ['{"version":1,"paths":["summ', '', '{"paths":"summary.md"}']) {
+        await fs.writeFile(record, bad);
+        expect(() => new PrivacyPaths([], { workspaceRoot: root })).toThrow(/cannot read/);
+      }
+      // A run that read it before keeps what it read — and adds nothing over it.
+      await new Promise((r) => setTimeout(r, 0));
+      expect(policy.isLocalOnly('summary.md')).toBe(true);
+      expect(() => policy.addDerived(['other.md'])).toThrow(/cannot read/);
+      expect(await fs.readFile(record, 'utf8')).toBe('{"paths":"summary.md"}');
+      // No record at all is no marks.
+      await fs.rm(record);
+      expect(new PrivacyPaths([], { workspaceRoot: root }).isLocalOnly('summary.md')).toBe(false);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});

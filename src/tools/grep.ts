@@ -10,6 +10,9 @@ import { glob } from 'glob';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
 import { WithheldError } from './file.js';
+import { resolveInWorkspace } from './utils/workspace-path.js';
+import { statePathFor } from '../config/project-state.js';
+import { realPathOf } from '../utils/real-path.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -52,9 +55,11 @@ export class GrepTool extends BaseTool {
 
   async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const pattern = input['pattern'] as string;
-    const searchPath = (input['path'] as string | undefined)
-      ? path.resolve(this.workspaceRoot, input['path'] as string)
-      : this.workspaceRoot;
+    const given = input['path'] as string | undefined;
+    // `@private/…` and `@screenshots/…` lead into the project's state folder,
+    // where the registry has let this call in; what is found stays inside it.
+    const searchPath = given ? resolveInWorkspace(this.workspaceRoot, given) : this.workspaceRoot;
+    const stateRoot = given ? statePathFor(this.workspaceRoot, given.split(/[\\/]/)[0]!) : null;
     const globPattern = input['glob'] as string | undefined;
     const outputMode = (input['output_mode'] as string | undefined) ?? 'content';
     const context = (input['context'] as number | undefined) ?? 0;
@@ -68,7 +73,7 @@ export class GrepTool extends BaseTool {
     try {
       if ((input['path'] as string | undefined) && (await fs.stat(searchPath)).isFile()) {
         const named = this.readGate(options, 'model');
-        if (!this.isProtectedPath(searchPath) && !named(searchPath)) {
+        if (!stateRoot && !this.isProtectedPath(searchPath) && !named(searchPath)) {
           throw new WithheldError(input['path'] as string);
         }
         mayRead = named;
@@ -76,6 +81,13 @@ export class GrepTool extends BaseTool {
     } catch (err) {
       if (err instanceof WithheldError) throw err;
     }
+
+    // Which files found may be shown: in the state folder, those that stay
+    // inside the folder named; elsewhere, those neither protected nor
+    // withheld from this caller.
+    const allowed = stateRoot
+      ? (abs: string) => isWithin(realPathOf(abs), realPathOf(stateRoot))
+      : (abs: string) => !this.isProtectedPath(abs) && mayRead(abs);
 
     // Try ripgrep first
     try {
@@ -86,14 +98,14 @@ export class GrepTool extends BaseTool {
         outputMode,
         context,
         caseInsensitive,
-        mayRead,
+        allowed,
       );
       return result;
     } catch {
       // ripgrep not available — fall back to Node.js scan
     }
 
-    return this.nodeScan(pattern, searchPath, globPattern, outputMode, context, caseInsensitive, mayRead);
+    return this.nodeScan(pattern, searchPath, globPattern, outputMode, context, caseInsensitive, allowed);
   }
 
   private async runRipgrep(
@@ -103,7 +115,7 @@ export class GrepTool extends BaseTool {
     outputMode: string,
     context: number,
     caseInsensitive: boolean,
-    mayRead: (absPath: string) => boolean,
+    shown: (absPath: string) => boolean,
   ): Promise<string> {
     const args: string[] = ['--no-heading'];
     if (caseInsensitive) args.push('-i');
@@ -126,10 +138,7 @@ export class GrepTool extends BaseTool {
       maxBuffer: 2 * 1024 * 1024,
     });
 
-    const allowed = (file: string): boolean => {
-      const abs = path.resolve(searchPath, file);
-      return !this.isProtectedPath(abs) && mayRead(abs);
-    };
+    const allowed = (file: string): boolean => shown(path.resolve(searchPath, file));
     let lines: string[];
     if (outputMode === 'files_with_matches') {
       lines = stdout.split('\0').map((file) => file.trim()).filter((file) => file && allowed(file));
@@ -175,7 +184,7 @@ export class GrepTool extends BaseTool {
     outputMode: string,
     context: number,
     caseInsensitive: boolean,
-    mayRead: (absPath: string) => boolean,
+    shown: (absPath: string) => boolean,
   ): Promise<string> {
     const flags = caseInsensitive ? 'gi' : 'g';
     let regex: RegExp;
@@ -203,7 +212,7 @@ export class GrepTool extends BaseTool {
 
     for (const rel of files) {
       const abs = path.join(searchPath, rel);
-      if (this.isProtectedPath(abs) || !mayRead(abs)) continue;
+      if (!shown(abs)) continue;
       let content: string;
       try {
         content = await fs.readFile(abs, 'utf-8');
@@ -246,4 +255,10 @@ export class GrepTool extends BaseTool {
     }
     return results.join('\n');
   }
+}
+
+/** Whether `p` is `dir` or inside it. */
+function isWithin(p: string, dir: string): boolean {
+  const rel = path.relative(dir, p);
+  return !rel.startsWith('..') && !path.isAbsolute(rel);
 }

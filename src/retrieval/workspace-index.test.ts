@@ -46,12 +46,12 @@ describe('WorkspaceIndex', () => {
     await fs.writeFile(file, 'export const notes = "public";');
     const marked = new Set<string>();
     const gate = WorkspaceGate.for(root);
-    const command = await gate.enter(true);
+    const command = await gate.enter('alone');
     const idx = new WorkspaceIndex({
       root, db, embedder: new FakeEmbedder(),
       isIgnored: (abs) => marked.has(abs),
       whileReading: async (read) => {
-        const leave = await gate.enter(false);
+        const leave = await gate.enter('tools');
         try { return await read(); } finally { leave(); }
       },
     });

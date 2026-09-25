@@ -461,6 +461,73 @@ describe('ToolRegistry — a local-only write that does not happen', () => {
   });
 });
 
+// A workspace that holds Cascade's own folder — a home folder opened as a
+// project — had it in reach of every file tool: the keys, and every project's
+// state, local-only outputs included.
+describe('ToolRegistry — a workspace that holds Cascade\'s own folder', () => {
+  it('keeps it out of reach of the file tools and the code index', async () => {
+    const { CascadeIgnore } = await import('../config/ignore.js');
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-home-ws-')));
+    const saved = process.env['CASCADE_GLOBAL_DIR'];
+    process.env['CASCADE_GLOBAL_DIR'] = path.join(ws, '.cascade-ai');
+    try {
+      await fs.mkdir(path.join(ws, '.cascade-ai', 'projects', 'p', 'private'), { recursive: true });
+      await fs.writeFile(path.join(ws, '.cascade-ai', 'credentials.json'), '{"providers":[{"apiKey":"SECRET-KEY"}]}');
+      await fs.writeFile(path.join(ws, '.cascade-ai', 'projects', 'p', 'private', 'out.md'), 'SECRET-OUTPUT');
+      await fs.writeFile(path.join(ws, 'notes.md'), 'public');
+      const reg = new ToolRegistry(toolsConfig, ws);
+      await expect(reg.execute('file_read', { path: '.cascade-ai/credentials.json' }, opts)).rejects.toThrow(/protected/);
+      await expect(reg.execute('file_read', { path: '.cascade-ai/projects/p/private/out.md' }, opts)).rejects.toThrow(/protected/);
+      expect(await reg.execute('grep', { pattern: 'SECRET', output_mode: 'content' }, opts)).not.toMatch(/SECRET-(KEY|OUTPUT)/);
+      const ignore = new CascadeIgnore();
+      expect(ignore.isIgnored(path.join(ws, '.cascade-ai', 'credentials.json'), ws)).toBe(true);
+      expect(ignore.isIgnored(path.join(ws, 'notes.md'), ws)).toBe(false);
+    } finally {
+      if (saved === undefined) delete process.env['CASCADE_GLOBAL_DIR']; else process.env['CASCADE_GLOBAL_DIR'] = saved;
+      await fs.rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+// grep and glob took `@private` as a folder in the workspace: a local-only
+// subtask could read its own outputs but not search them.
+describe('ToolRegistry — searching a local-only subtask\'s private folder', () => {
+  it('finds its outputs there, and nothing beside the folder', async () => {
+    const { PrivacyPaths } = await import('../core/privacy/paths.js');
+    const { statePath } = await import('../config/project-state.js');
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-private-search-')));
+    const reg = new ToolRegistry(toolsConfig, ws);
+    reg.setPrivacyPaths(new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }], { workspaceRoot: ws }));
+    const offline = { ...opts, isOffline: () => true };
+    await reg.execute('file_write', { path: 'notes.md', content: 'MARK private' }, offline);
+    await fs.writeFile(path.join(ws, 'public.md'), 'MARK public');
+    await fs.writeFile(statePath(ws, 'beside.md'), 'MARK beside');
+    const found = await reg.execute('grep', { pattern: 'MARK', path: '@private' }, offline);
+    expect(found).toContain('MARK private');
+    expect(found).not.toMatch(/MARK (public|beside)/);
+    expect(await reg.execute('glob', { pattern: '**/*.md', path: '@private' }, offline)).toContain('notes.md');
+    expect(await reg.execute('glob', { pattern: '../*.md', path: '@private' }, offline)).not.toContain('beside');
+    await fs.rm(ws, { recursive: true, force: true });
+  });
+});
+
+// A file tool checks a path, then opens it; a command running meanwhile
+// could swap it for a symlink to a secret in between.
+describe('ToolRegistry — tool calls and commands', () => {
+  it('holds a tool call while a command runs', async () => {
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-apart-')));
+    await fs.writeFile(path.join(ws, 'a.md'), 'public\n');
+    const reg = new ToolRegistry({ ...toolsConfig, processJail: 'off' } as never, ws);
+    const order: string[] = [];
+    const command = reg.execute('shell', { command: 'sleep 0.4' }, { ...opts, requireApproval: false }).then(() => order.push('command'));
+    await new Promise((r) => setTimeout(r, 100));
+    await reg.execute('file_read', { path: 'a.md' }, opts).then(() => order.push('read'));
+    await command;
+    expect(order).toEqual(['command', 'read']);
+    await fs.rm(ws, { recursive: true, force: true });
+  });
+});
+
 // Which file a local-only subtask chose to delete could say what it read,
 // and a cloud worker saw it was gone: the deletion was not marked.
 describe('ToolRegistry — a local-only deletion', () => {

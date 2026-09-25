@@ -55,7 +55,7 @@ export async function indexCommand(dirPath?: string): Promise<void> {
     isIgnored: (abs) => ignore.isIgnored(abs, workspace) || privacy.coversFile(abs, workspace),
     // …and so does what a local-only command in a run is writing meanwhile.
     whileReading: async (read) => {
-      const leave = await WorkspaceGate.for(workspace).enter(false, privacy.hasPolicies());
+      const leave = await WorkspaceGate.for(workspace).enter('tools', privacy.hasPolicies());
       try { return await read(); } finally { leave(); }
     },
   });

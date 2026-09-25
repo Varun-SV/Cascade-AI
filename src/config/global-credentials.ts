@@ -122,22 +122,32 @@ function isPersistable(p: ProviderConfig): boolean {
 const isProvider = (p: unknown): p is ProviderConfig =>
   Boolean(p) && typeof (p as { type?: unknown }).type === 'string';
 
-/** The whole file. Missing or corrupt → empty (never throws). */
-function readCredentialsFile(globalDir: string): CredentialsFile {
+/**
+ * The whole file. Missing → empty. One that is there but cannot be read —
+ * cut short, edited by hand — reads as empty too, unless `strict`: a change
+ * written over it would lose every key it holds, so a change throws instead.
+ */
+function readCredentialsFile(globalDir: string, strict = false): CredentialsFile {
+  const file = credentialsPath(globalDir);
+  let parsed: Partial<CredentialsFile>;
   try {
-    const parsed = JSON.parse(fs.readFileSync(credentialsPath(globalDir), 'utf-8')) as Partial<CredentialsFile>;
-    const projects: Record<string, ProviderConfig[]> = {};
-    for (const [id, rows] of Object.entries(parsed.projects ?? {})) {
-      if (Array.isArray(rows)) projects[id] = rows.filter(isProvider);
+    parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as Partial<CredentialsFile>;
+    if (!parsed || typeof parsed !== 'object' || (parsed.providers !== undefined && !Array.isArray(parsed.providers))) {
+      throw new Error('it is not a list of providers');
     }
-    return {
-      version: 1,
-      providers: Array.isArray(parsed.providers) ? parsed.providers.filter(isProvider) : [],
-      ...(Object.keys(projects).length ? { projects } : {}),
-    };
-  } catch {
-    return { version: 1, providers: [] };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT' || !strict) return { version: 1, providers: [] };
+    throw new Error(`The provider keys were not saved: ${file} cannot be read (${err instanceof Error ? err.message : String(err)}), and saving would replace every key in it. Fix the file, or move it aside to start afresh.`);
   }
+  const projects: Record<string, ProviderConfig[]> = {};
+  for (const [id, rows] of Object.entries(parsed.projects ?? {})) {
+    if (Array.isArray(rows)) projects[id] = rows.filter(isProvider);
+  }
+  return {
+    version: 1,
+    providers: Array.isArray(parsed.providers) ? parsed.providers.filter(isProvider) : [],
+    ...(Object.keys(projects).length ? { projects } : {}),
+  };
 }
 
 /**
@@ -151,7 +161,7 @@ function updateCredentialsFile(globalDir: string, change: (file: CredentialsFile
   fs.mkdirSync(globalDir, { recursive: true, mode: 0o700 });
   const filePath = credentialsPath(globalDir);
   withLock(`${filePath}.lock`, 'save the provider keys', () => {
-    const body = change(readCredentialsFile(globalDir));
+    const body = change(readCredentialsFile(globalDir, true));
     const tmp = `${filePath}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
     try {
       fs.writeFileSync(tmp, JSON.stringify(body, null, 2), { encoding: 'utf-8', mode: 0o600 });
@@ -236,7 +246,7 @@ export function adoptProjectCredentials(globalDir: string, project: string, prov
 
 /** A project's own keys, under the name its state folder has now — after the project moved. */
 export function renameProjectCredentials(globalDir: string, from: string, to: string): void {
-  if (!readCredentialsFile(globalDir).projects?.[from]) return;
+  if (!readCredentialsFile(globalDir, true).projects?.[from]) return;
   updateCredentialsFile(globalDir, (file) => {
     const projects = { ...(file.projects ?? {}) };
     const own = projects[from];

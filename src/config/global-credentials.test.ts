@@ -490,3 +490,22 @@ describe('the credential store, written by two processes at once', () => {
     }
   }, 60_000);
 });
+
+// A store cut short or edited by hand read as empty, and the next save
+// replaced it: every key in it, the machine's and each project's, gone.
+describe('a credential store that cannot be read', () => {
+  it('is read as holding nothing, and never written over', () => {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-creds-bad-')));
+    const file = path.join(dir, 'credentials.json');
+    try {
+      for (const bad of ['{"version":1,"providers":[{"type":"openai","apiKey":"sk-', 'null', '{"providers":"x"}']) {
+        fs.writeFileSync(file, bad);
+        expect(loadGlobalCredentials(dir)).toEqual([]);
+        expect(() => saveGlobalCredentials(dir, [{ type: 'anthropic', apiKey: 'sk-new' } as ProviderConfig])).toThrow(/cannot be read/);
+        expect(fs.readFileSync(file, 'utf-8')).toBe(bad);
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

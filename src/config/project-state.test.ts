@@ -189,6 +189,30 @@ describe('a project that moves', () => {
     expect(mgr.getConfig().providers.find((p) => p.type === 'anthropic')?.apiKey).toBe('sk-own');
   });
 
+  // The folder moved but its own keys stayed filed under the old name, for
+  // good, when the store could not take the change the first time.
+  it('files its own keys under the new name once the store takes the change', async () => {
+    const before = tempDir('cascade-moving-keys-');
+    fs.mkdirSync(path.join(before, '.cascade'));
+    fs.writeFileSync(path.join(before, '.cascade', 'config.json'), JSON.stringify({ providers: [{ type: 'anthropic', apiKey: 'sk-own' }] }));
+    await new ConfigManager(before).load();
+    const oldName = path.basename(projectStateDir(before));
+    const store = path.join(globalDir(), 'credentials.json');
+    const good = fs.readFileSync(store, 'utf-8');
+    fs.writeFileSync(store, '{"version":1,');
+    const after = `${before}-renamed`;
+    fs.renameSync(before, after);
+    made.push(after);
+
+    const newName = path.basename(projectStateDir(after));
+    expect(stateNotices(after).join(' ')).toMatch(/could not yet file this project's own provider keys/);
+    fs.writeFileSync(store, good);
+    migrateProjectState(after);
+    expect(credentials().projects?.[newName]?.[0]?.apiKey).toBe('sk-own');
+    expect(credentials().projects?.[oldName]).toBeUndefined();
+    expect(fs.readFileSync(path.join(projectStateDir(after), 'project.json'), 'utf-8')).not.toContain('keysFrom');
+  });
+
   it('starts a copy afresh, saying where the state of the one that is gone is', () => {
     const parent = tempDir('cascade-copying-');
     const original = path.join(parent, 'app');

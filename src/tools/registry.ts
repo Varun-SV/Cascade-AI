@@ -19,7 +19,7 @@ import { DEFAULT_APPROVAL_REQUIRED } from '../constants.js';
 import { globalDir, projectStateDir, statePath, statePathFor, STATE } from '../config/project-state.js';
 import { literalPattern, type PrivacyPaths } from '../core/privacy/paths.js';
 import { homeSecrets, ProcessJail } from './jail/process-jail.js';
-import { BUILT_IN_PROTECTED, READ_ONLY_POLICY } from '../config/ignore.js';
+import { BUILT_IN_PROTECTED, insideCascadeState, READ_ONLY_POLICY } from '../config/ignore.js';
 import { realPathOf } from '../utils/real-path.js';
 import type { BaseTool } from './base.js';
 import { WorkspaceGate } from './workspace-gate.js';
@@ -380,7 +380,11 @@ export class ToolRegistry extends EventEmitter {
     // is marked before the write (below, alone), a command's changes when it
     // ends (the jail finds them, and moves what it made).
     if (tool.delegatesToTools) return tool.execute(input, options);
-    const leave = await this.gate.enter(offline && (COMMAND_TOOLS.has(toolName) || CHANGE_TOOLS.has(toolName)), this.acrossProcesses());
+    // A command runs apart from tool calls: one could swap a path a tool
+    // has checked for a symlink before the tool opens it (workspace-gate.ts).
+    const mode = offline && (COMMAND_TOOLS.has(toolName) || CHANGE_TOOLS.has(toolName)) ? 'alone'
+      : COMMAND_TOOLS.has(toolName) ? 'commands' : 'tools';
+    const leave = await this.gate.enter(mode, this.acrossProcesses());
     // Checked, marked and unmarked while the write runs alone: another
     // local-only write to the same file cannot share — and then lose — a
     // mark, and no command can link the file elsewhere in between.
@@ -412,7 +416,7 @@ export class ToolRegistry extends EventEmitter {
    * before it is marked.
    */
   async whileShared<T>(fn: () => Promise<T>): Promise<T> {
-    const leave = await this.gate.enter(false, this.acrossProcesses());
+    const leave = await this.gate.enter('tools', this.acrossProcesses());
     try {
       return await fn();
     } finally {
@@ -593,6 +597,7 @@ export class ToolRegistry extends EventEmitter {
    */
   isProtected(absPath: string): boolean {
     if (this.protectedByName(absPath, this.workspaceRoot)) return true;
+    if (insideCascadeState(absPath, this.workspaceRoot)) return true;
     const real = realPathOf(absPath);
     if (real !== absPath && this.protectedByName(real, realPathOf(this.workspaceRoot))) return true;
     if (this.protectedFiles.has(path.resolve(absPath)) || this.protectedFiles.has(real)) return true;

@@ -7,6 +7,8 @@ import path from 'node:path';
 import * as _ignoreModule from 'ignore';
 import type { Ignore } from 'ignore';
 import { LinkAliases } from '../utils/link-aliases.js';
+import { realPathOf } from '../utils/real-path.js';
+import { globalDir, projectStateDir } from './project-state.js';
 // ignore is a CJS package — access .default under NodeNext ESM interop
 const ignore = (_ignoreModule as unknown as { default: () => Ignore }).default ?? (_ignoreModule as unknown as () => Ignore);
 
@@ -96,6 +98,9 @@ export class CascadeIgnore {
       // hands it POSIX paths explicitly, and so does this.
       const relative = native.split(path.sep).join('/');
       if (this.builtIn.ignores(relative) || this.ig.ignores(relative)) return true;
+      // Cascade's own folder, when the workspace holds it — a home folder
+      // opened as one: every project's state, and the keys.
+      if (workspacePath && insideCascadeState(path.resolve(workspacePath, filePath), workspacePath)) return true;
       // A hard link to a matched file is that file under another name — the
       // code index would otherwise read `.env` as `src/config.ts`.
       if (!workspacePath) return false;
@@ -150,4 +155,18 @@ build/
 Thumbs.db
 `;
   await fs.writeFile(filePath, content, 'utf-8');
+}
+
+/**
+ * Whether a path lies in Cascade's global folder, or in the workspace's
+ * state folder where a host keeps it elsewhere — through symlinks too.
+ * Outside a workspace these are out of every tool's reach anyway; one that
+ * holds them, such as a home folder, must not open them either.
+ */
+export function insideCascadeState(absPath: string, workspacePath: string): boolean {
+  const real = realPathOf(absPath);
+  return [globalDir(), projectStateDir(workspacePath)].some((dir) => {
+    const rel = path.relative(realPathOf(dir), real);
+    return !rel.startsWith('..') && !path.isAbsolute(rel);
+  });
 }

@@ -207,7 +207,12 @@ export class ProcessJail {
       for (const dir of await this.gitDirsToHide(opts.offline)) hidden.push({ path: dir, dir: true });
       hidden.push(...secretsToHide(this.policy.hiddenSecrets?.() ?? []));
     }
-    const frozen = (this.policy.readOnlyFiles?.() ?? []).flatMap((f) => {
+    // Read-only besides: what decides what is protected, and — to every
+    // command but the git tool's — git's own configuration, where a command
+    // could name a program for the git tool to run with the credentials it
+    // keeps (`gitConfigFiles`).
+    const gitConfig = opts.keepGit ? [] : await gitConfigFiles(this.policy.workspaceRoot);
+    const frozen = [...(this.policy.readOnlyFiles?.() ?? []), ...gitConfig].flatMap((f) => {
       try { return fs.lstatSync(f).isFile() ? [fs.realpathSync(f)] : []; } catch { return []; }
     });
 
@@ -546,6 +551,22 @@ export function homeSecrets(home = os.homedir(), configHome = process.env['XDG_C
     ].map((rel) => path.join(home, rel)),
     ...config.flatMap((dir) => ['gcloud', 'gh', 'hub', 'git/credentials', 'doctl', 'op', 'containers/auth.json'].map((rel) => path.join(dir, rel))),
   ];
+}
+
+/**
+ * Git's configuration files: the repository's (its own git directory's and
+ * the common one's, a worktree's too), the user's global ones and the
+ * system's. What they name — a credential helper, a filter, an ssh command —
+ * the git tool runs with the credentials it keeps in view.
+ */
+export async function gitConfigFiles(root: string, home = os.homedir(), configHome = process.env['XDG_CONFIG_HOME']): Promise<string[]> {
+  const repo = (await gitDirsOf(root)).flatMap((dir) => [path.join(dir, 'config'), path.join(dir, 'config.worktree')]);
+  return [...repo, ...globalGitConfigFiles(home, configHome), '/etc/gitconfig'];
+}
+
+/** The user's global git configuration files, in the order git reads them. */
+export function globalGitConfigFiles(home = os.homedir(), configHome = process.env['XDG_CONFIG_HOME']): string[] {
+  return [path.join(configHome ? path.resolve(configHome) : path.join(home, '.config'), 'git', 'config'), path.join(home, '.gitconfig')];
 }
 
 /** Those of `paths` that are there, as masks: a folder whole, and what a symlink among them leads to. */

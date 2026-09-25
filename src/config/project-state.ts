@@ -82,7 +82,10 @@ export function projectStateDir(workspacePath: string): string {
       if (!chosen && !fs.existsSync(dir)) followMove(root, dir);
       makePrivate(chosen ? [dir] : [globalDir(), path.join(globalDir(), 'projects'), dir]);
       movedIn.set(dir, moveLegacyState(workspacePath, dir));
-      if (!chosen) recordIdentity(root, dir);
+      if (!chosen) {
+        recordIdentity(root, dir);
+        moveOwnKeys(dir);
+      }
     } catch { /* left to whatever opens it to report */ }
   }
   return dir;
@@ -91,7 +94,11 @@ export function projectStateDir(workspacePath: string): string {
 /** What each state folder was made for: its project's path, and what that folder is on disk. */
 const IDENTITY_FILE = 'project.json';
 
-interface ProjectIdentity { path: string; dev: string; ino: string; born: string }
+interface ProjectIdentity {
+  path: string; dev: string; ino: string; born: string;
+  /** The state folder's name before the project moved, while its own keys are still filed under it. */
+  keysFrom?: string;
+}
 
 /** The folder's identity on disk: device and inode, which a rename or `mv` on one disk keeps, and when it was made. */
 function identityOf(root: string): Omit<ProjectIdentity, 'path'> | undefined {
@@ -107,7 +114,7 @@ function readIdentity(dir: string): ProjectIdentity | undefined {
   try {
     const parsed = JSON.parse(fs.readFileSync(path.join(dir, IDENTITY_FILE), 'utf-8')) as Partial<ProjectIdentity>;
     return typeof parsed.path === 'string' && typeof parsed.dev === 'string' && typeof parsed.ino === 'string'
-      ? { path: parsed.path, dev: parsed.dev, ino: parsed.ino, born: String(parsed.born ?? '0') }
+      ? { path: parsed.path, dev: parsed.dev, ino: parsed.ino, born: String(parsed.born ?? '0'), ...(typeof parsed.keysFrom === 'string' ? { keysFrom: parsed.keysFrom } : {}) }
       : undefined;
   } catch {
     return undefined;
@@ -120,12 +127,31 @@ function sameFolder(a: Omit<ProjectIdentity, 'path'>, b: Omit<ProjectIdentity, '
   return a.dev === b.dev && a.ino === b.ino && (a.born === '0' || b.born === '0' || a.born === b.born);
 }
 
-function recordIdentity(root: string, dir: string): void {
+function recordIdentity(root: string, dir: string, keysFrom?: string): void {
   const now = identityOf(root);
   if (!now) return;
   const was = readIdentity(dir);
-  if (was && was.path === root && sameFolder(was, now)) return;
-  fs.writeFileSync(path.join(dir, IDENTITY_FILE), JSON.stringify({ path: root, ...now }, null, 2), { mode: 0o600 });
+  const pending = keysFrom ?? was?.keysFrom;
+  if (was && was.path === root && sameFolder(was, now) && was.keysFrom === pending) return;
+  fs.writeFileSync(path.join(dir, IDENTITY_FILE), JSON.stringify({ path: root, ...now, ...(pending ? { keysFrom: pending } : {}) }, null, 2), { mode: 0o600 });
+}
+
+/**
+ * A moved project's own keys, filed under its state folder's old name, are
+ * filed under the new one — tried again each time the project is opened
+ * until the credential store takes the change.
+ */
+function moveOwnKeys(dir: string): void {
+  const record = readIdentity(dir);
+  if (!record?.keysFrom) return;
+  try {
+    renameProjectCredentials(globalDir(), record.keysFrom, path.basename(dir));
+  } catch (err) {
+    notices.set(dir, [...(notices.get(dir) ?? []), `Cascade could not yet file this project's own provider keys under its new name (${err instanceof Error ? err.message : String(err)}); it tries again each time the project is opened, and until then the machine-wide keys are used.`]);
+    return;
+  }
+  const { keysFrom: _done, ...rest } = record;
+  fs.writeFileSync(path.join(dir, IDENTITY_FILE), JSON.stringify(rest, null, 2), { mode: 0o600 });
 }
 
 /**
@@ -151,7 +177,8 @@ function followMove(root: string, dir: string): void {
     if (there && sameFolder(there, was)) continue; // still where it was
     if (sameFolder(was, now)) {
       fs.renameSync(other, dir);
-      try { renameProjectCredentials(globalDir(), name, path.basename(dir)); } catch { /* the keys stay under the old name */ }
+      // Its own keys follow once it is recorded where it is (moveOwnKeys).
+      recordIdentity(root, dir, name);
       notices.set(dir, [...(notices.get(dir) ?? []), `Cascade found this project's state from ${was.path}, where it was before it moved, and uses it here.`]);
       return;
     }
@@ -243,6 +270,7 @@ export function migrateProjectState(workspacePath: string): string[] {
   const dir = projectStateDir(workspacePath);
   const moved = [...(movedIn.get(dir) ?? []), ...moveLegacyState(workspacePath, dir)];
   movedIn.delete(dir);
+  if (!named.has(realRoot(workspacePath))) moveOwnKeys(dir);
   return moved;
 }
 

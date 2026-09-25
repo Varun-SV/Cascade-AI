@@ -244,7 +244,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and failing that, the files it changed are moved to its private folder
   rather than left where another process could read them. Runs sharing a
   workspace share the record: each merges its changes in under a lock, and
-  sees another's as they are made. The code index reads each file while no
+  sees another's as they are made. A record that cannot be read — cut
+  short, edited by hand — stops a run starting rather than reading as none,
+  and is never written over; nor is a credential store that cannot be read. The code index reads each file while no
   local-only command can write, in any run or process, so it never embeds
   what one is writing before it is marked. A planner reads nothing of a
   local-only result from the project's world state, not even its length. Its commands write nowhere else (their
@@ -280,6 +282,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deleted branch, an amended commit, a file staged and unstaged — whose
   contents no name tells; the `git` tool keeps working, leaves them out of
   its diffs and of what it stages or stashes (where they read as empty),
+  never runs a hook — git's configuration files are read-only to commands,
+  so none can name a program for it to run with the credentials it keeps —
   and refuses a push that would send a commit holding one, and runs
   no hook and none of the global or system git or ssh configuration there,
   since a command could rewrite those and git would run what they name with
@@ -288,6 +292,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capabilities, and a local-only worker's commands get no network and no
   Unix sockets, which would reach host daemons such as Docker's. A symlink
   whose name is covered hides what it leads to, a whole directory included.
+  Tool calls wait while a command runs, and a command for the tool calls in
+  progress, so no command can swap a path a tool has checked for a symlink
+  before the tool opens it.
   On macOS, `sandbox-exec` denies the same paths, and a local-only worker
   cannot run commands: nothing there stops such a command from
   hard-linking a file from outside the workspace in and writing to it, or

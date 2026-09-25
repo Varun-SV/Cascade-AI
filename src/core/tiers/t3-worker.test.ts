@@ -1040,7 +1040,7 @@ describe('privacy.paths, enforced when a file is read', () => {
         assignment,
         setup: async (root) => {
           await writeFile(join(root, 'out.md'), 'done\n');
-          const leave = await WorkspaceGate.for(root).enter(true);
+          const leave = await WorkspaceGate.for(root).enter('alone');
           setTimeout(() => { released = true; leave(); }, 300);
         },
       });

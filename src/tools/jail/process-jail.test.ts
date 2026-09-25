@@ -1118,7 +1118,10 @@ describe('the git tool where its store holds what commands may not see', () => {
     expect(g('log', '-1', '--format=%an <%ae> %s')).toBe('Global Name <global@example.com> revise');
   });
 
-  it('leaves a repository with nothing hidden in its store as it was', async () => {
+  // A command could plant a hook — in .git/hooks, or a husky folder in the
+  // workspace — for the next commit here to run with the credentials this
+  // tool keeps in view. It runs none, wherever the store stands.
+  it('runs no hook where nothing in the store is hidden either, and keeps the repository\'s own settings', async () => {
     const clean = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-hermetic-clean-')));
     const c = (...args: string[]) => execFileSync('git', ['-C', clean, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' });
     c('init', '-q');
@@ -1130,8 +1133,58 @@ describe('the git tool where its store holds what commands may not see', () => {
     const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {} } as never, clean);
     await reg.execute('git', { operation: 'add', args: ['a.md'] }, exec);
     await reg.execute('git', { operation: 'commit', args: ['b'] }, exec);
-    expect((await fs.stat(path.join(clean, 'hook-ran'))).isFile()).toBe(true);
+    await expect(fs.stat(path.join(clean, 'hook-ran'))).rejects.toThrow();
+    expect(c('log', '-1', '--format=%an <%ae>').trim()).toBe('Local <local@example.com>');
     await fs.rm(clean, { recursive: true, force: true });
+  });
+
+  // One made after Cascade started — where there was none to keep
+  // read-only — is not read.
+  it('reads no global git configuration made after it started', async () => {
+    const clean = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-late-config-')));
+    const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-late-home-')));
+    const savedHome = process.env['HOME'];
+    const savedXdg = process.env['XDG_CONFIG_HOME'];
+    try {
+      execFileSync('git', ['-C', clean, 'init', '-q']);
+      execFileSync('git', ['-C', clean, 'config', 'user.email', 'local@example.com']);
+      await fs.writeFile(path.join(clean, 'a.md'), 'a\n');
+      process.env['HOME'] = home;
+      delete process.env['XDG_CONFIG_HOME'];
+      const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {} } as never, clean);
+      await fs.writeFile(path.join(home, '.gitconfig'), '[user]\n\tname = Planted\n');
+      await reg.execute('git', { operation: 'add', args: ['a.md'] }, exec);
+      await reg.execute('git', { operation: 'commit', args: ['a'] }, exec).catch(() => {});
+      const author = (() => { try { return execFileSync('git', ['-C', clean, 'log', '-1', '--format=%an'], { encoding: 'utf8', env: { ...process.env, HOME: os.tmpdir() } }).trim(); } catch { return ''; } })();
+      expect(author).not.toBe('Planted');
+    } finally {
+      process.env['HOME'] = savedHome;
+      if (savedXdg === undefined) delete process.env['XDG_CONFIG_HOME']; else process.env['XDG_CONFIG_HOME'] = savedXdg;
+      await fs.rm(clean, { recursive: true, force: true });
+      await fs.rm(home, { recursive: true, force: true });
+    }
+  });
+
+  // …nor could it name one in git's configuration: a credential helper, a
+  // filter, an ssh command the git tool would run.
+  it.skipIf(!bwrapWorks)('keeps git\'s configuration read-only to commands', async () => {
+    const clean = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-frozen-config-')));
+    const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-frozen-home-')));
+    const savedHome = process.env['HOME'];
+    try {
+      execFileSync('git', ['-C', clean, 'init', '-q']);
+      await fs.writeFile(path.join(home, '.gitconfig'), '[user]\n\tname = Global\n');
+      process.env['HOME'] = home;
+      const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {} } as never, clean);
+      const out = await reg.execute('shell', { command: 'git config credential.helper "!touch /tmp/x" 2>&1; echo "[core]" >> "$HOME/.gitconfig" 2>&1; true' }, exec);
+      expect(out).toMatch(/Read-only file system|Device or resource busy|could not/i);
+      expect(await fs.readFile(path.join(clean, '.git', 'config'), 'utf8')).not.toContain('credential');
+      expect(await fs.readFile(path.join(home, '.gitconfig'), 'utf8')).not.toContain('[core]');
+    } finally {
+      process.env['HOME'] = savedHome;
+      await fs.rm(clean, { recursive: true, force: true });
+      await fs.rm(home, { recursive: true, force: true });
+    }
   });
 });
 

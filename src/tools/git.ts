@@ -9,8 +9,28 @@ import path from 'node:path';
 import { simpleGit, type SimpleGit } from 'simple-git';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
+import { globalGitConfigFiles } from './jail/process-jail.js';
+
+/** Where the git tool looks for hooks: nowhere. */
+const NO_HOOKS = `core.hooksPath=${process.platform === 'win32' ? 'NUL' : '/dev/null'}`;
+
+/**
+ * Settings that keep git to the global and system configuration files there
+ * were when Cascade started (see gitFor).
+ */
+function configAtStart(): Record<string, string> {
+  if (process.platform === 'win32') return {};
+  const env: Record<string, string> = {};
+  const globals = globalGitConfigFiles().filter((file) => fs.existsSync(file));
+  if (globals.length === 0) env['GIT_CONFIG_GLOBAL'] = '/dev/null';
+  else if (globals.length === 1) env['GIT_CONFIG_GLOBAL'] = globals[0]!;
+  if (process.platform === 'linux' && !fs.existsSync('/etc/gitconfig')) env['GIT_CONFIG_NOSYSTEM'] = '1';
+  return env;
+}
 
 export class GitTool extends BaseTool {
+  private readonly configAtStart = configAtStart();
+
   readonly name = 'git';
   readonly description = 'Execute git operations: status, diff, log, add, commit, branch, push, pull.';
   readonly inputSchema = {
@@ -129,17 +149,24 @@ export class GitTool extends BaseTool {
    * caller's git changed local-only (Launch.done).
    */
   private async gitFor(cwd: string, offline: boolean): Promise<{ git: SimpleGit; done: () => Promise<void> }> {
-    const plain = { git: simpleGit(cwd), done: async () => {} };
+    // No hooks, ever: a command could have written one — into .git/hooks, or
+    // a husky folder in the workspace — for the next commit here to run with
+    // the credentials this tool keeps in view.
+    const plain = { git: simpleGit({ baseDir: cwd, config: [NO_HOOKS], unsafe: { allowUnsafeHooksPath: true } }), done: async () => {} };
     if (!this.jail) return plain;
     const hermetic = process.platform !== 'win32' && await this.jail.gitStoreHidden(offline)
       ? await hermeticSettings(cwd)
       : undefined;
-    const prepared = await this.jail.prepare('git', hermetic?.args ?? [], { cwd, offline, keepGit: true });
+    const prepared = await this.jail.prepare('git', ['-c', NO_HOOKS, ...(hermetic?.args ?? [])], { cwd, offline, keepGit: true });
     if (!prepared.ok) throw new Error(prepared.reason);
     const { launch } = prepared;
-    if (process.platform === 'win32') return { git: gitWithEnv(cwd, launch.env), done: async () => { await launch.done?.(); } };
+    if (process.platform === 'win32') return { git: gitWithEnv(cwd, launch.env, [NO_HOOKS]), done: async () => { await launch.done?.(); } };
     const unset = Object.keys(process.env).filter((name) => !(name in launch.env) && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name));
-    if (!launch.jail && unset.length === 0 && !hermetic) return plain;
+    // Global and system configuration files that were not there when Cascade
+    // started are not read: commands cannot change the ones that were (the
+    // jail keeps them read-only), but could make one that was not.
+    const config = hermetic ? {} : this.configAtStart;
+    if (!launch.jail && unset.length === 0 && !hermetic && Object.keys(config).length === 0) return plain;
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-git-'));
     const script = path.join(dir, 'git');
@@ -147,7 +174,7 @@ export class GitTool extends BaseTool {
     fs.writeFileSync(script, [
       '#!/bin/sh',
       ...(unset.length ? [`unset ${unset.join(' ')}`] : []),
-      ...Object.entries(hermetic?.env ?? {}).map(([name, value]) => `export ${name}=${quote(value)}`),
+      ...Object.entries({ ...config, ...hermetic?.env }).map(([name, value]) => `export ${name}=${quote(value)}`),
       `exec ${[launch.file, ...launch.args].map(quote).join(' ')} "$@"`,
       '',
     ].join('\n'), { mode: 0o700 });
@@ -245,7 +272,7 @@ const GUARDED_ENV: Record<string, string> = {
  * through — and only those. Configuration injected through GIT_CONFIG_COUNT
  * is dropped instead: which settings it carries is not checked here.
  */
-export function gitWithEnv(cwd: string, env: NodeJS.ProcessEnv): SimpleGit {
+export function gitWithEnv(cwd: string, env: NodeJS.ProcessEnv, config: string[] = []): SimpleGit {
   const kept: Record<string, string> = {};
   const unsafe: Record<string, boolean> = {};
   for (const [name, value] of Object.entries(env)) {
@@ -256,7 +283,7 @@ export function gitWithEnv(cwd: string, env: NodeJS.ProcessEnv): SimpleGit {
     if (category) unsafe[category] = true;
     kept[name] = value;
   }
-  return simpleGit({ baseDir: cwd, unsafe }).env(kept);
+  return simpleGit({ baseDir: cwd, unsafe: { ...unsafe, ...(config.length ? { allowUnsafeHooksPath: true } : {}) }, config }).env(kept);
 }
 
 // ── Git Context Helper (injected into T1 system prompt) ──
