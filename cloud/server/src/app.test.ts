@@ -160,7 +160,11 @@ describe('cloud/server app', () => {
     // A self-hosted Steel behind a private network or its own gateway
     // legitimately has no key. Requiring one to guard the DEFAULT would break
     // a working deployment.
-    await restartWith({ REMOTE_BROWSER_PROVIDER: 'steel', REMOTE_BROWSER_URL: 'https://steel.internal' });
+    await restartWith({
+      REMOTE_BROWSER_PROVIDER: 'steel',
+      REMOTE_BROWSER_URL: 'https://api.steel.dev',
+      REMOTE_BROWSER_API_KEY: 'sk-test',
+    });
     expect(await away(), 'a URL the operator supplied is their business').toBe(true);
   });
 
@@ -328,7 +332,11 @@ describe('cloud/server app', () => {
 
   it('GET /api/usage reports plan and today\'s usage for a signed-in user', async () => {
     // A deployment whose browser sessions are billed, so they are rationed.
-    await restartWith({ REMOTE_BROWSER_PROVIDER: 'steel', REMOTE_BROWSER_URL: 'https://steel.internal' });
+    await restartWith({
+      REMOTE_BROWSER_PROVIDER: 'steel',
+      REMOTE_BROWSER_URL: 'https://api.steel.dev',
+      REMOTE_BROWSER_API_KEY: 'sk-test',
+    });
     const loginRes = await fetch(`${baseUrl}/auth/dev-login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -346,7 +354,11 @@ describe('cloud/server app', () => {
   });
 
   it('GET /api/usage counts the browser sessions this user opened today', async () => {
-    await restartWith({ REMOTE_BROWSER_PROVIDER: 'steel', REMOTE_BROWSER_URL: 'https://steel.internal' });
+    await restartWith({
+      REMOTE_BROWSER_PROVIDER: 'steel',
+      REMOTE_BROWSER_URL: 'https://api.steel.dev',
+      REMOTE_BROWSER_API_KEY: 'sk-test',
+    });
     const loginRes = await fetch(`${baseUrl}/auth/dev-login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -379,6 +391,8 @@ describe('cloud/server app', () => {
     expect(await fields(), 'no browser at all').toEqual([]);
     await restartWith({ REMOTE_BROWSER_PROVIDER: 'cdp', REMOTE_BROWSER_URL: 'ws://browser.internal:3000' });
     expect(await fields(), 'a CDP endpoint').toEqual([]);
+    await restartWith({ REMOTE_BROWSER_PROVIDER: 'steel', REMOTE_BROWSER_URL: 'https://steel.internal' });
+    expect(await fields(), 'self-hosted Steel').toEqual([]);
   });
 
   it('dev-login sets a session cookie and /api/me resolves the logged-in user', async () => {
