@@ -181,12 +181,14 @@ describe('the operator configures a browser for their deployment', () => {
       return { user, run };
     }
 
-    it('refuses a browser run once today\u2019s sessions are gone, before creating anything', async () => {
+    it('lets an exhausted user start a Browser-mode run that never opens a browser', async () => {
       const { user, run } = await setup(true);
       for (let i = 0; i < 5; i++) store!.incrementBrowserSessions(user.id, today());
 
-      await expect(run(true)).rejects.toThrow(/browser sessions are used up \(5 a day on the free plan\)/);
-      expect(store!.listConversations(user.id), 'nothing persisted for a refused run').toEqual([]);
+      const result = await run(true);
+      expect(result.output).toContain('Hello from the stub model.');
+      expect(store!.listConversations(user.id), 'the ordinary run is allowed to exist').toHaveLength(1);
+      expect(store!.getBrowserSessions(user.id, today()), 'no browser opened, so nothing new was charged').toBe(5);
     }, 30_000);
 
     it('still lets the same person run without the browser', async () => {
@@ -231,9 +233,9 @@ describe('the operator configures a browser for their deployment', () => {
     }, 30_000);
 
     it('claims from the allowance when the run would open a session, and refuses once it is spent', async () => {
-      // The start-of-run check cannot cover a run that began with one session
-      // left and needs a second, so the same allowance is claimed at the
-      // moment a session would be opened.
+      // The allowance lives at the only boundary that costs browser capacity:
+      // actual session creation. A Browser-mode run can exist with zero sessions,
+      // while every new session still consumes exactly one plan allowance.
       const set = vi.spyOn(RemoteBrowserController.prototype, 'setAllowanceFor');
       try {
         const { user, run } = await setup(true);
