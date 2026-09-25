@@ -41,7 +41,10 @@ WebAssembly sandbox.
   ends (`src/tools/workspace-gate.ts`).
 - **macOS — sandbox-exec**, a generated profile denying the same paths and,
   for a local-only caller, outbound connections and writes outside the
-  workspace (its temporary files go to a folder there, removed after). Checked at startup with a
+  workspace (its temporary files go to a folder there, removed after). Unlike
+  Linux, where the workspace is a mount of its own and a hard link to a file
+  outside it cannot be made, a local-only command there could link one in
+  and write through it; Cascade says so when a command made new links. Checked at startup with a
   profile of the same shape; not exercised in CI.
 - **Everywhere** — provider keys are taken out of every command's
   environment, `git`'s on Windows included. With no jailer, `auto` runs

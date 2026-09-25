@@ -134,15 +134,21 @@ export class GrepTool extends BaseTool {
       lines = stdout.split('\0').map((file) => file.trim()).filter((file) => file && allowed(file));
     } else {
       lines = [];
+      // A `--` between context groups is kept only between two groups that
+      // are shown: one beside a file left out would say it had matches.
+      let separate = false;
       for (const line of stdout.split('\n')) {
         const nul = line.indexOf('\0');
-        // A `--` between context groups, or a trailing blank.
         if (nul === -1) {
-          if (line.trim()) lines.push(line);
+          if (line.trim() === '--') separate = lines.length > 0;
           continue;
         }
         const file = line.slice(0, nul);
         if (!allowed(file)) continue;
+        if (separate) {
+          lines.push('--');
+          separate = false;
+        }
         const rest = line.slice(nul + 1);
         // rg's own layout: `file:12:match`, `file-13-context`, `file:3` for a count.
         lines.push(`${file}${/^\d+-/.test(rest) ? '-' : ':'}${rest}`);

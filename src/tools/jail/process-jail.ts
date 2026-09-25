@@ -223,8 +223,16 @@ export class ProcessJail {
     let scratchTmp: string | undefined;
     const done = async (): Promise<void> => {
       if (scratchTmp) fs.rmSync(scratchTmp, { recursive: true, force: true });
-      const changed = changedFiles(before, await stampFiles(root, gitDirs), startedAt);
+      const after = await stampFiles(root, gitDirs);
+      const changed = changedFiles(before, after, startedAt);
       if (changed.length) this.policy.taint?.(changed);
+      // On Linux the workspace is a mount of its own, so a link to a file
+      // outside it cannot be made. sandbox-exec has no such boundary: say so
+      // when the command made one, since that other name is out of reach.
+      const linked = changed.filter((rel) => (after.get(rel)?.nlink ?? 1) > 1 && (before.get(rel)?.nlink ?? 1) < 2);
+      if (kind === 'sandbox-exec' && linked.length) {
+        this.policy.log(`[jail] A local-only command made hard links in the workspace (${linked.join(', ')}); their other names, if outside it, were not marked local-only.`);
+      }
     };
 
     if (kind === 'sandbox-exec') {
@@ -326,7 +334,9 @@ export class ProcessJail {
       .map((spec) => spec.replace(/^\+/, '').split(':')[0] ?? '')
       .filter((src) => src !== '');
     if (sources.some((src) => src.startsWith('-'))) return unverified;
-    const every = bulk || (!deleting && positional.length === 0);
+    // `:` (or `+:`) is git's matching refspec: every branch the remote also has.
+    const matching = positional.some((spec) => spec.replace(/^\+/, '') === ':');
+    const every = bulk || matching || (!deleting && positional.length === 0);
 
     const remotes = await git(where, ['remote']);
     if (remotes === null) return unverified;

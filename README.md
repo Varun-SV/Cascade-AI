@@ -834,7 +834,7 @@ Cascade also has an encrypted keystore — the OS keychain (macOS Keychain, Wind
 Always protected, whatever `.cascadeignore` says — a `!` line cannot undo these:
 - `.cascade/config.json` (provider keys), `.cascade/dashboard-secret`, `.cascade/keystore.enc`, `.cascade/memory.db*`
 - the audit trail and the project's world state — `.cascade/audit_log.db*`, `.cascade/world_state.db*` and their `.key` files — and the code index, `.cascade/code-index.db*` (or wherever `codeIndex.dbPath` puts it)
-- the record of what local-only workers wrote, `.cascade/privacy-derived.json`
+- the record of what local-only workers wrote, `.cascade/privacy-derived.json`, and the run checkpoints in `.cascade/resume/`, which hold earlier prompts and outputs
 - `.env`, `.env.*`
 - `*.pem`, `*.key`, `id_rsa`, `id_ed25519`
 

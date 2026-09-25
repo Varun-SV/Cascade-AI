@@ -344,17 +344,20 @@ export class ToolRegistry extends EventEmitter {
     }
 
     // What a local-only subtask writes may carry what it read, so it is
-    // local-only too: a file tool's destination is marked before the write,
-    // a command's changes when it ends (the jail finds them).
+    // local-only too: a file tool's destination is marked before the write
+    // (below, alone), a command's changes when it ends (the jail finds them).
     const offline = options.isOffline?.() === true;
-    let unmark: (() => void) | undefined;
-    if (offline && WRITE_TOOLS.has(toolName) && typeof input['path'] === 'string') {
-      this.refuseLinkedDestination(input['path']);
-      unmark = this.markWritten(input['path']);
-    }
     if (tool.delegatesToTools) return tool.execute(input, options);
     const leave = await this.gate.enter(offline && (COMMAND_TOOLS.has(toolName) || WRITE_TOOLS.has(toolName)));
+    // Checked, marked and unmarked while the write runs alone: another
+    // local-only write to the same file cannot share — and then lose — a
+    // mark, and no command can link the file elsewhere in between.
+    let unmark: (() => void) | undefined;
     try {
+      if (offline && WRITE_TOOLS.has(toolName) && typeof input['path'] === 'string') {
+        this.refuseLinkedDestination(input['path']);
+        unmark = this.markWritten(input['path']);
+      }
       return await tool.execute(input, options);
     } finally {
       unmark?.();

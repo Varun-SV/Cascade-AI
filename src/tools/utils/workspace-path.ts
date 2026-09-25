@@ -4,6 +4,7 @@
 
 import path from 'node:path';
 import fs from 'node:fs';
+import { realPathOf } from '../../utils/real-path.js';
 
 export class WorkspaceSandboxError extends Error {
   constructor(attempted: string, workspaceRoot: string) {
@@ -39,17 +40,15 @@ export function resolveInWorkspace(workspaceRoot: string, input: string): string
   // The root is dereferenced too: a workspace opened through a symlink (or
   // under macOS's /tmp and /var) has files whose real paths all lie under the
   // root's real path, not under the name it was opened by.
-  try {
-    const real = fs.realpathSync(abs);
-    let realRoot = root;
-    try { realRoot = fs.realpathSync(root); } catch { /* compare against the name given */ }
-    const realRel = path.relative(realRoot, real);
-    if (realRel !== '' && realRel !== '.' && (realRel.startsWith('..') || path.isAbsolute(realRel))) {
-      throw new WorkspaceSandboxError(input, root);
-    }
-  } catch (e) {
-    if (e instanceof WorkspaceSandboxError) throw e;
-    // Path doesn't exist yet (new file being created) — symlink check not applicable.
+  // Where the path lands, symlinks followed: through its nearest existing
+  // ancestor for a file not written yet, and through a symlink whose target
+  // does not exist yet, which a write would create (realPathOf).
+  const real = realPathOf(abs);
+  let realRoot = root;
+  try { realRoot = fs.realpathSync(root); } catch { /* compare against the name given */ }
+  const realRel = path.relative(realRoot, real);
+  if (realRel !== '' && realRel !== '.' && (realRel.startsWith('..') || path.isAbsolute(realRel))) {
+    throw new WorkspaceSandboxError(input, root);
   }
 
   return abs;

@@ -235,7 +235,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commands could read the indexed text, deleted chunks included. The
   configured file and its journals are now protected too, and a hard link
   to any protected file is protected like the file — by the file tools,
-  commands and the code index alike.
+  commands and the code index alike. So are the run checkpoints in
+  `.cascade/resume/`, which hold earlier prompts and outputs, and a write
+  through a symlink whose target, outside the workspace, does not exist yet
+  is refused like any other write outside it.
 - **A private model is one whose endpoint is private.** `forceLocal` chose
   any model marked `isLocal` — which means it costs $0 — so an
   OpenAI-compatible server on a public host configured with `local: true`,

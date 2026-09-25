@@ -436,4 +436,54 @@ describe('ToolRegistry — a local-only write that does not happen', () => {
     expect(privacy.isLocalOnly('readme.md')).toBe(true);
     await fs.rm(ws, { recursive: true, force: true });
   });
+
+  // Marked before the gate, two writes to one file shared a mark: the first,
+  // failing, took it off while the second went on to write.
+  it('keeps the mark of a write that happened when another to the same file failed', async () => {
+    const { PrivacyPaths } = await import('../core/privacy/paths.js');
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-unmark2-')));
+    await fs.writeFile(path.join(ws, 'readme.md'), 'public\n');
+    const privacy = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }], { workspaceRoot: ws });
+    const reg = new ToolRegistry(toolsConfig, ws);
+    reg.setPrivacyPaths(privacy);
+    const offline = { ...opts, isOffline: () => true };
+    const [failed, wrote] = await Promise.allSettled([
+      reg.execute('file_edit', { path: 'readme.md', old_string: 'absent', new_string: 'x' }, offline),
+      reg.execute('file_write', { path: 'readme.md', content: 'private summary' }, offline),
+    ]);
+    expect(failed.status).toBe('rejected');
+    expect(wrote.status).toBe('fulfilled');
+    expect(privacy.isLocalOnly('readme.md')).toBe(true);
+    await fs.rm(ws, { recursive: true, force: true });
+  });
+});
+
+describe('ToolRegistry — where a write lands', () => {
+  // realpath fails on a symlink whose target is missing, and its name stood
+  // in for where the write would go: outside the workspace.
+  it('refuses a write through a symlink to a file outside the workspace that does not exist yet', async () => {
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-dangling-')));
+    const outside = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-dangling-out-')));
+    await fs.symlink(path.join(outside, 'created.txt'), path.join(ws, 'report.txt'));
+    await fs.mkdir(path.join(outside, 'dir'));
+    await fs.symlink(path.join(outside, 'dir', 'missing'), path.join(ws, 'folder'));
+    const reg = new ToolRegistry(toolsConfig, ws);
+    for (const target of ['report.txt', 'folder/new.txt']) {
+      await expect(reg.execute('file_write', { path: target, content: 'x' }, opts), target).rejects.toThrow(/workspace|cascadeignore/);
+    }
+    await expect(fs.stat(path.join(outside, 'created.txt'))).rejects.toThrow();
+    await expect(fs.stat(path.join(outside, 'dir', 'missing'))).rejects.toThrow();
+    await fs.rm(ws, { recursive: true, force: true });
+    await fs.rm(outside, { recursive: true, force: true });
+  });
+
+  it('keeps run checkpoints, which hold earlier prompts and outputs, from the file tools', async () => {
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-resume-')));
+    await fs.mkdir(path.join(ws, '.cascade', 'resume'), { recursive: true });
+    await fs.writeFile(path.join(ws, '.cascade', 'resume', 'run-1.json'), '{"prompt":"PRIOR-RUN-PROMPT"}');
+    const reg = new ToolRegistry(toolsConfig, ws);
+    await expect(reg.execute('file_read', { path: '.cascade/resume/run-1.json' }, opts)).rejects.toThrow(/cascadeignore/);
+    expect(await reg.execute('grep', { pattern: 'PRIOR-RUN', output_mode: 'content' }, opts)).not.toContain('PRIOR-RUN-PROMPT"');
+    await fs.rm(ws, { recursive: true, force: true });
+  });
 });

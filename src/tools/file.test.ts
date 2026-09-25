@@ -109,6 +109,25 @@ describe('File tools — reading only what the running tier allows', () => {
       .toContain('Replaced 1');
   });
 
+  // Between context groups rg prints a bare `--`, which names no file; kept
+  // beside groups that were all left out, it said the file had matched.
+  it('grep with context leaves no trace of a file it left out', async () => {
+    const { GrepTool } = await import('./grep.js');
+    await fs.writeFile(path.join(workspace, 'secret.md'), 'MARK one\nx\nx\nx\nx\nMARK two\n');
+    await fs.writeFile(path.join(workspace, 'public.md'), 'nothing here\n');
+    const tool = new GrepTool();
+    tool.setWorkspaceRoot(workspace);
+    const scan = { ...opts, mayRead: (abs: string) => !abs.endsWith('secret.md') };
+    expect(await tool.execute({ pattern: 'MARK', context: 1 }, scan as never)).toBe('No matches found for: MARK');
+    await fs.writeFile(path.join(workspace, 'public.md'), 'MARK a\nx\nx\nx\nx\nMARK b\n');
+    const out = await tool.execute({ pattern: 'MARK', context: 1 }, scan as never);
+    expect(out).toContain('MARK a');
+    expect(out).not.toContain('MARK one');
+    expect(out.trim().startsWith('--')).toBe(false);
+    expect(out.trim().endsWith('--')).toBe(false);
+    expect(out.split('\n').filter((l) => l === '--')).toHaveLength(1);
+  });
+
   it('image_analyze asks about the workspace file it reads — not one beside the process', async () => {
     const { ImageAnalyzeTool } = await import('./image.js');
     const tool = new ImageAnalyzeTool();

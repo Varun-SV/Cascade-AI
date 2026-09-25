@@ -30,6 +30,7 @@ export const BUILT_IN_PROTECTED: readonly string[] = [
   '.cascade/world_state.key',
   '.cascade/code-index.db*',
   '.cascade/privacy-derived.json',
+  '.cascade/resume/',
   '.env',
   '.env.*',
   '*.pem',

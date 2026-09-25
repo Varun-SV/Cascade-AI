@@ -488,6 +488,13 @@ describe('what git push may send', () => {
     expect(remoteHas('refs/heads/main') || remoteHas('refs/heads/leak')).toBe(false);
   });
 
+  // `:` pushes every branch the remote also has; with no source named, the
+  // check had nothing to look at and let it through.
+  it('refuses the matching refspec, which pushes every branch the remote has', async () => {
+    await expect(push('origin', ':')).rejects.toThrow(/refused/);
+    await expect(push('origin', '+:')).rejects.toThrow(/refused/);
+  });
+
   it('refuses one to somewhere that is not a configured remote', async () => {
     await expect(push(bare, 'main')).rejects.toThrow(/not a configured remote/);
     await expect(push('--repo', bare, 'main')).rejects.toThrow(/not a configured remote/);
@@ -731,6 +738,23 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: a local-only caller and files with 
     // A cloud worker's write is its own business.
     await reg.execute('file_write', { path: 'shared.txt', content: 'shared, edited\n' }, exec);
     expect(await fs.readFile(path.join(outside, 'shared.txt'), 'utf8')).toBe('shared, edited\n');
+  });
+
+  // A new link to a file outside the workspace would carry what the command
+  // writes to a name nothing marks. The workspace is a mount of its own, so
+  // the link cannot be made; a symlink out leads to the read-only rest.
+  it('keeps a command from linking a file outside the workspace in', async () => {
+    // In the home folder: /tmp is the command's own there.
+    const target = path.join(os.homedir(), `cascade-link-probe-${process.pid}.txt`);
+    await fs.writeFile(target, 'public\n');
+    const out = await registry().execute('shell', {
+      command: `ln ${target} ./linked.txt 2>&1; ln -s ${target} ./sym.txt && cat secret/plan.md > ./sym.txt 2>&1; true`,
+    }, offline);
+    expect(out).toMatch(/Invalid cross-device link/);
+    expect(out).toMatch(/Read-only file system/);
+    expect(await fs.readFile(target, 'utf8')).toBe('public\n');
+    await fs.rm(path.join(dir, 'sym.txt'), { force: true });
+    await fs.rm(target, { force: true });
   });
 
   it('keeps a command from writing through one, or into the packages it is installed with', async () => {

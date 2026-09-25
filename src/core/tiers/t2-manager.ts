@@ -829,20 +829,7 @@ Return ONLY the JSON array.`;
       const runOne = async (id: string) => {
         const assignment = sanitizedAssignments.find((a) => a.subtaskId === id)!;
         const worker = workerMap.get(id)!;
-        const result = await worker.execute(assignment, taskId, waveSignal);
-        // Per-path privacy tier: a local-only subtask's raw output never
-        // travels above T3 — the tiers above see only a success/fail signal.
-        if (result.localOnly) {
-          result.output = `[local-only path — output withheld by privacy policy; status: ${result.status}; ` +
-            `checks passed: ${result.testResults.passed.length}/${result.testResults.checksRun.length || 0}]`;
-        } else {
-          // Redact secrets/PII at the T3→T2 boundary so only logic travels up
-          // the chain. output may be a structured object — redact strings only.
-          if (typeof result.output === 'string' && result.output) {
-            result.output = RedactionLayer.redact(result.output);
-          }
-        }
-        if (result.issues) result.issues = result.issues.map((i) => RedactionLayer.redact(i));
+        const result = this.atBoundary(await worker.execute(assignment, taskId, waveSignal));
         resultMap.set(id, result);
         return result;
       };
@@ -964,7 +951,7 @@ Return ONLY the JSON array.`;
 
           this.log(`T3 worker ${id} failed: ${r.reason instanceof Error ? r.reason.message : String(r.reason)} — retrying once`);
           try {
-            const retried = await this.retryT3(assignment, taskId);
+            const retried = this.atBoundary(await this.retryT3(assignment, taskId));
             resultMap.set(id, retried);
           } catch (retryErr) {
             const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
@@ -1022,6 +1009,29 @@ Return ONLY the JSON array.`;
   }
 
 
+
+  /**
+   * A worker's result as it may travel above T3. A local-only subtask's
+   * output and issues never do — an issue can quote what a private endpoint
+   * said about the request — so the tiers above see only a success/fail
+   * line; its issues keep only the marker the tool-synthesis respawn looks
+   * for. Anything else is redacted of secrets and PII, strings only.
+   */
+  private atBoundary(result: T3Result): T3Result {
+    if (result.localOnly) {
+      result.output = `[local-only path — output withheld by privacy policy; status: ${result.status}; ` +
+        `checks passed: ${result.testResults.passed.length}/${result.testResults.checksRun.length || 0}]`;
+      result.issues = (result.issues ?? []).map((issue) => (issue.includes('dynamic tool generation')
+        ? 'Stalled: dynamic tool generation requested (details withheld: local-only path)'
+        : '[issue withheld by privacy policy: local-only path]'));
+      return result;
+    }
+    if (typeof result.output === 'string' && result.output) {
+      result.output = RedactionLayer.redact(result.output);
+    }
+    if (result.issues) result.issues = result.issues.map((i) => RedactionLayer.redact(i));
+    return result;
+  }
 
   private async retryT3(assignment: T2ToT3Assignment, taskId: string): Promise<T3Result> {
     this.log(`Retrying T3 for subtask: ${assignment.subtaskTitle}`);
