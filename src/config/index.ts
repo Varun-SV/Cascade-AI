@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import type { CascadeConfig, Identity } from '../types.js';
+import type { CascadeConfig, Identity, ProviderConfig } from '../types.js';
 import { Keystore } from './keystore.js';
 import { CascadeIgnore } from './ignore.js';
 import { loadCascadeMd, type CascadeMdContent } from './cascade-md.js';
@@ -170,6 +170,8 @@ export class ConfigManager {
    * must not re-announce a migration that already happened.
    */
   private revokedCredentials = 0;
+  /** The providers as last loaded or saved here (see save). */
+  private providersBase?: ProviderConfig[];
   /** Tier pins cleared by the revoked-credential migration this load. */
   private revokedPins: ClearedPin[] = [];
   /** This load's revoked-credential explanation, joined with any retirement one. */
@@ -301,6 +303,9 @@ export class ConfigManager {
     this.config.providers = mergeGlobalCredentials(this.config.providers, ownCreds);
     await this.injectEnvKeys(globalCreds.kept);
     this.config.providers = mergeGlobalCredentials(this.config.providers, globalCreds.kept);
+    // What a save starts from: its changes since are what it writes to the
+    // credential store, over whatever another process saved meanwhile.
+    this.providersBase = structuredClone(this.config.providers);
     // No post-merge pass: the workspace file was cleaned from its raw form in
     // loadConfig() and the global store just above, so both inputs to this
     // merge are already clean. Stripping again here would work, but it would
@@ -417,7 +422,7 @@ export class ConfigManager {
     // entered would be gone — or an old one back — on the next load.
     let undo: () => void;
     try {
-      undo = saveProjectCredentials(this.globalDir, this.project, config.providers ?? []);
+      undo = saveProjectCredentials(this.globalDir, this.project, config.providers ?? [], this.providersBase);
     } catch (err) {
       throw new Error(`The provider keys could not be saved to ${path.join(this.globalDir, 'credentials.json')}: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -431,6 +436,7 @@ export class ConfigManager {
       try { undo(); } catch { /* reported below with the write's own failure */ }
       throw err;
     }
+    this.providersBase = structuredClone(config.providers ?? []);
   }
 
   async updateConfig(updates: Partial<CascadeConfig>): Promise<void> {

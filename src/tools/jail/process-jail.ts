@@ -213,15 +213,24 @@ export class ProcessJail {
     // could name a program for the git tool to run with the credentials it
     // keeps (`gitConfigFiles`).
     const gitConfig = opts.keepGit ? [] : await gitConfigFiles(this.policy.workspaceRoot);
-    const frozen = [...(this.policy.readOnlyFiles?.() ?? []), ...gitConfig].flatMap((f) => {
-      try { return fs.lstatSync(f).isFile() ? [fs.realpathSync(f)] : []; } catch { return []; }
-    });
+    const policyFiles = this.policy.readOnlyFiles?.() ?? [];
+    // Through a symlink — what it leads to — and under every other name the
+    // file has in the workspace (hard links), where a write would reach it.
+    const frozen = [...new Set([...policyFiles, ...gitConfig].flatMap((f) => {
+      try { return fs.statSync(f).isFile() ? [fs.realpathSync(f)] : []; } catch { return []; }
+    }))];
+    frozen.push(...(await linkAliasesOf(frozen.map((f) => ({ path: f, dir: false })), this.policy.workspaceRoot)).map((h) => h.path).filter((f) => !frozen.includes(f)));
+    // A mount keeps a file's contents, not its name: a command can still
+    // remove a symlinked policy file and put another in its place. So each
+    // is looked at again when the command ends, and put back if changed.
+    const restorePolicy = guardFiles(policyFiles);
 
     if (!opts.offline) {
+      const done = async (): Promise<string | void> => restorePolicy();
       if (kind === 'sandbox-exec') {
-        return { ok: true, launch: { file: 'sandbox-exec', args: ['-p', seatbeltProfile(hidden, frozen), file, ...args], env, cwd: opts.cwd, jail: kind } };
+        return { ok: true, launch: { file: 'sandbox-exec', args: ['-p', seatbeltProfile(hidden, frozen), file, ...args], env, cwd: opts.cwd, jail: kind, done } };
       }
-      return { ok: true, launch: { file: 'bwrap', args: bwrapArgs(hidden, false, opts.cwd, file, args, undefined, frozen), env, cwd: opts.cwd, jail: kind } };
+      return { ok: true, launch: { file: 'bwrap', args: bwrapArgs(hidden, false, opts.cwd, file, args, undefined, frozen), env, cwd: opts.cwd, jail: kind, done } };
     }
 
     // A local-only caller's command writes only into the workspace, where
@@ -252,9 +261,12 @@ export class ProcessJail {
     };
     const own = this.policy.stateDirs?.().private;
     const done = async (): Promise<string | void> => {
+      const policyNote = restorePolicy();
       const dirsAfter = new Set<string>();
       const after = await stampFiles(root, gitDirs, dirsAfter);
-      const changed = changedFiles(before, after, startedAt);
+      // A policy file it changed has just been put back as it was.
+      const policyRels = new Set(policyFiles.map((f) => path.relative(root, f).split(path.sep).join('/')));
+      const changed = changedFiles(before, after, startedAt).filter((rel) => !policyRels.has(rel));
       // What it made — files, and the outermost folders — may carry what it
       // read in its names as well as its contents: it goes to the private
       // folder, where its names show to no one else, unless it lies in a
@@ -297,6 +309,7 @@ export class ProcessJail {
         const setAside = await recordMarks(this.policy, marked, inProject, root, own);
         if (setAside) notes.push(setAside);
       }
+      if (policyNote) notes.push(policyNote);
       if (notes.length) return notes.join('\n');
     };
 
@@ -910,6 +923,39 @@ async function stampFiles(root: string, skip: string[], dirs?: Set<string>, fold
   };
   await walk(root, '');
   return out;
+}
+
+/**
+ * Note what each file is now — its contents and mode, or where it leads if
+ * a symlink — and return a check that puts back any that has changed since,
+ * saying which. One not there now is left to whoever makes it.
+ */
+function guardFiles(files: string[]): () => string | void {
+  const was = new Map<string, { link: string } | { data: Buffer; mode: number }>();
+  for (const file of files) {
+    try {
+      const st = fs.lstatSync(file);
+      if (st.isSymbolicLink()) was.set(file, { link: fs.readlinkSync(file) });
+      else if (st.isFile()) was.set(file, { data: fs.readFileSync(file), mode: st.mode & 0o7777 });
+    } catch { /* not there */ }
+  }
+  return () => {
+    const restored: string[] = [];
+    for (const [file, then] of was) {
+      try {
+        const st = fs.lstatSync(file, { throwIfNoEntry: false });
+        const same = 'link' in then
+          ? !!st?.isSymbolicLink() && fs.readlinkSync(file) === then.link
+          : !!st?.isFile() && (st.mode & 0o7777) === then.mode && fs.readFileSync(file).equals(then.data);
+        if (same) continue;
+        fs.rmSync(file, { force: true, recursive: true });
+        if ('link' in then) fs.symlinkSync(then.link, file);
+        else fs.writeFileSync(file, then.data, { mode: then.mode });
+        restored.push(path.basename(file));
+      } catch { /* left as it is */ }
+    }
+    if (restored.length) return `${restored.join(', ')} decide${restored.length === 1 ? 's' : ''} what Cascade protects, and agents may not change ${restored.length === 1 ? 'it' : 'them'}: this command's change was undone.`;
+  };
 }
 
 /** Put each folder's mode and times back as `folders` has them, where they differ. */

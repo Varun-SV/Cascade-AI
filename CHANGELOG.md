@@ -69,7 +69,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the machine-wide ones. A project whose key differed from the machine-wide
   one when it moved keeps it, in the same file under that project, and goes
   on using it ahead of the environment, as before. Processes saving at once
-  take turns under a lock, so neither drops the other's change.
+  take turns under a lock, and each writes only the providers it changed,
+  so neither drops or brings back the other's change.
 - **Browser screenshots are named `@screenshots/<file>`,** a path
   `image_analyze` and the file tools read from the project's state folder,
   rather than an absolute path in the project.
@@ -88,7 +89,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer read or change those through the file and search tools; delete
   the lines to allow it. Agents may read `.cascadeignore` itself but not
   change or remove it — the file tools refuse, and commands see it
-  read-only — since a line taken out would unprotect a path in the next run.
+  read-only, whatever it links to or is linked from, and find it as it was
+  when they end — since a line taken out would unprotect a path in the next run.
 
 ### Fixed
 - **`pdf_create` wrote relative to the process, not the workspace.** In the
@@ -238,7 +240,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is local-only too — a file tool's destination before it writes, whatever
   its commands changed once they end — and stays so in later runs, recorded
   in the project's state folder even when a configured pattern covers it,
-  so narrowing the pattern later does not release it; a write that leaves
+  so narrowing the pattern later does not release it, whatever characters
+  its name holds (a backslash included); a write that leaves
   the file as it was takes its record back off. What it deletes is marked
   the same way — which files it chose to delete could say what it read —
   so the rest sees the path as local-only, not as missing. When a command's
@@ -261,7 +264,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the package folders pnpm links them into, are read-only. Siblings waiting on it get a status line, not its
   output, and no facts are taken from it into the knowledge graph.
   An approval it needs goes to you, not to the T2 and T1 models, which may
-  be cloud ones and would see the call's input.
+  be cloud ones and would see the call's input — nor does an "always" one of
+  them gave earlier answer it.
   `file_edit` asks like a read does, and plugin tools are refused to it like
   MCP ones, as is any tool registered from outside that does not declare
   `localOnlySafe`. Its output, tool calls and results, and streamed text are

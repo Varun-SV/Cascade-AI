@@ -212,7 +212,9 @@ function sameEntryIn(rows: ProviderConfig[], p: ProviderConfig): ProviderConfig 
  * machine-wide list follows this project's, as it did; and an entry that is
  * this project's own keeps up with it, or goes when its key is removed.
  */
-export function saveProjectCredentials(globalDir: string, project: string, providers: ProviderConfig[]): () => void {
+export function saveProjectCredentials(
+  globalDir: string, project: string, providers: ProviderConfig[], base?: ProviderConfig[],
+): () => void {
   let before: { shared: ProviderConfig[]; own: ProviderConfig[] } | undefined;
   updateCredentialsFile(globalDir, (file) => {
     before = { shared: file.providers, own: file.projects?.[project] ?? [] };
@@ -220,7 +222,9 @@ export function saveProjectCredentials(globalDir: string, project: string, provi
       const now = sameEntryIn(providers, mine);
       return now && credentialled(now) ? [{ ...now }] : [];
     });
-    return withProject(file, project, own, providers.filter(isPersistable));
+    const ours = providers.filter(isPersistable);
+    const shared = base ? mergeShared(file.providers, ours, base.filter(isPersistable)) : ours;
+    return withProject(file, project, own, shared);
   });
   // Puts back what this save changed, for a caller whose other half — the
   // project's config — could not be written after it.
@@ -262,6 +266,32 @@ export function renameProjectCredentials(globalDir: string, from: string, to: st
     projects[to] = own;
     return { ...file, projects };
   });
+}
+
+/**
+ * The machine-wide list after a save by a caller that started from `base`
+ * and now has `ours`, applied to what the file holds now (`theirs`): what the
+ * caller added, changed or removed since `base` is applied, and what another
+ * process saved meanwhile stands — where the caller's whole list used to
+ * replace it, dropping a key added elsewhere since the caller loaded.
+ */
+function mergeShared(theirs: ProviderConfig[], ours: ProviderConfig[], base: ProviderConfig[]): ProviderConfig[] {
+  const same = (a: ProviderConfig, b: ProviderConfig) => JSON.stringify(a) === JSON.stringify(b);
+  const at = (list: ProviderConfig[], p: ProviderConfig) => list.findIndex((q) => sameEntryIn([q], p) !== undefined);
+  const out = theirs.map((p) => ({ ...p }));
+  for (const mine of ours) {
+    const was = sameEntryIn(base, mine);
+    if (was && same(was, mine)) continue;
+    const i = at(out, mine);
+    if (i >= 0) out[i] = { ...mine };
+    else out.push({ ...mine });
+  }
+  for (const was of base) {
+    if (sameEntryIn(ours, was)) continue;
+    const i = at(out, was);
+    if (i >= 0) out.splice(i, 1);
+  }
+  return out;
 }
 
 function withProject(file: CredentialsFile, project: string, own: ProviderConfig[], shared: ProviderConfig[]): CredentialsFile {

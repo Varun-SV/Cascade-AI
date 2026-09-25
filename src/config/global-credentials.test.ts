@@ -509,3 +509,31 @@ describe('a credential store that cannot be read', () => {
     }
   });
 });
+
+// Two processes loaded, then each saved: the second wrote its whole list,
+// loaded before the first saved, and the first's new key was gone.
+describe('saves from two processes that loaded before either saved', () => {
+  it('keeps both processes\' keys, and a key one of them removed stays removed', async () => {
+    const { ConfigManager: Manager } = await import('./index.js');
+    const one = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-merge-a-')));
+    const two = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-merge-b-')));
+    try {
+      const seed = new Manager(one);
+      await seed.load();
+      await seed.save({ ...seed.getConfig(), providers: [{ type: 'gemini', apiKey: 'sk-gemini' }] } as never);
+
+      const desktop = new Manager(one);
+      const cli = new Manager(two);
+      await desktop.load();
+      await cli.load();
+      await desktop.save({ ...desktop.getConfig(), providers: [...desktop.getConfig().providers, { type: 'anthropic', apiKey: 'sk-anthropic' }] } as never);
+      await cli.save({ ...cli.getConfig(), providers: [...cli.getConfig().providers.filter((p) => p.type !== 'gemini'), { type: 'openai', apiKey: 'sk-openai' }] } as never);
+
+      const shared = loadGlobalCredentials(path.join(process.env['CASCADE_GLOBAL_DIR']!)).map((p) => p.type).sort();
+      expect(shared).toEqual(['anthropic', 'openai']);
+    } finally {
+      fs.rmSync(one, { recursive: true, force: true });
+      fs.rmSync(two, { recursive: true, force: true });
+    }
+  });
+});

@@ -41,13 +41,15 @@ export function writeProjectConfig(
   workspacePath: string,
   config: { providers?: ProviderConfig[] } & Record<string, unknown>,
   globalDirPath: string = globalDir(),
+  /** The providers the caller started from, so a key another process saved meanwhile is kept (see saveProjectCredentials). */
+  base?: ProviderConfig[],
 ): { ok: true } | { ok: false; error: string } {
   const providers = config.providers ?? [];
   // The keys first: with the config written and the keys not, a key just
   // entered would be gone on the next load.
   let undo: () => void;
   try {
-    undo = saveProjectCredentials(globalDirPath, path.basename(projectStateDir(workspacePath)), providers);
+    undo = saveProjectCredentials(globalDirPath, path.basename(projectStateDir(workspacePath)), providers, base);
   } catch (err) {
     return { ok: false, error: `the provider keys could not be saved: ${err instanceof Error ? err.message : String(err)}` };
   }

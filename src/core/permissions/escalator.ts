@@ -50,6 +50,8 @@ export class PermissionEscalator extends EventEmitter {
    * doc comment: "task-wide for T1").
    */
   private taskWideCache = new Map<string, boolean>();
+  /** The cache entries a T2 or T1 model made (`session:<key>`, `task:<tool>`), as against a person or a rule. */
+  private modelDecided = new Set<string>();
 
   private t2Evaluator?: T2Evaluator;
   private t1Evaluator?: T1Evaluator;
@@ -94,7 +96,12 @@ export class PermissionEscalator extends EventEmitter {
     // in the run, regardless of which T2 section raises the same tool next.
     // Untrusted callers (forceReprompt) skip the cache so a prior `always`
     // decision can't silently auto-approve their dangerous actions.
-    if (!req.forceReprompt && this.taskWideCache.has(req.toolName)) {
+    // A model's "always" does not stand for a local-only caller, whose
+    // requests those models never see: only a person's grant — or a refusal,
+    // which costs nothing to honour — carries over to it.
+    const stands = (approved: boolean, byModel: boolean) => !(req.localOnly && byModel && approved);
+    if (!req.forceReprompt && this.taskWideCache.has(req.toolName)
+      && stands(this.taskWideCache.get(req.toolName)!, this.modelDecided.has(`task:${req.toolName}`))) {
       return {
         requestId: req.id,
         approved: this.taskWideCache.get(req.toolName)!,
@@ -109,7 +116,8 @@ export class PermissionEscalator extends EventEmitter {
     // ── 1b. Check the per-T2 session cache ────────────
     // Untrusted callers (forceReprompt) skip the cache so a prior `always`
     // decision can't silently auto-approve their dangerous actions.
-    if (!req.forceReprompt && this.sessionCache.has(cacheKey)) {
+    if (!req.forceReprompt && this.sessionCache.has(cacheKey)
+      && stands(this.sessionCache.get(cacheKey)!, this.modelDecided.has(`session:${cacheKey}`))) {
       return {
         requestId: req.id,
         approved: this.sessionCache.get(cacheKey)!,
@@ -151,7 +159,10 @@ export class PermissionEscalator extends EventEmitter {
       try {
         const t2Decision = await this.t2Evaluator(req);
         if (t2Decision !== null) {
-          if (t2Decision.always) this.sessionCache.set(cacheKey, t2Decision.approved);
+          if (t2Decision.always) {
+            this.sessionCache.set(cacheKey, t2Decision.approved);
+            this.modelDecided.add(`session:${cacheKey}`);
+          }
           return t2Decision;
         }
       } catch {
@@ -164,7 +175,10 @@ export class PermissionEscalator extends EventEmitter {
       try {
         const t1Decision = await this.t1Evaluator(req);
         if (t1Decision !== null) {
-          if (t1Decision.always) this.taskWideCache.set(req.toolName, t1Decision.approved);
+          if (t1Decision.always) {
+            this.taskWideCache.set(req.toolName, t1Decision.approved);
+            this.modelDecided.add(`task:${req.toolName}`);
+          }
           return t1Decision;
         }
       } catch {
@@ -206,6 +220,7 @@ export class PermissionEscalator extends EventEmitter {
           // Task-wide: a user's "Always" should cover every sibling worker in
           // this run, not just future requests under the same parent T2.
           this.taskWideCache.set(req.toolName, decision.approved);
+          this.modelDecided.delete(`task:${req.toolName}`);
         }
         resolve(decision);
       };

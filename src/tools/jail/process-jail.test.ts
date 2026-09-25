@@ -342,6 +342,33 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: what shell, run_code and git can re
     }
   });
 
+  // Frozen only as a regular file under its own name: a symlinked one could
+  // be replaced, and one with another name written through that name.
+  it('keeps .cascadeignore as it was when it is a symlink or has another name', async () => {
+    const file = path.join(ws, '.cascadeignore');
+    const real = path.join(ws, 'policy-real.txt');
+    const alias = path.join(ws, 'policy-alias.txt');
+    try {
+      await fs.writeFile(real, 'private/\n');
+      await fs.symlink('policy-real.txt', file);
+      for (const caller of [exec, { ...exec, isOffline: () => true }]) {
+        await registry().execute('shell', { command: 'echo > policy-real.txt; rm -f .cascadeignore; echo "" > .cascadeignore; true' }, caller);
+        expect((await fs.lstat(file)).isSymbolicLink()).toBe(true);
+        expect(await fs.readlink(file)).toBe('policy-real.txt');
+        expect(await fs.readFile(file, 'utf8')).toBe('private/\n');
+      }
+      await fs.rm(file);
+      await fs.rm(real);
+      await fs.writeFile(file, 'private/\n');
+      await fs.link(file, alias);
+      const seen = await registry().execute('shell', { command: 'echo > policy-alias.txt 2>/dev/null; cat .cascadeignore; true' }, exec);
+      expect(seen).toContain('private/');
+      expect(await fs.readFile(file, 'utf8')).toBe('private/\n');
+    } finally {
+      for (const f of [file, real, alias]) await fs.rm(f, { force: true });
+    }
+  });
+
   // Scrubbing the child's environment is not enough on its own: a key
   // exported in the shell Cascade was started from is in Cascade's
   // /proc/<pid>/environ — the environment a process started with — for

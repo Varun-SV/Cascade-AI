@@ -250,3 +250,33 @@ describe('PrivacyPaths — a file whose name begins with two dots', () => {
     }
   });
 });
+
+// A backslash went into its pattern as `[\]`, which neither git nor the
+// ignore matcher reads as a backslash: a derived `a\b`, once committed, was
+// left out of git's exclusions and history checks.
+describe.skipIf(process.platform === 'win32')('PrivacyPaths — a derived path holding a backslash', () => {
+  it('is named by a pattern git and the matcher both read as that path', async () => {
+    const fs = await import('node:fs/promises');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { execFileSync } = await import('node:child_process');
+    const ignoreModule = await import('ignore');
+    const ignore = (ignoreModule.default ?? ignoreModule) as unknown as () => { add(p: string[]): { ignores(p: string): boolean } };
+    const { toPathspecs } = await import('../../tools/jail/process-jail.js');
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-backslash-')));
+    try {
+      const policy = new PrivacyPaths([], { workspaceRoot: root });
+      policy.addDerived(['a\\b']);
+      const patterns = policy.localOnlyPatterns();
+      expect(ignore().add(patterns).ignores('a\\b')).toBe(true);
+      expect(ignore().add(patterns).ignores('a/b')).toBe(false);
+      execFileSync('git', ['-C', root, 'init', '-q']);
+      await fs.writeFile(path.join(root, 'a\\b'), 'x');
+      execFileSync('git', ['-C', root, 'add', '-A']);
+      const listed = execFileSync('git', ['-C', root, 'ls-files', '-z', '--', ...toPathspecs(patterns)], { encoding: 'utf8' });
+      expect(listed.split('\0').filter(Boolean)).toEqual(['a\\b']);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});

@@ -558,7 +558,9 @@ export class DashboardServer {
     // The project's config without its keys, and the keys where every
     // project finds them (config/write-config.ts): both are the save now,
     // so a failure of either fails it.
-    const result = writeProjectConfig(this.workspacePath, config as never);
+    // From the config being replaced: a key another process saved since
+    // this one loaded is kept.
+    const result = writeProjectConfig(this.workspacePath, config as never, undefined, this.config.providers);
     if (!result.ok) console.warn(`[dashboard] Failed to persist config: ${result.error}`);
     return result;
   }

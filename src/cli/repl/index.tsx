@@ -414,7 +414,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     }
 
     // Persist the project's config — its keys go to the global store.
-    const written = writeProjectConfig(workspacePath, config as never);
+    // No keys change here: those another process saved since stay as they are.
+    const written = writeProjectConfig(workspacePath, config as never, undefined, config.providers);
     if (!written.ok) {
       const msg = written.error;
       dispatch({

@@ -298,7 +298,9 @@ function unreadable(file: string, why: unknown): Error {
  * each wildcard character, and a trailing space, in a class of its own.
  */
 export function literalPattern(rel: string): string {
-  return `/${rel.replace(/[*?[\\]/g, (c) => `[${c}]`).replace(/ $/, '[ ]')}`;
+  // A backslash as `\\`: git's wildmatch and the ignore matcher both read an
+  // escaped backslash as itself, and neither reads `[\\]` so.
+  return `/${rel.replace(/[*?[\\]/g, (c) => (c === '\\' ? '\\\\' : `[${c}]`)).replace(/ $/, '[ ]')}`;
 }
 
 /** `absPath` relative to `root` in POSIX form, or '' when it is not inside. */

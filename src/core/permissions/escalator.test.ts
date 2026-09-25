@@ -164,6 +164,25 @@ describe('PermissionEscalator', () => {
     expect((await promise).decidedBy).toBe('USER');
   });
 
+  // A T2 or T1 model's "always" was cached before the local-only check, so a
+  // local-only worker's request for the same tool came back approved by a
+  // model that never saw it.
+  it('lets no model-made "always" stand for a local-only caller, but a person\'s', async () => {
+    escalator.setT2Evaluator(vi.fn().mockResolvedValue({ ...makeDecision(true, 'T2'), always: true }) as any);
+    escalator.setT1Evaluator(vi.fn().mockResolvedValue({ ...makeDecision(true, 'T1'), always: true }) as any);
+    await escalator.requestPermission(makeRequest({ toolName: 'shell', isDangerous: true }));
+    expect((await escalator.requestPermission(makeRequest({ toolName: 'shell', isDangerous: true }))).approved).toBe(true);
+
+    const local = makeRequest({ toolName: 'shell', isDangerous: true, localOnly: true });
+    const asked = escalator.requestPermission(local);
+    await flushPromises();
+    escalator.resolveUserDecision(local.id, true, true);
+    expect((await asked).decidedBy).toBe('USER');
+    // The person said always: that stands, for local-only callers too.
+    const again = await escalator.requestPermission(makeRequest({ toolName: 'shell', isDangerous: true, localOnly: true }));
+    expect(again.approved).toBe(true);
+  });
+
   // ── User denies ────────────────────────────
 
   it('returns denied decision when user resolves with false', async () => {
