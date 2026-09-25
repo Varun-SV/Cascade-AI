@@ -147,6 +147,18 @@ describe('File tools — reading only what the running tier allows', () => {
     }
   });
 
+  // A name ending in a space was trimmed before the check, so the check was
+  // of another name — one nothing marked — and the real one was listed.
+  it.skipIf(process.platform === 'win32')('grep lists a file by its exact name, a trailing space included', async () => {
+    const { GrepTool } = await import('./grep.js');
+    await fs.writeFile(path.join(workspace, 'private-name '), 'MARK\n');
+    const tool = new GrepTool();
+    tool.setWorkspaceRoot(workspace);
+    const scan = { ...opts, mayRead: (abs: string) => !abs.endsWith('private-name ') };
+    const out = await tool.execute({ pattern: 'MARK', output_mode: 'files_with_matches' }, scan as never);
+    expect(out).not.toContain('private-name');
+  });
+
   it('image_analyze asks about the workspace file it reads — not one beside the process', async () => {
     const { ImageAnalyzeTool } = await import('./image.js');
     const tool = new ImageAnalyzeTool();

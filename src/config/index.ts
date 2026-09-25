@@ -415,14 +415,22 @@ export class ConfigManager {
     // is where every project finds them. The keys first, and a failure there
     // fails the save: with the config written and the keys not, a key just
     // entered would be gone — or an old one back — on the next load.
+    let undo: () => void;
     try {
-      saveProjectCredentials(this.globalDir, this.project, config.providers ?? []);
+      undo = saveProjectCredentials(this.globalDir, this.project, config.providers ?? []);
     } catch (err) {
       throw new Error(`The provider keys could not be saved to ${path.join(this.globalDir, 'credentials.json')}: ${err instanceof Error ? err.message : String(err)}`);
     }
+    // Both or neither: the keys' change is taken back when the config cannot
+    // be written after it.
     const configPath = statePath(this.workspacePath, STATE.config);
-    await fs.mkdir(path.dirname(configPath), { recursive: true, mode: 0o700 });
-    await fs.writeFile(configPath, JSON.stringify({ ...config, providers: withoutCredentials(config.providers ?? []) }, null, 2), 'utf-8');
+    try {
+      await fs.mkdir(path.dirname(configPath), { recursive: true, mode: 0o700 });
+      await fs.writeFile(configPath, JSON.stringify({ ...config, providers: withoutCredentials(config.providers ?? []) }, null, 2), 'utf-8');
+    } catch (err) {
+      try { undo(); } catch { /* reported below with the write's own failure */ }
+      throw err;
+    }
   }
 
   async updateConfig(updates: Partial<CascadeConfig>): Promise<void> {

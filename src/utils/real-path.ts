@@ -33,3 +33,17 @@ export function realPathOf(absPath: string): string {
     }
   }
 }
+
+/**
+ * Whether a `path.relative()` result leaves the folder it is relative to:
+ * `..` or `../…`, or another root altogether. `..name` — a file whose name
+ * begins with two dots — does not.
+ */
+export function leavesBase(rel: string): boolean {
+  return rel === '..' || rel.startsWith(`..${path.sep}`) || rel.startsWith('../') || path.isAbsolute(rel);
+}
+
+/** Whether `p` is `dir` or lies inside it, by name. */
+export function isWithin(p: string, dir: string): boolean {
+  return !leavesBase(path.relative(dir, p));
+}

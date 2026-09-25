@@ -31,8 +31,12 @@ describe('a project\'s state folder', () => {
     expect(projectStateDir(b)).not.toBe(projectStateDir(a));
     // A host that must not write the global folder names its own — outside
     // the workspace, whose tools would read it there.
-    expect(() => useProjectStateDir(b, path.join(b, '.cascade'))).toThrow(/must be outside/);
-    expect(() => useProjectStateDir(b, b)).toThrow(/must be outside/);
+    expect(() => useProjectStateDir(b, path.join(b, '.cascade'))).toThrow(/must be apart/);
+    expect(() => useProjectStateDir(b, b)).toThrow(/must be apart/);
+    // Nor around it, where the whole workspace would be taken for state.
+    expect(() => useProjectStateDir(b, path.dirname(b))).toThrow(/must be apart/);
+    // A name beginning with two dots is inside, not a way out.
+    expect(() => useProjectStateDir(b, path.join(b, '..state'))).toThrow(/must be apart/);
     const own = `${b}-state`;
     made.push(own);
     useProjectStateDir(b, own);
@@ -213,6 +217,38 @@ describe('a project that moves', () => {
     expect(fs.readFileSync(path.join(projectStateDir(after), 'project.json'), 'utf-8')).not.toContain('keysFrom');
   });
 
+  // Its state is found by path: a folder deleted and another made in its
+  // place inherited all of it — sessions and memories that then surfaced in
+  // an unrelated project.
+  it('sets aside what an earlier folder at the same path did and knew, and keeps its settings', async () => {
+    const ws = tempDir('cascade-same-path-');
+    await new ConfigManager(ws).load();
+    fs.writeFileSync(statePath(ws, STATE.config), JSON.stringify({ privacy: { paths: [{ pattern: 'secret/**', policy: 'local-only' }] } }));
+    fs.writeFileSync(statePath(ws, STATE.privacyDerived), JSON.stringify({ version: 1, paths: ['a.md'] }));
+    fs.writeFileSync(statePath(ws, STATE.memoryDb), 'old sessions');
+    fs.mkdirSync(statePath(ws, STATE.private), { recursive: true });
+    fs.writeFileSync(statePath(ws, STATE.private, 'out.md'), 'old output');
+    const config = fs.readFileSync(statePath(ws, STATE.config), 'utf-8');
+    // Another folder takes its place — made before the old one goes, so it
+    // cannot be given the old one's inode.
+    fs.mkdirSync(`${ws}-new`);
+    fs.rmSync(ws, { recursive: true });
+    fs.renameSync(`${ws}-new`, ws);
+
+    migrateProjectState(ws);
+    expect(fs.existsSync(statePath(ws, STATE.memoryDb))).toBe(false);
+    expect(fs.existsSync(statePath(ws, STATE.private, 'out.md'))).toBe(false);
+    expect(fs.readFileSync(statePath(ws, STATE.config), 'utf-8')).toBe(config);
+    expect(fs.readFileSync(statePath(ws, STATE.privacyDerived), 'utf-8')).toContain('a.md');
+    const aside = /set aside in (\S+)\.$/.exec(stateNotices(ws).join(' '))?.[1];
+    expect(aside && fs.readFileSync(path.join(aside, STATE.memoryDb), 'utf-8')).toBe('old sessions');
+    made.push(aside!);
+    // The same folder, opened again, keeps what it has since.
+    fs.writeFileSync(statePath(ws, STATE.memoryDb), 'new sessions');
+    migrateProjectState(ws);
+    expect(fs.readFileSync(statePath(ws, STATE.memoryDb), 'utf-8')).toBe('new sessions');
+  });
+
   it('starts a copy afresh, saying where the state of the one that is gone is', () => {
     const parent = tempDir('cascade-copying-');
     const original = path.join(parent, 'app');
@@ -306,6 +342,27 @@ describe('saving a project\'s config', () => {
       expect(fs.readFileSync(statePath(ws, STATE.config), 'utf-8')).toBe(before);
     } finally {
       fs.rmSync(store, { recursive: true, force: true });
+    }
+  });
+
+  // The keys are written first; a config that then could not be written left
+  // their change standing — for every project — under a save reported failed.
+  it('takes the keys\' change back when the config cannot be written after it', async () => {
+    const ws = tempDir('cascade-config-fail-');
+    const mgr = new ConfigManager(ws);
+    await mgr.load();
+    await mgr.save({ ...mgr.getConfig(), providers: [{ type: 'openai', apiKey: 'sk-kept' }] });
+    const store = fs.readFileSync(path.join(globalDir(), 'credentials.json'), 'utf-8');
+    const config = statePath(ws, STATE.config);
+    fs.rmSync(config);
+    fs.mkdirSync(config);
+    try {
+      const next = { ...mgr.getConfig(), providers: [{ type: 'openai', apiKey: 'sk-replaced' }] } as never;
+      await expect(mgr.save(next)).rejects.toThrow();
+      expect(writeProjectConfig(ws, next).ok).toBe(false);
+      expect(fs.readFileSync(path.join(globalDir(), 'credentials.json'), 'utf-8')).toBe(store);
+    } finally {
+      fs.rmSync(config, { recursive: true, force: true });
     }
   });
 

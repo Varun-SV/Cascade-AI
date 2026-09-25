@@ -22,7 +22,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import * as _ignoreModule from 'ignore';
 import type { Ignore } from 'ignore';
-import { realPathOf } from '../../utils/real-path.js';
+import { leavesBase, realPathOf } from '../../utils/real-path.js';
 import { LinkAliases } from '../../utils/link-aliases.js';
 import { statePath, STATE } from '../../config/project-state.js';
 import { stripTrailingSlashes } from '../../utils/net.js';
@@ -128,7 +128,7 @@ export class PrivacyPaths {
     const added: string[] = [];
     for (const raw of relativePaths) {
       const rel = stripTrailingSlashes(raw.split(path.sep).join('/').replace(/^\.?\//, ''));
-      if (!rel || rel.startsWith('../') || this.derived.has(rel) || added.includes(rel)) continue;
+      if (!rel || rel === '..' || rel.startsWith('../') || this.derived.has(rel) || added.includes(rel)) continue;
       added.push(rel);
     }
     if (added.length) this.saveDerived(added, []);
@@ -304,6 +304,6 @@ export function literalPattern(rel: string): string {
 /** `absPath` relative to `root` in POSIX form, or '' when it is not inside. */
 function relativeWithin(root: string, absPath: string): string {
   const rel = path.relative(root, absPath);
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return '';
+  if (!rel || leavesBase(rel)) return '';
   return rel.split(path.sep).join('/');
 }

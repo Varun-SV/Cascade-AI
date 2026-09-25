@@ -212,14 +212,21 @@ function sameEntryIn(rows: ProviderConfig[], p: ProviderConfig): ProviderConfig 
  * machine-wide list follows this project's, as it did; and an entry that is
  * this project's own keeps up with it, or goes when its key is removed.
  */
-export function saveProjectCredentials(globalDir: string, project: string, providers: ProviderConfig[]): void {
+export function saveProjectCredentials(globalDir: string, project: string, providers: ProviderConfig[]): () => void {
+  let before: { shared: ProviderConfig[]; own: ProviderConfig[] } | undefined;
   updateCredentialsFile(globalDir, (file) => {
+    before = { shared: file.providers, own: file.projects?.[project] ?? [] };
     const own = (file.projects?.[project] ?? []).flatMap((mine) => {
       const now = sameEntryIn(providers, mine);
       return now && credentialled(now) ? [{ ...now }] : [];
     });
     return withProject(file, project, own, providers.filter(isPersistable));
   });
+  // Puts back what this save changed, for a caller whose other half — the
+  // project's config — could not be written after it.
+  return () => {
+    if (before) updateCredentialsFile(globalDir, (file) => withProject(file, project, before!.own, before!.shared));
+  };
 }
 
 /**

@@ -20,7 +20,7 @@ import { globalDir, projectStateDir, statePath, statePathFor, STATE } from '../c
 import { literalPattern, type PrivacyPaths } from '../core/privacy/paths.js';
 import { homeSecrets, ProcessJail } from './jail/process-jail.js';
 import { BUILT_IN_PROTECTED, insideCascadeState, READ_ONLY_POLICY } from '../config/ignore.js';
-import { realPathOf } from '../utils/real-path.js';
+import { isWithin, leavesBase, realPathOf } from '../utils/real-path.js';
 import type { BaseTool } from './base.js';
 import { WorkspaceGate } from './workspace-gate.js';
 import { LinkAliases, PROBE } from '../utils/link-aliases.js';
@@ -443,7 +443,7 @@ export class ToolRegistry extends EventEmitter {
   private privateOutput(toolName: string, given: string): string | null {
     const abs = path.resolve(this.workspaceRoot, given);
     const rel = path.relative(this.workspaceRoot, abs);
-    if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || fs.existsSync(abs)) return null;
+    if (!rel || leavesBase(rel) || fs.existsSync(abs)) return null;
     const posixRel = posix(rel);
     const moved = `@private/${posixRel}`;
     if (!CREATE_TOOLS.has(toolName)) return fs.existsSync(statePath(this.workspaceRoot, STATE.private, rel)) ? moved : null;
@@ -491,7 +491,7 @@ export class ToolRegistry extends EventEmitter {
     const marks = [abs, made].filter((p): p is string => p !== undefined).map((p) => ({
       stamp: stampOf(p),
       rels: [path.relative(this.workspaceRoot, p), path.relative(realRoot, realPathOf(p))]
-        .filter((rel) => rel && !rel.startsWith('..') && !path.isAbsolute(rel)),
+        .filter((rel) => rel && !leavesBase(rel)),
       path: p,
     }));
     const added = this.markLocalOnly(marks.flatMap((m) => m.rels));
@@ -528,7 +528,7 @@ export class ToolRegistry extends EventEmitter {
     for (const file of this.protectedFiles) {
       for (const root of roots) {
         const rel = path.relative(root, file);
-        if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) out.add(literalPattern(posix(rel)));
+        if (rel && !leavesBase(rel)) out.add(literalPattern(posix(rel)));
       }
     }
     return [...out];
@@ -638,7 +638,7 @@ export class ToolRegistry extends EventEmitter {
     if (rel === '') return false;
     // Outside the workspace (defence in depth; the file tools' own
     // path-sandbox guards reject these too).
-    if (rel.startsWith('..') || path.isAbsolute(rel)) return true;
+    if (leavesBase(rel)) return true;
     // `ignore` requires POSIX-style separators.
     const posixRel = rel.split(path.sep).join('/');
     return this.builtInMatcher.ignores(posixRel) || this.ignoreMatcher.ignores(posixRel);
@@ -656,8 +656,3 @@ function posix(rel: string): string {
   return rel.split(path.sep).join('/');
 }
 
-/** Whether `p` is `dir` or inside it. */
-function isWithin(p: string, dir: string): boolean {
-  const rel = path.relative(dir, p);
-  return !rel.startsWith('..') && !path.isAbsolute(rel);
-}

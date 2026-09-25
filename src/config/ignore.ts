@@ -7,7 +7,7 @@ import path from 'node:path';
 import * as _ignoreModule from 'ignore';
 import type { Ignore } from 'ignore';
 import { LinkAliases } from '../utils/link-aliases.js';
-import { realPathOf } from '../utils/real-path.js';
+import { leavesBase, realPathOf } from '../utils/real-path.js';
 import { globalDir, projectStateDir } from './project-state.js';
 // ignore is a CJS package — access .default under NodeNext ESM interop
 const ignore = (_ignoreModule as unknown as { default: () => Ignore }).default ?? (_ignoreModule as unknown as () => Ignore);
@@ -167,6 +167,6 @@ export function insideCascadeState(absPath: string, workspacePath: string): bool
   const real = realPathOf(absPath);
   return [globalDir(), projectStateDir(workspacePath)].some((dir) => {
     const rel = path.relative(realPathOf(dir), real);
-    return !rel.startsWith('..') && !path.isAbsolute(rel);
+    return !leavesBase(rel);
   });
 }

@@ -45,10 +45,20 @@ export function writeProjectConfig(
   const providers = config.providers ?? [];
   // The keys first: with the config written and the keys not, a key just
   // entered would be gone on the next load.
+  let undo: () => void;
   try {
-    saveProjectCredentials(globalDirPath, path.basename(projectStateDir(workspacePath)), providers);
+    undo = saveProjectCredentials(globalDirPath, path.basename(projectStateDir(workspacePath)), providers);
   } catch (err) {
     return { ok: false, error: `the provider keys could not be saved: ${err instanceof Error ? err.message : String(err)}` };
   }
-  return writeConfigFile(statePath(workspacePath, STATE.config), { ...config, providers: withoutCredentials(providers) });
+  // Both or neither: a config that could not be written takes the keys'
+  // change back, or a key added, replaced or removed would stand for every
+  // project while the save reported it had not happened.
+  const written = writeConfigFile(statePath(workspacePath, STATE.config), { ...config, providers: withoutCredentials(providers) });
+  if (!written.ok) {
+    try { undo(); } catch (err) {
+      return { ok: false, error: `${written.error}; and the provider keys, saved first, could not be put back: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+  return written;
 }

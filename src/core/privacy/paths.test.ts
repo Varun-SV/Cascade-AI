@@ -229,3 +229,24 @@ describe('PrivacyPaths — a record that cannot be read', () => {
     }
   });
 });
+
+// A name beginning with two dots was taken for a way out of the workspace:
+// no policy covered `..secret.ts`, and the code index sent it to the embedder.
+describe('PrivacyPaths — a file whose name begins with two dots', () => {
+  it('is inside the workspace, and covered like any other', async () => {
+    const fs = await import('node:fs/promises');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { resolveInWorkspace } = await import('../../tools/utils/workspace-path.js');
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-dots-')));
+    try {
+      await fs.writeFile(path.join(root, '..secret.ts'), 'x');
+      const policy = new PrivacyPaths([{ pattern: '..secret.ts', policy: 'local-only' }]);
+      expect(policy.coversFile(path.join(root, '..secret.ts'), root)).toBe(true);
+      expect(resolveInWorkspace(root, '..secret.ts')).toBe(path.join(root, '..secret.ts'));
+      expect(() => resolveInWorkspace(root, '../elsewhere.ts')).toThrow(/outside workspace/);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});

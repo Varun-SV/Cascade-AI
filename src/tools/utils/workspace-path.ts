@@ -4,7 +4,7 @@
 
 import path from 'node:path';
 import fs from 'node:fs';
-import { realPathOf } from '../../utils/real-path.js';
+import { leavesBase, realPathOf } from '../../utils/real-path.js';
 import { statePathFor } from '../../config/project-state.js';
 
 export class WorkspaceSandboxError extends Error {
@@ -32,7 +32,7 @@ export function resolveInWorkspace(workspaceRoot: string, input: string): string
   const inState = statePathFor(workspaceRoot, input);
   if (inState !== null) {
     const folder = statePathFor(workspaceRoot, input.split(/[\\/]/)[0]!)!;
-    const escapes = (p: string, base: string) => { const r = path.relative(base, p); return r.startsWith('..') || path.isAbsolute(r); };
+    const escapes = (p: string, base: string) => leavesBase(path.relative(base, p));
     if (escapes(inState, folder) || escapes(realPathOf(inState), realPathOf(folder))) {
       throw new WorkspaceSandboxError(input, folder);
     }
@@ -45,7 +45,7 @@ export function resolveInWorkspace(workspaceRoot: string, input: string): string
 
   if (rel === '' || rel === '.') {
     // still verify symlink target for the root itself
-  } else if (rel.startsWith('..') || path.isAbsolute(rel)) {
+  } else if (leavesBase(rel)) {
     throw new WorkspaceSandboxError(input, root);
   }
 
@@ -60,7 +60,7 @@ export function resolveInWorkspace(workspaceRoot: string, input: string): string
   let realRoot = root;
   try { realRoot = fs.realpathSync(root); } catch { /* compare against the name given */ }
   const realRel = path.relative(realRoot, real);
-  if (realRel !== '' && realRel !== '.' && (realRel.startsWith('..') || path.isAbsolute(realRel))) {
+  if (realRel !== '' && realRel !== '.' && leavesBase(realRel)) {
     throw new WorkspaceSandboxError(input, root);
   }
 

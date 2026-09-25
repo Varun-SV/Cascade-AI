@@ -141,8 +141,8 @@ describe('toPathspecs', () => {
 
 describe('unixSocketFilter', () => {
   it('is a cBPF program for x64 and arm64, and nothing elsewhere', () => {
-    expect(unixSocketFilter('x64')?.length).toBe(13 * 8);
-    expect(unixSocketFilter('arm64')?.length).toBe(13 * 8);
+    expect(unixSocketFilter('x64')?.length).toBe((13 + 16) * 8);
+    expect(unixSocketFilter('arm64')?.length).toBe((13 + 16) * 8);
     expect(unixSocketFilter('ia32')).toBeNull();
   });
 });
@@ -621,10 +621,27 @@ describe('what git push may send', () => {
     await expect(push('origin', '+:')).rejects.toThrow(/refused/);
   });
 
-  it('refuses one to somewhere that is not a configured remote', async () => {
-    await expect(push(bare, 'main')).rejects.toThrow(/not a configured remote/);
-    await expect(push('--repo', bare, 'main')).rejects.toThrow(/not a configured remote/);
+  it('refuses one to somewhere that is not a configured remote, as to one that is', async () => {
+    await expect(push(bare, 'main')).rejects.toThrow(/refused: a commit .* does not have yet/);
+    await expect(push('--repo', bare, 'main')).rejects.toThrow(/refused/);
     expect(remoteHas('refs/heads/main')).toBe(false);
+  });
+
+  // Tracking refs say what a remote of that name had when last fetched: once
+  // it points at another server, the history they list is not there.
+  it('asks the destination what it has, not the tracking refs of a remote since repointed', async () => {
+    const other = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-push-other-')));
+    try {
+      g(other, 'init', '-q', '--bare');
+      g(repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+      g(repo, 'remote', 'set-url', 'origin', other);
+      await expect(push('origin', 'main')).rejects.toThrow(/refused/);
+      expect(() => g(other, 'rev-parse', '--verify', '--quiet', 'refs/heads/main')).toThrow();
+    } finally {
+      g(repo, 'remote', 'set-url', 'origin', bare);
+      g(repo, 'update-ref', '-d', 'refs/remotes/origin/main');
+      await fs.rm(other, { recursive: true, force: true });
+    }
   });
 
   it('lets the rest through: history without the file, and deleting', async () => {
@@ -687,6 +704,21 @@ describe('a file protected where it is, in git', () => {
   it.skipIf(!bwrapWorks)('hides the git store from commands', async () => {
     const out = await registry().execute('shell', { command: 'git show HEAD:data/idx.db 2>&1; true' }, exec);
     expect(out).not.toContain(INDEX);
+  });
+
+  // A journal not there when the command started was not masked: another
+  // process writing the index then made it, indexed text and all, in view.
+  it.skipIf(!bwrapWorks)('hides a journal that appears while a command runs', async () => {
+    const journal = path.join(repo, 'data', 'idx.db-wal');
+    await fs.rm(journal, { force: true });
+    try {
+      const running = registry().execute('shell', { command: 'sleep 0.5; cat data/idx.db-wal 2>&1; true' }, exec);
+      await new Promise((r) => setTimeout(r, 200));
+      await fs.writeFile(journal, INDEX);
+      expect(await running).not.toContain(INDEX);
+    } finally {
+      await fs.rm(journal, { force: true });
+    }
   });
 
   // In the jail the hidden file reads as empty: `git add .` staged it so,
@@ -861,6 +893,23 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: where a local-only caller\'s writes
     expect(out).toContain('@private/report.md');
     await expect(fs.stat(path.join(dir, 'report.md'))).rejects.toThrow();
     expect(fsSync.readFileSync(statePath(dir, 'private', 'report.md'), 'utf8')).toContain(LOCAL);
+  });
+
+  // Folders were stamped by name only: a command could leave what it read in
+  // a folder's extended attributes, mode or times, past every mark.
+  it('puts back what a command set on a folder it did not make, and gives it no extended attributes', async () => {
+    const docs = path.join(dir, 'docs');
+    await fs.mkdir(docs, { recursive: true });
+    const before = fsSync.statSync(docs);
+    const py = (code: string) => `python3 -c "import os; ${code}" 2>&1`;
+    const out = await registry().execute('shell', {
+      command: `chmod 700 docs; touch -d '2001-02-03 04:05:06' docs; ${py("os.setxattr('docs', 'user.leak', b'x')")}; true`,
+    }, offline);
+    const after = fsSync.statSync(docs);
+    expect(after.mode & 0o7777).toBe(before.mode & 0o7777);
+    expect(Math.abs(after.mtimeMs - before.mtimeMs)).toBeLessThan(1);
+    expect(out).toMatch(/not supported/i);
+    expect(() => execFileSync('python3', ['-c', `import os; os.getxattr(${JSON.stringify(docs)}, 'user.leak')`], { stdio: 'pipe' })).toThrow();
   });
 
   it('gives the command a private /tmp, and nowhere else to write outside the workspace', async () => {

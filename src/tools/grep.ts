@@ -12,7 +12,7 @@ import { BaseTool } from './base.js';
 import { WithheldError } from './file.js';
 import { resolveInWorkspace } from './utils/workspace-path.js';
 import { statePathFor } from '../config/project-state.js';
-import { realPathOf } from '../utils/real-path.js';
+import { isWithin, realPathOf } from '../utils/real-path.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -141,7 +141,9 @@ export class GrepTool extends BaseTool {
     const allowed = (file: string): boolean => shown(path.resolve(searchPath, file));
     let lines: string[];
     if (outputMode === 'files_with_matches') {
-      lines = stdout.split('\0').map((file) => file.trim()).filter((file) => file && allowed(file));
+      // Each name exactly as it is — one may end in a space — up to its NUL;
+      // the last NUL leaves an empty field, which names nothing.
+      lines = stdout.split('\0').filter((file) => file !== '' && allowed(file));
     } else {
       lines = [];
       // A `--` between context groups is kept only between two groups that
@@ -257,8 +259,3 @@ export class GrepTool extends BaseTool {
   }
 }
 
-/** Whether `p` is `dir` or inside it. */
-function isWithin(p: string, dir: string): boolean {
-  const rel = path.relative(dir, p);
-  return !rel.startsWith('..') && !path.isAbsolute(rel);
-}

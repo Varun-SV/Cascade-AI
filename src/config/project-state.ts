@@ -26,6 +26,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { GLOBAL_CONFIG_DIR } from '../constants.js';
 import { renameProjectCredentials } from './global-credentials.js';
+import { isWithin } from '../utils/real-path.js';
 
 /** The folder a project kept its state in before; moved out on first use (`projectStateDir`). */
 export const LEGACY_STATE_DIR = '.cascade';
@@ -50,13 +51,13 @@ function realRoot(workspacePath: string): string {
  * for a host that must not write there. Applies to this process.
  */
 export function useProjectStateDir(workspacePath: string, dir: string): void {
-  // Never inside the workspace: its tools read the workspace by any path,
-  // and the state folder holds what only a local-only subtask may see.
+  // Apart from the workspace, either way: inside it, its tools would read
+  // the state folder, which holds what only a local-only subtask may see;
+  // around it, the whole workspace would be taken for state and hidden.
   const root = realRoot(workspacePath);
   const at = realRoot(dir);
-  const rel = path.relative(root, at);
-  if (!rel || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
-    throw new Error(`A project's state folder must be outside it: ${dir} is inside ${workspacePath}.`);
+  if (isWithin(at, root) || isWithin(root, at)) {
+    throw new Error(`A project's state folder must be apart from it: ${dir} and ${workspacePath} overlap.`);
   }
   named.set(root, path.resolve(dir));
 }
@@ -80,6 +81,7 @@ export function projectStateDir(workspacePath: string): string {
     prepared.add(dir);
     try {
       if (!chosen && !fs.existsSync(dir)) followMove(root, dir);
+      else if (!chosen) setAsideForNewFolder(root, dir);
       makePrivate(chosen ? [dir] : [globalDir(), path.join(globalDir(), 'projects'), dir]);
       movedIn.set(dir, moveLegacyState(workspacePath, dir));
       if (!chosen) {
@@ -134,6 +136,39 @@ function recordIdentity(root: string, dir: string, keysFrom?: string): void {
   const pending = keysFrom ?? was?.keysFrom;
   if (was && was.path === root && sameFolder(was, now) && was.keysFrom === pending) return;
   fs.writeFileSync(path.join(dir, IDENTITY_FILE), JSON.stringify({ path: root, ...now, ...(pending ? { keysFrom: pending } : {}) }, null, 2), { mode: 0o600 });
+}
+
+/**
+ * What stays with a path when another folder takes its place: the settings —
+ * the config and its local-only rules, the record of what local-only
+ * subtasks wrote (which errs towards keeping a same-named file local-only),
+ * the project's own keys (filed under the folder's name) and the like. The
+ * rest is what the old project did and knew — sessions, world state, the
+ * audit trail, the code index, run checkpoints, private outputs — and would
+ * surface in an unrelated one: it is set aside.
+ */
+function keptForANewFolder(): Set<string> {
+  return new Set([STATE.config, STATE.privacyDerived, STATE.deadModels, STATE.dashboardSecret, STATE.gate, IDENTITY_FILE]);
+}
+
+/**
+ * The folder at this path is not the one its state was made for — deleted,
+ * and another made or cloned in its place: what the old one did and knew is
+ * moved beside the state folder, with a notice of where.
+ */
+function setAsideForNewFolder(root: string, dir: string): void {
+  const was = readIdentity(dir);
+  const now = identityOf(root);
+  if (!was || !now || was.path !== root) return;
+  // By inode and when it was made, not the device: a remount can change that.
+  if (was.ino === now.ino && (was.born === '0' || now.born === '0' || was.born === now.born)) return;
+  const kept = keptForANewFolder();
+  const entries = fs.readdirSync(dir).filter((name) => !kept.has(name));
+  if (entries.length === 0) return;
+  const aside = `${dir}.before-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  fs.mkdirSync(aside, { recursive: true, mode: 0o700 });
+  for (const name of entries) moveEntry(path.join(dir, name), path.join(aside, name));
+  notices.set(dir, [...(notices.get(dir) ?? []), `The folder at ${root} is not the one Cascade's state for it was made for. Its settings, local-only rules and own keys carry over; what the earlier project did and knew — sessions, world state, the audit trail, the code index, run checkpoints, private outputs — was set aside in ${aside}.`]);
 }
 
 /**
@@ -270,7 +305,13 @@ export function migrateProjectState(workspacePath: string): string[] {
   const dir = projectStateDir(workspacePath);
   const moved = [...(movedIn.get(dir) ?? []), ...moveLegacyState(workspacePath, dir)];
   movedIn.delete(dir);
-  if (!named.has(realRoot(workspacePath))) moveOwnKeys(dir);
+  const root = realRoot(workspacePath);
+  if (!named.has(root)) {
+    // As on first use — a folder replaced, or keys still to file, since.
+    setAsideForNewFolder(root, dir);
+    recordIdentity(root, dir);
+    moveOwnKeys(dir);
+  }
   return moved;
 }
 

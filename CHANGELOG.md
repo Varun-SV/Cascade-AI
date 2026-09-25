@@ -57,7 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where it is, and what it points at untouched. A project renamed or moved
   on its disk takes its state with it, found by the folder's identity on
   disk; a copy, or a move to another disk, starts afresh, with a notice of
-  where the old state is. `cascade doctor` prints where a
+  where the old state is. Another folder made at a project's path — the
+  old one deleted, a fresh clone — keeps its settings, local-only rules and
+  own keys, and has what the earlier one did and knew set aside. `cascade doctor` prints where a
   project's config is. A hosted server names a state folder of its own
   (`useProjectStateDir`), outside the workspace — which a folder inside it
   is refused — and never writes the machine-global one.
@@ -284,7 +286,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its diffs and of what it stages or stashes (where they read as empty),
   never runs a hook — git's configuration files are read-only to commands,
   so none can name a program for it to run with the credentials it keeps —
-  and refuses a push that would send a commit holding one, and runs
+  and refuses a push that would send a commit holding one — asking the
+  destination what it has, not trusting tracking refs — and runs
   no hook and none of the global or system git or ssh configuration there,
   since a command could rewrite those and git would run what they name with
   the history in view — and so is

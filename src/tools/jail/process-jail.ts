@@ -40,6 +40,7 @@
 import { execFile } from 'node:child_process';
 import { fileIdentity, PROBE } from '../../utils/link-aliases.js';
 import { stripTrailingSlashes } from '../../utils/net.js';
+import { isWithin } from '../../utils/real-path.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -230,11 +231,12 @@ export class ProcessJail {
     // no file shows. The command runs alone meanwhile (tools/workspace-gate.ts).
     let root: string;
     try { root = fs.realpathSync(this.policy.workspaceRoot); } catch { root = path.resolve(this.policy.workspaceRoot); }
-    const inside = (p: string) => { const rel = path.relative(root, p); return !rel.startsWith('..') && !path.isAbsolute(rel); };
+    const inside = (p: string) => isWithin(p, root);
     const gitDirs = (await gitDirsOf(root)).filter(inside);
     const startedAt = Date.now();
     const dirsBefore = new Set<string>();
-    const before = await stampFiles(root, gitDirs, dirsBefore);
+    const folders = new Map<string, FolderStamp>();
+    const before = await stampFiles(root, gitDirs, dirsBefore, folders);
     // A file with other names shares what is written to it with all of
     // them, and one outside the workspace can be neither marked nor hidden:
     // such files are read-only to the command (installed packages, where
@@ -279,6 +281,10 @@ export class ProcessJail {
       const inGone = (rel: string) => goneDirs.some((dir) => rel.startsWith(`${dir}/`));
       const deleted = [...goneDirs, ...[...before.keys()].filter((rel) => !after.has(rel) && !inGone(rel))];
       const marked = [...changed.filter((rel) => before.has(rel) || !inMade(rel)), ...made, ...deleted].filter((rel) => !moved.includes(rel));
+      // A folder it did not make carries nothing of its own choosing out:
+      // its mode and times are put back as they were (extended attributes
+      // it could not set at all).
+      restoreFolders(root, folders);
       const notes: string[] = [];
       if (moved.length) {
         notes.push(`A local-only subtask (privacy.paths) keeps what it makes in its private folder, outside the project: this command's new files were moved there (${listed(moved)}).`);
@@ -393,21 +399,24 @@ export class ProcessJail {
     const matching = positional.some((spec) => spec.replace(/^\+/, '') === ':');
     const every = bulk || matching || (!deleting && positional.length === 0);
 
-    const remotes = await git(where, ['remote']);
-    if (remotes === null) return unverified;
     if (target === undefined) target = await defaultPushRemote(where);
     if (!every && sources.length === 0) return null;
-    const configured = remotes.split('\n').map((r) => r.trim()).filter(Boolean).includes(target);
+    // What the destination has, asked of the destination itself: tracking
+    // refs say what a remote of that name had when last fetched — from
+    // another server, if it has since been pointed elsewhere. Of what it
+    // advertises, only commits this repository has count (--ignore-missing).
+    if (target.startsWith('-')) return unverified;
+    const advertised = await git(where, ['ls-remote', '--end-of-options', target]);
+    if (advertised === null) return unverified;
+    const has = [...new Set(advertised.split('\n').map((line) => line.split('\t')[0]?.trim() ?? '').filter((sha) => /^[0-9a-f]{40,64}$/.test(sha)))];
     const found = await git(where, [
-      'log', '-n', '1', '--format=%h %s', ...(every ? ['--all'] : []),
-      ...(configured ? ['--not', `--remotes=${target}`, '--not'] : []),
+      'log', '-n', '1', '--format=%h %s', '--ignore-missing', ...(every ? ['--all'] : []),
+      ...(has.length ? ['--not', ...has, '--not'] : []),
       '--end-of-options', ...sources, '--', ...specs,
     ]);
     if (found === null) return unverified;
     if (!found) return null;
-    return configured
-      ? `git push was refused: a commit "${target}" does not have yet (${found}) touches a protected or local-only (privacy.paths) file, and pushing would send it.`
-      : `git push was refused: what it would send holds a protected or local-only (privacy.paths) file (${found}), and "${target}" is not a configured remote, so what it already has is not known.`;
+    return `git push was refused: a commit "${target}" does not have yet (${found}) touches a protected or local-only (privacy.paths) file, and pushing would send it.`;
   }
 
   /**
@@ -527,7 +536,13 @@ export async function collectHidden(policy: JailPolicy, offline: boolean): Promi
     out.push({ path: at, dir: true, ...(keep.length ? { keep } : {}), ...(keepReadOnly.length ? { keepReadOnly } : {}) });
   }
   for (const file of policy.hiddenFiles?.() ?? []) {
-    try { if (fs.lstatSync(file).isFile()) out.push({ path: file, dir: false }); } catch { /* not there */ }
+    try {
+      // One not there yet — a database's journal, which another process
+      // makes when it next writes — is made, empty, so that the mask is in
+      // place when it fills: a mount needs something there to cover.
+      if (!fs.existsSync(file) && fs.existsSync(path.dirname(file))) fs.writeFileSync(file, '', { flag: 'wx', mode: 0o600 });
+      if (fs.lstatSync(file).isFile()) out.push({ path: file, dir: false });
+    } catch { /* not there, nor to be made */ }
   }
   out.push(...await linkAliasesOf(out, root));
   return out;
@@ -735,9 +750,15 @@ export function seatbeltProfile(hidden: Hidden[], readOnly: string[] = []): stri
 //  so is every call from another ABI (x32, or 32-bit code), whose socket
 //  call this filter cannot see.
 
-const SECCOMP_ARCH: Record<string, { audit: number; socket: number; ioUringSetup: number }> = {
-  x64: { audit: 0xc000003e, socket: 41, ioUringSetup: 425 },
-  arm64: { audit: 0xc00000b7, socket: 198, ioUringSetup: 425 },
+//  Extended attributes are refused too, as not supported: set on a folder
+//  the command did not otherwise change, one would carry what it read past
+//  the stamps that find its writes. What else a folder carries — its mode
+//  and times — is put back when the command ends.
+
+const SECCOMP_ARCH: Record<string, { audit: number; socket: number; ioUringSetup: number; xattrWrites: number[] }> = {
+  // setxattr, lsetxattr, fsetxattr, removexattr, lremovexattr, fremovexattr, setxattrat, removexattrat
+  x64: { audit: 0xc000003e, socket: 41, ioUringSetup: 425, xattrWrites: [188, 189, 190, 197, 198, 199, 463, 466] },
+  arm64: { audit: 0xc00000b7, socket: 198, ioUringSetup: 425, xattrWrites: [5, 6, 7, 14, 15, 16, 463, 466] },
 };
 
 /** The filter as a compiled cBPF program, as bubblewrap's --seccomp reads it; null on another architecture. */
@@ -747,21 +768,24 @@ export function unixSocketFilter(arch: string = process.arch): Buffer | null {
   const LD_ABS = 0x20, JEQ = 0x15, JGE = 0x35, RET = 0x06;
   const ALLOW = 0x7fff0000;
   const errno = (e: number) => 0x00050000 | e;
-  const EACCES = 13, ENOSYS = 38, AF_UNIX = 1;
+  const EACCES = 13, ENOSYS = 38, ENOTSUP = 95, AF_UNIX = 1;
   const program: Array<[number, number, number, number]> = [
-    [LD_ABS, 0, 0, 4],                // 0  A = arch
-    [JEQ, 1, 0, a.audit],             // 1  this ABI → 3
-    [RET, 0, 0, errno(EACCES)],       // 2  another ABI
-    [LD_ABS, 0, 0, 0],                // 3  A = syscall number
-    [JGE, 0, 1, 0x40000000],          // 4  x32 → 5, else 6
-    [RET, 0, 0, errno(EACCES)],       // 5
-    [JEQ, 0, 1, a.ioUringSetup],      // 6  io_uring_setup → 7, else 8
-    [RET, 0, 0, errno(ENOSYS)],       // 7
-    [JEQ, 0, 3, a.socket],            // 8  socket → 9, else 12
-    [LD_ABS, 0, 0, 16],               // 9  A = its domain
-    [JEQ, 0, 1, AF_UNIX],             // 10 AF_UNIX → 11, else 12
-    [RET, 0, 0, errno(EACCES)],       // 11
-    [RET, 0, 0, ALLOW],               // 12
+    // Jumps are relative: jt/jf skip that many instructions.
+    [LD_ABS, 0, 0, 4],                // A = arch
+    [JEQ, 1, 0, a.audit],             // this ABI → skip the refusal
+    [RET, 0, 0, errno(EACCES)],       //   another ABI
+    [LD_ABS, 0, 0, 0],                // A = syscall number
+    [JGE, 0, 1, 0x40000000],          // x32 → refuse, else on
+    [RET, 0, 0, errno(EACCES)],
+    // each extended-attribute write → not supported, else the next check
+    ...a.xattrWrites.flatMap((nr): Array<[number, number, number, number]> => [[JEQ, 0, 1, nr], [RET, 0, 0, errno(ENOTSUP)]]),
+    [JEQ, 0, 1, a.ioUringSetup],      // io_uring_setup → not there, else on
+    [RET, 0, 0, errno(ENOSYS)],
+    [JEQ, 0, 3, a.socket],            // socket → check its domain, else allow
+    [LD_ABS, 0, 0, 16],               //   A = its domain
+    [JEQ, 0, 1, AF_UNIX],             //   AF_UNIX → refuse, else allow
+    [RET, 0, 0, errno(EACCES)],
+    [RET, 0, 0, ALLOW],
   ];
   const buf = Buffer.alloc(program.length * 8);
   program.forEach(([code, jt, jf, k], i) => {
@@ -847,9 +871,20 @@ interface Stamp { ctime: number; mtime: number; size: number; ino: number; nlink
  * cannot write. Symlinks are stamped as themselves, never followed. The
  * directories walked go in `dirs`.
  */
-async function stampFiles(root: string, skip: string[], dirs?: Set<string>): Promise<Map<string, Stamp>> {
+/** A folder's mode and times, as they were before a command ran. */
+interface FolderStamp { mode: number; atime: number; mtime: number }
+
+async function stampFiles(root: string, skip: string[], dirs?: Set<string>, folders?: Map<string, FolderStamp>): Promise<Map<string, Stamp>> {
   const out = new Map<string, Stamp>();
   const skipped = new Set(skip);
+  const folder = async (abs: string, rel: string): Promise<void> => {
+    if (!folders) return;
+    try {
+      const st = await fs.promises.lstat(abs);
+      folders.set(rel, { mode: st.mode & 0o7777, atime: st.atimeMs, mtime: st.mtimeMs });
+    } catch { /* gone meanwhile */ }
+  };
+  await folder(root, '');
   const walk = async (dir: string, relDir: string): Promise<void> => {
     let entries: fs.Dirent[];
     try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
@@ -863,6 +898,7 @@ async function stampFiles(root: string, skip: string[], dirs?: Set<string>): Pro
           continue;
         }
         dirs?.add(rel);
+        await folder(abs, rel);
         await walk(abs, rel);
         continue;
       }
@@ -874,6 +910,19 @@ async function stampFiles(root: string, skip: string[], dirs?: Set<string>): Pro
   };
   await walk(root, '');
   return out;
+}
+
+/** Put each folder's mode and times back as `folders` has them, where they differ. */
+function restoreFolders(root: string, folders: Map<string, FolderStamp>): void {
+  for (const [rel, was] of folders) {
+    const abs = rel ? path.join(root, rel) : root;
+    try {
+      const now = fs.lstatSync(abs);
+      if (!now.isDirectory()) continue;
+      if ((now.mode & 0o7777) !== was.mode) fs.chmodSync(abs, was.mode);
+      if (now.atimeMs !== was.atime || now.mtimeMs !== was.mtime) fs.utimesSync(abs, was.atime / 1000, was.mtime / 1000);
+    } catch { /* gone, or not ours to change */ }
+  }
 }
 
 /**

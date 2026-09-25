@@ -9,7 +9,7 @@ import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
 import { resolveInWorkspace } from './utils/workspace-path.js';
 import { statePathFor } from '../config/project-state.js';
-import { realPathOf } from '../utils/real-path.js';
+import { isWithin, realPathOf } from '../utils/real-path.js';
 
 export class GlobTool extends BaseTool {
   readonly name = 'glob';
@@ -76,8 +76,3 @@ export class GlobTool extends BaseTool {
   }
 }
 
-/** Whether `p` is `dir` or inside it. */
-function isWithin(p: string, dir: string): boolean {
-  const rel = path.relative(dir, p);
-  return !rel.startsWith('..') && !path.isAbsolute(rel);
-}
