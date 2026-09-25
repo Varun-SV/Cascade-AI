@@ -119,31 +119,34 @@ describe('a deployment with no provider configured', () => {
 });
 
 describe('browser session rationing', () => {
-  it('does not apply the hosted daily allowance to self-hosted Steel', () => {
-    expect(providerRationsSessions({
-      provider: 'steel',
-      url: 'http://steel-browser.railway.internal:3000',
-      apiKey: 'ignored-by-self-hosted-steel',
-    })).toBe(false);
+  const privateSteel = {
+    provider: 'steel' as const,
+    url: 'http://steel-browser.railway.internal:3000',
+    apiKey: 'deployment-secret',
+  };
+
+  it('does not impose Cascade SaaS quotas on the self-hosted default', () => {
+    expect(providerRationsSessions(privateSteel)).toBe(false);
+    expect(providerRationsSessions(privateSteel, 'self-hosted')).toBe(false);
   });
 
-  it('still applies the daily allowance to hosted Steel', () => {
-    expect(providerRationsSessions({
-      provider: 'steel',
-      apiKey: 'hosted-secret',
-    })).toBe(true);
+  it('meters our managed hosted deployment even when Steel itself is private/self-hosted', () => {
+    expect(providerRationsSessions(privateSteel, 'hosted')).toBe(true);
+  });
+
+  it('also meters hosted Cascade when it uses Steel Cloud', () => {
     expect(providerRationsSessions({
       provider: 'steel',
       url: 'https://api.steel.dev',
       apiKey: 'hosted-secret',
-    })).toBe(true);
+    }, 'hosted')).toBe(true);
   });
 
-  it('does not ration a standing CDP endpoint', () => {
+  it('does not ration a standing CDP endpoint even in hosted mode', () => {
     expect(providerRationsSessions({
       provider: 'cdp',
       url: 'ws://browser.internal:9222',
-    })).toBe(false);
+    }, 'hosted')).toBe(false);
   });
 });
 

@@ -137,10 +137,10 @@ describe('the operator configures a browser for their deployment', () => {
   describe('the plan\u2019s daily allowance of browser sessions', () => {
     const today = () => new Date().toISOString().slice(0, 10);
     /**
-     * `true` is hosted Steel, whose allocated sessions are externally
-     * metered; it is never dialled here because small talk opens no browser.
-     * `'self-hosted'` is the deployment's own Steel and has no provider-side
-     * daily quota. `'cdp'` drives a standing browser and allocates nothing.
+     * `true` is OUR hosted Cascade deployment backed by private Steel, so its
+     * browser spend is monetized by plan. `'self-hosted'` uses the same Steel
+     * topology but represents an OSS operator paying for their own infrastructure.
+     * `'cdp'` is a standing browser and allocates no sessions.
      */
     async function setup(withBrowser: boolean | 'cdp' | 'self-hosted') {
       dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-rb-allowance-'));
@@ -150,14 +150,22 @@ describe('the operator configures a browser for their deployment', () => {
       const env = loadEnv({
         ...baseEnv(dir),
         ...(withBrowser === 'cdp'
-          ? { REMOTE_BROWSER_PROVIDER: 'cdp', REMOTE_BROWSER_URL: 'ws://127.0.0.1:9/devtools/browser/test' }
+          ? {
+            CASCADE_DEPLOYMENT_MODE: 'hosted',
+            REMOTE_BROWSER_PROVIDER: 'cdp',
+            REMOTE_BROWSER_URL: 'ws://127.0.0.1:9/devtools/browser/test',
+          }
           : withBrowser === 'self-hosted'
-            ? { REMOTE_BROWSER_PROVIDER: 'steel', REMOTE_BROWSER_URL: 'https://steel.internal' }
+            ? {
+              CASCADE_DEPLOYMENT_MODE: 'self-hosted',
+              REMOTE_BROWSER_PROVIDER: 'steel',
+              REMOTE_BROWSER_URL: 'https://steel.internal',
+            }
             : withBrowser
               ? {
+                CASCADE_DEPLOYMENT_MODE: 'hosted',
                 REMOTE_BROWSER_PROVIDER: 'steel',
-                REMOTE_BROWSER_URL: 'https://api.steel.dev',
-                REMOTE_BROWSER_API_KEY: 'sk-test',
+                REMOTE_BROWSER_URL: 'https://steel.internal',
               }
               : {}),
       });
@@ -200,12 +208,18 @@ describe('the operator configures a browser for their deployment', () => {
       expect(result.output).toContain('Hello from the stub model.');
     }, 30_000);
 
-    it('does not apply Steel Cloud’s daily allowance to self-hosted Steel', async () => {
+    it('does not apply Cascade Cloud’s daily allowance to a self-hosted deployment', async () => {
       const { user, run } = await setup('self-hosted');
       for (let i = 0; i < 5; i++) store!.incrementBrowserSessions(user.id, today());
 
-      const result = await run(true);
-      expect(result.output).toContain('Hello from the stub model.');
+      const set = vi.spyOn(RemoteBrowserController.prototype, 'setAllowanceFor');
+      try {
+        const result = await run(true);
+        expect(result.output).toContain('Hello from the stub model.');
+        expect(set.mock.calls.at(-1)?.[1], 'self-hosted runs get no SaaS browser allowance').toBeUndefined();
+      } finally {
+        set.mockRestore();
+      }
     }, 30_000);
 
     it('does not ration a browser the deployment does not have', async () => {

@@ -1312,7 +1312,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       // So the Browser chip can be off BEFORE a run is refused, not after —
       // and only where sessions are rationed. Reported for a deployment that
       // does not count them, the chip would show a limit nothing enforces.
-      ...(providerRationsSessions(remoteBrowserControls(env).remoteBrowser)
+      ...(providerRationsSessions(remoteBrowserControls(env).remoteBrowser, env.CASCADE_DEPLOYMENT_MODE)
         ? {
           browserSessions: store.getBrowserSessions(req.session!.userId, todayKey()),
           browserSessionLimit: limits.dailyBrowserSessions,
