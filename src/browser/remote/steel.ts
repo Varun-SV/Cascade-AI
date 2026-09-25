@@ -310,12 +310,15 @@ class SteelHttpError extends Error {
 function waitForColdStart(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    if (!signal) return;
-    signal.addEventListener('abort', () => {
+    const onAbort = () => {
       clearTimeout(timer);
-      reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
-    }, { once: true });
+      reject(signal?.reason ?? new DOMException('Aborted', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
 
@@ -355,7 +358,9 @@ export class SteelProvider implements RemoteBrowserProvider {
         break;
       } catch (err) {
         const delay = COLD_START_RETRY_DELAYS_MS[attempt];
-        if (!(err instanceof SteelHttpError) || err.status !== 502 || delay === undefined) throw err;
+        // Hosted Steel allocates paid sessions too; never replay its POST. This
+        // retry exists only for a self-hosted service that Railway may be waking.
+        if (isHostedSteel(this.base) || !(err instanceof SteelHttpError) || err.status !== 502 || delay === undefined) throw err;
         await waitForColdStart(delay, signal);
       }
     }
