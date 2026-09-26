@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -690,5 +690,57 @@ describe('ToolRegistry — a cloud caller changing a local-only file', () => {
     // Written by a local-only subtask, so recorded: local-only without the pattern too.
     expect(new PrivacyPaths([], { workspaceRoot: ws }).isLocalOnly('secret/plan.md')).toBe(true);
     await fs.rm(ws, { recursive: true, force: true });
+  });
+});
+
+// The path was checked before the call waited for its turn, so a command
+// running meanwhile could swap it for a symlink to a protected file, which
+// the call then opened unchecked.
+describe('ToolRegistry — a path changed while the call waited for its turn', () => {
+  it('checks the path again once the call has its turn', async () => {
+    const { WorkspaceGate } = await import('./workspace-gate.js');
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-swap-')));
+    try {
+      await fs.writeFile(path.join(ws, '.env'), 'API_KEY=sk-swapped-0123456789\n');
+      await fs.writeFile(path.join(ws, 'data.txt'), 'plain\n');
+      const reg = new ToolRegistry(toolsConfig, ws);
+      const command = await WorkspaceGate.for(ws).enter('commands');
+      const read = reg.execute('file_read', { path: 'data.txt' }, opts);
+      read.catch(() => undefined);
+      await new Promise((r) => setTimeout(r, 50));
+      await fs.rm(path.join(ws, 'data.txt'));
+      await fs.symlink('.env', path.join(ws, 'data.txt'));
+      command();
+      await expect(read).rejects.toThrow(/protected/);
+    } finally {
+      await fs.rm(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('takes the turn a local-only write needs when the path became local-only meanwhile', async () => {
+    const { WorkspaceGate } = await import('./workspace-gate.js');
+    const { PrivacyPaths } = await import('../core/privacy/paths.js');
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-turn-')));
+    const enter = vi.spyOn(WorkspaceGate.prototype, 'enter');
+    try {
+      await fs.writeFile(path.join(ws, 'draft.md'), 'draft\n');
+      const privacy = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }], { workspaceRoot: ws });
+      const reg = new ToolRegistry(toolsConfig, ws);
+      reg.setPrivacyPaths(privacy);
+      let local = false;
+      const moves = { ...opts, isOffline: () => local, mayRead: (abs: string) => { if (privacy.coversFile(abs, ws)) local = true; return true; } };
+      const command = await WorkspaceGate.for(ws).enter('commands');
+      enter.mockClear();
+      const write = reg.execute('file_write', { path: 'draft.md', content: 'new\n' }, moves);
+      await new Promise((r) => setTimeout(r, 50));
+      privacy.addDerived(['draft.md']);
+      command();
+      await write;
+      expect(local).toBe(true);
+      expect(enter.mock.calls.map((c) => c[0])).toEqual(['tools', 'alone']);
+    } finally {
+      enter.mockRestore();
+      await fs.rm(ws, { recursive: true, force: true });
+    }
   });
 });

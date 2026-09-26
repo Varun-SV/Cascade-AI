@@ -363,13 +363,16 @@ export class ToolRegistry extends EventEmitter {
     // folder, outside it (config/project-state.ts): a local-only subtask's
     // own outputs, for it alone, and the browser's screenshots, to read.
     const inState = given !== undefined && statePathFor(this.workspaceRoot, given) !== null;
-    if (inState) {
-      const privateOne = given.split(/[\\/]/)[0] === '@private';
-      if (privateOne && !offline) {
-        throw new Error(`Access denied: ${given} is where a local-only subtask (privacy.paths) keeps what it makes, and this subtask is not local-only.`);
+    const check = (): void => {
+      if (given === undefined) return;
+      if (inState) {
+        const privateOne = given.split(/[\\/]/)[0] === '@private';
+        if (privateOne && !offline) {
+          throw new Error(`Access denied: ${given} is where a local-only subtask (privacy.paths) keeps what it makes, and this subtask is not local-only.`);
+        }
+        if (!privateOne && CHANGE_TOOLS.has(toolName)) throw new Error(`Access denied: ${given} is read-only.`);
+        return;
       }
-      if (!privateOne && CHANGE_TOOLS.has(toolName)) throw new Error(`Access denied: ${given} is read-only.`);
-    } else if (given !== undefined) {
       // Enforce .cascadeignore and the built-in protected paths for every tool
       // that takes a path. It used to cover the four file_* tools only, so grep
       // printed a protected file's contents and glob listed it.
@@ -386,7 +389,9 @@ export class ToolRegistry extends EventEmitter {
         throw new WithheldError(given);
       }
       offline = options.isOffline?.() === true;
-    }
+    };
+    // Refused at once when it can be, before waiting for a turn.
+    check();
 
     // What a local-only subtask writes may carry what it read, so it is
     // local-only too: a new file goes to its private folder, outside the
@@ -396,9 +401,24 @@ export class ToolRegistry extends EventEmitter {
     if (tool.delegatesToTools) return tool.execute(input, options);
     // A command runs apart from tool calls: one could swap a path a tool
     // has checked for a symlink before the tool opens it (workspace-gate.ts).
-    const mode = offline && (COMMAND_TOOLS.has(toolName) || CHANGE_TOOLS.has(toolName)) ? 'alone'
+    // So the path is checked again once the turn is taken — a command that
+    // ran while this call waited could have done just that — and when that
+    // check moves the subtask local-only, the turn it needs is taken instead.
+    const modeFor = () => offline && (COMMAND_TOOLS.has(toolName) || CHANGE_TOOLS.has(toolName)) ? 'alone'
       : COMMAND_TOOLS.has(toolName) ? 'commands' : 'tools';
-    const leave = await this.gate.enter(mode, this.acrossProcesses());
+    let leave: () => void;
+    for (;;) {
+      const mode = modeFor();
+      leave = await this.gate.enter(mode, this.acrossProcesses());
+      try {
+        check();
+      } catch (err) {
+        leave();
+        throw err;
+      }
+      if (modeFor() === mode) break;
+      leave();
+    }
     // Checked, marked and unmarked while the write runs alone: another
     // local-only write to the same file cannot share — and then lose — a
     // mark, and no command can link the file elsewhere in between.

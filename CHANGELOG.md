@@ -327,8 +327,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Unix sockets, which would reach host daemons such as Docker's. A symlink
   whose name is covered hides what it leads to, a whole directory included.
   Tool calls wait while a command runs, and a command for the tool calls in
-  progress, so no command can swap a path a tool has checked for a symlink
-  before the tool opens it.
+  progress, and a tool call checks its path again once its turn comes, so no
+  command can swap a path a tool has checked for a symlink before the tool
+  opens it.
   On macOS, `sandbox-exec` denies the same paths, and a local-only worker
   cannot run commands: nothing there stops such a command from
   hard-linking a file from outside the workspace in and writing to it, or
