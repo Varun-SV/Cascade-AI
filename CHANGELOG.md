@@ -268,7 +268,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workspace share the record: each merges its changes in under a lock, and
   sees another's as they are made. A record that cannot be read — cut
   short, edited by hand — stops a run starting rather than reading as none,
-  and is never written over; nor is a credential store that cannot be read. The code index reads each file while no
+  refuses every check mid-run until it can be read again (what was read
+  before may lack another run's new marks), and is never written over; nor is a credential store that cannot be read. The code index reads each file while no
   local-only command can write, in any run or process, so it never embeds
   what one is writing before it is marked. A planner reads nothing of a
   local-only result from the project's world state, not even its length. Its commands write nowhere else (their

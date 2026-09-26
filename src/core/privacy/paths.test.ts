@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { PrivacyPaths } from './paths.js';
 
 describe('PrivacyPaths', () => {
@@ -216,14 +216,58 @@ describe('PrivacyPaths — a record that cannot be read', () => {
         await fs.writeFile(record, bad);
         expect(() => new PrivacyPaths([], { workspaceRoot: root })).toThrow(/cannot read/);
       }
-      // A run that read it before keeps what it read — and adds nothing over it.
+      // A run that read it before decides nothing until it can read it
+      // again: what it read then may lack marks another run has added since.
       await new Promise((r) => setTimeout(r, 0));
-      expect(policy.isLocalOnly('summary.md')).toBe(true);
+      expect(() => policy.isLocalOnly('summary.md')).toThrow(/cannot read/);
+      expect(() => policy.isLocalOnly('notes.md'), 'every check, not only the first').toThrow(/cannot read/);
       expect(() => policy.addDerived(['other.md'])).toThrow(/cannot read/);
       expect(await fs.readFile(record, 'utf8')).toBe('{"paths":"summary.md"}');
+      // Readable again, with another run's mark in it, it is read.
+      await fs.writeFile(record, JSON.stringify({ version: 1, paths: ['summary.md', 'theirs.md'] }));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(policy.isLocalOnly('theirs.md')).toBe(true);
       // No record at all is no marks.
       await fs.rm(record);
       expect(new PrivacyPaths([], { workspaceRoot: root }).isLocalOnly('summary.md')).toBe(false);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// Once a run had read the record, a later read that failed was passed over
+// and the record taken as read: another run's new mark went unseen, even
+// after the file could be read again.
+describe('PrivacyPaths — a changed record that cannot be read for a moment', () => {
+  it('decides nothing while it cannot be read, and reads it again once it can', async () => {
+    const fs = await import('node:fs/promises');
+    const nodeFs = (await import('node:fs')).default;
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { statePath, STATE } = await import('../../config/project-state.js');
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-derived-blip-')));
+    const record = statePath(root, STATE.privacyDerived);
+    const nextJob = () => new Promise((r) => setTimeout(r, 0));
+    try {
+      const policy = new PrivacyPaths([], { workspaceRoot: root });
+      policy.addDerived(['mine.md']);
+      // Another run marks a file of its own.
+      new PrivacyPaths([], { workspaceRoot: root }).addDerived(['theirs.md']);
+      const real = nodeFs.readFileSync;
+      const spy = vi.spyOn(nodeFs, 'readFileSync').mockImplementation(((file: string, ...rest: never[]) => {
+        if (String(file) === record) throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' });
+        return real(file, ...rest);
+      }) as never);
+      await nextJob();
+      try {
+        expect(() => policy.isLocalOnly('theirs.md')).toThrow(/cannot read/);
+      } finally {
+        spy.mockRestore();
+      }
+      // The file is as it was when the read failed: read again all the same.
+      await nextJob();
+      expect(policy.isLocalOnly('theirs.md')).toBe(true);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

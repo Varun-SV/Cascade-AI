@@ -56,8 +56,11 @@ export class PrivacyPaths {
   /** Whether the record was looked at in the current job, and how many saves this process had made then (see `sync`). */
   private synced = false;
   private savesSeen = 0;
-  /** Whether the record has been read once. */
-  private loaded = false;
+  /**
+   * Why the record could not be read, while it cannot: every check throws it
+   * until a read succeeds, rather than go on without marks it may hold.
+   */
+  private unreadable?: unknown;
   /** Other names — hard links — for the local-only files, per workspace root asked about. */
   private aliases = new Map<string, LinkAliases>();
 
@@ -124,13 +127,20 @@ export class PrivacyPaths {
    * ones newly recorded.
    */
   addDerived(relativePaths: string[]): string[] {
-    this.sync();
-    const added: string[] = [];
-    for (const raw of relativePaths) {
-      const rel = stripTrailingSlashes(raw.split(path.sep).join('/').replace(/^\.?\//, ''));
-      if (!rel || rel === '..' || rel.startsWith('../') || this.derived.has(rel) || added.includes(rel)) continue;
-      added.push(rel);
+    const wanted = relativePaths
+      .map((raw) => stripTrailingSlashes(raw.split(path.sep).join('/').replace(/^\.?\//, '')))
+      .filter((rel) => rel && rel !== '..' && !rel.startsWith('../'));
+    try {
+      this.sync();
+    } catch (err) {
+      // The record cannot be read: held here, local-only in this run, and
+      // written with the next save that can — `saveUnsaved`, which a
+      // command's marks are retried with.
+      for (const rel of wanted) this.unsaved.add(rel);
+      this.setDerived(new Set([...this.derived, ...wanted]));
+      throw err;
     }
+    const added = [...new Set(wanted)].filter((rel) => !this.derived.has(rel));
     if (added.length) this.saveDerived(added, []);
     return added;
   }
@@ -191,28 +201,30 @@ export class PrivacyPaths {
    */
   private sync(): void {
     const file = this.derivedFile;
-    if (!file || (this.synced && this.savesSeen === saves)) return;
+    if (!file) return;
+    if (this.synced && this.savesSeen === saves) {
+      if (this.unreadable !== undefined) throw this.unreadable;
+      return;
+    }
     if (!this.synced) queueMicrotask(() => { this.synced = false; });
     this.synced = true;
     this.savesSeen = saves;
     const now = stampOf(file);
-    if (now === this.seen) {
-      // As it was when last read or written here — or not there, as at first.
-      this.loaded = true;
-      return;
-    }
-    this.seen = now;
+    // As it was when last read or written here — or not there, as at first.
+    if (now === this.seen) return;
     let recorded: string[];
     try {
       recorded = readDerived(file);
     } catch (err) {
-      // Unreadable when first read: nothing to go on, so nothing goes on.
-      // Later: what was read before still holds, and a save — which would
-      // write over it — fails.
-      if (!this.loaded) throw err;
-      return;
+      // Unreadable, at first or after another run changed it: what it holds
+      // may include marks this run has not seen, which what was read before
+      // cannot stand in for. Nothing is decided until it can be read, and it
+      // is not taken as read — the next check reads it again.
+      this.unreadable = err;
+      throw err;
     }
-    this.loaded = true;
+    this.unreadable = undefined;
+    this.seen = now;
     this.setDerived(new Set([...recorded, ...this.unsaved]));
   }
 

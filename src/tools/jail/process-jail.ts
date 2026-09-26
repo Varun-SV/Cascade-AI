@@ -277,11 +277,16 @@ export class ProcessJail {
       const inMade = (rel: string) => made.some((dir) => rel.startsWith(`${dir}/`));
       const createdFiles = changed.filter((rel) => !before.has(rel) && !inMade(rel));
       const created = [...made, ...createdFiles];
+      // Not known to be covered — the record unreadable — is taken as not
+      // covered: what it made is then moved to the private folder, or set
+      // aside, rather than left where it is.
       const coveredWhole = (rel: string, isDir: boolean) => {
         const parts = rel.split('/');
-        for (let i = isDir ? parts.length : parts.length - 1; i > 0; i--) {
-          if (this.policy.isLocalOnly?.(`${parts.slice(0, i).join('/')}/${PROBE}`)) return true;
-        }
+        try {
+          for (let i = isDir ? parts.length : parts.length - 1; i > 0; i--) {
+            if (this.policy.isLocalOnly?.(`${parts.slice(0, i).join('/')}/${PROBE}`)) return true;
+          }
+        } catch { /* see above */ }
         return false;
       };
       const toMove = own ? created.filter((rel) => !coveredWhole(rel, made.includes(rel))) : [];

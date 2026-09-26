@@ -892,6 +892,28 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: where a local-only caller\'s writes
     expect(await reg.execute('shell', { command: 'cat "$CASCADE_PRIVATE_DIR/summary.txt"' }, offline)).toContain(LOCAL);
   });
 
+  // A record unreadable as the command ended made the check of what a
+  // pattern covers whole throw there, and what it made was left where it
+  // was — unmoved and unmarked, for anyone once the record could be read.
+  it('moves what it made to its private folder when the record cannot be read as it ends', async () => {
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-blip-')));
+    try {
+      const policy = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }], { workspaceRoot: ws });
+      policy.addDerived(['earlier.md']);
+      const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {} } as never, ws);
+      reg.setPrivacyPaths(policy);
+      // A folder it makes is what asks whether a pattern covers it whole.
+      const run = reg.execute('shell', { command: 'mkdir out && echo made > out/made.txt; sleep 1' }, offline);
+      await new Promise((r) => setTimeout(r, 400));
+      await fs.writeFile(statePath(ws, 'privacy-derived.json'), '{"version":1,"paths":["earl');
+      await run.catch(() => undefined);
+      expect(fsSync.existsSync(path.join(ws, 'out'))).toBe(false);
+      expect(fsSync.existsSync(statePath(ws, 'private', 'out', 'made.txt'))).toBe(true);
+    } finally {
+      await fs.rm(ws, { recursive: true, force: true });
+    }
+  });
+
   // A later command that makes the same folder again finds none in the
   // workspace — the first was moved — and its folder joins the moved one.
   it('merges a folder a later command makes again into the one already moved', async () => {
@@ -928,12 +950,16 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: where a local-only caller\'s writes
     await fs.writeFile(path.join(dir, 'report.md'), 'public report\n');
     const record = statePath(dir, 'privacy-derived.json');
     const kept = await fs.readFile(record).catch(() => undefined);
-    await fs.rm(record, { force: true });
-    await fs.mkdir(record);
     process.env['CASCADE_MARK_RETRY_MS'] = '200';
     let out: string;
     try {
-      out = await reg.execute('shell', { command: 'cat secret/plan.md >> report.md' }, offline);
+      // Unsaveable once the command runs: one unreadable before it starts
+      // refuses the command outright.
+      const run = reg.execute('shell', { command: 'sleep 1; cat secret/plan.md >> report.md' }, offline);
+      await new Promise((r) => setTimeout(r, 400));
+      await fs.rm(record, { force: true });
+      await fs.mkdir(record);
+      out = await run;
     } finally {
       delete process.env['CASCADE_MARK_RETRY_MS'];
       await fs.rm(record, { recursive: true, force: true });
