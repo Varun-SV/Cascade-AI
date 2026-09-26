@@ -43,7 +43,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a deployment driving its own browser over CDP opens none, so it has no
   daily limit.
 
+### Changed
+- **Cascade keeps a project's state outside the project.** Its settings,
+  sessions, audit trail, world state, code index, run checkpoints and the
+  record of what local-only subtasks wrote used to sit in the project's own
+  `.cascade/`, where every tool and command in the project had to be kept
+  from them and where they could be committed by accident. They now live in
+  `~/.cascade-ai/projects/<folder name>-<hash>/`, and the project holds only
+  `CASCADE.md` and `.cascadeignore`. The folder, and those above it, are
+  readable by you alone. An existing `.cascade/` is moved there the first
+  time anything in Cascade opens the project, and removed; if it was tracked
+  in git, that shows as its deletion. A `.cascade` that is a symlink is left
+  where it is, and what it points at untouched. A project renamed or moved
+  on its disk takes its state with it, found by the folder's identity on
+  disk; a copy, or a move to another disk, starts afresh, with a notice of
+  where the old state is. Another folder made at a project's path — the
+  old one deleted, a fresh clone — keeps its settings, local-only rules and
+  own keys, and has what the earlier one did and knew set aside. `cascade doctor` prints where a
+  project's config is. A hosted server names a state folder of its own
+  (`useProjectStateDir`), outside the workspace — which a folder inside it
+  is refused — and never writes the machine-global one. `useProjectStateDir`
+  returns a function a host calls when the run ends — one that fails as it
+  starts included: once the last run holding a workspace has, the process
+  forgets it, so what it keeps follows the runs going on, not every tenant
+  that ever ran. A state folder whose preparation fails is prepared again
+  the next time it is asked for. A host's folder is judged by where it will
+  be — through a symlinked parent, for one not made yet — and kept by that
+  path. A state folder others can read, which Cascade cannot tighten — one
+  owned by another account — is refused rather than used.
+- **Provider keys are kept once, for the machine.** They lived in both
+  `~/.cascade-ai/credentials.json` and each project's config; a project's
+  config now holds its providers without their keys, and every project uses
+  the machine-wide ones. A project whose key differed from the machine-wide
+  one when it moved keeps it, in the same file under that project, and goes
+  on using it ahead of the environment, as before. Processes saving at once
+  take turns under a lock, and each writes only the providers it changed,
+  so neither drops or brings back the other's change — nor does a save
+  taken back, when the config could not be written after it, undo what
+  another process saved in between. `cascade init` and the first-run
+  wizard add the providers chosen there to the machine's, removing none of
+  the others.
+- **Browser screenshots are named `@screenshots/<file>`,** a path
+  `image_analyze`, the file tools and `generate_document`'s images read
+  from the project's state folder, rather than an absolute path in the
+  project.
+- **`tools.dynamicToolSandbox` offers `wasm` in place of `worker`.** `worker`
+  ran agent-written tools in a bare thread that confined nothing. A config
+  that still names it gets the new WebAssembly sandbox, and Settings →
+  Advanced offers `auto`, `wasm` and `isolate`.
+- **Commands no longer see provider keys in their environment.** `shell`,
+  `run_code` and `git` launch with the model and search providers' keys,
+  and any variable holding a configured secret, taken out. A project
+  script that needs one of them in a command it is asked to run no longer
+  gets it; `tools.processJail: "off"` restores the old behaviour.
+- **A workspace's `.cascadeignore` takes effect.** Nothing passed it to the
+  tools, so it protected nothing. The template `cascade init` writes lists
+  `node_modules/`, `dist/` and `build/`, so in such a workspace agents can
+  no longer read or change those through the file and search tools; delete
+  the lines to allow it. Agents may read `.cascadeignore` itself but not
+  change or remove it — the file tools refuse, and commands see it
+  read-only, whatever it links to or is linked from, and find it as it was
+  when they end — since a line taken out would unprotect a path in the next run.
+
 ### Fixed
+- **`pdf_create` wrote relative to the process, not the workspace.** In the
+  desktop app and the server those differ, so a PDF landed outside the
+  workspace, where no file check looked. It resolves its path in the
+  workspace like every other file tool.
+- **File tools work in a workspace opened through a symlink.** Each file's
+  real path was checked against the workspace's name rather than its real
+  path, so every file looked like an escape — which on macOS includes any
+  workspace under `/tmp` or `/var`.
 - **Maths in an answer is typeset, whichever way the model wrote it.** GPT
   and Gemini write `\(…\)` and `\[…\]`, which Markdown reads as escaped
   brackets, so an equation reached the web chat as
@@ -131,6 +201,164 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The "section needs your decision" prompt says what you are deciding.**
   It shows what the section was asked to do, what it has so far, and what
   each choice does to that work — on the web and in the desktop app.
+
+### Security
+- **Reading a provider's error no longer slows down on a crafted message.**
+  Two patterns for "model … not found" were tried again from every
+  "model " in the message, so one made of them took time growing with its
+  length squared; they now read it in one pass.
+- **Agents can no longer read `.cascade/config.json`.** It holds your
+  provider keys in plain JSON, and nothing protected it: `file_read`
+  returned it, `grep` printed its lines, and the code index could embed it
+  and hand it back through `code_search`. It is now always protected, with
+  the dashboard secret, the session database, the audit trail and the
+  project's world state (with their keys) and the code index, and no
+  `.cascadeignore` line can undo that. An index built before is pruned of
+  such files, and nothing is shown to its reranker that could not be shown;
+  where left-out files hold a search's best matches, it looks further for
+  ones it may show. Protection covers every tool that
+  takes a path — `grep`, `glob` and `file_list` among them, which used to
+  see everything, and could search outside the workspace — and follows
+  symlinks.
+- **Agent-written tools always run confined.** Without the optional
+  `isolated-vm` addon — and the desktop app never ships it — they ran in a
+  worker thread whose code could reach `process`, and through it the
+  files, network and processes of the machine. They now run in a
+  WebAssembly sandbox (QuickJS) that ships with Cascade, on a thread of its
+  own with a memory cap and a hard kill at the deadline, reaching the
+  machine only through `callTool` and `fetch`. There is no unconfined
+  fallback left.
+- **`privacy.paths` is enforced when a file is read.** It applied only to a
+  subtask whose assignment named a matching path, so a worker that came
+  across the file by search read it on a cloud model. Reading a local-only
+  file with `file_read`, `file_edit`, `image_analyze` or a `grep` of that
+  file now moves the subtask to a private model before the contents reach
+  any model, or refuses the read when there is none; so does grading an
+  acceptance criterion against one. A `grep` across folders leaves
+  local-only files out for a subtask that is not local-only, so that
+  whether they matched says nothing about them, and `file_list` and `glob`
+  leave out their names — and directories covered whole — since a name can
+  carry what a local-only subtask read. A file an assignment names, as an
+  artifact or in an acceptance criterion, is judged by what it is, so a
+  link to a local-only file counts; a protected one is not read to check
+  it. Nothing a local-only subtask knows leaves the machine
+  through Cascade's tools: it cannot message its peers, ask for more
+  workers or have a replacement tool written for it; web, browser, GitHub,
+  media, `code_search` and MCP tools are refused to it; and a tool the
+  agent wrote cannot `fetch` once it has read a local-only file. Local-only
+  files are kept out of the code index, never sent for transcription, and
+  not embedded by `generate_document` in a document that is not local-only.
+  What a local-only subtask makes goes to its private folder, outside the
+  project — `@private/…` to the file tools, `$CASCADE_PRIVATE_DIR` to its
+  commands, whose new files are moved there when they end — so a name it
+  chose, which could carry what it read, shows to no one else, and only a
+  local-only subtask reaches it; a new file in a folder a local-only pattern
+  covers whole stays there, with that folder's names hidden. What it changes
+  is local-only too — a file tool's destination before it writes, whatever
+  its commands changed once they end — and stays so in later runs, recorded
+  in the project's state folder even when a configured pattern covers it,
+  so narrowing the pattern later does not release it, whatever characters
+  its name holds (a backslash included); a write that leaves
+  the file as it was takes its record back off. What it deletes is marked
+  the same way — which files it chose to delete could say what it read —
+  so the rest sees the path as local-only, not as missing. When a command's
+  marks cannot be saved, they are tried again with the workspace still held,
+  and failing that, the files it changed are moved to its private folder
+  rather than left where another process could read them. Runs sharing a
+  workspace share the record: each merges its changes in under a lock, and
+  sees another's as they are made. A record that cannot be read — cut
+  short, edited by hand — stops a run starting rather than reading as none,
+  refuses every check mid-run until it can be read again (what was read
+  before may lack another run's new marks), and is never written over; nor is a credential store that cannot be read. The code index reads each file while no
+  local-only command can write, in any run or process, so it never embeds
+  what one is writing before it is marked. A planner reads nothing of a
+  local-only result from the project's world state, not even its length. Its commands write nowhere else (their
+  `/tmp` is private, the rest of the machine and the git store read-only)
+  and run alone meanwhile — against every run in the workspace, in other
+  windows and processes too, and against a worker checking its own
+  artifacts. Nor does it write through a file with other
+  names — hard links, whose names outside the workspace could be neither
+  marked nor hidden: a file tool refuses, and to its commands such files,
+  and the package folders pnpm links them into, are read-only. Siblings waiting on it get a status line, not its
+  output, and no facts are taken from it into the knowledge graph.
+  An approval it needs goes to you, not to the T2 and T1 models, which may
+  be cloud ones and would see the call's input — nor does an "always" one of
+  them gave earlier answer it.
+  `file_edit` asks like a read does, and so does any change or deletion of a
+  local-only file by a subtask that is not local-only yet — `file_write`,
+  `file_delete`, `pdf_create`, `generate_document` — which moves it to a
+  private model first, or is refused. Every file the assignment declares
+  counts at the start, one without an extension (`Dockerfile`) too.
+  `read_current_page`, which takes no input, stays open to it.
+  Plugin tools are refused to it like
+  MCP ones, as is any tool registered from outside that does not declare
+  `localOnlySafe`. Its output, tool calls and results, and streamed text are
+  kept out of the status and tool events the dashboard broadcasts and the
+  audit log records: those carry the same withheld line, a malformed call's
+  error included, and a tool name its model made up shows as a placeholder. A subtask that
+  turns local-only mid-run moves to the private
+  model, and that model's tool protocol, before its next call; only private
+  endpoints still usable count, not ones in backoff or out for the run.
+- **`shell`, `run_code` and `git` run in a process jail.** An approved
+  command could `cat .cascade/config.json`, read a local-only file, or read
+  Cascade's own environment from `/proc` — and approval can come from a
+  tier above rather than a person. On Linux they now run in bubblewrap:
+  Cascade's own files, the built-in secrets, `~/.cascade-ai`, the usual
+  credential locations in the home folder (`~/.ssh`, `~/.aws`,
+  `~/.config/gcloud`, `~/.kube`, `~/.netrc`, `~/.npmrc` and the like, which
+  the `git` tool alone keeps, to push and pull with) and local-only paths
+  (for a worker that is not local-only) are mounted over — and the git
+  store too, while its history holds any of them, since a blob is as
+  readable as the file, or while git keeps anything no branch reaches — a
+  deleted branch, an amended commit, a file staged and unstaged — whose
+  contents no name tells; the `git` tool keeps working, leaves them out of
+  its diffs and of what it stages or stashes (where they read as empty),
+  never runs a hook — git's configuration files are read-only to commands,
+  so none can name a program for it to run with the credentials it keeps —
+  and refuses a push that would send a commit holding one — asking the
+  destination what it has, not trusting tracking refs, through the same
+  jailed git the push uses, since reaching a remote can run a program —
+  and runs
+  no hook and none of the global or system git or ssh configuration there,
+  since a command could rewrite those and git would run what they name with
+  the history in view — and so is
+  a hard link to any of them, under whatever name. Each command gets its own process namespace and no
+  capabilities, and a local-only worker's commands get no network and no
+  Unix sockets, which would reach host daemons such as Docker's. A symlink
+  whose name is covered hides what it leads to, a whole directory included.
+  Tool calls wait while a command runs, and a command for the tool calls in
+  progress, and a tool call checks its path again once its turn comes, so no
+  command can swap a path a tool has checked for a symlink before the tool
+  opens it.
+  On macOS, `sandbox-exec` denies the same paths, and a local-only worker
+  cannot run commands: nothing there stops such a command from
+  hard-linking a file from outside the workspace in and writing to it, or
+  from leaving a child running that writes after it ends. Where neither
+  jailer works, a local-only worker cannot run commands either. On Windows, `git` gets the provider keys taken
+  out of its environment too. `tools.processJail`: `auto` (default),
+  `bwrap`, `sandbox-exec` — that jailer or no commands — or `off`.
+- **The code index's database is protected wherever it is.** Only its
+  default place was, so with `codeIndex.dbPath` set the file tools and
+  commands could read the indexed text, deleted chunks included. The
+  configured file and its journals are now protected too — a relative
+  `dbPath` is the workspace's, where it was opened relative to the process —
+  in git as well:
+  its blob hides the git store from commands, and a push that would send
+  it is refused — and a hard link
+  to any protected file is protected like the file — by the file tools,
+  commands and the code index alike. So are the run checkpoints in
+  `.cascade/resume/`, which hold earlier prompts and outputs, and a write
+  through a symlink whose target, outside the workspace, does not exist yet
+  is refused like any other write outside it.
+- **A private model is one whose endpoint is private.** `forceLocal` chose
+  any model marked `isLocal` — which means it costs $0 — so an
+  OpenAI-compatible server on a public host configured with `local: true`,
+  or an Ollama pointed at someone else's machine, was sent local-only
+  subtasks. It is now judged by the endpoint's host: this machine, an IPv4
+  or IPv6 private range, or a `.local` name. A bare name like `ollama` does
+  not count by itself — a resolver's search domain or a hosts entry can send
+  it anywhere — so a provider reached that way (a compose service, a private
+  DNS zone) is declared with `privateNetwork: true`.
 
 ## 0.82.0 - 2026-09-22
 

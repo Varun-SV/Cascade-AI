@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Cascade, buildContextualPrompt } from './cascade.js';
+import { Cascade, buildContextualPrompt, secretValuesIn } from './cascade.js';
 import type { CascadeConfig, ConversationMessage } from '../types.js';
 import { ACTING_INTEGRITY_RULE } from './tiers/integrity.js';
 
@@ -821,6 +821,106 @@ describe('Extended context (compaction integration)', () => {
   });
 });
 
+describe('.cascadeignore reaches the tools', () => {
+  it("applies the workspace's .cascadeignore once init() runs", async () => {
+    // Nothing used to hand the file's patterns to the tool registry, so a
+    // .cascadeignore protected nothing: file_read opened what it listed.
+    const fsp = await import('node:fs/promises');
+    const os = await import('node:os');
+    const nodePath = await import('node:path');
+    const workspace = await fsp.mkdtemp(nodePath.join(os.tmpdir(), 'cascade-ignore-init-'));
+    try {
+      await fsp.mkdir(nodePath.join(workspace, 'private'));
+      await fsp.writeFile(nodePath.join(workspace, 'private', 'plan.txt'), 'secret plan', 'utf-8');
+      await fsp.writeFile(nodePath.join(workspace, '.cascadeignore'), 'private/\n', 'utf-8');
+      const cascade = new Cascade(baseConfig, workspace);
+      const { EventEmitter } = await import('node:events');
+      const emitter = new EventEmitter();
+      (cascade as any).router = new Proxy(emitter, {
+        get(target, prop, receiver) {
+          const existing = Reflect.get(target, prop, receiver);
+          if (typeof existing === 'function') return existing.bind(target);
+          if (existing !== undefined) return existing;
+          return () => Promise.resolve();
+        },
+      });
+      await cascade.init();
+      await expect(
+        cascade.getToolRegistry().execute('file_read', { path: 'private/plan.txt' }, { tierId: 'T3', sessionId: 's' }),
+      ).rejects.toThrow(/cascadeignore/);
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+});
+
+// The record of what local-only subtasks wrote was read only when one
+// existed at start: a run begun before another wrote its first entry never
+// saw it, and its cloud workers read those files.
+describe('what local-only subtasks wrote reaches every run in the workspace', () => {
+  it('is read by a run that started before the record existed', async () => {
+    const fsp = await import('node:fs/promises');
+    const os = await import('node:os');
+    const nodePath = await import('node:path');
+    const { PrivacyPaths } = await import('./privacy/paths.js');
+    const workspace = await fsp.mkdtemp(nodePath.join(os.tmpdir(), 'cascade-derived-init-'));
+    try {
+      const cascade = new Cascade(baseConfig, workspace);
+      new PrivacyPaths([], { workspaceRoot: workspace }).addDerived(['summary.md']);
+      expect((cascade as any).router.getPrivacyPaths()?.isLocalOnly('summary.md')).toBe(true);
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+});
+
+// An embedder builds a Cascade without a ConfigManager; the project's state
+// still moves out of its .cascade/ the first time.
+describe('a project opened by an embedder', () => {
+  it('has its state moved out of .cascade/', async () => {
+    const fsp = await import('node:fs/promises');
+    const os = await import('node:os');
+    const nodePath = await import('node:path');
+    const { statePath } = await import('../config/project-state.js');
+    const workspace = await fsp.realpath(await fsp.mkdtemp(nodePath.join(os.tmpdir(), 'cascade-embed-')));
+    try {
+      await fsp.mkdir(nodePath.join(workspace, '.cascade'));
+      await fsp.writeFile(nodePath.join(workspace, '.cascade', 'dead-models.json'), '{}');
+      new Cascade(baseConfig, workspace);
+      await expect(fsp.stat(nodePath.join(workspace, '.cascade'))).rejects.toThrow();
+      expect(await fsp.readFile(statePath(workspace, 'dead-models.json'), 'utf8')).toBe('{}');
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+});
+
+// A relative codeIndex.dbPath was protected under the workspace but opened
+// under the process's directory — elsewhere on desktop and the server.
+describe('the code index opens the database it protects', () => {
+  it('resolves a relative dbPath against the workspace, not the process', async () => {
+    const fsp = await import('node:fs/promises');
+    const os = await import('node:os');
+    const nodePath = await import('node:path');
+    const workspace = await fsp.realpath(await fsp.mkdtemp(nodePath.join(os.tmpdir(), 'cascade-index-path-')));
+    const rel = `idx-${process.pid}/code.db`;
+    try {
+      const cascade = new Cascade({
+        ...baseConfig,
+        providers: [{ type: 'openai', apiKey: 'sk-test' }],
+        codeIndex: { enabled: true, dbPath: rel, autoRefresh: false },
+      } as CascadeConfig, workspace);
+      await (cascade as any).initCodeIndex();
+      await expect(fsp.stat(nodePath.join(workspace, rel))).resolves.toBeTruthy();
+      await expect(fsp.stat(nodePath.resolve(rel))).rejects.toThrow();
+      expect(cascade.getToolRegistry().isProtected(nodePath.join(workspace, rel))).toBe(true);
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+      await fsp.rm(nodePath.resolve(`idx-${process.pid}`), { recursive: true, force: true });
+    }
+  });
+});
+
 describe('provider:exhausted reaches consumers', () => {
   it('forwards the router event to Cascade listeners and records it in /why', async () => {
     // The policy this PR settled on is "continue on another provider, but say
@@ -871,5 +971,20 @@ describe('provider:exhausted reaches consumers', () => {
     expect(entry).toBeDefined();
     expect(entry!.detail).toContain('gemini:gemini-2.5-flash');
     expect(entry!.detail).toContain('azure:prod-gpt5');
+  });
+});
+
+describe('secretValuesIn — what the process jail keeps out of a command\'s environment', () => {
+  it('finds every credential by its field name, wherever it sits in the config', () => {
+    const found = secretValuesIn({
+      providers: [
+        { type: 'anthropic', apiKey: 'sk-ant-1' },
+        { type: 'azure', apiKey: 'az-2', baseUrl: 'https://x.openai.azure.com' },
+        { type: 'anthropic', authToken: 'oauth-3' },
+      ],
+      tools: { webSearch: { tavilyApiKey: 'tvly-4', searxngUrl: 'http://searx' }, remoteBrowser: { apiKey: 'steel-5' } },
+      models: { t1: 'claude-opus' },
+    });
+    expect(found.sort()).toEqual(['az-2', 'oauth-3', 'sk-ant-1', 'steel-5', 'tvly-4']);
   });
 });

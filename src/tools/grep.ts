@@ -9,6 +9,10 @@ import path from 'node:path';
 import { glob } from 'glob';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
+import { WithheldError } from './file.js';
+import { resolveInWorkspace } from './utils/workspace-path.js';
+import { statePathFor } from '../config/project-state.js';
+import { isWithin, realPathOf } from '../utils/real-path.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -49,15 +53,41 @@ export class GrepTool extends BaseTool {
     required: ['pattern'],
   };
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const pattern = input['pattern'] as string;
-    const searchPath = (input['path'] as string | undefined)
-      ? path.resolve(this.workspaceRoot, input['path'] as string)
-      : this.workspaceRoot;
+    const given = input['path'] as string | undefined;
+    // `@private/…` and `@screenshots/…` lead into the project's state folder,
+    // where the registry has let this call in; what is found stays inside it.
+    const searchPath = given ? resolveInWorkspace(this.workspaceRoot, given) : this.workspaceRoot;
+    const stateRoot = given ? statePathFor(this.workspaceRoot, given.split(/[\\/]/)[0]!) : null;
     const globPattern = input['glob'] as string | undefined;
     const outputMode = (input['output_mode'] as string | undefined) ?? 'content';
     const context = (input['context'] as number | undefined) ?? 0;
     const caseInsensitive = (input['case_insensitive'] as boolean | undefined) ?? false;
+    // Searching a file is reading it: whether it matched says something
+    // about what it holds. A file the search names is asked about before the
+    // search, as a read would be; files it comes across in a folder are
+    // searched only where that changes nothing about the caller ('scan') —
+    // a local-only one is left out for a caller that is not local-only.
+    let mayRead = this.readGate(options, 'scan');
+    try {
+      if ((input['path'] as string | undefined) && (await fs.stat(searchPath)).isFile()) {
+        const named = this.readGate(options, 'model');
+        if (!stateRoot && !this.isProtectedPath(searchPath) && !named(searchPath)) {
+          throw new WithheldError(input['path'] as string);
+        }
+        mayRead = named;
+      }
+    } catch (err) {
+      if (err instanceof WithheldError) throw err;
+    }
+
+    // Which files found may be shown: in the state folder, those that stay
+    // inside the folder named; elsewhere, those neither protected nor
+    // withheld from this caller.
+    const allowed = stateRoot
+      ? (abs: string) => isWithin(realPathOf(abs), realPathOf(stateRoot))
+      : (abs: string) => !this.isProtectedPath(abs) && mayRead(abs);
 
     // Try ripgrep first
     try {
@@ -68,13 +98,14 @@ export class GrepTool extends BaseTool {
         outputMode,
         context,
         caseInsensitive,
+        allowed,
       );
       return result;
     } catch {
       // ripgrep not available — fall back to Node.js scan
     }
 
-    return this.nodeScan(pattern, searchPath, globPattern, outputMode, context, caseInsensitive);
+    return this.nodeScan(pattern, searchPath, globPattern, outputMode, context, caseInsensitive, allowed);
   }
 
   private async runRipgrep(
@@ -84,6 +115,7 @@ export class GrepTool extends BaseTool {
     outputMode: string,
     context: number,
     caseInsensitive: boolean,
+    shown: (absPath: string) => boolean,
   ): Promise<string> {
     const args: string[] = ['--no-heading'];
     if (caseInsensitive) args.push('-i');
@@ -94,14 +126,56 @@ export class GrepTool extends BaseTool {
       if (context > 0) args.push(`-C${context}`);
     }
     if (globPattern) args.push('--glob', globPattern);
-    args.push('--', pattern, searchPath);
+    // Every line names its file — even when the search is one file, which rg
+    // would otherwise leave unnamed — with a NUL after it, so a path can be
+    // told from what follows it even when it contains a colon, and a file's
+    // lines dropped when it is protected or its contents are withheld.
+    // An absolute path, so no name printed can begin like a `--` separator.
+    args.push('--with-filename', '--null', '--', pattern, path.resolve(searchPath));
 
     const { stdout } = await execFileAsync('rg', args, {
       timeout: 15_000,
       maxBuffer: 2 * 1024 * 1024,
     });
 
-    const trimmed = stdout.trim();
+    const allowed = (file: string): boolean => shown(path.resolve(searchPath, file));
+    let lines: string[];
+    if (outputMode === 'files_with_matches') {
+      // Each name exactly as it is — one may end in a space — up to its NUL;
+      // the last NUL leaves an empty field, which names nothing.
+      lines = stdout.split('\0').filter((file) => file !== '' && allowed(file));
+    } else {
+      lines = [];
+      // A `--` between context groups is kept only between two groups that
+      // are shown: one beside a file left out would say it had matches.
+      let separate = false;
+      // Each record is a path, a NUL, and the rest of its line. A path may
+      // hold a newline itself, so it is read up to its NUL — not split off
+      // a line — or the part after the newline would pass for the path.
+      let at = 0;
+      while (at < stdout.length) {
+        if (stdout.startsWith('--\n', at) || stdout.slice(at) === '--') {
+          separate = lines.length > 0;
+          at += 3;
+          continue;
+        }
+        const nul = stdout.indexOf('\0', at);
+        if (nul === -1) break;
+        const file = stdout.slice(at, nul);
+        const end = stdout.indexOf('\n', nul);
+        const rest = stdout.slice(nul + 1, end === -1 ? stdout.length : end);
+        at = end === -1 ? stdout.length : end + 1;
+        if (!allowed(file)) continue;
+        if (separate) {
+          lines.push('--');
+          separate = false;
+        }
+        // rg's own layout: `file:12:match`, `file-13-context`, `file:3` for a count.
+        lines.push(`${file}${/^\d+-/.test(rest) ? '-' : ':'}${rest}`);
+      }
+    }
+
+    const trimmed = lines.join('\n').trim();
     return trimmed || `No matches found for: ${pattern}`;
   }
 
@@ -112,6 +186,7 @@ export class GrepTool extends BaseTool {
     outputMode: string,
     context: number,
     caseInsensitive: boolean,
+    shown: (absPath: string) => boolean,
   ): Promise<string> {
     const flags = caseInsensitive ? 'gi' : 'g';
     let regex: RegExp;
@@ -139,6 +214,7 @@ export class GrepTool extends BaseTool {
 
     for (const rel of files) {
       const abs = path.join(searchPath, rel);
+      if (!shown(abs)) continue;
       let content: string;
       try {
         content = await fs.readFile(abs, 'utf-8');
@@ -182,3 +258,4 @@ export class GrepTool extends BaseTool {
     return results.join('\n');
   }
 }
+

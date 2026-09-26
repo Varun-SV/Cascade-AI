@@ -92,6 +92,13 @@ export interface ProviderConfig {
    */
   local?: boolean;
   /**
+   * "This endpoint is on my machine or my private network", for one whose
+   * address cannot show it (a bare name like `ollama`, a private DNS zone). A
+   * local-only subtask may then run on it. See `isPrivateEndpoint` in
+   * core/router/endpoint.ts.
+   */
+  privateNetwork?: boolean;
+  /**
    * Deployment region for providers whose price varies by region (Azure lists
    * different rates for `global`, `us` and `eu` deployments of the same model).
    * Matched against the pricing dataset's per-region entries.
@@ -306,6 +313,14 @@ export interface EscalationDecision {
   automatic?: boolean;
 }
 
+/**
+ * Where a file's contents go when a tool reads them; see `ToolExecuteOptions.mayRead`.
+ * `'scan'` is a search across files the caller did not name: a local-only
+ * one is searched only by a caller that is local-only already, and never
+ * makes it so — whether it matched would be something learnt about it.
+ */
+export type ReadDestination = 'model' | 'scan' | 'service' | { file: string };
+
 export interface ToolExecuteOptions {
   tierId: string;
   sessionId: string;
@@ -322,6 +337,23 @@ export interface ToolExecuteOptions {
    * which is the most likely reason someone kills one.
    */
   onProgress?: (note: string) => void;
+  /**
+   * Asked before a tool reads a workspace file's contents into what it
+   * returns ('model': the result goes to the model running the call), sends
+   * them to an outside service it calls itself ('service'), or copies them
+   * into another file (`{ file }`, absolute). False withholds that file. The
+   * tier running the call answers from privacy.paths, and a 'model' question
+   * it answers yes may move it onto a private model first. Absent, every read
+   * is allowed.
+   */
+  mayRead?: (absPath: string, to: ReadDestination) => boolean;
+  /**
+   * True once the tier running the call is local-only (privacy.paths):
+   * nothing it knows may leave this machine, so tools that send what they are
+   * given elsewhere are refused. A function, asked at the moment of sending:
+   * a read earlier in the same call can be what makes it so.
+   */
+  isOffline?: () => boolean;
   saveSnapshot?: (filePath: string, content: string) => Promise<void>;
   sendPeerSync?: (
     to: string,
@@ -834,11 +866,19 @@ export interface ToolsConfig {
   /** Web search backends — at least one should be configured for best results */
   webSearch?: WebSearchConfig;
   /**
-   * Sandbox runtime for LLM-authored dynamic tools. 'isolate' = hard V8 isolate
-   * (isolated-vm, capability-confined), 'worker' = node:worker_threads,
-   * 'auto' (default) = isolate when available else worker.
+   * Sandbox runtime for LLM-authored dynamic tools; every choice confines the
+   * code. 'isolate' = hard V8 isolate (optional isolated-vm), 'wasm' = QuickJS
+   * compiled to WebAssembly (always available), 'auto' (default) = the isolate
+   * when available, else 'wasm'. 'worker' is retired and reads as 'wasm'.
    */
-  dynamicToolSandbox?: 'isolate' | 'worker' | 'auto';
+  dynamicToolSandbox?: 'isolate' | 'wasm' | 'auto' | 'worker';
+  /**
+   * Confinement for `shell`, `run_code` and `git`, on top of approvals: 'auto'
+   * (default) = bubblewrap on Linux or sandbox-exec on macOS where it works,
+   * else commands run with provider keys removed from their environment;
+   * 'bwrap' / 'sandbox-exec' = that jailer or no command at all; 'off' = none.
+   */
+  processJail?: 'auto' | 'bwrap' | 'sandbox-exec' | 'off';
   /**
    * When set, ONLY these tool names are registered — every other built-in tool
    * (including shell/file/git, which have no other off-switch) is omitted
@@ -1056,6 +1096,12 @@ export interface PermissionRequest {
    * auto-approve a later dangerous action.
    */
   forceReprompt?: boolean;
+  /**
+   * The caller is local-only (privacy.paths): its input may carry what it
+   * read, so no tier's model is asked about it — T2 and T1 may run on cloud
+   * models. It is decided by rule or by the user.
+   */
+  localOnly?: boolean;
   /**
    * Escalation trail — each engaged tier's non-binding recommendation as the
    * request rose toward the user. Dangerous tools never get a terminal

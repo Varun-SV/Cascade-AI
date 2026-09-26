@@ -7,35 +7,47 @@
 //
 //  SAFETY:
 //  - Requires `enableToolCreation: true` in config (on by default)
-//  - Generated tools run in node:vm with a restricted sandbox
+//  - Generated tools always run confined: in a hard V8 isolate when the
+//    optional isolated-vm addon loads, otherwise in the WebAssembly sandbox
+//    (sandbox/wasm-sandbox.ts), which every install has. Neither can see Node.
 //  - Generated tools CAN call existing registered cascade tools via callTool()
 //  - Dangerous tool access requires approval via the PermissionEscalator chain
 //    (T3 → T2 → T1 → user) before execution
 //  - Tools are session-scoped and not persisted
 //
 
-import { Worker } from 'node:worker_threads';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { statePath, STATE } from '../config/project-state.js';
 import { BaseTool } from './base.js';
 import { safeFetch } from './utils/safe-fetch.js';
+import { runInWasmSandbox } from './sandbox/wasm-sandbox.js';
 import type { ToolExecuteOptions } from '../types.js';
 import type { ToolRegistry } from './registry.js';
 import type { CascadeRouter } from '../core/router/index.js';
 import type { PermissionEscalator } from '../core/permissions/escalator.js';
 import type { PermissionRequest } from '../types.js';
 
-export type SandboxMode = 'isolate' | 'worker' | 'auto';
+export type SandboxMode = 'isolate' | 'wasm' | 'auto';
+
+/**
+ * The configured sandbox as one this file runs. 'worker' — a bare thread,
+ * which confined nothing — is retired, and a config that still names it gets
+ * the WebAssembly sandbox; anything unknown gets the default.
+ */
+export function sandboxModeOf(configured: unknown): SandboxMode {
+  if (configured === 'worker') return 'wasm';
+  return configured === 'isolate' || configured === 'wasm' ? configured : 'auto';
+}
 
 // ── Optional hard-isolate runtime (isolated-vm) ────
 //
-//  A `node:worker_threads` Worker is a robustness boundary (kill timeout, memory
-//  cap, crash containment) but NOT a security one: generated code still sees Node
-//  globals (`process`, `process.binding`, …) inside the worker. `isolated-vm` runs
-//  it in a hard V8 isolate whose global has NO Node built-ins at all — real
-//  capability confinement — reaching the host ONLY through the same escalator-gated
-//  `callTool` and SSRF-guarded `fetch` bridges. It's an optional native dependency:
-//  if it's absent or failed to build we transparently fall back to the worker.
+//  `isolated-vm` runs generated code in a hard V8 isolate whose global has NO
+//  Node built-ins at all, reaching the host ONLY through the escalator-gated
+//  `callTool` and SSRF-guarded `fetch` bridges. It is faster than the
+//  WebAssembly sandbox and confines the same way, but it is an optional native
+//  dependency — absent from the desktop app, and wherever it failed to build —
+//  so the WebAssembly sandbox runs the tool instead.
 //
 //  The addon's surface is declared LOCALLY (structural types below) and loaded via
 //  a non-literal dynamic import: a literal `import type ... from 'isolated-vm'`
@@ -105,9 +117,6 @@ export interface GeneratedToolSpec {
   trusted?: boolean;
 }
 
-/** File (under .cascade/) where created tools persist between runs. */
-const DYNAMIC_TOOLS_FILE = 'dynamic-tools.json';
-
 /**
  * Wrap a generated `inputSchema` into a valid JSON Schema object. LLMs commonly
  * emit just a properties map (`{ path: { type, description } }`); passed through
@@ -134,68 +143,18 @@ function capabilityKey(text: string): string {
   ).sort().join(' ');
 }
 
-// ── Worker sandbox ─────────────────────────────
+// ── Limits and bridges ─────────────────────────
 //
-//  Generated (LLM-authored, hence UNTRUSTED) code runs in a node:worker_threads
-//  Worker, not in the main process. node:vm was never a security boundary — its
-//  `timeout` can't stop async runaway, the code shares the main heap, and a throw
-//  can take down the Ink TUI. The worker gives an enforceable kill timeout
-//  (worker.terminate()), a memory cap (resourceLimits), and crash containment,
-//  and — crucially — keeps Cascade's privileged objects (registry, router, the
-//  PermissionEscalator) on the MAIN thread. The worker reaches them ONLY through a
-//  message bridge whose callTool path is gated by the escalator and whose fetch
-//  path is SSRF-guarded by safeFetch. (A hard V8 isolate would need isolated-vm;
-//  worker + gating is the chosen dependency-free boundary.)
+//  Generated (LLM-authored, hence UNTRUSTED) code never runs in the main
+//  process. Whichever sandbox runs it, Cascade's privileged objects (registry,
+//  router, the PermissionEscalator) stay here, reached ONLY through the
+//  callTool bridge the escalator gates and the fetch bridge safeFetch guards.
 
 const DYNAMIC_TOOL_TIMEOUT_MS = 15_000;
 const DYNAMIC_FETCH_MAX = 1_000_000;
 
-// Fixed harness run inside the worker. The generated `executeCode` arrives as DATA
-// via workerData (never imported as a module); `callTool`/`fetch` are bridged to
-// the main thread. No `require`/`process` is in the generated code's scope.
-const HARNESS_SRC = `
-const { parentPort, workerData } = require('node:worker_threads');
-const { executeCode, input } = workerData;
-let nextId = 0;
-const pending = new Map();
-function bridge(kind, payload) {
-  return new Promise((resolve, reject) => {
-    const id = nextId++;
-    pending.set(id, { resolve, reject });
-    parentPort.postMessage(Object.assign({ kind, id }, payload));
-  });
-}
-parentPort.on('message', (msg) => {
-  const p = pending.get(msg.id);
-  if (!p) return;
-  pending.delete(msg.id);
-  if (msg.error !== undefined) p.reject(new Error(msg.error));
-  else p.resolve(msg.value);
-});
-const callTool = (name, toolInput) => bridge('callTool', { name: name, input: toolInput });
-const fetch = async (url, init) => {
-  const safeInit = init && typeof init === 'object'
-    ? { method: init.method, headers: init.headers, body: typeof init.body === 'string' ? init.body : undefined }
-    : undefined;
-  const r = await bridge('fetch', { url: url, init: safeInit });
-  return {
-    ok: r.ok, status: r.status, statusText: r.statusText,
-    headers: { get: (k) => (String(k).toLowerCase() === 'content-type' ? r.contentType : null) },
-    text: async () => r.body,
-    json: async () => JSON.parse(r.body),
-  };
-};
-(async () => {
-  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-  const fn = new AsyncFunction('input', 'callTool', 'fetch', 'console', executeCode);
-  return await fn(input, callTool, fetch, { log() {}, error() {} });
-})()
-  .then((r) => parentPort.postMessage({ kind: 'result', value: String(r == null ? '' : r) }))
-  .catch((e) => parentPort.postMessage({ kind: 'result', value: 'Tool error: ' + (e && e.message ? e.message : String(e)) }));
-`;
-
 /**
- * Validate that generated code compiles with the SAME async signature the worker
+ * Validate that generated code compiles with the SAME async signature the sandbox
  * uses to run it, so `await callTool(...)` / `await fetch(...)` are valid (a plain
  * sync `new Function` wrongly rejects every I/O tool). Reused on creation AND when
  * re-validating untrusted persisted/peer specs before re-registering them.
@@ -211,7 +170,7 @@ export function isExecutableToolCode(code: string): boolean {
 }
 
 /** Run an agent-supplied fetch on the MAIN thread through the SSRF guard, marshaling
- *  a minimal Response for the worker (a real Response can't cross the thread). */
+ *  a minimal Response for the sandbox (a real Response can't cross into it). */
 async function bridgeFetch(
   url: string,
   init: unknown,
@@ -229,7 +188,7 @@ async function bridgeFetch(
     if (body.length > DYNAMIC_FETCH_MAX) body = body.slice(0, DYNAMIC_FETCH_MAX);
     return { ok: resp.ok, status: resp.status, statusText: resp.statusText, contentType, body };
   } catch (err) {
-    // SSRF block / network error → reject the worker's fetch (like a real failure).
+    // SSRF block / network error → reject the sandbox's fetch (like a real failure).
     return { __error: err instanceof Error ? err.message : String(err) };
   }
 }
@@ -240,6 +199,8 @@ class DynamicTool extends BaseTool {
   readonly name: string;
   readonly description: string;
   readonly inputSchema: Record<string, unknown>;
+  // The guest has no filesystem; it reaches files only through callTool.
+  override readonly delegatesToTools = true;
   private executeCode: string;
   private _isDangerous: boolean;
   private registry: ToolRegistry;
@@ -281,7 +242,7 @@ class DynamicTool extends BaseTool {
   async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const registry = this.registry;
 
-    // callTool runs on the MAIN thread (the worker bridges to it). Dangerous tools
+    // callTool runs on the MAIN thread (the sandbox bridges to it). Dangerous tools
     // require escalation; when NO approver is available we DEFAULT-DENY rather than
     // execute. Untrusted tools always re-prompt (forceReprompt bypasses the cache).
     const callTool = async (toolName: string, toolInput: Record<string, unknown>): Promise<string> => {
@@ -302,6 +263,7 @@ class DynamicTool extends BaseTool {
           subtaskContext: `Dynamic tool "${this.name}" (${this.trusted ? 'trusted' : 'UNTRUSTED'}) requesting access to "${toolName}"`,
           sectionContext: `Dynamic tool "${this.name}"`,
           forceReprompt: !this.trusted,
+          localOnly: options.isOffline?.() === true,
         };
         const decision = await escalator.requestPermission(req);
         if (!decision.approved) {
@@ -317,19 +279,26 @@ class DynamicTool extends BaseTool {
       }
     };
 
-    // Choose the executor. 'isolate'/'auto' prefer the hard V8 isolate; both fall
-    // back to the worker if isolated-vm isn't loadable ('isolate' warns once that
-    // the confinement it asked for is unavailable). 'worker' skips the isolate.
+    // fetch is the guest's way off the machine. Asked at the moment of sending:
+    // a local-only file read through callTool earlier in this same run makes
+    // the caller local-only, and what the guest read must then stay here.
+    const sendOut: typeof bridgeFetch = async (url, init) => (options.isOffline?.()
+      ? { __error: 'fetch is unavailable to a local-only subtask (privacy.paths).' }
+      : bridgeFetch(url, init));
+
+    // Choose the executor. 'isolate'/'auto' prefer the hard V8 isolate, and run
+    // in the WebAssembly sandbox when isolated-vm isn't loadable ('isolate' says
+    // so once); 'wasm' always uses the WebAssembly sandbox. Both confine the code.
     const mode = this.getSandboxMode();
-    if (mode !== 'worker') {
+    if (mode !== 'wasm') {
       const ivm = await loadIsolatedVm();
-      if (ivm) return this.runInIsolate(ivm, input, callTool);
+      if (ivm) return this.runInIsolate(ivm, input, callTool, sendOut);
       if (mode === 'isolate' && !ivmWarned) {
         ivmWarned = true;
-        this.log('[tool-creator] isolated-vm is not available (not installed or failed to build) — dynamic tools fall back to the worker sandbox, which is NOT capability-confined. Install isolated-vm for a hard isolate.');
+        this.log('[tool-creator] isolated-vm is not available (not installed or failed to build) — dynamic tools run in the WebAssembly sandbox instead, which confines them the same way.');
       }
     }
-    return this.runInWorker(input, callTool);
+    return this.runInWasm(input, callTool, sendOut);
   }
 
   /**
@@ -339,12 +308,13 @@ class DynamicTool extends BaseTool {
    * `callTool` (escalator-gated on the main thread) and `fetch` (SSRF-guarded via
    * bridgeFetch). `script.run({ timeout })` bounds synchronous CPU; an outer
    * wall-clock race + `isolate.dispose()` bounds async runaway (a never-resolving
-   * await), mirroring the worker's terminate().
+   * await), as the WebAssembly sandbox's own deadline does.
    */
   private async runInIsolate(
     ivm: IvmModule,
     input: Record<string, unknown>,
     callTool: (name: string, input: Record<string, unknown>) => Promise<string>,
+    sendOut: typeof bridgeFetch,
   ): Promise<string> {
     const timeoutMs = Math.max(200, Number(process.env['CASCADE_DYNAMIC_TOOL_TIMEOUT_MS']) || DYNAMIC_TOOL_TIMEOUT_MS);
     const isolate = new ivm.Isolate({ memoryLimit: 128 });
@@ -362,7 +332,7 @@ class DynamicTool extends BaseTool {
         return String(out);
       }));
       await jail.set('_fetch', new ivm.Reference(async (url: string, initJson: string) => {
-        const r = await bridgeFetch(String(url), safeJsonParse(initJson));
+        const r = await sendOut(String(url), safeJsonParse(initJson));
         return JSON.stringify(r);
       }));
       await jail.set('_input', new ivm.ExternalCopy(input).copyInto());
@@ -414,55 +384,30 @@ class DynamicTool extends BaseTool {
     }
   }
 
-  /** Spawn the worker, service its callTool/fetch bridge, enforce the kill timeout. */
-  private runInWorker(
+  /**
+   * Run the generated code in the WebAssembly sandbox: QuickJS on a thread of
+   * its own, with no Node at all, reaching the host through the same two
+   * bridges as the isolate. Always available — it ships with Cascade.
+   */
+  private async runInWasm(
     input: Record<string, unknown>,
     callTool: (name: string, input: Record<string, unknown>) => Promise<string>,
+    sendOut: typeof bridgeFetch,
   ): Promise<string> {
-    // Tunable kill timeout (ops may shorten/lengthen; min 200ms).
     const timeoutMs = Math.max(200, Number(process.env['CASCADE_DYNAMIC_TOOL_TIMEOUT_MS']) || DYNAMIC_TOOL_TIMEOUT_MS);
-    return new Promise<string>((resolve) => {
-      let settled = false;
-      const worker = new Worker(HARNESS_SRC, {
-        eval: true,
-        workerData: { executeCode: this.executeCode, input },
-        resourceLimits: { maxOldGenerationSizeMb: 128 },
-      });
-
-      const finish = (value: string) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        void worker.terminate();
-        resolve(value);
-      };
-
-      const timer = setTimeout(
-        () => finish(`Dynamic tool "${this.name}" timed out after ${timeoutMs}ms and was terminated.`),
-        timeoutMs,
-      );
-      timer.unref?.();
-
-      worker.on('message', (msg: { kind?: string; id?: number; name?: string; input?: unknown; url?: string; init?: unknown; value?: unknown }) => {
-        if (msg?.kind === 'result') {
-          finish(typeof msg.value === 'string' ? msg.value : String(msg.value ?? ''));
-        } else if (msg?.kind === 'callTool') {
-          void (async () => {
-            const value = await callTool(String(msg.name), (msg.input ?? {}) as Record<string, unknown>);
-            if (!settled) worker.postMessage({ id: msg.id, value });
-          })();
-        } else if (msg?.kind === 'fetch') {
-          void (async () => {
-            const r = await bridgeFetch(String(msg.url), msg.init);
-            if (settled) return;
-            if ('__error' in r) worker.postMessage({ id: msg.id, error: r.__error });
-            else worker.postMessage({ id: msg.id, value: r });
-          })();
-        }
-      });
-      worker.on('error', (err) => finish(`Dynamic tool error: ${err instanceof Error ? err.message : String(err)}`));
-      worker.on('exit', (code) => { if (code !== 0) finish(`Dynamic tool "${this.name}" exited unexpectedly (code ${code}).`); });
-    });
+    const outcome = await runInWasmSandbox(this.executeCode, input, {
+      callTool,
+      fetch: async (url, init) => {
+        const r = await sendOut(url, init);
+        if ('__error' in r) throw new Error(r.__error);
+        return JSON.stringify(r);
+      },
+    }, { timeoutMs });
+    if (outcome.kind === 'ok') return outcome.value;
+    if (outcome.kind === 'timeout') {
+      return `Dynamic tool "${this.name}" timed out after ${timeoutMs}ms and was terminated.`;
+    }
+    return `Tool error: ${outcome.message}`;
   }
 }
 
@@ -600,7 +545,7 @@ Required capability: ${description.slice(0, 300)}`;
       spec.name = `${spec.name}_${Date.now() % 10000}`;
     }
 
-    // Validate the code compiles with the worker's async signature before
+    // Validate the code compiles with the sandbox's async signature before
     // registering (the v0.9.5 fix — a sync check wrongly rejected every I/O tool).
     if (!isExecutableToolCode(spec.executeCode)) {
       this.log(`[tool-creator] Generated code for "${spec.name}" has a syntax error — discarded.`);
@@ -652,7 +597,7 @@ Required capability: ${description.slice(0, 300)}`;
    *  any dangerous action, so a silently-reloaded tool can't act without approval. */
   async loadPersistedTools(): Promise<void> {
     if (!this.workspacePath || !this.persistEnabled) return;
-    const file = path.join(this.workspacePath, '.cascade', DYNAMIC_TOOLS_FILE);
+    const file = statePath(this.workspacePath, STATE.dynamicTools);
     try {
       const raw = await fs.readFile(file, 'utf-8');
       const specs = JSON.parse(raw) as GeneratedToolSpec[];
@@ -679,8 +624,8 @@ Required capability: ${description.slice(0, 300)}`;
 
   private async persist(): Promise<void> {
     if (!this.workspacePath || !this.persistEnabled) return;
-    const dir = path.join(this.workspacePath, '.cascade');
-    const file = path.join(dir, DYNAMIC_TOOLS_FILE);
+    const file = statePath(this.workspacePath, STATE.dynamicTools);
+    const dir = path.dirname(file);
     try {
       await fs.mkdir(dir, { recursive: true });
       await fs.writeFile(file, JSON.stringify(Array.from(this.specs.values()), null, 2), 'utf-8');

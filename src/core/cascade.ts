@@ -63,12 +63,13 @@ import { Telemetry, noopTelemetry } from '../telemetry/index.js';
 import { TaskAnalyzer } from './router/task-analyzer.js';
 import { ModelPerformanceTracker } from './router/model-performance-tracker.js';
 import { benchmarkScore01 } from './router/benchmarks.js';
-import { ToolCreator } from '../tools/tool-creator.js';
+import { ToolCreator, sandboxModeOf } from '../tools/tool-creator.js';
 import { CascadeCancelledError } from '../utils/retry.js';
 import { WorldStateDB } from './knowledge/world-state.js';
 import { ResumeStore, summarizeCompleted, type CompletedNode, type ResumeReason } from './orchestration/resume-store.js';
 import { PrivacyPaths } from './privacy/paths.js';
 import { CascadeIgnore } from '../config/ignore.js';
+import { statePath, STATE } from '../config/project-state.js';
 import { WorkspaceIndex } from '../retrieval/workspace-index.js';
 import { embedderFromProviders } from '../retrieval/embedder.js';
 import { LLMReranker, chatCompleterFromProviders } from '../retrieval/rerank.js';
@@ -208,18 +209,17 @@ export class Cascade extends EventEmitter {
     // rediscovers a 404'd id every session — and because a T3 wave fires
     // concurrently, "rediscovers" means one wasted call per worker.
     //
-    // Scoped to the WORKSPACE, never the machine-global config dir. On a hosted
-    // server the workspace is the per-user scratch dir, so one tenant's dead
-    // model cannot suppress another's — which matters because the verdict is
+    // Scoped to the PROJECT — its state folder (config/project-state.ts) — never
+    // shared across projects. On a hosted server that folder is the per-user
+    // scratch dir's own (the server names it), so one tenant's dead model
+    // cannot suppress another's — which matters because the verdict is
     // key-specific: a model that 404s for one account is often perfectly live
     // for another whose key has access to it. A shared file would let one user
-    // silently poison everyone else's routing. (The global dir is single-tenant
-    // by design and a hosted server must never write it — see cloud db.ts.)
-    // On desktop this makes verdicts per-project, which is also right: provider
-    // config is per-project too.
+    // silently poison everyone else's routing. On desktop this makes verdicts
+    // per-project, which is also right: provider config is per-project too.
     try {
       this.router.setDeadModelStore(new DeadModelStore(
-        fileDeadModelPersistence(path.join(workspacePath, '.cascade', 'dead-models.json')),
+        fileDeadModelPersistence(statePath(workspacePath, STATE.deadModels)),
       ));
     } catch { /* memory-only fallback; the router already has a default store */ }
 
@@ -228,7 +228,7 @@ export class Cascade extends EventEmitter {
     // run history, not of the machine.
     try {
       this.resumeStore = new ResumeStore({
-        dir: path.join(workspacePath, '.cascade', 'resume'),
+        dir: statePath(workspacePath, STATE.resume),
       });
     } catch { /* resume is a convenience; never block construction on it */ }
 
@@ -250,8 +250,21 @@ export class Cascade extends EventEmitter {
 
     // Per-path privacy tiers: subtasks touching local-only paths are forced
     // onto private models and their raw output is withheld from upper tiers.
+    // What such subtasks wrote stays local-only, recorded in the workspace —
+    // so the record applies even once the policies that caused it are gone,
+    // and to a run that started before another run made it.
     const privacyPolicies = this.config.privacy?.paths ?? [];
-    if (privacyPolicies.length) this.router.setPrivacyPaths(new PrivacyPaths(privacyPolicies));
+    this.router.setPrivacyPaths(new PrivacyPaths(privacyPolicies, { workspaceRoot: this.workspacePath }));
+
+    // The process jail (tools/jail/process-jail.ts) hides local-only paths
+    // from commands, and keeps every configured secret out of their
+    // environment — read when a command launches, so a key added in Settings
+    // mid-session is covered too.
+    this.toolRegistry.setPrivacyPaths(this.router.getPrivacyPaths());
+    this.toolRegistry.setSecretValues(() => secretValuesIn(this.config));
+    this.toolRegistry.on('log', (message: string) => {
+      if (this.listenerCount('log') > 0) this.emit('log', { level: 'warn', message });
+    });
 
     // Live steering: user guidance injected mid-run reaches T3 agent loops
     // through this queue (carried on the router like the world-state DB).
@@ -287,7 +300,7 @@ export class Cascade extends EventEmitter {
     }
     const cfg = this.config as unknown as Record<string, unknown>;
     if (cfg['enableToolCreation'] === true) {
-      const sandboxMode = (this.config.tools?.dynamicToolSandbox ?? 'auto');
+      const sandboxMode = sandboxModeOf(this.config.tools?.dynamicToolSandbox);
       this.toolCreator = new ToolCreator(this.router, this.toolRegistry, this.workspacePath, cfg['persistDynamicTools'] !== false, sandboxMode);
       this.toolCreator.setLogger((m) => {
         if (this.listenerCount('log') > 0) this.emit('log', { level: 'info', message: m });
@@ -342,9 +355,14 @@ export class Cascade extends EventEmitter {
       this.emit('log', { level: 'warn', message: 'Code index enabled but no embeddings-capable provider is configured — skipping.' });
       return;
     }
-    const dbPath = ci.dbPath || path.join(this.workspacePath, '.cascade', 'code-index.db');
-    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-    const db = new Database(dbPath);
+    // A relative dbPath is the workspace's, not the process's: on desktop and
+    // the server those differ, and the file opened must be the one protected.
+    const dbFile = ci.dbPath ? path.resolve(this.workspacePath, ci.dbPath) : statePath(this.workspacePath, STATE.codeIndex);
+    fs.mkdirSync(path.dirname(dbFile), { recursive: true });
+    // The default place is protected by name; a configured one is not, and
+    // holds the indexed text — deleted chunks too, until SQLite reuses them.
+    this.toolRegistry.protectFiles(['', '-wal', '-shm', '-journal'].map((suffix) => `${dbFile}${suffix}`));
+    const db = new Database(dbFile);
     db.pragma('journal_mode = WAL');
 
     const complete = chatCompleterFromProviders(this.config.providers);
@@ -352,18 +370,31 @@ export class Cascade extends EventEmitter {
 
     const ignore = new CascadeIgnore();
     await ignore.load(this.workspacePath);
+    const privacy = this.router.getPrivacyPaths();
 
     const index = new WorkspaceIndex({
       root: this.workspacePath,
       db,
       embedder,
       reranker,
-      isIgnored: (abs) => ignore.isIgnored(abs, this.workspacePath),
+      // A local-only file is never indexed: indexing sends it to the
+      // embedder, which may be a cloud one, and code_search would hand its
+      // text to any subtask.
+      isIgnored: (abs) => ignore.isIgnored(abs, this.workspacePath)
+        || !!privacy?.coversFile(abs, this.workspacePath),
+      // Nor what a local-only command — this run's or another's — is
+      // writing while the index reads.
+      whileReading: (read) => this.toolRegistry.whileShared(read),
     });
 
     if (ci.autoRefresh) {
       const res = await index.refresh();
       this.emit('log', { level: 'info', message: `Code index refreshed: ${res.filesIndexed} indexed, ${res.filesUnchanged} unchanged, ${res.chunks} chunks.` });
+    } else {
+      // No refresh to drop them, so drop them here: files protected or made
+      // local-only since they were indexed.
+      const pruned = index.prune();
+      if (pruned) this.emit('log', { level: 'info', message: `Code index: dropped ${pruned} file(s) that are now protected or local-only.` });
     }
     this.codeIndex = index;
     this.toolRegistry.register(new CodeSearchTool(index));
@@ -1548,6 +1579,13 @@ export class Cascade extends EventEmitter {
 
     this.initPromise = (async () => {
       await this.router.init(this.config);
+
+      // The workspace's .cascadeignore reaches the tools here; the built-in
+      // protected paths are in force from construction. Nothing used to pass
+      // the file on, so a .cascadeignore protected nothing at all.
+      const cascadeIgnore = new CascadeIgnore();
+      await cascadeIgnore.load(this.workspacePath);
+      this.toolRegistry.setIgnoredPaths(cascadeIgnore.getUserPatterns());
 
       // Bubble budget:warning events from the router up to Cascade consumers
       this.router.on('budget:warning', (payload: {
@@ -2811,3 +2849,26 @@ ${prompt}`
     } catch { /* non-critical */ }
   }
 }
+
+/**
+ * Every credential in a config — provider keys and tokens, search and
+ * browser keys — found by field name wherever it sits, so a new provider's
+ * key is covered without being listed here.
+ */
+export function secretValuesIn(config: unknown): string[] {
+  const out: string[] = [];
+  const walk = (value: unknown, key: string, depth: number): void => {
+    if (depth > 6 || value == null) return;
+    if (typeof value === 'string') {
+      if (/(api_?key|auth_?token|secret|password|token)$/i.test(key)) out.push(value);
+      return;
+    }
+    if (Array.isArray(value)) { for (const item of value) walk(item, key, depth + 1); return; }
+    if (typeof value === 'object') {
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) walk(v, k, depth + 1);
+    }
+  };
+  walk(config, '', 0);
+  return out;
+}
+

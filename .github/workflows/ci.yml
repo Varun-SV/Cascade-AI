@@ -70,6 +70,18 @@ jobs:
       - name: Lint (tsc --noEmit)
         run: npm run lint
 
+      # The process jail's tests launch real commands in bubblewrap, and skip
+      # where it cannot run. The runner has no bubblewrap and restricts the
+      # unprivileged user namespaces it needs (AppArmor), so both are set up
+      # here. A failure to set up only means those tests skip.
+      - name: Set up bubblewrap for the process jail tests
+        continue-on-error: true
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --unshare-pid --bind / / --proc /proc --dev /dev -- true && echo "bubblewrap works"
+
       - name: Test
         run: npm test
 

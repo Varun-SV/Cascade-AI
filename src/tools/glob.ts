@@ -7,6 +7,9 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
+import { resolveInWorkspace } from './utils/workspace-path.js';
+import { statePathFor } from '../config/project-state.js';
+import { isWithin, realPathOf } from '../utils/real-path.js';
 
 export class GlobTool extends BaseTool {
   readonly name = 'glob';
@@ -27,17 +30,28 @@ export class GlobTool extends BaseTool {
     required: ['pattern'],
   };
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const pattern = input['pattern'] as string;
-    const searchPath = (input['path'] as string | undefined)
-      ? path.resolve(this.workspaceRoot, input['path'] as string)
-      : this.workspaceRoot;
+    const given = input['path'] as string | undefined;
+    // `@private/…` and `@screenshots/…` lead into the project's state folder,
+    // where the registry has let this call in; what is listed stays inside it.
+    const searchPath = given ? resolveInWorkspace(this.workspaceRoot, given) : this.workspaceRoot;
+    const stateRoot = given ? statePathFor(this.workspaceRoot, given.split(/[\\/]/)[0]!) : null;
 
-    const matches = await glob(pattern, {
+    const found = await glob(pattern, {
       cwd: searchPath,
       ignore: ['node_modules/**', '.git/**', 'dist/**', 'build/**'],
       nodir: true,
       dot: false,
+    });
+    // Protected files are not listed, nor is anything a `../` pattern
+    // reached outside the workspace — and nor, for a worker that may not
+    // read it, is a local-only file.
+    const shown = this.listGate(options);
+    const matches = found.filter((rel) => {
+      const abs = path.resolve(searchPath, rel);
+      if (stateRoot) return isWithin(realPathOf(abs), realPathOf(stateRoot));
+      return !this.isProtectedPath(abs) && shown(abs, false);
     });
 
     if (matches.length === 0) {
@@ -61,3 +75,4 @@ export class GlobTool extends BaseTool {
     return lines.join('\n');
   }
 }
+

@@ -15,9 +15,10 @@ import { MemoryStore } from '../memory/store.js';
 import { hasProviderCredential } from '../config/index.js';
 import { explainRefusal } from '../config/credential-write.js';
 import { commitSettings, settingsSnapshot } from '../config/settings-payload.js';
-import { writeConfigFile } from '../config/write-config.js';
+import { writeProjectConfig } from '../config/write-config.js';
 import type { RuntimeNode, RuntimeNodeLog, RuntimeSession } from '../types.js';
-import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE, CASCADE_CONFIG_FILE, CASCADE_DASHBOARD_SECRET_FILE } from '../constants.js';
+import { GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE } from '../constants.js';
+import { statePath, STATE } from '../config/project-state.js';
 import { DashboardSocket } from './websocket.js';
 import { authMiddleware, createToken } from './auth.js';
 import { DEFAULT_DASHBOARD_PORT } from '../constants.js';
@@ -254,7 +255,6 @@ export class DashboardServer {
         // Nothing was adopted — the live config is exactly what it was.
         return { refused, snapshot: settingsSnapshot(this.config), error: result.error };
       }
-      this.syncGlobalCredentials();
       // The fresh snapshot rides back with the acknowledgement, so the panel
       // re-hydrates from what was actually stored rather than from what it sent.
       return { refused, snapshot: settingsSnapshot(this.config) };
@@ -555,30 +555,14 @@ export class DashboardServer {
    * silently and still typecheck.
    */
   private persistConfig(config: typeof this.config): { ok: true } | { ok: false; error: string } {
-    const result = writeConfigFile(path.join(this.workspacePath, CASCADE_CONFIG_FILE), config);
+    // The project's config without its keys, and the keys where every
+    // project finds them (config/write-config.ts): both are the save now,
+    // so a failure of either fails it.
+    // From the config being replaced: a key another process saved since
+    // this one loaded is kept.
+    const result = writeProjectConfig(this.workspacePath, config as never, undefined, this.config.providers);
     if (!result.ok) console.warn(`[dashboard] Failed to persist config: ${result.error}`);
     return result;
-  }
-
-  /**
-   * Copy provider credentials to the machine-global store, so keys saved over
-   * the socket survive a workspace switch — the same sync `ConfigManager.save()`
-   * performs.
-   *
-   * Separate from the workspace write, and called only AFTER it succeeds. It
-   * used to run unconditionally inside `persistConfig()`, so a failed workspace
-   * write still pushed the provider half of a rejected save into the global
-   * store: half the change persisted, behind an error saying none of it had.
-   *
-   * Best-effort on its own account: this is a convenience copy, and failing it
-   * does not lose what the user just entered.
-   */
-  private syncGlobalCredentials(): void {
-    try {
-      saveGlobalCredentials(path.join(os.homedir(), GLOBAL_CONFIG_DIR), this.config.providers ?? []);
-    } catch (err) {
-      console.warn(`[dashboard] Failed to sync global credentials: ${err instanceof Error ? err.message : String(err)}`);
-    }
   }
 
   /**
@@ -592,7 +576,7 @@ export class DashboardServer {
     const fromConfig = this.config.dashboard.secret ?? process.env['CASCADE_DASHBOARD_SECRET'];
     if (fromConfig) return fromConfig;
 
-    const secretPath = path.join(this.workspacePath, CASCADE_DASHBOARD_SECRET_FILE);
+    const secretPath = statePath(this.workspacePath, STATE.dashboardSecret);
     try {
       if (fs.existsSync(secretPath)) {
         const existing = fs.readFileSync(secretPath, 'utf-8').trim();
@@ -1049,7 +1033,7 @@ export class DashboardServer {
   }
 
   watchRuntimeChanges(): void {
-    const workspaceDbPath = path.join(this.workspacePath, CASCADE_DB_FILE);
+    const workspaceDbPath = statePath(this.workspacePath, STATE.memoryDb);
     const globalDbPath = path.join(os.homedir(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
     const watchPaths = [workspaceDbPath, globalDbPath].filter((p, index, arr) => arr.indexOf(p) === index);
 
@@ -1443,9 +1427,10 @@ export class DashboardServer {
       }
       if (body['tierLimits']) this.config.tierLimits = { ...this.config.tierLimits, ...(body['tierLimits'] as TierLimits) };
       if (body['budget'])     this.config.budget     = { ...this.config.budget,     ...(body['budget'] as BudgetConfig) };
-      // Persist to .cascade/config.json atomically (write temp + rename)
+      // Persist to the project's config atomically (write temp + rename)
       try {
-        const configPath = path.join(this.workspacePath, CASCADE_CONFIG_FILE);
+        const configPath = statePath(this.workspacePath, STATE.config);
+        fs.mkdirSync(path.dirname(configPath), { recursive: true });
         const existing = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf-8')) : {};
         const updated = { ...existing, tierLimits: this.config.tierLimits, budget: this.config.budget };
         const tmp = configPath + '.tmp';

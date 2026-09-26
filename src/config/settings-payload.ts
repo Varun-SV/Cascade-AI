@@ -231,7 +231,7 @@ export function applySettingsPayload(
     if (typeof a['cascadeAuto'] === 'boolean') config.cascadeAuto = a['cascadeAuto'];
     if (['auto', 'T1', 'T2', 'T3'].includes(a['forceTier'] as string)) config.routing = { ...(config.routing ?? {}), forceTier: a['forceTier'] as NonNullable<CascadeConfig['routing']>['forceTier'] };
     if (typeof a['benchmarksLive'] === 'boolean') config.benchmarks = { ...(config.benchmarks ?? {}), live: a['benchmarksLive'] };
-    if (['isolate', 'worker', 'auto'].includes(a['dynamicToolSandbox'] as string)) config.tools = { ...(config.tools ?? {}), dynamicToolSandbox: a['dynamicToolSandbox'] as NonNullable<CascadeConfig['tools']>['dynamicToolSandbox'] };
+    if (['isolate', 'wasm', 'auto'].includes(a['dynamicToolSandbox'] as string)) config.tools = { ...(config.tools ?? {}), dynamicToolSandbox: a['dynamicToolSandbox'] as NonNullable<CascadeConfig['tools']>['dynamicToolSandbox'] };
     // Let a run act on the desktop's built-in browser. Named here as well as in
     // the schema because this allowlist is what a renderer's payload is filtered
     // through — a key it does not list is dropped, so a toggle wired only in the
@@ -346,7 +346,7 @@ export function settingsSnapshot(config: CascadeConfig): SettingsSnapshot {
       cascadeAuto: config.cascadeAuto,
       forceTier: config.routing?.forceTier,
       benchmarksLive: config.benchmarks?.live,
-      dynamicToolSandbox: config.tools?.dynamicToolSandbox,
+      dynamicToolSandbox: config.tools?.dynamicToolSandbox === 'worker' ? 'wasm' : config.tools?.dynamicToolSandbox,
       agentBrowserControl: config.tools?.agentBrowserControl,
       factsExtraction: config.knowledge?.factsExtraction,
       rememberSessions: config.memory?.rememberSessions,

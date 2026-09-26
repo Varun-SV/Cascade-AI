@@ -4,6 +4,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { statePath, STATE } from '../config/project-state.js';
 import { execFile, execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type { ToolExecuteOptions } from '../types.js';
@@ -43,7 +44,7 @@ export class CodeInterpreterTool extends BaseTool {
 
   isDangerous(): boolean { return true; }
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const language = input['language'] as 'python' | 'nodejs';
     const code = input['code'] as string;
     const args = (input['args'] as string[]) ?? [];
@@ -70,8 +71,9 @@ export class CodeInterpreterTool extends BaseTool {
       cmdPrefix = NODE_CMD;
     }
 
-    // Setup temporary directory structure in .cascade/tmp
-    const tmpDir = path.join(this.workspaceRoot, '.cascade', 'tmp');
+    // The script goes in the project's scratch folder, outside the project;
+    // the jail mounts it back for the command (jail/process-jail.ts).
+    const tmpDir = statePath(this.workspaceRoot, STATE.tmp);
     if (!fs.existsSync(tmpDir)) {
       fs.mkdirSync(tmpDir, { recursive: true });
     }
@@ -90,10 +92,21 @@ export class CodeInterpreterTool extends BaseTool {
     //    `exec` command line.)
     const execArgs = [filePath, ...args];
 
+    // In the jail, when there is one (jail/process-jail.ts). The script lives
+    // under .cascade/tmp, which the jail leaves in view.
+    const prepared = this.jail
+      ? await this.jail.prepare(cmdPrefix, execArgs, { cwd: this.workspaceRoot, offline: options.isOffline?.() === true })
+      : undefined;
+    if (prepared && !prepared.ok) {
+      try { fs.unlinkSync(filePath); } catch { /* already gone */ }
+      throw new Error(prepared.reason);
+    }
+    const launch = prepared?.launch ?? { file: cmdPrefix, args: execArgs, cwd: this.workspaceRoot, env: process.env };
+
     // 3. Execute
-    return new Promise((resolve) => {
+    const output = await new Promise<string>((resolve) => {
       const startMs = Date.now();
-      execFile(cmdPrefix, execArgs, { cwd: this.workspaceRoot, timeout: 30000 }, (error, stdout, stderr) => {
+      execFile(launch.file, launch.args, { cwd: launch.cwd, env: launch.env, timeout: 30000 }, (error, stdout, stderr) => {
         const duration = Date.now() - startMs;
 
         // 4. Cleanup (Always delete the script from the filesystem)
@@ -117,5 +130,7 @@ export class CodeInterpreterTool extends BaseTool {
         }
       });
     });
+    const note = await prepared?.launch.done?.();
+    return note ? `${output}\n\n[note] ${note}` : output;
   }
 }

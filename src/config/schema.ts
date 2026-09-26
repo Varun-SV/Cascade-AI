@@ -23,6 +23,14 @@ export const ProviderConfigSchema = z.object({
    * hostname.
    */
   local: z.boolean().optional(),
+  /**
+   * "This endpoint is on my machine or my private network", for one whose
+   * address cannot show it — a bare name like `ollama` in a compose file, or
+   * a name a private DNS zone serves. A `privacy.paths` local-only subtask
+   * may then run on it. Loopback, private-range and `.local` addresses need
+   * no flag. Only meaningful for `ollama` and `openai-compatible`.
+   */
+  privateNetwork: z.boolean().optional(),
   /** Region for providers whose price varies by region (Azure: global | us | eu | …). */
   region: z.string().optional(),
 });
@@ -122,13 +130,30 @@ export const ToolsConfigSchema = z.object({
   /** Web search backends — at least one should be configured for best results */
   webSearch: WebSearchConfigSchema.optional(),
   /**
-   * Sandbox runtime for LLM-authored dynamic tools:
-   * - 'isolate': hard V8 isolate (isolated-vm) — no Node globals, true capability
-   *   confinement. Requires the optional native `isolated-vm` dependency.
-   * - 'worker': node:worker_threads (resource/kill limits, but not capability-confined).
-   * - 'auto' (default): use the isolate when `isolated-vm` loads, else fall back to worker.
+   * Sandbox runtime for LLM-authored dynamic tools. Every choice confines the
+   * code — no Node globals, only the gated callTool and fetch bridges:
+   * - 'isolate': hard V8 isolate (isolated-vm), an optional native dependency;
+   *   the WebAssembly sandbox runs the tool when it isn't installed.
+   * - 'wasm': QuickJS compiled to WebAssembly, on a thread of its own. Ships
+   *   with Cascade, so it is there on every platform, the desktop app included.
+   * - 'auto' (default): the isolate when `isolated-vm` loads, else 'wasm'.
+   * 'worker', a bare thread that confined nothing, is retired: it reads as 'wasm'.
    */
-  dynamicToolSandbox: z.enum(['isolate', 'worker', 'auto']).default('auto'),
+  dynamicToolSandbox: z.enum(['isolate', 'wasm', 'auto', 'worker'])
+    .transform((mode) => (mode === 'worker' ? 'wasm' : mode))
+    .default('auto'),
+  /**
+   * Confinement for `shell`, `run_code` and `git`, on top of approvals. The
+   * jail hides Cascade's own files, the built-in secrets and — from a caller
+   * that is not local-only — local-only paths; gives each command its own
+   * process namespace; and cuts the network for a local-only caller.
+   * - 'auto' (default): bubblewrap on Linux, sandbox-exec on macOS, where it
+   *   works; elsewhere commands run with provider keys removed from their
+   *   environment, and a local-only caller cannot run them.
+   * - 'bwrap' / 'sandbox-exec': that jailer, or no commands.
+   * - 'off': no jail and no scrubbing.
+   */
+  processJail: z.enum(['auto', 'bwrap', 'sandbox-exec', 'off']).default('auto'),
   /**
    * When set, ONLY these tool names are registered — the sole way to omit a
    * built-in tool (shell/file/git/…) from existing at all, rather than just

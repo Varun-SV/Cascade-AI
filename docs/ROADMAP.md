@@ -8,34 +8,64 @@ without re-discovery.
 
 Dynamic tools now run in an `isolated-vm` hard V8 isolate (no Node globals),
 reaching the host only through the escalator-gated `callTool` / SSRF-guarded
-`fetch` bridges, with a graceful fall back to the worker sandbox when the
-optional native addon is unavailable (`tools.dynamicToolSandbox`,
-`src/tools/tool-creator.ts`).
+`fetch` bridges (`tools.dynamicToolSandbox`, `src/tools/tool-creator.ts`).
+Where the optional native addon is unavailable — the desktop app never ships
+it — they run in a WebAssembly sandbox instead: QuickJS on a worker thread of
+its own, with the same two bridges, a memory cap and a hard kill at the
+deadline (`src/tools/sandbox/`). The bare
+worker fallback, which confined nothing, is gone; a config naming it gets the
+WebAssembly sandbox.
 
-**Still open — OS-level jail for real-process execution (own PR).** `shell`
-(`child_process.exec`, `src/tools/shell.ts`) and the `run_code` interpreter
-(real Python/Node, `src/tools/interpreter.ts`) remain approval-gated but
-unconfined at the OS level. A WASM/V8 isolate can't run those — they need real
-runtimes — so the jail is per-platform process confinement:
+**OS-level jail for real-process execution — ✅ shipped for Linux and macOS.**
+`shell`, `run_code` and `git` launch through `ProcessJail`
+(`src/tools/jail/process-jail.ts`, `tools.processJail: 'auto' | 'bwrap' |
+'sandbox-exec' | 'off'`), on top of approvals:
 
-- **Linux — bubblewrap (`bwrap`)**, first target. Unprivileged user-namespace
-  jail, no daemon, no setuid: bind the workspace read-write, `/` read-only,
-  tmpfs `/tmp`, no network by default (opt-in per approval). The command line
-  wraps the existing spawn, so the approval gate and allow/blocklists are
-  unchanged.
-- **macOS — `sandbox-exec`** Seatbelt profiles (deprecated-but-working; what
-  Bazel/Chromium use): a generated profile allowing workspace writes + read-only
-  system paths, network denied by default.
-- **Anywhere — Docker/Podman fallback** when a daemon is available: a slim
-  python+node image, workspace bind-mount, `--network=none` by default.
-  Heaviest but fully cross-platform.
-- **Windows — off-with-warning** initially (Job Objects/AppContainer are
-  hard mode; WSL2 + bwrap is the pragmatic route for developers who want it).
+- **Linux — bubblewrap.** The host filesystem as it is, with Cascade's own
+  folder (bar its scratch), the built-in secrets, `~/.cascade-ai` and — for a
+  caller that is not local-only — local-only paths mounted over, directories
+  whole where a pattern covers them, so files created mid-command are hidden
+  too; the git store as well while its history holds any of them; its own
+  PID namespace, so no other process's `/proc/<pid>/environ` is readable; no
+  capabilities; and for a local-only caller `--unshare-net` plus a seccomp
+  filter refusing `socket(AF_UNIX)` and io_uring, so host daemons behind
+  socket files are out of reach. Hard links to hidden files are found by
+  inode and mounted over too. A cloud caller's root stays writable: builds
+  and package managers write outside the workspace, and the aim there is
+  keeping secrets and private files out of reach, not freezing the machine.
+  A local-only caller's is read-only — the workspace writable, `/tmp` and
+  `~/.cache` private tmpfs, the git store read-only — because whatever it
+  writes may carry what it read: what it made in the workspace, found by
+  stamping files before and after, is moved to its private folder in the
+  project's state folder (outside the project, mounted writable for it
+  alone), and what it changed or deleted is marked local-only — set aside
+  there too if the mark cannot be saved — with other tool calls
+  held until it ends (`src/tools/workspace-gate.ts`), in every run in the
+  workspace: one gate per workspace in a process, and marker files in the
+  project's state folder between processes.
+  `.cascadeignore` is mounted over itself read-only for every caller.
+- **macOS — sandbox-exec**, a generated profile denying the same paths.
+  A local-only caller runs no commands there: with no mount boundary a
+  command could hard-link a file from outside the workspace in and write
+  through it, and with no process namespace a child it left running could
+  write after it ended — either way where Cascade cannot mark it. Checked at
+  startup with a profile of the same shape; not exercised in CI.
+- **Everywhere** — provider keys are taken out of every command's
+  environment, `git`'s on Windows included; the usual credential locations
+  in the home folder (`~/.ssh`, `~/.aws`, …) are hidden from every command
+  but the `git` tool's, and the git store while git keeps objects no ref
+  reaches. With no jailer, `auto` runs
+  commands that way and refuses them to a local-only caller. The `git` tool
+  refuses a push that would send a commit holding a hidden path.
 
-Config sketch: `tools.processJail: 'auto' | 'bwrap' | 'sandbox-exec' |
-'docker' | 'off'` — `auto` probes for an available jailer at startup and logs
-which one is active; `off` keeps today's behavior. The jail is confinement ON
-TOP of approvals, never a replacement for them.
+**Still open:** Windows (Job Objects/AppContainer, or WSL2 + bubblewrap), and
+a Docker/Podman fallback where no jailer works — which would also give
+macOS local-only commands. On macOS a command can still
+read another same-user process's startup environment; Linux's PID namespace
+closes that there. A mask hides what a path holds, not that it is there: a
+cloud worker's command can list the name of a file a local-only pattern
+matches — one you named, since what a local-only worker makes is kept out of
+the project.
 
 ## Project knowledge graph (world-state v2) — ✅ shipped in v0.14.0
 

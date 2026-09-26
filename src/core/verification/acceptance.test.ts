@@ -84,6 +84,26 @@ describe('evaluateAcceptance', () => {
   });
 });
 
+describe('evaluateAcceptance and a file the caller may not look at', () => {
+  // Existence, emptiness and "contains X" are each a fact about the file;
+  // graded for a caller that may not read it, they were a way to ask.
+  it('leaves it to the model without looking at it', async () => {
+    const looked: string[] = [];
+    const probe: AcceptanceProbe = {
+      stat: async (p) => { looked.push(`stat ${p}`); return { size: 5 }; },
+      read: async (p) => { looked.push(`read ${p}`); return 'plans'; },
+      allowed: (p) => p !== 'secret/plan.md',
+    };
+    const results = await evaluateAcceptance(
+      ['secret/plan.md contains "plans"', 'secret/plan.md exists', 'notes.md exists'],
+      [],
+      probe,
+    );
+    expect(results.map((r) => r.verdict)).toEqual(['undecidable', 'undecidable', 'passed']);
+    expect(looked).toEqual(['stat notes.md']);
+  });
+});
+
 describe('evaluateAcceptance on a run that cannot write files', () => {
   /** A probe that fails the test if consulted. */
   const forbiddenProbe: AcceptanceProbe = {

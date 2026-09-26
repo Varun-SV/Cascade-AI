@@ -9,6 +9,8 @@ export default defineConfig({
     // developer happens to have exported, and pass for reasons CI will not
     // reproduce.
     setupFiles: ['./vitest.setup.ts'],
+    // Builds the WebAssembly sandbox's worker for the run (see the file).
+    globalSetup: ['./vitest.global-setup.ts'],
     // app/electron and app/src/lib hold a little pure logic (address-bar
     // parsing, the endpoint-payload rule) that is worth testing; the rest of
     // those directories imports electron or React and is not.

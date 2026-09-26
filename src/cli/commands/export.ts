@@ -8,7 +8,8 @@ import path from 'node:path';
 import chalk from 'chalk';
 import ora from 'ora';
 import { MemoryStore } from '../../memory/store.js';
-import { GLOBAL_CONFIG_DIR, GLOBAL_DB_FILE, CASCADE_DB_FILE } from '../../constants.js';
+import { GLOBAL_CONFIG_DIR, GLOBAL_DB_FILE } from '../../constants.js';
+import { statePath, STATE } from '../../config/project-state.js';
 import type { Session, StoredMessage } from '../../types.js';
 
 export interface ExportOptions {
@@ -26,10 +27,10 @@ export async function exportCommand(options: ExportOptions = {}): Promise<void> 
 
   let store: MemoryStore;
   try {
-    // Prefer the workspace DB where sessions are actually stored (.cascade/memory.db).
+    // Prefer the project's DB, where sessions are actually stored (its state folder).
     // Fall back to the global DB only if the workspace DB doesn't exist.
     const workspacePath = options.workspacePath ?? process.cwd();
-    const workspaceDbPath = path.join(workspacePath, CASCADE_DB_FILE);
+    const workspaceDbPath = statePath(workspacePath, STATE.memoryDb);
     const globalDbPath = path.join(os.homedir(), GLOBAL_CONFIG_DIR, GLOBAL_DB_FILE);
 
     // Check if file exists synchronously to pick the right DB

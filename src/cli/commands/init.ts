@@ -9,15 +9,15 @@ import chalk from 'chalk';
 import { createDefaultCascadeMd } from '../../config/cascade-md.js';
 import { createDefaultIgnoreFile } from '../../config/ignore.js';
 import { ConfigManager } from '../../config/index.js';
-import { CASCADE_CONFIG_FILE } from '../../constants.js';
-import { runSetupWizard } from '../setup/index.js';
+import { projectStateDir, statePath, STATE } from '../../config/project-state.js';
+import { applySetup, runSetupWizard } from '../setup/index.js';
 
 export async function initCommand(workspacePath = process.cwd()): Promise<void> {
   const spin = ora({ text: 'Initializing Cascade project…', color: 'magenta' }).start();
 
   try {
-    const configDir = path.join(workspacePath, '.cascade');
-    await fs.mkdir(configDir, { recursive: true });
+    // Cascade's own files go in the project's state folder, outside it.
+    await fs.mkdir(projectStateDir(workspacePath), { recursive: true });
 
     // Write CASCADE.md
     const mdPath = path.join(workspacePath, 'CASCADE.md');
@@ -39,18 +39,16 @@ export async function initCommand(workspacePath = process.cwd()): Promise<void> 
     console.log();
 
     // Launch interactive setup wizard to configure providers and models
-    const configPath = path.join(workspacePath, CASCADE_CONFIG_FILE);
+    const configPath = statePath(workspacePath, STATE.config);
     if (await fileExists(configPath)) {
-      console.log(chalk.yellow('  .cascade/config.json already exists — launching wizard to reconfigure.'));
+      console.log(chalk.yellow(`  ${configPath} already exists — launching wizard to reconfigure.`));
       console.log();
     }
 
     const config = await runSetupWizard(workspacePath);
 
     // Persist config via ConfigManager so all schema defaults are applied
-    const cm = new ConfigManager(workspacePath);
-    await cm.load();
-    await cm.updateConfig(config);
+    await applySetup(new ConfigManager(workspacePath), config);
 
     console.log();
     console.log(chalk.green('  ◈ Setup complete! Run `cascade` to start.'));

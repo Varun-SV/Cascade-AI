@@ -23,6 +23,16 @@ describe('CurrentPageTool', () => {
     expect(out).toContain('Install it with npm.');
   });
 
+  // Registered by the host after the built-ins, it was refused to a
+  // local-only subtask like a tool that could send what it knows away.
+  it('is open to a local-only subtask: it takes no input and reads only the open page', async () => {
+    const { ToolRegistry } = await import('./registry.js');
+    const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], webSearch: {}, browserEnabled: false, requireApprovalFor: [] } as never);
+    reg.register(new CurrentPageTool(async () => ({ url: 'https://example.com/docs', title: 'The Docs', text: 'Install it with npm.' })));
+    const out = await reg.execute('read_current_page', {}, { tierId: 't3', sessionId: 's', isOffline: () => true });
+    expect(out).toContain('Install it with npm.');
+  });
+
   it('says plainly when nothing is open, rather than returning empty', async () => {
     // An empty string reads to a model as "the page was blank", and it will
     // then answer about a page it never saw. Naming the state stops that.

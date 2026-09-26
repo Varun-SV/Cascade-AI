@@ -119,7 +119,21 @@ const BILLING_SHAPED = /billing|\bcredits?\b|balance is too low|insufficient[_\s
  * itself is fine, and other deployments on the same resource still work.
  * Reading that as a dead credential condemns a whole working provider.
  */
-const MODEL_SCOPED = /deployment|does not exist|do(?:es)? not have access to|access to (?:the )?(?:model|deployment)|model .*not (?:enabled|available|supported)/;
+const MODEL_SCOPED = /deployment|does not exist|do(?:es)? not have access to|access to (?:the )?(?:model|deployment)/;
+const modelScoped = (m: string): boolean => MODEL_SCOPED.test(m) || modelThen(m, /not (?:enabled|available|supported)/);
+
+/**
+ * Whether a line of `m` says "model " and, later on that line, matches
+ * `after` — as `/model .*(after)/` would, in one pass: that pattern tried
+ * again from every "model " in a message made of them. The first on a line
+ * has the most after it, so it is the only one to look past.
+ */
+function modelThen(m: string, after: RegExp): boolean {
+  return m.split(/[\n\r\u2028\u2029]/).some((line) => {
+    const at = line.indexOf('model ');
+    return at >= 0 && after.test(line.slice(at + 'model '.length));
+  });
+}
 
 /**
  * The provider told us when to come back.
@@ -194,7 +208,7 @@ export function classifyProviderError(err: unknown): ClassifiedError {
     if (status === 401) return 'auth';
     // 403 is the ambiguous one: a rejected credential and a credential that
     // simply lacks this one model arrive identically.
-    if (status === 403) return MODEL_SCOPED.test(m) ? 'model_unavailable' : 'auth';
+    if (status === 403) return modelScoped(m) ? 'model_unavailable' : 'auth';
     if (status === 404) return 'model_unavailable';
 
     // ── By message ──
@@ -205,7 +219,7 @@ export function classifyProviderError(err: unknown): ClassifiedError {
     // backs off rather than writing the provider off.
     if (/\bquota\b/.test(m)) return 'rate_limit';
     if (/api key|unauthorized|authentication|permission denied|invalid[_ ]api/.test(m)) return 'auth';
-    if (/model .*(not found|does not exist|unavailable)|no such model|unknown model|not supported for/.test(m)) {
+    if (modelThen(m, /not found|does not exist|unavailable/) || /no such model|unknown model|not supported for/.test(m)) {
       return 'model_unavailable';
     }
     if (/context length|too many tokens|maximum context|prompt is too long|input too long/.test(m)) return 'context_length';

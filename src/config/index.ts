@@ -6,13 +6,17 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import type { CascadeConfig, Identity } from '../types.js';
+import type { CascadeConfig, Identity, ProviderConfig } from '../types.js';
 import { Keystore } from './keystore.js';
 import { CascadeIgnore } from './ignore.js';
 import { loadCascadeMd, type CascadeMdContent } from './cascade-md.js';
 import { MemoryStore } from '../memory/store.js';
 import { validateConfig } from './validate.js';
-import { loadGlobalCredentials, mergeGlobalCredentials, saveGlobalCredentials } from './global-credentials.js';
+import {
+  adoptProjectCredentials, loadGlobalCredentials, loadProjectCredentials, mergeGlobalCredentials,
+  saveGlobalCredentials, saveProjectCredentials, withoutCredentials,
+} from './global-credentials.js';
+import { globalDir, LEGACY_STATE_DIR, legacyStateIsLink, migrateProjectState, projectStateDir, stateNotices, statePath, STATE } from './project-state.js';
 import { normalizeAzureEndpoint, sameAzureEndpoint } from './azure-endpoint.js';
 import { resolveAzureRouting } from './azure-routing.js';
 import { hasDefaultEndpoint, sameCredentialEndpoint } from './endpoint-identity.js';
@@ -26,12 +30,7 @@ import {
 } from './retired-providers.js';
 import { stripRevokedCredentials, stripRevokedFromConfig, clearAnthropicPins, hasUsableAnthropic, isSubscriptionToken, REVOKED_CREDENTIAL_REASON, type ClearedPin } from './revoked-credentials.js';
 import { disambiguateMcpServerNames, type McpServerRename } from '../tools/tool-name.js';
-import {
-  CASCADE_CONFIG_FILE,
-  CASCADE_DB_FILE,
-  GLOBAL_CONFIG_DIR,
-  GLOBAL_KEYSTORE_FILE,
-} from '../constants.js';
+import { GLOBAL_KEYSTORE_FILE } from '../constants.js';
 
 // Provider types the setup wizard treats as key-optional (local servers need
 // no credential — see cli/setup/index.tsx's `keyOptional`/ollama handling). A
@@ -171,6 +170,8 @@ export class ConfigManager {
    * must not re-announce a migration that already happened.
    */
   private revokedCredentials = 0;
+  /** The providers as last loaded or saved here (see save). */
+  private providersBase?: ProviderConfig[];
   /** Tier pins cleared by the revoked-credential migration this load. */
   private revokedPins: ClearedPin[] = [];
   /** This load's revoked-credential explanation, joined with any retirement one. */
@@ -192,10 +193,39 @@ export class ConfigManager {
   /** `globalDirOverride` exists for tests — never point it at the real home dir there. */
   constructor(workspacePath = process.cwd(), globalDirOverride?: string) {
     this.workspacePath = workspacePath;
-    this.globalDir = globalDirOverride ?? path.join(os.homedir(), GLOBAL_CONFIG_DIR);
+    this.globalDir = globalDirOverride ?? globalDir();
+  }
+
+  /** Where this project's config is kept (config/project-state.ts). */
+  getConfigPath(): string {
+    return statePath(this.workspacePath, STATE.config);
+  }
+
+  /** The project's name in the global credential store: its state folder's. */
+  private get project(): string {
+    return path.basename(projectStateDir(this.workspacePath));
+  }
+
+  /**
+   * A project's state used to live in its own `.cascade/`; it moves to the
+   * project's state folder (config/project-state.ts) the first time it is
+   * loaded, its keys to the global credential store on the way.
+   */
+  private migrateLegacyState(): void {
+    // The config moves as it is; loadConfig() takes its keys out, after the
+    // clean-up of retired and revoked ones.
+    const moved = migrateProjectState(this.workspacePath);
+    const legacy = path.join(this.workspacePath, LEGACY_STATE_DIR);
+    if (moved.length) {
+      console.warn(`Cascade moved this project's state out of ${legacy} to ${projectStateDir(this.workspacePath)}; its provider keys are in ${path.join(this.globalDir, 'credentials.json')}.`);
+    } else if (legacyStateIsLink(this.workspacePath)) {
+      console.warn(`Cascade left ${legacy} where it is: it is a symlink, and is not followed. Move what it holds to ${projectStateDir(this.workspacePath)} to keep using it.`);
+    }
+    for (const notice of stateNotices(this.workspacePath)) console.warn(notice);
   }
 
   async load(): Promise<void> {
+    this.migrateLegacyState();
     // Note: loadConfig() resets `retiredCleanup` on entry, so everything below
     // reads this load's result and never a previous one's.
     this.config = await this.loadConfig();
@@ -227,7 +257,7 @@ export class ConfigManager {
     await this.ignore.load(this.workspacePath);
     this.cascadeMd = await loadCascadeMd(this.workspacePath);
     this.keystore = new Keystore(path.join(this.globalDir, GLOBAL_KEYSTORE_FILE));
-    this.store = new MemoryStore(path.join(this.workspacePath, CASCADE_DB_FILE));
+    this.store = new MemoryStore(statePath(this.workspacePath, STATE.memoryDb));
     // Fill in machine-global credentials (~/.cascade-ai/credentials.json) so
     // keys entered once are available in EVERY workspace — previously keys
     // lived only in the workspace config, so pointing the desktop app (or CLI)
@@ -267,8 +297,15 @@ export class ConfigManager {
         };
       }
     }
+    // This project's own keys, where its config held them, come in first:
+    // ahead of the environment and of the machine-wide ones, as they were.
+    const ownCreds = filterRetiredCredentials(stripRevokedCredentials(loadProjectCredentials(this.globalDir, this.project)).kept).kept;
+    this.config.providers = mergeGlobalCredentials(this.config.providers, ownCreds);
     await this.injectEnvKeys(globalCreds.kept);
     this.config.providers = mergeGlobalCredentials(this.config.providers, globalCreds.kept);
+    // What a save starts from: its changes since are what it writes to the
+    // credential store, over whatever another process saved meanwhile.
+    this.providersBase = structuredClone(this.config.providers);
     // No post-merge pass: the workspace file was cleaned from its raw form in
     // loadConfig() and the global store just above, so both inputs to this
     // merge are already clean. Stripping again here would work, but it would
@@ -323,7 +360,15 @@ export class ConfigManager {
     // already written from the raw file inside loadConfig(), before this
     // config was enriched with env and machine-global credentials. Saving it
     // here would push those secrets into the workspace file (see loadConfig).
-    if (mcpNamesChanged) await this.save();
+    // Best-effort, like the migrations: the rename holds for this process
+    // whether or not it reaches the disk.
+    if (mcpNamesChanged) {
+      try {
+        await this.save();
+      } catch (err) {
+        console.warn(`Could not persist the MCP server rename: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     // console.warn alone is not enough — startRepl() clears the TTY right
     // after load() returns, and the desktop main process has no UI at all.
     // Keep the notice so each surface can show it once it has somewhere to
@@ -371,17 +416,27 @@ export class ConfigManager {
    * never reached the disk (see `commitSettings`).
    */
   async save(config: CascadeConfig = this.config): Promise<void> {
-    const configPath = path.join(this.workspacePath, CASCADE_CONFIG_FILE);
-    await fs.mkdir(path.dirname(configPath), { recursive: true });
-    await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8');
-    // Sync credential-bearing provider entries to the global store so they
-    // survive workspace switches. Best-effort: a read-only home dir must not
-    // fail the workspace save.
+    // The project's config keeps no key: they go to the global store, which
+    // is where every project finds them. The keys first, and a failure there
+    // fails the save: with the config written and the keys not, a key just
+    // entered would be gone — or an old one back — on the next load.
+    let undo: () => void;
     try {
-      saveGlobalCredentials(this.globalDir, config.providers);
+      undo = saveProjectCredentials(this.globalDir, this.project, config.providers ?? [], this.providersBase);
     } catch (err) {
-      console.warn(`Failed to sync credentials to global store: ${err instanceof Error ? err.message : String(err)}`);
+      throw new Error(`The provider keys could not be saved to ${path.join(this.globalDir, 'credentials.json')}: ${err instanceof Error ? err.message : String(err)}`);
     }
+    // Both or neither: the keys' change is taken back when the config cannot
+    // be written after it.
+    const configPath = statePath(this.workspacePath, STATE.config);
+    try {
+      await fs.mkdir(path.dirname(configPath), { recursive: true, mode: 0o700 });
+      await fs.writeFile(configPath, JSON.stringify({ ...config, providers: withoutCredentials(config.providers ?? []) }, null, 2), 'utf-8');
+    } catch (err) {
+      try { undo(); } catch { /* reported below with the write's own failure */ }
+      throw err;
+    }
+    this.providersBase = structuredClone(config.providers ?? []);
   }
 
   async updateConfig(updates: Partial<CascadeConfig>): Promise<void> {
@@ -440,7 +495,7 @@ export class ConfigManager {
     this.revokedCredentials = 0;
     this.revokedPins = [];
     this.revokedNotice = undefined;
-    const configPath = path.join(this.workspacePath, CASCADE_CONFIG_FILE);
+    const configPath = statePath(this.workspacePath, STATE.config);
     try {
       const raw = await fs.readFile(configPath, 'utf-8');
       const parsed = JSON.parse(raw) as unknown;
@@ -456,7 +511,23 @@ export class ConfigManager {
       // on every launch forever.
       const revokedHere = stripRevokedFromConfig(parsed).removed;
       if (revokedHere > 0) this.revokedCredentials += revokedHere;
-      if (didCleanupChangeAnything(cleanup) || revokedHere > 0) {
+      // Keys still in the config — one moved from the project's `.cascade/`,
+      // or written in by hand — go where keys are kept, as the project's own.
+      const providers = (parsed as { providers?: unknown }).providers;
+      const keyed = Array.isArray(providers) && providers.some((p) => p && (p.apiKey || p.authToken));
+      // Taken out only once they are safely in: where the store cannot be
+      // written, they stay, and are tried again next time.
+      let adopted = false;
+      if (keyed) {
+        try {
+          adoptProjectCredentials(this.globalDir, this.project, providers);
+          (parsed as { providers: unknown }).providers = withoutCredentials(providers);
+          adopted = true;
+        } catch (err) {
+          console.warn(`Could not move this project's provider keys to the global store: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      if (didCleanupChangeAnything(cleanup) || revokedHere > 0 || adopted) {
         if (didCleanupChangeAnything(cleanup)) this.retiredCleanup = cleanup;
         // Persist HERE, from the raw parsed file, not via save() at the end of
         // load(). By then `this.config` has been enriched by injectEnvKeys()
@@ -608,7 +679,7 @@ export class ConfigManager {
   }
 
   private async persistClearedPins(tiers: readonly string[]): Promise<void> {
-    const configPath = path.join(this.workspacePath, CASCADE_CONFIG_FILE);
+    const configPath = statePath(this.workspacePath, STATE.config);
     try {
       const raw = JSON.parse(await fs.readFile(configPath, 'utf-8')) as Record<string, unknown>;
       const models = raw['models'];

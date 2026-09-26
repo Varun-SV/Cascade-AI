@@ -8,7 +8,8 @@ import path from 'node:path';
 import type { CascadeConfig } from '../../types.js';
 import { DashboardServer } from '../../dashboard/server.js';
 import { MemoryStore } from '../../memory/store.js';
-import { CASCADE_DB_FILE, DEFAULT_DASHBOARD_PORT } from '../../constants.js';
+import { DEFAULT_DASHBOARD_PORT } from '../../constants.js';
+import { statePath, STATE } from '../../config/project-state.js';
 
 export async function dashboardCommand(
   config: CascadeConfig,
@@ -17,7 +18,7 @@ export async function dashboardCommand(
   const port = config.dashboard.port ?? DEFAULT_DASHBOARD_PORT;
   const spin = ora({ text: `Starting dashboard on port ${port}…`, color: 'magenta' }).start();
 
-  const store = new MemoryStore(path.join(workspacePath, CASCADE_DB_FILE));
+  const store = new MemoryStore(statePath(workspacePath, STATE.memoryDb));
   const server = new DashboardServer(config, store, workspacePath);
   server.watchRuntimeChanges();
 

@@ -115,22 +115,19 @@ export class BrowserTool extends BaseTool {
           // same millisecond resolve to the same path and one silently
           // overwrites the other — each worker then told to inspect a file
           // holding someone else's page.
-          // Under `.cascade/screenshots/`, not the workspace root. A workspace
-          // is usually a git checkout, `.gitignore` already covers `.cascade/`,
-          // and the alternative is every browser call leaving an untracked PNG
-          // in someone's repo for them to notice and delete. Same convention as
-          // the interpreter's `.cascade/tmp` scratch.
-          const rel = path.join('.cascade', 'screenshots', `screenshot-${Date.now()}-${randomUUID().slice(0, 8)}.png`);
-          const abs = resolveInWorkspace(this.workspaceRoot, rel);
+          // In the project's state folder (config/project-state.ts), not the
+          // project: a workspace is usually a git checkout, and the
+          // alternative is every browser call leaving an untracked PNG in
+          // someone's repo for them to notice and delete. Named to the model
+          // as `@screenshots/<file>`, a path the file and image tools resolve
+          // there — an absolute one outside the workspace they refuse.
+          const name = `screenshot-${Date.now()}-${randomUUID().slice(0, 8)}.png`;
+          const toolPath = `@screenshots/${name}`;
+          const abs = resolveInWorkspace(this.workspaceRoot, toolPath);
           await fs.mkdir(path.dirname(abs), { recursive: true });
           await fs.writeFile(abs, buf);
-          // The ABSOLUTE path, not the relative one. image_analyze reads with a
-          // bare `fs.readFile(filePath)` and never consults its own workspace
-          // root, so a relative path resolves against process.cwd() — which is
-          // not the workspace for an SDK embedder, a hosted run, or the
-          // desktop app, and the read fails with ENOENT.
           return [
-            `Screenshot saved to ${abs} (${Math.round(buf.byteLength / 1024)} KB).`,
+            `Screenshot saved to ${toolPath} (${Math.round(buf.byteLength / 1024)} KB).`,
             `Call image_analyze with that path to see what is on it — that needs a vision-capable model.`,
           ].join(' ');
         }

@@ -23,6 +23,7 @@ import path from 'node:path';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
 import { resolveInWorkspace } from './utils/workspace-path.js';
+import { statePathFor } from '../config/project-state.js';
 import {
   fileExt,
   isDocumentFormat,
@@ -42,6 +43,8 @@ const SOURCE_HINT: Record<DocumentFormat, string> = {
 
 export class GenerateDocumentTool extends BaseTool {
   readonly name = 'generate_document';
+  // Keeps what it is given on this machine: a local-only subtask may call it.
+  override readonly localOnlySafe = true;
   readonly description =
     'Create a REAL Microsoft Office file (.docx Word, .pptx PowerPoint, .xlsx Excel) in the workspace. '
     + 'You write the SOURCE and this tool renders the actual binary: Markdown for .docx, Markdown slides '
@@ -109,11 +112,34 @@ export class GenerateDocumentTool extends BaseTool {
     // was dropped rather than silently shipping a picture-less deck.
     const embedded: string[] = [];
     const skipped: string[] = [];
+    // An embedded file is copied into the document, which outlives this call
+    // and is readable by anything that can read it: a protected file is not
+    // copied, nor a local-only one into a document that is not local-only.
+    const mayCopy = this.readGate(options, { file: absPath });
     const loadImageBytes = async (url: string): Promise<Uint8Array | null> => {
       if (/^(https?|ftp):\/\//i.test(url)) { skipped.push(`${url} (remote URL — download it into the workspace first)`); return null; }
       const local = url.replace(/^file:\/\//i, '').split('?')[0]!.split('#')[0]!;
+      let source: string;
+      const named = decodeURIComponent(local);
       try {
-        const bytes = await this.readFile(resolveInWorkspace(this.workspaceRoot, decodeURIComponent(local)));
+        source = resolveInWorkspace(this.workspaceRoot, named);
+      } catch {
+        skipped.push(`${local} (outside the workspace)`);
+        return null;
+      }
+      // `@screenshots/…` and `@private/…` are in the project's state folder,
+      // which is protected whole, and are taken as the registry takes them:
+      // the screenshots for anyone, the private folder for a local-only
+      // subtask alone. A path to the state folder by any other name is not.
+      const alias = statePathFor(this.workspaceRoot, named) !== null;
+      if (alias && named.split(/[\\/]/)[0] === '@private' && !options.isOffline?.()) {
+        skipped.push(`${local} (a local-only subtask's — not copied into the document)`);
+        return null;
+      }
+      if (!alias && this.isProtectedPath(source)) { skipped.push(`${local} (protected — not copied into the document)`); return null; }
+      if (!mayCopy(source)) { skipped.push(`${local} (local-only — not copied into a document that is not)`); return null; }
+      try {
+        const bytes = await this.readFile(source);
         embedded.push(local);
         return bytes;
       } catch {

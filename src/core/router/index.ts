@@ -36,6 +36,7 @@ import type { TaskAnalyzer } from './task-analyzer.js';
 import type { FeedbackSource } from './feedback-prior.js';
 import { DeadModelStore } from './dead-models.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
+import { isPrivateEndpoint, providerConfigFor } from './endpoint.js';
 import { buildTokenUsage, resolveModelPricing } from '../../utils/cost.js';
 import { hasProviderCredential } from '../../config/index.js';
 import { estimateTokens, contentToText, CHARS_PER_TOKEN } from '../context/compaction.js';
@@ -1039,7 +1040,7 @@ export class CascadeRouter extends EventEmitter {
     // Swap to a private model when the resolved one isn't; hard-error rather
     // than silently falling back to cloud when no private model exists.
     if (options.forceLocal && model && !this.isPrivateModel(model)) {
-      const localModel = this.selector.getAllAvailableModels().find((m) => this.isPrivateModel(m));
+      const localModel = this.getPrivateModel({ tools: !!options.tools?.length });
       if (!localModel) {
         throw new Error(
           'privacy.paths: this subtask touches a local-only path but no LOCAL model is available. ' +
@@ -1682,6 +1683,35 @@ export class CascadeRouter extends EventEmitter {
     return this.privacyPaths;
   }
 
+  /**
+   * Whether a `forceLocal` call could be served: some available model runs on
+   * this machine or a private network. A subtask about to read a local-only
+   * file asks first, and is refused the read when nothing private could take
+   * it on from there.
+   */
+  hasPrivateModel(): boolean {
+    return this.getPrivateModel() !== undefined;
+  }
+
+  /**
+   * The private model a local-only call would be served by: `current` when it
+   * is private and still usable, otherwise the first usable private model —
+   * one with native tool support first when the call carries tools.
+   *
+   * "Usable" is the selector's own test, so an endpoint in backoff or out for
+   * the run does not count: answering "yes" for one would let a subtask read a
+   * local-only file and then find nothing able to take it on.
+   */
+  getPrivateModel(opts: { current?: ModelInfo | null; tools?: boolean } = {}): ModelInfo | undefined {
+    const usable = this.selector.getUsableModels().filter((m) => this.isPrivateModel(m));
+    // The same model, not just the same ID: a cloud model and a private one
+    // can share an ID, and the cloud one would bring the wrong tool protocol.
+    const current = opts.current;
+    const same = current ? usable.find((m) => m.id === current.id && m.provider === current.provider) : undefined;
+    if (same) return same;
+    return (opts.tools ? usable.find((m) => m.supportsToolUse !== false) : undefined) ?? usable[0];
+  }
+
   setGuidanceQueue(queue: GuidanceQueue | undefined): void {
     this.guidanceQueue = queue;
   }
@@ -1691,24 +1721,13 @@ export class CascadeRouter extends EventEmitter {
   }
 
   /**
-   * "Private" = inference never leaves the user's machine/network: Ollama
-   * models (isLocal), or an OpenAI-compatible endpoint (e.g. llama.cpp, vLLM,
-   * LM Studio) whose configured host is loopback or a private range. A cloud
-   * OpenAI-compatible endpoint (public host) does NOT qualify.
+   * "Private" = inference never leaves the user's machine/network: the
+   * endpoint serving the model — Ollama, or an OpenAI-compatible server such
+   * as llama.cpp, vLLM or LM Studio — is loopback or a private range. A cloud
+   * endpoint does NOT qualify, however its pricing is configured.
    */
   private isPrivateModel(model: ModelInfo): boolean {
-    if (model.isLocal) return true;
-    if (model.provider !== 'openai-compatible') return false;
-    const baseUrl = this.config?.providers?.find((p) => p.type === 'openai-compatible')?.baseUrl;
-    if (!baseUrl) return false;
-    try {
-      const host = new URL(baseUrl).hostname.toLowerCase();
-      return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]'
-        || /^10\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host)
-        || host.endsWith('.local');
-    } catch {
-      return false;
-    }
+    return isPrivateEndpoint(model, this.config?.providers ?? []);
   }
 
   /**
@@ -2130,13 +2149,8 @@ export class CascadeRouter extends EventEmitter {
     // Azure supports multiple deployments, each its own resource/endpoint/key —
     // the model's id IS the deployment name, so bind the matching config entry
     // (find-first would silently route every deployment to the first resource).
-    const cfg = (model.provider === 'azure'
-      ? configs.find((c) => c.type === 'azure' && c.deploymentName === model.id)
-      : undefined)
-      ?? configs.find((c) => c.type === model.provider)
-      ?? { type: model.provider };
-
-    const provider = this.createProvider(cfg, model);
+    // isPrivateModel() reads the same binding, so what it judges is what is called.
+    const provider = this.createProvider(providerConfigFor(model, configs), model);
     this.providers.set(key, provider);
   }
 

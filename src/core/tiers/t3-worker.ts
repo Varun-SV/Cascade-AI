@@ -9,6 +9,7 @@ import type {
   GenerateOptions,
   ModelInfo,
   PermissionRequest,
+  ReadDestination,
   T2ToT3Assignment,
   T3Result,
   TaskType,
@@ -39,6 +40,7 @@ import {
 import { ACTING_INTEGRITY_RULE, appendToolRecord, describeHandedWork, describeToolRecord, recordToolCall, type HandedWork, type ToolRecordEntry } from './integrity.js';
 import { RedactionLayer } from '../audit/redaction.js';
 import { BROWSER_TOOL, BROWSER_WORKER_RULE } from './browser-planning.js';
+import { statePath, STATE } from '../../config/project-state.js';
 
 /**
  * Thrown by executeTool() when the underlying tool error indicates a condition
@@ -455,8 +457,12 @@ export class T3Worker extends BaseTier {
     // ── Per-path privacy tier ──────────────────
     // A subtask touching a local-only path runs on private models only and
     // its raw output is withheld from the tiers above (see privacy/paths.ts).
+    // Judged by what each target is, not only its name: an artifact that is
+    // a symlink or hard link to a local-only file is that file.
     const privacy = this.router.getPrivacyPaths?.();
-    this.localOnlyMatch = !!privacy?.hasPolicies() && privacy.anyLocalOnly(this.extractArtifactPaths(assignment));
+    const root = this.artifactRoot();
+    this.localOnlyMatch = !!privacy?.hasPolicies()
+      && this.privacyTargets(assignment).some((target) => privacy.coversFile(path.resolve(root, target), root));
     if (this.localOnlyMatch) {
       this.log('Privacy: subtask touches a local-only path — forcing a private model; raw output will be withheld upstream.');
     }
@@ -609,7 +615,7 @@ export class T3Worker extends BaseTier {
           issues.push(...retryArtifactCheck.issues);
           this.setStatus('FAILED');
           // ── Publish failure to peers ──
-          this.peerBus?.publish(this.id, assignment.subtaskId, output, 'ESCALATED');
+          this.publishOutcome(assignment.subtaskId, output, 'ESCALATED');
           return this.buildResult('ESCALATED', output, { checksRun, passed, failed }, issues, correctionAttempts);
         }
       }
@@ -656,7 +662,7 @@ export class T3Worker extends BaseTier {
           checksRun.push(...acceptanceResults.map((r) => r.criterion));
           failed.push(...recheck);
           this.setStatus('FAILED');
-          this.peerBus?.publish(this.id, assignment.subtaskId, output, 'ESCALATED');
+          this.publishOutcome(assignment.subtaskId, output, 'ESCALATED');
           return this.buildResult('ESCALATED', output, { checksRun, passed, failed }, issues, correctionAttempts);
         }
       }
@@ -690,7 +696,7 @@ export class T3Worker extends BaseTier {
         if (retest.failed.length > 0) {
           failed.push(...retest.failed);
           this.setStatus('FAILED');
-          this.peerBus?.publish(this.id, assignment.subtaskId, output, 'ESCALATED');
+          this.publishOutcome(assignment.subtaskId, output, 'ESCALATED');
           return this.buildResult('ESCALATED', output, { checksRun, passed, failed }, issues, correctionAttempts);
         }
       }
@@ -719,22 +725,28 @@ export class T3Worker extends BaseTier {
       const db = this.router.getWorldStateDB?.();
       if (db) {
         try {
-          db.addEntry(this.id, `Completed: ${assignment.subtaskTitle}. Output length: ${output.length} chars.`);
+          // Nothing about a local-only output, its length included: a planner
+          // on a cloud model reads these entries.
+          db.addEntry(this.id, this.localOnlyMatch
+            ? `Completed: ${assignment.subtaskTitle}. Output withheld (local-only).`
+            : `Completed: ${assignment.subtaskTitle}. Output length: ${output.length} chars.`);
         } catch (e) {
           this.log('Failed to write to World State DB');
         }
         // world-state v2: distill the output into queryable facts (best-effort,
         // never blocks or fails the subtask). Skipped when disabled in config.
-        if (this.router.getKnowledgeConfig?.().factsExtraction !== false) {
+        // Facts land in the knowledge graph, which any later worker can
+        // search, whatever model it is on — so none from a local-only output.
+        if (this.router.getKnowledgeConfig?.().factsExtraction !== false && !this.localOnlyMatch) {
           await this.extractAndStoreFacts(db, assignment, output);
         }
       }
 
-      this.setStatus('COMPLETED', output);
-      this.sendStatusUpdate({ progressPct: 100, currentAction: 'Subtask complete', status: 'IN_PROGRESS', output });
+      this.setStatus('COMPLETED', this.shareable(output, 'COMPLETED'));
+      this.sendStatusUpdate({ progressPct: 100, currentAction: 'Subtask complete', status: 'IN_PROGRESS', output: this.shareable(output, 'COMPLETED') });
 
       // ── Publish success to peers ─────────────
-      this.peerBus?.publish(this.id, assignment.subtaskId, output, 'COMPLETED');
+      this.publishOutcome(assignment.subtaskId, output, 'COMPLETED');
 
       return this.buildResult('COMPLETED', output, { checksRun, passed, failed }, issues, correctionAttempts);
     } catch (err) {
@@ -745,15 +757,15 @@ export class T3Worker extends BaseTier {
       if (err instanceof WorkerStallError) {
         issues.push(`Stalled: ${errMsg}`);
         const finalOutput = err.partialOutput || output || errMsg;
-        this.setStatus('FAILED', finalOutput);
-        this.peerBus?.publish(this.id, assignment.subtaskId, finalOutput, 'FAILED');
+        this.setStatus('FAILED', this.shareable(finalOutput, 'FAILED'));
+        this.publishOutcome(assignment.subtaskId, finalOutput, 'FAILED');
         return this.buildResult('ESCALATED', finalOutput, { checksRun, passed, failed }, issues, correctionAttempts);
       }
       if (err instanceof CriticalToolError) {
         issues.push(`[CRITICAL_TOOL_ERROR] ${err.toolName}: ${errMsg}`);
         const finalOutput = output || `Tool "${err.toolName}" failed unrecoverably: ${errMsg}`;
-        this.setStatus('FAILED', finalOutput);
-        this.peerBus?.publish(this.id, assignment.subtaskId, finalOutput, 'FAILED');
+        this.setStatus('FAILED', this.shareable(finalOutput, 'FAILED'));
+        this.publishOutcome(assignment.subtaskId, finalOutput, 'FAILED');
         return this.buildResult('ESCALATED', finalOutput, { checksRun, passed, failed }, issues, correctionAttempts);
       }
       // A budget stop is FAILED, never ESCALATED. The router has permanently
@@ -764,14 +776,14 @@ export class T3Worker extends BaseTier {
       if (err instanceof Error && err.name === 'BudgetExceededError') {
         issues.push(errMsg);
         const stopped = output || errMsg;
-        this.setStatus('FAILED', stopped);
-        this.peerBus?.publish(this.id, assignment.subtaskId, stopped, 'FAILED');
+        this.setStatus('FAILED', this.shareable(stopped, 'FAILED'));
+        this.publishOutcome(assignment.subtaskId, stopped, 'FAILED');
         return this.buildResult('FAILED', stopped, { checksRun, passed, failed }, issues, correctionAttempts);
       }
       issues.push(`Execution error: ${errMsg}`);
       const finalOutput = output || errMsg;
-      this.setStatus('FAILED', finalOutput);
-      this.peerBus?.publish(this.id, assignment.subtaskId, finalOutput, 'FAILED');
+      this.setStatus('FAILED', this.shareable(finalOutput, 'FAILED'));
+      this.publishOutcome(assignment.subtaskId, finalOutput, 'FAILED');
       return this.buildResult('ESCALATED', finalOutput, { checksRun, passed, failed }, issues, correctionAttempts);
     } finally {
       // This worker will never ask for the browser again, whether it completed,
@@ -809,7 +821,39 @@ export class T3Worker extends BaseTier {
   }
 
   sendToPeer(toId: string, content: unknown): void {
+    if (this.localOnlyMatch) throw new Error('A local-only subtask (privacy.paths) cannot share its output with peers.');
     this.peerBus?.send(this.id, toId, 'SHARE_OUTPUT', this.assignment?.subtaskId ?? '', content);
+  }
+
+  /**
+   * Tell the siblings how this subtask ended. A dependent sibling puts what
+   * arrives here into its own context, and may be on a cloud model — so a
+   * local-only subtask publishes only that it ran.
+   */
+  private publishOutcome(subtaskId: string, output: string, status: 'COMPLETED' | 'FAILED' | 'ESCALATED'): void {
+    this.peerBus?.publish(this.id, subtaskId, this.shareable(output, status), status);
+  }
+
+  /**
+   * What this subtask's output may be shown as outside it — to siblings, and
+   * in the status, stream and tool events that reach the dashboard, its
+   * socket clients and the audit log: for a local-only subtask, only that it
+   * ran, the line the tiers above get at the T3→T2 boundary.
+   */
+  /**
+   * A tool's name as events show it. A local-only subtask's model may name
+   * one it was never given, and such a name could carry what it read: that
+   * shows as a placeholder, a name from the fixed list it was given as is.
+   */
+  private shownToolName(name: string): string {
+    if (!this.localOnlyMatch || this.tools.some((t) => t.name === name) || this.toolRegistry.hasTool?.(name) === true) return name;
+    return '[unknown tool — name withheld]';
+  }
+
+  private shareable(output: string, status: string): string {
+    return this.localOnlyMatch
+      ? `[local-only path — output withheld by privacy policy; status: ${status}]`
+      : output;
   }
 
   async requestFromPeer(peerId: string, subtaskId: string): Promise<string> {
@@ -870,11 +914,33 @@ export class T3Worker extends BaseTier {
 
     // Detect tool-use mode against the EFFECTIVE model (per-subtask override if
     // any, else the tier default).
-    const effectiveModel = subtaskModel ?? this.router.getModelForTier('T3');
+    let effectiveModel = subtaskModel ?? this.router.getModelForTier('T3');
     // Tag this node with the model actually serving it — including a Cascade
     // Auto per-subtask override — so the desktop can show model-per-task.
     if (effectiveModel) this.setServingModel(`${effectiveModel.provider}:${effectiveModel.id}`);
-    const useTextTools = effectiveModel?.supportsToolUse === false && tools.length > 0;
+    let useTextTools = effectiveModel?.supportsToolUse === false && tools.length > 0;
+    // Once local-only (from the start, or when a read flips it mid-loop), the
+    // subtask is served by a private model, which may speak a different tool
+    // protocol from the one chosen above. Resolved here rather than left to
+    // the router's swap, which happens after the request is already shaped for
+    // the cloud model: a tool-less local model would be handed native tool
+    // definitions and no text-tool contract.
+    let resolvedPrivately = false;
+    const servePrivately = (): void => {
+      resolvedPrivately = true;
+      const privateModel = this.router.getPrivateModel?.({ current: effectiveModel, tools: tools.length > 0 });
+      // None: leave the request as it is, and forceLocal makes the router refuse it.
+      if (!privateModel) return;
+      subtaskModel = privateModel;
+      subtaskTaskType = undefined;
+      effectiveModel = privateModel;
+      this.setServingModel(`${privateModel.provider}:${privateModel.id}`);
+      const textTools = privateModel.supportsToolUse === false && tools.length > 0;
+      if (textTools !== useTextTools) {
+        useTextTools = textTools;
+        sentFullTextContract = false;
+      }
+    };
     // Token economy for text-tool models: the FULL per-parameter contract goes
     // out only on the first call (and again whenever the tool list changes,
     // e.g. a dynamic tool was created mid-run — the system prompt is rebuilt
@@ -900,6 +966,8 @@ export class T3Worker extends BaseTier {
           content: `USER INTERVENTION (mid-run steering — follow this over prior instructions where they conflict):\n${g.text}`,
         });
       }
+
+      if (this.localOnlyMatch && !resolvedPrivately) servePrivately();
 
       let textToolSuffix = '';
       if (useTextTools) {
@@ -936,7 +1004,8 @@ export class T3Worker extends BaseTier {
         'T3',
         options,
         (chunk) => {
-          this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: this.isPresenter });
+          // A local-only subtask's words stay out of the event stream.
+          if (!this.localOnlyMatch) this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: this.isPresenter });
         },
       );
 
@@ -1060,7 +1129,7 @@ export class T3Worker extends BaseTier {
     // pass an out-of-range enum value, which otherwise fails opaquely at run time.
     const validationError = this.validateToolInput(tc);
     if (validationError) {
-      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: tc.name, error: validationError, durationMs: 0 });
+      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), error: this.shareable(validationError, 'tool error'), durationMs: 0 });
       return validationError;
     }
 
@@ -1078,6 +1147,7 @@ export class T3Worker extends BaseTier {
           isDangerous: this.toolRegistry.isDangerous(tc.name),
           subtaskContext: this.assignment?.subtaskTitle ?? 'Unknown subtask',
           sectionContext: this.assignment?.subtaskTitle ?? 'Unknown section',
+          localOnly: this.localOnlyMatch,
         };
         const decision = await this.permissionEscalator.requestPermission(req);
         if (!decision.approved) return `Tool ${tc.name} was denied (decided by ${decision.decidedBy}).`;
@@ -1131,12 +1201,12 @@ export class T3Worker extends BaseTier {
     if (this.toolRegistry.hasTool?.(tc.name) !== false) {
       this.sendStatusUpdate({
         progressPct: 50,
-        currentAction: `Using tool: ${tc.name}`,
+        currentAction: `Using tool: ${this.shownToolName(tc.name)}`,
         status: 'IN_PROGRESS',
       });
     }
 
-    this.emit('tool:call', { id: tc.id, tierId: this.id, toolName: tc.name, input: tc.input });
+    this.emit('tool:call', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), input: this.localOnlyMatch ? {} : tc.input });
     const toolStartMs = Date.now();
 
     try {
@@ -1147,10 +1217,16 @@ export class T3Worker extends BaseTier {
         // Media generation can run for a minute; without this a cancelled run
         // still pays for an image nobody will see.
         ...(this.signal ? { signal: this.signal } : {}),
+        mayRead: this.mayRead,
+        isOffline: this.isOffline,
         saveSnapshot: async (path, content) => {
           this.store?.addFileSnapshot(this.taskId, path, content);
         },
         sendPeerSync: (to, syncType, content) => {
+          // Peers may run on cloud models: what a local-only subtask knows stays here.
+          if (this.localOnlyMatch) {
+            throw new Error('A local-only subtask (privacy.paths) cannot message its peers.');
+          }
           this.peerBus?.send(this.id, to, syncType, this.assignment?.subtaskId ?? '', content);
         },
         getPeerMessages: () => {
@@ -1166,12 +1242,12 @@ export class T3Worker extends BaseTier {
         }
       }
       const durationMs = Date.now() - toolStartMs;
-      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: tc.name, output: typeof result === 'string' ? result : JSON.stringify(result), durationMs });
+      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), output: this.shareable(typeof result === 'string' ? result : JSON.stringify(result), 'tool result'), durationMs });
       return typeof result === 'string' ? result : JSON.stringify(result);
     } catch (err) {
       const durationMs = Date.now() - toolStartMs;
       const errMsg = err instanceof Error ? err.message : String(err);
-      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: tc.name, error: errMsg, durationMs });
+      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), error: this.shareable(errMsg, 'tool error'), durationMs });
       // Unrecoverable/systemic conditions (rate-limit, auth, quota, AND a 404
       // "model not found" — the shared classifier this reuses is the same one
       // `router/index.ts` uses for chat-tier failover, so a dead image model
@@ -1243,7 +1319,7 @@ export class T3Worker extends BaseTier {
     // Strategy 1: alternative tool with overlapping purpose
     const altTool = this.findAlternativeTool(tc.name);
     if (altTool) {
-      this.log(`Adaptive fallback: trying alternative tool "${altTool}" for failed "${tc.name}"`);
+      this.log(`Adaptive fallback: trying alternative tool "${altTool}" for failed "${this.shownToolName(tc.name)}"`);
       this.sendStatusUpdate({ progressPct: 50, currentAction: `Fallback: trying ${altTool}`, status: 'IN_PROGRESS' });
       try {
         const result = await this.toolRegistry.execute(altTool, tc.input, {
@@ -1251,6 +1327,8 @@ export class T3Worker extends BaseTier {
           sessionId: this.taskId,
           requireApproval: false,
           ...(this.signal ? { signal: this.signal } : {}),
+          mayRead: this.mayRead,
+          isOffline: this.isOffline,
         });
         const str = typeof result === 'string' ? result : JSON.stringify(result);
         if (!str.startsWith('Tool error:') && !str.startsWith('Error:')) {
@@ -1260,8 +1338,10 @@ export class T3Worker extends BaseTier {
       } catch { /* fall through to next strategy */ }
     }
 
-    // Strategy 2: synthesize a new tool via ToolCreator
-    if (this.toolCreator) {
+    // Strategy 2: synthesize a new tool via ToolCreator. Not for a local-only
+    // subtask: the request, error text and all, goes to a model this worker
+    // does not choose.
+    if (this.toolCreator && !this.localOnlyMatch) {
       this.log(`Adaptive fallback: requesting dynamic tool synthesis for "${tc.name}"`);
       this.sendStatusUpdate({ progressPct: 55, currentAction: `Synthesizing fallback tool for: ${tc.name}`, status: 'IN_PROGRESS' });
       try {
@@ -1276,6 +1356,8 @@ export class T3Worker extends BaseTier {
             sessionId: this.taskId,
             requireApproval: false,
             ...(this.signal ? { signal: this.signal } : {}),
+            mayRead: this.mayRead,
+            isOffline: this.isOffline,
           });
           const str = typeof result === 'string' ? result : JSON.stringify(result);
           if (!str.startsWith('Tool error:')) {
@@ -1402,6 +1484,77 @@ export class T3Worker extends BaseTier {
     return this.toolRegistry.getWorkspaceRoot?.() ?? process.cwd();
   }
 
+  /**
+   * Whether a tool this worker runs may read a workspace file's contents —
+   * privacy.paths, enforced at the read itself. The subtask's own description
+   * decides at the start whether it is local-only; a file it reads on the way
+   * can decide it later. Reading a local-only file makes the subtask
+   * local-only from then on — every call after it goes to a private model,
+   * and its raw output is withheld from the tiers above — or, when no private
+   * model is available, is refused. Contents bound for an outside service
+   * are refused either way, and so is a copy into a file that is not itself
+   * local-only: anything could read that file later.
+   */
+  private readonly mayRead = (absPath: string, to: ReadDestination): boolean => {
+    const privacy = this.router.getPrivacyPaths?.();
+    const root = this.artifactRoot();
+    if (!privacy?.hasPolicies() || !privacy.coversFile(absPath, root)) return true;
+    const rel = path.relative(root, absPath) || absPath;
+    if (to === 'service') {
+      this.log(`Privacy: ${rel} is local-only — not sent to an outside service.`);
+      return false;
+    }
+    if (typeof to === 'object') {
+      // Its private folder is local-only whole: nothing but a local-only
+      // subtask can reach what is there.
+      const own = statePath(root, STATE.private);
+      if (privacy.coversFile(to.file, root) || to.file.startsWith(own + path.sep)) return true;
+      this.log(`Privacy: ${rel} is local-only — not copied into ${path.relative(root, to.file) || to.file}, which is not.`);
+      return false;
+    }
+    if (this.localOnlyMatch) return true;
+    // A search that did not name the file: skipped, not a reason to move.
+    if (to === 'scan') return false;
+    if (!this.router.hasPrivateModel?.()) {
+      this.log(`Privacy: ${rel} is local-only and no private model is available — the read was refused.`);
+      return false;
+    }
+    this.localOnlyMatch = true;
+    this.log(`Privacy: read ${rel}, a local-only path — this subtask now runs on a private model only, and its raw output will be withheld upstream.`);
+    return true;
+  };
+
+  /**
+   * Whether this worker may look into a workspace file itself — to verify
+   * or grade it — rather than through a tool: what it finds goes into its
+   * next prompt, so the file must be one a tool could read. A protected
+   * file is not; a local-only one decides as for `file_read`.
+   */
+  private mayInspect(absPath: string): boolean {
+    if (this.toolRegistry.isProtected?.(absPath)) {
+      this.log(`Verification: ${path.relative(this.artifactRoot(), absPath) || absPath} is protected — not read to check it.`);
+      return false;
+    }
+    return this.mayRead(absPath, 'model');
+  }
+
+  /** Whether nothing this worker knows may leave the machine; see `ToolExecuteOptions.isOffline`. */
+  private readonly isOffline = (): boolean => this.localOnlyMatch;
+
+  /**
+   * The paths an assignment names, for the privacy decision made before any
+   * work: its files and prose, and the files its acceptance criteria check,
+   * which the worker reads to grade itself.
+   */
+  private privacyTargets(assignment: T2ToT3Assignment): string[] {
+    const criteria = (assignment.acceptance ?? []).join('\n');
+    const named = criteria.match(new RegExp(ARTIFACT_FILE_RE.source, 'gi')) ?? [];
+    // Every file it declares, with an extension or not (`Dockerfile`,
+    // `secrets/token`) — not only those artifact checks would verify.
+    const declared = (assignment.files ?? []).map((f) => f.trim()).filter(Boolean);
+    return [...new Set([...declared, ...this.extractArtifactPaths(assignment), ...named.map((m) => m.trim())])];
+  }
+
   private extractArtifactPaths(assignment: T2ToT3Assignment): string[] {
     // Spec-declared files verify deterministically; regex over the prose is
     // the fallback for plans that didn't declare them.
@@ -1412,7 +1565,16 @@ ${assignment.expectedOutput}`;
     return [...new Set([...declared, ...matches.map((m) => m.trim())])];
   }
 
+  /**
+   * Its reads hold the workspace gate like a tool call's: a local-only
+   * command may be writing one of these files, not yet marked.
+   */
   private async verifyArtifacts(assignment: T2ToT3Assignment): Promise<{ ok: boolean; issues: string[] }> {
+    const check = () => this.checkArtifacts(assignment);
+    return this.toolRegistry.whileShared ? this.toolRegistry.whileShared(check) : check();
+  }
+
+  private async checkArtifacts(assignment: T2ToT3Assignment): Promise<{ ok: boolean; issues: string[] }> {
     const artifactPaths = this.extractArtifactPaths(assignment);
     if (!artifactPaths.length) return { ok: true, issues: [] };
 
@@ -1423,6 +1585,9 @@ ${assignment.expectedOutput}`;
 
     for (const artifactPath of artifactPaths) {
       const absolutePath = path.resolve(this.artifactRoot(), artifactPath);
+      // Checked before anything touches it: a compiler's diagnostics quote
+      // the source, and they go into the correction prompt.
+      if (!this.mayInspect(absolutePath)) continue;
       try {
         const stat = await fs.stat(absolutePath);
         if (!stat.isFile()) {
@@ -1553,7 +1718,7 @@ Is this output sufficient and correct? Respond with ONLY a JSON object:
           break; // sufficient
         }
 
-        this.log(`T2-Critic rejected output: ${parsed.notes}`);
+        this.log(this.localOnlyMatch ? 'T2-Critic rejected output (notes withheld: local-only subtask).' : `T2-Critic rejected output: ${parsed.notes}`);
         
         const improved = await this.generateTracked('T3', {
           messages: [{
@@ -1600,7 +1765,13 @@ ${current}`,
     // a hosted worker on a filesystem it had no way to touch — see
     // canProduceFiles() above for why that ends as a failed node.
     const workerCanWriteFiles = canProduceFiles(this.tools.map((t) => t.name));
-    return evaluateAcceptance(criteria, assignment.files ?? [], {
+    // Under the workspace gate, like verifyArtifacts: a local-only command
+    // may be writing one of these files, not yet marked.
+    const grade = () => evaluateAcceptance(criteria, assignment.files ?? [], {
+      // Reading a file to grade it is reading it: the protected paths and
+      // the privacy gate decide, as for any tool, so a criterion cannot probe
+      // `.env` or a local-only file.
+      allowed: (target) => this.mayInspect(resolve(target)),
       stat: async (target) => {
         try {
           const stat = await fs.stat(resolve(target));
@@ -1618,6 +1789,7 @@ ${current}`,
         } catch { return null; }
       },
     }, { workerCanWriteFiles });
+    return this.toolRegistry.whileShared ? this.toolRegistry.whileShared(grade) : grade();
   }
 
   private async selfTest(
@@ -1801,6 +1973,10 @@ Begin execution now.`;
   private recordReinforcements(input: Record<string, unknown>): string {
     if (this.reinforcementDepth !== 0) {
       return 'request_workers is unavailable to reinforcement workers — complete your assigned subtask.';
+    }
+    // The new workers' descriptions go up to the manager, above the privacy line.
+    if (this.localOnlyMatch) {
+      return 'request_workers is unavailable to a local-only subtask (privacy.paths) — complete your assigned subtask.';
     }
     const max = this.router.getReinforcementsConfig?.()?.maxPerSection ?? 4;
     const raw = Array.isArray((input as { subtasks?: unknown }).subtasks)
