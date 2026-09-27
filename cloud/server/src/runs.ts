@@ -414,6 +414,7 @@ export interface RunControls {
     provider?: 'cdp' | 'steel';
     url?: string;
     apiKey?: string;
+    cdpHostHeader?: string;
     maxSessions?: number;
   };
 }
