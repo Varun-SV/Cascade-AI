@@ -493,6 +493,7 @@ export function remoteBrowserControls(env: CloudEnv): Pick<RunControls, 'remoteB
       provider: env.REMOTE_BROWSER_PROVIDER,
       ...(env.REMOTE_BROWSER_URL ? { url: env.REMOTE_BROWSER_URL } : {}),
       ...(env.REMOTE_BROWSER_API_KEY ? { apiKey: env.REMOTE_BROWSER_API_KEY } : {}),
+      ...(env.REMOTE_BROWSER_CDP_HOST_HEADER ? { cdpHostHeader: env.REMOTE_BROWSER_CDP_HOST_HEADER } : {}),
       maxSessions: env.REMOTE_BROWSER_MAX_SESSIONS,
     },
   };
