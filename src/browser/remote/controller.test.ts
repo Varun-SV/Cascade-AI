@@ -286,6 +286,49 @@ describe('the six actions reach the page', () => {
   });
 });
 
+describe('CDP handshake metadata', () => {
+  it('forwards provider headers only to Playwright connectOverCDP', async () => {
+    const provider: RemoteBrowserProvider = {
+      name: 'headered',
+      isolatesSessions: true,
+      async createSession() {
+        return {
+          id: 'sess-header',
+          cdpUrl: 'ws://steel.internal:3000/',
+          cdpHeaders: { Host: 'localhost' },
+        };
+      },
+      async endSession() {},
+    };
+    const { chromium } = await import('playwright') as unknown as {
+      chromium: {
+        connectOverCDP(
+          url: string,
+          opts?: { headers?: Record<string, string> },
+        ): Promise<unknown>;
+      };
+    };
+    const original = chromium.connectOverCDP;
+    let seen: { url: string; opts?: { headers?: Record<string, string> } } | undefined;
+    chromium.connectOverCDP = async (url, opts) => {
+      seen = { url, ...(opts ? { opts } : {}) };
+      return browser;
+    };
+
+    try {
+      const controller = new RemoteBrowserController({ provider });
+      const out = await controller.controller({ kind: 'click', selector: '#a' }, ctx('run-H', 'w1'));
+      expect(out.ok).toBe(true);
+      expect(seen).toEqual({
+        url: 'ws://steel.internal:3000/',
+        opts: { headers: { Host: 'localhost' } },
+      });
+    } finally {
+      chromium.connectOverCDP = original;
+    }
+  });
+});
+
 describe('one browser, many workers', () => {
   it('makes a second worker wait rather than interleave', async () => {
     const { provider } = fakeProvider();
