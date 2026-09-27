@@ -507,7 +507,7 @@ function buildProvider(
       warn?.(`remoteBrowser.url must be a ws:// or wss:// endpoint; got ${settings.url ?? '(none)'}`);
       return null;
     }
-    return new GenericCdpProvider(settings.url);
+    return new GenericCdpProvider(settings.url, settings.cdpHostHeader);
   }
 
   // Validated like the cdp endpoint above, and for the same reason. The cdp
@@ -559,6 +559,7 @@ function buildProvider(
   return new SteelProvider({
     ...(settings.url ? { url: settings.url } : {}),
     ...(settings.apiKey ? { apiKey: settings.apiKey } : {}),
+    ...(settings.cdpHostHeader ? { cdpHostHeader: settings.cdpHostHeader } : {}),
   });
 }
 
