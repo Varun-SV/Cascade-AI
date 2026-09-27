@@ -746,6 +746,9 @@ export function buildCloudConfig(
               provider: controls.remoteBrowser.provider,
               ...(controls.remoteBrowser.url ? { url: controls.remoteBrowser.url } : {}),
               ...(controls.remoteBrowser.apiKey ? { apiKey: controls.remoteBrowser.apiKey } : {}),
+              ...(controls.remoteBrowser.cdpHostHeader
+                ? { cdpHostHeader: controls.remoteBrowser.cdpHostHeader }
+                : {}),
               ...(controls.remoteBrowser.maxSessions
                 ? { maxSessions: controls.remoteBrowser.maxSessions }
                 : {}),
