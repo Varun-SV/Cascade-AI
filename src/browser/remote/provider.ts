@@ -37,6 +37,16 @@ export interface RemoteBrowserSession {
    */
   cdpUrl: string;
   /**
+   * Extra headers for the CDP WebSocket handshake.
+   *
+   * This is operator/provider metadata, never model input. Some self-hosted
+   * Chromium proxies forward the caller's Host header to Chrome unchanged;
+   * Chrome rejects DNS names there and accepts localhost/IP only. Providers
+   * can request the narrow handshake override without teaching the controller
+   * anything about that provider's networking.
+   */
+  cdpHeaders?: Record<string, string>;
+  /**
    * A page showing the live session, embeddable in an iframe.
    *
    * A CAPABILITY URL: providers issue it deliberately without a token so it can
@@ -113,6 +123,14 @@ export interface RemoteBrowserConfig {
    */
   url?: string;
   apiKey?: string;
+  /**
+   * Optional Host header override for the CDP websocket handshake.
+   *
+   * Intended for direct/self-hosted Chromium proxies that preserve the
+   * external Host header. The cloud env currently restricts this to
+   * `localhost`, the value Chromium explicitly accepts.
+   */
+  cdpHostHeader?: string;
   /**
    * Concurrent sessions allowed. One by default, and deliberately so: every
    * session is billed, and a wave of workers each opening their own is a cost

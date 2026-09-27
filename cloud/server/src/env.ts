@@ -130,6 +130,11 @@ const EnvSchema = z.object({
   // about what was configured, which is the point: they disagreed before.
   REMOTE_BROWSER_URL: z.string().trim().optional(),
   REMOTE_BROWSER_API_KEY: z.string().trim().optional(),
+  // Advanced CDP handshake workaround for direct Chromium/self-hosted proxies
+  // that forward the incoming Host header unchanged. Chromium rejects DNS names
+  // on its DevTools endpoint; "localhost" is explicitly accepted. Keep this
+  // deliberately narrow rather than allowing arbitrary header injection.
+  REMOTE_BROWSER_CDP_HOST_HEADER: z.literal('localhost').optional(),
   // Concurrent sessions across the whole deployment. One by default and
   // deliberately so: every session is billed, and a wave of workers each
   // opening their own is a cost the operator did not choose. A bare CDP

@@ -2583,7 +2583,10 @@ export class RemoteBrowserController {
     // REGISTERED. See the comment on that announcement for why the wait matters.
     let held: RunBrowser;
     try {
-      browser = await playwright.chromium.connectOverCDP(session.cdpUrl) as unknown as Browser;
+      browser = await playwright.chromium.connectOverCDP(
+        session.cdpUrl,
+        session.cdpHeaders ? { headers: session.cdpHeaders } : undefined,
+      ) as unknown as Browser;
       // Whose context this is decides everything about how the run may use it.
       //
       // A provider that ISOLATES sessions just made this browser for this run,
@@ -2902,9 +2905,11 @@ function scrollDelta(n: unknown): number {
  * launch. Telling someone to download a browser they will never run is the
  * kind of wrong advice that costs an afternoon.
  */
-async function loadPlaywright(): Promise<{ chromium: { connectOverCDP(url: string): Promise<unknown> } }> {
+type CdpConnectOptions = { headers?: Record<string, string> };
+
+async function loadPlaywright(): Promise<{ chromium: { connectOverCDP(url: string, opts?: CdpConnectOptions): Promise<unknown> } }> {
   try {
-    return await import('playwright') as unknown as { chromium: { connectOverCDP(url: string): Promise<unknown> } };
+    return await import('playwright') as unknown as { chromium: { connectOverCDP(url: string, opts?: CdpConnectOptions): Promise<unknown> } };
   } catch {
     throw new Error('Playwright is not installed. Run: npm install playwright (no browser download is needed — this connects to a remote browser).');
   }

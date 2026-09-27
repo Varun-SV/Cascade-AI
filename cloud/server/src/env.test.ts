@@ -56,3 +56,18 @@ describe('loadEnv — deployment mode', () => {
     expect(() => loadEnv({ ...BASE, CASCADE_DEPLOYMENT_MODE: 'maybe-hosted' })).toThrow(/CASCADE_DEPLOYMENT_MODE/);
   });
 });
+
+
+describe('loadEnv — remote browser CDP Host override', () => {
+  it('accepts only the Chromium-safe localhost override', () => {
+    expect(loadEnv({ ...BASE, REMOTE_BROWSER_CDP_HOST_HEADER: 'localhost' }).REMOTE_BROWSER_CDP_HOST_HEADER)
+      .toBe('localhost');
+  });
+
+  it('rejects arbitrary Host-header values', () => {
+    expect(() => loadEnv({
+      ...BASE,
+      REMOTE_BROWSER_CDP_HOST_HEADER: 'steel-browser.railway.internal',
+    })).toThrow(/REMOTE_BROWSER_CDP_HOST_HEADER/);
+  });
+});
