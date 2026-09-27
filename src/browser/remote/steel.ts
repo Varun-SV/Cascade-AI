@@ -340,14 +340,16 @@ export class SteelProvider implements RemoteBrowserProvider {
 
   private base: string;
   private apiKey: string | undefined;
+  private cdpHostHeader: string | undefined;
 
-  constructor(opts: { url?: string; apiKey?: string } = {}) {
+  constructor(opts: { url?: string; apiKey?: string; cdpHostHeader?: string } = {}) {
     // Stripped so `${base}/v1/sessions` cannot become a double slash — some
     // gateways 404 on that, which reads as "wrong endpoint". The rule itself
     // lives in `withoutTrailingSlashes`, because the usability check has to
     // apply exactly the same one.
     this.base = withoutTrailingSlashes(opts.url || DEFAULT_BASE);
     this.apiKey = opts.apiKey;
+    this.cdpHostHeader = opts.cdpHostHeader;
   }
 
   async createSession(signal?: AbortSignal): Promise<RemoteBrowserSession> {
@@ -374,6 +376,7 @@ export class SteelProvider implements RemoteBrowserProvider {
     return {
       id: details.id,
       cdpUrl: details.websocketUrl,
+      ...(this.cdpHostHeader ? { cdpHeaders: { Host: this.cdpHostHeader } } : {}),
       ...(details.debugUrl ? { liveViewUrl: details.debugUrl } : {}),
       // Carried through because it explains an otherwise mysterious death. A
       // session nobody released dies at exactly this number, and without it a
