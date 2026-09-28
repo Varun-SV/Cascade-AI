@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { BrowserAllowanceView } from './browserAllowance.js';
 import { AnimatePresence, motion } from 'framer-motion';
-import { AlertTriangle, KeyRound, Sparkles, Layers, ChevronDown, Search } from 'lucide-react';
+import { AlertTriangle, KeyRound, Layers, ChevronDown, Search } from 'lucide-react';
 import CascadeMark from '../components/CascadeMark.js';
 import Message from './Message.js';
 import Composer from './Composer.js';
@@ -126,13 +126,10 @@ export default function ChatPanel({
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.4 }}
           >
-            <div>
-              <div className="accent-grad mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl text-white shadow-xl shadow-accent-700/30">
-                <Sparkles size={26} />
-              </div>
-              <p className="text-lg font-semibold text-ink-100">Start a conversation</p>
-              <p className="mt-1 text-sm">
-                Cascade routes your prompt through its T1/T2/T3 orchestration and streams the result here.
+            <div className="flex flex-col items-center gap-4">
+              <CascadeMark size={40} animate={false} />
+              <p className="font-serif text-[clamp(26px,4vw,36px)] leading-tight tracking-[-0.015em] text-ink-50">
+                What should Cascade work on?
               </p>
             </div>
           </motion.div>
@@ -204,18 +201,21 @@ export default function ChatPanel({
           )}
           {status && busy && (
             <motion.div
-              className="flex flex-col gap-2"
+              className="grid grid-cols-[3px_1fr] gap-4"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
             >
+              {/* The spine: the brand ramp flowing down beside live work. */}
+              <div className="cascade-spine rounded-full" aria-hidden="true" />
+              <div className="flex min-w-0 flex-col gap-2">
               <button
                 type="button"
                 onClick={() => activity.length > 0 && setActivityOpen((o) => !o)}
                 disabled={activity.length === 0}
-                className={`group flex items-center gap-2 self-start text-sm text-ink-400 ${activity.length > 0 ? 'cursor-pointer hover:text-ink-200' : 'cursor-default'}`}
+                className={`group flex items-center gap-2.5 self-start text-[14px] text-ink-300 ${activity.length > 0 ? 'cursor-pointer hover:text-ink-100' : 'cursor-default'}`}
                 aria-expanded={activityOpen}
               >
-                <CascadeMark size={15} />
+                <CascadeMark size={18} />
                 <span className="shimmer-text">{status}</span>
                 {activity.length > 0 && (
                   <ChevronDown
@@ -233,6 +233,7 @@ export default function ChatPanel({
               <AnimatePresence initial={false}>
                 {latestReview && <ReviewCard review={latestReview} />}
               </AnimatePresence>
+              </div>
             </motion.div>
           )}
         </div>

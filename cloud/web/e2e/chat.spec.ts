@@ -75,7 +75,9 @@ test('dev login -> add a key -> pick a skill -> attach an image -> send -> reply
     await page.getByLabel('Skill').selectOption('general');
 
     // Attach an image; wait for the upload thumbnail before sending.
-    await page.locator('input[type="file"]').setInputFiles({ name: 'pixel.png', mimeType: 'image/png', buffer: TINY_PNG });
+    // The composer's picker is the only multi-file input (the sidebar's
+    // import pickers take a single JSON file each).
+    await page.locator('input[type="file"][multiple]').setInputFiles({ name: 'pixel.png', mimeType: 'image/png', buffer: TINY_PNG });
     await expect(page.locator('img[alt="pending"]')).toBeVisible();
 
     await page.getByPlaceholder('Message Cascade…').fill('review this');

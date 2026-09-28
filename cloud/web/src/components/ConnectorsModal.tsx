@@ -422,7 +422,7 @@ export default function ConnectorsModal({ onClose }: { onClose: () => void }) {
                       type="button"
                       onClick={connectOAuth}
                       disabled={oauthBusy || busy}
-                      className="accent-grad flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+                      className="bg-accent-500 hover:bg-accent-600 flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
                     >
                       {oauthBusy ? <Loader2 size={14} className="animate-spin" /> : <LogIn size={14} />} Sign in with OAuth
                     </button>
@@ -447,7 +447,7 @@ export default function ConnectorsModal({ onClose }: { onClose: () => void }) {
                     type="button"
                     onClick={submitAdd}
                     disabled={busy}
-                    className="accent-grad flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+                    className="bg-accent-500 hover:bg-accent-600 flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
                   >
                     {busy ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />} Connect
                   </button>

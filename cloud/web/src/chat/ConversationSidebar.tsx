@@ -3,6 +3,7 @@ import clsx from 'clsx';
 import { motion } from 'framer-motion';
 import { MessageSquarePlus, Settings, Trash2, Upload } from 'lucide-react';
 import UsageMeter from './UsageMeter.js';
+import CascadeMark from '../components/CascadeMark.js';
 import TierMix from './TierMix.js';
 import { deleteConversation, deleteAllConversations, importConversation, importMemories } from '../lib/api.js';
 import type { CloudConversation, CloudUser } from '../lib/types.js';
@@ -76,10 +77,8 @@ export default function ConversationSidebar({
   return (
     <div className="flex h-full w-full min-w-0 flex-col">
       <div className="flex items-center gap-2 px-4 pb-2 pt-4">
-        <div className="accent-grad flex h-6 w-6 items-center justify-center rounded-lg text-white shadow-lg">
-          <span className="text-xs font-bold">C</span>
-        </div>
-        <span className="text-sm font-semibold tracking-tight text-ink-50">Cascade Cloud</span>
+        <CascadeMark size={22} animate={false} />
+        <span className="font-serif text-[19px] font-medium tracking-[-0.01em] text-ink-50">Cascade</span>
       </div>
 
       <div className="flex flex-col gap-2 p-3">
@@ -88,7 +87,7 @@ export default function ConversationSidebar({
           onClick={onNewChat}
           whileHover={{ scale: 1.01 }}
           whileTap={{ scale: 0.98 }}
-          className="flex w-full items-center gap-2 rounded-xl border border-elev/10 bg-elev/[0.04] px-3 py-2.5 text-sm font-medium text-ink-100 hover:bg-elev/[0.08]"
+          className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-ink-50 hover:bg-elev/[0.06]"
         >
           <MessageSquarePlus size={16} /> New chat
         </motion.button>
@@ -111,7 +110,7 @@ export default function ConversationSidebar({
               key={c.id}
               className={clsx(
                 'group flex items-center rounded-lg transition-colors',
-                active ? 'bg-elev/[0.08] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]' : 'hover:bg-elev/[0.05]',
+                active ? 'bg-elev/[0.07]' : 'hover:bg-elev/[0.05]',
               )}
             >
               <button
@@ -121,7 +120,6 @@ export default function ConversationSidebar({
                 title={c.title ?? 'Untitled conversation'}
               >
                 <span className="flex items-center gap-2">
-                  {active && <span className="accent-grad h-3.5 w-0.5 shrink-0 rounded-full" />}
                   <span className="truncate">{c.title ?? 'Untitled conversation'}</span>
                 </span>
               </button>
@@ -158,7 +156,7 @@ export default function ConversationSidebar({
           className="mt-1 flex items-center justify-between gap-2 rounded-lg px-3 py-2 text-sm text-ink-200 hover:bg-elev/[0.06]"
         >
           <span className="flex min-w-0 items-center gap-2.5">
-            <span className="accent-grad flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white">
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-ink-50 text-[11.5px] font-semibold text-ink-900">
               {(user.name ?? user.email ?? 'U').charAt(0).toUpperCase()}
             </span>
             <span className="truncate">{user.name ?? user.email ?? 'Signed in'}</span>

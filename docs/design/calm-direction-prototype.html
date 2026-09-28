@@ -1,0 +1,1520 @@
+<title>Cascade Design Direction</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Source+Serif+4:ital,opsz,wght@0,8..60,400..600;1,8..60,400&display=swap">
+<script src="https://cdn.jsdelivr.net/npm/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<style>
+:root{
+  --paper:#F7F6F2; --side:#EFEDE7; --card:#FFFFFF; --sunk:#EAE8E1; --hover:rgba(21,23,28,.05);
+  --ink:#15171C; --ink-2:#555A63; --ink-3:#868B94; --line:rgba(21,23,28,.10); --line-2:rgba(21,23,28,.17);
+  --accent:#2F6FE4; --accent-ink:#FFFFFF; --accent-soft:rgba(47,111,228,.10);
+  --t1:#2F6FE4; --t2:#1C8FBE; --t3:#0E9B89;
+  --ramp:linear-gradient(180deg,#4C8DFF,#38B0DE 50%,#2DD4BF);
+  --ramp-x:linear-gradient(90deg,#4C8DFF,#38B0DE 50%,#2DD4BF);
+  --save:#0E8A7A; --warn:#A8671A; --bad:#B8322A;
+  --user:#E9E7E0; --btn:#15171C; --btn-ink:#F7F6F2;
+  --shadow:0 1px 2px rgba(21,23,28,.05),0 10px 30px rgba(21,23,28,.07);
+  --shadow-lg:0 24px 60px rgba(21,23,28,.16);
+  --f-ui:"Geist","Figtree",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-read:"Source Serif 4",Georgia,"Times New Roman",serif;
+  --f-mono:"Geist Mono","JetBrains Mono",ui-monospace,Menlo,monospace;
+  --r:10px; --r-lg:16px; --r-xl:20px;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --paper:#0E1117; --side:#0A0D12; --card:#161A22; --sunk:#1B2029; --hover:rgba(233,235,240,.05);
+  --ink:#E9EBF0; --ink-2:#A2A8B4; --ink-3:#6E7583; --line:rgba(233,235,240,.08); --line-2:rgba(233,235,240,.15);
+  --accent:#6FA3FF; --accent-ink:#0E1117; --accent-soft:rgba(111,163,255,.14);
+  --t1:#6FA3FF; --t2:#4CC3EC; --t3:#3EDFC9; --save:#3EDFC9; --warn:#E6B25C; --bad:#F08A80;
+  --user:#1B2029; --btn:#E9EBF0; --btn-ink:#0E1117;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px rgba(0,0,0,.3); --shadow-lg:0 24px 60px rgba(0,0,0,.5);
+  color-scheme:dark; } }
+:root[data-theme="dark"]{
+  --paper:#0E1117; --side:#0A0D12; --card:#161A22; --sunk:#1B2029; --hover:rgba(233,235,240,.05);
+  --ink:#E9EBF0; --ink-2:#A2A8B4; --ink-3:#6E7583; --line:rgba(233,235,240,.08); --line-2:rgba(233,235,240,.15);
+  --accent:#6FA3FF; --accent-ink:#0E1117; --accent-soft:rgba(111,163,255,.14);
+  --t1:#6FA3FF; --t2:#4CC3EC; --t3:#3EDFC9; --save:#3EDFC9; --warn:#E6B25C; --bad:#F08A80;
+  --user:#1B2029; --btn:#E9EBF0; --btn-ink:#0E1117;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px rgba(0,0,0,.3); --shadow-lg:0 24px 60px rgba(0,0,0,.5);
+  color-scheme:dark; }
+
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{height:100%}
+body{margin:0;display:flex;flex-direction:column;background:var(--paper);color:var(--ink);font-family:var(--f-ui);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;overflow:hidden}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.ic{width:17px;height:17px;flex:none;display:inline-block;vertical-align:middle}
+.ic-sm{width:14px;height:14px}
+.mono{font-family:var(--f-mono)}
+.tnum{font-variant-numeric:tabular-nums}
+.muted{color:var(--ink-2)} .faint{color:var(--ink-3)}
+.row{display:flex;align-items:center;gap:8px}
+.grow{flex:1;min-width:0}
+.trunc{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.no-motion *{animation:none!important;transition:none!important}
+@media (prefers-reduced-motion: reduce){*{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}}
+@keyframes fade{from{opacity:0}}
+@keyframes flow{from{background-position:0 0}to{background-position:0 -200%}}
+@keyframes arc{0%,100%{opacity:1}50%{opacity:.25}}
+@keyframes draw{from{stroke-dashoffset:1}to{stroke-dashoffset:0}}
+
+/* mark */
+.mark path{fill:none;stroke-width:2.1;stroke-linecap:round}
+.mark .a1{stroke:var(--t1)}.mark .a2{stroke:var(--t2)}.mark .a3{stroke:var(--t3)}
+.mark.busy path{animation:arc 1.2s ease-in-out infinite}
+.mark.busy .a2{animation-delay:.18s}.mark.busy .a3{animation-delay:.36s}
+
+/* controls */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:36px;padding:0 16px;border:0;border-radius:var(--r);background:var(--btn);color:var(--btn-ink);font-weight:500;white-space:nowrap}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn.ghost{background:transparent;color:var(--ink);box-shadow:inset 0 0 0 1px var(--line-2)}
+.btn.ghost:hover{background:var(--hover)}
+.btn.quiet{background:transparent;color:var(--ink-2)}
+.btn.quiet:hover{background:var(--hover);color:var(--ink)}
+.btn.accent{background:var(--accent);color:var(--accent-ink)}
+.btn.danger{background:transparent;color:var(--bad);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--bad) 40%,transparent)}
+.btn.sm{height:30px;padding:0 11px;font-size:13px;border-radius:8px}
+.btn.lg{height:44px;padding:0 20px;font-size:15px}
+.ib{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border:0;border-radius:8px;background:transparent;color:var(--ink-2);flex:none}
+.ib:hover{background:var(--hover);color:var(--ink)}
+.ib.sm{width:26px;height:26px}
+.ib:disabled{opacity:.35;cursor:not-allowed}
+.chip{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:8px;border:0;box-shadow:inset 0 0 0 1px var(--line-2);background:transparent;color:var(--ink-2);font-size:13px;white-space:nowrap}
+.chip:hover{color:var(--ink);background:var(--hover)}
+.chip[aria-pressed="true"]{background:var(--accent-soft);box-shadow:none;color:var(--accent)}
+.chip .x{display:inline-flex;border:0;background:none;padding:0;color:inherit;opacity:.7}
+.field{width:100%;height:38px;border:0;box-shadow:inset 0 0 0 1px var(--line-2);background:var(--card);border-radius:var(--r);padding:0 12px;outline:none;color:var(--ink)}
+textarea.field{height:auto;min-height:90px;padding:10px 12px;resize:vertical}
+.field:focus{box-shadow:inset 0 0 0 1.5px var(--accent)}
+.seg{display:inline-flex;gap:2px;padding:3px;border-radius:10px;background:var(--sunk)}
+.seg button{border:0;background:transparent;color:var(--ink-2);font-size:13px;font-weight:500;padding:4px 11px;border-radius:7px}
+.seg button[aria-pressed="true"]{background:var(--card);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.1)}
+.switch{position:relative;width:36px;height:21px;border-radius:99px;border:0;background:var(--line-2);flex:none;transition:background .2s;padding:0}
+.switch::after{content:"";position:absolute;top:2.5px;left:2.5px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.3);transition:transform .2s}
+.switch[aria-checked="true"]{background:var(--accent)}
+.switch[aria-checked="true"]::after{transform:translateX(15px)}
+.label{font-size:11.5px;font-weight:500;color:var(--ink-3);letter-spacing:.02em}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block;flex:none}
+.d1{background:var(--t1)}.d2{background:var(--t2)}.d3{background:var(--t3)}
+.tag{font-family:var(--f-mono);font-size:11px;padding:1px 6px;border-radius:5px;background:var(--sunk);color:var(--ink-2)}
+kbd{font-family:var(--f-mono);font-size:11px;padding:1px 5px;border-radius:5px;box-shadow:inset 0 0 0 1px var(--line-2);color:var(--ink-3)}
+
+/* ============ TOP STRIP ============ */
+.strip{flex:none;display:flex;align-items:center;gap:12px;padding:8px 16px;border-bottom:1px solid var(--line);background:var(--paper);flex-wrap:wrap}
+.strip b{font-weight:600}
+.strip .note{font-size:12px;color:var(--ink-3)}
+@media (max-width:640px){.strip .note{display:none}}
+.stage{flex:1;min-height:0;position:relative}
+.view{position:absolute;inset:0;overflow:hidden;display:flex}
+.scrollview{overflow-y:auto;display:block}
+
+/* ============ APP ============ */
+.side{width:260px;flex:none;display:flex;flex-direction:column;background:var(--side);border-right:1px solid var(--line);padding:12px 10px;gap:2px;min-height:0;transition:margin .22s ease;z-index:20}
+.side.closed{margin-left:-260px}
+.brand{display:flex;align-items:center;gap:9px;padding:4px 8px 12px}
+.brand b{font-family:var(--f-read);font-size:20px;font-weight:500;letter-spacing:-.01em;flex:1}
+.nav{display:flex;align-items:center;gap:10px;width:100%;border:0;background:transparent;color:var(--ink);padding:7px 10px;border-radius:8px;text-align:left}
+.nav:hover{background:var(--hover)}
+.nav .ic{color:var(--ink-2)}
+.side .label{padding:18px 10px 6px}
+.side-search{display:flex;align-items:center;gap:8px;margin:2px 0;padding:0 10px;height:34px;border-radius:8px;box-shadow:inset 0 0 0 1px var(--line-2);background:var(--card)}
+.side-search input{border:0;background:none;outline:none;flex:1;min-width:0}
+.convs{flex:1;overflow-y:auto;min-height:40px;display:flex;flex-direction:column;gap:1px}
+.conv{display:flex;align-items:center;border-radius:8px;color:var(--ink-2)}
+.conv:hover{background:var(--hover);color:var(--ink)}
+.conv.on{background:var(--sunk);color:var(--ink)}
+.conv button.o{flex:1;min-width:0;border:0;background:none;color:inherit;text-align:left;padding:7px 10px;font-size:13.5px}
+.conv .del{opacity:0}
+.conv:hover .del,.conv .del:focus-visible{opacity:1}
+.conv .run{width:7px;height:7px;border-radius:50%;background:var(--accent);margin-right:6px;animation:arc 1.2s infinite}
+.acct{display:flex;align-items:center;gap:10px;border:0;background:transparent;border-radius:10px;padding:8px;text-align:left;width:100%;margin-top:6px}
+.acct:hover{background:var(--hover)}
+.av{width:30px;height:30px;border-radius:50%;background:var(--ink);color:var(--paper);display:inline-flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:600;flex:none}
+.acct small{display:block;color:var(--ink-3);font-size:12px}
+.scrim{display:none}
+@media (max-width:820px){.side{position:absolute;left:0;top:0;bottom:0;box-shadow:var(--shadow-lg)}.side.closed{margin-left:0;transform:translateX(-105%);box-shadow:none}.scrim.on{display:block;position:absolute;inset:0;background:rgba(0,0,0,.3);z-index:15}}
+
+.main{flex:1;min-width:0;display:flex;flex-direction:column;position:relative}
+.head{height:52px;flex:none;display:flex;align-items:center;gap:6px;padding:0 12px}
+.titlebtn{display:inline-flex;align-items:center;gap:4px;border:0;background:none;padding:6px 10px;border-radius:8px;color:var(--ink-2);font-size:13.5px;max-width:min(52vw,480px)}
+.titlebtn:hover{background:var(--hover);color:var(--ink)}
+.receipt-chip{display:inline-flex;align-items:center;gap:6px;border:0;background:transparent;color:var(--save);font-family:var(--f-mono);font-size:12px;padding:5px 9px;border-radius:8px}
+.receipt-chip:hover{background:var(--hover)}
+.scroll{flex:1;min-height:0;overflow-y:auto;padding:12px 20px 28px}
+.thread{max-width:720px;margin:0 auto;display:flex;flex-direction:column;gap:26px}
+.dock{flex:none;padding:0 20px 16px;display:flex;flex-direction:column;gap:10px}
+.dock > *{max-width:720px;width:100%;margin:0 auto}
+#gates{display:flex;flex-direction:column;gap:8px;max-height:48vh;overflow-y:auto}
+#gates > *{flex:none}
+#gates:empty,#suggest:empty{display:none}
+
+/* empty */
+.main.empty{justify-content:center}
+.main.empty .scroll{flex:0 0 auto;overflow:visible}
+.main.empty .dock{padding-bottom:12vh}
+.hello{display:flex;flex-direction:column;align-items:center;gap:14px;text-align:center;padding:10px 0 18px}
+.hello h1{margin:0;font-family:var(--f-read);font-weight:400;font-size:clamp(28px,4.2vw,38px);letter-spacing:-.015em}
+.suggest{display:flex;justify-content:center;gap:8px;flex-wrap:wrap}
+.preview-note{font-size:12px;color:var(--ink-3);text-align:center}
+
+/* messages */
+.msg{display:flex;flex-direction:column;gap:6px;min-width:0;animation:rise .25s ease}
+.msg.u{align-items:flex-end}
+.bubble{max-width:min(82%,600px);background:var(--user);padding:10px 15px;border-radius:14px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:15px}
+.atts{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end}
+.att{display:inline-flex;align-items:center;gap:7px;height:34px;padding:0 10px;border-radius:8px;box-shadow:inset 0 0 0 1px var(--line-2);background:var(--card);font-size:12.5px;max-width:240px;position:relative}
+.att img{width:52px;height:52px;border-radius:8px;object-fit:cover;display:block}
+.att.img{padding:0;height:auto;box-shadow:none;background:none}
+.att .x{position:absolute;top:-7px;right:-7px;width:19px;height:19px;border-radius:50%;border:0;box-shadow:0 0 0 1px var(--line-2);background:var(--card);display:flex;align-items:center;justify-content:center;padding:0;color:var(--ink-2)}
+.hover-acts{display:flex;align-items:center;gap:1px;opacity:0;transition:opacity .15s}
+.msg:hover .hover-acts,.msg:focus-within .hover-acts{opacity:1}
+@media (hover:none){.hover-acts{opacity:1}}
+.sib{display:inline-flex;align-items:center;font-size:12px;color:var(--ink-3);font-family:var(--f-mono)}
+.editbox{width:min(100%,600px);display:flex;flex-direction:column;gap:8px}
+.md{font-family:var(--f-read);font-size:16.5px;line-height:1.68;overflow-wrap:anywhere}
+.md > *:first-child{margin-top:0}.md > *:last-child{margin-bottom:0}
+.md p{margin:0 0 .8em}
+.md h2,.md h3{font-family:var(--f-read);font-weight:600;line-height:1.3;margin:1.3em 0 .45em}
+.md h2{font-size:1.14em}.md h3{font-size:1.02em}
+.md ul,.md ol{padding-left:1.35em;margin:0 0 .8em}
+.md li{margin:.28em 0}
+.md code{font-family:var(--f-mono);font-size:.82em;background:var(--sunk);padding:.12em .36em;border-radius:5px}
+.md pre{background:var(--sunk);border-radius:12px;padding:12px 14px;overflow-x:auto;font-size:13px}
+.md pre code{background:none;padding:0}
+.md a{color:var(--accent)}
+.tbl{overflow-x:auto;margin:.4em 0 1em;border-radius:12px;box-shadow:inset 0 0 0 1px var(--line)}
+.md table{border-collapse:collapse;width:100%;font-family:var(--f-ui);font-size:13.5px}
+.md th,.md td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+.md tr:last-child td{border-bottom:0}
+.md th{font-weight:600;color:var(--ink-2);font-size:12.5px}
+.caret{display:inline-block;width:7px;height:1em;background:var(--accent);vertical-align:-.13em;margin-left:2px;animation:arc .9s infinite}
+.shimmer{background:linear-gradient(90deg,var(--ink-3),var(--ink) 50%,var(--ink-3));background-size:200% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:shim 1.6s linear infinite}
+@keyframes shim{from{background-position:200% 0}to{background-position:-200% 0}}
+.fold{display:inline-flex;align-items:center;gap:7px;border:0;background:none;color:var(--ink-2);padding:4px 8px;margin-left:-8px;border-radius:8px;font-size:13.5px;align-self:flex-start;max-width:100%}
+.fold:hover{background:var(--hover);color:var(--ink)}
+.fold .chev{transition:transform .15s}
+.fold[aria-expanded="true"] .chev{transform:rotate(90deg)}
+.thought{font-size:13.5px;color:var(--ink-2);white-space:pre-wrap;line-height:1.6;padding:2px 0 4px 14px;border-left:2px solid var(--line-2)}
+
+/* receipt line */
+.rline{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-height:28px}
+.receipt{display:inline-flex;align-items:center;gap:7px;border:0;background:none;padding:3px 8px;margin-left:-8px;border-radius:8px;font-family:var(--f-mono);font-size:12px;color:var(--ink-3)}
+.receipt:hover{background:var(--hover);color:var(--ink-2)}
+.receipt .s{color:var(--save)}
+.receipt .pill{font-family:var(--f-ui);font-size:11px;padding:0 6px;border-radius:99px;background:var(--sunk);color:var(--ink-2)}
+.why{border-radius:14px;background:var(--card);box-shadow:inset 0 0 0 1px var(--line);padding:14px 16px;display:flex;flex-direction:column;gap:12px;font-size:13px;animation:rise .2s ease}
+.why ul{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;color:var(--ink-2)}
+.why li{display:flex;gap:8px}
+.why li .k{font-family:var(--f-mono);font-size:11px;color:var(--ink-3);min-width:78px}
+.costs{display:flex;flex-direction:column;gap:6px;font-family:var(--f-mono);font-size:12px}
+.costs .r{display:grid;grid-template-columns:86px 1fr auto;gap:10px;align-items:center}
+.trk{height:6px;border-radius:99px;background:var(--sunk);overflow:hidden}
+.trk i{display:block;height:100%;border-radius:99px}
+.tiercost{display:grid;grid-template-columns:auto 1fr auto;gap:4px 10px;font-family:var(--f-mono);font-size:12px;color:var(--ink-2);padding-top:10px;border-top:1px solid var(--line)}
+
+/* tree + live run (the spine) */
+.tree{display:flex;flex-direction:column;gap:2px}
+.tn{display:grid;grid-template-columns:14px 1fr auto;gap:8px;align-items:center;padding:4px 0;font-size:13px}
+.tn.l1{padding-left:16px}.tn.l2{padding-left:32px}
+.tn .lbl{color:var(--ink);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tn.done .lbl{color:var(--ink-2)}
+.tn .m{font-family:var(--f-mono);font-size:11px;color:var(--ink-3);white-space:nowrap}
+.tn .st{display:inline-flex;align-items:center;justify-content:center}
+.tn .pb{grid-column:2 / 4;height:2px;background:var(--sunk);border-radius:2px;overflow:hidden;margin-top:2px}
+.tn .pb i{display:block;height:100%;background:var(--ramp-x);transition:width .3s}
+.st-ok{color:var(--save)}.st-esc{color:var(--warn)}.st-fail{color:var(--bad)}.st-skip{color:var(--ink-3)}
+.live{display:grid;grid-template-columns:3px 1fr;gap:16px;animation:rise .25s ease}
+.spine{border-radius:3px;background:linear-gradient(180deg,#4C8DFF,#38B0DE,#2DD4BF,#38B0DE,#4C8DFF);background-size:100% 200%;animation:flow 2.4s linear infinite}
+.live-b{display:flex;flex-direction:column;gap:10px;min-width:0}
+.live-s{display:flex;align-items:center;gap:9px;font-size:14px}
+.planline{font-family:var(--f-mono);font-size:12px;color:var(--ink-2);display:flex;flex-wrap:wrap;gap:6px 14px}
+.planline span{display:inline-flex;align-items:center;gap:6px}
+.secs{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:3px;font-size:13px;color:var(--ink-2)}
+.secs li{display:flex;gap:8px}
+.secs .n{font-family:var(--f-mono);font-size:11px;color:var(--ink-3);width:14px}
+.note{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--ink-2)}
+.note .ic{color:var(--ink-3)}
+.note.warn .ic{color:var(--warn)}
+.review{border-radius:12px;background:color-mix(in srgb,var(--warn) 8%,var(--card));box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--warn) 25%,transparent);padding:10px 12px;font-size:13px;display:flex;flex-direction:column;gap:6px}
+
+/* file card */
+.file{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:14px;background:var(--card);box-shadow:var(--shadow),inset 0 0 0 1px var(--line);max-width:520px;flex-wrap:wrap}
+.ficon{width:34px;height:40px;border-radius:6px;display:flex;align-items:flex-end;justify-content:center;padding-bottom:4px;font-family:var(--f-mono);font-size:8.5px;font-weight:600;color:#fff;background:#2B579A;flex:none}
+.ficon.pptx{background:#C43E1C}.ficon.xlsx{background:#107C41}.ficon.pdf{background:#B30B00}.ficon.md{background:#57606A}
+.file .meta{flex:1;min-width:140px}
+.file .meta b{display:block;font-weight:500}
+.file .meta span{font-size:12px;color:var(--ink-3)}
+
+/* gates */
+.gate{border-radius:16px;background:var(--card);box-shadow:var(--shadow),inset 0 0 0 1px var(--line);padding:14px 16px;display:flex;flex-direction:column;gap:12px;animation:rise .2s ease}
+.gate-h{display:flex;align-items:center;gap:8px;font-weight:500}
+.gate-h .grow{font-weight:500}
+.gate pre{margin:0;background:var(--sunk);border-radius:10px;padding:10px 12px;font-family:var(--f-mono);font-size:12px;max-height:110px;overflow:auto;white-space:pre-wrap;color:var(--ink-2)}
+.gate .q p{margin:0 0 6px;font-size:13.5px;color:var(--ink-2)}
+.opts{display:flex;flex-wrap:wrap;gap:6px}
+
+/* composer */
+.composer{background:var(--card);border-radius:var(--r-xl);box-shadow:var(--shadow),inset 0 0 0 1px var(--line-2);padding:8px;display:flex;flex-direction:column;transition:box-shadow .15s}
+.composer:focus-within{box-shadow:var(--shadow),inset 0 0 0 1px color-mix(in srgb,var(--accent) 55%,transparent)}
+.composer.drag{box-shadow:0 0 0 2px var(--accent)}
+.cmp-atts{display:flex;flex-wrap:wrap;gap:8px;padding:6px 6px 2px}
+.cmp-atts:empty{display:none}
+.cmp-ta{border:0;outline:none;background:transparent;resize:none;padding:8px 8px 6px;font-size:15.5px;line-height:1.45;min-height:48px;max-height:200px;width:100%;color:var(--ink)}
+.cmp-ta::placeholder{color:var(--ink-3)}
+.cmp-bar{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.toks{display:flex;gap:6px;flex-wrap:wrap}
+.mode{display:inline-flex;align-items:center;gap:4px;border:0;background:none;color:var(--ink-2);padding:5px 8px;border-radius:8px;font-size:13px}
+.mode:hover{background:var(--hover);color:var(--ink)}
+.mode b{font-weight:500;color:var(--ink)}
+.send{width:34px;height:34px;border-radius:10px;border:0;background:var(--accent);color:var(--accent-ink);display:inline-flex;align-items:center;justify-content:center;flex:none}
+.send:disabled{background:var(--sunk);color:var(--ink-3);cursor:not-allowed}
+.send.stop{background:var(--ink);color:var(--paper)}
+
+/* pane */
+.pane{width:min(480px,44%);flex:none;display:flex;flex-direction:column;min-height:0;border-left:1px solid var(--line);background:var(--side);z-index:18}
+.pane-h{height:52px;flex:none;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid var(--line)}
+.pane-h b{flex:1;min-width:0;font-weight:500}
+.pane-b{flex:1;overflow-y:auto;padding:18px;display:flex;flex-direction:column;gap:12px}
+.doc{background:var(--card);border-radius:14px;box-shadow:var(--shadow);padding:24px 26px}
+.frow{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:10px}
+.frow:hover{background:var(--hover)}
+@media (max-width:980px){.pane{position:absolute;right:0;top:0;bottom:0;width:min(480px,100%);box-shadow:var(--shadow-lg)}}
+.browser{border-radius:14px;overflow:hidden;box-shadow:var(--shadow),inset 0 0 0 1px var(--line);background:var(--card)}
+.bh{display:flex;align-items:center;gap:8px;padding:8px 10px;font-size:12px;border-bottom:1px solid var(--line)}
+.bh .url{flex:1;min-width:0;font-family:var(--f-mono);font-size:11.5px;color:var(--ink-2);background:var(--sunk);border-radius:99px;padding:3px 10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.livedot{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;color:var(--bad)}
+.livedot::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--bad);animation:arc 1.2s infinite}
+.page{position:relative;height:230px;background:#fff;color:#1B1F24;overflow:hidden;font-family:system-ui,sans-serif}
+.page .nv{display:flex;justify-content:space-between;padding:10px 16px;font-size:11px;border-bottom:1px solid #eee}
+.page h4{margin:14px 16px 8px;font-size:15px}
+.page .tg{margin:0 16px 12px;display:inline-flex;border:1px solid #ddd;border-radius:99px;font-size:10px}
+.page .tg span{padding:3px 10px;border-radius:99px}
+.page .tg span.on{background:#1B1F24;color:#fff}
+.page .pl{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:0 16px}
+.page .pl div{border:1px solid #e6e6e6;border-radius:8px;padding:8px;font-size:10.5px}
+.page .pl b{display:block;font-size:13px;margin-top:2px}
+.page.loading > *:not(.cursor){opacity:.15}
+.page.human{outline:3px solid #2F6FE4;outline-offset:-3px}
+.page.paused{filter:grayscale(1) blur(1px)}
+.cursor{position:absolute;width:16px;height:16px;transition:left .8s ease,top .8s ease;pointer-events:none;filter:drop-shadow(0 1px 1px rgba(0,0,0,.35))}
+.bf{display:flex;flex-wrap:wrap;gap:6px;padding:8px 10px;border-top:1px solid var(--line)}
+
+/* menus & modals */
+.menu{position:fixed;z-index:70;min-width:240px;max-width:min(320px,92vw);background:var(--card);border-radius:14px;box-shadow:var(--shadow-lg),inset 0 0 0 1px var(--line);padding:6px;max-height:72vh;overflow:auto;animation:rise .12s ease}
+.mi{display:flex;align-items:center;gap:10px;width:100%;border:0;background:transparent;padding:7px 9px;border-radius:8px;text-align:left;color:var(--ink);font-size:13.5px}
+.mi:hover,.mi:focus-visible{background:var(--hover)}
+.mi .ic{color:var(--ink-2)}
+.mi .l{flex:1;min-width:0}
+.mi .sub{display:block;font-size:12px;color:var(--ink-3)}
+.mi .chk{color:var(--accent);display:inline-flex}
+.mi .switch{pointer-events:none;transform:scale(.85);transform-origin:right}
+.ml{padding:8px 9px 3px;font-size:11.5px;font-weight:500;color:var(--ink-3)}
+.msep{height:1px;background:var(--line);margin:5px 6px}
+.usage{padding:8px 9px 6px;display:flex;flex-direction:column;gap:8px;font-size:12px;color:var(--ink-2)}
+.bar{height:4px;border-radius:99px;background:var(--sunk);overflow:hidden;display:flex}
+.bar i{display:block;height:100%}
+.overlay{position:fixed;inset:0;z-index:60;background:rgba(10,12,16,.35);display:flex;align-items:center;justify-content:center;padding:16px;animation:fade .15s ease}
+.modal{width:100%;max-width:500px;max-height:min(86vh,720px);background:var(--card);border-radius:18px;box-shadow:var(--shadow-lg);display:flex;flex-direction:column;overflow:hidden;animation:rise .18s ease}
+.modal.wide{max-width:720px}
+.mh{display:flex;align-items:center;gap:8px;padding:18px 20px 8px}
+.mh h2{margin:0;flex:1;font-family:var(--f-read);font-weight:500;font-size:21px}
+.mb{padding:6px 20px 20px;overflow-y:auto;display:flex;flex-direction:column;gap:14px}
+.mb p{margin:0}
+.set{display:grid;grid-template-columns:150px 1fr;gap:18px;min-height:340px}
+@media (max-width:600px){.set{grid-template-columns:1fr}}
+.setnav{display:flex;flex-direction:column;gap:2px}
+@media (max-width:600px){.setnav{flex-direction:row;overflow-x:auto}}
+.setnav button{border:0;background:none;text-align:left;padding:7px 10px;border-radius:8px;color:var(--ink-2)}
+.setnav button[aria-selected="true"]{background:var(--sunk);color:var(--ink)}
+.srow{display:flex;align-items:center;gap:14px;padding:11px 0;border-bottom:1px solid var(--line)}
+.srow:last-child{border-bottom:0}
+.srow .l{flex:1;min-width:0}
+.srow .l span{display:block;font-size:12.5px;color:var(--ink-3)}
+@media (max-width:520px){.srow{flex-wrap:wrap}}
+.list{display:flex;flex-direction:column}
+.item{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--line)}
+.item:last-child{border-bottom:0}
+.item .t{font-weight:500}
+.item .d{font-size:12.5px;color:var(--ink-3)}
+.badge{font-size:11px;padding:1px 8px;border-radius:99px;background:var(--sunk);color:var(--ink-2);white-space:nowrap}
+.badge.on{background:color-mix(in srgb,var(--save) 14%,transparent);color:var(--save)}
+.plans{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
+.plan{border-radius:16px;box-shadow:inset 0 0 0 1px var(--line-2);padding:18px;display:flex;flex-direction:column;gap:12px;background:var(--card)}
+.plan.pro{box-shadow:inset 0 0 0 1.5px var(--accent)}
+.plan h3{margin:0;font-family:var(--f-read);font-weight:500;font-size:22px}
+.plan ul{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:7px;font-size:13.5px;color:var(--ink-2)}
+.plan li{display:flex;gap:8px}
+.plan li .ic{color:var(--t3)}
+.code{font-family:var(--f-mono);font-size:28px;letter-spacing:.14em;text-align:center;padding:14px;border-radius:14px;background:var(--sunk)}
+.toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--ink);color:var(--paper);padding:9px 16px;border-radius:10px;font-size:13px;z-index:80;box-shadow:var(--shadow-lg);max-width:min(92vw,460px);animation:rise .2s ease}
+
+/* ============ HOME ============ */
+.home{max-width:1080px;margin:0 auto;padding:0 24px}
+.hnav{position:sticky;top:0;z-index:5;background:var(--paper);border-bottom:1px solid var(--line)}
+.hnav .home{display:flex;align-items:center;gap:22px;height:64px}
+.hnav .brand{padding:0}
+.hnav .links{display:flex;gap:18px;font-size:14px}
+.hnav .links button,.hnav .links a{border:0;background:none;padding:0;color:var(--ink-2);text-decoration:none}
+.hnav .links button:hover,.hnav .links a:hover{color:var(--ink)}
+@media (max-width:640px){.hnav .links{display:none}}
+.hero{display:grid;grid-template-columns:1.1fr .9fr;gap:48px;align-items:center;padding:72px 0 40px}
+@media (max-width:880px){.hero{grid-template-columns:1fr;padding-top:48px}}
+.hero h1{margin:0 0 18px;font-family:var(--f-read);font-weight:400;font-size:clamp(42px,6.2vw,72px);line-height:1.02;letter-spacing:-.03em}
+.hero p{margin:0 0 28px;font-size:18px;line-height:1.55;color:var(--ink-2);max-width:40ch}
+.ctas{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.npm{display:inline-flex;align-items:center;gap:8px;margin-top:18px;font-family:var(--f-mono);font-size:12.5px;color:var(--ink-2);background:var(--sunk);border:0;border-radius:8px;padding:6px 10px}
+.flow{background:var(--card);border-radius:22px;box-shadow:var(--shadow);padding:22px;display:flex;flex-direction:column;gap:16px}
+.flow .prompt{background:var(--user);border-radius:12px;padding:10px 14px;font-size:14.5px;align-self:flex-end;max-width:90%}
+.flow svg{width:100%;height:auto;display:block}
+.flow .arc{fill:none;stroke-width:5;stroke-linecap:round;stroke-dasharray:1;animation:draw 1s ease both}
+.flow .leg{display:flex;gap:16px;flex-wrap:wrap;justify-content:center;font-family:var(--f-mono);font-size:12px;color:var(--ink-2)}
+.flow .leg span{display:inline-flex;align-items:center;gap:6px}
+.flow .arc.a2{animation-delay:.35s}.flow .arc.a3{animation-delay:.7s}
+.flow text{font-family:var(--f-mono);font-size:11px;fill:var(--ink-2)}
+.flow .rc{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;font-family:var(--f-mono);font-size:12.5px;padding-top:12px;border-top:1px solid var(--line);color:var(--ink-2)}
+.flow .rc b{color:var(--save);font-weight:500}
+.hsec{padding:88px 0 0}
+.hsec h2{margin:0 0 28px;font-family:var(--f-read);font-weight:400;font-size:clamp(30px,4vw,44px);letter-spacing:-.02em;line-height:1.1;max-width:18ch}
+.tiers3{display:grid;grid-template-columns:repeat(3,1fr);gap:32px}
+@media (max-width:760px){.tiers3{grid-template-columns:1fr;gap:24px}}
+.tiers3 svg{width:56px;height:28px}
+.tiers3 h3{margin:12px 0 6px;font-size:16px;font-weight:600}
+.tiers3 p{margin:0;color:var(--ink-2);line-height:1.55}
+.split{display:grid;grid-template-columns:.9fr 1.1fr;gap:48px;align-items:center}
+@media (max-width:880px){.split{grid-template-columns:1fr}}
+.split p{color:var(--ink-2);font-size:17px;line-height:1.6;margin:0;max-width:36ch}
+.rcard{background:var(--card);border-radius:18px;box-shadow:var(--shadow);padding:20px 22px;font-family:var(--f-mono);font-size:13px;display:flex;flex-direction:column;gap:10px}
+.rcard .r{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;color:var(--ink-2)}
+.rcard .tot{border-top:1px dashed var(--line-2);padding-top:12px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+.rcard .tot b{color:var(--save);font-weight:500}
+.surf{display:grid;grid-template-columns:repeat(3,1fr);gap:0;border-top:1px solid var(--line)}
+@media (max-width:760px){.surf{grid-template-columns:1fr}}
+.surf > div{padding:24px 24px 24px 0;display:flex;flex-direction:column;gap:8px}
+.surf b{font-size:16px;font-weight:600;display:flex;align-items:center;gap:8px}
+.surf p{margin:0;color:var(--ink-2)}
+.surf .lnk{align-self:flex-start}
+.lnk{border:0;background:none;padding:0;color:var(--accent);font-size:14px;cursor:pointer}
+.lnk:hover{text-decoration:underline}
+.hfoot{margin-top:96px;padding:28px 0 36px;border-top:1px solid var(--line);display:flex;align-items:center;gap:16px;flex-wrap:wrap;font-size:13px;color:var(--ink-3)}
+.hfoot button,.hfoot a{border:0;background:none;padding:0;color:var(--ink-2);text-decoration:none;font-size:13px}
+
+/* ============ DOCS ============ */
+.docs{flex:1;display:flex;flex-direction:column;min-height:0}
+.dtop{flex:none;height:56px;display:flex;align-items:center;gap:14px;padding:0 18px;border-bottom:1px solid var(--line)}
+.dtop .brand{padding:0}
+.dtop .brand b{font-size:18px;flex:none}
+.dtop .sep{color:var(--ink-3);font-size:14px}
+.dsearch{display:flex;align-items:center;gap:8px;width:min(300px,36vw);height:34px;padding:0 10px;border:0;border-radius:9px;box-shadow:inset 0 0 0 1px var(--line-2);background:var(--card);color:var(--ink-3);font-size:13.5px;text-align:left}
+@media (max-width:640px){.dsearch span,.dsearch kbd{display:none}.dsearch{width:auto}}
+.dbody{flex:1;min-height:0;display:flex;position:relative}
+.dnav{width:250px;flex:none;overflow-y:auto;padding:18px 12px;border-right:1px solid var(--line)}
+.dnav .label{display:block;padding:14px 10px 6px}
+.dnav button{display:block;width:100%;border:0;background:none;text-align:left;padding:6px 10px;border-radius:8px;color:var(--ink-2);font-size:14px}
+.dnav button:hover{background:var(--hover);color:var(--ink)}
+.dnav button.on{background:var(--sunk);color:var(--ink);font-weight:500}
+@media (max-width:860px){.dnav{position:absolute;left:0;top:0;bottom:0;z-index:8;background:var(--paper);transform:translateX(-105%);transition:transform .2s;box-shadow:var(--shadow-lg)}.dnav.open{transform:none}}
+.dmain{flex:1;min-width:0;overflow-y:auto}
+.dpage{max-width:740px;padding:36px 44px 60px}
+@media (max-width:640px){.dpage{padding:24px 18px 48px}}
+.dpage .grp{font-size:12.5px;color:var(--accent);font-weight:500;margin-bottom:6px}
+.dpage h1{margin:0 0 8px;font-family:var(--f-read);font-weight:500;font-size:clamp(30px,4vw,40px);letter-spacing:-.02em}
+.dpage .sum{margin:0 0 28px;font-size:17.5px;color:var(--ink-2)}
+.dcontent{font-family:var(--f-ui);font-size:15.5px;line-height:1.7}
+.dcontent h2{font-family:var(--f-read);font-weight:600;font-size:21px;margin:36px 0 10px;scroll-margin-top:16px}
+.dtoc{width:210px;flex:none;overflow-y:auto;padding:36px 16px;display:flex;flex-direction:column;gap:2px;font-size:13px}
+.dtoc button{border:0;background:none;text-align:left;color:var(--ink-3);padding:4px 0 4px 10px;border-left:1px solid var(--line-2)}
+.dtoc button:hover{color:var(--ink);border-left-color:var(--accent)}
+@media (max-width:1180px){.dtoc{display:none}}
+.cg{border-radius:12px;overflow:hidden;margin:14px 0 20px;background:var(--sunk)}
+.cg pre{margin:0;background:transparent;border-radius:0;padding:12px 16px;font-size:13px;line-height:1.6}
+.cgh{display:flex;align-items:center;gap:4px;padding:4px 6px 4px 10px;border-bottom:1px solid var(--line)}
+.cgh .tabs{display:flex;gap:2px;flex:1;min-width:0;overflow-x:auto}
+.cgh .tabs button{border:0;background:none;color:var(--ink-3);font-size:12.5px;padding:4px 9px;border-radius:6px;white-space:nowrap}
+.cgh .tabs button[aria-selected="true"]{color:var(--ink);background:var(--card)}
+.cgh .lang{font-family:var(--f-mono);font-size:11.5px;color:var(--ink-3)}
+.callout{margin:16px 0;padding:12px 16px;border-radius:12px;font-size:14.5px;background:var(--card);box-shadow:inset 3px 0 0 var(--accent),inset 0 0 0 1px var(--line)}
+.callout.warning{box-shadow:inset 3px 0 0 var(--warn),inset 0 0 0 1px var(--line)}
+.callout.tip{box-shadow:inset 3px 0 0 var(--t3),inset 0 0 0 1px var(--line)}
+.callout p{margin:0}
+.callout .ch{font-weight:600;font-size:12.5px;margin-bottom:2px;display:flex;gap:6px;align-items:center}
+.dpn{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:44px}
+.dpn button{border:0;box-shadow:inset 0 0 0 1px var(--line-2);background:none;border-radius:12px;padding:12px 14px;text-align:left;display:flex;flex-direction:column;gap:2px}
+.dpn button:hover{box-shadow:inset 0 0 0 1px var(--accent)}
+.dpn button span{font-size:12px;color:var(--ink-3)}
+.dpn .r{text-align:right;align-items:flex-end}
+.res{display:flex;flex-direction:column}
+.res button{border:0;background:none;text-align:left;padding:10px;border-radius:10px;display:flex;flex-direction:column;gap:2px}
+.res button:hover{background:var(--hover)}
+.res span{font-size:12.5px;color:var(--ink-3)}
+.hljs-keyword,.hljs-built_in{color:var(--t1)}.hljs-string{color:var(--t3)}.hljs-comment{color:var(--ink-3);font-style:italic}.hljs-number,.hljs-literal{color:var(--warn)}.hljs-title,.hljs-attr,.hljs-property{color:var(--t2)}
+
+/* ============ SYSTEM ============ */
+.sys{max-width:980px;margin:0 auto;padding:48px 24px 80px;display:flex;flex-direction:column;gap:56px}
+.sys h1{margin:0 0 8px;font-family:var(--f-read);font-weight:400;font-size:clamp(34px,5vw,52px);letter-spacing:-.025em}
+.sys h2{margin:0 0 18px;font-family:var(--f-read);font-weight:500;font-size:24px}
+.sys .lead{margin:0;font-size:17px;color:var(--ink-2);max-width:48ch}
+.princ{display:grid;grid-template-columns:repeat(3,1fr);gap:28px}
+@media (max-width:760px){.princ{grid-template-columns:1fr}}
+.princ b{display:block;font-size:15px;margin-bottom:4px}
+.princ p{margin:0;color:var(--ink-2)}
+.sw{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+.swc{border-radius:12px;overflow:hidden;box-shadow:inset 0 0 0 1px var(--line);background:var(--card)}
+.swc i{display:block;height:64px;box-shadow:inset 0 -1px 0 var(--line)}
+.swc div{padding:8px 10px;font-size:12.5px}
+.swc code{display:block;font-family:var(--f-mono);font-size:11px;color:var(--ink-3)}
+.rampbar{height:14px;border-radius:99px;background:var(--ramp-x);margin-bottom:10px}
+.types{display:flex;flex-direction:column;gap:18px}
+.types > div{display:grid;grid-template-columns:130px 1fr;gap:16px;align-items:baseline;padding-bottom:18px;border-bottom:1px solid var(--line)}
+@media (max-width:620px){.types > div{grid-template-columns:1fr;gap:4px}}
+.comp{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+.comp > div{background:var(--card);border-radius:16px;box-shadow:inset 0 0 0 1px var(--line);padding:18px;display:flex;flex-direction:column;gap:12px}
+.comp .cap{font-size:12px;color:var(--ink-3)}
+.tokens{position:relative}
+.tokens pre{margin:0;background:var(--sunk);border-radius:14px;padding:18px;font-family:var(--f-mono);font-size:12.5px;line-height:1.6;overflow-x:auto;max-height:380px}
+.tokens .ib{position:absolute;top:10px;right:10px;background:var(--card)}
+</style>
+<script type="text/plain" id="ans-pg">For a CLI tool's local storage, **SQLite** is the better default. Postgres only earns its place once several machines need to read and write the same data.
+
+| | SQLite | Postgres |
+|---|---|---|
+| Setup | None: one file next to the app | A running server |
+| Concurrency | One writer at a time (WAL helps a lot) | Many concurrent writers |
+| Distribution | Ships inside the package | Separate install or container |
+| Backups | Copy the file | `pg_dump` or replication |
+| Best for | Per-user state, history, caches | Shared, multi-user data |
+
+**Recommendation:** use SQLite with WAL mode (`PRAGMA journal_mode = WAL`) through `better-sqlite3` for fast synchronous access. Keep storage behind a small interface so a Postgres adapter can slot in if you add hosted sync later.</script>
+<script type="text/plain" id="ans-pg-v1">Use **SQLite**. It needs no server, stores everything in one file, and handles a single user's history and settings comfortably. Reach for Postgres only if several machines must share the data.</script>
+<script type="text/plain" id="ans-report">The report is ready. Four sections ran in parallel under their own managers, the reviewer sent one section back for sources, and T1 compiled the result.
+
+## Summary
+- **Claude Code** goes deepest on agentic editing and permission controls. It is a single agent on one vendor's models.
+- **Gemini CLI** has the most generous free tier and a very long context window. Also a single agent.
+- **Copilot CLI** wins on GitHub integration (issues, PRs, Actions) for teams already on a Copilot plan.
+- **Cascade** is the only one that delegates across tiers and routes each step to a different provider, which is where its cost advantage comes from.
+
+## Where Cascade should lean in
+1. Show per-run savings next to every answer. None of the three shows cost at all.
+2. Ship the VS Code extension. All three rivals have an editor surface.
+3. Lead with bring-your-own-keys for teams already paying two vendors.
+
+The full report, with the feature matrix and a sourced pricing table, is attached.</script>
+<script type="text/plain" id="think-report">The ask has four independent parts (one per product plus positioning), so this is Complex: plan four sections, one T2 manager each, and let their workers run in parallel.
+
+Pricing needs live sources, so that section gets web_search. The final output must be a real .docx, so the compile step calls generate_document instead of writing text under a .docx name.
+
+The attached positioning note says to stress bring-your-own-keys; carry that into the recommendations.</script>
+<script type="text/plain" id="doc-report"># AI coding CLIs: competitive report
+
+*Prepared by Cascade · 4 sections · compiled by T1*
+
+## 1. Feature matrix
+
+| Capability | Claude Code | Gemini CLI | Copilot CLI | Cascade |
+|---|---|---|---|---|
+| Multi-agent delegation | Sub-agents | No | No | T1 → T2 → T3 |
+| Multi-provider routing | No | No | Limited | Yes, per step |
+| Cost shown per run | No | No | No | Yes, with savings |
+| MCP servers | Yes | Yes | Yes | Yes, with OAuth |
+| Editor extension | Yes | Yes | Yes | Planned |
+| Local models | No | No | No | Ollama, LM Studio |
+
+## 2. Positioning
+Cascade sells *orchestration*: one prompt becomes an organization of agents, and every run shows what the hierarchy saved against running everything on a frontier model.
+
+## 3. Pricing (sourced)
+All three rivals bundle usage into a subscription or a free tier. Cascade is free and uses the customer's own keys, so it competes on total spend rather than list price.
+
+## 4. Recommendations
+1. Put the savings receipt on the landing page.
+2. Ship the VS Code extension this quarter.
+3. Target teams with keys for two or more providers.</script>
+<script type="text/plain" id="ans-hi">Hi! What should we work on? I can split bigger jobs across a team of agents, search the web, read files you attach, drive a browser, and hand back real Word, Excel, PowerPoint or PDF files.</script>
+<script type="text/plain" id="ans-offsite">Here's a two-day plan built around your answers.
+
+## Day 1
+- **Morning:** arrive and check in, then a short kickoff on the quarter's goals.
+- **Afternoon:** two 90-minute working sessions with a break outside.
+- **Evening:** a group dinner, booked for everyone in one place.
+
+## Day 2
+- **Morning:** a team activity that doesn't need special kit.
+- **Afternoon:** retro and a written list of decisions, then travel home.
+
+**Next steps:** confirm the headcount, then I can compare three venues and build a budget sheet you can download as Excel.</script>
+<script type="text/plain" id="ans-browser">I checked the pricing page live in the browser (annual billing selected):
+
+| Plan | Price | Includes |
+|---|---|---|
+| Starter | $0 | 3 projects, community support |
+| Team | $24 per seat / month | Unlimited projects, SSO |
+| Enterprise | Custom | Audit log, dedicated support |
+
+Annual billing takes about 20% off the Team plan compared with monthly. Want me to save this as a spreadsheet?</script>
+<script type="text/plain" id="ans-escalate">Summary of **acme-org**, based on your decision:
+
+| Repository | Visibility | Last push | Summary |
+|---|---|---|---|
+| web-app | Public | 2 days ago | Next.js front end for the customer dashboard |
+| api | Public | today | Express API; 3 open PRs waiting on review |
+| infra | Public | last week | Terraform for staging and production |
+| docs | Public | 5 days ago | Docs site, deployed from the main branch |
+
+The private repositories were handled the way you chose in the decision dialog.</script>
+<script type="text/plain" id="ans-generic">**Preview.** This page doesn't call a model. Cascade would handle "{{p}}" as {{c}}, for about ${{cost}}, {{pct}}% less than running every step on T1.
+
+Try a suggestion on the new-chat screen to see planning, a question, the browser, or an escalation.</script>
+<script type="text/plain" id="dp-what" data-group="Get started" data-tab="guides" data-kind="Article" data-title="What is Cascade" data-summary="A multi-tier AI orchestrator that turns one prompt into an organization of agents.">
+Cascade is a multi-tier AI orchestrator. Instead of sending every request to one expensive model, it routes work across three tiers:
+
+- **Tier 1: Administrator** plans the task and delegates.
+- **Tier 2: Supervisor** breaks work down and coordinates.
+- **Tier 3: Worker** does the actual generation.
+
+Simple asks are answered directly; complex ones fan out across the tiers. You bring your own provider API keys, so you pay providers directly and your data stays yours.
+
+## Where you can use it
+
+| Surface | What it is |
+|---|---|
+| **Web app** | Hosted chat at cascadeai.in with files, memory, generated documents and browser control. Bring your own keys. |
+| **Desktop app** | Chat, a live Cockpit of the agent tree, a code editor with a terminal, and a browser the agent can drive. |
+| **CLI** | Interactive REPL and one-shot runs in your terminal. |
+| **Self-host** | The web app on your own machine with `docker compose up`. |
+| **OpenAI-compatible API** | `POST /v1/chat/completions` for any OpenAI SDK. |
+| **SDK** | `runCascade()` and `createCascade()` from Node. |
+
+The CLI, desktop app and web app share one account. Settings can follow you between them through opt-in, end-to-end encrypted sync.
+
+## What makes it different
+
+- **Delegation savings.** Every run shows what the hierarchy saved against running everything on T1, for example `saved $5.63 · 90% vs. all-T1`.
+- **Live benchmark Auto-routing.** Set a tier to Auto and Cascade weighs public benchmark scores against live pricing to pick the best-value model for each task.
+- **Asks instead of guessing.** When a request is genuinely ambiguous, Cascade asks one structured question instead of inventing an answer.
+- **Safe by default.** Permission escalation (T3 → T2 → T1 → you), an SSRF-guarded fetch, and a budget kill-switch.
+
+> **Tip** New here? Start with the [Quick start](#dp-quickstart).
+</script>
+<script type="text/plain" id="dp-quickstart" data-group="Get started" data-tab="guides" data-kind="Article" data-title="Quick start" data-summary="Send your first orchestrated prompt in the web app or the CLI.">
+## In the web app
+
+1. Sign in at cascadeai.in with GitHub or Google.
+2. Open **Settings → API keys** and add a key for at least one provider: OpenAI, Anthropic, Google, Azure, or any OpenAI-compatible endpoint.
+3. Type a request in the composer and send it. Cascade picks the tiers and the models.
+4. Watch the run. Each answer shows which tier and model handled it, and **/why** explains the routing and what it saved against running everything on the top model.
+
+## In the terminal
+
+```bash
+# 1. Install (Node.js 22 or newer)
+npm install -g cascade-ai
+
+# 2. Initialize a project
+cd my-project
+cascade init
+
+# 3. Set at least one key (or add it to .env)
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# 4. Check everything is working
+cascade doctor
+
+# 5. Start the REPL, or run one prompt
+cascade
+cascade run "explain the auth module in this repo"
+```
+
+> **Note** Already use Claude Code, Codex, Gemini CLI or Copilot CLI? `cascade link` lists API keys it can reuse from them. Subscription logins are detected but never adopted.
+</script>
+<script type="text/plain" id="dp-install" data-group="Get started" data-tab="guides" data-kind="Article" data-title="Install & surfaces" data-summary="Get the desktop app, the CLI, or run the web app yourself.">
+## Desktop app
+
+Download it from cascadeai.in/download. The site detects your platform and architecture and shows the size and version. Stable links never go stale:
+
+| Platform | Build |
+|---|---|
+| macOS | Apple silicon (`mac-arm64`) or Intel (`mac-x64`) |
+| Windows | `win-x64` |
+| Linux | AppImage, `.deb`, `.rpm` or pacman |
+
+The desktop app is free.
+
+## CLI
+
+```bash
+npm install -g cascade-ai
+cascade --version
+```
+
+Requires Node.js 22 or newer. Shell completions ship for Bash, Zsh and Fish.
+
+## Web app
+
+Nothing to install. Sign in at cascadeai.in; the same account works in the desktop app and the CLI (`cascade login`).
+
+> **Tip** To run the web app on your own machine, see [Self-host](#dp-selfhost).
+</script>
+<script type="text/plain" id="dp-tiers" data-group="Concepts" data-tab="guides" data-kind="Article" data-title="How the tiers route" data-summary="Complexity decides how much of the organization a task gets, and Auto picks the model for each tier.">
+A classifier grades each prompt (cheap heuristics first) and only the tiers the work needs are spun up.
+
+| Complexity | Tiers in play | Shape |
+|---|---|---|
+| Simple | T3 | One worker answers directly. Small talk gets an answer with no worker at all. |
+| Moderate | T2 → T3 | One manager and its workers, no planner. |
+| Complex | T1 → T2 → T3 | T1 plans 3–5 sections, one T2 manager each. |
+| Highly complex | T1 → T2 → T3 | 5 or more sections. |
+
+## Cascade Auto
+
+Every tier can be set to a specific model or to **Cascade Auto**. Auto ranks the models your providers actually serve by a benchmark-quality score against price, so a cheaper model that is good enough wins the cheap work and the strongest model is saved for the hard work. Newly released models are scored by their class until the benchmark table catches up.
+
+Pin a model to a tier and that pin is authoritative; Auto only applies to tiers you leave on Auto. In the web app you can also bias Auto toward **Quality** or **Fast**, and force a single tier for a one-off request.
+
+## Failover
+
+Failover is per failure type: a rate limit backs off, an exhausted quota or a model your key cannot use is routed around, and a recovered provider is used again.
+
+> **Note** Run `/why` in the CLI, or open **/why** under any answer, to see the complexity verdict, the model each tier used, failovers and escalations.
+</script>
+<script type="text/plain" id="dp-providers" data-group="Concepts" data-tab="guides" data-kind="Article" data-title="Providers & API keys" data-summary="Cascade is bring-your-own-key across six providers.">
+Add keys under **Settings → API keys**. Keys are encrypted on your device before they are stored, and account sync moves them between your devices end-to-end encrypted. The server relays ciphertext it cannot read.
+
+## Supported providers
+
+- Anthropic, including gateways reached through `ANTHROPIC_BASE_URL`
+- OpenAI
+- Google Gemini
+- Azure OpenAI, with any number of deployments across resources
+- OpenAI-compatible endpoints: OpenRouter, Groq, DeepSeek, xAI, Mistral, Together, Fireworks, llama.cpp, vLLM, LM Studio
+- Ollama, for local models
+
+Models are discovered from each provider at startup, so new releases compete in routing without a Cascade update.
+
+## Environment variables (CLI)
+
+| Provider | Variable |
+|---|---|
+| Anthropic | `ANTHROPIC_API_KEY`, or a gateway's `ANTHROPIC_AUTH_TOKEN` with its `ANTHROPIC_BASE_URL` |
+| OpenAI | `OPENAI_API_KEY` |
+| Gemini | `GOOGLE_API_KEY` |
+| Azure | `AZURE_OPENAI_KEY` with `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_DEPLOYMENT` |
+
+## Is this endpoint free?
+
+An OpenAI-compatible endpoint is either your own hardware, where inference costs nothing, or somebody's paid API. Set `local` to say which: `true` reports $0; `false` prices calls from the pricing dataset and reports "cost not tracked" for a model it can't price, never $0.00.
+
+> **Warning** Subscription tokens (Claude Free, Pro or Max; ChatGPT login; Gemini CLI; Copilot CLI) are detected but never adopted. They are locked to their vendor's own backend.
+</script>
+<script type="text/plain" id="dp-files" data-group="Concepts" data-tab="guides" data-kind="Article" data-title="Files & document exports" data-summary="Ask for a file and get a real PDF, Word, Excel or PowerPoint document.">
+A run streams text, so the model writes the source and your browser renders the real binary on download. Nothing is rendered on a server and your content never leaves the client.
+
+| Ask for | Written as | You get |
+|---|---|---|
+| PDF | Markdown | A `.pdf` with selectable text |
+| Word | Markdown | A `.docx` with headings, lists, tables, code and quotes |
+| Excel | CSV | A real `.xlsx` workbook |
+| PowerPoint | A Markdown deck | A `.pptx`, slides split on `---`, each led by a heading |
+
+Every generated file can be **viewed**, **downloaded** for free, or **saved** to your Cascade storage, which is metered by plan. Plain code, CSV, JSON and Markdown files work the same way.
+
+In the CLI and desktop app, the `generate_document` tool writes the same formats to disk and can embed generated images and turn a `chart:bar` block into an editable PowerPoint chart.
+</script>
+<script type="text/plain" id="dp-privacy" data-group="Concepts" data-tab="guides" data-kind="Article" data-title="Privacy & security" data-summary="Your keys stay yours, and every run is contained.">
+Your provider keys are encrypted on-device, synced end-to-end, and used to call providers directly. Document rendering happens entirely in your browser. You can delete any chat or file at any time, and clear everything from Settings.
+
+## What keeps a run contained
+
+- **Permission escalation.** A worker that needs more than it was given asks up the chain: T3 → T2 → T1 → you.
+- **SSRF-guarded fetching.** `web_fetch` and hosted search cannot reach private or link-local addresses, checked again at connect time.
+- **Secret redaction.** Secrets and PII are stripped from a worker's output before it travels up the hierarchy.
+- **Privacy paths.** `privacy.paths` forces local models for sensitive folders named in a worker's assignment.
+- **Hash-chained audit log.** `/audit` checks the chain for edited or removed entries.
+- **Budget kill-switch.** A run stops at its token budget; `/continue` resumes it with a raised one.
+
+## Where the CLI stores keys
+
+Keys you add are written to `~/.cascade-ai/credentials.json` (mode `0600`) and the workspace's `.cascade/config.json`. Keep `.cascade/` out of version control.
+
+> **Warning** Agent-written tools are confined only when the optional `isolated-vm` addon is installed. Set `"enableToolCreation": false` if that matters to you.
+</script>
+<script type="text/plain" id="dp-chat" data-group="Using the app" data-tab="guides" data-kind="Article" data-title="Chatting with Cascade" data-summary="Everything the composer and the run view can do.">
+## The composer
+
+- **Attach** up to six images (PNG, JPEG, GIF, WebP) or documents (PDF, Word, text, Markdown, CSV, JSON, YAML, HTML). Drag files in or paste them.
+- **Skill** picks a persona for the chat. See [Skills & Memory](#dp-skills).
+- **Routing**: **Auto** balances cost and quality, **Quality** leans toward stronger models, **Fast** toward cheaper ones.
+- **Tier** pins one message to T1, T2 or T3.
+- **Web** allows web search and fetch for the run. **Browser** lets the agent drive a real browser instead.
+- **Fast answer** (the lightning button) sends to one quick model and skips orchestration.
+
+## While a run works
+
+The status line opens **Run activity**: the live tree of the administrator, managers and workers, the model each uses and its progress. In the Advanced view you also see the plan: sections, manager and worker counts, and the estimated cost. If a review finds gaps, a **Review** card explains them and the section is replanned; you can **Skip and keep**.
+
+## When Cascade needs you
+
+- **A question.** An ambiguous request gets one structured question with a two-minute timer. Answer it, or choose **Skip, decide for me**.
+- **A tool approval.** Dangerous tools show their exact arguments. Choose **Allow once**, **Allow for this run**, or **Deny**.
+- **An escalation.** A section that needs a decision pauses the run. Retry, skip it, or send guidance.
+- **The browser.** Watch it live, **Take over** to drive it yourself, **Hand back**, or **Stop browser** without stopping the run.
+
+## Every answer
+
+Copy, rate with thumbs up or down (it teaches Auto-routing), regenerate, or delete. Edit your own message to start a new **branch**; the ‹ 1/2 › arrows switch versions. **/why** shows the routing decisions, the cost per tier and what delegation saved.
+</script>
+<script type="text/plain" id="dp-skills" data-group="Using the app" data-tab="guides" data-kind="Article" data-title="Skills & Memory" data-summary="Reusable personas, and facts Cascade remembers across chats.">
+## Skills
+
+Skills are reusable personas Cascade adopts for a chat. Five are built in: General assistant, Code reviewer, Research analyst, Writing editor and Brainstorm partner. Create your own under **Settings → Skills** with a name, a short description and instructions (the system prompt the skill follows).
+
+## Memory
+
+Memory holds facts Cascade remembers across chats. Each one is either:
+
+- **Always true**: holds until you change it, or
+- **Current context**: expected to change; what you say now wins if it conflicts.
+
+Turn on **Settings → Privacy → Remember chats in Memory** to let Cascade distill durable facts after a chat. It's off by default, and you can search, edit and delete every memory.
+
+> **Tip** Moving from another assistant? **Import chats or memories** takes a JSON export with `sessions` and `memories`.
+</script>
+<script type="text/plain" id="dp-connectors" data-group="Using the app" data-tab="guides" data-kind="Article" data-title="Connectors & MCP" data-summary="Connect apps and any Model Context Protocol server.">
+Connect an app or any **MCP server** under **Settings → Connectors & MCP**. Enabled connections are available to every chat, and you choose which of each server's tools can be used.
+
+Built-in connectors: GitHub, Notion, Linear, Sentry, Jira & Confluence, Stripe, Cloudflare Docs, Slack and Google. Or point at any remote (https) MCP endpoint.
+
+Connecting can run a real **OAuth** sign-in, with PKCE and dynamic client registration handled by the MCP SDK. Servers that don't support OAuth accept a pasted token instead.
+
+## In the CLI
+
+```bash
+cascade mcp connect https://mcp.example.com/sse   # OAuth login in your browser
+cascade mcp list
+cascade mcp remove <name>
+```
+
+Local (stdio) servers go in `.cascade/config.json` under `tools.mcpServers`. List each one in `tools.mcpTrusted` too; an untrusted server is refused before it starts.
+</script>
+<script type="text/plain" id="dp-sync" data-group="Using the app" data-tab="guides" data-kind="Article" data-title="Sync & continue elsewhere" data-summary="Move keys, settings and chats between web, desktop and CLI.">
+## Key sync
+
+Provider keys, web-search keys, MCP tokens and preferences can follow your account across web, desktop and CLI. The bundle is encrypted on the device with AES-256-GCM, using a passphrase only you know. The server stores one encrypted envelope it cannot read.
+
+Sync is manual: **Push** uploads this device's settings, **Pull** applies them. A wrong passphrase is reported as "check your passphrase".
+
+```bash
+cascade login
+cascade sync push
+cascade sync pull
+```
+
+## Continue elsewhere
+
+In a chat, choose **Continue elsewhere** to get a one-time code (it expires in ten minutes). In the other app, open **Continue elsewhere → Bring a chat here** and enter it.
+</script>
+<script type="text/plain" id="dp-cli" data-group="Reference" data-tab="cli" data-kind="Command-line tool" data-title="CLI reference" data-summary="Every cascade command and option.">
+```bash
+cascade [options]                    # Start the interactive REPL
+cascade run <prompt>                 # Run a single prompt and exit
+cascade init [path]                  # Initialize Cascade in a directory
+cascade doctor                       # Diagnose API keys, Ollama, config
+cascade link [provider]              # Reuse credentials from other AI CLIs
+cascade models [action] [tier] [v]   # List or set a tier's model
+cascade stats                        # What Auto-routing has learned
+cascade index [path]                 # Build the code index for code_search
+cascade export                       # Export a session to Markdown or JSON
+cascade identity list|create|set-default
+cascade mcp connect <url>|list|remove
+cascade dashboard                    # Launch the local web dashboard
+cascade telemetry [on|off|status]
+cascade update
+```
+
+## Account commands
+
+| Command | Does |
+|---|---|
+| `cascade login` · `logout` · `whoami` | Sign in to your Cascade account on this machine |
+| `cascade sync push` · `pull` | Encrypt and upload, or download, your settings |
+| `cascade sessions` | List your cloud chats |
+| `cascade sessions show <id>` | Print a chat with branch markers |
+| `cascade sessions branch <chat> <message>` | Switch a chat to another branch |
+| `cascade sessions rename <chat> <title>` | Rename a chat |
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `-p, --prompt <text>` | Single prompt, non-interactive |
+| `-t, --theme <name>` | Color theme |
+| `-w, --workspace <path>` | Workspace path (default: current directory) |
+| `-i, --identity <name>` | Identity to run as |
+| `--alt-screen` | Vim-style alternate screen, flicker-proof |
+| `--no-color` | Disable colors |
+</script>
+<script type="text/plain" id="dp-slash" data-group="Reference" data-tab="cli" data-kind="Command-line tool" data-title="Slash commands" data-summary="Commands you type inside the REPL.">
+| Command | Description |
+|---|---|
+| `/help` · `/exit` · `/clear` | Commands, exit, clear the conversation |
+| `/sessions` · `/resume <id>` · `/search` | List, resume and search past sessions |
+| `/branch` | Fork the session into parallel branches |
+| `/compact` | Summarize and compress context now |
+| `/export [markdown\|json]` · `/copy [n]` | Export the session; copy a response |
+| `/retry` · `/rollback` | Retry the last prompt; undo this session's file changes |
+| `/plan <prompt>` | Preview the plan without running it |
+| `/replan [guidance]` | One corrective re-plan of the last task |
+| `/steer <correction>` | Steer the workers of a running task |
+| `/auto [on\|off\|status]` | Autonomous mode: safe tools run silently, dangerous ones still ask |
+| `/continue [tokens]` | Resume a task that hit its token budget |
+| `/budget [set <$> \| clear]` | Session budget cap |
+| `/status` · `/tree` | Live agent tree; execution timeline |
+| `/comms` | Live agent-to-agent comms feed |
+| `/why` | How the last run was routed |
+| `/cost` | Session cost, tokens and delegation savings |
+| `/model` · `/models` · `/providers` | Pick a model per tier; list models and providers |
+| `/rate good\|bad` | Rate the last task to improve Auto-routing |
+| `/theme <name>` | midnight, aurora, daybreak, bloom, tide or ember |
+</script>
+<script type="text/plain" id="dp-config" data-group="Reference" data-tab="cli" data-kind="Command-line tool" data-title="Configuration" data-summary="The .cascade/config.json file.">
+Cascade loads config from `.cascade/config.json` in your project. The file is strict JSON, no comments.
+
+> **Tip** Prefer `/model` in the REPL: a three-step picker (provider → tier → model) that writes the file and hot-swaps the router without a restart.
+
+```json
+{
+  "version": "1.0",
+  "providers": [
+    { "type": "anthropic", "apiKey": "sk-ant-..." },
+    { "type": "openai", "apiKey": "sk-..." },
+    { "type": "ollama" }
+  ],
+  "models": { "t3": "llama3.2:3b" },
+  "autoBias": "balanced",
+  "tools": {
+    "shellBlocklist": ["sudo rm", "rm -rf", "mkfs"],
+    "requireApprovalFor": ["shell", "file_write", "file_delete"],
+    "mcpTrusted": ["filesystem"]
+  },
+  "theme": "midnight",
+  "planApproval": "never"
+}
+```
+
+## Keys worth knowing
+
+| Key | Effect |
+|---|---|
+| `models` | Pins a tier to a model; a tier left out stays on Auto |
+| `autoBias` | `"balanced"`, `"quality"` or `"cost"` |
+| `planApproval` | `"always"` pauses Complex runs so you can approve T1's plan first |
+| `codeIndex.enabled` | Turns on `code_search`; build it with `cascade index` |
+| `altScreen` | Render the TUI in the alternate screen buffer |
+
+## Project files
+
+- `CASCADE.md` gives agents project-specific instructions; `cascade init` writes a template.
+- `.cascadeignore` lists files agents cannot touch, in `.gitignore` syntax. `.env`, keys and Cascade's own database are always protected.
+</script>
+<script type="text/plain" id="dp-api" data-group="API & SDK" data-tab="api" data-kind="API" data-title="OpenAI-compatible API" data-summary="Call Cascade from any OpenAI SDK.">
+Point your client's `base_url` at the server's `/v1` and use a Cascade access token as the API key. `POST /v1/chat/completions` and `GET /v1/models` work with the official SDKs, streaming and not.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(api_key=CASCADE_ACCESS_TOKEN, base_url="https://cascadeai.in/v1")
+
+reply = client.chat.completions.create(
+    model="cascade",
+    messages=[{"role": "user", "content": "Compare Postgres and SQLite for a CLI tool."}],
+)
+print(reply.choices[0].message.content)
+print(reply.cascade)   # which tier and model served it, and what routing saved
+```
+```js
+import OpenAI from "openai";
+
+const client = new OpenAI({ apiKey: process.env.CASCADE_ACCESS_TOKEN, baseURL: "https://cascadeai.in/v1" });
+
+const reply = await client.chat.completions.create({
+  model: "cascade",
+  messages: [{ role: "user", content: "Compare Postgres and SQLite for a CLI tool." }],
+});
+console.log(reply.choices[0].message.content);
+```
+```bash
+curl https://cascadeai.in/v1/chat/completions \
+  -H "Authorization: Bearer $CASCADE_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"cascade","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+## Models are routing modes
+
+Cascade picks a model per subtask, so `model` selects a **routing mode**:
+
+| `model` | What runs |
+|---|---|
+| `cascade` | Full orchestration, balanced quality against cost |
+| `cascade-fast` | One mid-tier model, no orchestration |
+| `cascade-quality` | Full orchestration, biased to quality |
+
+Anything else returns `404 model_not_found`. Each reply carries the usual `usage` block plus a `cascade` object naming the tier and model that actually served it.
+
+> **Warning** Unsupported parameters (`n > 1`, `logprobs`, `tools`, `response_format`) are rejected, not ignored. `temperature` and `max_tokens` are honoured across tiers.
+</script>
+<script type="text/plain" id="dp-sdk" data-group="API & SDK" data-tab="api" data-kind="API" data-title="SDK" data-summary="Run Cascade from Node with runCascade, streamCascade and createCascade.">
+```ts
+import { runCascade, createCascade, streamCascade } from 'cascade-ai';
+
+// Simple run
+const result = await runCascade('Write a Fibonacci function in TypeScript');
+console.log(result.output);
+
+// Streaming
+await streamCascade('Explain this codebase', (token) => process.stdout.write(token));
+
+// Full control
+const cascade = createCascade({
+  providers: [{ type: 'anthropic', apiKey: process.env.ANTHROPIC_API_KEY }],
+});
+await cascade.init();
+await cascade.run({
+  prompt: 'Refactor the auth module',
+  workspacePath: '/my/project',
+  approvalCallback: async (req) => true,
+  streamCallback: (chunk) => process.stdout.write(chunk.text),
+});
+```
+
+## Cancellation
+
+Pass an `AbortSignal` to stop a run. Every tier halts at the next safe checkpoint, before its next model call, and `run()` resolves with the partial output instead of rejecting.
+
+```ts
+const controller = new AbortController();
+cascade.on('run:cancelled', ({ taskId, reason, partialOutput }) => { /* … */ });
+const run = cascade.run({ prompt: 'Perform a deep codebase audit', signal: controller.signal });
+setTimeout(() => controller.abort('User requested stop'), 10_000);
+const result = await run;
+```
+
+## MCP from code
+
+```ts
+import { McpClient } from 'cascade-ai';
+
+const mcp = new McpClient();
+await mcp.connect({ name: 'filesystem', command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'] });
+```
+</script>
+<script type="text/plain" id="dp-selfhost" data-group="API & SDK" data-tab="api" data-kind="Article" data-title="Self-host" data-summary="Run the web app, API and socket on one port with Docker.">
+```bash
+cp .env.example .env
+echo "SESSION_SECRET=$(openssl rand -base64 32)" >> .env
+echo "CLOUD_DEV_BYPASS=1" >> .env    # local-only sign-in
+docker compose up                    # → http://localhost:8787
+```
+
+`docker compose up` builds the image, serves the web UI from the server, and keeps the SQLite database and uploads in a named volume so a restart doesn't wipe them. `.env.example` documents every variable the server reads.
+
+> **Warning** `CLOUD_DEV_BYPASS` is an authentication bypass: anyone who can reach the port can sign in as anyone. That's why `docker-compose.yml` publishes to `127.0.0.1` only. Before exposing the server, set `GITHUB_CLIENT_ID` or `GOOGLE_CLIENT_ID` for real OAuth, remove the bypass, and only then change the port binding.
+
+## Provider keys on a self-host
+
+On a single-account instance the OpenAI-compatible endpoint uses the keys in your `.env`. The moment a second account exists this stops automatically, so the operator's key never pays for someone else's runs.
+</script>
+<div class="strip" id="strip"></div>
+<main class="stage">
+  <section class="view scrollview" id="home" hidden></section>
+  <section class="view" id="app"></section>
+  <section class="view" id="docs" hidden></section>
+  <section class="view scrollview" id="system" hidden></section>
+</main>
+<div id="menuroot"></div>
+<div id="modalroot"></div>
+<div id="toastroot"></div>
+<input type="file" id="fileinput" multiple hidden accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,.docx,.txt,.md,.csv,.tsv,.json,.xml,.html,.yaml,.yml">
+<input type="file" id="importinput" hidden accept="application/json,.json">
+<script>
+/* ================= BASICS ================= */
+const $=(s,r=document)=>r.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let _u=0; const nid=p=>(p||'n')+(++_u).toString(36)+Math.random().toString(36).slice(2,5);
+const txt=id=>{ const el=document.getElementById(id); return el?el.textContent.trim():''; };
+const store={get(k,d){ try{ const v=localStorage.getItem(k); return v==null?d:v; }catch(e){ return d; } },set(k,v){ try{ localStorage.setItem(k,v); }catch(e){} }};
+const wide=px=>window.innerWidth>px;
+const money=v=>v<0.01?v.toFixed(4):v.toFixed(2);
+const compactN=n=>n>=1000?(n/1000).toFixed(n>=10000?0:1)+'k':String(n);
+const greet=()=>{ const h=new Date().getHours(); return h<12?'Good morning':h<18?'Good afternoon':'Good evening'; };
+const I=(n,c='')=>`<i class="ic ${c}" data-lucide="${n}" aria-hidden="true"></i>`;
+function paint(){ if(window.lucide){ try{ lucide.createIcons({attrs:{'stroke-width':1.7}}); }catch(e){} } }
+const MARK=(s=20,busy=false)=>`<svg class="mark${busy?' busy':''}" width="${s}" height="${s}" viewBox="0 0 24 24" aria-hidden="true"><path class="a1" d="M3.5 7.5 Q12 14.5 20.5 7.5"/><path class="a2" d="M6.25 12.5 Q12 17.75 17.75 12.5"/><path class="a3" d="M9 17.5 Q12 20.5 15 17.5"/></svg>`;
+function md(s){ let h; try{ h=window.marked?marked.parse(s,{gfm:true}):'<p>'+esc(s).replace(/\n/g,'<br>')+'</p>'; }catch(e){ h='<p>'+esc(s)+'</p>'; } return h.replace(/<table>/g,'<div class="tbl"><table>').replace(/<\/table>/g,'</table></div>'); }
+function toast(m){ const r=$('#toastroot'); r.innerHTML=`<div class="toast" role="status">${esc(m)}</div>`; clearTimeout(toast.t); toast.t=setTimeout(()=>r.innerHTML='',2600); }
+function copy(t,ok='Copied'){ try{ navigator.clipboard.writeText(t).then(()=>toast(ok),()=>toast('Copy was blocked here. Select the text instead.')); }catch(e){ toast('Copy was blocked here. Select the text instead.'); } }
+const hostTheme=document.documentElement.getAttribute('data-theme');
+
+/* ================= DATA ================= */
+const MODELS={auto:{T1:'claude-sonnet-4.5',T2:'gpt-5.4-mini',T3:'gemini-2.5-flash',m:1},quality:{T1:'gpt-5.5',T2:'claude-sonnet-4.5',T3:'gpt-5.4-mini',m:1.8},fast:{T1:'gpt-5.4-mini',T2:'gemini-2.5-flash',T3:'gemini-2.5-flash-lite',m:.45}};
+const ROUTES=[['auto','Auto','Best value per step'],['quality','Quality','Stronger models'],['fast','Fast','Cheaper, quicker models']];
+const SKILLS=[['general','General assistant','Balanced default'],['code-reviewer','Code reviewer','Bugs, security, clarity'],['research-analyst','Research analyst','Evidence first, with sources'],['writing-editor','Writing editor','Tighter prose, your voice'],['brainstorm','Brainstorm partner','Ideas, pressure-tested']].map(s=>({id:s[0],name:s[1],description:s[2],builtin:true}));
+const CONNECTORS=[['github','GitHub','Repos, issues and PRs',1,['search_repositories','get_file_contents','list_commits','create_issue','create_pull_request']],['notion','Notion','Pages and databases',1,['search','fetch_page','create_page']],['linear','Linear','Issues and projects',1,['list_issues','create_issue']],['sentry','Sentry','Errors and releases',1,['search_issues','get_issue_details']],['atlassian','Jira & Confluence','Tickets and wiki',1,['jira_search','confluence_search']],['stripe','Stripe','Payments and customers',0,['list_customers','list_payments']],['cfdocs','Cloudflare Docs','Public docs search',0,['search_docs']],['slack','Slack','Your Slack MCP endpoint',0,['list_channels','post_message']],['google','Google','Drive, Gmail, Calendar',0,['drive_search','gmail_search']]].map(c=>({id:c[0],name:c[1],d:c[2],oauth:!!c[3],tools:c[4]}));
+const PROVIDERS=[['anthropic','Anthropic'],['openai','OpenAI'],['gemini','Google Gemini'],['azure','Azure OpenAI'],['openai-compatible','OpenAI-compatible']];
+
+const S={
+  view:store.get('cv2-view','app'), theme:'system', side:wide(820), pane:null, menu:null, modal:null, searching:false, q:'',
+  convs:[], active:null, routing:'auto', tier:'auto', web:false, browser:false, fastNext:false, skill:'general', browserUsed:0,
+  custom:[], detail:true, reduce:false,
+  set:{bias:'auto',webDefault:false,extCtx:true,maxTokens:'',costCap:'',memory:true,telemetry:false,onDevice:false},
+  memories:[{id:nid('m'),text:'Prefers TypeScript and concise answers',kind:'permanent'},{id:nid('m'),text:'Building Cascade AI, a multi-tier orchestration CLI',kind:'permanent'},{id:nid('m'),text:'Preparing a competitive analysis this sprint',kind:'volatile'}],
+  connected:{github:{on:true,tools:{search_repositories:true,get_file_contents:true,list_commits:true,create_issue:true,create_pull_request:false}},cfdocs:{on:true,tools:{search_docs:true}}},
+  keys:[{id:nid('k'),label:'Anthropic',mask:'sk-ant-…4f2a'},{id:nid('k'),label:'OpenAI',mask:'sk-…9c1e'},{id:nid('k'),label:'Google Gemini',mask:'AIza…Qx7M'}], keyType:'anthropic', search:'brave',
+  files:[{id:nid('f'),name:'q3-pricing-snapshot.xlsx',size:'14 KB',when:'Yesterday'}],
+  usage:{runs:7,limit:20,plan:'Free'}, mix:{T1:3,T2:5,T3:9},
+  pending:[], draft:'', run:null, clar:null, approvals:[], bv:null, esc:null, open:{}, editing:null, thumbs:{}, saved:{}, stick:true, docPage:'dp-what', docQ:'', docNav:false
+};
+
+/* ================= TREE ================= */
+function newConv(t){ return {id:nid('c'),title:t||null,nodes:{},kids:[],act:0}; }
+function add(c,pid,d){ const n=Object.assign({id:nid('m'),parent:pid,children:[],act:0},d); c.nodes[n.id]=n; const l=pid?c.nodes[pid].children:c.kids; l.push(n.id); if(pid) c.nodes[pid].act=l.length-1; else c.act=l.length-1; return n; }
+function path(c){ const o=[]; let k=c.kids,i=c.act; while(k.length){ const n=c.nodes[k[Math.min(i,k.length-1)]]; if(!n) break; o.push(n); k=n.children; i=n.act; } return o; }
+const sibs=(c,n)=>n.parent?c.nodes[n.parent].children:c.kids;
+function step(c,n,d){ const l=sibs(c,n), i=l.indexOf(n.id)+d; if(i<0||i>=l.length) return; if(n.parent) c.nodes[n.parent].act=i; else c.act=i; }
+function del(c,id){ const n=c.nodes[id]; if(!n) return; const l=sibs(c,n); l.splice(l.indexOf(id),1); (function rm(x){ c.nodes[x].children.forEach(rm); delete c.nodes[x]; })(id); if(n.parent){ const p=c.nodes[n.parent]; p.act=Math.max(0,Math.min(p.act,l.length-1)); } else c.act=Math.max(0,Math.min(c.act,l.length-1)); }
+const conv=()=>S.convs.find(c=>c.id===S.active);
+const lastA=()=>{ const c=conv(); return c?path(c).filter(n=>n.role==='a'&&!n.streaming).pop():null; };
+const allSkills=()=>SKILLS.concat(S.custom);
+
+function why(tier,detail,mode='auto',extra){ const M=MODELS[mode]; const cost={T1:0.012,T2:0.0022,T3:0.0006}[tier]*M.m; return {saved:cost*3.1,pct:tier==='T1'?45:76,decisions:[['complexity',detail],['model',`${tier} → ${M[tier]}`]].concat(extra||[]),costs:{[tier]:cost},models:{[tier]:M[tier]}}; }
+function reportWhy(mode){ const M=MODELS[mode]; return {saved:0.34*M.m,pct:89,decisions:[['complexity','Complex: 4 sections, web research, a Word file'],['model',`T1 ${M.T1} · T2 ${M.T2} · T3 ${M.T3}`],['failover',`Rate limit on one worker, retried on ${M.T2}`],['review','§3 Pricing sent back once for sources']],costs:{T1:0.021*M.m,T2:0.012*M.m,T3:0.008*M.m},models:{T1:M.T1,T2:M.T2,T3:M.T3}}; }
+const reportPlan=M=>({summary:'3 profiles in parallel, positioning after',t2:4,t3:9,est:0.06*M.m,sections:['Claude Code profile','Gemini CLI profile','Copilot CLI profile','Positioning'] });
+function reportTrace(M){ return [['t1','T1','Compiled · generate_document',null],['s1','T2','Claude Code profile','t1'],['s1w','T3','web_fetch docs.anthropic.com','s1'],['s2','T2','Gemini CLI profile','t1'],['s2w','T3','web_search "Gemini CLI free tier"','s2'],['s3','T2','Pricing, re-run with sources','t1'],['s3w','T3','web_fetch pricing pages','s3'],['s4','T2','Positioning','t1']].map(r=>({id:r[0],role:r[1],label:r[2],parent:r[3],st:'done',model:M[r[1]]})); }
+function seed(){ const A=MODELS.auto;
+  const c1=newConv('Postgres vs SQLite, then a CLI report');
+  const u1=add(c1,null,{role:'u',content:"Compare Postgres and SQLite for a CLI tool's local storage"});
+  add(c1,u1.id,{role:'a',tier:'T2',model:A.T2,content:txt('ans-pg-v1'),cost:0.0009,why:why('T2','Simple, one worker')});
+  const a1=add(c1,u1.id,{role:'a',tier:'T2',model:A.T2,content:txt('ans-pg'),cost:0.0019,trace:[{id:'m',role:'T2',label:'Aggregated 2 subtasks',st:'done',model:A.T2},{id:'w1',role:'T3',parent:'m',label:'Draft the comparison table',st:'done',model:A.T3},{id:'w2',role:'T3',parent:'m',label:'Write the recommendation',st:'done',model:A.T3}],why:why('T2','Moderate: one comparison')});
+  const u2=add(c1,a1.id,{role:'u',content:'Now build a competitor report on AI coding CLIs (Claude Code, Gemini CLI, Copilot CLI) and export it as a Word doc',atts:[{id:nid('a'),kind:'doc',name:'cascade-positioning.md',chars:6400}]});
+  add(c1,u2.id,{role:'a',tier:'T1',model:A.T1,thinking:txt('think-report'),content:txt('ans-report'),cost:0.041,trace:reportTrace(A),plan:reportPlan(A),files:[{id:'f-report',name:'competitor-report.docx',ext:'docx',size:'18 KB',src:'doc-report'}],why:reportWhy('auto')});
+  const mk=(t,p,a,tier,d)=>{ const c=newConv(t); const u=add(c,null,{role:'u',content:p}); add(c,u.id,{role:'a',tier,model:A[tier],content:txt(a),cost:{T1:0.018,T2:0.0031,T3:0.0006}[tier],why:why(tier,d)}); return c; };
+  S.convs=[c1,mk('Team offsite plan','Plan a team offsite','ans-offsite','T2','Asked one question, then Moderate'),mk('Pricing on example.com','Open example.com/pricing and tell me the Team plan price with annual billing','ans-browser','T3','One browser task'),mk('Summarise acme-org','Summarise every repository in our GitHub org','ans-escalate','T1','Complex: listing, then summaries'),mk('Hello','hi','ans-hi','T3','Small talk, answered directly')];
+  S.active=c1.id; }
+
+/* ================= STRIP ================= */
+const VIEWS=[['home','Home'],['app','App'],['docs','Docs'],['system','System']];
+function renderStrip(){ $('#strip').innerHTML=`${MARK(18)}<b>Cascade</b><span class="note">A design direction · replies are scripted</span><span class="grow"></span><div class="seg" role="group" aria-label="Page">${VIEWS.map(v=>`<button type="button" data-view="${v[0]}" aria-pressed="${S.view===v[0]}">${v[1]}</button>`).join('')}</div><button class="ib" type="button" data-act="theme" aria-label="Theme: ${S.theme}" title="Theme: ${S.theme}">${I(S.theme==='dark'?'moon':S.theme==='light'?'sun':'monitor')}</button>`; }
+
+/* ================= APP SHELL ================= */
+function renderApp(){ $('#app').innerHTML=`<aside class="side" id="side" aria-label="Chats"></aside><div class="scrim" id="scrim" data-act="close-side"></div><div class="main" id="main"><header class="head" id="head"></header><div class="scroll" id="scroll"><div id="thread"></div></div><div class="dock"><div id="gates"></div><div class="composer" id="composer"></div><div id="suggest"></div></div></div><aside class="pane" id="pane" hidden></aside>`; renderSide(); renderHead(); renderThread(); renderGates(); renderComposer(); renderPane(); paint(); }
+function convRows(){ const q=S.q.trim().toLowerCase(); const l=S.convs.filter(c=>!q||(c.title||'').toLowerCase().includes(q)); return l.map(c=>`<div class="conv${c.id===S.active?' on':''}"><button class="o trunc" type="button" data-open="${c.id}">${esc(c.title||'New chat')}</button>${S.run&&S.run.cid===c.id?'<span class="run" title="Working"></span>':''}<button class="ib sm del" type="button" data-del="${c.id}" aria-label="Delete chat">${I('trash-2','ic-sm')}</button></div>`).join('')||`<p class="faint" style="padding:6px 10px;margin:0;font-size:13px">${q?'No matches':'No chats yet'}</p>`; }
+function renderSide(){ const s=$('#side'); if(!s) return; s.classList.toggle('closed',!S.side); $('#scrim').classList.toggle('on',S.side&&!wide(820));
+  s.innerHTML=`<div class="brand">${MARK(22)}<b>Cascade</b><button class="ib sm" type="button" data-act="toggle-side" aria-label="Close sidebar">${I('panel-left-close','ic-sm')}</button></div>
+  <button class="nav" type="button" data-act="new">${I('square-pen')} New chat</button>
+  ${S.searching?`<label class="side-search">${I('search','ic-sm')}<span class="sr">Search chats</span><input id="chatq" value="${esc(S.q)}" placeholder="Search chats" autocomplete="off"></label>`:`<button class="nav" type="button" data-act="search">${I('search')} Search</button>`}
+  <button class="nav" type="button" data-act="files">${I('folder')} Files</button>
+  <button class="nav" type="button" data-act="skills">${I('sparkles')} Skills</button>
+  <div class="label">Recents</div><div class="convs" id="convs">${convRows()}</div>
+  <button class="acct" type="button" data-menu="account" aria-haspopup="menu"><span class="av">V</span><span class="grow">Varun<small>${S.usage.plan} · ${S.usage.runs}/${S.usage.limit} runs today</small></span>${I('chevrons-up-down','ic-sm')}</button>`; paint(); }
+function savedTotal(){ const c=conv(); return c?path(c).reduce((a,n)=>a+(n.why?n.why.saved:0),0):0; }
+function renderHead(){ const h=$('#head'); if(!h) return; const c=conv(); const sv=savedTotal();
+  h.innerHTML=`${S.side&&wide(820)?'':`<button class="ib" type="button" data-act="toggle-side" aria-label="Open sidebar">${I('panel-left')}</button>`}<span class="grow"></span>${S.renaming&&c?`<form id="rename" class="row"><input class="field" id="renamein" value="${esc(c.title||'')}" aria-label="Chat title" style="height:32px;width:min(340px,50vw)"><button class="btn sm" type="submit">Save</button></form>`:c?`<button class="titlebtn" type="button" data-menu="title"><span class="trunc">${esc(c.title||'New chat')}</span>${I('chevron-down','ic-sm')}</button>`:''}<span class="grow"></span>${sv>0?`<button class="receipt-chip" type="button" data-act="why-last" title="What delegation saved in this chat">${I('trending-down','ic-sm')} saved $${money(sv)}</button>`:''}`; paint(); }
+
+/* ================= THREAD ================= */
+const SUGG=[['Research a topic','Build a competitor report on AI coding CLIs and export it as a Word doc','book-open'],['Plan something','Plan a team offsite','calendar'],['Check a live page','Open example.com/pricing and tell me the Team plan price with annual billing','globe',1],['Summarise repos','Summarise every repository in our GitHub org','github']];
+function renderThread(){ const c=conv(), p=c?path(c):[]; const live=S.run&&S.run.cid===S.active; const empty=!p.length&&!live;
+  $('#main').classList.toggle('empty',empty);
+  if(empty){ $('#thread').innerHTML=`<div class="hello">${MARK(40)}<h1>${greet()}, Varun</h1></div>`; $('#suggest').innerHTML=`<div class="suggest">${SUGG.map((s,i)=>`<button class="chip" type="button" data-sugg="${i}">${I(s[2],'ic-sm')} ${s[0]}</button>`).join('')}</div><p class="preview-note">Preview: replies are scripted.</p>`; }
+  else { $('#suggest').innerHTML=''; $('#thread').innerHTML=`<div class="thread">${p.filter(n=>!(n.streaming&&!n.content)).map(n=>msg(c,n)).join('')}<div id="live">${liveHTML()}</div></div>`; }
+  paint(); }
+function sibNav(c,n){ const l=sibs(c,n); if(l.length<2) return ''; const i=l.indexOf(n.id); return `<span class="sib"><button class="ib sm" type="button" data-sib="${n.id}" data-d="-1" ${i?'':'disabled'} aria-label="Previous version">${I('chevron-left','ic-sm')}</button>${i+1}/${l.length}<button class="ib sm" type="button" data-sib="${n.id}" data-d="1" ${i<l.length-1?'':'disabled'} aria-label="Next version">${I('chevron-right','ic-sm')}</button></span>`; }
+function att(a,rm){ const x=rm?`<button class="x" type="button" data-rmatt="${a.id}" aria-label="Remove">${I('x','ic-sm')}</button>`:''; return a.kind==='img'?`<div class="att img"><img src="${a.url}" alt="${esc(a.name)}">${x}</div>`:`<div class="att">${I('file-text','ic-sm')}<span class="trunc">${esc(a.name)}</span>${a.chars?`<span class="faint mono">${compactN(a.chars)}</span>`:''}${x}</div>`; }
+function traceSummary(t){ const s=t.filter(a=>a.role==='T2').length, w=t.filter(a=>a.role==='T3').length; return s>1?`Worked through ${s} sections · ${w} workers`:`1 manager · ${w} worker${w===1?'':'s'}`; }
+function msg(c,n){ const busy=!!S.run;
+  if(n.role==='u'){ const ed=S.editing===n.id; return `<div class="msg u">${n.atts&&n.atts.length?`<div class="atts">${n.atts.map(a=>att(a)).join('')}</div>`:''}${ed?`<div class="editbox"><textarea class="field" id="editta" aria-label="Edit message">${esc(n.content)}</textarea><div class="row" style="justify-content:flex-end"><button class="btn quiet sm" type="button" data-act="edit-cancel">Cancel</button><button class="btn sm" type="button" data-act="edit-save" data-id="${n.id}" ${busy?'disabled':''}>Save as new branch</button></div></div>`:`<div class="bubble">${esc(n.content)}</div><div class="hover-acts">${sibNav(c,n)}<button class="ib sm" type="button" data-copy="${n.id}" aria-label="Copy">${I('copy','ic-sm')}</button><button class="ib sm" type="button" data-edit="${n.id}" aria-label="Edit" ${busy?'disabled':''}>${I('pencil','ic-sm')}</button><button class="ib sm" type="button" data-delmsg="${n.id}" aria-label="Delete">${I('trash-2','ic-sm')}</button></div>`}</div>`; }
+  const o=S.open; let pre='';
+  if(n.thinking&&!n.streaming) pre+=`<button class="fold" type="button" data-toggle="th${n.id}" aria-expanded="${!!o['th'+n.id]}">${I('chevron-right','ic-sm chev')} Thought process</button>${o['th'+n.id]?`<div class="thought">${esc(n.thinking)}</div>`:''}`;
+  if(n.trace&&n.trace.length&&!n.streaming) pre+=`<button class="fold" type="button" data-toggle="tr${n.id}" aria-expanded="${!!o['tr'+n.id]}">${I('chevron-right','ic-sm chev')} ${traceSummary(n.trace)}</button>${o['tr'+n.id]?`<div style="padding-left:14px;border-left:2px solid var(--line-2)">${tree(n.trace)}</div>`:''}`;
+  const w=n.why, th=S.thumbs[n.id];
+  const rc=!n.streaming&&n.content?`<div class="rline"><button class="receipt" type="button" data-why="${n.id}" aria-expanded="${!!o['w'+n.id]}"><span class="dot d${(n.tier||'T2')[1]}"></span>${n.tier} · ${esc(n.model)}${n.cost?` · $${n.cost.toFixed(4)}`:''}${w&&w.saved>0?` · <span class="s">saved $${money(w.saved)}</span>`:''}${n.fast?'<span class="pill">fast</span>':''}${n.pinned?'<span class="pill">pinned</span>':''}${n.cancelled?'<span class="pill">stopped</span>':''}</button><span class="grow"></span><span class="hover-acts">${sibNav(c,n)}<button class="ib sm" type="button" data-copy="${n.id}" aria-label="Copy">${I('copy','ic-sm')}</button><button class="ib sm" type="button" data-thumb="${n.id}" data-v="good" aria-label="Good response" aria-pressed="${th==='good'}" style="${th==='good'?'color:var(--accent)':''}">${I('thumbs-up','ic-sm')}</button><button class="ib sm" type="button" data-thumb="${n.id}" data-v="bad" aria-label="Poor response" aria-pressed="${th==='bad'}" style="${th==='bad'?'color:var(--accent)':''}">${I('thumbs-down','ic-sm')}</button><button class="ib sm" type="button" data-regen="${n.id}" aria-label="Regenerate" ${busy?'disabled':''}>${I('rotate-ccw','ic-sm')}</button><button class="ib sm" type="button" data-delmsg="${n.id}" aria-label="Delete">${I('trash-2','ic-sm')}</button></span></div>${o['w'+n.id]&&w?whyHTML(w):''}`:'';
+  return `<div class="msg a">${pre}<div class="md" id="md-${n.id}">${md(n.content)}${n.streaming?'<span class="caret"></span>':''}</div>${!n.streaming&&n.files?n.files.map(fileCard).join(''):''}${rc}</div>`; }
+function costBars(w){ const a=Object.values(w.costs).reduce((x,y)=>x+y,0), all=a+w.saved; return `<div class="costs"><div class="r"><span>Cascade</span><span class="trk"><i style="width:${Math.max(2,a/all*100)}%;background:var(--ramp-x)"></i></span><span>$${a.toFixed(4)}</span></div><div class="r"><span>All on T1</span><span class="trk"><i style="width:100%;background:var(--ink-3)"></i></span><span>$${all.toFixed(4)}</span></div></div>`; }
+function whyHTML(w){ return `<div class="why"><div class="row"><b style="font-weight:500">Saved <span class="mono" style="color:var(--save)">$${w.saved.toFixed(4)}</span> · ${w.pct}% less than all-T1</b></div>${costBars(w)}<ul>${w.decisions.map(d=>`<li><span class="k">${d[0]}</span><span>${esc(d[1])}</span></li>`).join('')}</ul><div class="tiercost">${Object.keys(w.costs).map(t=>`<span class="dot d${t[1]}" style="margin-top:5px"></span><span>${t} · ${esc(w.models[t]||'')}</span><span>$${w.costs[t].toFixed(4)}</span>`).join('')}</div></div>`; }
+function fileCard(f){ const sv=S.saved[f.id]; return `<div class="file"><span class="ficon ${f.ext}">${f.ext.toUpperCase()}</span><div class="meta"><b class="trunc">${esc(f.name)}</b><span>${f.size}</span></div><button class="btn ghost sm" type="button" data-viewfile="${f.id}">Open</button><button class="btn ghost sm" type="button" data-dl="${esc(f.name)}" aria-label="Download">${I('download','ic-sm')}</button><button class="btn sm" type="button" data-savefile="${f.id}" ${sv?'disabled':''}>${sv?'Saved':'Save'}</button></div>`; }
+function stIc(s,role){ return s==='done'?`<span class="st st-ok">${I('check','ic-sm')}</span>`:s==='esc'?`<span class="st st-esc">${I('corner-up-right','ic-sm')}</span>`:s==='fail'?`<span class="st st-fail">${I('x','ic-sm')}</span>`:s==='skip'?`<span class="st st-skip">${I('minus','ic-sm')}</span>`:`<span class="st"><span class="dot d${role[1]}" style="animation:arc 1.1s infinite"></span></span>`; }
+function order(l){ const out=[], seen=new Set(); const push=(a,d)=>{ if(seen.has(a.id)) return; seen.add(a.id); out.push([a,d]); l.filter(x=>x.parent===a.id).forEach(k=>push(k,d+1)); }; l.filter(a=>!a.parent||!l.find(x=>x.id===a.parent)).forEach(a=>push(a,0)); return out; }
+function tree(l){ return `<div class="tree">${order(l).map(([a,d])=>`<div class="tn l${Math.min(d,2)}${a.st==='done'?' done':''}">${stIc(a.st,a.role)}<span class="lbl">${esc(a.label)}</span><span class="m">${a.role}${a.model?' · '+esc(a.model):''}</span>${a.pct>0&&a.pct<100&&a.st==='run'?`<span class="pb"><i style="width:${a.pct}%"></i></span>`:''}</div>`).join('')}</div>`; }
+function liveHTML(){ const R=S.run; if(!R||R.cid!==S.active||R.streaming) return ''; const p=R.plan;
+  return `<div class="live"><div class="spine"></div><div class="live-b"><div class="live-s">${MARK(18,true)}<span class="shimmer">${esc(R.status||'Working')}</span></div>
+  ${S.detail&&p?`<div class="planline"><span><span class="dot d1"></span>plan</span><span><span class="dot d2"></span>${p.t2} managers</span><span><span class="dot d3"></span>${p.t3} workers</span><span>~$${money(p.est)}</span></div>`:''}
+  ${R.notes.map(n=>`<div class="note${n[0]==='warn'?' warn':''}">${I(n[0]==='warn'?'triangle-alert':'info','ic-sm')}${esc(n[1])}</div>`).join('')}
+  ${S.detail&&R.activity.length?tree(R.activity):''}
+  ${R.review?`<div class="review"><div class="row">${I('rotate-cw','ic-sm')}<b class="grow" style="font-weight:500">Replanning · ${esc(R.review)}</b><button class="btn quiet sm" type="button" data-act="skip-review">Keep as is</button></div></div>`:''}</div></div>`; }
+function refreshLive(){ const l=$('#live'); if(l){ l.innerHTML=liveHTML(); paint(); } else renderThread(); scrollDown(); }
+function scrollDown(){ const s=$('#scroll'); if(s&&S.stick) s.scrollTop=s.scrollHeight; }
+
+/* ================= GATES ================= */
+function renderGates(){ const g=$('#gates'); if(!g) return; let h='';
+  if(S.run&&S.run.cid!==S.active){ const rc=S.convs.find(c=>c.id===S.run.cid); g.innerHTML=`<div class="gate" style="flex-direction:row;align-items:center">${MARK(16,true)}<span class="grow">Working in “${esc(rc&&rc.title||'another chat')}”</span><button class="btn ghost sm" type="button" data-open="${S.run.cid}">Open</button></div>`; paint(); return; }
+  if(S.clar){ const q=S.clar, left=Math.max(0,Math.ceil((q.deadline-Date.now())/1000));
+    h+=`<section class="gate" aria-label="Question"><div class="gate-h">${I('message-circle-question','ic-sm')}<span class="grow">Quick question before I continue</span><span class="mono faint" id="clarleft">${Math.floor(left/60)}:${String(left%60).padStart(2,'0')}</span></div>${q.qs.map(x=>`<div class="q"><p>${esc(x.p)}</p>${x.k==='text'?`<input class="field" data-cltext="${x.id}" value="${esc(q.draft[x.id]||'')}" placeholder="Optional" aria-label="${esc(x.p)}">`:`<div class="opts">${x.o.map(v=>{ const on=x.k==='multi'?(q.draft[x.id]||[]).includes(v):q.draft[x.id]===v; return `<button class="chip" type="button" aria-pressed="${on}" data-clopt="${x.id}" data-v="${esc(v)}">${esc(v)}</button>`; }).join('')}</div>`}</div>`).join('')}<div class="row"><button class="btn sm" type="button" data-act="clar-send">Send</button><button class="btn quiet sm" type="button" data-act="clar-skip">Decide for me</button></div></section>`; }
+  if(S.approvals.length){ const a=S.approvals[0];
+    h+=`<section class="gate" aria-label="Approval"><div class="gate-h">${I('shield-alert','ic-sm')}<span class="grow">Allow <span class="mono">${esc(a.tool)}</span>?</span>${S.approvals.length>1?`<span class="faint">+${S.approvals.length-1}</span>`:''}</div><pre>${esc(JSON.stringify(a.input,null,2))}</pre><div class="row" style="flex-wrap:wrap"><button class="btn sm" type="button" data-appr="once">Allow once</button><button class="btn ghost sm" type="button" data-appr="run">Allow for this run</button><span class="grow"></span><button class="btn danger sm" type="button" data-appr="deny">Deny</button></div></section>`; }
+  g.innerHTML=h; paint(); }
+setInterval(()=>{ if(S.clar){ const l=Math.max(0,Math.ceil((S.clar.deadline-Date.now())/1000)); const e=$('#clarleft'); if(e) e.textContent=`${Math.floor(l/60)}:${String(l%60).padStart(2,'0')}`; if(!l) answerClar([]); }
+  if(S.esc){ const e=$('#escleft'); if(e){ const l=Math.max(0,Math.ceil((S.esc.deadline-Date.now())/1000)); e.textContent=`${Math.floor(l/60)}:${String(l%60).padStart(2,'0')}`; } }
+  if(S.modal==='continue'&&S.hcode){ const e=$('#hexp'); if(e){ const l=Math.max(0,Math.ceil((S.hcode.exp-Date.now())/1000)); e.textContent=`expires in ${Math.floor(l/60)}:${String(l%60).padStart(2,'0')}`; } } },1000);
+
+/* ================= COMPOSER ================= */
+function toksHTML(){ const t=[]; if(S.fastNext) t.push(['fast','zap','Fast answer']); if(S.web) t.push(['web','globe','Web']); if(S.browser) t.push(['browser','monitor-play','Browser']); if(S.skill!=='general') t.push(['skill','sparkles',(allSkills().find(s=>s.id===S.skill)||{}).name]);
+  return t.map(x=>`<span class="chip" aria-pressed="true">${I(x[1],'ic-sm')} ${esc(x[2])}<button class="x" type="button" data-untok="${x[0]}" aria-label="Remove ${esc(x[2])}">${I('x','ic-sm')}</button></span>`).join(''); }
+const modeLabel=()=>`<b>${ROUTES.find(r=>r[0]===S.routing)[1]}</b>${S.tier!=='auto'?` · ${S.tier}`:''}`;
+function renderComposer(){ const el=$('#composer'); if(!el) return; const nk=!S.keys.length;
+  el.innerHTML=`<div class="cmp-atts" id="atts"></div><textarea class="cmp-ta" id="ta" rows="1" placeholder="${nk?'Add an API key to start':'Ask Cascade anything'}" aria-label="Message Cascade"></textarea><div class="cmp-bar"><button class="ib" type="button" data-menu="plus" aria-label="Attach and skills" aria-haspopup="menu">${I('plus')}</button><button class="ib" type="button" data-menu="tools" aria-label="Tools" aria-haspopup="menu" id="toolsbtn">${I('sliders-horizontal')}</button><div class="toks" id="toks">${toksHTML()}</div><span class="grow"></span><button class="mode" type="button" data-menu="mode" aria-haspopup="menu" id="modebtn">${modeLabel()} ${I('chevron-down','ic-sm')}</button><span id="sendw"></span></div>`;
+  const t=$('#ta'); t.value=S.draft; size(t); renderAtts(); renderSend(); paint(); }
+function refreshBar(){ const t=$('#toks'); if(t) t.innerHTML=toksHTML(); const m=$('#modebtn'); if(m) m.innerHTML=modeLabel()+' '+I('chevron-down','ic-sm'); paint(); }
+function renderAtts(){ const a=$('#atts'); if(a){ a.innerHTML=S.pending.map(x=>att(x,true)).join(''); paint(); } }
+function renderSend(){ const w=$('#sendw'); if(!w) return; const t=$('#ta'); const has=t&&t.value.trim(); w.innerHTML=S.run?`<button class="send stop" type="button" data-act="stop" aria-label="Stop">${I('square','ic-sm')}</button>`:`<button class="send" type="button" data-act="send" aria-label="Send" ${has&&S.keys.length?'':'disabled'}>${I('arrow-up','ic-sm')}</button>`; if(t) t.disabled=!S.keys.length; paint(); }
+function size(t){ t.style.height='auto'; t.style.height=Math.min(t.scrollHeight,200)+'px'; }
+
+/* ================= PANE ================= */
+function renderPane(){ const p=$('#pane'); if(!p) return; if(!S.pane){ p.hidden=true; return; } p.hidden=false; const k=S.pane.kind; const x=`<button class="ib sm" type="button" data-act="close-pane" aria-label="Close">${I('x','ic-sm')}</button>`;
+  if(k==='browser') p.innerHTML=`<div class="pane-h">${I('monitor-play','ic-sm')}<b>Browser</b>${x}</div><div class="pane-b">${browserHTML()}</div>`;
+  else if(k==='files') p.innerHTML=`<div class="pane-h">${I('folder','ic-sm')}<b>Files</b>${x}</div><div class="pane-b">${S.files.map(f=>{ const e=f.name.split('.').pop(); return `<div class="frow"><span class="ficon ${e}" style="width:26px;height:30px;font-size:7px;padding-bottom:3px">${e.toUpperCase()}</span><div class="grow"><div class="trunc">${esc(f.name)}</div><div class="faint" style="font-size:12px">${f.size} · ${f.when}</div></div><button class="ib sm" type="button" data-viewsaved="${f.id}" aria-label="Open">${I('eye','ic-sm')}</button><button class="ib sm" type="button" data-rmfile="${f.id}" aria-label="Delete">${I('trash-2','ic-sm')}</button></div>`; }).join('')||'<p class="faint">Saved files appear here.</p>'}<p class="faint" style="font-size:12px;margin:8px 0 0">${S.files.length} of 50 on the ${S.usage.plan} plan</p></div>`;
+  else { const f=S.pane.file; p.innerHTML=`<div class="pane-h"><span class="ficon ${f.ext}" style="width:24px;height:28px;font-size:6.5px;padding-bottom:3px">${f.ext.toUpperCase()}</span><b class="trunc">${esc(f.name)}</b><button class="btn ghost sm" type="button" data-dl="${esc(f.name)}">${I('download','ic-sm')} Download</button>${x}</div><div class="pane-b"><div class="doc md">${md(f.src?txt(f.src):'# '+f.name)}</div></div>`; }
+  paint(); }
+function browserHTML(){ const b=S.bv; if(!b) return '<p class="faint">The browser closed.</p>'; return `<div class="browser"><div class="bh"><span class="livedot">LIVE</span><span class="url">${esc(b.url)}</span></div><div class="page${b.loading?' loading':''}${b.human?' human':''}${b.paused?' paused':''}"><div class="nv"><b>example.com</b><span>Product · Pricing · Docs</span></div><h4>Simple pricing</h4><div class="tg"><span class="${b.annual?'':'on'}">Monthly</span><span class="${b.annual?'on':''}">Annual −20%</span></div><div class="pl"><div>Starter<b>$0</b></div><div>Team<b>${b.annual?'$24':'$30'}</b>per seat</div><div>Enterprise<b>Custom</b></div></div><svg class="cursor" id="bcur" viewBox="0 0 16 16" style="left:${b.cx}px;top:${b.cy}px"><path d="M2 1l11 6-5 1.5L6 14z" fill="#111" stroke="#fff"/></svg></div><div class="bf">${b.human?`<button class="btn sm" type="button" data-act="bv-back">${I('hand','ic-sm')} Hand back</button>`:`<button class="btn ghost sm" type="button" data-act="bv-take">${I('hand','ic-sm')} Take over</button>`}<button class="btn ghost sm" type="button" data-act="bv-pause">${I(b.paused?'play':'pause','ic-sm')}</button><span class="grow"></span><button class="btn danger sm" type="button" data-act="bv-stop">Stop</button></div></div><p class="faint" style="font-size:12px;margin:0">${b.human?'You have control. Cascade waits.':'Cascade is driving.'} · session ${S.browserUsed} of 3 today</p>`; }
+
+/* ================= MENUS ================= */
+function items(k){ const L=[];
+  const radio=(label,on,fn,sub)=>L.push({t:'r',label,on,fn,sub}); const tog=(label,on,fn,ic,sub)=>L.push({t:'t',label,on,fn,ic,sub}); const actn=(label,ic,fn)=>L.push({t:'a',label,ic,fn}); const lab=l=>L.push({t:'l',label:l}); const sep=()=>L.push({t:'s'});
+  if(k==='mode'){ lab('Routing'); ROUTES.forEach(r=>radio(r[1],S.routing===r[0],()=>S.routing=r[0],r[2])); sep(); lab('Tier'); ['auto','T1','T2','T3'].forEach(t=>radio(t==='auto'?'Let Cascade decide':t+' only',S.tier===t,()=>S.tier=t)); sep(); tog('Fast answer',S.fastNext,()=>S.fastNext=!S.fastNext,'zap','Next message skips orchestration'); }
+  if(k==='plus'){ actn('Attach files','paperclip',()=>$('#fileinput').click()); sep(); lab('Skill'); allSkills().forEach(s=>radio(s.name,S.skill===s.id,()=>S.skill=s.id)); actn('Manage skills','settings-2',openSkills); }
+  if(k==='tools'){ tog('Web search',S.web,()=>{ S.web=!S.web; if(S.web) S.browser=false; },'globe'); tog('Browser',S.browser,()=>{ if(!S.browser&&S.browserUsed>=3) return toast("Today's 3 browser sessions are used."); S.browser=!S.browser; if(S.browser) S.web=false; },'monitor-play',`${3-S.browserUsed} of 3 left today`); sep(); lab('Connectors'); CONNECTORS.filter(c=>S.connected[c.id]).forEach(c=>tog(c.name,S.connected[c.id].on,()=>S.connected[c.id].on=!S.connected[c.id].on,'plug')); actn('Manage connectors','settings-2',openConnectors); }
+  if(k==='account'){ L.push({t:'u'}); sep(); [['Settings','settings',()=>openSettings()],['Memory','brain',openMemory],['Connectors','plug',openConnectors],['API keys','key-round',openKeys],['Files','folder',()=>showFiles()],['Import chats or memories','upload',()=>$('#importinput').click()],['Continue on another device','monitor-smartphone',openContinue],['Upgrade','gem',openUpgrade],['Documentation','book-open',()=>goDoc('dp-what')]].forEach(a=>actn(a[0],a[1],a[2])); sep(); actn('Sign out','log-out',()=>toast('Sign out is off in this preview')); }
+  if(k==='title'){ actn('Rename','pencil',()=>{ S.renaming=true; renderHead(); const i=$('#renamein'); if(i){ i.focus(); i.select(); } }); actn('Files','folder',()=>showFiles()); actn('Continue on another device','monitor-smartphone',openContinue); sep(); actn('Delete chat','trash-2',()=>delConv(S.active)); }
+  return L; }
+function openMenu(k,a){ S.menu={k,a}; drawMenu(); }
+function drawMenu(){ const m=S.menu; if(!m) return; const L=items(m.k); m.L=L; const u=S.usage, tot=S.mix.T1+S.mix.T2+S.mix.T3;
+  $('#menuroot').innerHTML=`<div class="menu" role="menu">${L.map((it,i)=>it.t==='s'?'<div class="msep"></div>':it.t==='l'?`<div class="ml">${esc(it.label)}</div>`:it.t==='u'?`<div class="usage"><div class="row"><span class="grow">Runs today</span><span class="mono">${u.runs}/${u.limit}</span></div><div class="bar"><i style="width:${u.runs/u.limit*100}%;background:var(--ink)"></i></div><div class="row"><span class="grow">Tier mix</span><span class="mono">${tot} runs</span></div><div class="bar">${['T1','T2','T3'].map(t=>`<i style="width:${S.mix[t]/tot*100}%;background:var(--${t.toLowerCase()})"></i>`).join('')}</div></div>`:`<button class="mi" type="button" role="${it.t==='r'?'menuitemradio':it.t==='t'?'menuitemcheckbox':'menuitem'}" ${it.t!=='a'?`aria-checked="${!!it.on}"`:''} data-mi="${i}">${it.ic?I(it.ic,'ic-sm'):''}<span class="l">${esc(it.label)}${it.sub?`<span class="sub">${esc(it.sub)}</span>`:''}</span>${it.t==='r'&&it.on?`<span class="chk">${I('check','ic-sm')}</span>`:''}${it.t==='t'?`<span class="switch" aria-hidden="true" aria-checked="${!!it.on}"></span>`:''}</button>`).join('')}</div>`;
+  const el=$('#menuroot').firstChild, r=m.a.getBoundingClientRect(); const w=el.offsetWidth, h=el.offsetHeight; let x=Math.min(Math.max(8,r.left),innerWidth-w-8), y=r.bottom+6; if(y+h>innerHeight-8) y=Math.max(8,r.top-h-6); el.style.left=x+'px'; el.style.top=y+'px'; paint(); }
+function closeMenu(){ S.menu=null; $('#menuroot').innerHTML=''; }
+
+/* ================= RUNS ================= */
+const CANCEL=Symbol('cancel');
+function wait(ms){ const R=S.run; return new Promise((ok,no)=>{ const t=setTimeout(()=>{ if(!S.run||S.run!==R||R.dead) no(CANCEL); else ok(); },ms*(S.reduce?.35:1)); R.rej.push(()=>{ clearTimeout(t); no(CANCEL); }); }); }
+function hold(setup){ const R=S.run; return new Promise((ok,no)=>{ R.rej.push(()=>no(CANCEL)); setup(ok); }); }
+function status(s){ S.run.status=s; refreshLive(); }
+function act(id,o){ const R=S.run; let a=R.activity.find(x=>x.id===id); if(!a){ a={id,pct:0}; R.activity.push(a); } Object.assign(a,o); refreshLive(); }
+function kind(p,o){ const s=p.toLowerCase(); if(o.fast) return 'fast'; if(S.browser) return 'browser';
+  if(/^(hi|hello|hey|thanks|thank you|good (morning|evening|afternoon))\b/.test(s)&&s.length<30) return 'simple';
+  if(/offsite|trip|party|event/.test(s)&&s.split(/\s+/).length<9) return 'clarify';
+  if(/(github|repo)/.test(s)&&/(every|all|org)/.test(s)) return 'escalate';
+  if(/report|research|competitor|analy[sz]e|deck|docx|word doc|excel|pdf|build/.test(s)) return 'complex';
+  if(/postgres|sqlite/.test(s)) return 'pg'; return 'generic'; }
+async function run(c,u,o={}){
+  if(S.usage.runs>=S.usage.limit) return toast('Daily limit reached. Upgrade for 200 runs a day.');
+  const K=kind(u.content,o), mode=S.routing, M=MODELS[mode];
+  const a=add(c,u.id,{role:'a',content:'',streaming:true});
+  S.run={cid:c.id,dead:false,rej:[],status:'Reading your request',activity:[],plan:null,review:null,notes:[]};
+  if(S.set.memory&&K!=='simple'&&K!=='fast') S.run.notes.push(['info','Using 2 facts from Memory']);
+  if(o.compact) S.run.notes.push(['info','Long input summarized to fit the window']);
+  S.stick=true; renderThread(); renderSend(); renderSide(); renderHead(); scrollDown();
+  let f;
+  try{ await wait(450);
+    if(K==='fast'){ status('Fast answer, one model'); await wait(500); f={tier:'T2',content:generic(u.content,'Fast: one mid-tier model',0.0008*M.m,62),why:why('T2','Fast answer, orchestration skipped',mode),fast:true}; }
+    else if(K==='simple'){ status('Answering directly'); act('w',{role:'T3',label:'Direct answer',st:'run',model:M.T3}); await wait(600); act('w',{st:'done'}); f={tier:'T3',content:txt('ans-hi'),why:why('T3','Small talk, answered directly',mode)}; }
+    else if(K==='pg'){ await moderate(M,['Draft the comparison table','Write the recommendation']); f={tier:'T2',content:txt('ans-pg'),why:why('T2','Moderate: one comparison',mode)}; }
+    else if(K==='complex') f=await complex(M,mode,u.content);
+    else if(K==='clarify') f=await clarify(M,mode);
+    else if(K==='browser') f=await browse(M,mode);
+    else if(K==='escalate') f=await escalate(M,mode);
+    else { await moderate(M,['Outline','Fill in the details']); f={tier:'T2',content:generic(u.content,'Moderate: one manager, two workers',0.0021*M.m,76),why:why('T2','Moderate',mode)}; }
+    if(S.tier!=='auto'){ f.tier=S.tier; f.pinned=true; }
+    Object.assign(a,{tier:f.tier,model:M[f.tier],fast:f.fast,pinned:f.pinned,thinking:f.thinking||null,trace:S.run.activity.map(x=>Object.assign({},x,{st:x.st==='run'?'done':x.st})),plan:S.run.plan});
+    S.run.activity=[]; S.run.plan=null; S.run.review=null; S.run.notes=[]; S.run.streaming=true; renderThread();
+    await stream(a,f.content);
+    Object.assign(a,{streaming:false,why:f.why,cost:Object.values(f.why.costs).reduce((x,y)=>x+y,0),files:f.files||null});
+    S.usage.runs++; S.mix[f.tier]++; if(!c.title) c.title=title(c);
+  }catch(e){ if(e!==CANCEL) console.error(e); a.streaming=false; a.cancelled=true; if(!a.content) a.content='_Stopped before any output._'; a.tier=a.tier||'T2'; a.model=a.model||M.T2; }
+  const hadB=!!S.bv; S.run=null; S.clar=null; S.approvals=[]; S.bv=null; S.fastNext=false; if(hadB&&S.pane&&S.pane.kind==='browser') S.pane=null; if(S.esc) S.esc=null; if(S.modal==='esc') closeModal(true);
+  renderThread(); renderGates(); renderSend(); renderSide(); renderHead(); renderPane(); refreshBar(); scrollDown(); }
+async function stream(n,t){ let i=0; while(i<t.length){ i=Math.min(t.length,i+(S.reduce?40:4+(Math.random()*7|0))); n.content=t.slice(0,i); const e=document.getElementById('md-'+n.id); if(e) e.innerHTML=md(n.content)+'<span class="caret"></span>'; else renderThread(); scrollDown(); await wait(18); } }
+function generic(p,c,cost,pct){ return txt('ans-generic').replace('{{p}}',p.length>80?p.slice(0,78)+'…':p).replace('{{c}}',c).replace('{{cost}}',cost.toFixed(4)).replace('{{pct}}',pct); }
+function title(c){ const f=path(c)[0]; if(!f) return null; let t=f.content.replace(/\s+/g,' ').trim(); t=t[0].toUpperCase()+t.slice(1); return t.length>40?t.slice(0,38).replace(/\s\S*$/,'')+'…':t; }
+async function moderate(M,ws){ status('Grading complexity'); act('m',{role:'T2',label:`${ws.length} subtasks`,st:'run',model:M.T2}); await wait(600); status(`${ws.length} workers running`);
+  for(let p=0;p<=100;p+=20){ ws.forEach((l,k)=>act('w'+k,{role:'T3',parent:'m',label:(S.web&&!k?'web_search · ':'')+l,st:p>=100?'done':'run',model:M.T3,pct:Math.min(100,p+k*10)})); await wait(250); } act('m',{st:'done'}); }
+async function complex(M,mode,p){ status('Planning'); act('t1',{role:'T1',label:'Planning',st:'run',model:M.T1}); await wait(700);
+  const doc=/docx|word|excel|pptx|deck|pdf|export/i.test(p); S.run.plan=reportPlan(M); act('t1',{label:'Dispatching 4 sections'}); await wait(600);
+  const secs=[['s1','Claude Code profile','web_fetch docs.anthropic.com'],['s2','Gemini CLI profile','web_search "Gemini CLI free tier"'],['s3','Pricing','web_search "Copilot CLI pricing"']];
+  secs.forEach(([id,l])=>act(id,{role:'T2',parent:'t1',label:l,st:'run',model:M.T2})); act('s4',{role:'T2',parent:'t1',label:'Positioning · waits on 1–3',st:'run',model:M.T2});
+  status('3 sections in parallel');
+  for(let q=0;q<=100;q+=10){ secs.forEach(([id,l,w],k)=>{ act(id+'w',{role:'T3',parent:id,label:w,st:q>=100?'done':'run',model:M.T3,pct:Math.min(100,q+k*5)}); act(id,{st:q>=100?'done':'run'}); }); if(q===50){ S.run.notes.push(['warn',`Rate limit on one worker, retried on ${M.T2}`]); } await wait(280); }
+  status('Reviewing'); await wait(500);
+  if(!S.run.skip){ S.run.review='Pricing needs sources'; act('s3',{label:'Pricing · adding sources',st:'esc'}); status('Replanning 1 section');
+    for(let q=0;q<=100;q+=25){ act('s3w',{label:'web_fetch pricing pages, with dates',st:q>=100?'done':'run',pct:q}); if(S.run.skip) break; await wait(300); } act('s3',{label:'Pricing',st:'done'}); S.run.review=null; }
+  act('s4',{label:'Positioning',st:'run'}); await wait(450); act('s4',{st:'done'});
+  act('t1',{label:doc?'generate_document → competitor-report.docx':'Compiling'}); status(doc?'Writing the Word file':'Compiling'); await wait(600); act('t1',{st:'done'});
+  return {tier:'T1',content:txt('ans-report'),thinking:txt('think-report'),why:reportWhy(mode),files:doc?[{id:nid('f'),name:'competitor-report.docx',ext:'docx',size:'18 KB',src:'doc-report'}]:null}; }
+async function clarify(M,mode){ status('Reading'); act('t1',{role:'T1',label:'Grading complexity',st:'run',model:M.T1}); await wait(600); act('t1',{label:'ask_user',st:'esc'}); status('Waiting for you');
+  const ans=await hold(ok=>{ S.clar={qs:[{id:'n',p:'How many people?',k:'single',o:['5–10','10–25','25+']},{id:'f',p:'What matters most?',k:'multi',o:['Budget','Easy travel','Activities','Food']},{id:'w',p:'City or dates?',k:'text'}],draft:{},deadline:Date.now()+120000,ok}; renderGates(); scrollDown(); });
+  S.clar=null; renderGates(); act('t1',{label:ans.length?'Got your answers':'Deciding sensibly',st:'done'}); await moderate(M,['Two-day agenda','Next steps']);
+  let t=txt('ans-offsite'); if(ans.length) t=`Based on your answers (${ans.map(a=>Array.isArray(a.v)?a.v.join(', '):a.v).join(' · ')}):\n\n`+t;
+  return {tier:'T2',content:t,why:why('T2','Asked one question, then Moderate',mode)}; }
+function approve(tool,input){ if(S.run.allowAll) return Promise.resolve(true); return hold(ok=>{ S.approvals.push({tool,input,ok}); renderGates(); scrollDown(); }); }
+async function browse(M,mode){ status('Grading complexity'); act('m',{role:'T2',label:'1 browser task',st:'run',model:M.T2}); await wait(500); act('w',{role:'T3',parent:'m',label:'browser_control · waiting for you',st:'esc',model:M.T3}); status('Waiting for approval');
+  if(!await approve('browser_control',{action:'navigate',url:'https://example.com/pricing'})){ act('w',{label:'Denied',st:'fail'}); return {tier:'T3',content:"I didn't open the page because you denied browser access. Turn on **Web search** and I can fetch its text instead.",why:why('T3','Browser task, denied',mode)}; }
+  S.browserUsed++; S.bv={url:'https://example.com/pricing',loading:true,cx:20,cy:20,annual:false}; S.prevPane=S.pane; S.pane={kind:'browser'}; renderPane();
+  act('w',{label:'Opening example.com/pricing',st:'run',pct:20}); status('Using the browser'); await wait(900);
+  if(!S.bv) return gone(M,mode); S.bv.loading=false; renderPane(); await wait(500); await human(); if(!S.bv) return gone(M,mode);
+  act('w',{label:'Reading monthly plans',pct:45}); cur(250,72); await wait(900);
+  const ok=await approve('browser_control',{action:'click',selector:'.tg span:nth-child(2)'}); if(!S.bv) return gone(M,mode);
+  if(ok){ await human(); if(!S.bv) return gone(M,mode); S.bv.annual=true; renderPane(); act('w',{label:'Switched to annual',pct:80}); await wait(900); }
+  cur(200,150); await wait(500); S.bv=null; S.pane=S.prevPane||null; renderPane(); act('w',{label:'Done',st:'done'}); act('m',{st:'done'});
+  return {tier:'T3',content:txt('ans-browser'),why:why('T3','One browser task',mode)}; }
+function gone(M,mode){ act('w',{label:'You stopped the browser',st:'skip'}); return {tier:'T3',content:"You stopped the browser, so this is from what I read first: **Starter $0**, **Team $30 per seat monthly**, **Enterprise custom**.",why:why('T3','Browser stopped mid-task',mode)}; }
+async function human(){ while(S.bv&&S.bv.human) await wait(300); }
+function cur(x,y){ if(!S.bv) return; S.bv.cx=x; S.bv.cy=y; const c=$('#bcur'); if(c){ c.style.left=x+'px'; c.style.top=y+'px'; } }
+async function escalate(M,mode){ status('Planning'); act('t1',{role:'T1',label:'2 sections',st:'run',model:M.T1}); await wait(600);
+  S.run.plan={t2:2,t3:4,est:0.02*M.m}; act('a',{role:'T2',parent:'t1',label:'List repositories',st:'run',model:M.T2}); act('aw',{role:'T3',parent:'a',label:'github.search_repositories',st:'run',model:M.T3,pct:50}); await wait(800);
+  act('aw',{label:'14 repositories, 6 private',st:'done'}); act('a',{st:'done'}); act('b',{role:'T2',parent:'t1',label:'Summarise each repository',st:'esc',model:M.T2}); act('bw',{role:'T3',parent:'b',label:'Needs private access · asking you',st:'esc',model:M.T3}); status('Needs your decision');
+  const d=await hold(ok=>{ S.esc={deadline:Date.now()+300000,ok}; openEscalation(); }); S.esc=null; closeModal(true);
+  act('bw',{label:d.a==='skip'?'Skipped':'Summarising',st:d.a==='skip'?'skip':'run',pct:40}); await wait(800); if(d.a!=='skip') act('bw',{st:'done'}); act('b',{st:d.a==='skip'?'skip':'done'}); act('t1',{st:'done'});
+  const t=txt('ans-escalate').replace('The private repositories were handled the way you chose in the decision dialog.',d.a==='retry'?'You allowed access, so the 6 private repositories are included too.':d.a==='skip'?'You skipped that section, so the private repositories are not summarised.':`Following your guidance: "${d.note}".`);
+  return {tier:'T1',content:t,why:why('T1','Complex: listing, then summaries',mode,[['escalation',`Private access: you chose ${d.a}`]])}; }
+function answerClar(v){ if(!S.clar) return; const ok=S.clar.ok; S.clar=null; ok(v); }
+function send(fast,force){ const t=$('#ta'); const v=t.value.trim(); if(!v) return; if(S.run) return toast('One run at a time on Free. Wait, or press Stop.'); if(!S.keys.length) return toast('Add an API key first.');
+  if(v.length>6000&&S.set.extCtx&&!force) return openCtx(v,fast);
+  let c=conv(); if(!c){ c=newConv(null); S.convs.unshift(c); S.active=c.id; }
+  const p=path(c); const u=add(c,p.length?p[p.length-1].id:null,{role:'u',content:v,atts:S.pending.slice()}); if(!c.title) c.title=title(c);
+  t.value=''; S.draft=''; size(t); S.pending=[]; renderAtts(); if(!wide(820)) S.side=false;
+  run(c,u,{fast:fast||S.fastNext,compact:force}); }
+function stop(){ const R=S.run; if(!R) return; R.dead=true; R.rej.forEach(f=>{ try{ f(); }catch(e){} }); }
+function delConv(id){ if(S.run&&S.run.cid===id) stop(); S.convs=S.convs.filter(c=>c.id!==id); if(S.active===id){ S.active=S.convs[0]?S.convs[0].id:null; S.pane=null; } renderApp(); toast('Chat deleted'); }
+function showFile(f){ S.pane={kind:'file',file:f}; renderPane(); }
+function showFiles(){ S.pane=S.pane&&S.pane.kind==='files'?null:{kind:'files'}; renderPane(); }
+
+/* ================= MODALS ================= */
+function openModal(id,title,body,o={}){ closeMenu(); S.modal=id; S.mrender=()=>{ $('#modalroot').innerHTML=`<div class="overlay" data-overlay="1"><div class="modal${o.wide?' wide':''}" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="mh"><h2>${esc(title)}</h2><button class="ib" type="button" data-act="close-modal" aria-label="Close">${I('x')}</button></div><div class="mb">${typeof body==='function'?body():body}</div></div></div>`; if(o.after) o.after(); paint(); }; S.mrender(); }
+function closeModal(silent){ if(!silent&&S.modal==='esc'&&S.esc){ const ok=S.esc.ok; S.esc=null; ok({a:'skip'}); } S.modal=null; S.mrender=null; $('#modalroot').innerHTML=''; }
+const remodal=()=>S.mrender&&S.mrender();
+let tab='general';
+function openSettings(t){ if(t) tab=t; openModal('settings','Settings',()=>{ const s=S.set;
+  const sw=(k,on,l)=>`<button class="switch" type="button" role="switch" aria-checked="${on}" aria-label="${l}" data-sw="${k}"></button>`;
+  const row=(t,sub,r)=>`<div class="srow"><div class="l">${t}${sub?`<span>${sub}</span>`:''}</div>${r}</div>`;
+  const seg=(k,v,o)=>`<div class="seg">${o.map(x=>`<button type="button" data-seg="${k}" data-v="${x[0]}" aria-pressed="${v===x[0]}">${x[1]}</button>`).join('')}</div>`;
+  const P={general:row('Varun','Signed in with GitHub · '+S.usage.plan,`<button class="btn ghost sm" type="button" data-act="signout">Sign out</button>`)+row('On-device assist','Names chats and pre-sorts prompts in your browser',sw('onDevice',s.onDevice,'On-device assist'))+row('API keys',S.keys.length+' providers',`<button class="btn ghost sm" type="button" data-act="keys">Manage</button>`)+row('Plan',S.usage.plan,`<button class="btn ghost sm" type="button" data-act="upgrade">Upgrade</button>`),
+    appearance:row('Theme','',seg('theme',S.theme,[['light','Light'],['dark','Dark'],['system','System']]))+row('Run detail','Show the plan and agent tree while a run works',sw('detail',S.detail,'Run detail'))+row('Reduce motion','',sw('reduce',S.reduce,'Reduce motion')),
+    chat:row('Default routing','',seg('bias',s.bias,ROUTES.map(r=>[r[0],r[1]])))+row('Web search by default','',sw('webDefault',s.webDefault,'Web search by default')),
+    advanced:row('Extended context','Chunk and summarize very long input, after asking',sw('extCtx',s.extCtx,'Extended context'))+row('Max tokens per run','Default 200k',`<input class="field" style="width:110px" inputmode="numeric" placeholder="200000" data-setin="maxTokens" value="${esc(s.maxTokens)}" aria-label="Max tokens per run">`)+row('Cost cap per run','Default $0.50',`<input class="field" style="width:100px" inputmode="decimal" placeholder="0.50" data-setin="costCap" value="${esc(s.costCap)}" aria-label="Cost cap per run">`),
+    privacy:row('Remember chats in Memory','Off by default',sw('memory',s.memory,'Remember chats in Memory'))+row('Share anonymous routing data','Never prompts or outputs',sw('telemetry',s.telemetry,'Share anonymous routing data'))+row('Delete all chats','',`<button class="btn danger sm" type="button" data-act="clear-all">Delete</button>`)};
+  return `<div class="set"><nav class="setnav" role="tablist">${Object.keys(P).map(k=>`<button type="button" role="tab" aria-selected="${tab===k}" data-tab="${k}">${k[0].toUpperCase()+k.slice(1)}</button>`).join('')}</nav><div>${P[tab]}</div></div>`; },{wide:true}); }
+function openSkills(){ openModal('skills','Skills',()=>{ const d=S.sdraft||{};
+  return `<div class="list">${allSkills().map(s=>`<div class="item"><div class="grow"><div class="t">${esc(s.name)}</div><div class="d">${esc(s.description||'')}</div></div>${S.skill===s.id?'<span class="badge on">In use</span>':`<button class="btn quiet sm" type="button" data-skuse="${s.id}">Use</button>`}${s.builtin?'':`<button class="ib sm" type="button" data-skdel="${s.id}" aria-label="Delete">${I('trash-2','ic-sm')}</button>`}</div>`).join('')}</div><form id="skillform" style="display:flex;flex-direction:column;gap:8px"><div class="label">New skill</div><input class="field" id="skn" placeholder="Name" required aria-label="Skill name"><textarea class="field" id="skp" placeholder="Instructions Cascade follows with this skill" required aria-label="Instructions"></textarea><div><button class="btn sm" type="submit">Create</button></div></form>`; },{after(){ $('#skillform').onsubmit=e=>{ e.preventDefault(); const n=$('#skn').value.trim(), p=$('#skp').value.trim(); if(!n||!p) return; const s={id:nid('s'),name:n,description:p.slice(0,60),prompt:p}; S.custom.push(s); S.skill=s.id; refreshBar(); remodal(); toast(`Using “${n}”`); }; }}); }
+function openMemory(){ openModal('memory','Memory',()=>`<div class="list">${S.memories.map(m=>`<div class="item"><div class="grow"><div>${esc(m.text)}</div></div><select class="field" style="width:auto;height:30px;font-size:12.5px" data-memkind="${m.id}" aria-label="Kind"><option value="permanent" ${m.kind==='permanent'?'selected':''}>Always true</option><option value="volatile" ${m.kind==='volatile'?'selected':''}>For now</option></select><button class="ib sm" type="button" data-memdel="${m.id}" aria-label="Delete">${I('trash-2','ic-sm')}</button></div>`).join('')||'<p class="faint">Nothing remembered yet.</p>'}</div><form id="memform" class="row"><input class="field" id="memt" placeholder="Add something to remember" aria-label="New memory"><button class="btn sm" type="submit">Add</button></form>`,{after(){ $('#memform').onsubmit=e=>{ e.preventDefault(); const t=$('#memt').value.trim(); if(!t) return; S.memories.unshift({id:nid('m'),text:t,kind:'permanent'}); remodal(); }; }}); }
+function openConnectors(){ openModal('connectors','Connectors',()=>`<div class="list">${CONNECTORS.map(c=>{ const st=S.connected[c.id]; return `<div class="item"><div class="grow"><div class="t">${esc(c.name)}</div><div class="d">${esc(c.d)}${st?` · ${Object.values(st.tools).filter(Boolean).length}/${c.tools.length} tools`:''}</div></div>${st?`<button class="switch" type="button" role="switch" aria-checked="${st.on}" aria-label="Enable ${esc(c.name)}" data-connon="${c.id}"></button><button class="ib sm" type="button" data-connrm="${c.id}" aria-label="Remove">${I('trash-2','ic-sm')}</button>`:`<button class="btn ghost sm" type="button" data-connadd="${c.id}">Connect</button>`}</div>`; }).join('')}</div><form id="mcpform" class="row"><input class="field" id="mcpurl" type="url" placeholder="https://… any MCP server" aria-label="MCP server URL"><button class="btn sm" type="submit">Add</button></form>`,{after(){ $('#mcpform').onsubmit=e=>{ e.preventDefault(); const u=$('#mcpurl').value.trim(); if(!/^https:\/\//.test(u)) return toast('Use an https:// MCP endpoint.'); const id=nid('mcp'); CONNECTORS.push({id,name:u.replace(/^https:\/\//,'').split('/')[0],d:'Custom MCP server',tools:['call_tool']}); S.connected[id]={on:true,tools:{call_tool:true}}; remodal(); toast('Connected'); }; }}); }
+function openKeys(){ openModal('keys','API keys',()=>`<div class="list">${S.keys.map(k=>`<div class="item"><div class="grow"><div class="t">${esc(k.label)}</div><div class="d mono">${esc(k.mask)}</div></div><button class="ib sm" type="button" data-keyrm="${k.id}" aria-label="Remove">${I('trash-2','ic-sm')}</button></div>`).join('')||'<p class="faint">Add a key to start chatting.</p>'}</div><form id="keyform" style="display:flex;flex-direction:column;gap:8px"><div class="row"><select class="field" id="kt" style="width:auto" aria-label="Provider">${PROVIDERS.map(p=>`<option value="${p[0]}">${p[1]}</option>`).join('')}</select><input class="field grow" id="kv" type="password" placeholder="Paste key" autocomplete="off" aria-label="API key"></div><div class="row"><button class="btn sm" type="submit">Add key</button><span class="grow"></span><button class="btn quiet sm" type="button" data-act="sync">${I('refresh-cw','ic-sm')} Sync devices</button></div></form><p class="faint" style="font-size:12.5px">Encrypted on this device. You pay providers directly.</p>`,{after(){ $('#keyform').onsubmit=e=>{ e.preventDefault(); const v=$('#kv').value.trim(); if(v.length<6) return toast('That key looks too short.'); const t=$('#kt').value; S.keys.push({id:nid('k'),label:PROVIDERS.find(p=>p[0]===t)[1],mask:v.slice(0,4)+'…'+v.slice(-4)}); remodal(); renderComposer(); }; }}); }
+function plansHTML(cta){ const pro=S.usage.plan==='Pro'; return `<div class="plans"><div class="plan"><div class="row"><h3 class="grow">Free</h3>${pro?'':'<span class="badge on">Current</span>'}</div><ul>${['20 runs a day','1 run at a time','Web search and fetch'].map(x=>`<li>${I('check','ic-sm')}${x}</li>`).join('')}</ul></div><div class="plan pro"><div class="row"><h3 class="grow">Pro</h3>${pro?'<span class="badge on">Current</span>':''}</div><ul>${['200 runs a day','3 runs at a time','Priority routing'].map(x=>`<li>${I('check','ic-sm')}${x}</li>`).join('')}</ul>${cta?(pro?`<button class="btn danger sm" type="button" data-act="unsub">Cancel plan</button>`:`<button class="btn accent" type="button" data-act="sub">Upgrade</button>`):''}</div></div>`; }
+function openUpgrade(){ openModal('upgrade','Plans',()=>plansHTML(true)+'<p class="faint" style="font-size:12.5px">The desktop app is free, always.</p>',{wide:true}); }
+function code8(){ const a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s=''; for(let i=0;i<8;i++){ s+=a[Math.random()*a.length|0]; if(i===3) s+='-'; } return {code:s,exp:Date.now()+600000}; }
+function openContinue(){ if(!S.hcode||S.hcode.exp<Date.now()) S.hcode=code8(); S.ctab=S.ctab||'send'; openModal('continue','Continue elsewhere',()=>`<div class="seg" style="align-self:flex-start"><button type="button" data-ctab="send" aria-pressed="${S.ctab==='send'}">Send this chat</button><button type="button" data-ctab="recv" aria-pressed="${S.ctab==='recv'}">Bring one here</button></div>${S.ctab==='send'?`<div class="code">${S.hcode.code}</div><div class="row"><span class="faint mono grow" id="hexp" style="font-size:12px">expires in 10:00</span><button class="btn ghost sm" type="button" data-act="copy-code">${I('copy','ic-sm')} Copy</button><button class="btn quiet sm" type="button" data-act="new-code">New code</button></div><p class="muted" style="font-size:13.5px">In the desktop app or CLI, choose <b>Bring one here</b> and enter the code.</p>`:`<form id="recv" class="row"><input class="field mono" id="rc" placeholder="XXXX-XXXX" maxlength="9" style="letter-spacing:.12em;text-transform:uppercase" aria-label="Code"><button class="btn" type="submit">Continue</button></form>`}`,{after(){ const f=$('#recv'); if(f) f.onsubmit=e=>{ e.preventDefault(); if(!/^[A-Z0-9]{4}-?[A-Z0-9]{4}$/i.test($('#rc').value.trim())) return toast('Codes look like K7Q4-9MZD.'); const c=newConv('Chat from desktop'); const u=add(c,null,{role:'u',content:'Refactor the auth module to use JWT and add tests'}); add(c,u.id,{role:'a',tier:'T1',model:MODELS.auto.T1,content:'Picked up from your desktop session. The JWT middleware and its tests are done; updating the login route is next.',cost:0.012,why:why('T1','Continued from desktop')}); S.convs.unshift(c); S.active=c.id; closeModal(); renderApp(); }; }}); }
+function openEscalation(){ openModal('esc','A section needs you',`<p><b>Summarise each repository</b> wants to read <b>6 private repositories</b> in acme-org. You asked for every repository.</p><div class="row"><button class="btn sm" type="button" data-esc="retry">Allow</button><button class="btn ghost sm" type="button" data-esc="skip">Skip section</button><span class="grow"></span><span class="mono faint" id="escleft">5:00</span></div><textarea class="field" id="escnote" placeholder="Or tell it what to do instead" aria-label="Guidance"></textarea><div><button class="btn quiet sm" type="button" data-esc="guidance">Send guidance</button></div>`); }
+function openCtx(v,fast){ const n=Math.ceil(v.length/128000)+1; openModal('ctx','Long message',`<p>This is about <b>${compactN(Math.round(v.length/4))} tokens</b>. Cascade can summarize it in ${n} extra calls (about $${(n*0.002).toFixed(3)}) and then send.</p><div class="row"><button class="btn" type="button" data-act="ctx-ok" data-fast="${fast?1:0}">Summarize and send</button><button class="btn quiet" type="button" data-act="close-modal">Cancel</button></div>`); }
+
+/* ================= FILES ================= */
+async function addFiles(fs){ const ok=Array.from(fs).filter(f=>/^image\/(png|jpeg|gif|webp)$/.test(f.type)||/\.(pdf|docx|txt|md|csv|tsv|json|xml|html?|ya?ml)$/i.test(f.name)); if(!ok.length) return toast('Attach images, PDF, Word or text files.');
+  for(const f of ok){ if(S.pending.length>=6){ toast('Up to 6 files per message.'); break; } if(f.type.startsWith('image/')) S.pending.push({id:nid('a'),kind:'img',name:f.name,url:URL.createObjectURL(f)}); else { let ch=Math.round(f.size*.9); if(/\.(txt|md|csv|tsv|json|xml|html?|ya?ml)$/i.test(f.name)){ try{ ch=(await f.text()).length; }catch(e){} } S.pending.push({id:nid('a'),kind:'doc',name:f.name,chars:ch}); } } renderAtts(); }
+async function importFile(f){ try{ const d=JSON.parse(await f.text()); let c=0,m=0; (Array.isArray(d.sessions)?d.sessions.slice(0,100):[]).forEach(s=>{ const ms=(s.messages||[]).filter(x=>String(x.content||'').trim()); if(!ms.length) return; const cv=newConv(s.title||'Imported chat'); let p=null; ms.forEach(x=>{ p=add(cv,p,{role:x.role==='assistant'?'a':'u',content:String(x.content),tier:'T2',model:'imported'}).id; }); S.convs.unshift(cv); c++; }); (Array.isArray(d.memories)?d.memories:[]).forEach(x=>{ const t=typeof x==='string'?x:x&&x.content; if(t){ S.memories.push({id:nid('m'),text:t,kind:'permanent'}); m++; } }); toast(c||m?`Imported ${c} chats, ${m} memories`:'Nothing to import in that file'); renderSide(); }catch(e){ toast('Use a JSON export with sessions or memories.'); } }
+
+/* ================= HOME ================= */
+function renderHome(){ $('#home').innerHTML=`<div class="hnav"><div class="home"><span class="brand">${MARK(24)}<b>Cascade</b></span><nav class="links"><button type="button" data-scrollto="how">How it works</button><button type="button" data-view="docs">Docs</button><button type="button" data-scrollto="pricing">Pricing</button><a href="https://github.com/Varun-SV/Cascade-AI" target="_blank" rel="noopener">GitHub</a></nav><span class="grow"></span><button class="btn quiet" type="button" data-view="app">Sign in</button><button class="btn" type="button" data-view="app">Try Cascade</button></div></div>
+  <div class="home">
+   <section class="hero"><div><h1>One prompt.<br>A whole organization.</h1><p>Cascade plans the work, hands each part to the right model, and shows you what that saved.</p><div class="ctas"><button class="btn lg" type="button" data-view="app">Try Cascade</button><button class="btn ghost lg" type="button" data-act="download">${I('download','ic-sm')} Download</button></div><button class="npm" type="button" data-act="copy-npm" title="Copy">npm i -g cascade-ai ${I('copy','ic-sm')}</button></div>
+    <div class="flow" aria-label="Example run"><div class="prompt">Build a competitor report and export it as a Word doc</div><svg viewBox="0 0 320 170" role="img" aria-label="Three tiers falling: T1 plans, T2 manages, T3 works"><path class="arc" pathLength="1" style="stroke:var(--t1)" d="M20 30 Q160 110 300 30"/><path class="arc a2" pathLength="1" style="stroke:var(--t2)" d="M65 85 Q160 150 255 85"/><path class="arc a3" pathLength="1" style="stroke:var(--t3)" d="M112 132 Q160 166 208 132"/></svg><div class="leg"><span><span class="dot d1"></span>T1 plans</span><span><span class="dot d2"></span>T2 ×4</span><span><span class="dot d3"></span>T3 ×9</span></div><div class="rc"><span>competitor-report.docx</span><span><b>saved $0.34</b> · 89% vs all-T1</span></div></div></section>
+   <section class="hsec" id="how"><h2>Each tier does what it's best at.</h2><div class="tiers3">${[['Plans','A frontier model reads the request and splits it into sections.','M4 4 Q28 22 52 4','t1'],['Manages','Mid-size models run each section and coordinate its workers.','M12 4 Q28 18 44 4','t2'],['Works','Small, fast models do the actual work, in parallel.','M20 4 Q28 12 36 4','t3']].map(t=>`<div><svg viewBox="0 0 56 28" aria-hidden="true"><path d="${t[2]}" fill="none" stroke="var(--${t[3]})" stroke-width="3.5" stroke-linecap="round"/></svg><h3>${t[0]}</h3><p>${t[1]}</p></div>`).join('')}</div></section>
+   <section class="hsec"><div class="split"><div><h2>Every answer comes with a receipt.</h2><p>See which model did what, and what delegating saved against running it all on the top model.</p></div><div class="rcard">${[['T1','claude-sonnet-4.5','0.0210'],['T2','gpt-5.4-mini','0.0120'],['T3','gemini-2.5-flash','0.0080']].map(r=>`<div class="r"><span class="row" style="gap:6px"><span class="dot d${r[0][1]}"></span>${r[0]}</span><span>${r[1]}</span><span>$${r[2]}</span></div>`).join('')}<div class="tot"><span>total $0.0410 · all-T1 $0.3810</span><b>saved 89%</b></div></div></div></section>
+   <section class="hsec"><h2>Wherever you work.</h2><div class="surf">${[['terminal','CLI','The full orchestrator in your terminal.','Install','dp-install'],['monitor','Desktop','Chat, a live agent tree, an editor and a browser.','Download',null],['globe','Web','Nothing to install. Bring your keys.','Open','app']].map(s=>`<div><b>${I(s[0])} ${s[1]}</b><p>${s[2]}</p>${s[4]==='app'?`<button class="lnk" type="button" data-view="app">${s[3]} →</button>`:s[4]?`<button class="lnk" type="button" data-doc="${s[4]}">${s[3]} →</button>`:`<button class="lnk" type="button" data-act="download">${s[3]} →</button>`}</div>`).join('')}</div></section>
+   <section class="hsec" id="pricing"><h2>Free to start.</h2>${plansHTML(false)}</section>
+   <footer class="hfoot">${MARK(16)}<span>© 2026 Varun SV · MIT</span><span class="grow"></span><button type="button" data-view="docs">Docs</button><button type="button" data-doc="dp-privacy">Privacy</button><a href="https://github.com/Varun-SV/Cascade-AI" target="_blank" rel="noopener">GitHub</a></footer>
+  </div>`; paint(); }
+
+/* ================= DOCS ================= */
+let DOCS=null;
+const docs=()=>DOCS||(DOCS=Array.from(document.querySelectorAll('script[id^="dp-"]')).map(e=>({id:e.id,group:e.dataset.group,title:e.dataset.title,summary:e.dataset.summary,md:e.textContent.trim()})));
+const doc=id=>docs().find(d=>d.id===id)||docs()[0];
+const slug=s=>s.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+const LANG={bash:'Shell',python:'Python',js:'Node.js',ts:'TypeScript',json:'JSON'};
+function docBody(p){ const b=document.createElement('div'); b.innerHTML=md(p.md); const toc=[];
+  b.querySelectorAll('h2').forEach(h=>{ h.id='h-'+slug(h.textContent); toc.push([h.id,h.textContent]); });
+  b.querySelectorAll('blockquote').forEach(q=>{ const s=q.querySelector('p > strong:first-child'); if(!s) return; const k=s.textContent.trim().toLowerCase(); if(!['note','tip','warning'].includes(k)) return; s.remove(); q.className='callout '+k; q.insertAdjacentHTML('afterbegin',`<div class="ch">${k[0].toUpperCase()+k.slice(1)}</div>`); });
+  b.querySelectorAll('a[href^="#dp-"]').forEach(a=>a.dataset.doc=a.getAttribute('href').slice(1));
+  Array.from(b.querySelectorAll('pre')).forEach(pre=>{ const c=pre.querySelector('code'); pre.dataset.lang=((c&&c.className.match(/language-(\w+)/))||[])[1]||''; });
+  Array.from(b.querySelectorAll('pre')).forEach(pre=>{ if(!pre.parentNode||pre.closest('.cg')) return; const g=[pre]; let n=pre.nextElementSibling; while(n&&n.tagName==='PRE'){ g.push(n); n=n.nextElementSibling; }
+    const w=document.createElement('div'); w.className='cg'; pre.parentNode.insertBefore(w,pre);
+    w.insertAdjacentHTML('afterbegin',`<div class="cgh">${g.length>1?`<div class="tabs" role="tablist">${g.map((x,i)=>`<button type="button" role="tab" data-ctabi="${i}" aria-selected="${!i}">${LANG[x.dataset.lang]||x.dataset.lang}</button>`).join('')}</div>`:`<span class="lang grow">${LANG[pre.dataset.lang]||pre.dataset.lang||''}</span>`}<button class="ib sm" type="button" data-copycode="1" aria-label="Copy code">${I('copy','ic-sm')}</button></div>`);
+    g.forEach((x,i)=>{ if(i) x.hidden=true; w.appendChild(x); }); });
+  return {html:b.innerHTML,toc}; }
+function results(q){ q=q.trim().toLowerCase(); return docs().filter(d=>!q||(d.title+' '+d.summary+' '+d.md).toLowerCase().includes(q)); }
+function renderDocs(){ const p=doc(S.docPage); S.docPage=p.id; const b=docBody(p); const g={}; docs().forEach(d=>(g[d.group]=g[d.group]||[]).push(d)); const all=docs(), i=all.indexOf(p), pv=all[i-1], nx=all[i+1];
+  $('#docs').innerHTML=`<div class="docs"><div class="dtop"><button class="ib" type="button" data-act="doc-nav" aria-label="Menu" style="${wide(860)?'display:none':''}">${I('menu')}</button><span class="brand">${MARK(20)}<b>Cascade</b></span><span class="sep">Docs</span><button class="dsearch" type="button" data-act="doc-search">${I('search','ic-sm')}<span class="grow">Search</span><kbd>⌘K</kbd></button><span class="grow"></span><button class="btn sm" type="button" data-view="app">Open app</button></div>
+  <div class="dbody"><nav class="dnav${S.docNav?' open':''}" id="dnav">${Object.entries(g).map(([k,ds])=>`<span class="label">${esc(k)}</span>${ds.map(d=>`<button type="button" class="${d.id===p.id?'on':''}" data-doc="${d.id}">${esc(d.title)}</button>`).join('')}`).join('')}</nav>
+  <main class="dmain" id="dmain"><div class="dpage"><div class="grp">${esc(p.group)}</div><div class="row" style="align-items:flex-start"><h1 class="grow">${esc(p.title)}</h1><button class="btn quiet sm" type="button" data-act="copy-page">${I('copy','ic-sm')} Copy page</button></div><p class="sum">${esc(p.summary)}</p><div class="dcontent md">${b.html}</div><div class="dpn">${pv?`<button type="button" data-doc="${pv.id}"><span>Previous</span>${esc(pv.title)}</button>`:'<span></span>'}${nx?`<button type="button" class="r" data-doc="${nx.id}"><span>Next</span>${esc(nx.title)}</button>`:'<span></span>'}</div></div></main>
+  <aside class="dtoc">${b.toc.length?`<span class="label" style="padding:0 0 8px">On this page</span>${b.toc.map(t=>`<button type="button" data-toc="${t[0]}">${esc(t[1])}</button>`).join('')}`:''}</aside></div></div>`;
+  paint(); if(window.hljs) document.querySelectorAll('#docs pre code').forEach(c=>{ try{ hljs.highlightElement(c); }catch(e){} }); }
+function goDoc(id){ S.docPage=id; S.docNav=false; closeModal(); closeMenu(); if(S.view!=='docs'){ S.view='docs'; store.set('cv2-view','docs'); render(); } else renderDocs(); const m=$('#dmain'); if(m) m.scrollTop=0; }
+function openDocSearch(){ openModal('search','Search docs',()=>`<input class="field" id="dq" placeholder="Search Cascade docs" value="${esc(S.docQ)}" autocomplete="off" aria-label="Search docs"><div class="res">${results(S.docQ).slice(0,10).map(d=>`<button type="button" data-doc="${d.id}"><b style="font-weight:500">${esc(d.title)}</b><span>${esc(d.summary)}</span></button>`).join('')||'<p class="faint">No pages match.</p>'}</div>`,{after(){ const q=$('#dq'); q.focus(); q.setSelectionRange(q.value.length,q.value.length); q.oninput=()=>{ S.docQ=q.value; remodal(); }; q.onkeydown=e=>{ if(e.key==='Enter'){ const f=$('.res button'); if(f) f.click(); } }; }}); }
+
+/* ================= SYSTEM ================= */
+const TOKENS=`:root {
+  /* surfaces */
+  --paper: #F7F6F2;  --side: #EFEDE7;  --card: #FFFFFF;  --sunk: #EAE8E1;
+  /* ink */
+  --ink: #15171C;  --ink-2: #555A63;  --ink-3: #868B94;
+  --line: rgba(21,23,28,.10);  --line-2: rgba(21,23,28,.17);
+  /* cascade */
+  --accent: #2F6FE4;
+  --t1: #2F6FE4;  --t2: #1C8FBE;  --t3: #0E9B89;   /* text-safe tier inks */
+  --ramp: linear-gradient(180deg, #4C8DFF, #38B0DE, #2DD4BF);  /* brand: azure → sky → teal */
+  --save: #0E8A7A;  --warn: #A8671A;  --bad: #B8322A;
+  /* type */
+  --f-ui: "Geist", system-ui, sans-serif;
+  --f-read: "Source Serif 4", Georgia, serif;
+  --f-mono: "Geist Mono", ui-monospace, monospace;
+  /* shape */
+  --r: 10px;  --r-lg: 16px;  --r-xl: 20px;
+}
+[data-theme="dark"] {   /* "midnight" */
+  --paper: #0E1117;  --side: #0A0D12;  --card: #161A22;  --sunk: #1B2029;
+  --ink: #E9EBF0;  --ink-2: #A2A8B4;  --ink-3: #6E7583;
+  --line: rgba(233,235,240,.08);  --line-2: rgba(233,235,240,.15);
+  --accent: #6FA3FF;  --t1: #6FA3FF;  --t2: #4CC3EC;  --t3: #3EDFC9;
+  --save: #3EDFC9;  --warn: #E6B25C;  --bad: #F08A80;
+}`;
+function renderSystem(){ const sw=(n,v,d)=>`<div class="swc"><i style="background:${v}"></i><div>${n}<code>${d}</code></div></div>`;
+  $('#system').innerHTML=`<div class="sys">
+  <section><h1>Cascade × calm</h1><p class="lead">Claude's quiet structure, Cascade's flow. One accent family, used where work happens.</p></section>
+  <section class="princ"><div><b>Quiet by default</b><p>Paper, ink and space. Everything secondary lives in a menu.</p></div><div><b>Color means tier</b><p>Azure, sky and teal only ever mark T1, T2 and T3, or live work.</p></div><div><b>Money is a number</b><p>Costs and savings are set in mono so they read like a receipt.</p></div></section>
+  <section><h2>Color</h2><div class="rampbar"></div><p class="faint mono" style="margin:0 0 16px;font-size:12px">#4C8DFF → #38B0DE → #2DD4BF · the brand ramp, T1 → T3</p><div class="sw">${sw('Paper','var(--paper)','--paper')}${sw('Card','var(--card)','--card')}${sw('Sunk','var(--sunk)','--sunk')}${sw('Ink','var(--ink)','--ink')}${sw('Ink 2','var(--ink-2)','--ink-2')}${sw('T1 · azure','var(--t1)','--t1')}${sw('T2 · sky','var(--t2)','--t2')}${sw('T3 · teal','var(--t3)','--t3')}${sw('Saved','var(--save)','--save')}${sw('Warning','var(--warn)','--warn')}</div></section>
+  <section><h2>Type</h2><div class="types"><div><span class="label">Display · Source Serif 4</span><span style="font-family:var(--f-read);font-size:40px;letter-spacing:-.02em;line-height:1.1">One prompt. A whole organization.</span></div><div><span class="label">Reading · Source Serif 4</span><span style="font-family:var(--f-read);font-size:16.5px;line-height:1.65">Answers are set for reading: a book face, generous leading, a 720px measure.</span></div><div><span class="label">Interface · Geist</span><span style="font-size:14px">Buttons, menus, labels and navigation.</span></div><div><span class="label">Receipt · Geist Mono</span><span class="mono" style="font-size:12.5px">T1 · claude-sonnet-4.5 · $0.0410 · <span style="color:var(--save)">saved $0.34</span></span></div></div></section>
+  <section><h2>Components</h2><div class="comp">
+   <div><span class="cap">Mark · static and working</span><div class="row" style="gap:18px">${MARK(20)}${MARK(28)}${MARK(40)}${MARK(28,true)}</div></div>
+   <div><span class="cap">Buttons</span><div class="row" style="flex-wrap:wrap"><button class="btn" type="button">Primary</button><button class="btn ghost" type="button">Ghost</button><button class="btn quiet" type="button">Quiet</button><button class="btn accent" type="button">Accent</button></div></div>
+   <div><span class="cap">Chips · active tools</span><div class="row" style="flex-wrap:wrap"><span class="chip">${I('globe','ic-sm')} Web</span><span class="chip" aria-pressed="true">${I('monitor-play','ic-sm')} Browser</span><button class="mode" type="button"><b>Auto</b> ${I('chevron-down','ic-sm')}</button></div></div>
+   <div><span class="cap">Receipt line</span><button class="receipt" type="button"><span class="dot d1"></span>T1 · claude-sonnet-4.5 · $0.0410 · <span class="s">saved $0.34</span></button>${costBars(reportWhy('auto'))}</div>
+   <div><span class="cap">Live run · the spine</span><div class="live"><div class="spine"></div><div class="live-b"><div class="live-s">${MARK(18,true)}<span class="shimmer">3 sections in parallel</span></div>${tree([{id:'a',role:'T1',label:'Dispatching 4 sections',st:'run',model:'claude-sonnet-4.5'},{id:'b',role:'T2',parent:'a',label:'Pricing',st:'run',model:'gpt-5.4-mini',pct:60},{id:'c',role:'T3',parent:'b',label:'web_fetch pricing pages',st:'done',model:'gemini-2.5-flash'}])}</div></div></div>
+   <div><span class="cap">Tier dots</span><div class="row" style="gap:14px"><span class="row"><span class="dot d1"></span>T1 plans</span><span class="row"><span class="dot d2"></span>T2 manages</span><span class="row"><span class="dot d3"></span>T3 works</span></div></div>
+  </div></section>
+  <section><div class="row"><h2 class="grow" style="margin:0">Tokens</h2></div><p class="faint" style="margin:6px 0 14px">Drop these into the web app's theme file.</p><div class="tokens"><pre>${esc(TOKENS)}</pre><button class="ib" type="button" data-act="copy-tokens" aria-label="Copy tokens">${I('copy','ic-sm')}</button></div></section>
+  </div>`; paint(); }
+
+/* ================= RENDER ================= */
+function applyTheme(){ const r=document.documentElement; if(S.theme==='system'){ if(hostTheme) r.setAttribute('data-theme',hostTheme); else r.removeAttribute('data-theme'); } else r.setAttribute('data-theme',S.theme); document.body.classList.toggle('no-motion',S.reduce); }
+function render(){ closeMenu(); applyTheme(); renderStrip(); ['home','app','docs','system'].forEach(v=>$('#'+v).hidden=S.view!==v); if(S.view==='home') renderHome(); if(S.view==='docs') renderDocs(); if(S.view==='system') renderSystem(); renderApp(); paint(); }
+
+/* ================= EVENTS ================= */
+document.addEventListener('click',e=>{
+  const mi=e.target.closest('[data-mi]'); if(mi&&S.menu){ const it=S.menu.L[+mi.dataset.mi]; if(it.t==='a'){ closeMenu(); it.fn(); } else { it.fn(); drawMenu(); refreshBar(); const tb=$('#toolsbtn'); if(tb) tb.style.color=S.web||S.browser?'var(--accent)':''; } return; }
+  if(S.menu&&!e.target.closest('.menu')){ const same=e.target.closest('[data-menu]'); const k=S.menu.k; closeMenu(); if(same&&same.dataset.menu===k) return; }
+  const t=e.target.closest('button,[data-overlay],[data-act="close-side"],a[data-doc]'); if(!t) return; const d=t.dataset;
+  if(d.overlay){ if(e.target===t) closeModal(); return; }
+  if(d.menu) return openMenu(d.menu,t);
+  if(d.view){ S.view=d.view; store.set('cv2-view',d.view); render(); const h=$('#home'); if(h) h.scrollTop=0; return; }
+  if(d.doc){ e.preventDefault(); return goDoc(d.doc); }
+  if(d.toc){ const h=document.getElementById(d.toc); if(h) h.scrollIntoView({behavior:S.reduce?'auto':'smooth'}); return; }
+  if(d.ctabi!=null){ const g=t.closest('.cg'); g.querySelectorAll('pre').forEach((p,i)=>p.hidden=i!==+d.ctabi); g.querySelectorAll('[data-ctabi]').forEach(b=>b.setAttribute('aria-selected',String(b===t))); return; }
+  if(d.copycode){ const p=Array.from(t.closest('.cg').querySelectorAll('pre')).find(x=>!x.hidden); return copy(p.innerText); }
+  if(d.scrollto){ const el=document.getElementById(d.scrollto); if(el) el.scrollIntoView({behavior:S.reduce?'auto':'smooth'}); return; }
+  if(d.open){ S.active=d.open; S.editing=null; S.renaming=false; S.pane=null; if(!wide(820)) S.side=false; S.stick=true; renderApp(); return; }
+  if(d.del) return delConv(d.del);
+  if(d.sugg!=null){ if(S.run) return toast('One run at a time on Free.'); const s=SUGG[+d.sugg]; if(s[3]){ S.browser=true; S.web=false; } $('#ta').value=s[1]; return send(false); }
+  if(d.untok){ ({fast:()=>S.fastNext=false,web:()=>S.web=false,browser:()=>S.browser=false,skill:()=>S.skill='general'})[d.untok](); return refreshBar(); }
+  if(d.copy) return copy(conv().nodes[d.copy].content);
+  if(d.edit){ S.editing=d.edit; renderThread(); const a=$('#editta'); if(a){ a.focus(); a.setSelectionRange(a.value.length,a.value.length); } return; }
+  if(d.delmsg){ const c=conv(); if(S.run&&S.run.cid===c.id) return toast('Stop the run first.'); del(c,d.delmsg); renderThread(); renderHead(); return; }
+  if(d.sib){ const c=conv(); step(c,c.nodes[d.sib],+d.d); S.stick=false; renderThread(); renderHead(); return; }
+  if(d.regen){ if(S.run) return; const c=conv(); return run(c,c.nodes[c.nodes[d.regen].parent]); }
+  if(d.thumb){ S.thumbs[d.thumb]=S.thumbs[d.thumb]===d.v?null:d.v; S.stick=false; renderThread(); if(S.thumbs[d.thumb]) toast('Thanks. Auto-routing learns from this.'); return; }
+  if(d.why){ S.open['w'+d.why]=!S.open['w'+d.why]; S.stick=false; renderThread(); return; }
+  if(d.toggle){ S.open[d.toggle]=!S.open[d.toggle]; S.stick=false; renderThread(); return; }
+  if(d.viewfile) return showFile(Object.values(conv().nodes).flatMap(n=>n.files||[]).find(f=>f.id===d.viewfile));
+  if(d.viewsaved){ const f=S.files.find(x=>x.id===d.viewsaved); return showFile({name:f.name,ext:f.name.split('.').pop(),src:f.src}); }
+  if(d.dl) return toast(`Cascade downloads ${d.dl} here. Downloads are off in this preview.`);
+  if(d.savefile){ const f=Object.values(conv().nodes).flatMap(n=>n.files||[]).find(x=>x.id===d.savefile); S.saved[f.id]=1; S.files.unshift({id:nid('f'),name:f.name,size:f.size,when:'Just now',src:f.src}); S.stick=false; renderThread(); renderPane(); return toast('Saved to Files'); }
+  if(d.rmfile){ S.files=S.files.filter(f=>f.id!==d.rmfile); return renderPane(); }
+  if(d.rmatt){ S.pending=S.pending.filter(a=>a.id!==d.rmatt); return renderAtts(); }
+  if(d.clopt){ const q=S.clar.qs.find(x=>x.id===d.clopt); if(q.k==='multi'){ const c=S.clar.draft[q.id]||[]; S.clar.draft[q.id]=c.includes(d.v)?c.filter(v=>v!==d.v):c.concat(d.v); } else S.clar.draft[q.id]=S.clar.draft[q.id]===d.v?undefined:d.v; return renderGates(); }
+  if(d.appr){ const a=S.approvals.shift(); if(d.appr==='run') S.run.allowAll=true; renderGates(); return a.ok(d.appr!=='deny'); }
+  if(d.esc){ const note=(($('#escnote')||{}).value||'').trim(); if(d.esc==='guidance'&&!note) return toast('Type your guidance first.'); const ok=S.esc.ok; S.esc=null; return ok({a:d.esc,note}); }
+  if(d.tab){ tab=d.tab; return remodal(); }
+  if(d.sw){ const k=d.sw; if(k==='detail') S.detail=!S.detail; else if(k==='reduce'){ S.reduce=!S.reduce; applyTheme(); } else { S.set[k]=!S.set[k]; if(k==='webDefault') S.web=S.set.webDefault; } refreshLive(); refreshBar(); return remodal(); }
+  if(d.seg){ if(d.seg==='theme'){ S.theme=d.v; applyTheme(); renderStrip(); } else { S.set.bias=d.v; S.routing=d.v; refreshBar(); } remodal(); return paint(); }
+  if(d.skuse){ S.skill=d.skuse; refreshBar(); return remodal(); }
+  if(d.skdel){ S.custom=S.custom.filter(s=>s.id!==d.skdel); if(S.skill===d.skdel) S.skill='general'; refreshBar(); return remodal(); }
+  if(d.memdel){ S.memories=S.memories.filter(m=>m.id!==d.memdel); return remodal(); }
+  if(d.connon){ S.connected[d.connon].on=!S.connected[d.connon].on; return remodal(); }
+  if(d.connrm){ delete S.connected[d.connrm]; return remodal(); }
+  if(d.connadd){ t.disabled=true; t.textContent='Signing in…'; setTimeout(()=>{ const c=CONNECTORS.find(x=>x.id===d.connadd); S.connected[c.id]={on:true,tools:Object.fromEntries(c.tools.map(x=>[x,true]))}; remodal(); toast(c.name+' connected'); },900); return; }
+  if(d.keyrm){ S.keys=S.keys.filter(k=>k.id!==d.keyrm); remodal(); return renderComposer(); }
+  if(d.ctab){ S.ctab=d.ctab; return remodal(); }
+  switch(d.act){
+    case 'theme': S.theme=S.theme==='system'?'light':S.theme==='light'?'dark':'system'; applyTheme(); renderStrip(); paint(); break;
+    case 'toggle-side': S.side=!S.side; renderSide(); renderHead(); break;
+    case 'close-side': S.side=false; renderSide(); renderHead(); break;
+    case 'new': S.active=null; S.editing=null; S.pane=null; S.renaming=false; S.web=S.set.webDefault; S.browser=false; S.routing=S.set.bias; if(!wide(820)) S.side=false; renderApp(); $('#ta').focus(); break;
+    case 'search': S.searching=true; renderSide(); $('#chatq').focus(); break;
+    case 'files': showFiles(); break;
+    case 'skills': openSkills(); break;
+    case 'close-pane': S.pane=null; renderPane(); break;
+    case 'why-last': { const n=lastA(); if(n){ S.open['w'+n.id]=true; S.stick=false; renderThread(); const el=document.getElementById('md-'+n.id); if(el) el.parentNode.scrollIntoView({block:'end',behavior:'smooth'}); } break; }
+    case 'send': send(false); break;
+    case 'stop': stop(); break;
+    case 'skip-review': if(S.run){ S.run.skip=true; S.run.review=null; refreshLive(); } break;
+    case 'edit-cancel': S.editing=null; renderThread(); break;
+    case 'edit-save': { const c=conv(), n=c.nodes[d.id], v=$('#editta').value.trim(); if(!v||S.run) return; S.editing=null; run(c,add(c,n.parent,{role:'u',content:v,atts:n.atts})); break; }
+    case 'clar-send': { const q=S.clar; q.qs.forEach(x=>{ if(x.k==='text'){ const el=document.querySelector(`[data-cltext="${x.id}"]`); if(el) q.draft[x.id]=el.value; } }); answerClar(Object.entries(q.draft).filter(([,v])=>Array.isArray(v)?v.length:(v||'').trim()).map(([id,v])=>({id,v}))); break; }
+    case 'clar-skip': answerClar([]); break;
+    case 'bv-take': S.bv.human=true; renderPane(); break;
+    case 'bv-back': S.bv.human=false; renderPane(); break;
+    case 'bv-pause': S.bv.paused=!S.bv.paused; renderPane(); break;
+    case 'bv-stop': S.bv=null; S.pane=S.prevPane||null; renderPane(); toast('Browser stopped. The run continues.'); break;
+    case 'close-modal': closeModal(); break;
+    case 'keys': closeModal(); openKeys(); break;
+    case 'upgrade': closeModal(); openUpgrade(); break;
+    case 'signout': toast('Sign out is off in this preview'); break;
+    case 'clear-all': closeModal(); stop(); S.convs=[]; S.active=null; S.pane=null; renderApp(); toast('All chats deleted'); break;
+    case 'sub': S.usage.plan='Pro'; S.usage.limit=200; remodal(); renderSide(); toast('You are on Pro'); break;
+    case 'unsub': S.usage.plan='Free'; S.usage.limit=20; remodal(); renderSide(); break;
+    case 'sync': toast('Settings encrypted with your passphrase and synced'); break;
+    case 'copy-code': copy(S.hcode.code,'Code copied'); break;
+    case 'new-code': S.hcode=code8(); remodal(); break;
+    case 'ctx-ok': closeModal(); send(d.fast==='1',true); break;
+    case 'download': toast('Cascade picks the build for your computer here.'); break;
+    case 'copy-npm': copy('npm i -g cascade-ai'); break;
+    case 'doc-nav': S.docNav=!S.docNav; $('#dnav').classList.toggle('open',S.docNav); break;
+    case 'doc-search': openDocSearch(); break;
+    case 'copy-page': { const p=doc(S.docPage); copy('# '+p.title+'\n\n'+p.md,'Page copied as Markdown'); break; }
+    case 'copy-tokens': copy(TOKENS,'Tokens copied'); break;
+  } });
+document.addEventListener('submit',e=>{ if(e.target.id==='rename'){ e.preventDefault(); const c=conv(), v=$('#renamein').value.trim(); if(c&&v) c.title=v; S.renaming=false; renderHead(); renderSide(); } });
+document.addEventListener('input',e=>{ const t=e.target; if(t.id==='ta'){ S.draft=t.value; size(t); renderSend(); } if(t.id==='chatq'){ S.q=t.value; $('#convs').innerHTML=convRows(); paint(); } if(t.dataset.cltext&&S.clar) S.clar.draft[t.dataset.cltext]=t.value; });
+document.addEventListener('change',e=>{ const t=e.target; if(t.id==='fileinput'){ addFiles(t.files); t.value=''; } if(t.id==='importinput'){ if(t.files[0]) importFile(t.files[0]); t.value=''; } if(t.dataset.memkind) S.memories.find(m=>m.id===t.dataset.memkind).kind=t.value; if(t.dataset.setin){ const v=t.value.trim(); if(t.dataset.setin==='costCap'&&v&&!(+v>=.05&&+v<=25)){ t.value=S.set.costCap; return toast('Use a cap between $0.05 and $25.'); } S.set[t.dataset.setin]=v; toast('Saved'); } });
+document.addEventListener('keydown',e=>{ const t=e.target;
+  if(t.id==='ta'&&e.key==='Enter'&&!e.shiftKey&&!e.isComposing){ e.preventDefault(); send(false); }
+  if(t.id==='editta'&&e.key==='Enter'&&(e.metaKey||e.ctrlKey)){ e.preventDefault(); $('[data-act="edit-save"]').click(); }
+  if(t.id==='chatq'&&e.key==='Escape'){ S.searching=false; S.q=''; renderSide(); }
+  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){ e.preventDefault(); if(S.view==='docs') openDocSearch(); else if(S.view==='app'){ S.side=true; S.searching=true; renderSide(); $('#chatq').focus(); } }
+  if(e.key==='Escape'){ if(S.menu) closeMenu(); else if(S.modal) closeModal(); else if(S.renaming){ S.renaming=false; renderHead(); } } });
+document.addEventListener('paste',e=>{ if(e.target.id!=='ta') return; const f=Array.from(e.clipboardData.files||[]); if(f.length){ e.preventDefault(); addFiles(f); } });
+document.addEventListener('dragover',e=>{ const c=e.target.closest&&e.target.closest('#composer'); if(c){ e.preventDefault(); c.classList.add('drag'); } });
+document.addEventListener('dragleave',e=>{ const c=e.target.closest&&e.target.closest('#composer'); if(c) c.classList.remove('drag'); });
+document.addEventListener('drop',e=>{ const c=e.target.closest&&e.target.closest('#composer'); if(c){ e.preventDefault(); c.classList.remove('drag'); if(e.dataTransfer.files.length) addFiles(e.dataTransfer.files); } });
+document.addEventListener('scroll',e=>{ if(e.target.id==='scroll'){ const s=e.target; S.stick=s.scrollHeight-s.scrollTop-s.clientHeight<80; } },true);
+let rz; addEventListener('resize',()=>{ clearTimeout(rz); rz=setTimeout(()=>{ closeMenu(); renderSide(); renderHead(); },120); });
+
+seed(); render();
+</script>

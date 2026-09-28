@@ -3,7 +3,12 @@
 @tailwind utilities;
 
 /* ─────────────────────────────────────────────────────────────────────────
-   Cascade "Bold Console" theme tokens.
+   Cascade "Calm" theme tokens.
+
+   Claude's quiet structure — paper, ink and space — with Cascade's own
+   identity: the azure → sky → teal ramp (lib/brand.ts) is the ONLY accent
+   family, and it always means a tier or live work. Dark is "midnight", the
+   CLI's default theme; light is warm paper.
 
    Colours are space-separated RGB channels so Tailwind's `/<alpha>` modifiers
    work (see tailwind.config.js). `:root` is the dark theme (default); the
@@ -11,115 +16,120 @@
    toggles `data-theme` on <html> (see lib/theme.ts) — light/dark/system.
    ───────────────────────────────────────────────────────────────────────── */
 :root {
-  /* Neutral ramp — 50/100 brightest text … 900/950 base surface (dark). */
-  --c-ink-50: 247 249 255;
-  --c-ink-100: 237 240 250;
-  --c-ink-200: 209 214 232;
-  --c-ink-300: 176 183 208;
-  --c-ink-400: 140 147 174;
-  --c-ink-500: 100 108 138;
-  --c-ink-600: 50 58 86;
-  --c-ink-700: 32 38 58;
-  --c-ink-800: 21 25 39;
-  --c-ink-900: 15 18 28;
-  --c-ink-950: 8 10 18;
+  /* Neutral ramp — 50/100 brightest text … 900/950 base surface (midnight). */
+  --c-ink-50: 245 246 249;
+  --c-ink-100: 233 235 240;
+  --c-ink-200: 196 200 209;
+  --c-ink-300: 162 168 180;
+  --c-ink-400: 128 134 147;
+  --c-ink-500: 110 117 131;
+  --c-ink-600: 52 58 70;
+  --c-ink-700: 34 39 49;
+  --c-ink-800: 27 32 41;
+  --c-ink-900: 22 26 34;
+  --c-ink-950: 10 13 18;
 
   /* Cascade azure — primary brand / action. */
-  --c-accent-300: 143 182 255;
-  --c-accent-400: 107 160 255;
+  --c-accent-300: 143 186 255;
+  --c-accent-400: 111 163 255;
   --c-accent-500: 76 141 255;
-  --c-accent-600: 47 116 238;
-  --c-accent-700: 32 95 208;
+  --c-accent-600: 47 111 228;
+  --c-accent-700: 32 90 200;
 
-  /* Elevation tint: white overlays in dark. */
-  --c-elev: 255 255 255;
+  /* Elevation tint: a neutral overlay (no blue cast). */
+  --c-elev: 233 235 240;
 
   /* Orchestration tiers flow with the cascade: azure → sky → teal. */
-  --c-t1: 76 141 255;
-  --c-t2: 56 176 222;
-  --c-t3: 45 212 191;
+  --c-t1: 111 163 255;
+  --c-t2: 76 195 236;
+  --c-t3: 62 223 201;
 
-  --c-success-300: 167 240 209;
-  --c-success-500: 61 220 151;
-  --c-success-800: 15 74 52;
-  --c-success-950: 10 42 31;
-  --c-warning-300: 251 227 161;
-  --c-warning-500: 242 201 76;
-  --c-warning-800: 74 60 15;
-  --c-warning-950: 42 34 10;
-  --c-danger-300: 249 184 187;
-  --c-danger-500: 255 102 133;
-  --c-danger-800: 74 16 19;
-  --c-danger-950: 42 10 12;
-  --c-info-300: 185 217 255;
-  --c-info-500: 103 168 255;
-  --c-info-800: 15 42 74;
-  --c-info-950: 10 26 42;
+  /* "Saved" reads in the T3 teal: cheap work is where the savings come from. */
+  --c-success-300: 134 239 222;
+  --c-success-500: 62 223 201;
+  --c-success-800: 14 62 56;
+  --c-success-950: 9 38 35;
+  --c-warning-300: 240 206 140;
+  --c-warning-500: 230 178 92;
+  --c-warning-800: 74 56 20;
+  --c-warning-950: 40 31 12;
+  --c-danger-300: 246 170 162;
+  --c-danger-500: 240 138 128;
+  --c-danger-800: 74 24 22;
+  --c-danger-950: 40 13 12;
+  --c-info-300: 185 214 255;
+  --c-info-500: 111 163 255;
+  --c-info-800: 20 42 74;
+  --c-info-950: 12 24 42;
 
   /* Composite tokens used by component classes below. */
-  --page-bg: #080a12;
-  --glass-tint: 15 18 28;         /* ink-900 channels for frosted panels */
-  --glass-inset: rgba(255, 255, 255, 0.05);
-  --glass-shadow: 0 12px 34px -14px rgba(0, 0, 0, 0.7);
-  --glass-shadow-strong: 0 24px 60px -18px rgba(0, 0, 0, 0.75);
-  --code-inline-bg: #151927;
-  --code-block-bg: #0c0f18;
-  --scrollbar: rgba(255, 255, 255, 0.14);
-  --scrollbar-hover: rgba(255, 255, 255, 0.22);
+  --page-bg: #0e1117;
+  --glass-tint: 22 26 34;
+  --glass-inset: transparent;
+  --glass-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 30px rgba(0, 0, 0, 0.3);
+  --glass-shadow-strong: 0 24px 60px rgba(0, 0, 0, 0.5);
+  --code-inline-bg: #1b2029;
+  --code-block-bg: #0a0d12;
+  --scrollbar: rgba(233, 235, 240, 0.14);
+  --scrollbar-hover: rgba(233, 235, 240, 0.24);
+  /* The brand ramp itself — used for the mark, the live-run spine, and
+     cost bars. Never as a fill for ordinary controls. */
+  --cascade-ramp: linear-gradient(180deg, #4c8dff, #38b0de 50%, #2dd4bf);
+  --cascade-ramp-x: linear-gradient(90deg, #4c8dff, #38b0de 50%, #2dd4bf);
   color-scheme: dark;
 }
 
 :root[data-theme='light'] {
-  --c-ink-50: 20 23 38;
-  --c-ink-100: 32 35 54;
-  --c-ink-200: 74 82 104;
-  --c-ink-300: 102 112 133;
-  --c-ink-400: 122 132 154;
-  --c-ink-500: 152 160 179;
-  --c-ink-600: 197 201 217;
-  --c-ink-700: 217 220 232;
-  --c-ink-800: 240 241 247;
+  --c-ink-50: 21 23 28;
+  --c-ink-100: 30 33 40;
+  --c-ink-200: 64 69 78;
+  --c-ink-300: 85 90 99;
+  --c-ink-400: 110 115 124;
+  --c-ink-500: 134 139 148;
+  --c-ink-600: 207 203 193;
+  --c-ink-700: 227 224 216;
+  --c-ink-800: 239 237 231;
   --c-ink-900: 255 255 255;
-  --c-ink-950: 236 239 245;
+  --c-ink-950: 234 232 225;
 
-  --c-accent-300: 76 141 255;
-  --c-accent-400: 59 125 240;
-  --c-accent-500: 47 111 230;
-  --c-accent-600: 36 86 196;
-  --c-accent-700: 27 65 151;
+  --c-accent-300: 59 120 235;
+  --c-accent-400: 47 111 228;
+  --c-accent-500: 47 111 228;
+  --c-accent-600: 36 90 200;
+  --c-accent-700: 27 70 160;
 
-  --c-elev: 24 27 46;
+  --c-elev: 21 23 28;
 
-  --c-t1: 47 111 230;
-  --c-t2: 44 147 199;
-  --c-t3: 18 165 148;
+  --c-t1: 47 111 228;
+  --c-t2: 28 143 190;
+  --c-t3: 14 155 137;
 
-  --c-success-300: 6 106 74;
-  --c-success-500: 22 163 116;
-  --c-success-800: 167 240 209;
-  --c-success-950: 224 247 237;
-  --c-warning-300: 140 94 8;
-  --c-warning-500: 200 150 26;
-  --c-warning-800: 250 235 190;
-  --c-warning-950: 252 246 226;
-  --c-danger-300: 176 32 56;
-  --c-danger-500: 220 56 86;
-  --c-danger-800: 250 205 210;
-  --c-danger-950: 253 235 238;
-  --c-info-300: 30 90 168;
-  --c-info-500: 59 130 220;
-  --c-info-800: 200 220 245;
-  --c-info-950: 232 240 252;
+  --c-success-300: 14 138 122;
+  --c-success-500: 14 155 137;
+  --c-success-800: 190 236 228;
+  --c-success-950: 226 246 242;
+  --c-warning-300: 140 90 16;
+  --c-warning-500: 168 103 26;
+  --c-warning-800: 246 226 190;
+  --c-warning-950: 251 243 228;
+  --c-danger-300: 168 40 34;
+  --c-danger-500: 184 50 42;
+  --c-danger-800: 246 208 204;
+  --c-danger-950: 252 238 236;
+  --c-info-300: 36 90 200;
+  --c-info-500: 47 111 228;
+  --c-info-800: 206 222 250;
+  --c-info-950: 234 241 253;
 
-  --page-bg: #eceff5;
+  --page-bg: #f7f6f2;
   --glass-tint: 255 255 255;
-  --glass-inset: rgba(255, 255, 255, 0.6);
-  --glass-shadow: 0 12px 30px -16px rgba(30, 41, 90, 0.28);
-  --glass-shadow-strong: 0 22px 55px -20px rgba(30, 41, 90, 0.32);
-  --code-inline-bg: #eef0f7;
-  --code-block-bg: #f4f5fa;
-  --scrollbar: rgba(24, 27, 46, 0.18);
-  --scrollbar-hover: rgba(24, 27, 46, 0.3);
+  --glass-inset: transparent;
+  --glass-shadow: 0 1px 2px rgba(21, 23, 28, 0.05), 0 10px 30px rgba(21, 23, 28, 0.07);
+  --glass-shadow-strong: 0 24px 60px rgba(21, 23, 28, 0.16);
+  --code-inline-bg: #eae8e1;
+  --code-block-bg: #f0eee8;
+  --scrollbar: rgba(21, 23, 28, 0.16);
+  --scrollbar-hover: rgba(21, 23, 28, 0.28);
   color-scheme: light;
 }
 
@@ -164,50 +174,90 @@ select option {
   scroll-behavior: auto !important;
 }
 
-/* Ground: a deep base with soft, fixed brand glows so the frosted-glass panels
-   layered on top read with real depth. Both channels flip with the theme. */
+/* Ground: flat paper (light) or midnight (dark). No glows — the only colour
+   on screen should be the tier ramp where work is happening. */
 body {
-  @apply text-ink-100;
-  background:
-    radial-gradient(1100px 620px at 12% -12%, rgba(76, 141, 255, 0.16), transparent 55%),
-    radial-gradient(1000px 700px at 100% 0%, rgba(45, 212, 191, 0.09), transparent 52%),
-    radial-gradient(900px 700px at 50% 120%, rgba(56, 176, 222, 0.05), transparent 55%),
-    var(--page-bg);
-  background-attachment: fixed;
-}
-:root[data-theme='light'] body {
-  background:
-    radial-gradient(1100px 620px at 12% -12%, rgba(47, 111, 230, 0.1), transparent 55%),
-    radial-gradient(1000px 700px at 100% 0%, rgba(44, 147, 199, 0.06), transparent 52%),
-    radial-gradient(900px 700px at 50% 120%, rgba(18, 165, 148, 0.05), transparent 55%),
-    var(--page-bg);
-  background-attachment: fixed;
+  @apply font-sans text-ink-100 antialiased;
+  background: var(--page-bg);
 }
 
 @layer components {
-  /* Frosted translucent surface with an inset top highlight + soft drop shadow. */
+  /* A raised card: solid surface, hairline edge, soft shadow. (The class
+     names are kept from the frosted theme so every panel restyles at once.) */
   .glass {
-    background: rgb(var(--glass-tint) / 0.55);
-    @apply border border-elev/10 backdrop-blur-xl;
-    box-shadow: inset 0 1px 0 0 var(--glass-inset), var(--glass-shadow);
+    background: rgb(var(--glass-tint));
+    @apply border border-elev/10;
+    box-shadow: var(--glass-shadow);
   }
   .glass-strong {
-    background: rgb(var(--glass-tint) / 0.82);
-    @apply border border-elev/10 backdrop-blur-2xl;
-    box-shadow: inset 0 1px 0 0 var(--glass-inset), var(--glass-shadow-strong);
+    background: rgb(var(--glass-tint));
+    @apply border border-elev/10;
+    box-shadow: var(--glass-shadow-strong);
   }
   /* Reveal-on-hover highlight for interactive rows. */
   .reveal {
     @apply relative transition-colors duration-200;
   }
   .reveal:hover {
-    @apply bg-elev/[0.06];
-    box-shadow: inset 0 0 0 1px rgb(var(--c-elev) / 0.06);
+    @apply bg-elev/[0.05];
   }
-  /* The cascade gradient (azure → teal) used on primary actions. */
+  /* The cascade ramp (azure → teal). Reserved for brand moments — the mark,
+     the live-run spine, cost bars — not for ordinary buttons. */
   .accent-grad {
     background-image: linear-gradient(135deg, #4c8dff 0%, #38b0de 52%, #2dd4bf 100%);
   }
+
+  /* Answers are set for reading: a book face, generous leading, and prose
+     colours bound to the ink ramp so they flip correctly with the theme. */
+  .cascade-answer {
+    @apply font-serif;
+    font-size: 16.5px;
+    line-height: 1.68;
+    --tw-prose-body: rgb(var(--c-ink-100));
+    --tw-prose-headings: rgb(var(--c-ink-50));
+    --tw-prose-bold: rgb(var(--c-ink-50));
+    --tw-prose-links: rgb(var(--c-accent-400));
+    --tw-prose-bullets: rgb(var(--c-ink-500));
+    --tw-prose-counters: rgb(var(--c-ink-500));
+    --tw-prose-quotes: rgb(var(--c-ink-200));
+    --tw-prose-quote-borders: rgb(var(--c-ink-600));
+    --tw-prose-hr: rgb(var(--c-ink-600));
+    --tw-prose-th-borders: rgb(var(--c-ink-600));
+    --tw-prose-td-borders: rgb(var(--c-ink-700));
+    --tw-prose-code: rgb(var(--c-ink-100));
+    --tw-prose-invert-body: rgb(var(--c-ink-100));
+    --tw-prose-invert-headings: rgb(var(--c-ink-50));
+    --tw-prose-invert-bold: rgb(var(--c-ink-50));
+    --tw-prose-invert-links: rgb(var(--c-accent-400));
+    --tw-prose-invert-bullets: rgb(var(--c-ink-500));
+    --tw-prose-invert-counters: rgb(var(--c-ink-500));
+    --tw-prose-invert-quotes: rgb(var(--c-ink-200));
+    --tw-prose-invert-quote-borders: rgb(var(--c-ink-600));
+    --tw-prose-invert-hr: rgb(var(--c-ink-600));
+    --tw-prose-invert-th-borders: rgb(var(--c-ink-600));
+    --tw-prose-invert-td-borders: rgb(var(--c-ink-700));
+    --tw-prose-invert-code: rgb(var(--c-ink-100));
+  }
+  .cascade-answer :where(h1, h2, h3, h4) { @apply font-serif font-semibold; }
+  .cascade-answer :where(table, pre, code) { font-family: inherit; }
+  .cascade-answer :where(table) { @apply font-sans text-[13.5px]; }
+  .cascade-answer :where(code, pre) { @apply font-mono; }
+
+  /* The spine: a thin line of the brand ramp beside a live run, flowing slowly
+     downward — the hierarchy handing work down. The one bold element. */
+  .cascade-spine {
+    background: linear-gradient(180deg, #4c8dff, #38b0de, #2dd4bf, #38b0de, #4c8dff);
+    background-size: 100% 200%;
+    animation: cascadeSpine 2.4s linear infinite;
+  }
+
+  /* Receipts: costs and savings read as numbers, in mono. */
+  .receipt { @apply font-mono text-[12px] tabular-nums; }
+}
+
+@keyframes cascadeSpine {
+  from { background-position: 0 0; }
+  to { background-position: 0 -200%; }
 }
 
 /* The Cascade mark, animated: three arcs, lit in turn from the top down. That
@@ -232,6 +282,9 @@ body {
     0%, 100% { opacity: 0.3; transform: none; }
     50%      { opacity: 1;   transform: none; }
   }
+  /* The spine is ambient, not a busy signal (the mark and the tree carry
+     that), so it simply holds still: the ramp stays, the flow stops. */
+  .cascade-spine { animation: none; }
 }
 
 /* Shimmer sweep for streaming / loading states. */

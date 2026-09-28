@@ -1,7 +1,7 @@
 import typography from '@tailwindcss/typography';
 
 /**
- * Cascade "Bold Console" tokens.
+ * Cascade "Calm" tokens — Claude-like quiet structure, Cascade's own identity.
  *
  * Every colour resolves from a CSS custom property holding space-separated RGB
  * channels (e.g. `--c-ink-900: 15 18 28`), wrapped so Tailwind's `/<alpha>`
@@ -11,10 +11,11 @@ import typography from '@tailwindcss/typography';
  * automatically — no per-component theme branching.
  *
  * - `ink`    — the neutral ramp: 50/100 = brightest text … 900/950 = base surface.
- * - `accent` — Cascade violet, the primary brand/action colour.
+ * - `accent` — Cascade azure, the primary brand/action colour.
  * - `elev`   — translucent elevation tint (white in dark, deep ink in light);
  *              use in place of raw `white/x` so overlays read in both themes.
- * - `t1/t2/t3` — orchestration tier accents (amber / violet / cyan).
+ * - `t1/t2/t3` — orchestration tier accents: azure → sky → teal (lib/brand.ts).
+ *              These are the only accent hues; colour always means a tier.
  */
 export default {
   content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
@@ -74,7 +75,12 @@ export default {
         },
       },
       fontFamily: {
-        mono: ['JetBrains Mono', 'Fira Code', 'Cascadia Code', 'monospace'],
+        // Interface. Geist is self-hosted via @fontsource-variable (main.tsx).
+        sans: ['"Geist Variable"', 'system-ui', '-apple-system', '"Segoe UI"', 'sans-serif'],
+        // Reading: answers and display headings.
+        serif: ['"Source Serif 4 Variable"', 'Georgia', '"Times New Roman"', 'serif'],
+        // Receipts (tiers, models, costs) and code.
+        mono: ['"Geist Mono Variable"', '"JetBrains Mono"', '"Fira Code"', 'ui-monospace', 'monospace'],
       },
     },
   },
