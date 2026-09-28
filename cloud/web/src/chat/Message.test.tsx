@@ -182,3 +182,26 @@ describe('Message — generated media (unsaved)', () => {
     expect(mockFetchPending).not.toHaveBeenCalled();
   });
 });
+
+describe('Message — receipt', () => {
+  const why = {
+    tier: 'T3', model: 'openai:gpt-mini',
+    decisions: [], savedUsd: 0, savedPct: 0, totalCostUsd: 0, totalTokens: 0, durationMs: 0,
+    costByTier: {}, tokensByTier: {},
+    // T1 planned first, so it is first in insertion order — but T3 did the work.
+    models: { T1: 'anthropic:claude-big', T2: 'openai:gpt-mid', T3: 'openai:gpt-mini' },
+  };
+
+  it('falls back to the report’s primary tier and model, not the first tier it lists', () => {
+    render(<Message message={base({ role: 'assistant', content: 'done', why })} />);
+    expect(screen.getByText('T3')).toBeInTheDocument();
+    expect(screen.getByText(/gpt-mini/)).toBeInTheDocument();
+    expect(screen.queryByText('T1')).not.toBeInTheDocument();
+  });
+
+  it('prefers the reply’s own tier and model when it has them', () => {
+    render(<Message message={base({ role: 'assistant', content: 'done', tier: 'T2', model: 'openai:gpt-mid', why })} />);
+    expect(screen.getByText('T2')).toBeInTheDocument();
+    expect(screen.getByText(/gpt-mid/)).toBeInTheDocument();
+  });
+});

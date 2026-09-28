@@ -256,11 +256,12 @@ const TIER_DOT: Record<string, string> = { T1: 'bg-t1', T2: 'bg-t2', T3: 'bg-t3'
  */
 function Receipt({ message, open, onToggle }: { message: ChatMessage; open: boolean; onToggle?: () => void }) {
   const saved = message.why?.savedUsd ?? 0;
-  // A reply doesn't always carry its tier/model directly; the /why report
-  // names the tier that served it, so fall back to that.
+  // A reply doesn't always carry its tier/model directly. The /why report
+  // names the tier that did the most work (`why.tier`/`why.model`), so fall
+  // back to that; only if it's missing, look the model up by tier.
   const whyModels = message.why?.models ?? {};
-  const tier = message.tier ?? Object.keys(whyModels).find((t) => /^T[123]$/.test(t));
-  const rawModel = message.model ?? (tier ? whyModels[tier] : undefined);
+  const tier = message.tier ?? message.why?.tier ?? undefined;
+  const rawModel = message.model ?? message.why?.model ?? (tier ? whyModels[tier] : undefined);
   // "openai-compatible:stub-model" → "stub-model": the provider is noise here.
   const model = rawModel ? rawModel.slice(rawModel.indexOf(':') + 1) : undefined;
   const body = (
