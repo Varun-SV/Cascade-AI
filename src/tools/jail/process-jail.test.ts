@@ -12,10 +12,7 @@ import { PrivacyPaths } from '../../core/privacy/paths.js';
 import { execFileSync } from 'node:child_process';
 import { BUILT_IN_PROTECTED } from '../../config/ignore.js';
 import { projectStateDir, statePath } from '../../config/project-state.js';
-import {
-  ProcessJail, bwrapArgs, collectHidden, detectJail, homeSecrets, scrubEnv, seatbeltProfile, toPathspecs, unixSocketFilter,
-  type JailKind, type JailPolicy,
-} from './process-jail.js';
+import { ProcessJail, bwrapArgs, collectHidden, detectJail, homeSecrets, scrubEnv, seatbeltProfile, toPathspecs, unixSocketFilter, type JailKind, type JailPolicy, withIncludes } from './process-jail.js';
 
 const SECRET = 'sk-live-JAILTEST-0123456789';
 const LOCAL = 'LOCAL-ONLY-LAUNCH-PLAN';
@@ -837,6 +834,107 @@ describe('git on Windows gets the scrubbed environment', () => {
 // in the workspace, /tmp, the home folder, a commit — for a cloud worker's
 // command to read later. Now it writes only into the workspace, and what it
 // changed there is local-only from then on.
+// Only the top-level config files were frozen: what they include, git reads
+// as its own configuration all the same.
+describe('withIncludes', () => {
+  it('follows include and includeIf paths, whatever the condition, into what they include', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-includes-')));
+    try {
+      const home = path.join(dir, 'home');
+      await fs.mkdir(home);
+      const top = path.join(dir, 'config');
+      await fs.writeFile(top, '[include]\n\tpath = ~/a.cfg\n[includeIf "gitdir:/nowhere/"]\n\tpath = sub/b.cfg\n');
+      await fs.writeFile(path.join(home, 'a.cfg'), '[include]\n\tpath = c.cfg\n');
+      const files = await withIncludes([top], home);
+      expect([...files].sort()).toEqual([top, path.join(home, 'a.cfg'), path.join(home, 'c.cfg'), path.join(dir, 'sub', 'b.cfg')].sort());
+      // Not there yet: made empty, so a command cannot make it.
+      expect(await fs.readFile(path.join(dir, 'sub', 'b.cfg'), 'utf8')).toBe('');
+      expect(await fs.readFile(path.join(home, 'c.cfg'), 'utf8')).toBe('');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// A repository nested in the workspace — or a submodule — was never checked:
+// its store stayed in view with a removed secret in its history. Its config,
+// and every file a git config includes, stayed writable to commands, for the
+// git tool to run what they name with the credentials it keeps.
+describe.skipIf(!bwrapWorks)('in bubblewrap: repositories nested in the workspace, and what a git config includes', () => {
+  let ws: string;
+  const exec = { tierId: 't3', sessionId: 's', requireApproval: false };
+  const g = (dir: string, ...args: string[]) => execFileSync('git', ['-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' });
+  const registry = () => {
+    const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {} } as never, ws);
+    reg.setPrivacyPaths(new PrivacyPaths([
+      { pattern: 'secret/**', policy: 'local-only' },
+      { pattern: 'pkgs/y/token.txt', policy: 'local-only' },
+    ], { workspaceRoot: ws }));
+    return reg;
+  };
+
+  beforeAll(async () => {
+    ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-nested-')));
+    g(ws, 'init', '-q');
+    await fs.writeFile(path.join(ws, 'readme.md'), 'readme\n');
+    g(ws, 'add', 'readme.md'); g(ws, 'commit', '-qm', 'readme');
+    const lib = path.join(ws, 'vendor', 'lib');
+    await fs.mkdir(lib, { recursive: true });
+    g(lib, 'init', '-q');
+    await fs.writeFile(path.join(lib, '.env'), 'API_KEY=sk-nested-0123456789\n');
+    g(lib, 'add', '-f', '.env'); g(lib, 'commit', '-qm', 'env');
+    g(lib, 'rm', '-q', '.env'); g(lib, 'commit', '-qm', 'gone');
+    // A pattern that names a path through a nested repository.
+    const y = path.join(ws, 'pkgs', 'y');
+    await fs.mkdir(y, { recursive: true });
+    g(y, 'init', '-q');
+    await fs.writeFile(path.join(y, 'token.txt'), 'NESTED-LOCAL-TOKEN\n');
+    g(y, 'add', 'token.txt'); g(y, 'commit', '-qm', 'token');
+    const tool = path.join(ws, 'tools', 'x');
+    await fs.mkdir(tool, { recursive: true });
+    g(tool, 'init', '-q');
+    g(tool, 'commit', '-q', '--allow-empty', '-m', 'start');
+    // Relative to the git folder: the workspace's inc.cfg, and one not there yet.
+    g(ws, 'config', 'include.path', '../inc.cfg');
+    g(ws, 'config', 'includeIf.gitdir:/nowhere/.path', '../later.cfg');
+    await fs.writeFile(path.join(ws, 'inc.cfg'), '[user]\n\tname = t\n');
+  });
+  afterAll(async () => { await fs.rm(ws, { recursive: true, force: true }); });
+
+  it('hides a nested repository\'s store when its history holds a protected file', async () => {
+    const out = await registry().execute('shell', { command: 'git -C vendor/lib show HEAD~1:.env 2>&1; git -C vendor/lib log -p 2>&1; true' }, exec);
+    expect(out).not.toContain('sk-nested');
+    // Its store masked, git finds the workspace's own above it instead.
+    expect(out).not.toMatch(/\bgone\b/);
+    const named = await registry().execute('shell', { command: 'git -C pkgs/y show HEAD:token.txt 2>&1; true' }, exec);
+    expect(named).not.toContain('NESTED-LOCAL-TOKEN');
+    // One with nothing to hide, and the workspace's own, stay in view.
+    expect(await registry().execute('shell', { command: 'git -C tools/x log --oneline 2>&1; git log --oneline 2>&1' }, exec)).toMatch(/start[\s\S]*readme/);
+  });
+
+  it('keeps a nested repository\'s config, and what a config includes, from commands — one not there yet included', async () => {
+    const evil = '[diff]\\n\\texternal = /bin/false\\n';
+    await registry().execute('shell', {
+      command: `printf '${evil}' >> inc.cfg; printf '${evil}' >> later.cfg; printf '${evil}' >> tools/x/.git/config; true`,
+    }, exec);
+    for (const file of ['inc.cfg', 'later.cfg', 'tools/x/.git/config']) {
+      expect(await fs.readFile(path.join(ws, file), 'utf8'), file).not.toContain('external');
+    }
+  });
+
+  it('keeps a nested repository\'s store read-only to a local-only worker\'s commands', async () => {
+    // Unsigned: a signing program the host's git config names is not in
+    // the command's private /tmp, and would fail it for another reason.
+    await registry().execute('shell', {
+      command: 'git -C tools/x -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit -q --allow-empty -m sneaked 2>&1; true',
+    }, { ...exec, isOffline: () => true });
+    // Refused, and the repository whole: nothing of it was moved away.
+    const log = g(path.join(ws, 'tools', 'x'), 'log', '--oneline');
+    expect(log).toContain('start');
+    expect(log).not.toContain('sneaked');
+  });
+});
+
 describe.skipIf(!bwrapWorks)('in bubblewrap: where a local-only caller\'s writes go', () => {
   let dir: string;
   let privacy: PrivacyPaths;

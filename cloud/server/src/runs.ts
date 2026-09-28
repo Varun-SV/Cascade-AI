@@ -465,7 +465,12 @@ export function parkApproval(
       clearTimeout(timer);
       resolve(d);
     });
-    opts.emit('permission:user-required', { conversationId: opts.conversationId, ...request });
+    // A local-only subtask's input may carry what it read, and this goes to
+    // a browser, off the machine: the tool is named, its input withheld.
+    const shown = request.localOnly
+      ? { ...request, input: { withheld: '[local-only path — input withheld by privacy policy]' } }
+      : request;
+    opts.emit('permission:user-required', { conversationId: opts.conversationId, ...shown });
   });
 }
 

@@ -1056,6 +1056,11 @@ export interface ApprovalRequest {
   input: Record<string, unknown>;
   description: string;
   isDangerous: boolean;
+  /**
+   * From a local-only subtask (privacy.paths): its input may carry what it
+   * read, so a host that shows it off this machine withholds it.
+   */
+  localOnly?: boolean;
 }
 
 export interface ApprovalResponse {

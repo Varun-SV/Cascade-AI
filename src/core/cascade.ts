@@ -2118,21 +2118,7 @@ ${prompt}`
       this.recordDecision('escalation', `"${req.toolName}" by ${req.requestedBy} — T2 and T1 both unsure, escalated to user`);
 
       // Build enriched context for the approval callback / REPL
-      const enrichedRequest: ApprovalRequest & { escalationContext?: unknown } = {
-        id: req.id,
-        tierId: req.requestedBy,
-        toolName: req.toolName,
-        input: req.input,
-        description: `T3 Worker "${req.subtaskContext}" wants to run "${req.toolName}". T2 and T1 could not determine if this is safe.`,
-        isDangerous: req.isDangerous,
-        escalationContext: {
-          requestedBy: req.requestedBy,
-          parentT2Id: req.parentT2Id,
-          subtaskContext: req.subtaskContext,
-          sectionContext: req.sectionContext,
-          taskContext: req.taskContext,
-        },
-      };
+      const enrichedRequest = approvalRequestFor(req);
 
       let approved = false;
       let always = false;
@@ -2872,3 +2858,26 @@ export function secretValuesIn(config: unknown): string[] {
   return out;
 }
 
+/**
+ * What a host is asked to approve for an escalated request: the call, why it
+ * reached the user, and — for a local-only subtask's — that it is one, so a
+ * host that shows it off this machine withholds its input.
+ */
+export function approvalRequestFor(req: PermissionRequest): ApprovalRequest & { escalationContext?: unknown } {
+  return {
+    id: req.id,
+    tierId: req.requestedBy,
+    toolName: req.toolName,
+    input: req.input,
+    description: `T3 Worker "${req.subtaskContext}" wants to run "${req.toolName}". T2 and T1 could not determine if this is safe.`,
+    isDangerous: req.isDangerous,
+    ...(req.localOnly ? { localOnly: true } : {}),
+    escalationContext: {
+      requestedBy: req.requestedBy,
+      parentT2Id: req.parentT2Id,
+      subtaskContext: req.subtaskContext,
+      sectionContext: req.sectionContext,
+      taskContext: req.taskContext,
+    },
+  };
+}

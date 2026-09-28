@@ -282,16 +282,18 @@ function makePrivate(dirs: string[]): void {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     if (process.platform === 'win32') continue;
     const st = fs.statSync(dir);
-    if ((st.mode & 0o077) === 0) continue;
-    // Tightened where it is this user's own. Another account's folder is
-    // not changed, but refused: what is kept in it would be open to others.
-    const own = st.uid === process.getuid?.();
+    // Another account's folder is not changed, but refused, however closed
+    // its mode: its owner can read and replace what is kept in it.
+    const uid = process.getuid?.();
+    const own = uid === undefined || st.uid === uid;
+    if (own && (st.mode & 0o077) === 0) continue;
+    // This user's own is tightened.
     if (own) {
       try { fs.chmodSync(dir, st.mode & 0o700); } catch { /* checked below */ }
     }
-    if ((fs.statSync(dir).mode & 0o077) !== 0) {
+    if (!own || (fs.statSync(dir).mode & 0o077) !== 0) {
       throw new StateNotPrivateError(
-        `Cascade's state folder ${dir} is open to other users (mode ${(st.mode & 0o777).toString(8)}${own ? '' : ', owned by another account'}) and could not be made private. `
+        `Cascade's state folder ${dir} is ${own ? 'open to other users' : 'owned by another account'} (mode ${(st.mode & 0o777).toString(8)}) and could not be made private. `
         + 'Make it this user\'s own, with no group or other access (chmod 700), and try again.',
       );
     }

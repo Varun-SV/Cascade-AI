@@ -988,3 +988,18 @@ describe('secretValuesIn — what the process jail keeps out of a command\'s env
     expect(found.sort()).toEqual(['az-2', 'oauth-3', 'sk-ant-1', 'steel-5', 'tvly-4']);
   });
 });
+
+// The host was handed a local-only subtask's request like any other, with
+// nothing to tell it that the input may carry what the subtask read.
+describe('approvalRequestFor', () => {
+  it('says when the request is a local-only subtask\'s, so a host can withhold its input', async () => {
+    const { approvalRequestFor } = await import('./cascade.js');
+    const req = {
+      id: 'r1', requestedBy: 't3', parentT2Id: 't2', toolName: 'shell', input: { command: 'ls' },
+      isDangerous: true, subtaskContext: 'Summarize', sectionContext: 'Summarize',
+    };
+    expect(approvalRequestFor({ ...req, localOnly: true } as never).localOnly).toBe(true);
+    expect(approvalRequestFor(req as never).localOnly).toBeUndefined();
+    expect(approvalRequestFor(req as never).input).toEqual({ command: 'ls' });
+  });
+});

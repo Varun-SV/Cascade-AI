@@ -38,6 +38,7 @@
 //  `node_modules/` and `dist/`, which builds and tests have to read.
 
 import { execFile } from 'node:child_process';
+import ignoreFactory from 'ignore';
 import { fileIdentity, PROBE } from '../../utils/link-aliases.js';
 import { stripTrailingSlashes } from '../../utils/net.js';
 import { isWithin } from '../../utils/real-path.js';
@@ -203,16 +204,21 @@ export class ProcessJail {
     if (opts.offline && kind === 'sandbox-exec') {
       return { ok: false, reason: 'A local-only subtask (privacy.paths) cannot run commands on macOS: sandbox-exec cannot stop a command from hard-linking a file outside the workspace in and writing to it, nor end a child it leaves running, so what it writes could not all be marked local-only.' };
     }
-    const hidden = await collectHidden(this.policy, opts.offline);
+    // Repositories nested in the workspace — independent ones, submodules —
+    // are found on the way: each store is checked as the workspace's own is.
+    const nested: string[] = [];
+    const hidden = await collectHidden(this.policy, opts.offline, nested);
     if (!opts.keepGit) {
-      for (const dir of await this.gitDirsToHide(opts.offline)) hidden.push({ path: dir, dir: true });
+      for (const repo of [this.policy.workspaceRoot, ...nested]) {
+        for (const dir of await this.gitDirsToHide(opts.offline, repo)) hidden.push({ path: dir, dir: true });
+      }
       hidden.push(...secretsToHide(this.policy.hiddenSecrets?.() ?? []));
     }
     // Read-only besides: what decides what is protected, and — to every
     // command but the git tool's — git's own configuration, where a command
     // could name a program for the git tool to run with the credentials it
-    // keeps (`gitConfigFiles`).
-    const gitConfig = opts.keepGit ? [] : await gitConfigFiles(this.policy.workspaceRoot);
+    // keeps (`gitConfigFiles`), with every file it includes.
+    const gitConfig = opts.keepGit ? [] : await withIncludes(await gitConfigFiles(this.policy.workspaceRoot, undefined, undefined, nested));
     const policyFiles = this.policy.readOnlyFiles?.() ?? [];
     // Through a symlink — what it leads to — and under every other name the
     // file has in the workspace (hard links), where a write would reach it.
@@ -241,7 +247,7 @@ export class ProcessJail {
     let root: string;
     try { root = fs.realpathSync(this.policy.workspaceRoot); } catch { root = path.resolve(this.policy.workspaceRoot); }
     const inside = (p: string) => isWithin(p, root);
-    const gitDirs = (await gitDirsOf(root)).filter(inside);
+    const gitDirs = [...new Set((await Promise.all([root, ...nested].map(gitDirsOf))).flat())].filter(inside);
     const startedAt = Date.now();
     const dirsBefore = new Set<string>();
     const folders = new Map<string, FolderStamp>();
@@ -454,10 +460,16 @@ export class ProcessJail {
    * remembered until the index, the refs, a reflog, the packs or the last
    * fetch change. When git cannot tell, they are hidden.
    */
-  private async gitDirsToHide(offline: boolean): Promise<string[]> {
-    const root = this.policy.workspaceRoot;
-    const specs = toPathspecs(this.policy.hiddenPatterns(offline));
+  private async gitDirsToHide(offline: boolean, repo = this.policy.workspaceRoot): Promise<string[]> {
+    const root = repo;
+    const patterns = this.policy.hiddenPatterns(offline);
+    const specs = toPathspecs(patterns);
     if (specs.length === 0) return [];
+    // Where a repository nested in the workspace sits in it: its paths are
+    // named from there, not from the workspace the patterns are written for.
+    const nestedAt = path.resolve(repo) === path.resolve(this.policy.workspaceRoot)
+      ? undefined
+      : path.relative(this.policy.workspaceRoot, repo).split(path.sep).join('/');
     const located = await git(root, ['rev-parse', '--absolute-git-dir', '--git-common-dir']);
     if (located === null) return [];
     const [gitDir = '', common = ''] = located.split('\n').map((line) => line.trim());
@@ -468,16 +480,48 @@ export class ProcessJail {
     const cached = this.gitChecks.get(`${gitDir}|${offline}`);
     if (cached?.key === key) return cached.dirs;
 
-    const tracked = await git(root, ['ls-files', '-z', '--', ...specs]);
-    const history = tracked ? '' : await git(root, ['log', '--all', '-n', '1', '--format=%H', '--', ...specs]);
+    const found = nestedAt === undefined
+      ? await this.holdsHidden(root, specs)
+      : await this.nestedHoldsHidden(root, nestedAt, patterns);
     // Reflogs are not counted as reaching anything: an amended commit is
     // reachable from one alone, and a command can read it there too.
-    const leftovers = tracked || history ? '' : await git(root, ['fsck', '--unreachable', '--no-reflogs', '--connectivity-only', '--no-progress']);
-    const holds = tracked === null || history === null || leftovers === null
-      || Boolean(tracked) || Boolean(history) || /^unreachable /m.test(leftovers);
+    const leftovers = found !== false ? '' : await git(root, ['fsck', '--unreachable', '--no-reflogs', '--connectivity-only', '--no-progress']);
+    const holds = found !== false || leftovers === null || /^unreachable /m.test(leftovers);
     const result = holds ? dirs : [];
     this.gitChecks.set(`${gitDir}|${offline}`, { key, dirs: result });
     return result;
+  }
+
+  /** Whether the workspace's own index or history holds a hidden path; null when git cannot tell. */
+  private async holdsHidden(root: string, specs: string[]): Promise<boolean | null> {
+    const tracked = await git(root, ['ls-files', '-z', '--', ...specs]);
+    if (tracked === null) return null;
+    if (tracked) return true;
+    const history = await git(root, ['log', '--all', '-n', '1', '--format=%H', '--', ...specs]);
+    return history === null ? null : Boolean(history);
+  }
+
+  /**
+   * The same for a repository nested in the workspace at `at`. Its paths are
+   * not the workspace's, so every path its index and history hold is named
+   * as the workspace names it and judged by the patterns themselves — a
+   * pattern naming a path through it (`vendor/lib/token.txt`, a local-only
+   * mark there) included.
+   */
+  private async nestedHoldsHidden(root: string, at: string, patterns: string[]): Promise<boolean | null> {
+    const tracked = await git(root, ['ls-files', '-z']);
+    const history = tracked === null ? null : await git(root, ['log', '--all', '--name-only', '--format=', '-z']);
+    if (tracked === null || history === null) return null;
+    const matcher = ignoreFactory().add(patterns);
+    const names = new Set([...tracked.split('\0'), ...history.split(/[\0\n]/)].filter(Boolean));
+    for (const name of names) {
+      try {
+        if (matcher.ignores(`${at}/${name}`)) return true;
+      } catch {
+        return true;
+      }
+    }
+    return false;
   }
 }
 
@@ -501,7 +545,7 @@ export function scrubEnv(env: NodeJS.ProcessEnv, secretValues: string[]): NodeJS
  * and not walked. The walk awaits each directory, so the event loop keeps
  * running in a large workspace.
  */
-export async function collectHidden(policy: JailPolicy, offline: boolean): Promise<Hidden[]> {
+export async function collectHidden(policy: JailPolicy, offline: boolean, nestedRepos?: string[]): Promise<Hidden[]> {
   const out: Hidden[] = [];
   let root: string;
   try { root = fs.realpathSync(policy.workspaceRoot); } catch { root = path.resolve(policy.workspaceRoot); }
@@ -513,6 +557,9 @@ export async function collectHidden(policy: JailPolicy, offline: boolean): Promi
     for (const entry of entries) {
       const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
       const abs = path.join(dir, entry.name);
+      // A nested repository's store — a `.git` folder, or a submodule's
+      // `.git` file naming one — for the caller to check.
+      if (entry.name === '.git' && relDir) nestedRepos?.push(dir);
       if (entry.isDirectory()) {
         if (rel === '.cascade') {
           const keep = CASCADE_DIR_KEPT.map((k) => path.join(abs, k)).filter((k) => fs.existsSync(k));
@@ -598,9 +645,62 @@ export function homeSecrets(home = os.homedir(), configHome = process.env['XDG_C
  * system's. What they name — a credential helper, a filter, an ssh command —
  * the git tool runs with the credentials it keeps in view.
  */
-export async function gitConfigFiles(root: string, home = os.homedir(), configHome = process.env['XDG_CONFIG_HOME']): Promise<string[]> {
-  const repo = (await gitDirsOf(root)).flatMap((dir) => [path.join(dir, 'config'), path.join(dir, 'config.worktree')]);
+export async function gitConfigFiles(
+  root: string, home = os.homedir(), configHome = process.env['XDG_CONFIG_HOME'], nested: string[] = [],
+): Promise<string[]> {
+  const dirs = [...new Set((await Promise.all([root, ...nested].map(gitDirsOf))).flat())];
+  const repo = dirs.flatMap((dir) => [path.join(dir, 'config'), path.join(dir, 'config.worktree')]);
   return [...repo, ...globalGitConfigFiles(home, configHome), '/etc/gitconfig'];
+}
+
+/**
+ * `files` and every file their `include.path` and `includeIf.*.path`
+ * entries name, whatever the condition — one not in force now may be
+ * later — followed into what those include in turn, as git does. What such
+ * a file says git reads as its own configuration, so it is frozen with the
+ * rest; one not there yet is made empty first, so no command can make it.
+ */
+export async function withIncludes(files: string[], home = os.homedir()): Promise<string[]> {
+  const out = new Set<string>();
+  const queue = [...files];
+  for (let depth = 0; queue.length && depth < 64; depth++) {
+    const file = queue.shift()!;
+    if (out.has(file)) continue;
+    out.add(file);
+    if (!fs.existsSync(file)) continue;
+    for (const target of await includesOf(file, home)) {
+      if (out.has(target)) continue;
+      if (!fs.existsSync(target)) {
+        try {
+          fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+          fs.writeFileSync(target, '', { flag: 'wx', mode: 0o600 });
+        } catch { /* made meanwhile, or cannot be: frozen if there */ }
+      }
+      queue.push(target);
+    }
+  }
+  return [...out];
+}
+
+/** What a config file's include entries name, as git resolves them: `~/` from home, a relative path from the file's own folder. */
+const includeCache = new Map<string, { stamp: string; targets: string[] }>();
+async function includesOf(file: string, home: string): Promise<string[]> {
+  let stamp: string;
+  try { const st = fs.statSync(file); stamp = `${st.ino}:${st.mtimeMs}:${st.size}`; } catch { return []; }
+  const cached = includeCache.get(file);
+  if (cached?.stamp === stamp) return cached.targets;
+  const listed = await new Promise<string>((resolve) => {
+    execFile('git', ['config', '--file', file, '--null', '--get-regexp', '^include(if\\..*)?\\.path$'],
+      { timeout: 10_000, windowsHide: true, maxBuffer: 1024 * 1024 }, (_err, stdout) => resolve(stdout ?? ''));
+  });
+  const targets = listed.split('\0').filter(Boolean).flatMap((entry) => {
+    const value = entry.slice(entry.indexOf('\n') + 1);
+    if (!value || value.startsWith('%(')) return [];
+    if (value.startsWith('~/')) return [path.join(home, value.slice(2))];
+    return [path.resolve(path.dirname(file), value)];
+  });
+  includeCache.set(file, { stamp, targets });
+  return targets;
 }
 
 /** The user's global git configuration files, in the order git reads them. */

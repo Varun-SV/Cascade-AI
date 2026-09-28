@@ -133,6 +133,20 @@ describe('a project\'s state folder', () => {
     } finally {
       release();
     }
+    // Closed to others (0700 now), but another account's: its owner can
+    // read and replace what is kept there. Named afresh, it is prepared again.
+    const again = useProjectStateDir(ws, own);
+    const real = fs.statSync;
+    const closed = vi.spyOn(fs, 'statSync').mockImplementation(((p: fs.PathLike, o?: never) => {
+      const st = real(p, o) as fs.Stats;
+      return String(p) === own ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: 4242 }) : st;
+    }) as never);
+    try {
+      expect(() => statePath(ws, STATE.config)).toThrow(/owned by another account/);
+    } finally {
+      closed.mockRestore();
+      again();
+    }
   });
 
   it('is where @private/ and @screenshots/ tool paths lead, and nothing else is', () => {

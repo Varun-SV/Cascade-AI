@@ -69,8 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that ever ran. A state folder whose preparation fails is prepared again
   the next time it is asked for. A host's folder is judged by where it will
   be — through a symlinked parent, for one not made yet — and kept by that
-  path. A state folder others can read, which Cascade cannot tighten — one
-  owned by another account — is refused rather than used.
+  path. A state folder others can read, which Cascade cannot tighten, or
+  one owned by another account however closed its mode, is refused rather
+  than used.
 - **Provider keys are kept once, for the machine.** They lived in both
   `~/.cascade-ai/credentials.json` and each project's config; a project's
   config now holds its providers without their keys, and every project uses
@@ -283,7 +284,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   output, and no facts are taken from it into the knowledge graph.
   An approval it needs goes to you, not to the T2 and T1 models, which may
   be cloud ones and would see the call's input — nor does an "always" one of
-  them gave earlier answer it.
+  them gave earlier answer it. The request says it is a local-only
+  subtask's, and the hosted server, whose viewers are off the machine,
+  shows its tool but withholds its input.
   `file_edit` asks like a read does, and so does any change or deletion of a
   local-only file by a subtask that is not local-only yet — `file_write`,
   `file_delete`, `pdf_create`, `generate_document` — which moves it to a
@@ -317,8 +320,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so none can name a program for it to run with the credentials it keeps —
   and refuses a push that would send a commit holding one — asking the
   destination what it has, not trusting tracking refs, through the same
-  jailed git the push uses, since reaching a remote can run a program —
-  and runs
+  jailed git the push uses, since reaching a remote can run a program. A
+  repository nested in the workspace, or a submodule, is checked as the
+  workspace's own is — every path its history holds, named as the
+  workspace names it — and its store hidden, and its config frozen, the
+  same way; every file a git config includes is frozen too, one not there
+  yet made empty first — and runs
   no hook and none of the global or system git or ssh configuration there,
   since a command could rewrite those and git would run what they name with
   the history in view — and so is
