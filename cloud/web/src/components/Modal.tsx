@@ -21,7 +21,7 @@ interface Props {
 export default function Modal({ title, onClose, maxWidth = 'max-w-md', children, zIndexClassName = 'z-40' }: Props) {
   return (
     <motion.div
-      className={`fixed inset-0 ${zIndexClassName} flex items-center justify-center bg-black/50 p-4 backdrop-blur-md`}
+      className={`fixed inset-0 ${zIndexClassName} flex items-center justify-center bg-black/40 p-4`}
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}

@@ -854,6 +854,7 @@ export interface ToolsConfig {
     provider?: 'cdp' | 'steel';
     url?: string;
     apiKey?: string;
+    cdpHostHeader?: string;
     maxSessions?: number;
   };
   mcpServers?: McpServerConfig[];

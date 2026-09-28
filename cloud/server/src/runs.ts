@@ -414,6 +414,7 @@ export interface RunControls {
     provider?: 'cdp' | 'steel';
     url?: string;
     apiKey?: string;
+    cdpHostHeader?: string;
     maxSessions?: number;
   };
 }
@@ -498,6 +499,7 @@ export function remoteBrowserControls(env: CloudEnv): Pick<RunControls, 'remoteB
       provider: env.REMOTE_BROWSER_PROVIDER,
       ...(env.REMOTE_BROWSER_URL ? { url: env.REMOTE_BROWSER_URL } : {}),
       ...(env.REMOTE_BROWSER_API_KEY ? { apiKey: env.REMOTE_BROWSER_API_KEY } : {}),
+      ...(env.REMOTE_BROWSER_CDP_HOST_HEADER ? { cdpHostHeader: env.REMOTE_BROWSER_CDP_HOST_HEADER } : {}),
       maxSessions: env.REMOTE_BROWSER_MAX_SESSIONS,
     },
   };
@@ -749,6 +751,9 @@ export function buildCloudConfig(
               provider: controls.remoteBrowser.provider,
               ...(controls.remoteBrowser.url ? { url: controls.remoteBrowser.url } : {}),
               ...(controls.remoteBrowser.apiKey ? { apiKey: controls.remoteBrowser.apiKey } : {}),
+              ...(controls.remoteBrowser.cdpHostHeader
+                ? { cdpHostHeader: controls.remoteBrowser.cdpHostHeader }
+                : {}),
               ...(controls.remoteBrowser.maxSessions
                 ? { maxSessions: controls.remoteBrowser.maxSessions }
                 : {}),

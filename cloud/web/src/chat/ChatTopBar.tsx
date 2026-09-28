@@ -12,7 +12,7 @@ interface Props {
 
 export default function ChatTopBar({ title, sidebarOpen, onToggleSidebar, saved, onContinueElsewhere, onOpenFiles }: Props) {
   return (
-    <div className="flex h-12 shrink-0 items-center gap-3 border-b border-elev/10 px-3">
+    <div className="flex h-12 shrink-0 items-center gap-3 px-3">
       <motion.button
         type="button"
         aria-label={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
@@ -23,7 +23,7 @@ export default function ChatTopBar({ title, sidebarOpen, onToggleSidebar, saved,
       >
         {sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
       </motion.button>
-      <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-200">{title ?? 'New chat'}</span>
+      <span className="min-w-0 flex-1 truncate text-center text-[13.5px] text-ink-300">{title ?? 'New chat'}</span>
       <motion.button
         type="button"
         aria-label="Your files"
@@ -49,7 +49,7 @@ export default function ChatTopBar({ title, sidebarOpen, onToggleSidebar, saved,
       {saved && saved.usd > 0 && (
         <span
           title="Saved by delegating below the top tier"
-          className="flex shrink-0 items-center gap-1 rounded-md border border-success-500/25 bg-success-500/10 px-2 py-1 font-mono text-[11px] text-success-300"
+          className="receipt flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1 text-success-300"
         >
           <TrendingDown size={12} />
           saved ${saved.usd.toFixed(2)}

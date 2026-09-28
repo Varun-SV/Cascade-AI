@@ -245,23 +245,52 @@ function GeneratedMediaCard({ media, saved }: { media: PendingMedia; saved: bool
   );
 }
 
-// Tier accent colors match the run-explorer design (T1 green / T2 amber /
-// T3 violet), rendered as subtle tinted chips over the existing dark surface.
-const TIER_STYLE: Record<string, string> = {
-  T1: 'text-[#4ade80] bg-[#4ade80]/12 ring-[#4ade80]/25',
-  T2: 'text-[#f0b429] bg-[#f0b429]/12 ring-[#f0b429]/25',
-  T3: 'text-[#c084fc] bg-[#c084fc]/12 ring-[#c084fc]/25',
-};
+// Tier dots take the theme's tier tokens (azure → sky → teal), so a reply's
+// tier reads the same here as in the run tree, the tier mix and the mark.
+const TIER_DOT: Record<string, string> = { T1: 'bg-t1', T2: 'bg-t2', T3: 'bg-t3' };
 
-function TierBadge({ tier }: { tier: string }) {
+/**
+ * The receipt line under every reply: which tier and model served it, what it
+ * cost, and what delegating below T1 saved. It IS the /why toggle — the
+ * detail sits behind the number it explains.
+ */
+function Receipt({ message, open, onToggle }: { message: ChatMessage; open: boolean; onToggle?: () => void }) {
+  const saved = message.why?.savedUsd ?? 0;
+  // A reply doesn't always carry its tier/model directly. The /why report
+  // names the tier that did the most work (`why.tier`/`why.model`), so fall
+  // back to that; only if it's missing, look the model up by tier.
+  const whyModels = message.why?.models ?? {};
+  const tier = message.tier ?? message.why?.tier ?? undefined;
+  const rawModel = message.model ?? message.why?.model ?? (tier ? whyModels[tier] : undefined);
+  // "openai-compatible:stub-model" → "stub-model": the provider is noise here.
+  const model = rawModel ? rawModel.slice(rawModel.indexOf(':') + 1) : undefined;
+  const body = (
+    <>
+      <span className={`h-[7px] w-[7px] shrink-0 rounded-full ${tier ? TIER_DOT[tier] ?? 'bg-ink-500' : 'accent-grad'}`} />
+      {tier && <span>{tier}</span>}
+      {model ? <span className="truncate">{tier ? '· ' : ''}{model}</span> : !tier && <span className="font-sans">Cascade</span>}
+      {typeof message.costUsd === 'number' && message.costUsd > 0 && <span>· ${message.costUsd.toFixed(4)}</span>}
+      {saved > 0 && <span className="text-success-300">· saved ${saved < 0.01 ? saved.toFixed(4) : saved.toFixed(2)}</span>}
+      {message.cancelled && (
+        <span className="rounded-full bg-danger-500/15 px-1.5 font-sans text-[10.5px] text-danger-300">stopped</span>
+      )}
+    </>
+  );
+  if (!onToggle) {
+    return <span className="receipt flex min-w-0 items-center gap-1.5 text-ink-500">{body}</span>;
+  }
   return (
-    <span
-      className={`rounded-md px-1.5 py-0.5 font-mono text-[10.5px] font-semibold uppercase tracking-wide ring-1 ${
-        TIER_STYLE[tier] ?? 'text-ink-300 bg-elev/5 ring-elev/10'
-      }`}
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={open}
+      title="Why this tier and model, and what it saved"
+      className="receipt -ml-2 flex min-w-0 items-center gap-1.5 rounded-lg px-2 py-1 text-ink-500 hover:bg-elev/[0.05] hover:text-ink-300"
     >
-      {tier}
-    </span>
+      {body}
+      <span className="sr-only">/why</span>
+      <ChevronDown size={11} className={open ? 'rotate-180 transition-transform' : 'transition-transform'} />
+    </button>
   );
 }
 
@@ -274,13 +303,29 @@ const KIND_DOT: Record<string, string> = {
 
 function WhyPanel({ why }: { why: WhyReport }) {
   const tiers = Object.keys(why.costByTier).filter((t) => (why.costByTier[t] ?? 0) > 0);
+  const spent = tiers.reduce((sum, t) => sum + (why.costByTier[t] ?? 0), 0);
+  const allT1 = spent + Math.max(0, why.savedUsd);
   return (
-    <div className="mt-1 rounded-lg border border-elev/10 bg-black/30 p-3 text-xs text-ink-300">
+    <div className="mt-1 rounded-2xl border border-elev/10 bg-ink-900 p-4 text-xs text-ink-300">
       {why.savedUsd > 0 && (
-        <p className="mb-2 text-success-300">
-          Saved <span className="font-mono">${why.savedUsd.toFixed(4)}</span> ({why.savedPct}%) by delegating below the
-          top tier.
-        </p>
+        <div className="mb-3 flex flex-col gap-2">
+          <p className="text-[13px] text-ink-100">
+            Saved <span className="receipt text-success-300">${why.savedUsd.toFixed(4)}</span> · {why.savedPct}% less than running it all on T1
+          </p>
+          {/* Both bars share one scale: the all-T1 cost is the full width. */}
+          <div className="receipt grid grid-cols-[5.5rem_1fr_auto] items-center gap-x-3 gap-y-1.5 text-ink-400">
+            <span>Cascade</span>
+            <span className="h-1.5 overflow-hidden rounded-full bg-elev/10">
+              <span className="block h-full rounded-full" style={{ width: `${allT1 > 0 ? Math.max(2, (spent / allT1) * 100) : 0}%`, background: 'var(--cascade-ramp-x)' }} />
+            </span>
+            <span>${spent.toFixed(4)}</span>
+            <span>All on T1</span>
+            <span className="h-1.5 overflow-hidden rounded-full bg-elev/10">
+              <span className="block h-full w-full rounded-full bg-ink-500" />
+            </span>
+            <span>${allT1.toFixed(4)}</span>
+          </div>
+        </div>
       )}
       {why.decisions.length > 0 && (
         <ul className="flex flex-col gap-1.5">
@@ -295,10 +340,10 @@ function WhyPanel({ why }: { why: WhyReport }) {
         </ul>
       )}
       {tiers.length > 0 && (
-        <div className="mt-2 flex flex-col gap-1 border-t border-elev/10 pt-2">
+        <div className="mt-3 flex flex-col gap-1 border-t border-elev/10 pt-3">
           {tiers.map((t) => (
             <div key={t} className="flex items-center justify-between font-mono text-[11px]">
-              <span>{t}{why.models[t] ? ` · ${why.models[t]}` : ''}</span>
+              <span className="flex items-center gap-2"><span className={`h-1.5 w-1.5 rounded-full ${TIER_DOT[t] ?? 'bg-ink-500'}`} />{t}{why.models[t] ? ` · ${why.models[t]}` : ''}</span>
               <span className="text-ink-400">${(why.costByTier[t] ?? 0).toFixed(4)}</span>
             </div>
           ))}
@@ -437,11 +482,11 @@ function ThinkingBlock({ text, streaming }: { text: string; streaming?: boolean 
   const [open, setOpen] = useState(false);
   if (!text) return null;
   return (
-    <div className="rounded-lg border border-elev/10 bg-elev/[0.03]">
+    <div>
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium text-ink-500 hover:text-ink-300"
+        className="-ml-2 flex items-center gap-1.5 rounded-lg px-2 py-1 text-[13px] text-ink-400 hover:bg-elev/[0.05] hover:text-ink-200"
         aria-expanded={open}
       >
         {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
@@ -449,7 +494,7 @@ function ThinkingBlock({ text, streaming }: { text: string; streaming?: boolean 
         {streaming && <span className="accent-grad h-1.5 w-1.5 animate-pulse rounded-full" />}
       </button>
       {open && (
-        <div className="prose prose-invert prose-sm max-w-none border-t border-elev/10 px-3 py-2 text-ink-400">
+        <div className="prose prose-invert prose-sm mt-1 max-w-none border-l-2 border-elev/15 py-0.5 pl-3 text-ink-400">
           <Markdown>{text}</Markdown>
         </div>
       )}
@@ -549,7 +594,7 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
                 type="button"
                 onClick={submitEdit}
                 disabled={busy || !draft.trim()}
-                className="rounded-lg bg-accent-600 px-3 py-1 text-xs text-white hover:bg-accent-500 disabled:opacity-60"
+                className="rounded-lg bg-ink-50 px-3 py-1 text-xs text-ink-900 hover:opacity-90 disabled:opacity-60"
               >
                 Save &amp; submit
               </button>
@@ -557,7 +602,7 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
           </div>
         ) : (
           message.content && (
-            <div className="accent-grad max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-br-md px-4 py-2 font-medium text-white shadow-lg shadow-accent-700/20">
+            <div className="max-w-[80%] whitespace-pre-wrap rounded-2xl bg-ink-800 px-4 py-2.5 text-[15px] text-ink-50">
               {message.content}
             </div>
           )
@@ -587,44 +632,11 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
     );
   }
 
+  const hasReceipt = Boolean(message.tier || message.model || message.why || message.cancelled || message.costUsd);
   return (
-    <div data-role="assistant" className="group flex flex-col gap-1.5">
-      <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-ink-400">
-        {message.tier ? (
-          <TierBadge tier={message.tier} />
-        ) : (
-          <span className="accent-grad h-2 w-2 rounded-full" />
-        )}
-        <span>Cascade</span>
-        {message.model && <span className="text-ink-500">{message.model}</span>}
-        {message.cancelled && (
-          <span className="rounded bg-danger-500/15 px-1.5 py-0.5 text-[10px] font-medium text-danger-300">stopped</span>
-        )}
-        {message.why && (
-          <button
-            type="button"
-            onClick={() => setWhyOpen((o) => !o)}
-            className="flex items-center gap-0.5 font-mono text-[11px] text-ink-500 hover:text-ink-300"
-          >
-            /why
-            <ChevronDown size={11} className={whyOpen ? 'rotate-180 transition-transform' : 'transition-transform'} />
-          </button>
-        )}
-      </div>
-      <AnimatePresence initial={false}>
-        {whyOpen && message.why && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            className="overflow-hidden"
-          >
-            <WhyPanel why={message.why} />
-          </motion.div>
-        )}
-      </AnimatePresence>
+    <div data-role="assistant" className="group flex flex-col gap-2">
       {message.streaming && !message.content ? (
-        <span className="shimmer-text text-sm">Composing a response…</span>
+        <span className="shimmer-text text-sm">Writing…</span>
       ) : (() => {
         // Reasoning (<think>…</think>) renders as a collapsed "Thoughts" block,
         // never inline in the answer. Files are pulled from the answer only once
@@ -637,7 +649,7 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
           <>
             {thinking && <ThinkingBlock text={thinking} streaming={message.streaming && thinkingOpen} />}
             {rest && (
-              <div className="prose prose-invert prose-sm max-w-none text-ink-100">
+              <div className="cascade-answer prose prose-invert max-w-none text-ink-100">
                 <Markdown>{rest}</Markdown>
               </div>
             )}
@@ -652,28 +664,51 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
           </>
         );
       })()}
-      {!message.streaming && message.content && (
-        <div className="flex items-center gap-2 pt-0.5 text-ink-400 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
-          <SiblingNav message={message} onSelect={onSelectSibling} />
-          <CopyButton getText={() => splitThinking(message.content).answer || message.content} />
-          {/* Only a persisted message can carry a verdict — an id is what the
-              server keys the vote on, and a still-streaming reply has none. */}
-          {message.id && <FeedbackButtons messageId={message.id} initial={message.verdict} />}
-          {onRegenerate && (
-            <button type="button" aria-label="Regenerate" onClick={onRegenerate} className="hover:text-ink-100">
-              <RotateCcw size={14} />
-            </button>
+      {/* The receipt stands on its own: a run stopped before its first token
+          has no content but still needs "stopped" and its /why. The actions
+          act on the text, so they wait for some. */}
+      {!message.streaming && (message.content || hasReceipt) && (
+        <div className="flex min-h-[28px] flex-wrap items-center gap-2">
+          {hasReceipt && (
+            <Receipt
+              message={message}
+              open={whyOpen}
+              onToggle={message.why ? () => setWhyOpen((o) => !o) : undefined}
+            />
           )}
-          {onDelete && (
-            <button type="button" aria-label="Delete" onClick={onDelete} className="hover:text-danger-300">
-              <Trash2 size={14} />
-            </button>
-          )}
-          {typeof message.costUsd === 'number' && message.costUsd > 0 && (
-            <span className="ml-1 text-[11px] tabular-nums">${message.costUsd.toFixed(4)}</span>
+          {message.content && (
+            <div className="ml-auto flex items-center gap-2 text-ink-400 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
+              <SiblingNav message={message} onSelect={onSelectSibling} />
+              <CopyButton getText={() => splitThinking(message.content).answer || message.content} />
+              {/* Only a persisted message can carry a verdict — an id is what the
+                  server keys the vote on, and a still-streaming reply has none. */}
+              {message.id && <FeedbackButtons messageId={message.id} initial={message.verdict} />}
+              {onRegenerate && (
+                <button type="button" aria-label="Regenerate" onClick={onRegenerate} className="hover:text-ink-100">
+                  <RotateCcw size={14} />
+                </button>
+              )}
+              {onDelete && (
+                <button type="button" aria-label="Delete" onClick={onDelete} className="hover:text-danger-300">
+                  <Trash2 size={14} />
+                </button>
+              )}
+            </div>
           )}
         </div>
       )}
+      <AnimatePresence initial={false}>
+        {whyOpen && message.why && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden"
+          >
+            <WhyPanel why={message.why} />
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

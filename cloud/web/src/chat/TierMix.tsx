@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react';
 import { fetchTierMix } from '../lib/api.js';
 
-// Tier accent colors match the run-explorer (T1 green / T2 amber / T3 violet).
+// Tier colours come from the theme (azure → sky → teal), so the mix reads the
+// same as the tier dots on every reply.
 const TIER_COLOR: Record<string, string> = {
-  T1: '#4ade80',
-  T2: '#f0b429',
-  T3: '#c084fc',
+  T1: 'rgb(var(--c-t1))',
+  T2: 'rgb(var(--c-t2))',
+  T3: 'rgb(var(--c-t3))',
 };
 
 interface Props {

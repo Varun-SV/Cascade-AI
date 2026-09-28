@@ -34,6 +34,11 @@ describe('the generic CDP endpoint', () => {
     expect(session.cdpUrl).toBe('wss://browser.internal:9222/');
   });
 
+  it('can override only the CDP handshake Host header', async () => {
+    const session = await new GenericCdpProvider('ws://browser.internal:9222', 'localhost').createSession();
+    expect(session.cdpHeaders).toEqual({ Host: 'localhost' });
+  });
+
   it('offers no live view, because it has no session API to ask one for', async () => {
     // Callers must cope with this rather than assume every provider has one.
     const session = await new GenericCdpProvider('ws://localhost:9222').createSession();
@@ -69,6 +74,17 @@ describe('Steel', () => {
     expect(calls[0]?.url).toBe('https://steel.test/v1/sessions');
     expect(calls[0]?.init.method).toBe('POST');
     expect(session).toEqual({ id: 'sess-1', cdpUrl: 'wss://s/cdp', liveViewUrl: 'https://s/debug' });
+  });
+
+  it('carries a configured CDP Host override without adding it to Steel API requests', async () => {
+    const calls = stubFetch([{ body: { id: 'sess-1', websocketUrl: 'ws://steel.internal:3000/' } }]);
+    const session = await new SteelProvider({
+      url: 'http://steel.internal:3000',
+      cdpHostHeader: 'localhost',
+    }).createSession();
+
+    expect(session.cdpHeaders).toEqual({ Host: 'localhost' });
+    expect((calls[0]?.init.headers as Record<string, string> | undefined)?.Host).toBeUndefined();
   });
 
   it('retries only Railway-style 502 cold starts before creating a session', async () => {

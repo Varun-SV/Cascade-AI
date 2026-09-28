@@ -26,9 +26,11 @@ export class GenericCdpProvider implements RemoteBrowserProvider {
   readonly allocatesSessions = false;
 
   private endpoint: string;
+  private cdpHostHeader: string | undefined;
 
-  constructor(endpoint: string) {
+  constructor(endpoint: string, cdpHostHeader?: string) {
     this.endpoint = endpoint;
+    this.cdpHostHeader = cdpHostHeader;
   }
 
   /**
@@ -39,7 +41,11 @@ export class GenericCdpProvider implements RemoteBrowserProvider {
    * would imply a lifecycle this provider does not have.
    */
   async createSession(): Promise<RemoteBrowserSession> {
-    return { id: 'cdp', cdpUrl: this.endpoint };
+    return {
+      id: 'cdp',
+      cdpUrl: this.endpoint,
+      ...(this.cdpHostHeader ? { cdpHeaders: { Host: this.cdpHostHeader } } : {}),
+    };
   }
 
   /**

@@ -65,6 +65,7 @@ describe('the operator configures a browser for their deployment', () => {
       ...baseEnv(dir),
       REMOTE_BROWSER_PROVIDER: 'cdp',
       REMOTE_BROWSER_URL: 'ws://browserless.internal:3000',
+      REMOTE_BROWSER_CDP_HOST_HEADER: 'localhost',
       REMOTE_BROWSER_MAX_SESSIONS: '3',
     });
 
@@ -82,6 +83,7 @@ describe('the operator configures a browser for their deployment', () => {
     expect(config.tools?.remoteBrowser).toEqual({
       provider: 'cdp',
       url: 'ws://browserless.internal:3000',
+      cdpHostHeader: 'localhost',
       maxSessions: 3,
     });
   });

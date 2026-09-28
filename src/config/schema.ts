@@ -118,6 +118,8 @@ export const ToolsConfigSchema = z.object({
     /** The websocket endpoint for `cdp`, or the API base for `steel`. */
     url: z.string().optional(),
     apiKey: z.string().optional(),
+    /** Narrow Chromium DevTools Host-header compatibility override. */
+    cdpHostHeader: z.literal('localhost').optional(),
     /**
      * Concurrent sessions. One by default and deliberately so: every session
      * is billed, and a wave of workers each opening their own is a cost the

@@ -115,7 +115,7 @@ export default function DownloadSection({ reduced }: { reduced: boolean }) {
             <>
               <a
                 href={downloadUrl(primary.id)}
-                className="accent-grad inline-flex items-center gap-2.5 rounded-xl px-6 py-3.5 text-sm font-semibold text-white shadow-lg shadow-accent-700/25 transition hover:brightness-110"
+                className="bg-accent-500 hover:bg-accent-600 inline-flex items-center gap-2.5 rounded-xl px-6 py-3.5 text-sm font-semibold text-white transition"
               >
                 <Download size={17} />
                 Download for {primary.label}

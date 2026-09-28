@@ -97,7 +97,7 @@ function ContextApprovalCard({ info, position, onResolve }: {
           <button
             type="button"
             onClick={() => onResolve(true)}
-            className="accent-grad flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold text-white shadow-lg shadow-accent-700/25"
+            className="bg-accent-500 hover:bg-accent-600 flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold text-white"
           >
             <Zap size={14} /> Process with extended context
           </button>
