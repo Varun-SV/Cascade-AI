@@ -45,6 +45,13 @@ export default {
         // Elevation tint — stands in for raw white overlays so borders/fills
         // read on both dark and light surfaces.
         elev: 'rgb(var(--c-elev) / <alpha-value>)',
+        // Surfaces by role (see index.css): page, sidebar, raised card, sunken
+        // well and the user's message bubble.
+        paper: 'rgb(var(--c-paper) / <alpha-value>)',
+        side: 'rgb(var(--c-side) / <alpha-value>)',
+        card: 'rgb(var(--c-card) / <alpha-value>)',
+        sunk: 'rgb(var(--c-sunk) / <alpha-value>)',
+        bubble: 'rgb(var(--c-bubble) / <alpha-value>)',
         // Orchestration tier accents.
         t1: 'rgb(var(--c-t1) / <alpha-value>)',
         t2: 'rgb(var(--c-t2) / <alpha-value>)',

@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { ToolRegistry, CascadeConfigSchema, Retriever, embedderFromProviders } from '#cascade-ai';
 import type { Chunk, ProviderConfig, ScoredChunk } from '#cascade-ai';
-import { allowances, answersThisRun, browserAllowanceFor, buildCloudConfig, buildMediaSink, parseChatRunPayload, primaryTierOf, resolveDocuments, runChatTurn, sanitiseClarificationAnswers, sanitiseEscalationNote, tenantScratchDir } from './runs.js';
+import { allowances, answersThisRun, browserAllowanceFor, buildCloudConfig, buildMediaSink, parseChatRunPayload, primaryTierOf, MAX_TRACE_NODES, resolveDocuments, runChatTurn, sanitiseClarificationAnswers, sanitiseEscalationNote, tenantScratchDir, traceStatus, type TraceNode } from './runs.js';
 import { CloudStore } from './db.js';
 import { limitsForPlan, PENDING_MEDIA_TTL_MS } from './entitlements.js';
 import type { CloudEnv } from './env.js';
@@ -1314,6 +1314,39 @@ describe('browserAllowanceFor — a run\u2019s claim on its owner\u2019s browser
     const allowance = browserAllowanceFor(store, user.id);
     for (let i = 0; i < 5; i++) expect(allowance.take()).toHaveProperty('giveBack');
     expect(allowance.take()).toEqual({ refusal: expect.stringContaining('browser sessions') });
+  });
+});
+
+// Each reply keeps the tree its run showed, so a finished answer can fold it open.
+describe('traceStatus', () => {
+  it('keeps each agent as it last reported, in the order they first appeared', () => {
+    const t = new Map<string, TraceNode>();
+    traceStatus(t, { tierId: 'T2-1', role: 't2', label: 'Pricing', model: 'openai:gpt-mid', status: 'ACTIVE' });
+    traceStatus(t, { tierId: 'T3-1', role: 'T3', label: 'fetch pricing pages', status: 'ACTIVE' });
+    traceStatus(t, { tierId: 'T2-1', status: 'COMPLETED' });
+    expect([...t.values()]).toEqual([
+      { id: 'T2-1', role: 'T2', label: 'Pricing', model: 'openai:gpt-mid', status: 'COMPLETED' },
+      { id: 'T3-1', role: 'T3', label: 'fetch pricing pages', status: 'ACTIVE' },
+    ]);
+  });
+
+  it('stays small: later agents past the cap are dropped and long labels are cut', () => {
+    const t = new Map<string, TraceNode>();
+    for (let i = 0; i < MAX_TRACE_NODES + 5; i++) traceStatus(t, { tierId: `T3-${i}`, role: 'T3', label: 'x'.repeat(500) });
+    expect(t.size).toBe(MAX_TRACE_NODES);
+    expect(t.has('T3-0')).toBe(true);
+    expect(t.has(`T3-${MAX_TRACE_NODES}`)).toBe(false);
+    expect(t.get('T3-0')!.label).toHaveLength(140);
+    // An agent already in the trace still updates once the cap is reached.
+    traceStatus(t, { tierId: 'T3-0', status: 'COMPLETED' });
+    expect(t.get('T3-0')!.status).toBe('COMPLETED');
+  });
+
+  it('ignores an event with no agent id', () => {
+    const t = new Map<string, TraceNode>();
+    traceStatus(t, { role: 'T1', status: 'ACTIVE' });
+    traceStatus(t, null);
+    expect(t.size).toBe(0);
   });
 });
 

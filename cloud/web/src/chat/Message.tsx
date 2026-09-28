@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Copy, Check, RotateCcw, ChevronDown, ChevronLeft, ChevronRight, Pencil, Trash2, FileText, Download, UploadCloud, Loader2, Eye, ThumbsUp, ThumbsDown, Image as ImageIcon, Film, Clock } from 'lucide-react';
 import { uploadUrl, saveFile, setFeedback, clearFeedback, fileDownloadUrl, type Verdict, type PendingMedia } from '../lib/api.js';
@@ -7,8 +7,9 @@ import Markdown from '../components/Markdown.js';
 import FileViewerModal from '../components/FileViewerModal.js';
 import { fileExt } from '../lib/fileKind.js';
 import { isExportableExt, renderExport, exportLabel, sourceHint } from '../lib/exporters.js';
+import ActivityDrawer from './ActivityDrawer.js';
 import type { ChatMessage } from './useChatSession.js';
-import type { WhyReport } from '../lib/types.js';
+import type { TraceNode, WhyReport } from '../lib/types.js';
 
 // Compact "12k chars" / "980 chars" label for a document attachment's size.
 function formatChars(n: number): string {
@@ -48,6 +49,24 @@ function blobToBase64(blob: Blob): Promise<string> {
  *  For Office/PDF names (.pdf/.xlsx/.docx/.pptx) the model's Markdown/CSV source
  *  is rendered into the real binary in the browser: View previews it (PDF inline,
  *  Office as its source), Download and Save produce the binary. */
+// The prototype's file card: a raised row with a coloured document badge.
+const FILE_CARD = 'flex max-w-[520px] flex-wrap items-center gap-3 rounded-[14px] bg-card px-3 py-2.5';
+const FILE_CARD_STYLE = { boxShadow: 'var(--glass-shadow), inset 0 0 0 1px rgb(var(--c-elev) / 0.1)' };
+// Office's own colours, so a .docx reads as Word at a glance.
+const FILE_ICON_BG: Record<string, string> = { docx: '#2B579A', pptx: '#C43E1C', xlsx: '#107C41', pdf: '#B30B00' };
+
+function FileIcon({ ext }: { ext: string }) {
+  return (
+    <span
+      aria-hidden="true"
+      className="flex h-10 w-[34px] shrink-0 items-end justify-center rounded-md pb-1 font-mono text-[8.5px] font-semibold uppercase text-white"
+      style={{ background: FILE_ICON_BG[ext] ?? '#57606A' }}
+    >
+      {(ext || 'file').slice(0, 4)}
+    </span>
+  );
+}
+
 function GeneratedFileCard({ file }: { file: GeneratedFile }) {
   const [busy, setBusy] = useState(false);     // metered save
   const [saved, setSaved] = useState(false);
@@ -108,31 +127,24 @@ function GeneratedFileCard({ file }: { file: GeneratedFile }) {
     finally { setBusy(false); }
   }
   const saveButton = (small: boolean) => (
-    <button type="button" onClick={save} disabled={busy || saved} className={`flex ${small ? 'shrink-0 ' : ''}items-center gap-1 rounded-lg bg-accent-600 px-2.5 py-1 text-xs text-white hover:bg-accent-500 disabled:opacity-60`}>
-      {busy ? <Loader2 size={small ? 12 : 13} className="animate-spin" /> : saved ? <Check size={small ? 12 : 13} /> : <UploadCloud size={small ? 12 : 13} />} {saved ? 'Saved' : 'Save'}
+    <button type="button" onClick={save} disabled={busy || saved} className={`cz-btn cz-btn-sm ${small ? 'shrink-0' : ''}`}>
+      {busy ? <Loader2 size={13} className="animate-spin" /> : saved ? <Check size={13} /> : <UploadCloud size={13} />} {saved ? 'Saved' : 'Save'}
     </button>
   );
   return (
-    <div className="flex items-center gap-2.5 rounded-xl border border-elev/10 bg-elev/[0.05] px-3 py-2.5">
-      <FileText size={16} className="shrink-0 text-accent-300" />
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1.5">
-          <span className="truncate text-sm font-medium text-ink-100">{file.name}</span>
-          {exportable && (
-            <span className="shrink-0 rounded bg-accent-500/12 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-accent-300">
-              {exportLabel(ext)}
-            </span>
-          )}
-        </div>
-        <div className="truncate text-[11px] text-ink-500">
+    <div className={FILE_CARD} style={FILE_CARD_STYLE}>
+      <FileIcon ext={ext} />
+      <div className="min-w-[140px] flex-1">
+        <b className="block truncate font-medium text-ink-50">{file.name}</b>
+        <span className="block truncate text-[12px] text-ink-500">
           {exportable ? `${exportLabel(ext)} document ${sourceHint(ext)}` : formatBytes(size)}{error ? ` · ${error}` : ''}
-        </div>
+        </span>
       </div>
-      <button type="button" onClick={view} disabled={vw} className="flex items-center gap-1 rounded-lg border border-elev/10 px-2.5 py-1 text-xs text-ink-200 hover:bg-elev/[0.06] disabled:opacity-60">
-        {vw ? <Loader2 size={13} className="animate-spin" /> : <Eye size={13} />} View
+      <button type="button" onClick={view} disabled={vw} className="cz-btn cz-btn-ghost cz-btn-sm">
+        {vw ? <Loader2 size={14} className="animate-spin" /> : <Eye size={14} />} Open
       </button>
-      <button type="button" onClick={download} disabled={dl} className="flex items-center gap-1 rounded-lg border border-elev/10 px-2.5 py-1 text-xs text-ink-200 hover:bg-elev/[0.06] disabled:opacity-60">
-        {dl ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />} Download
+      <button type="button" onClick={download} disabled={dl} aria-label="Download" title="Download" className="cz-btn cz-btn-ghost cz-btn-sm">
+        {dl ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
       </button>
       {saveButton(false)}
       {viewing && (
@@ -204,11 +216,11 @@ function GeneratedMediaCard({ media, saved }: { media: PendingMedia; saved: bool
   }
 
   return (
-    <div data-testid="generated-media-card" className="flex items-center gap-2.5 rounded-xl border border-elev/10 bg-elev/[0.05] px-3 py-2.5">
-      <Icon size={16} className="shrink-0 text-accent-300" />
-      <div className="min-w-0 flex-1">
+    <div data-testid="generated-media-card" className={FILE_CARD} style={FILE_CARD_STYLE}>
+      <span className="flex h-10 w-[34px] shrink-0 items-center justify-center rounded-md bg-sunk text-ink-300"><Icon size={16} /></span>
+      <div className="min-w-[140px] flex-1">
         <div className="flex items-center gap-1.5">
-          <span className="truncate text-sm font-medium text-ink-100">{media.name}</span>
+          <b className="truncate font-medium text-ink-50">{media.name}</b>
           {saved ? (
             <span className="shrink-0 rounded bg-success-500/12 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-success-300">
               Saved
@@ -219,7 +231,7 @@ function GeneratedMediaCard({ media, saved }: { media: PendingMedia; saved: bool
             </span>
           )}
         </div>
-        <div className="truncate text-[11px] text-ink-500">
+        <div className="truncate text-[12px] text-ink-500">
           {formatBytes(media.size)} · {saved
             ? 'Saved to your Cascade files.'
             : `Expires in ${formatRemaining(media.expiresAt)} unless you save it.`}
@@ -229,15 +241,15 @@ function GeneratedMediaCard({ media, saved }: { media: PendingMedia; saved: bool
       <a
         href={fileDownloadUrl(media.id)}
         download={media.name}
-        className="flex items-center gap-1 rounded-lg border border-elev/10 px-2.5 py-1 text-xs text-ink-200 hover:bg-elev/[0.06]"
+        className="cz-btn cz-btn-ghost cz-btn-sm"
       >
-        <Download size={13} /> Download
+        <Download size={14} /> Download
       </a>
       <button
         type="button"
         onClick={save}
         disabled={busy || saved}
-        className="flex items-center gap-1 rounded-lg bg-accent-600 px-2.5 py-1 text-xs text-white hover:bg-accent-500 disabled:opacity-60"
+        className="cz-btn cz-btn-sm"
       >
         {busy ? <Loader2 size={13} className="animate-spin" /> : saved ? <Check size={13} /> : <UploadCloud size={13} />} {saved ? 'Saved' : 'Save'}
       </button>
@@ -275,7 +287,7 @@ function Receipt({ message, open, onToggle }: { message: ChatMessage; open: bool
       {typeof message.costUsd === 'number' && message.costUsd > 0 && <span>· ${message.costUsd.toFixed(4)}</span>}
       {saved > 0 && <span className="text-success-300">· saved ${saved < 0.01 ? saved.toFixed(4) : saved.toFixed(2)}</span>}
       {message.cancelled && (
-        <span className="rounded-full bg-danger-500/15 px-1.5 font-sans text-[10.5px] text-danger-300">stopped</span>
+        <span className="rounded-full bg-sunk px-1.5 font-sans text-[11px] text-ink-300">stopped</span>
       )}
     </>
   );
@@ -288,31 +300,23 @@ function Receipt({ message, open, onToggle }: { message: ChatMessage; open: bool
       onClick={onToggle}
       aria-expanded={open}
       title="Why this tier and model, and what it saved"
-      className="receipt -ml-2 flex min-w-0 items-center gap-1.5 rounded-lg px-2 py-1 text-ink-500 hover:bg-elev/[0.05] hover:text-ink-300"
+      className="receipt -ml-2 flex min-w-0 items-center gap-[7px] rounded-lg px-2 py-[3px] text-ink-500 hover:bg-elev/[0.05] hover:text-ink-300"
     >
       {body}
       <span className="sr-only">/why</span>
-      <ChevronDown size={11} className={open ? 'rotate-180 transition-transform' : 'transition-transform'} />
     </button>
   );
 }
-
-const KIND_DOT: Record<string, string> = {
-  complexity: 'bg-info-500',
-  model: 'bg-accent-500',
-  failover: 'bg-warning-500',
-  escalation: 'bg-danger-500',
-};
 
 function WhyPanel({ why }: { why: WhyReport }) {
   const tiers = Object.keys(why.costByTier).filter((t) => (why.costByTier[t] ?? 0) > 0);
   const spent = tiers.reduce((sum, t) => sum + (why.costByTier[t] ?? 0), 0);
   const allT1 = spent + Math.max(0, why.savedUsd);
   return (
-    <div className="mt-1 rounded-2xl border border-elev/10 bg-ink-900 p-4 text-xs text-ink-300">
+    <div className="mt-1 flex flex-col gap-3 rounded-[14px] bg-card px-4 py-3.5 text-[13px] text-ink-300" style={{ boxShadow: 'inset 0 0 0 1px rgb(var(--c-elev) / 0.1)' }}>
       {why.savedUsd > 0 && (
-        <div className="mb-3 flex flex-col gap-2">
-          <p className="text-[13px] text-ink-100">
+        <div className="flex flex-col gap-2">
+          <p className="m-0 font-medium text-ink-50">
             Saved <span className="receipt text-success-300">${why.savedUsd.toFixed(4)}</span> · {why.savedPct}% less than running it all on T1
           </p>
           {/* Both bars share one scale: the all-T1 cost is the full width. */}
@@ -331,19 +335,17 @@ function WhyPanel({ why }: { why: WhyReport }) {
         </div>
       )}
       {why.decisions.length > 0 && (
-        <ul className="flex flex-col gap-1.5">
+        <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
           {why.decisions.map((d, i) => (
             <li key={i} className="flex gap-2">
-              <span className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${KIND_DOT[d.kind] ?? 'bg-ink-400'}`} />
-              <span className="leading-snug">
-                <span className="font-mono text-[10.5px] uppercase text-ink-400">{d.kind}</span> · {d.detail}
-              </span>
+              <span className="min-w-[78px] shrink-0 pt-px font-mono text-[11px] text-ink-500">{d.kind}</span>
+              <span className="leading-snug">{d.detail}</span>
             </li>
           ))}
         </ul>
       )}
       {tiers.length > 0 && (
-        <div className="mt-3 flex flex-col gap-1 border-t border-elev/10 pt-3">
+        <div className="flex flex-col gap-1 border-t border-elev/10 pt-2.5">
           {tiers.map((t) => (
             <div key={t} className="flex items-center justify-between font-mono text-[11px]">
               <span className="flex items-center gap-2"><span className={`h-1.5 w-1.5 rounded-full ${TIER_DOT[t] ?? 'bg-ink-500'}`} />{t}{why.models[t] ? ` · ${why.models[t]}` : ''}</span>
@@ -389,7 +391,7 @@ function FeedbackButtons({ messageId, initial }: { messageId: string; initial?: 
         aria-label="Good response"
         aria-pressed={verdict === 'good'}
         onClick={() => void cast('good')}
-        className={verdict === 'good' ? 'text-success-500' : 'hover:text-ink-100'}
+        className={`cz-ib cz-ib-sm ${verdict === 'good' ? 'text-accent-500' : ''}`}
       >
         <ThumbsUp size={14} />
       </button>
@@ -398,7 +400,7 @@ function FeedbackButtons({ messageId, initial }: { messageId: string; initial?: 
         aria-label="Poor response"
         aria-pressed={verdict === 'bad'}
         onClick={() => void cast('bad')}
-        className={verdict === 'bad' ? 'text-danger-300' : 'hover:text-ink-100'}
+        className={`cz-ib cz-ib-sm ${verdict === 'bad' ? 'text-accent-500' : ''}`}
       >
         <ThumbsDown size={14} />
       </button>
@@ -417,7 +419,7 @@ function CopyButton({ getText, className }: { getText: () => string; className?:
         setCopied(true);
         setTimeout(() => setCopied(false), 1200);
       }}
-      className={className ?? 'text-ink-400 hover:text-ink-100'}
+      className={className ?? 'cz-ib cz-ib-sm'}
     >
       {copied ? <Check size={14} className="text-success-500" /> : <Copy size={14} />}
     </button>
@@ -434,15 +436,15 @@ function SiblingNav({ message, onSelect }: { message: ChatMessage; onSelect?: (i
   const prev = ids[idx - 1];
   const next = ids[idx + 1];
   return (
-    <span className="flex items-center gap-0.5 text-[11px] text-ink-500">
+    <span className="inline-flex items-center font-mono text-[12px] text-ink-500">
       <button
         type="button"
         aria-label="Previous version"
         disabled={!prev}
         onClick={() => prev && onSelect(prev)}
-        className="rounded p-0.5 hover:text-ink-200 disabled:opacity-30"
+        className="cz-ib cz-ib-sm"
       >
-        <ChevronLeft size={13} />
+        <ChevronLeft size={14} />
       </button>
       <span className="tabular-nums">{idx + 1}/{ids.length}</span>
       <button
@@ -450,9 +452,9 @@ function SiblingNav({ message, onSelect }: { message: ChatMessage; onSelect?: (i
         aria-label="Next version"
         disabled={!next}
         onClick={() => next && onSelect(next)}
-        className="rounded p-0.5 hover:text-ink-200 disabled:opacity-30"
+        className="cz-ib cz-ib-sm"
       >
-        <ChevronRight size={13} />
+        <ChevronRight size={14} />
       </button>
     </span>
   );
@@ -489,15 +491,15 @@ function ThinkingBlock({ text, streaming }: { text: string; streaming?: boolean 
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="-ml-2 flex items-center gap-1.5 rounded-lg px-2 py-1 text-[13px] text-ink-400 hover:bg-elev/[0.05] hover:text-ink-200"
+        className="-ml-2 flex items-center gap-[7px] self-start rounded-lg px-2 py-1 text-[13.5px] text-ink-300 hover:bg-elev/[0.05] hover:text-ink-50"
         aria-expanded={open}
       >
-        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        <span>{streaming ? 'Thinking…' : 'Thoughts'}</span>
+        <ChevronRight size={14} className={open ? 'rotate-90 transition-transform' : 'transition-transform'} />
+        <span>{streaming ? 'Thinking…' : 'Thought process'}</span>
         {streaming && <span className="accent-grad h-1.5 w-1.5 animate-pulse rounded-full" />}
       </button>
       {open && (
-        <div className="prose prose-invert prose-sm mt-1 max-w-none border-l-2 border-elev/15 py-0.5 pl-3 text-ink-400">
+        <div className="prose prose-invert prose-sm mt-1 max-w-none border-l-2 border-elev/[0.17] py-0.5 pl-3.5 text-ink-300">
           <Markdown>{text}</Markdown>
         </div>
       )}
@@ -517,13 +519,52 @@ interface Props {
   onDelete?: () => void;
   /** Switch the active path to a sibling (the < n/m > arrows). */
   onSelectSibling?: (messageId: string) => void;
+  /** A new number opens this reply's /why and brings it into view. */
+  whyRequest?: number;
 }
 
-export default function Message({ message, busy, onRegenerate, onEdit, onDelete, onSelectSibling }: Props) {
+/** "1 manager · 3 workers", or "Worked through 4 sections · 9 workers". */
+function traceSummary(trace: TraceNode[]): string {
+  const managers = trace.filter((n) => n.role.startsWith('T2')).length;
+  const workers = trace.filter((n) => n.role.startsWith('T3')).length;
+  const w = `${workers} worker${workers === 1 ? '' : 's'}`;
+  return managers > 1 ? `Worked through ${managers} sections · ${w}` : `${managers} manager · ${w}`;
+}
+
+/** The finished run's agents, folded above the answer — the tree the live run showed. */
+function TraceFold({ trace }: { trace: TraceNode[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="flex flex-col">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="-ml-2 flex max-w-full items-center gap-[7px] self-start rounded-lg px-2 py-1 text-[13.5px] text-ink-300 hover:bg-elev/[0.05] hover:text-ink-50"
+      >
+        <ChevronRight size={14} className={open ? 'rotate-90 transition-transform' : 'transition-transform'} />
+        <span className="truncate">{traceSummary(trace)}</span>
+      </button>
+      {open && (
+        <div className="border-l-2 border-elev/[0.17] pl-3.5">
+          <ActivityDrawer activity={trace.map((n, i) => ({ tierId: n.id, role: n.role, label: n.label, model: n.model, status: n.status, order: i }))} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function Message({ message, busy, onRegenerate, onEdit, onDelete, onSelectSibling, whyRequest }: Props) {
+  const rootRef = useRef<HTMLDivElement>(null);
   const attachments = message.attachments ?? [];
   const images = attachments.filter((a) => a.mime.startsWith('image/'));
   const docs = attachments.filter((a) => a.kind === 'document' || (!a.mime.startsWith('image/') && !!a.filename));
   const [whyOpen, setWhyOpen] = useState(false);
+  useEffect(() => {
+    if (whyRequest === undefined) return;
+    setWhyOpen(true);
+    rootRef.current?.scrollIntoView?.({ block: 'end', behavior: 'smooth' });
+  }, [whyRequest]);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(message.content);
   // Only a reply that actually references generated media asks the server
@@ -543,7 +584,7 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
 
   if (message.role === 'user') {
     return (
-      <div data-role="user" className="group flex flex-col items-end gap-2">
+      <div data-role="user" className="group flex flex-col items-end gap-1.5">
         {images.length > 0 && (
           <div className="flex flex-wrap justify-end gap-2">
             {images.map((a) => (
@@ -551,7 +592,7 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
                 key={a.id}
                 src={uploadUrl(a.id)}
                 alt="attachment"
-                className="max-h-40 rounded-xl border border-elev/10 object-cover shadow-lg"
+                className="max-h-40 rounded-lg object-cover"
               />
             ))}
           </div>
@@ -561,19 +602,20 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
             {docs.map((a) => (
               <div
                 key={a.id}
-                className="flex items-center gap-2 rounded-xl border border-elev/10 bg-elev/[0.06] px-3 py-2 text-xs text-ink-200 shadow-lg"
+                className="inline-flex h-[34px] max-w-[240px] items-center gap-[7px] rounded-lg bg-card px-2.5 text-[12.5px] text-ink-100"
+                style={{ boxShadow: 'inset 0 0 0 1px rgb(var(--c-elev) / 0.17)' }}
               >
-                <FileText size={14} className="shrink-0 text-accent-300" />
-                <span className="max-w-[12rem] truncate font-medium">{a.filename ?? 'document'}</span>
+                <FileText size={14} className="shrink-0 text-ink-300" />
+                <span className="truncate">{a.filename ?? 'document'}</span>
                 {typeof a.charCount === 'number' && a.charCount > 0 && (
-                  <span className="text-ink-500">{formatChars(a.charCount)}</span>
+                  <span className="font-mono text-ink-500">{formatChars(a.charCount)}</span>
                 )}
               </div>
             ))}
           </div>
         )}
         {editing ? (
-          <div className="w-full max-w-[80%]">
+          <div className="flex w-full max-w-[600px] flex-col gap-2">
             <textarea
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
@@ -583,13 +625,13 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
               }}
               rows={Math.min(10, draft.split('\n').length + 1)}
               autoFocus
-              className="w-full resize-y rounded-2xl border border-accent-500/30 bg-elev/[0.06] px-4 py-2 text-sm text-ink-100 focus:outline-none focus:ring-1 focus:ring-accent-500"
+              className="cz-field h-auto min-h-[90px] resize-y py-2.5"
             />
-            <div className="mt-1.5 flex justify-end gap-2">
+            <div className="flex justify-end gap-2">
               <button
                 type="button"
                 onClick={() => { setEditing(false); setDraft(message.content); }}
-                className="rounded-lg px-3 py-1 text-xs text-ink-400 hover:text-ink-200"
+                className="cz-btn cz-btn-quiet cz-btn-sm"
               >
                 Cancel
               </button>
@@ -597,35 +639,36 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
                 type="button"
                 onClick={submitEdit}
                 disabled={busy || !draft.trim()}
-                className="rounded-lg bg-ink-50 px-3 py-1 text-xs text-ink-900 hover:opacity-90 disabled:opacity-60"
+                className="cz-btn cz-btn-sm"
               >
-                Save &amp; submit
+                Save as new branch
               </button>
             </div>
           </div>
         ) : (
           message.content && (
-            <div className="max-w-[80%] whitespace-pre-wrap rounded-2xl bg-ink-800 px-4 py-2.5 text-[15px] text-ink-50">
+            <div className="max-w-[min(82%,600px)] whitespace-pre-wrap rounded-[14px] bg-bubble px-[15px] py-2.5 text-[15px] text-ink-50 [overflow-wrap:anywhere]">
               {message.content}
             </div>
           )
         )}
         {!editing && (message.content || (message.siblingIds?.length ?? 0) > 1) && (
-          <div className="flex items-center gap-1.5 text-ink-400 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
+          <div className="flex items-center gap-px opacity-100 transition-opacity [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-focus-within:opacity-100 [@media(hover:hover)]:group-hover:opacity-100">
             <SiblingNav message={message} onSelect={onSelectSibling} />
             <CopyButton getText={() => message.content} />
             {onEdit && (
               <button
                 type="button"
                 aria-label="Edit"
+                disabled={busy}
                 onClick={() => { setDraft(message.content); setEditing(true); }}
-                className="hover:text-ink-100"
+                className="cz-ib cz-ib-sm"
               >
                 <Pencil size={14} />
               </button>
             )}
             {onDelete && (
-              <button type="button" aria-label="Delete" onClick={onDelete} className="hover:text-danger-300">
+              <button type="button" aria-label="Delete" onClick={onDelete} className="cz-ib cz-ib-sm">
                 <Trash2 size={14} />
               </button>
             )}
@@ -637,7 +680,7 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
 
   const hasReceipt = Boolean(message.tier || message.model || message.why || message.cancelled || message.costUsd);
   return (
-    <div data-role="assistant" className="group flex flex-col gap-2">
+    <div ref={rootRef} data-role="assistant" className="group flex flex-col gap-1.5">
       {message.streaming && !message.content ? (
         <span className="shimmer-text text-sm">Writing…</span>
       ) : (() => {
@@ -651,6 +694,9 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
         return (
           <>
             {thinking && <ThinkingBlock text={thinking} streaming={message.streaming && thinkingOpen} />}
+            {/* Only an orchestrated run has a tree worth folding: a direct answer
+                has no managers, and "0 managers" says nothing. */}
+            {!message.streaming && message.why?.trace?.some((n) => n.role.startsWith('T2')) && <TraceFold trace={message.why.trace} />}
             {rest && (
               <div className="cascade-answer prose prose-invert max-w-none text-ink-100">
                 <Markdown>{rest}</Markdown>
@@ -671,7 +717,7 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
           has no content but still needs "stopped" and its /why. The actions
           act on the text, so they wait for some. */}
       {!message.streaming && (message.content || hasReceipt) && (
-        <div className="flex min-h-[28px] flex-wrap items-center gap-2">
+        <div className="flex min-h-[28px] flex-wrap items-center gap-1.5">
           {hasReceipt && (
             <Receipt
               message={message}
@@ -680,19 +726,19 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
             />
           )}
           {message.content && (
-            <div className="ml-auto flex items-center gap-2 text-ink-400 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
+            <div className="ml-auto flex items-center gap-px opacity-100 transition-opacity [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-focus-within:opacity-100 [@media(hover:hover)]:group-hover:opacity-100">
               <SiblingNav message={message} onSelect={onSelectSibling} />
               <CopyButton getText={() => splitThinking(message.content).answer || message.content} />
               {/* Only a persisted message can carry a verdict — an id is what the
                   server keys the vote on, and a still-streaming reply has none. */}
               {message.id && <FeedbackButtons messageId={message.id} initial={message.verdict} />}
               {onRegenerate && (
-                <button type="button" aria-label="Regenerate" onClick={onRegenerate} className="hover:text-ink-100">
+                <button type="button" aria-label="Regenerate" onClick={onRegenerate} disabled={busy} className="cz-ib cz-ib-sm">
                   <RotateCcw size={14} />
                 </button>
               )}
               {onDelete && (
-                <button type="button" aria-label="Delete" onClick={onDelete} className="hover:text-danger-300">
+                <button type="button" aria-label="Delete" onClick={onDelete} className="cz-ib cz-ib-sm">
                   <Trash2 size={14} />
                 </button>
               )}

@@ -1,12 +1,14 @@
-import { useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react';
-import { browserChip, type BrowserAllowanceView } from './browserAllowance.js';
+import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode } from 'react';
+import { browserChip, CHECKING, type BrowserAllowanceView } from './browserAllowance.js';
 import clsx from 'clsx';
-import { motion } from 'framer-motion';
-import { Send, Paperclip, X, Loader2, Globe, Square, Zap, FileText, MonitorPlay } from 'lucide-react';
-import { uploadImage, uploadDocument } from '../lib/api.js';
+import {
+  ArrowUp, Paperclip, X, Loader2, Globe, Square, Zap, FileText, MonitorPlay, Plus, SlidersHorizontal,
+  ChevronDown, Sparkles, Settings2, Plug,
+} from 'lucide-react';
+import Menu, { type MenuItem } from '../components/Menu.js';
+import { fetchMcpServers, setMcpServerEnabled, uploadImage, uploadDocument, type McpServer } from '../lib/api.js';
 import type { Skill } from '../lib/types.js';
 import type { ChatAttachment, ForceTier, RoutingMode, SendInput } from './useChatSession.js';
-import type { UiMode } from '../lib/prefs.js';
 
 const ALLOWED = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 // Document MIME types + a filename-extension fallback (browsers often report a
@@ -44,13 +46,21 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
-const ROUTING_MODES: Array<{ value: RoutingMode; label: string; title: string }> = [
-  { value: 'auto', label: 'Auto', title: 'Balanced — Cascade picks the cheapest model that clears the bar' },
-  { value: 'quality', label: 'Quality', title: 'Bias toward stronger models' },
-  { value: 'fast', label: 'Fast', title: 'Bias toward cheaper, faster models' },
+const ROUTING_MODES: Array<{ value: RoutingMode; label: string; sub: string }> = [
+  { value: 'auto', label: 'Auto', sub: 'Best value per step' },
+  { value: 'quality', label: 'Quality', sub: 'Stronger models' },
+  { value: 'fast', label: 'Fast', sub: 'Cheaper, quicker models' },
 ];
 
 const FORCE_TIERS: ForceTier[] = ['auto', 'T1', 'T2', 'T3'];
+
+/** How many browser sessions are left, for the Browser switch's second line. */
+function browserSub(allowance: BrowserAllowanceView): string {
+  if (allowance === CHECKING) return 'Checking today’s sessions…';
+  if (!allowance) return 'A real browser for this run';
+  const left = Math.max(0, allowance.limit - allowance.used);
+  return left === 0 ? `All ${allowance.limit} used today` : `${left} of ${allowance.limit} left today`;
+}
 
 interface Props {
   skills: Skill[];
@@ -71,13 +81,19 @@ interface Props {
   /** Today's browser sessions against the plan's allowance. See `browserChip`. */
   browserAllowance?: BrowserAllowanceView;
   onWebSearchChange: (on: boolean) => void;
-  uiMode: UiMode;
+  onManageSkills?: () => void;
+  onManageConnectors?: () => void;
+  /** A suggestion from the empty state, placed in the box for the user to send or edit. */
+  draftRequest?: { text: string; seq: number } | null;
 }
+
+type MenuKey = 'plus' | 'tools' | 'mode';
 
 export default function Composer({
   skills, skillId, onSkillChange, hasProviders, busy, onSend, onStop,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
-  browserMode, onBrowserModeChange, browserAvailable, browserAllowance, uiMode,
+  browserMode, onBrowserModeChange, browserAvailable, browserAllowance,
+  onManageSkills, onManageConnectors, draftRequest,
 }: Props) {
   const chip = browserChip(browserAllowance ?? null);
   const [input, setInput] = useState('');
@@ -85,7 +101,33 @@ export default function Composer({
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  // Fast answer applies to the next message only, like the prototype's toggle.
+  const [fastNext, setFastNext] = useState(false);
+  const [menu, setMenu] = useState<{ key: MenuKey; anchor: HTMLElement } | null>(null);
+  const [servers, setServers] = useState<McpServer[] | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const textRef = useRef<HTMLTextAreaElement>(null);
+
+  // Grow with the draft, up to a limit, then scroll.
+  useEffect(() => {
+    const t = textRef.current;
+    if (!t) return;
+    t.style.height = 'auto';
+    t.style.height = `${Math.min(t.scrollHeight, 200)}px`;
+  }, [input]);
+
+  useEffect(() => {
+    if (!draftRequest) return;
+    setInput(draftRequest.text);
+    textRef.current?.focus();
+  }, [draftRequest]);
+
+  // The tools menu lists your connectors; read them when it opens so a change
+  // made in the Connectors window shows up here.
+  useEffect(() => {
+    if (menu?.key !== 'tools') return;
+    fetchMcpServers().then((r) => setServers(r.servers)).catch(() => setServers([]));
+  }, [menu?.key]);
 
   async function addFiles(files: FileList | File[]) {
     const usable = Array.from(files).filter((f) => isImage(f) || isDocument(f));
@@ -127,13 +169,14 @@ export default function Composer({
     });
   }
 
-  function submit(fast = false) {
+  function submit() {
     if (!input.trim() || busy || uploading) return;
     onSend({
       prompt: input,
       attachments: pending.map(({ id, mime, kind, filename, charCount }) => ({ id, mime, kind, filename, charCount })),
-      fast,
+      fast: fastNext,
     });
+    setFastNext(false);
     setInput('');
     setUploadError(null);
     pending.forEach((p) => { if (p.previewUrl) URL.revokeObjectURL(p.previewUrl); });
@@ -161,248 +204,216 @@ export default function Composer({
     if (e.dataTransfer.files.length) void addFiles(e.dataTransfer.files);
   }
 
-  const disabled = busy || !hasProviders;
+
+  async function toggleServer(server: McpServer) {
+    const next = !server.enabled;
+    setServers((prev) => prev?.map((s) => (s.id === server.id ? { ...s, enabled: next } : s)) ?? prev);
+    try { await setMcpServerEnabled(server.id, next); }
+    catch { setServers((prev) => prev?.map((s) => (s.id === server.id ? { ...s, enabled: !next } : s)) ?? prev); }
+  }
+
+  const skillName = skills.find((s) => s.id === skillId)?.name;
+  const openMenu = (key: MenuKey) => (e: React.MouseEvent<HTMLElement>) => {
+    const anchor = e.currentTarget;
+    setMenu((m) => (m?.key === key ? null : { key, anchor }));
+  };
+
+  function itemsFor(key: MenuKey): MenuItem[] {
+    if (key === 'plus') {
+      return [
+        {
+          kind: 'action', label: 'Attach files', icon: <Paperclip size={15} />,
+          disabled: !hasProviders || uploading || pending.length >= MAX_FILES,
+          onSelect: () => fileRef.current?.click(),
+        },
+        { kind: 'separator' },
+        { kind: 'label', label: 'Skill' },
+        ...skills.map<MenuItem>((s) => ({ kind: 'radio', label: s.name, checked: s.id === skillId, onSelect: () => onSkillChange(s.id) })),
+        ...(onManageSkills ? [{ kind: 'action', label: 'Manage skills', icon: <Settings2 size={15} />, onSelect: onManageSkills } as MenuItem] : []),
+      ];
+    }
+    if (key === 'tools') {
+      const list: MenuItem[] = [
+        { kind: 'toggle', label: 'Web search', icon: <Globe size={15} />, checked: webSearch, onToggle: () => onWebSearchChange(!webSearch) },
+      ];
+      // Absent, not disabled, where no provider is configured: the capability
+      // does not exist until an operator supplies an endpoint. Web and Browser
+      // are mutually exclusive; `useChatSession` clears one when the other is set.
+      if (browserAvailable) {
+        list.push({
+          kind: 'toggle', label: 'Browser', icon: <MonitorPlay size={15} />, checked: browserMode,
+          sub: browserSub(browserAllowance ?? null), title: chip.title, disabled: chip.disabled,
+          onToggle: () => onBrowserModeChange(!browserMode),
+        });
+      }
+      list.push({ kind: 'separator' }, { kind: 'label', label: 'Connectors' });
+      if (servers === null) list.push({ kind: 'custom', key: 'loading', render: <p className="m-0 px-[9px] py-1 text-[12.5px] text-ink-500">Loading…</p> });
+      else if (servers.length === 0) list.push({ kind: 'custom', key: 'none', render: <p className="m-0 px-[9px] py-1 text-[12.5px] text-ink-500">None connected yet</p> });
+      else list.push(...servers.map<MenuItem>((s) => ({ kind: 'toggle', label: s.name, icon: <Plug size={15} />, checked: s.enabled, onToggle: () => void toggleServer(s) })));
+      if (onManageConnectors) list.push({ kind: 'action', label: 'Manage connectors', icon: <Settings2 size={15} />, onSelect: onManageConnectors });
+      return list;
+    }
+    return [
+      { kind: 'label', label: 'Routing' },
+      ...ROUTING_MODES.map<MenuItem>((m) => ({ kind: 'radio', label: m.label, sub: m.sub, checked: routingMode === m.value, onSelect: () => onRoutingModeChange(m.value) })),
+      { kind: 'separator' },
+      { kind: 'label', label: 'Tier' },
+      ...FORCE_TIERS.map<MenuItem>((t) => ({ kind: 'radio', label: t === 'auto' ? 'Let Cascade decide' : `${t} only`, checked: forceTier === t, onSelect: () => onForceTierChange(t) })),
+      { kind: 'separator' },
+      { kind: 'toggle', label: 'Fast answer', sub: 'Next message skips orchestration', icon: <Zap size={15} />, checked: fastNext, onToggle: () => setFastNext((f) => !f) },
+    ];
+  }
+
+  // What is switched on shows as a chip beside the menus, with its own way off —
+  // a billed capability like the browser is never on without saying so.
+  const tokens: Array<{ key: string; icon: ReactNode; label: string; off: () => void }> = [];
+  if (fastNext) tokens.push({ key: 'fast', icon: <Zap size={14} />, label: 'Fast answer', off: () => setFastNext(false) });
+  if (webSearch) tokens.push({ key: 'web', icon: <Globe size={14} />, label: 'Web', off: () => onWebSearchChange(false) });
+  if (browserMode) tokens.push({ key: 'browser', icon: <MonitorPlay size={14} />, label: 'Browser', off: () => onBrowserModeChange(false) });
+  if (skillId && skillId !== 'general' && skillName) tokens.push({ key: 'skill', icon: <Sparkles size={14} />, label: skillName, off: () => onSkillChange('general') });
+
+  const routeLabel = ROUTING_MODES.find((m) => m.value === routingMode)?.label ?? 'Auto';
+  const canSend = hasProviders && !busy && !uploading && input.trim().length > 0;
 
   return (
-    <div className="px-4 py-3 sm:px-6">
-      <div
-        className={clsx(
-          'mx-auto max-w-3xl rounded-[20px] border bg-ink-900 shadow-[var(--glass-shadow)] transition-colors focus-within:border-accent-500/50',
-          dragOver ? 'border-accent-500 ring-2 ring-accent-500/40' : 'border-elev/15',
-        )}
-        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={onDrop}
-      >
-        {pending.length > 0 && (
-          <div className="flex flex-wrap gap-2 px-3 pt-3">
-            {pending.map((p) =>
-              p.kind === 'document' ? (
-                <div
-                  key={p.id}
-                  className="relative flex items-center gap-2 rounded-xl border border-elev/10 bg-elev/[0.06] px-3 py-2 pr-6 text-xs text-ink-200 shadow-lg"
-                >
-                  <FileText size={14} className="shrink-0 text-accent-300" />
-                  <span className="max-w-[10rem] truncate font-medium">{p.filename ?? 'document'}</span>
-                  {typeof p.charCount === 'number' && p.charCount > 0 && (
-                    <span className="text-ink-500">{p.charCount >= 1000 ? `${Math.round(p.charCount / 1000)}k` : p.charCount}</span>
-                  )}
-                  <button
-                    type="button"
-                    aria-label="Remove attachment"
-                    onClick={() => removePending(p.id)}
-                    className="absolute -right-1.5 -top-1.5 rounded-full border border-elev/10 bg-ink-900 p-0.5 text-ink-200 hover:text-ink-50"
-                  >
-                    <X size={12} />
-                  </button>
-                </div>
-              ) : (
-                <div key={p.id} className="relative">
-                  <img src={p.previewUrl} alt="pending" className="h-16 w-16 rounded-xl border border-elev/10 object-cover shadow-lg" />
-                  <button
-                    type="button"
-                    aria-label="Remove attachment"
-                    onClick={() => removePending(p.id)}
-                    className="absolute -right-1.5 -top-1.5 rounded-full border border-elev/10 bg-ink-900 p-0.5 text-ink-200 hover:text-ink-50"
-                  >
-                    <X size={12} />
-                  </button>
-                </div>
-              ),
-            )}
-          </div>
-        )}
-        {uploadError && (
-          <div className="px-3 pt-2 text-[11px] text-danger-300">{uploadError}</div>
-        )}
-
-        {/* On a phone the text box takes its own full-width line above the
-            controls, so neither the placeholder nor the draft is squeezed. */}
-        <div className="flex items-end gap-2 p-2 max-sm:flex-wrap">
-          <input
-            ref={fileRef}
-            type="file"
-            accept={FILE_ACCEPT}
-            multiple
-            hidden
-            onChange={(e) => { if (e.target.files) void addFiles(e.target.files); e.target.value = ''; }}
-          />
-          <motion.button
-            type="button"
-            aria-label="Attach image or document"
-            title="Attach an image, PDF, Word doc, or text file"
-            disabled={disabled || pending.length >= MAX_FILES}
-            onClick={() => fileRef.current?.click()}
-            whileHover={{ scale: 1.1 }}
-            whileTap={{ scale: 0.9 }}
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-400 hover:bg-elev/10 hover:text-ink-100 disabled:opacity-40"
-          >
-            {uploading ? <Loader2 size={16} className="animate-spin" /> : <Paperclip size={16} />}
-          </motion.button>
-
-          <select
-            aria-label="Skill"
-            value={skillId}
-            onChange={(e) => onSkillChange(e.target.value)}
-            disabled={disabled}
-            className="max-w-[9rem] shrink-0 truncate rounded-lg border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-xs text-ink-200 outline-none disabled:opacity-40 max-sm:mr-auto"
-          >
-            {skills.map((s) => (
-              <option key={s.id} value={s.id}>{s.name}</option>
-            ))}
-          </select>
-
-          <textarea
-            className="max-h-48 min-h-[36px] min-w-0 flex-1 resize-none bg-transparent px-1 py-2 text-[15px] leading-relaxed text-ink-50 outline-none placeholder:text-ink-500 max-sm:order-first max-sm:basis-full"
-            placeholder={hasProviders ? 'Message Cascade…' : 'Add a provider key to start chatting'}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={onKeyDown}
-            onPaste={onPaste}
-            disabled={disabled}
-            rows={1}
-          />
-
-          {!busy && (
-            <motion.button
-              type="button"
-              onClick={() => submit(true)}
-              disabled={disabled || uploading || !input.trim()}
-              aria-label="Fast answer"
-              title="Fast answer — one quick model, skips the multi-agent orchestration (cheaper &amp; faster)"
-              whileHover={{ scale: 1.06 }}
-              whileTap={{ scale: 0.92 }}
-              className={clsx(
-                'flex h-8 w-8 shrink-0 items-center justify-center rounded-full border transition-colors',
-                disabled || uploading || !input.trim()
-                  ? 'cursor-not-allowed border-elev/10 text-ink-500'
-                  : 'border-transparent text-ink-400 hover:bg-elev/[0.06] hover:text-warning-300',
-              )}
-            >
-              <Zap size={15} />
-            </motion.button>
-          )}
-          {busy ? (
-            <motion.button
-              type="button"
-              onClick={onStop}
-              aria-label="Stop"
-              title="Stop this run"
-              whileHover={{ scale: 1.06 }}
-              whileTap={{ scale: 0.92 }}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-ink-50 text-ink-900"
-            >
-              <Square size={13} fill="currentColor" />
-            </motion.button>
-          ) : (
-            <motion.button
-              type="button"
-              onClick={() => submit()}
-              disabled={disabled || uploading || !input.trim()}
-              aria-label="Send"
-              whileHover={{ scale: 1.06 }}
-              whileTap={{ scale: 0.92 }}
-              className={clsx(
-                'flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] transition-colors',
-                disabled || uploading || !input.trim()
-                  ? 'cursor-not-allowed bg-elev/[0.07] text-ink-500'
-                  : 'bg-accent-500 text-white hover:bg-accent-600',
-              )}
-            >
-              <Send size={15} />
-            </motion.button>
+    <div
+      className={clsx(
+        'flex flex-col rounded-[20px] bg-card p-2 transition-shadow',
+        dragOver ? 'ring-2 ring-accent-500' : '',
+      )}
+      style={{ boxShadow: 'var(--glass-shadow), inset 0 0 0 1px rgb(var(--c-elev) / 0.17)' }}
+      onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={onDrop}
+    >
+      <input
+        ref={fileRef}
+        type="file"
+        accept={FILE_ACCEPT}
+        multiple
+        hidden
+        onChange={(e) => { if (e.target.files) void addFiles(e.target.files); e.target.value = ''; }}
+      />
+      {pending.length > 0 && (
+        <div className="flex flex-wrap gap-2 px-1.5 pb-0.5 pt-1.5">
+          {pending.map((p) =>
+            p.kind === 'document' ? (
+              <div
+                key={p.id}
+                className="relative inline-flex h-[34px] max-w-[240px] items-center gap-[7px] rounded-lg bg-card px-2.5 text-[12.5px] text-ink-100"
+                style={{ boxShadow: 'inset 0 0 0 1px rgb(var(--c-elev) / 0.17)' }}
+              >
+                <FileText size={14} className="shrink-0 text-ink-300" />
+                <span className="truncate">{p.filename ?? 'document'}</span>
+                {typeof p.charCount === 'number' && p.charCount > 0 && (
+                  <span className="font-mono text-ink-500">{p.charCount >= 1000 ? `${Math.round(p.charCount / 1000)}k` : p.charCount}</span>
+                )}
+                <RemoveAttachment onClick={() => removePending(p.id)} />
+              </div>
+            ) : (
+              <div key={p.id} className="relative">
+                <img src={p.previewUrl} alt="pending" className="block h-[52px] w-[52px] rounded-lg object-cover" />
+                <RemoveAttachment onClick={() => removePending(p.id)} />
+              </div>
+            ),
           )}
         </div>
+      )}
+      {uploadError && <div className="px-2 pt-1.5 text-[12px] text-danger-500">{uploadError}</div>}
 
-        {/* Routing controls: bias Cascade Auto, pin a tier, toggle web tools.
-            Advanced view only — Simple keeps the composer minimal. */}
-        {uiMode === 'advanced' && (
-          <div className="flex flex-wrap items-center gap-1.5 px-2.5 pb-2">
-            <div className="flex items-center gap-0.5 rounded-lg bg-elev/[0.05] p-0.5" role="group" aria-label="Routing mode">
-              {ROUTING_MODES.map((m) => (
-                <button
-                  key={m.value}
-                  type="button"
-                  title={m.title}
-                  disabled={disabled}
-                  aria-pressed={routingMode === m.value}
-                  onClick={() => onRoutingModeChange(m.value)}
-                  className={clsx(
-                    'rounded-md px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-40',
-                    routingMode === m.value
-                      ? 'bg-ink-900 text-ink-50 shadow-sm ring-1 ring-elev/10'
-                      : 'text-ink-400 hover:text-ink-100',
-                  )}
-                >
-                  {m.label}
+      <textarea
+        ref={textRef}
+        aria-label="Message Cascade"
+        className="max-h-[200px] min-h-12 w-full resize-none bg-transparent px-2 pb-1.5 pt-2 text-[15.5px] leading-[1.45] text-ink-50 outline-none placeholder:text-ink-500"
+        placeholder={hasProviders ? 'Ask Cascade anything' : 'Add an API key to start'}
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        onKeyDown={onKeyDown}
+        onPaste={onPaste}
+        disabled={!hasProviders}
+        rows={1}
+      />
+
+      <div className="flex flex-wrap items-center gap-1">
+        <button type="button" aria-label="Attach and skills" aria-haspopup="menu" aria-expanded={menu?.key === 'plus'} onClick={openMenu('plus')} className="cz-ib">
+          {uploading ? <Loader2 size={17} className="animate-spin" /> : <Plus size={17} />}
+        </button>
+        <button
+          type="button"
+          aria-label="Tools"
+          aria-haspopup="menu"
+          aria-expanded={menu?.key === 'tools'}
+          onClick={openMenu('tools')}
+          className={clsx('cz-ib', (webSearch || browserMode) && 'text-accent-500')}
+        >
+          <SlidersHorizontal size={17} />
+        </button>
+        {tokens.length > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {tokens.map((t) => (
+              <span key={t.key} className="cz-chip" aria-pressed="true">
+                {t.icon} {t.label}
+                <button type="button" aria-label={`Remove ${t.label}`} onClick={t.off} className="inline-flex opacity-70 hover:opacity-100">
+                  <X size={14} />
                 </button>
-              ))}
-            </div>
-
-            <label className="flex items-center gap-1 text-[11px] text-ink-400">
-              <span className="hidden sm:inline">Tier</span>
-              <select
-                aria-label="Force tier"
-                value={forceTier}
-                onChange={(e) => onForceTierChange(e.target.value as ForceTier)}
-                disabled={disabled}
-                className="rounded-lg border border-elev/10 bg-elev/[0.04] px-1.5 py-1 text-[11px] text-ink-200 outline-none disabled:opacity-40"
-              >
-                {FORCE_TIERS.map((t) => (
-                  <option key={t} value={t}>{t === 'auto' ? 'Auto' : t}</option>
-                ))}
-              </select>
-            </label>
-
-            <button
-              type="button"
-              title="Allow web search & fetch for this run"
-              disabled={disabled}
-              aria-pressed={webSearch}
-              onClick={() => onWebSearchChange(!webSearch)}
-              className={clsx(
-                'flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-40',
-                webSearch
-                  ? 'border-accent-500/30 bg-accent-500/10 text-accent-300'
-                  : 'border-elev/10 bg-elev/[0.04] text-ink-400 hover:text-ink-100',
-              )}
-            >
-              <Globe size={12} />
-              Web
-            </button>
-
-            {/* Absent, not disabled, where no provider is configured: the
-                capability does not exist until an operator supplies an
-                endpoint, and a switch that silently does nothing is worse
-                than no switch.
-
-                Its own control rather than a second meaning for Web, because
-                "Web off" reads as NO INTERNET and gives no hint that the agent
-                will drive a real page instead — which is why the browser was
-                reachable only by turning something else off, or by typing the
-                tool's name into the prompt. The two are mutually exclusive;
-                `useChatSession` clears one when the other is set. */}
-            {browserAvailable && (
-              <button
-                type="button"
-                title={chip.title}
-                disabled={disabled || chip.disabled}
-                aria-pressed={browserMode}
-                onClick={() => onBrowserModeChange(!browserMode)}
-                className={clsx(
-                  'flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-40',
-                  browserMode
-                    ? 'border-accent-500/30 bg-accent-500/10 text-accent-300'
-                    : 'border-elev/10 bg-elev/[0.04] text-ink-400 hover:text-ink-100',
-                )}
-              >
-                <MonitorPlay size={12} />
-                Browser
-              </button>
-            )}
+              </span>
+            ))}
           </div>
         )}
+        <span className="min-w-0 flex-1" />
+        <button
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded={menu?.key === 'mode'}
+          title="Routing and tier"
+          onClick={openMenu('mode')}
+          className="inline-flex items-center gap-1 rounded-lg px-2 py-[5px] text-[13px] text-ink-300 hover:bg-elev/[0.05] hover:text-ink-50"
+        >
+          <b className="font-medium text-ink-50">{routeLabel}</b>
+          {forceTier !== 'auto' && <span>· {forceTier}</span>}
+          <ChevronDown size={14} />
+        </button>
+        {busy ? (
+          <button type="button" aria-label="Stop" title="Stop this run" onClick={onStop} className="inline-flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[10px] bg-ink-50 text-paper">
+            <Square size={14} fill="currentColor" />
+          </button>
+        ) : (
+          <button
+            type="button"
+            aria-label="Send"
+            onClick={submit}
+            disabled={!canSend}
+            className={clsx(
+              'inline-flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[10px] transition-colors',
+              canSend ? 'bg-accent-500 text-white hover:bg-accent-600' : 'cursor-not-allowed bg-sunk text-ink-500',
+            )}
+          >
+            <ArrowUp size={16} />
+          </button>
+        )}
       </div>
+      {menu && (
+        <Menu
+          label={menu.key === 'plus' ? 'Attach and skills' : menu.key === 'tools' ? 'Tools' : 'Routing and tier'}
+          anchor={menu.anchor}
+          items={itemsFor(menu.key)}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
+  );
+}
+
+function RemoveAttachment({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-label="Remove attachment"
+      onClick={onClick}
+      className="absolute -right-[7px] -top-[7px] flex h-[19px] w-[19px] items-center justify-center rounded-full bg-card p-0 text-ink-300"
+      style={{ boxShadow: '0 0 0 1px rgb(var(--c-elev) / 0.17)' }}
+    >
+      <X size={12} />
+    </button>
   );
 }

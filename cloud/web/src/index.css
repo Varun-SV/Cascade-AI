@@ -62,6 +62,23 @@
   --c-info-800: 20 42 74;
   --c-info-950: 12 24 42;
 
+  /* Surfaces by role, from the calm-direction prototype. The neutral ramp
+     above can't name them: the sidebar sits BELOW the page in midnight and
+     above it on paper, so "side" and "sunk" swap ramp steps between themes. */
+  --c-paper: 14 17 23;
+  --c-side: 10 13 18;
+  --c-card: 22 26 34;
+  --c-sunk: 27 32 41;
+  --c-bubble: 27 32 41;
+  /* The agent-browser panel reads these (inline styles, with dark
+     fallbacks): a card, a hairline, and teal / amber for who is driving. */
+  --panel: rgb(22 26 34);
+  --border: rgba(233, 235, 240, 0.15);
+  --ok-bg: rgba(62, 223, 201, 0.10);
+  --ok-fg: #3edfc9;
+  --warn-bg: rgba(230, 178, 92, 0.12);
+  --warn-fg: #e6b25c;
+
   /* Composite tokens used by component classes below. */
   --page-bg: #0e1117;
   --glass-tint: 22 26 34;
@@ -120,6 +137,18 @@
   --c-info-500: 47 111 228;
   --c-info-800: 206 222 250;
   --c-info-950: 234 241 253;
+
+  --c-paper: 247 246 242;
+  --c-side: 239 237 231;
+  --c-card: 255 255 255;
+  --c-sunk: 234 232 225;
+  --c-bubble: 233 231 224;
+  --panel: #ffffff;
+  --border: rgba(21, 23, 28, 0.17);
+  --ok-bg: rgba(14, 138, 122, 0.08);
+  --ok-fg: #0e8a7a;
+  --warn-bg: rgba(168, 103, 26, 0.10);
+  --warn-fg: #8c5a10;
 
   --page-bg: #f7f6f2;
   --glass-tint: 255 255 255;
@@ -242,6 +271,14 @@ body {
   .cascade-answer :where(table, pre, code) { font-family: inherit; }
   .cascade-answer :where(table) { @apply font-sans text-[13.5px]; }
   .cascade-answer :where(code, pre) { @apply font-mono; }
+  .cz-tbl {
+    @apply my-[0.4em] mb-[1em] overflow-x-auto rounded-xl;
+    box-shadow: inset 0 0 0 1px rgb(var(--c-elev) / 0.1);
+  }
+  .cz-tbl table { @apply m-0 w-full border-collapse; }
+  .cz-tbl :where(th, td) { @apply border-b border-elev/10 px-3 py-2 text-left align-top; }
+  .cz-tbl tr:last-child td { @apply border-b-0; }
+  .cz-tbl th { @apply text-[12.5px] font-semibold text-ink-300; }
 
   /* The spine: a thin line of the brand ramp beside a live run, flowing slowly
      downward — the hierarchy handing work down. The one bold element. */
@@ -253,6 +290,74 @@ body {
 
   /* Receipts: costs and savings read as numbers, in mono. */
   .receipt { @apply font-mono text-[12px] tabular-nums; }
+}
+
+/* ── Calm-direction controls (docs/design/calm-direction-prototype.html) ──
+   Prefixed `cz-` so they never collide with Tailwind utilities. */
+@layer components {
+  .cz-menu {
+    @apply fixed z-[70] min-w-[240px] max-w-[min(320px,92vw)] overflow-auto rounded-[14px] bg-card p-1.5;
+    max-height: 72vh;
+    box-shadow: var(--glass-shadow-strong), inset 0 0 0 1px rgb(var(--c-elev) / 0.1);
+    animation: czRise 0.12s ease;
+  }
+  .cz-mi {
+    @apply flex w-full items-center gap-2.5 rounded-lg px-[9px] py-[7px] text-left text-[13.5px] text-ink-50 outline-none;
+  }
+  .cz-mi:hover, .cz-mi:focus-visible { @apply bg-elev/[0.05]; }
+  .cz-mi:disabled { @apply cursor-not-allowed opacity-40; }
+  .cz-switch {
+    @apply relative inline-block h-[21px] w-9 shrink-0 rounded-full bg-elev/[0.17] transition-colors;
+  }
+  .cz-switch::after {
+    content: '';
+    @apply absolute left-[2.5px] top-[2.5px] h-4 w-4 rounded-full bg-white transition-transform;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  }
+  .cz-switch[data-on='true'] { @apply bg-accent-500; }
+  .cz-switch[data-on='true']::after { transform: translateX(15px); }
+  .cz-ib {
+    @apply inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-ink-300 transition-colors;
+  }
+  .cz-ib:hover { @apply bg-elev/[0.05] text-ink-50; }
+  .cz-ib:disabled { @apply cursor-not-allowed opacity-35; }
+  .cz-ib-sm { @apply h-[26px] w-[26px]; }
+  .cz-chip {
+    @apply inline-flex h-7 items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 text-[13px] text-ink-300;
+    box-shadow: inset 0 0 0 1px rgb(var(--c-elev) / 0.17);
+  }
+  .cz-chip:hover { @apply bg-elev/[0.05] text-ink-50; }
+  .cz-chip[aria-pressed='true'] { @apply bg-accent-500/10 text-accent-500; box-shadow: none; }
+  .cz-btn {
+    @apply inline-flex h-9 items-center justify-center gap-[7px] whitespace-nowrap rounded-[10px] bg-ink-50 px-4 font-medium text-paper;
+  }
+  .cz-btn:disabled { @apply cursor-not-allowed opacity-40; }
+  .cz-btn-ghost { @apply bg-transparent text-ink-50; box-shadow: inset 0 0 0 1px rgb(var(--c-elev) / 0.17); }
+  .cz-btn-ghost:hover { @apply bg-elev/[0.05]; }
+  .cz-btn-quiet { @apply bg-transparent text-ink-300; }
+  .cz-btn-quiet:hover { @apply bg-elev/[0.05] text-ink-50; }
+  .cz-btn-danger { @apply bg-transparent text-danger-500; box-shadow: inset 0 0 0 1px rgb(var(--c-danger-500) / 0.4); }
+  .cz-btn-sm { @apply h-[30px] rounded-lg px-[11px] text-[13px]; }
+  .cz-field {
+    @apply h-[38px] w-full rounded-[10px] bg-card px-3 text-ink-50 outline-none;
+    box-shadow: inset 0 0 0 1px rgb(var(--c-elev) / 0.17);
+  }
+  .cz-field:focus { box-shadow: inset 0 0 0 1.5px rgb(var(--c-accent-500)); }
+  .cz-toast {
+    @apply fixed left-1/2 z-[80] max-w-[min(92vw,460px)] rounded-[10px] bg-ink-50 px-4 py-[9px] text-[13px] text-paper;
+    bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+    transform: translateX(-50%);
+    box-shadow: var(--glass-shadow-strong);
+    animation: czToast 0.2s ease;
+  }
+}
+
+@keyframes czRise {
+  from { opacity: 0; transform: translateY(6px); }
+}
+/* Centred with a transform, so its rise has to keep the centring. */
+@keyframes czToast {
+  from { opacity: 0; transform: translate(-50%, 6px); }
 }
 
 @keyframes cascadeSpine {

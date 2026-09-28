@@ -6,6 +6,7 @@ const FAST_MODEL_KEY = 'cascade-cloud-fast-model';
 const THEME_KEY = 'cascade-cloud-theme';
 const DENSITY_KEY = 'cascade-cloud-density';
 const UI_MODE_KEY = 'cascade-cloud-ui-mode';
+const RUN_DETAIL_KEY = 'cascade-cloud-run-detail';
 const TIER_PARAMS_KEY = 'cascade-cloud-tier-params';
 const EXT_CONTEXT_KEY = 'cascade-cloud-ext-context';
 const SHARE_LEARNING_KEY = 'cascade-cloud-share-learning';
@@ -17,8 +18,6 @@ const DEFAULT_WEB_KEY = 'cascade-cloud-default-web';
 
 export type ThemeMode = 'light' | 'dark' | 'system';
 export type Density = 'comfortable' | 'compact';
-/** Simple = minimal chat; Advanced = full console (routing controls, tier detail). */
-export type UiMode = 'simple' | 'advanced';
 export type RoutingBias = 'auto' | 'quality' | 'fast';
 
 function readString<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
@@ -110,9 +109,22 @@ export const setThemeMode = (v: ThemeMode) => writeString(THEME_KEY, v);
 export const density = (): Density => readString(DENSITY_KEY, ['comfortable', 'compact'] as const, 'comfortable');
 export const setDensity = (v: Density) => writeString(DENSITY_KEY, v);
 
-/** UI mode: minimal chat (default) vs. full console. */
-export const uiMode = (): UiMode => readString(UI_MODE_KEY, ['simple', 'advanced'] as const, 'simple');
-export const setUiMode = (v: UiMode) => writeString(UI_MODE_KEY, v);
+/**
+ * Run detail: show the plan and the agent tree while a run works. On by
+ * default. It replaces the Simple / Advanced view, whose Advanced half was the
+ * routing row — now always a menu away — so an explicit earlier choice of
+ * Simple carries over as "off", and nothing else does.
+ */
+export const runDetail = (): boolean => {
+  try {
+    const stored = localStorage.getItem(RUN_DETAIL_KEY);
+    if (stored !== null) return stored === '1';
+    return localStorage.getItem(UI_MODE_KEY) !== 'simple';
+  } catch {
+    return true;
+  }
+};
+export const setRunDetail = (v: boolean) => writeBool(RUN_DETAIL_KEY, v);
 
 /** Advanced per-tier generation knobs. Both fields optional per tier. */
 export interface TierParam { maxTokens?: number; temperature?: number }

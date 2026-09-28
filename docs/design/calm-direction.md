@@ -26,9 +26,13 @@ the web app now follows.
 | Live runs | A thin **spine** of the brand ramp flows beside the status and the agent tree — the one bold element. The tree is compact rows with tier dots. |
 | Colour fixes | Tier badges and the tier mix used hard-coded green / amber / violet; they now use the `t1/t2/t3` tokens. |
 | Landing, /docs | Serif headlines, the three-arc mark everywhere (it replaces the old three-bar mark), solid azure primary buttons. /docs follows the OS theme. |
+| Shell | The prototype's structure: a 260px sidebar (New chat, Search, Files, Skills, Recents) with an account menu that holds the usage gauges and every account action; a title menu (Rename, Files, Continue on another device, Delete); the chat's total saving at the top right, from its replies' stored /why reports. |
+| Composer | Text on top, controls below: `+` (attach, skill), tools (Web search, Browser, connectors), and the routing menu (Auto / Quality / Fast, tier, Fast answer for the next message). Whatever is switched on shows as a chip with its own ×. |
+| Run detail | Replaces Simple / Advanced view. On, a live run shows its plan line and agent tree; a finished orchestrated reply folds its tree above the answer ("1 manager · 3 workers"). |
 
-Behaviour, accessible names and routing controls are unchanged; the composer's
-Advanced controls are restyled in place rather than moved.
+Nothing the app could do before is gone: each control that moved has a new
+home in a menu, and the routing controls — which Simple view used to hide —
+are now always a menu away.
 
 ## Tokens (for other surfaces)
 

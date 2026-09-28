@@ -57,8 +57,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   everywhere else. The landing page and /docs follow the same design, with
   the three-arc mark in place of the old three-bar one. The receipt names
   the tier that answered even when a provider reports no token or cost
-  figures, and on a phone the message box has a line of its own above the
-  controls. See `docs/design/calm-direction.md`.
+  figures. The app now has the prototype's structure too: a sidebar with
+  Search, Files, Skills and an account menu (usage, settings, keys, import,
+  sign out); a menu on the chat's title to rename or delete it; the chat's
+  total saving at the top right, which no longer resets on reload; and a
+  composer whose attach, skill, tools and routing controls live in three
+  menus, with whatever is switched on shown as a removable chip. "Run detail"
+  replaces the Simple / Advanced view, and an orchestrated reply keeps its
+  agent tree, folded above the answer. See `docs/design/calm-direction.md`.
 
 ### Fixed
 - **Maths in an answer is typeset, whichever way the model wrote it.** GPT

@@ -54,25 +54,29 @@ test('dev login -> add a key -> pick a skill -> attach an image -> send -> reply
 
     await page.getByPlaceholder('Your name').fill('E2E Tester');
     await page.getByText('Dev login').click();
-    // Logged in — the consolidated Settings button (username, bottom-left) shows.
-    await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
+    // Logged in — the account button (your name, bottom-left) shows.
+    await expect(page.getByRole('button', { name: 'Account' })).toBeVisible();
 
-    // Add a provider key. API keys now live in the Settings modal.
-    await page.getByRole('button', { name: 'Settings' }).click();
-    await page.getByRole('button', { name: /API keys/ }).click();
+    // Add a provider key, from the account menu.
+    await page.getByRole('button', { name: 'Account' }).click();
+    await page.getByRole('menuitem', { name: 'API keys' }).click();
     await page.getByText('Add provider').click();
     const providerSelect = page.locator('select').filter({ has: page.locator('option[value="openai-compatible"]') });
     await providerSelect.selectOption('openai-compatible');
     await page.getByPlaceholder('https://...').fill(stub.url);
     await page.getByText('Save').click();
-    await page.getByLabel('Close').click();
+    await page.getByRole('button', { name: 'Close', exact: true }).click();
 
-    // Exercise the skill picker (the dropdown has the presets), then keep the
+    // Exercise the skill picker (the + menu has the presets), then keep the
     // default 'general' so this send is a fast single-tier run — a heavy skill
     // prompt pushes the stub into a slow multi-tier replan loop, and only the
     // presenter's output streams now (intermediate node output is hidden).
-    await page.getByLabel('Skill').selectOption('code-reviewer');
-    await page.getByLabel('Skill').selectOption('general');
+    await page.getByRole('button', { name: 'Attach and skills' }).click();
+    await page.getByRole('menuitemradio', { name: 'Code reviewer' }).click();
+    // The chosen skill shows as a chip beside the menus; its x puts General back.
+    await expect(page.getByRole('button', { name: 'Remove Code reviewer' })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Remove Code reviewer' }).click();
 
     // Attach an image; wait for the upload thumbnail before sending.
     // The composer's picker is the only multi-file input (the sidebar's
@@ -80,7 +84,7 @@ test('dev login -> add a key -> pick a skill -> attach an image -> send -> reply
     await page.locator('input[type="file"][multiple]').setInputFiles({ name: 'pixel.png', mimeType: 'image/png', buffer: TINY_PNG });
     await expect(page.locator('img[alt="pending"]')).toBeVisible();
 
-    await page.getByPlaceholder('Message Cascade…').fill('review this');
+    await page.getByLabel('Message Cascade').fill('review this');
     await page.getByLabel('Send').click();
 
     await expect(page.locator('[data-role="assistant"]').last()).toContainText('e2e stub model', { timeout: 20_000 });
@@ -92,32 +96,29 @@ test('dev login -> add a key -> pick a skill -> attach an image -> send -> reply
     // (the e2e DB is reused across runs) and scope to the list row span so the
     // draft textarea's value doesn't collide with the assertion.
     const memory = `e2e memory ${Date.now()}`;
-    // Memory now lives behind the consolidated Settings modal (username, bottom-left).
-    await page.getByRole('button', { name: 'Settings' }).click();
-    await page.getByRole('button', { name: /^Memory/ }).click();
+    // Memory is in the account menu.
+    await page.getByRole('button', { name: 'Account' }).click();
+    await page.getByRole('menuitem', { name: 'Memory' }).click();
     await page.getByPlaceholder(/I prefer TypeScript/).fill(memory);
     await page.getByRole('button', { name: /^Add/ }).click();
     await expect(page.locator('span.whitespace-pre-wrap', { hasText: memory })).toBeVisible();
-    await page.getByLabel('Close').click();
+    await page.getByRole('button', { name: 'Close', exact: true }).click();
 
-    // The composer starts in Simple view (minimal) — the routing controls are
-    // hidden until the user opts into Advanced. Switch to Advanced in Settings,
-    // then confirm they render: Auto mode selected by default, Web toggle OFF
-    // (hosted chat is pure conversation unless the user opts in).
-    await page.getByRole('button', { name: 'Settings' }).click();
-    // Settings is now tabbed — the View control lives under the Appearance tab.
-    await page.getByRole('button', { name: 'Appearance' }).click();
-    await page.getByRole('group', { name: 'View mode' }).getByRole('button', { name: 'Advanced' }).click();
-    await page.getByLabel('Close').click();
-    const routing = page.getByRole('group', { name: 'Routing mode' });
-    await expect(routing.getByRole('button', { name: 'Auto', pressed: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Web', pressed: false })).toBeVisible();
+    // Routing sits behind the composer's mode menu: Auto is selected by
+    // default, and the Tools menu has Web search OFF (hosted chat is pure
+    // conversation unless the user opts in).
+    await page.getByRole('button', { name: /^Auto/ }).click();
+    await expect(page.getByRole('menuitemradio', { name: /^Auto/ })).toHaveAttribute('aria-checked', 'true');
+    await expect(page.getByRole('menuitemradio', { name: 'Let Cascade decide' })).toHaveAttribute('aria-checked', 'true');
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Tools' }).click();
+    await expect(page.getByRole('menuitemcheckbox', { name: /Web search/ })).toHaveAttribute('aria-checked', 'false');
+    await page.keyboard.press('Escape');
 
     // Custom skill CRUD: create one, confirm it lists with a usage badge, and
     // that it then appears in the composer's skill picker.
     const skillName = `E2E Skill ${Date.now()}`;
-    await page.getByRole('button', { name: 'Settings' }).click();
-    await page.getByRole('button', { name: /^Skills/ }).click();
+    await page.getByRole('button', { name: 'Skills', exact: true }).click();
     await page.getByRole('button', { name: /New skill/ }).click();
     await page.getByPlaceholder(/Name \(e\.g\. SQL Tutor\)/).fill(skillName);
     await page.getByPlaceholder(/Instructions/).fill('You are an e2e test persona.');
@@ -126,8 +127,9 @@ test('dev login -> add a key -> pick a skill -> attach an image -> send -> reply
     // other custom skills, so assert at least one such badge is present rather
     // than a unique match).
     await expect(page.getByText(/used 0×/).first()).toBeVisible();
-    await page.getByLabel('Close').click();
-    await expect(page.getByLabel('Skill').locator('option', { hasText: skillName })).toHaveCount(1);
+    await page.getByRole('button', { name: 'Close', exact: true }).click();
+    await page.getByRole('button', { name: 'Attach and skills' }).click();
+    await expect(page.getByRole('menuitemradio', { name: skillName })).toHaveCount(1);
   } finally {
     await stub.close();
   }

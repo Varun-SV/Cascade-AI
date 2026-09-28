@@ -782,6 +782,44 @@ export interface WhyReport {
   tokensByTier: Record<string, number>;
   /** tier → model that served it (from tier:status). */
   models: Record<string, string>;
+  /** The agents that worked the run, each as it last reported — the tree the
+   *  live run showed, kept so a finished reply can fold it open. */
+  trace?: TraceNode[];
+}
+
+export interface TraceNode {
+  id: string;
+  role: string;
+  label?: string;
+  model?: string;
+  status: string;
+}
+
+// A run's tree is stored in every reply's /why report, so it is kept small: a
+// large fan-out keeps its first agents, and a long label is cut.
+export const MAX_TRACE_NODES = 60;
+const MAX_TRACE_LABEL = 140;
+
+/**
+ * Fold one tier:status event into the run's trace, latest state per agent.
+ * Agents past the cap are dropped rather than replacing earlier ones, so the
+ * trace stays the start of the tree rather than a random sample of it.
+ */
+export function traceStatus(trace: Map<string, TraceNode>, e: unknown): void {
+  const ev = (e ?? {}) as Record<string, unknown>;
+  const str = (k: string) => (typeof ev[k] === 'string' && (ev[k] as string).trim() ? (ev[k] as string).trim() : undefined);
+  const id = str('tierId') ?? str('id');
+  if (!id) return;
+  const prev = trace.get(id);
+  if (!prev && trace.size >= MAX_TRACE_NODES) return;
+  const label = str('label') ?? prev?.label;
+  trace.set(id, {
+    id,
+    role: (str('role') ?? prev?.role ?? '').toUpperCase(),
+    ...(label ? { label: label.slice(0, MAX_TRACE_LABEL) } : {}),
+    ...((str('model') ?? prev?.model) ? { model: str('model') ?? prev?.model } : {}),
+    status: str('status') ?? prev?.status ?? 'ACTIVE',
+  });
 }
 
 export interface ChatRunResult {
@@ -1960,6 +1998,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // tier:status event (base.ts setServingModel), and there's no post-run
   // getter for a tier→model map, so we build it from the stream.
   const tierModels: Record<string, string> = {};
+  const trace = new Map<string, TraceNode>();
 
   const onToken = (e: { text: string; tierId: string; primary?: boolean }) => {
     socket.emit('stream:token', { conversationId: conversation.id, ...e });
@@ -1967,6 +2006,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   const onStatus = (e: unknown) => {
     const ev = e as { role?: string; model?: string };
     if (ev.role && ev.model) tierModels[ev.role] = ev.model;
+    traceStatus(trace, e);
     socket.emit('tier:status', { conversationId: conversation.id, ...(e as object) });
   };
   const onPlan = (e: unknown) => {
@@ -2222,6 +2262,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
       costByTier,
       tokensByTier,
       models: tierModels,
+      ...(trace.size > 0 ? { trace: [...trace.values()] } : {}),
     };
 
     const assistantMessage = store.addMessage({
