@@ -801,10 +801,15 @@ export interface ChatRunResult {
 // the most tokens, falling back to the most cost. Undefined for runs that never
 // surfaced tier data (e.g. the conversational fast-path) — the UI then shows no
 // badge rather than a fabricated one.
-export function primaryTierOf(tokensByTier: Record<string, number>, costByTier: Record<string, number>): string | null {
+export function primaryTierOf(
+  tokensByTier: Record<string, number>, costByTier: Record<string, number>, servedBy: Record<string, string> = {},
+): string | null {
   const rank = (m: Record<string, number>) =>
     Object.entries(m).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1])[0]?.[0];
-  return rank(tokensByTier) ?? rank(costByTier) ?? null;
+  // A provider that reports no usage leaves both empty; when one tier served
+  // the whole run, it is the answering one all the same.
+  const served = Object.keys(servedBy);
+  return rank(tokensByTier) ?? rank(costByTier) ?? (served.length === 1 ? served[0]! : null);
 }
 
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
@@ -2203,7 +2208,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     const savings = cascade.getRouter().getDelegationSavings();
     const costByTier = result.costByTier ?? stats.costByTier ?? {};
     const tokensByTier = result.tokensByTier ?? stats.tokensByTier ?? {};
-    const tier = primaryTierOf(tokensByTier, costByTier);
+    const tier = primaryTierOf(tokensByTier, costByTier, tierModels);
     const model = (tier && tierModels[tier]) || null;
     const why: WhyReport = {
       tier,

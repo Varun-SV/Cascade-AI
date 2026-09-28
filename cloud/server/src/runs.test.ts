@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { ToolRegistry, CascadeConfigSchema, Retriever, embedderFromProviders } from '#cascade-ai';
 import type { Chunk, ProviderConfig, ScoredChunk } from '#cascade-ai';
-import { allowances, answersThisRun, browserAllowanceFor, buildCloudConfig, buildMediaSink, parseChatRunPayload, resolveDocuments, runChatTurn, sanitiseClarificationAnswers, sanitiseEscalationNote, tenantScratchDir } from './runs.js';
+import { allowances, answersThisRun, browserAllowanceFor, buildCloudConfig, buildMediaSink, parseChatRunPayload, primaryTierOf, resolveDocuments, runChatTurn, sanitiseClarificationAnswers, sanitiseEscalationNote, tenantScratchDir } from './runs.js';
 import { CloudStore } from './db.js';
 import { limitsForPlan, PENDING_MEDIA_TTL_MS } from './entitlements.js';
 import type { CloudEnv } from './env.js';
@@ -1314,5 +1314,17 @@ describe('browserAllowanceFor — a run\u2019s claim on its owner\u2019s browser
     const allowance = browserAllowanceFor(store, user.id);
     for (let i = 0; i < 5; i++) expect(allowance.take()).toHaveProperty('giveBack');
     expect(allowance.take()).toEqual({ refusal: expect.stringContaining('browser sessions') });
+  });
+});
+
+// A provider that reports no usage left both tallies empty, so no tier was
+// named — and the receipt fell back to "Cascade" for a one-tier run.
+describe('primaryTierOf', () => {
+  it('ranks by tokens, then cost, then names the one tier that served the run', () => {
+    expect(primaryTierOf({ T1: 10, T3: 90 }, {})).toBe('T3');
+    expect(primaryTierOf({}, { T1: 0.02, T2: 0.01 })).toBe('T1');
+    expect(primaryTierOf({}, {}, { T3: 'openai-compatible:stub-model' })).toBe('T3');
+    // Several tiers and nothing to rank them by: none is named.
+    expect(primaryTierOf({}, {}, { T1: 'a', T3: 'b' })).toBeNull();
   });
 });

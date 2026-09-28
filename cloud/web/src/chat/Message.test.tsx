@@ -199,6 +199,15 @@ describe('Message — receipt', () => {
     expect(screen.queryByText('T1')).not.toBeInTheDocument();
   });
 
+  // A provider that reports no usage left the report with no tier, and the
+  // receipt read "Cascade" though /why named the one tier and model.
+  it('names the one tier that served the run when the report has no usage to rank by', () => {
+    const noUsage = { ...why, tier: null, model: null, models: { T3: 'openai-compatible:stub-model' } };
+    render(<Message message={base({ role: 'assistant', content: 'done', why: noUsage })} />);
+    expect(screen.getByText('T3')).toBeInTheDocument();
+    expect(screen.getByText(/stub-model/)).toBeInTheDocument();
+  });
+
   it('prefers the reply’s own tier and model when it has them', () => {
     render(<Message message={base({ role: 'assistant', content: 'done', tier: 'T2', model: 'openai:gpt-mid', why })} />);
     expect(screen.getByText('T2')).toBeInTheDocument();

@@ -260,7 +260,10 @@ function Receipt({ message, open, onToggle }: { message: ChatMessage; open: bool
   // names the tier that did the most work (`why.tier`/`why.model`), so fall
   // back to that; only if it's missing, look the model up by tier.
   const whyModels = message.why?.models ?? {};
-  const tier = message.tier ?? message.why?.tier ?? undefined;
+  // With no token or cost figures (a provider that reports no usage) the
+  // report names no tier; when one tier served the whole run, it is that one.
+  const served = Object.keys(whyModels);
+  const tier = message.tier ?? message.why?.tier ?? (served.length === 1 ? served[0] : undefined);
   const rawModel = message.model ?? message.why?.model ?? (tier ? whyModels[tier] : undefined);
   // "openai-compatible:stub-model" → "stub-model": the provider is noise here.
   const model = rawModel ? rawModel.slice(rawModel.indexOf(':') + 1) : undefined;

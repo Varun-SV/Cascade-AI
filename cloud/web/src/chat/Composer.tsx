@@ -216,7 +216,9 @@ export default function Composer({
           <div className="px-3 pt-2 text-[11px] text-danger-300">{uploadError}</div>
         )}
 
-        <div className="flex items-end gap-2 p-2">
+        {/* On a phone the text box takes its own full-width line above the
+            controls, so neither the placeholder nor the draft is squeezed. */}
+        <div className="flex items-end gap-2 p-2 max-sm:flex-wrap">
           <input
             ref={fileRef}
             type="file"
@@ -243,7 +245,7 @@ export default function Composer({
             value={skillId}
             onChange={(e) => onSkillChange(e.target.value)}
             disabled={disabled}
-            className="max-w-[9rem] shrink-0 truncate rounded-lg border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-xs text-ink-200 outline-none disabled:opacity-40"
+            className="max-w-[9rem] shrink-0 truncate rounded-lg border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-xs text-ink-200 outline-none disabled:opacity-40 max-sm:mr-auto"
           >
             {skills.map((s) => (
               <option key={s.id} value={s.id}>{s.name}</option>
@@ -251,7 +253,7 @@ export default function Composer({
           </select>
 
           <textarea
-            className="max-h-48 min-h-[36px] flex-1 resize-none bg-transparent px-1 py-2 text-[15px] leading-relaxed text-ink-50 outline-none placeholder:text-ink-500"
+            className="max-h-48 min-h-[36px] min-w-0 flex-1 resize-none bg-transparent px-1 py-2 text-[15px] leading-relaxed text-ink-50 outline-none placeholder:text-ink-500 max-sm:order-first max-sm:basis-full"
             placeholder={hasProviders ? 'Message Cascade…' : 'Add a provider key to start chatting'}
             value={input}
             onChange={(e) => setInput(e.target.value)}
