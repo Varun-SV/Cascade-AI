@@ -229,7 +229,7 @@ export default function App() {
 
   return (
     <MotionConfig reducedMotion={reduceMotion ? 'always' : 'user'}>
-    <div className="relative flex h-dvh gap-0 overflow-hidden md:gap-3 md:p-3">
+    <div className="relative flex h-dvh gap-0 overflow-hidden">
       {retiredNotice && (
         <div
           role="status"
@@ -246,14 +246,14 @@ export default function App() {
         </div>
       )}
 
-      {/* Desktop: collapsible floating glass panel */}
+      {/* Desktop: collapsible sidebar, flush with the page */}
       <div
         className={clsx(
           'hidden shrink-0 overflow-hidden transition-[width,opacity] duration-300 ease-out md:block',
           sidebarOpen ? 'w-72 opacity-100' : 'w-0 opacity-0',
         )}
       >
-        <div className="glass h-full w-72 overflow-hidden rounded-2xl">{sidebar}</div>
+        <div className="h-full w-72 overflow-hidden border-r border-elev/10 bg-ink-800">{sidebar}</div>
       </div>
 
       {/* Mobile: spring-in glass drawer */}
@@ -283,7 +283,7 @@ export default function App() {
       </AnimatePresence>
 
       {/* Main chat panel */}
-      <div className="glass flex min-w-0 flex-1 flex-col overflow-hidden md:rounded-2xl">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <ChatTopBar
           title={activeTitle}
           sidebarOpen={sidebarOpen}

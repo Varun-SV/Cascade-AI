@@ -167,8 +167,8 @@ export default function Composer({
     <div className="px-4 py-3 sm:px-6">
       <div
         className={clsx(
-          'mx-auto max-w-3xl rounded-2xl border bg-elev/[0.04] backdrop-blur-xl transition-colors',
-          dragOver ? 'border-accent-500 ring-2 ring-accent-500/40' : 'border-elev/10',
+          'mx-auto max-w-3xl rounded-[20px] border bg-ink-900 shadow-[var(--glass-shadow)] transition-colors focus-within:border-accent-500/50',
+          dragOver ? 'border-accent-500 ring-2 ring-accent-500/40' : 'border-elev/15',
         )}
         onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
@@ -191,7 +191,7 @@ export default function Composer({
                     type="button"
                     aria-label="Remove attachment"
                     onClick={() => removePending(p.id)}
-                    className="absolute -right-1.5 -top-1.5 rounded-full border border-elev/10 bg-ink-800 p-0.5 text-ink-200 backdrop-blur hover:text-ink-50"
+                    className="absolute -right-1.5 -top-1.5 rounded-full border border-elev/10 bg-ink-900 p-0.5 text-ink-200 hover:text-ink-50"
                   >
                     <X size={12} />
                   </button>
@@ -203,7 +203,7 @@ export default function Composer({
                     type="button"
                     aria-label="Remove attachment"
                     onClick={() => removePending(p.id)}
-                    className="absolute -right-1.5 -top-1.5 rounded-full border border-elev/10 bg-ink-800 p-0.5 text-ink-200 backdrop-blur hover:text-ink-50"
+                    className="absolute -right-1.5 -top-1.5 rounded-full border border-elev/10 bg-ink-900 p-0.5 text-ink-200 hover:text-ink-50"
                   >
                     <X size={12} />
                   </button>
@@ -243,7 +243,7 @@ export default function Composer({
             value={skillId}
             onChange={(e) => onSkillChange(e.target.value)}
             disabled={disabled}
-            className="max-w-[9rem] shrink-0 truncate rounded-lg border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-xs text-ink-200 outline-none backdrop-blur disabled:opacity-40"
+            className="max-w-[9rem] shrink-0 truncate rounded-lg border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-xs text-ink-200 outline-none disabled:opacity-40"
           >
             {skills.map((s) => (
               <option key={s.id} value={s.id}>{s.name}</option>
@@ -251,7 +251,7 @@ export default function Composer({
           </select>
 
           <textarea
-            className="max-h-40 min-h-[32px] flex-1 resize-none bg-transparent px-1 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-400"
+            className="max-h-48 min-h-[36px] flex-1 resize-none bg-transparent px-1 py-2 text-[15px] leading-relaxed text-ink-50 outline-none placeholder:text-ink-500"
             placeholder={hasProviders ? 'Message Cascade…' : 'Add a provider key to start chatting'}
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -274,7 +274,7 @@ export default function Composer({
                 'flex h-8 w-8 shrink-0 items-center justify-center rounded-full border transition-colors',
                 disabled || uploading || !input.trim()
                   ? 'cursor-not-allowed border-elev/10 text-ink-500'
-                  : 'border-warning-500/40 bg-warning-500/10 text-warning-300 hover:bg-warning-500/20',
+                  : 'border-transparent text-ink-400 hover:bg-elev/[0.06] hover:text-warning-300',
               )}
             >
               <Zap size={15} />
@@ -288,7 +288,7 @@ export default function Composer({
               title="Stop this run"
               whileHover={{ scale: 1.06 }}
               whileTap={{ scale: 0.92 }}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-danger-500/90 text-white shadow-lg shadow-danger-700/30"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-ink-50 text-ink-900"
             >
               <Square size={13} fill="currentColor" />
             </motion.button>
@@ -301,10 +301,10 @@ export default function Composer({
               whileHover={{ scale: 1.06 }}
               whileTap={{ scale: 0.92 }}
               className={clsx(
-                'flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-shadow',
+                'flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] transition-colors',
                 disabled || uploading || !input.trim()
-                  ? 'cursor-not-allowed bg-ink-700 text-ink-400'
-                  : 'accent-grad text-white shadow-lg shadow-accent-700/30',
+                  ? 'cursor-not-allowed bg-elev/[0.07] text-ink-500'
+                  : 'bg-accent-500 text-white hover:bg-accent-600',
               )}
             >
               <Send size={15} />
@@ -315,8 +315,8 @@ export default function Composer({
         {/* Routing controls: bias Cascade Auto, pin a tier, toggle web tools.
             Advanced view only — Simple keeps the composer minimal. */}
         {uiMode === 'advanced' && (
-          <div className="flex flex-wrap items-center gap-1.5 border-t border-elev/5 px-2.5 py-1.5">
-            <div className="flex items-center gap-0.5 rounded-lg bg-elev/[0.04] p-0.5" role="group" aria-label="Routing mode">
+          <div className="flex flex-wrap items-center gap-1.5 px-2.5 pb-2">
+            <div className="flex items-center gap-0.5 rounded-lg bg-elev/[0.05] p-0.5" role="group" aria-label="Routing mode">
               {ROUTING_MODES.map((m) => (
                 <button
                   key={m.value}
@@ -328,8 +328,8 @@ export default function Composer({
                   className={clsx(
                     'rounded-md px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-40',
                     routingMode === m.value
-                      ? 'accent-grad text-white shadow-sm'
-                      : 'text-ink-400 hover:bg-elev/10 hover:text-ink-100',
+                      ? 'bg-ink-900 text-ink-50 shadow-sm ring-1 ring-elev/10'
+                      : 'text-ink-400 hover:text-ink-100',
                   )}
                 >
                   {m.label}
@@ -344,7 +344,7 @@ export default function Composer({
                 value={forceTier}
                 onChange={(e) => onForceTierChange(e.target.value as ForceTier)}
                 disabled={disabled}
-                className="rounded-lg border border-elev/10 bg-elev/[0.04] px-1.5 py-1 text-[11px] text-ink-200 outline-none backdrop-blur disabled:opacity-40"
+                className="rounded-lg border border-elev/10 bg-elev/[0.04] px-1.5 py-1 text-[11px] text-ink-200 outline-none disabled:opacity-40"
               >
                 {FORCE_TIERS.map((t) => (
                   <option key={t} value={t}>{t === 'auto' ? 'Auto' : t}</option>
@@ -401,9 +401,6 @@ export default function Composer({
           </div>
         )}
       </div>
-      <p className="mx-auto mt-1.5 max-w-3xl px-1 text-[11px] text-ink-400">
-        Attach images &amp; documents (PDF, Word, text) · ask for a report and download it as PDF, Word, Excel or PowerPoint.
-      </p>
     </div>
   );
 }

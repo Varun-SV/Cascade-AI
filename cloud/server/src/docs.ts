@@ -138,60 +138,56 @@ export function renderDocsPage(): string {
 <title>Cascade — Documentation</title>
 <meta name="description" content="Documentation for Cascade, the multi-tier AI orchestrator: providers & keys, tier routing, file exports, and privacy." />
 <style>
+  /* Cascade "Calm": warm paper in light, midnight in dark. The tier ramp
+     (azure → sky → teal) is the only accent, used for the mark and the spine. */
   :root{
-    --bg:#0b0c10;--panel:#111318;--ink:#e7e9ee;--muted:#9aa0ab;--line:#23262e;
+    --bg:#f7f6f2;--panel:#efede7;--ink:#15171c;--muted:#555a63;--line:rgba(21,23,28,.12);
+    --code:#eae8e1;--link:#2f6fe4;--btn:#15171c;--btn-ink:#f7f6f2;
     --azure:#4C8DFF;--sky:#38B0DE;--teal:#2DD4BF;
   }
+  @media(prefers-color-scheme:dark){:root{
+    --bg:#0e1117;--panel:#161a22;--ink:#e9ebf0;--muted:#a2a8b4;--line:rgba(233,235,240,.1);
+    --code:#1b2029;--link:#6fa3ff;--btn:#e9ebf0;--btn-ink:#0e1117;color-scheme:dark}}
   *{box-sizing:border-box}
   html{scroll-behavior:smooth}
   body{margin:0;background:var(--bg);color:var(--ink);
-    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    font:16px/1.65 "Geist",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     -webkit-font-smoothing:antialiased}
-  a{color:var(--sky);text-decoration:none}
+  h1,h2{font-family:"Source Serif 4",Georgia,"Times New Roman",serif;font-weight:500}
+  a{color:var(--link);text-decoration:none}
   a:hover{text-decoration:underline}
-  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em;
-    background:#1a1d24;border:1px solid var(--line);border-radius:5px;padding:.08em .35em}
+  code{font-family:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.86em;
+    background:var(--code);border-radius:5px;padding:.1em .38em}
   .t1{color:var(--azure)} .t2{color:var(--sky)} .t3{color:var(--teal)}
-  header{border-bottom:1px solid var(--line);position:sticky;top:0;background:rgba(11,12,16,.85);
-    backdrop-filter:blur(10px);z-index:10}
-  .bar{max-width:1080px;margin:0 auto;display:flex;align-items:center;gap:12px;padding:14px 24px}
-  .mark{display:flex;gap:3px;align-items:flex-end;height:22px}
-  .mark span{width:6px;border-radius:2px}
-  .mark span:nth-child(1){height:10px;background:var(--azure)}
-  .mark span:nth-child(2){height:16px;background:var(--sky)}
-  .mark span:nth-child(3){height:22px;background:var(--teal)}
-  .brand{font-weight:700;letter-spacing:-.01em}
-  .brand em{font-style:normal;background:linear-gradient(90deg,var(--azure),var(--sky),var(--teal));
-    -webkit-background-clip:text;background-clip:text;color:transparent}
-  .cta{margin-left:auto;font-size:.9rem;font-weight:600;color:#fff;
-    background:linear-gradient(90deg,var(--azure),var(--teal));padding:8px 14px;border-radius:9px}
-  .cta:hover{text-decoration:none;filter:brightness(1.07)}
-  .hero{max-width:1080px;margin:0 auto;padding:52px 24px 8px}
-  .hero h1{font-size:2.2rem;margin:0 0 8px;letter-spacing:-.02em}
-  .hero p{color:var(--muted);max-width:60ch;margin:0}
+  header{border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:10}
+  .bar{max-width:1080px;margin:0 auto;display:flex;align-items:center;gap:10px;padding:14px 24px}
+  .mark{display:block;width:22px;height:22px}
+  .mark path{fill:none;stroke-width:2.1;stroke-linecap:round}
+  .brand{font-family:"Source Serif 4",Georgia,serif;font-size:1.25rem;font-weight:500;letter-spacing:-.01em}
+  .brand span{color:var(--muted);font-family:inherit;font-size:.95rem;margin-left:6px}
+  .cta{margin-left:auto;font-size:.9rem;font-weight:500;color:var(--btn-ink);
+    background:var(--btn);padding:8px 14px;border-radius:10px}
+  .cta:hover{text-decoration:none;opacity:.9}
+  .hero{max-width:1080px;margin:0 auto;padding:56px 24px 8px}
+  .hero h1{font-size:2.6rem;line-height:1.1;margin:0 0 10px;letter-spacing:-.025em}
+  .hero p{color:var(--muted);max-width:56ch;margin:0;font-size:1.05rem}
   .wrap{max-width:1080px;margin:0 auto;display:grid;grid-template-columns:220px 1fr;gap:40px;padding:28px 24px 80px}
   nav{position:sticky;top:74px;align-self:start;display:flex;flex-direction:column;gap:2px;font-size:.92rem}
-  nav a{color:var(--muted);padding:6px 10px;border-radius:7px;border-left:2px solid transparent}
-  nav a:hover{color:var(--ink);background:var(--panel);text-decoration:none;border-left-color:currentColor}
-  /* Nav entries pick up the tier ramp, so the docs read in the same colour
-     language as the landing page's spine. */
-  nav a:nth-child(3n+1){border-left-color:rgba(76,141,255,.35)}
-  nav a:nth-child(3n+2){border-left-color:rgba(56,176,222,.35)}
-  nav a:nth-child(3n+3){border-left-color:rgba(45,212,191,.35)}
+  nav a{color:var(--muted);padding:6px 10px;border-radius:8px}
+  nav a:hover{color:var(--ink);background:var(--panel);text-decoration:none}
 
-  /* The spine. Same device as the landing page: one line running down the
-     content with a tier-coloured node per section, so both public surfaces
-     descend the same way instead of looking like two different sites. */
-  main{min-width:0;position:relative;padding-left:26px}
-  main::before{content:"";position:absolute;left:0;top:6px;bottom:0;width:1px;
-    background:linear-gradient(to bottom,var(--azure),var(--sky),var(--teal));opacity:.5}
-  section{padding:8px 0 26px;border-bottom:1px solid var(--line);position:relative}
-  section::before{content:"";position:absolute;left:-30px;top:16px;width:9px;height:9px;
+  /* The spine. Same device as the app's live run and the landing page: one
+     line of the tier ramp running down the content with a tier-coloured node
+     per section, so every public surface descends the same way. */
+  main{min-width:0;position:relative;padding-left:26px;max-width:68ch}
+  main::before{content:"";position:absolute;left:0;top:6px;bottom:0;width:2px;border-radius:2px;
+    background:linear-gradient(to bottom,var(--azure),var(--sky),var(--teal))}
+  section{padding:8px 0 28px;position:relative}
+  section::before{content:"";position:absolute;left:-30px;top:18px;width:10px;height:10px;
     border-radius:50%;background:var(--sky);box-shadow:0 0 0 3px var(--bg)}
   section:nth-child(3n+1)::before{background:var(--azure)}
   section:nth-child(3n+3)::before{background:var(--teal)}
-  section:last-child{border-bottom:0}
-  section h2{font-size:1.4rem;margin:0 0 10px;letter-spacing:-.01em}
+  section h2{font-size:1.6rem;margin:0 0 10px;letter-spacing:-.015em}
   section p{margin:0 0 12px} ul,ol{margin:0 0 12px;padding-left:22px} li{margin:4px 0}
   footer{border-top:1px solid var(--line);color:var(--muted);font-size:.86rem;text-align:center;padding:26px 24px}
 
@@ -199,7 +195,7 @@ export function renderDocsPage(): string {
     .wrap{grid-template-columns:1fr;gap:8px;padding:20px 18px 60px}
     nav{position:static;flex-flow:row wrap}
     .hero{padding:36px 18px 4px}
-    .hero h1{font-size:1.7rem}
+    .hero h1{font-size:2rem}
     .bar{padding:12px 18px}
     /* The full spine costs horizontal room a phone doesn't have; the section
        nodes carry the same idea in less of it. */
@@ -212,9 +208,9 @@ export function renderDocsPage(): string {
 <body>
 <header>
   <div class="bar">
-    <span class="mark"><span></span><span></span><span></span></span>
-    <span class="brand"><em>Cascade</em> Docs</span>
-    <a class="cta" href="/">Launch app →</a>
+    <svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5 Q12 14.5 20.5 7.5" stroke="#4C8DFF"/><path d="M6.25 12.5 Q12 17.75 17.75 12.5" stroke="#38B0DE"/><path d="M9 17.5 Q12 20.5 15 17.5" stroke="#2DD4BF"/></svg>
+    <span class="brand">Cascade<span>Docs</span></span>
+    <a class="cta" href="/">Open the app</a>
   </div>
 </header>
 <div class="hero">

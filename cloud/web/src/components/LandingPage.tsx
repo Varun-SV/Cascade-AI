@@ -7,6 +7,7 @@ import {
 import type { CloudConfig } from '../lib/api.js';
 import { devLogin } from '../lib/api.js';
 import { AZURE, SKY, TEAL, TIERS } from '../lib/brand.js';
+import CascadeMark from './CascadeMark.js';
 import CascadeSpine from './CascadeSpine.js';
 import RunDiagram from './RunDiagram.js';
 import DownloadSection from './DownloadSection.js';
@@ -21,16 +22,10 @@ const REPO = 'https://github.com/Varun-SV/Cascade-AI';
 /** Sections the spine tracks, top to bottom. */
 const SPINE_SECTIONS = ['tiers', 'visible', 'surfaces', 'download', 'features'] as const;
 
-/** The three-bar cascade mark (azure → sky → teal), matching the /docs page. */
+/** The Cascade mark — three falling arcs, the same object as the app's logo
+ *  and loading indicator (components/CascadeMark), and the /docs header. */
 function Mark({ size = 22 }: { size?: number }) {
-  const unit = size / 22;
-  return (
-    <span className="inline-flex items-end gap-[3px]" style={{ height: size }} aria-hidden>
-      <span style={{ width: 6 * unit, height: 10 * unit, borderRadius: 2, background: AZURE }} />
-      <span style={{ width: 6 * unit, height: 16 * unit, borderRadius: 2, background: SKY }} />
-      <span style={{ width: 6 * unit, height: 22 * unit, borderRadius: 2, background: TEAL }} />
-    </span>
-  );
+  return <CascadeMark size={size} animate={false} />;
 }
 
 /**
@@ -128,7 +123,7 @@ export default function LandingPage({ config, onDevLogin }: Props) {
   const signInButtons = (
     <div className="flex flex-col gap-2.5 sm:flex-row sm:justify-center">
       {config.githubEnabled && (
-        <a href="/auth/github" className="accent-grad flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-accent-700/25 transition hover:brightness-110">
+        <a href="/auth/github" className="bg-accent-500 hover:bg-accent-600 flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold text-white transition">
           <Github size={17} /> Continue with GitHub
         </a>
       )}
@@ -157,44 +152,38 @@ export default function LandingPage({ config, onDevLogin }: Props) {
   return (
     <div className="h-dvh overflow-y-auto text-ink-100">
       {/* Top bar */}
-      <header className="sticky top-0 z-20 border-b border-elev/10 bg-ink-900/60 backdrop-blur-md">
+      <header className="sticky top-0 z-20 border-b border-elev/10 bg-[var(--page-bg)]">
         <div className="mx-auto flex max-w-6xl items-center gap-3 px-5 py-3.5">
           <Mark />
-          <span className="font-semibold tracking-tight">
-            <span className="bg-gradient-to-r from-[#4C8DFF] via-[#38B0DE] to-[#2DD4BF] bg-clip-text text-transparent">Cascade</span>
-          </span>
+          <span className="font-serif text-[21px] font-medium tracking-[-0.01em] text-ink-50">Cascade</span>
           <nav className="ml-auto flex items-center gap-1 text-sm">
             <a href="#download" className="rounded-lg px-3 py-1.5 text-ink-300 hover:bg-elev/[0.06] hover:text-ink-100">Download</a>
             <a href="/docs" className="rounded-lg px-3 py-1.5 text-ink-300 hover:bg-elev/[0.06] hover:text-ink-100">Docs</a>
             <a href={REPO} target="_blank" rel="noreferrer" className="hidden rounded-lg px-3 py-1.5 text-ink-300 hover:bg-elev/[0.06] hover:text-ink-100 sm:block">GitHub</a>
-            <a href="#start" className="accent-grad ml-1 rounded-lg px-3.5 py-1.5 font-semibold text-white shadow shadow-accent-700/20 hover:brightness-110">Sign in</a>
+            <a href="#start" className="bg-accent-500 hover:bg-accent-600 ml-1 rounded-lg px-3.5 py-1.5 font-semibold text-white">Sign in</a>
           </nav>
         </div>
       </header>
 
       {/* Hero */}
       <section className="relative overflow-hidden">
-        <div className="pointer-events-none absolute inset-x-0 -top-32 mx-auto h-72 max-w-3xl rounded-full opacity-25 blur-3xl"
-          style={{ background: `radial-gradient(closest-side, ${SKY}, transparent)` }} />
         <div className="mx-auto max-w-5xl px-5 pb-10 pt-16 sm:pt-24">
           <div className="grid items-center gap-10 lg:grid-cols-[1.05fr_1fr]">
             <div className="text-center lg:text-left">
               <motion.h1
                 initial={reduced ? undefined : { opacity: 0, y: 20 }} animate={reduced ? undefined : { opacity: 1, y: 0 }}
                 transition={{ duration: 0.55 }}
-                className="text-4xl font-bold leading-[1.05] tracking-tight sm:text-6xl"
+                className="font-serif text-[clamp(2.6rem,6vw,4.5rem)] font-normal leading-[1.02] tracking-[-0.03em] text-ink-50"
               >
-                Agents that<br />
-                <span className="bg-gradient-to-r from-[#4C8DFF] via-[#38B0DE] to-[#2DD4BF] bg-clip-text text-transparent">cascade</span>
-                <span className="text-ink-500">.</span>
+                One prompt.<br />
+                A whole organization.
               </motion.h1>
               <motion.p
                 initial={reduced ? undefined : { opacity: 0, y: 20 }} animate={reduced ? undefined : { opacity: 1, y: 0 }}
                 transition={{ duration: 0.55, delay: 0.08 }}
                 className="mx-auto mt-5 max-w-xl text-[15px] leading-relaxed text-ink-300 sm:text-lg lg:mx-0"
               >
-                One prompt becomes a hierarchy of agents that plan, delegate and execute in parallel —
-                each step routed to the cheapest model that is genuinely good at it.
+                Cascade plans the work, hands each part to the right model, and shows you what that saved.
               </motion.p>
 
               <motion.div
@@ -233,7 +222,7 @@ export default function LandingPage({ config, onDevLogin }: Props) {
         {/* Tiers — each steps further right, so the section descends as it reads. */}
         <section id="tiers" className="scroll-mt-24 py-16">
           <motion.div {...reveal} className="mb-10 max-w-2xl">
-            <h2 className="text-2xl font-bold tracking-tight sm:text-3xl">One prompt, three tiers</h2>
+            <h2 className="font-serif text-[clamp(1.8rem,3.6vw,2.6rem)] font-normal tracking-[-0.02em] text-ink-50">One prompt, three tiers</h2>
             <p className="mt-3 text-ink-400">
               Complexity decides how far it cascades. A trivial ask gets answered directly; a hard one fans
               out across all three.
@@ -273,7 +262,7 @@ export default function LandingPage({ config, onDevLogin }: Props) {
         {/* The differentiators. */}
         <section id="visible" className="scroll-mt-24 py-16">
           <motion.div {...reveal} className="mb-10 max-w-2xl">
-            <h2 className="text-2xl font-bold tracking-tight sm:text-3xl">What other orchestrators hide</h2>
+            <h2 className="font-serif text-[clamp(1.8rem,3.6vw,2.6rem)] font-normal tracking-[-0.02em] text-ink-50">What other orchestrators hide</h2>
             <p className="mt-3 text-ink-400">
               Most agent tools show you a graph and a log. The useful questions are what got skipped, what
               survives a crash, and why this model — so Cascade answers those.
@@ -302,7 +291,7 @@ export default function LandingPage({ config, onDevLogin }: Props) {
         {/* Three surfaces. */}
         <section id="surfaces" className="scroll-mt-24 py-16">
           <motion.div {...reveal} className="mb-10 max-w-2xl">
-            <h2 className="text-2xl font-bold tracking-tight sm:text-3xl">Three surfaces, one account</h2>
+            <h2 className="font-serif text-[clamp(1.8rem,3.6vw,2.6rem)] font-normal tracking-[-0.02em] text-ink-50">Three surfaces, one account</h2>
             <p className="mt-3 text-ink-400">Your keys, chats and settings follow you between them.</p>
           </motion.div>
           <div className="grid gap-4 sm:grid-cols-3">
@@ -331,7 +320,7 @@ export default function LandingPage({ config, onDevLogin }: Props) {
 
         {/* Features. */}
         <section id="features" className="scroll-mt-24 py-16">
-          <motion.h2 {...reveal} className="mb-10 text-2xl font-bold tracking-tight sm:text-3xl">Everything else you need</motion.h2>
+          <motion.h2 {...reveal} className="mb-10 font-serif text-[clamp(1.8rem,3.6vw,2.6rem)] font-normal tracking-[-0.02em] text-ink-50">Everything else you need</motion.h2>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {FEATURES.map((f, i) => (
               <motion.div
@@ -357,7 +346,7 @@ export default function LandingPage({ config, onDevLogin }: Props) {
           <div className="pointer-events-none absolute inset-x-0 -top-16 mx-auto h-40 max-w-md rounded-full opacity-20 blur-3xl"
             style={{ background: `radial-gradient(closest-side, ${AZURE}, transparent)` }} />
           <Mark size={30} />
-          <h2 className="mt-4 text-2xl font-bold tracking-tight sm:text-3xl">Start orchestrating in a minute</h2>
+          <h2 className="mt-4 font-serif text-[clamp(1.8rem,3.6vw,2.6rem)] font-normal tracking-[-0.02em] text-ink-50">Start orchestrating in a minute</h2>
           <p className="mx-auto mt-3 max-w-md text-ink-300">Sign in, add a provider key, and send your first prompt. No setup, no lock-in.</p>
           <div className="mt-7">{signInButtons}</div>
 
@@ -368,7 +357,7 @@ export default function LandingPage({ config, onDevLogin }: Props) {
                 <input className="flex-1 rounded-lg border border-elev/10 bg-elev/[0.04] px-3 py-1.5 text-sm text-ink-100 outline-none focus:border-accent-500/60"
                   placeholder="Your name" value={devName} onChange={(e) => setDevName(e.target.value)} />
                 <button type="button" disabled={busy} onClick={handleDevLogin}
-                  className="accent-grad rounded-lg px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50">
+                  className="bg-accent-500 hover:bg-accent-600 rounded-lg px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50">
                   <span className="inline-flex items-center gap-1"><Sparkles size={13} /> Dev login</span>
                 </button>
               </div>
