@@ -55,8 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loaded from a third party. Tier badges and the tier mix were still green /
   amber / violet from an older palette and now match the tier colours used
   everywhere else. The landing page and /docs follow the same design, with
-  the three-arc mark in place of the old three-bar one. See
-  `docs/design/calm-direction.md`.
+  the three-arc mark in place of the old three-bar one. The receipt names
+  the tier that answered even when a provider reports no token or cost
+  figures, and on a phone the message box has a line of its own above the
+  controls. See `docs/design/calm-direction.md`.
 
 ### Fixed
 - **Maths in an answer is typeset, whichever way the model wrote it.** GPT
