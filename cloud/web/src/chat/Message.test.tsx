@@ -204,4 +204,14 @@ describe('Message — receipt', () => {
     expect(screen.getByText('T2')).toBeInTheDocument();
     expect(screen.getByText(/gpt-mid/)).toBeInTheDocument();
   });
+
+  it('still shows "stopped" and /why for a run stopped before its first token', () => {
+    render(<Message message={base({ role: 'assistant', content: '', cancelled: true, why })} onDelete={() => {}} />);
+    expect(screen.getByText('stopped')).toBeInTheDocument();
+    const toggle = screen.getByRole('button', { name: /\/why/ });
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    // Nothing to copy or rate on an empty reply.
+    expect(screen.queryByLabelText('Copy')).not.toBeInTheDocument();
+  });
 });

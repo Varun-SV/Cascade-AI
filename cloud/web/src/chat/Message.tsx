@@ -632,6 +632,7 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
     );
   }
 
+  const hasReceipt = Boolean(message.tier || message.model || message.why || message.cancelled || message.costUsd);
   return (
     <div data-role="assistant" className="group flex flex-col gap-2">
       {message.streaming && !message.content ? (
@@ -663,32 +664,37 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
           </>
         );
       })()}
-      {!message.streaming && message.content && (
+      {/* The receipt stands on its own: a run stopped before its first token
+          has no content but still needs "stopped" and its /why. The actions
+          act on the text, so they wait for some. */}
+      {!message.streaming && (message.content || hasReceipt) && (
         <div className="flex min-h-[28px] flex-wrap items-center gap-2">
-          {(message.tier || message.model || message.why || message.cancelled || message.costUsd) && (
+          {hasReceipt && (
             <Receipt
               message={message}
               open={whyOpen}
               onToggle={message.why ? () => setWhyOpen((o) => !o) : undefined}
             />
           )}
-          <div className="ml-auto flex items-center gap-2 text-ink-400 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
-            <SiblingNav message={message} onSelect={onSelectSibling} />
-            <CopyButton getText={() => splitThinking(message.content).answer || message.content} />
-            {/* Only a persisted message can carry a verdict — an id is what the
-                server keys the vote on, and a still-streaming reply has none. */}
-            {message.id && <FeedbackButtons messageId={message.id} initial={message.verdict} />}
-            {onRegenerate && (
-              <button type="button" aria-label="Regenerate" onClick={onRegenerate} className="hover:text-ink-100">
-                <RotateCcw size={14} />
-              </button>
-            )}
-            {onDelete && (
-              <button type="button" aria-label="Delete" onClick={onDelete} className="hover:text-danger-300">
-                <Trash2 size={14} />
-              </button>
-            )}
-          </div>
+          {message.content && (
+            <div className="ml-auto flex items-center gap-2 text-ink-400 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
+              <SiblingNav message={message} onSelect={onSelectSibling} />
+              <CopyButton getText={() => splitThinking(message.content).answer || message.content} />
+              {/* Only a persisted message can carry a verdict — an id is what the
+                  server keys the vote on, and a still-streaming reply has none. */}
+              {message.id && <FeedbackButtons messageId={message.id} initial={message.verdict} />}
+              {onRegenerate && (
+                <button type="button" aria-label="Regenerate" onClick={onRegenerate} className="hover:text-ink-100">
+                  <RotateCcw size={14} />
+                </button>
+              )}
+              {onDelete && (
+                <button type="button" aria-label="Delete" onClick={onDelete} className="hover:text-danger-300">
+                  <Trash2 size={14} />
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
       <AnimatePresence initial={false}>
