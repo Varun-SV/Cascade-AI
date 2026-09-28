@@ -282,6 +282,9 @@ body {
     0%, 100% { opacity: 0.3; transform: none; }
     50%      { opacity: 1;   transform: none; }
   }
+  /* The spine is ambient, not a busy signal (the mark and the tree carry
+     that), so it simply holds still: the ramp stays, the flow stops. */
+  .cascade-spine { animation: none; }
 }
 
 /* Shimmer sweep for streaming / loading states. */

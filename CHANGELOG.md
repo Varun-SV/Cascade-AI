@@ -7,22 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
-<!-- One `### Added` / `### Changed` / `### Changed
-- **Cascade Cloud has a calmer look.** Flat paper in light and "midnight" in
-  dark replace the frosted glass and background glows, and the azure → sky →
-  teal ramp is now the only accent, used where it means something: tiers and
-  live work. Answers are set in a serif for reading, and the header above
-  each reply is replaced by one receipt line underneath (`T1 · model · $cost
-  · saved $x`) that opens /why, which now draws Cascade against all-T1 on one
-  scale. A live run shows a thin flowing spine beside the agent tree. Fonts
-  (Geist, Source Serif 4, Geist Mono) are bundled with the app rather than
-  loaded from a third party. Tier badges and the tier mix were still green /
-  amber / violet from an older palette and now match the tier colours used
-  everywhere else. The landing page and /docs follow the same design, with
-  the three-arc mark in place of the old three-bar one. See
-  `docs/design/calm-direction.md`.
-
-### Fixed` per release, not per PR.
+<!-- One `### Added` / `### Changed` / `### Fixed` per release, not per PR.
      The release workflow copies this whole block verbatim into the GitHub
      release notes (.github/workflows/release.yml), so appending a fresh
      heading per merge ships a release page with four "Added" sections — which
@@ -57,6 +42,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one shown. Only billed sessions are rationed:
   a deployment driving its own browser over CDP opens none, so it has no
   daily limit.
+
+### Changed
+- **Cascade Cloud has a calmer look.** Flat paper in light and "midnight" in
+  dark replace the frosted glass and background glows, and the azure → sky →
+  teal ramp is now the only accent, used where it means something: tiers and
+  live work. Answers are set in a serif for reading, and the header above
+  each reply is replaced by one receipt line underneath (`T1 · model · $cost
+  · saved $x`) that opens /why, which now draws Cascade against all-T1 on one
+  scale. A live run shows a thin flowing spine beside the agent tree. Fonts
+  (Geist, Source Serif 4, Geist Mono) are bundled with the app rather than
+  loaded from a third party. Tier badges and the tier mix were still green /
+  amber / violet from an older palette and now match the tier colours used
+  everywhere else. The landing page and /docs follow the same design, with
+  the three-arc mark in place of the old three-bar one. See
+  `docs/design/calm-direction.md`.
 
 ### Fixed
 - **Maths in an answer is typeset, whichever way the model wrote it.** GPT
