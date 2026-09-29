@@ -37,7 +37,7 @@
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
-    "socket.io-client": "^4.8.0",
+    "socket.io-client": "^4.8.4",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
