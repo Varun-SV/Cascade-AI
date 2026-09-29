@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { ToolRegistry } from './registry.js';
+import { BaseTool } from './base.js';
 import { ToolCreator, normalizeToolSchema, sandboxModeOf, type GeneratedToolSpec } from './tool-creator.js';
 import { generateDiff, diffSummary } from './diff.js';
 import { PermissionEscalator } from '../core/permissions/escalator.js';
@@ -202,6 +203,53 @@ describe('ToolCreator — the WebAssembly sandbox', () => {
     const out = await reg.execute('dynamic_w_danger', {}, opts);
     expect(asked).toBe(true);
     expect(out).toMatch(/Permission denied/);
+  });
+
+  // The deadline ended the guest, but a call it had started ran on: an
+  // approval answered after the timeout still wrote the file.
+  it('withdraws an approval still waiting at the deadline, and never runs the tool', async () => {
+    const escalator = new PermissionEscalator();
+    const { reg, creator } = await wasmTool('dynamic_w_late', "await callTool('file_write', { path: 'late-write.txt', content: 'late' }); return 'done';", true);
+    creator.setPermissionEscalator(escalator);
+    const asked: Array<{ id: string }> = [];
+    escalator.on('permission:user-required', (req: { id: string }) => asked.push(req));
+
+    const out = await withTimeout('600', () => reg.execute('dynamic_w_late', {}, opts));
+    expect(out).toMatch(/timed out after 600ms/);
+    expect(asked).toHaveLength(1);
+    expect(escalator.hasPendingUserDecisions()).toBe(false);
+    // The user approves the stale prompt: nothing runs.
+    escalator.resolveUserDecision(asked[0]!.id, true);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(existsSync(path.join(ws, 'late-write.txt'))).toBe(false);
+  });
+
+  it('runs nothing an approver grants after the deadline, even one that ignores the withdrawal', async () => {
+    const { reg, creator } = await wasmTool('dynamic_w_slowyes', "await callTool('file_write', { path: 'late-yes.txt', content: 'late' }); return 'done';", true);
+    creator.setPermissionEscalator({
+      requestPermission: () => new Promise((r) => setTimeout(() => r({ approved: true, decidedBy: 'USER' }), 900)),
+    } as any);
+    const out = await withTimeout('600', () => reg.execute('dynamic_w_slowyes', {}, opts));
+    expect(out).toMatch(/timed out/);
+    await new Promise((r) => setTimeout(r, 700));
+    expect(existsSync(path.join(ws, 'late-yes.txt'))).toBe(false);
+  });
+
+  it('tells a tool still running at the deadline to stop', async () => {
+    const { reg } = await wasmTool('dynamic_w_slow', "return await callTool('slow_probe', {});");
+    let seen: AbortSignal | undefined;
+    reg.register(new (class extends BaseTool {
+      readonly name = 'slow_probe';
+      readonly description = 'waits';
+      readonly inputSchema = { type: 'object', properties: {} };
+      async execute(_input: Record<string, unknown>, options: { signal?: AbortSignal }) {
+        seen = options.signal;
+        return new Promise<string>((resolve) => setTimeout(() => resolve('late'), 3000).unref());
+      }
+    })());
+    const out = await withTimeout('600', () => reg.execute('dynamic_w_slow', {}, opts));
+    expect(out).toMatch(/timed out/);
+    expect(seen?.aborted).toBe(true);
   });
 
   it('keeps fetch behind the SSRF guard', async () => {

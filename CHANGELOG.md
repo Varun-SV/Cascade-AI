@@ -253,7 +253,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   WebAssembly sandbox (QuickJS) that ships with Cascade, on a thread of its
   own with a memory cap and a hard kill at the deadline, reaching the
   machine only through `callTool` and `fetch`. There is no unconfined
-  fallback left.
+  fallback left. The deadline ends what the code started too: an approval
+  it is waiting on is withdrawn, a tool call or request it made is told to
+  stop — `shell` and `run_code` kill their command — and nothing it asked
+  for starts afterwards.
 - **`privacy.paths` is enforced when a file is read.** It applied only to a
   subtask whose assignment named a matching path, so a worker that came
   across the file by search read it on a cloud model. Reading a local-only
@@ -339,7 +342,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   store too, while its history holds any of them, since a blob is as
   readable as the file, or while git keeps anything no branch reaches — a
   deleted branch, an amended commit, a file staged and unstaged — whose
-  contents no name tells; the `git` tool keeps working, leaves them out of
+  contents no name tells; the `git` tool keeps working, runs only in the
+  workspace, compares only files `file_read` could read (`git diff
+  --no-index`, or given a path outside the work tree, compares any file,
+  the home credentials it keeps included) and writes no diff to a file,
+  leaves them out of
   its diffs and of what it stages or stashes (where they read as empty),
   never runs a hook — git's configuration files are read-only to commands,
   so none can name a program for it to run with the credentials it keeps —

@@ -442,6 +442,14 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: what shell, run_code and git can re
     expect(out).not.toContain(LOCAL);
   });
 
+  it('stops a jailed command when its call is cancelled', async () => {
+    const stop = new AbortController();
+    const started = Date.now();
+    setTimeout(() => stop.abort(), 200);
+    await registry().execute('shell', { command: 'sleep 5' }, { ...exec, signal: stop.signal }).catch(() => 'stopped');
+    expect(Date.now() - started).toBeLessThan(3000);
+  });
+
   it('git runs in the same jail', async () => {
     // The git tool refuses to name .env itself now; launched as the tool
     // launches git, the jail still keeps it out of reach.

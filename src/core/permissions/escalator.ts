@@ -36,6 +36,11 @@ type T1Evaluator = (req: PermissionRequest) => Promise<PermissionDecision | null
  * 5. Emit `permission:user-required` → wait for external decision via
  *    `resolveUserDecision()`; an "always" answer caches task-wide.
  */
+/** The answer to a request its caller withdrew before it was decided. */
+function withdrawn(req: PermissionRequest): PermissionDecision {
+  return { requestId: req.id, approved: false, decidedBy: 'USER', reasoning: 'Withdrawn: the caller stopped before it was decided' };
+}
+
 export class PermissionEscalator extends EventEmitter {
   /**
    * Session cache keyed by `${t2Id}:${toolName}`.
@@ -90,7 +95,15 @@ export class PermissionEscalator extends EventEmitter {
    * Main entry point. Called by T3Worker instead of emitting `tool:approval-request`.
    * Returns a PermissionDecision from whichever tier was able to decide.
    */
-  async requestPermission(req: PermissionRequest): Promise<PermissionDecision> {
+  async requestPermission(req: PermissionRequest, signal?: AbortSignal): Promise<PermissionDecision> {
+    const decision = await this.decide(req, signal);
+    // A decision reached after the caller stopped waiting grants nothing:
+    // what it would have allowed is no longer running to use it.
+    return signal?.aborted && decision.approved ? withdrawn(req) : decision;
+  }
+
+  private async decide(req: PermissionRequest, signal?: AbortSignal): Promise<PermissionDecision> {
+    if (signal?.aborted) return withdrawn(req);
     // ── 1. Check the task-wide cache (USER/T1 "always") ────────────
     // Checked BEFORE the per-T2 cache so a grant covers every sibling worker
     // in the run, regardless of which T2 section raises the same tool next.
@@ -187,7 +200,7 @@ export class PermissionEscalator extends EventEmitter {
     }
 
     // ── 5. Escalate to user ───────────────────
-    return this.waitForUserDecision(req);
+    return this.waitForUserDecision(req, signal);
   }
 
   /**
@@ -211,11 +224,18 @@ export class PermissionEscalator extends EventEmitter {
     resolver(decision);
   }
 
-  private waitForUserDecision(req: PermissionRequest): Promise<PermissionDecision> {
+  private waitForUserDecision(req: PermissionRequest, signal?: AbortSignal): Promise<PermissionDecision> {
     return new Promise<PermissionDecision>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
+      // The caller stopped waiting: the question is taken back, unanswered.
+      const onAbort = () => {
+        if (!this.pendingUserDecisions.delete(req.id)) return;
+        if (timer) clearTimeout(timer);
+        resolve(withdrawn(req));
+      };
       const wrappedResolver = (decision: PermissionDecision) => {
         if (timer) clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
         if (decision.always) {
           // Task-wide: a user's "Always" should cover every sibling worker in
           // this run, not just future requests under the same parent T2.
@@ -245,6 +265,7 @@ export class PermissionEscalator extends EventEmitter {
         timer.unref?.();
       }
 
+      signal?.addEventListener('abort', onAbort, { once: true });
       // Emit event so cascade.ts / REPL can pick it up
       this.emit('permission:user-required', req);
     });

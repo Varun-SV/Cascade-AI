@@ -106,7 +106,7 @@ export class CodeInterpreterTool extends BaseTool {
     // 3. Execute
     const output = await new Promise<string>((resolve) => {
       const startMs = Date.now();
-      execFile(launch.file, launch.args, { cwd: launch.cwd, env: launch.env, timeout: 30000 }, (error, stdout, stderr) => {
+      execFile(launch.file, launch.args, { cwd: launch.cwd, env: launch.env, timeout: 30000, signal: options.signal }, (error, stdout, stderr) => {
         const duration = Date.now() - startMs;
 
         // 4. Cleanup (Always delete the script from the filesystem)

@@ -348,3 +348,41 @@ describe('PermissionEscalator', () => {
     expect(t2B).not.toHaveBeenCalled();
   });
 });
+
+// A dynamic tool's run can end while one of its calls waits for approval.
+// What it asked must not be granted afterwards, to nothing still running.
+describe('PermissionEscalator — a withdrawn request', () => {
+  it('takes back a question the user has not answered, and grants nothing later', async () => {
+    const escalator = new PermissionEscalator();
+    const asked = vi.fn();
+    escalator.on('permission:user-required', asked);
+    const ended = new AbortController();
+    const pending = escalator.requestPermission(makeRequest({ id: 'late', isDangerous: true }), ended.signal);
+    await flushPromises();
+    expect(asked).toHaveBeenCalled();
+    expect(escalator.hasPendingUserDecisions()).toBe(true);
+
+    ended.abort();
+    const decision = await pending;
+    expect(decision.approved).toBe(false);
+    expect(decision.reasoning).toMatch(/Withdrawn/);
+    expect(escalator.hasPendingUserDecisions()).toBe(false);
+    // An answer arriving now has nothing to answer, and leaves no "always" behind.
+    escalator.resolveUserDecision('late', true, true);
+    expect((escalator as unknown as { taskWideCache: Map<string, boolean> }).taskWideCache.has('file_write')).toBe(false);
+  });
+
+  it('does not grant what a model approved after the caller stopped waiting', async () => {
+    const escalator = new PermissionEscalator();
+    const ended = new AbortController();
+    escalator.setT2Evaluator(async () => { ended.abort(); return makeDecision(true); });
+    const decision = await escalator.requestPermission(makeRequest({ isDangerous: true }), ended.signal);
+    expect(decision.approved).toBe(false);
+  });
+
+  it('changes nothing for a caller that passes no signal', async () => {
+    const escalator = new PermissionEscalator();
+    escalator.setT2Evaluator(async () => makeDecision(true));
+    expect((await escalator.requestPermission(makeRequest({ isDangerous: true }))).approved).toBe(true);
+  });
+});

@@ -27,12 +27,17 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 
-/** What the guest may ask of the host. Both are gated by the caller. */
+/**
+ * What the guest may ask of the host. Both are gated by the caller, and both
+ * are handed a signal that fires when the run ends — at its deadline, or any
+ * other way — so work the guest started does not outlive it: an approval
+ * still waiting is withdrawn, and a tool or request still running is stopped.
+ */
 export interface SandboxHost {
   /** Run a registered tool; its result, or why it did not run, as text. */
-  callTool(name: string, input: Record<string, unknown>): Promise<string>;
+  callTool(name: string, input: Record<string, unknown>, signal: AbortSignal): Promise<string>;
   /** Fetch a URL; the JSON the guest's response is built from. Throws to fail it. */
-  fetch(url: string, init: unknown): Promise<string>;
+  fetch(url: string, init: unknown, signal: AbortSignal): Promise<string>;
 }
 
 export type SandboxOutcome =
@@ -79,6 +84,7 @@ export function runInWasmSandbox(
 
   return new Promise<SandboxOutcome>((resolve) => {
     let done = false;
+    const ended = new AbortController();
     const worker = new Worker(file, {
       workerData: {
         code,
@@ -102,6 +108,9 @@ export function runInWasmSandbox(
       done = true;
       clearTimeout(timer);
       void worker.terminate();
+      // Before resolving: whoever reads the outcome can take it that nothing
+      // the guest asked for will start from here on.
+      ended.abort(new Error(outcome.kind === 'timeout' ? 'the sandbox timed out' : 'the sandbox run ended'));
       resolve(outcome);
     };
 
@@ -114,7 +123,7 @@ export function runInWasmSandbox(
       if (msg?.kind === 'done' && msg.outcome) {
         finish(msg.outcome);
       } else if (msg?.kind === 'call') {
-        serve(host, String(msg.call), String(msg.payload)).then(
+        serve(host, String(msg.call), String(msg.payload), ended.signal).then(
           (text) => { if (!done) worker.postMessage({ id: msg.id, ok: true, text }); },
           (err: unknown) => {
             if (!done) worker.postMessage({ id: msg.id, ok: false, text: err instanceof Error ? err.message : String(err) });
@@ -127,7 +136,7 @@ export function runInWasmSandbox(
   });
 }
 
-async function serve(host: SandboxHost, call: string, payload: string): Promise<string> {
+async function serve(host: SandboxHost, call: string, payload: string, signal: AbortSignal): Promise<string> {
   const request = parseObject(payload);
   if (call === 'callTool') {
     const toolInput = request['input'];
@@ -136,9 +145,10 @@ async function serve(host: SandboxHost, call: string, payload: string): Promise<
       toolInput && typeof toolInput === 'object' && !Array.isArray(toolInput)
         ? (toolInput as Record<string, unknown>)
         : {},
+      signal,
     );
   }
-  if (call === 'fetch') return host.fetch(String(request['url']), request['init']);
+  if (call === 'fetch') return host.fetch(String(request['url']), request['init'], signal);
   throw new Error(`Unknown host call: ${call}`);
 }
 

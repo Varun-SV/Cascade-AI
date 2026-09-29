@@ -59,8 +59,8 @@ export class ShellTool extends BaseTool {
       // Output is piped (exec default), never inherited — it cannot write
       // over the live TUI.
       const { stdout, stderr } = launch && posix
-        ? await execFileAsync(launch.file, launch.args, { cwd: launch.cwd, env: launch.env, timeout, windowsHide: true })
-        : await execAsync(command, { cwd, timeout, windowsHide: true, ...(launch ? { env: launch.env } : {}) });
+        ? await execFileAsync(launch.file, launch.args, { cwd: launch.cwd, env: launch.env, timeout, windowsHide: true, signal: options.signal })
+        : await execAsync(command, { cwd, timeout, windowsHide: true, signal: options.signal, ...(launch ? { env: launch.env } : {}) });
       output = [stdout, stderr].filter(Boolean).join('\n').trim() || '(no output)';
     } catch (err) {
       if (!(err instanceof Error && 'stdout' in err && 'stderr' in err)) throw err;

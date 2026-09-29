@@ -174,6 +174,7 @@ export function isExecutableToolCode(code: string): boolean {
 async function bridgeFetch(
   url: string,
   init: unknown,
+  signal?: AbortSignal,
 ): Promise<{ ok: boolean; status: number; statusText: string; contentType: string; body: string } | { __error: string }> {
   try {
     const i = (init && typeof init === 'object') ? (init as Record<string, unknown>) : {};
@@ -181,6 +182,7 @@ async function bridgeFetch(
       method: typeof i['method'] === 'string' ? (i['method'] as string) : undefined,
       headers: i['headers'] as Record<string, string> | undefined,
       body: typeof i['body'] === 'string' ? (i['body'] as string) : undefined,
+      ...(signal ? { signal } : {}),
     });
     const contentType = resp.headers.get('content-type') ?? '';
     let body = '';
@@ -245,7 +247,12 @@ class DynamicTool extends BaseTool {
     // callTool runs on the MAIN thread (the sandbox bridges to it). Dangerous tools
     // require escalation; when NO approver is available we DEFAULT-DENY rather than
     // execute. Untrusted tools always re-prompt (forceReprompt bypasses the cache).
-    const callTool = async (toolName: string, toolInput: Record<string, unknown>): Promise<string> => {
+    // `ended` fires when the sandbox run is over — its deadline, or any other
+    // end: nothing the guest asked for starts after that, a question still
+    // waiting for an answer is withdrawn, and a tool still running is told to
+    // stop, as a cancelled run tells it.
+    const callTool = async (toolName: string, toolInput: Record<string, unknown>, ended?: AbortSignal): Promise<string> => {
+      if (ended?.aborted) return `Not run: dynamic tool "${this.name}" had already ended.`;
       if (!registry.hasTool(toolName)) return `Tool not found: ${toolName}`;
 
       if (registry.isDangerous(toolName)) {
@@ -265,14 +272,16 @@ class DynamicTool extends BaseTool {
           forceReprompt: !this.trusted,
           localOnly: options.isOffline?.() === true,
         };
-        const decision = await escalator.requestPermission(req);
+        const decision = await escalator.requestPermission(req, ended);
         if (!decision.approved) {
           return `Permission denied for ${toolName} (decided by ${decision.decidedBy}).`;
         }
       }
+      if (ended?.aborted) return `Not run: dynamic tool "${this.name}" had already ended.`;
 
       try {
-        const result = await registry.execute(toolName, toolInput, options);
+        const signal = ended && options.signal ? AbortSignal.any([ended, options.signal]) : (ended ?? options.signal);
+        const result = await registry.execute(toolName, toolInput, { ...options, ...(signal ? { signal } : {}) });
         return typeof result === 'string' ? result : JSON.stringify(result);
       } catch (err) {
         return `Error calling ${toolName}: ${err instanceof Error ? err.message : String(err)}`;
@@ -282,9 +291,11 @@ class DynamicTool extends BaseTool {
     // fetch is the guest's way off the machine. Asked at the moment of sending:
     // a local-only file read through callTool earlier in this same run makes
     // the caller local-only, and what the guest read must then stay here.
-    const sendOut: typeof bridgeFetch = async (url, init) => (options.isOffline?.()
+    const sendOut: typeof bridgeFetch = async (url, init, ended) => (options.isOffline?.()
       ? { __error: 'fetch is unavailable to a local-only subtask (privacy.paths).' }
-      : bridgeFetch(url, init));
+      : ended?.aborted
+        ? { __error: 'the dynamic tool had already ended.' }
+        : bridgeFetch(url, init, ended));
 
     // Choose the executor. 'isolate'/'auto' prefer the hard V8 isolate, and run
     // in the WebAssembly sandbox when isolated-vm isn't loadable ('isolate' says
@@ -313,13 +324,18 @@ class DynamicTool extends BaseTool {
   private async runInIsolate(
     ivm: IvmModule,
     input: Record<string, unknown>,
-    callTool: (name: string, input: Record<string, unknown>) => Promise<string>,
+    callTool: (name: string, input: Record<string, unknown>, ended?: AbortSignal) => Promise<string>,
     sendOut: typeof bridgeFetch,
   ): Promise<string> {
     const timeoutMs = Math.max(200, Number(process.env['CASCADE_DYNAMIC_TOOL_TIMEOUT_MS']) || DYNAMIC_TOOL_TIMEOUT_MS);
     const isolate = new ivm.Isolate({ memoryLimit: 128 });
+    // As in the WebAssembly sandbox: the run's end ends what it started.
+    const ended = new AbortController();
     let disposed = false;
-    const dispose = () => { if (!disposed) { disposed = true; try { isolate.dispose(); } catch { /* already gone */ } } };
+    const dispose = () => {
+      ended.abort(new Error('the isolate run ended'));
+      if (!disposed) { disposed = true; try { isolate.dispose(); } catch { /* already gone */ } }
+    };
 
     try {
       const context = await isolate.createContext();
@@ -328,11 +344,11 @@ class DynamicTool extends BaseTool {
       // Host bridges — the ONLY capabilities the isolate has. callTool is already
       // escalator-gated (dangerous tools) in execute(); fetch is SSRF-guarded.
       await jail.set('_callTool', new ivm.Reference(async (name: string, inputJson: string) => {
-        const out = await callTool(String(name), safeJsonParse(inputJson));
+        const out = await callTool(String(name), safeJsonParse(inputJson), ended.signal);
         return String(out);
       }));
       await jail.set('_fetch', new ivm.Reference(async (url: string, initJson: string) => {
-        const r = await sendOut(String(url), safeJsonParse(initJson));
+        const r = await sendOut(String(url), safeJsonParse(initJson), ended.signal);
         return JSON.stringify(r);
       }));
       await jail.set('_input', new ivm.ExternalCopy(input).copyInto());
@@ -391,14 +407,14 @@ class DynamicTool extends BaseTool {
    */
   private async runInWasm(
     input: Record<string, unknown>,
-    callTool: (name: string, input: Record<string, unknown>) => Promise<string>,
+    callTool: (name: string, input: Record<string, unknown>, ended?: AbortSignal) => Promise<string>,
     sendOut: typeof bridgeFetch,
   ): Promise<string> {
     const timeoutMs = Math.max(200, Number(process.env['CASCADE_DYNAMIC_TOOL_TIMEOUT_MS']) || DYNAMIC_TOOL_TIMEOUT_MS);
     const outcome = await runInWasmSandbox(this.executeCode, input, {
       callTool,
-      fetch: async (url, init) => {
-        const r = await sendOut(url, init);
+      fetch: async (url, init, ended) => {
+        const r = await sendOut(url, init, ended);
         if ('__error' in r) throw new Error(r.__error);
         return JSON.stringify(r);
       },
