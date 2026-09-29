@@ -79,10 +79,10 @@ export default function DownloadSection({ reduced }: { reduced: boolean }) {
   );
 
   return (
-    <section id="download" className="scroll-mt-24 py-16">
-      <div className="mb-8 max-w-2xl">
-        <h2 className="text-2xl font-bold tracking-tight sm:text-3xl">Get the desktop app</h2>
-        <p className="mt-3 text-ink-400">
+    <section id="download" className="scroll-mt-20 pt-[88px]">
+      <div className="mb-7 max-w-2xl">
+        <h2 className="m-0 font-serif text-[clamp(30px,4vw,44px)] font-normal leading-[1.1] tracking-[-0.02em] text-ink-50">Get the desktop app.</h2>
+        <p className="mt-3 text-[17px] leading-[1.6] text-ink-300">
           The full orchestrator running locally, with your own keys and your files on your own disk.
           {manifest && (
             <> Version {manifest.version}, free and open source.</>
@@ -96,7 +96,7 @@ export default function DownloadSection({ reduced }: { reduced: boolean }) {
           href={RELEASES_URL}
           target="_blank"
           rel="noreferrer"
-          className="glass inline-flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold text-ink-100 hover:bg-elev/[0.08]"
+          className="cz-btn cz-btn-ghost h-11 px-5 text-[15px]"
         >
           <Download size={16} /> Downloads on GitHub <ExternalLink size={13} className="text-ink-500" />
         </a>
@@ -106,7 +106,7 @@ export default function DownloadSection({ reduced }: { reduced: boolean }) {
         // three that did.
         <div
           data-testid="download-skeleton"
-          className={`h-[52px] w-64 rounded-xl bg-elev/[0.06] ${reduced ? '' : 'animate-pulse'}`}
+          className={`h-11 w-64 rounded-[10px] bg-sunk ${reduced ? '' : 'animate-pulse'}`}
           aria-hidden
         />
       ) : (
@@ -115,7 +115,7 @@ export default function DownloadSection({ reduced }: { reduced: boolean }) {
             <>
               <a
                 href={downloadUrl(primary.id)}
-                className="bg-accent-500 hover:bg-accent-600 inline-flex items-center gap-2.5 rounded-xl px-6 py-3.5 text-sm font-semibold text-white transition"
+                className="cz-btn h-11 gap-2.5 px-5 text-[15px]"
               >
                 <Download size={17} />
                 Download for {primary.label}
@@ -127,7 +127,7 @@ export default function DownloadSection({ reduced }: { reduced: boolean }) {
               {sibling && (
                 <p className="mt-3 text-sm text-ink-400">
                   On an {sibling.detail} Mac?{' '}
-                  <a href={downloadUrl(sibling.id)} className="text-accent-300 underline-offset-2 hover:underline">
+                  <a href={downloadUrl(sibling.id)} className="text-accent-500 underline-offset-2 hover:underline">
                     Download that build instead
                   </a>
                   .
@@ -142,7 +142,7 @@ export default function DownloadSection({ reduced }: { reduced: boolean }) {
             type="button"
             onClick={() => setShowAll((v) => !v)}
             aria-expanded={showAll}
-            className="mt-4 inline-flex items-center gap-1.5 text-sm text-ink-400 transition hover:text-ink-100"
+            className="mt-4 inline-flex items-center gap-1.5 text-[14px] text-ink-300 transition hover:text-ink-50"
           >
             <ChevronDown
               size={15}
@@ -162,8 +162,8 @@ export default function DownloadSection({ reduced }: { reduced: boolean }) {
             </ul>
           )}
 
-          <p className="mt-5 text-xs text-ink-500">
-            Also on npm — <code className="rounded bg-elev/[0.08] px-1.5 py-0.5 text-ink-300">npm i -g cascade-ai</code> for the CLI.
+          <p className="mt-5 text-[13px] text-ink-500">
+            Also on npm — <code className="rounded-md bg-sunk px-1.5 py-0.5 font-mono text-ink-300">npm i -g cascade-ai</code> for the CLI.
           </p>
         </div>
       )}
@@ -178,7 +178,7 @@ function TargetRow({ target }: { target: DownloadTarget }) {
     <li>
       <a
         href={downloadUrl(target.id)}
-        className="glass flex items-center gap-3 rounded-xl px-3.5 py-3 transition hover:bg-elev/[0.08]"
+        className="flex items-center gap-3 rounded-xl bg-card px-3.5 py-3 transition hover:bg-elev/[0.05]" style={{ boxShadow: 'inset 0 0 0 1px rgb(var(--c-elev) / 0.1)' }}
       >
         <span
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg"

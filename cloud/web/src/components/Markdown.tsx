@@ -69,6 +69,8 @@ export default function Markdown({ children }: { children: string }) {
       ]}
       components={{
         pre: PreBlock,
+        // A framed, sideways-scrolling table, as in the calm-direction prototype.
+        table: ({ children: rows }) => <div className="cz-tbl"><table>{rows}</table></div>,
       }}
     >
       {normalize(shown)}
@@ -92,7 +94,7 @@ function PreBlock({ children }: { children?: ReactNode }) {
   return (
     <div className="group relative">
       <CopyButton getText={() => ref.current?.innerText ?? ''} />
-      <pre ref={ref} className="overflow-x-auto rounded-xl border border-elev/10 bg-black/40 p-3 text-sm shadow-inner">
+      <pre ref={ref} className="overflow-x-auto rounded-xl bg-sunk px-3.5 py-3 text-[13px]">
         {children}
       </pre>
     </div>

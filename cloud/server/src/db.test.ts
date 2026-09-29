@@ -34,6 +34,57 @@ describe('CloudStore', () => {
     expect(gh.id).not.toBe(gg.id);
   });
 
+  it('searches every chat by title, not just the recent page', () => {
+    const u = store.upsertUser({ provider: 'github', providerId: 'search', email: null, name: null, avatar: null });
+    const other = store.upsertUser({ provider: 'github', providerId: 'someone-else', email: null, name: null, avatar: null });
+    const old = store.createConversation(u.id, 'Postgres vs SQLite');
+    // Push the old chat off the first page of the recent list.
+    for (let i = 0; i < 55; i++) store.createConversation(u.id, `Chat ${i}`);
+    store.createConversation(other.id, 'Postgres tuning');
+    expect(store.listConversations(u.id).map((c) => c.id)).not.toContain(old.id);
+    // Case-insensitive, and only this user's chats.
+    expect(store.searchConversations(u.id, 'postgres').map((c) => c.id)).toEqual([old.id]);
+  });
+
+  it('searches titles in any case, in every script', () => {
+    const u = store.upsertUser({ provider: 'github', providerId: 'unicode', email: null, name: null, avatar: null });
+    const de = store.createConversation(u.id, 'Überblick 2026');
+    const ru = store.createConversation(u.id, 'Обзор рынка');
+    const gr = store.createConversation(u.id, 'ΣΧΕΔΙΟ ταξιδιού');
+    expect(store.searchConversations(u.id, 'über').map((c) => c.id)).toEqual([de.id]);
+    expect(store.searchConversations(u.id, 'ÜBERBLICK').map((c) => c.id)).toEqual([de.id]);
+    expect(store.searchConversations(u.id, 'обзор').map((c) => c.id)).toEqual([ru.id]);
+    expect(store.searchConversations(u.id, 'σχεδιο').map((c) => c.id)).toEqual([gr.id]);
+  });
+
+  it('pages through search results from the last chat of each page, newest first', () => {
+    const u = store.upsertUser({ provider: 'github', providerId: 'paging', email: null, name: null, avatar: null });
+    const ids = [0, 1, 2, 3, 4].map((i) => store.createConversation(u.id, `Offsite ${i}`).id);
+    const page = (before?: { updatedAt: number; id: string }) => store.searchConversations(u.id, 'offsite', 2, before);
+    const first = page();
+    const second = page(first.at(-1));
+    // A chat on the first page is touched before the next is asked for: it
+    // moves to the top, and the rest neither repeat nor shift.
+    store.touchConversation(first[0]!.id);
+    const third = page(second.at(-1));
+    const seen = [...first, ...second, ...third].map((c) => c.id);
+    expect(new Set(seen).size).toBe(5);
+    expect(seen.sort()).toEqual([...ids].sort());
+    expect(page(third.at(-1))).toEqual([]);
+  });
+
+  it('matches %, _ and \\ in a search literally', () => {
+    const u = store.upsertUser({ provider: 'github', providerId: 'literal', email: null, name: null, avatar: null });
+    const pct = store.createConversation(u.id, 'Growth 50% plan');
+    store.createConversation(u.id, 'Growth 500 plan');
+    const under = store.createConversation(u.id, 'snake_case names');
+    store.createConversation(u.id, 'snakeXcase names');
+    const slash = store.createConversation(u.id, 'C:\\temp paths');
+    expect(store.searchConversations(u.id, '50%').map((c) => c.id)).toEqual([pct.id]);
+    expect(store.searchConversations(u.id, 'snake_case').map((c) => c.id)).toEqual([under.id]);
+    expect(store.searchConversations(u.id, ':\\t').map((c) => c.id)).toEqual([slash.id]);
+  });
+
   it('defaults new users to the free plan', () => {
     const user = store.upsertUser({ provider: 'github', providerId: '1', email: null, name: null, avatar: null });
     expect(user.plan).toBe('free');

@@ -116,7 +116,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loaded from a third party. Tier badges and the tier mix were still green /
   amber / violet from an older palette and now match the tier colours used
   everywhere else. The landing page and /docs follow the same design, with
-  the three-arc mark in place of the old three-bar one. See
+  the three-arc mark in place of the old three-bar one. The receipt names
+  the tier that answered even when a provider reports no token or cost
+  figures. The app now has the prototype's structure too: a sidebar with
+  Search, Files, Skills and an account menu (usage, settings, keys, import,
+  sign out); a menu on the chat's title to rename or delete it; the chat's
+  total saving at the top right, which no longer resets on reload and opens
+  what the whole chat spent against all-T1; and a composer whose attach, skill, tools and routing controls live in three
+  menus, with whatever is switched on shown as a removable chip. "Run detail"
+  replaces the Simple / Advanced view, and an orchestrated reply keeps its
+  agent tree, folded above the answer. The landing page follows the
+  prototype's layout too — the arcs card, a receipt, where Cascade runs, the
+  desktop downloads and the two plans — and signing in opens a small dialog
+  instead of sending you to the bottom of the page. See
   `docs/design/calm-direction.md`.
 
 ### Fixed

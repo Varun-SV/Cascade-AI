@@ -104,4 +104,15 @@ export interface WhyReport {
   costByTier: Record<string, number>;
   tokensByTier: Record<string, number>;
   models: Record<string, string>;
+  /** The agents that worked the run, as they last reported. Absent from older reports. */
+  trace?: TraceNode[];
+}
+
+/** One agent in a finished run's tree: its tier, what it worked on, and how it ended. */
+export interface TraceNode {
+  id: string;
+  role: string;
+  label?: string;
+  model?: string;
+  status: string;
 }

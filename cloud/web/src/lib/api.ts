@@ -190,6 +190,16 @@ export function listConversations(): Promise<{ conversations: CloudConversation[
   return json(fetch('/api/conversations', { credentials: 'include' }));
 }
 
+/** Every chat whose title contains `query` — beyond the recent page `listConversations` returns. */
+/** A page of chats whose title matches; pass the last one back for the next page. */
+export function searchConversations(
+  query: string,
+  after?: Pick<CloudConversation, 'id' | 'updatedAt'>,
+): Promise<{ conversations: CloudConversation[]; hasMore: boolean }> {
+  const before = after ? `&before=${encodeURIComponent(`${after.updatedAt}:${after.id}`)}` : '';
+  return json(fetch(`/api/conversations?q=${encodeURIComponent(query)}${before}`, { credentials: 'include' }));
+}
+
 export function getMessages(
   conversationId: string,
 ): Promise<{ conversation?: { id: string; title: string | null; skillId: string | null }; messages: CloudMessage[] }> {

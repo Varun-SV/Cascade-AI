@@ -21,7 +21,7 @@ interface Props {
 export default function Modal({ title, onClose, maxWidth = 'max-w-md', children, zIndexClassName = 'z-40' }: Props) {
   return (
     <motion.div
-      className={`fixed inset-0 ${zIndexClassName} flex items-center justify-center bg-black/40 p-4`}
+      className={`fixed inset-0 ${zIndexClassName} flex items-center justify-center bg-[rgba(10,12,16,0.35)] p-4`}
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
@@ -29,25 +29,21 @@ export default function Modal({ title, onClose, maxWidth = 'max-w-md', children,
       onClick={onClose}
     >
       <motion.div
-        className={`glass-strong flex max-h-[90dvh] w-full ${maxWidth} flex-col overflow-hidden rounded-2xl`}
-        initial={{ opacity: 0, scale: 0.94, y: 12 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.96, y: 8 }}
-        transition={{ type: 'spring', stiffness: 380, damping: 30 }}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className={`flex max-h-[min(86dvh,720px)] w-full ${maxWidth} flex-col overflow-hidden rounded-[18px] bg-card shadow-[var(--glass-shadow-strong)]`}
+        initial={{ opacity: 0, y: 6 }}
+        animate={{ opacity: 1, y: 0 }}
+        exit={{ opacity: 0, y: 4 }}
+        transition={{ duration: 0.18, ease: 'easeOut' }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex shrink-0 items-center justify-between border-b border-elev/10 px-4 py-3">
-          <h2 className="text-sm font-semibold text-ink-50">{title}</h2>
-          <motion.button
-            type="button"
-            aria-label="Close"
-            onClick={onClose}
-            whileHover={{ scale: 1.1 }}
-            whileTap={{ scale: 0.9 }}
-            className="rounded-md p-1 text-ink-400 hover:bg-elev/10 hover:text-ink-100"
-          >
-            <X size={16} />
-          </motion.button>
+        <div className="flex shrink-0 items-center gap-2 px-5 pb-2 pt-[18px]">
+          <h2 className="m-0 flex-1 font-serif text-[21px] font-medium text-ink-50">{title}</h2>
+          <button type="button" aria-label="Close" onClick={onClose} className="cz-ib">
+            <X size={17} />
+          </button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
       </motion.div>

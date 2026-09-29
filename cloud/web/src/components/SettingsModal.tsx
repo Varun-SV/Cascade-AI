@@ -1,10 +1,8 @@
 import { useState } from 'react';
-import {
-  Sparkles, Brain, KeyRound, Crown, LogOut, Cpu, Eye, ChevronRight, Zap,
-  Sun, Moon, Monitor, LayoutGrid, Rows3, SlidersHorizontal, Layers, LineChart,
-  User, Palette, MessageSquare, Shield, Globe, Gauge, Plug,
-} from 'lucide-react';
+import { SlidersHorizontal } from 'lucide-react';
 import Modal from './Modal.js';
+import { deleteAllConversations } from '../lib/api.js';
+import { toast } from '../lib/toast.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
 import {
   localModelEnabled, setLocalModelEnabled, reduceMotionEnabled, setReduceMotionEnabled,
@@ -14,7 +12,7 @@ import {
   maxTokensPerRun, setMaxTokensPerRun, maxCostPerRunUsd, setMaxCostPerRunUsd,
   defaultRoutingBias, setDefaultRoutingBias,
   defaultWebSearch, setDefaultWebSearch,
-  type ThemeMode, type Density, type UiMode, type TierParams, type TierParam, type ExtendedContextPref, type RoutingBias,
+  type ThemeMode, type Density, type TierParams, type TierParam, type ExtendedContextPref, type RoutingBias,
 } from '../lib/prefs.js';
 import type { CloudUser } from '../lib/types.js';
 
@@ -57,26 +55,23 @@ function TierParamRow({ tier, value, onChange }: {
   );
 }
 
-/** Compact segmented control — one active option, keyboard/aria friendly. */
+/** The prototype's segmented control: a sunken well, the chosen option raised. */
 function Segmented<T extends string>({ value, onChange, options, label }: {
   value: T; onChange: (v: T) => void; label: string;
-  options: Array<{ value: T; label: string; icon?: React.ReactNode }>;
+  options: Array<{ value: T; label: string }>;
 }) {
   return (
-    <div role="group" aria-label={label} className="flex items-center gap-0.5 rounded-lg bg-elev/[0.05] p-0.5">
+    <div role="group" aria-label={label} className="inline-flex shrink-0 gap-0.5 rounded-[10px] bg-sunk p-[3px]">
       {options.map((o) => (
         <button
           key={o.value}
           type="button"
           aria-pressed={value === o.value}
           onClick={() => onChange(o.value)}
-          className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-            value === o.value
-              ? 'bg-accent-500 text-white shadow-sm'
-              : 'text-ink-400 hover:bg-elev/10 hover:text-ink-100'
+          className={`rounded-[7px] px-[11px] py-1 text-[13px] font-medium ${
+            value === o.value ? 'bg-card text-ink-50 shadow-[0_1px_2px_rgba(0,0,0,0.1)]' : 'text-ink-300 hover:text-ink-50'
           }`}
         >
-          {o.icon}
           {o.label}
         </button>
       ))}
@@ -85,9 +80,6 @@ function Segmented<T extends string>({ value, onChange, options, label }: {
 }
 
 function Toggle({ on, onChange, disabled, label }: { on: boolean; onChange: (v: boolean) => void; disabled?: boolean; label: string }) {
-  // Flex + justify keeps the knob physically inside the track — it can't
-  // overflow the way an absolute/translate knob could when the pixel math is
-  // off. items-center handles the vertical centering.
   return (
     <button
       type="button"
@@ -96,29 +88,25 @@ function Toggle({ on, onChange, disabled, label }: { on: boolean; onChange: (v: 
       aria-label={label}
       disabled={disabled}
       onClick={() => onChange(!on)}
-      className={`flex h-5 w-9 shrink-0 items-center rounded-full px-0.5 transition-colors disabled:opacity-40 ${
-        on ? 'justify-end bg-accent-500' : 'justify-start bg-elev/15'
-      }`}
-    >
-      <span className="h-4 w-4 rounded-full bg-white shadow-sm" />
-    </button>
+      data-on={on}
+      className="cz-switch disabled:opacity-40"
+    />
   );
 }
 
-function Row({ icon, title, subtitle, right }: { icon: React.ReactNode; title: string; subtitle?: string; right: React.ReactNode }) {
+function Row({ title, subtitle, right }: { title: React.ReactNode; subtitle?: React.ReactNode; right?: React.ReactNode }) {
   return (
-    <div className="flex items-center justify-between gap-3 py-2.5">
-      <div className="flex min-w-0 items-start gap-2.5">
-        <span className="mt-0.5 text-ink-400">{icon}</span>
-        <div className="min-w-0">
-          <p className="text-sm text-ink-100">{title}</p>
-          {subtitle && <p className="mt-0.5 text-xs text-ink-400">{subtitle}</p>}
-        </div>
+    <div className="flex items-center gap-3.5 border-b border-elev/10 py-[11px] last:border-0 max-[520px]:flex-wrap">
+      <div className="min-w-0 flex-1">
+        <div className="text-[14px] text-ink-50">{title}</div>
+        {subtitle && <span className="mt-0.5 block text-[12.5px] leading-snug text-ink-500">{subtitle}</span>}
       </div>
-      <div className="shrink-0">{right}</div>
+      {right && <div className="shrink-0">{right}</div>}
     </div>
   );
 }
+
+const fieldCls = 'cz-field h-[34px] w-28 text-[14px]';
 
 interface Props {
   user: CloudUser;
@@ -136,27 +124,16 @@ interface Props {
   onThemeChange: (v: ThemeMode) => void;
   density: Density;
   onDensityChange: (v: Density) => void;
-  uiMode: UiMode;
-  onUiModeChange: (v: UiMode) => void;
-}
-
-function LinkRow({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="flex w-full items-center justify-between rounded-lg px-2 py-2 text-sm text-ink-200 hover:bg-elev/[0.06]"
-    >
-      <span className="flex items-center gap-2.5">{icon} {label}</span>
-      <ChevronRight size={15} className="text-ink-500" />
-    </button>
-  );
+  runDetail: boolean;
+  onRunDetailChange: (v: boolean) => void;
+  /** Every chat was deleted: the parent clears its list and the open chat. */
+  onChatsCleared: () => void;
 }
 
 export default function SettingsModal({
   user, onClose, onOpenSkills, onOpenMemory, onOpenConnectors, onOpenKeyVault, onOpenUpgrade, onLogout,
   onLocalModelChange, onReduceMotionChange,
-  theme, onThemeChange, density, onDensityChange, uiMode, onUiModeChange,
+  theme, onThemeChange, density, onDensityChange, runDetail, onRunDetailChange, onChatsCleared,
 }: Props) {
   const cap = detectLocalModelCapability();
   const [localOn, setLocalOn] = useState(localModelEnabled());
@@ -172,16 +149,14 @@ export default function SettingsModal({
   const [webDefault, setWebDefault] = useState<boolean>(() => defaultWebSearch());
   const isPro = user.plan === 'pro';
 
-  // Tabbed layout so the (now long) settings never force an awkward scroll —
-  // each pane is short. The active pane still scrolls internally if needed.
   type Tab = 'general' | 'appearance' | 'chat' | 'advanced' | 'privacy';
   const [tab, setTab] = useState<Tab>('general');
-  const TABS: Array<{ id: Tab; label: string; icon: React.ReactNode }> = [
-    { id: 'general', label: 'General', icon: <User size={14} /> },
-    { id: 'appearance', label: 'Appearance', icon: <Palette size={14} /> },
-    { id: 'chat', label: 'Chat', icon: <MessageSquare size={14} /> },
-    { id: 'advanced', label: 'Advanced', icon: <SlidersHorizontal size={14} /> },
-    { id: 'privacy', label: 'Privacy', icon: <Shield size={14} /> },
+  const TABS: Array<{ id: Tab; label: string }> = [
+    { id: 'general', label: 'General' },
+    { id: 'appearance', label: 'Appearance' },
+    { id: 'chat', label: 'Chat' },
+    { id: 'advanced', label: 'Advanced' },
+    { id: 'privacy', label: 'Privacy' },
   ];
 
   function updateTierParam(key: 't1' | 't2' | 't3', v: TierParam) {
@@ -205,45 +180,54 @@ export default function SettingsModal({
     onReduceMotionChange(v);
   }
 
-  return (
-    <Modal title="Settings" onClose={onClose} maxWidth="max-w-lg">
-      {/* Tab bar — horizontally scrollable so it never breaks the layout at
-          narrow widths; the active pane below carries the content. */}
-      <div className="flex gap-1 overflow-x-auto border-b border-elev/10 px-3 pt-2">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            aria-pressed={tab === t.id}
-            onClick={() => setTab(t.id)}
-            className={`flex shrink-0 items-center gap-1.5 rounded-t-lg px-3 py-2 text-xs font-medium transition-colors ${
-              tab === t.id
-                ? 'border-b-2 border-accent-500 text-ink-100'
-                : 'border-b-2 border-transparent text-ink-400 hover:text-ink-100'
-            }`}
-          >
-            {t.icon} {t.label}
-          </button>
-        ))}
-      </div>
+  async function clearAll() {
+    if (!window.confirm("Delete all your chats? This can't be undone.")) return;
+    try {
+      await deleteAllConversations();
+      onChatsCleared();
+      toast('All chats deleted');
+    } catch {
+      toast('Could not delete all chats.');
+    }
+  }
 
-      <div className="flex max-h-[60dvh] flex-col gap-1 overflow-y-auto p-4 text-sm text-ink-100">
+  const manage = (label: string, open: () => void) => (
+    <button type="button" aria-label={`Manage ${label}`} onClick={() => { onClose(); open(); }} className="cz-btn cz-btn-ghost cz-btn-sm">Manage</button>
+  );
+  const plan = user.plan ? user.plan.charAt(0).toUpperCase() + user.plan.slice(1) : 'Free';
+  const via = user.provider ? user.provider.charAt(0).toUpperCase() + user.provider.slice(1) : null;
+
+  return (
+    <Modal title="Settings" onClose={onClose} maxWidth="max-w-[720px]">
+      <div className="grid min-h-[340px] gap-[18px] px-5 pb-5 pt-1.5 sm:grid-cols-[150px_1fr]">
+        <nav role="tablist" aria-label="Settings sections" aria-orientation="vertical" className="flex gap-0.5 overflow-x-auto sm:flex-col">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              role="tab"
+              id={`settings-tab-${t.id}`}
+              aria-selected={tab === t.id}
+              aria-controls="settings-panel"
+              onClick={() => setTab(t.id)}
+              className={`shrink-0 rounded-lg px-2.5 py-[7px] text-left text-[14px] ${
+                tab === t.id ? 'bg-sunk text-ink-50' : 'text-ink-300 hover:text-ink-50'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </nav>
+
+        <div id="settings-panel" role="tabpanel" aria-labelledby={`settings-tab-${tab}`} className="min-w-0">
         {tab === 'general' && (
           <>
-            {/* Account */}
-            <div className="mb-1 rounded-lg bg-elev/[0.04] px-3 py-2.5">
-              <p className="font-medium text-ink-100">{user.name ?? 'Signed in'}</p>
-              {user.email && <p className="text-xs text-ink-400">{user.email}</p>}
-              <div className="mt-1.5 flex items-center gap-2">
-                <span className="rounded bg-elev/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-300">
-                  {user.plan} plan
-                </span>
-                <span className="text-[10px] text-ink-500">via {user.provider}</span>
-              </div>
-            </div>
-
             <Row
-              icon={<Cpu size={15} />}
+              title={user.name ?? user.email ?? 'Signed in'}
+              subtitle={`${via ? `Signed in with ${via} · ` : ''}${plan}${user.email && user.name ? ` · ${user.email}` : ''}`}
+              right={<button type="button" onClick={() => { onClose(); onLogout(); }} className="cz-btn cz-btn-ghost cz-btn-sm">Sign out</button>}
+            />
+            <Row
               title="On-device assist"
               subtitle={
                 cap.supported
@@ -252,28 +236,21 @@ export default function SettingsModal({
               }
               right={<Toggle on={localOn && cap.supported} onChange={toggleLocal} disabled={!cap.supported} label="On-device assist" />}
             />
-
-            <p className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-ink-400">Manage</p>
-            <LinkRow icon={<Sparkles size={15} className="text-ink-400" />} label="Skills" onClick={() => { onClose(); onOpenSkills(); }} />
-            <LinkRow icon={<Brain size={15} className="text-ink-400" />} label="Memory" onClick={() => { onClose(); onOpenMemory(); }} />
-            <LinkRow icon={<Plug size={15} className="text-ink-400" />} label="Connectors & MCP" onClick={() => { onClose(); onOpenConnectors(); }} />
-            <LinkRow icon={<KeyRound size={15} className="text-ink-400" />} label="API keys" onClick={() => { onClose(); onOpenKeyVault(); }} />
-            <LinkRow icon={<Crown size={15} className="text-ink-400" />} label="Upgrade" onClick={() => { onClose(); onOpenUpgrade(); }} />
-
-            <button
-              type="button"
-              onClick={() => { onClose(); onLogout(); }}
-              className="mt-2 flex items-center gap-2.5 rounded-lg px-2 py-2 text-sm text-danger-300 hover:bg-danger-500/10"
-            >
-              <LogOut size={15} /> Sign out
-            </button>
+            <Row title="Skills" subtitle="Reusable personas for a chat" right={manage('Skills', onOpenSkills)} />
+            <Row title="Memory" subtitle="Facts Cascade keeps across chats" right={manage('Memory', onOpenMemory)} />
+            <Row title="Connectors & MCP" subtitle="Apps and MCP servers Cascade can use" right={manage('Connectors', onOpenConnectors)} />
+            <Row title="API keys" subtitle="Your provider keys, encrypted on this device" right={manage('API keys', onOpenKeyVault)} />
+            <Row
+              title="Plan"
+              subtitle={plan}
+              right={<button type="button" onClick={() => { onClose(); onOpenUpgrade(); }} className="cz-btn cz-btn-ghost cz-btn-sm">Upgrade</button>}
+            />
           </>
         )}
 
         {tab === 'appearance' && (
           <>
             <Row
-              icon={<Sun size={15} />}
               title="Theme"
               subtitle="Light, dark, or follow your system."
               right={
@@ -282,15 +259,14 @@ export default function SettingsModal({
                   value={theme}
                   onChange={onThemeChange}
                   options={[
-                    { value: 'light', label: 'Light', icon: <Sun size={13} /> },
-                    { value: 'dark', label: 'Dark', icon: <Moon size={13} /> },
-                    { value: 'system', label: 'System', icon: <Monitor size={13} /> },
+                    { value: 'light', label: 'Light' },
+                    { value: 'dark', label: 'Dark' },
+                    { value: 'system', label: 'System' },
                   ]}
                 />
               }
             />
             <Row
-              icon={<Rows3 size={15} />}
               title="Density"
               subtitle="Comfortable spacing or a tighter, compact layout."
               right={
@@ -306,23 +282,11 @@ export default function SettingsModal({
               }
             />
             <Row
-              icon={<LayoutGrid size={15} />}
-              title="View"
-              subtitle="Simple keeps chat minimal; Advanced reveals routing controls and tier detail."
-              right={
-                <Segmented
-                  label="View mode"
-                  value={uiMode}
-                  onChange={onUiModeChange}
-                  options={[
-                    { value: 'simple', label: 'Simple' },
-                    { value: 'advanced', label: 'Advanced' },
-                  ]}
-                />
-              }
+              title="Run detail"
+              subtitle="Show the plan and agent tree while a run works."
+              right={<Toggle on={runDetail} onChange={onRunDetailChange} label="Run detail" />}
             />
             <Row
-              icon={<Eye size={15} />}
               title="Reduce motion"
               subtitle="Minimize animations and transitions."
               right={<Toggle on={reduceMotion} onChange={toggleMotion} label="Reduce motion" />}
@@ -333,8 +297,7 @@ export default function SettingsModal({
         {tab === 'chat' && (
           <>
             <Row
-              icon={<Sparkles size={15} />}
-              title="Default response bias"
+              title="Default routing"
               subtitle="How new chats start: Auto balances cost & quality, Quality favors stronger models, Fast favors cheaper/quicker ones. Change it per chat anytime."
               right={
                 <Segmented
@@ -350,40 +313,41 @@ export default function SettingsModal({
               }
             />
             <Row
-              icon={<Globe size={15} />}
               title="Web search by default"
               subtitle="Start new chats with web search & fetch enabled. Off keeps chat as pure conversation until you toggle it on."
               right={<Toggle on={webDefault} onChange={(v) => { setWebDefault(v); setDefaultWebSearch(v); }} label="Web search by default" />}
             />
-            <div className="flex items-start gap-2.5 py-2.5">
-              <span className="mt-0.5 text-ink-400"><Zap size={15} /></span>
-              <div className="min-w-0 flex-1">
-                <p className="text-sm text-ink-100">Fast answer model</p>
-                <p className="mt-0.5 text-xs text-ink-400">The model the ⚡ Fast answer button uses. Leave blank to auto-pick a capable mid-tier model.</p>
-                <input
-                  value={fastModel}
-                  onChange={(e) => { setFastModel(e.target.value); setFastAnswerModel(e.target.value); }}
-                  placeholder="auto — e.g. gpt-4o-mini"
-                  spellCheck={false}
-                  className="mt-1.5 w-full rounded-md border border-elev/10 bg-elev/[0.04] px-2.5 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-500 focus:border-accent-500/40"
-                />
-              </div>
-            </div>
+            <Row
+              title="Fast answer model"
+              subtitle={
+                <>
+                  The model Fast answer uses. Leave blank to auto-pick a capable mid-tier model.
+                  <input
+                    value={fastModel}
+                    onChange={(e) => { setFastModel(e.target.value); setFastAnswerModel(e.target.value); }}
+                    placeholder="auto — e.g. gpt-4o-mini"
+                    spellCheck={false}
+                    aria-label="Fast answer model"
+                    className="cz-field mt-2 h-[34px] text-[14px]"
+                  />
+                </>
+              }
+            />
           </>
         )}
 
         {tab === 'advanced' && (
           <>
-            <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-400">
+            <p className="m-0 flex items-center gap-1.5 pt-2 text-[11.5px] font-medium tracking-[0.02em] text-ink-500">
               <SlidersHorizontal size={12} /> Model parameters
             </p>
-            <p className="mb-1 text-xs text-ink-400">
+            <p className="mb-1 mt-1 text-[12.5px] text-ink-500">
               Per-tier limit on a <strong>single model call</strong> (its output ceiling) and sampling
               temperature. Blank = the model's default. This is not a whole-run budget — for that,
               see "Max tokens per run" and "Per-run cost cap" below.
             </p>
-            <div className="rounded-lg border border-elev/10 bg-elev/[0.03] px-3 py-2">
-              <div className="flex items-center gap-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-ink-500">
+            <div className="rounded-[10px] bg-sunk/60 px-3 py-2">
+              <div className="flex items-center gap-2 pb-1 text-[11px] font-medium text-ink-500">
                 <span className="w-16">Tier</span>
                 <span className="w-24">Max tokens/call</span>
                 <span className="w-24">Temperature</span>
@@ -399,7 +363,6 @@ export default function SettingsModal({
             </div>
 
             <Row
-              icon={<Layers size={15} />}
               title="Extended context"
               subtitle="Compact history and oversized inputs so they fit the model's window — a big paste is chunked, summarized, and combined (with a one-tap confirm before the extra calls)."
               right={
@@ -411,22 +374,23 @@ export default function SettingsModal({
               }
             />
             {extCtx.enabled && (
-              <div className="flex items-center justify-between gap-3 pb-1 pl-7">
-                <span className="text-xs text-ink-400">Max size past the window (before truncating)</span>
-                <Segmented
-                  label="Extended context cap"
-                  value={String(extCtx.maxMultiplier)}
-                  onChange={(v) => updateExtCtx({ ...extCtx, maxMultiplier: v === '3' ? 3 : 2 })}
-                  options={[
-                    { value: '2', label: '2×' },
-                    { value: '3', label: '3×' },
-                  ]}
-                />
-              </div>
+              <Row
+                title={<span className="text-[13px] text-ink-300">Max size past the window (before truncating)</span>}
+                right={
+                  <Segmented
+                    label="Extended context cap"
+                    value={String(extCtx.maxMultiplier)}
+                    onChange={(v) => updateExtCtx({ ...extCtx, maxMultiplier: v === '3' ? 3 : 2 })}
+                    options={[
+                      { value: '2', label: '2×' },
+                      { value: '3', label: '3×' },
+                    ]}
+                  />
+                }
+              />
             )}
 
             <Row
-              icon={<Gauge size={15} />}
               title="Max tokens per run"
               subtitle="Hard ceiling on total tokens a single run may spend across all tiers — a runaway multi-agent run stops here. Blank = the default (200k). The per-run cost limit still applies."
               right={
@@ -440,13 +404,12 @@ export default function SettingsModal({
                     setMaxTokensPerRun(v);
                   }}
                   placeholder="200000"
-                  className="w-28 shrink-0 rounded-md border border-elev/10 bg-elev/[0.04] px-2.5 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-500 focus:border-accent-500/40"
+                  className={fieldCls}
                 />
               }
             />
 
             <Row
-              icon={<Gauge size={15} />}
               title="Per-run cost cap (USD)"
               subtitle="A single run stops once its estimated spend reaches this, so a runaway multi-agent run can't drain your API budget. You pay providers directly with your own keys. Blank = the default ($0.50). Range $0.05–$25."
               right={
@@ -460,7 +423,7 @@ export default function SettingsModal({
                     setMaxCostPerRunUsd(v);
                   }}
                   placeholder="0.50"
-                  className="w-28 shrink-0 rounded-md border border-elev/10 bg-elev/[0.04] px-2.5 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-500 focus:border-accent-500/40"
+                  className={fieldCls}
                 />
               }
             />
@@ -470,7 +433,6 @@ export default function SettingsModal({
         {tab === 'privacy' && (
           <>
             <Row
-              icon={<Brain size={15} />}
               title="Remember chats in Memory"
               subtitle="Opt-in: after a chat, Cascade distills durable facts (your preferences, project details) into Memory so future chats remember them. Off by default — you manage and delete these in the Memory panel."
               right={
@@ -482,7 +444,6 @@ export default function SettingsModal({
               }
             />
             <Row
-              icon={<LineChart size={15} />}
               title="Improve routing for everyone"
               subtitle={
                 isPro
@@ -497,14 +458,18 @@ export default function SettingsModal({
                     label="Share anonymous performance data"
                   />
                 ) : (
-                  <span className="shrink-0 rounded bg-elev/[0.06] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-400">
-                    Always on
-                  </span>
+                  <span className="rounded-full bg-sunk px-2 py-px text-[11px] text-ink-300">Always on</span>
                 )
               }
             />
+            <Row
+              title="Delete all chats"
+              subtitle="Removes every chat and its messages. This can't be undone."
+              right={<button type="button" onClick={() => void clearAll()} className="cz-btn cz-btn-danger cz-btn-sm">Delete</button>}
+            />
           </>
         )}
+        </div>
       </div>
     </Modal>
   );
