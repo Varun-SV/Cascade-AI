@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { ToolRegistry } from '../registry.js';
 import { PrivacyPaths } from '../../core/privacy/paths.js';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { BUILT_IN_PROTECTED } from '../../config/ignore.js';
 import { projectStateDir, statePath } from '../../config/project-state.js';
 import { ProcessJail, bwrapArgs, collectHidden, detectJail, homeSecrets, scrubEnv, seatbeltProfile, toPathspecs, unixSocketFilter, type JailKind, type JailPolicy, withIncludes } from './process-jail.js';
@@ -443,17 +443,19 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: what shell, run_code and git can re
   });
 
   it('git runs in the same jail', async () => {
-    let out: string;
-    try {
-      out = await registry().execute('git', { operation: 'diff', args: ['--no-index', '/dev/null', '.env'] }, exec);
-    } catch (err) {
-      out = String(err);
-    }
+    // The git tool refuses to name .env itself now; launched as the tool
+    // launches git, the jail still keeps it out of reach.
+    const jail = new ProcessJail(policy({ detect: async () => 'bwrap' }));
+    const git = await jail.prepare('git', ['diff', '--no-index', '/dev/null', '.env'], { cwd: ws, offline: false, keepGit: true, confinesItself: true });
+    if (!git.ok) throw new Error(git.reason);
+    const r = spawnSync(git.launch.file, git.launch.args, { cwd: git.launch.cwd, env: git.launch.env, encoding: 'utf8' });
+    await git.launch.done?.();
+    const out = `${r.stdout}${r.stderr}`;
+    expect(git.launch.file).toBe('bwrap');
     expect(out).not.toContain(SECRET);
-    // It ran, and was refused the file by the jail — not by simple-git, which
-    // rejects an environment handed to it that holds EDITOR or the like.
-    expect(out).not.toMatch(/not permitted/);
     expect(out).toMatch(/Permission denied|unsupported file type|could not|unable/i);
+    // And through the tool, it is refused before git runs.
+    await expect(registry().execute('git', { operation: 'diff', args: ['--no-index', '/dev/null', '.env'] }, exec)).rejects.toThrow(/cannot compare \.env: it is protected/);
   });
 
   it('hides Cascade\'s global folder whole', async () => {

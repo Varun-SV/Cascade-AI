@@ -10,6 +10,7 @@ import { simpleGit, type SimpleGit } from 'simple-git';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
 import { globalGitConfigFiles } from './jail/process-jail.js';
+import { resolveInWorkspace } from './utils/workspace-path.js';
 
 /** Where the git tool looks for hooks: nowhere. */
 const NO_HOOKS = `core.hooksPath=${process.platform === 'win32' ? 'NUL' : '/dev/null'}`;
@@ -56,7 +57,10 @@ export class GitTool extends BaseTool {
   async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const operation = input['operation'] as string;
     const args = (input['args'] as string[] | undefined) ?? [];
-    const cwd = (input['cwd'] as string | undefined) ?? this.workspaceRoot;
+    // In the workspace: outside a repository, git diff compares any two
+    // files it is given — the jail keeps the home credentials in view of
+    // this tool, for pushing, and without a jail nothing is hidden at all.
+    const cwd = resolveInWorkspace(this.workspaceRoot, (input['cwd'] as string | undefined) ?? '.');
 
     const offline = options.isOffline?.() === true;
     const { git, done } = await this.gitFor(cwd, offline);
@@ -74,6 +78,7 @@ export class GitTool extends BaseTool {
           return this.formatStatus(status);
         }
         case 'diff': {
+          this.checkDiffOperands(args, cwd, options);
           // --no-index compares two files, which the jail itself hides when
           // they are hidden; git takes no pathspecs alongside them.
           const scoped = exclusions.length && !args.includes('--no-index')
@@ -136,6 +141,37 @@ export class GitTool extends BaseTool {
       throw new Error(`git ${operation} failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       await done();
+    }
+  }
+
+  /**
+   * What a diff may read. With --no-index — or on its own, when a path lies
+   * outside the work tree or the call is not in a repository — git diff
+   * compares any two files, and this tool keeps the home credentials in view
+   * for pushing. So every operand that names a file must be one in the
+   * workspace that this call could read with file_read; the rest are
+   * revisions or pathspecs for git to look up in the repository. --output,
+   * which writes the diff to a file of the caller's choosing, is refused.
+   */
+  private checkDiffOperands(args: string[], cwd: string, options: ToolExecuteOptions): void {
+    const mayRead = this.readGate(options);
+    let options_ = true;
+    for (const arg of args) {
+      if (options_ && arg === '--') { options_ = false; continue; }
+      if (options_ && arg.startsWith('-')) {
+        if (arg === '--output' || arg.startsWith('--output=')) throw new Error('git diff --output is not allowed: it writes a file.');
+        continue;
+      }
+      if (arg === '/dev/null') continue;
+      const abs = path.resolve(cwd, arg);
+      if (!fs.existsSync(abs)) continue;
+      let inWorkspace: string;
+      try { inWorkspace = resolveInWorkspace(this.workspaceRoot, abs); } catch {
+        throw new Error(`git diff cannot compare ${arg}: it is outside the workspace.`);
+      }
+      if (this.isProtectedPath(inWorkspace) || !mayRead(inWorkspace)) {
+        throw new Error(`git diff cannot compare ${arg}: it is protected.`);
+      }
     }
   }
 
