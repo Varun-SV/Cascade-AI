@@ -1,11 +1,12 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import Composer from './Composer.js';
 import { CHECKING, type BrowserAllowanceView } from './browserAllowance.js';
 
 vi.mock('../lib/api.js', () => ({
-  uploadImage: vi.fn(),
+  uploadImage: vi.fn().mockResolvedValue({ id: 'img 1', mime: 'image/png' }),
+  uploadUrl: (id: string) => `/api/uploads/${encodeURIComponent(id)}`,
   uploadDocument: vi.fn(),
   fetchMcpServers: vi.fn().mockResolvedValue({ servers: [] }),
   setMcpServerEnabled: vi.fn(),
@@ -125,5 +126,16 @@ describe('the composer menus', () => {
     fireEvent.click(screen.getByRole('menuitemradio', { name: 'T2 only' }));
     expect(onRoutingModeChange).toHaveBeenCalledWith('quality');
     expect(onForceTierChange).toHaveBeenCalledWith('T2');
+  });
+});
+
+describe('attachments', () => {
+  it('previews an image from the server’s copy of the upload, not a URL built from the picked file', async () => {
+    renderComposer();
+    const input = document.querySelector('input[type="file"][multiple]') as HTMLInputElement;
+    const png = new File([new Uint8Array([137, 80, 78, 71])], 'pixel.png', { type: 'image/png' });
+    fireEvent.change(input, { target: { files: [png] } });
+    const img = await waitFor(() => screen.getByAltText('pending'));
+    expect(img.getAttribute('src')).toBe('/api/uploads/img%201');
   });
 });

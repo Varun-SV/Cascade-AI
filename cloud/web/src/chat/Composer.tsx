@@ -6,7 +6,7 @@ import {
   ChevronDown, Sparkles, Settings2, Plug,
 } from 'lucide-react';
 import Menu, { type MenuItem } from '../components/Menu.js';
-import { fetchMcpServers, setMcpServerEnabled, uploadImage, uploadDocument, type McpServer } from '../lib/api.js';
+import { fetchMcpServers, setMcpServerEnabled, uploadImage, uploadDocument, uploadUrl, type McpServer } from '../lib/api.js';
 import type { Skill } from '../lib/types.js';
 import type { ChatAttachment, ForceTier, RoutingMode, SendInput } from './useChatSession.js';
 
@@ -32,10 +32,10 @@ function isDocument(f: File): boolean {
   return DOC_MIME.has(f.type) || DOC_EXT.test(f.name);
 }
 
-interface Pending extends ChatAttachment {
-  /** Object URL for image previews; absent for documents. */
-  previewUrl?: string;
-}
+// An image is uploaded before it joins the list, so its preview is the
+// server's copy (`uploadUrl`), exactly as the sent message will show it —
+// not an object URL built in the page from the picked file.
+type Pending = ChatAttachment;
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -142,7 +142,7 @@ export default function Composer({
           if (isImage(file)) {
             const { id, mime } = await uploadImage(file.type, base64);
             setPending((prev) =>
-              prev.length >= MAX_FILES ? prev : [...prev, { id, mime, kind: 'image', previewUrl: URL.createObjectURL(file) }],
+              prev.length >= MAX_FILES ? prev : [...prev, { id, mime, kind: 'image' }],
             );
           } else {
             const res = await uploadDocument(file.type || 'application/octet-stream', base64, file.name);
@@ -162,11 +162,7 @@ export default function Composer({
   }
 
   function removePending(id: string) {
-    setPending((prev) => {
-      const gone = prev.find((p) => p.id === id);
-      if (gone?.previewUrl) URL.revokeObjectURL(gone.previewUrl);
-      return prev.filter((p) => p.id !== id);
-    });
+    setPending((prev) => prev.filter((p) => p.id !== id));
   }
 
   function submit() {
@@ -179,7 +175,6 @@ export default function Composer({
     setFastNext(false);
     setInput('');
     setUploadError(null);
-    pending.forEach((p) => { if (p.previewUrl) URL.revokeObjectURL(p.previewUrl); });
     setPending([]);
   }
 
@@ -312,7 +307,7 @@ export default function Composer({
               </div>
             ) : (
               <div key={p.id} className="relative">
-                <img src={p.previewUrl} alt="pending" className="block h-[52px] w-[52px] rounded-lg object-cover" />
+                <img src={uploadUrl(p.id)} alt="pending" className="block h-[52px] w-[52px] rounded-lg object-cover" />
                 <RemoveAttachment onClick={() => removePending(p.id)} />
               </div>
             ),
