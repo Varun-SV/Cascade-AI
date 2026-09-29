@@ -4,6 +4,8 @@ test.use({ viewport: { width: 360, height: 740 }, isMobile: true, hasTouch: true
 
 test('on a phone the text box has its own line above the controls, and no sideways scroll', async ({ page }) => {
   await page.goto('/');
+  // Sign-in lives in a dialog opened from the landing page.
+  await page.getByRole('button', { name: 'Sign in' }).click();
   await page.getByPlaceholder('Your name').fill('E2E Phone');
   await page.getByText('Dev login').click();
 

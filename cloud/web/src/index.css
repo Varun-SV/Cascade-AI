@@ -352,6 +352,13 @@ body {
   }
 }
 
+/* The landing page's arcs draw in, one tier after another. */
+.cz-arc { animation: czDraw 1s ease both; }
+@keyframes czDraw {
+  from { stroke-dashoffset: 1; }
+  to { stroke-dashoffset: 0; }
+}
+
 @keyframes czRise {
   from { opacity: 0; transform: translateY(6px); }
 }

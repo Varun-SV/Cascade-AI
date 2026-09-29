@@ -64,7 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   composer whose attach, skill, tools and routing controls live in three
   menus, with whatever is switched on shown as a removable chip. "Run detail"
   replaces the Simple / Advanced view, and an orchestrated reply keeps its
-  agent tree, folded above the answer. See `docs/design/calm-direction.md`.
+  agent tree, folded above the answer. The landing page follows the
+  prototype's layout too — the arcs card, a receipt, where Cascade runs, the
+  desktop downloads and the two plans — and signing in opens a small dialog
+  instead of sending you to the bottom of the page. See
+  `docs/design/calm-direction.md`.
 
 ### Fixed
 - **Maths in an answer is typeset, whichever way the model wrote it.** GPT
