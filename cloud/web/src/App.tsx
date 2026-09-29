@@ -251,9 +251,7 @@ export default function App() {
     try { await deleteConversation(id); removedConversation(id); } catch { toast('Could not delete that chat.'); }
   }
 
-  async function renameActive(title: string) {
-    const id = chat.conversationId;
-    if (!id) return;
+  async function renameChat(id: string, title: string) {
     try {
       // The server keeps at most 120 characters; show what it stored.
       const stored = (await renameConversation(id, title)).title;
@@ -365,7 +363,7 @@ export default function App() {
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <ChatTopBar
           title={activeTitle}
-          hasConversation={!!chat.conversationId}
+          conversationId={chat.conversationId}
           // On a phone the sidebar is an overlay, so the chat always needs a way to open it.
           sidebarOpen={sidebarOpen && desktop}
           onOpenSidebar={() => setSidebar(true)}
@@ -373,7 +371,7 @@ export default function App() {
           spentUsd={spentUsd}
           savedReplies={savedReplies}
           onShowWhy={() => { if (lastWithWhy) setWhyRequest({ messageId: lastWithWhy.id, seq: Date.now() }); }}
-          onRename={renameActive}
+          onRename={renameChat}
           onContinueElsewhere={() => setShowContinue(true)}
           onOpenFiles={() => setShowFiles(true)}
           onDeleteChat={() => void deleteActive()}
@@ -510,6 +508,7 @@ export default function App() {
             onChange={refreshSkills}
             activeSkillId={skillId}
             onUse={setSkillId}
+            useLocked={chat.busy}
           />
         )}
         {showContinue && (

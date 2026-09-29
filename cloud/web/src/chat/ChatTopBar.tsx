@@ -1,11 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { PanelLeft, ChevronDown, TrendingDown, Pencil, Folder, MonitorSmartphone, Trash2 } from 'lucide-react';
 import Menu, { type MenuItem } from '../components/Menu.js';
 
 interface Props {
   title: string | undefined;
-  /** False until the chat exists on the server: a new chat has nothing to rename or delete. */
-  hasConversation: boolean;
+  /** Undefined until the chat exists on the server: a new chat has nothing to rename or delete. */
+  conversationId: string | undefined;
   sidebarOpen: boolean;
   onOpenSidebar: () => void;
   /** What delegation saved across this chat's replies (from their stored /why reports). */
@@ -15,7 +15,7 @@ interface Props {
   savedReplies?: number;
   /** Opens /why on the latest reply. */
   onShowWhy: () => void;
-  onRename: (title: string) => Promise<void>;
+  onRename: (conversationId: string, title: string) => Promise<void>;
   onContinueElsewhere: () => void;
   onOpenFiles: () => void;
   onDeleteChat: () => void;
@@ -26,16 +26,22 @@ function money(v: number): string {
 }
 
 export default function ChatTopBar({
-  title, hasConversation, sidebarOpen, onOpenSidebar, savedUsd, spentUsd = 0, savedReplies = 0, onShowWhy,
+  title, conversationId, sidebarOpen, onOpenSidebar, savedUsd, spentUsd = 0, savedReplies = 0, onShowWhy,
   onRename, onContinueElsewhere, onOpenFiles, onDeleteChat,
 }: Props) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const [savedAnchor, setSavedAnchor] = useState<HTMLElement | null>(null);
-  const [renaming, setRenaming] = useState(false);
+  // The chat a rename began on: the draft is its title, and Save renames it.
+  const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
 
+  // Opening another chat drops an unsaved rename of this one.
+  useEffect(() => {
+    setRenaming((r) => (r && r !== conversationId ? null : r));
+  }, [conversationId]);
+
   const items: MenuItem[] = [
-    { kind: 'action', label: 'Rename', icon: <Pencil size={15} />, onSelect: () => { setDraft(title ?? ''); setRenaming(true); } },
+    { kind: 'action', label: 'Rename', icon: <Pencil size={15} />, onSelect: () => { setDraft(title ?? ''); setRenaming(conversationId ?? null); } },
     { kind: 'action', label: 'Files', icon: <Folder size={15} />, onSelect: onOpenFiles },
     { kind: 'action', label: 'Continue on another device', icon: <MonitorSmartphone size={15} />, onSelect: onContinueElsewhere },
     { kind: 'separator' },
@@ -77,9 +83,10 @@ export default function ChatTopBar({
 
   async function submitRename(e: React.FormEvent) {
     e.preventDefault();
+    const id = renaming;
     const next = draft.trim();
-    setRenaming(false);
-    if (next && next !== title) await onRename(next);
+    setRenaming(null);
+    if (id && next && next !== title) await onRename(id, next);
   }
 
   return (
@@ -97,14 +104,14 @@ export default function ChatTopBar({
             autoFocus
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Escape') setRenaming(false); }}
+            onKeyDown={(e) => { if (e.key === 'Escape') setRenaming(null); }}
             aria-label="Chat title"
             maxLength={120}
             className="cz-field h-8 w-[min(340px,50vw)]"
           />
           <button type="submit" className="cz-btn cz-btn-sm">Save</button>
         </form>
-      ) : hasConversation ? (
+      ) : conversationId ? (
         <button
           type="button"
           aria-haspopup="menu"

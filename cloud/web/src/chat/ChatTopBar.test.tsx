@@ -8,7 +8,7 @@ afterEach(cleanup);
 function renderBar(over: Partial<React.ComponentProps<typeof ChatTopBar>> = {}) {
   const props = {
     title: 'Postgres vs SQLite',
-    hasConversation: true,
+    conversationId: 'c1' as string | undefined,
     sidebarOpen: true,
     onOpenSidebar: vi.fn(),
     savedUsd: 0,
@@ -19,8 +19,8 @@ function renderBar(over: Partial<React.ComponentProps<typeof ChatTopBar>> = {}) 
     onDeleteChat: vi.fn(),
     ...over,
   };
-  render(<ChatTopBar {...props} />);
-  return props;
+  const { rerender } = render(<ChatTopBar {...props} />);
+  return { ...props, rerender };
 }
 
 describe('ChatTopBar', () => {
@@ -47,7 +47,18 @@ describe('ChatTopBar', () => {
     const input = screen.getByLabelText('Chat title');
     fireEvent.change(input, { target: { value: 'Storage choice' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(onRename).toHaveBeenCalledWith('Storage choice'));
+    await waitFor(() => expect(onRename).toHaveBeenCalledWith('c1', 'Storage choice'));
+  });
+
+  it('drops an unsaved rename when another chat opens, rather than renaming that one', () => {
+    const { onRename, rerender, ...props } = renderBar();
+    fireEvent.click(screen.getByRole('button', { name: /Postgres vs SQLite/ }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }));
+    fireEvent.change(screen.getByLabelText('Chat title'), { target: { value: 'Storage choice' } });
+    rerender(<ChatTopBar {...props} onRename={onRename} conversationId="c2" title="Team offsite plan" />);
+    expect(screen.queryByLabelText('Chat title')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Team offsite plan/ })).toBeInTheDocument();
+    expect(onRename).not.toHaveBeenCalled();
   });
 
   it('offers the sidebar back only while it is closed', () => {

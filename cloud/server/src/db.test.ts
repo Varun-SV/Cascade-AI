@@ -46,6 +46,17 @@ describe('CloudStore', () => {
     expect(store.searchConversations(u.id, 'postgres').map((c) => c.id)).toEqual([old.id]);
   });
 
+  it('searches titles in any case, in every script', () => {
+    const u = store.upsertUser({ provider: 'github', providerId: 'unicode', email: null, name: null, avatar: null });
+    const de = store.createConversation(u.id, 'Überblick 2026');
+    const ru = store.createConversation(u.id, 'Обзор рынка');
+    const gr = store.createConversation(u.id, 'ΣΧΕΔΙΟ ταξιδιού');
+    expect(store.searchConversations(u.id, 'über').map((c) => c.id)).toEqual([de.id]);
+    expect(store.searchConversations(u.id, 'ÜBERBLICK').map((c) => c.id)).toEqual([de.id]);
+    expect(store.searchConversations(u.id, 'обзор').map((c) => c.id)).toEqual([ru.id]);
+    expect(store.searchConversations(u.id, 'σχεδιο').map((c) => c.id)).toEqual([gr.id]);
+  });
+
   it('pages through search results from the last chat of each page, newest first', () => {
     const u = store.upsertUser({ provider: 'github', providerId: 'paging', email: null, name: null, avatar: null });
     const ids = [0, 1, 2, 3, 4].map((i) => store.createConversation(u.id, `Offsite ${i}`).id);

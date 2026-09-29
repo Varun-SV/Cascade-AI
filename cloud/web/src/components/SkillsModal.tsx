@@ -11,6 +11,8 @@ interface Props {
   /** The skill the composer is using, and a way to switch to another from here. */
   activeSkillId?: string;
   onUse?: (id: string) => void;
+  /** A run is working: it took its skill when it started, so switching waits for it to end. */
+  useLocked?: boolean;
 }
 
 interface DraftState {
@@ -22,7 +24,7 @@ interface DraftState {
 
 const EMPTY_DRAFT: DraftState = { id: null, name: '', description: '', systemPrompt: '' };
 
-export default function SkillsModal({ skills, onClose, onChange, activeSkillId, onUse }: Props) {
+export default function SkillsModal({ skills, onClose, onChange, activeSkillId, onUse, useLocked = false }: Props) {
   const [draft, setDraft] = useState<DraftState | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -57,7 +59,15 @@ export default function SkillsModal({ skills, onClose, onChange, activeSkillId, 
     !onUse ? null : id === activeSkillId ? (
       <span className="shrink-0 rounded-full bg-success-500/[0.14] px-2 py-px text-[11px] text-success-300">In use</span>
     ) : (
-      <button type="button" onClick={() => onUse(id)} className="cz-btn cz-btn-quiet cz-btn-sm shrink-0">Use</button>
+      <button
+        type="button"
+        onClick={() => onUse(id)}
+        disabled={useLocked}
+        title={useLocked ? 'Available when this run ends' : undefined}
+        className="cz-btn cz-btn-quiet cz-btn-sm shrink-0 disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        Use
+      </button>
     );
 
   return (
