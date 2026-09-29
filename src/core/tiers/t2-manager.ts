@@ -34,6 +34,7 @@ import { describeBrowserForPlanner } from './browser-planning.js';
 import { describeGenerationForPlanner } from '../multimodal/registry.js';
 import { compileSubtaskGraph } from '../orchestration/adapters.js';
 import { planSpecShape, typedFieldRules } from './plan-spec.js';
+import { keepFirst, workersWithin } from '../router/run-budget.js';
 
 // Built per-run so the peer-coordination hint only appears when the
 // peer_message tool is actually registered. On a restricted host (e.g. cloud
@@ -292,6 +293,13 @@ export class T2Manager extends BaseTier {
         }
       }
 
+      // No more workers than this section's share of the budget pays for.
+      const affordable = this.workersAffordable(assignment);
+      if (subtasks.length > affordable) {
+        this.log(`Budget: ${subtasks.length} workers planned, keeping the first ${affordable}.`);
+        subtasks = keepFirst(subtasks, affordable, (t) => t.subtaskId);
+      }
+
       this.sendStatusUpdate({
         progressPct: 20,
         currentAction: `Dispatching ${subtasks.length} T3 workers`,
@@ -531,7 +539,8 @@ export class T2Manager extends BaseTier {
     // run cannot produce is enough on its own to fail the subtask.
     const toolNames = this.toolRegistry.getToolDefinitions().map((t) => t.name);
     const spec = planSpecShape(canProduceFiles(toolNames), canProduceNonDiskDeliverables(toolNames));
-    const prompt = `Decompose this section into 1-4 concrete subtasks for T3 workers — the FEWEST that fully cover it (one subtask is the correct answer for a small section).${spec.preamble ? `\n\n${spec.preamble}` : ''}
+    const most = Math.min(4, this.workersAffordable(assignment));
+    const prompt = `Decompose this section into ${most === 1 ? '1 concrete subtask' : `1-${most} concrete subtasks`} for T3 workers — the FEWEST that fully cover it (one subtask is the correct answer for a small section).${most < 4 ? ' The task\'s budget pays for no more than that.' : ''}${spec.preamble ? `\n\n${spec.preamble}` : ''}
 
 Section: ${assignment.sectionTitle}
 Description: ${assignment.description}
@@ -585,6 +594,13 @@ Return ONLY the JSON array.`;
         executionMode: 'parallel',
       }];
     }
+  }
+
+  /** Workers this section's share of the budget pays for; unlimited without a cost cap. */
+  private workersAffordable(assignment: T1ToT2Assignment): number {
+    const share = assignment.budgetUsd ?? this.router.runBudget?.().workRemainingUsd;
+    if (share == null) return Number.POSITIVE_INFINITY;
+    return workersWithin(share, this.router.getModelForTier?.('T2'), this.router.getModelForTier?.('T3'));
   }
 
   private buildWorkerMap(assignments: T2ToT3Assignment[], taskId: string): Map<string, T3Worker> {

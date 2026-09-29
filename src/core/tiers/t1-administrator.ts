@@ -35,7 +35,7 @@ import { canProduceFiles, canProduceNonDiskDeliverables, hasFileWritingTool } fr
 import { planSpecShape, quotedFieldRules } from './plan-spec.js';
 import { REPORTING_INTEGRITY_RULE } from './integrity.js';
 import { describeBrowserForPlanner } from './browser-planning.js';
-import { assembleFinishedWork, isBudgetStop } from '../router/run-budget.js';
+import { assembleFinishedWork, isBudgetStop, keepFirst, sectionsWithin, workersWithin } from '../router/run-budget.js';
 
 /** Case-insensitive shared keywords between two keyword lists. */
 export function sharedKeywords(a: string[] = [], b: string[] = []): string[] {
@@ -144,6 +144,18 @@ export interface PlanApprovalMeta {
  */
 function producedOutput(result: T2Result): boolean {
   return result.status === 'COMPLETED' || result.status === 'PARTIAL';
+}
+
+/**
+ * The plan rule a budget adds: how many sections it pays for. Said only when
+ * it binds — a budget that pays for more than any plan would use is not worth
+ * a line of the planner's attention.
+ */
+function budgetRule(maxSections: number): string {
+  if (maxSections > 12) return '';
+  return `\n- BUDGET: what is left of this task's budget pays for about ${maxSections} section${maxSections === 1 ? '' : 's'} of two workers each. `
+    + 'Plan within that — fewer, broader sections and workers are better than a plan that runs out of money half-way. '
+    + 'A plan over it is cut to its first sections, in the order you list them, so put the essential ones first.';
 }
 
 /** A section's finished worker outputs, joined — its text when it has no summary. */
@@ -623,6 +635,10 @@ In 3-5 terse bullets, flag the most important RISKS, GAPS, or over-/under-decomp
     // scaffolds a project (see plan-spec.ts).
     const available = new Set(this.toolRegistry.getToolDefinitions().map((t) => t.name));
     const spec = planSpecShape(canProduceFiles([...available]), canProduceNonDiskDeliverables([...available]));
+    // What the run's cost cap has left for work, and how many sections it pays for.
+    const workUsd = this.router.runBudget?.().workRemainingUsd;
+    const maxSections = workUsd == null ? null
+      : sectionsWithin(workUsd, this.router.getModelForTier?.('T2'), this.router.getModelForTier?.('T3'));
     const decompositionPrompt = `Analyze this task and create an execution plan.${spec.preamble ? `\n\n${spec.preamble}` : ''}${contextSection}${worldStateContext}
 
     Task: ${prompt}
@@ -669,7 +685,7 @@ Leave dependsOn empty for sections that can run immediately in parallel.
 SPEC RULES — each subtask is a self-contained spec slice (workers execute from their slice ALONE):
 ${quotedFieldRules(spec)}
 - "contextBrief": 1-3 short sentences with the ONLY background the worker needs. It sees nothing else about the task, so make the brief self-sufficient — but never pad it.
-- RIGHT-SIZE the plan: use the FEWEST sections and workers that fully cover the task. One section with 1-2 subtasks is the CORRECT plan for a small task; padding a plan with filler sections wastes the user's money.`;
+- RIGHT-SIZE the plan: use the FEWEST sections and workers that fully cover the task. One section with 1-2 subtasks is the CORRECT plan for a small task; padding a plan with filler sections wastes the user's money.${maxSections != null ? budgetRule(maxSections) : ''}`;
 
     const messages: ConversationMessage[] = [{ role: 'user', content: decompositionPrompt }];
     const result = await this.generateTracked('T1', {
@@ -682,7 +698,7 @@ ${quotedFieldRules(spec)}
       const parsed = parseFirstJsonObject<TaskPlan>(result.content);
       if (!parsed) throw new Error('No JSON in T1 response');
       this.validatePlan(parsed);
-      return parsed;
+      return workUsd != null && maxSections != null ? this.fitPlanToBudget(parsed, workUsd, maxSections) : parsed;
     } catch {
       // Fallback: single section, single T3
       return {
@@ -708,6 +724,26 @@ ${quotedFieldRules(spec)}
         }],
       };
     }
+  }
+
+  /**
+   * Hold a plan to what the budget pays for. The planner is told the limit;
+   * a plan over it anyway keeps its first sections, in the order the planner
+   * wrote them, rather than starting work it cannot finish — and then each
+   * section keeps the workers its share of the budget pays for.
+   */
+  private fitPlanToBudget(plan: TaskPlan, workUsd: number, maxSections: number): TaskPlan {
+    if (plan.sections.length > maxSections) {
+      this.log(`Budget: plan has ${plan.sections.length} sections, keeping the first ${maxSections}.`);
+    }
+    const kept = keepFirst(plan.sections, maxSections, (sec) => sec.sectionId);
+    const maxWorkers = workersWithin(workUsd / kept.length, this.router.getModelForTier?.('T2'), this.router.getModelForTier?.('T3'));
+    const sections = kept.map((sec) => {
+      if (!sec.t3Subtasks || sec.t3Subtasks.length <= maxWorkers) return sec;
+      this.log(`Budget: "${sec.sectionTitle}" has ${sec.t3Subtasks.length} workers, keeping the first ${maxWorkers}.`);
+      return { ...sec, t3Subtasks: keepFirst(sec.t3Subtasks, maxWorkers, (t) => t.subtaskId) };
+    });
+    return { ...plan, sections };
   }
 
   private validatePlan(plan: TaskPlan): void {
@@ -753,6 +789,11 @@ ${quotedFieldRules(spec)}
   }
 
   private async dispatchT2Managers(sections: T1ToT2Assignment[]): Promise<T2Result[]> {
+    // Each section plans its workers within an equal share of what is left.
+    const workUsd = this.router.runBudget?.().workRemainingUsd;
+    if (workUsd != null && sections.length) {
+      for (const section of sections) section.budgetUsd = workUsd / sections.length;
+    }
     // Wire peer sync IDs
     for (const section of sections) {
       section.peerT2Ids = sections

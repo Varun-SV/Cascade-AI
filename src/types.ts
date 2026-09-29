@@ -410,6 +410,11 @@ export interface T1ToT2Assignment {
   executionMode?: 'parallel' | 'sequential';
   dependsOn?: string[];
   peerT2Ids?: string[];
+  /**
+   * This section's share of what the run's cost cap has left for work, when
+   * one is set. Its manager plans no more workers than that pays for.
+   */
+  budgetUsd?: number;
 }
 
 export interface T3SubtaskSpec {

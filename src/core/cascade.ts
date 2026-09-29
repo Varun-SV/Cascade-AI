@@ -20,9 +20,8 @@ import type { EscalationContext,
   T3Result
 } from '../types.js';
 import { CascadeRouter } from './router/index.js';
-import { wrapUpNote } from './router/run-budget.js';
+import { plannedCallUsd, T2_CALLS_PER_SECTION, T3_CALLS_PER_SUBTASK, wrapUpNote } from './router/run-budget.js';
 import { T1Administrator, type PlanApprovalDecision, type TaskPlan } from './tiers/t1-administrator.js';
-import { calculateCost } from '../utils/cost.js';
 import { T2Manager } from './tiers/t2-manager.js';
 import { composeRootSectionOutput, summaryLeadsRootAnswer } from './tiers/escalation-policy.js';
 import { ACTING_INTEGRITY_RULE } from './tiers/integrity.js';
@@ -1524,17 +1523,14 @@ export class Cascade extends EventEmitter {
    * the approval dialog, not an invoice — always label it "est."
    */
   private estimatePlanCost(plan: TaskPlan): number {
-    const T2_CALLS_PER_SECTION = 3;
-    const T3_CALLS_PER_SUBTASK = 4;
-    const IN_TOKENS = 1500;
-    const OUT_TOKENS = 700;
-    const t2Model = this.router.getTierModel('T2');
-    const t3Model = this.router.getTierModel('T3');
+    // The same shape a budget sizes plans with (router/run-budget.ts), so the
+    // estimate shown for approval and the plan the budget allows agree.
+    const t2Call = plannedCallUsd(this.router.getTierModel('T2'));
+    const t3Call = plannedCallUsd(this.router.getTierModel('T3'));
     let est = 0;
     for (const section of plan.sections) {
-      if (t2Model) est += T2_CALLS_PER_SECTION * calculateCost(IN_TOKENS, OUT_TOKENS, t2Model);
-      const subtasks = section.t3Subtasks?.length ?? 1;
-      if (t3Model) est += subtasks * T3_CALLS_PER_SUBTASK * calculateCost(IN_TOKENS, OUT_TOKENS, t3Model);
+      est += T2_CALLS_PER_SECTION * t2Call;
+      est += (section.t3Subtasks?.length ?? 1) * T3_CALLS_PER_SUBTASK * t3Call;
     }
     return est;
   }

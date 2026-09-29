@@ -12,6 +12,9 @@
 // whatever work is done. Work that would eat into that reserve is not started;
 // the answer is written instead. The cap itself stays the hard ceiling.
 
+import type { ModelInfo } from '../../types.js';
+import { calculateCost } from '../../utils/cost.js';
+
 /** The share of a per-run cap kept back for writing the answer. */
 export const WRAP_UP_RESERVE = 0.2;
 
@@ -71,4 +74,63 @@ export function wrapUpNote(budget: RunBudget): string {
     ? `$${budget.spentUsd.toFixed(2)} of this task's $${budget.capUsd.toFixed(2)} budget`
     : `${budget.usedTokens.toLocaleString()} of this task's ${(budget.capTokens ?? 0).toLocaleString()}-token budget`;
   return `_Budget: work stopped at ${spent}, so this answer covers what was finished. Raise the per-task budget for a fuller one._`;
+}
+
+// ── Sizing a plan to the budget ───────────────
+//
+// A plan is priced before it runs from the same rough shape the plan-approval
+// estimate uses: a model call reads about 1,500 tokens and writes about 700; a
+// section's manager makes about 3 calls and each worker about 4. Crude, but
+// the planner only needs to know whether the budget pays for two sections or
+// twenty — and the wrap-up above still catches a plan that runs over.
+
+export const PLANNED_CALL = { inputTokens: 1_500, outputTokens: 700 } as const;
+export const T2_CALLS_PER_SECTION = 3;
+export const T3_CALLS_PER_SUBTASK = 4;
+/** Workers a section is counted with when working out how many sections fit. */
+const WORKERS_PER_SECTION = 2;
+
+/** One call of the plan's shape on `model`; 0 when there is no model or no price. */
+export function plannedCallUsd(model: ModelInfo | null | undefined): number {
+  return model ? calculateCost(PLANNED_CALL.inputTokens, PLANNED_CALL.outputTokens, model) : 0;
+}
+
+/** How many workers a section's share of the budget pays for (Infinity when unpriced). */
+export function workersWithin(
+  sectionUsd: number,
+  t2: ModelInfo | null | undefined,
+  t3: ModelInfo | null | undefined,
+): number {
+  const worker = T3_CALLS_PER_SUBTASK * plannedCallUsd(t3);
+  if (!(worker > 0)) return Number.POSITIVE_INFINITY;
+  return Math.max(1, Math.floor((sectionUsd - T2_CALLS_PER_SECTION * plannedCallUsd(t2)) / worker));
+}
+
+/**
+ * How many sections `workUsd` pays for, each counted with two workers. Null
+ * when the models have no price — a local model costs nothing to fit a plan
+ * to. Always at least one: a budget too small for one section is the
+ * wrap-up's to handle, and a plan of nothing answers nothing.
+ */
+export function sectionsWithin(
+  workUsd: number,
+  t2: ModelInfo | null | undefined,
+  t3: ModelInfo | null | undefined,
+): number | null {
+  const section = T2_CALLS_PER_SECTION * plannedCallUsd(t2) + WORKERS_PER_SECTION * T3_CALLS_PER_SUBTASK * plannedCallUsd(t3);
+  if (!(section > 0)) return null;
+  return Math.max(1, Math.floor(workUsd / section));
+}
+
+/**
+ * The first `max` items, and their dependencies on anything dropped removed —
+ * a kept item must not wait on one that will never run.
+ */
+export function keepFirst<T extends { dependsOn?: string[] }>(items: readonly T[], max: number, id: (item: T) => string): T[] {
+  if (items.length <= max) return [...items];
+  const kept = items.slice(0, max);
+  const ids = new Set(kept.map(id));
+  return kept.map((item) => (item.dependsOn?.length
+    ? { ...item, dependsOn: item.dependsOn.filter((dep) => ids.has(dep)) }
+    : item));
 }
