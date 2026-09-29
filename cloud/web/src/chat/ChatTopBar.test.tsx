@@ -24,9 +24,14 @@ function renderBar(over: Partial<React.ComponentProps<typeof ChatTopBar>> = {}) 
 }
 
 describe('ChatTopBar', () => {
-  it('shows what this chat saved, and opens its explanation', () => {
-    const { onShowWhy } = renderBar({ savedUsd: 0.3412 });
-    fireEvent.click(screen.getByRole('button', { name: /saved \$0\.34/ }));
+  it('accounts for the whole chat, and opens the latest reply from there', () => {
+    const { onShowWhy } = renderBar({ savedUsd: 0.3, spentUsd: 0.1, savedReplies: 3 });
+    fireEvent.click(screen.getByRole('button', { name: /saved \$0\.30/ }));
+    expect(onShowWhy).not.toHaveBeenCalled();
+    const menu = screen.getByRole('menu', { name: 'What this chat saved' });
+    expect(menu).toHaveTextContent('Saved $0.30 · 75% less than all-T1');
+    expect(menu).toHaveTextContent('Across 3 replies that delegated below T1.');
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Explain the latest reply' }));
     expect(onShowWhy).toHaveBeenCalled();
   });
 

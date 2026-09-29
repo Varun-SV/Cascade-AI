@@ -70,7 +70,12 @@ export default function ConversationSidebar({
   }, [searchRequest]);
 
   async function remove(id: string) {
-    try { await deleteConversation(id); onDeleted(id); } catch { toast('Could not delete that chat.'); }
+    try {
+      await deleteConversation(id);
+      onDeleted(id);
+      // Search results are this component's own copy; the parent's list isn't.
+      setFound((f) => (f ? { ...f, conversations: f.conversations.filter((c) => c.id !== id) } : f));
+    } catch { toast('Could not delete that chat.'); }
   }
 
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {

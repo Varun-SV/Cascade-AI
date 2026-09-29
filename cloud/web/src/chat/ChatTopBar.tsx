@@ -10,7 +10,10 @@ interface Props {
   onOpenSidebar: () => void;
   /** What delegation saved across this chat's replies (from their stored /why reports). */
   savedUsd: number;
-  /** Opens /why on the latest reply — the saved figure's explanation. */
+  /** What those replies cost, and how many of them saved anything. */
+  spentUsd?: number;
+  savedReplies?: number;
+  /** Opens /why on the latest reply. */
   onShowWhy: () => void;
   onRename: (title: string) => Promise<void>;
   onContinueElsewhere: () => void;
@@ -23,10 +26,11 @@ function money(v: number): string {
 }
 
 export default function ChatTopBar({
-  title, hasConversation, sidebarOpen, onOpenSidebar, savedUsd, onShowWhy,
+  title, hasConversation, sidebarOpen, onOpenSidebar, savedUsd, spentUsd = 0, savedReplies = 0, onShowWhy,
   onRename, onContinueElsewhere, onOpenFiles, onDeleteChat,
 }: Props) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const [savedAnchor, setSavedAnchor] = useState<HTMLElement | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState('');
 
@@ -36,6 +40,39 @@ export default function ChatTopBar({
     { kind: 'action', label: 'Continue on another device', icon: <MonitorSmartphone size={15} />, onSelect: onContinueElsewhere },
     { kind: 'separator' },
     { kind: 'action', label: 'Delete chat', icon: <Trash2 size={15} />, onSelect: onDeleteChat },
+  ];
+
+  // The figure is the whole chat's, so it opens the whole chat's account —
+  // the latest reply's /why explains only that reply.
+  const allT1 = spentUsd + savedUsd;
+  const savedItems: MenuItem[] = [
+    {
+      kind: 'custom',
+      key: 'summary',
+      render: (
+        <div className="flex flex-col gap-2.5 px-[9px] py-2 text-[13px] text-ink-300">
+          <p className="m-0 font-medium text-ink-50">
+            Saved <span className="receipt text-success-300">${money(savedUsd)}</span>
+            {allT1 > 0 && <> · {Math.round((savedUsd / allT1) * 100)}% less than all-T1</>}
+          </p>
+          <div className="receipt grid grid-cols-[4.5rem_1fr_auto] items-center gap-x-2.5 gap-y-1.5 text-ink-400">
+            <span>This chat</span>
+            <span className="h-1.5 overflow-hidden rounded-full bg-sunk">
+              <span className="block h-full rounded-full" style={{ width: `${allT1 > 0 ? Math.max(2, (spentUsd / allT1) * 100) : 0}%`, background: 'var(--cascade-ramp-x)' }} />
+            </span>
+            <span>${spentUsd.toFixed(4)}</span>
+            <span>All on T1</span>
+            <span className="h-1.5 overflow-hidden rounded-full bg-sunk"><span className="block h-full w-full rounded-full bg-ink-500" /></span>
+            <span>${allT1.toFixed(4)}</span>
+          </div>
+          <p className="m-0 text-[12px] text-ink-500">
+            Across {savedReplies} {savedReplies === 1 ? 'reply' : 'replies'} that delegated below T1.
+          </p>
+        </div>
+      ),
+    },
+    { kind: 'separator' },
+    { kind: 'action', label: 'Explain the latest reply', onSelect: onShowWhy },
   ];
 
   async function submitRename(e: React.FormEvent) {
@@ -62,6 +99,7 @@ export default function ChatTopBar({
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Escape') setRenaming(false); }}
             aria-label="Chat title"
+            maxLength={120}
             className="cz-field h-8 w-[min(340px,50vw)]"
           />
           <button type="submit" className="cz-btn cz-btn-sm">Save</button>
@@ -82,7 +120,9 @@ export default function ChatTopBar({
       {savedUsd > 0 && (
         <button
           type="button"
-          onClick={onShowWhy}
+          aria-haspopup="menu"
+          aria-expanded={!!savedAnchor}
+          onClick={(e) => setSavedAnchor(savedAnchor ? null : e.currentTarget)}
           title="What delegation saved in this chat"
           className="receipt inline-flex shrink-0 items-center gap-1.5 rounded-lg px-[9px] py-[5px] text-success-300 hover:bg-elev/[0.05]"
         >
@@ -90,6 +130,7 @@ export default function ChatTopBar({
         </button>
       )}
       {anchor && <Menu label="Chat" anchor={anchor} items={items} onClose={() => setAnchor(null)} />}
+      {savedAnchor && <Menu label="What this chat saved" anchor={savedAnchor} items={savedItems} onClose={() => setSavedAnchor(null)} />}
     </header>
   );
 }

@@ -1,5 +1,5 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import ConversationSidebar from './ConversationSidebar.js';
 import { searchConversations } from '../lib/api.js';
@@ -63,6 +63,15 @@ describe('ConversationSidebar', () => {
     // …and the full search adds the one beyond it.
     expect(await screen.findByText('Offsite budget from last year')).toBeInTheDocument();
     expect(vi.mocked(searchConversations)).toHaveBeenCalledWith('offsite');
+  });
+
+  it('drops a deleted chat from the search results too', async () => {
+    renderSidebar();
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    fireEvent.change(screen.getByPlaceholderText('Search chats'), { target: { value: 'offsite' } });
+    const row = (await screen.findByText('Offsite budget from last year')).parentElement!;
+    fireEvent.click(within(row).getByRole('button', { name: 'Delete chat' }));
+    await waitFor(() => expect(screen.queryByText('Offsite budget from last year')).not.toBeInTheDocument());
   });
 
   it('marks the open chat and the one a run is working in', () => {

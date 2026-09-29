@@ -1342,6 +1342,17 @@ describe('traceStatus', () => {
     expect(t.get('T3-0')!.status).toBe('COMPLETED');
   });
 
+  it('leaves out the run\'s summary-only root completion, which repeats the real root agent', () => {
+    const t = new Map<string, TraceNode>();
+    traceStatus(t, { tierId: 'T2-7f3a', role: 'T2', label: 'Direct Task', model: 'openai:gpt-mid', status: 'ACTIVE' });
+    traceStatus(t, { tierId: 'T3-1', role: 'T3', label: 'draft the table', status: 'COMPLETED' });
+    traceStatus(t, { tierId: 'T2-7f3a', status: 'COMPLETED' });
+    // Cascade.run() then closes a Moderate run with this, under a fixed id.
+    traceStatus(t, { tierId: 't2-root', status: 'COMPLETED', role: 'T2' });
+    traceStatus(t, { tierId: 't3-root', status: 'COMPLETED', role: 'T3' });
+    expect([...t.keys()]).toEqual(['T2-7f3a', 'T3-1']);
+  });
+
   it('ignores an event with no agent id', () => {
     const t = new Map<string, TraceNode>();
     traceStatus(t, { role: 'T1', status: 'ACTIVE' });

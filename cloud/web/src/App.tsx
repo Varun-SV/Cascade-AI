@@ -19,6 +19,7 @@ import KeyVault from './keys/KeyVault.js';
 import Toaster from './components/Toaster.js';
 import { toast } from './lib/toast.js';
 import { useMediaQuery } from './lib/useMediaQuery.js';
+import { titleOf } from './lib/conversations.js';
 import { useChatSession, toChatMessage } from './chat/useChatSession.js';
 import { useAutoTitler } from './chat/useAutoTitler.js';
 import { useBrowserAllowance } from './chat/browserAllowance.js';
@@ -74,6 +75,9 @@ export default function App() {
   // on a reply from the top bar's saved figure.
   const [searchRequest, setSearchRequest] = useState(0);
   const [whyRequest, setWhyRequest] = useState<{ messageId: string; seq: number } | null>(null);
+  // The chat last opened, as the server named it — the recent list may not
+  // hold it (an older chat opened from search).
+  const [opened, setOpened] = useState<{ id: string; title: string | null } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     const stored = localStorage.getItem(SIDEBAR_OPEN_KEY);
     // No explicit preference yet: default open on desktop (today's always-visible
@@ -179,12 +183,14 @@ export default function App() {
 
   async function selectConversation(id: string) {
     const { conversation, messages } = await getMessages(id);
+    setOpened(conversation ? { id: conversation.id, title: conversation.title } : null);
     chat.setConversationId(id);
     if (conversation?.skillId) setSkillId(conversation.skillId);
     chat.loadMessages(messages.map(toChatMessage));
   }
 
   function newChat() {
+    setOpened(null);
     chat.setConversationId(undefined);
     chat.loadMessages([]);
   }
@@ -223,10 +229,13 @@ export default function App() {
     return <LandingPage config={config} onDevLogin={refreshMe} />;
   }
 
-  const activeTitle = conversations.find((c) => c.id === chat.conversationId)?.title ?? undefined;
+  const activeTitle = titleOf(chat.conversationId, conversations, opened);
   // What delegation saved across this chat, from each reply's stored /why
   // report — so the figure is the same after a reload, or on another day.
-  const savedUsd = chat.messages.reduce((sum, m) => sum + (!m.streaming && (m.why?.savedUsd ?? 0) > 0 ? m.why!.savedUsd : 0), 0);
+  const replies = chat.messages.filter((m) => m.role === 'assistant' && !m.streaming);
+  const savedUsd = replies.reduce((sum, m) => sum + Math.max(0, m.why?.savedUsd ?? 0), 0);
+  const spentUsd = replies.reduce((sum, m) => sum + Math.max(0, m.costUsd ?? 0), 0);
+  const savedReplies = replies.filter((m) => (m.why?.savedUsd ?? 0) > 0).length;
   const lastWithWhy = [...chat.messages].reverse().find((m) => m.role === 'assistant' && !m.streaming && m.why);
   const narrow = () => !desktop;
 
@@ -246,8 +255,10 @@ export default function App() {
     const id = chat.conversationId;
     if (!id) return;
     try {
-      await renameConversation(id, title);
-      setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title } : c)));
+      // The server keeps at most 120 characters; show what it stored.
+      const stored = (await renameConversation(id, title)).title;
+      setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title: stored } : c)));
+      setOpened((o) => (o?.id === id ? { ...o, title: stored } : o));
     } catch {
       toast('Could not rename that chat.');
     }
@@ -359,6 +370,8 @@ export default function App() {
           sidebarOpen={sidebarOpen && desktop}
           onOpenSidebar={() => setSidebar(true)}
           savedUsd={savedUsd}
+          spentUsd={spentUsd}
+          savedReplies={savedReplies}
           onShowWhy={() => { if (lastWithWhy) setWhyRequest({ messageId: lastWithWhy.id, seq: Date.now() }); }}
           onRename={renameActive}
           onContinueElsewhere={() => setShowContinue(true)}

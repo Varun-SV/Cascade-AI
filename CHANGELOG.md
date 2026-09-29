@@ -60,8 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   figures. The app now has the prototype's structure too: a sidebar with
   Search, Files, Skills and an account menu (usage, settings, keys, import,
   sign out); a menu on the chat's title to rename or delete it; the chat's
-  total saving at the top right, which no longer resets on reload; and a
-  composer whose attach, skill, tools and routing controls live in three
+  total saving at the top right, which no longer resets on reload and opens
+  what the whole chat spent against all-T1; and a composer whose attach, skill, tools and routing controls live in three
   menus, with whatever is switched on shown as a removable chip. "Run detail"
   replaces the Simple / Advanced view, and an orchestrated reply keeps its
   agent tree, folded above the answer. The landing page follows the

@@ -798,6 +798,7 @@ export interface TraceNode {
 // A run's tree is stored in every reply's /why report, so it is kept small: a
 // large fan-out keeps its first agents, and a long label is cut.
 export const MAX_TRACE_NODES = 60;
+const SYNTHETIC_ROOT = /^t[23]-root$/;
 const MAX_TRACE_LABEL = 140;
 
 /**
@@ -810,6 +811,11 @@ export function traceStatus(trace: Map<string, TraceNode>, e: unknown): void {
   const str = (k: string) => (typeof ev[k] === 'string' && (ev[k] as string).trim() ? (ev[k] as string).trim() : undefined);
   const id = str('tierId') ?? str('id');
   if (!id) return;
+  // `Cascade.run()` closes a Simple or Moderate run with a summary-only
+  // completion under a fixed `t3-root` / `t2-root` id, after the real worker
+  // or manager has already reported under its own. Kept, it doubled the root
+  // agent in every saved tree.
+  if (SYNTHETIC_ROOT.test(id) && !str('label') && !str('model')) return;
   const prev = trace.get(id);
   if (!prev && trace.size >= MAX_TRACE_NODES) return;
   const label = str('label') ?? prev?.label;
