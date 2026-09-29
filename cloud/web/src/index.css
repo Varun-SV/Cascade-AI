@@ -93,6 +93,11 @@
      cost bars. Never as a fill for ordinary controls. */
   --cascade-ramp: linear-gradient(180deg, #4c8dff, #38b0de 50%, #2dd4bf);
   --cascade-ramp-x: linear-gradient(90deg, #4c8dff, #38b0de 50%, #2dd4bf);
+  /* The spend report's two series, checked as a pair against the card for
+     lightness, colour-blind separation and contrast in each theme. */
+  --chart-spent: #4c8dff;
+  --chart-saved: #20a898;
+  --chart-grid: rgba(233, 235, 240, 0.08);
   color-scheme: dark;
 }
 
@@ -159,6 +164,9 @@
   --code-block-bg: #f0eee8;
   --scrollbar: rgba(21, 23, 28, 0.16);
   --scrollbar-hover: rgba(21, 23, 28, 0.28);
+  --chart-spent: #2f6fe4;
+  --chart-saved: #0e9b89;
+  --chart-grid: rgba(21, 23, 28, 0.08);
   color-scheme: light;
 }
 

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 import {
   SquarePen, Search, Folder, Sparkles, Trash2, PanelLeftClose, ChevronsUpDown,
-  Settings, Brain, Plug, KeyRound, Upload, MonitorSmartphone, Gem, BookOpen, LogOut,
+  Settings, Brain, Plug, KeyRound, Upload, MonitorSmartphone, Gem, BookOpen, LogOut, ChartColumn,
 } from 'lucide-react';
 import UsageMeter from './UsageMeter.js';
 import CascadeMark from '../components/CascadeMark.js';
@@ -35,6 +35,8 @@ interface Props {
   onOpenKeys: () => void;
   onOpenContinue: () => void;
   onOpenUpgrade: () => void;
+  /** Opens the spend & savings report. */
+  onOpenSpend: () => void;
   onLogout: () => void;
   /** Called after a chat is deleted so the parent can update its list/active id. */
   onDeleted: (id: string) => void;
@@ -46,7 +48,7 @@ export default function ConversationSidebar({
   user, conversations, activeConversationId, runningConversationIds = [],
   contextTokens, contextWindow, lastTokens, usageRefreshSignal, searchRequest,
   onSelect, onNewChat, onClose, onOpenSettings, onOpenFiles, onOpenSkills, onOpenMemory,
-  onOpenConnectors, onOpenKeys, onOpenContinue, onOpenUpgrade, onLogout, onDeleted, onImported,
+  onOpenConnectors, onOpenKeys, onOpenContinue, onOpenUpgrade, onOpenSpend, onLogout, onDeleted, onImported,
 }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -158,6 +160,7 @@ export default function ConversationSidebar({
         </div>
       ),
     },
+    { kind: 'action', label: 'Spend & savings', icon: <ChartColumn size={15} />, onSelect: onOpenSpend },
     { kind: 'separator' },
     { kind: 'action', label: 'Settings', icon: <Settings size={15} />, onSelect: onOpenSettings },
     { kind: 'action', label: 'Memory', icon: <Brain size={15} />, onSelect: onOpenMemory },

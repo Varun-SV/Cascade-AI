@@ -308,7 +308,7 @@ function Receipt({ message, open, onToggle }: { message: ChatMessage; open: bool
   );
 }
 
-function WhyPanel({ why }: { why: WhyReport }) {
+function WhyPanel({ why, onOpenSpend }: { why: WhyReport; onOpenSpend?: () => void }) {
   const tiers = Object.keys(why.costByTier).filter((t) => (why.costByTier[t] ?? 0) > 0);
   const spent = tiers.reduce((sum, t) => sum + (why.costByTier[t] ?? 0), 0);
   const allT1 = spent + Math.max(0, why.savedUsd);
@@ -353,6 +353,11 @@ function WhyPanel({ why }: { why: WhyReport }) {
             </div>
           ))}
         </div>
+      )}
+      {onOpenSpend && (
+        <button type="button" onClick={onOpenSpend} className="-ml-2 self-start rounded-lg px-2 py-1 text-[12.5px] text-ink-400 hover:bg-elev/[0.05] hover:text-ink-50">
+          All spending and savings →
+        </button>
       )}
     </div>
   );
@@ -521,6 +526,8 @@ interface Props {
   onSelectSibling?: (messageId: string) => void;
   /** A new number opens this reply's /why and brings it into view. */
   whyRequest?: number;
+  /** Opens the spend & savings report from this reply's /why. */
+  onOpenSpend?: () => void;
 }
 
 /** "1 manager · 3 workers", or "Worked through 4 sections · 9 workers". */
@@ -554,7 +561,7 @@ function TraceFold({ trace }: { trace: TraceNode[] }) {
   );
 }
 
-export default function Message({ message, busy, onRegenerate, onEdit, onDelete, onSelectSibling, whyRequest }: Props) {
+export default function Message({ message, busy, onRegenerate, onEdit, onDelete, onSelectSibling, whyRequest, onOpenSpend }: Props) {
   const attachments = message.attachments ?? [];
   const images = attachments.filter((a) => a.mime.startsWith('image/'));
   const docs = attachments.filter((a) => a.kind === 'document' || (!a.mime.startsWith('image/') && !!a.filename));
@@ -765,7 +772,7 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
             }}
             className="overflow-hidden"
           >
-            <WhyPanel why={message.why} />
+            <WhyPanel why={message.why} onOpenSpend={onOpenSpend} />
           </motion.div>
         )}
       </AnimatePresence>
