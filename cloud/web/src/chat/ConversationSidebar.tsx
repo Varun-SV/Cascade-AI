@@ -54,8 +54,13 @@ export default function ConversationSidebar({
   const [query, setQuery] = useState('');
   const [usage, setUsage] = useState<UsageInfo | null>(null);
   // The server's answer for the current query: it searches every chat, where
-  // `conversations` is only the most recent page.
-  const [found, setFound] = useState<{ query: string; conversations: CloudConversation[] } | null>(null);
+  // `conversations` is only the most recent page. It holds for the list it was
+  // asked against — a rename or delete anywhere (the top bar's too) makes a new
+  // list, and the search is asked again.
+  const [found, setFound] = useState<{
+    query: string; basis: CloudConversation[]; conversations: CloudConversation[]; hasMore: boolean;
+  } | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [accountAnchor, setAccountAnchor] = useState<HTMLElement | null>(null);
 
   useEffect(() => {
@@ -73,7 +78,7 @@ export default function ConversationSidebar({
     try {
       await deleteConversation(id);
       onDeleted(id);
-      // Search results are this component's own copy; the parent's list isn't.
+      // At once, without waiting for the search to be asked again.
       setFound((f) => (f ? { ...f, conversations: f.conversations.filter((c) => c.id !== id) } : f));
     } catch { toast('Could not delete that chat.'); }
   }
@@ -108,16 +113,35 @@ export default function ConversationSidebar({
     // A pause in typing, not every keystroke, reaches the server.
     const timer = setTimeout(() => {
       searchConversations(q)
-        .then((r) => { if (current) setFound({ query: q, conversations: r.conversations }); })
+        .then((r) => { if (current) setFound({ query: q, basis: conversations, conversations: r.conversations, hasMore: r.hasMore }); })
         .catch(() => { /* the recent page's matches stay on screen */ });
     }, 250);
     return () => { current = false; clearTimeout(timer); };
-  }, [q]);
+  }, [q, conversations]);
+  const answered = found && found.query === q && found.basis === conversations ? found : null;
+
+  async function loadMore() {
+    if (!answered || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const r = await searchConversations(q, answered.conversations.at(-1));
+      setFound((f) => {
+        if (f !== answered) return f; // the query or the list moved on meanwhile
+        const have = new Set(f.conversations.map((c) => c.id));
+        return { ...f, conversations: [...f.conversations, ...r.conversations.filter((c) => !have.has(c.id))], hasMore: r.hasMore };
+      });
+    } catch {
+      toast('Could not load more results.');
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
   // The recent page's matches show at once; the full search replaces them when it answers.
   const shown = !q
     ? conversations
-    : found?.query === q
-      ? found.conversations
+    : answered
+      ? answered.conversations
       : conversations.filter((c) => (c.title ?? '').toLowerCase().includes(q));
   const name = user.name ?? user.email ?? 'Signed in';
   const atLimit = usage ? usage.dailyRuns >= usage.dailyRunLimit : false;
@@ -226,6 +250,16 @@ export default function ConversationSidebar({
         })}
         {shown.length === 0 && (
           <p className="m-0 px-2.5 py-1.5 text-[13px] text-ink-500">{q ? 'No matches' : 'No chats yet'}</p>
+        )}
+        {answered?.hasMore && (
+          <button
+            type="button"
+            onClick={() => void loadMore()}
+            disabled={loadingMore}
+            className="rounded-lg px-2.5 py-[7px] text-left text-[13px] text-ink-400 hover:bg-elev/[0.05] hover:text-ink-50 disabled:opacity-60"
+          >
+            {loadingMore ? 'Loading…' : 'More results'}
+          </button>
         )}
       </div>
 

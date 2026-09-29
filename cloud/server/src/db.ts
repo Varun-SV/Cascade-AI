@@ -711,11 +711,22 @@ export class CloudStore {
    * search, which the recent-page `listConversations` cannot serve past its
    * first 50. `%`, `_` and `\` in the query are matched literally.
    */
-  searchConversations(userId: string, query: string, limit = 50): CloudConversation[] {
+  /**
+   * Chats whose title contains `query`, newest first, a page at a time. The
+   * next page starts `before` the last chat of this one — by position, not by
+   * count, so a chat touched between pages is neither repeated nor skipped over.
+   */
+  searchConversations(
+    userId: string,
+    query: string,
+    limit = 50,
+    before?: { updatedAt: number; id: string },
+  ): CloudConversation[] {
     const pattern = `%${query.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    const after = before ? 'AND (updated_at < ? OR (updated_at = ? AND id < ?))' : '';
     const rows = this.db
-      .prepare("SELECT * FROM conversations WHERE user_id = ? AND title LIKE ? ESCAPE '\\' ORDER BY updated_at DESC, rowid DESC LIMIT ?")
-      .all(userId, pattern, limit) as DbConversationRow[];
+      .prepare(`SELECT * FROM conversations WHERE user_id = ? AND title LIKE ? ESCAPE '\\' ${after} ORDER BY updated_at DESC, id DESC LIMIT ?`)
+      .all(userId, pattern, ...(before ? [before.updatedAt, before.updatedAt, before.id] : []), limit) as DbConversationRow[];
     return rows.map((r) => this.deserializeConversation(r));
   }
 

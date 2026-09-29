@@ -22,32 +22,38 @@ vi.mock('../lib/api.js', () => ({
 afterEach(cleanup);
 
 const noop = () => {};
-function renderSidebar() {
-  render(
-    <ConversationSidebar
-      user={{ id: 'u1', name: 'Varun', email: null, avatar: null, provider: 'dev', plan: 'free' } as never}
-      conversations={[
-        { id: 'c1', title: 'Postgres vs SQLite' },
-        { id: 'c2', title: 'Team offsite plan' },
-      ] as never}
-      activeConversationId="c1"
-      runningConversationIds={['c2']}
-      contextTokens={0}
-      contextWindow={0}
-      lastTokens={0}
-      usageRefreshSignal={0}
-      onSelect={noop} onNewChat={noop} onClose={noop} onOpenSettings={noop} onOpenFiles={noop}
-      onOpenSkills={noop} onOpenMemory={noop} onOpenConnectors={noop} onOpenKeys={noop}
-      onOpenContinue={noop} onOpenUpgrade={noop} onLogout={noop} onDeleted={noop} onImported={noop}
-    />,
-  );
+const recent = [
+  { id: 'c1', title: 'Postgres vs SQLite' },
+  { id: 'c2', title: 'Team offsite plan' },
+];
+function renderSidebar(over: Partial<React.ComponentProps<typeof ConversationSidebar>> = {}) {
+  const props = {
+    user: { id: 'u1', name: 'Varun', email: null, avatar: null, provider: 'dev', plan: 'free' } as never,
+    conversations: recent as never,
+    activeConversationId: 'c1',
+    runningConversationIds: ['c2'],
+    contextTokens: 0,
+    contextWindow: 0,
+    lastTokens: 0,
+    usageRefreshSignal: 0,
+    onSelect: noop, onNewChat: noop, onClose: noop, onOpenSettings: noop, onOpenFiles: noop,
+    onOpenSkills: noop, onOpenMemory: noop, onOpenConnectors: noop, onOpenKeys: noop,
+    onOpenContinue: noop, onOpenUpgrade: noop, onLogout: noop, onDeleted: noop, onImported: noop,
+    ...over,
+  };
+  const { rerender } = render(<ConversationSidebar {...props} />);
+  return (more: Partial<typeof props>) => rerender(<ConversationSidebar {...props} {...more} />);
+}
+
+function search(text: string) {
+  fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+  fireEvent.change(screen.getByPlaceholderText('Search chats'), { target: { value: text } });
 }
 
 describe('ConversationSidebar', () => {
   it('filters Recents by title from Search', () => {
     renderSidebar();
-    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
-    fireEvent.change(screen.getByPlaceholderText('Search chats'), { target: { value: 'offsite' } });
+    search('offsite');
     expect(screen.getByText('Team offsite plan')).toBeInTheDocument();
     expect(screen.queryByText('Postgres vs SQLite')).not.toBeInTheDocument();
     fireEvent.change(screen.getByPlaceholderText('Search chats'), { target: { value: 'zzz' } });
@@ -56,8 +62,7 @@ describe('ConversationSidebar', () => {
 
   it('finds older chats the recent page does not hold, once the server answers', async () => {
     renderSidebar();
-    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
-    fireEvent.change(screen.getByPlaceholderText('Search chats'), { target: { value: 'offsite' } });
+    search('offsite');
     // The recent page's match shows at once…
     expect(screen.getByText('Team offsite plan')).toBeInTheDocument();
     // …and the full search adds the one beyond it.
@@ -67,11 +72,39 @@ describe('ConversationSidebar', () => {
 
   it('drops a deleted chat from the search results too', async () => {
     renderSidebar();
-    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
-    fireEvent.change(screen.getByPlaceholderText('Search chats'), { target: { value: 'offsite' } });
+    search('offsite');
     const row = (await screen.findByText('Offsite budget from last year')).parentElement!;
     fireEvent.click(within(row).getByRole('button', { name: 'Delete chat' }));
     await waitFor(() => expect(screen.queryByText('Offsite budget from last year')).not.toBeInTheDocument());
+  });
+
+  it('asks the search again when a chat is renamed or deleted elsewhere, and shows no stale row meanwhile', async () => {
+    const rerender = renderSidebar();
+    search('offsite');
+    expect(await screen.findByText('Offsite budget from last year')).toBeInTheDocument();
+    const asked = vi.mocked(searchConversations).mock.calls.length;
+    // The top bar deletes the older chat: the parent's list is a new one, and
+    // the server no longer has it.
+    vi.mocked(searchConversations).mockResolvedValueOnce({ conversations: [{ id: 'c2', title: 'Team offsite plan' }] as never, hasMore: false });
+    rerender({ conversations: [...recent] as never });
+    expect(screen.queryByText('Offsite budget from last year')).not.toBeInTheDocument();
+    expect(screen.getByText('Team offsite plan')).toBeInTheDocument();
+    await waitFor(() => expect(vi.mocked(searchConversations).mock.calls.length).toBe(asked + 1));
+    expect(screen.queryByText('Offsite budget from last year')).not.toBeInTheDocument();
+  });
+
+  it('pages through a search with more matches than one answer holds', async () => {
+    const first = Array.from({ length: 3 }, (_, i) => ({ id: `s${i}`, title: `Offsite ${i}`, updatedAt: 300 - i }));
+    vi.mocked(searchConversations)
+      .mockResolvedValueOnce({ conversations: first as never, hasMore: true })
+      .mockResolvedValueOnce({ conversations: [{ id: 's9', title: 'Offsite 2019', updatedAt: 9 }] as never, hasMore: false });
+    renderSidebar();
+    search('offsite');
+    fireEvent.click(await screen.findByRole('button', { name: 'More results' }));
+    expect(await screen.findByText('Offsite 2019')).toBeInTheDocument();
+    expect(vi.mocked(searchConversations)).toHaveBeenLastCalledWith('offsite', first[2]);
+    expect(screen.getByText('Offsite 0')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'More results' })).not.toBeInTheDocument();
   });
 
   it('marks the open chat and the one a run is working in', () => {

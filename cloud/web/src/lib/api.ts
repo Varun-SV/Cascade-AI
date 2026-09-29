@@ -191,8 +191,13 @@ export function listConversations(): Promise<{ conversations: CloudConversation[
 }
 
 /** Every chat whose title contains `query` — beyond the recent page `listConversations` returns. */
-export function searchConversations(query: string): Promise<{ conversations: CloudConversation[] }> {
-  return json(fetch(`/api/conversations?q=${encodeURIComponent(query)}`, { credentials: 'include' }));
+/** A page of chats whose title matches; pass the last one back for the next page. */
+export function searchConversations(
+  query: string,
+  after?: Pick<CloudConversation, 'id' | 'updatedAt'>,
+): Promise<{ conversations: CloudConversation[]; hasMore: boolean }> {
+  const before = after ? `&before=${encodeURIComponent(`${after.updatedAt}:${after.id}`)}` : '';
+  return json(fetch(`/api/conversations?q=${encodeURIComponent(query)}${before}`, { credentials: 'include' }));
 }
 
 export function getMessages(

@@ -287,4 +287,32 @@ describe('Message — the finished run’s tree', () => {
     rerender(<Message message={msg} whyRequest={1} />);
     expect(screen.getByRole('button', { name: /\/why/ })).toHaveAttribute('aria-expanded', 'true');
   });
+
+  it('scrolls to that /why once it has opened, not to where it was about to', async () => {
+    // What was on screen at each scroll: scrolling before the panel exists
+    // lands on the receipt, and a long panel then opens below the viewport.
+    const scrolledTo: string[] = [];
+    Element.prototype.scrollIntoView = function (this: Element) { scrolledTo.push(this.textContent ?? ''); };
+    // framer-motion restores the page scroll after measuring an auto height;
+    // jsdom has no scrolling to restore.
+    const scrollTo = window.scrollTo;
+    window.scrollTo = () => {};
+    try {
+      const msg = base({
+        id: 'a5', role: 'assistant', content: 'Answer.', tier: 'T2',
+        why: { ...why([]), decisions: [{ at: '2026-09-29T00:00:00Z', kind: 'route', detail: 'kept on T2 for the table' }] },
+      });
+      const { rerender } = render(<Message message={msg} />);
+      rerender(<Message message={msg} whyRequest={1} />);
+      await waitFor(() => expect(scrolledTo).toHaveLength(1));
+      expect(scrolledTo[0]).toContain('kept on T2 for the table');
+      // Asked again while open, it scrolls straight there.
+      rerender(<Message message={msg} whyRequest={2} />);
+      await waitFor(() => expect(scrolledTo).toHaveLength(2));
+      expect(scrolledTo[1]).toContain('kept on T2 for the table');
+    } finally {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+      window.scrollTo = scrollTo;
+    }
+  });
 });

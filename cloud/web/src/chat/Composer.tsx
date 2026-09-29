@@ -122,6 +122,12 @@ export default function Composer({
     textRef.current?.focus();
   }, [draftRequest]);
 
+  // A run takes its options when it starts, so they are locked until it ends:
+  // a switch flipped mid-run would describe a run that never had it.
+  useEffect(() => {
+    if (busy) setMenu(null);
+  }, [busy]);
+
   // The tools menu lists your connectors; read them when it opens so a change
   // made in the Connectors window shows up here.
   useEffect(() => {
@@ -330,7 +336,7 @@ export default function Composer({
       />
 
       <div className="flex flex-wrap items-center gap-1">
-        <button type="button" aria-label="Attach and skills" aria-haspopup="menu" aria-expanded={menu?.key === 'plus'} onClick={openMenu('plus')} className="cz-ib">
+        <button type="button" aria-label="Attach and skills" aria-haspopup="menu" aria-expanded={menu?.key === 'plus'} onClick={openMenu('plus')} disabled={busy} className="cz-ib">
           {uploading ? <Loader2 size={17} className="animate-spin" /> : <Plus size={17} />}
         </button>
         <button
@@ -339,6 +345,7 @@ export default function Composer({
           aria-haspopup="menu"
           aria-expanded={menu?.key === 'tools'}
           onClick={openMenu('tools')}
+          disabled={busy}
           className={clsx('cz-ib', (webSearch || browserMode) && 'text-accent-500')}
         >
           <SlidersHorizontal size={17} />
@@ -348,9 +355,11 @@ export default function Composer({
             {tokens.map((t) => (
               <span key={t.key} className="cz-chip" aria-pressed="true">
                 {t.icon} {t.label}
-                <button type="button" aria-label={`Remove ${t.label}`} onClick={t.off} className="inline-flex opacity-70 hover:opacity-100">
-                  <X size={14} />
-                </button>
+                {!busy && (
+                  <button type="button" aria-label={`Remove ${t.label}`} onClick={t.off} className="inline-flex opacity-70 hover:opacity-100">
+                    <X size={14} />
+                  </button>
+                )}
               </span>
             ))}
           </div>
@@ -362,7 +371,8 @@ export default function Composer({
           aria-expanded={menu?.key === 'mode'}
           title="Routing and tier"
           onClick={openMenu('mode')}
-          className="inline-flex items-center gap-1 rounded-lg px-2 py-[5px] text-[13px] text-ink-300 hover:bg-elev/[0.05] hover:text-ink-50"
+          disabled={busy}
+          className="inline-flex items-center gap-1 rounded-lg px-2 py-[5px] text-[13px] text-ink-300 hover:bg-elev/[0.05] hover:text-ink-50 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
         >
           <b className="font-medium text-ink-50">{routeLabel}</b>
           {forceTier !== 'auto' && <span>· {forceTier}</span>}

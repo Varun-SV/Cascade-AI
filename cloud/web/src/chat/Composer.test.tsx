@@ -84,8 +84,8 @@ function renderComposer(over: Partial<React.ComponentProps<typeof Composer>> = {
     browserAllowance: null,
     ...over,
   };
-  render(<Composer {...props} />);
-  return props;
+  const { rerender } = render(<Composer {...props} />);
+  return { ...props, rerender };
 }
 
 describe('the composer menus', () => {
@@ -117,6 +117,25 @@ describe('the composer menus', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Attach and skills' }));
     fireEvent.click(screen.getByRole('menuitemradio', { name: 'General assistant' }));
     expect(onSkillChange).toHaveBeenLastCalledWith('general');
+  });
+
+  it('locks the run’s options while it runs, since the run already took them', () => {
+    renderComposer({ busy: true, browserMode: true, skillId: 'code-reviewer' });
+    for (const name of ['Attach and skills', 'Tools', /^Auto/]) {
+      expect(screen.getByRole('button', { name })).toBeDisabled();
+    }
+    // The chips still say what this run has, without a way to switch it off.
+    expect(screen.getByText('Browser')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove Browser' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove Code reviewer' })).not.toBeInTheDocument();
+  });
+
+  it('closes an open menu when a run starts', () => {
+    const { rerender, ...props } = renderComposer();
+    fireEvent.click(screen.getByRole('button', { name: /^Auto/ }));
+    expect(screen.getByRole('menu', { name: 'Routing and tier' })).toBeInTheDocument();
+    rerender(<Composer {...props} busy />);
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
 
   it('sets routing and tier from the mode menu', () => {

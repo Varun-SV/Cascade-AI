@@ -46,6 +46,22 @@ describe('CloudStore', () => {
     expect(store.searchConversations(u.id, 'postgres').map((c) => c.id)).toEqual([old.id]);
   });
 
+  it('pages through search results from the last chat of each page, newest first', () => {
+    const u = store.upsertUser({ provider: 'github', providerId: 'paging', email: null, name: null, avatar: null });
+    const ids = [0, 1, 2, 3, 4].map((i) => store.createConversation(u.id, `Offsite ${i}`).id);
+    const page = (before?: { updatedAt: number; id: string }) => store.searchConversations(u.id, 'offsite', 2, before);
+    const first = page();
+    const second = page(first.at(-1));
+    // A chat on the first page is touched before the next is asked for: it
+    // moves to the top, and the rest neither repeat nor shift.
+    store.touchConversation(first[0]!.id);
+    const third = page(second.at(-1));
+    const seen = [...first, ...second, ...third].map((c) => c.id);
+    expect(new Set(seen).size).toBe(5);
+    expect(seen.sort()).toEqual([...ids].sort());
+    expect(page(third.at(-1))).toEqual([]);
+  });
+
   it('matches %, _ and \\ in a search literally', () => {
     const u = store.upsertUser({ provider: 'github', providerId: 'literal', email: null, name: null, avatar: null });
     const pct = store.createConversation(u.id, 'Growth 50% plan');

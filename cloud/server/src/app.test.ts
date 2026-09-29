@@ -229,6 +229,23 @@ describe('cloud/server app', () => {
     expect(missing.status).toBe(404);
   });
 
+  it('searches chats a page at a time, and refuses a malformed cursor', async () => {
+    const alice = await login('Alice');
+    const me = (await (await fetch(`${baseUrl}/api/me`, { headers: { Cookie: alice } })).json()) as { user: { id: string } };
+    for (let i = 0; i < 52; i++) store.createConversation(me.user.id, `Offsite ${i}`);
+    type Page = { conversations: Array<{ id: string; updatedAt: number }>; hasMore: boolean };
+    const search = async (qs: string) => fetch(`${baseUrl}/api/conversations?q=offsite${qs}`, { headers: { Cookie: alice } });
+    const first = (await (await search('')).json()) as Page;
+    expect(first.conversations).toHaveLength(50);
+    expect(first.hasMore).toBe(true);
+    const last = first.conversations.at(-1)!;
+    const second = (await (await search(`&before=${last.updatedAt}:${last.id}`)).json()) as Page;
+    expect(second.conversations).toHaveLength(2);
+    expect(second.hasMore).toBe(false);
+    expect(new Set([...first.conversations, ...second.conversations].map((c) => c.id)).size).toBe(52);
+    expect((await search('&before=soon')).status).toBe(400);
+  });
+
   it('native write API: create a cloud conversation, append turns, branch, and delete', async () => {
     const alice = await login('Alice');
     const bob = await login('Bob');

@@ -555,15 +555,20 @@ function TraceFold({ trace }: { trace: TraceNode[] }) {
 }
 
 export default function Message({ message, busy, onRegenerate, onEdit, onDelete, onSelectSibling, whyRequest }: Props) {
-  const rootRef = useRef<HTMLDivElement>(null);
   const attachments = message.attachments ?? [];
   const images = attachments.filter((a) => a.mime.startsWith('image/'));
   const docs = attachments.filter((a) => a.kind === 'document' || (!a.mime.startsWith('image/') && !!a.filename));
   const [whyOpen, setWhyOpen] = useState(false);
+  const whyRef = useRef<HTMLDivElement>(null);
+  // Scroll once the panel has finished opening: before then it has no height,
+  // and a long one would open below the viewport.
+  const scrollToWhy = useRef(false);
+  const showWhy = () => whyRef.current?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
   useEffect(() => {
     if (whyRequest === undefined) return;
+    if (whyRef.current) { showWhy(); return; }
+    scrollToWhy.current = true;
     setWhyOpen(true);
-    rootRef.current?.scrollIntoView?.({ block: 'end', behavior: 'smooth' });
   }, [whyRequest]);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(message.content);
@@ -680,7 +685,7 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
 
   const hasReceipt = Boolean(message.tier || message.model || message.why || message.cancelled || message.costUsd);
   return (
-    <div ref={rootRef} data-role="assistant" className="group flex flex-col gap-1.5">
+    <div data-role="assistant" className="group flex flex-col gap-1.5">
       {message.streaming && !message.content ? (
         <span className="shimmer-text text-sm">Writing…</span>
       ) : (() => {
@@ -749,9 +754,15 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
       <AnimatePresence initial={false}>
         {whyOpen && message.why && (
           <motion.div
+            ref={whyRef}
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
+            onAnimationComplete={() => {
+              if (!scrollToWhy.current) return;
+              scrollToWhy.current = false;
+              showWhy();
+            }}
             className="overflow-hidden"
           >
             <WhyPanel why={message.why} />
