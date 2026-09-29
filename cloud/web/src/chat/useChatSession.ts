@@ -554,6 +554,15 @@ export function useChatSession(
    */
   const unnamedRunsRef = useRef(0);
   const runOriginsRef = useRef<RunOrigins>(new Map());
+  // The conversations those runs belong to, for display (the sidebar's
+  // "working" dot). The map is changed in socket handlers that always set
+  // some state too, so reading it after each render keeps this current
+  // without threading a setter through every place that edits it.
+  const [runningConversationIds, setRunningConversationIds] = useState<string[]>([]);
+  useEffect(() => {
+    const next = [...runOriginsRef.current.keys()].sort();
+    setRunningConversationIds((prev) => (prev.length === next.length && prev.every((id, i) => id === next[i]) ? prev : next));
+  });
   /**
    * WHICH RUNS this pane is showing — by name, and there can be more than one.
    *
@@ -3186,7 +3195,7 @@ export function useChatSession(
 
   return {
     messages, send, stop, regenerate, editMessage, deleteMessage: deleteMessageById, selectSibling,
-    busy, error, status, lastTokens, lastSaved, conversationId, loadMessages,
+    busy, error, status, lastTokens, lastSaved, conversationId, loadMessages, runningConversationIds,
     setConversationId: selectConversation,
     contextTokens, contextWindow,
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, browserMode, setBrowserMode, approval,

@@ -270,6 +270,9 @@ export class CloudStore {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('synchronous = NORMAL');
+    // SQLite's own lower() and LIKE fold ASCII only; chat search folds every
+    // script ("Überblick", "Обзор") the way the browser's toLowerCase() does.
+    this.db.function('fold_case', { deterministic: true }, (v: unknown) => (typeof v === 'string' ? v.toLowerCase() : null));
     this.migrate();
   }
 
@@ -703,6 +706,31 @@ export class CloudStore {
     const rows = this.db
       .prepare('SELECT * FROM conversations WHERE user_id = ? ORDER BY updated_at DESC, rowid DESC LIMIT ?')
       .all(userId, limit) as DbConversationRow[];
+    return rows.map((r) => this.deserializeConversation(r));
+  }
+
+  /**
+   * Conversations whose title contains `query`, newest first — the sidebar's
+   * search, which the recent-page `listConversations` cannot serve past its
+   * first 50. `%`, `_` and `\` in the query are matched literally.
+   */
+  /**
+   * Chats whose title contains `query`, in any case and any script, newest
+   * first, a page at a time. The
+   * next page starts `before` the last chat of this one — by position, not by
+   * count, so a chat touched between pages is neither repeated nor skipped over.
+   */
+  searchConversations(
+    userId: string,
+    query: string,
+    limit = 50,
+    before?: { updatedAt: number; id: string },
+  ): CloudConversation[] {
+    // instr() matches literally, so `%`, `_` and `\` need no escaping.
+    const after = before ? 'AND (updated_at < ? OR (updated_at = ? AND id < ?))' : '';
+    const rows = this.db
+      .prepare(`SELECT * FROM conversations WHERE user_id = ? AND instr(fold_case(title), ?) > 0 ${after} ORDER BY updated_at DESC, id DESC LIMIT ?`)
+      .all(userId, query.toLowerCase(), ...(before ? [before.updatedAt, before.updatedAt, before.id] : []), limit) as DbConversationRow[];
     return rows.map((r) => this.deserializeConversation(r));
   }
 

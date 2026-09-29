@@ -1,16 +1,13 @@
-import { useState, type CSSProperties } from 'react';
-import { motion, useReducedMotion } from 'framer-motion';
+import { useState } from 'react';
+import { AnimatePresence, useReducedMotion } from 'framer-motion';
 import {
-  Github, ArrowRight, Layers, KeyRound, Coins, FileText, Terminal, ShieldCheck,
-  Download, BookOpen, Sparkles, Ban, RotateCcw, HelpCircle,
+  Github, Download, Copy, Check, Terminal, Monitor, Globe, Ban, RotateCcw, HelpCircle, Sparkles,
 } from 'lucide-react';
 import type { CloudConfig } from '../lib/api.js';
 import { devLogin } from '../lib/api.js';
-import { AZURE, SKY, TEAL, TIERS } from '../lib/brand.js';
 import CascadeMark from './CascadeMark.js';
-import CascadeSpine from './CascadeSpine.js';
-import RunDiagram from './RunDiagram.js';
 import DownloadSection from './DownloadSection.js';
+import Modal from './Modal.js';
 
 interface Props {
   config: CloudConfig;
@@ -18,100 +15,65 @@ interface Props {
 }
 
 const REPO = 'https://github.com/Varun-SV/Cascade-AI';
+const NPM = 'npm i -g cascade-ai';
 
-/** Sections the spine tracks, top to bottom. */
-const SPINE_SECTIONS = ['tiers', 'visible', 'surfaces', 'download', 'features'] as const;
+// Each tier as a single arc, shallower as it falls: the mark, taken apart.
+const TIER_STEPS = [
+  { name: 'Plans', body: 'A frontier model reads the request and splits it into sections.', d: 'M4 4 Q28 22 52 4', color: 'rgb(var(--c-t1))' },
+  { name: 'Manages', body: 'Mid-size models run each section and coordinate its workers.', d: 'M12 4 Q28 18 44 4', color: 'rgb(var(--c-t2))' },
+  { name: 'Works', body: 'Small, fast models do the actual work, in parallel.', d: 'M20 4 Q28 12 36 4', color: 'rgb(var(--c-t3))' },
+];
 
-/** The Cascade mark — three falling arcs, the same object as the app's logo
- *  and loading indicator (components/CascadeMark), and the /docs header. */
-function Mark({ size = 22 }: { size?: number }) {
-  return <CascadeMark size={size} animate={false} />;
-}
+const RECEIPT = [
+  { tier: 'T1', model: 'claude-sonnet-4.5', cost: '0.0210' },
+  { tier: 'T2', model: 'gpt-5.4-mini', cost: '0.0120' },
+  { tier: 'T3', model: 'gemini-2.5-flash', cost: '0.0080' },
+];
 
 /**
- * The three moments no other orchestrator shows you. These are the product's
- * actual differentiators and the old landing mentioned none of them — it sold
- * "a graph, a timeline, logs", which every agent framework has.
+ * The three moments no other orchestrator shows you — the product's actual
+ * differentiators, which a graph-and-logs pitch never mentions.
  */
 const MOMENTS = [
   {
     icon: Ban,
-    color: AZURE,
     title: 'Work that was skipped, and why',
-    body: 'When a section fails, everything downstream of it is skipped rather than run into the same wall. You see which upstream failed and that the skipped work cost you nothing.',
-    demo: (
-      <div className="space-y-1.5 text-[11px]">
-        <Row tone="fail" label="Implement API" right="FAILED" />
-        <Row tone="block" label="Integration tests" right="BLOCKED" />
-        <p className="pt-0.5 text-ink-500">Blocked by: Implement API · 0 tokens spent</p>
-      </div>
-    ),
+    body: 'When a section fails, everything downstream of it is skipped rather than run into the same wall — and it cost you nothing.',
+    rows: [['Implement API', 'FAILED'], ['Integration tests', 'BLOCKED']],
   },
   {
     icon: RotateCcw,
-    color: SKY,
     title: 'Runs that survive an interruption',
-    body: 'Hit the budget cap, cancel, or lose the process entirely — the finished sections are checkpointed. Continue picks up where it stopped instead of paying for the same work twice.',
-    demo: (
-      <div className="space-y-1.5 text-[11px]">
-        <Row tone="done" label="Research competitors" right="DONE" />
-        <Row tone="done" label="Gather pricing" right="DONE" />
-        <Row tone="idle" label="Draft the report" right="REMAINING" />
-        <p className="pt-0.5 text-ink-500">/continue → re-plans only what is left</p>
-      </div>
-    ),
+    body: 'Hit the budget cap, cancel, or lose the process: finished sections are kept, and Continue re-plans only what is left.',
+    rows: [['Research competitors', 'DONE'], ['Draft the report', 'REMAINING']],
   },
   {
     icon: HelpCircle,
-    color: TEAL,
     title: 'The reason behind every choice',
-    body: 'Each answer shows the tier and model that produced it. “Why?” explains the routing decision and what it saved against running the whole thing on a frontier model.',
-    demo: (
-      <div className="space-y-1.5 text-[11px]">
-        <Row tone="done" label="Table extraction" right="gpt-5-mini" />
-        <Row tone="done" label="Final synthesis" right="sonnet" />
-        <p className="pt-0.5 text-ink-500">$0.04 vs $0.38 all-frontier · 89% saved</p>
-      </div>
-    ),
+    body: '“Why?” explains each routing decision and what it saved against running the whole thing on a frontier model.',
+    rows: [['Table extraction', 'gpt-5-mini'], ['Final synthesis', 'sonnet']],
   },
 ];
 
-function Row({ tone, label, right }: { tone: 'done' | 'fail' | 'block' | 'idle'; label: string; right: string }) {
-  const color = tone === 'done' ? TEAL : tone === 'fail' ? '#F87171' : tone === 'block' ? '#FBBF24' : undefined;
-  return (
-    <div className="flex items-center justify-between gap-2 rounded-lg border border-elev/10 px-2 py-1.5">
-      <span className="truncate text-ink-300">{label}</span>
-      <span className="shrink-0 font-semibold tabular-nums" style={{ color: color ?? 'rgb(var(--c-ink-500))' }}>{right}</span>
-    </div>
-  );
-}
-
-const FEATURES = [
-  { icon: Coins, title: 'Auto-routing that saves money', body: 'Cascade Auto ranks the models your providers serve by benchmark quality against price, so cheap work goes to cheap models and only the hard work reaches the frontier ones.' },
-  { icon: KeyRound, title: 'Bring your own keys', body: 'Add your own provider keys — encrypted on your device, synced between your devices end-to-end. You pay providers directly; nothing is stored on our servers in the clear.' },
-  { icon: FileText, title: 'Real document exports', body: 'Ask for a report and download a genuine PDF, Word, Excel or PowerPoint — rendered in your browser from the model’s output, never on a server.' },
-  { icon: Layers, title: 'Parallel by default', body: 'Independent sections run at the same time; dependent ones wait. The plan is compiled into a graph, so ordering comes from the work rather than from luck.' },
-  { icon: Terminal, title: 'Web, desktop & CLI', body: 'One account across a polished web app, a native desktop app, and a terminal CLI — your keys, chats and settings follow you.' },
-  { icon: ShieldCheck, title: 'Yours to control', body: 'Cap a run’s spend and token budget, pin a model to a tier, delete any chat or file, and clear everything whenever you want.' },
-];
-
 const SURFACES = [
-  { icon: Terminal, name: 'CLI', body: 'The full orchestrator in your terminal. Watch tiers stream, approve tool calls, resume with /continue.' },
-  { icon: Layers, name: 'Desktop', body: 'A native app with the run graph, timeline, artifacts and diff review side by side.' },
-  { icon: BookOpen, name: 'Web', body: 'Nothing to install. Same account, same keys, same chats — in any browser.' },
+  { icon: Terminal, name: 'CLI', body: 'The full orchestrator in your terminal.', link: 'Install', href: '/docs#quickstart' },
+  { icon: Monitor, name: 'Desktop', body: 'Chat, a live agent tree, an editor and a browser.', link: 'Download', href: '#download' },
+  { icon: Globe, name: 'Web', body: 'Nothing to install. Bring your keys.', link: 'Open', href: null },
 ];
+
+function Dot({ tier }: { tier: string }) {
+  const bg = tier === 'T1' ? 'bg-t1' : tier === 'T2' ? 'bg-t2' : 'bg-t3';
+  return <span className={`inline-block h-[7px] w-[7px] shrink-0 rounded-full ${bg}`} />;
+}
 
 export default function LandingPage({ config, onDevLogin }: Props) {
   const [devName, setDevName] = useState('');
   const [busy, setBusy] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
+  const [copied, setCopied] = useState(false);
   const canSignIn = config.githubEnabled || config.googleEnabled;
-
-  // A run diagram and a scroll-driven spine are exactly the kind of motion that
-  // makes people ill, so the preference has to be known on the FIRST render.
-  // Reading matchMedia in an effect defaulted to `false`, which meant Framer and
-  // RunDiagram both mounted in animated mode and played a frame of animation
-  // before the setting was applied — the one frame the user asked not to see.
-  // useReducedMotion subscribes and reads synchronously (and is SSR-safe).
+  // Known on the first render, so the arcs never play a frame for someone
+  // who asked for less motion (useReducedMotion reads synchronously).
   const reduced = useReducedMotion() ?? false;
 
   async function handleDevLogin() {
@@ -120,264 +82,251 @@ export default function LandingPage({ config, onDevLogin }: Props) {
     finally { setBusy(false); }
   }
 
-  const signInButtons = (
-    <div className="flex flex-col gap-2.5 sm:flex-row sm:justify-center">
-      {config.githubEnabled && (
-        <a href="/auth/github" className="bg-accent-500 hover:bg-accent-600 flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold text-white transition">
-          <Github size={17} /> Continue with GitHub
-        </a>
-      )}
-      {config.googleEnabled && (
-        <a href="/auth/google" className="flex items-center justify-center gap-2 rounded-xl border border-elev/15 bg-elev/[0.05] px-5 py-3 text-sm font-semibold text-ink-100 transition hover:bg-elev/[0.1]">
-          Continue with Google
-        </a>
-      )}
-      {!canSignIn && !config.devLoginEnabled && (
-        <p className="text-sm text-ink-400">No sign-in methods are configured yet.</p>
-      )}
-    </div>
-  );
+  function copyNpm() {
+    void navigator.clipboard?.writeText(NPM).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1400);
+    }, () => {});
+  }
 
-  // Reveal-on-scroll, disabled wholesale under reduced motion so nothing waits
-  // on an animation that will never play.
-  const reveal = reduced
-    ? {}
-    : {
-      initial: { opacity: 0, y: 18 },
-      whileInView: { opacity: 1, y: 0 },
-      viewport: { once: true, margin: '-60px' },
-      transition: { duration: 0.5, ease: [0.22, 1, 0.36, 1] as const },
-    };
+  const plans = [
+    {
+      name: 'Free',
+      features: ['20 runs a day', '1 run at a time', 'Web search and fetch', ...(config.remoteBrowserEnabled ? ['5 browser sessions a day'] : [])],
+    },
+    {
+      name: 'Pro',
+      features: ['200 runs a day', '3 runs at a time', 'Priority routing', ...(config.remoteBrowserEnabled ? ['50 browser sessions a day'] : [])],
+    },
+  ];
+
+  const h2 = 'm-0 mb-7 max-w-[18ch] font-serif text-[clamp(30px,4vw,44px)] font-normal leading-[1.1] tracking-[-0.02em] text-ink-50';
+  const lnk = 'text-[14px] text-accent-500 hover:underline';
 
   return (
-    <div className="h-dvh overflow-y-auto text-ink-100">
-      {/* Top bar */}
-      <header className="sticky top-0 z-20 border-b border-elev/10 bg-[var(--page-bg)]">
-        <div className="mx-auto flex max-w-6xl items-center gap-3 px-5 py-3.5">
-          <Mark />
-          <span className="font-serif text-[21px] font-medium tracking-[-0.01em] text-ink-50">Cascade</span>
-          <nav className="ml-auto flex items-center gap-1 text-sm">
-            <a href="#download" className="rounded-lg px-3 py-1.5 text-ink-300 hover:bg-elev/[0.06] hover:text-ink-100">Download</a>
-            <a href="/docs" className="rounded-lg px-3 py-1.5 text-ink-300 hover:bg-elev/[0.06] hover:text-ink-100">Docs</a>
-            <a href={REPO} target="_blank" rel="noreferrer" className="hidden rounded-lg px-3 py-1.5 text-ink-300 hover:bg-elev/[0.06] hover:text-ink-100 sm:block">GitHub</a>
-            <a href="#start" className="bg-accent-500 hover:bg-accent-600 ml-1 rounded-lg px-3.5 py-1.5 font-semibold text-white">Sign in</a>
+    <div className="h-dvh overflow-y-auto bg-paper text-ink-50">
+      <header className="sticky top-0 z-20 border-b border-elev/10 bg-paper">
+        <div className="mx-auto flex h-16 max-w-[1080px] items-center gap-[22px] px-6">
+          <span className="flex items-center gap-[9px]">
+            <CascadeMark size={24} animate={false} />
+            <b className="font-serif text-[20px] font-medium tracking-[-0.01em]">Cascade</b>
+          </span>
+          <nav className="hidden gap-[18px] text-[14px] sm:flex">
+            <a href="#how" className="text-ink-300 hover:text-ink-50">How it works</a>
+            <a href="/docs" className="text-ink-300 hover:text-ink-50">Docs</a>
+            <a href="#pricing" className="text-ink-300 hover:text-ink-50">Pricing</a>
+            <a href={REPO} target="_blank" rel="noopener noreferrer" className="text-ink-300 hover:text-ink-50">GitHub</a>
           </nav>
+          <span className="flex-1" />
+          <button type="button" onClick={() => setSigningIn(true)} className="cz-btn cz-btn-quiet">Sign in</button>
+          <button type="button" onClick={() => setSigningIn(true)} className="cz-btn max-[400px]:hidden">Try Cascade</button>
         </div>
       </header>
 
-      {/* Hero */}
-      <section className="relative overflow-hidden">
-        <div className="mx-auto max-w-5xl px-5 pb-10 pt-16 sm:pt-24">
-          <div className="grid items-center gap-10 lg:grid-cols-[1.05fr_1fr]">
-            <div className="text-center lg:text-left">
-              <motion.h1
-                initial={reduced ? undefined : { opacity: 0, y: 20 }} animate={reduced ? undefined : { opacity: 1, y: 0 }}
-                transition={{ duration: 0.55 }}
-                className="font-serif text-[clamp(2.6rem,6vw,4.5rem)] font-normal leading-[1.02] tracking-[-0.03em] text-ink-50"
-              >
-                One prompt.<br />
-                A whole organization.
-              </motion.h1>
-              <motion.p
-                initial={reduced ? undefined : { opacity: 0, y: 20 }} animate={reduced ? undefined : { opacity: 1, y: 0 }}
-                transition={{ duration: 0.55, delay: 0.08 }}
-                className="mx-auto mt-5 max-w-xl text-[15px] leading-relaxed text-ink-300 sm:text-lg lg:mx-0"
-              >
-                Cascade plans the work, hands each part to the right model, and shows you what that saved.
-              </motion.p>
-
-              <motion.div
-                id="start"
-                initial={reduced ? undefined : { opacity: 0, y: 20 }} animate={reduced ? undefined : { opacity: 1, y: 0 }}
-                transition={{ duration: 0.55, delay: 0.16 }}
-                className="mt-8 scroll-mt-24"
-              >
-                <div className="lg:[&>div]:justify-start">{signInButtons}</div>
-                <p className="mt-3 text-xs text-ink-500">Free to start — you bring your own API keys.</p>
-                <div className="mt-5 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-sm lg:justify-start">
-                  <a href="#download" className="inline-flex items-center gap-1.5 text-ink-300 hover:text-ink-100">
-                    <Download size={15} /> Download desktop app
-                  </a>
-                  <a href="/docs" className="inline-flex items-center gap-1.5 text-ink-300 hover:text-ink-100">
-                    <BookOpen size={15} /> Read the docs
-                  </a>
-                </div>
-              </motion.div>
+      <div className="mx-auto max-w-[1080px] px-6">
+        <section className="grid items-center gap-12 pb-10 pt-12 min-[881px]:grid-cols-[1.1fr_0.9fr] min-[881px]:pt-[72px]">
+          <div>
+            <h1 className="m-0 mb-[18px] font-serif text-[clamp(42px,6.2vw,72px)] font-normal leading-[1.02] tracking-[-0.03em]">
+              One prompt.<br />A whole organization.
+            </h1>
+            <p className="m-0 mb-7 max-w-[40ch] text-[18px] leading-[1.55] text-ink-300">
+              Cascade plans the work, hands each part to the right model, and shows you what that saved.
+            </p>
+            <div className="flex flex-wrap items-center gap-2.5">
+              <button type="button" onClick={() => setSigningIn(true)} className="cz-btn h-11 px-5 text-[15px]">Try Cascade</button>
+              <a href="#download" className="cz-btn cz-btn-ghost h-11 px-5 text-[15px]"><Download size={14} /> Download</a>
             </div>
-
-            <motion.div
-              initial={reduced ? undefined : { opacity: 0, scale: 0.97 }} animate={reduced ? undefined : { opacity: 1, scale: 1 }}
-              transition={{ duration: 0.6, delay: 0.2 }}
+            <button
+              type="button"
+              onClick={copyNpm}
+              title="Copy"
+              className="mt-[18px] inline-flex items-center gap-2 rounded-lg bg-sunk px-2.5 py-1.5 font-mono text-[12.5px] text-ink-300"
             >
-              <RunDiagram reduced={reduced} />
-            </motion.div>
+              {NPM} {copied ? <Check size={14} className="text-success-500" /> : <Copy size={14} />}
+              <span className="sr-only">{copied ? 'Copied' : 'Copy the install command'}</span>
+            </button>
           </div>
-        </div>
-      </section>
 
-      {/* Everything below hangs off the spine. */}
-      <div className="relative mx-auto max-w-6xl px-5 lg:pl-16">
-        <CascadeSpine sectionIds={SPINE_SECTIONS} reduced={reduced} />
+          <div aria-label="Example run" className="flex flex-col gap-4 rounded-[22px] bg-card p-[22px] shadow-[var(--glass-shadow)]">
+            <div className="max-w-[90%] self-end rounded-xl bg-bubble px-3.5 py-2.5 text-[14.5px]">
+              Build a competitor report and export it as a Word doc
+            </div>
+            <svg viewBox="0 0 320 170" role="img" aria-label="Three tiers falling: T1 plans, T2 manages, T3 works" className="block h-auto w-full">
+              {[
+                { d: 'M20 30 Q160 110 300 30', c: 'rgb(var(--c-t1))', delay: '0s' },
+                { d: 'M65 85 Q160 150 255 85', c: 'rgb(var(--c-t2))', delay: '.35s' },
+                { d: 'M112 132 Q160 166 208 132', c: 'rgb(var(--c-t3))', delay: '.7s' },
+              ].map((a) => (
+                <path
+                  key={a.d}
+                  d={a.d}
+                  pathLength={1}
+                  fill="none"
+                  stroke={a.c}
+                  strokeWidth={5}
+                  strokeLinecap="round"
+                  strokeDasharray={1}
+                  className={reduced ? undefined : 'cz-arc'}
+                  style={reduced ? undefined : { animationDelay: a.delay }}
+                />
+              ))}
+            </svg>
+            <div className="flex flex-wrap justify-center gap-4 font-mono text-[12px] text-ink-300">
+              <span className="inline-flex items-center gap-1.5"><Dot tier="T1" />T1 plans</span>
+              <span className="inline-flex items-center gap-1.5"><Dot tier="T2" />T2 ×4</span>
+              <span className="inline-flex items-center gap-1.5"><Dot tier="T3" />T3 ×9</span>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-2.5 border-t border-elev/10 pt-3 font-mono text-[12.5px] text-ink-300">
+              <span>competitor-report.docx</span>
+              <span><b className="font-medium text-success-300">saved $0.34</b> · 89% vs all-T1</span>
+            </div>
+          </div>
+        </section>
 
-        {/* Tiers — each steps further right, so the section descends as it reads. */}
-        <section id="tiers" className="scroll-mt-24 py-16">
-          <motion.div {...reveal} className="mb-10 max-w-2xl">
-            <h2 className="font-serif text-[clamp(1.8rem,3.6vw,2.6rem)] font-normal tracking-[-0.02em] text-ink-50">One prompt, three tiers</h2>
-            <p className="mt-3 text-ink-400">
-              Complexity decides how far it cascades. A trivial ask gets answered directly; a hard one fans
-              out across all three.
-            </p>
-          </motion.div>
-
-          <div className="space-y-4">
-            {TIERS.map((t, i) => (
-              <motion.div
-                key={t.n}
-                {...reveal}
-                transition={reduced ? undefined : { ...(reveal as { transition?: object }).transition, delay: i * 0.08 }}
-                className="glass rounded-2xl border-l-2 p-5 sm:p-6 lg:ml-[var(--tier-step)]"
-                style={{
-                  borderLeftColor: t.color,
-                  // The step is a CSS variable consumed ONLY by the lg: class
-                  // above. Setting marginLeft inline applied it at every width —
-                  // a 375px phone still gave the third card ~30px of indent,
-                  // exactly the behaviour the comment claimed it avoided.
-                  '--tier-step': `${i * 3}rem`,
-                } as CSSProperties}
-              >
-                <div className="flex flex-wrap items-center gap-3">
-                  <span className="flex h-9 w-9 items-center justify-center rounded-xl text-sm font-bold text-white" style={{ background: t.color }}>{t.n}</span>
-                  <div>
-                    <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: t.color }}>Tier {t.n}</div>
-                    <h3 className="text-lg font-semibold text-ink-50">{t.name}</h3>
-                  </div>
-                </div>
-                <p className="mt-3 text-sm leading-relaxed text-ink-300">{t.text}</p>
-                <p className="mt-2 text-sm leading-relaxed text-ink-500">{t.example}</p>
-              </motion.div>
+        <section id="how" className="scroll-mt-20 pt-[88px]">
+          <h2 className={h2}>Each tier does what it's best at.</h2>
+          <div className="grid gap-6 min-[761px]:grid-cols-3 min-[761px]:gap-8">
+            {TIER_STEPS.map((t) => (
+              <div key={t.name}>
+                <svg viewBox="0 0 56 28" aria-hidden="true" className="h-7 w-14">
+                  <path d={t.d} fill="none" stroke={t.color} strokeWidth={3.5} strokeLinecap="round" />
+                </svg>
+                <h3 className="mb-1.5 mt-3 text-[16px] font-semibold">{t.name}</h3>
+                <p className="m-0 leading-[1.55] text-ink-300">{t.body}</p>
+              </div>
             ))}
           </div>
         </section>
 
-        {/* The differentiators. */}
-        <section id="visible" className="scroll-mt-24 py-16">
-          <motion.div {...reveal} className="mb-10 max-w-2xl">
-            <h2 className="font-serif text-[clamp(1.8rem,3.6vw,2.6rem)] font-normal tracking-[-0.02em] text-ink-50">What other orchestrators hide</h2>
-            <p className="mt-3 text-ink-400">
-              Most agent tools show you a graph and a log. The useful questions are what got skipped, what
-              survives a crash, and why this model — so Cascade answers those.
-            </p>
-          </motion.div>
-
-          <div className="grid gap-4 md:grid-cols-3">
-            {MOMENTS.map((m, i) => (
-              <motion.div
-                key={m.title}
-                {...reveal}
-                transition={reduced ? undefined : { ...(reveal as { transition?: object }).transition, delay: i * 0.08 }}
-                className="glass flex flex-col rounded-2xl p-5"
-              >
-                <div className="flex h-10 w-10 items-center justify-center rounded-xl" style={{ background: `${m.color}1F`, color: m.color }}>
-                  <m.icon size={19} />
+        <section className="pt-[88px]">
+          <div className="grid items-center gap-12 min-[881px]:grid-cols-[0.9fr_1.1fr]">
+            <div>
+              <h2 className={h2}>Every answer comes with a receipt.</h2>
+              <p className="m-0 max-w-[36ch] text-[17px] leading-[1.6] text-ink-300">
+                See which model did what, and what delegating saved against running it all on the top model.
+              </p>
+            </div>
+            <div className="flex flex-col gap-2.5 rounded-[18px] bg-card px-[22px] py-5 font-mono text-[13px] shadow-[var(--glass-shadow)]">
+              {RECEIPT.map((r) => (
+                <div key={r.tier} className="grid grid-cols-[auto_1fr_auto] items-center gap-3 text-ink-300">
+                  <span className="inline-flex items-center gap-1.5"><Dot tier={r.tier} />{r.tier}</span>
+                  <span>{r.model}</span>
+                  <span>${r.cost}</span>
                 </div>
-                <h3 className="mt-4 font-semibold text-ink-50">{m.title}</h3>
-                <p className="mt-1.5 text-sm leading-relaxed text-ink-400">{m.body}</p>
-                <div className="mt-4 rounded-xl border border-elev/10 bg-elev/[0.03] p-2.5">{m.demo}</div>
-              </motion.div>
-            ))}
-          </div>
-        </section>
-
-        {/* Three surfaces. */}
-        <section id="surfaces" className="scroll-mt-24 py-16">
-          <motion.div {...reveal} className="mb-10 max-w-2xl">
-            <h2 className="font-serif text-[clamp(1.8rem,3.6vw,2.6rem)] font-normal tracking-[-0.02em] text-ink-50">Three surfaces, one account</h2>
-            <p className="mt-3 text-ink-400">Your keys, chats and settings follow you between them.</p>
-          </motion.div>
-          <div className="grid gap-4 sm:grid-cols-3">
-            {SURFACES.map((s, i) => (
-              <motion.div
-                key={s.name}
-                {...reveal}
-                transition={reduced ? undefined : { ...(reveal as { transition?: object }).transition, delay: i * 0.07 }}
-                className="glass rounded-2xl p-5"
-              >
-                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-accent-500/12 text-accent-300">
-                  <s.icon size={19} />
-                </div>
-                <h3 className="mt-4 font-semibold text-ink-50">{s.name}</h3>
-                <p className="mt-1.5 text-sm leading-relaxed text-ink-400">{s.body}</p>
-              </motion.div>
-            ))}
-          </div>
-        </section>
-
-        {/* Downloads — placed right after the three surfaces, since that
-            section is where "there is a desktop app" lands. */}
-        <motion.div {...reveal}>
-          <DownloadSection reduced={reduced} />
-        </motion.div>
-
-        {/* Features. */}
-        <section id="features" className="scroll-mt-24 py-16">
-          <motion.h2 {...reveal} className="mb-10 font-serif text-[clamp(1.8rem,3.6vw,2.6rem)] font-normal tracking-[-0.02em] text-ink-50">Everything else you need</motion.h2>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {FEATURES.map((f, i) => (
-              <motion.div
-                key={f.title}
-                {...reveal}
-                transition={reduced ? undefined : { ...(reveal as { transition?: object }).transition, delay: (i % 3) * 0.06 }}
-                className="glass rounded-2xl p-5"
-              >
-                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-accent-500/12 text-accent-300">
-                  <f.icon size={19} />
-                </div>
-                <h3 className="mt-4 font-semibold text-ink-50">{f.title}</h3>
-                <p className="mt-1.5 text-sm leading-relaxed text-ink-400">{f.body}</p>
-              </motion.div>
-            ))}
-          </div>
-        </section>
-      </div>
-
-      {/* Final CTA */}
-      <section className="mx-auto max-w-3xl px-5 pb-20">
-        <motion.div {...reveal} className="glass-strong relative overflow-hidden rounded-3xl px-6 py-12 text-center">
-          <div className="pointer-events-none absolute inset-x-0 -top-16 mx-auto h-40 max-w-md rounded-full opacity-20 blur-3xl"
-            style={{ background: `radial-gradient(closest-side, ${AZURE}, transparent)` }} />
-          <Mark size={30} />
-          <h2 className="mt-4 font-serif text-[clamp(1.8rem,3.6vw,2.6rem)] font-normal tracking-[-0.02em] text-ink-50">Start orchestrating in a minute</h2>
-          <p className="mx-auto mt-3 max-w-md text-ink-300">Sign in, add a provider key, and send your first prompt. No setup, no lock-in.</p>
-          <div className="mt-7">{signInButtons}</div>
-
-          {config.devLoginEnabled && (
-            <div className="mx-auto mt-7 max-w-xs border-t border-elev/10 pt-5">
-              <p className="mb-2 text-xs text-ink-400">Local development only</p>
-              <div className="flex gap-2">
-                <input className="flex-1 rounded-lg border border-elev/10 bg-elev/[0.04] px-3 py-1.5 text-sm text-ink-100 outline-none focus:border-accent-500/60"
-                  placeholder="Your name" value={devName} onChange={(e) => setDevName(e.target.value)} />
-                <button type="button" disabled={busy} onClick={handleDevLogin}
-                  className="bg-accent-500 hover:bg-accent-600 rounded-lg px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50">
-                  <span className="inline-flex items-center gap-1"><Sparkles size={13} /> Dev login</span>
-                </button>
+              ))}
+              <div className="flex flex-wrap justify-between gap-2 border-t border-dashed border-elev/[0.17] pt-3">
+                <span>total $0.0410 · all-T1 $0.3810</span>
+                <b className="font-medium text-success-300">saved 89%</b>
               </div>
             </div>
-          )}
-        </motion.div>
-      </section>
-
-      {/* Footer */}
-      <footer className="border-t border-elev/10">
-        <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-3 px-5 py-6 text-sm text-ink-400 sm:flex-row">
-          <span className="inline-flex items-center gap-2"><Mark size={16} /> Cascade — multi-tier AI orchestration</span>
-          <div className="flex items-center gap-4">
-            <a href="#download" className="hover:text-ink-100 inline-flex items-center gap-1"><Download size={14} /> Download</a>
-            <a href="/docs" className="hover:text-ink-100 inline-flex items-center gap-1"><BookOpen size={14} /> Docs</a>
-            <a href={REPO} target="_blank" rel="noreferrer" className="hover:text-ink-100 inline-flex items-center gap-1"><Github size={14} /> GitHub</a>
-            <a href="#start" className="inline-flex items-center gap-1 hover:text-ink-100">Sign in <ArrowRight size={13} /></a>
           </div>
-        </div>
-      </footer>
+        </section>
+
+        <section className="pt-[88px]">
+          <h2 className={h2}>What other orchestrators hide.</h2>
+          <div className="grid gap-6 min-[761px]:grid-cols-3 min-[761px]:gap-8">
+            {MOMENTS.map((m) => (
+              <div key={m.title} className="flex flex-col gap-2">
+                <m.icon size={20} className="text-ink-300" />
+                <h3 className="m-0 mt-1 text-[16px] font-semibold">{m.title}</h3>
+                <p className="m-0 leading-[1.55] text-ink-300">{m.body}</p>
+                <div className="mt-1 flex flex-col gap-1 font-mono text-[12px] text-ink-500">
+                  {m.rows.map(([label, state]) => (
+                    <span key={label} className="flex justify-between gap-3 border-b border-elev/10 py-1 last:border-0">
+                      <span className="truncate text-ink-300">{label}</span><span>{state}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="pt-[88px]">
+          <h2 className={h2}>Wherever you work.</h2>
+          <div className="grid border-t border-elev/10 min-[761px]:grid-cols-3">
+            {SURFACES.map((s) => (
+              <div key={s.name} className="flex flex-col gap-2 py-6 pr-6">
+                <b className="flex items-center gap-2 text-[16px] font-semibold"><s.icon size={17} /> {s.name}</b>
+                <p className="m-0 text-ink-300">{s.body}</p>
+                {s.href ? (
+                  <a href={s.href} className={`${lnk} self-start`}>{s.link} →</a>
+                ) : (
+                  <button type="button" onClick={() => setSigningIn(true)} className={`${lnk} self-start`}>{s.link} →</button>
+                )}
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <DownloadSection reduced={reduced} />
+
+        <section id="pricing" className="scroll-mt-20 pt-[72px]">
+          <h2 className={h2}>Free to start.</h2>
+          <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(210px,1fr))]">
+            {plans.map((p) => (
+              <div
+                key={p.name}
+                className="flex flex-col gap-3 rounded-2xl bg-card p-[18px]"
+                style={{ boxShadow: p.name === 'Pro' ? 'inset 0 0 0 1.5px rgb(var(--c-accent-500))' : 'inset 0 0 0 1px rgb(var(--c-elev) / 0.17)' }}
+              >
+                <h3 className="m-0 font-serif text-[22px] font-medium">{p.name}</h3>
+                <ul className="m-0 flex list-none flex-col gap-[7px] p-0 text-[13.5px] text-ink-300">
+                  {p.features.map((f) => (
+                    <li key={f} className="flex gap-2"><Check size={14} className="mt-[3px] shrink-0 text-t3" />{f}</li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+          <p className="mt-4 text-[13px] text-ink-500">You bring your own API keys and pay providers directly. The desktop app is free, always.</p>
+        </section>
+
+        <footer className="mt-24 flex flex-wrap items-center gap-4 border-t border-elev/10 pb-9 pt-7 text-[13px] text-ink-500">
+          <CascadeMark size={16} animate={false} />
+          <span>© 2026 Varun SV · MIT</span>
+          <span className="flex-1" />
+          <a href="/docs" className="text-ink-300 hover:text-ink-50">Docs</a>
+          <a href="/docs#privacy" className="text-ink-300 hover:text-ink-50">Privacy</a>
+          <a href={REPO} target="_blank" rel="noopener noreferrer" className="text-ink-300 hover:text-ink-50">GitHub</a>
+        </footer>
+      </div>
+
+      <AnimatePresence>
+        {signingIn && (
+          <Modal title="Sign in to Cascade" onClose={() => setSigningIn(false)} maxWidth="max-w-[400px]">
+            <div className="flex flex-col gap-2.5 px-5 pb-5 pt-1.5">
+              <p className="m-0 mb-1 text-[14px] text-ink-300">Free to start. You bring your own API keys.</p>
+              {config.githubEnabled && (
+                <a href="/auth/github" className="cz-btn h-11"><Github size={17} /> Continue with GitHub</a>
+              )}
+              {config.googleEnabled && (
+                <a href="/auth/google" className="cz-btn cz-btn-ghost h-11">Continue with Google</a>
+              )}
+              {!canSignIn && !config.devLoginEnabled && (
+                <p className="m-0 text-[14px] text-ink-500">No sign-in methods are configured yet.</p>
+              )}
+              {config.devLoginEnabled && (
+                <div className={canSignIn ? 'mt-2 border-t border-elev/10 pt-4' : ''}>
+                  <p className="m-0 mb-2 text-[12px] text-ink-500">Local development only</p>
+                  <div className="flex gap-2">
+                    <input
+                      className="cz-field h-9 flex-1 text-[14px]"
+                      placeholder="Your name"
+                      value={devName}
+                      onChange={(e) => setDevName(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') void handleDevLogin(); }}
+                    />
+                    <button type="button" disabled={busy} onClick={() => void handleDevLogin()} className="cz-btn h-9">
+                      <Sparkles size={13} /> Dev login
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </Modal>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

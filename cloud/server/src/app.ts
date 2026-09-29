@@ -49,6 +49,19 @@ const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 const MAX_MEMORY_LEN = 2000;
 const MAX_MEMORY_CATEGORY_LEN = 32;
 const MAX_TITLE_LEN = 120;
+const SEARCH_PAGE = 50;
+
+/**
+ * `before=<updatedAt>:<id>` from a search page's last chat. Absent is the first
+ * page (undefined); anything else malformed is null.
+ */
+export function parseSearchCursor(raw: unknown): { updatedAt: number; id: string } | undefined | null {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string') return null;
+  const m = /^(\d{1,15}):([\w-]{1,64})$/.exec(raw);
+  return m ? { updatedAt: Number(m[1]), id: m[2]! } : null;
+}
+
 /** Upper bound on a persisted message (well above any real turn; a light DoS rail). */
 const MAX_MESSAGE_LEN = 500_000;
 const MAX_SKILL_NAME_LEN = 60;
@@ -499,8 +512,15 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   });
 
   app.get('/api/conversations', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
-    const conversations = store.listConversations(req.session!.userId);
-    res.json({ conversations });
+    // `?q=` searches every chat by title, a page at a time (`&before=` the last
+    // result's `updatedAt:id` for the next); without it, the most recent page.
+    const q = typeof req.query['q'] === 'string' ? req.query['q'].trim().slice(0, MAX_TITLE_LEN) : '';
+    if (!q) { res.json({ conversations: store.listConversations(req.session!.userId) }); return; }
+    const before = parseSearchCursor(req.query['before']);
+    if (before === null) { res.status(400).json({ error: 'Invalid cursor' }); return; }
+    // One past the page says whether there is another.
+    const rows = store.searchConversations(req.session!.userId, q, SEARCH_PAGE + 1, before);
+    res.json({ conversations: rows.slice(0, SEARCH_PAGE), hasMore: rows.length > SEARCH_PAGE });
   });
 
   // Create an empty conversation — native surfaces (desktop/CLI) open a cloud-

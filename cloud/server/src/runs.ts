@@ -782,6 +782,50 @@ export interface WhyReport {
   tokensByTier: Record<string, number>;
   /** tier → model that served it (from tier:status). */
   models: Record<string, string>;
+  /** The agents that worked the run, each as it last reported — the tree the
+   *  live run showed, kept so a finished reply can fold it open. */
+  trace?: TraceNode[];
+}
+
+export interface TraceNode {
+  id: string;
+  role: string;
+  label?: string;
+  model?: string;
+  status: string;
+}
+
+// A run's tree is stored in every reply's /why report, so it is kept small: a
+// large fan-out keeps its first agents, and a long label is cut.
+export const MAX_TRACE_NODES = 60;
+const SYNTHETIC_ROOT = /^t[23]-root$/;
+const MAX_TRACE_LABEL = 140;
+
+/**
+ * Fold one tier:status event into the run's trace, latest state per agent.
+ * Agents past the cap are dropped rather than replacing earlier ones, so the
+ * trace stays the start of the tree rather than a random sample of it.
+ */
+export function traceStatus(trace: Map<string, TraceNode>, e: unknown): void {
+  const ev = (e ?? {}) as Record<string, unknown>;
+  const str = (k: string) => (typeof ev[k] === 'string' && (ev[k] as string).trim() ? (ev[k] as string).trim() : undefined);
+  const id = str('tierId') ?? str('id');
+  if (!id) return;
+  // `Cascade.run()` closes a Simple or Moderate run with a summary-only
+  // completion under a fixed `t3-root` / `t2-root` id, after the real worker
+  // or manager has already reported under its own. Kept, it doubled the root
+  // agent in every saved tree.
+  if (SYNTHETIC_ROOT.test(id) && !str('label') && !str('model')) return;
+  const prev = trace.get(id);
+  if (!prev && trace.size >= MAX_TRACE_NODES) return;
+  const label = str('label') ?? prev?.label;
+  trace.set(id, {
+    id,
+    role: (str('role') ?? prev?.role ?? '').toUpperCase(),
+    ...(label ? { label: label.slice(0, MAX_TRACE_LABEL) } : {}),
+    ...((str('model') ?? prev?.model) ? { model: str('model') ?? prev?.model } : {}),
+    status: str('status') ?? prev?.status ?? 'ACTIVE',
+  });
 }
 
 export interface ChatRunResult {
@@ -801,10 +845,15 @@ export interface ChatRunResult {
 // the most tokens, falling back to the most cost. Undefined for runs that never
 // surfaced tier data (e.g. the conversational fast-path) — the UI then shows no
 // badge rather than a fabricated one.
-export function primaryTierOf(tokensByTier: Record<string, number>, costByTier: Record<string, number>): string | null {
+export function primaryTierOf(
+  tokensByTier: Record<string, number>, costByTier: Record<string, number>, servedBy: Record<string, string> = {},
+): string | null {
   const rank = (m: Record<string, number>) =>
     Object.entries(m).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1])[0]?.[0];
-  return rank(tokensByTier) ?? rank(costByTier) ?? null;
+  // A provider that reports no usage leaves both empty; when one tier served
+  // the whole run, it is the answering one all the same.
+  const served = Object.keys(servedBy);
+  return rank(tokensByTier) ?? rank(costByTier) ?? (served.length === 1 ? served[0]! : null);
 }
 
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
@@ -1955,6 +2004,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // tier:status event (base.ts setServingModel), and there's no post-run
   // getter for a tier→model map, so we build it from the stream.
   const tierModels: Record<string, string> = {};
+  const trace = new Map<string, TraceNode>();
 
   const onToken = (e: { text: string; tierId: string; primary?: boolean }) => {
     socket.emit('stream:token', { conversationId: conversation.id, ...e });
@@ -1962,6 +2012,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   const onStatus = (e: unknown) => {
     const ev = e as { role?: string; model?: string };
     if (ev.role && ev.model) tierModels[ev.role] = ev.model;
+    traceStatus(trace, e);
     socket.emit('tier:status', { conversationId: conversation.id, ...(e as object) });
   };
   const onPlan = (e: unknown) => {
@@ -2203,7 +2254,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     const savings = cascade.getRouter().getDelegationSavings();
     const costByTier = result.costByTier ?? stats.costByTier ?? {};
     const tokensByTier = result.tokensByTier ?? stats.tokensByTier ?? {};
-    const tier = primaryTierOf(tokensByTier, costByTier);
+    const tier = primaryTierOf(tokensByTier, costByTier, tierModels);
     const model = (tier && tierModels[tier]) || null;
     const why: WhyReport = {
       tier,
@@ -2217,6 +2268,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
       costByTier,
       tokensByTier,
       models: tierModels,
+      ...(trace.size > 0 ? { trace: [...trace.values()] } : {}),
     };
 
     const assistantMessage = store.addMessage({
