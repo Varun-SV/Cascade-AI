@@ -84,8 +84,12 @@ export function azureModelForTier<T>(tier: 'T1' | 'T2' | 'T3', ranked: T[]): T |
   return ranked[Math.min(1, ranked.length - 1)]; // T2: second-strongest, or the only one
 }
 
-function nestedCopy(m: Record<string, Record<string, number>>): Record<string, Record<string, number>> {
-  return Object.fromEntries(Object.entries(m).map(([k, v]) => [k, { ...v }]));
+/** Per tier, per model (`provider:id`): what it cost and how many tokens it used. */
+type ServedBy = Map<string, Map<string, { costUsd: number; tokens: number }>>;
+
+function servedByRecord(m: ServedBy, pick: 'costUsd' | 'tokens'): Record<string, Record<string, number>> {
+  return Object.fromEntries([...m].map(([tier, models]) =>
+    [tier, Object.fromEntries([...models].map(([model, sums]) => [model, sums[pick]]))]));
 }
 
 export interface RouterStats {
@@ -447,7 +451,10 @@ export class CascadeRouter extends EventEmitter {
   private selector!: ModelSelector;
   private failover!: FailoverManager;
   private providers: Map<string, BaseProvider> = new Map();
-  private stats: RouterStats = {
+  // Kept in Maps, not in `stats`: a tier or model name is used as a key, and a
+  // plain object keyed by input could be written through to its prototype.
+  private servedBy: ServedBy = new Map();
+  private stats: Omit<RouterStats, 'costByTierModel' | 'tokensByTierModel'> = {
     totalTokens: 0,
     totalCostUsd: 0,
     callsByProvider: {},
@@ -457,8 +464,6 @@ export class CascadeRouter extends EventEmitter {
     inputTokensByTier: {},
     outputTokensByTier: {},
     costByFeature: {},
-    costByTierModel: {},
-    tokensByTierModel: {},
     untrackedCostCalls: 0,
     untrackedCostModels: [],
   };
@@ -1779,8 +1784,8 @@ export class CascadeRouter extends EventEmitter {
       inputTokensByTier: { ...this.stats.inputTokensByTier },
       outputTokensByTier: { ...this.stats.outputTokensByTier },
       costByFeature: { ...this.stats.costByFeature },
-      costByTierModel: nestedCopy(this.stats.costByTierModel),
-      tokensByTierModel: nestedCopy(this.stats.tokensByTierModel),
+      costByTierModel: servedByRecord(this.servedBy, 'costUsd'),
+      tokensByTierModel: servedByRecord(this.servedBy, 'tokens'),
       untrackedCostCalls: this.stats.untrackedCostCalls,
       untrackedCostModels: [...this.stats.untrackedCostModels],
     };
@@ -1838,11 +1843,10 @@ export class CascadeRouter extends EventEmitter {
       inputTokensByTier: {},
       outputTokensByTier: {},
       costByFeature: {},
-      costByTierModel: {},
-      tokensByTierModel: {},
       untrackedCostCalls: 0,
       untrackedCostModels: [],
     };
+    this.servedBy = new Map();
     this.sessionCostUsd = 0;
     this.budgetState = 'ok';
     this.budgetExceededReason = undefined;
@@ -2223,10 +2227,12 @@ export class CascadeRouter extends EventEmitter {
     this.stats.outputTokensByTier[tier] = (this.stats.outputTokensByTier[tier] ?? 0) + usage.outputTokens;
     // Keyed as `provider:id`, the way a tier reports the model serving it.
     const served = `${model.provider}:${model.id}`;
-    const costs = (this.stats.costByTierModel[tier] ??= {});
-    costs[served] = (costs[served] ?? 0) + usage.estimatedCostUsd;
-    const tokens = (this.stats.tokensByTierModel[tier] ??= {});
-    tokens[served] = (tokens[served] ?? 0) + usage.totalTokens;
+    const models = this.servedBy.get(tier) ?? new Map<string, { costUsd: number; tokens: number }>();
+    this.servedBy.set(tier, models);
+    const sums = models.get(served) ?? { costUsd: 0, tokens: 0 };
+    sums.costUsd += usage.estimatedCostUsd;
+    sums.tokens += usage.totalTokens;
+    models.set(served, sums);
 
     if (featureTag) {
       this.stats.costByFeature[featureTag] = (this.stats.costByFeature[featureTag] ?? 0) + usage.estimatedCostUsd;

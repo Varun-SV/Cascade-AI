@@ -198,6 +198,15 @@ describe('RouterStats — per-tier cost tracking', () => {
     expect(router.getStats().costByTierModel).toEqual({});
     expect(router.getStats().tokensByTierModel).toEqual({});
   });
+
+  it('keeps a tier named like a prototype key to itself', () => {
+    const r = router as unknown as {
+      recordStats: (tier: string, model: { id: string; provider: string }, usage: { inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number }) => void;
+    };
+    r.recordStats('__proto__', { id: 'x', provider: 'openai' }, { inputTokens: 1, outputTokens: 0, totalTokens: 1, estimatedCostUsd: 0.5 });
+    expect(({} as Record<string, unknown>)['openai:x']).toBeUndefined();
+    expect(Object.hasOwn(router.getStats().costByTierModel, '__proto__')).toBe(true);
+  });
 });
 
 // ── Untracked spend ────────────────────────────
