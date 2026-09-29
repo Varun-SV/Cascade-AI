@@ -13,6 +13,7 @@ import { benchmarkScore01 } from './benchmarks.js';
 import { applyFeedback, type FeedbackSource } from './feedback-prior.js';
 import { posteriorMean, sampleBeta, posteriorStdDev, type Rng } from './bayes.js';
 import { BLENDED_COST_CEILING, blendedCostPer1k } from './pricing.js';
+import { plannedCallUsd } from './run-budget.js';
 
 export type { TaskType };
 
@@ -22,6 +23,12 @@ export type AutoBias = 'balanced' | 'quality' | 'cost';
 /** Options shared by both selection entry points. */
 export interface SelectOptions {
   requiresToolUse?: boolean;
+  /**
+   * What one call of this subtask may cost, when a per-run cost cap is set
+   * (router/run-budget.ts). Candidates over it are passed over for the best
+   * one within it; with none within it, the cheapest runs.
+   */
+  maxCallUsd?: number;
 }
 
 /**
@@ -378,6 +385,16 @@ export class TaskAnalyzer {
       if (toolCapable.length > 0) candidates = toolCapable;
     }
 
+    // Money running low: only what a call can afford is in the running. The
+    // best overall is remembered so the choice can say what it passed over.
+    const unbudgeted = candidates;
+    if (opts?.maxCallUsd != null) {
+      const within = candidates.filter((m) => plannedCallUsd(m) <= opts.maxCallUsd!);
+      candidates = within.length > 0
+        ? within
+        : [[...candidates].sort((a, b) => plannedCallUsd(a) - plannedCallUsd(b))[0]!];
+    }
+
     // Scored twice: once on what we BELIEVE (the posterior mean) and once on a
     // DRAW from the same posterior. The draw is what gets picked.
     //
@@ -400,9 +417,15 @@ export class TaskAnalyzer {
     // An exploratory pick is one the evidence alone would not have made. It
     // has to be explainable, or it reads as the router malfunctioning.
     const byBelief = [...scored].sort((a, b) => b.belief - a.belief)[0];
-    const note = chosen && byBelief && chosen.model.id !== byBelief.model.id
+    let note = chosen && byBelief && chosen.model.id !== byBelief.model.id
       ? this.describeExploration(chosen.model, byBelief.model, profile)
       : null;
+    if (chosen && candidates !== unbudgeted) {
+      const preferred = [...unbudgeted].sort((a, b) => this.scoreModel(b, profile, 'mean') - this.scoreModel(a, profile, 'mean'))[0];
+      if (preferred && preferred.id !== chosen.model.id) {
+        note = `chose ${chosen.model.id} over ${preferred.id}, which costs more than what is left of this task's budget allows`;
+      }
+    }
 
     return recordSelection(chosen?.model ?? selector.selectForTier(tier), note);
   }

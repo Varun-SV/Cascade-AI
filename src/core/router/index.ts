@@ -37,7 +37,7 @@ import type { FeedbackSource } from './feedback-prior.js';
 import { DeadModelStore } from './dead-models.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
 import { buildTokenUsage, resolveModelPricing } from '../../utils/cost.js';
-import { MIN_FINAL_OUTPUT_TOKENS, workShare, type RunBudget } from './run-budget.js';
+import { MIN_FINAL_OUTPUT_TOKENS, T2_CALLS_PER_SECTION, T3_CALLS_PER_SUBTASK, workShare, type RunBudget } from './run-budget.js';
 import { hasProviderCredential } from '../../config/index.js';
 import { estimateTokens, contentToText, CHARS_PER_TOKEN } from '../context/compaction.js';
 import { withTimeout, withTimeoutAbort, anySignal, CascadeCancelledError } from '../../utils/retry.js';
@@ -191,6 +191,8 @@ function newRunAbort(): AbortController {
  */
 const TOKENS_PER_MESSAGE_FRAMING = 4;
 
+/** A subtask may take at most 1/this of what is left for work (see affordableCall). */
+const SUBTASK_SHARE_OF_WORK = 4;
 /** What a work call is expected to write, for holding the answer's reserve. */
 const EXPECTED_WORK_OUTPUT_TOKENS = 1_500;
 /** An answer call's output when neither it nor its model names a limit. */
@@ -1788,7 +1790,10 @@ export class CascadeRouter extends EventEmitter {
       // posterior behind it, so it is announced rather than left to be
       // discovered in a bill. The note arrives with the selection, so two
       // subtasks selecting at once cannot be attributed to each other.
-      const { model: chosen, note, taskType } = await this.taskAnalyzer.select(text, tier, this.selector, opts);
+      const { model: chosen, note, taskType } = await this.taskAnalyzer.select(text, tier, this.selector, {
+        ...opts,
+        ...this.affordableCall(tier),
+      });
       // HELD, not emitted. A selection is not a call: T3Worker selects before
       // its cancellation checkpoint and T2Manager before its approval gate, so
       // a subtask that loses a wave race throws without ever reaching a
@@ -1802,6 +1807,19 @@ export class CascadeRouter extends EventEmitter {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * What one call of a subtask may cost as a run's budget runs down: a
+   * section's manager or a worker may take at most a quarter of what is left
+   * for work, so the run can still afford the rest of its plan. Nothing
+   * without a cost cap.
+   */
+  private affordableCall(tier: TierRole): { maxCallUsd?: number } {
+    const workUsd = this.runBudget().workRemainingUsd;
+    if (workUsd == null) return {};
+    const calls = tier === 'T2' ? T2_CALLS_PER_SECTION : T3_CALLS_PER_SUBTASK;
+    return { maxCallUsd: workUsd / (SUBTASK_SHARE_OF_WORK * calls) };
   }
 
   getStats(): RouterStats {
