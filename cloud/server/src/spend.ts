@@ -100,6 +100,8 @@ export const SPEND_PERIODS: readonly SpendPeriod[] = ['today', '7d', '30d', 'all
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
+/** The longest history "all time" still shows day by day. */
+export const ALL_TIME_DAILY_UP_TO = 60;
 /** Real UTC offsets run from −12:00 to +14:00. */
 export const MAX_TZ_OFFSET_MIN = 14 * 60;
 
@@ -151,7 +153,16 @@ export function periodRange(period: SpendPeriod, tzOffsetMin: number, nowMs: num
     const keys = Array.from({ length: days }, (_, i) => bucketKey(fromMs + i * DAY, tzOffsetMin, 'day'));
     return { fromMs, bucket: 'day', keys };
   }
-  // All time: one slot per month from the first run's month to this one.
+  // All time: day by day while the history is short, so a new account sees
+  // its days rather than one or two monthly bars; month by month after that.
+  if (firstAtMs != null) {
+    const firstDay = Math.floor((firstAtMs + offset) / DAY) * DAY - offset;
+    const days = Math.round((todayStart - firstDay) / DAY) + 1;
+    if (days <= ALL_TIME_DAILY_UP_TO) {
+      const keys = Array.from({ length: days }, (_, i) => bucketKey(firstDay + i * DAY, tzOffsetMin, 'day'));
+      return { fromMs: null, bucket: 'day', keys };
+    }
+  }
   const keys: string[] = [];
   if (firstAtMs != null) {
     const last = bucketKey(nowMs, tzOffsetMin, 'month');

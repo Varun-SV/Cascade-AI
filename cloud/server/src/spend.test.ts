@@ -90,7 +90,17 @@ describe('report periods', () => {
     expect(month.keys[0]).toBe('2026-09-01');
   });
 
-  it('runs all time month by month from the first run, across a year end', () => {
+  it('runs a short all-time history day by day, from the first run\'s day', () => {
+    const r = periodRange('all', 0, now, Date.UTC(2026, 8, 27, 23, 0));
+    expect(r.fromMs).toBeNull();
+    expect(r.bucket).toBe('day');
+    expect(r.keys).toEqual(['2026-09-27', '2026-09-28', '2026-09-29']);
+    // Sixty days is still daily; a day more switches to months.
+    expect(periodRange('all', 0, now, now - 59 * 86_400_000).bucket).toBe('day');
+    expect(periodRange('all', 0, now, now - 60 * 86_400_000).bucket).toBe('month');
+  });
+
+  it('runs a longer all-time history month by month, across a year end', () => {
     const r = periodRange('all', 0, now, Date.UTC(2025, 10, 15));
     expect(r.fromMs).toBeNull();
     expect(r.keys[0]).toBe('2025-11');

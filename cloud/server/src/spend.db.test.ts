@@ -72,8 +72,10 @@ describe('spend ledger', () => {
 
     const all = buildSpendReport(store.spend, u.id, 'all', 0, NOW);
     expect(all.totals.runs).toBe(4);
-    expect(all.bucket).toBe('month');
-    expect(all.series.map((s) => s.key)).toEqual(['2026-09']);
+    // Twenty-one days of history: all time is day by day, from the first run.
+    expect(all.bucket).toBe('day');
+    expect(all.series).toHaveLength(21);
+    expect(all.series[0]).toMatchObject({ key: '2026-09-09', runs: 1 });
   });
 
   it('keeps a deleted chat\'s spend, counted together as deleted chats', () => {
