@@ -366,7 +366,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot run commands: nothing there stops such a command from
   hard-linking a file from outside the workspace in and writing to it, or
   from leaving a child running that writes after it ends. Where neither
-  jailer works, a local-only worker cannot run commands either. On Windows, `git` gets the provider keys taken
+  jailer works (Windows, or a Linux without working bubblewrap), `shell`
+  and `run_code` are refused, since taking the keys out of a command's
+  environment leaves the files on disk readable; `tools.processJail: "off"`
+  runs them anyway. On Windows, `git` gets the provider keys taken
   out of its environment too. `tools.processJail`: `auto` (default),
   `bwrap`, `sandbox-exec` — that jailer or no commands — or `off`.
 - **The code index's database is protected wherever it is.** Only its

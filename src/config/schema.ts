@@ -150,8 +150,10 @@ export const ToolsConfigSchema = z.object({
    * that is not local-only — local-only paths; gives each command its own
    * process namespace; and cuts the network for a local-only caller.
    * - 'auto' (default): bubblewrap on Linux, sandbox-exec on macOS, where it
-   *   works; elsewhere commands run with provider keys removed from their
-   *   environment, and a local-only caller cannot run them.
+   *   works. Elsewhere (Windows, or a Linux without working bubblewrap)
+   *   `shell` and `run_code` are refused, since nothing would keep them from
+   *   reading protected files; `git`, whose operations it checks itself, runs
+   *   with provider keys removed from its environment.
    * - 'bwrap' / 'sandbox-exec': that jailer, or no commands.
    * - 'off': no jail and no scrubbing.
    */

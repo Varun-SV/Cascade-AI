@@ -54,8 +54,9 @@ WebAssembly sandbox.
   environment, `git`'s on Windows included; the usual credential locations
   in the home folder (`~/.ssh`, `~/.aws`, …) are hidden from every command
   but the `git` tool's, and the git store while git keeps objects no ref
-  reaches. With no jailer, `auto` runs
-  commands that way and refuses them to a local-only caller. The `git` tool
+  reaches. With no jailer, `auto` refuses `shell` and `run_code` — the
+  environment is clean but the files on disk are not hidden — and runs the
+  `git` tool, which checks its own operations, that way. The `git` tool
   refuses a push that would send a commit holding a hidden path.
 
 **Still open:** Windows (Job Objects/AppContainer, or WSL2 + bubblewrap), and

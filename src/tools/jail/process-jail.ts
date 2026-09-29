@@ -166,6 +166,27 @@ export interface PrepareOptions {
    * the credentials git pushes and pulls with (`hiddenSecrets`).
    */
   keepGit?: boolean;
+  /**
+   * The caller runs only operations it checks itself — the git tool — so
+   * where no jail is available it still runs, with the provider keys taken
+   * out of its environment. Any other command is refused there: nothing but
+   * the jail keeps it from reading a protected file and handing it to a
+   * cloud model.
+   */
+  confinesItself?: boolean;
+}
+
+/** Why a command was refused for want of a jail, and what the user can do about it. */
+function noJailReason(): string {
+  const why = process.platform === 'win32'
+    ? 'Windows has no supported process jail'
+    : process.platform === 'darwin'
+      ? 'sandbox-exec is not working on this Mac'
+      : 'bubblewrap is missing here or cannot create user namespaces';
+  const fix = process.platform === 'linux'
+    ? 'Install bubblewrap, or set tools.processJail to "off" to run commands without a jail.'
+    : 'Set tools.processJail to "off" to run commands without a jail.';
+  return `${why}, so the command was not run: without one it could read protected files (.env, local-only paths, ~/.cascade-ai, credentials in your home folder) and hand them to a cloud model. ${fix}`;
 }
 
 export class ProcessJail {
@@ -194,9 +215,13 @@ export class ProcessJail {
       if (opts.offline) {
         return { ok: false, reason: 'A local-only subtask (privacy.paths) cannot run commands here: there is no process jail to keep them off the network.' };
       }
+      // Scrubbing the environment keeps the keys out of it, not the files
+      // on disk: an approved command could still read them. So `auto` fails
+      // closed here, and "off" is the user's own choice to run without.
+      if (!opts.confinesItself) return { ok: false, reason: noJailReason() };
       if (!this.warned) {
         this.warned = true;
-        this.policy.log('[jail] No process jail is available (bubblewrap on Linux, sandbox-exec on macOS): commands run with provider keys removed from their environment, but can read any file once approved.');
+        this.policy.log('[jail] No process jail is available (bubblewrap on Linux, sandbox-exec on macOS): the git tool runs with provider keys removed from its environment, and shell and code commands are refused until tools.processJail is "off".');
       }
       return { ok: true, launch: { file, args, env, cwd: opts.cwd, jail: null } };
     }

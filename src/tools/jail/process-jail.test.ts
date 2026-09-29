@@ -210,16 +210,42 @@ describe('ProcessJail.prepare — which way a command runs', () => {
     expect(r.ok && r.launch.env['ANTHROPIC_API_KEY']).toBe('kept-when-off');
   });
 
-  it('"auto" without a jailer runs it with the keys taken out, and says so once', async () => {
+  // Taking the keys out of the environment left the files on disk: an
+  // approved `cat .env` read them, and handed them to the cloud model.
+  it('"auto" without a jailer refuses a command, and says what to do instead', async () => {
+    const r = await new ProcessJail(policy({ detect: none })).prepare('sh', ['-c', 'cat .env'], { cwd: ws, offline: false });
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.reason).toMatch(/the command was not run: without one it could read protected files/);
+    expect(!r.ok && r.reason).toMatch(/tools\.processJail to "off"/);
+  });
+
+  it('"auto" without a jailer still runs the git tool, with the keys taken out, and says so once', async () => {
     const said: string[] = [];
     const jail = new ProcessJail(policy({ detect: none, log: (m) => said.push(m) }));
     process.env['OPENAI_API_KEY'] = 'removed';
-    const r = await jail.prepare('sh', [], { cwd: ws, offline: false });
-    await jail.prepare('sh', [], { cwd: ws, offline: false });
+    const r = await jail.prepare('git', [], { cwd: ws, offline: false, keepGit: true, confinesItself: true });
+    await jail.prepare('git', [], { cwd: ws, offline: false, keepGit: true, confinesItself: true });
     delete process.env['OPENAI_API_KEY'];
-    expect(r.ok && r.launch.file).toBe('sh');
+    expect(r.ok && r.launch.file).toBe('git');
     expect(r.ok && r.launch.env['OPENAI_API_KEY']).toBeUndefined();
     expect(said).toHaveLength(1);
+  });
+
+  it('without a jailer, shell and run_code run nothing, and "off" is the way to run them anyway', async () => {
+    const make = (mode: 'auto' | 'off') => {
+      const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {}, processJail: mode } as never, ws);
+      // As on Windows, or a Linux without working bubblewrap.
+      (reg as unknown as { processJail: { policy: JailPolicy } }).processJail.policy.detect = none;
+      return reg;
+    };
+    const marker = path.join(ws, 'ran-without-jail.txt');
+    const exec = { tierId: 't3', sessionId: 's' };
+    await expect(make('auto').execute('shell', { command: `echo ran > ${marker}` }, exec)).rejects.toThrow(/command was not run/);
+    await expect(make('auto').execute('run_code', { language: 'python', code: `open(${JSON.stringify(marker)}, 'w').write('ran')` }, exec)).rejects.toThrow(/command was not run/);
+    expect(fsSync.existsSync(marker)).toBe(false);
+    await make('off').execute('shell', { command: `echo ran > ${marker}` }, exec);
+    expect(fsSync.readFileSync(marker, 'utf8').trim()).toBe('ran');
+    await fs.rm(marker, { force: true });
   });
 
   it('refuses a local-only caller when there is no jail to cut its network', async () => {

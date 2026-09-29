@@ -159,7 +159,7 @@ export class GitTool extends BaseTool {
     const hermetic = process.platform !== 'win32' && await this.jail.gitStoreHidden(offline)
       ? await hermeticSettings(cwd)
       : undefined;
-    const prepared = await this.jail.prepare('git', ['-c', NO_HOOKS, ...(hermetic?.args ?? [])], { cwd, offline, keepGit: true });
+    const prepared = await this.jail.prepare('git', ['-c', NO_HOOKS, ...(hermetic?.args ?? [])], { cwd, offline, keepGit: true, confinesItself: true });
     if (!prepared.ok) throw new Error(prepared.reason);
     const { launch } = prepared;
     if (process.platform === 'win32') return { git: gitWithEnv(cwd, launch.env, [NO_HOOKS]), done: async () => { await launch.done?.(); } };
