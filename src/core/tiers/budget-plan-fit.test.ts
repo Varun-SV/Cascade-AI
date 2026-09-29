@@ -46,7 +46,9 @@ type Decompose = (p: string, c?: string) => Promise<TaskPlan>;
 
 function planner(workRemainingUsd: number | undefined, plan: string) {
   const prompts: string[] = [];
+  const noteWorkNotStarted = vi.fn();
   const router = {
+    noteWorkNotStarted,
     runBudget: () => (workRemainingUsd == null ? { spentUsd: 0, usedTokens: 0, wrappingUp: false } : { capUsd: 1, spentUsd: 0, workRemainingUsd, usedTokens: 0, wrappingUp: false }),
     getModelForTier: () => PRICED,
     generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> }) => {
@@ -55,7 +57,7 @@ function planner(workRemainingUsd: number | undefined, plan: string) {
     }),
   } as unknown as CascadeRouter;
   const admin = new T1Administrator(router, tools(), {} as CascadeConfig);
-  return { decompose: (admin as unknown as { decomposeTask: Decompose }).decomposeTask.bind(admin), prompts, admin };
+  return { decompose: (admin as unknown as { decomposeTask: Decompose }).decomposeTask.bind(admin), prompts, admin, noteWorkNotStarted };
 }
 
 describe('T1 plans within the budget', () => {
@@ -66,9 +68,11 @@ describe('T1 plans within the budget', () => {
   });
 
   it('keeps the first sections and workers of a plan over it, and drops links to what was cut', async () => {
-    const { decompose } = planner(0.8, bigPlan(6));
+    const { decompose, noteWorkNotStarted } = planner(0.8, bigPlan(6));
     const plan = await decompose('research three databases');
     expect(plan.sections.map((s) => s.sectionId)).toEqual(['s1', 's2', 's3', 's4']);
+    // Counted as work the budget held back: 2 sections, and 3 workers from each of 4.
+    expect(noteWorkNotStarted).toHaveBeenCalledWith(14);
     expect(plan.sections.every((s) => s.t3Subtasks.length === 2)).toBe(true);
     expect(plan.sections[1]!.dependsOn).toEqual(['s1']);
     expect(plan.sections[0]!.t3Subtasks[1]!.dependsOn).toEqual(['s1t1']);
@@ -119,8 +123,9 @@ describe('T2 plans its workers within its share', () => {
     };
   }
 
-  function managerRouter(started: string[], workRemainingUsd?: number) {
+  function managerRouter(started: string[], workRemainingUsd?: number, notStarted?: (n: number) => void) {
     return {
+      noteWorkNotStarted: notStarted ?? (() => {}),
       runBudget: () => (workRemainingUsd == null ? { spentUsd: 0, usedTokens: 0, wrappingUp: false } : { capUsd: 1, spentUsd: 0, workRemainingUsd, usedTokens: 0, wrappingUp: false }),
       isWrappingUp: () => false,
       getModelForTier: () => PRICED,
@@ -137,9 +142,11 @@ describe('T2 plans its workers within its share', () => {
   it('runs no more workers than the section\'s share pays for', async () => {
     const started: string[] = [];
     // $0.18 - $0.045 for the manager = $0.135: two workers at $0.06.
-    const manager = new T2Manager(managerRouter(started), tools(), 't1-root');
+    const notStarted = vi.fn();
+    const manager = new T2Manager(managerRouter(started, undefined, notStarted), tools(), 't1-root');
     const result = await manager.execute(sectionWith(5, 0.18), 'task');
     expect(started).toEqual(['Worker 1', 'Worker 2']);
+    expect(notStarted).toHaveBeenCalledWith(3);
     expect(result.t3Results).toHaveLength(2);
   });
 

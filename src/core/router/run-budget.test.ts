@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assembleFinishedWork, keepFirst, plannedCallUsd, sectionsWithin, workersWithin, wrapUpNote } from './run-budget.js';
+import { assembleFinishedWork, budgetNote, keepFirst, plannedCallUsd, sectionsWithin, workersWithin } from './run-budget.js';
 import type { ModelInfo } from '../../types.js';
 
 /** $3 per million input tokens, $15 per million output: one planned call is $0.015. */
@@ -50,11 +50,11 @@ describe('sizing a plan to the budget', () => {
 });
 
 describe('what a wrapped-up run says', () => {
-  it('names where work stopped against the cap', () => {
-    expect(wrapUpNote({ capUsd: 1, spentUsd: 0.8, usedTokens: 0, wrappingUp: true }))
-      .toMatch(/work stopped at \$0\.80 of this task's \$1\.00 budget/);
-    expect(wrapUpNote({ capTokens: 200_000, spentUsd: 0, usedTokens: 160_000, wrappingUp: true }))
-      .toMatch(/160,000 of this task's 200,000-token budget/);
+  it('names the budget the planned work did not fit in', () => {
+    expect(budgetNote({ capUsd: 1, spentUsd: 0.8, usedTokens: 0, wrappingUp: true, workNotStarted: 1 }))
+      .toMatch(/not all the planned work fitted in this task's \$1\.00 budget \(\$0\.80 spent\)/);
+    expect(budgetNote({ capTokens: 200_000, spentUsd: 0, usedTokens: 160_000, wrappingUp: true, workNotStarted: 1 }))
+      .toMatch(/this task's 200,000-token budget \(160,000 used\)/);
   });
 
   it('returns the finished work under headings, then what was not finished', () => {

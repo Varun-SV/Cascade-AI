@@ -10,6 +10,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { T1Administrator, type TaskPlan } from './t1-administrator.js';
 import { T2Manager } from './t2-manager.js';
+import { T3Worker } from './t3-worker.js';
 import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import type { CascadeConfig, GenerateResult, T1ToT2Assignment, T2Result, ToolDefinition } from '../../types.js';
@@ -39,7 +40,8 @@ type T1Internals = {
 describe('T1 while the budget wraps up', () => {
   it('starts no section once the run is wrapping up, and says why it was left', async () => {
     let wrapping = false;
-    const router = { getT3ExecutionMode: () => 'sequential', isWrappingUp: () => wrapping } as unknown as CascadeRouter;
+    const noteWorkNotStarted = vi.fn();
+    const router = { getT3ExecutionMode: () => 'sequential', isWrappingUp: () => wrapping, noteWorkNotStarted } as unknown as CascadeRouter;
     const admin = new T1Administrator(router, {} as ToolRegistry, {} as CascadeConfig);
     const managers = ['a', 'b'].map((id) => ({
       execute: vi.fn(async () => { wrapping = true; return done(id, `${id} done`); }),
@@ -54,6 +56,7 @@ describe('T1 while the budget wraps up', () => {
     expect(managers[1]!.execute).not.toHaveBeenCalled();
     expect(results[1]).toMatchObject({ sectionId: 'b', status: 'BLOCKED' });
     expect(results[1]!.issues.join(' ')).toMatch(/kept for writing the answer/);
+    expect(noteWorkNotStarted).toHaveBeenCalledOnce();
   });
 
   it('skips review and correction while wrapping up, and goes straight to the answer', async () => {
@@ -137,9 +140,10 @@ function twoStepSection(): T1ToT2Assignment {
 }
 
 describe('T2 while the budget wraps up', () => {
-  function routerFor(state: { wrapping: boolean; started: string[]; summaryOptions?: Record<string, unknown> }) {
+  function routerFor(state: { wrapping: boolean; started: string[]; summaryOptions?: Record<string, unknown>; notStarted?: number }) {
     return {
       isWrappingUp: () => state.wrapping,
+      noteWorkNotStarted: (n = 1) => { state.notStarted = (state.notStarted ?? 0) + n; },
       getModelForTier: () => undefined,
       generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> } & Record<string, unknown>) => {
         const content = String(options.messages[options.messages.length - 1]?.content ?? '');
@@ -163,11 +167,12 @@ describe('T2 while the budget wraps up', () => {
   }
 
   it('starts no more workers once the run is wrapping up, and says why they were left', async () => {
-    const state = { wrapping: false, started: [] as string[] };
+    const state = { wrapping: false, started: [] as string[], notStarted: 0 };
     const manager = new T2Manager(routerFor(state), tools(), 't1-root');
     const result = await manager.execute(twoStepSection(), 'task');
 
     expect(state.started).toEqual(['Draft notes']);
+    expect(state.notStarted).toBe(1);
     const finalize = result.t3Results.find((r) => r.subtaskId === 'finalize');
     expect(finalize).toMatchObject({ status: 'FAILED', output: '' });
     expect(finalize!.issues.join(' ')).toMatch(/kept for writing the answer/);
@@ -186,5 +191,40 @@ describe('T2 while the budget wraps up', () => {
     const manager = new T2Manager(routerFor(state), tools(), 't1-root');
     await manager.execute(twoStepSection(), 'task');
     expect(state.summaryOptions?.budgetClass).toBe('work');
+  });
+});
+
+describe('T3 while the budget wraps up', () => {
+  const assignment = {
+    subtaskId: 'w1', subtaskTitle: 'Research', description: 'Research the topic', expectedOutput: 'notes',
+    constraints: [], peerT3Ids: [], parentT2: 't2',
+  };
+
+  function workerRefusing(refuse: (content: string) => boolean) {
+    const router = {
+      getModelForTier: () => undefined,
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> }) => {
+        const content = String(options.messages[options.messages.length - 1]?.content ?? '');
+        if (refuse(content)) throw wrapUp();
+        return reply('The finished notes.');
+      }),
+    } as unknown as CascadeRouter;
+    return new T3Worker(router, tools(), 't2');
+  }
+
+  it('keeps a draft it finished when its self-check is not paid for, and says so', async () => {
+    const worker = workerRefusing((c) => c.startsWith('Self-test this output'));
+    const result = await worker.execute(assignment, 'task');
+    expect(result.status).toBe('COMPLETED');
+    expect(result.output).toBe('The finished notes.');
+    expect(result.issues.join(' ')).toMatch(/Not self-checked/);
+  });
+
+  it('reports a worker stopped before it wrote anything as not finished, not as a question for the user', async () => {
+    const worker = workerRefusing(() => true);
+    const result = await worker.execute(assignment, 'task');
+    expect(result.status).toBe('FAILED');
+    expect(result.output).toBe('');
+    expect(result.issues.join(' ')).toMatch(/Not finished/);
   });
 });

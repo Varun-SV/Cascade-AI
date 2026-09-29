@@ -35,7 +35,7 @@ import { canProduceFiles, canProduceNonDiskDeliverables, hasFileWritingTool } fr
 import { planSpecShape, quotedFieldRules } from './plan-spec.js';
 import { REPORTING_INTEGRITY_RULE } from './integrity.js';
 import { describeBrowserForPlanner } from './browser-planning.js';
-import { assembleFinishedWork, isBudgetStop, keepFirst, sectionsWithin, workersWithin } from '../router/run-budget.js';
+import { assembleFinishedWork, directAnswerPrompt, isBudgetStop, keepFirst, sectionsWithin, workersWithin } from '../router/run-budget.js';
 
 /** Case-insensitive shared keywords between two keyword lists. */
 export function sharedKeywords(a: string[] = [], b: string[] = []): string[] {
@@ -737,12 +737,15 @@ ${quotedFieldRules(spec)}
       this.log(`Budget: plan has ${plan.sections.length} sections, keeping the first ${maxSections}.`);
     }
     const kept = keepFirst(plan.sections, maxSections, (sec) => sec.sectionId);
+    let cut = plan.sections.length - kept.length;
     const maxWorkers = workersWithin(workUsd / kept.length, this.router.getModelForTier?.('T2'), this.router.getModelForTier?.('T3'));
     const sections = kept.map((sec) => {
       if (!sec.t3Subtasks || sec.t3Subtasks.length <= maxWorkers) return sec;
       this.log(`Budget: "${sec.sectionTitle}" has ${sec.t3Subtasks.length} workers, keeping the first ${maxWorkers}.`);
+      cut += sec.t3Subtasks.length - maxWorkers;
       return { ...sec, t3Subtasks: keepFirst(sec.t3Subtasks, maxWorkers, (t) => t.subtaskId) };
     });
+    if (cut > 0) this.router.noteWorkNotStarted?.(cut);
     return { ...plan, sections };
   }
 
@@ -1153,6 +1156,13 @@ ${quotedFieldRules(spec)}
   ): Promise<string> {
     const completedSections = t2Results.filter(producedOutput);
 
+    // Nothing finished because the budget ran down to the answer's reserve:
+    // spend that reserve answering the request directly.
+    if (!completedSections.length && this.router.isWrappingUp?.()) {
+      const direct = await this.answerDirectly(originalPrompt);
+      if (direct) return direct;
+    }
+
     if (!completedSections.length) {
       // Aggregate T3 issues across all FAILED sections to surface the root
       // cause. Critical errors (rate-limit / auth / forbidden, marked with
@@ -1225,6 +1235,24 @@ Instructions:
     }
   }
 
+  /** One direct answer from the budget kept back for it; null if even that cannot be paid for. */
+  private async answerDirectly(request: string): Promise<string | null> {
+    try {
+      const result = await this.generateTracked('T1', {
+        messages: [{ role: 'user', content: directAnswerPrompt(request) }],
+        systemPrompt: this.systemPromptOverride + REPORTING_INTEGRITY_RULE,
+        maxTokens: 4000,
+        budgetClass: 'final',
+      }, (chunk) => {
+        this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: this.isPresenter });
+      });
+      return result.content;
+    } catch (err) {
+      if (isBudgetStop(err)) return null;
+      throw err;
+    }
+  }
+
   /**
    * A section not started because the run is wrapping up. BLOCKED, like a
    * section held back by a failed dependency: never attempted, nothing spent,
@@ -1233,6 +1261,7 @@ Instructions:
   private notStartedForBudget(section: T1ToT2Assignment): T2Result {
     const reason = 'Not started: the budget left was kept for writing the answer from the finished sections';
     this.log(`⤫ Skipped "${section.sectionTitle}" — ${reason}`);
+    this.router.noteWorkNotStarted?.();
     this.emit('tier:status', {
       tierId: section.sectionId,
       nodeId: section.sectionId,

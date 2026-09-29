@@ -509,6 +509,8 @@ export class CascadeRouter extends EventEmitter {
    */
   private runWrappingUp = false;
   private runWrapUpReason: string | undefined;
+  /** Work held back by the wrap-up this run (RunBudget.workNotStarted). */
+  private runWorkNotStarted = 0;
   /**
    * Worst-case OUTPUT held for work calls in flight. The hard-cap reservation
    * counts input only, which is right for a ceiling that must not refuse
@@ -961,6 +963,7 @@ export class CascadeRouter extends EventEmitter {
     const finalCall = options.budgetClass === 'final';
     // Wrapping up: no new work, only the answer.
     if (this.runWrappingUp && !finalCall) {
+      this.runWorkNotStarted++;
       throw new CascadeRouter.BudgetWrapUpError(this.runWrapUpReason ?? WRAP_UP_MESSAGE);
     }
 
@@ -2388,6 +2391,7 @@ export class CascadeRouter extends EventEmitter {
     this.runBudgetExceededReason = undefined;
     this.runWrappingUp = false;
     this.runWrapUpReason = undefined;
+    this.runWorkNotStarted = 0;
     this.reservedWorkUsd = 0;
     this.reservedWorkTokens = 0;
     // Quota/auth verdicts are RUN-scoped by design — a user who tops up their
@@ -2646,7 +2650,13 @@ export class CascadeRouter extends EventEmitter {
       } : {}),
       usedTokens: this.runTokens,
       wrappingUp: this.runWrappingUp,
+      workNotStarted: this.runWorkNotStarted,
     };
+  }
+
+  /** A tier did not start a section or worker because the run is wrapping up. */
+  noteWorkNotStarted(count = 1): void {
+    this.runWorkNotStarted += count;
   }
 
   /** True once this run has stopped starting work so the rest pays for its answer. */
@@ -2683,6 +2693,7 @@ export class CascadeRouter extends EventEmitter {
       const held = this.runCostUsd + this.reservedCostUsd + this.reservedWorkUsd;
       if (held + outputUsd > workShare(capUsd)) {
         this.startWrapUp(this.costWrapUpReason(capUsd));
+        this.runWorkNotStarted++;
         throw new CascadeRouter.BudgetWrapUpError(this.runWrapUpReason ?? WRAP_UP_MESSAGE);
       }
     }
@@ -2690,6 +2701,7 @@ export class CascadeRouter extends EventEmitter {
       const held = this.runTokens + this.reservedTokens + this.reservedWorkTokens;
       if (held + outputTokens > workShare(capTokens)) {
         this.startWrapUp(this.tokenWrapUpReason(capTokens));
+        this.runWorkNotStarted++;
         throw new CascadeRouter.BudgetWrapUpError(this.runWrapUpReason ?? WRAP_UP_MESSAGE);
       }
     }

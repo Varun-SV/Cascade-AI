@@ -78,6 +78,16 @@ describe('wrapping up a run', () => {
     await expect(router.generate('T3', ask)).rejects.toMatchObject({ name: 'BudgetWrapUpError' });
     await expect(router.generate('T3', ask)).rejects.toMatchObject({ name: 'BudgetWrapUpError' });
     await expect(router.generate('T1', { ...ask, budgetClass: 'final' })).resolves.toMatchObject({ content: 'ok' });
+    // Both refusals count as work held back; the answer does not.
+    expect(router.runBudget().workNotStarted).toBe(2);
+  });
+
+  it('counts the work a tier chose not to start', async () => {
+    const router = await makeRouter({ maxCostPerRunUsd: 1 });
+    router.noteWorkNotStarted(3);
+    expect(router.runBudget().workNotStarted).toBe(3);
+    router.beginRun();
+    expect(router.runBudget().workNotStarted).toBe(0);
   });
 
   it('once wrapping up, refuses even a small call that would still fit', async () => {

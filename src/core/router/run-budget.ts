@@ -37,6 +37,13 @@ export interface RunBudget {
   remainingTokens?: number;
   /** True once work has stopped so that what is left pays for the answer. */
   wrappingUp: boolean;
+  /**
+   * Planned work the budget held back: sections and workers cut from a plan
+   * to fit it, work calls refused while wrapping up, and sections or workers
+   * not started then. A run can wrap up with nothing left to hold back — its
+   * last worker crossing the line — and then its answer covers everything.
+   */
+  workNotStarted: number;
 }
 
 /** The part of a cap that work may spend. */
@@ -66,14 +73,15 @@ export function assembleFinishedWork(
 }
 
 /**
- * The line under an answer written while wrapping up: what it covers is what
- * was finished, not everything that was asked, and the reader should know why.
+ * The line under an answer when the budget held planned work back: what it
+ * covers is what was finished, not everything that was asked, and the reader
+ * should know why.
  */
-export function wrapUpNote(budget: RunBudget): string {
-  const spent = budget.capUsd != null
-    ? `$${budget.spentUsd.toFixed(2)} of this task's $${budget.capUsd.toFixed(2)} budget`
-    : `${budget.usedTokens.toLocaleString()} of this task's ${(budget.capTokens ?? 0).toLocaleString()}-token budget`;
-  return `_Budget: work stopped at ${spent}, so this answer covers what was finished. Raise the per-task budget for a fuller one._`;
+export function budgetNote(budget: RunBudget): string {
+  const cap = budget.capUsd != null
+    ? `this task's $${budget.capUsd.toFixed(2)} budget ($${budget.spentUsd.toFixed(2)} spent)`
+    : `this task's ${(budget.capTokens ?? 0).toLocaleString()}-token budget (${budget.usedTokens.toLocaleString()} used)`;
+  return `_Budget: not all the planned work fitted in ${cap}, so this answer covers what was finished. Raise the per-task budget for a fuller one._`;
 }
 
 // ── Sizing a plan to the budget ───────────────
@@ -133,4 +141,16 @@ export function keepFirst<T extends { dependsOn?: string[] }>(items: readonly T[
   return kept.map((item) => (item.dependsOn?.length
     ? { ...item, dependsOn: item.dependsOn.filter((dep) => ids.has(dep)) }
     : item));
+}
+
+/**
+ * The request for one direct answer, when the budget ran down before any of
+ * the planned work finished: the reserve kept for the answer answers the
+ * question itself, as a fast answer would, rather than reporting a failure
+ * the budget caused.
+ */
+export function directAnswerPrompt(request: string): string {
+  return 'Answer this request directly, in one reply, as well as you can without further research or tools. '
+    + 'The planned multi-step work did not fit within this task\'s budget, so end with one short line on what a fuller answer would still need.'
+    + `\n\nRequest: ${request}`;
 }

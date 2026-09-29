@@ -61,9 +61,18 @@ describe('a budget-limited run', () => {
   it('says under the answer that work stopped at the budget', async () => {
     const { cascade, router } = await cascadeAnswering(answer('The answer.'), { routing: { forceTier: 'T3' } } as Partial<CascadeConfig>);
     router['isWrappingUp'] = () => true;
-    router['runBudget'] = () => ({ capUsd: 1, spentUsd: 0.8, usedTokens: 1_000, wrappingUp: true });
+    router['runBudget'] = () => ({ capUsd: 1, spentUsd: 0.8, usedTokens: 1_000, wrappingUp: true, workNotStarted: 2 });
     const result = await cascade.run({ prompt: 'summarise the plan in one line' });
-    expect(result.output).toMatch(/Budget: work stopped at \$0\.80 of this task's \$1\.00 budget/);
+    expect(result.output).toMatch(/Budget: not all the planned work fitted in this task's \$1\.00 budget \(\$0\.80 spent\)/);
+  });
+
+  it('says nothing when it wrapped up with nothing left to hold back', async () => {
+    // Its last worker crossed the line: everything planned was done.
+    const { cascade, router } = await cascadeAnswering(answer('The answer.'), { routing: { forceTier: 'T3' } } as Partial<CascadeConfig>);
+    router['isWrappingUp'] = () => true;
+    router['runBudget'] = () => ({ capUsd: 1, spentUsd: 0.85, usedTokens: 1_000, wrappingUp: true, workNotStarted: 0 });
+    const result = await cascade.run({ prompt: 'summarise the plan in one line' });
+    expect(result.output).not.toMatch(/Budget:/);
   });
 
   it('adds nothing when the run never wrapped up', async () => {

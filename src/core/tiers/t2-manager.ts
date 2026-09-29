@@ -297,6 +297,7 @@ export class T2Manager extends BaseTier {
       const affordable = this.workersAffordable(assignment);
       if (subtasks.length > affordable) {
         this.log(`Budget: ${subtasks.length} workers planned, keeping the first ${affordable}.`);
+        this.router.noteWorkNotStarted?.(subtasks.length - affordable);
         subtasks = keepFirst(subtasks, affordable, (t) => t.subtaskId);
       }
 
@@ -801,6 +802,7 @@ Return ONLY the JSON array.`;
       if (this.router.isWrappingUp?.()) {
         const why = 'Not started: the budget left was kept for writing the answer from the finished work';
         this.log(`Wrapping up — not starting ${remaining.size} remaining subtask(s)`);
+        this.router.noteWorkNotStarted?.(remaining.size);
         for (const id of remaining) {
           this.t3PeerBus.publish(this.id, id, why, 'FAILED');
           resultMap.set(id, {

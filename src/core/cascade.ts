@@ -20,11 +20,11 @@ import type { EscalationContext,
   T3Result
 } from '../types.js';
 import { CascadeRouter } from './router/index.js';
-import { plannedCallUsd, T2_CALLS_PER_SECTION, T3_CALLS_PER_SUBTASK, wrapUpNote } from './router/run-budget.js';
+import { budgetNote, directAnswerPrompt, plannedCallUsd, T2_CALLS_PER_SECTION, T3_CALLS_PER_SUBTASK } from './router/run-budget.js';
 import { T1Administrator, type PlanApprovalDecision, type TaskPlan } from './tiers/t1-administrator.js';
 import { T2Manager } from './tiers/t2-manager.js';
 import { composeRootSectionOutput, summaryLeadsRootAnswer } from './tiers/escalation-policy.js';
-import { ACTING_INTEGRITY_RULE } from './tiers/integrity.js';
+import { ACTING_INTEGRITY_RULE, REPORTING_INTEGRITY_RULE } from './tiers/integrity.js';
 import { BROWSER_ROUTING_RULE, BROWSER_TOOL } from './tiers/browser-planning.js';
 import { MultimodalRegistry } from './multimodal/registry.js';
 import type { FeedbackSource } from './router/feedback-prior.js';
@@ -1522,6 +1522,22 @@ export class Cascade extends EventEmitter {
    * plus ~4 T3 calls per subtask at typical token volumes. A ballpark for
    * the approval dialog, not an invoice — always label it "est."
    */
+  /** One direct answer from the budget kept back for it; null if even that cannot be paid for. */
+  private async answerDirectlyWithinBudget(request: string): Promise<string | null> {
+    try {
+      const result = await this.router.generate('T2', {
+        messages: [{ role: 'user', content: directAnswerPrompt(request) }],
+        systemPrompt: REPORTING_INTEGRITY_RULE,
+        maxTokens: 4000,
+        budgetClass: 'final',
+      });
+      return result.content;
+    } catch (err) {
+      if (err instanceof Error && (err.name === 'BudgetWrapUpError' || err.name === 'BudgetExceededError')) return null;
+      throw err;
+    }
+  }
+
   private estimatePlanCost(plan: TaskPlan): number {
     // The same shape a budget sizes plans with (router/run-budget.ts), so the
     // estimate shown for approval and the plan the budget allows agree.
@@ -2398,7 +2414,14 @@ ${prompt}`
             ...t2Result.t3Results.flatMap((r: T3Result) => r.issues ?? []),
           ].filter(Boolean)),
         );
-        if (partial) {
+        // Nothing to show because the budget ran down to the answer's reserve:
+        // that reserve answers the request directly instead.
+        const direct = !partial && this.router.isWrappingUp()
+          ? await this.answerDirectlyWithinBudget(rootPrompt)
+          : null;
+        if (direct) {
+          finalOutput = direct;
+        } else if (partial) {
           finalOutput = reasons.length ? `${partial}\n\n_(incomplete: ${reasons.join('; ')})_` : partial;
         } else {
           finalOutput = reasons.length
@@ -2455,10 +2478,12 @@ ${prompt}`
     const budgetInfo = this.router.budgetExceededInfo();
     if (budgetInfo) throw new CascadeRouter.BudgetExceededError(budgetInfo.reason);
 
-    // Work stopped at its share of the cap and the answer was written from what
-    // was finished. Said under the answer, so it is not read as complete.
-    if (this.router.isWrappingUp() && finalOutput) {
-      finalOutput = `${finalOutput}\n\n${wrapUpNote(this.router.runBudget())}`;
+    // The budget held planned work back — cut from the plan, or not started
+    // while wrapping up — so the answer covers what was finished. Said under
+    // it, so it is not read as complete; and only then: a run whose last
+    // worker crossed the line finished everything it planned.
+    if (this.router.runBudget().workNotStarted > 0 && finalOutput) {
+      finalOutput = `${finalOutput}\n\n${budgetNote(this.router.runBudget())}`;
     }
 
     // The run stopped because a model was failing every call. T1 composes its
