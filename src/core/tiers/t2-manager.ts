@@ -779,6 +779,28 @@ Return ONLY the JSON array.`;
         break;
       }
 
+      // Wrapping up: what is left of the budget writes the answer from the work
+      // already done, so the rest is not started. Same shape as the breaker
+      // above, with no output — nothing was attempted.
+      if (this.router.isWrappingUp?.()) {
+        const why = 'Not started: the budget left was kept for writing the answer from the finished work';
+        this.log(`Wrapping up — not starting ${remaining.size} remaining subtask(s)`);
+        for (const id of remaining) {
+          this.t3PeerBus.publish(this.id, id, why, 'FAILED');
+          resultMap.set(id, {
+            subtaskId: id,
+            status: 'FAILED',
+            output: '',
+            testResults: { checksRun: [], passed: [], failed: [] },
+            issues: [why],
+            peerSyncsUsed: [],
+            correctionAttempts: 0,
+          });
+        }
+        remaining.clear();
+        break;
+      }
+
       // Collect all runnable tasks this wave
       const runnableIds = [...remaining].filter((id) => (inDegree.get(id) ?? 0) === 0);
 
@@ -1137,6 +1159,9 @@ Return ONLY the JSON array.`;
           // a failure smoothed over here reaches the user as a success.
           systemPrompt: this.systemPromptOverride + 'You are a T2 Manager. Summarize the work of your T3 workers succinctly.\n' + REPORTING_INTEGRITY_RULE + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
           maxTokens: 500,
+          // On a Moderate run the last pass is the answer, which may use the
+          // budget kept back for it.
+          ...(isLastChunk && this.isPresenter ? { budgetClass: 'final' as const } : {}),
           ...(this.sectionModel
           ? { model: this.sectionModel, selectionTaskType: this.sectionTaskType }
           : {}),

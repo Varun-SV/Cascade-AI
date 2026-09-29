@@ -20,6 +20,7 @@ import type { EscalationContext,
   T3Result
 } from '../types.js';
 import { CascadeRouter } from './router/index.js';
+import { wrapUpNote } from './router/run-budget.js';
 import { T1Administrator, type PlanApprovalDecision, type TaskPlan } from './tiers/t1-administrator.js';
 import { calculateCost } from '../utils/cost.js';
 import { T2Manager } from './tiers/t2-manager.js';
@@ -94,7 +95,7 @@ export interface DecisionLogEntry {
   // is a routing choice that worked; this is an account going out of service
   // for the rest of the run, and in the case that matters most — no other
   // provider could serve the tier — there was no failover at all to describe.
-  kind: 'complexity' | 'model' | 'failover' | 'escalation' | 'context' | 'provider-exhausted';
+  kind: 'complexity' | 'model' | 'failover' | 'escalation' | 'context' | 'provider-exhausted' | 'budget';
   detail: string;
 }
 
@@ -1591,6 +1592,13 @@ export class Cascade extends EventEmitter {
         this.emit('provider:exhausted', e);
       });
 
+      // Work has spent its share of the cap: the run writes its answer from
+      // what is done. Recorded for /why, and passed on so a host can say so.
+      this.router.on('budget:wrap-up', (payload: { reason: string; spentUsd: number; capUsd?: number }) => {
+        this.recordDecision('budget', payload.reason);
+        this.emit('budget:wrap-up', payload);
+      });
+
       // Budget hard-kill: cancel any pending user approvals and notify
       // consumers so the REPL/dashboard can tear down gracefully instead
       // of waiting for an approval that will never resolve.
@@ -2294,6 +2302,8 @@ ${prompt}`
     if (complexity === 'Simple') {
       const t3 = new T3Worker(this.router, this.toolRegistry, 'root');
       t3.setPresenter(true); // Simple run: this T3 IS the answer — stream it live.
+      // And every call it makes is the answer, so wrapping up never refuses one.
+      t3.setBudgetClass('final');
       t3.setHierarchyContext('You are the DIRECT worker for this task. There is no T1 Administrator or T2 Manager involved in this run.');
       if (identityPrompt) {
         t3.setSystemPromptOverride(identityPrompt);
@@ -2449,6 +2459,12 @@ ${prompt}`
     const budgetInfo = this.router.budgetExceededInfo();
     if (budgetInfo) throw new CascadeRouter.BudgetExceededError(budgetInfo.reason);
 
+    // Work stopped at its share of the cap and the answer was written from what
+    // was finished. Said under the answer, so it is not read as complete.
+    if (this.router.isWrappingUp() && finalOutput) {
+      finalOutput = `${finalOutput}\n\n${wrapUpNote(this.router.runBudget())}`;
+    }
+
     // The run stopped because a model was failing every call. T1 composes its
     // answer from the section summaries, which is why this used to surface as
     // "a series of system-level errors" — true, but not something anyone can
@@ -2496,7 +2512,9 @@ ${prompt}`
         await this.checkpointRun(taskId, options.prompt, finalOutput || '', 'cancelled',
           err instanceof Error ? err.message : 'Task cancelled');
         runError = null; // suppress telemetry error flag for intentional cancels
-      } else if (err instanceof Error && err.name === 'BudgetExceededError') {
+      } else if (err instanceof Error && (err.name === 'BudgetExceededError' || err.name === 'BudgetWrapUpError')) {
+        // A wrap-up only reaches here when it came before any work finished —
+        // planning itself, say — so there is nothing to write an answer from.
         // Per-task (or session) budget ceiling hit — stop gracefully with a
         // clear message instead of letting a runaway task throw to the user.
         this.emit('run:budget-exceeded', {
@@ -2701,7 +2719,7 @@ ${prompt}`
     try {
       result = await this.router.generate(
         tier,
-        { messages, systemPrompt, maxTokens: 2048, ...(requireVision ? {} : { model }) },
+        { messages, systemPrompt, maxTokens: 2048, budgetClass: 'final', ...(requireVision ? {} : { model }) },
         (chunk) => {
           streamed += chunk.text;
           this.emit('stream:token', { tierId: 'fast', text: chunk.text, primary: true });

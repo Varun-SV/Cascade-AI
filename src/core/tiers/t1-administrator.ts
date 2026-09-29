@@ -35,6 +35,7 @@ import { canProduceFiles, canProduceNonDiskDeliverables, hasFileWritingTool } fr
 import { planSpecShape, quotedFieldRules } from './plan-spec.js';
 import { REPORTING_INTEGRITY_RULE } from './integrity.js';
 import { describeBrowserForPlanner } from './browser-planning.js';
+import { assembleFinishedWork, isBudgetStop } from '../router/run-budget.js';
 
 /** Case-insensitive shared keywords between two keyword lists. */
 export function sharedKeywords(a: string[] = [], b: string[] = []): string[] {
@@ -143,6 +144,14 @@ export interface PlanApprovalMeta {
  */
 function producedOutput(result: T2Result): boolean {
   return result.status === 'COMPLETED' || result.status === 'PARTIAL';
+}
+
+/** A section's finished worker outputs, joined — its text when it has no summary. */
+function sectionOutputs(result: T2Result): string {
+  return result.t3Results
+    .filter((t) => t.status === 'COMPLETED')
+    .map((t) => (typeof t.output === 'string' ? t.output : JSON.stringify(t.output)))
+    .join('\n\n');
 }
 
 export class T1Administrator extends BaseTier {
@@ -356,7 +365,10 @@ export class T1Administrator extends BaseTier {
     // and the client carries the last review forward across updates that omit
     // the field. See the clear below.
     let reviewSettled = false;
-    while (pass <= maxReplanPasses) {
+    // Wrapping up: what is done is what the answer is written from. A review
+    // could only ask for more work, and the correction plan it leads to would
+    // be refused.
+    while (pass <= maxReplanPasses && !this.router.isWrappingUp?.()) {
       const reviewResult = await this.reviewT2Outputs(enrichedPrompt, plan, allT2Results);
       if (reviewResult.approved) {
         this.log('T1 Review passed.');
@@ -394,12 +406,20 @@ export class T1Administrator extends BaseTier {
       // did) re-emit sections that already completed.
       const completedSummary = this.summarizeCompletedSections(allT2Results);
       const correctionContext = [systemContext, completedSummary].filter(Boolean).join('\n\n') || undefined;
-      const correctionPlan = await this.decomposeTask(`The previous execution plan failed to fully satisfy the original goal or encountered errors.
+      let correctionPlan: TaskPlan;
+      try {
+        correctionPlan = await this.decomposeTask(`The previous execution plan failed to fully satisfy the original goal or encountered errors.
 Review reason: ${reviewResult.reason}
 
 Original goal: ${enrichedPrompt}
 
 Create a CORRECTION PLAN that contains only the new sections needed to fix the issues. Do not repeat successful sections.`, correctionContext);
+      } catch (err) {
+        // The budget ran down to the answer's reserve during the review: write
+        // the answer from what is done rather than lose it.
+        if (isBudgetStop(err)) break;
+        throw err;
+      }
 
       const correctionResults = await this.dispatchT2Managers(correctionPlan.sections);
       allT2Results = [...allT2Results, ...correctionResults];
@@ -954,6 +974,8 @@ ${quotedFieldRules(spec)}
 
           this.throwIfCancelled();
 
+          if (this.router.isWrappingUp?.()) return this.notStartedForBudget(section);
+
           try {
             const result = await manager.execute(section, taskId, this.signal);
             manager.shareCompletedOutput(section.sectionId, result.sectionSummary);
@@ -1138,17 +1160,55 @@ Instructions:
 - Do NOT expose JSON or tier internals`;
 
     const messages: ConversationMessage[] = [{ role: 'user', content: compilePrompt }];
-    const result = await this.generateTracked('T1', {
-      messages,
-      // Streams as the answer on a Complex run — the last place a failed
-      // section can be quietly rewritten as a finished one.
-      systemPrompt: this.systemPromptOverride + 'You are a final output compiler. Summarize and format the task results clearly.\n' + REPORTING_INTEGRITY_RULE,
-      maxTokens: 8000
-    }, (chunk) => {
-      this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: this.isPresenter });
-    });
+    try {
+      const result = await this.generateTracked('T1', {
+        messages,
+        // Streams as the answer on a Complex run — the last place a failed
+        // section can be quietly rewritten as a finished one.
+        systemPrompt: this.systemPromptOverride + 'You are a final output compiler. Summarize and format the task results clearly.\n' + REPORTING_INTEGRITY_RULE,
+        maxTokens: 8000,
+        // The answer: it may use the budget kept back for it.
+        budgetClass: 'final',
+      }, (chunk) => {
+        this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: this.isPresenter });
+      });
+      return result.content;
+    } catch (err) {
+      if (!isBudgetStop(err)) throw err;
+      // No budget left even to write it up: return the finished work as it is.
+      return assembleFinishedWork(
+        completedSections.map((r) => ({ title: r.sectionTitle, text: r.sectionSummary || sectionOutputs(r) })),
+        t2Results.filter((r) => !producedOutput(r)).map((r) => r.sectionTitle),
+        `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 
-    return result.content;
+  /**
+   * A section not started because the run is wrapping up. BLOCKED, like a
+   * section held back by a failed dependency: never attempted, nothing spent,
+   * and nothing about whether it would have worked.
+   */
+  private notStartedForBudget(section: T1ToT2Assignment): T2Result {
+    const reason = 'Not started: the budget left was kept for writing the answer from the finished sections';
+    this.log(`⤫ Skipped "${section.sectionTitle}" — ${reason}`);
+    this.emit('tier:status', {
+      tierId: section.sectionId,
+      nodeId: section.sectionId,
+      dependsOn: [...(section.dependsOn ?? [])],
+      role: 'T2',
+      label: section.sectionTitle,
+      status: 'BLOCKED',
+      output: reason,
+    });
+    return {
+      sectionId: section.sectionId,
+      sectionTitle: section.sectionTitle,
+      status: 'BLOCKED',
+      t3Results: [],
+      sectionSummary: '',
+      issues: [`${reason}.`],
+    };
   }
 
   /**
