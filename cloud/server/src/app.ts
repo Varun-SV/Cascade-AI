@@ -499,7 +499,11 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   });
 
   app.get('/api/conversations', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
-    const conversations = store.listConversations(req.session!.userId);
+    // `?q=` searches every chat by title; without it, the most recent page.
+    const q = typeof req.query['q'] === 'string' ? req.query['q'].trim().slice(0, MAX_TITLE_LEN) : '';
+    const conversations = q
+      ? store.searchConversations(req.session!.userId, q)
+      : store.listConversations(req.session!.userId);
     res.json({ conversations });
   });
 

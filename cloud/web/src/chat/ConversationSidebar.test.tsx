@@ -2,6 +2,7 @@ import { afterEach, describe, it, expect, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import ConversationSidebar from './ConversationSidebar.js';
+import { searchConversations } from '../lib/api.js';
 
 vi.mock('../lib/api.js', () => ({
   fetchUsage: vi.fn().mockResolvedValue({ plan: 'free', dailyRuns: 20, dailyRunLimit: 20, maxConcurrentRuns: 1 }),
@@ -9,6 +10,13 @@ vi.mock('../lib/api.js', () => ({
   deleteConversation: vi.fn(),
   importConversation: vi.fn(),
   importMemories: vi.fn(),
+  // The server searches every chat; this one is older than the recent page.
+  searchConversations: vi.fn(async (q: string) => ({
+    conversations: [
+      { id: 'c2', title: 'Team offsite plan' },
+      { id: 'c9', title: 'Offsite budget from last year' },
+    ].filter((c) => c.title.toLowerCase().includes(q)),
+  })),
 }));
 
 afterEach(cleanup);
@@ -23,7 +31,7 @@ function renderSidebar() {
         { id: 'c2', title: 'Team offsite plan' },
       ] as never}
       activeConversationId="c1"
-      runningConversationId="c2"
+      runningConversationIds={['c2']}
       contextTokens={0}
       contextWindow={0}
       lastTokens={0}
@@ -44,6 +52,17 @@ describe('ConversationSidebar', () => {
     expect(screen.queryByText('Postgres vs SQLite')).not.toBeInTheDocument();
     fireEvent.change(screen.getByPlaceholderText('Search chats'), { target: { value: 'zzz' } });
     expect(screen.getByText('No matches')).toBeInTheDocument();
+  });
+
+  it('finds older chats the recent page does not hold, once the server answers', async () => {
+    renderSidebar();
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    fireEvent.change(screen.getByPlaceholderText('Search chats'), { target: { value: 'offsite' } });
+    // The recent page's match shows at once…
+    expect(screen.getByText('Team offsite plan')).toBeInTheDocument();
+    // …and the full search adds the one beyond it.
+    expect(await screen.findByText('Offsite budget from last year')).toBeInTheDocument();
+    expect(vi.mocked(searchConversations)).toHaveBeenCalledWith('offsite');
   });
 
   it('marks the open chat and the one a run is working in', () => {

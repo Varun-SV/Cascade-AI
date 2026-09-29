@@ -122,7 +122,7 @@ export default function ChatPanel({
   const wide = useMediaQuery('(min-width: 1024px)');
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    bottomRef.current?.scrollIntoView?.({ behavior: 'smooth' });
   }, [messages, status]);
 
   // The most recent verdict across the live tiers. Reviews come from T1, so
@@ -134,6 +134,9 @@ export default function ChatPanel({
   );
 
   const empty = messages.length === 0 && !busy;
+  // The status line clears when the answer starts streaming, but the run is
+  // still working until it ends: its plan and tree stay for the whole of it.
+  const detailShown = runDetail && (!!approval || activity.length > 0);
   const ctxWindow = contextWindow > 0 ? contextWindow : 128_000;
   const ctxFull = contextTokens > 0 && contextTokens / ctxWindow >= 0.85;
 
@@ -220,11 +223,12 @@ export default function ChatPanel({
               {knowledgeNotice && (
                 <div className={note}><Search size={14} className="shrink-0 text-ink-500" /><span>{knowledgeNotice}</span></div>
               )}
-              {status && busy && (
+              {busy && (status || detailShown || latestReview) && (
                 <motion.div className="grid grid-cols-[3px_1fr] gap-4" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}>
                   {/* The spine: the brand ramp flowing down beside live work. */}
                   <div className="cascade-spine rounded-full" aria-hidden="true" />
                   <div className="flex min-w-0 flex-col gap-2.5">
+                    {status && (
                     <button
                       type="button"
                       onClick={() => !runDetail && activity.length > 0 && setActivityOpen((o) => !o)}
@@ -238,6 +242,7 @@ export default function ChatPanel({
                         <ChevronDown size={13} className={`text-ink-500 transition-transform group-hover:text-ink-300 ${activityOpen ? 'rotate-180' : ''}`} />
                       )}
                     </button>
+                    )}
                     {runDetail && approval && <PlanNotice approval={approval} />}
                     <AnimatePresence initial={false}>
                       {(runDetail || activityOpen) && activity.length > 0 && <ActivityDrawer activity={activity} />}

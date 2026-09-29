@@ -268,7 +268,9 @@ export default function App() {
       user={user}
       conversations={conversations}
       activeConversationId={chat.conversationId}
-      runningConversationId={chat.busy ? chat.conversationId : undefined}
+      // Where the runs are, not where the user is looking: switching chats
+      // mid-run must not move the marker off the chat that is working.
+      runningConversationIds={chat.busy ? chat.runningConversationIds : []}
       contextTokens={chat.contextTokens}
       contextWindow={chat.contextWindow}
       lastTokens={chat.lastTokens}

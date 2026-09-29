@@ -8,7 +8,7 @@ import UsageMeter from './UsageMeter.js';
 import CascadeMark from '../components/CascadeMark.js';
 import Menu, { type MenuItem } from '../components/Menu.js';
 import TierMix from './TierMix.js';
-import { deleteConversation, fetchUsage, importConversation, importMemories, type UsageInfo } from '../lib/api.js';
+import { deleteConversation, fetchUsage, importConversation, importMemories, searchConversations, type UsageInfo } from '../lib/api.js';
 import { toast } from '../lib/toast.js';
 import type { CloudConversation, CloudUser } from '../lib/types.js';
 
@@ -16,8 +16,8 @@ interface Props {
   user: CloudUser;
   conversations: CloudConversation[];
   activeConversationId: string | undefined;
-  /** The chat a run is working in right now, marked with a pulsing dot. */
-  runningConversationId?: string | undefined;
+  /** The chats a run is working in right now, each marked with a pulsing dot. */
+  runningConversationIds?: string[];
   contextTokens: number;
   contextWindow: number;
   lastTokens: number;
@@ -43,7 +43,7 @@ interface Props {
 }
 
 export default function ConversationSidebar({
-  user, conversations, activeConversationId, runningConversationId,
+  user, conversations, activeConversationId, runningConversationIds = [],
   contextTokens, contextWindow, lastTokens, usageRefreshSignal, searchRequest,
   onSelect, onNewChat, onClose, onOpenSettings, onOpenFiles, onOpenSkills, onOpenMemory,
   onOpenConnectors, onOpenKeys, onOpenContinue, onOpenUpgrade, onLogout, onDeleted, onImported,
@@ -53,6 +53,9 @@ export default function ConversationSidebar({
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState('');
   const [usage, setUsage] = useState<UsageInfo | null>(null);
+  // The server's answer for the current query: it searches every chat, where
+  // `conversations` is only the most recent page.
+  const [found, setFound] = useState<{ query: string; conversations: CloudConversation[] } | null>(null);
   const [accountAnchor, setAccountAnchor] = useState<HTMLElement | null>(null);
 
   useEffect(() => {
@@ -94,7 +97,23 @@ export default function ConversationSidebar({
   }
 
   const q = query.trim().toLowerCase();
-  const shown = q ? conversations.filter((c) => (c.title ?? '').toLowerCase().includes(q)) : conversations;
+  useEffect(() => {
+    if (!q) { setFound(null); return; }
+    let current = true;
+    // A pause in typing, not every keystroke, reaches the server.
+    const timer = setTimeout(() => {
+      searchConversations(q)
+        .then((r) => { if (current) setFound({ query: q, conversations: r.conversations }); })
+        .catch(() => { /* the recent page's matches stay on screen */ });
+    }, 250);
+    return () => { current = false; clearTimeout(timer); };
+  }, [q]);
+  // The recent page's matches show at once; the full search replaces them when it answers.
+  const shown = !q
+    ? conversations
+    : found?.query === q
+      ? found.conversations
+      : conversations.filter((c) => (c.title ?? '').toLowerCase().includes(q));
   const name = user.name ?? user.email ?? 'Signed in';
   const atLimit = usage ? usage.dailyRuns >= usage.dailyRunLimit : false;
   const plan = usage?.plan ? usage.plan.charAt(0).toUpperCase() + usage.plan.slice(1) : null;
@@ -186,7 +205,7 @@ export default function ConversationSidebar({
               >
                 {c.title ?? 'Untitled conversation'}
               </button>
-              {c.id === runningConversationId && (
+              {runningConversationIds.includes(c.id) && (
                 <span title="Working" className="mr-1.5 h-[7px] w-[7px] shrink-0 animate-pulse rounded-full bg-accent-500" />
               )}
               <button

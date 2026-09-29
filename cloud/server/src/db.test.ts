@@ -34,6 +34,30 @@ describe('CloudStore', () => {
     expect(gh.id).not.toBe(gg.id);
   });
 
+  it('searches every chat by title, not just the recent page', () => {
+    const u = store.upsertUser({ provider: 'github', providerId: 'search', email: null, name: null, avatar: null });
+    const other = store.upsertUser({ provider: 'github', providerId: 'someone-else', email: null, name: null, avatar: null });
+    const old = store.createConversation(u.id, 'Postgres vs SQLite');
+    // Push the old chat off the first page of the recent list.
+    for (let i = 0; i < 55; i++) store.createConversation(u.id, `Chat ${i}`);
+    store.createConversation(other.id, 'Postgres tuning');
+    expect(store.listConversations(u.id).map((c) => c.id)).not.toContain(old.id);
+    // Case-insensitive, and only this user's chats.
+    expect(store.searchConversations(u.id, 'postgres').map((c) => c.id)).toEqual([old.id]);
+  });
+
+  it('matches %, _ and \\ in a search literally', () => {
+    const u = store.upsertUser({ provider: 'github', providerId: 'literal', email: null, name: null, avatar: null });
+    const pct = store.createConversation(u.id, 'Growth 50% plan');
+    store.createConversation(u.id, 'Growth 500 plan');
+    const under = store.createConversation(u.id, 'snake_case names');
+    store.createConversation(u.id, 'snakeXcase names');
+    const slash = store.createConversation(u.id, 'C:\\temp paths');
+    expect(store.searchConversations(u.id, '50%').map((c) => c.id)).toEqual([pct.id]);
+    expect(store.searchConversations(u.id, 'snake_case').map((c) => c.id)).toEqual([under.id]);
+    expect(store.searchConversations(u.id, ':\\t').map((c) => c.id)).toEqual([slash.id]);
+  });
+
   it('defaults new users to the free plan', () => {
     const user = store.upsertUser({ provider: 'github', providerId: '1', email: null, name: null, avatar: null });
     expect(user.plan).toBe('free');
