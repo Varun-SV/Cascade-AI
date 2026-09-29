@@ -172,6 +172,32 @@ describe('RouterStats — per-tier cost tracking', () => {
     router.resetStats();
     expect(router.getStats().costByFeature).toEqual({});
   });
+
+  it('splits a tier across the models that served it', () => {
+    const r = router as unknown as {
+      recordStats: (tier: string, model: { id: string; provider: string }, usage: { inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number }) => void;
+    };
+    const call = (tier: string, id: string, tokens: number, cost: number) =>
+      r.recordStats(tier, { id, provider: 'openai' }, { inputTokens: tokens, outputTokens: 0, totalTokens: tokens, estimatedCostUsd: cost });
+    call('T3', 'mini', 100, 0.001);
+    call('T3', 'nano', 50, 0.0002);
+    call('T3', 'mini', 100, 0.001);
+    call('T1', 'mini', 10, 0.0005);
+
+    const stats = router.getStats();
+    expect(stats.costByTierModel['T3']!['openai:mini']).toBeCloseTo(0.002, 8);
+    expect(stats.costByTierModel['T3']!['openai:nano']).toBeCloseTo(0.0002, 8);
+    expect(stats.costByTierModel['T1']).toEqual({ 'openai:mini': 0.0005 });
+    expect(stats.tokensByTierModel['T3']).toEqual({ 'openai:mini': 200, 'openai:nano': 50 });
+
+    // A snapshot is a copy, nested maps included.
+    stats.costByTierModel['T3']!['openai:mini'] = 999;
+    expect(router.getStats().costByTierModel['T3']!['openai:mini']).toBeCloseTo(0.002, 8);
+
+    router.resetStats();
+    expect(router.getStats().costByTierModel).toEqual({});
+    expect(router.getStats().tokensByTierModel).toEqual({});
+  });
 });
 
 // ── Untracked spend ────────────────────────────

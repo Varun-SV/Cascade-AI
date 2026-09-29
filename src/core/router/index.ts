@@ -84,6 +84,10 @@ export function azureModelForTier<T>(tier: 'T1' | 'T2' | 'T3', ranked: T[]): T |
   return ranked[Math.min(1, ranked.length - 1)]; // T2: second-strongest, or the only one
 }
 
+function nestedCopy(m: Record<string, Record<string, number>>): Record<string, Record<string, number>> {
+  return Object.fromEntries(Object.entries(m).map(([k, v]) => [k, { ...v }]));
+}
+
 export interface RouterStats {
   totalTokens: number;
   totalCostUsd: number;
@@ -98,6 +102,13 @@ export interface RouterStats {
   outputTokensByTier: Record<string, number>;
   /** Accumulated cost (USD) broken down by feature tag (e.g. T2 section names). */
   costByFeature: Record<string, number>;
+  /**
+   * Cost and tokens per tier, then per `provider:id`. A tier is not one model:
+   * Cascade Auto picks each subtask's model, so a tier's spend can span
+   * several, and a spend report that keys it to one would misattribute it.
+   */
+  costByTierModel: Record<string, Record<string, number>>;
+  tokensByTierModel: Record<string, Record<string, number>>;
   /**
    * Calls made against models Cascade has no price for. Their spend is NOT in
    * `totalCostUsd` — it can't be — so a non-zero count here means the totals
@@ -446,6 +457,8 @@ export class CascadeRouter extends EventEmitter {
     inputTokensByTier: {},
     outputTokensByTier: {},
     costByFeature: {},
+    costByTierModel: {},
+    tokensByTierModel: {},
     untrackedCostCalls: 0,
     untrackedCostModels: [],
   };
@@ -1766,6 +1779,8 @@ export class CascadeRouter extends EventEmitter {
       inputTokensByTier: { ...this.stats.inputTokensByTier },
       outputTokensByTier: { ...this.stats.outputTokensByTier },
       costByFeature: { ...this.stats.costByFeature },
+      costByTierModel: nestedCopy(this.stats.costByTierModel),
+      tokensByTierModel: nestedCopy(this.stats.tokensByTierModel),
       untrackedCostCalls: this.stats.untrackedCostCalls,
       untrackedCostModels: [...this.stats.untrackedCostModels],
     };
@@ -1823,6 +1838,8 @@ export class CascadeRouter extends EventEmitter {
       inputTokensByTier: {},
       outputTokensByTier: {},
       costByFeature: {},
+      costByTierModel: {},
+      tokensByTierModel: {},
       untrackedCostCalls: 0,
       untrackedCostModels: [],
     };
@@ -2204,6 +2221,12 @@ export class CascadeRouter extends EventEmitter {
     this.stats.tokensByTier[tier] = (this.stats.tokensByTier[tier] ?? 0) + usage.totalTokens;
     this.stats.inputTokensByTier[tier] = (this.stats.inputTokensByTier[tier] ?? 0) + usage.inputTokens;
     this.stats.outputTokensByTier[tier] = (this.stats.outputTokensByTier[tier] ?? 0) + usage.outputTokens;
+    // Keyed as `provider:id`, the way a tier reports the model serving it.
+    const served = `${model.provider}:${model.id}`;
+    const costs = (this.stats.costByTierModel[tier] ??= {});
+    costs[served] = (costs[served] ?? 0) + usage.estimatedCostUsd;
+    const tokens = (this.stats.tokensByTierModel[tier] ??= {});
+    tokens[served] = (tokens[served] ?? 0) + usage.totalTokens;
 
     if (featureTag) {
       this.stats.costByFeature[featureTag] = (this.stats.costByFeature[featureTag] ?? 0) + usage.estimatedCostUsd;
