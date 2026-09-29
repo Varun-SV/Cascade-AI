@@ -241,4 +241,22 @@ describe('ModelSelector — selectVisionModel for a dynamically-discovered model
     expect(vision).not.toBeNull();
     expect(vision!.provider).toBe('anthropic');
   });
+
+  it('lists every usable vision model, the priority list first, each once', () => {
+    const selector = new ModelSelector(new Set(['anthropic', 'openai-compatible']));
+    const discovered = (id: string, isVisionCapable: boolean): ModelInfo => ({
+      id, name: id, provider: 'openai-compatible', contextWindow: 128_000, isVisionCapable,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    selector.addDynamicModel(discovered('openai/gpt-4o', true));
+    selector.addDynamicModel(discovered('meta/llama-text-only', false));
+    const ids = selector.visionModels().map((m) => m.id);
+    // The static list's anthropic entries lead; the discovered one follows; the text-only one is absent.
+    expect(ids[0]).toBe(selector.selectVisionModel()!.id);
+    expect(selector.visionModels().slice(0, ids.indexOf('openai/gpt-4o')).every((m) => m.provider === 'anthropic')).toBe(true);
+    expect(ids).toContain('openai/gpt-4o');
+    expect(ids).not.toContain('meta/llama-text-only');
+    expect(new Set(ids).size).toBe(ids.length);
+  });
 });

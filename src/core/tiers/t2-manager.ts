@@ -296,9 +296,10 @@ export class T2Manager extends BaseTier {
       // No more workers than this section's share of the budget pays for.
       const affordable = this.workersAffordable(assignment);
       if (subtasks.length > affordable) {
-        this.log(`Budget: ${subtasks.length} workers planned, keeping the first ${affordable}.`);
-        this.router.noteWorkNotStarted?.(subtasks.length - affordable);
-        subtasks = keepFirst(subtasks, affordable, (t) => t.subtaskId);
+        const kept = keepFirst(subtasks, affordable, (t) => t.subtaskId);
+        this.log(`Budget: ${subtasks.length} workers planned, keeping ${kept.length} with the work they depend on.`);
+        this.router.noteWorkNotStarted?.(subtasks.length - kept.length);
+        subtasks = kept;
       }
 
       this.sendStatusUpdate({

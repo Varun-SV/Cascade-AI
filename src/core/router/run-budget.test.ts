@@ -35,17 +35,49 @@ describe('sizing a plan to the budget', () => {
     expect(workersWithin(0.3, PRICED, PRICED)).toBe(4);
   });
 
-  it('keeps the first items, dropping any dependency on what was cut', () => {
-    const items = [
-      { id: 'a', dependsOn: [] as string[] },
-      { id: 'b', dependsOn: ['a', 'c'] },
-      { id: 'c', dependsOn: ['a'] },
+  it('keeps an item only with the items it depends on, never rewriting its dependencies', () => {
+    // s1 depends on s3, planned later: keeping s1 means keeping s3, so s2 goes.
+    const plan = [
+      { id: 's1', dependsOn: ['s3'] },
+      { id: 's2', dependsOn: [] as string[] },
+      { id: 's3', dependsOn: [] as string[] },
     ];
-    expect(keepFirst(items, 2, (i) => i.id)).toEqual([
-      { id: 'a', dependsOn: [] },
-      { id: 'b', dependsOn: ['a'] },
-    ]);
-    expect(keepFirst(items, 5, (i) => i.id)).toEqual(items);
+    const kept = keepFirst(plan, 2, (i) => i.id);
+    expect(kept.map((i) => i.id)).toEqual(['s1', 's3']);
+    expect(kept[0]!.dependsOn).toEqual(['s3']);
+    expect(keepFirst(plan, 5, (i) => i.id)).toEqual(plan);
+  });
+
+  it('drops an item whose prerequisites do not fit beside it, and keeps what does', () => {
+    const plan = [
+      { id: 'a', dependsOn: [] as string[] },
+      { id: 'b', dependsOn: ['c', 'd'] }, // needs three places; only one is left
+      { id: 'c', dependsOn: [] as string[] },
+      { id: 'd', dependsOn: [] as string[] },
+    ];
+    expect(keepFirst(plan, 2, (i) => i.id).map((i) => i.id)).toEqual(['a', 'c']);
+  });
+
+  it('follows dependencies through other items', () => {
+    const plan = [
+      { id: 'apply', dependsOn: ['change'] },
+      { id: 'change', dependsOn: ['research'] },
+      { id: 'other', dependsOn: [] as string[] },
+      { id: 'research', dependsOn: [] as string[] },
+    ];
+    expect(keepFirst(plan, 3, (i) => i.id).map((i) => i.id)).toEqual(['apply', 'change', 'research']);
+    // Two places cannot hold the whole chain: its end goes, and the next
+    // item in the plan's order that fits with its prerequisite is kept.
+    expect(keepFirst(plan, 2, (i) => i.id).map((i) => i.id)).toEqual(['change', 'research']);
+  });
+
+  it('keeps the smallest whole group when a cycle leaves nothing that fits', () => {
+    const plan = [
+      { id: 'p', dependsOn: ['q'] },
+      { id: 'q', dependsOn: ['p'] },
+      { id: 'r', dependsOn: ['p', 'q'] },
+    ];
+    expect(keepFirst(plan, 1, (i) => i.id).map((i) => i.id)).toEqual(['p', 'q']);
   });
 });
 

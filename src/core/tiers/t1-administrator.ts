@@ -729,21 +729,23 @@ ${quotedFieldRules(spec)}
   /**
    * Hold a plan to what the budget pays for. The planner is told the limit;
    * a plan over it anyway keeps its first sections, in the order the planner
-   * wrote them, rather than starting work it cannot finish — and then each
-   * section keeps the workers its share of the budget pays for.
+   * wrote them, each with the sections it depends on, rather than starting
+   * work it cannot finish — and then each section keeps the workers its share
+   * of the budget pays for, on the same terms.
    */
   private fitPlanToBudget(plan: TaskPlan, workUsd: number, maxSections: number): TaskPlan {
-    if (plan.sections.length > maxSections) {
-      this.log(`Budget: plan has ${plan.sections.length} sections, keeping the first ${maxSections}.`);
-    }
     const kept = keepFirst(plan.sections, maxSections, (sec) => sec.sectionId);
     let cut = plan.sections.length - kept.length;
+    if (cut > 0) {
+      this.log(`Budget: plan has ${plan.sections.length} sections, keeping ${kept.length} with the sections they depend on.`);
+    }
     const maxWorkers = workersWithin(workUsd / kept.length, this.router.getModelForTier?.('T2'), this.router.getModelForTier?.('T3'));
     const sections = kept.map((sec) => {
       if (!sec.t3Subtasks || sec.t3Subtasks.length <= maxWorkers) return sec;
-      this.log(`Budget: "${sec.sectionTitle}" has ${sec.t3Subtasks.length} workers, keeping the first ${maxWorkers}.`);
-      cut += sec.t3Subtasks.length - maxWorkers;
-      return { ...sec, t3Subtasks: keepFirst(sec.t3Subtasks, maxWorkers, (t) => t.subtaskId) };
+      const workers = keepFirst(sec.t3Subtasks, maxWorkers, (t) => t.subtaskId);
+      this.log(`Budget: "${sec.sectionTitle}" has ${sec.t3Subtasks.length} workers, keeping ${workers.length} with the work they depend on.`);
+      cut += sec.t3Subtasks.length - workers.length;
+      return { ...sec, t3Subtasks: workers };
     });
     if (cut > 0) this.router.noteWorkNotStarted?.(cut);
     return { ...plan, sections };

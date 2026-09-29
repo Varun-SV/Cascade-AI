@@ -369,9 +369,21 @@ export class TaskAnalyzer {
       return { model, note, taskType: profile.type };
     };
 
-    // Vision tasks: always route to a vision-capable model
+    const overBudget = (chosen: ModelInfo, preferred: ModelInfo) =>
+      `chose ${chosen.id} over ${preferred.id}, which costs more than what is left of this task's budget allows`;
+
+    // Vision tasks: always route to a vision-capable model — and while money
+    // runs low, to the best one a call can afford, or the cheapest if none can.
     if (profile.requiresVision) {
-      return recordSelection(selector.selectVisionModel());
+      const preferred = selector.selectVisionModel();
+      if (!preferred || opts?.maxCallUsd == null || plannedCallUsd(preferred) <= opts.maxCallUsd) {
+        return recordSelection(preferred);
+      }
+      const vision = selector.visionModels();
+      const chosen = vision.find((m) => plannedCallUsd(m) <= opts.maxCallUsd!)
+        ?? [...vision].sort((a, b) => plannedCallUsd(a) - plannedCallUsd(b))[0]
+        ?? preferred;
+      return recordSelection(chosen, chosen.id === preferred.id ? null : overBudget(chosen, preferred));
     }
 
     let candidates = selector.getCandidatesForTier(tier);
@@ -423,7 +435,7 @@ export class TaskAnalyzer {
     if (chosen && candidates !== unbudgeted) {
       const preferred = [...unbudgeted].sort((a, b) => this.scoreModel(b, profile, 'mean') - this.scoreModel(a, profile, 'mean'))[0];
       if (preferred && preferred.id !== chosen.model.id) {
-        note = `chose ${chosen.model.id} over ${preferred.id}, which costs more than what is left of this task's budget allows`;
+        note = overBudget(chosen.model, preferred);
       }
     }
 

@@ -60,6 +60,53 @@ describe('Cascade Auto under a budget', () => {
   });
 });
 
+describe('Cascade Auto under a budget, for a subtask that needs vision', () => {
+  const vision = (id: string, inPer1k: number, outPer1k: number) => ({ ...model(id, inPer1k, outPer1k), isVisionCapable: true }) as ModelInfo;
+  // Planned call: BIG_EYES $0.075, SMALL_EYES $0.015. SMALL (no vision) is cheaper than both.
+  const BIG_EYES = vision('big-eyes', 0.015, 0.075);
+  const SMALL_EYES = vision('small-eyes', 0.003, 0.015);
+
+  function visionSelector() {
+    const analyzer = new TaskAnalyzer();
+    const selector = {
+      getCandidatesForTier: () => [SMALL, BIG_EYES, SMALL_EYES],
+      selectForTier: () => BIG,
+      // The vision route's own preference, best first.
+      selectVisionModel: () => BIG_EYES,
+      visionModels: () => [BIG_EYES, SMALL_EYES],
+    } as unknown as ModelSelector;
+    return { analyzer, selector };
+  }
+  const PROMPT = 'describe what this screenshot shows';
+
+  it('keeps the preferred vision model when a call can afford it', async () => {
+    const { analyzer, selector } = visionSelector();
+    const { model: chosen, note } = await analyzer.select(PROMPT, 'T3', selector, { maxCallUsd: 0.1 });
+    expect(chosen?.id).toBe('big-eyes');
+    expect(note).toBeNull();
+  });
+
+  it('takes a vision model the budget affords, never one that cannot see', async () => {
+    const { analyzer, selector } = visionSelector();
+    const { model: chosen, note } = await analyzer.select(PROMPT, 'T3', selector, { maxCallUsd: 0.02 });
+    expect(chosen?.id).toBe('small-eyes');
+    expect(note).toMatch(/chose small-eyes over big-eyes, which costs more than what is left of this task's budget allows/);
+  });
+
+  it('runs the cheapest vision model when none is within reach', async () => {
+    const { analyzer, selector } = visionSelector();
+    const { model: chosen } = await analyzer.select(PROMPT, 'T3', selector, { maxCallUsd: 0.0001 });
+    expect(chosen?.id).toBe('small-eyes');
+  });
+
+  it('changes nothing for a vision subtask without a limit', async () => {
+    const { analyzer, selector } = visionSelector();
+    const { model: chosen, note } = await analyzer.select(PROMPT, 'T3', selector);
+    expect(chosen?.id).toBe('big-eyes');
+    expect(note).toBeNull();
+  });
+});
+
 describe('the router hands Auto what a call can afford', () => {
   async function routerWith(budget?: CascadeConfig['budget']) {
     const router = new CascadeRouter();

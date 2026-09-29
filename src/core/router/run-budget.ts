@@ -131,16 +131,51 @@ export function sectionsWithin(
 }
 
 /**
- * The first `max` items, and their dependencies on anything dropped removed —
- * a kept item must not wait on one that will never run.
+ * At most `max` items, taken in the planner's order, each kept only together
+ * with everything it depends on, directly or through another item. An item
+ * whose prerequisites do not fit alongside it is dropped with them: running it
+ * without the work the planner said it needs would change what the plan
+ * means, and the executors would silently drop a dependency on a cut item.
+ *
+ * In an acyclic plan something always fits, since an item with no
+ * dependencies needs only itself. If nothing does (every item sits behind a
+ * cycle larger than `max`), the smallest complete group is kept anyway: the
+ * run's wrap-up still holds the budget, and a partial group would not.
  */
 export function keepFirst<T extends { dependsOn?: string[] }>(items: readonly T[], max: number, id: (item: T) => string): T[] {
   if (items.length <= max) return [...items];
-  const kept = items.slice(0, max);
-  const ids = new Set(kept.map(id));
-  return kept.map((item) => (item.dependsOn?.length
-    ? { ...item, dependsOn: item.dependsOn.filter((dep) => ids.has(dep)) }
-    : item));
+  const byId = new Map(items.map((item) => [id(item), item] as const));
+  const kept = new Set<string>();
+  /** The item and every item it depends on that is not already kept. */
+  const needs = (item: T): Set<string> => {
+    const need = new Set<string>();
+    const stack = [item];
+    while (stack.length > 0) {
+      const next = stack.pop()!;
+      const key = id(next);
+      if (kept.has(key) || need.has(key)) continue;
+      need.add(key);
+      for (const dep of next.dependsOn ?? []) {
+        const found = byId.get(dep);
+        if (found) stack.push(found);
+      }
+    }
+    return need;
+  };
+  for (const item of items) {
+    if (kept.size >= max) break;
+    const need = needs(item);
+    if (kept.size + need.size <= max) for (const key of need) kept.add(key);
+  }
+  if (kept.size === 0) {
+    let smallest: Set<string> | null = null;
+    for (const item of items) {
+      const need = needs(item);
+      if (!smallest || need.size < smallest.size) smallest = need;
+    }
+    for (const key of smallest ?? []) kept.add(key);
+  }
+  return items.filter((item) => kept.has(id(item)));
 }
 
 /**

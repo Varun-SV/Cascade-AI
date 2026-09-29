@@ -67,7 +67,7 @@ describe('T1 plans within the budget', () => {
     expect(prompts[0]).toMatch(/BUDGET: .*pays for about 4 sections of two workers each/);
   });
 
-  it('keeps the first sections and workers of a plan over it, and drops links to what was cut', async () => {
+  it('keeps the first sections and workers of a plan over it', async () => {
     const { decompose, noteWorkNotStarted } = planner(0.8, bigPlan(6));
     const plan = await decompose('research three databases');
     expect(plan.sections.map((s) => s.sectionId)).toEqual(['s1', 's2', 's3', 's4']);
@@ -76,6 +76,32 @@ describe('T1 plans within the budget', () => {
     expect(plan.sections.every((s) => s.t3Subtasks.length === 2)).toBe(true);
     expect(plan.sections[1]!.dependsOn).toEqual(['s1']);
     expect(plan.sections[0]!.t3Subtasks[1]!.dependsOn).toEqual(['s1t1']);
+  });
+
+  it('keeps a section with the later section it depends on, instead of cutting the link', async () => {
+    // s1 needs s6, planned last. Four places: s1 and s6, then s2 and s3.
+    const plan = JSON.parse(bigPlan(6)) as { sections: Array<{ sectionId: string; dependsOn: string[] }> };
+    for (const sec of plan.sections) sec.dependsOn = [];
+    plan.sections[0]!.dependsOn = ['s6'];
+    const { decompose, noteWorkNotStarted } = planner(0.8, JSON.stringify(plan));
+    const fitted = await decompose('research three databases');
+    expect(fitted.sections.map((s) => s.sectionId)).toEqual(['s1', 's2', 's3', 's6']);
+    expect(fitted.sections[0]!.dependsOn).toEqual(['s6']);
+    // Two sections cut, and three workers from each of the four kept.
+    expect(noteWorkNotStarted).toHaveBeenCalledWith(14);
+  });
+
+  it('counts every worker a section could not keep whole', async () => {
+    // Room for two workers per section. In s1, Workers 2 and 3 need each other
+    // and Workers 4 and 5 need them: only Worker 1 can run whole.
+    const plan = JSON.parse(bigPlan(6)) as { sections: Array<{ t3Subtasks: Array<{ subtaskId: string; dependsOn: string[] }> }> };
+    const deps: Record<string, string[]> = { s1t1: [], s1t2: ['s1t3'], s1t3: ['s1t2'], s1t4: ['s1t2'], s1t5: ['s1t2'] };
+    for (const t of plan.sections[0]!.t3Subtasks) t.dependsOn = deps[t.subtaskId]!;
+    const { decompose, noteWorkNotStarted } = planner(0.8, JSON.stringify(plan));
+    const fitted = await decompose('research three databases');
+    expect(fitted.sections[0]!.t3Subtasks.map((t) => t.subtaskId)).toEqual(['s1t1']);
+    // Two sections, four workers from s1, and three from each of the other three.
+    expect(noteWorkNotStarted).toHaveBeenCalledWith(15);
   });
 
   it('lets a smaller plan keep more workers in each section', async () => {
@@ -148,6 +174,37 @@ describe('T2 plans its workers within its share', () => {
     expect(started).toEqual(['Worker 1', 'Worker 2']);
     expect(notStarted).toHaveBeenCalledWith(3);
     expect(result.t3Results).toHaveLength(2);
+  });
+
+  it('never starts a worker without the worker it depends on', async () => {
+    const started: string[] = [];
+    const notStarted = vi.fn();
+    // Room for two workers. Worker 1 needs Worker 3, and Worker 2 needs Worker 4:
+    // Worker 1 fits with its prerequisite, Worker 2 then cannot, so it waits for nothing.
+    const section = sectionWith(4, 0.18);
+    const deps: Record<string, string[]> = { t1: ['t3'], t2: ['t4'], t3: [], t4: [] };
+    for (const t of section.t3Subtasks) t.dependsOn = deps[t.subtaskId]!;
+    const manager = new T2Manager(managerRouter(started, undefined, notStarted), tools(), 't1-root');
+    const result = await manager.execute(section, 'task');
+    expect([...started].sort()).toEqual(['Worker 1', 'Worker 3']);
+    // Worker 3 ran first: Worker 1 waited for it, as planned.
+    expect(started).toEqual(['Worker 3', 'Worker 1']);
+    expect(notStarted).toHaveBeenCalledWith(2);
+    expect(result.t3Results).toHaveLength(2);
+  });
+
+  it('counts every worker it did not start, even when fewer fit than it could afford', async () => {
+    const started: string[] = [];
+    const notStarted = vi.fn();
+    // Room for two, but Workers 2 and 3 need each other and Worker 4 needs them:
+    // only Worker 1 can run whole, so three are held back, not two.
+    const section = sectionWith(4, 0.18);
+    const deps: Record<string, string[]> = { t1: [], t2: ['t3'], t3: ['t2'], t4: ['t2'] };
+    for (const t of section.t3Subtasks) t.dependsOn = deps[t.subtaskId]!;
+    const manager = new T2Manager(managerRouter(started, undefined, notStarted), tools(), 't1-root');
+    await manager.execute(section, 'task');
+    expect(started).toEqual(['Worker 1']);
+    expect(notStarted).toHaveBeenCalledWith(3);
   });
 
   it('uses what is left for the whole run when it has no share of its own', async () => {
