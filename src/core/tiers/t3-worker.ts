@@ -33,6 +33,7 @@ import {
   buildTextToolReminder,
 } from '../../tools/text-tool-parser.js';
 import { truncateForContext } from '../../utils/truncate.js';
+import { leavesBase } from '../../utils/real-path.js';
 import { classifyProviderError } from '../router/provider-errors.js';
 import {
   evaluateAcceptance, failures, undecided, type AcceptanceResult,
@@ -379,6 +380,8 @@ export class T3Worker extends BaseTier {
    * See describeToolRecord.
    */
   private toolRecord: ToolRecordEntry[] = [];
+  /** Workspace files this subtask read into a prompt: its facts' sources. */
+  private readForModel = new Set<string>();
   /**
    * What the subtasks this one depends on handed it. Their tool calls are in
    * THEIR records, so the self-test is shown this to tell a report of what
@@ -450,6 +453,7 @@ export class T3Worker extends BaseTier {
     this.assignment = assignment;
     this.taskId = taskId;
     this.toolRecord = [];
+    this.readForModel = new Set();
     this.handedWork = [];
     this.setLabel(assignment.subtaskTitle);
     this.setStatus('ACTIVE');
@@ -1496,6 +1500,16 @@ export class T3Worker extends BaseTier {
    * local-only: anything could read that file later.
    */
   private readonly mayRead = (absPath: string, to: ReadDestination): boolean => {
+    const allowed = this.readDecision(absPath, to);
+    // Kept as a source of what this subtask learns (extractAndStoreFacts).
+    if (allowed && to === 'model') {
+      const rel = path.relative(this.artifactRoot(), absPath);
+      if (rel && !leavesBase(rel)) this.readForModel.add(rel.split(path.sep).join('/'));
+    }
+    return allowed;
+  };
+
+  private readDecision(absPath: string, to: ReadDestination): boolean {
     const privacy = this.router.getPrivacyPaths?.();
     const root = this.artifactRoot();
     if (!privacy?.hasPolicies() || !privacy.coversFile(absPath, root)) return true;
@@ -1522,7 +1536,7 @@ export class T3Worker extends BaseTier {
     this.localOnlyMatch = true;
     this.log(`Privacy: read ${rel}, a local-only path — this subtask now runs on a private model only, and its raw output will be withheld upstream.`);
     return true;
-  };
+  }
 
   /**
    * Whether this worker may look into a workspace file itself — to verify
@@ -1896,9 +1910,12 @@ ${output.slice(0, 4000)}`;
       if (!match) return;
       const facts = JSON.parse(match[0]);
       if (!Array.isArray(facts)) return;
+      // Where they came from: the files it was set to work on and those it
+      // read, so a fact is set aside if one of them turns local-only later.
+      const sources = [...new Set([...this.privacyTargets(assignment), ...this.readForModel])];
       for (const f of facts.slice(0, 8)) {
         if (f && typeof f.entity === 'string' && typeof f.relation === 'string' && typeof f.value === 'string') {
-          db.upsertFact(f.entity, f.relation, f.value, this.id);
+          db.upsertFact(f.entity, f.relation, f.value, this.id, undefined, sources);
         }
       }
     } catch {

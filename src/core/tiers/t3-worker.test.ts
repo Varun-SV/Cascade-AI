@@ -1409,3 +1409,28 @@ describe('T3Worker — copying into its private folder', () => {
     expect(mayRead(image, { file: `${statePath(ws, STATE.private)}-elsewhere${path.sep}deck.pptx` })).toBe(false);
   });
 });
+
+// A fact must say where it came from, so it can be set aside if that file
+// turns local-only later (world-state factMayLeave).
+describe('T3Worker — where its facts came from', () => {
+  it('records the files it was set to work on and those it read into a prompt', async () => {
+    const ws = path.join(os.tmpdir(), 'cascade-fact-sources');
+    const db = { upsertFact: vi.fn() };
+    const router = {
+      getPrivacyPaths: () => ({ hasPolicies: () => true, coversFile: (abs: string) => abs.includes(`${path.sep}secret${path.sep}`) }),
+      hasPrivateModel: () => false,
+      generate: vi.fn(async () => makeResult('[{"entity":"auth","relation":"uses","value":"JWT"}]')),
+    } as unknown as CascadeRouter;
+    const registry = makeToolRegistry({ getToolDefinitions: () => [], getWorkspaceRoot: () => ws } as unknown as Partial<ToolRegistry>);
+    const worker = new T3Worker(router, registry, 't2-parent');
+    const mayRead = (worker as unknown as { mayRead: (abs: string, to: unknown) => boolean }).mayRead;
+    expect(mayRead(path.join(ws, 'src', 'auth.ts'), 'model')).toBe(true);
+    // Not read into a prompt: a name seen by a search, and a read refused.
+    expect(mayRead(path.join(ws, 'src', 'other.ts'), 'scan')).toBe(true);
+    expect(mayRead(path.join(ws, 'secret', 'plan.md'), 'model')).toBe(false);
+
+    await (worker as unknown as { extractAndStoreFacts: (db: unknown, a: T2ToT3Assignment, out: string) => Promise<void> })
+      .extractAndStoreFacts(db, makeAssignment({ files: ['README.md'] }), 'The auth module uses JWT.');
+    expect(db.upsertFact).toHaveBeenCalledWith('auth', 'uses', 'JWT', worker.id, undefined, ['README.md', 'src/auth.ts']);
+  });
+});

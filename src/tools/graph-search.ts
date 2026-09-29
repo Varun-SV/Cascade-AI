@@ -5,6 +5,7 @@
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
 import { GraphRetriever, type GraphFactSource } from '../retrieval/graph.js';
+import { factMayLeave, type FactPrivacy } from '../core/knowledge/world-state.js';
 
 const MAX_CHARS = 8_000;
 
@@ -29,22 +30,30 @@ export class GraphSearchTool extends BaseTool {
     required: ['query'],
   };
 
-  private retriever: GraphRetriever;
-
-  constructor(source: GraphFactSource) {
+  /**
+   * @param privacy the project's privacy.paths rules, read at each call: a
+   *   caller that is not local-only is shown only facts that may leave
+   *   (factMayLeave) — its model may be a cloud one.
+   */
+  constructor(private readonly source: GraphFactSource, private readonly privacy: () => FactPrivacy | undefined = () => undefined) {
     super();
-    this.retriever = new GraphRetriever(source);
   }
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const query = String(input['query'] ?? '').trim();
     if (!query) return 'Provide a "query" naming the entities to look up.';
     const hops = typeof input['hops'] === 'number' ? Math.max(0, Math.min(3, input['hops'])) : 1;
 
-    const facts = this.retriever.search(query, { hops, limit: 40 });
+    const privacy = options.isOffline?.() ? undefined : this.privacy();
+    const mayUse = (fact: Parameters<typeof factMayLeave>[0]) => factMayLeave(fact, privacy);
+    const retriever = new GraphRetriever({
+      getAllFacts: () => this.source.getAllFacts().filter(mayUse),
+      getFactsForEntities: (entities) => this.source.getFactsForEntities(entities).filter(mayUse),
+    });
+    const facts = retriever.search(query, { hops, limit: 40 });
     if (facts.length === 0) return 'No related facts found in the project knowledge graph.';
 
-    const formatted = this.retriever.format(facts);
+    const formatted = retriever.format(facts);
     return formatted.length > MAX_CHARS ? `${formatted.slice(0, MAX_CHARS)}\n…` : formatted;
   }
 }

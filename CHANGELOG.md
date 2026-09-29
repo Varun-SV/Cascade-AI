@@ -309,7 +309,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names — hard links, whose names outside the workspace could be neither
   marked nor hidden: a file tool refuses, and to its commands such files,
   and the package folders pnpm links them into, are read-only. Siblings waiting on it get a status line, not its
-  output, and no facts are taken from it into the knowledge graph.
+  output, and no facts are taken from it into the knowledge graph. Each
+  fact now records the files it came from, and with any `privacy.paths`
+  rule, one with no record — every fact saved before this — or with a
+  source that has since become local-only is left out of T1's plan and of
+  `knowledge_graph_search` for a caller that is not local-only. Nothing is
+  deleted: loosen the rules and they come back.
   An approval it needs goes to you, not to the T2 and T1 models, which may
   be cloud ones and would see the call's input — nor does an "always" one of
   them gave earlier answer it. The request says it is a local-only

@@ -1683,7 +1683,7 @@ export class Cascade extends EventEmitter {
         try {
           const ws = this.worldStateDB;
           if (ws && ws.getAllFacts().length > 0) {
-            this.toolRegistry.register(new GraphSearchTool(ws));
+            this.toolRegistry.register(new GraphSearchTool(ws, () => this.router.getPrivacyPaths()));
           }
         } catch (err) {
           console.error('Failed to register knowledge graph search:', err);
@@ -2811,7 +2811,8 @@ ${prompt}`
       });
       return res.content;
     });
-    for (const f of facts) db.upsertFact(f.entity, f.relation, f.value, 'session-memory');
+    // From the conversation, not from files: recorded as coming from none.
+    for (const f of facts) db.upsertFact(f.entity, f.relation, f.value, 'session-memory', undefined, []);
   }
 
   getRouter(): CascadeRouter {
