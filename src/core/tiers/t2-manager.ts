@@ -34,6 +34,7 @@ import { describeBrowserForPlanner } from './browser-planning.js';
 import { describeGenerationForPlanner } from '../multimodal/registry.js';
 import { compileSubtaskGraph } from '../orchestration/adapters.js';
 import { planSpecShape, typedFieldRules } from './plan-spec.js';
+import { keepFirst, workersWithin } from '../router/run-budget.js';
 
 // Built per-run so the peer-coordination hint only appears when the
 // peer_message tool is actually registered. On a restricted host (e.g. cloud
@@ -292,6 +293,15 @@ export class T2Manager extends BaseTier {
         }
       }
 
+      // No more workers than this section's share of the budget pays for.
+      const affordable = this.workersAffordable(assignment);
+      if (subtasks.length > affordable) {
+        const kept = keepFirst(subtasks, affordable, (t) => t.subtaskId);
+        this.log(`Budget: ${subtasks.length} workers planned, keeping ${kept.length} with the work they depend on.`);
+        this.router.noteWorkNotStarted?.(subtasks.length - kept.length);
+        subtasks = kept;
+      }
+
       this.sendStatusUpdate({
         progressPct: 20,
         currentAction: `Dispatching ${subtasks.length} T3 workers`,
@@ -531,7 +541,8 @@ export class T2Manager extends BaseTier {
     // run cannot produce is enough on its own to fail the subtask.
     const toolNames = this.toolRegistry.getToolDefinitions().map((t) => t.name);
     const spec = planSpecShape(canProduceFiles(toolNames), canProduceNonDiskDeliverables(toolNames));
-    const prompt = `Decompose this section into 1-4 concrete subtasks for T3 workers — the FEWEST that fully cover it (one subtask is the correct answer for a small section).${spec.preamble ? `\n\n${spec.preamble}` : ''}
+    const most = Math.min(4, this.workersAffordable(assignment));
+    const prompt = `Decompose this section into ${most === 1 ? '1 concrete subtask' : `1-${most} concrete subtasks`} for T3 workers — the FEWEST that fully cover it (one subtask is the correct answer for a small section).${most < 4 ? ' The task\'s budget pays for no more than that.' : ''}${spec.preamble ? `\n\n${spec.preamble}` : ''}
 
 Section: ${assignment.sectionTitle}
 Description: ${assignment.description}
@@ -585,6 +596,13 @@ Return ONLY the JSON array.`;
         executionMode: 'parallel',
       }];
     }
+  }
+
+  /** Workers this section's share of the budget pays for; unlimited without a cost cap. */
+  private workersAffordable(assignment: T1ToT2Assignment): number {
+    const share = assignment.budgetUsd ?? this.router.runBudget?.().workRemainingUsd;
+    if (share == null) return Number.POSITIVE_INFINITY;
+    return workersWithin(share, this.router.getModelForTier?.('T2'), this.router.getModelForTier?.('T3'));
   }
 
   private buildWorkerMap(assignments: T2ToT3Assignment[], taskId: string): Map<string, T3Worker> {
@@ -769,6 +787,29 @@ Return ONLY the JSON array.`;
             subtaskId: id,
             status: 'FAILED',
             output: why,
+            testResults: { checksRun: [], passed: [], failed: [] },
+            issues: [why],
+            peerSyncsUsed: [],
+            correctionAttempts: 0,
+          });
+        }
+        remaining.clear();
+        break;
+      }
+
+      // Wrapping up: what is left of the budget writes the answer from the work
+      // already done, so the rest is not started. Same shape as the breaker
+      // above, with no output — nothing was attempted.
+      if (this.router.isWrappingUp?.()) {
+        const why = 'Not started: the budget left was kept for writing the answer from the finished work';
+        this.log(`Wrapping up — not starting ${remaining.size} remaining subtask(s)`);
+        this.router.noteWorkNotStarted?.(remaining.size);
+        for (const id of remaining) {
+          this.t3PeerBus.publish(this.id, id, why, 'FAILED');
+          resultMap.set(id, {
+            subtaskId: id,
+            status: 'FAILED',
+            output: '',
             testResults: { checksRun: [], passed: [], failed: [] },
             issues: [why],
             peerSyncsUsed: [],
@@ -1137,6 +1178,9 @@ Return ONLY the JSON array.`;
           // a failure smoothed over here reaches the user as a success.
           systemPrompt: this.systemPromptOverride + 'You are a T2 Manager. Summarize the work of your T3 workers succinctly.\n' + REPORTING_INTEGRITY_RULE + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
           maxTokens: 500,
+          // On a Moderate run the last pass is the answer, which may use the
+          // budget kept back for it.
+          ...(isLastChunk && this.isPresenter ? { budgetClass: 'final' as const } : {}),
           ...(this.sectionModel
           ? { model: this.sectionModel, selectionTaskType: this.sectionTaskType }
           : {}),

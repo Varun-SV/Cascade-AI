@@ -159,6 +159,14 @@ export interface GenerateOptions {
    * rather than silently falling back to cloud.
    */
   forceLocal?: boolean;
+  /**
+   * What the call is for, against a per-run cap. `'work'` (the default) is
+   * planning, workers and reviews: once a run has spent the part of its cap
+   * set aside for work, those are refused so what is left pays for the answer.
+   * `'final'` writes the answer from the work that is done: it may use that
+   * reserve, and its output is capped to what the cap has left.
+   */
+  budgetClass?: 'work' | 'final';
 }
 
 export interface GenerateResult {
@@ -402,6 +410,11 @@ export interface T1ToT2Assignment {
   executionMode?: 'parallel' | 'sequential';
   dependsOn?: string[];
   peerT2Ids?: string[];
+  /**
+   * This section's share of what the run's cost cap has left for work, when
+   * one is set. Its manager plans no more workers than that pays for.
+   */
+  budgetUsd?: number;
 }
 
 export interface T3SubtaskSpec {
