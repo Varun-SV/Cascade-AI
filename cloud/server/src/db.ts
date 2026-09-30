@@ -12,6 +12,10 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { SqliteVectorStore, mcpServerPrefix } from '#cascade-ai';
 import { randomUUID } from 'node:crypto';
+import {
+  spendEntryFromRun,
+  type SpendBucket, type SpendChatRow, type SpendEntry, type SpendSlot, type SpendSource, type SpendTotals,
+} from './spend.js';
 
 export type OAuthProvider = 'github' | 'google' | 'dev';
 
@@ -562,6 +566,65 @@ export class CloudStore {
     // Index the branching pointer once the column is guaranteed to exist (fresh
     // installs get it from CREATE TABLE, upgrades from the ALTER above).
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id)');
+
+    this.migrateSpendLedger();
+  }
+
+  /**
+   * The spend & savings ledger: one row per run, and one per tier and model it
+   * spent on. It deliberately has no link to messages or conversations that
+   * would delete it with them: a deleted chat's money was still spent. Only the
+   * user's own deletion removes it.
+   *
+   * Created together with a one-time back-fill from the replies already stored,
+   * inside one transaction, so a crash part-way leaves neither behind and the
+   * next boot simply tries again. Runs whose chat was deleted before the ledger
+   * existed cannot be recovered: nothing of them is left to read.
+   */
+  private migrateSpendLedger(): void {
+    const exists = this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'spend_ledger'")
+      .get();
+    if (exists) return;
+    const create = this.db.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE spend_ledger (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          conversation_id TEXT,
+          at INTEGER NOT NULL,
+          cost_usd REAL NOT NULL DEFAULT 0,
+          saved_usd REAL NOT NULL DEFAULT 0,
+          tokens INTEGER NOT NULL DEFAULT 0,
+          outcome TEXT NOT NULL DEFAULT 'answered'
+        );
+        CREATE INDEX idx_spend_user_at ON spend_ledger(user_id, at);
+        CREATE TABLE spend_ledger_models (
+          run_id TEXT NOT NULL REFERENCES spend_ledger(id) ON DELETE CASCADE,
+          tier TEXT NOT NULL,
+          model TEXT NOT NULL DEFAULT '',
+          cost_usd REAL NOT NULL DEFAULT 0,
+          tokens INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (run_id, tier, model)
+        );
+      `);
+      // A reply with neither a report nor a cost was not a run here: an
+      // imported or handed-off transcript carries neither. The oldest
+      // databases predate the cost column; their replies have a report or nothing.
+      const hasCost = (this.db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>).some((c) => c.name === 'cost_usd');
+      const cost = hasCost ? 'm.cost_usd' : 'NULL';
+      const replies = this.db.prepare(
+        `SELECT m.id, c.user_id, m.conversation_id, m.created_at, ${cost} AS cost_usd, m.why_json
+           FROM messages m JOIN conversations c ON c.id = m.conversation_id
+          WHERE m.role = 'assistant' AND (m.why_json IS NOT NULL OR ${cost} IS NOT NULL)`,
+      ).all() as Array<{ id: string; user_id: string; conversation_id: string; created_at: number; cost_usd: number | null; why_json: string | null }>;
+      for (const r of replies) {
+        this.recordSpend(spendEntryFromRun({
+          id: r.id, userId: r.user_id, conversationId: r.conversation_id, at: r.created_at, costUsd: r.cost_usd, why: r.why_json,
+        }));
+      }
+    });
+    create();
   }
 
   // ── Users ─────────────────────────────────────
@@ -894,11 +957,18 @@ export class CloudStore {
       const userMsg = regen ?? this.addMessage({
         conversationId, role: 'user', content: input.userContent, parentId: branchParentId,
       });
-      this.addMessage({
+      const reply = this.addMessage({
         conversationId, role: 'assistant', content: input.assistant.content, parentId: userMsg.id,
         model: input.assistant.model ?? null, tier: input.assistant.tier ?? null,
         why: input.assistant.why ?? null, costUsd: input.assistant.costUsd ?? null,
       });
+      // A run on the user's own device, synced here: it spent their money all
+      // the same, so it counts in their report as the chat's saved chip does.
+      if (input.assistant.why != null || input.assistant.costUsd != null) {
+        this.recordSpend(spendEntryFromRun({
+          id: reply.id, userId, conversationId, at: reply.createdAt, costUsd: input.assistant.costUsd, why: input.assistant.why,
+        }));
+      }
     });
     tx();
     return this.getActivePath(conversationId);
@@ -988,6 +1058,86 @@ export class CloudStore {
     });
     tx();
     return this.getActivePath(conversationId);
+  }
+
+  // ── Spend & savings ledger ────────────────────
+
+  /** Record one run's spend. Recording the same run twice keeps the first. */
+  recordSpend(e: SpendEntry): void {
+    const tx = this.db.transaction(() => {
+      const added = this.db
+        .prepare(
+          `INSERT OR IGNORE INTO spend_ledger (id, user_id, conversation_id, at, cost_usd, saved_usd, tokens, outcome)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(e.id, e.userId, e.conversationId, e.at, e.costUsd, e.savedUsd, e.tokens, e.outcome);
+      if (added.changes === 0) return;
+      const line = this.db.prepare(
+        `INSERT INTO spend_ledger_models (run_id, tier, model, cost_usd, tokens) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(run_id, tier, model) DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd, tokens = tokens + excluded.tokens`,
+      );
+      for (const l of e.lines) line.run(e.id, l.tier, l.model, l.costUsd, l.tokens);
+    });
+    tx();
+  }
+
+  /** The queries behind a spend report, all owner-scoped. `fromMs` null is all time. */
+  get spend(): SpendSource {
+    const since = 'l.user_id = ? AND (? IS NULL OR l.at >= ?)';
+    return {
+      firstSpendAt: (userId) => {
+        const row = this.db.prepare('SELECT MIN(at) AS first FROM spend_ledger WHERE user_id = ?').get(userId) as { first: number | null };
+        return row.first ?? null;
+      },
+      spendTotals: (userId, fromMs): SpendTotals => {
+        const row = this.db.prepare(
+          `SELECT COALESCE(SUM(l.cost_usd), 0) AS spentUsd, COALESCE(SUM(l.saved_usd), 0) AS savedUsd,
+                  COUNT(*) AS runs, COALESCE(SUM(l.tokens), 0) AS tokens,
+                  COALESCE(SUM(l.outcome = 'failed'), 0) AS failedRuns,
+                  COALESCE(SUM(CASE WHEN l.outcome = 'failed' THEN l.cost_usd ELSE 0 END), 0) AS failedUsd
+             FROM spend_ledger l WHERE ${since}`,
+        ).get(userId, fromMs, fromMs) as SpendTotals;
+        return row;
+      },
+      spendSeries: (userId, fromMs, tzOffsetMin, bucket: SpendBucket): SpendSlot[] => {
+        const fmt = bucket === 'hour' ? '%Y-%m-%d %H' : bucket === 'month' ? '%Y-%m' : '%Y-%m-%d';
+        return this.db.prepare(
+          `SELECT strftime(?, (l.at + ?) / 1000, 'unixepoch') AS key,
+                  SUM(l.cost_usd) AS spentUsd, SUM(l.saved_usd) AS savedUsd, COUNT(*) AS runs
+             FROM spend_ledger l WHERE ${since}
+            GROUP BY key`,
+        ).all(fmt, tzOffsetMin * 60_000, userId, fromMs, fromMs) as SpendSlot[];
+      },
+      spendByTierModel: (userId, fromMs) => {
+        const rows = this.db.prepare(
+          `SELECT m.tier, m.model, SUM(m.cost_usd) AS spentUsd, SUM(m.tokens) AS tokens, COUNT(DISTINCT m.run_id) AS runs
+             FROM spend_ledger_models m JOIN spend_ledger l ON l.id = m.run_id
+            WHERE ${since}
+            GROUP BY m.tier, m.model`,
+        ).all(userId, fromMs, fromMs) as Array<{ tier: string; model: string; spentUsd: number; tokens: number; runs: number }>;
+        // A run that used two models on one tier is still one run of that tier.
+        const tierRuns = new Map((this.db.prepare(
+          `SELECT m.tier, COUNT(DISTINCT m.run_id) AS runs
+             FROM spend_ledger_models m JOIN spend_ledger l ON l.id = m.run_id
+            WHERE ${since}
+            GROUP BY m.tier`,
+        ).all(userId, fromMs, fromMs) as Array<{ tier: string; runs: number }>).map((r) => [r.tier, r.runs]));
+        return rows.map((r) => ({ ...r, tierRuns: tierRuns.get(r.tier) ?? r.runs }));
+      },
+      spendTopChats: (userId, fromMs, limit): SpendChatRow[] =>
+        // Deleted chats are counted together under one row with no id or title.
+        this.db.prepare(
+          `SELECT CASE WHEN c.id IS NULL THEN NULL ELSE l.conversation_id END AS conversationId,
+                  MAX(c.title) AS title,
+                  SUM(l.cost_usd) AS spentUsd, SUM(l.saved_usd) AS savedUsd, COUNT(*) AS runs
+             FROM spend_ledger l
+             LEFT JOIN conversations c ON c.id = l.conversation_id AND c.user_id = l.user_id
+            WHERE ${since}
+            GROUP BY conversationId
+            ORDER BY spentUsd DESC, runs DESC
+            LIMIT ?`,
+        ).all(userId, fromMs, fromMs, limit) as SpendChatRow[],
+    };
   }
 
   // ── Usage / entitlements ──────────────────────

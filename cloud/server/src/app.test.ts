@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
 import { buildMediaSink } from './runs.js';
 import { CloudStore } from './db.js';
+import { spendEntryFromRun } from './spend.js';
+import { cloudRunReport, cloudTurnAccounting } from '#cascade-ai';
 import { DOCX_MIME, expandingDocx } from './test-support/expanding-docx.js';
 import { MAX_CONCURRENT_EXTRACTIONS, MAX_QUEUED_EXTRACTION_BYTES, withExtractionSlot } from './documents.js';
 import { limitsForPlan, ORPHAN_UPLOAD_TTL_MS } from './entitlements.js';
@@ -391,6 +393,82 @@ describe('cloud/server app', () => {
     const body = (await res.json()) as { browserSessions: number; browserSessionLimit: number };
     expect(body.browserSessions).toBe(2);
     expect(body.browserSessionLimit).toBe(5);
+  });
+
+  it('GET /api/usage/report is the signed-in user\'s own spend, and checks its inputs', async () => {
+    expect((await fetch(`${baseUrl}/api/usage/report`)).status).toBe(401);
+
+    const cookie = await login('Spender');
+    const other = await login('Someone else');
+    const me = await userIdFor(cookie);
+    const chat = store.createConversation(me, 'Costly chat');
+    store.recordSpend(spendEntryFromRun({
+      id: 'r-mine', userId: me, conversationId: chat.id, at: Date.now(), costUsd: 0.25,
+      why: { savedUsd: 0.75, costByTier: { T3: 0.25 }, models: { T3: 'openai:mini' } },
+    }));
+    store.recordSpend(spendEntryFromRun({
+      id: 'r-theirs', userId: await userIdFor(other), conversationId: null, at: Date.now(), costUsd: 9, why: {},
+    }));
+
+    const res = await fetch(`${baseUrl}/api/usage/report?period=7d&tz=330`, { headers: { Cookie: cookie } });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { period: string; bucket: string; totals: { spentUsd: number; savedUsd: number; runs: number }; series: unknown[]; tiers: Array<{ tier: string }>; chats: Array<{ title: string }> };
+    expect(body.period).toBe('7d');
+    expect(body.bucket).toBe('day');
+    expect(body.series).toHaveLength(7);
+    expect(body.totals).toMatchObject({ spentUsd: 0.25, savedUsd: 0.75, runs: 1 });
+    expect(body.tiers.map((t) => t.tier)).toEqual(['T3']);
+    expect(body.chats.map((c) => c.title)).toEqual(['Costly chat']);
+
+    // Thirty days is the default period.
+    const byDefault = await (await fetch(`${baseUrl}/api/usage/report`, { headers: { Cookie: cookie } })).json() as { period: string };
+    expect(byDefault.period).toBe('30d');
+
+    for (const bad of ['period=year', 'tz=900', 'tz=abc', 'period=7d&period=30d']) {
+      expect((await fetch(`${baseUrl}/api/usage/report?${bad}`, { headers: { Cookie: cookie } })).status).toBe(400);
+    }
+  });
+
+  it('counts a run synced from the CLI or the desktop app, as those clients send it', async () => {
+    const cookie = await login('Device user');
+    const j = { 'Content-Type': 'application/json', Cookie: cookie };
+    const cid = ((await (await fetch(`${baseUrl}/api/conversations`, {
+      method: 'POST', headers: j, body: JSON.stringify({ title: 'On my laptop' }),
+    })).json()) as { conversation: { id: string } }).conversation.id;
+    const append = (assistant: Record<string, unknown>) => fetch(`${baseUrl}/api/conversations/${cid}/turns`, {
+      method: 'POST', headers: j, body: JSON.stringify({ userContent: 'q', assistant }),
+    });
+
+    // The router's stats after a run: T1 planned, and two models on T3 worked.
+    const stats = {
+      totalCostUsd: 0.0123, totalTokens: 6000,
+      costByTier: { T1: 0.01, T3: 0.0023 }, tokensByTier: { T1: 1000, T3: 5000 },
+      inputTokensByTier: { T1: 1000, T3: 4000 }, outputTokensByTier: { T3: 1000 },
+      costByTierModel: { T1: { 'anthropic:big': 0.01 }, T3: { 'openai:mini': 0.002, 'openai:nano': 0.0003 } },
+      tokensByTierModel: { T1: { 'anthropic:big': 1000 }, T3: { 'openai:mini': 2000, 'openai:nano': 3000 } },
+    } as unknown as Parameters<typeof cloudRunReport>[0]['stats'];
+    const t1 = { id: 'big', provider: 'anthropic', inputCostPer1kTokens: 0.01, outputCostPer1kTokens: 0.03 } as Parameters<typeof cloudRunReport>[0]['t1Model'];
+    const report = cloudRunReport({ stats, t1Model: t1, decisions: [], durationMs: 1000 });
+    // What the CLI's mirror and the desktop app's both send: the reply, its cost, and its /why.
+    expect((await append({ content: 'a', ...cloudTurnAccounting(report) })).status).toBe(200);
+
+    const body = await (await fetch(`${baseUrl}/api/usage/report?period=today`, { headers: { Cookie: cookie } })).json() as {
+      totals: { spentUsd: number; savedUsd: number; runs: number; tokens: number };
+      tiers: Array<{ tier: string; spentUsd: number; models: Array<{ model: string; spentUsd: number; tokens: number }> }>;
+      chats: Array<{ title: string }>;
+    };
+    expect(body.totals.spentUsd).toBeCloseTo(0.0123, 8);
+    expect(body.totals.savedUsd).toBeCloseTo(0.08 - 0.0123, 8);
+    expect(body.totals).toMatchObject({ runs: 1, tokens: 6000 });
+    const t3 = body.tiers.find((t) => t.tier === 'T3')!;
+    expect(t3.models.map((m) => [m.model, m.tokens])).toEqual([['openai:mini', 2000], ['openai:nano', 3000]]);
+    expect(body.tiers.find((t) => t.tier === 'T1')!.models.map((m) => m.model)).toEqual(['anthropic:big']);
+    expect(body.chats.map((c) => c.title)).toEqual(['On my laptop']);
+
+    // The same reply's /why, as the web shows it.
+    const messages = (await (await fetch(`${baseUrl}/api/conversations/${cid}/messages`, { headers: { Cookie: cookie } })).json()) as { messages: Array<{ role: string; why: string | null }> };
+    const why = JSON.parse(messages.messages.find((m) => m.role === 'assistant')!.why!) as { tier: string; model: string };
+    expect(why).toMatchObject({ tier: 'T3', model: 'openai:nano' });
   });
 
   it('GET /api/usage reports no browser allowance where nothing rations one', async () => {
