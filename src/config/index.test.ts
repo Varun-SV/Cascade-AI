@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { applyProviderApiKey, ConfigManager, hasProviderCredential, hasUsableProvider } from './index.js';
-import { CASCADE_CONFIG_FILE } from '../constants.js';
+import { statePath, STATE } from './project-state.js';
 
 const tempDirs: string[] = [];
 
@@ -20,7 +20,7 @@ afterEach(async () => {
 describe('ConfigManager', () => {
   it('throws when the workspace config file is invalid instead of silently defaulting', async () => {
     const workspace = await makeTempWorkspace();
-    const configPath = path.join(workspace, CASCADE_CONFIG_FILE);
+    const configPath = statePath(workspace, STATE.config);
 
     await fs.mkdir(path.dirname(configPath), { recursive: true });
     await fs.writeFile(configPath, JSON.stringify({
@@ -42,7 +42,7 @@ describe('ConfigManager — MCP server name disambiguation on load', () => {
   it('renames a pre-existing colliding pair and persists the fix', async () => {
     const workspace = await makeTempWorkspace();
     const globalDir = await makeTempWorkspace();
-    const configPath = path.join(workspace, CASCADE_CONFIG_FILE);
+    const configPath = statePath(workspace, STATE.config);
     await fs.mkdir(path.dirname(configPath), { recursive: true });
     await fs.writeFile(configPath, JSON.stringify({
       tools: {
@@ -73,7 +73,7 @@ describe('ConfigManager — MCP server name disambiguation on load', () => {
     // interactively or is rejected outright in a headless run.
     const workspace = await makeTempWorkspace();
     const globalDir = await makeTempWorkspace();
-    const configPath = path.join(workspace, CASCADE_CONFIG_FILE);
+    const configPath = statePath(workspace, STATE.config);
     await fs.mkdir(path.dirname(configPath), { recursive: true });
     await fs.writeFile(configPath, JSON.stringify({
       tools: {
@@ -110,7 +110,7 @@ describe('ConfigManager — MCP server name disambiguation on load', () => {
     // headless.
     const workspace = await makeTempWorkspace();
     const globalDir = await makeTempWorkspace();
-    const configPath = path.join(workspace, CASCADE_CONFIG_FILE);
+    const configPath = statePath(workspace, STATE.config);
     await fs.mkdir(path.dirname(configPath), { recursive: true });
     await fs.writeFile(configPath, JSON.stringify({
       tools: {
@@ -146,7 +146,7 @@ describe('ConfigManager — MCP server name disambiguation on load', () => {
     // silently skips granting trust to its renamed identity.
     const workspace = await makeTempWorkspace();
     const globalDir = await makeTempWorkspace();
-    const configPath = path.join(workspace, CASCADE_CONFIG_FILE);
+    const configPath = statePath(workspace, STATE.config);
     await fs.mkdir(path.dirname(configPath), { recursive: true });
     await fs.writeFile(configPath, JSON.stringify({
       tools: {
@@ -184,7 +184,7 @@ describe('ConfigManager — MCP server name disambiguation on load', () => {
     // guessed onto it.
     const workspace = await makeTempWorkspace();
     const globalDir = await makeTempWorkspace();
-    const configPath = path.join(workspace, CASCADE_CONFIG_FILE);
+    const configPath = statePath(workspace, STATE.config);
     await fs.mkdir(path.dirname(configPath), { recursive: true });
     await fs.writeFile(configPath, JSON.stringify({
       tools: {
@@ -205,7 +205,7 @@ describe('ConfigManager — MCP server name disambiguation on load', () => {
   it('does not rewrite the file when nothing collides', async () => {
     const workspace = await makeTempWorkspace();
     const globalDir = await makeTempWorkspace();
-    const configPath = path.join(workspace, CASCADE_CONFIG_FILE);
+    const configPath = statePath(workspace, STATE.config);
     await fs.mkdir(path.dirname(configPath), { recursive: true });
     await fs.writeFile(configPath, JSON.stringify({
       tools: { mcpServers: [{ name: 'github', url: 'https://a' }, { name: 'notion', url: 'https://b' }] },
@@ -499,7 +499,7 @@ describe('an env key does not delete an endpoint the environment cannot name', (
   const seed = async (providers: unknown): Promise<{ workspace: string; globalDir: string }> => {
     const workspace = await makeTempWorkspace();
     const globalDir = await makeTempWorkspace();
-    const configPath = path.join(workspace, CASCADE_CONFIG_FILE);
+    const configPath = statePath(workspace, STATE.config);
     await fs.mkdir(path.dirname(configPath), { recursive: true });
     await fs.writeFile(configPath, JSON.stringify({ providers }), 'utf-8');
     return { workspace, globalDir };
@@ -645,7 +645,7 @@ describe('an endpointless Azure row is completed, not credentialled by accident'
     // dropped on the floor.
     const workspace = await makeTempWorkspace();
     const globalDir = await makeTempWorkspace();
-    const configPath = path.join(workspace, CASCADE_CONFIG_FILE);
+    const configPath = statePath(workspace, STATE.config);
     await fs.mkdir(path.dirname(configPath), { recursive: true });
     await fs.writeFile(configPath, JSON.stringify({
       providers: [
@@ -674,7 +674,7 @@ describe('an endpointless Azure row is completed, not credentialled by accident'
   it('leaves a credentialless endpointless row to be filled as before', async () => {
     const workspace = await makeTempWorkspace();
     const globalDir = await makeTempWorkspace();
-    const configPath = path.join(workspace, CASCADE_CONFIG_FILE);
+    const configPath = statePath(workspace, STATE.config);
     await fs.mkdir(path.dirname(configPath), { recursive: true });
     await fs.writeFile(configPath, JSON.stringify({
       providers: [
@@ -745,9 +745,9 @@ describe('an environment key and gateway are a pair', () => {
   afterEach(async () => { await fs.rm(dir, { recursive: true, force: true }); });
 
   async function seed(providers: unknown[]): Promise<void> {
-    await fs.mkdir(path.join(dir, '.cascade'), { recursive: true });
+    await fs.mkdir(path.dirname(statePath(dir, STATE.config)), { recursive: true });
     await fs.writeFile(
-      path.join(dir, CASCADE_CONFIG_FILE),
+      statePath(dir, STATE.config),
       JSON.stringify({ providers, models: {}, tools: {} }),
       'utf-8',
     );
@@ -1119,9 +1119,9 @@ describe('automatic Azure env routing agrees with `cascade link azure`', () => {
   });
 
   async function seedWorkspace(providers: unknown[]): Promise<void> {
-    await fs.mkdir(path.join(dir, '.cascade'), { recursive: true });
+    await fs.mkdir(path.dirname(statePath(dir, STATE.config)), { recursive: true });
     await fs.writeFile(
-      path.join(dir, CASCADE_CONFIG_FILE),
+      statePath(dir, STATE.config),
       JSON.stringify({ providers, models: {}, tools: {} }),
       'utf-8',
     );

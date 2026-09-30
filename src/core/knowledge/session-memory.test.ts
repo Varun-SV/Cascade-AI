@@ -60,3 +60,23 @@ describe('distillSessionFacts', () => {
     expect(facts[0]).toEqual({ entity: 'ok', relation: 'r', value: 'v' });
   });
 });
+
+describe('Cascade — remembering a session', () => {
+  // A fact from a conversation came from no file: recorded as such, so it is
+  // not set aside with the older facts that have no record at all.
+  it('saves its facts as coming from no file', async () => {
+    const { Cascade } = await import('../cascade.js');
+    const db = { upsertFact: vi.fn() };
+    const router = {
+      getWorldStateDB: () => db,
+      generate: vi.fn(async () => ({ content: '[{"entity":"deploy","relation":"runs on","value":"Railway"}]' })),
+    };
+    const history: ConversationMessage[] = [
+      { role: 'user', content: 'Set up the deploy' },
+      { role: 'assistant', content: 'x'.repeat(150) },
+    ];
+    await (Cascade.prototype as unknown as { rememberSession: (o: unknown, out: string) => Promise<void> })
+      .rememberSession.call({ router }, { prompt: 'Use Railway', conversationHistory: history }, 'y'.repeat(120));
+    expect(db.upsertFact).toHaveBeenCalledWith('deploy', 'runs on', 'Railway', 'session-memory', undefined, []);
+  });
+});

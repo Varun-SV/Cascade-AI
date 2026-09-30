@@ -34,6 +34,13 @@ export interface WorkspaceIndexOptions {
   reranker?: Reranker;
   /** Predicate for paths to skip (e.g. CascadeIgnore.isIgnored bound to root). */
   isIgnored?: (absPath: string) => boolean;
+  /**
+   * Runs each file's check and read while no local-only command can write —
+   * the workspace gate's shared side (tools/workspace-gate.ts). A file such a
+   * command changes is marked local-only only once it ends: read before
+   * then, its bytes would reach the embedder while it still looked public.
+   */
+  whileReading?: <T>(read: () => Promise<T>) => Promise<T>;
   namespace?: string;
   extensions?: string[];
   maxFileBytes?: number;
@@ -57,6 +64,7 @@ export class WorkspaceIndex {
   private readonly extensions: Set<string>;
   private readonly maxFileBytes: number;
   private readonly isIgnored: (absPath: string) => boolean;
+  private readonly whileReading: <T>(read: () => Promise<T>) => Promise<T>;
   private readonly chunker: CodeChunker;
 
   constructor(opts: WorkspaceIndexOptions) {
@@ -66,6 +74,7 @@ export class WorkspaceIndex {
     this.extensions = new Set((opts.extensions ?? DEFAULT_EXTENSIONS).map((e) => e.replace(/^\./, '').toLowerCase()));
     this.maxFileBytes = opts.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
     this.isIgnored = opts.isIgnored ?? (() => false);
+    this.whileReading = opts.whileReading ?? ((read) => read());
     this.chunker = opts.chunker ?? heuristicCodeChunker;
     this.store = new SqliteVectorStore(this.db);
     this.retriever = new Retriever(opts.embedder, this.store, opts.reranker);
@@ -134,14 +143,20 @@ export class WorkspaceIndex {
   async refresh(onFile?: (rel: string) => void): Promise<RefreshResult> {
     const rels = await this.collectFiles();
     const entries: Array<{ path: string; hash: string; text: string }> = [];
+    const read = async (rel: string): Promise<{ path: string; hash: string; text: string } | null> => {
+      const abs = path.join(this.root, rel);
+      // Again, at the read: what is skipped may have changed since the scan.
+      if (this.isIgnored(abs)) return null;
+      const stat = await fs.stat(abs);
+      if (stat.size > this.maxFileBytes) return null;
+      const buf = await fs.readFile(abs);
+      if (buf.includes(0)) return null; // skip binary
+      return { path: rel, hash: hashContent(buf), text: buf.toString('utf8') };
+    };
     for (const rel of rels) {
       try {
-        const abs = path.join(this.root, rel);
-        const stat = await fs.stat(abs);
-        if (stat.size > this.maxFileBytes) continue;
-        const buf = await fs.readFile(abs);
-        if (buf.includes(0)) continue; // skip binary
-        entries.push({ path: rel, hash: hashContent(buf), text: buf.toString('utf8') });
+        const entry = await this.whileReading(() => read(rel));
+        if (entry) entries.push(entry);
       } catch {
         /* unreadable — skip */
       }
@@ -170,9 +185,35 @@ export class WorkspaceIndex {
     };
   }
 
-  /** Hybrid + reranked search over the indexed codebase. */
-  async search(query: string, k = 8): Promise<ScoredChunk[]> {
-    return this.retriever.search(query, { namespace: this.namespace, k, candidates: 40 });
+  /** The directory indexed; every hit's `sourceId` is relative to it. */
+  getRoot(): string {
+    return this.root;
+  }
+
+  /**
+   * Hybrid + reranked search over the indexed codebase. `exclude` drops a
+   * file's chunks before they are reranked — the reranker sends their text to
+   * a model — as well as from what is returned.
+   */
+  async search(query: string, k = 8, exclude?: (sourceId: string) => boolean): Promise<ScoredChunk[]> {
+    return this.retriever.search(query, { namespace: this.namespace, k, candidates: 40, exclude });
+  }
+
+  /**
+   * Drop every indexed file the ignore predicate now covers, without reading
+   * or embedding anything. A refresh does this too, as part of a full scan;
+   * this is for an index that is searched without one, which would otherwise
+   * keep the text of a file protected since it was indexed.
+   */
+  prune(): number {
+    const stored = this.loadStoredManifest();
+    if (!stored) return 0;
+    const dropped = Object.keys(stored.files).filter((rel) => this.isIgnored(path.join(this.root, rel)));
+    if (dropped.length === 0) return 0;
+    for (const rel of dropped) this.store.deleteSource(this.namespace, rel);
+    const del = this.db.prepare('DELETE FROM code_manifest WHERE namespace = ? AND path = ?');
+    for (const rel of dropped) del.run(this.namespace, rel);
+    return dropped.length;
   }
 }
 

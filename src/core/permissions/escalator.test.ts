@@ -148,6 +148,41 @@ describe('PermissionEscalator', () => {
     expect(decision.approved).toBe(true);
   });
 
+  // The evaluators put the input in a prompt for T2's and T1's models, which
+  // may be cloud ones; a local-only caller's input may carry what it read.
+  it('asks no tier model about a local-only caller\'s request, only the user', async () => {
+    const t2 = vi.fn().mockResolvedValue(makeDecision(true, 'T2'));
+    const t1 = vi.fn().mockResolvedValue(makeDecision(true, 'T1'));
+    escalator.setT2Evaluator(t2 as any);
+    escalator.setT1Evaluator(t1 as any);
+    const req = makeRequest({ toolName: 'shell', isDangerous: true, localOnly: true, input: { command: 'echo PRIVATE' } });
+    const promise = escalator.requestPermission(req);
+    await flushPromises();
+    expect(t2).not.toHaveBeenCalled();
+    expect(t1).not.toHaveBeenCalled();
+    escalator.resolveUserDecision(req.id, true, false);
+    expect((await promise).decidedBy).toBe('USER');
+  });
+
+  // A T2 or T1 model's "always" was cached before the local-only check, so a
+  // local-only worker's request for the same tool came back approved by a
+  // model that never saw it.
+  it('lets no model-made "always" stand for a local-only caller, but a person\'s', async () => {
+    escalator.setT2Evaluator(vi.fn().mockResolvedValue({ ...makeDecision(true, 'T2'), always: true }) as any);
+    escalator.setT1Evaluator(vi.fn().mockResolvedValue({ ...makeDecision(true, 'T1'), always: true }) as any);
+    await escalator.requestPermission(makeRequest({ toolName: 'shell', isDangerous: true }));
+    expect((await escalator.requestPermission(makeRequest({ toolName: 'shell', isDangerous: true }))).approved).toBe(true);
+
+    const local = makeRequest({ toolName: 'shell', isDangerous: true, localOnly: true });
+    const asked = escalator.requestPermission(local);
+    await flushPromises();
+    escalator.resolveUserDecision(local.id, true, true);
+    expect((await asked).decidedBy).toBe('USER');
+    // The person said always: that stands, for local-only callers too.
+    const again = await escalator.requestPermission(makeRequest({ toolName: 'shell', isDangerous: true, localOnly: true }));
+    expect(again.approved).toBe(true);
+  });
+
   // ── User denies ────────────────────────────
 
   it('returns denied decision when user resolves with false', async () => {
@@ -311,5 +346,43 @@ describe('PermissionEscalator', () => {
 
     expect(decisionB.approved).toBe(true);
     expect(t2B).not.toHaveBeenCalled();
+  });
+});
+
+// A dynamic tool's run can end while one of its calls waits for approval.
+// What it asked must not be granted afterwards, to nothing still running.
+describe('PermissionEscalator — a withdrawn request', () => {
+  it('takes back a question the user has not answered, and grants nothing later', async () => {
+    const escalator = new PermissionEscalator();
+    const asked = vi.fn();
+    escalator.on('permission:user-required', asked);
+    const ended = new AbortController();
+    const pending = escalator.requestPermission(makeRequest({ id: 'late', isDangerous: true }), ended.signal);
+    await flushPromises();
+    expect(asked).toHaveBeenCalled();
+    expect(escalator.hasPendingUserDecisions()).toBe(true);
+
+    ended.abort();
+    const decision = await pending;
+    expect(decision.approved).toBe(false);
+    expect(decision.reasoning).toMatch(/Withdrawn/);
+    expect(escalator.hasPendingUserDecisions()).toBe(false);
+    // An answer arriving now has nothing to answer, and leaves no "always" behind.
+    escalator.resolveUserDecision('late', true, true);
+    expect((escalator as unknown as { taskWideCache: Map<string, boolean> }).taskWideCache.has('file_write')).toBe(false);
+  });
+
+  it('does not grant what a model approved after the caller stopped waiting', async () => {
+    const escalator = new PermissionEscalator();
+    const ended = new AbortController();
+    escalator.setT2Evaluator(async () => { ended.abort(); return makeDecision(true); });
+    const decision = await escalator.requestPermission(makeRequest({ isDangerous: true }), ended.signal);
+    expect(decision.approved).toBe(false);
+  });
+
+  it('changes nothing for a caller that passes no signal', async () => {
+    const escalator = new PermissionEscalator();
+    escalator.setT2Evaluator(async () => makeDecision(true));
+    expect((await escalator.requestPermission(makeRequest({ isDangerous: true }))).approved).toBe(true);
   });
 });

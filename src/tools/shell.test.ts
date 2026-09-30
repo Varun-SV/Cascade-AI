@@ -53,3 +53,14 @@ describe('ShellTool allowlist', () => {
     await expect(run(tool, 'gitlab-runner status')).rejects.toThrow(/gitlab-runner/);
   });
 });
+
+describe('ShellTool — stopping', () => {
+  it('stops a running command when its call is cancelled', async () => {
+    const tool = new ShellTool();
+    const stop = new AbortController();
+    const started = Date.now();
+    setTimeout(() => stop.abort(), 100);
+    await tool.execute({ command: 'sleep 5' }, { tierId: 'T3', sessionId: 's', signal: stop.signal } as never).catch(() => 'stopped');
+    expect(Date.now() - started).toBeLessThan(3000);
+  });
+});

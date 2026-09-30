@@ -229,6 +229,15 @@ export class ModelSelector {
   }
 
   /**
+   * The available models a call could be routed to right now: the same set
+   * narrowed by isUsable(), so a model under the veto (a credential in backoff
+   * or out for the run) or one its provider did not confirm is left out.
+   */
+  getUsableModels(): ModelInfo[] {
+    return Array.from(this.availableModels.values()).filter((m) => this.isUsable(m));
+  }
+
+  /**
    * Returns all available models eligible for the given tier, ordered by the
    * tier's priority chain. Use this as the candidate set for scored selection.
    */

@@ -15,8 +15,10 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { CascadeConfigSchema } from '../../config/schema.js';
-import { CASCADE_CONFIG_FILE, GLOBAL_CONFIG_DIR } from '../../constants.js';
+import { GLOBAL_CONFIG_DIR } from '../../constants.js';
+import { writeProjectConfig } from '../../config/write-config.js';
 import type { CascadeConfig } from '../../types.js';
+import type { ConfigManager } from '../../config/index.js';
 import { SafeTextInput } from '../components/SafeTextInput.js';
 import { getTheme } from '../themes/index.js';
 import { Frame, FieldBox, TierCard } from './components.js';
@@ -223,6 +225,56 @@ interface SetupWizardProps {
   onComplete: (config: CascadeConfig) => void;
 }
 
+/**
+ * Save what the wizard gathered: the project's config, in its state folder,
+ * and the keys to the global store, where every project finds them — added
+ * to what is there (an empty base), since the wizard showed none of the
+ * machine's other providers, so choosing one here removes none of them.
+ */
+export function saveSetup(
+  workspacePath: string,
+  entries: Array<Pick<ProviderEntry, 'type' | 'apiKey' | 'baseUrl' | 'deploymentName' | 'apiVersion'>>,
+  tiers: { t1: string; t2: string; t3: string },
+): CascadeConfig {
+  const providers = entries.map(e => ({
+    type: e.type,
+    ...(e.apiKey ? { apiKey: e.apiKey } : {}),
+    ...(e.baseUrl ? { baseUrl: e.baseUrl } : {}),
+    ...(e.deploymentName ? { deploymentName: e.deploymentName } : {}),
+    ...(e.apiVersion ? { apiVersion: e.apiVersion } : {}),
+  }));
+
+  const models: Record<string, string> = {};
+  if (tiers.t1 !== 'auto') models['t1'] = tiers.t1;
+  if (tiers.t2 !== 'auto') models['t2'] = tiers.t2;
+  if (tiers.t3 !== 'auto') models['t3'] = tiers.t3;
+
+  // Any tier left on "Auto" turns on Cascade Auto so the task analyzer
+  // routes each subtask to the benchmark-best model for its type. Without
+  // this flag "Auto" silently fell back to the static priority list.
+  const anyAuto = tiers.t1 === 'auto' || tiers.t2 === 'auto' || tiers.t3 === 'auto';
+
+  const config = CascadeConfigSchema.parse({
+    providers,
+    ...(Object.keys(models).length ? { models } : {}),
+    ...(anyAuto ? { cascadeAuto: true } : {}),
+  });
+  const written = writeProjectConfig(workspacePath, config as never, undefined, []);
+  if (!written.ok) throw new Error(written.error);
+  return config as CascadeConfig;
+}
+
+/**
+ * The wizard's other settings, through a manager for their defaults. Its
+ * providers it saved already, beside the machine's others: handed over
+ * again as the whole list, they would remove those.
+ */
+export async function applySetup(cm: ConfigManager, config: CascadeConfig): Promise<void> {
+  await cm.load();
+  const { providers: _saved, ...settings } = config;
+  await cm.updateConfig(settings);
+}
+
 export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): React.ReactElement {
   const { exit } = useApp();
   const theme = getTheme('cascade');
@@ -318,37 +370,8 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
 
     const run = async () => {
       try {
-        const providers = state.entries.map(e => ({
-          type: e.type,
-          ...(e.apiKey ? { apiKey: e.apiKey } : {}),
-          ...(e.baseUrl ? { baseUrl: e.baseUrl } : {}),
-          ...(e.deploymentName ? { deploymentName: e.deploymentName } : {}),
-          ...(e.apiVersion ? { apiVersion: e.apiVersion } : {}),
-        }));
-
-        const models: Record<string, string> = {};
-        if (state.tierT1 !== 'auto') models['t1'] = state.tierT1;
-        if (state.tierT2 !== 'auto') models['t2'] = state.tierT2;
-        if (state.tierT3 !== 'auto') models['t3'] = state.tierT3;
-
-        // Any tier left on "Auto" turns on Cascade Auto so the task analyzer
-        // routes each subtask to the benchmark-best model for its type. Without
-        // this flag "Auto" silently fell back to the static priority list.
-        const anyAuto = state.tierT1 === 'auto' || state.tierT2 === 'auto' || state.tierT3 === 'auto';
-
-        const rawConfig = {
-          providers,
-          ...(Object.keys(models).length ? { models } : {}),
-          ...(anyAuto ? { cascadeAuto: true } : {}),
-        };
-        const config = CascadeConfigSchema.parse(rawConfig);
-
-        const configDir = path.join(workspacePath, '.cascade');
-        await fs.mkdir(configDir, { recursive: true });
-        const configPath = path.join(workspacePath, CASCADE_CONFIG_FILE);
-        await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8');
-
-        savedConfigRef.current = config as CascadeConfig;
+        const config = saveSetup(workspacePath, state.entries, { t1: state.tierT1, t2: state.tierT2, t3: state.tierT3 });
+        savedConfigRef.current = config;
         dispatchRef.current({ type: 'GO_DONE' });
       } catch (err) {
         dispatchRef.current({ type: 'SET_ERROR', error: err instanceof Error ? err.message : String(err) });

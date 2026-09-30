@@ -8,6 +8,7 @@ import {
   loadGlobalCredentials,
   mergeGlobalCredentials,
   saveGlobalCredentials,
+  saveProjectCredentials,
 } from './global-credentials.js';
 import { ConfigManager } from './index.js';
 import type { ProviderConfig } from '../types.js';
@@ -462,5 +463,131 @@ describe('ConfigManager + global credentials (the "AppImage forgets my keys" bug
       apiKey: 'groq-key',
       baseUrl: 'https://api.groq.com/openai/v1',
     });
+  });
+});
+
+// Two processes saving at once — two projects' keys moving out of their
+// configs, the desktop and the CLI — each read the whole file and replaced
+// it: the last writer dropped the other's project.
+describe('the credential store, written by two processes at once', () => {
+  it('keeps every change, whichever process made it', async () => {
+    const { execFile } = await import('node:child_process');
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-creds-race-')));
+    const module = path.resolve('src/config/global-credentials.ts');
+    const script = (who: string) => [
+      `const { adoptProjectCredentials } = await import(${JSON.stringify(module)});`,
+      `for (let i = 0; i < 25; i++) adoptProjectCredentials(${JSON.stringify(dir)}, '${who}-' + i, [{ type: 'openai', apiKey: 'sk-${who}-' + i }]);`,
+    ].join('\n');
+    const run = (who: string) => new Promise<void>((resolve, reject) => {
+      execFile(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script(who)], { cwd: process.cwd() }, (err) => (err ? reject(err) : resolve()));
+    });
+    try {
+      await Promise.all([run('a'), run('b')]);
+      const file = JSON.parse(fs.readFileSync(path.join(dir, 'credentials.json'), 'utf-8')) as { projects: Record<string, unknown> };
+      expect(Object.keys(file.projects).sort()).toEqual([...['a', 'b'].flatMap((w) => Array.from({ length: 25 }, (_, i) => `${w}-${i}`))].sort());
+      expect(fs.readdirSync(dir).filter((f) => f !== 'credentials.json')).toEqual([]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+});
+
+// A store cut short or edited by hand read as empty, and the next save
+// replaced it: every key in it, the machine's and each project's, gone.
+describe('a credential store that cannot be read', () => {
+  it('is read as holding nothing, and never written over', () => {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-creds-bad-')));
+    const file = path.join(dir, 'credentials.json');
+    try {
+      for (const bad of ['{"version":1,"providers":[{"type":"openai","apiKey":"sk-', 'null', '{"providers":"x"}']) {
+        fs.writeFileSync(file, bad);
+        expect(loadGlobalCredentials(dir)).toEqual([]);
+        expect(() => saveGlobalCredentials(dir, [{ type: 'anthropic', apiKey: 'sk-new' } as ProviderConfig])).toThrow(/cannot be read/);
+        expect(fs.readFileSync(file, 'utf-8')).toBe(bad);
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Two processes loaded, then each saved: the second wrote its whole list,
+// loaded before the first saved, and the first's new key was gone.
+describe('saves from two processes that loaded before either saved', () => {
+  it('keeps both processes\' keys, and a key one of them removed stays removed', async () => {
+    const { ConfigManager: Manager } = await import('./index.js');
+    const one = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-merge-a-')));
+    const two = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-merge-b-')));
+    try {
+      const seed = new Manager(one);
+      await seed.load();
+      await seed.save({ ...seed.getConfig(), providers: [{ type: 'gemini', apiKey: 'sk-gemini' }] } as never);
+
+      const desktop = new Manager(one);
+      const cli = new Manager(two);
+      await desktop.load();
+      await cli.load();
+      await desktop.save({ ...desktop.getConfig(), providers: [...desktop.getConfig().providers, { type: 'anthropic', apiKey: 'sk-anthropic' }] } as never);
+      await cli.save({ ...cli.getConfig(), providers: [...cli.getConfig().providers.filter((p) => p.type !== 'gemini'), { type: 'openai', apiKey: 'sk-openai' }] } as never);
+
+      const shared = loadGlobalCredentials(path.join(process.env['CASCADE_GLOBAL_DIR']!)).map((p) => p.type).sort();
+      expect(shared).toEqual(['anthropic', 'openai']);
+    } finally {
+      fs.rmSync(one, { recursive: true, force: true });
+      fs.rmSync(two, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('taking a save back', () => {
+  // The rollback put back the whole lists as they were before the save,
+  // dropping what another process saved in between.
+  it('takes back only what it saved, where it is still as it left it', () => {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-creds-undo-')));
+    try {
+      const gemini = (apiKey: string) => ({ type: 'gemini', apiKey }) as ProviderConfig;
+      const anthropic = (apiKey: string) => ({ type: 'anthropic', apiKey }) as ProviderConfig;
+      saveProjectCredentials(dir, 'one', [gemini('g1')]);
+      const undo = saveProjectCredentials(dir, 'one', [gemini('g2'), anthropic('a1')], [gemini('g1')]);
+      // Another process, since: changes the key this save added, and adds one.
+      saveProjectCredentials(dir, 'two', [gemini('g2'), anthropic('a2'), { type: 'openai', apiKey: 'o1' } as ProviderConfig], [gemini('g2'), anthropic('a1')]);
+      undo();
+      const keys = Object.fromEntries(loadGlobalCredentials(dir).map((p) => [p.type, p.apiKey]));
+      expect(keys).toEqual({ gemini: 'g1', anthropic: 'a2', openai: 'o1' });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves an entry it changed that another process has changed since', () => {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-creds-undo-')));
+    try {
+      const gemini = (apiKey: string) => ({ type: 'gemini', apiKey }) as ProviderConfig;
+      saveProjectCredentials(dir, 'one', [gemini('g1')]);
+      const undo = saveProjectCredentials(dir, 'one', [gemini('g2')], [gemini('g1')]);
+      saveProjectCredentials(dir, 'two', [gemini('g3')], [gemini('g2')]);
+      undo();
+      expect(loadGlobalCredentials(dir).map((p) => p.apiKey)).toEqual(['g3']);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('brings back what it removed, unless another process has saved one since', () => {
+    for (const since of [undefined, 'a9']) {
+      const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-creds-undo-')));
+      try {
+        const gemini = { type: 'gemini', apiKey: 'g1' } as ProviderConfig;
+        const anthropic = (apiKey: string) => ({ type: 'anthropic', apiKey }) as ProviderConfig;
+        saveProjectCredentials(dir, 'one', [gemini, anthropic('a0')]);
+        const undo = saveProjectCredentials(dir, 'one', [gemini], [gemini, anthropic('a0')]);
+        if (since) saveProjectCredentials(dir, 'two', [gemini, anthropic(since)], [gemini]);
+        undo();
+        const keys = Object.fromEntries(loadGlobalCredentials(dir).map((p) => [p.type, p.apiKey]));
+        expect(keys).toEqual({ gemini: 'g1', anthropic: since ?? 'a0' });
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
   });
 });

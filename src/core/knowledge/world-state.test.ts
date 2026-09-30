@@ -4,11 +4,13 @@ import fs from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { WorldStateDB } from './world-state.js';
+import { WorldStateDB, factMayLeave } from './world-state.js';
+import { PrivacyPaths } from '../privacy/paths.js';
 import { T1Administrator } from '../tiers/t1-administrator.js';
 import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import type { CascadeConfig, GenerateResult } from '../../types.js';
+import { projectStateDir } from '../../config/project-state.js';
 
 let ws: string;
 let db: WorldStateDB;
@@ -153,7 +155,7 @@ describe('WorldStateDB v3 — history-preserving writes + undo', () => {
     db.upsertFact('secret', 'token', 'ROTATED', 't3');
     db.close();
     // Read the raw SQLite bytes — the archived value must not appear in plaintext.
-    const raw = readFileSync(path.join(ws, '.cascade', 'world_state.db'));
+    const raw = readFileSync(path.join(projectStateDir(ws), 'world_state.db'));
     expect(raw.includes(Buffer.from('HUNTER2'))).toBe(false);
     // Re-open for afterEach's close() to succeed.
     db = new WorldStateDB(ws);
@@ -249,5 +251,75 @@ describe('T1 decomposition consumes world-state v2 facts', () => {
     const prompt = generate.mock.calls[0]![1]!.messages[0]!.content as string;
     expect(prompt).not.toContain('PROJECT KNOWLEDGE');
     expect(prompt).not.toContain('PROJECT WORLD STATE');
+  });
+});
+
+// Facts from before privacy.paths was set, or saved from work that has since
+// become local-only, went into T1's plan all the same: nothing said where
+// they came from.
+describe('WorldStateDB — where a fact came from', () => {
+  const rules = (...localOnly: string[]) => ({ hasPolicies: () => true, isLocalOnly: (p: string) => localOnly.includes(p) });
+
+  it('records the files a fact came from — none, for a fact saved without', () => {
+    db.upsertFact('auth', 'uses', 'JWT', 't3', undefined, ['src/auth.ts', 'src/auth.ts']);
+    db.upsertFact('db', 'is', 'postgres', 't3');
+    db.upsertFact('team', 'prefers', 'tabs', 'session-memory', undefined, []);
+    expect(Object.fromEntries(db.getAllFacts().map((f) => [f.entity, f.sources]))).toEqual({
+      auth: ['src/auth.ts'], db: null, team: [],
+    });
+  });
+
+  it('with privacy.paths rules, sets aside a fact with no record and one whose file is now local-only', () => {
+    const recorded = { entity: 'a', relation: 'r', value: 'v', sourceWorker: 't3', timestamp: 't', sources: ['src/a.ts'] };
+    const older = { ...recorded, sources: null };
+    const unrecordedField = { entity: 'a', relation: 'r', value: 'v', sourceWorker: 't3', timestamp: 't' };
+    expect(factMayLeave(recorded, rules())).toBe(true);
+    expect(factMayLeave({ ...recorded, sources: [] }, rules())).toBe(true);
+    expect(factMayLeave(older, rules())).toBe(false);
+    expect(factMayLeave(unrecordedField, rules())).toBe(false);
+    expect(factMayLeave(recorded, rules('src/a.ts'))).toBe(false);
+    // Without rules, all may: nothing was deleted, so loosening brings them back.
+    expect(factMayLeave(older, undefined)).toBe(true);
+    expect(factMayLeave(recorded, { hasPolicies: () => false, isLocalOnly: () => true })).toBe(true);
+  });
+
+  it('brings a restored value back with where it came from', () => {
+    db.upsertFact('auth', 'uses', 'sessions', 't3', undefined, ['secret/old.md']);
+    db.upsertFact('auth', 'uses', 'JWT', 't3', undefined, ['src/auth.ts']);
+    expect(db.restoreFact('auth', 'uses')).toBe(true);
+    expect(db.getAllFacts()[0]).toMatchObject({ value: 'sessions', sources: ['secret/old.md'] });
+  });
+
+  it('carries sources through an export and import, and imports a fact without them as unrecorded', async () => {
+    db.upsertFact('auth', 'uses', 'JWT', 't3', undefined, ['src/auth.ts']);
+    const bundle = JSON.parse(JSON.stringify(db.exportKnowledge()));
+    const other = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-worldstate-import-'));
+    const into = new WorldStateDB(other);
+    try {
+      into.importKnowledge({ facts: [...bundle.facts, { entity: 'db', relation: 'is', value: 'postgres', timestamp: '2026-01-01' }] });
+      expect(Object.fromEntries(into.getAllFacts().map((f) => [f.entity, f.sources]))).toEqual({ auth: ['src/auth.ts'], db: null });
+    } finally {
+      into.close();
+      await fs.rm(other, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps T1\'s plan to facts that may leave', async () => {
+    db.upsertFact('auth module', 'uses', 'JWT', 't3', undefined, ['src/auth.ts']);
+    db.upsertFact('auth module', 'stores', 'hashes in vault', 't3'); // saved before sources were
+    db.upsertFact('auth module', 'rotates', 'keys weekly', 't3', undefined, ['secret/runbook.md']);
+    const plan = async (privacy: PrivacyPaths | undefined) => {
+      const generate = vi.fn(async () => makeResult(PLAN_JSON));
+      const router = { generate, getModelForTier: () => undefined, getWorldStateDB: () => db, getPrivacyPaths: () => privacy } as unknown as CascadeRouter;
+      await new T1Administrator(router, makeToolRegistry(), {} as unknown as CascadeConfig).previewPlan('refactor the auth module');
+      return generate.mock.calls[0]![1]!.messages[0]!.content as string;
+    };
+    const withRules = await plan(new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]));
+    expect(withRules).toContain('auth module uses JWT');
+    expect(withRules).not.toContain('hashes in vault');
+    expect(withRules).not.toContain('keys weekly');
+    const without = await plan(undefined);
+    expect(without).toContain('hashes in vault');
+    expect(without).toContain('keys weekly');
   });
 });

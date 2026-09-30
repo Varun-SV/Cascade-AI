@@ -1,5 +1,6 @@
 import Database, { type Database as SQLiteDatabase } from 'better-sqlite3';
 import path from 'node:path';
+import { projectStateDir } from '../../config/project-state.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -23,6 +24,45 @@ export interface WorldFact {
   value: string;
   sourceWorker: string;
   timestamp: string;
+  /**
+   * The workspace files the fact was drawn from, relative to the workspace;
+   * empty when it came from none (a conversation). Absent or null for a fact
+   * saved before sources were recorded, or imported without them.
+   */
+  sources?: string[] | null;
+}
+
+/** What `factMayLeave` needs to know of the project's privacy.paths rules. */
+export interface FactPrivacy {
+  hasPolicies(): boolean;
+  isLocalOnly(relativePath: string): boolean;
+}
+
+/**
+ * Whether a fact may go into what a model that is not private reads — T1's
+ * plan, or a worker's search of the graph. With no privacy.paths rule, every
+ * fact may. With any, a fact must say which files it came from, and none of
+ * them may be local-only now: a fact saved before sources were recorded is
+ * set aside, and so is one whose file has become local-only since. Nothing is
+ * deleted; loosen the rules and they come back.
+ */
+export function factMayLeave(fact: WorldFact, privacy: FactPrivacy | undefined): boolean {
+  if (!privacy?.hasPolicies()) return true;
+  if (!Array.isArray(fact.sources)) return false;
+  return !fact.sources.some((p) => privacy.isLocalOnly(p));
+}
+
+/** A fact's payload: its value and, when recorded, where it came from. Both encrypted. */
+function factPayload(value: string, sources: string[] | null | undefined): string {
+  return JSON.stringify(Array.isArray(sources) ? { value, sources } : { value });
+}
+
+function readPayload(json: string): { value: string; sources: string[] | null } {
+  const parsed = JSON.parse(json) as { value: string; sources?: unknown };
+  const sources = Array.isArray(parsed.sources) && parsed.sources.every((p) => typeof p === 'string')
+    ? (parsed.sources as string[])
+    : null;
+  return { value: parsed.value, sources };
 }
 
 /** Normalize an entity/relation key so casing/whitespace don't fragment upserts. */
@@ -37,9 +77,10 @@ export class WorldStateDB {
   private encryptionKey!: Buffer;
   
   constructor(private workspacePath: string, private debugMode = false) {
-    const cascadeDir = path.join(workspacePath, '.cascade');
+    // In the project's state folder, outside the project (config/project-state.ts).
+    const cascadeDir = projectStateDir(workspacePath);
     if (!fs.existsSync(cascadeDir)) {
-      fs.mkdirSync(cascadeDir, { recursive: true });
+      fs.mkdirSync(cascadeDir, { recursive: true, mode: 0o700 });
     }
     this.keyPath = path.join(cascadeDir, 'world_state.key');
     this.dbPath = path.join(cascadeDir, 'world_state.db');
@@ -196,14 +237,18 @@ export class WorldStateDB {
    * fragment the key; an existing pair is superseded (value + provenance updated)
    * rather than duplicated. Empty entity/relation/value are ignored.
    */
-  public upsertFact(entity: string, relation: string, value: string, sourceWorker: string, timestamp?: string): void {
+  public upsertFact(
+    entity: string, relation: string, value: string, sourceWorker: string, timestamp?: string,
+    /** The workspace files it came from (see WorldFact.sources); omitted, it has no record. */
+    sources?: string[] | null,
+  ): void {
     const e = normalizeKey(entity);
     const r = normalizeKey(relation);
     const v = value.trim();
     if (!e || !r || !v) return;
 
     const now = timestamp ?? new Date().toISOString();
-    const encrypted = this.encrypt(JSON.stringify({ value: v }));
+    const encrypted = this.encrypt(factPayload(v, sources ? [...new Set(sources)] : sources));
     const upsert = this.db.prepare(`
       INSERT INTO facts (entity, relation, encrypted_value, source_worker, timestamp)
       VALUES (?, ?, ?, ?, ?)
@@ -220,7 +265,7 @@ export class WorldStateDB {
         .get(e, r) as { encrypted_value: string } | undefined;
       if (current) {
         let prevValue: string | null = null;
-        try { prevValue = JSON.parse(this.decrypt(current.encrypted_value)).value; } catch { prevValue = null; }
+        try { prevValue = readPayload(this.decrypt(current.encrypted_value)).value; } catch { prevValue = null; }
         if (prevValue !== v) this.archiveCurrentFact(e, r, 'update', now);
       }
       upsert.run(e, r, encrypted, sourceWorker, now);
@@ -231,12 +276,13 @@ export class WorldStateDB {
 
   private rowToFact(row: any): WorldFact {
     let value: string;
+    let sources: string[] | null = null;
     try {
-      value = JSON.parse(this.decrypt(row.encrypted_value)).value;
+      ({ value, sources } = readPayload(this.decrypt(row.encrypted_value)));
     } catch {
       value = '[Decryption Failed - Payload Corrupted]';
     }
-    return { entity: row.entity, relation: row.relation, value, sourceWorker: row.source_worker, timestamp: row.timestamp };
+    return { entity: row.entity, relation: row.relation, value, sourceWorker: row.source_worker, timestamp: row.timestamp, sources };
   }
 
   /** All facts whose entity matches one of the (normalized) query entities. */
@@ -274,8 +320,8 @@ export class WorldStateDB {
    * `limit`). Returns '' when there are no facts, so the caller can fall back to
    * the raw linear log — this replaces replaying the whole log during planning.
    */
-  public getFormattedKnowledge(prompt?: string, limit = 40): string {
-    const all = this.getAllFacts();
+  public getFormattedKnowledge(prompt?: string, limit = 40, mayUse: (fact: WorldFact) => boolean = () => true): string {
+    const all = this.getAllFacts().filter(mayUse);
     if (all.length === 0) return '';
     let selected = all;
     if (prompt && prompt.trim()) {
@@ -374,11 +420,12 @@ export class WorldStateDB {
            WHERE entity = ? AND relation = ? ORDER BY valid_to DESC, id DESC LIMIT 1`,
         ).get(e, r)) as { encrypted_value: string; source_worker: string } | undefined;
     if (!row) return false;
-    let value: string;
-    try { value = JSON.parse(this.decrypt(row.encrypted_value)).value; } catch { return false; }
+    let restored: { value: string; sources: string[] | null };
+    try { restored = readPayload(this.decrypt(row.encrypted_value)); } catch { return false; }
     // Route through upsertFact so the current value is archived and normal
     // change-detection applies (a no-op restore of the same value is harmless).
-    this.upsertFact(e, r, value, `${row.source_worker} (restored)`);
+    // Where it came from comes back with it.
+    this.upsertFact(e, r, restored.value, `${row.source_worker} (restored)`, undefined, restored.sources);
     return true;
   }
 
@@ -399,7 +446,7 @@ export class WorldStateDB {
    * (worker + timestamp + summary). Returns counts of what actually landed.
    */
   public importKnowledge(data: {
-    facts?: Array<{ entity?: string; relation?: string; value?: string; sourceWorker?: string; timestamp?: string }>;
+    facts?: Array<{ entity?: string; relation?: string; value?: string; sourceWorker?: string; timestamp?: string; sources?: unknown }>;
     worldLog?: Array<{ workerId?: string; summary?: string; timestamp?: string }>;
   }): { facts: number; logEntries: number } {
     let facts = 0;
@@ -413,7 +460,9 @@ export class WorldStateDB {
         const localTs = local.get(key);
         const importTs = f.timestamp ?? new Date().toISOString();
         if (localTs && localTs >= importTs) continue; // local fact is newer — keep it
-        this.upsertFact(f.entity, f.relation, f.value, f.sourceWorker ?? 'imported', importTs);
+        // Sources come along when the bundle has them; a fact without any has no record.
+        const sources = Array.isArray(f.sources) && f.sources.every((p) => typeof p === 'string') ? (f.sources as string[]) : null;
+        this.upsertFact(f.entity, f.relation, f.value, f.sourceWorker ?? 'imported', importTs, sources);
         facts++;
       }
     }

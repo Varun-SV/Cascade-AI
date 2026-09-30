@@ -60,6 +60,10 @@ export class CurrentPageTool extends BaseTool {
   // nothing they have not already opened themselves.
   isDangerous(): boolean { return false; }
 
+  // It takes no input, so it carries nothing a local-only subtask knows off
+  // the machine: the host hands over the page already open on it.
+  override readonly localOnlySafe = true;
+
   async execute(_input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
     let page: CurrentPageSnapshot | null;
     try {
