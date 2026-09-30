@@ -27,6 +27,7 @@ import { Cascade } from '../core/cascade.js';
 import { WorldStateDB } from '../core/knowledge/world-state.js';
 import { TaskScheduler } from '../scheduler/index.js';
 import type { ScheduledTask, CascadeRunResult } from '../types.js';
+import { cloudRunReport, cloudTurnAccounting } from '../cloud/run-report.js';
 import { aggregateCostStats } from './cost-stats.js';
 import type { WhyReport } from './cost-stats.js';
 import { saveGlobalCredentials } from '../config/global-credentials.js';
@@ -330,8 +331,8 @@ export class DashboardServer {
           approvalCallback: this.makeApprovalCallback(sessionId),
         });
         this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED', result);
-        this.captureWhy(sessionId, cascade, result);
-        this.emitToSessionClients(socketId, sessionId, 'session:complete', { sessionId, result });
+        const cloud = this.captureWhy(sessionId, cascade, result);
+        this.emitToSessionClients(socketId, sessionId, 'session:complete', { sessionId, result, cloud });
         this.socket.broadcast('cost:update', {
           sessionId,
           totalTokens: result.usage.totalTokens,
@@ -709,8 +710,12 @@ export class DashboardServer {
    * Capture the run's decision trail + router economics ("why") and broadcast
    * it so the desktop's Why panel updates live; kept per-session for the
    * GET /api/sessions/:id/why fallback (panel opened after the run).
+   *
+   * Returns the run's accounting as the cloud takes it, for the desktop to
+   * send with the chat it copies there: each run has its own Cascade, so the
+   * router's stats are this run's alone.
    */
-  private captureWhy(sessionId: string, cascade: Cascade, result?: CascadeRunResult): void {
+  private captureWhy(sessionId: string, cascade: Cascade, result?: CascadeRunResult): { costUsd: number; why: string } | undefined {
     try {
       const stats = cascade.getRouter().getStats();
       const savings = cascade.getRouter().getDelegationSavings();
@@ -732,8 +737,12 @@ export class DashboardServer {
         if (oldest) this.whyBySession.delete(oldest);
       }
       this.socket.broadcast('run:why', report);
+      return cloudTurnAccounting(cloudRunReport({
+        stats, t1Model: cascade.getRouter().getTierModel('T1'), decisions: report.decisions, durationMs: result?.durationMs ?? 0,
+      }));
     } catch (err) {
       console.warn('[dashboard] failed to capture decision trail:', err);
+      return undefined;
     }
   }
 
@@ -809,8 +818,8 @@ export class DashboardServer {
         approvalCallback: async () => ({ approved: true, always: false }),
       });
       this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED', result);
-      this.captureWhy(sessionId, cascade, result);
-      this.socket.broadcast('session:complete', { sessionId, result });
+      const cloud = this.captureWhy(sessionId, cascade, result);
+      this.socket.broadcast('session:complete', { sessionId, result, cloud });
       this.socket.broadcast('cost:update', {
         sessionId,
         totalTokens: result.usage.totalTokens,
@@ -1580,14 +1589,14 @@ export class DashboardServer {
             approvalCallback: this.makeApprovalCallback(sessionId),
           });
           this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED', result);
-          this.captureWhy(sessionId, cascade, result);
+          const cloud = this.captureWhy(sessionId, cascade, result);
           this.socket.broadcast('cost:update', {
             sessionId,
             totalTokens: result.usage.totalTokens,
             totalCostUsd: result.usage.estimatedCostUsd,
             costUnknown: result.usage.costUnknown === true,
           });
-          this.socket.broadcastToRoom(`session:${sessionId}`, 'session:complete', { sessionId, result });
+          this.socket.broadcastToRoom(`session:${sessionId}`, 'session:complete', { sessionId, result, cloud });
           this.throttledBroadcast('workspace');
         } catch (err) {
           this.persistRunEnd(sessionId, title, prompt, undefined, 'FAILED');

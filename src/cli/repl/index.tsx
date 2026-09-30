@@ -28,6 +28,7 @@ import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE } from '../.
 import { Cascade, type DecisionLogEntry } from '../../core/cascade.js';
 import { MemoryStore } from '../../memory/store.js';
 import { CloudClient } from '../../cloud/client.js';
+import { cloudRunReport, cloudTurnAccounting } from '../../cloud/run-report.js';
 import { ModelSelector } from '../../core/router/selector.js';
 import { OpenAIProvider } from '../../providers/openai.js';
 import { GeminiProvider } from '../../providers/gemini.js';
@@ -357,7 +358,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   // turn, and the whole thing is best-effort: it never blocks or breaks a run,
   // and `CASCADE_NO_CLOUD_SYNC=1` opts out.
   const cloudMirrorRef = useRef<{ client: CloudClient; convId: string | null } | null>(null);
-  const mirrorTurnToCloud = useCallback(async (userContent: string, assistant: { content: string; costUsd?: number }) => {
+  const mirrorTurnToCloud = useCallback(async (userContent: string, assistant: { content: string; costUsd: number; why: string }) => {
     const mirror = cloudMirrorRef.current;
     if (!mirror || process.env['CASCADE_NO_CLOUD_SYNC']) return;
     try {
@@ -375,7 +376,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       }
       await mirror.client.appendTurn(mirror.convId, {
         userContent,
-        assistant: { content: assistant.content, costUsd: assistant.costUsd ?? null },
+        assistant: { content: assistant.content, costUsd: assistant.costUsd, why: assistant.why },
       });
     } catch { /* best-effort mirror — offline, revoked token, etc. Local run is unaffected. */ }
   }, []);
@@ -1012,6 +1013,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     });
     try {
       runAbortRef.current = new AbortController();
+      // The router serves the whole session: this run is what it adds from here.
+      const statsBefore = cascade.getRouter().getStats();
       const result = await cascade.run({
         prompt: trimmed,
         workspacePath,
@@ -1033,8 +1036,13 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier, costByFeature: stats.costByFeature, savedUsd: savings.savedUsd, savedPct: savings.savedPct });
       dispatch({ type: 'COMMIT_STREAM', finalText: result.output, timestamp: new Date().toISOString() });
       persistMessage('assistant', result.output, new Date().toISOString());
-      // Mirror the finished turn into the shared cloud session (best-effort).
-      void mirrorTurnToCloud(trimmed, { content: result.output, costUsd: stats.totalCostUsd });
+      // Mirror the finished turn into the shared cloud session (best-effort),
+      // with what this run cost: the cloud's /why and spend report read it.
+      const report = cloudRunReport({
+        stats, before: statsBefore, t1Model: cascade.getRouter().getTierModel('T1'),
+        decisions: cascade.getDecisionLog(), durationMs: result.durationMs,
+      });
+      void mirrorTurnToCloud(trimmed, { content: result.output, ...cloudTurnAccounting(report) });
       // One-line run receipt — the delegation economics in scrollback.
       const receipt = formatRunReceipt(result, stats.totalCostUsd, savings);
       if (receipt) {

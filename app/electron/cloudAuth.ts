@@ -54,7 +54,7 @@ interface CloudMsg {
 /** A locally-executed turn to persist into the shared cloud conversation. */
 interface CloudTurn {
   userContent: string;
-  assistant: { content: string; tier?: string | null; model?: string | null; costUsd?: number | null };
+  assistant: { content: string; tier?: string | null; model?: string | null; costUsd?: number | null; why?: string | null };
   editOfMessageId?: string;
   regenerateFromUserMessageId?: string;
 }
