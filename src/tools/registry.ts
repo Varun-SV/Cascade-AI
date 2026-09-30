@@ -101,6 +101,13 @@ const WRITE_TOOLS = new Set(['file_write', 'file_edit', 'generate_document', 'pd
 /** Built-in tools that make the file their `path` input names, when it is not there. */
 const CREATE_TOOLS = new Set(['file_write', 'generate_document', 'pdf_create']);
 
+/** A name as Windows keeps it: without trailing dots and spaces. A loop, not a regex, which would take quadratic time on a long run of them. */
+function withoutTrailingDotsOrSpaces(name: string): string {
+  let end = name.length;
+  while (end > 0 && (name[end - 1] === '.' || name[end - 1] === ' ')) end--;
+  return name.slice(0, end);
+}
+
 /** Built-in tools that change or remove the file their `path` input names. */
 const CHANGE_TOOLS = new Set([...WRITE_TOOLS, 'file_delete']);
 
@@ -566,7 +573,7 @@ export class ToolRegistry extends EventEmitter {
    */
   private isGitOwn(absPath: string): boolean {
     const gitNamed = (root: string, p: string) => path.relative(root, p).split(/[\\/]/)
-      .some((part) => part.replace(/[. ]+$/, '').toLowerCase() === '.git');
+      .some((part) => withoutTrailingDotsOrSpaces(part).toLowerCase() === '.git');
     if (gitNamed(this.workspaceRoot, path.resolve(absPath)) || gitNamed(realPathOf(this.workspaceRoot), realPathOf(absPath))) return true;
     // The repository's configuration under another name: a hard link.
     const st = fs.statSync(absPath, { throwIfNoEntry: false });
