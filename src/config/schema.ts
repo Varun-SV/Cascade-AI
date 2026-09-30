@@ -153,7 +153,8 @@ export const ToolsConfigSchema = z.object({
    *   works. Elsewhere (Windows, or a Linux without working bubblewrap)
    *   `shell` and `run_code` are refused, since nothing would keep them from
    *   reading protected files; `git`, whose operations it checks itself, runs
-   *   with provider keys removed from its environment.
+   *   with provider keys removed from its environment and no configuration
+   *   that can start a program (tools/git-hermetic.ts).
    * - 'bwrap' / 'sandbox-exec': that jailer, or no commands.
    * - 'off': no jail and no scrubbing.
    */

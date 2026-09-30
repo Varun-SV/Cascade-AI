@@ -381,9 +381,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   jailer works (Windows, or a Linux without working bubblewrap), `shell`
   and `run_code` are refused, since taking the keys out of a command's
   environment leaves the files on disk readable; `tools.processJail: "off"`
-  runs them anyway. On Windows, `git` gets the provider keys taken
-  out of its environment too. `tools.processJail`: `auto` (default),
-  `bwrap`, `sandbox-exec` — that jailer or no commands — or `off`.
+  runs them anyway. There the `git` tool still runs, with the provider keys
+  taken out of its environment and no configuration that can start a
+  program, since one would run outside any jail: git reads no global or
+  system file (the words in them — line endings, your name — are passed on,
+  and a filter they define is marked required, so a file that needs it is
+  not added unfiltered), a repository whose own configuration names a
+  program (a diff or merge driver, a filter, a credential helper, an ssh
+  command) is refused with the setting named, and a commit your
+  configuration would sign is not made. Pushing over HTTPS then has no
+  credential helper, and ssh reads no `~/.ssh/config`. Agents' file tools
+  can no longer change anything in `.git`, where git's configuration lives,
+  under any name. `tools.processJail`: `auto` (default), `bwrap`,
+  `sandbox-exec` — that jailer or no commands — or `off`.
 - **The code index's database is protected wherever it is.** Only its
   default place was, so with `codeIndex.dbPath` set the file tools and
   commands could read the indexed text, deleted chunks included. The

@@ -9,7 +9,8 @@ import path from 'node:path';
 import { simpleGit, type SimpleGit } from 'simple-git';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
-import { globalGitConfigFiles } from './jail/process-jail.js';
+import { globalGitConfigFiles, type Launch } from './jail/process-jail.js';
+import { listGitConfig, unjailedSettings } from './git-hermetic.js';
 import { resolveInWorkspace } from './utils/workspace-path.js';
 
 /** Where the git tool looks for hooks: nowhere. */
@@ -63,7 +64,7 @@ export class GitTool extends BaseTool {
     const cwd = resolveInWorkspace(this.workspaceRoot, (input['cwd'] as string | undefined) ?? '.');
 
     const offline = options.isOffline?.() === true;
-    const { git, done } = await this.gitFor(cwd, offline);
+    const { git, done, unconfined } = await this.gitFor(cwd, offline, operation);
     // The git store stays in view of this tool (gitFor), so what it shows
     // leaves out the paths the jail hides from commands: a protected or
     // local-only file's blob is as readable as the file itself.
@@ -138,7 +139,12 @@ export class GitTool extends BaseTool {
           throw new Error(`Unknown git operation: ${operation}`);
       }
     } catch (err) {
-      throw new Error(`git ${operation} failed: ${err instanceof Error ? err.message : String(err)}`);
+      const message = err instanceof Error ? err.message : String(err);
+      // Without a jail, git reads no credential helper or ssh configuration of the user's (git-hermetic.ts).
+      const hint = unconfined && (operation === 'push' || operation === 'pull') && /terminal prompts disabled|could not read (username|password)|permission denied \(publickey|authentication failed/i.test(message)
+        ? ' Without a process jail, git runs with no credential helper and no ~/.ssh/config: use an ssh key ssh finds by default, or set tools.processJail to "off".'
+        : '';
+      throw new Error(`git ${operation} failed: ${message}${hint}`);
     } finally {
       await done();
     }
@@ -186,7 +192,7 @@ export class GitTool extends BaseTool {
    * (gitWithEnv). `done` removes the script, and marks what a local-only
    * caller's git changed local-only (Launch.done).
    */
-  private async gitFor(cwd: string, offline: boolean): Promise<{ git: SimpleGit; done: () => Promise<void> }> {
+  private async gitFor(cwd: string, offline: boolean, operation?: string): Promise<{ git: SimpleGit; done: () => Promise<void>; unconfined?: true }> {
     // No hooks, ever: a command could have written one — into .git/hooks, or
     // a husky folder in the workspace — for the next commit here to run with
     // the credentials this tool keeps in view.
@@ -198,6 +204,7 @@ export class GitTool extends BaseTool {
     const prepared = await this.jail.prepare('git', ['-c', NO_HOOKS, ...(hermetic?.args ?? [])], { cwd, offline, keepGit: true, confinesItself: true });
     if (!prepared.ok) throw new Error(prepared.reason);
     const { launch } = prepared;
+    if (launch.unconfined) return this.unjailedGit(cwd, launch, operation);
     if (process.platform === 'win32') return { git: gitWithEnv(cwd, launch.env, [NO_HOOKS]), done: async () => { await launch.done?.(); } };
     const unset = Object.keys(process.env).filter((name) => !(name in launch.env) && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name));
     // Global and system configuration files that were not there when Cascade
@@ -224,6 +231,24 @@ export class GitTool extends BaseTool {
         await launch.done?.();
       },
     };
+  }
+
+  /**
+   * git where no jail is available: with no configuration that can start a
+   * program (git-hermetic.ts), or not at all while the repository's own
+   * configuration names one.
+   */
+  private async unjailedGit(cwd: string, launch: Launch, operation?: string): Promise<{ git: SimpleGit; done: () => Promise<void>; unconfined: true }> {
+    const listed = await listGitConfig(cwd, launch.env);
+    if (listed === null) {
+      throw new Error('No process jail is available, and git could not list its configuration here to run without the settings that start programs (this needs git 2.26 or newer). Set tools.processJail to "off" to run git as it is.');
+    }
+    const settings = unjailedSettings(listed, launch.env);
+    if (!settings.ok) throw new Error(settings.reason);
+    if (operation === 'commit' && settings.signsCommits) {
+      throw new Error('Your git configuration signs commits, which runs gpg or ssh-keygen, and without a process jail git runs no program: the commit was not made. Commit it yourself, or set tools.processJail to "off".');
+    }
+    return { git: gitWithEnv(cwd, settings.env, [], true), done: async () => { await launch.done?.(); }, unconfined: true };
   }
 
   private formatStatus(status: Awaited<ReturnType<SimpleGit['status']>>): string {
@@ -310,18 +335,23 @@ const GUARDED_ENV: Record<string, string> = {
  * through — and only those. Configuration injected through GIT_CONFIG_COUNT
  * is dropped instead: which settings it carries is not checked here.
  */
-export function gitWithEnv(cwd: string, env: NodeJS.ProcessEnv, config: string[] = []): SimpleGit {
+export function gitWithEnv(cwd: string, env: NodeJS.ProcessEnv, config: string[] = [], checkedEnvConfig = false): SimpleGit {
   const kept: Record<string, string> = {};
   const unsafe: Record<string, boolean> = {};
   for (const [name, value] of Object.entries(env)) {
     if (value === undefined) continue;
     const key = name.toLowerCase().trim();
-    if (/^git_config_(count|key_\d+|value_\d+)$/.test(key)) continue;
+    if (!checkedEnvConfig && /^git_config_(count|key_\d+|value_\d+)$/.test(key)) continue;
     const category = GUARDED_ENV[key];
     if (category) unsafe[category] = true;
     kept[name] = value;
   }
-  return simpleGit({ baseDir: cwd, unsafe: { ...unsafe, ...(config.length ? { allowUnsafeHooksPath: true } : {}) }, config }).env(kept);
+  // What the environment carries was checked (git-hermetic.ts): words, and
+  // the settings that turn hooks, fsmonitor and ext:: off.
+  const envConfig = checkedEnvConfig
+    ? { allowUnsafeConfigEnvCount: true, allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true, allowUnsafeProtocolOverride: true }
+    : {};
+  return simpleGit({ baseDir: cwd, unsafe: { ...unsafe, ...envConfig, ...(config.length ? { allowUnsafeHooksPath: true } : {}) }, config }).env(kept);
 }
 
 // ── Git Context Helper (injected into T1 system prompt) ──

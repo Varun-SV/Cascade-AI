@@ -380,6 +380,9 @@ export class ToolRegistry extends EventEmitter {
       if (CHANGE_TOOLS.has(toolName) && this.isPolicyFile(path.resolve(this.workspaceRoot, given))) {
         throw new Error(`Access denied: ${given} decides what Cascade protects, and agents may read it but not change it.`);
       }
+      if (CHANGE_TOOLS.has(toolName) && this.isGitOwn(path.resolve(this.workspaceRoot, given))) {
+        throw new Error(`Access denied: ${given} is git's own (.git), whose configuration can name programs for the git tool to run; agents change a repository only through the git tool.`);
+      }
       // A change to a local-only file is asked about as a read is: a cloud
       // model's call must not overwrite or delete it unseen, nor learn from
       // the answer whether it was there. The subtask moves to a private
@@ -549,6 +552,28 @@ export class ToolRegistry extends EventEmitter {
       if (path.resolve(absPath) === policy || real === realPathOf(policy)) return true;
       const other = st && fs.statSync(policy, { throwIfNoEntry: false });
       return !!other && other.dev === st.dev && other.ino === st.ino;
+    });
+  }
+
+  /**
+   * Whether a path is git's own: inside a `.git` folder, or a `.git` file,
+   * which names where a repository's store is — by the name given or by
+   * where it leads. Git reads its configuration there, including programs
+   * to run (a diff driver, a filter, an ssh command), and the git tool runs
+   * git with the credentials it keeps in view, or with no jail at all.
+   * Windows drops trailing dots and spaces from a name, so `.git.` is
+   * `.git` there.
+   */
+  private isGitOwn(absPath: string): boolean {
+    const gitNamed = (root: string, p: string) => path.relative(root, p).split(/[\\/]/)
+      .some((part) => part.replace(/[. ]+$/, '').toLowerCase() === '.git');
+    if (gitNamed(this.workspaceRoot, path.resolve(absPath)) || gitNamed(realPathOf(this.workspaceRoot), realPathOf(absPath))) return true;
+    // The repository's configuration under another name: a hard link.
+    const st = fs.statSync(absPath, { throwIfNoEntry: false });
+    if (!st?.isFile() || st.nlink < 2) return false;
+    return ['config', 'config.worktree'].some((name) => {
+      const config = fs.statSync(path.join(this.workspaceRoot, '.git', name), { throwIfNoEntry: false });
+      return !!config && config.dev === st.dev && config.ino === st.ino;
     });
   }
 

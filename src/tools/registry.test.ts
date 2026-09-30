@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { ToolRegistry } from './registry.js';
 import { projectStateDir } from '../config/project-state.js';
 import { BaseTool } from './base.js';
@@ -635,6 +636,34 @@ describe('ToolRegistry — the files that decide what is protected', () => {
     expect(await fs.readFile(path.join(ws, '.cascadeignore'), 'utf8')).toBe('private/\n');
     // Somewhere it would be new is not where Cascade reads it from.
     await reg.execute('file_write', { path: 'sub/.cascadeignore', content: 'x' }, opts);
+    await fs.rm(ws, { recursive: true, force: true });
+  });
+});
+
+// Git reads its configuration from .git, and it can name a program to run —
+// a diff driver, a filter, an ssh command — which the git tool would start
+// with the credentials it keeps in view, or with no jail at all.
+describe('ToolRegistry — git\'s own files', () => {
+  it('lets agents read what is in .git, but not change it under any name', async () => {
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-gitown-')));
+    execFileSync('git', ['init', '-q', ws]);
+    await fs.mkdir(path.join(ws, 'sub'));
+    await fs.symlink(path.join(ws, '.git'), path.join(ws, 'store'));
+    await fs.link(path.join(ws, '.git', 'config'), path.join(ws, 'settings.txt'));
+    const before = await fs.readFile(path.join(ws, '.git', 'config'), 'utf8');
+    const reg = new ToolRegistry(toolsConfig, ws);
+    expect(await reg.execute('file_read', { path: '.git/config' }, opts)).toContain('[core]');
+    for (const name of ['.git/config', './.git/config', '.git/hooks/pre-commit', '.GIT/config', '.git./config', 'store/config', 'settings.txt', 'sub/.git', 'sub/.git/config']) {
+      await expect(reg.execute('file_write', { path: name, content: '[diff]\n\texternal = /tmp/x\n' }, opts), name).rejects.toThrow(/git's own \(\.git\)/);
+      await expect(reg.execute('file_edit', { path: name, old_string: '[core]', new_string: '[diff]' }, opts), name).rejects.toThrow(/git's own/);
+      await expect(reg.execute('file_delete', { path: name }, opts), name).rejects.toThrow(/git's own/);
+    }
+    expect(await fs.readFile(path.join(ws, '.git', 'config'), 'utf8')).toBe(before);
+    await expect(fs.stat(path.join(ws, 'sub', '.git'))).rejects.toThrow();
+    // Names that only look like it are the project's own.
+    for (const name of ['.gitignore', '.github/workflow.yml', 'notes.git', 'docs/git/config']) {
+      await reg.execute('file_write', { path: name, content: 'x' }, opts);
+    }
     await fs.rm(ws, { recursive: true, force: true });
   });
 });

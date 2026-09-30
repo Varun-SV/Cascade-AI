@@ -821,11 +821,35 @@ describe('a file protected where it is, in git', () => {
   });
 });
 
+// The jail asks git about the repository itself, outside any jail — and
+// `git ls-files` starts the fsmonitor the configuration names.
+describe('git the jail runs itself', () => {
+  it('starts no program the repository\'s configuration names', async () => {
+    const repo = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-helper-')));
+    const marker = path.join(os.tmpdir(), `cascade-fsmonitor-ran-${process.pid}`);
+    const script = path.join(os.tmpdir(), `cascade-fsmonitor-${process.pid}.sh`);
+    await fs.writeFile(script, `#!/bin/sh\necho ran >> '${marker}'\n`, { mode: 0o755 });
+    const g = (...args: string[]) => execFileSync('git', ['-C', repo, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' });
+    try {
+      g('init', '-q');
+      await fs.writeFile(path.join(repo, 'a.md'), 'a\n');
+      g('add', '.'); g('commit', '-qm', 'a');
+      g('config', 'core.fsmonitor', script);
+      await new ProcessJail(policy({ workspaceRoot: repo, detect: async () => null })).gitStoreHidden(false);
+      expect(fsSync.existsSync(marker)).toBe(false);
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true });
+      await fs.rm(script, { force: true });
+      await fs.rm(marker, { force: true });
+    }
+  });
+});
+
 // Windows has no jail and no /bin/sh to unset variables in, so the git tool
 // ran git with Cascade's whole environment — provider keys included — for
 // its hooks and credential helpers to read.
 describe('git on Windows gets the scrubbed environment', () => {
-  it('hands git the environment with the keys taken out, and keeps the user\'s own git settings', async () => {
+  it('hands git the environment with the keys taken out, and none of the configuration it carries that starts a program', async () => {
     const { GitTool } = await import('../git.js');
     const repo = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-wingit-')));
     const g = (...args: string[]) => execFileSync('git', ['-C', repo, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' });
@@ -834,10 +858,11 @@ describe('git on Windows gets the scrubbed environment', () => {
     g('add', '.'); g('commit', '-qm', 'a');
     await fs.writeFile(path.join(repo, 'a.md'), 'b\n');
     // git runs the external diff with its own environment: a window onto it.
+    // Named in Cascade's own environment, which is the user's to set; one
+    // named in the repository's configuration would not run (git-hermetic.ts).
     const dump = path.join(repo, 'env.out');
     const script = path.join(os.tmpdir(), `cascade-dump-env-${process.pid}.sh`);
     await fs.writeFile(script, `#!/bin/sh\nenv > '${dump}'\n`, { mode: 0o755 });
-    g('config', 'diff.external', script);
 
     const tool = new GitTool();
     tool.setWorkspaceRoot(repo);
@@ -847,6 +872,7 @@ describe('git on Windows gets the scrubbed environment', () => {
     Object.defineProperty(process, 'platform', { value: 'win32' });
     process.env['OPENAI_API_KEY'] = SECRET;
     process.env['EDITOR'] = 'vi';
+    process.env['GIT_EXTERNAL_DIFF'] = script;
     process.env['GIT_CONFIG_COUNT'] = '1';
     process.env['GIT_CONFIG_KEY_0'] = 'core.pager';
     process.env['GIT_CONFIG_VALUE_0'] = 'cat';
@@ -860,7 +886,9 @@ describe('git on Windows gets the scrubbed environment', () => {
     const seen = await fs.readFile(dump, 'utf8');
     expect(seen).not.toContain(SECRET);
     expect(seen).toMatch(/^EDITOR=vi$/m);
-    expect(seen).not.toMatch(/^GIT_CONFIG_COUNT=/m);
+    // The pager the environment named is a program: not passed on.
+    expect(seen).not.toMatch(/^GIT_CONFIG_VALUE_\d+=cat$/m);
+    expect(seen).toMatch(/^GIT_CONFIG_NOSYSTEM=1$/m);
     await fs.rm(repo, { recursive: true, force: true });
     await fs.rm(script, { force: true });
   });

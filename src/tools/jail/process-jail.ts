@@ -124,6 +124,12 @@ export interface Launch {
   /** The jailer the launch is wrapped in, or null when it runs as it is. */
   jail: JailKind | null;
   /**
+   * No jail was available, and the caller runs only what it checks itself
+   * (`confinesItself`): the launch runs as it is, and the caller keeps it
+   * from starting anything else (the git tool: git-hermetic.ts).
+   */
+  unconfined?: true;
+  /**
    * To call once the command has ended, whatever its outcome: for a
    * local-only caller, marks what it changed in the workspace local-only.
    */
@@ -169,7 +175,8 @@ export interface PrepareOptions {
   /**
    * The caller runs only operations it checks itself — the git tool — so
    * where no jail is available it still runs, with the provider keys taken
-   * out of its environment. Any other command is refused there: nothing but
+   * out of its environment, and it keeps the program from starting others
+   * (`Launch.unconfined`). Any other command is refused there: nothing but
    * the jail keeps it from reading a protected file and handing it to a
    * cloud model.
    */
@@ -221,9 +228,9 @@ export class ProcessJail {
       if (!opts.confinesItself) return { ok: false, reason: noJailReason() };
       if (!this.warned) {
         this.warned = true;
-        this.policy.log('[jail] No process jail is available (bubblewrap on Linux, sandbox-exec on macOS): the git tool runs with provider keys removed from its environment, and shell and code commands are refused until tools.processJail is "off".');
+        this.policy.log('[jail] No process jail is available (bubblewrap on Linux, sandbox-exec on macOS): the git tool runs with provider keys removed from its environment and no configuration that can start a program, and shell and code commands are refused until tools.processJail is "off".');
       }
-      return { ok: true, launch: { file, args, env, cwd: opts.cwd, jail: null } };
+      return { ok: true, launch: { file, args, env, cwd: opts.cwd, jail: null, unconfined: true } };
     }
 
     if (opts.offline && kind === 'sandbox-exec') {
@@ -1261,10 +1268,14 @@ async function defaultPushRemote(cwd: string): Promise<string> {
     || 'origin';
 }
 
-/** git's output in `cwd`, or null when it failed — not a repository, or git missing. */
+/**
+ * git's output in `cwd`, or null when it failed — not a repository, or git
+ * missing. Run outside any jail, so with nothing its configuration names to
+ * start: an fsmonitor as the index is read, gpg to show a signature.
+ */
 function git(cwd: string, args: string[]): Promise<string | null> {
   return new Promise((resolve) => {
-    execFile('git', ['-C', cwd, ...args], { timeout: 20_000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+    execFile('git', ['-c', 'core.fsmonitor=false', '-c', 'log.showSignature=false', '-C', cwd, ...args], { timeout: 20_000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
       resolve(err ? null : stdout.trim());
     });
   });
