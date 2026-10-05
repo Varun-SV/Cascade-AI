@@ -772,6 +772,23 @@ export class T3Worker extends BaseTier {
         this.publishOutcome(assignment.subtaskId, finalOutput, 'FAILED');
         return this.buildResult('ESCALATED', finalOutput, { checksRun, passed, failed }, issues, correctionAttempts);
       }
+      // Wrapping up (router/run-budget.ts): the rest of the budget writes the
+      // answer from what is done. A draft this worker finished is kept — its
+      // checks were not paid for, and it says so — rather than escalated, which
+      // would park the run on a question about work that is already done. A
+      // worker stopped before it wrote anything simply did not finish.
+      if (err instanceof Error && err.name === 'BudgetWrapUpError') {
+        if (output) {
+          issues.push(`Not self-checked: ${errMsg}`);
+          this.setStatus('COMPLETED', output);
+          this.peerBus?.publish(this.id, assignment.subtaskId, output, 'COMPLETED');
+          return this.buildResult('COMPLETED', output, { checksRun, passed, failed }, issues, correctionAttempts);
+        }
+        issues.push(`Not finished: ${errMsg}`);
+        this.setStatus('FAILED', '');
+        this.peerBus?.publish(this.id, assignment.subtaskId, '', 'FAILED');
+        return this.buildResult('FAILED', '', { checksRun, passed, failed }, issues, correctionAttempts);
+      }
       // A budget stop is FAILED, never ESCALATED. The router has permanently
       // marked this run over its hard cap, so every further generation fails
       // instantly — escalating would park the run for five minutes and offer a

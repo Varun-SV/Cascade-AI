@@ -239,13 +239,19 @@ export const BudgetConfigSchema = z.object({
   dailyBudgetUsd:   z.number().optional(),
   sessionBudgetUsd: z.number().optional(),
   /**
-   * Hard per-task token ceiling. A single `cascade run` is stopped once its
-   * combined token usage crosses this, so a mis-routed trivial task can never
-   * fan out into a runaway multi-agent burn. Resets every run. Raise it for
-   * genuinely large jobs. Defaults to 200k.
+   * Per-task token ceiling, so a mis-routed trivial task can never fan out into
+   * a runaway multi-agent burn. At 80% of it the run starts no new work and
+   * writes its answer from what is done; it is stopped outright only past it
+   * (router/run-budget.ts). Resets every run. Raise it for genuinely large
+   * jobs. Defaults to 200k.
    */
   maxTokensPerRun:  z.number().int().positive().default(200_000),
-  /** Optional hard per-task cost ceiling (USD). Unset = only the token cap applies. */
+  /**
+   * Optional per-task cost ceiling (USD). The run plans within it — sections,
+   * workers and Cascade Auto's models are sized to what it has left — and at
+   * 80% starts no new work and writes its answer from what is done. It is the
+   * hard stop past that. Unset = only the token cap applies.
+   */
   maxCostPerRunUsd: z.number().positive().optional(),
   /**
    * Consecutive systemic failures against ONE model before the run stops

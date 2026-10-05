@@ -159,15 +159,23 @@ export class ModelSelector {
   }
 
   selectVisionModel(): ModelInfo | null {
+    return this.visionModels()[0] ?? null;
+  }
+
+  /**
+   * Every usable vision-capable model, best first: the order
+   * selectVisionModel() picks from, for a caller that has to weigh something
+   * else too, such as what a call may cost.
+   */
+  visionModels(): ModelInfo[] {
+    const out = new Map<string, ModelInfo>();
     // isUsable(), not a bare provider check: this path resolves EVERY
     // vision-required call, and reading only `availableProviders` made it the
     // one selection route that ignored both the model veto (so a credential
     // whose quota is gone still got handed the image) and validatedIds.
     for (const key of VISION_MODEL_PRIORITY) {
       const model = this.availableModels.get(key);
-      if (model && this.isUsable(model) && model.isVisionCapable) {
-        return model;
-      }
+      if (model && this.isUsable(model) && model.isVisionCapable) out.set(model.id, model);
     }
     // VISION_MODEL_PRIORITY only covers the bundled static catalog — a
     // vision-capable model that's discovered live (GitHub Models has no
@@ -178,9 +186,9 @@ export class ModelSelector {
     // any explicit tier/vision override is even consulted. Same worst-case
     // widening selectForTier() and getNextFallback() already apply elsewhere.
     for (const model of this.availableModels.values()) {
-      if (this.isUsable(model) && model.isVisionCapable) return model;
+      if (this.isUsable(model) && model.isVisionCapable && !out.has(model.id)) out.set(model.id, model);
     }
-    return null;
+    return [...out.values()];
   }
 
   getNextFallback(currentModelId: string, tier: TierRole): ModelInfo | null {

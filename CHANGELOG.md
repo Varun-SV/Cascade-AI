@@ -105,6 +105,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   change or remove it — the file tools refuse, and commands see it
   read-only, whatever it links to or is linked from, and find it as it was
   when they end — since a line taken out would unprotect a path in the next run.
+- **A run with a budget plans within it, and always answers.** A per-run
+  cap used to end the run the moment it was crossed, answer or not: half a
+  plan's work could be paid for and the reply was only "stopped to avoid
+  runaway cost". Now the planner is told how many sections and workers what
+  is left pays for, a plan over it keeps its first ones, and Cascade Auto
+  picks cheaper models as the money runs down. Work may spend 80% of the cap
+  (the cost cap and the per-run token cap alike). Past that no new work
+  starts, and the rest pays for writing the answer from what is finished.
+  Whenever the budget held planned work back, cut from the plan or not
+  started, a line under the answer says so. A worker whose draft was
+  finished keeps it, marked unchecked, instead of stopping to ask about it.
+  If nothing finished at all, the rest answers the question directly, the
+  way Fast answer does; if even that cannot be paid for, the finished
+  sections are returned as they are. The cap itself is never exceeded by
+  work, and nothing changes without one.
 - **Cascade Cloud has a calmer look.** Flat paper in light and "midnight" in
   dark replace the frosted glass and background glows, and the azure → sky →
   teal ramp is now the only accent, used where it means something: tiers and

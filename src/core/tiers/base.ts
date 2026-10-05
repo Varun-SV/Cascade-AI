@@ -39,6 +39,13 @@ export abstract class BaseTier extends EventEmitter {
    */
   protected isPresenter = false;
   /**
+   * What this tier's calls are for against a per-run cap (GenerateOptions
+   * `budgetClass`). Work by default; a tier whose every call IS the answer —
+   * the root worker of a Simple run — is `'final'`, so a run that is wrapping
+   * up still gets one.
+   */
+  protected budgetClass: 'work' | 'final' = 'work';
+  /**
    * The model actually serving this tier (`provider:id`), once resolved —
    * rides on every tier:status event so the desktop can show which model ran
    * which node (Cockpit node panel / Why panel).
@@ -71,6 +78,16 @@ export abstract class BaseTier extends EventEmitter {
   /** Mark this tier as the run's presenter (root tier). */
   setPresenter(on = true): void {
     this.isPresenter = on;
+  }
+
+  setBudgetClass(budgetClass: 'work' | 'final'): void {
+    this.budgetClass = budgetClass;
+  }
+
+  /** The tier's budget class, unless the call names its own. */
+  private withBudgetClass(args: Parameters<CascadeRouter['generate']>): Parameters<CascadeRouter['generate']> {
+    const [tier, options, ...rest] = args;
+    return [tier, { budgetClass: this.budgetClass, ...options }, ...rest];
   }
 
   /**
@@ -165,13 +182,13 @@ export abstract class BaseTier extends EventEmitter {
   protected async generateAuxiliary(
     ...args: Parameters<CascadeRouter['generate']>
   ): Promise<Awaited<ReturnType<CascadeRouter['generate']>>> {
-    return this.router.generate(...args);
+    return this.router.generate(...this.withBudgetClass(args));
   }
 
   protected async generateTracked(
     ...args: Parameters<CascadeRouter['generate']>
   ): Promise<Awaited<ReturnType<CascadeRouter['generate']>>> {
-    const result = await this.router.generate(...args);
+    const result = await this.router.generate(...this.withBudgetClass(args));
     if (result?.servedBy) {
       this.setServingModel(`${result.servedBy.provider}:${result.servedBy.id}`);
     }

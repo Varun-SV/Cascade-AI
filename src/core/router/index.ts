@@ -38,6 +38,7 @@ import { DeadModelStore } from './dead-models.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
 import { isPrivateEndpoint, providerConfigFor } from './endpoint.js';
 import { buildTokenUsage, resolveModelPricing } from '../../utils/cost.js';
+import { MIN_FINAL_OUTPUT_TOKENS, T2_CALLS_PER_SECTION, T3_CALLS_PER_SUBTASK, workShare, type RunBudget } from './run-budget.js';
 import { hasProviderCredential } from '../../config/index.js';
 import { estimateTokens, contentToText, CHARS_PER_TOKEN } from '../context/compaction.js';
 import { withTimeout, withTimeoutAbort, anySignal, CascadeCancelledError } from '../../utils/retry.js';
@@ -190,6 +191,14 @@ function newRunAbort(): AbortController {
  * the provider billed several times that.
  */
 const TOKENS_PER_MESSAGE_FRAMING = 4;
+
+/** A subtask may take at most 1/this of what is left for work (see affordableCall). */
+const SUBTASK_SHARE_OF_WORK = 4;
+/** What a work call is expected to write, for holding the answer's reserve. */
+const EXPECTED_WORK_OUTPUT_TOKENS = 1_500;
+/** An answer call's output when neither it nor its model names a limit. */
+const DEFAULT_FINAL_OUTPUT_TOKENS = 4_096;
+const WRAP_UP_MESSAGE = 'Most of this task\'s budget is spent, so no more work was started and the rest pays for writing the answer from what is done.';
 
 /**
  * ASCII is left at four characters per token, deliberately.
@@ -495,6 +504,23 @@ export class CascadeRouter extends EventEmitter {
   private runBudgetExceeded = false;
   private runBudgetExceededReason: string | undefined;
   /**
+   * Work has spent its share of the per-run cap (see run-budget.ts): new work
+   * is refused so that what is left pays for the answer. Unlike the hard stop
+   * above, nothing in flight is cancelled, and a `'final'` call still runs.
+   */
+  private runWrappingUp = false;
+  private runWrapUpReason: string | undefined;
+  /** Work held back by the wrap-up this run (RunBudget.workNotStarted). */
+  private runWorkNotStarted = 0;
+  /**
+   * Worst-case OUTPUT held for work calls in flight. The hard-cap reservation
+   * counts input only, which is right for a ceiling that must not refuse
+   * ordinary calls — but the answer's reserve has to survive a whole wave
+   * finishing at once, so admission to work counts what each call may write.
+   */
+  private reservedWorkUsd = 0;
+  private reservedWorkTokens = 0;
+  /**
    * Budget state machine — guards against two concurrent `generate()` calls
    * each firing the warning or both slipping past the hard cap. All
    * transitions happen inside `updateBudgetState()` which is called only
@@ -567,6 +593,14 @@ export class CascadeRouter extends EventEmitter {
   private permanentRepoints = new Map<TierRole, ModelInfo>();
   /** The current run's abort signal — injected into every provider call so a cancel aborts in-flight requests. */
   private runSignal?: AbortSignal;
+
+  /**
+   * Thrown for a work call once the run is wrapping up. Not a stop: the run
+   * goes on to write its answer from the work already done.
+   */
+  static BudgetWrapUpError = class extends Error {
+    constructor(msg: string) { super(msg); this.name = 'BudgetWrapUpError'; }
+  };
 
   /** Thrown when the configured budget is exceeded. */
   static BudgetExceededError = class extends Error {
@@ -927,6 +961,12 @@ export class CascadeRouter extends EventEmitter {
         this.runBudgetExceededReason ?? 'Per-task budget exceeded.',
       );
     }
+    const finalCall = options.budgetClass === 'final';
+    // Wrapping up: no new work, only the answer.
+    if (this.runWrappingUp && !finalCall) {
+      this.runWorkNotStarted++;
+      throw new CascadeRouter.BudgetWrapUpError(this.runWrapUpReason ?? WRAP_UP_MESSAGE);
+    }
 
     // ── Pin this call to the run it starts in ─────────────────
     //
@@ -1063,7 +1103,22 @@ export class CascadeRouter extends EventEmitter {
     // Returns a release handle: the estimate is RESERVED against the budget
     // until the call settles, so concurrent calls cannot each be admitted
     // against the same unspent allowance.
-    let releaseReservation: (() => void) | undefined = this.enforcePreflightBudget(model, options);
+    // The answer's call is fitted to what the cap has left, or declined without
+    // stopping the run so the caller can fall back to the finished work as is.
+    if (finalCall) options = this.fitFinalCall(model, options);
+    const releasePreflight = this.enforcePreflightBudget(model, options);
+    let releaseWork: (() => void) | undefined;
+    if (!finalCall) {
+      try {
+        releaseWork = this.admitWork(model, options);
+      } catch (err) {
+        releasePreflight?.();
+        throw err;
+      }
+    }
+    let releaseReservation: (() => void) | undefined = releasePreflight || releaseWork
+      ? () => { releasePreflight?.(); releaseWork?.(); }
+      : undefined;
 
     // Per-provider TPM guard: pause this call until the token bucket has
     // enough budget to cover the estimated input+output tokens. Prevents
@@ -1334,7 +1389,7 @@ export class CascadeRouter extends EventEmitter {
       }
 
       // Add to tracking
-      this.recordStats(tier, model, result.usage, options.featureTag, runGeneration);
+      this.recordStats(tier, model, result.usage, options.featureTag, runGeneration, finalCall);
       // On success, signal the failover manager so that a provider which
       // previously tripped a rate-limit can be immediately re-enabled rather
       // than waiting the full backoff window to expire.
@@ -1757,7 +1812,10 @@ export class CascadeRouter extends EventEmitter {
       // posterior behind it, so it is announced rather than left to be
       // discovered in a bill. The note arrives with the selection, so two
       // subtasks selecting at once cannot be attributed to each other.
-      const { model: chosen, note, taskType } = await this.taskAnalyzer.select(text, tier, this.selector, opts);
+      const { model: chosen, note, taskType } = await this.taskAnalyzer.select(text, tier, this.selector, {
+        ...opts,
+        ...this.affordableCall(tier),
+      });
       // HELD, not emitted. A selection is not a call: T3Worker selects before
       // its cancellation checkpoint and T2Manager before its approval gate, so
       // a subtask that loses a wave race throws without ever reaching a
@@ -1771,6 +1829,19 @@ export class CascadeRouter extends EventEmitter {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * What one call of a subtask may cost as a run's budget runs down: a
+   * section's manager or a worker may take at most a quarter of what is left
+   * for work, so the run can still afford the rest of its plan. Nothing
+   * without a cost cap.
+   */
+  private affordableCall(tier: TierRole): { maxCallUsd?: number } {
+    const workUsd = this.runBudget().workRemainingUsd;
+    if (workUsd == null) return {};
+    const calls = tier === 'T2' ? T2_CALLS_PER_SECTION : T3_CALLS_PER_SUBTASK;
+    return { maxCallUsd: workUsd / (SUBTASK_SHARE_OF_WORK * calls) };
   }
 
   getStats(): RouterStats {
@@ -2205,6 +2276,7 @@ export class CascadeRouter extends EventEmitter {
     usage: TokenUsage,
     featureTag?: string,
     runGeneration?: number,
+    finalCall = false,
   ): void {
     this.stats.totalTokens += usage.totalTokens;
     this.stats.totalCostUsd += usage.estimatedCostUsd;
@@ -2267,7 +2339,17 @@ export class CascadeRouter extends EventEmitter {
 
     // ── Budget enforcement & warning (atomic state transitions) ─
     this.updateBudgetState();
-    if (currentRun) this.enforceRunBudget();
+    if (currentRun) {
+      // The answer's call keeps its result even if it lands past the cap: the
+      // money is spent either way, and discarding the answer it bought is the
+      // one outcome worse than overspending. The run still stops after it.
+      try {
+        this.enforceRunBudget();
+      } catch (err) {
+        if (!finalCall) throw err;
+      }
+      this.checkWrapUp();
+    }
   }
 
   /**
@@ -2321,6 +2403,11 @@ export class CascadeRouter extends EventEmitter {
     this.runGeneration++;
     this.runBudgetExceeded = false;
     this.runBudgetExceededReason = undefined;
+    this.runWrappingUp = false;
+    this.runWrapUpReason = undefined;
+    this.runWorkNotStarted = 0;
+    this.reservedWorkUsd = 0;
+    this.reservedWorkTokens = 0;
     // Quota/auth verdicts are RUN-scoped by design — a user who tops up their
     // account gets the provider back on the next run rather than after a TTL.
     // The router outlives a run in the REPL and the desktop app, so without
@@ -2556,6 +2643,169 @@ export class CascadeRouter extends EventEmitter {
   }
 
   /** Trips the same run-level flag a post-hoc overrun does, and reports it the same way. */
+  /** Where this run stands against its caps. */
+  runBudget(): RunBudget {
+    const budget = this.config?.budget;
+    const capUsd = budget?.maxCostPerRunUsd;
+    const capTokens = budget?.maxTokensPerRun;
+    const heldUsd = this.runCostUsd + this.reservedCostUsd + this.reservedWorkUsd;
+    const heldTokens = this.runTokens + this.reservedTokens + this.reservedWorkTokens;
+    return {
+      ...(capUsd != null ? {
+        capUsd,
+        workRemainingUsd: Math.max(0, workShare(capUsd) - heldUsd),
+        remainingUsd: Math.max(0, capUsd - heldUsd),
+      } : {}),
+      spentUsd: this.runCostUsd,
+      ...(capTokens != null ? {
+        capTokens,
+        workRemainingTokens: Math.max(0, workShare(capTokens) - heldTokens),
+        remainingTokens: Math.max(0, capTokens - heldTokens),
+      } : {}),
+      usedTokens: this.runTokens,
+      wrappingUp: this.runWrappingUp,
+      workNotStarted: this.runWorkNotStarted,
+    };
+  }
+
+  /** A tier did not start a section or worker because the run is wrapping up. */
+  noteWorkNotStarted(count = 1): void {
+    this.runWorkNotStarted += count;
+  }
+
+  /** True once this run has stopped starting work so the rest pays for its answer. */
+  isWrappingUp(): boolean {
+    return this.runWrappingUp;
+  }
+
+  /**
+   * Admit a work call only if it leaves the answer's reserve alone.
+   *
+   * Counted against spent, plus what calls in flight hold, plus this call's
+   * input (already reserved by the preflight) and the output it can expect to
+   * write — held until it settles, so a wave admitted together cannot all
+   * finish into the reserve. The expected output, not the worst case: a
+   * worst-case count refused the first call of a run on a small cap, and the
+   * answer's call is fitted to what is actually left in any case.
+   */
+  private admitWork(model: ModelInfo, options: GenerateOptions): (() => void) | undefined {
+    const budget = this.config?.budget;
+    const capUsd = budget?.maxCostPerRunUsd;
+    const capTokens = budget?.maxTokensPerRun;
+    if (capUsd == null && capTokens == null) return undefined;
+
+    const inputTokens = this.estimateInputTokens(options, model);
+    const outputTokens = Math.min(
+      options.maxTokens ?? model.maxOutputTokens ?? EXPECTED_WORK_OUTPUT_TOKENS,
+      model.maxOutputTokens ?? Number.POSITIVE_INFINITY,
+      EXPECTED_WORK_OUTPUT_TOKENS,
+    );
+    let outputUsd = 0;
+    if (capUsd != null) {
+      const { output, unknown } = resolveModelPricing(model, { inputTokens });
+      if (!unknown) outputUsd = (outputTokens / 1000) * output;
+      const held = this.runCostUsd + this.reservedCostUsd + this.reservedWorkUsd;
+      if (held + outputUsd > workShare(capUsd)) {
+        this.startWrapUp(this.costWrapUpReason(capUsd));
+        this.runWorkNotStarted++;
+        throw new CascadeRouter.BudgetWrapUpError(this.runWrapUpReason ?? WRAP_UP_MESSAGE);
+      }
+    }
+    if (capTokens != null) {
+      const held = this.runTokens + this.reservedTokens + this.reservedWorkTokens;
+      if (held + outputTokens > workShare(capTokens)) {
+        this.startWrapUp(this.tokenWrapUpReason(capTokens));
+        this.runWorkNotStarted++;
+        throw new CascadeRouter.BudgetWrapUpError(this.runWrapUpReason ?? WRAP_UP_MESSAGE);
+      }
+    }
+
+    this.reservedWorkUsd += outputUsd;
+    this.reservedWorkTokens += outputTokens;
+    const generation = this.runGeneration;
+    let released = false;
+    return () => {
+      if (released || generation !== this.runGeneration) return;
+      released = true;
+      this.reservedWorkUsd -= outputUsd;
+      this.reservedWorkTokens -= outputTokens;
+    };
+  }
+
+  /**
+   * Fit the answer's call to what the caps have left: its output is limited to
+   * what remains after its input. With too little room to be worth asking, it
+   * is declined — without stopping the run, so the caller can return the
+   * finished work as it stands.
+   */
+  private fitFinalCall(model: ModelInfo, options: GenerateOptions): GenerateOptions {
+    const budget = this.config?.budget;
+    const capUsd = budget?.maxCostPerRunUsd;
+    const capTokens = budget?.maxTokensPerRun;
+    if (capUsd == null && capTokens == null) return options;
+
+    const inputTokens = this.estimateInputTokens(options, model);
+    const requested = Math.min(
+      options.maxTokens ?? model.maxOutputTokens ?? DEFAULT_FINAL_OUTPUT_TOKENS,
+      model.maxOutputTokens ?? Number.POSITIVE_INFINITY,
+    );
+    let room = requested;
+    if (capTokens != null) {
+      room = Math.min(room, capTokens - this.runTokens - this.reservedTokens - inputTokens);
+    }
+    if (capUsd != null) {
+      const { input, output, unknown } = resolveModelPricing(model, { inputTokens });
+      if (!unknown) {
+        const left = capUsd - this.runCostUsd - this.reservedCostUsd - (inputTokens / 1000) * input;
+        if (output > 0) room = Math.min(room, Math.floor((left / output) * 1000));
+        else if (left < 0) room = 0;
+      }
+    }
+    if (room < MIN_FINAL_OUTPUT_TOKENS) {
+      throw new CascadeRouter.BudgetWrapUpError(
+        'Too little of this task\'s budget is left to write an answer, so the finished work is returned as it is.',
+      );
+    }
+    return room < requested ? { ...options, maxTokens: room } : options;
+  }
+
+  /** After each call: has work reached its share of a cap? */
+  private checkWrapUp(): void {
+    if (this.runWrappingUp || this.runBudgetExceeded) return;
+    const budget = this.config?.budget;
+    const capUsd = budget?.maxCostPerRunUsd;
+    const capTokens = budget?.maxTokensPerRun;
+    if (capUsd != null && this.runCostUsd >= workShare(capUsd)) {
+      this.startWrapUp(this.costWrapUpReason(capUsd));
+    } else if (capTokens != null && this.runTokens >= workShare(capTokens)) {
+      this.startWrapUp(this.tokenWrapUpReason(capTokens));
+    }
+  }
+
+  private startWrapUp(reason: string): void {
+    if (this.runWrappingUp) return;
+    this.runWrappingUp = true;
+    this.runWrapUpReason = reason;
+    const budget = this.config?.budget;
+    this.emit('budget:wrap-up', {
+      reason,
+      spentUsd: this.runCostUsd,
+      usedTokens: this.runTokens,
+      ...(budget?.maxCostPerRunUsd != null ? { capUsd: budget.maxCostPerRunUsd } : {}),
+      ...(budget?.maxTokensPerRun != null ? { capTokens: budget.maxTokensPerRun } : {}),
+    });
+  }
+
+  private costWrapUpReason(capUsd: number): string {
+    return `Used $${this.runCostUsd.toFixed(4)} of this task's $${capUsd.toFixed(2)} budget, `
+      + 'so no more work was started and the rest pays for writing the answer from what is done.';
+  }
+
+  private tokenWrapUpReason(capTokens: number): string {
+    return `Used ${this.runTokens.toLocaleString()} of this task's ${capTokens.toLocaleString()}-token budget, `
+      + 'so no more work was started and the rest pays for writing the answer from what is done.';
+  }
+
   private failPreflight(reason: string): never {
     this.runBudgetExceeded = true;
     this.runBudgetExceededReason = reason;
