@@ -363,7 +363,7 @@ export default function App() {
       </AnimatePresence>
 
       {/* Main chat panel */}
-      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+      <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <ChatTopBar
           title={activeTitle}
           conversationId={chat.conversationId}
@@ -442,7 +442,7 @@ export default function App() {
             activity={chat.activity}
           />
         </div>
-      </div>
+      </main>
 
       <AnimatePresence>
         {/* Settings renders FIRST so that a sub-modal opened from it (Skills,

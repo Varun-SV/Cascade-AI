@@ -306,8 +306,8 @@ body {
   /* Above the phone drawer and ordinary windows (z-40), below the prompts a
      run waits on — ContextApprovalDialog (z-50) and EscalationModal (z-[60]). */
   .cz-menu {
+    /* Its height is capped where it is placed (see placeMenu). */
     @apply fixed z-[45] min-w-[240px] max-w-[min(320px,92vw)] overflow-auto rounded-[14px] bg-card p-1.5;
-    max-height: 72vh;
     box-shadow: var(--glass-shadow-strong), inset 0 0 0 1px rgb(var(--c-elev) / 0.1);
     animation: czRise 0.12s ease;
   }

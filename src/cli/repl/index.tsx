@@ -1490,6 +1490,7 @@ const DECISION_KIND_LABEL: Record<DecisionLogEntry['kind'], string> = {
   escalation: 'Escalation',
   context: 'Context',
   'provider-exhausted': 'Provider out',
+  budget: 'Budget',
 };
 
 function formatPlanPreview(plan: { complexity: string; sections: Array<{ sectionTitle: string; t3Subtasks?: unknown[] }>; reasoning?: string }): string {

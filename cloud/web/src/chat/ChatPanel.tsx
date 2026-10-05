@@ -115,7 +115,7 @@ export default function ChatPanel({
   onBrowserFrameShown,
   toolApprovals, onDecideToolApproval,
 }: Props) {
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const threadRef = useRef<HTMLDivElement>(null);
   const [activityOpen, setActivityOpen] = useState(false);
   const [draftRequest, setDraftRequest] = useState<{ text: string; seq: number } | null>(null);
   // The browser gets a pane of its own where there is room for one beside the
@@ -123,8 +123,14 @@ export default function ChatPanel({
   // control is never scrolled away with the messages.
   const wide = useMediaQuery('(min-width: 1024px)');
 
+  // Follow the conversation by scrolling the thread itself. scrollIntoView
+  // would scroll every ancestor too, the overflow-hidden ones included, and
+  // could push the top bar and thread off screen above the composer.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView?.({ behavior: 'smooth' });
+    const el = threadRef.current;
+    if (!el) return;
+    if (el.scrollTo) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    else el.scrollTop = el.scrollHeight;
   }, [messages, status]);
 
   // The most recent verdict across the live tiers. Reviews come from T1, so
@@ -176,7 +182,10 @@ export default function ChatPanel({
   return (
     <div className="flex h-full min-h-0">
       <div className={`relative flex min-w-0 flex-1 flex-col ${empty ? 'justify-center' : ''}`}>
-        <div className={empty ? 'flex-none px-5 pb-[18px] pt-2.5' : 'min-h-0 flex-1 overflow-y-auto px-5 pb-7 pt-3'}>
+        {/* `relative`: the thread is the containing block for anything
+            absolutely placed in it (the receipts' screen-reader labels), so
+            its scrolling clips them rather than letting them stretch the page. */}
+        <div ref={threadRef} className={empty ? 'flex-none px-5 pb-[18px] pt-2.5' : 'relative min-h-0 flex-1 overflow-y-auto px-5 pb-7 pt-3'}>
           {empty ? (
             <motion.div
               className="flex flex-col items-center gap-3.5 text-center"
@@ -261,7 +270,6 @@ export default function ChatPanel({
               )}
             </div>
           )}
-          <div ref={bottomRef} />
         </div>
 
         <div className="flex shrink-0 flex-col gap-2.5 px-5 pb-4 [&>*]:mx-auto [&>*]:w-full [&>*]:max-w-[720px]" style={empty ? { paddingBottom: '12vh' } : undefined}>

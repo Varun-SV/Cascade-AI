@@ -369,7 +369,7 @@ export default function SettingsModal({
 
             <Row
               title="Max tokens per run"
-              subtitle="Hard ceiling on total tokens a single run may spend across all tiers — a runaway multi-agent run stops here. Blank = the default (200k). The per-run cost limit still applies."
+              subtitle="Ceiling on total tokens a single run may spend across all tiers. At 80% it starts no new work and writes the answer from what is done; it never goes past it. Blank = the default (200k). The per-run cost cap still applies."
               right={
                 <input
                   type="number" min={1000} step={1000} inputMode="numeric"
@@ -388,7 +388,7 @@ export default function SettingsModal({
 
             <Row
               title="Per-run cost cap (USD)"
-              subtitle="A single run stops once its estimated spend reaches this, so a runaway multi-agent run can't drain your API budget. You pay providers directly with your own keys. Blank = the default ($0.50). Range $0.05–$25."
+              subtitle="A single run plans within this: fewer sections and cheaper models when it is small. At 80% it starts no new work and writes the answer from what is done, so you still get one; it never goes past the cap. You pay providers directly with your own keys. Blank = the default ($0.50). Range $0.05–$25."
               right={
                 <input
                   type="number" min={0.05} max={25} step={0.05} inputMode="decimal"

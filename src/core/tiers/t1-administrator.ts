@@ -35,6 +35,7 @@ import { canProduceFiles, canProduceNonDiskDeliverables, hasFileWritingTool } fr
 import { planSpecShape, quotedFieldRules } from './plan-spec.js';
 import { REPORTING_INTEGRITY_RULE } from './integrity.js';
 import { describeBrowserForPlanner } from './browser-planning.js';
+import { assembleFinishedWork, directAnswerPrompt, isBudgetStop, keepFirst, sectionsWithin, workersWithin } from '../router/run-budget.js';
 
 /** Case-insensitive shared keywords between two keyword lists. */
 export function sharedKeywords(a: string[] = [], b: string[] = []): string[] {
@@ -143,6 +144,26 @@ export interface PlanApprovalMeta {
  */
 function producedOutput(result: T2Result): boolean {
   return result.status === 'COMPLETED' || result.status === 'PARTIAL';
+}
+
+/**
+ * The plan rule a budget adds: how many sections it pays for. Said only when
+ * it binds — a budget that pays for more than any plan would use is not worth
+ * a line of the planner's attention.
+ */
+function budgetRule(maxSections: number): string {
+  if (maxSections > 12) return '';
+  return `\n- BUDGET: what is left of this task's budget pays for about ${maxSections} section${maxSections === 1 ? '' : 's'} of two workers each. `
+    + 'Plan within that — fewer, broader sections and workers are better than a plan that runs out of money half-way. '
+    + 'A plan over it is cut to its first sections, in the order you list them, so put the essential ones first.';
+}
+
+/** A section's finished worker outputs, joined — its text when it has no summary. */
+function sectionOutputs(result: T2Result): string {
+  return result.t3Results
+    .filter((t) => t.status === 'COMPLETED')
+    .map((t) => (typeof t.output === 'string' ? t.output : JSON.stringify(t.output)))
+    .join('\n\n');
 }
 
 export class T1Administrator extends BaseTier {
@@ -356,7 +377,10 @@ export class T1Administrator extends BaseTier {
     // and the client carries the last review forward across updates that omit
     // the field. See the clear below.
     let reviewSettled = false;
-    while (pass <= maxReplanPasses) {
+    // Wrapping up: what is done is what the answer is written from. A review
+    // could only ask for more work, and the correction plan it leads to would
+    // be refused.
+    while (pass <= maxReplanPasses && !this.router.isWrappingUp?.()) {
       const reviewResult = await this.reviewT2Outputs(enrichedPrompt, plan, allT2Results);
       if (reviewResult.approved) {
         this.log('T1 Review passed.');
@@ -394,12 +418,20 @@ export class T1Administrator extends BaseTier {
       // did) re-emit sections that already completed.
       const completedSummary = this.summarizeCompletedSections(allT2Results);
       const correctionContext = [systemContext, completedSummary].filter(Boolean).join('\n\n') || undefined;
-      const correctionPlan = await this.decomposeTask(`The previous execution plan failed to fully satisfy the original goal or encountered errors.
+      let correctionPlan: TaskPlan;
+      try {
+        correctionPlan = await this.decomposeTask(`The previous execution plan failed to fully satisfy the original goal or encountered errors.
 Review reason: ${reviewResult.reason}
 
 Original goal: ${enrichedPrompt}
 
 Create a CORRECTION PLAN that contains only the new sections needed to fix the issues. Do not repeat successful sections.`, correctionContext);
+      } catch (err) {
+        // The budget ran down to the answer's reserve during the review: write
+        // the answer from what is done rather than lose it.
+        if (isBudgetStop(err)) break;
+        throw err;
+      }
 
       const correctionResults = await this.dispatchT2Managers(correctionPlan.sections);
       allT2Results = [...allT2Results, ...correctionResults];
@@ -603,6 +635,10 @@ In 3-5 terse bullets, flag the most important RISKS, GAPS, or over-/under-decomp
     // scaffolds a project (see plan-spec.ts).
     const available = new Set(this.toolRegistry.getToolDefinitions().map((t) => t.name));
     const spec = planSpecShape(canProduceFiles([...available]), canProduceNonDiskDeliverables([...available]));
+    // What the run's cost cap has left for work, and how many sections it pays for.
+    const workUsd = this.router.runBudget?.().workRemainingUsd;
+    const maxSections = workUsd == null ? null
+      : sectionsWithin(workUsd, this.router.getModelForTier?.('T2'), this.router.getModelForTier?.('T3'));
     const decompositionPrompt = `Analyze this task and create an execution plan.${spec.preamble ? `\n\n${spec.preamble}` : ''}${contextSection}${worldStateContext}
 
     Task: ${prompt}
@@ -649,7 +685,7 @@ Leave dependsOn empty for sections that can run immediately in parallel.
 SPEC RULES — each subtask is a self-contained spec slice (workers execute from their slice ALONE):
 ${quotedFieldRules(spec)}
 - "contextBrief": 1-3 short sentences with the ONLY background the worker needs. It sees nothing else about the task, so make the brief self-sufficient — but never pad it.
-- RIGHT-SIZE the plan: use the FEWEST sections and workers that fully cover the task. One section with 1-2 subtasks is the CORRECT plan for a small task; padding a plan with filler sections wastes the user's money.`;
+- RIGHT-SIZE the plan: use the FEWEST sections and workers that fully cover the task. One section with 1-2 subtasks is the CORRECT plan for a small task; padding a plan with filler sections wastes the user's money.${maxSections != null ? budgetRule(maxSections) : ''}`;
 
     const messages: ConversationMessage[] = [{ role: 'user', content: decompositionPrompt }];
     const result = await this.generateTracked('T1', {
@@ -662,7 +698,7 @@ ${quotedFieldRules(spec)}
       const parsed = parseFirstJsonObject<TaskPlan>(result.content);
       if (!parsed) throw new Error('No JSON in T1 response');
       this.validatePlan(parsed);
-      return parsed;
+      return workUsd != null && maxSections != null ? this.fitPlanToBudget(parsed, workUsd, maxSections) : parsed;
     } catch {
       // Fallback: single section, single T3
       return {
@@ -688,6 +724,31 @@ ${quotedFieldRules(spec)}
         }],
       };
     }
+  }
+
+  /**
+   * Hold a plan to what the budget pays for. The planner is told the limit;
+   * a plan over it anyway keeps its first sections, in the order the planner
+   * wrote them, each with the sections it depends on, rather than starting
+   * work it cannot finish — and then each section keeps the workers its share
+   * of the budget pays for, on the same terms.
+   */
+  private fitPlanToBudget(plan: TaskPlan, workUsd: number, maxSections: number): TaskPlan {
+    const kept = keepFirst(plan.sections, maxSections, (sec) => sec.sectionId);
+    let cut = plan.sections.length - kept.length;
+    if (cut > 0) {
+      this.log(`Budget: plan has ${plan.sections.length} sections, keeping ${kept.length} with the sections they depend on.`);
+    }
+    const maxWorkers = workersWithin(workUsd / kept.length, this.router.getModelForTier?.('T2'), this.router.getModelForTier?.('T3'));
+    const sections = kept.map((sec) => {
+      if (!sec.t3Subtasks || sec.t3Subtasks.length <= maxWorkers) return sec;
+      const workers = keepFirst(sec.t3Subtasks, maxWorkers, (t) => t.subtaskId);
+      this.log(`Budget: "${sec.sectionTitle}" has ${sec.t3Subtasks.length} workers, keeping ${workers.length} with the work they depend on.`);
+      cut += sec.t3Subtasks.length - workers.length;
+      return { ...sec, t3Subtasks: workers };
+    });
+    if (cut > 0) this.router.noteWorkNotStarted?.(cut);
+    return { ...plan, sections };
   }
 
   private validatePlan(plan: TaskPlan): void {
@@ -733,6 +794,11 @@ ${quotedFieldRules(spec)}
   }
 
   private async dispatchT2Managers(sections: T1ToT2Assignment[]): Promise<T2Result[]> {
+    // Each section plans its workers within an equal share of what is left.
+    const workUsd = this.router.runBudget?.().workRemainingUsd;
+    if (workUsd != null && sections.length) {
+      for (const section of sections) section.budgetUsd = workUsd / sections.length;
+    }
     // Wire peer sync IDs
     for (const section of sections) {
       section.peerT2Ids = sections
@@ -954,6 +1020,8 @@ ${quotedFieldRules(spec)}
 
           this.throwIfCancelled();
 
+          if (this.router.isWrappingUp?.()) return this.notStartedForBudget(section);
+
           try {
             const result = await manager.execute(section, taskId, this.signal);
             manager.shareCompletedOutput(section.sectionId, result.sectionSummary);
@@ -1090,6 +1158,13 @@ ${quotedFieldRules(spec)}
   ): Promise<string> {
     const completedSections = t2Results.filter(producedOutput);
 
+    // Nothing finished because the budget ran down to the answer's reserve:
+    // spend that reserve answering the request directly.
+    if (!completedSections.length && this.router.isWrappingUp?.()) {
+      const direct = await this.answerDirectly(originalPrompt);
+      if (direct) return direct;
+    }
+
     if (!completedSections.length) {
       // Aggregate T3 issues across all FAILED sections to surface the root
       // cause. Critical errors (rate-limit / auth / forbidden, marked with
@@ -1138,17 +1213,74 @@ Instructions:
 - Do NOT expose JSON or tier internals`;
 
     const messages: ConversationMessage[] = [{ role: 'user', content: compilePrompt }];
-    const result = await this.generateTracked('T1', {
-      messages,
-      // Streams as the answer on a Complex run — the last place a failed
-      // section can be quietly rewritten as a finished one.
-      systemPrompt: this.systemPromptOverride + 'You are a final output compiler. Summarize and format the task results clearly.\n' + REPORTING_INTEGRITY_RULE,
-      maxTokens: 8000
-    }, (chunk) => {
-      this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: this.isPresenter });
-    });
+    try {
+      const result = await this.generateTracked('T1', {
+        messages,
+        // Streams as the answer on a Complex run — the last place a failed
+        // section can be quietly rewritten as a finished one.
+        systemPrompt: this.systemPromptOverride + 'You are a final output compiler. Summarize and format the task results clearly.\n' + REPORTING_INTEGRITY_RULE,
+        maxTokens: 8000,
+        // The answer: it may use the budget kept back for it.
+        budgetClass: 'final',
+      }, (chunk) => {
+        this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: this.isPresenter });
+      });
+      return result.content;
+    } catch (err) {
+      if (!isBudgetStop(err)) throw err;
+      // No budget left even to write it up: return the finished work as it is.
+      return assembleFinishedWork(
+        completedSections.map((r) => ({ title: r.sectionTitle, text: r.sectionSummary || sectionOutputs(r) })),
+        t2Results.filter((r) => !producedOutput(r)).map((r) => r.sectionTitle),
+        `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 
-    return result.content;
+  /** One direct answer from the budget kept back for it; null if even that cannot be paid for. */
+  private async answerDirectly(request: string): Promise<string | null> {
+    try {
+      const result = await this.generateTracked('T1', {
+        messages: [{ role: 'user', content: directAnswerPrompt(request) }],
+        systemPrompt: this.systemPromptOverride + REPORTING_INTEGRITY_RULE,
+        maxTokens: 4000,
+        budgetClass: 'final',
+      }, (chunk) => {
+        this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: this.isPresenter });
+      });
+      return result.content;
+    } catch (err) {
+      if (isBudgetStop(err)) return null;
+      throw err;
+    }
+  }
+
+  /**
+   * A section not started because the run is wrapping up. BLOCKED, like a
+   * section held back by a failed dependency: never attempted, nothing spent,
+   * and nothing about whether it would have worked.
+   */
+  private notStartedForBudget(section: T1ToT2Assignment): T2Result {
+    const reason = 'Not started: the budget left was kept for writing the answer from the finished sections';
+    this.log(`⤫ Skipped "${section.sectionTitle}" — ${reason}`);
+    this.router.noteWorkNotStarted?.();
+    this.emit('tier:status', {
+      tierId: section.sectionId,
+      nodeId: section.sectionId,
+      dependsOn: [...(section.dependsOn ?? [])],
+      role: 'T2',
+      label: section.sectionTitle,
+      status: 'BLOCKED',
+      output: reason,
+    });
+    return {
+      sectionId: section.sectionId,
+      sectionTitle: section.sectionTitle,
+      status: 'BLOCKED',
+      t3Results: [],
+      sectionSummary: '',
+      issues: [`${reason}.`],
+    };
   }
 
   /**
