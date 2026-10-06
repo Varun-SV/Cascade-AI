@@ -57,6 +57,11 @@ export interface PageView {
    * the action is shown.
    */
   labels: Map<string, string>;
+  /**
+   * Where each control listed on screen is, for drawing its ref (`marked`).
+   * Headings are listed to orient the model but not boxed: nothing to press.
+   */
+  marks: Array<{ ref: string; x: number; y: number; w: number; h: number }>;
 }
 
 /** Controls listed on screen, at most. */
@@ -232,6 +237,8 @@ function readBox(v: string, dx: number, dy: number): { x: number; y: number; w: 
 
 interface Entry {
   ref: string;
+  box?: SnapshotNode['box'];
+  heading: boolean;
   /** `button "Pay"` — the role and name, without the ref or states. */
   label: string;
   line: string;
@@ -267,7 +274,7 @@ export function describePage(input: {
     const listed = Boolean(ref) && (interactive || ((heading || pointer) && !insideClickable));
     if (listed && ref) {
       const where = placement(node.box, input.viewport);
-      if (where) entries.push({ ref, ...describe(node, ref), where });
+      if (where) entries.push({ ref, ...describe(node, ref), where, heading: node.role === 'heading', ...(node.box ? { box: node.box } : {}) });
     }
     for (const child of node.children) visit(child, insideClickable || interactive || pointer);
   };
@@ -301,6 +308,7 @@ export function describePage(input: {
   return {
     text: lines.join('\n'),
     labels: new Map([...shownView, ...shownBelow].map((e) => [e.ref, e.label])),
+    marks: shownView.flatMap((e) => (e.box && !e.heading ? [{ ref: e.ref, x: e.box.x, y: e.box.y, w: e.box.w, h: e.box.h }] : [])),
   };
 }
 

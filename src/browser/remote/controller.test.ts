@@ -4884,6 +4884,39 @@ describe('page views and refs', () => {
       expect(out.view!.text).toContain('No screenshot: the picture could not be taken.');
     });
 
+    it('draws the refs on a copy when marks are asked for', async () => {
+      const send = cdp.send;
+      cdp.send = async (method: string, params?: Record<string, unknown>) => {
+        if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'MAIN' } } };
+        if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 };
+        if (method === 'Runtime.evaluate') {
+          // What is drawn: the controls on screen, never a heading.
+          const expression = String(params?.['expression']);
+          page.calls.push(`marks:${['e5', 'e9', 'e11'].filter((r) => expression.includes(`"ref":"${r}"`)).join(',')}`);
+          return { result: { value: 'TUFSS0VE' } };
+        }
+        return send(method, params);
+      };
+      try {
+        const out = await controller().controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
+        expect(out.image).toMatchObject({ data: 'TUFSS0VE', width: 1280, height: 800 });
+        expect(page.calls).toContain('marks:e5,e9,e11');
+      } finally {
+        cdp.send = send;
+      }
+    });
+
+    it('sends the clean picture when the marks cannot be drawn', async () => {
+      // The fake CDP answers none of the drawing calls.
+      const out = await controller().controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
+      expect(out.image?.data).toBe('AQID');
+    });
+
+    it('draws nothing unless marks are asked for', async () => {
+      await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(cdp.sent).not.toContain('Page.createIsolatedWorld');
+    });
+
     it('cannot price a picture whose size it does not know, so takes none', async () => {
       extra['evaluate'] = async (expression: string) => (expression.includes('one-time-code') ? false : { width: 'wide' });
       const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));

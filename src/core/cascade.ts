@@ -1160,7 +1160,8 @@ export class Cascade extends EventEmitter {
     const pageView = features.pageView === true && vision !== 'off';
     // Screenshots are opt-in until the side-by-side test says they pay.
     const screenshots = pageView && features.screenshots === true && (vision === 'image' || vision === 'marked');
-    this.toolRegistry.register(new BrowserControlTool(controller, release, { pageView, screenshots }));
+    const marked = screenshots && vision === 'marked';
+    this.toolRegistry.register(new BrowserControlTool(controller, release, { pageView, screenshots, marked }));
   }
 
   /**

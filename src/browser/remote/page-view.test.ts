@@ -201,6 +201,15 @@ describe('describePage', () => {
     expect(v.text).toContain("Page: Shop (e1) button 'Pay' — https://x.example/ (Page view 9)");
   });
 
+  it('marks where each listed control is on screen, but not headings, which are not pressed', () => {
+    const v = view(BOOKING)!;
+    expect(v.marks.find((m) => m.ref === 'e5')).toEqual({ ref: 'e5', x: 84, y: 0, w: 32, h: 25 });
+    expect(v.marks.find((m) => m.ref === 'f1e2')).toMatchObject({ x: 8, y: 201 });
+    expect(v.marks.some((m) => m.ref === 'e7')).toBe(false);
+    // Only what is on screen: the picture shows nothing further down.
+    expect(v.marks.some((m) => m.ref === 'e24')).toBe(false);
+  });
+
   it('offers exactly the refs it lists', () => {
     const v = view(BOOKING)!;
     expect([...v.labels.keys()]).toEqual(['e3', 'e4', 'e5', 'e7', 'e8', 'e9', 'e10', 'e11', 'e13', 'e14', 'e15', 'e16', 'e18', 'f1e2', 'e23', 'e24']);

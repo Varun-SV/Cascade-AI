@@ -910,3 +910,47 @@ describe('a browser screenshot reaches the next request, once', () => {
     expect(sent.some(hasImage)).toBe(false);
   });
 });
+
+describe('a person approving a browser action sees what it acts on', () => {
+  async function approve(shown: { input: Record<string, unknown>; alwaysAsk: boolean }) {
+    let call = 0;
+    const router = makeRouter(vi.fn(async () => {
+      call += 1;
+      return call === 1
+        ? makeResult('', [{ id: 'c1', name: 'browser_control', input: { action: 'click', ref: 'e14' } }])
+        : makeResult('Booked.');
+    }) as unknown as CascadeRouter['generate']);
+    const execute = vi.fn().mockResolvedValue('Clicked');
+    const forApproval = vi.fn(() => shown);
+    const registry = makeToolRegistry({
+      requiresApproval: () => true,
+      isDangerous: () => true,
+      execute,
+      getTool: (name: string) => (name === 'browser_control' ? { forApproval } : undefined),
+    } as unknown as Partial<ToolRegistry>);
+    const escalator = new PermissionEscalator();
+    const requestPermission = vi.spyOn(escalator, 'requestPermission').mockResolvedValue({
+      requestId: 'r', approved: true, decidedBy: 'USER', always: false,
+    } satisfies PermissionDecision);
+    const worker = new T3Worker(router, registry, 't2-parent');
+    worker.setPermissionEscalator(escalator);
+    await worker.execute(makeAssignment({ subtaskTitle: 'Book a table' }), 'task-approve');
+    return { request: requestPermission.mock.calls[0]![0], forApproval, execute };
+  }
+
+  it('shows the element by name, and runs the call as the model wrote it', async () => {
+    const { request, forApproval, execute } = await approve({
+      input: { action: 'click', ref: 'e14', target: 'button "Reserve 7:30 pm"', site: 'dine.example' },
+      alwaysAsk: false,
+    });
+    expect(forApproval).toHaveBeenCalledWith({ action: 'click', ref: 'e14' }, 'task-approve');
+    expect(request.input).toEqual({ action: 'click', ref: 'e14', target: 'button "Reserve 7:30 pm"', site: 'dine.example' });
+    expect(request.forceReprompt).toBeUndefined();
+    expect(execute.mock.calls[0]![1]).toEqual({ action: 'click', ref: 'e14' });
+  });
+
+  it('puts an irreversible one to the person even after an "always"', async () => {
+    const { request } = await approve({ input: { action: 'click', ref: 'e14', target: 'button "Pay $42.00"' }, alwaysAsk: true });
+    expect(request.forceReprompt).toBe(true);
+  });
+});

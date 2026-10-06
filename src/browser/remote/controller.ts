@@ -33,6 +33,7 @@ import type {
 import type { RemoteBrowserProvider, RemoteBrowserSession } from './provider.js';
 import { BrowserLease } from '../lease.js';
 import { describePage, type PageView, type Viewport } from './page-view.js';
+import { drawMarks } from './marks.js';
 
 /** Playwright's shapes, named locally so the optional dep stays optional. */
 type Page = {
@@ -2941,6 +2942,7 @@ export class RemoteBrowserController {
     stoppable: <T>(work: Promise<T>) => Promise<T>,
     seen: { view: PageView; viewport: Viewport | undefined },
     always: boolean,
+    marked: boolean,
   ): Promise<{ image: NonNullable<BrowserActionOutcome['image']> } | { withheld: string } | null> {
     const page = held.page;
     // The view without its number: the same page twice reads the same.
@@ -2962,9 +2964,13 @@ export class RemoteBrowserController {
       const bytes = await stoppable(page.screenshot({
         type: 'jpeg', quality: SCREENSHOT_QUALITY, scale: 'css', caret: 'initial', timeout: SCREENSHOT_TIMEOUT_MS,
       }));
-      const data = Buffer.from(bytes).toString('base64');
-      if (!data || data.length > SCREENSHOT_MAX_CHARS) return { withheld: 'No screenshot: the picture could not be taken.' };
+      const clean = Buffer.from(bytes).toString('base64');
+      if (!clean || clean.length > SCREENSHOT_MAX_CHARS) return { withheld: 'No screenshot: the picture could not be taken.' };
       held.shotOf = looks;
+      const size = { width: Math.round(seen.viewport.width), height: Math.round(seen.viewport.height) };
+      // The marks go on a copy; if they cannot be drawn, the clean picture is
+      // still worth sending.
+      const data = marked ? (await this.marked(page, clean, size, seen.view)) ?? clean : clean;
       return {
         image: {
           data,
@@ -2975,6 +2981,25 @@ export class RemoteBrowserController {
       };
     } catch {
       return { withheld: 'No screenshot: the picture could not be taken.' };
+    }
+  }
+
+  /** The screenshot with the view's refs drawn on it, or null. See `marks.ts`. */
+  private async marked(
+    page: Page,
+    data: string,
+    size: { width: number; height: number },
+    view: PageView,
+  ): Promise<string | null> {
+    let cdp: CDPSession | undefined;
+    try {
+      cdp = await page.context().newCDPSession(page);
+      const drawn = await drawMarks(cdp, { data, ...size }, view.marks);
+      return drawn && drawn.length <= SCREENSHOT_MAX_CHARS ? drawn : null;
+    } catch {
+      return null;
+    } finally {
+      await cdp?.detach().catch(() => {});
     }
   }
 
@@ -3017,7 +3042,7 @@ export class RemoteBrowserController {
     const view = viewOutcome(seen.view);
     if (!action.screenshot) return { view };
     // Asked for by name, a picture is taken even of an unchanged page.
-    const shot = await this.screenshot(held, stoppable, seen, action.kind === 'observe');
+    const shot = await this.screenshot(held, stoppable, seen, action.kind === 'observe', action.marked === true);
     if (!shot) return { view };
     if ('withheld' in shot) return { view: { ...view, text: `${view.text}\n\n${shot.withheld}` } };
     return { view, image: shot.image };

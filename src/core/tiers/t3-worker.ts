@@ -1105,6 +1105,11 @@ export class T3Worker extends BaseTier {
     const needsApproval = this.toolRegistry.requiresApproval(tc.name);
 
     if (needsApproval) {
+      // What the person approving sees, and whether an earlier "always" may
+      // answer for them. A tool that offers neither is shown as called.
+      const shown = (this.toolRegistry.getTool?.(tc.name) as {
+        forApproval?: (input: Record<string, unknown>, sessionId: string) => { input: Record<string, unknown>; alwaysAsk: boolean };
+      } | undefined)?.forApproval?.(tc.input, this.taskId);
       // ── Hierarchical permission escalation: T3 → T2 → T1 → User ──
       if (this.permissionEscalator) {
         const req: PermissionRequest = {
@@ -1112,16 +1117,17 @@ export class T3Worker extends BaseTier {
           requestedBy: this.id,
           parentT2Id: this.parentId ?? 'root',
           toolName: tc.name,
-          input: tc.input,
+          input: shown?.input ?? tc.input,
           isDangerous: this.toolRegistry.isDangerous(tc.name),
           subtaskContext: this.assignment?.subtaskTitle ?? 'Unknown subtask',
           sectionContext: this.assignment?.subtaskTitle ?? 'Unknown section',
+          ...(shown?.alwaysAsk ? { forceReprompt: true } : {}),
         };
         const decision = await this.permissionEscalator.requestPermission(req);
         if (!decision.approved) return `Tool ${tc.name} was denied (decided by ${decision.decidedBy}).`;
       } else {
         // ── Fallback: legacy direct approval event (used when escalator not wired) ──
-        if (this.sessionApprovals.has(tc.name)) {
+        if (this.sessionApprovals.has(tc.name) && !shown?.alwaysAsk) {
           const wasApproved = this.sessionApprovals.get(tc.name)!;
           if (!wasApproved) return `Tool ${tc.name} was denied by user.`;
         } else {
@@ -1139,7 +1145,7 @@ export class T3Worker extends BaseTier {
               id: `${this.id}-${tc.id}`,
               tierId: this.id,
               toolName: tc.name,
-              input: tc.input,
+              input: shown?.input ?? tc.input,
               description: `T3 (${this.assignment?.subtaskTitle}) wants to run "${tc.name}"`,
               isDangerous: this.toolRegistry.isDangerous(tc.name),
             });
@@ -1148,7 +1154,7 @@ export class T3Worker extends BaseTier {
               resolve(d);
             });
           });
-          if (legacyDecision.always) this.sessionApprovals.set(tc.name, legacyDecision.approved);
+          if (legacyDecision.always && !shown?.alwaysAsk) this.sessionApprovals.set(tc.name, legacyDecision.approved);
           if (!legacyDecision.approved) return `Tool ${tc.name} was denied by user.`;
         }
       }

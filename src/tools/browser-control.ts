@@ -68,6 +68,8 @@ export interface BrowserAction {
    * worker is using can see images.
    */
   screenshot?: true;
+  /** With `screenshot`: draw each listed ref on it, on a copy, outside the page. */
+  marked?: true;
 }
 
 export interface BrowserActionOutcome {
@@ -100,12 +102,24 @@ export interface BrowserControlFeatures {
   pageView?: boolean;
   /** The controller can take a screenshot to go with a page view. */
   screenshots?: boolean;
+  /** Draw each ref on the screenshot (`browserVision: marked`). */
+  marked?: boolean;
 }
 
 const BASIC_ACTIONS = ['navigate', 'click', 'fill', 'press', 'wait_for', 'extract_text'] as const;
 const VIEW_ACTIONS = [...BASIC_ACTIONS, 'observe', 'scroll', 'select_option', 'hover'] as const;
 /** Actions that come back with a fresh page view when views are on. */
 const VIEWED_AFTER = new Set<BrowserAction['kind']>(['navigate', 'click', 'press', 'scroll', 'hover', 'observe']);
+/**
+ * Words on a control that mean the click may not be taken back. Acting on one
+ * asks the person every time, however the run's earlier approvals were
+ * answered.
+ */
+const IRREVERSIBLE = /\b(?:pay|buy|purchase|order|checkout|delete|remove|send|transfer|publish)\b/i;
+/** Actions that can set off what a control is labelled to do. */
+const TRIGGERS = new Set(['click', 'fill', 'press']);
+/** Runs whose latest page view is remembered for approval prompts. */
+const REMEMBERED_RUNS = 64;
 /** What a ref looks like: Playwright's `e14`, or `f1e2` inside a frame. */
 const REF_PATTERN = /^[a-z]{0,3}\d{0,4}e\d{1,6}$/;
 
@@ -180,6 +194,14 @@ export class BrowserControlTool extends BaseTool {
   private pageView: boolean;
   /** Whether a page view may come with a screenshot. Fixed at registration. */
   private screenshots: boolean;
+  /** Whether that screenshot has the refs drawn on it. Fixed at registration. */
+  private marked: boolean;
+  /**
+   * Per run: what its latest page view called each ref, and the page it was
+   * on. The approval prompt names the element from it, so a person approves
+   * `button "Pay $42.00"` on `shop.example` rather than `e14`.
+   */
+  private seen = new Map<string, { labels: Record<string, string>; url?: string }>();
 
   constructor(controller: BrowserController, release?: BrowserActorRelease, features: BrowserControlFeatures = {}) {
     super();
@@ -187,6 +209,7 @@ export class BrowserControlTool extends BaseTool {
     this.release = release;
     this.pageView = features.pageView === true;
     this.screenshots = this.pageView && features.screenshots === true;
+    this.marked = this.screenshots && features.marked === true;
     // The model is offered only what this host can do. A host without page
     // views gets exactly the six-action tool it always had, so nothing there
     // can name an action the host would have to refuse.
@@ -220,6 +243,40 @@ export class BrowserControlTool extends BaseTool {
    */
   revoke(): void {
     this.revoked = true;
+  }
+
+  /**
+   * The call as a person approving it should see it, and whether it must be
+   * put to them even when this run's earlier answers said "always".
+   *
+   * The input gains `target` — what the latest page view called the ref — and
+   * `site`, the page it is on (or, for navigate, the one it opens). It is for
+   * showing only: the call runs with the input the model wrote.
+   */
+  forApproval(input: Record<string, unknown>, sessionId: string): { input: Record<string, unknown>; alwaysAsk: boolean } {
+    const seen = this.seen.get(sessionId);
+    const ref = typeof input['ref'] === 'string' ? input['ref'] : undefined;
+    const target = ref ? seen?.labels[ref] : undefined;
+    const site = hostOf(input['action'] === 'navigate' ? input['url'] : seen?.url);
+    const named = target ?? (typeof input['selector'] === 'string' ? input['selector'] : '');
+    return {
+      input: { ...input, ...(target ? { target } : {}), ...(site ? { site } : {}) },
+      alwaysAsk: TRIGGERS.has(String(input['action'])) && IRREVERSIBLE.test(named),
+    };
+  }
+
+  /** Keep what this run's latest page view said, for `forApproval`. */
+  private remember(sessionId: string, outcome: BrowserActionOutcome): void {
+    if (!outcome.view && !outcome.url) return;
+    const prior = this.seen.get(sessionId);
+    this.seen.delete(sessionId);
+    this.seen.set(sessionId, {
+      labels: outcome.view?.labels ?? prior?.labels ?? {},
+      ...(outcome.url ?? prior?.url ? { url: outcome.url ?? prior?.url } : {}),
+    });
+    // Bounded: a long-lived host serves many runs, and each one's view is
+    // only worth keeping while it is current.
+    while (this.seen.size > REMEMBERED_RUNS) this.seen.delete(this.seen.keys().next().value!);
   }
 
   // Acting on a session the user is signed into is the highest-consequence
@@ -268,6 +325,7 @@ export class BrowserControlTool extends BaseTool {
       // Only when the worker can show one: a model that cannot see a picture
       // is not made to wait while one is taken.
       ...(this.screenshots && VIEWED_AFTER.has(kind) && options?.attachImage ? { screenshot: true as const } : {}),
+      ...(this.marked && VIEWED_AFTER.has(kind) && options?.attachImage ? { marked: true as const } : {}),
     };
 
     let outcome: BrowserActionOutcome;
@@ -283,6 +341,8 @@ export class BrowserControlTool extends BaseTool {
     } catch (err) {
       return `Error: the browser could not perform "${kind}" — ${err instanceof Error ? err.message : String(err)}`;
     }
+
+    this.remember(options?.sessionId ?? '', outcome);
 
     // A page view already opens with the page's title and address.
     const where = outcome.view
@@ -360,6 +420,17 @@ const VIEW_SCHEMA = {
   },
   required: ['action'],
 };
+
+/** The host of an http(s) address, or undefined. */
+function hostOf(url: unknown): string | undefined {
+  if (typeof url !== 'string') return undefined;
+  try {
+    const u = new URL(url);
+    return u.protocol === 'http:' || u.protocol === 'https:' ? u.host : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * The rules page views add: a well-formed ref, and never a ref AND a selector

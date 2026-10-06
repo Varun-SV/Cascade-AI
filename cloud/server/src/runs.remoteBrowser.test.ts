@@ -88,6 +88,23 @@ describe('the operator configures a browser for their deployment', () => {
     });
   });
 
+  it('carries what the browser shows the model, and leaves the SDK default when unset', async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-rb-vision-'));
+    const shown = loadEnv({ ...baseEnv(dir), REMOTE_BROWSER_PROVIDER: 'steel', REMOTE_BROWSER_VISION: 'image' });
+    const config = buildCloudConfig([], shown.MAX_COST_PER_RUN_USD, { ...remoteBrowserControls(shown), browserMode: true });
+    expect(config.tools?.browserVision).toBe('image');
+
+    const unset = loadEnv({ ...baseEnv(dir), REMOTE_BROWSER_PROVIDER: 'steel' });
+    const plain = buildCloudConfig([], unset.MAX_COST_PER_RUN_USD, { ...remoteBrowserControls(unset), browserMode: true });
+    expect(plain.tools?.browserVision).toBeUndefined();
+
+    // Without the browser chip there is no browser, so nothing to show.
+    const off = buildCloudConfig([], shown.MAX_COST_PER_RUN_USD, { ...remoteBrowserControls(shown), browserMode: false });
+    expect(off.tools?.browserVision).toBeUndefined();
+
+    expect(() => loadEnv({ ...baseEnv(dir), REMOTE_BROWSER_VISION: 'everything' })).toThrow();
+  });
+
   it('leaves the config untouched when the operator configured nothing', async () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-rb-off-'));
     const env = loadEnv(baseEnv(dir));

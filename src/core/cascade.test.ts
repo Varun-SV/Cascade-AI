@@ -200,6 +200,20 @@ describe('the hosted browser gate is not the desktop one', () => {
       expect(await asked(cannot)).toBe(false);
     });
 
+    it('draw the refs on the screenshot only in marked mode', async () => {
+      const seen: Array<{ marked?: boolean }> = [];
+      const recording = async (action: { marked?: boolean }) => { seen.push(action); return { ok: true, detail: 'ok' }; };
+      for (const browserVision of ['image', 'marked']) {
+        const c = withTools({ ...remote, browserVision });
+        c.setRemoteBrowserController(recording, undefined, { pageView: true, screenshots: true });
+        const tool = c.getToolRegistry().getTool('browser_control') as unknown as {
+          execute(i: Record<string, unknown>, o: unknown): Promise<string>;
+        };
+        await tool.execute({ action: 'observe' }, { sessionId: 's', tierId: 't', attachImage: () => {} });
+      }
+      expect(seen.map((a) => a.marked === true)).toEqual([false, true]);
+    });
+
     it('say in /why how many screenshots the run sent, once, not once a step', () => {
       const c = withTools(remote);
       const router = (c as unknown as { router: { getRunScreenshots: () => { sent: number; leftOut: number } } }).router;

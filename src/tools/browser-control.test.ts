@@ -342,3 +342,72 @@ describe('BrowserControlTool — screenshots', () => {
     expect(out).toContain('A screenshot of the page goes with this step.');
   });
 });
+
+describe('BrowserControlTool — marks', () => {
+  it('asks for marks only in marked mode, and only with a screenshot', async () => {
+    const rec = recorder();
+    const marked = new BrowserControlTool(rec.controller, undefined, { pageView: true, screenshots: true, marked: true });
+    await marked.execute({ action: 'observe' }, { attachImage: vi.fn() } as never);
+    await marked.execute({ action: 'observe' }, {} as never);
+    const plain = new BrowserControlTool(rec.controller, undefined, { pageView: true, screenshots: true });
+    await plain.execute({ action: 'observe' }, { attachImage: vi.fn() } as never);
+    const noShots = new BrowserControlTool(rec.controller, undefined, { pageView: true, marked: true });
+    await noShots.execute({ action: 'observe' }, { attachImage: vi.fn() } as never);
+    expect(rec.calls.map((c) => c.marked === true)).toEqual([true, false, false, false]);
+  });
+});
+
+describe('BrowserControlTool — what a person approving sees', () => {
+  const VIEW = {
+    text: '[Page view 1]',
+    labels: { e14: 'button "Pay $42.00"', e9: 'textbox "Email"', e3: 'link "Order history"', e5: 'button "Sender settings"' },
+  };
+  async function seenTool() {
+    const rec = recorder({ detail: 'Looked at the page.', url: 'https://shop.example/checkout', view: VIEW });
+    const tool = new BrowserControlTool(rec.controller, undefined, { pageView: true });
+    await tool.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
+    return tool;
+  }
+
+  it('names the element and the site, not a ref', async () => {
+    const tool = await seenTool();
+    expect(tool.forApproval({ action: 'fill', ref: 'e9', value: 'a@b.c' }, 'run-1')).toEqual({
+      input: { action: 'fill', ref: 'e9', value: 'a@b.c', target: 'textbox "Email"', site: 'shop.example' },
+      alwaysAsk: false,
+    });
+  });
+
+  it('names the site a navigate opens', async () => {
+    const tool = await seenTool();
+    expect(tool.forApproval({ action: 'navigate', url: 'https://bank.example/login' }, 'run-1').input['site']).toBe('bank.example');
+  });
+
+  it('asks every time before something that may not be taken back', async () => {
+    const tool = await seenTool();
+    expect(tool.forApproval({ action: 'click', ref: 'e14' }, 'run-1')).toMatchObject({ alwaysAsk: true, input: { target: 'button "Pay $42.00"' } });
+    expect(tool.forApproval({ action: 'press', ref: 'e3', key: 'Enter' }, 'run-1').alwaysAsk).toBe(true);
+    // No ref, no view: the selector is all there is to go on.
+    expect(tool.forApproval({ action: 'click', selector: '#delete-account' }, 'run-1').alwaysAsk).toBe(true);
+  });
+
+  it('does not ask again for what is harmless, or merely sounds alike', async () => {
+    const tool = await seenTool();
+    expect(tool.forApproval({ action: 'click', ref: 'e9' }, 'run-1').alwaysAsk).toBe(false);
+    expect(tool.forApproval({ action: 'click', ref: 'e5' }, 'run-1').alwaysAsk).toBe(false);
+    // Looking is not doing.
+    expect(tool.forApproval({ action: 'hover', ref: 'e14' }, 'run-1').alwaysAsk).toBe(false);
+  });
+
+  it('keeps each run\'s view to itself', async () => {
+    const tool = await seenTool();
+    expect(tool.forApproval({ action: 'click', ref: 'e14' }, 'run-2').input).toEqual({ action: 'click', ref: 'e14' });
+  });
+
+  it('remembers a bounded number of runs', async () => {
+    const rec = recorder({ detail: 'ok', url: 'https://a.example/', view: VIEW });
+    const tool = new BrowserControlTool(rec.controller, undefined, { pageView: true });
+    for (let i = 0; i < 70; i++) await tool.execute({ action: 'observe' }, { sessionId: `run-${i}` } as never);
+    expect(tool.forApproval({ action: 'click', ref: 'e14' }, 'run-0').input).not.toHaveProperty('target');
+    expect(tool.forApproval({ action: 'click', ref: 'e14' }, 'run-69').input).toHaveProperty('target');
+  });
+});

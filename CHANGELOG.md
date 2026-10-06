@@ -43,6 +43,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a deployment driving its own browser over CDP opens none, so it has no
   daily limit.
 
+- **The browser agent reads a page as a list of its controls, and can see
+  it.** On the web (CDP or Steel), `browser_control` now describes each page
+  as a page view: the controls on screen and further down, each under a ref
+  like `e14`, from Playwright's own accessibility snapshot. The model clicks,
+  types, chooses and hovers by ref instead of guessing CSS selectors, which
+  still work. New actions: `observe`, `scroll`, `select_option` and `hover`.
+  A page view never shows what is typed into a field. Only the two newest
+  views are sent whole; older ones fold to a line.
+  `tools.browserVision` (`off`, `list` by default, `image`, `marked`) adds a
+  screenshot for models that can see images:
+  - It's taken clean, at 1280×800 on Steel, and sent with one step only, so
+    it isn't kept in the history.
+  - None is taken while a password, card or one-time-code field is on screen,
+    or right after you took control of the browser or hid it.
+  - A model that can't see images, or would be charged far more than usual
+    for one, gets the page view alone.
+  - `marked` draws each ref on a copy of the screenshot, as an experiment.
+  - /why counts the screenshots a run sent.
+  - Hosted deployments set it with `REMOTE_BROWSER_VISION`.
+  Approval prompts now name the element and the site. A click on something
+  labelled pay, buy, order, delete, remove, send, transfer or publish asks
+  every time, even after "always allow". `scripts/browser-vision-eval/` has
+  ten test tasks and a runner to compare the settings.
+
 ### Changed
 - **A run with a budget plans within it, and always answers.** A per-run
   cap used to end the run the moment it was crossed, answer or not: half a
@@ -86,6 +110,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/design/calm-direction.md`.
 
 ### Fixed
+- **A failed browser action no longer quotes the page back.** Playwright adds
+  a log to its errors that prints the element it found, attributes and all;
+  a failed choice on a password field printed the password to the model. The
+  reason is kept and the log dropped.
 - **Maths in an answer is typeset, whichever way the model wrote it.** GPT
   and Gemini write `\(…\)` and `\[…\]`, which Markdown reads as escaped
   brackets, so an equation reached the web chat as
