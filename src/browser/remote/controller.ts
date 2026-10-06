@@ -32,6 +32,7 @@ import type {
 } from '../../tools/browser-control.js';
 import type { RemoteBrowserProvider, RemoteBrowserSession } from './provider.js';
 import { BrowserLease } from '../lease.js';
+import { describePage, type PageView, type Viewport } from './page-view.js';
 
 /** Playwright's shapes, named locally so the optional dep stays optional. */
 type Page = {
@@ -44,6 +45,15 @@ type Page = {
   keyboard: { press(key: string): Promise<void> };
   waitForSelector(selector: string, opts?: { timeout?: number }): Promise<unknown>;
   innerText(selector: string, opts?: { timeout?: number }): Promise<string>;
+  /**
+   * The page view's source — see `page-view.ts`. Optional because Playwright
+   * is: an install without the AI snapshot falls back to text and selectors.
+   */
+  ariaSnapshot?(opts: { mode: 'ai'; boxes: boolean; timeout?: number }): Promise<string>;
+  /** Where refs (`aria-ref=e14`) and the newer actions resolve. */
+  locator?(selector: string): Locator;
+  evaluate?(expression: string): Promise<unknown>;
+  waitForLoadState?(state: 'load', opts?: { timeout?: number }): Promise<void>;
   on(event: string, handler: (...args: never[]) => void): void;
   /** The page's own top-level frame; sub-frames are not it. See `generation`. */
   mainFrame(): unknown;
@@ -51,6 +61,18 @@ type Page = {
   context(): BrowserContext;
   isClosed(): boolean;
   close(): Promise<void>;
+};
+/** One control on the page, as Playwright resolves it at the moment of acting. */
+type Locator = {
+  count(): Promise<number>;
+  click(opts?: { timeout?: number }): Promise<void>;
+  fill(value: string, opts?: { timeout?: number }): Promise<void>;
+  press(key: string, opts?: { timeout?: number }): Promise<void>;
+  hover(opts?: { timeout?: number }): Promise<void>;
+  selectOption(value: string, opts?: { timeout?: number }): Promise<unknown>;
+  scrollIntoViewIfNeeded(opts?: { timeout?: number }): Promise<void>;
+  waitFor(opts?: { state?: 'visible'; timeout?: number }): Promise<void>;
+  innerText(opts?: { timeout?: number }): Promise<string>;
 };
 /**
  * A raw Chrome DevTools Protocol session on one page.
@@ -224,6 +246,18 @@ const SCREENCAST = { format: 'jpeg', quality: 60, maxWidth: 1280, maxHeight: 800
 /** Default ceiling for a single action, matching the tool's own clamp. */
 const ACTION_TIMEOUT_MS = 30_000;
 /**
+ * How long a page view waits for the page to finish loading after an action
+ * that may have changed it. Bounded: a page that never stops loading still
+ * gets described, only less settled.
+ */
+const SETTLE_LOAD_MS = 2_000;
+/** And a beat after that, for script-rendered content to land. */
+const SETTLE_QUIET_MS = 300;
+/** The snapshot's own ceiling. A huge page fails over to text, not a hang. */
+const SNAPSHOT_TIMEOUT_MS = 5_000;
+/** The page's scroll state, read without reaching into page globals twice. */
+const VIEWPORT_EXPRESSION = '({ width: innerWidth, height: innerHeight, scrollY: scrollY, scrollHeight: document.documentElement.scrollHeight })';
+/**
  * How long the agent waits for a restored picture before refusing to act.
  *
  * A started screencast emits its first frame immediately, so this is generous
@@ -299,6 +333,11 @@ export interface RemoteBrowserControllerOptions {
    * its own trouble.
    */
   ready?: Promise<unknown>;
+  /**
+   * The pause after an action before its page view is taken, in ms. Tests set
+   * it to 0; everything else should leave it alone.
+   */
+  settleQuietMs?: number;
 }
 
 /** One run's browser, and the page it is working on. */
@@ -486,6 +525,14 @@ interface RunBrowser {
   ownedContext?: BrowserContext;
   /** Bumped on every main-frame navigation. See the desktop's equivalent. */
   generation: number;
+  /**
+   * The latest page view the model was shown: which refs it may act on, what
+   * each one is called, and the page generation they belong to. A ref is good
+   * only while all three still hold — see `refRefusal`.
+   */
+  view?: { generation: number; labels: Map<string, string> };
+  /** Views shown so far, so each one can say which it is. */
+  views?: number;
   /**
    * Fires when this run's browser must stop, now.
    *
@@ -685,7 +732,17 @@ export class RemoteBrowserController {
     this.onLiveViewAll = options.onLiveView;
     this.onReleaseFailed = options.onReleaseFailed;
     this.ready = options.ready;
+    this.settleQuietMs = options.settleQuietMs ?? SETTLE_QUIET_MS;
   }
+
+  /** See `RemoteBrowserControllerOptions.settleQuietMs`. */
+  private settleQuietMs: number;
+
+  /**
+   * What this controller can do beyond the six original actions. The tool
+   * reads it to decide which actions and parameters to offer the model.
+   */
+  readonly features = { pageView: true } as const;
 
   /**
    * The predecessor's teardown, until it has been waited for once.
@@ -2317,7 +2374,7 @@ export class RemoteBrowserController {
 
       return await this.perform(runId, held, action, recoveringClosedPage ? held.generation : planned);
     } catch (err) {
-      return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+      return { ok: false, detail: actionError(err) };
     } finally {
       if (temporaryCapture) {
         const { held, cdp, watchGen } = temporaryCapture;
@@ -2765,6 +2822,51 @@ export class RemoteBrowserController {
     this.announceControl(runId);
   }
 
+  /**
+   * Describe the run's page as it is now, and remember what was shown.
+   *
+   * Null when the page cannot be described — no AI snapshot in this
+   * Playwright, a snapshot that failed, or one with no refs in it. The caller
+   * then says so rather than presenting an empty list as the page.
+   */
+  private async pageView(
+    held: RunBrowser,
+    stoppable: <T>(work: Promise<T>) => Promise<T>,
+    settle: boolean,
+  ): Promise<PageView | null> {
+    // The CURRENT page: a click may have moved the run to a popup.
+    const page = held.page;
+    if (typeof page.ariaSnapshot !== 'function') return null;
+    try {
+      if (settle) {
+        if (typeof page.waitForLoadState === 'function') {
+          await stoppable(page.waitForLoadState('load', { timeout: SETTLE_LOAD_MS })).catch(() => {});
+        }
+        if (this.settleQuietMs > 0) await new Promise((r) => setTimeout(r, this.settleQuietMs));
+      }
+      // Read before the snapshot, so a navigation landing in between makes the
+      // view stale rather than credits it to the new page.
+      const generation = held.generation;
+      const snapshot = await stoppable(page.ariaSnapshot({ mode: 'ai', boxes: true, timeout: SNAPSHOT_TIMEOUT_MS }));
+      const viewport = typeof page.evaluate === 'function'
+        ? readViewport(await stoppable(page.evaluate(VIEWPORT_EXPRESSION)).catch(() => undefined))
+        : undefined;
+      const view = describePage({
+        snapshot,
+        url: page.url(),
+        title: await page.title().catch(() => ''),
+        viewport,
+        number: (held.views ?? 0) + 1,
+      });
+      if (!view) return null;
+      held.views = (held.views ?? 0) + 1;
+      held.view = { generation, labels: view.labels };
+      return view;
+    } catch {
+      return null;
+    }
+  }
+
   private async perform(runId: string, held: RunBrowser, action: BrowserAction, planned: number): Promise<BrowserActionOutcome> {
     const { page } = held;
     /**
@@ -2819,6 +2921,44 @@ export class RemoteBrowserController {
       };
     }
 
+    // A ref names a control from the latest page view, and only from it. It is
+    // refused rather than re-matched when that view no longer describes the
+    // page: guessing which new button "e14" meant is how a click lands on the
+    // wrong thing.
+    let target: Locator | undefined;
+    let named = action.selector ?? '';
+    if (action.ref) {
+      const refused = refRefusal(held, action.ref);
+      if (refused) return { ok: false, detail: refused, ...(await where()) };
+      target = page.locator!(`aria-ref=${action.ref}`);
+      if ((await stoppable(target.count())) === 0) {
+        return {
+          ok: false,
+          detail: `${action.ref} is no longer on the page. Call observe for a fresh page view.`,
+          ...(await where()),
+        };
+      }
+      named = `${held.view!.labels.get(action.ref)} (${action.ref})`;
+    } else if (action.selector && needsLocator(action.kind)) {
+      if (typeof page.locator !== 'function') {
+        return { ok: false, detail: `This browser cannot ${action.kind.replace('_', ' ')}.` };
+      }
+      target = page.locator(action.selector);
+    }
+
+    /**
+     * Finish an action, with a fresh page view when the tool asked for one.
+     *
+     * The view never turns a done action into a failed one: the click happened
+     * whether or not the page could then be described, and saying otherwise
+     * invites the model to click again.
+     */
+    const finish = async (outcome: BrowserActionOutcome, settle: boolean): Promise<BrowserActionOutcome> => {
+      if (!action.pageView) return outcome;
+      const view = await this.pageView(held, stoppable, settle);
+      return view ? { ...outcome, view: viewOutcome(view) } : outcome;
+    };
+
     switch (action.kind) {
       case 'navigate': {
         const target = action.url ?? '';
@@ -2826,33 +2966,69 @@ export class RemoteBrowserController {
           return { ok: false, detail: 'Only http and https addresses can be opened.' };
         }
         await stoppable(page.goto(target, { timeout: ACTION_TIMEOUT_MS, waitUntil: 'domcontentloaded' }));
-        return { ok: true, detail: `Opened ${target}`, ...(await where()) };
+        return finish({ ok: true, detail: `Opened ${target}`, ...(await where()) }, true);
       }
       case 'click': {
         const pagesBefore = new Set(page.context().pages());
-        await stoppable(page.click(action.selector!, { timeout }));
+        if (target) await stoppable(target.click({ timeout }));
+        else await stoppable(page.click(action.selector!, { timeout }));
         await this.followOpenedPage(runId, held, pagesBefore);
-        return { ok: true, detail: `Clicked ${action.selector}`, ...(await where()) };
+        return finish({ ok: true, detail: `Clicked ${named}`, ...(await where()) }, true);
       }
       case 'fill':
-        await stoppable(page.fill(action.selector!, action.value ?? '', { timeout }));
-        return { ok: true, detail: `Filled ${action.selector}`, ...(await where()) };
+        if (target) await stoppable(target.fill(action.value ?? '', { timeout }));
+        else await stoppable(page.fill(action.selector!, action.value ?? '', { timeout }));
+        return { ok: true, detail: `Filled ${named}`, ...(await where()) };
       case 'press': {
         // A selector focuses first; without one the key goes to whatever has
         // focus, which is what "press Escape" usually means.
         const pagesBefore = new Set(page.context().pages());
-        if (action.selector) await stoppable(page.press(action.selector, action.key!, { timeout }));
+        if (target) await stoppable(target.press(action.key!, { timeout }));
+        else if (action.selector) await stoppable(page.press(action.selector, action.key!, { timeout }));
         else await stoppable(page.keyboard.press(action.key!));
         await this.followOpenedPage(runId, held, pagesBefore);
-        return { ok: true, detail: `Pressed ${action.key}`, ...(await where()) };
+        return finish({ ok: true, detail: `Pressed ${action.key}`, ...(await where()) }, true);
       }
       case 'wait_for':
-        await stoppable(page.waitForSelector(action.selector!, { timeout }));
-        return { ok: true, detail: `${action.selector} appeared`, ...(await where()) };
+        if (target) await stoppable(target.waitFor({ state: 'visible', timeout }));
+        else await stoppable(page.waitForSelector(action.selector!, { timeout }));
+        return { ok: true, detail: `${named} appeared`, ...(await where()) };
       case 'extract_text': {
-        const text = await stoppable(page.innerText(action.selector ?? 'body', { timeout }));
+        const text = target
+          ? await stoppable(target.innerText({ timeout }))
+          : await stoppable(page.innerText(action.selector ?? 'body', { timeout }));
         return { ok: true, detail: text.slice(0, 200_000), ...(await where()) };
       }
+      case 'observe': {
+        const view = await this.pageView(held, stoppable, false);
+        if (!view) {
+          return {
+            ok: false,
+            detail: 'This browser cannot list the page\'s controls. Use extract_text to read the page and CSS selectors to act on it.',
+            ...(await where()),
+          };
+        }
+        return { ok: true, detail: 'Looked at the page.', view: viewOutcome(view), ...(await where()) };
+      }
+      case 'scroll': {
+        if (target) {
+          await stoppable(target.scrollIntoViewIfNeeded({ timeout }));
+        } else {
+          if (typeof page.evaluate !== 'function') return { ok: false, detail: 'This browser cannot scroll.' };
+          // Fixed text: the direction picks the sign and nothing the model
+          // wrote reaches the expression.
+          const sign = action.direction === 'up' ? -1 : 1;
+          await stoppable(page.evaluate(`window.scrollBy(0, ${sign} * Math.round(innerHeight * 0.8))`));
+        }
+        const how = target ? `Scrolled to ${named}` : `Scrolled ${action.direction === 'up' ? 'up' : 'down'}`;
+        return finish({ ok: true, detail: how, ...(await where()) }, false);
+      }
+      case 'select_option':
+        await stoppable(target!.selectOption(action.value ?? '', { timeout }));
+        return { ok: true, detail: `Chose "${action.value}" in ${named}`, ...(await where()) };
+      case 'hover':
+        await stoppable(target!.hover({ timeout }));
+        return finish({ ok: true, detail: `Hovered over ${named}`, ...(await where()) }, false);
       default:
         return { ok: false, detail: `Unsupported action: ${String(action.kind)}` };
     }
@@ -2869,6 +3045,53 @@ function refusal(result: 'busy' | 'cancelled' | 'off' | 'human'): string {
   if (result === 'off') return 'Browser control was turned off while this action waited for the browser.';
   if (result === 'cancelled') return 'The run was cancelled while waiting for the browser.';
   return 'The browser is in use by another part of this run and did not come free in time. Try again, or do something else first.';
+}
+
+/**
+ * A failed action, said in the words the model is shown.
+ *
+ * Playwright appends a call log to its errors, and the log quotes the element
+ * it resolved — attributes and all, so `<input type="password" value="…">`
+ * arrives with the password in it. Only the first part, the reason, is kept,
+ * without the terminal colours it is written in.
+ */
+export function actionError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  // eslint-disable-next-line no-control-regex
+  return message.split(/\n\s*Call log:/)[0]!.replace(/\u001b\[[0-9;]*m/g, '').trim();
+}
+
+/** Why a ref cannot be used now, or null when it can. */
+function refRefusal(held: RunBrowser, ref: string): string | null {
+  if (!held.view) return `There is no page view to take ${ref} from. Call observe first.`;
+  if (held.view.generation !== held.generation) {
+    return `${ref} is from an earlier page. Call observe for a fresh page view.`;
+  }
+  if (!held.view.labels.has(ref)) return `${ref} is not in the latest page view. Use a ref from it, or call observe again.`;
+  if (typeof held.page.locator !== 'function') return 'This browser cannot act on refs. Use a CSS selector.';
+  return null;
+}
+
+/** Actions that resolve their selector through a locator rather than a page method. */
+function needsLocator(kind: BrowserAction['kind']): boolean {
+  return kind === 'scroll' || kind === 'select_option' || kind === 'hover';
+}
+
+function viewOutcome(view: PageView): NonNullable<BrowserActionOutcome['view']> {
+  return { text: view.text, labels: Object.fromEntries(view.labels) };
+}
+
+/** The page's own report of its size and scroll, kept only when it is numbers. */
+function readViewport(v: unknown): Viewport | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const o = v as Record<string, unknown>;
+  const n = (k: string) => (typeof o[k] === 'number' && Number.isFinite(o[k]) ? o[k] as number : undefined);
+  const width = n('width');
+  const height = n('height');
+  const scrollY = n('scrollY');
+  const scrollHeight = n('scrollHeight');
+  if (width === undefined || height === undefined || scrollY === undefined || scrollHeight === undefined) return undefined;
+  return { width, height, scrollY, scrollHeight };
 }
 
 /**

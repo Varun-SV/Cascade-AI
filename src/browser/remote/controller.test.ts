@@ -2,7 +2,7 @@
 //  Cascade AI — driving a remote browser
 // ─────────────────────────────────────────────
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { RemoteBrowserProvider } from './provider.js';
 import type { BrowserFrame } from './controller.js';
 
@@ -4522,5 +4522,248 @@ describe('round 34 view-boundary regressions', () => {
     expect(states.at(-1)?.confirmed).toBe(true);
     expect(await c.setCapture('run-A', false)).toBe(false);
     expect((await c.input('run-A', { kind: 'text', text: '123456' })).ok).toBe(true);
+  });
+});
+
+describe('page views and refs', () => {
+  /** What the fake page's AI snapshot says the page holds. */
+  let snapshot = '';
+  let snapshotFails = false;
+  /** Refs the fake page can still resolve, whatever the last view listed. */
+  let liveRefs = new Set<string>();
+  const extra = page as unknown as Record<string, unknown>;
+
+  const BOOKING = [
+    '- main [ref=e1] [box=0,0,1280,1600]:',
+    '  - button "Account" [ref=e5] [box=84,0,32,25]',
+    '  - textbox "Password" [ref=e9] [box=189,96,185,21]: hunter2',
+    '  - combobox "Party size" [ref=e11] [box=567,97,74,19]:',
+    '    - option "2 people" [selected] [box=0,0,0,0]',
+    '  - button "Reserve 7:30 pm" [ref=e14] [box=0,1200,118,21]',
+  ].join('\n');
+
+  beforeEach(() => {
+    snapshot = BOOKING;
+    snapshotFails = false;
+    liveRefs = new Set(['e5', 'e9', 'e11', 'e14']);
+    extra['ariaSnapshot'] = async (opts: unknown) => {
+      page.calls.push(`snapshot:${JSON.stringify(opts)}`);
+      if (snapshotFails) throw new Error('snapshot timed out');
+      return snapshot;
+    };
+    extra['evaluate'] = async (expression: string) => {
+      if (expression.startsWith('window.scrollBy')) { page.calls.push(`eval:${expression}`); return undefined; }
+      return { width: 1280, height: 800, scrollY: 0, scrollHeight: 1600 };
+    };
+    extra['waitForLoadState'] = async (state: string) => { page.calls.push(`settle:${state}`); };
+    extra['locator'] = (selector: string) => {
+      const record = (what: string) => async (...args: unknown[]) => {
+        page.calls.push(`${selector} ${what}${args.length && typeof args[0] === 'string' ? `=${args[0]}` : ''}`);
+        return what === 'innerText' ? 'located text' : undefined;
+      };
+      return {
+        count: async () => {
+          const ref = /^aria-ref=(.+)$/.exec(selector)?.[1];
+          return ref === undefined || liveRefs.has(ref) ? 1 : 0;
+        },
+        click: record('click'),
+        fill: record('fill'),
+        press: record('press'),
+        hover: record('hover'),
+        selectOption: record('selectOption'),
+        scrollIntoViewIfNeeded: record('scrollIntoView'),
+        waitFor: record('waitFor'),
+        innerText: record('innerText'),
+      };
+    };
+  });
+
+  afterEach(() => {
+    for (const k of ['ariaSnapshot', 'evaluate', 'waitForLoadState', 'locator']) delete extra[k];
+  });
+
+  const controller = () => new RemoteBrowserController({ provider: fakeProvider().provider, settleQuietMs: 0 });
+
+  it('says what it offers, so the tool can offer refs', () => {
+    expect(controller().features).toEqual({ pageView: true });
+  });
+
+  it('describes the page from Playwright\'s AI snapshot, with boxes', async () => {
+    const c = controller();
+    const out = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(true);
+    expect(page.calls).toContain('snapshot:{"mode":"ai","boxes":true,"timeout":5000}');
+    expect(out.view!.text).toContain('[Page view 1]');
+    expect(out.view!.text).toContain('[e5] button "Account"');
+    expect(out.view!.text).toContain('[e11] combobox "Party size": "2 people"');
+    expect(out.view!.text).toContain('Further down:\n[e14] button "Reserve 7:30 pm"');
+    expect(out.view!.labels).toEqual({
+      e5: 'button "Account"', e9: 'textbox "Password"', e11: 'combobox "Party size"', e14: 'button "Reserve 7:30 pm"',
+    });
+    // Never the value — the snapshot carries a password field's contents.
+    expect(JSON.stringify(out)).not.toContain('hunter2');
+  });
+
+  it('numbers its views', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const second = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(second.view!.text.startsWith('[Page view 2]')).toBe(true);
+  });
+
+  it('acts on a ref through Playwright\'s own aria-ref locator, and names it', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(true);
+    expect(page.calls).toEqual(['aria-ref=e14 click']);
+    expect(out.detail).toBe('Clicked button "Reserve 7:30 pm" (e14)');
+  });
+
+  it('routes every ref action through the locator', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.calls = [];
+    await c.controller({ kind: 'fill', ref: 'e9', value: 'secret' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'press', ref: 'e9', key: 'Enter' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'wait_for', ref: 'e14' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'select_option', ref: 'e11', value: '4 people' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'hover', ref: 'e5' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'scroll', ref: 'e14' }, ctx('run', 'w1'));
+    const text = await c.controller({ kind: 'extract_text', ref: 'e14' }, ctx('run', 'w1'));
+    expect(page.calls).toEqual([
+      'aria-ref=e9 fill=secret', 'aria-ref=e9 press=Enter', 'aria-ref=e14 waitFor', 'aria-ref=e11 selectOption=4 people',
+      'aria-ref=e5 hover', 'aria-ref=e14 scrollIntoView', 'aria-ref=e14 innerText',
+    ]);
+    expect(text.detail).toBe('located text');
+  });
+
+  it('refuses a ref before any view has been shown', async () => {
+    const out = await controller().controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('Call observe first');
+    expect(page.calls).toEqual([]);
+  });
+
+  it('refuses a ref the latest view did not list', async () => {
+    // e1 is a real ref — the container — but it was never offered.
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', ref: 'e1' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('not in the latest page view');
+    expect(page.calls).toEqual([]);
+  });
+
+  it('refuses a ref from before the page navigated, rather than re-matching it', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'navigate', url: 'https://elsewhere.test/' }, ctx('run', 'w1'));
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('from an earlier page');
+    expect(page.calls).toEqual([]);
+  });
+
+  it('refuses a listed ref whose control has since gone from the page', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    liveRefs.delete('e14');
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('no longer on the page');
+    expect(page.calls).toEqual([]);
+  });
+
+  it('describes the page after an action that asked for it, once the page has settled', async () => {
+    const c = controller();
+    const out = await c.controller({ kind: 'navigate', url: 'https://a.test/', pageView: true }, ctx('run', 'w1'));
+    expect(page.calls.slice(0, 3)).toEqual(['goto:https://a.test/', 'settle:load', expect.stringMatching(/^snapshot:/)]);
+    expect(out.view!.text).toContain('[e5] button "Account"');
+    // The view's refs belong to the page as it is AFTER the navigation.
+    page.calls = [];
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(true);
+  });
+
+  it('does not describe the page unless asked', async () => {
+    const out = await controller().controller({ kind: 'click', selector: '#go' }, ctx('run', 'w1'));
+    expect(out.view).toBeUndefined();
+    expect(page.calls).toEqual(['click:#go']);
+  });
+
+  it('does not turn a done action into a failed one when the page cannot then be described', async () => {
+    // The click happened. Saying it failed invites a second click.
+    snapshotFails = true;
+    const out = await controller().controller({ kind: 'click', selector: '#go', pageView: true }, ctx('run', 'w1'));
+    expect(out.ok).toBe(true);
+    expect(out.detail).toBe('Clicked #go');
+    expect(out.view).toBeUndefined();
+  });
+
+  it('falls back to text and selectors where Playwright has no AI snapshot', async () => {
+    delete extra['ariaSnapshot'];
+    const c = controller();
+    const observed = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(observed.ok).toBe(false);
+    expect(observed.detail).toContain('Use extract_text');
+    const clicked = await c.controller({ kind: 'click', selector: '#go', pageView: true }, ctx('run', 'w1'));
+    expect(clicked.ok).toBe(true);
+    expect(clicked.view).toBeUndefined();
+  });
+
+  it('treats a snapshot without refs as no view at all', async () => {
+    // An older Playwright ignores `mode: 'ai'` and writes the plain snapshot.
+    snapshot = '- main:\n  - button "Go"';
+    const out = await controller().controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+  });
+
+  it('scrolls by a fixed expression the model cannot write into', async () => {
+    const c = controller();
+    await c.controller({ kind: 'scroll', direction: 'up', pageView: true }, ctx('run', 'w1'));
+    await c.controller({ kind: 'scroll' }, ctx('run', 'w1'));
+    expect(page.calls.filter((x) => x.startsWith('eval:'))).toEqual([
+      'eval:window.scrollBy(0, -1 * Math.round(innerHeight * 0.8))',
+      'eval:window.scrollBy(0, 1 * Math.round(innerHeight * 0.8))',
+    ]);
+  });
+
+  it('chooses and hovers by selector through a locator too', async () => {
+    const c = controller();
+    await c.controller({ kind: 'select_option', selector: '#size', value: 'Two' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'hover', selector: '#menu' }, ctx('run', 'w1'));
+    expect(page.calls).toEqual(['#size selectOption=Two', '#menu hover']);
+  });
+
+  it('leaves out a scroll position the page did not report as numbers', async () => {
+    extra['evaluate'] = async () => ({ width: '1280', height: 800, scrollY: 0, scrollHeight: 1600 });
+    const out = await controller().controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(out.view!.text).not.toContain('Viewport');
+  });
+});
+
+describe('a failed action is told without Playwright\'s call log', () => {
+  it('keeps the reason and drops the log, which quotes the element\'s attributes', async () => {
+    // Captured from Playwright 1.62: the log printed a password field whole.
+    const { actionError } = await import('./controller.js');
+    const err = new Error([
+      'locator.selectOption: Error: Element is not a <select> element',
+      'Call log:',
+      '\u001b[2m  - waiting for locator(\'aria-ref=e7\')\u001b[22m',
+      '\u001b[2m    - locator resolved to <input type="password" aria-label="Password" value="hunter2secret"/>\u001b[22m',
+    ].join('\n'));
+    expect(actionError(err)).toBe('locator.selectOption: Error: Element is not a <select> element');
+    expect(actionError('plain')).toBe('plain');
+  });
+
+  it('applies to what the model is told', async () => {
+    const c = new RemoteBrowserController({ provider: fakeProvider().provider });
+    page.click = async () => { throw new Error('page.click: Timeout 30000ms exceeded.\nCall log:\n  - waiting for <input value="secret">'); };
+    const out = await c.controller({ kind: 'click', selector: '#x' }, ctx('run', 'w1'));
+    expect(out).toMatchObject({ ok: false, detail: 'page.click: Timeout 30000ms exceeded.' });
   });
 });

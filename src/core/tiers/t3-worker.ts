@@ -38,7 +38,7 @@ import {
 } from '../verification/acceptance.js';
 import { ACTING_INTEGRITY_RULE, appendToolRecord, describeHandedWork, describeToolRecord, recordToolCall, type HandedWork, type ToolRecordEntry } from './integrity.js';
 import { RedactionLayer } from '../audit/redaction.js';
-import { BROWSER_TOOL, BROWSER_WORKER_RULE } from './browser-planning.js';
+import { BROWSER_TOOL, BROWSER_WORKER_RULE, foldOldPageViews } from './browser-planning.js';
 
 /**
  * Thrown by executeTool() when the underlying tool error indicates a condition
@@ -931,7 +931,7 @@ export class T3Worker extends BaseTier {
       }
 
       const options: GenerateOptions = {
-        messages: this.context.getMessages(),
+        messages: foldOldPageViews(this.context.getMessages()),
         systemPrompt: this.systemPromptOverride + systemPrompt
           + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : '')
           + textToolSuffix,

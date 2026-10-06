@@ -79,7 +79,7 @@ import {
 } from './context/compaction.js';
 import { GuidanceQueue } from './steering/guidance.js';
 import { CurrentPageTool, type CurrentPageProvider } from '../tools/current-page.js';
-import { BrowserControlTool, type BrowserController, type BrowserActorRelease } from '../tools/browser-control.js';
+import { BrowserControlTool, type BrowserController, type BrowserActorRelease, type BrowserControlFeatures } from '../tools/browser-control.js';
 import {
   AskUserTool,
   type ClarificationAnswer,
@@ -1095,8 +1095,12 @@ export class Cascade extends EventEmitter {
    * real browser to drive, so it never has to be refused in the CLI or a hosted
    * run — it is simply not there.
    */
-  setBrowserController(controller: BrowserController, release?: BrowserActorRelease): void {
-    this.registerBrowserControl(controller, release, this.config.tools?.agentBrowserControl === true);
+  setBrowserController(
+    controller: BrowserController,
+    release?: BrowserActorRelease,
+    features?: BrowserControlFeatures,
+  ): void {
+    this.registerBrowserControl(controller, release, this.config.tools?.agentBrowserControl === true, features);
   }
 
   /**
@@ -1116,8 +1120,12 @@ export class Cascade extends EventEmitter {
    * session the user is already authenticated in, and one the desktop flag
    * cannot stand in for.
    */
-  setRemoteBrowserController(controller: BrowserController, release?: BrowserActorRelease): void {
-    this.registerBrowserControl(controller, release, Boolean(this.config.tools?.remoteBrowser?.provider));
+  setRemoteBrowserController(
+    controller: BrowserController,
+    release?: BrowserActorRelease,
+    features?: BrowserControlFeatures,
+  ): void {
+    this.registerBrowserControl(controller, release, Boolean(this.config.tools?.remoteBrowser?.provider), features);
   }
 
   /**
@@ -1131,11 +1139,15 @@ export class Cascade extends EventEmitter {
     controller: BrowserController,
     release: BrowserActorRelease | undefined,
     enabled: boolean,
+    features: BrowserControlFeatures = {},
   ): void {
     if (this.unattended) return;
     if (!enabled) return;
     if ((this.config.tools?.disabledTools ?? []).includes('browser_control')) return;
-    this.toolRegistry.register(new BrowserControlTool(controller, release));
+    // Page views are what the host CAN do; `browserVision: off` is the user
+    // saying not to. Either one missing leaves the six-action tool.
+    const pageView = features.pageView === true && this.config.tools?.browserVision !== 'off';
+    this.toolRegistry.register(new BrowserControlTool(controller, release, { pageView }));
   }
 
   /**

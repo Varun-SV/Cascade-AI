@@ -838,6 +838,11 @@ export interface ToolsConfig {
     cdpHostHeader?: string;
     maxSessions?: number;
   };
+  /**
+   * What `browser_control` shows the model of a page. See
+   * `src/config/schema.ts`. Absent means `list`.
+   */
+  browserVision?: 'off' | 'list' | 'image' | 'marked';
   mcpServers?: McpServerConfig[];
   /**
    * Names of MCP servers (matching McpServerConfig.name) that the user has

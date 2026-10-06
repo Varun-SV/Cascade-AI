@@ -119,6 +119,20 @@ export const ToolsConfigSchema = z.object({
      */
     maxSessions: z.number().int().min(1).max(16).default(1),
   }).optional(),
+  /**
+   * What `browser_control` shows the model of a page, where the browser can
+   * describe one (a remote browser today; the desktop's keeps selectors).
+   *
+   *   - `off`: page text and CSS selectors, as before page views existed.
+   *   - `list`: a list of the page's controls, each with a ref the model can
+   *     act on. Every model can read it.
+   *   - `image`: the list, plus a screenshot for models that can see images.
+   *   - `marked`: the list, plus a screenshot with each ref drawn on it.
+   *
+   * `list` by default: the screenshot costs tokens on every step and has not
+   * yet been shown to pay for them.
+   */
+  browserVision: z.enum(['off', 'list', 'image', 'marked']).default('list'),
   mcpServers: z.array(McpServerConfigSchema).optional(),
   mcpTrusted: z.array(z.string()).optional(),
   /** Web search backends — at least one should be configured for best results */

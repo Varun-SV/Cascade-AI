@@ -155,6 +155,32 @@ describe('the hosted browser gate is not the desktop one', () => {
     c.setRemoteBrowserController(controller);
     expect(c.getToolRegistry().hasTool('browser_control')).toBe(false);
   });
+
+  describe('page views', () => {
+    const remote = { remoteBrowser: { provider: 'cdp', url: 'ws://b.test:9222' } };
+    const offersRefs = (c: Cascade) => {
+      const schema = c.getToolRegistry().getTool('browser_control')!.inputSchema as { properties: Record<string, unknown> };
+      return 'ref' in schema.properties;
+    };
+
+    it('are on by default where the host can describe pages', () => {
+      const c = withTools(remote);
+      c.setRemoteBrowserController(controller, undefined, { pageView: true });
+      expect(offersRefs(c)).toBe(true);
+    });
+
+    it('stay off where the host cannot, whatever the setting says', () => {
+      const c = withTools({ ...remote, browserVision: 'image' });
+      c.setRemoteBrowserController(controller);
+      expect(offersRefs(c)).toBe(false);
+    });
+
+    it('are turned off by browserVision: off', () => {
+      const c = withTools({ ...remote, browserVision: 'off' });
+      c.setRemoteBrowserController(controller, undefined, { pageView: true });
+      expect(offersRefs(c)).toBe(false);
+    });
+  });
 });
 
 describe('a run announces its id before it can fail', () => {
