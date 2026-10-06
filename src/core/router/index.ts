@@ -27,6 +27,7 @@ import { OpenAIProvider } from '../../providers/openai.js';
 import { ProviderUnreachableError } from '../../providers/base.js';
 import type { BaseProvider } from '../../providers/base.js';
 import { ModelSelector } from './selector.js';
+import { countScreenshots, fitScreenshots } from './screenshots.js';
 import { FailoverManager, failureScopeOf } from './failover.js';
 import { normalizeEndpoint } from '../../utils/net.js';
 import { classifyProviderError, describeProviderError, enrichProviderError } from './provider-errors.js';
@@ -149,7 +150,7 @@ const IMAGE_TOKENS_MAX = 2_000;
  * rate per image, at the top of the range they bill in, so no real image falls
  * below what was reserved for it.
  */
-const IMAGE_TOKENS_EACH = IMAGE_TOKENS_MAX;
+export const IMAGE_TOKENS_EACH = IMAGE_TOKENS_MAX;
 
 function safeJson(value: unknown): string {
   try { return JSON.stringify(value) ?? ''; } catch { return ''; }
@@ -1095,6 +1096,15 @@ export class CascadeRouter extends EventEmitter {
     const provider = this.getProvider(model);
     if (!provider) throw new Error(`No provider for model ${model.id}`);
 
+    // A browser screenshot goes only to a model that can see it, at no more
+    // than the flat amount the check below reserves for an image. Decided
+    // here, against the model this call actually resolved to: failover, a
+    // backoff and the local-only swap above can all have changed it since the
+    // worker built the request.
+    const offeredShots = countScreenshots(options);
+    options = fitScreenshots(options, model, IMAGE_TOKENS_EACH);
+    const sentShots = countScreenshots(options);
+
     // Refuse a call whose INPUT alone cannot fit the remaining budget, before
     // spending it. Placed ahead of the TPM wait: there is no point queueing for
     // provider capacity on a call we are about to decline.
@@ -1359,6 +1369,12 @@ export class CascadeRouter extends EventEmitter {
           `Model ${model.id} inference timed out after ${cloudTimeoutMs}ms`,
           [options.signal, runAbort.signal],
         );
+      }
+
+      // Counted once the request has gone and come back, for /why.
+      if (offeredShots && runGeneration === this.runGeneration) {
+        this.runScreenshots.sent += sentShots;
+        this.runScreenshots.leftOut += offeredShots - sentShots;
       }
 
       // Recompute against the ROUTER's view of the model (which carries dataset
@@ -2371,6 +2387,14 @@ export class CascadeRouter extends EventEmitter {
     this.emit('routing:exploring', { tier, note });
   }
 
+  /** Browser screenshots this run sent to a model, and left out for one that could not take them. */
+  private runScreenshots = { sent: 0, leftOut: 0 };
+
+  /** See `runScreenshots`. Read by /why. */
+  getRunScreenshots(): { sent: number; leftOut: number } {
+    return { ...this.runScreenshots };
+  }
+
   beginRun(): void {
     // Per-run, like everything else here: a stale mapping would credit this
     // run's calls to the task type a previous run happened to select under.
@@ -2392,6 +2416,7 @@ export class CascadeRouter extends EventEmitter {
     this.runWrappingUp = false;
     this.runWrapUpReason = undefined;
     this.runWorkNotStarted = 0;
+    this.runScreenshots = { sent: 0, leftOut: 0 };
     this.reservedWorkUsd = 0;
     this.reservedWorkTokens = 0;
     // Quota/auth verdicts are RUN-scoped by design — a user who tops up their

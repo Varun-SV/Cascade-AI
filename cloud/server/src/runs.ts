@@ -416,6 +416,8 @@ export interface RunControls {
     apiKey?: string;
     cdpHostHeader?: string;
     maxSessions?: number;
+    /** What the model is shown of a page. See REMOTE_BROWSER_VISION. */
+    vision?: 'off' | 'list' | 'image' | 'marked';
   };
 }
 
@@ -496,6 +498,7 @@ export function remoteBrowserControls(env: CloudEnv): Pick<RunControls, 'remoteB
       ...(env.REMOTE_BROWSER_API_KEY ? { apiKey: env.REMOTE_BROWSER_API_KEY } : {}),
       ...(env.REMOTE_BROWSER_CDP_HOST_HEADER ? { cdpHostHeader: env.REMOTE_BROWSER_CDP_HOST_HEADER } : {}),
       maxSessions: env.REMOTE_BROWSER_MAX_SESSIONS,
+      ...(env.REMOTE_BROWSER_VISION ? { vision: env.REMOTE_BROWSER_VISION } : {}),
     },
   };
 }
@@ -753,6 +756,7 @@ export function buildCloudConfig(
                 ? { maxSessions: controls.remoteBrowser.maxSessions }
                 : {}),
             },
+            ...(controls.remoteBrowser.vision ? { browserVision: controls.remoteBrowser.vision } : {}),
           }
         : {}),
     },

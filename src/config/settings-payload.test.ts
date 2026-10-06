@@ -115,6 +115,16 @@ describe('applySettingsPayload — the whole Settings save, not part of it', () 
     expect((config as unknown as Record<string, unknown>)['somethingElse']).toBeUndefined();
   });
 
+  it('applies what the browser shows the model, and only the four known values', () => {
+    const config = base();
+    applySettingsPayload(config, { advanced: { browserVision: 'image' } });
+    expect(config.tools.browserVision).toBe('image');
+    applySettingsPayload(config, { advanced: { browserVision: 'everything' } });
+    expect(config.tools.browserVision).toBe('image');
+    expect(settingsSnapshot(config).advanced['browserVision']).toBe('image');
+    expect(CascadeConfigSchema.parse({}).tools.browserVision).toBe('list');
+  });
+
   it("deletes a model binding set to 'auto' rather than storing the word", () => {
     const config = base();
     config.models = { t1: 'claude-opus-4', t2: 'gpt-4o' } as CascadeConfig['models'];

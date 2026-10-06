@@ -2,7 +2,7 @@
 //  Cascade AI — driving a remote browser
 // ─────────────────────────────────────────────
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { RemoteBrowserProvider } from './provider.js';
 import type { BrowserFrame } from './controller.js';
 
@@ -4522,5 +4522,434 @@ describe('round 34 view-boundary regressions', () => {
     expect(states.at(-1)?.confirmed).toBe(true);
     expect(await c.setCapture('run-A', false)).toBe(false);
     expect((await c.input('run-A', { kind: 'text', text: '123456' })).ok).toBe(true);
+  });
+});
+
+describe('page views and refs', () => {
+  /** What the fake page's AI snapshot says the page holds. */
+  let snapshot = '';
+  let snapshotFails = false;
+  /** What the privacy check finds in the page itself: a field on screen, or an error. */
+  let privateOnScreen: boolean | 'throws' = false;
+  /** What each sub-frame's privacy check finds, and where its iframe sits (on screen unless given). */
+  let subFrames: Array<boolean | 'throws' | { found: boolean; y: number }> = [];
+  let shotFails = false;
+  /** Refs the fake page can still resolve, whatever the last view listed. */
+  let liveRefs = new Set<string>();
+  const extra = page as unknown as Record<string, unknown>;
+
+  const BOOKING = [
+    '- main [ref=e1] [box=0,0,1280,1600]:',
+    '  - button "Account" [ref=e5] [box=84,0,32,25]',
+    '  - textbox "Password" [ref=e9] [box=189,96,185,21]: hunter2',
+    '  - combobox "Party size" [ref=e11] [box=567,97,74,19]:',
+    '    - option "2 people" [selected] [box=0,0,0,0]',
+    '  - button "Reserve 7:30 pm" [ref=e14] [box=0,1200,118,21]',
+  ].join('\n');
+
+  beforeEach(() => {
+    snapshot = BOOKING;
+    snapshotFails = false;
+    privateOnScreen = false;
+    subFrames = [];
+    shotFails = false;
+    liveRefs = new Set(['e5', 'e9', 'e11', 'e14']);
+    extra['ariaSnapshot'] = async (opts: unknown) => {
+      page.calls.push(`snapshot:${JSON.stringify(opts)}`);
+      if (snapshotFails) throw new Error('snapshot timed out');
+      return snapshot;
+    };
+    const privacyCheck = (found: boolean | 'throws') => {
+      page.calls.push('privacy');
+      if (found === 'throws') throw new Error('Execution context was destroyed');
+      return found;
+    };
+    extra['evaluate'] = async (expression: string) => {
+      if (expression.startsWith('window.scrollBy')) { page.calls.push(`eval:${expression}`); return undefined; }
+      if (expression.includes('one-time-code')) return privacyCheck(privateOnScreen);
+      return { width: 1280, height: 800, scrollY: 0, scrollHeight: 1600 };
+    };
+    extra['frames'] = () => [
+      { evaluate: async () => { throw new Error('the main frame is asked through page.evaluate'); } },
+      ...subFrames.map((frame) => {
+        const found = typeof frame === 'object' ? frame.found : frame;
+        const y = typeof frame === 'object' ? frame.y : 100;
+        return {
+          evaluate: async () => privacyCheck(found),
+          frameElement: async () => ({ boundingBox: async () => ({ x: 0, y, width: 200, height: 40 }) }),
+        };
+      }),
+    ];
+    extra['screenshot'] = async (opts: unknown) => {
+      page.calls.push(`shot:${JSON.stringify(opts)}`);
+      if (shotFails) throw new Error('Target closed');
+      return new Uint8Array([1, 2, 3]);
+    };
+    extra['waitForLoadState'] = async (state: string) => { page.calls.push(`settle:${state}`); };
+    extra['locator'] = (selector: string) => {
+      const record = (what: string) => async (...args: unknown[]) => {
+        page.calls.push(`${selector} ${what}${args.length && typeof args[0] === 'string' ? `=${args[0]}` : ''}`);
+        return what === 'innerText' ? 'located text' : undefined;
+      };
+      return {
+        count: async () => {
+          const ref = /^aria-ref=(.+)$/.exec(selector)?.[1];
+          return ref === undefined || liveRefs.has(ref) ? 1 : 0;
+        },
+        click: record('click'),
+        fill: record('fill'),
+        press: record('press'),
+        hover: record('hover'),
+        selectOption: record('selectOption'),
+        scrollIntoViewIfNeeded: record('scrollIntoView'),
+        waitFor: record('waitFor'),
+        innerText: record('innerText'),
+      };
+    };
+  });
+
+  afterEach(() => {
+    for (const k of ['ariaSnapshot', 'evaluate', 'waitForLoadState', 'locator', 'screenshot', 'frames']) delete extra[k];
+  });
+
+  const controller = () => new RemoteBrowserController({ provider: fakeProvider().provider, settleQuietMs: 0 });
+
+  it('says what it offers, so the tool can offer refs and screenshots', () => {
+    expect(controller().features).toEqual({ pageView: true, screenshots: true });
+  });
+
+  it('describes the page from Playwright\'s AI snapshot, with boxes', async () => {
+    const c = controller();
+    const out = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(true);
+    expect(page.calls).toContain('snapshot:{"mode":"ai","boxes":true,"timeout":5000}');
+    expect(out.view!.text).toContain('[Page view 1]');
+    expect(out.view!.text).toContain('[e5] button "Account"');
+    expect(out.view!.text).toContain('[e11] combobox "Party size": "2 people"');
+    expect(out.view!.text).toContain('Further down:\n[e14] button "Reserve 7:30 pm"');
+    expect(out.view!.labels).toEqual({
+      e5: 'button "Account"', e9: 'textbox "Password"', e11: 'combobox "Party size"', e14: 'button "Reserve 7:30 pm"',
+    });
+    // Never the value — the snapshot carries a password field's contents.
+    expect(JSON.stringify(out)).not.toContain('hunter2');
+  });
+
+  it('numbers its views', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const second = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(second.view!.text.startsWith('[Page view 2]')).toBe(true);
+  });
+
+  it('acts on a ref through Playwright\'s own aria-ref locator, and names it', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(true);
+    expect(page.calls).toEqual(['aria-ref=e14 click']);
+    expect(out.detail).toBe('Clicked button "Reserve 7:30 pm" (e14)');
+  });
+
+  it('routes every ref action through the locator', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.calls = [];
+    await c.controller({ kind: 'fill', ref: 'e9', value: 'secret' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'press', ref: 'e9', key: 'Enter' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'wait_for', ref: 'e14' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'select_option', ref: 'e11', value: '4 people' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'hover', ref: 'e5' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'scroll', ref: 'e14' }, ctx('run', 'w1'));
+    const text = await c.controller({ kind: 'extract_text', ref: 'e14' }, ctx('run', 'w1'));
+    expect(page.calls).toEqual([
+      'aria-ref=e9 fill=secret', 'aria-ref=e9 press=Enter', 'aria-ref=e14 waitFor', 'aria-ref=e11 selectOption=4 people',
+      'aria-ref=e5 hover', 'aria-ref=e14 scrollIntoView', 'aria-ref=e14 innerText',
+    ]);
+    expect(text.detail).toBe('located text');
+  });
+
+  it('refuses a ref before any view has been shown', async () => {
+    const out = await controller().controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('Call observe first');
+    expect(page.calls).toEqual([]);
+  });
+
+  it('refuses a ref the latest view did not list', async () => {
+    // e1 is a real ref — the container — but it was never offered.
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', ref: 'e1' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('not in the latest page view');
+    expect(page.calls).toEqual([]);
+  });
+
+  it('refuses a ref from before the page navigated, rather than re-matching it', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'navigate', url: 'https://elsewhere.test/' }, ctx('run', 'w1'));
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('from an earlier page');
+    expect(page.calls).toEqual([]);
+  });
+
+  it('refuses a listed ref whose control has since gone from the page', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    liveRefs.delete('e14');
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('no longer on the page');
+    expect(page.calls).toEqual([]);
+  });
+
+  it('describes the page after an action that asked for it, once the page has settled', async () => {
+    const c = controller();
+    const out = await c.controller({ kind: 'navigate', url: 'https://a.test/', pageView: true }, ctx('run', 'w1'));
+    expect(page.calls.slice(0, 3)).toEqual(['goto:https://a.test/', 'settle:load', expect.stringMatching(/^snapshot:/)]);
+    expect(out.view!.text).toContain('[e5] button "Account"');
+    // The view's refs belong to the page as it is AFTER the navigation.
+    page.calls = [];
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(true);
+  });
+
+  it('does not describe the page unless asked', async () => {
+    const out = await controller().controller({ kind: 'click', selector: '#go' }, ctx('run', 'w1'));
+    expect(out.view).toBeUndefined();
+    expect(page.calls).toEqual(['click:#go']);
+  });
+
+  it('does not turn a done action into a failed one when the page cannot then be described', async () => {
+    // The click happened. Saying it failed invites a second click.
+    snapshotFails = true;
+    const out = await controller().controller({ kind: 'click', selector: '#go', pageView: true }, ctx('run', 'w1'));
+    expect(out.ok).toBe(true);
+    expect(out.detail).toBe('Clicked #go');
+    expect(out.view).toBeUndefined();
+  });
+
+  it('falls back to text and selectors where Playwright has no AI snapshot', async () => {
+    delete extra['ariaSnapshot'];
+    const c = controller();
+    const observed = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(observed.ok).toBe(false);
+    expect(observed.detail).toContain('Use extract_text');
+    const clicked = await c.controller({ kind: 'click', selector: '#go', pageView: true }, ctx('run', 'w1'));
+    expect(clicked.ok).toBe(true);
+    expect(clicked.view).toBeUndefined();
+  });
+
+  it('treats a snapshot without refs as no view at all', async () => {
+    // An older Playwright ignores `mode: 'ai'` and writes the plain snapshot.
+    snapshot = '- main:\n  - button "Go"';
+    const out = await controller().controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+  });
+
+  it('scrolls by a fixed expression the model cannot write into', async () => {
+    const c = controller();
+    await c.controller({ kind: 'scroll', direction: 'up', pageView: true }, ctx('run', 'w1'));
+    await c.controller({ kind: 'scroll' }, ctx('run', 'w1'));
+    expect(page.calls.filter((x) => x.startsWith('eval:'))).toEqual([
+      'eval:window.scrollBy(0, -1 * Math.round(innerHeight * 0.8))',
+      'eval:window.scrollBy(0, 1 * Math.round(innerHeight * 0.8))',
+    ]);
+  });
+
+  it('chooses and hovers by selector through a locator too', async () => {
+    const c = controller();
+    await c.controller({ kind: 'select_option', selector: '#size', value: 'Two' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'hover', selector: '#menu' }, ctx('run', 'w1'));
+    expect(page.calls).toEqual(['#size selectOption=Two', '#menu hover']);
+  });
+
+  describe('screenshots', () => {
+    const shots = () => page.calls.filter((x) => x.startsWith('shot:'));
+
+    it('takes a clean JPEG of the screen, with the view, when asked', async () => {
+      const out = await controller().controller({ kind: 'observe', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toEqual({ data: 'AQID', mimeType: 'image/jpeg', width: 1280, height: 800 });
+      // CSS pixels, so a high-density screen does not double the bill; the
+      // caret left alone, because hiding it means injecting a style.
+      expect(shots()).toEqual(['shot:{"type":"jpeg","quality":80,"scale":"css","caret":"initial","timeout":5000}']);
+      expect(out.view!.text).toContain('[e5] button "Account"');
+    });
+
+    it('checks for private fields before taking one', async () => {
+      await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(page.calls.indexOf('privacy')).toBeLessThan(page.calls.findIndex((x) => x.startsWith('shot:')));
+    });
+
+    it('takes none unless asked', async () => {
+      const out = await controller().controller({ kind: 'click', ref: 'e5', pageView: true }, ctx('run', 'w1')).catch(() => null);
+      const observed = await controller().controller({ kind: 'observe' }, ctx('run', 'w1'));
+      expect(out?.image).toBeUndefined();
+      expect(observed.image).toBeUndefined();
+      expect(shots()).toEqual([]);
+    });
+
+    it('sends no second picture of a page that looks the same — unless asked by name', async () => {
+      const c = controller();
+      await c.controller({ kind: 'click', selector: '#a', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      const again = await c.controller({ kind: 'click', selector: '#b', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      expect(again.image).toBeUndefined();
+      expect(again.view!.text).not.toContain('No screenshot');
+      const asked = await c.controller({ kind: 'observe', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      expect(asked.image).toBeDefined();
+      snapshot = BOOKING.replace('Account', 'Signed in');
+      const changed = await c.controller({ kind: 'click', selector: '#c', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      expect(changed.image).toBeDefined();
+      expect(shots()).toHaveLength(3);
+    });
+
+    it('withholds it while a password, card or one-time-code field is on screen', async () => {
+      privateOnScreen = true;
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: a password, card or one-time-code field is on screen.');
+      expect(shots()).toEqual([]);
+    });
+
+    it('looks in every frame, where a payment form usually lives', async () => {
+      subFrames = [false, true];
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot');
+    });
+
+    it('does not count a frame whose iframe is off the screen, however its own check reads', async () => {
+      // Inside its own 40px viewport, a login iframe 1,000px down "shows" its
+      // password field. Found on a real page, where it withheld every picture.
+      subFrames = [{ found: true, y: 1000 }];
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeDefined();
+      expect(page.calls.filter((x) => x === 'privacy')).toHaveLength(1);
+    });
+
+    it('does not let a sub-frame that went away end every screenshot', async () => {
+      subFrames = ['throws'];
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeDefined();
+    });
+
+    it('takes none when the page itself cannot be checked', async () => {
+      privateOnScreen = 'throws';
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(shots()).toEqual([]);
+    });
+
+    it('takes none while the person watching has hidden the page', async () => {
+      const c = controller();
+      await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+      (c as unknown as { runs: Map<string, { hiddenByHolder?: boolean }> }).runs.get('run')!.hiddenByHolder = true;
+      const out = await c.controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot this time: the person watching had hidden the page.');
+      expect(shots()).toEqual([]);
+    });
+
+    it('skips the first one after a person had control, then carries on', async () => {
+      // They may have just typed a password; the field can be gone from
+      // the screen while what they typed is still on it.
+      const c = controller();
+      await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+      let gen: number | undefined;
+      await c.startWatching('run', (f) => { gen = f.generation; });
+      cdp.pushFrame(1);
+      if (gen !== undefined) c.frameSeen('run', gen);
+      c.actorEnded('w1');
+      expect(await c.takeOver('run')).toEqual({ ok: true });
+      expect(c.handBack('run')).toBe(true);
+
+      const first = await c.controller({ kind: 'observe', screenshot: true }, ctx('run', 'w2'));
+      expect(first.ok).toBe(true);
+      expect(first.image).toBeUndefined();
+      expect(first.view!.text).toContain('No screenshot this time: a person was just using this page.');
+      const second = await c.controller({ kind: 'observe', screenshot: true }, ctx('run', 'w2'));
+      expect(second.image).toBeDefined();
+    });
+
+    it('says so when the picture could not be taken, and the action still counts', async () => {
+      shotFails = true;
+      const out = await controller().controller({ kind: 'click', selector: '#go', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      expect(out.ok).toBe(true);
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: the picture could not be taken.');
+    });
+
+    it('draws the refs on a copy when marks are asked for', async () => {
+      const send = cdp.send;
+      cdp.send = async (method: string, params?: Record<string, unknown>) => {
+        if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'MAIN' } } };
+        if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 };
+        if (method === 'Runtime.evaluate') {
+          // What is drawn: the controls on screen, never a heading.
+          const expression = String(params?.['expression']);
+          page.calls.push(`marks:${['e5', 'e9', 'e11'].filter((r) => expression.includes(`"ref":"${r}"`)).join(',')}`);
+          return { result: { value: 'TUFSS0VE' } };
+        }
+        return send(method, params);
+      };
+      try {
+        const out = await controller().controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
+        expect(out.image).toMatchObject({ data: 'TUFSS0VE', width: 1280, height: 800 });
+        expect(page.calls).toContain('marks:e5,e9,e11');
+      } finally {
+        cdp.send = send;
+      }
+    });
+
+    it('sends the clean picture when the marks cannot be drawn', async () => {
+      // The fake CDP answers none of the drawing calls.
+      const out = await controller().controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
+      expect(out.image?.data).toBe('AQID');
+    });
+
+    it('draws nothing unless marks are asked for', async () => {
+      await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(cdp.sent).not.toContain('Page.createIsolatedWorld');
+    });
+
+    it('cannot price a picture whose size it does not know, so takes none', async () => {
+      extra['evaluate'] = async (expression: string) => (expression.includes('one-time-code') ? false : { width: 'wide' });
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(shots()).toEqual([]);
+    });
+  });
+
+  it('leaves out a scroll position the page did not report as numbers', async () => {
+    extra['evaluate'] = async () => ({ width: '1280', height: 800, scrollY: 0, scrollHeight: 1600 });
+    const out = await controller().controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(out.view!.text).not.toContain('Viewport');
+  });
+});
+
+describe('a failed action is told without Playwright\'s call log', () => {
+  it('keeps the reason and drops the log, which quotes the element\'s attributes', async () => {
+    // Captured from Playwright 1.62: the log printed a password field whole.
+    const { actionError } = await import('./controller.js');
+    const err = new Error([
+      'locator.selectOption: Error: Element is not a <select> element',
+      'Call log:',
+      '\u001b[2m  - waiting for locator(\'aria-ref=e7\')\u001b[22m',
+      '\u001b[2m    - locator resolved to <input type="password" aria-label="Password" value="hunter2secret"/>\u001b[22m',
+    ].join('\n'));
+    expect(actionError(err)).toBe('locator.selectOption: Error: Element is not a <select> element');
+    expect(actionError('plain')).toBe('plain');
+  });
+
+  it('applies to what the model is told', async () => {
+    const c = new RemoteBrowserController({ provider: fakeProvider().provider });
+    page.click = async () => { throw new Error('page.click: Timeout 30000ms exceeded.\nCall log:\n  - waiting for <input value="secret">'); };
+    const out = await c.controller({ kind: 'click', selector: '#x' }, ctx('run', 'w1'));
+    expect(out).toMatchObject({ ok: false, detail: 'page.click: Timeout 30000ms exceeded.' });
   });
 });

@@ -1,0 +1,20 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Book Ember &amp; Oak</title><link rel="stylesheet" href="style.css"><script src="done.js"></script>
+<style>.days{display:grid;grid-template-columns:repeat(7,36px);gap:4px}.days span{border:1px solid #ccc;text-align:center;cursor:pointer;padding:4px 0}.days span.on{background:#2f6f4f;color:#fff}</style></head><body>
+<main><h1>Book a table at Ember &amp; Oak</h1>
+<div class="row"><label>Name <input id="name"></label></div>
+<div class="row"><label>Party size <select id="size"><option>2</option><option>3</option><option>4</option><option>6</option></select></label></div>
+<div class="row">Date (October)</div>
+<div class="days" id="days"></div>
+<div class="row" role="radiogroup" aria-label="Time"><label><input type="radio" name="t" value="19:30"> 7:30 pm</label><label><input type="radio" name="t" value="20:45"> 8:45 pm</label><label><input type="radio" name="t" value="21:15"> 9:15 pm</label></div>
+<button id="book">Request booking</button><p id="msg"></p>
+<script>
+let day = null;
+const days = document.getElementById('days');
+for (let d = 1; d <= 31; d++) { const s = document.createElement('span'); s.textContent = d; s.onclick = () => { day = d; [...days.children].forEach((c) => c.classList.toggle('on', c === s)); }; days.append(s); }
+document.getElementById('book').onclick = () => {
+  const t = document.querySelector('input[name=t]:checked')?.value;
+  const ok = document.getElementById('name').value.trim().toLowerCase() === 'asha' && document.getElementById('size').value === '4' && day === 14 && t === '20:45';
+  document.getElementById('msg').textContent = ok ? 'Requested.' : 'Something is not right yet.';
+  if (ok) done('booking');
+};
+</script></main></body></html>

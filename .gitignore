@@ -30,6 +30,8 @@ scripts/*
 !scripts/publish-release.ps1
 # Benchmark aggregator: engine, tests, and per-source data (CI reads these).
 !scripts/benchmarks/
+# The browser vision test: its site, tasks and runner.
+!scripts/browser-vision-eval/
 
 # AI tools & generated analysis artefacts
 Cascade-AI TUI Standalone.html

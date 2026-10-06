@@ -263,7 +263,7 @@ const MEDIA_UNAVAILABLE = String.raw`No \w+ model is available on your configure
 
 const TOOL_FAILURE: Record<string, RegExp> = {
   // `outcome.detail` is page content, so only the prefixes this tool adds.
-  browser_control: /^(?:Failed: |Error: (?:browser control is not available|action is required|the run was cancelled|"[^"\n]*" needs |the browser could not perform ))/,
+  browser_control: /^(?:Failed: |Error: (?:browser control is not available|action is required|the run was cancelled|"[^"\n]*" (?:needs |is not something this browser can do|is not a ref|does not take a ref)|the browser could not perform |this browser takes CSS selectors|give either ref or selector|direction must be ))/,
   browser: /^(?:Error: Playwright is not installed|Browser launch failed: |Browser action "[^"\n]*" failed: |Browser error \(page reset\): |Unknown browser action: )/,
   read_current_page: /^(?:Error: could not read the open page|No page is open in the built-in browser)/,
   code_search: /^(?:Code search failed: |Provide a "query" to search the codebase)/,

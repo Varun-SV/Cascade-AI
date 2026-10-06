@@ -35,7 +35,7 @@ The CLI, desktop app and Cascade Cloud share one account. Settings can follow yo
 ## ✨ Highlights
 
 - 🧠 **Live benchmark Auto-routing** — set a tier to `Auto` and Cascade fuses *live* public benchmark scores with *live* pricing to pick the best-**value** model for each task, then learns from how each model actually did.
-- 🌐 **Browser control** (desktop app and web) — the agent drives a real browser: the desktop's own, or on the web your Chrome over CDP or a hosted Steel session. You watch it live and can take the wheel and hand it back.
+- 🌐 **Browser control** (desktop app and web) — the agent drives a real browser: the desktop's own, or on the web your Chrome over CDP or a hosted Steel session. You watch it live and can take the wheel and hand it back. On the web the agent reads each page as a numbered list of its controls and acts on them by number; a model that can see images can also get a screenshot (`tools.browserVision`).
 - 🙋 **Asks instead of guessing** (Cascade Cloud and self-hosted web) — when a request is genuinely ambiguous, Cascade asks one structured question rather than inventing an answer.
 - 🤖 **Autonomous mode** (`/auto`) — hands-off runs: safe tools run silently, dangerous ones still ask, budget caps stay the hard stop.
 - 📋 **Boardroom plan review** — pause to review, **edit**, or steer T1's plan (with an AI reviewer's critique) before any worker spawns.
@@ -341,6 +341,7 @@ Cascade loads config from `.cascade/config.json` in your project directory.
     "shellBlocklist":     ["sudo rm", "rm -rf", "mkfs"],
     "requireApprovalFor": ["shell", "file_write", "file_delete"],
     "browserEnabled":     false,
+    "browserVision":      "list",
     "mcpServers": [
       { "name": "filesystem", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] }
     ],
@@ -507,7 +508,7 @@ T3 workers have access to the following tools. All destructive operations requir
 | `web_search` | Search the web (SearXNG, Brave or Tavily) | |
 | `web_fetch` | Fetch a page, SSRF-guarded | |
 | `browser` | Headless Playwright automation (off unless `tools.browserEnabled`) | ✓ |
-| `browser_control` | Drive a real browser — desktop app and web (CDP or Steel) | ✓ |
+| `browser_control` | Drive a real browser — desktop app and web (CDP or Steel). On the web: page views with refs, and screenshots for vision models (`tools.browserVision`) | ✓ |
 | `read_current_page` | Read the page you have open — desktop app | |
 | `image_analyze` | Describe an image (vision-capable models) | |
 | `generate_image` · `generate_speech` · `generate_video` | Generate media, with a provider key that supports it | |
@@ -517,6 +518,35 @@ T3 workers have access to the following tools. All destructive operations requir
 | `knowledge_graph_search` | Query the project's knowledge graph of facts — appears once the project has learned some | |
 | `peer_message` | Message a sibling worker | |
 | `ask_user` | Ask you one structured question instead of guessing — Cascade Cloud and self-hosted web | |
+
+#### What the browser agent sees
+
+On the web (a CDP browser or Steel), `browser_control` describes each page as a **page view**: the controls on screen and further down, each under a ref.
+
+```
+[Page view 2]
+Page: Dine — https://dine.example/search
+On screen:
+[e5] button "Account"
+[e8] combobox "Party size": "2 people"
+[e14] button "Reserve 7:30 pm"
+```
+
+The model acts by ref (`{"action":"click","ref":"e14"}`), and CSS selectors still work. A page view never shows what is typed into a field. `tools.browserVision` sets how much it sees:
+
+| Setting | What the model gets |
+|---|---|
+| `off` | Page text and CSS selectors only |
+| `list` (default) | Page views with refs, for every model |
+| `image` | Page views, plus a screenshot for models that can see images |
+| `marked` | Page views, plus a screenshot with each ref drawn on it (experimental) |
+
+When screenshots are on:
+- No screenshot is taken while a password, card or one-time-code field is on screen, or right after you took control of the browser or hid it.
+- A screenshot is sent with one step and not kept, so it costs about 1.4k tokens a step on Claude.
+- A model that can't see images, or would be charged far more for one, gets the page view alone.
+
+Approval prompts name the element and the site. A click on something labelled pay, buy, order, delete, remove, send, transfer or publish asks every time, even after "always allow". Hosted deployments set `REMOTE_BROWSER_VISION`. `scripts/browser-vision-eval/` holds the side-by-side test that decides the default.
 
 MCP servers' tools, plugins and dynamic tools join this list at runtime.
 

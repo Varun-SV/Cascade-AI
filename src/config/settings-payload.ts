@@ -237,6 +237,7 @@ export function applySettingsPayload(
     // through — a key it does not list is dropped, so a toggle wired only in the
     // UI would appear to save and then not.
     if (typeof a['agentBrowserControl'] === 'boolean') config.tools = { ...(config.tools ?? {}), agentBrowserControl: a['agentBrowserControl'] };
+    if (['off', 'list', 'image', 'marked'].includes(a['browserVision'] as string)) config.tools = { ...(config.tools ?? {}), browserVision: a['browserVision'] as NonNullable<ToolsConfig['browserVision']> };
     if (typeof a['factsExtraction'] === 'boolean') config.knowledge = { ...(config.knowledge ?? {}), factsExtraction: a['factsExtraction'] };
     if (typeof a['rememberSessions'] === 'boolean') config.memory = { ...(config.memory ?? {}), rememberSessions: a['rememberSessions'] };
     if (typeof a['enableToolCreation'] === 'boolean') config.enableToolCreation = a['enableToolCreation'];
@@ -348,6 +349,7 @@ export function settingsSnapshot(config: CascadeConfig): SettingsSnapshot {
       benchmarksLive: config.benchmarks?.live,
       dynamicToolSandbox: config.tools?.dynamicToolSandbox,
       agentBrowserControl: config.tools?.agentBrowserControl,
+      browserVision: config.tools?.browserVision,
       factsExtraction: config.knowledge?.factsExtraction,
       rememberSessions: config.memory?.rememberSessions,
       enableToolCreation: config.enableToolCreation,

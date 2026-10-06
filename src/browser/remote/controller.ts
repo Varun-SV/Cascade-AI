@@ -32,6 +32,8 @@ import type {
 } from '../../tools/browser-control.js';
 import type { RemoteBrowserProvider, RemoteBrowserSession } from './provider.js';
 import { BrowserLease } from '../lease.js';
+import { describePage, type PageView, type Viewport } from './page-view.js';
+import { drawMarks } from './marks.js';
 
 /** Playwright's shapes, named locally so the optional dep stays optional. */
 type Page = {
@@ -44,6 +46,21 @@ type Page = {
   keyboard: { press(key: string): Promise<void> };
   waitForSelector(selector: string, opts?: { timeout?: number }): Promise<unknown>;
   innerText(selector: string, opts?: { timeout?: number }): Promise<string>;
+  /**
+   * The page view's source — see `page-view.ts`. Optional because Playwright
+   * is: an install without the AI snapshot falls back to text and selectors.
+   */
+  ariaSnapshot?(opts: { mode: 'ai'; boxes: boolean; timeout?: number }): Promise<string>;
+  /** Where refs (`aria-ref=e14`) and the newer actions resolve. */
+  locator?(selector: string): Locator;
+  evaluate?(expression: string): Promise<unknown>;
+  waitForLoadState?(state: 'load', opts?: { timeout?: number }): Promise<void>;
+  /** A picture of what is on screen. See `screenshot`. */
+  screenshot?(opts: {
+    type: 'jpeg'; quality: number; scale: 'css'; caret: 'initial'; timeout?: number;
+  }): Promise<Uint8Array>;
+  /** Every frame, the page's own first. Where the privacy check looks. */
+  frames?(): Frame[];
   on(event: string, handler: (...args: never[]) => void): void;
   /** The page's own top-level frame; sub-frames are not it. See `generation`. */
   mainFrame(): unknown;
@@ -51,6 +68,23 @@ type Page = {
   context(): BrowserContext;
   isClosed(): boolean;
   close(): Promise<void>;
+};
+/** A frame of the page, and where its iframe sits on the page's screen. */
+type Frame = {
+  evaluate(expression: string): Promise<unknown>;
+  frameElement?(): Promise<{ boundingBox(): Promise<{ x: number; y: number; width: number; height: number } | null> }>;
+};
+/** One control on the page, as Playwright resolves it at the moment of acting. */
+type Locator = {
+  count(): Promise<number>;
+  click(opts?: { timeout?: number }): Promise<void>;
+  fill(value: string, opts?: { timeout?: number }): Promise<void>;
+  press(key: string, opts?: { timeout?: number }): Promise<void>;
+  hover(opts?: { timeout?: number }): Promise<void>;
+  selectOption(value: string, opts?: { timeout?: number }): Promise<unknown>;
+  scrollIntoViewIfNeeded(opts?: { timeout?: number }): Promise<void>;
+  waitFor(opts?: { state?: 'visible'; timeout?: number }): Promise<void>;
+  innerText(opts?: { timeout?: number }): Promise<string>;
 };
 /**
  * A raw Chrome DevTools Protocol session on one page.
@@ -224,6 +258,48 @@ const SCREENCAST = { format: 'jpeg', quality: 60, maxWidth: 1280, maxHeight: 800
 /** Default ceiling for a single action, matching the tool's own clamp. */
 const ACTION_TIMEOUT_MS = 30_000;
 /**
+ * How long a page view waits for the page to finish loading after an action
+ * that may have changed it. Bounded: a page that never stops loading still
+ * gets described, only less settled.
+ */
+const SETTLE_LOAD_MS = 2_000;
+/** And a beat after that, for script-rendered content to land. */
+const SETTLE_QUIET_MS = 300;
+/** The snapshot's own ceiling. A huge page fails over to text, not a hang. */
+const SNAPSHOT_TIMEOUT_MS = 5_000;
+/** Why a screenshot was skipped after the person watching hid the page. */
+const HIDDEN_SHOT = 'No screenshot this time: the person watching had hidden the page.';
+/** A screenshot's encoding. JPEG at 80 reads text cleanly at a fifth of PNG's size. */
+const SCREENSHOT_QUALITY = 80;
+/** Longest a screenshot may take before the step goes on without one. */
+const SCREENSHOT_TIMEOUT_MS = 5_000;
+/** A screenshot this large (base64) is not sent: something is wrong with it. */
+const SCREENSHOT_MAX_CHARS = 2_000_000;
+/** Frames the privacy check reads before calling the page unsafe to picture. */
+const PRIVACY_FRAME_LIMIT = 20;
+/**
+ * True when something private is on screen in this frame: a password, card or
+ * one-time-code field, or a payment provider's iframe. Read in every frame
+ * before a screenshot is taken; any "yes", or a main frame that cannot answer,
+ * means no screenshot.
+ */
+const PRIVATE_ON_SCREEN_EXPRESSION = `(() => {
+  const H = innerHeight, W = innerWidth;
+  const seen = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 && r.top < H && r.left < W; };
+  const FIELDS = 'input[type="password" i], [autocomplete^="cc-" i], [autocomplete="one-time-code" i], input[name*="cvc" i], input[name*="cvv" i], input[name*="cardnumber" i], input[name*="card_number" i], input[name*="card-number" i]';
+  const PAYMENT = /stripe|braintree|adyen|paypal|checkout\\.com|squareup|razorpay|klarna|recurly|chargebee|authorize\\.net/i;
+  const roots = [document];
+  for (let i = 0; i < roots.length && i < 500; i++) {
+    const root = roots[i];
+    for (const el of root.querySelectorAll(FIELDS)) if (seen(el)) return true;
+    for (const f of root.querySelectorAll('iframe')) if (PAYMENT.test(f.src || '') && seen(f)) return true;
+    for (const el of root.querySelectorAll('*')) if (el.shadowRoot) roots.push(el.shadowRoot);
+  }
+  return false;
+})()`;
+/** The page's scroll state, read without reaching into page globals twice. */
+const VIEWPORT_EXPRESSION = '({ width: innerWidth, height: innerHeight, scrollY: scrollY, scrollHeight: document.documentElement.scrollHeight })';
+/**
  * How long the agent waits for a restored picture before refusing to act.
  *
  * A started screencast emits its first frame immediately, so this is generous
@@ -299,6 +375,11 @@ export interface RemoteBrowserControllerOptions {
    * its own trouble.
    */
   ready?: Promise<unknown>;
+  /**
+   * The pause after an action before its page view is taken, in ms. Tests set
+   * it to 0; everything else should leave it alone.
+   */
+  settleQuietMs?: number;
 }
 
 /** One run's browser, and the page it is working on. */
@@ -486,6 +567,25 @@ interface RunBrowser {
   ownedContext?: BrowserContext;
   /** Bumped on every main-frame navigation. See the desktop's equivalent. */
   generation: number;
+  /**
+   * The latest page view the model was shown: which refs it may act on, what
+   * each one is called, and the page generation they belong to. A ref is good
+   * only while all three still hold — see `refRefusal`.
+   */
+  view?: { generation: number; labels: Map<string, string> };
+  /** Views shown so far, so each one can say which it is. */
+  views?: number;
+  /**
+   * The page view the last screenshot went with. An action that leaves the
+   * page looking the same sends no second picture of it.
+   */
+  shotOf?: string;
+  /**
+   * Why the next screenshot is skipped, when something since the last one
+   * says a picture could catch what a person wanted kept private: they took
+   * control (and may have typed a password), or they hid the page.
+   */
+  skipShot?: string;
   /**
    * Fires when this run's browser must stop, now.
    *
@@ -685,7 +785,17 @@ export class RemoteBrowserController {
     this.onLiveViewAll = options.onLiveView;
     this.onReleaseFailed = options.onReleaseFailed;
     this.ready = options.ready;
+    this.settleQuietMs = options.settleQuietMs ?? SETTLE_QUIET_MS;
   }
+
+  /** See `RemoteBrowserControllerOptions.settleQuietMs`. */
+  private settleQuietMs: number;
+
+  /**
+   * What this controller can do beyond the six original actions. The tool
+   * reads it to decide which actions and parameters to offer the model.
+   */
+  readonly features = { pageView: true, screenshots: true } as const;
 
   /**
    * The predecessor's teardown, until it has been waited for once.
@@ -1615,6 +1725,7 @@ export class RemoteBrowserController {
         return { ok: false, detail: 'The browser view changed while you were waiting. Take control again from the current view.' };
       }
       lease.takeOver(runId);
+      held.skipShot = 'No screenshot this time: a person was just using this page.';
     } finally {
       lease.endAction(token);
     }
@@ -2212,6 +2323,11 @@ export class RemoteBrowserController {
         return { ok: false, detail: 'The run was cancelled.' };
       }
 
+      // An action on a hidden page shows it again first (below), so by the
+      // time a screenshot could be taken the page no longer reads as hidden.
+      // The person hid it for a reason; the next picture is skipped.
+      if (held.hiddenByHolder === true) held.skipShot = HIDDEN_SHOT;
+
       // A deliberate Hide survives handback, and an unwatch deliberately
       // detaches the CDP session. Those two facts can coexist: hiddenByHolder
       // can still be true here with no screencast to restore. Skipping the gate
@@ -2317,7 +2433,7 @@ export class RemoteBrowserController {
 
       return await this.perform(runId, held, action, recoveringClosedPage ? held.generation : planned);
     } catch (err) {
-      return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+      return { ok: false, detail: actionError(err) };
     } finally {
       if (temporaryCapture) {
         const { held, cdp, watchGen } = temporaryCapture;
@@ -2765,6 +2881,173 @@ export class RemoteBrowserController {
     this.announceControl(runId);
   }
 
+  /**
+   * Describe the run's page as it is now, and remember what was shown.
+   *
+   * Null when the page cannot be described — no AI snapshot in this
+   * Playwright, a snapshot that failed, or one with no refs in it. The caller
+   * then says so rather than presenting an empty list as the page.
+   */
+  private async pageView(
+    held: RunBrowser,
+    stoppable: <T>(work: Promise<T>) => Promise<T>,
+    settle: boolean,
+  ): Promise<{ view: PageView; viewport: Viewport | undefined } | null> {
+    // The CURRENT page: a click may have moved the run to a popup.
+    const page = held.page;
+    if (typeof page.ariaSnapshot !== 'function') return null;
+    try {
+      if (settle) {
+        if (typeof page.waitForLoadState === 'function') {
+          await stoppable(page.waitForLoadState('load', { timeout: SETTLE_LOAD_MS })).catch(() => {});
+        }
+        if (this.settleQuietMs > 0) await new Promise((r) => setTimeout(r, this.settleQuietMs));
+      }
+      // Read before the snapshot, so a navigation landing in between makes the
+      // view stale rather than credits it to the new page.
+      const generation = held.generation;
+      const snapshot = await stoppable(page.ariaSnapshot({ mode: 'ai', boxes: true, timeout: SNAPSHOT_TIMEOUT_MS }));
+      const viewport = typeof page.evaluate === 'function'
+        ? readViewport(await stoppable(page.evaluate(VIEWPORT_EXPRESSION)).catch(() => undefined))
+        : undefined;
+      const view = describePage({
+        snapshot,
+        url: page.url(),
+        title: await page.title().catch(() => ''),
+        viewport,
+        number: (held.views ?? 0) + 1,
+      });
+      if (!view) return null;
+      held.views = (held.views ?? 0) + 1;
+      held.view = { generation, labels: view.labels };
+      return { view, viewport };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * A picture of the run's page to go with a page view, or the reason there
+   * is none. Null when nothing needs saying — the page looks as it did in the
+   * last picture.
+   *
+   * Taken clean: nothing is drawn on or injected into the page, and Chrome
+   * captures what is on screen. Withheld, and the model told why, while the
+   * person watching has hidden the page, on the first view after they took
+   * control, and whenever a password, card or one-time-code field or a payment
+   * frame is on screen. The page view still goes: it never holds a value.
+   */
+  private async screenshot(
+    held: RunBrowser,
+    stoppable: <T>(work: Promise<T>) => Promise<T>,
+    seen: { view: PageView; viewport: Viewport | undefined },
+    always: boolean,
+    marked: boolean,
+  ): Promise<{ image: NonNullable<BrowserActionOutcome['image']> } | { withheld: string } | null> {
+    const page = held.page;
+    // The view without its number: the same page twice reads the same.
+    const looks = seen.view.text.slice(seen.view.text.indexOf('\n') + 1);
+    if (!always && held.shotOf === looks) return null;
+    if (typeof page.screenshot !== 'function' || !seen.viewport) {
+      return { withheld: 'No screenshot: this browser cannot take one.' };
+    }
+    if (held.hiddenByHolder === true) return { withheld: HIDDEN_SHOT };
+    if (held.skipShot) {
+      const why = held.skipShot;
+      held.skipShot = undefined;
+      return { withheld: why };
+    }
+    if (await this.privateOnScreen(page, stoppable, seen.viewport)) {
+      return { withheld: 'No screenshot: a password, card or one-time-code field is on screen.' };
+    }
+    try {
+      const bytes = await stoppable(page.screenshot({
+        type: 'jpeg', quality: SCREENSHOT_QUALITY, scale: 'css', caret: 'initial', timeout: SCREENSHOT_TIMEOUT_MS,
+      }));
+      const clean = Buffer.from(bytes).toString('base64');
+      if (!clean || clean.length > SCREENSHOT_MAX_CHARS) return { withheld: 'No screenshot: the picture could not be taken.' };
+      held.shotOf = looks;
+      const size = { width: Math.round(seen.viewport.width), height: Math.round(seen.viewport.height) };
+      // The marks go on a copy; if they cannot be drawn, the clean picture is
+      // still worth sending.
+      const data = marked ? (await this.marked(page, clean, size, seen.view)) ?? clean : clean;
+      return {
+        image: {
+          data,
+          mimeType: 'image/jpeg',
+          width: Math.round(seen.viewport.width),
+          height: Math.round(seen.viewport.height),
+        },
+      };
+    } catch {
+      return { withheld: 'No screenshot: the picture could not be taken.' };
+    }
+  }
+
+  /** The screenshot with the view's refs drawn on it, or null. See `marks.ts`. */
+  private async marked(
+    page: Page,
+    data: string,
+    size: { width: number; height: number },
+    view: PageView,
+  ): Promise<string | null> {
+    let cdp: CDPSession | undefined;
+    try {
+      cdp = await page.context().newCDPSession(page);
+      const drawn = await drawMarks(cdp, { data, ...size }, view.marks);
+      return drawn && drawn.length <= SCREENSHOT_MAX_CHARS ? drawn : null;
+    } catch {
+      return null;
+    } finally {
+      await cdp?.detach().catch(() => {});
+    }
+  }
+
+  /**
+   * Whether anything private is on screen, in any frame. Fails closed for the
+   * page itself — a page that cannot be checked is not pictured — and open for
+   * a sub-frame that went away mid-check, which would otherwise end every
+   * screenshot on a page with an ad slot.
+   */
+  private async privateOnScreen(
+    page: Page,
+    stoppable: <T>(work: Promise<T>) => Promise<T>,
+    viewport: Viewport,
+  ): Promise<boolean> {
+    if (typeof page.evaluate !== 'function') return true;
+    try {
+      if ((await stoppable(page.evaluate(PRIVATE_ON_SCREEN_EXPRESSION))) !== false) return true;
+    } catch {
+      return true;
+    }
+    const frames = typeof page.frames === 'function' ? page.frames().slice(1, PRIVACY_FRAME_LIMIT + 1) : [];
+    for (const frame of frames) {
+      // A frame judges "on screen" against its own little viewport, so a
+      // login iframe far below the fold reads as showing its password field.
+      // Only a frame whose iframe is itself on the page's screen counts.
+      if (!(await frameOnScreen(frame, viewport))) continue;
+      const found = await stoppable(frame.evaluate(PRIVATE_ON_SCREEN_EXPRESSION)).catch(() => false);
+      if (found === true) return true;
+    }
+    return false;
+  }
+
+  /** A view for the outcome, with its screenshot or the reason for none when one was asked for. */
+  private async pictured(
+    held: RunBrowser,
+    stoppable: <T>(work: Promise<T>) => Promise<T>,
+    seen: { view: PageView; viewport: Viewport | undefined },
+    action: BrowserAction,
+  ): Promise<Pick<BrowserActionOutcome, 'view' | 'image'>> {
+    const view = viewOutcome(seen.view);
+    if (!action.screenshot) return { view };
+    // Asked for by name, a picture is taken even of an unchanged page.
+    const shot = await this.screenshot(held, stoppable, seen, action.kind === 'observe', action.marked === true);
+    if (!shot) return { view };
+    if ('withheld' in shot) return { view: { ...view, text: `${view.text}\n\n${shot.withheld}` } };
+    return { view, image: shot.image };
+  }
+
   private async perform(runId: string, held: RunBrowser, action: BrowserAction, planned: number): Promise<BrowserActionOutcome> {
     const { page } = held;
     /**
@@ -2819,6 +3102,45 @@ export class RemoteBrowserController {
       };
     }
 
+    // A ref names a control from the latest page view, and only from it. It is
+    // refused rather than re-matched when that view no longer describes the
+    // page: guessing which new button "e14" meant is how a click lands on the
+    // wrong thing.
+    let target: Locator | undefined;
+    let named = action.selector ?? '';
+    if (action.ref) {
+      const refused = refRefusal(held, action.ref);
+      if (refused) return { ok: false, detail: refused, ...(await where()) };
+      target = page.locator!(`aria-ref=${action.ref}`);
+      if ((await stoppable(target.count())) === 0) {
+        return {
+          ok: false,
+          detail: `${action.ref} is no longer on the page. Call observe for a fresh page view.`,
+          ...(await where()),
+        };
+      }
+      named = `${held.view!.labels.get(action.ref)} (${action.ref})`;
+    } else if (action.selector && needsLocator(action.kind)) {
+      if (typeof page.locator !== 'function') {
+        return { ok: false, detail: `This browser cannot ${action.kind.replace('_', ' ')}.` };
+      }
+      target = page.locator(action.selector);
+    }
+
+    /**
+     * Finish an action, with a fresh page view when the tool asked for one.
+     *
+     * The view never turns a done action into a failed one: the click happened
+     * whether or not the page could then be described, and saying otherwise
+     * invites the model to click again.
+     */
+    const finish = async (outcome: BrowserActionOutcome, settle: boolean): Promise<BrowserActionOutcome> => {
+      if (!action.pageView) return outcome;
+      const seen = await this.pageView(held, stoppable, settle);
+      if (!seen) return outcome;
+      return { ...outcome, ...(await this.pictured(held, stoppable, seen, action)) };
+    };
+
     switch (action.kind) {
       case 'navigate': {
         const target = action.url ?? '';
@@ -2826,33 +3148,69 @@ export class RemoteBrowserController {
           return { ok: false, detail: 'Only http and https addresses can be opened.' };
         }
         await stoppable(page.goto(target, { timeout: ACTION_TIMEOUT_MS, waitUntil: 'domcontentloaded' }));
-        return { ok: true, detail: `Opened ${target}`, ...(await where()) };
+        return finish({ ok: true, detail: `Opened ${target}`, ...(await where()) }, true);
       }
       case 'click': {
         const pagesBefore = new Set(page.context().pages());
-        await stoppable(page.click(action.selector!, { timeout }));
+        if (target) await stoppable(target.click({ timeout }));
+        else await stoppable(page.click(action.selector!, { timeout }));
         await this.followOpenedPage(runId, held, pagesBefore);
-        return { ok: true, detail: `Clicked ${action.selector}`, ...(await where()) };
+        return finish({ ok: true, detail: `Clicked ${named}`, ...(await where()) }, true);
       }
       case 'fill':
-        await stoppable(page.fill(action.selector!, action.value ?? '', { timeout }));
-        return { ok: true, detail: `Filled ${action.selector}`, ...(await where()) };
+        if (target) await stoppable(target.fill(action.value ?? '', { timeout }));
+        else await stoppable(page.fill(action.selector!, action.value ?? '', { timeout }));
+        return { ok: true, detail: `Filled ${named}`, ...(await where()) };
       case 'press': {
         // A selector focuses first; without one the key goes to whatever has
         // focus, which is what "press Escape" usually means.
         const pagesBefore = new Set(page.context().pages());
-        if (action.selector) await stoppable(page.press(action.selector, action.key!, { timeout }));
+        if (target) await stoppable(target.press(action.key!, { timeout }));
+        else if (action.selector) await stoppable(page.press(action.selector, action.key!, { timeout }));
         else await stoppable(page.keyboard.press(action.key!));
         await this.followOpenedPage(runId, held, pagesBefore);
-        return { ok: true, detail: `Pressed ${action.key}`, ...(await where()) };
+        return finish({ ok: true, detail: `Pressed ${action.key}`, ...(await where()) }, true);
       }
       case 'wait_for':
-        await stoppable(page.waitForSelector(action.selector!, { timeout }));
-        return { ok: true, detail: `${action.selector} appeared`, ...(await where()) };
+        if (target) await stoppable(target.waitFor({ state: 'visible', timeout }));
+        else await stoppable(page.waitForSelector(action.selector!, { timeout }));
+        return { ok: true, detail: `${named} appeared`, ...(await where()) };
       case 'extract_text': {
-        const text = await stoppable(page.innerText(action.selector ?? 'body', { timeout }));
+        const text = target
+          ? await stoppable(target.innerText({ timeout }))
+          : await stoppable(page.innerText(action.selector ?? 'body', { timeout }));
         return { ok: true, detail: text.slice(0, 200_000), ...(await where()) };
       }
+      case 'observe': {
+        const seen = await this.pageView(held, stoppable, false);
+        if (!seen) {
+          return {
+            ok: false,
+            detail: 'This browser cannot list the page\'s controls. Use extract_text to read the page and CSS selectors to act on it.',
+            ...(await where()),
+          };
+        }
+        return { ok: true, detail: 'Looked at the page.', ...(await where()), ...(await this.pictured(held, stoppable, seen, action)) };
+      }
+      case 'scroll': {
+        if (target) {
+          await stoppable(target.scrollIntoViewIfNeeded({ timeout }));
+        } else {
+          if (typeof page.evaluate !== 'function') return { ok: false, detail: 'This browser cannot scroll.' };
+          // Fixed text: the direction picks the sign and nothing the model
+          // wrote reaches the expression.
+          const sign = action.direction === 'up' ? -1 : 1;
+          await stoppable(page.evaluate(`window.scrollBy(0, ${sign} * Math.round(innerHeight * 0.8))`));
+        }
+        const how = target ? `Scrolled to ${named}` : `Scrolled ${action.direction === 'up' ? 'up' : 'down'}`;
+        return finish({ ok: true, detail: how, ...(await where()) }, false);
+      }
+      case 'select_option':
+        await stoppable(target!.selectOption(action.value ?? '', { timeout }));
+        return { ok: true, detail: `Chose "${action.value}" in ${named}`, ...(await where()) };
+      case 'hover':
+        await stoppable(target!.hover({ timeout }));
+        return finish({ ok: true, detail: `Hovered over ${named}`, ...(await where()) }, false);
       default:
         return { ok: false, detail: `Unsupported action: ${String(action.kind)}` };
     }
@@ -2869,6 +3227,71 @@ function refusal(result: 'busy' | 'cancelled' | 'off' | 'human'): string {
   if (result === 'off') return 'Browser control was turned off while this action waited for the browser.';
   if (result === 'cancelled') return 'The run was cancelled while waiting for the browser.';
   return 'The browser is in use by another part of this run and did not come free in time. Try again, or do something else first.';
+}
+
+/**
+ * A failed action, said in the words the model is shown.
+ *
+ * Playwright appends a call log to its errors, and the log quotes the element
+ * it resolved — attributes and all, so `<input type="password" value="…">`
+ * arrives with the password in it. Only the first part, the reason, is kept,
+ * without the terminal colours it is written in.
+ */
+export function actionError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  // eslint-disable-next-line no-control-regex
+  return message.split(/\n\s*Call log:/)[0]!.replace(/\u001b\[[0-9;]*m/g, '').trim();
+}
+
+/**
+ * Whether a frame's iframe is on the page's screen. Yes when that cannot be
+ * told: the check it decides is a privacy check, and a frame it skips is a
+ * frame it does not read.
+ */
+async function frameOnScreen(frame: Frame, viewport: Viewport): Promise<boolean> {
+  if (typeof frame.frameElement !== 'function') return true;
+  try {
+    const box = await (await frame.frameElement()).boundingBox();
+    if (!box) return false;
+    return box.width > 0 && box.height > 0
+      && box.x + box.width > 0 && box.y + box.height > 0
+      && box.x < viewport.width && box.y < viewport.height;
+  } catch {
+    return true;
+  }
+}
+
+/** Why a ref cannot be used now, or null when it can. */
+function refRefusal(held: RunBrowser, ref: string): string | null {
+  if (!held.view) return `There is no page view to take ${ref} from. Call observe first.`;
+  if (held.view.generation !== held.generation) {
+    return `${ref} is from an earlier page. Call observe for a fresh page view.`;
+  }
+  if (!held.view.labels.has(ref)) return `${ref} is not in the latest page view. Use a ref from it, or call observe again.`;
+  if (typeof held.page.locator !== 'function') return 'This browser cannot act on refs. Use a CSS selector.';
+  return null;
+}
+
+/** Actions that resolve their selector through a locator rather than a page method. */
+function needsLocator(kind: BrowserAction['kind']): boolean {
+  return kind === 'scroll' || kind === 'select_option' || kind === 'hover';
+}
+
+function viewOutcome(view: PageView): NonNullable<BrowserActionOutcome['view']> {
+  return { text: view.text, labels: Object.fromEntries(view.labels) };
+}
+
+/** The page's own report of its size and scroll, kept only when it is numbers. */
+function readViewport(v: unknown): Viewport | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const o = v as Record<string, unknown>;
+  const n = (k: string) => (typeof o[k] === 'number' && Number.isFinite(o[k]) ? o[k] as number : undefined);
+  const width = n('width');
+  const height = n('height');
+  const scrollY = n('scrollY');
+  const scrollHeight = n('scrollHeight');
+  if (width === undefined || height === undefined || scrollY === undefined || scrollHeight === undefined) return undefined;
+  return { width, height, scrollY, scrollHeight };
 }
 
 /**

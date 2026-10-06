@@ -155,6 +155,82 @@ describe('the hosted browser gate is not the desktop one', () => {
     c.setRemoteBrowserController(controller);
     expect(c.getToolRegistry().hasTool('browser_control')).toBe(false);
   });
+
+  describe('page views', () => {
+    const remote = { remoteBrowser: { provider: 'cdp', url: 'ws://b.test:9222' } };
+    const offersRefs = (c: Cascade) => {
+      const schema = c.getToolRegistry().getTool('browser_control')!.inputSchema as { properties: Record<string, unknown> };
+      return 'ref' in schema.properties;
+    };
+
+    it('are on by default where the host can describe pages', () => {
+      const c = withTools(remote);
+      c.setRemoteBrowserController(controller, undefined, { pageView: true });
+      expect(offersRefs(c)).toBe(true);
+    });
+
+    it('stay off where the host cannot, whatever the setting says', () => {
+      const c = withTools({ ...remote, browserVision: 'image' });
+      c.setRemoteBrowserController(controller);
+      expect(offersRefs(c)).toBe(false);
+    });
+
+    it('come with screenshots only where the setting asks and the host can take them', async () => {
+      const asked = async (c: Cascade) => {
+        const tool = c.getToolRegistry().getTool('browser_control') as unknown as {
+          execute(i: Record<string, unknown>, o: unknown): Promise<string>;
+        };
+        await tool.execute({ action: 'observe' }, { sessionId: 's', tierId: 't', attachImage: () => {} });
+        return seen.at(-1)?.screenshot === true;
+      };
+      const seen: Array<{ screenshot?: boolean }> = [];
+      const recording = async (action: { screenshot?: boolean }) => { seen.push(action); return { ok: true, detail: 'ok' }; };
+      const both = { pageView: true, screenshots: true };
+
+      const listOnly = withTools(remote);
+      listOnly.setRemoteBrowserController(recording, undefined, both);
+      expect(await asked(listOnly), 'list is the default: no screenshots').toBe(false);
+
+      const image = withTools({ ...remote, browserVision: 'image' });
+      image.setRemoteBrowserController(recording, undefined, both);
+      expect(await asked(image)).toBe(true);
+
+      const cannot = withTools({ ...remote, browserVision: 'image' });
+      cannot.setRemoteBrowserController(recording, undefined, { pageView: true });
+      expect(await asked(cannot)).toBe(false);
+    });
+
+    it('draw the refs on the screenshot only in marked mode', async () => {
+      const seen: Array<{ marked?: boolean }> = [];
+      const recording = async (action: { marked?: boolean }) => { seen.push(action); return { ok: true, detail: 'ok' }; };
+      for (const browserVision of ['image', 'marked']) {
+        const c = withTools({ ...remote, browserVision });
+        c.setRemoteBrowserController(recording, undefined, { pageView: true, screenshots: true });
+        const tool = c.getToolRegistry().getTool('browser_control') as unknown as {
+          execute(i: Record<string, unknown>, o: unknown): Promise<string>;
+        };
+        await tool.execute({ action: 'observe' }, { sessionId: 's', tierId: 't', attachImage: () => {} });
+      }
+      expect(seen.map((a) => a.marked === true)).toEqual([false, true]);
+    });
+
+    it('say in /why how many screenshots the run sent, once, not once a step', () => {
+      const c = withTools(remote);
+      const router = (c as unknown as { router: { getRunScreenshots: () => { sent: number; leftOut: number } } }).router;
+      router.getRunScreenshots = () => ({ sent: 0, leftOut: 0 });
+      expect(c.getDecisionLog().filter((d) => d.kind === 'browser')).toEqual([]);
+      router.getRunScreenshots = () => ({ sent: 7, leftOut: 1 });
+      const browser = c.getDecisionLog().filter((d) => d.kind === 'browser');
+      expect(browser).toHaveLength(1);
+      expect(browser[0]!.detail).toBe('7 browser screenshots sent to the model; 1 left out for a model that could not take it');
+    });
+
+    it('are turned off by browserVision: off', () => {
+      const c = withTools({ ...remote, browserVision: 'off' });
+      c.setRemoteBrowserController(controller, undefined, { pageView: true });
+      expect(offersRefs(c)).toBe(false);
+    });
+  });
 });
 
 describe('a run announces its id before it can fail', () => {

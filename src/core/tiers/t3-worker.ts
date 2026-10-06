@@ -7,6 +7,7 @@ import path from 'node:path';
 import type {
   ConversationMessage,
   GenerateOptions,
+  ImageAttachment,
   ModelInfo,
   PermissionRequest,
   T2ToT3Assignment,
@@ -38,7 +39,9 @@ import {
 } from '../verification/acceptance.js';
 import { ACTING_INTEGRITY_RULE, appendToolRecord, describeHandedWork, describeToolRecord, recordToolCall, type HandedWork, type ToolRecordEntry } from './integrity.js';
 import { RedactionLayer } from '../audit/redaction.js';
-import { BROWSER_TOOL, BROWSER_WORKER_RULE } from './browser-planning.js';
+import { BROWSER_TOOL, BROWSER_WORKER_RULE, foldOldPageViews, withScreenshot } from './browser-planning.js';
+import { IMAGE_TOKENS_EACH } from '../router/index.js';
+import { mayTakeScreenshots } from '../router/screenshots.js';
 
 /**
  * Thrown by executeTool() when the underlying tool error indicates a condition
@@ -364,6 +367,18 @@ export class T3Worker extends BaseTier {
   /** True when this subtask matched a privacy.paths local-only pattern. */
   private localOnlyMatch = false;
   private peerSyncBuffer: Array<{ fromId: string; content: unknown; timestamp: string }> = [];
+  /**
+   * Whether the model this worker runs on can be shown a browser screenshot.
+   * Set when the loop picks its model; tools are offered `attachImage` only
+   * while it holds.
+   */
+  private seesScreenshots = false;
+  /**
+   * The newest screenshot a tool handed over, waiting for the next request.
+   * Sent once and dropped — never stored in the history — so the cost is one
+   * picture per step rather than every picture on every step.
+   */
+  private pendingScreenshot: ImageAttachment | undefined;
   private store?: MemoryStore;
   private audit?: AuditLogger;
   private tools: ToolDefinition[] = [];
@@ -888,6 +903,7 @@ export class T3Worker extends BaseTier {
     // Detect tool-use mode against the EFFECTIVE model (per-subtask override if
     // any, else the tier default).
     const effectiveModel = subtaskModel ?? this.router.getModelForTier('T3');
+    this.seesScreenshots = mayTakeScreenshots(effectiveModel, IMAGE_TOKENS_EACH);
     // Tag this node with the model actually serving it — including a Cascade
     // Auto per-subtask override — so the desktop can show model-per-task.
     if (effectiveModel) this.setServingModel(`${effectiveModel.provider}:${effectiveModel.id}`);
@@ -930,8 +946,13 @@ export class T3Worker extends BaseTier {
         }
       }
 
+      // The screenshot rides on this request only, after the tool results it
+      // belongs to. The router still drops it if the model it resolves to
+      // cannot see it.
+      const screenshot = this.pendingScreenshot;
+      this.pendingScreenshot = undefined;
       const options: GenerateOptions = {
-        messages: this.context.getMessages(),
+        messages: withScreenshot(foldOldPageViews(this.context.getMessages()), screenshot),
         systemPrompt: this.systemPromptOverride + systemPrompt
           + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : '')
           + textToolSuffix,
@@ -1084,6 +1105,11 @@ export class T3Worker extends BaseTier {
     const needsApproval = this.toolRegistry.requiresApproval(tc.name);
 
     if (needsApproval) {
+      // What the person approving sees, and whether an earlier "always" may
+      // answer for them. A tool that offers neither is shown as called.
+      const shown = (this.toolRegistry.getTool?.(tc.name) as {
+        forApproval?: (input: Record<string, unknown>, sessionId: string) => { input: Record<string, unknown>; alwaysAsk: boolean };
+      } | undefined)?.forApproval?.(tc.input, this.taskId);
       // ── Hierarchical permission escalation: T3 → T2 → T1 → User ──
       if (this.permissionEscalator) {
         const req: PermissionRequest = {
@@ -1091,16 +1117,17 @@ export class T3Worker extends BaseTier {
           requestedBy: this.id,
           parentT2Id: this.parentId ?? 'root',
           toolName: tc.name,
-          input: tc.input,
+          input: shown?.input ?? tc.input,
           isDangerous: this.toolRegistry.isDangerous(tc.name),
           subtaskContext: this.assignment?.subtaskTitle ?? 'Unknown subtask',
           sectionContext: this.assignment?.subtaskTitle ?? 'Unknown section',
+          ...(shown?.alwaysAsk ? { forceReprompt: true } : {}),
         };
         const decision = await this.permissionEscalator.requestPermission(req);
         if (!decision.approved) return `Tool ${tc.name} was denied (decided by ${decision.decidedBy}).`;
       } else {
         // ── Fallback: legacy direct approval event (used when escalator not wired) ──
-        if (this.sessionApprovals.has(tc.name)) {
+        if (this.sessionApprovals.has(tc.name) && !shown?.alwaysAsk) {
           const wasApproved = this.sessionApprovals.get(tc.name)!;
           if (!wasApproved) return `Tool ${tc.name} was denied by user.`;
         } else {
@@ -1118,7 +1145,7 @@ export class T3Worker extends BaseTier {
               id: `${this.id}-${tc.id}`,
               tierId: this.id,
               toolName: tc.name,
-              input: tc.input,
+              input: shown?.input ?? tc.input,
               description: `T3 (${this.assignment?.subtaskTitle}) wants to run "${tc.name}"`,
               isDangerous: this.toolRegistry.isDangerous(tc.name),
             });
@@ -1127,7 +1154,7 @@ export class T3Worker extends BaseTier {
               resolve(d);
             });
           });
-          if (legacyDecision.always) this.sessionApprovals.set(tc.name, legacyDecision.approved);
+          if (legacyDecision.always && !shown?.alwaysAsk) this.sessionApprovals.set(tc.name, legacyDecision.approved);
           if (!legacyDecision.approved) return `Tool ${tc.name} was denied by user.`;
         }
       }
@@ -1175,6 +1202,8 @@ export class T3Worker extends BaseTier {
           this.peerSyncBuffer = [];
           return msgs;
         },
+        // The newest wins: one picture per step, of the page as it is now.
+        ...(this.seesScreenshots ? { attachImage: (image: ImageAttachment) => { this.pendingScreenshot = image; } } : {}),
       });
       if (this.audit) {
         this.audit.toolCall(this.id, tc.name, tc.input);

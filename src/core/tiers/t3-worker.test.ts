@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import type {
+  ConversationMessage,
   GenerateResult,
+  ImageAttachment,
+  ModelInfo,
   PermissionDecision,
   PermissionRequest,
   T2ToT3Assignment,
@@ -839,5 +842,115 @@ describe('tool status display', () => {
     await worker.execute(makeAssignment(), 'task-real-tool');
 
     expect(statuses).toContain('Using tool: file_write');
+  });
+});
+
+describe('a browser screenshot reaches the next request, once', () => {
+  const SEEING = {
+    id: 'claude-sonnet-x', name: 'Claude', provider: 'anthropic', contextWindow: 200_000, isVisionCapable: true,
+    inputCostPer1kTokens: 0.003, outputCostPer1kTokens: 0.015, maxOutputTokens: 8_000, supportsStreaming: true,
+    isLocal: false, supportsToolUse: true,
+  } as ModelInfo;
+  const IMAGE: ImageAttachment = { type: 'base64', data: 'AQID', mimeType: 'image/jpeg', screenshot: { width: 1280, height: 800 } };
+  const hasImage = (messages: ConversationMessage[]) =>
+    messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'image'));
+
+  /** Two browser steps, the first of which hands over a picture, then an answer. */
+  function run(model: ModelInfo) {
+    const sent: ConversationMessage[][] = [];
+    let call = 0;
+    const generate = vi.fn(async (_tier: string, options: { messages: ConversationMessage[] }) => {
+      sent.push(options.messages);
+      call += 1;
+      if (call <= 2) return makeResult('', [{ id: `c${call}`, name: 'browser_control', input: { action: 'observe' } }]);
+      return makeResult('The page shows a booking form.');
+    });
+    const router = { generate, getModelForTier: () => model } as unknown as CascadeRouter;
+    const offered: boolean[] = [];
+    let executed = 0;
+    const registry = makeToolRegistry({
+      getToolDefinitions: () => [{ name: 'browser_control', description: 'Browse', inputSchema: {} }],
+      execute: vi.fn(async (_name: string, _input: unknown, options: { attachImage?: (i: ImageAttachment) => void }) => {
+        executed += 1;
+        offered.push(typeof options.attachImage === 'function');
+        if (executed === 1) options.attachImage?.(IMAGE);
+        return 'Looked at the page.';
+      }),
+    } as unknown as Partial<ToolRegistry>);
+    return { sent, offered, registry, router };
+  }
+
+  it('rides on the request after the step that took it, as a user turn after the results', async () => {
+    const { sent, registry, router } = run(SEEING);
+    const worker = new T3Worker(router, registry, 't2-parent');
+    await worker.execute(makeAssignment({ subtaskTitle: 'Read the booking page' }), 'task-shot');
+
+    expect(hasImage(sent[0]!)).toBe(false);
+    const second = sent[1]!;
+    expect(second.at(-2)).toMatchObject({ role: 'tool', toolCallId: 'c1' });
+    expect(second.at(-1)).toMatchObject({ role: 'user', content: [{ type: 'text' }, { type: 'image', image: IMAGE }] });
+    // Once. The next request has moved on, and so has the page.
+    expect(hasImage(sent[2]!)).toBe(false);
+  });
+
+  it('never enters the worker\'s history', async () => {
+    const { registry, router } = run(SEEING);
+    const worker = new T3Worker(router, registry, 't2-parent');
+    await worker.execute(makeAssignment({ subtaskTitle: 'Read the booking page' }), 'task-history');
+    const history = (worker as unknown as { context: { getMessages(): ConversationMessage[] } }).context.getMessages();
+    expect(hasImage(history)).toBe(false);
+  });
+
+  it('is not even taken for a model that cannot see it', async () => {
+    const { sent, offered, registry, router } = run({ ...SEEING, id: 'blind', isVisionCapable: false });
+    const worker = new T3Worker(router, registry, 't2-parent');
+    await worker.execute(makeAssignment({ subtaskTitle: 'Read the booking page' }), 'task-blind');
+    expect(offered.length).toBeGreaterThan(0);
+    expect(offered.every((o) => o === false)).toBe(true);
+    expect(sent.some(hasImage)).toBe(false);
+  });
+});
+
+describe('a person approving a browser action sees what it acts on', () => {
+  async function approve(shown: { input: Record<string, unknown>; alwaysAsk: boolean }) {
+    let call = 0;
+    const router = makeRouter(vi.fn(async () => {
+      call += 1;
+      return call === 1
+        ? makeResult('', [{ id: 'c1', name: 'browser_control', input: { action: 'click', ref: 'e14' } }])
+        : makeResult('Booked.');
+    }) as unknown as CascadeRouter['generate']);
+    const execute = vi.fn().mockResolvedValue('Clicked');
+    const forApproval = vi.fn(() => shown);
+    const registry = makeToolRegistry({
+      requiresApproval: () => true,
+      isDangerous: () => true,
+      execute,
+      getTool: (name: string) => (name === 'browser_control' ? { forApproval } : undefined),
+    } as unknown as Partial<ToolRegistry>);
+    const escalator = new PermissionEscalator();
+    const requestPermission = vi.spyOn(escalator, 'requestPermission').mockResolvedValue({
+      requestId: 'r', approved: true, decidedBy: 'USER', always: false,
+    } satisfies PermissionDecision);
+    const worker = new T3Worker(router, registry, 't2-parent');
+    worker.setPermissionEscalator(escalator);
+    await worker.execute(makeAssignment({ subtaskTitle: 'Book a table' }), 'task-approve');
+    return { request: requestPermission.mock.calls[0]![0], forApproval, execute };
+  }
+
+  it('shows the element by name, and runs the call as the model wrote it', async () => {
+    const { request, forApproval, execute } = await approve({
+      input: { action: 'click', ref: 'e14', target: 'button "Reserve 7:30 pm"', site: 'dine.example' },
+      alwaysAsk: false,
+    });
+    expect(forApproval).toHaveBeenCalledWith({ action: 'click', ref: 'e14' }, 'task-approve');
+    expect(request.input).toEqual({ action: 'click', ref: 'e14', target: 'button "Reserve 7:30 pm"', site: 'dine.example' });
+    expect(request.forceReprompt).toBeUndefined();
+    expect(execute.mock.calls[0]![1]).toEqual({ action: 'click', ref: 'e14' });
+  });
+
+  it('puts an irreversible one to the person even after an "always"', async () => {
+    const { request } = await approve({ input: { action: 'click', ref: 'e14', target: 'button "Pay $42.00"' }, alwaysAsk: true });
+    expect(request.forceReprompt).toBe(true);
   });
 });
