@@ -358,8 +358,8 @@ export class SteelProvider implements RemoteBrowserProvider {
   async createSession(signal?: AbortSignal): Promise<RemoteBrowserSession> {
     // The size is set rather than left to the provider: a screenshot of the
     // page is sent to vision models at the size it is taken, and 1280×800 is
-    // where one costs about 1.4k tokens on Claude. `dimensions` is in the accepted list
-    // above.
+    // where one costs about 1.4k tokens on Claude. `dimensions` is in the
+    // accepted list above.
     let details: SteelSessionDetails | undefined;
     for (let attempt = 0; ; attempt += 1) {
       try {
