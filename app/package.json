@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "@monaco-editor/react": "^4.6.0",
-    "@reduxjs/toolkit": "^2.3.0",
+    "@reduxjs/toolkit": "^2.13.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
@@ -42,7 +42,7 @@
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
-    "socket.io-client": "^4.8.0",
+    "socket.io-client": "^4.8.4",
     "socket.io-msgpack-parser": "^3.0.2"
   },
   "devDependencies": {
