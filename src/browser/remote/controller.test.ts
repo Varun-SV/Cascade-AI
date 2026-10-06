@@ -4529,6 +4529,11 @@ describe('page views and refs', () => {
   /** What the fake page's AI snapshot says the page holds. */
   let snapshot = '';
   let snapshotFails = false;
+  /** What the privacy check finds in the page itself: a field on screen, or an error. */
+  let privateOnScreen: boolean | 'throws' = false;
+  /** What each sub-frame's privacy check finds, and where its iframe sits (on screen unless given). */
+  let subFrames: Array<boolean | 'throws' | { found: boolean; y: number }> = [];
+  let shotFails = false;
   /** Refs the fake page can still resolve, whatever the last view listed. */
   let liveRefs = new Set<string>();
   const extra = page as unknown as Record<string, unknown>;
@@ -4545,15 +4550,40 @@ describe('page views and refs', () => {
   beforeEach(() => {
     snapshot = BOOKING;
     snapshotFails = false;
+    privateOnScreen = false;
+    subFrames = [];
+    shotFails = false;
     liveRefs = new Set(['e5', 'e9', 'e11', 'e14']);
     extra['ariaSnapshot'] = async (opts: unknown) => {
       page.calls.push(`snapshot:${JSON.stringify(opts)}`);
       if (snapshotFails) throw new Error('snapshot timed out');
       return snapshot;
     };
+    const privacyCheck = (found: boolean | 'throws') => {
+      page.calls.push('privacy');
+      if (found === 'throws') throw new Error('Execution context was destroyed');
+      return found;
+    };
     extra['evaluate'] = async (expression: string) => {
       if (expression.startsWith('window.scrollBy')) { page.calls.push(`eval:${expression}`); return undefined; }
+      if (expression.includes('one-time-code')) return privacyCheck(privateOnScreen);
       return { width: 1280, height: 800, scrollY: 0, scrollHeight: 1600 };
+    };
+    extra['frames'] = () => [
+      { evaluate: async () => { throw new Error('the main frame is asked through page.evaluate'); } },
+      ...subFrames.map((frame) => {
+        const found = typeof frame === 'object' ? frame.found : frame;
+        const y = typeof frame === 'object' ? frame.y : 100;
+        return {
+          evaluate: async () => privacyCheck(found),
+          frameElement: async () => ({ boundingBox: async () => ({ x: 0, y, width: 200, height: 40 }) }),
+        };
+      }),
+    ];
+    extra['screenshot'] = async (opts: unknown) => {
+      page.calls.push(`shot:${JSON.stringify(opts)}`);
+      if (shotFails) throw new Error('Target closed');
+      return new Uint8Array([1, 2, 3]);
     };
     extra['waitForLoadState'] = async (state: string) => { page.calls.push(`settle:${state}`); };
     extra['locator'] = (selector: string) => {
@@ -4579,13 +4609,13 @@ describe('page views and refs', () => {
   });
 
   afterEach(() => {
-    for (const k of ['ariaSnapshot', 'evaluate', 'waitForLoadState', 'locator']) delete extra[k];
+    for (const k of ['ariaSnapshot', 'evaluate', 'waitForLoadState', 'locator', 'screenshot', 'frames']) delete extra[k];
   });
 
   const controller = () => new RemoteBrowserController({ provider: fakeProvider().provider, settleQuietMs: 0 });
 
-  it('says what it offers, so the tool can offer refs', () => {
-    expect(controller().features).toEqual({ pageView: true });
+  it('says what it offers, so the tool can offer refs and screenshots', () => {
+    expect(controller().features).toEqual({ pageView: true, screenshots: true });
   });
 
   it('describes the page from Playwright\'s AI snapshot, with boxes', async () => {
@@ -4737,6 +4767,129 @@ describe('page views and refs', () => {
     await c.controller({ kind: 'select_option', selector: '#size', value: 'Two' }, ctx('run', 'w1'));
     await c.controller({ kind: 'hover', selector: '#menu' }, ctx('run', 'w1'));
     expect(page.calls).toEqual(['#size selectOption=Two', '#menu hover']);
+  });
+
+  describe('screenshots', () => {
+    const shots = () => page.calls.filter((x) => x.startsWith('shot:'));
+
+    it('takes a clean JPEG of the screen, with the view, when asked', async () => {
+      const out = await controller().controller({ kind: 'observe', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toEqual({ data: 'AQID', mimeType: 'image/jpeg', width: 1280, height: 800 });
+      // CSS pixels, so a high-density screen does not double the bill; the
+      // caret left alone, because hiding it means injecting a style.
+      expect(shots()).toEqual(['shot:{"type":"jpeg","quality":80,"scale":"css","caret":"initial","timeout":5000}']);
+      expect(out.view!.text).toContain('[e5] button "Account"');
+    });
+
+    it('checks for private fields before taking one', async () => {
+      await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(page.calls.indexOf('privacy')).toBeLessThan(page.calls.findIndex((x) => x.startsWith('shot:')));
+    });
+
+    it('takes none unless asked', async () => {
+      const out = await controller().controller({ kind: 'click', ref: 'e5', pageView: true }, ctx('run', 'w1')).catch(() => null);
+      const observed = await controller().controller({ kind: 'observe' }, ctx('run', 'w1'));
+      expect(out?.image).toBeUndefined();
+      expect(observed.image).toBeUndefined();
+      expect(shots()).toEqual([]);
+    });
+
+    it('sends no second picture of a page that looks the same — unless asked by name', async () => {
+      const c = controller();
+      await c.controller({ kind: 'click', selector: '#a', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      const again = await c.controller({ kind: 'click', selector: '#b', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      expect(again.image).toBeUndefined();
+      expect(again.view!.text).not.toContain('No screenshot');
+      const asked = await c.controller({ kind: 'observe', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      expect(asked.image).toBeDefined();
+      snapshot = BOOKING.replace('Account', 'Signed in');
+      const changed = await c.controller({ kind: 'click', selector: '#c', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      expect(changed.image).toBeDefined();
+      expect(shots()).toHaveLength(3);
+    });
+
+    it('withholds it while a password, card or one-time-code field is on screen', async () => {
+      privateOnScreen = true;
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: a password, card or one-time-code field is on screen.');
+      expect(shots()).toEqual([]);
+    });
+
+    it('looks in every frame, where a payment form usually lives', async () => {
+      subFrames = [false, true];
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot');
+    });
+
+    it('does not count a frame whose iframe is off the screen, however its own check reads', async () => {
+      // Inside its own 40px viewport, a login iframe 1,000px down "shows" its
+      // password field. Found on a real page, where it withheld every picture.
+      subFrames = [{ found: true, y: 1000 }];
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeDefined();
+      expect(page.calls.filter((x) => x === 'privacy')).toHaveLength(1);
+    });
+
+    it('does not let a sub-frame that went away end every screenshot', async () => {
+      subFrames = ['throws'];
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeDefined();
+    });
+
+    it('takes none when the page itself cannot be checked', async () => {
+      privateOnScreen = 'throws';
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(shots()).toEqual([]);
+    });
+
+    it('takes none while the person watching has hidden the page', async () => {
+      const c = controller();
+      await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+      (c as unknown as { runs: Map<string, { hiddenByHolder?: boolean }> }).runs.get('run')!.hiddenByHolder = true;
+      const out = await c.controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot this time: the person watching had hidden the page.');
+      expect(shots()).toEqual([]);
+    });
+
+    it('skips the first one after a person had control, then carries on', async () => {
+      // They may have just typed a password; the field can be gone from
+      // the screen while what they typed is still on it.
+      const c = controller();
+      await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+      let gen: number | undefined;
+      await c.startWatching('run', (f) => { gen = f.generation; });
+      cdp.pushFrame(1);
+      if (gen !== undefined) c.frameSeen('run', gen);
+      c.actorEnded('w1');
+      expect(await c.takeOver('run')).toEqual({ ok: true });
+      expect(c.handBack('run')).toBe(true);
+
+      const first = await c.controller({ kind: 'observe', screenshot: true }, ctx('run', 'w2'));
+      expect(first.ok).toBe(true);
+      expect(first.image).toBeUndefined();
+      expect(first.view!.text).toContain('No screenshot this time: a person was just using this page.');
+      const second = await c.controller({ kind: 'observe', screenshot: true }, ctx('run', 'w2'));
+      expect(second.image).toBeDefined();
+    });
+
+    it('says so when the picture could not be taken, and the action still counts', async () => {
+      shotFails = true;
+      const out = await controller().controller({ kind: 'click', selector: '#go', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      expect(out.ok).toBe(true);
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: the picture could not be taken.');
+    });
+
+    it('cannot price a picture whose size it does not know, so takes none', async () => {
+      extra['evaluate'] = async (expression: string) => (expression.includes('one-time-code') ? false : { width: 'wide' });
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(shots()).toEqual([]);
+    });
   });
 
   it('leaves out a scroll position the page did not report as numbers', async () => {

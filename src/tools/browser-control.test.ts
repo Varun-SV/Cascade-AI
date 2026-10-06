@@ -302,3 +302,43 @@ describe('BrowserControlTool — page views', () => {
     });
   });
 });
+
+describe('BrowserControlTool — screenshots', () => {
+  const IMAGE = { data: 'AQID', mimeType: 'image/jpeg' as const, width: 1280, height: 800 };
+  const shotTool = (features = { pageView: true, screenshots: true }) => {
+    const rec = recorder({ detail: 'Looked at the page.', view: { text: '[Page view 1]\nPage: A — https://a.example/', labels: {} }, image: IMAGE });
+    return { ...rec, tool: new BrowserControlTool(rec.controller, undefined, features) };
+  };
+
+  it('asks for a screenshot only when the worker can show one', async () => {
+    const { calls, tool } = shotTool();
+    const attachImage = vi.fn();
+    await tool.execute({ action: 'observe' }, { attachImage } as never);
+    await tool.execute({ action: 'observe' }, {} as never);
+    expect(calls[0]).toMatchObject({ kind: 'observe', pageView: true, screenshot: true });
+    expect(calls[1]).not.toHaveProperty('screenshot');
+  });
+
+  it('never asks for one on an action that brings back no view', async () => {
+    const { calls, tool } = shotTool();
+    await tool.execute({ action: 'fill', ref: 'e1', value: 'x' }, { attachImage: vi.fn() } as never);
+    expect(calls[0]).not.toHaveProperty('screenshot');
+  });
+
+  it('never asks where screenshots are off', async () => {
+    const { calls, tool } = shotTool({ pageView: true, screenshots: false });
+    await tool.execute({ action: 'observe' }, { attachImage: vi.fn() } as never);
+    expect(calls[0]).not.toHaveProperty('screenshot');
+  });
+
+  it('hands the picture to the worker beside the result, never inside it', async () => {
+    const { tool } = shotTool();
+    const attachImage = vi.fn();
+    const out = await tool.execute({ action: 'observe' }, { attachImage } as never);
+    expect(attachImage).toHaveBeenCalledWith({
+      type: 'base64', data: 'AQID', mimeType: 'image/jpeg', screenshot: { width: 1280, height: 800 },
+    });
+    expect(out).not.toContain('AQID');
+    expect(out).toContain('A screenshot of the page goes with this step.');
+  });
+});

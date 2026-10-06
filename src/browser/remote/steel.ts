@@ -238,6 +238,9 @@ const FETCH_BLOCKED_PORTS: ReadonlySet<string> = new Set([
  */
 const PROBE_PATH = '/v1/sessions';
 
+/** The page size a session is created at. See `createSession`. */
+export const STEEL_VIEWPORT = { width: 1280, height: 800 } as const;
+
 /**
  * A URL or path with its trailing slashes removed.
  *
@@ -353,10 +356,14 @@ export class SteelProvider implements RemoteBrowserProvider {
   }
 
   async createSession(signal?: AbortSignal): Promise<RemoteBrowserSession> {
+    // The size is set rather than left to the provider: a screenshot of the
+    // page is sent to vision models at the size it is taken, and 1280×800 is
+    // where one costs about 1.3k tokens. `dimensions` is in the accepted list
+    // above.
     let details: SteelSessionDetails | undefined;
     for (let attempt = 0; ; attempt += 1) {
       try {
-        details = await this.call<SteelSessionDetails>('POST', '/v1/sessions', signal, {});
+        details = await this.call<SteelSessionDetails>('POST', '/v1/sessions', signal, { dimensions: STEEL_VIEWPORT });
         break;
       } catch (err) {
         const delay = COLD_START_RETRY_DELAYS_MS[attempt];

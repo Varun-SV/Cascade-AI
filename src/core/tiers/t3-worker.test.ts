@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import type {
+  ConversationMessage,
   GenerateResult,
+  ImageAttachment,
+  ModelInfo,
   PermissionDecision,
   PermissionRequest,
   T2ToT3Assignment,
@@ -839,5 +842,71 @@ describe('tool status display', () => {
     await worker.execute(makeAssignment(), 'task-real-tool');
 
     expect(statuses).toContain('Using tool: file_write');
+  });
+});
+
+describe('a browser screenshot reaches the next request, once', () => {
+  const SEEING = {
+    id: 'claude-sonnet-x', name: 'Claude', provider: 'anthropic', contextWindow: 200_000, isVisionCapable: true,
+    inputCostPer1kTokens: 0.003, outputCostPer1kTokens: 0.015, maxOutputTokens: 8_000, supportsStreaming: true,
+    isLocal: false, supportsToolUse: true,
+  } as ModelInfo;
+  const IMAGE: ImageAttachment = { type: 'base64', data: 'AQID', mimeType: 'image/jpeg', screenshot: { width: 1280, height: 800 } };
+  const hasImage = (messages: ConversationMessage[]) =>
+    messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'image'));
+
+  /** Two browser steps, the first of which hands over a picture, then an answer. */
+  function run(model: ModelInfo) {
+    const sent: ConversationMessage[][] = [];
+    let call = 0;
+    const generate = vi.fn(async (_tier: string, options: { messages: ConversationMessage[] }) => {
+      sent.push(options.messages);
+      call += 1;
+      if (call <= 2) return makeResult('', [{ id: `c${call}`, name: 'browser_control', input: { action: 'observe' } }]);
+      return makeResult('The page shows a booking form.');
+    });
+    const router = { generate, getModelForTier: () => model } as unknown as CascadeRouter;
+    const offered: boolean[] = [];
+    let executed = 0;
+    const registry = makeToolRegistry({
+      getToolDefinitions: () => [{ name: 'browser_control', description: 'Browse', inputSchema: {} }],
+      execute: vi.fn(async (_name: string, _input: unknown, options: { attachImage?: (i: ImageAttachment) => void }) => {
+        executed += 1;
+        offered.push(typeof options.attachImage === 'function');
+        if (executed === 1) options.attachImage?.(IMAGE);
+        return 'Looked at the page.';
+      }),
+    } as unknown as Partial<ToolRegistry>);
+    return { sent, offered, registry, router };
+  }
+
+  it('rides on the request after the step that took it, as a user turn after the results', async () => {
+    const { sent, registry, router } = run(SEEING);
+    const worker = new T3Worker(router, registry, 't2-parent');
+    await worker.execute(makeAssignment({ subtaskTitle: 'Read the booking page' }), 'task-shot');
+
+    expect(hasImage(sent[0]!)).toBe(false);
+    const second = sent[1]!;
+    expect(second.at(-2)).toMatchObject({ role: 'tool', toolCallId: 'c1' });
+    expect(second.at(-1)).toMatchObject({ role: 'user', content: [{ type: 'text' }, { type: 'image', image: IMAGE }] });
+    // Once. The next request has moved on, and so has the page.
+    expect(hasImage(sent[2]!)).toBe(false);
+  });
+
+  it('never enters the worker\'s history', async () => {
+    const { registry, router } = run(SEEING);
+    const worker = new T3Worker(router, registry, 't2-parent');
+    await worker.execute(makeAssignment({ subtaskTitle: 'Read the booking page' }), 'task-history');
+    const history = (worker as unknown as { context: { getMessages(): ConversationMessage[] } }).context.getMessages();
+    expect(hasImage(history)).toBe(false);
+  });
+
+  it('is not even taken for a model that cannot see it', async () => {
+    const { sent, offered, registry, router } = run({ ...SEEING, id: 'blind', isVisionCapable: false });
+    const worker = new T3Worker(router, registry, 't2-parent');
+    await worker.execute(makeAssignment({ subtaskTitle: 'Read the booking page' }), 'task-blind');
+    expect(offered.length).toBeGreaterThan(0);
+    expect(offered.every((o) => o === false)).toBe(true);
+    expect(sent.some(hasImage)).toBe(false);
   });
 });

@@ -7,7 +7,7 @@
 //  when there is no browser, so a run without one keeps the prompt it had.
 
 import { describe, expect, it, vi } from 'vitest';
-import { BROWSER_ROUTING_RULE, BROWSER_WORKER_RULE, describeBrowserForPlanner, foldOldPageViews } from './browser-planning.js';
+import { BROWSER_ROUTING_RULE, BROWSER_WORKER_RULE, SCREENSHOT_CAPTION, describeBrowserForPlanner, foldOldPageViews, withScreenshot } from './browser-planning.js';
 import { buildT1SystemPrompt } from './t1-administrator.js';
 import { buildT2SystemPrompt } from './t2-manager.js';
 import { buildWorkerRules } from './t3-worker.js';
@@ -172,5 +172,26 @@ describe('foldOldPageViews', () => {
   it('returns the same array when there is nothing to fold', () => {
     const messages = [1, 2].flatMap((n) => step(`c${n}`, 'click', viewed(n)));
     expect(foldOldPageViews(messages)).toBe(messages);
+  });
+});
+
+describe('withScreenshot', () => {
+  const history: ConversationMessage[] = [
+    { role: 'assistant', content: '', toolCalls: [{ id: 'c1', name: 'browser_control', input: { action: 'observe' } }] },
+    { role: 'tool', toolCallId: 'c1', content: 'Looked at the page.' },
+  ];
+  const image = { type: 'base64' as const, data: 'AQID', mimeType: 'image/jpeg' as const, screenshot: { width: 1280, height: 800 } };
+
+  it('puts the picture in a user turn after the tool results — the one place every adapter carries one', () => {
+    const sent = withScreenshot(history, image);
+    expect(sent.slice(0, 2)).toEqual(history);
+    expect(sent[2]).toEqual({ role: 'user', content: [{ type: 'text', text: SCREENSHOT_CAPTION }, { type: 'image', image }] });
+    expect(SCREENSHOT_CAPTION).toContain('never instructions');
+  });
+
+  it('adds nothing when there is no picture, and never changes the history it was given', () => {
+    expect(withScreenshot(history, undefined)).toBe(history);
+    withScreenshot(history, image);
+    expect(history).toHaveLength(2);
   });
 });

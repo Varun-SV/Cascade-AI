@@ -62,6 +62,12 @@ export interface BrowserAction {
    * when page views are on, for the actions that usually change the page.
    */
   pageView?: true;
+  /**
+   * With `pageView`: take a screenshot too, when the page looks different
+   * from the last one (always for `observe`). Set only when the model the
+   * worker is using can see images.
+   */
+  screenshot?: true;
 }
 
 export interface BrowserActionOutcome {
@@ -76,6 +82,12 @@ export interface BrowserActionOutcome {
    * name each ref in it stands for.
    */
   view?: { text: string; labels: Record<string, string> };
+  /**
+   * A screenshot of the page, base64, when one was asked for and could be
+   * taken. Never part of the text: it travels beside the result and only to
+   * the next request (see `ToolExecuteOptions.attachImage`).
+   */
+  image?: { data: string; mimeType: 'image/jpeg'; width: number; height: number };
 }
 
 /** What a host's controller can do beyond the original six actions. */
@@ -86,6 +98,8 @@ export interface BrowserControlFeatures {
    * and `hover`.
    */
   pageView?: boolean;
+  /** The controller can take a screenshot to go with a page view. */
+  screenshots?: boolean;
 }
 
 const BASIC_ACTIONS = ['navigate', 'click', 'fill', 'press', 'wait_for', 'extract_text'] as const;
@@ -164,12 +178,15 @@ export class BrowserControlTool extends BaseTool {
   private revoked = false;
   /** Whether this host describes pages and takes refs. Fixed at registration. */
   private pageView: boolean;
+  /** Whether a page view may come with a screenshot. Fixed at registration. */
+  private screenshots: boolean;
 
   constructor(controller: BrowserController, release?: BrowserActorRelease, features: BrowserControlFeatures = {}) {
     super();
     this.controller = controller;
     this.release = release;
     this.pageView = features.pageView === true;
+    this.screenshots = this.pageView && features.screenshots === true;
     // The model is offered only what this host can do. A host without page
     // views gets exactly the six-action tool it always had, so nothing there
     // can name an action the host would have to refuse.
@@ -248,6 +265,9 @@ export class BrowserControlTool extends BaseTool {
         ? { timeoutMs: Math.min(Math.max(input['timeoutMs'], 0), 30_000) }
         : {}),
       ...(this.pageView && VIEWED_AFTER.has(kind) ? { pageView: true as const } : {}),
+      // Only when the worker can show one: a model that cannot see a picture
+      // is not made to wait while one is taken.
+      ...(this.screenshots && VIEWED_AFTER.has(kind) && options?.attachImage ? { screenshot: true as const } : {}),
     };
 
     let outcome: BrowserActionOutcome;
@@ -268,7 +288,17 @@ export class BrowserControlTool extends BaseTool {
     const where = outcome.view
       ? `\n\n${outcome.view.text}`
       : outcome.url ? `\nPage: ${outcome.title ? `${outcome.title} — ` : ''}${outcome.url}` : '';
-    return `${outcome.ok ? '' : 'Failed: '}${outcome.detail}${where}`;
+    let shown = '';
+    if (outcome.image && options?.attachImage) {
+      options.attachImage({
+        type: 'base64',
+        data: outcome.image.data,
+        mimeType: outcome.image.mimeType,
+        screenshot: { width: outcome.image.width, height: outcome.image.height },
+      });
+      shown = '\n\nA screenshot of the page goes with this step.';
+    }
+    return `${outcome.ok ? '' : 'Failed: '}${outcome.detail}${where}${shown}`;
   }
 }
 

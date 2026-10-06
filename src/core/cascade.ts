@@ -94,7 +94,7 @@ export interface DecisionLogEntry {
   // is a routing choice that worked; this is an account going out of service
   // for the rest of the run, and in the case that matters most — no other
   // provider could serve the tier — there was no failover at all to describe.
-  kind: 'complexity' | 'model' | 'failover' | 'escalation' | 'context' | 'provider-exhausted' | 'budget';
+  kind: 'complexity' | 'model' | 'failover' | 'escalation' | 'context' | 'provider-exhausted' | 'budget' | 'browser';
   detail: string;
 }
 
@@ -379,7 +379,17 @@ export class Cascade extends EventEmitter {
    * escalations. Powers the /why command.
    */
   getDecisionLog(): DecisionLogEntry[] {
-    return [...this.decisionLog];
+    const log = [...this.decisionLog];
+    // Screenshots are counted by the router, one per request, and said once
+    // here rather than once a step — a fifteen-step browse would otherwise be
+    // fifteen lines of the same thing.
+    const shots = this.router.getRunScreenshots?.();
+    if (shots && (shots.sent > 0 || shots.leftOut > 0)) {
+      const sent = `${shots.sent} browser screenshot${shots.sent === 1 ? '' : 's'} sent to the model`;
+      const left = shots.leftOut > 0 ? `; ${shots.leftOut} left out for a model that could not take ${shots.leftOut === 1 ? 'it' : 'them'}` : '';
+      log.push({ at: new Date().toISOString(), kind: 'browser', detail: `${sent}${left}` });
+    }
+    return log;
   }
 
   /** Resolve a pending MCP server approval from a REPL / dashboard listener. */
@@ -1146,8 +1156,11 @@ export class Cascade extends EventEmitter {
     if ((this.config.tools?.disabledTools ?? []).includes('browser_control')) return;
     // Page views are what the host CAN do; `browserVision: off` is the user
     // saying not to. Either one missing leaves the six-action tool.
-    const pageView = features.pageView === true && this.config.tools?.browserVision !== 'off';
-    this.toolRegistry.register(new BrowserControlTool(controller, release, { pageView }));
+    const vision = this.config.tools?.browserVision ?? 'list';
+    const pageView = features.pageView === true && vision !== 'off';
+    // Screenshots are opt-in until the side-by-side test says they pay.
+    const screenshots = pageView && features.screenshots === true && (vision === 'image' || vision === 'marked');
+    this.toolRegistry.register(new BrowserControlTool(controller, release, { pageView, screenshots }));
   }
 
   /**

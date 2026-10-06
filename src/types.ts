@@ -205,6 +205,14 @@ export interface ImageAttachment {
   type: 'base64' | 'url';
   data: string;         // base64 string or URL
   mimeType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+  /**
+   * Set on a browser screenshot, with its size in pixels: a picture the
+   * request still makes sense without. The router leaves it out for a model
+   * that cannot see it or would be overcharged for it, and says so in its
+   * place — see `core/router/screenshots.ts`. Never set on an image a person
+   * attached; those are not the router's to drop.
+   */
+  screenshot?: { width: number; height: number };
 }
 
 // ── Tools ─────────────────────────────────────
@@ -337,6 +345,14 @@ export interface ToolExecuteOptions {
     content: string | Record<string, unknown>,
   ) => void;
   getPeerMessages?: () => Array<{ fromId: string; content: unknown; timestamp: string }>;
+  /**
+   * Hand the worker a picture to show the model with its NEXT request — a
+   * browser screenshot. Present only when that model can see images, so a
+   * tool that has a picture to give checks for it before going to the
+   * trouble. The picture never enters the result, the history, events or the
+   * audit log; the worker sends it once and lets it go.
+   */
+  attachImage?: (image: ImageAttachment) => void;
 }
 
 // ── Tier System ───────────────────────────────
