@@ -131,6 +131,9 @@ export type {
   CloudConversation, CloudMessage, CloudTurnInput, DeviceStart, NativeProvider, CloudSessionStore,
 } from './cloud/client.js';
 export type { CloudSession, CloudUser } from './cloud/session-store.js';
+// A device run's /why, copied with it into the cloud chat.
+export { cloudRunReport, cloudTurnAccounting } from './cloud/run-report.js';
+export type { CloudRunReport } from './cloud/run-report.js';
 // Key sync: E2E crypto (byte-compatible with the web KeyVault) + bundle helpers.
 export { encryptJSON as encryptSyncBlob, decryptJSON as decryptSyncBlob } from './cloud/keysync-crypto.js';
 export type { EncryptedBlob } from './cloud/keysync-crypto.js';

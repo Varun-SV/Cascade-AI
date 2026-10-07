@@ -27,6 +27,8 @@ import { beginRun, checkDailyLimit, checkPendingMediaCap, claimBrowserSession, P
 import { getSkill } from './skills.js';
 import { tenantScratchDir } from './paths.js';
 import { pendingMediaDir, sweepPendingMedia } from './pending-media.js';
+import { spendEntryFromRun, type SpendEntry } from './spend.js';
+import { randomUUID } from 'node:crypto';
 
 export { tenantScratchDir };
 
@@ -780,6 +782,10 @@ export interface WhyReport {
   durationMs: number;
   costByTier: Record<string, number>;
   tokensByTier: Record<string, number>;
+  /** tier → `provider:id` → cost and tokens: a tier's spend split by the
+   *  models that served it, which the spend report keeps per model. */
+  costByModel?: Record<string, Record<string, number>>;
+  tokensByModel?: Record<string, Record<string, number>>;
   /** tier → model that served it (from tier:status). */
   models: Record<string, string>;
   /** The agents that worked the run, each as it last reported — the tree the
@@ -854,6 +860,18 @@ export function primaryTierOf(
   // the whole run, it is the answering one all the same.
   const served = Object.keys(servedBy);
   return rank(tokensByTier) ?? rank(costByTier) ?? (served.length === 1 ? served[0]! : null);
+}
+
+/**
+ * Add a run to the spend ledger. The reply is already saved and the user is
+ * waiting on it, so a ledger that cannot be written is logged, not thrown.
+ */
+function recordRunSpend(store: CloudStore, entry: SpendEntry): void {
+  try {
+    store.recordSpend(entry);
+  } catch (err) {
+    console.error(`[spend] could not record run ${entry.id}:`, err);
+  }
 }
 
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
@@ -2267,6 +2285,8 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
       durationMs: result.durationMs,
       costByTier,
       tokensByTier,
+      costByModel: stats.costByTierModel,
+      tokensByModel: stats.tokensByTierModel,
       models: tierModels,
       ...(trace.size > 0 ? { trace: [...trace.values()] } : {}),
     };
@@ -2286,6 +2306,10 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     });
     store.incrementUsage(userId, todayKey());
     const cancelled = signal?.aborted ?? false;
+    recordRunSpend(store, spendEntryFromRun({
+      id: assistantMessage.id, userId, conversationId: conversation.id, at: assistantMessage.createdAt,
+      costUsd: result.usage.estimatedCostUsd, why, outcome: cancelled ? 'stopped' : 'answered',
+    }));
     socket.emit('run:why', { conversationId: conversation.id, messageId: assistantMessage.id, ...why });
     socket.emit('session:complete', { conversationId: conversation.id, result, cancelled });
 
@@ -2325,6 +2349,19 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     // Log the full error (with stack) server-side — the client only gets the
     // message, but the stack is what pins a crash like the FK violation.
     console.error(`[run ${conversation.id}] failed:`, err);
+    // A run that failed part-way leaves no reply, but its calls were billed —
+    // and what its cheaper tiers saved is as real as on an answered run.
+    const spent = cascade.getRouter().getStats();
+    if (spent.totalCostUsd > 0 || spent.totalTokens > 0) {
+      recordRunSpend(store, spendEntryFromRun({
+        id: randomUUID(), userId, conversationId: conversation.id, at: Date.now(), costUsd: spent.totalCostUsd,
+        why: {
+          costByModel: spent.costByTierModel, tokensByModel: spent.tokensByTierModel, totalTokens: spent.totalTokens,
+          savedUsd: cascade.getRouter().getDelegationSavings().savedUsd,
+        },
+        outcome: 'failed',
+      }));
+    }
     socket.emit('session:error', { conversationId: conversation.id, error: message });
     throw err;
   } finally {

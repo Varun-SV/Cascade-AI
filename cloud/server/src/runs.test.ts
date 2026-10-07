@@ -9,6 +9,7 @@ import { CloudStore } from './db.js';
 import { limitsForPlan, PENDING_MEDIA_TTL_MS } from './entitlements.js';
 import type { CloudEnv } from './env.js';
 import { startStubOpenAIServer, type StubOpenAIServer } from './test-support/stub-openai-server.js';
+import Database from 'better-sqlite3';
 
 class FakeSocket {
   events: Array<{ event: string; payload: unknown }> = [];
@@ -827,6 +828,92 @@ describe('runChatTurn (stub-provider integration)', () => {
     await expect(
       runChatTurn(payload, { env, store, userId: bob.id, socket: new FakeSocket() as unknown as import('socket.io').Socket }),
     ).rejects.toThrow(/Conversation not found/);
+  });
+
+  describe('the spend ledger', () => {
+    const ledger = (d: string) => {
+      const raw = new Database(path.join(d, 'cloud.db'), { readonly: true });
+      try {
+        return {
+          runs: raw.prepare('SELECT id, conversation_id, outcome, tokens FROM spend_ledger').all() as Array<{ id: string; conversation_id: string; outcome: string; tokens: number }>,
+          saved: (raw.prepare('SELECT saved_usd FROM spend_ledger').all() as Array<{ saved_usd: number }>).map((r) => r.saved_usd),
+          lines: raw.prepare('SELECT tier, model, tokens FROM spend_ledger_models').all() as Array<{ tier: string; model: string; tokens: number }>,
+        };
+      } finally { raw.close(); }
+    };
+    const setup = async () => {
+      dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-runs-'));
+      store = new CloudStore(path.join(dir, 'cloud.db'));
+      stub = await startStubOpenAIServer();
+      const env = { DATA_DIR: dir, MAX_COST_PER_RUN_USD: 1 } as CloudEnv;
+      const user = store.upsertUser({ provider: 'dev', providerId: 'spender', email: null, name: null, avatar: null });
+      const payload = parseChatRunPayload({
+        prompt: 'hello',
+        providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'k', model: 'stub-model' }],
+      });
+      return { env, user, payload };
+    };
+
+    it('records each answered run under its reply, with the model that spent it', async () => {
+      const { env, user, payload } = await setup();
+      const result = await runChatTurn(payload, { env, store: store!, userId: user.id, socket: new FakeSocket() as unknown as import('socket.io').Socket });
+
+      const reply = store!.getMessages(result.conversationId).find((m) => m.role === 'assistant')!;
+      const { runs, lines } = ledger(dir);
+      expect(runs).toEqual([{ id: reply.id, conversation_id: result.conversationId, outcome: 'answered', tokens: 9 }]);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]!.model).toMatch(/stub-model$/);
+      expect(lines[0]!.tokens).toBe(9);
+      // The reply's /why keeps the same split, so a later back-fill agrees.
+      expect(JSON.parse(reply.why!).costByModel[lines[0]!.tier]).toHaveProperty(lines[0]!.model);
+    }, 30_000);
+
+    it('records a run the user stopped as stopped', async () => {
+      const { env, user, payload } = await setup();
+      const controller = new AbortController();
+      controller.abort();
+      const result = await runChatTurn(payload, {
+        env, store: store!, userId: user.id, socket: new FakeSocket() as unknown as import('socket.io').Socket, signal: controller.signal,
+      });
+      const replies = store!.getMessages(result.conversationId).filter((m) => m.role === 'assistant');
+      expect(replies).toHaveLength(1);
+      expect(ledger(dir).runs.map((r) => [r.id, r.outcome])).toEqual([[replies[0]!.id, 'stopped']]);
+    }, 30_000);
+
+    it('still records what a run spent when it fails after its calls', async () => {
+      const { env, user, payload } = await setup();
+      // The model answered (and billed); saving the reply is what fails.
+      const save = store!.addMessage.bind(store!);
+      vi.spyOn(store!, 'addMessage').mockImplementation((input) => {
+        if (input.role === 'assistant') throw new Error('disk full');
+        return save(input);
+      });
+      await expect(
+        runChatTurn(payload, { env, store: store!, userId: user.id, socket: new FakeSocket() as unknown as import('socket.io').Socket }),
+      ).rejects.toThrow(/disk full/);
+
+      const { runs, lines } = ledger(dir);
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({ outcome: 'failed', tokens: 9 });
+      expect(lines.map((l) => l.tokens)).toEqual([9]);
+    }, 30_000);
+
+    it('keeps what a failed run\'s cheaper tiers saved', async () => {
+      const { env, user, payload } = await setup();
+      // One stub model serves every tier here, so nothing is saved on its own;
+      // the router's figure is what the ledger has to keep.
+      const { CascadeRouter } = await import('#cascade-ai');
+      vi.spyOn(CascadeRouter.prototype, 'getDelegationSavings').mockReturnValue({ savedUsd: 0.04, savedPct: 80, counterfactualUsd: 0.05 });
+      const save = store!.addMessage.bind(store!);
+      vi.spyOn(store!, 'addMessage').mockImplementation((input) => {
+        if (input.role === 'assistant') throw new Error('disk full');
+        return save(input);
+      });
+      await expect(
+        runChatTurn(payload, { env, store: store!, userId: user.id, socket: new FakeSocket() as unknown as import('socket.io').Socket }),
+      ).rejects.toThrow(/disk full/);
+      expect(ledger(dir).saved).toEqual([0.04]);
+    }, 30_000);
   });
 
   it('blocks a run once the daily limit is hit, without creating a conversation or a stray message', async () => {
