@@ -9,6 +9,10 @@
 [![providers](https://img.shields.io/badge/providers-6-a78bff.svg)](#ai-providers)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-f5a623.svg)](CONTRIBUTING.md)
 
+<p align="center">
+  <img src="assets/readme/cascade-reel.webp" width="100%" alt="Cascade AI in 36 seconds: one prompt becomes an organization of AI agents. T1 plans, T2 managers delegate, T3 workers execute in parallel, with web, browser, media, document and code tools, from the CLI, desktop app, cloud, self-host or API.">
+</p>
+
 Cascade runs your prompt through a hierarchical three-tier agent system — **T1 plans → T2 manages → T3 executes**, sized to the task — auto-routing each step to the best-value model, running tools, and compiling one coherent result. Think Claude Code / Gemini CLI / Copilot CLI, but built around **orchestration**.
 
 ```
