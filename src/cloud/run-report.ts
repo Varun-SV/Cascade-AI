@@ -89,6 +89,7 @@ export function cloudRunReport(input: {
     totalCostUsd,
     inputTokensByTier: minus(stats.inputTokensByTier, before?.inputTokensByTier),
     outputTokensByTier: minus(stats.outputTokensByTier, before?.outputTokensByTier),
+    untrackedCostCalls: Math.max(0, stats.untrackedCostCalls - (before?.untrackedCostCalls ?? 0)),
   }, input.t1Model);
 
   const models: Record<string, string> = {};

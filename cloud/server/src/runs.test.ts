@@ -836,6 +836,7 @@ describe('runChatTurn (stub-provider integration)', () => {
       try {
         return {
           runs: raw.prepare('SELECT id, conversation_id, outcome, tokens FROM spend_ledger').all() as Array<{ id: string; conversation_id: string; outcome: string; tokens: number }>,
+          saved: (raw.prepare('SELECT saved_usd FROM spend_ledger').all() as Array<{ saved_usd: number }>).map((r) => r.saved_usd),
           lines: raw.prepare('SELECT tier, model, tokens FROM spend_ledger_models').all() as Array<{ tier: string; model: string; tokens: number }>,
         };
       } finally { raw.close(); }
@@ -895,6 +896,23 @@ describe('runChatTurn (stub-provider integration)', () => {
       expect(runs).toHaveLength(1);
       expect(runs[0]).toMatchObject({ outcome: 'failed', tokens: 9 });
       expect(lines.map((l) => l.tokens)).toEqual([9]);
+    }, 30_000);
+
+    it('keeps what a failed run\'s cheaper tiers saved', async () => {
+      const { env, user, payload } = await setup();
+      // One stub model serves every tier here, so nothing is saved on its own;
+      // the router's figure is what the ledger has to keep.
+      const { CascadeRouter } = await import('#cascade-ai');
+      vi.spyOn(CascadeRouter.prototype, 'getDelegationSavings').mockReturnValue({ savedUsd: 0.04, savedPct: 80, counterfactualUsd: 0.05 });
+      const save = store!.addMessage.bind(store!);
+      vi.spyOn(store!, 'addMessage').mockImplementation((input) => {
+        if (input.role === 'assistant') throw new Error('disk full');
+        return save(input);
+      });
+      await expect(
+        runChatTurn(payload, { env, store: store!, userId: user.id, socket: new FakeSocket() as unknown as import('socket.io').Socket }),
+      ).rejects.toThrow(/disk full/);
+      expect(ledger(dir).saved).toEqual([0.04]);
     }, 30_000);
   });
 

@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import { SqliteVectorStore, mcpServerPrefix } from '#cascade-ai';
 import { randomUUID } from 'node:crypto';
 import {
+  legacyCliRunCost,
   spendEntryFromRun,
   type SpendBucket, type SpendChatRow, type SpendEntry, type SpendSlot, type SpendSource, type SpendTotals,
 } from './spend.js';
@@ -613,14 +614,23 @@ export class CloudStore {
       // databases predate the cost column; their replies have a report or nothing.
       const hasCost = (this.db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>).some((c) => c.name === 'cost_usd');
       const cost = hasCost ? 'm.cost_usd' : 'NULL';
+      // In order within each chat: an old CLI's replies carry a running total,
+      // and each run is what it grew by (`legacyCliRunCost`).
       const replies = this.db.prepare(
         `SELECT m.id, c.user_id, m.conversation_id, m.created_at, ${cost} AS cost_usd, m.why_json
            FROM messages m JOIN conversations c ON c.id = m.conversation_id
-          WHERE m.role = 'assistant' AND (m.why_json IS NOT NULL OR ${cost} IS NOT NULL)`,
+          WHERE m.role = 'assistant' AND (m.why_json IS NOT NULL OR ${cost} IS NOT NULL)
+          ORDER BY m.conversation_id, m.created_at, m.rowid`,
       ).all() as Array<{ id: string; user_id: string; conversation_id: string; created_at: number; cost_usd: number | null; why_json: string | null }>;
+      const runningTotal = new Map<string, number>();
       for (const r of replies) {
+        let costUsd = r.cost_usd;
+        if (r.why_json === null && r.cost_usd !== null) {
+          costUsd = legacyCliRunCost(r.cost_usd, runningTotal.get(r.conversation_id) ?? null);
+          runningTotal.set(r.conversation_id, r.cost_usd);
+        }
         this.recordSpend(spendEntryFromRun({
-          id: r.id, userId: r.user_id, conversationId: r.conversation_id, at: r.created_at, costUsd: r.cost_usd, why: r.why_json,
+          id: r.id, userId: r.user_id, conversationId: r.conversation_id, at: r.created_at, costUsd, why: r.why_json,
         }));
       }
     });
@@ -954,6 +964,17 @@ export class CloudStore {
     const branchParentId = regen ? regen.parentId : edited ? edited.parentId : convo.activeLeafId;
 
     const tx = this.db.transaction(() => {
+      // An old CLI sends its session's running total, not the run's cost. Read
+      // the chat's previous total before this reply joins it.
+      let spent = input.assistant.costUsd ?? null;
+      if (input.assistant.why == null && spent != null) {
+        const previous = this.db.prepare(
+          `SELECT cost_usd FROM messages
+            WHERE conversation_id = ? AND role = 'assistant' AND why_json IS NULL AND cost_usd IS NOT NULL
+            ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+        ).get(conversationId) as { cost_usd: number } | undefined;
+        spent = legacyCliRunCost(spent, previous?.cost_usd ?? null);
+      }
       const userMsg = regen ?? this.addMessage({
         conversationId, role: 'user', content: input.userContent, parentId: branchParentId,
       });
@@ -966,7 +987,7 @@ export class CloudStore {
       // the same, so it counts in their report as the chat's saved chip does.
       if (input.assistant.why != null || input.assistant.costUsd != null) {
         this.recordSpend(spendEntryFromRun({
-          id: reply.id, userId, conversationId, at: reply.createdAt, costUsd: input.assistant.costUsd, why: input.assistant.why,
+          id: reply.id, userId, conversationId, at: reply.createdAt, costUsd: spent, why: input.assistant.why,
         }));
       }
     });

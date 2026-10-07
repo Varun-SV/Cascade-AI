@@ -2349,12 +2349,16 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     // Log the full error (with stack) server-side — the client only gets the
     // message, but the stack is what pins a crash like the FK violation.
     console.error(`[run ${conversation.id}] failed:`, err);
-    // A run that failed part-way leaves no reply, but its calls were billed.
+    // A run that failed part-way leaves no reply, but its calls were billed —
+    // and what its cheaper tiers saved is as real as on an answered run.
     const spent = cascade.getRouter().getStats();
     if (spent.totalCostUsd > 0 || spent.totalTokens > 0) {
       recordRunSpend(store, spendEntryFromRun({
         id: randomUUID(), userId, conversationId: conversation.id, at: Date.now(), costUsd: spent.totalCostUsd,
-        why: { costByModel: spent.costByTierModel, tokensByModel: spent.tokensByTierModel, totalTokens: spent.totalTokens },
+        why: {
+          costByModel: spent.costByTierModel, tokensByModel: spent.tokensByTierModel, totalTokens: spent.totalTokens,
+          savedUsd: cascade.getRouter().getDelegationSavings().savedUsd,
+        },
         outcome: 'failed',
       }));
     }

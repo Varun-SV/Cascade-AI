@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { bucketKey, parsePeriod, parseTzOffset, periodRange, spendEntryFromRun } from './spend.js';
+import { bucketKey, legacyCliRunCost, parsePeriod, parseTzOffset, periodRange, spendEntryFromRun } from './spend.js';
 
 const base = { id: 'r1', userId: 'u1', conversationId: 'c1', at: 1_000 };
 
@@ -120,5 +120,22 @@ describe('report periods', () => {
     expect(parseTzOffset('841')).toBeNull();
     expect(parseTzOffset('5.5')).toBeNull();
     expect(parseTzOffset('')).toBeNull();
+  });
+});
+
+describe('legacyCliRunCost', () => {
+  it('takes what an old CLI\'s running total grew by', () => {
+    expect(legacyCliRunCost(0.01, null)).toBeCloseTo(0.01, 12);
+    expect(legacyCliRunCost(0.03, 0.01)).toBeCloseTo(0.02, 12);
+    expect(legacyCliRunCost(0.03, 0.03)).toBe(0);
+  });
+
+  it('reads a total that went down as a new session, all its own', () => {
+    expect(legacyCliRunCost(0.002, 0.05)).toBeCloseTo(0.002, 12);
+  });
+
+  it('never goes negative or counts nonsense', () => {
+    expect(legacyCliRunCost(-1, null)).toBe(0);
+    expect(legacyCliRunCost(Number.NaN, 0.01)).toBe(0);
   });
 });

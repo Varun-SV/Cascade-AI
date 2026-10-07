@@ -68,6 +68,29 @@ describe('a device run\'s /why for the cloud', () => {
     expect(report.costByModel).toEqual({ T3: { 'openai:mini': 0.0005 } });
   });
 
+  it('claims no savings for a run with a call on a model that has no price', () => {
+    call('T3', 'openai', 'mini', 1000, 0, 0.001);
+    (router as unknown as {
+      recordStats: (tier: string, model: { id: string; provider: string }, usage: Record<string, unknown>) => void;
+    }).recordStats('T3', { id: 'mystery', provider: 'openai-compatible' }, {
+      inputTokens: 5000, outputTokens: 0, totalTokens: 5000, estimatedCostUsd: 0, costUnknown: true,
+    });
+    const report = cloudRunReport({ stats: router.getStats(), t1Model: t1, decisions: [], durationMs: 0 });
+    expect(report.savedUsd).toBe(0);
+  });
+
+  it('does not hold an earlier run\'s unpriced call against a later one', () => {
+    (router as unknown as {
+      recordStats: (tier: string, model: { id: string; provider: string }, usage: Record<string, unknown>) => void;
+    }).recordStats('T3', { id: 'mystery', provider: 'openai-compatible' }, {
+      inputTokens: 5000, outputTokens: 0, totalTokens: 5000, estimatedCostUsd: 0, costUnknown: true,
+    });
+    const before = router.getStats();
+    call('T3', 'openai', 'mini', 1000, 0, 0.001);
+    const report = cloudRunReport({ stats: router.getStats(), before, t1Model: t1, decisions: [], durationMs: 0 });
+    expect(report.savedUsd).toBeCloseTo(0.009, 8);
+  });
+
   it('is what the cloud\'s /turns takes: the cost, and the report as JSON', () => {
     call('T2', 'openai', 'mini', 100, 0, 0.0001);
     const report = cloudRunReport({ stats: router.getStats(), t1Model: null, decisions: [{ at: 'now', kind: 'model', detail: 'T2 → mini' }], durationMs: 5 });

@@ -171,6 +171,30 @@ describe('spend ledger', () => {
     expect(r.tiers[0]!.models[0]!.model).toBe('openai:mini');
   });
 
+  it('counts an old CLI\'s sync by what each run added, not the running total it sent', () => {
+    // The CLI before /why sent its whole session's cost so far on every reply.
+    const u = user('cli');
+    const c = store.createConversation(u.id, 'From the terminal');
+    for (const total of [0.01, 0.03, 0.06]) {
+      store.appendTurn(c.id, u.id, { userContent: 'q', assistant: { content: 'a', costUsd: total } });
+    }
+    const r = buildSpendReport(store.spend, u.id, 'all', 0, Date.now());
+    expect(r.totals.runs).toBe(3);
+    expect(r.totals.spentUsd).toBeCloseTo(0.06, 9);
+    // The reply keeps what was sent, so the next one can be measured against it.
+    expect(store.getMessages(c.id).filter((m) => m.role === 'assistant').map((m) => m.costUsd)).toEqual([0.01, 0.03, 0.06]);
+  });
+
+  it('does not take a reply with its own /why as a running total', () => {
+    const u = user('mix');
+    const c = store.createConversation(u.id, 'Mixed');
+    store.appendTurn(c.id, u.id, { userContent: 'q', assistant: { content: 'a', costUsd: 0.04 } });
+    store.appendTurn(c.id, u.id, { userContent: 'q', assistant: { content: 'a', costUsd: 0.06, why: JSON.stringify({ totalTokens: 10 }) } });
+    store.appendTurn(c.id, u.id, { userContent: 'q', assistant: { content: 'a', costUsd: 0.05 } });
+    // 0.04, then the reporting run's own 0.06, then what the old total grew by.
+    expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals.spentUsd).toBeCloseTo(0.04 + 0.06 + 0.01, 9);
+  });
+
   it('back-fills the ledger once, from the replies stored before it existed', () => {
     const u = user('h');
     const c = store.createConversation(u.id, 'Before the ledger');
@@ -200,5 +224,30 @@ describe('spend ledger', () => {
     store.close();
     store = new CloudStore(dbPath);
     expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals.runs).toBe(1);
+  });
+
+  it('back-fills an old CLI\'s replies by what each run added, chat by chat', () => {
+    const u = user('old-cli');
+    const first = store.createConversation(u.id, 'Session one');
+    const second = store.createConversation(u.id, 'Session two');
+    // Running totals, as the old CLI sent them; the second chat's went down
+    // part-way because a new session began.
+    for (const total of [0.01, 0.03, 0.06]) store.addMessage({ conversationId: first.id, role: 'assistant', content: 'a', costUsd: total });
+    for (const total of [0.08, 0.1, 0.01]) store.addMessage({ conversationId: second.id, role: 'assistant', content: 'a', costUsd: total });
+    // A hosted reply in the first chat carries its own /why and its own cost.
+    store.addMessage({ conversationId: first.id, role: 'assistant', content: 'a', costUsd: 0.5, why: JSON.stringify({ totalTokens: 10 }) });
+    store.close();
+
+    const raw = new Database(dbPath);
+    raw.exec('DROP TABLE spend_ledger_models; DROP TABLE spend_ledger;');
+    raw.close();
+
+    store = new CloudStore(dbPath);
+    const r = buildSpendReport(store.spend, u.id, 'all', 0, Date.now());
+    expect(r.totals.runs).toBe(7);
+    // 0.06 for the first session's three runs, 0.1 + 0.01 for the second
+    // chat's two sessions — measured against its own totals, not the first
+    // chat's — and the hosted run's 0.5.
+    expect(r.totals.spentUsd).toBeCloseTo(0.06 + 0.11 + 0.5, 9);
   });
 });

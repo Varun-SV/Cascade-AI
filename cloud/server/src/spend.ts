@@ -92,6 +92,27 @@ export function spendEntryFromRun(input: {
   };
 }
 
+/**
+ * What one run of an old CLI cost, from the running total it sent.
+ *
+ * Before replies carried their own /why, the CLI synced its whole session's
+ * cost so far with every reply: three runs costing c1, c2 and c3 arrived as
+ * c1, c1+c2 and c1+c2+c3. Counted as they came, a session was billed again
+ * for every earlier run on every later reply. The run is what the total grew
+ * by since the chat's last such reply; a total that went down belongs to a new
+ * session, and is all this run's.
+ *
+ * Only replies with a cost and no /why are read this way. Nothing else ever
+ * stored that shape: a hosted reply always carries its /why, today's CLI and
+ * desktop app send one, and the desktop app before them sent no cost at all.
+ */
+export function legacyCliRunCost(total: number, previousTotal: number | null): number {
+  const now = num(total);
+  if (previousTotal === null) return now;
+  const before = num(previousTotal);
+  return now >= before ? now - before : now;
+}
+
 // ── Report periods ─────────────────────────────
 
 export type SpendPeriod = 'today' | '7d' | '30d' | 'all';

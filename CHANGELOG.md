@@ -32,7 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   /why with the chat it copies to your account (`cloudRunReport`), so the
   report splits them by tier and model like a hosted run, and the web shows
   their /why. The CLI used to send the whole session's cost with every
-  reply; it now sends that run's alone.
+  reply; it now sends that run's alone, and a reply from an older CLI, stored
+  or still arriving, is counted at what its running total grew by.
   `GET /api/usage/report`. The router's stats now split each tier's cost by
   model (`costByTierModel`, `tokensByTierModel`).
 - **The MIT License text, in `LICENSE`.** Cascade AI was already declared
@@ -102,6 +103,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/design/calm-direction.md`.
 
 ### Fixed
+- **A run that used a model with no published price no longer claims a
+  saving.** Its total leaves out what those calls cost, so "all on T1 minus
+  the total" counted money that may well have been spent as saved. The
+  saved figure, /why and the spend report now show no saving for it.
 - **Maths in an answer is typeset, whichever way the model wrote it.** GPT
   and Gemini write `\(…\)` and `\[…\]`, which Markdown reads as escaped
   brackets, so an equation reached the web chat as
