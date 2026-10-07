@@ -171,6 +171,10 @@ export class PermissionEscalator extends EventEmitter {
     if (this.t2Evaluator && !req.localOnly) {
       try {
         const t2Decision = await this.t2Evaluator(req);
+        // The caller may have stopped waiting while the model thought. Its
+        // answer is not cached: an "always" reached for a call that no
+        // longer exists would approve the next one in its place.
+        if (signal?.aborted) return withdrawn(req);
         if (t2Decision !== null) {
           if (t2Decision.always) {
             this.sessionCache.set(cacheKey, t2Decision.approved);
@@ -187,6 +191,7 @@ export class PermissionEscalator extends EventEmitter {
     if (this.t1Evaluator && !req.localOnly) {
       try {
         const t1Decision = await this.t1Evaluator(req);
+        if (signal?.aborted) return withdrawn(req);
         if (t1Decision !== null) {
           if (t1Decision.always) {
             this.taskWideCache.set(req.toolName, t1Decision.approved);
@@ -225,6 +230,9 @@ export class PermissionEscalator extends EventEmitter {
   }
 
   private waitForUserDecision(req: PermissionRequest, signal?: AbortSignal): Promise<PermissionDecision> {
+    // Nobody to ask for: a listener added to a signal already aborted never
+    // fires, so the question would sit on screen for a call that has gone.
+    if (signal?.aborted) return Promise.resolve(withdrawn(req));
     return new Promise<PermissionDecision>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       // The caller stopped waiting: the question is taken back, unanswered.

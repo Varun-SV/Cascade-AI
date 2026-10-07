@@ -58,6 +58,23 @@ describe('a project\'s state folder', () => {
     expect(projectStateDir(ws).startsWith(path.join(globalDir(), 'projects'))).toBe(true);
   });
 
+  it('refuses a second folder for a workspace another run is holding', () => {
+    // The second would take over the first run's look-ups, and releasing
+    // either could not give the first its folder back.
+    const ws = tempDir('cascade-state-conflict-');
+    const first = `${ws}-first`;
+    const second = `${ws}-second`;
+    made.push(first, second);
+    const release = useProjectStateDir(ws, first);
+    expect(() => useProjectStateDir(ws, second)).toThrow(/already kept in/);
+    expect(projectStateDir(ws), 'the first run keeps its folder').toBe(first);
+    release();
+    // Once nobody holds it, another folder may be named.
+    const again = useProjectStateDir(ws, second);
+    expect(projectStateDir(ws)).toBe(second);
+    again();
+  });
+
   // A first preparation that failed — the global folder unwritable for a
   // moment — was taken as done for the rest of the process.
   it('is prepared again after a preparation that failed', () => {

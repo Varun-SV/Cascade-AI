@@ -13,6 +13,25 @@ import { globalGitConfigFiles, type Launch } from './jail/process-jail.js';
 import { listGitConfig, unjailedSettings } from './git-hermetic.js';
 import { resolveInWorkspace } from './utils/workspace-path.js';
 
+/**
+ * Refuse `--pathspec-from-file`, which `add`, `checkout` and `stash push`
+ * take: git reads the file it names, and repeats every line that matches
+ * nothing in its error — `pathspec 'machine … password …' did not match` —
+ * which goes back to the model. The file is any the tool can see, and this
+ * tool keeps the home credentials in view for pushing. Git accepts a long
+ * option cut short while it stays unambiguous, so `--pathspec-from=` counts.
+ */
+function refusePathspecFile(operation: string, args: string[]): void {
+  const full = '--pathspec-from-file';
+  for (const arg of args) {
+    if (arg === '--') return;
+    const name = arg.split('=')[0]!;
+    if (name.length >= '--pathspec-fr'.length && full.startsWith(name)) {
+      throw new Error(`git ${operation} ${full} is not allowed: git reads that file and repeats what it holds.`);
+    }
+  }
+}
+
 /** Where the git tool looks for hooks: nowhere. */
 const NO_HOOKS = `core.hooksPath=${process.platform === 'win32' ? 'NUL' : '/dev/null'}`;
 
@@ -93,6 +112,7 @@ export class GitTool extends BaseTool {
           return log.all.map((c) => `${c.hash.slice(0, 8)} ${c.date.slice(0, 10)} ${c.message}`).join('\n');
         }
         case 'add': {
+          refusePathspecFile(operation, args);
           // A hidden file shows to git here as the jail shows it — empty, or
           // a folder with nothing in it — so staging it would record that in
           // place of what it holds. Hidden paths are left out.
@@ -109,6 +129,7 @@ export class GitTool extends BaseTool {
           return branches.all.join('\n');
         }
         case 'checkout': {
+          refusePathspecFile(operation, args);
           await git.checkout(args);
           return `Checked out ${args.join(' ')}`;
         }
@@ -128,6 +149,7 @@ export class GitTool extends BaseTool {
           // A stash records the working tree as this call sees it, hidden
           // files emptied, then resets them: stashing leaves them out, as
           // staging does. Other subcommands take no paths.
+          refusePathspecFile(operation, args);
           const pushing = args.length === 0 || args[0] === 'push' || args[0]!.startsWith('-');
           const stashArgs = pushing && exclusions.length
             ? [...(args[0] === 'push' ? args : ['push', ...args]), ...(args.includes('--') ? [] : ['--']), ...exclusions]

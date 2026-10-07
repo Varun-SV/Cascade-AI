@@ -12,7 +12,7 @@ import { PrivacyPaths } from '../../core/privacy/paths.js';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { BUILT_IN_PROTECTED } from '../../config/ignore.js';
 import { projectStateDir, statePath } from '../../config/project-state.js';
-import { ProcessJail, bwrapArgs, collectHidden, detectJail, homeSecrets, scrubEnv, seatbeltProfile, toPathspecs, unixSocketFilter, type JailKind, type JailPolicy, withIncludes } from './process-jail.js';
+import { ProcessJail, bwrapArgs, collectHidden, detectJail, homeSecrets, reachesUnder, scrubEnv, seatbeltProfile, toPathspecs, unixSocketFilter, type JailKind, type JailPolicy, withIncludes } from './process-jail.js';
 
 const SECRET = 'sk-live-JAILTEST-0123456789';
 const LOCAL = 'LOCAL-ONLY-LAUNCH-PLAN';
@@ -115,6 +115,90 @@ describe('collectHidden — symlinks', () => {
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// A rule can name a file inside a symlinked folder by the link's name —
+// `alias/secret.txt` with `alias -> data` — and no walk of `data` meets it.
+describe('collectHidden — a rule that reaches through a symlinked folder', () => {
+  const withRule = async (pattern: string, build: (dir: string) => Promise<void>, limit?: number) => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-through-')));
+    try {
+      await build(dir);
+      const privacy = new PrivacyPaths([{ pattern, policy: 'local-only' }]);
+      const hidden = await collectHidden(policy({
+        workspaceRoot: dir,
+        isLocalOnly: (rel) => privacy.isLocalOnly(rel),
+        hiddenPatterns: (offline) => [...BUILT_IN_PROTECTED, ...(offline ? [] : privacy.localOnlyPatterns())],
+      }), false, undefined, limit);
+      return { dir, hidden };
+    } catch (err) {
+      await fs.rm(dir, { recursive: true, force: true });
+      throw err;
+    }
+  };
+
+  it('hides the file where it really is, which hides it by both names', async () => {
+    const { dir, hidden } = await withRule('alias/secret.txt', async (d) => {
+      await fs.mkdir(path.join(d, 'data'));
+      await fs.writeFile(path.join(d, 'data', 'secret.txt'), LOCAL);
+      await fs.writeFile(path.join(d, 'data', 'open.txt'), 'fine');
+      await fs.symlink(path.join(d, 'data'), path.join(d, 'alias'));
+    });
+    expect(hidden).toContainEqual({ path: path.join(dir, 'data', 'secret.txt'), dir: false });
+    expect(hidden.some((h) => h.path.endsWith('open.txt'))).toBe(false);
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('does not go round a link back to a folder it is already in', async () => {
+    // `**` reaches under the link at every depth, so only the guard stops it.
+    const { dir, hidden } = await withRule('loop/**/x.txt', async (d) => {
+      await fs.symlink(d, path.join(d, 'loop'));
+      await fs.writeFile(path.join(d, 'x.txt'), LOCAL);
+    });
+    expect(Array.isArray(hidden)).toBe(true);
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('refuses commands rather than leave a rule unchecked in a folder too big to read', async () => {
+    await expect(withRule('alias/secret.txt', async (d) => {
+      await fs.mkdir(path.join(d, 'data'));
+      for (let i = 0; i < 20; i++) await fs.writeFile(path.join(d, 'data', `f${i}`), '');
+      await fs.symlink(path.join(d, 'data'), path.join(d, 'alias'));
+    }, 10)).rejects.toThrow(/"alias" is a symlinked folder a privacy rule reaches into/);
+  });
+
+  it('reads no linked folder that no rule reaches into by name', async () => {
+    // A limit of zero would refuse at the first linked entry read.
+    const { dir } = await withRule('secret/**', async (d) => {
+      await fs.mkdir(path.join(d, 'data'));
+      await fs.writeFile(path.join(d, 'data', 'a'), '');
+      await fs.symlink(path.join(d, 'data'), path.join(d, 'alias'));
+    }, 0);
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe('reachesUnder', () => {
+  it('is true for an anchored pattern that names something inside the folder', () => {
+    expect(reachesUnder('alias/secret.txt', 'alias')).toBe(true);
+    expect(reachesUnder('/alias/secret.txt', 'alias')).toBe(true);
+    expect(reachesUnder('al*/secret.txt', 'alias')).toBe(true);
+    expect(reachesUnder('[ab]lias/x', 'alias')).toBe(true);
+    expect(reachesUnder('a/**', 'a/b')).toBe(true);
+    expect(reachesUnder('a/b/c', 'a')).toBe(true);
+    expect(reachesUnder('a/?/c', 'a/b')).toBe(true);
+  });
+
+  it('is false where the walk of the real folder already meets the name, or nothing inside is named', () => {
+    expect(reachesUnder('secret.txt', 'alias')).toBe(false);
+    expect(reachesUnder('alias/', 'alias')).toBe(false);
+    expect(reachesUnder('**/secret.txt', 'alias')).toBe(false);
+    expect(reachesUnder('other/x', 'alias')).toBe(false);
+    expect(reachesUnder('a/b', 'a/b')).toBe(false);
+    expect(reachesUnder('!alias/x', 'alias')).toBe(false);
+    expect(reachesUnder('# alias/x', 'alias')).toBe(false);
+    expect(reachesUnder('a.b/x', 'axb')).toBe(false);
   });
 });
 
@@ -329,6 +413,23 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: what shell, run_code and git can re
       command: 'umount .cascade/config.json 2>/dev/null; umount -l .cascade/config.json 2>/dev/null; cat .cascade/config.json 2>&1; true',
     }, exec);
     expect(out).not.toContain(SECRET);
+  });
+
+  it('keeps a command from reading a file a rule names through a symlinked folder, by either name', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-through-')));
+    try {
+      await fs.mkdir(path.join(dir, 'data'));
+      await fs.writeFile(path.join(dir, 'data', 'secret.txt'), LOCAL);
+      await fs.writeFile(path.join(dir, 'data', 'open.txt'), 'fine to read');
+      await fs.symlink(path.join(dir, 'data'), path.join(dir, 'alias'));
+      const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false, webSearch: {} } as never, dir);
+      reg.setPrivacyPaths(new PrivacyPaths([{ pattern: 'alias/secret.txt', policy: 'local-only' }]));
+      const out = await reg.execute('shell', { command: 'cat alias/secret.txt data/secret.txt alias/open.txt 2>/dev/null; true' }, exec);
+      expect(out).not.toContain(LOCAL);
+      expect(out).toContain('fine to read');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('keeps a command from following a local-only symlink to the directory it names', async () => {

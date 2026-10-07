@@ -63,6 +63,46 @@ export const SECRET_ENV_NAMES: readonly string[] = [
 const UNWALKED_DIRS = new Set(['.git', 'node_modules']);
 
 /**
+ * Entries read through symlinked folders before commands are refused rather
+ * than run with a rule unchecked. Only folders a rule reaches into by the
+ * link's own name are read this way (`reachesUnder`).
+ */
+const LINKED_WALK_LIMIT = 50_000;
+
+/**
+ * Whether a gitignore-style pattern could name something inside `rel/` by
+ * that name: `alias/secret.txt` inside `alias`.
+ *
+ * Only an anchored pattern can. One that matches a name wherever it is, such
+ * as `.env` or one starting with `**`, meets the same file by its real name
+ * in the walk of the folder the link leads to, when that folder is in the
+ * workspace. (When it is not, a command can open it by its real path anyway.)
+ */
+export function reachesUnder(pattern: string, rel: string): boolean {
+  let p = pattern.trim();
+  if (!p || p.startsWith('#') || p.startsWith('!')) return false;
+  p = stripTrailingSlashes(p);
+  if (!p.includes('/')) return false;
+  const segments = p.replace(/^\/+/, '').split('/');
+  if (segments[0] === '**') return false;
+  const names = rel.split('/');
+  for (let i = 0; i < names.length; i++) {
+    const segment = segments[i];
+    if (segment === undefined) return false;
+    if (segment === '**') return true;
+    if (!segmentMatches(segment, names[i]!)) return false;
+  }
+  return segments.length > names.length;
+}
+
+/** One path segment of a gitignore pattern against one name. A class (`[ab]`) is taken to match. */
+function segmentMatches(segment: string, name: string): boolean {
+  if (segment.includes('[')) return true;
+  const source = segment.replace(/[.+^${}()|\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]');
+  return new RegExp(`^${source}$`).test(name);
+}
+
+/**
  * Cascade's folder is hidden whole, so a file Cascade writes there while a
  * command runs — a database journal, say — is hidden too. These are the
  * parts commands use, and stay: run_code's scripts, and browser screenshots.
@@ -577,15 +617,29 @@ export function scrubEnv(env: NodeJS.ProcessEnv, secretValues: string[]): NodeJS
  * and not walked. The walk awaits each directory, so the event loop keeps
  * running in a large workspace.
  */
-export async function collectHidden(policy: JailPolicy, offline: boolean, nestedRepos?: string[]): Promise<Hidden[]> {
+export async function collectHidden(policy: JailPolicy, offline: boolean, nestedRepos?: string[], linkedLimit = LINKED_WALK_LIMIT): Promise<Hidden[]> {
   const out: Hidden[] = [];
   let root: string;
   try { root = fs.realpathSync(policy.workspaceRoot); } catch { root = path.resolve(policy.workspaceRoot); }
   const hide = (rel: string): boolean => policy.isProtected(rel) || (!offline && !!policy.isLocalOnly?.(rel));
+  const patterns = policy.hiddenPatterns(offline);
+  /** Entries read through symlinked directories so far. See LINKED_WALK_LIMIT. */
+  let throughLinks = 0;
 
-  const walk = async (dir: string, relDir: string): Promise<void> => {
+  /**
+   * `chain`: the real directories the walk is inside, so a link back up to
+   * one of them is not followed round again. `link`: the symlink whose name
+   * this part of the walk goes by, if any.
+   */
+  const walk = async (dir: string, relDir: string, chain: string[], link?: string): Promise<void> => {
     let entries: fs.Dirent[];
     try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
+    if (link !== undefined) {
+      throughLinks += entries.length;
+      if (throughLinks > linkedLimit) {
+        throw new Error(`Commands are not run: "${link}" is a symlinked folder a privacy rule reaches into by that name, and it leads to more than ${linkedLimit.toLocaleString('en-US')} files to check.`);
+      }
+    }
     for (const entry of entries) {
       const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
       const abs = path.join(dir, entry.name);
@@ -598,12 +652,12 @@ export async function collectHidden(policy: JailPolicy, offline: boolean, nested
           out.push({ path: abs, dir: true, keep });
           // The kept parts are mounted back whole; what in them is hidden
           // is masked again after (a local-only subtask's file in tmp).
-          for (const k of keep) await walk(k, `${rel}/${path.basename(k)}`);
+          for (const k of keep) await walk(k, `${rel}/${path.basename(k)}`, [...chain, abs, k], link);
           continue;
         }
         if (hide(`${rel}/`) || hide(`${rel}/${PROBE}`)) { out.push({ path: abs, dir: true }); continue; }
-        if (UNWALKED_DIRS.has(entry.name)) continue;
-        await walk(abs, rel);
+        if (UNWALKED_DIRS.has(entry.name) || chain.includes(abs)) continue;
+        await walk(abs, rel, [...chain, abs], link);
       } else if (entry.isSymbolicLink()) {
         // A command follows a symlink, so what it leads to is hidden with
         // it: a directory whole when the link's name covers every child —
@@ -614,7 +668,16 @@ export async function collectHidden(policy: JailPolicy, offline: boolean, nested
           target = { real: await fs.promises.realpath(abs), dir: (await fs.promises.stat(abs)).isDirectory() };
         } catch { /* dangling: only the name is there */ }
         if (target?.dir) {
-          if (hide(`${rel}/`) || hide(`${rel}/${PROBE}`)) out.push({ path: target.real, dir: true });
+          if (hide(`${rel}/`) || hide(`${rel}/${PROBE}`)) {
+            out.push({ path: target.real, dir: true });
+          } else if (!UNWALKED_DIRS.has(entry.name) && !chain.includes(target.real) && patterns.some((p) => reachesUnder(p, rel))) {
+            // A rule naming something inside it by the link's name —
+            // `alias/secret.txt` for `alias -> data` — is met by no other
+            // walk: the one of `data` goes by `data/secret.txt`. So it is
+            // walked again under this name, and what a rule matches there is
+            // hidden where it really is, which hides it by both names.
+            await walk(target.real, rel, [...chain, target.real], link ?? rel);
+          }
         } else if (hide(rel)) {
           out.push({ path: abs, dir: false });
           if (target) out.push({ path: target.real, dir: false });
@@ -624,7 +687,7 @@ export async function collectHidden(policy: JailPolicy, offline: boolean, nested
       }
     }
   };
-  await walk(root, '');
+  await walk(root, '', [root]);
 
   const state = policy.stateDirs?.();
   const real = (p: string): string | undefined => { try { return fs.realpathSync(p); } catch { return undefined; } };

@@ -68,6 +68,14 @@ export function useProjectStateDir(workspacePath: string, dir: string): () => vo
   if (isWithin(at, root) || isWithin(root, at)) {
     throw new Error(`A project's state folder must be apart from it: ${dir} and ${workspacePath} overlap.`);
   }
+  // One folder per workspace while any run holds it. A second run naming
+  // another would take the first's lazy look-ups with it — its private
+  // outputs and gate files landing in the second's folder — and releasing
+  // either could not put the first one back.
+  const held = named.get(root);
+  if (held !== undefined && held !== at) {
+    throw new Error(`This project's state is already kept in ${held} by a run in progress; it cannot also be kept in ${dir}.`);
+  }
   named.set(root, at);
   holds.set(root, (holds.get(root) ?? 0) + 1);
   let released = false;

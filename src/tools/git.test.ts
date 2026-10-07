@@ -56,6 +56,35 @@ describe('GitTool', () => {
     ).rejects.toThrow(/Unknown git operation/);
   });
 
+  it('refuses a pathspec read from a file, which git repeats back', async () => {
+    // `git checkout --pathspec-from-file=~/.netrc` prints each line that
+    // matches nothing: "pathspec 'machine … password …' did not match".
+    const tool = new GitTool();
+    const cases: Array<[string, string[]]> = [
+      ['checkout', ['--pathspec-from-file=/home/u/.netrc']],
+      ['checkout', ['--pathspec-from-file', '/home/u/.netrc']],
+      ['checkout', ['main', '--pathspec-from=/home/u/.netrc']],
+      ['add', ['--pathspec-fr=/home/u/.netrc']],
+      ['stash', ['push', '--pathspec-from-file=/home/u/.netrc']],
+    ];
+    for (const [operation, args] of cases) {
+      await expect(tool.execute({ operation, args }, opts), `${operation} ${args.join(' ')}`).rejects.toThrow(/--pathspec-from-file is not allowed/);
+    }
+    expect(mockGit.checkout).not.toHaveBeenCalled();
+    expect(mockGit.add).not.toHaveBeenCalled();
+    expect(mockGit.stash).not.toHaveBeenCalled();
+  });
+
+  it('still takes a path that only looks like the option, after --', async () => {
+    mockGit.checkout.mockResolvedValue(undefined);
+    const tool = new GitTool();
+    await tool.execute({ operation: 'checkout', args: ['--', '--pathspec-from-file'] }, opts);
+    expect(mockGit.checkout).toHaveBeenCalledWith(['--', '--pathspec-from-file']);
+    // --pathspec-file-nul reads nothing on its own.
+    await tool.execute({ operation: 'checkout', args: ['--pathspec-file-nul', 'main'] }, opts);
+    expect(mockGit.checkout).toHaveBeenCalledTimes(2);
+  });
+
   it('formats status output for humans', async () => {
     mockGit.status.mockResolvedValue({
       current: 'main',

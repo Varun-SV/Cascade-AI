@@ -380,6 +380,39 @@ describe('PermissionEscalator — a withdrawn request', () => {
     expect(decision.approved).toBe(false);
   });
 
+  it('caches nothing a model decided after the caller stopped waiting', async () => {
+    // The next call for the tool, a live one, must not be approved by it.
+    const caches = (e: PermissionEscalator) => e as unknown as { sessionCache: Map<string, boolean>; taskWideCache: Map<string, boolean> };
+    const viaT2 = new PermissionEscalator();
+    const t2Ended = new AbortController();
+    viaT2.setT2Evaluator(async () => { t2Ended.abort(); return makeDecision(true); });
+    await viaT2.requestPermission(makeRequest({ isDangerous: true }), t2Ended.signal);
+    expect(caches(viaT2).sessionCache.size).toBe(0);
+
+    const viaT1 = new PermissionEscalator();
+    const t1Ended = new AbortController();
+    viaT1.setT2Evaluator(async () => null);
+    viaT1.setT1Evaluator(async () => { t1Ended.abort(); return makeDecision(true, 'T1'); });
+    await viaT1.requestPermission(makeRequest({ isDangerous: true }), t1Ended.signal);
+    expect(caches(viaT1).taskWideCache.size).toBe(0);
+  });
+
+  it('asks nobody for a call that stopped waiting while the models thought', async () => {
+    // Including when the model then failed: its error is not a reason to
+    // put the question to a person for a call that has gone.
+    for (const evaluate of [async () => null, async () => { throw new Error('model down'); }]) {
+      const escalator = new PermissionEscalator();
+      const asked = vi.fn();
+      escalator.on('permission:user-required', asked);
+      const ended = new AbortController();
+      escalator.setT2Evaluator(async (req) => { ended.abort(); return evaluate(req as never); });
+      const decision = await escalator.requestPermission(makeRequest({ isDangerous: true }), ended.signal);
+      expect(decision.approved).toBe(false);
+      expect(asked).not.toHaveBeenCalled();
+      expect(escalator.hasPendingUserDecisions()).toBe(false);
+    }
+  });
+
   it('changes nothing for a caller that passes no signal', async () => {
     const escalator = new PermissionEscalator();
     escalator.setT2Evaluator(async () => makeDecision(true));
