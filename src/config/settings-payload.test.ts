@@ -115,6 +115,24 @@ describe('applySettingsPayload — the whole Settings save, not part of it', () 
     expect((config as unknown as Record<string, unknown>)['somethingElse']).toBeUndefined();
   });
 
+  // 'worker' ran agent-written tools in a bare thread that confined nothing.
+  // A config that still names it gets the WebAssembly sandbox, on every path
+  // the setting is read by, and Settings can no longer write it.
+  it("reads the retired 'worker' sandbox as 'wasm', and no longer offers it", () => {
+    const parsed = CascadeConfigSchema.parse({ tools: { dynamicToolSandbox: 'worker' } });
+    expect(parsed.tools?.dynamicToolSandbox).toBe('wasm');
+
+    const legacy = base();
+    legacy.tools = { dynamicToolSandbox: 'worker' } as CascadeConfig['tools'];
+    expect(settingsSnapshot(legacy).advanced['dynamicToolSandbox']).toBe('wasm');
+
+    const config = base();
+    applySettingsPayload(config, { advanced: { dynamicToolSandbox: 'worker' } });
+    expect(config.tools?.dynamicToolSandbox).toBeUndefined();
+    applySettingsPayload(config, { advanced: { dynamicToolSandbox: 'wasm' } });
+    expect(config.tools?.dynamicToolSandbox).toBe('wasm');
+  });
+
   it("deletes a model binding set to 'auto' rather than storing the word", () => {
     const config = base();
     config.models = { t1: 'claude-opus-4', t2: 'gpt-4o' } as CascadeConfig['models'];

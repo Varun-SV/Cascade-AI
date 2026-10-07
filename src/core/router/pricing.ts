@@ -34,6 +34,7 @@
 //  The one thing this module will never do is invent a price. A model with no
 //  entry is `unknown`, not $0 — see resolvePricing().
 
+import { isIP } from 'node:net';
 import type { ModelInfo, ProviderConfig, ProviderType } from '../../types.js';
 import pricingData from './pricing-data.json' with { type: 'json' };
 
@@ -310,17 +311,34 @@ export function tokenRatesPer1k(
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', '[::1]']);
 
-/** True when a URL points at this machine or a private/LAN address. */
+/**
+ * True when a URL points at this machine or a private/LAN address: loopback,
+ * the IPv4 private ranges, IPv6 unique-local (fc00::/7) and link-local
+ * (fe80::/10) addresses, a `.local` name, or a single-label name like
+ * `gpu-box` — which public DNS cannot resolve, so it names a machine on the
+ * local network.
+ */
 export function isLoopbackOrPrivateHost(url?: string): boolean {
   if (!url) return false;
   try {
-    const host = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    let host = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, '');
     if (LOOPBACK_HOSTS.has(host) || LOOPBACK_HOSTS.has(`[${host}]`)) return true;
     if (host.endsWith('.local')) return true;
+    if (isIP(host) === 6) {
+      // An IPv4 address carried in IPv6 is judged as IPv4 — URL writes one
+      // in hex, `[::ffff:10.0.0.1]` as `::ffff:a00:1`.
+      const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
+      if (!mapped) return /^f[cd][0-9a-f]{0,2}:/.test(host) || /^fe[89ab][0-9a-f]?:/.test(host);
+      const [hi, lo] = [parseInt(mapped[1]!, 16), parseInt(mapped[2]!, 16)];
+      host = `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+    }
     if (/^127\./.test(host)) return true;
     if (/^10\./.test(host)) return true;
     if (/^192\.168\./.test(host)) return true;
     if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true;
+    // Not a bare name like `ollama` either: a resolver's search domain or a
+    // hosts entry can take it anywhere. Such an endpoint is declared private
+    // with `privateNetwork: true` (router/endpoint.ts).
     return false;
   } catch {
     return false;

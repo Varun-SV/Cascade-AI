@@ -121,6 +121,71 @@ describe('generate_document — image embedding and reporting', () => {
     expect(await zipSignature('deck.pptx')).toBe('PK\x03\x04');
   }, 30_000);
 
+  // An embedded file is copied into the document, which anything can read
+  // later: a worker on a cloud model could copy a private image into an
+  // ordinary deck, then pull it back out with a command.
+  it('does not copy a protected file, or a local-only one into a document that is not local-only', async () => {
+    await fs.mkdir(path.join(workspace, 'secret'), { recursive: true });
+    await fs.writeFile(path.join(workspace, 'secret/diagram.png'), png(32, 32));
+    await fs.writeFile(path.join(workspace, 'key.png'), png(8, 8));
+    const t = tool();
+    t.setPathGuard((abs) => abs === path.join(workspace, 'key.png'));
+    const asked: Array<[string, unknown]> = [];
+    const mayRead = (abs: string, to: unknown) => {
+      asked.push([abs, to]);
+      // As a worker answers: a local-only file only into a local-only file.
+      return !abs.includes('/secret/') || (typeof to === 'object' && String((to as { file: string }).file).includes('/secret/'));
+    };
+
+    const out = await t.execute(
+      { path: 'deck.pptx', content: '# S\n\n![d](secret/diagram.png)\n\n![k](key.png)\n' },
+      { mayRead } as never,
+    );
+    expect(out).toContain('Could NOT embed 2 image');
+    expect(out).toContain('secret/diagram.png (local-only');
+    expect(out).toContain('key.png (protected');
+    expect(asked).toContainEqual([path.join(workspace, 'secret/diagram.png'), { file: path.join(workspace, 'deck.pptx') }]);
+
+    const inside = await t.execute(
+      { path: 'secret/deck.pptx', content: '# S\n\n![d](secret/diagram.png)\n' },
+      { mayRead } as never,
+    );
+    expect(inside).toContain('Embedded 1 image');
+  }, 30_000);
+
+  // The state folder is protected whole, so `@screenshots/…`, and a
+  // local-only subtask's own `@private/…`, were always dropped.
+  it('embeds a screenshot, and its own private image for a local-only subtask', async () => {
+    const { projectStateDir, statePath, STATE } = await import('../config/project-state.js');
+    const before = process.env['CASCADE_GLOBAL_DIR'];
+    const global = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-doc-global-'));
+    process.env['CASCADE_GLOBAL_DIR'] = global;
+    try {
+      const shot = statePath(workspace, STATE.screenshots, 'shot.png');
+      const mine = statePath(workspace, STATE.private, 'chart.png');
+      for (const f of [shot, mine]) {
+        await fs.mkdir(path.dirname(f), { recursive: true });
+        await fs.writeFile(f, png(16, 16));
+      }
+      const t = tool();
+      const state = projectStateDir(workspace);
+      t.setPathGuard((abs) => abs === state || abs.startsWith(state + path.sep));
+      const content = '# S\n\n![s](@screenshots/shot.png)\n\n![c](@private/chart.png)\n';
+      const cloud = await t.execute({ path: 'deck.pptx', content }, { isOffline: () => false } as never);
+      expect(cloud).toContain('Embedded 1 image');
+      expect(cloud).toContain("@private/chart.png (a local-only subtask's");
+      const local = await t.execute({ path: 'mine.pptx', content }, { isOffline: () => true } as never);
+      expect(local).toContain('Embedded 2 image');
+      // The state folder by its own path is still not a source.
+      const raw = await t.execute({ path: 'raw.pptx', content: `# S\n\n![s](${shot})\n` }, { isOffline: () => true } as never);
+      expect(raw).toContain('Could NOT embed 1 image');
+    } finally {
+      if (before === undefined) delete process.env['CASCADE_GLOBAL_DIR'];
+      else process.env['CASCADE_GLOBAL_DIR'] = before;
+      await fs.rm(global, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it('explains that a remote URL has to be downloaded first', async () => {
     const out = await tool().execute(
       { path: 'deck.pptx', content: '# Slide\n\n![web](https://example.com/a.png)\n' },

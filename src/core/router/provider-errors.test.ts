@@ -215,3 +215,25 @@ describe('enrichProviderError', () => {
     expect(enrichProviderError(original, c, 'x').message).toBe(describeProviderError(c, 'x'));
   });
 });
+
+// `/model .*(not found|…)/` was tried again from every "model " in the
+// message: one made of them took time growing with its length squared.
+describe('classifyProviderError — "model … not found" in one pass', () => {
+  it('reads the same messages as before', () => {
+    const kind = (message: string, status?: number) =>
+      classifyProviderError(Object.assign(new Error(message), status ? { status } : {})).kind;
+    expect(kind('The model `gpt-9` was not found')).toBe('model_unavailable');
+    expect(kind('model llama3 does not exist, pull it first')).toBe('model_unavailable');
+    expect(kind('This model is not enabled for your key', 403)).toBe('model_unavailable');
+    expect(kind('Forbidden', 403)).toBe('auth');
+    // Not across lines, as `.` never was.
+    expect(kind('model list refreshed\nroute not found')).not.toBe('model_unavailable');
+  });
+
+  it('takes no longer for a message made of "model " over and over', () => {
+    const started = performance.now();
+    classifyProviderError(Object.assign(new Error(`${'model '.repeat(40_000)}!`), { status: 403 }));
+    classifyProviderError(new Error(`${'model '.repeat(40_000)}!`));
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+});

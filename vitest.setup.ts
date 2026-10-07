@@ -17,7 +17,25 @@
 //
 //  A test that needs one of these sets it explicitly and restores it.
 
-import { beforeEach } from 'vitest';
+import { afterAll, beforeEach } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+// Cascade's machine-global folder — credentials, and every project's state
+// (config/project-state.ts) — is a temporary one for each test file, never
+// the developer's own ~/.cascade-ai. Per file rather than per test: a
+// fixture made in `beforeAll` has to find its project's state where its
+// tests do. A project's state folder is its own, so tests with their own
+// workspaces do not meet; the one file they share is the credential store,
+// which is emptied before each test.
+const globalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-global-'));
+process.env['CASCADE_GLOBAL_DIR'] = globalDir;
+beforeEach(() => {
+  process.env['CASCADE_GLOBAL_DIR'] = globalDir;
+  fs.rmSync(path.join(globalDir, 'credentials.json'), { force: true });
+});
+afterAll(() => { fs.rmSync(globalDir, { recursive: true, force: true }); });
 
 const PROVIDER_ENV = [
   'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',

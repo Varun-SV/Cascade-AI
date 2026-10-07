@@ -35,6 +35,7 @@ import { canProduceFiles, canProduceNonDiskDeliverables, hasFileWritingTool } fr
 import { planSpecShape, quotedFieldRules } from './plan-spec.js';
 import { REPORTING_INTEGRITY_RULE } from './integrity.js';
 import { describeBrowserForPlanner } from './browser-planning.js';
+import { factMayLeave } from '../knowledge/world-state.js';
 import { assembleFinishedWork, directAnswerPrompt, isBudgetStop, keepFirst, sectionsWithin, workersWithin } from '../router/run-budget.js';
 
 /** Case-insensitive shared keywords between two keyword lists. */
@@ -619,7 +620,10 @@ In 3-5 terse bullets, flag the most important RISKS, GAPS, or over-/under-decomp
     const db = this.router.getWorldStateDB?.();
     let worldStateContext = '';
     if (db) {
-      const knowledge = db.getFormattedKnowledge(prompt);
+      // The plan goes to cloud models, the planner's and every tier's below:
+      // facts are left out that may not leave (factMayLeave).
+      const privacy = this.router.getPrivacyPaths?.();
+      const knowledge = db.getFormattedKnowledge(prompt, undefined, (fact) => factMayLeave(fact, privacy));
       if (knowledge) {
         worldStateContext = `\n\nPROJECT KNOWLEDGE (relevant facts about this codebase):\n${knowledge}`;
       } else {

@@ -31,7 +31,7 @@ import { exportCommand } from './commands/export.js';
 import { linkCommand } from './commands/link.js';
 import { telemetryCommand } from './commands/telemetry.js';
 import { statsCommand } from './commands/stats.js';
-import { runSetupWizard } from './setup/index.js';
+import { applySetup, runSetupWizard } from './setup/index.js';
 import { McpClient } from '../mcp/client.js';
 import { restoreTerminal } from './terminal.js';
 
@@ -368,7 +368,7 @@ async function startRepl(options: {
     console.log(chalk.magenta('  ◈ No providers configured — launching setup wizard…'));
     console.log();
     config = await runSetupWizard(workspacePath);
-    await cm.updateConfig(config);
+    await applySetup(cm, config);
     // Reload to pick up persisted defaults
     await cm.load();
     config = cm.getConfig();

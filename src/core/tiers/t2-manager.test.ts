@@ -761,3 +761,48 @@ describe('T2 decomposition prompt — file capability awareness', () => {
     expect(captured.prompt).not.toMatch(/READING THE WRITTEN ANSWER/);
   });
 });
+
+// The retried worker's result skipped the T3→T2 boundary: a local-only
+// subtask's output, and issues quoting a private endpoint, went into the
+// section's aggregation prompt.
+describe('T2Manager — what a retried local-only worker hands up', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('withholds its output and issues, keeping only the respawn marker', async () => {
+    const SECRET = 'PRIVATE-ENDPOINT-ECHO-4711';
+    const prompts: string[] = [];
+    const router = {
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> }) => {
+        prompts.push(JSON.stringify(options.messages));
+        return makeResult('Merged');
+      }),
+      getModelForTier: () => undefined,
+    } as unknown as CascadeRouter;
+    vi.spyOn(T3Worker.prototype, 'execute').mockImplementation(async function (assignment) {
+      if (assignment.subtaskId === 'draft' && !assignment.description.startsWith('[RETRY]')) {
+        throw new Error('worker crashed');
+      }
+      return {
+        subtaskId: assignment.subtaskId,
+        status: assignment.subtaskId === 'draft' ? 'ESCALATED' : 'COMPLETED',
+        output: `answer: ${SECRET}`,
+        testResults: { checksRun: [], passed: [], failed: [] },
+        issues: [`provider said: ${SECRET}`],
+        peerSyncsUsed: [],
+        correctionAttempts: 0,
+        localOnly: true,
+      };
+    });
+    const manager = new T2Manager(router, makeToolRegistry(), 't1-root');
+    await manager.execute(makeAssignment(), 'task-retry-local');
+    expect(prompts.length).toBeGreaterThan(0);
+    expect(prompts.filter((p) => p.includes(SECRET))).toEqual([]);
+    const boundary = (manager as unknown as { atBoundary(r: unknown): { issues: string[] } }).atBoundary({
+      subtaskId: 's', status: 'ESCALATED', output: SECRET, testResults: { checksRun: [], passed: [], failed: [] },
+      issues: [`Stalled: Requesting dynamic tool generation from T2 Manager for: x`, `said ${SECRET}`],
+      peerSyncsUsed: [], correctionAttempts: 0, localOnly: true,
+    });
+    expect(boundary.issues[0]).toContain('dynamic tool generation');
+    expect(JSON.stringify(boundary)).not.toContain(SECRET);
+  });
+});

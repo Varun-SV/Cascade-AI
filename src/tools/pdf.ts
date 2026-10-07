@@ -7,6 +7,7 @@ import path from 'node:path';
 import PDFDocument from 'pdfkit';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
+import { resolveInWorkspace } from './utils/workspace-path.js';
 
 export class PDFCreateTool extends BaseTool {
   readonly name = 'pdf_create';
@@ -27,9 +28,12 @@ export class PDFCreateTool extends BaseTool {
     const filePath = input['path'] as string;
     const content = input['content'] as string;
     const title = input['title'] as string | undefined;
+    // In the workspace, like every file tool: not wherever the process
+    // happens to be running, which in the desktop app or the server is not it.
+    const absPath = resolveInWorkspace(this.workspaceRoot, filePath);
 
     // Ensure directory exists
-    const dir = path.dirname(filePath);
+    const dir = path.dirname(absPath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
@@ -37,7 +41,7 @@ export class PDFCreateTool extends BaseTool {
     return new Promise((resolve, reject) => {
       try {
         const doc = new PDFDocument({ margin: 50 });
-        const stream = fs.createWriteStream(filePath);
+        const stream = fs.createWriteStream(absPath);
 
         doc.pipe(stream);
 

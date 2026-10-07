@@ -10,6 +10,8 @@ web/node_modules/
 # Stray build / watcher artifacts
 tsup.config.bundled_*.mjs
 vitest.config.ts.timestamp-*.mjs
+# The sandbox worker bundle the test run builds beside its source (vitest.global-setup.ts).
+src/tools/sandbox/wasm-sandbox-worker.cjs
 .cascade/keystore.enc
 .cascade/sessions/
 coverage/

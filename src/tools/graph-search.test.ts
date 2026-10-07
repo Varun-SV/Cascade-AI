@@ -34,3 +34,25 @@ describe('GraphSearchTool', () => {
     expect(out).toContain('- Payments uses Stripe');
   });
 });
+
+describe('GraphSearchTool — facts that may not leave', () => {
+  const rules = { hasPolicies: () => true, isLocalOnly: (p: string) => p.startsWith('secret/') };
+  const facts = [
+    { ...fact('Payments', 'uses', 'Stripe'), sources: ['src/pay.ts'] },
+    { ...fact('Payments', 'settles', 'weekly'), sources: null },
+    { ...fact('Payments', 'owner', 'ops team'), sources: ['secret/org.md'] },
+  ];
+
+  it('shows a caller on any model only facts that may leave', async () => {
+    const out = await new GraphSearchTool(source(facts), () => rules).execute({ query: 'Payments' }, opts);
+    expect(out).toContain('Payments uses Stripe');
+    expect(out).not.toContain('weekly');
+    expect(out).not.toContain('ops team');
+  });
+
+  it('shows a local-only caller everything: it stays on this machine', async () => {
+    const out = await new GraphSearchTool(source(facts), () => rules).execute({ query: 'Payments' }, { isOffline: () => true } as never);
+    expect(out).toContain('weekly');
+    expect(out).toContain('ops team');
+  });
+});
