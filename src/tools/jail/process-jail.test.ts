@@ -1806,6 +1806,42 @@ describe('ProcessJail.prepare — git configuration, policy files and stores', (
     }
   });
 
+  // A guarded file a command changed and that could not be put back was
+  // left as the command made it, and the next command or git call used it.
+  it('refuses commands, in this run and later ones, while a changed policy file cannot be put back', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-unrestored-')));
+    try {
+      const ignore = path.join(dir, '.cascadeignore');
+      await fs.writeFile(ignore, 'private/\n');
+      const make = () => new ProcessJail(policy({ workspaceRoot: dir, detect: bwrap, readOnlyFiles: () => [ignore] }));
+      const jail = make();
+      const r = await jail.prepare('sh', [], { cwd: dir, offline: false });
+      if (!r.ok) throw new Error(r.reason);
+      await fs.writeFile(ignore, '');
+      const write = fsSync.writeFileSync;
+      const stuck = vi.spyOn(fsSync, 'writeFileSync').mockImplementation(((f: fsSync.PathOrFileDescriptor, d: unknown, o?: unknown) => {
+        if (f === ignore) throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+        return (write as (f: fsSync.PathOrFileDescriptor, d: unknown, o?: unknown) => void)(f, d, o);
+      }) as typeof write);
+      try {
+        expect(await r.launch.done?.()).toMatch(/could not be put back/);
+        const again = await jail.prepare('sh', [], { cwd: dir, offline: false });
+        expect(!again.ok && again.reason).toMatch(/\.cascadeignore was changed by a command and could not be put back/);
+        // The git tool too, and another run.
+        expect((await jail.prepare('git', [], { cwd: dir, offline: false, keepGit: true })).ok).toBe(false);
+        expect((await make().prepare('sh', [], { cwd: dir, offline: false })).ok).toBe(false);
+      } finally {
+        stuck.mockRestore();
+      }
+      // Once it can be put back, it is, and commands run again.
+      expect((await make().prepare('sh', [], { cwd: dir, offline: false })).ok).toBe(true);
+      expect(await fs.readFile(ignore, 'utf8')).toBe('private/\n');
+      expect((await jail.prepare('sh', [], { cwd: dir, offline: false })).ok).toBe(true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   // A policy file not there when a command started was left to whatever the
   // command put there.
   it('removes a policy file a command made where there was none', async () => {
@@ -1844,6 +1880,22 @@ describe('collectHidden — what it cannot look into', () => {
       await collectHidden(policy({ workspaceRoot: dir }), false, nested);
       expect(nested).toContain(path.join(dir, 'mirror.git'));
     } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The workspace itself, unlistable, read as empty: nothing was hidden.
+  it('refuses commands when the workspace folder itself cannot be listed', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-unlistable-root-')));
+    const real = fsSync.promises.readdir;
+    const spy = vi.spyOn(fsSync.promises, 'readdir').mockImplementation(((p: fsSync.PathLike, o: unknown) => {
+      if (p === dir) return Promise.reject(Object.assign(new Error('EACCES'), { code: 'EACCES' }));
+      return (real as (p: fsSync.PathLike, o: unknown) => Promise<unknown>)(p, o);
+    }) as typeof real);
+    try {
+      await expect(collectHidden(policy({ workspaceRoot: dir }), false)).rejects.toThrow(/workspace folder .* cannot be listed/);
+    } finally {
+      spy.mockRestore();
       await fs.rm(dir, { recursive: true, force: true });
     }
   });

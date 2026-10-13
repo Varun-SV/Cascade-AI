@@ -1116,6 +1116,20 @@ describe('privacy.paths, enforced when a file is read', () => {
     expect(bad.result.status).not.toBe('COMPLETED');
   });
 
+  // The approval request for a call naming a local-only file went to the
+  // tier models — cloud ones — before the call moved the subtask private.
+  it('becomes local-only before asking about a call that names a local-only file', async () => {
+    const asked: Array<{ toolName: string; localOnly?: boolean }> = [];
+    const escalator = { requestPermission: async (req: { id: string; toolName: string; localOnly?: boolean }) => { asked.push(req); return { requestId: req.id, approved: false, decidedBy: 'USER' }; } };
+    const { result } = await run({
+      privateModel: true,
+      call: [{ id: 'tc-1', name: 'file_edit', input: { path: 'secret/plan.md', old_string: 'PLAN', new_string: 'NEW' } }],
+      escalator,
+    });
+    expect(asked).toEqual([expect.objectContaining({ toolName: 'file_edit', localOnly: true })]);
+    expect(result.localOnly).toBe(true);
+  });
+
   // A failed read fell back to the first tool sharing a word with it —
   // file_write — and ran it with no approval asked.
   it('does not turn a failed read into a write, and asks afresh for the tool a fallback runs', async () => {
@@ -1547,5 +1561,31 @@ describe('T3Worker — where its facts came from', () => {
     await (worker as unknown as { extractAndStoreFacts: (db: unknown, a: T2ToT3Assignment, out: string) => Promise<void> })
       .extractAndStoreFacts(db, makeAssignment({ files: ['README.md'] }), 'The auth module uses JWT.');
     expect(db.upsertFact).toHaveBeenCalledWith('auth', 'uses', 'JWT', worker.id, undefined, ['README.md', 'src/auth.ts']);
+  });
+
+  // A command's reads are not seen, so its facts were recorded as coming
+  // from the named files alone — and kept once another turned local-only.
+  it('records its facts\' sources as unknown once a tool whose reads are not seen has run', async () => {
+    const db = { upsertFact: vi.fn() };
+    const router = {
+      getPrivacyPaths: () => ({ hasPolicies: () => true, coversFile: () => false }),
+      hasPrivateModel: () => false,
+      generate: vi.fn(async () => makeResult('[{"entity":"auth","relation":"uses","value":"JWT"}]')),
+    } as unknown as CascadeRouter;
+    const registry = makeToolRegistry({ getToolDefinitions: () => [], getWorkspaceRoot: () => os.tmpdir() } as unknown as Partial<ToolRegistry>);
+    const worker = new T3Worker(router, registry, 't2-parent');
+    const internals = worker as unknown as {
+      noteRan: (name: string) => void;
+      extractAndStoreFacts: (db: unknown, a: T2ToT3Assignment, out: string) => Promise<void>;
+    };
+    internals.noteRan('file_read');
+    await internals.extractAndStoreFacts(db, makeAssignment({ files: ['README.md'] }), 'The auth module uses JWT.');
+    expect(db.upsertFact).toHaveBeenLastCalledWith('auth', 'uses', 'JWT', worker.id, undefined, ['README.md']);
+    for (const tool of ['shell', 'run_code', 'git', 'code_search']) {
+      const fresh = new T3Worker(router, registry, 't2-parent') as unknown as typeof internals;
+      fresh.noteRan(tool);
+      await fresh.extractAndStoreFacts(db, makeAssignment({ files: ['README.md'] }), 'The auth module uses JWT.');
+      expect(db.upsertFact, tool).toHaveBeenLastCalledWith('auth', 'uses', 'JWT', expect.any(String), undefined, null);
+    }
   });
 });

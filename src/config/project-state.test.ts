@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ConfigManager } from './index.js';
-import { globalDir, migrateProjectState, projectStateDir, stateNotices, statePath, statePathFor, STATE, useProjectStateDir } from './project-state.js';
+import { globalDir, LegacyStateNotMovedError, migrateProjectState, projectStateDir, stateNotices, statePath, statePathFor, STATE, useProjectStateDir } from './project-state.js';
 import { writeProjectConfig } from './write-config.js';
 
 const made: string[] = [];
@@ -281,7 +281,8 @@ describe('moving it on first use', () => {
       throw new Error('ENOSPC');
     });
     try {
-      expect(fs.existsSync(statePath(ws, STATE.memoryDb))).toBe(false);
+      // Refused while it is left behind, rather than shadowed by fresh state.
+      expect(() => statePath(ws, STATE.memoryDb)).toThrow(LegacyStateNotMovedError);
       expect(fs.readFileSync(path.join(ws, '.cascade', 'memory.db'), 'utf-8')).toBe('sessions');
       expect(migrateProjectState(ws)).toEqual(['memory.db']);
       expect(fs.readFileSync(statePath(ws, STATE.memoryDb), 'utf-8')).toBe('sessions');
@@ -290,6 +291,29 @@ describe('moving it on first use', () => {
       crossDevice.mockRestore();
       cutShort.mockRestore();
     }
+  });
+
+  // An entry that could not be moved was skipped, and startup went on with
+  // fresh state that then shadowed it for good.
+  it('refuses to start while a legacy entry cannot be moved, and moves it once it can', () => {
+    const ws = tempDir('cascade-legacy-stuck-');
+    fs.mkdirSync(path.join(ws, '.cascade'));
+    fs.writeFileSync(path.join(ws, '.cascade', 'memory.db'), 'sessions');
+    fs.writeFileSync(path.join(ws, '.cascade', 'notes.json'), '{}');
+    const rename = fs.renameSync;
+    const stuck = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (String(from).endsWith(path.join('.cascade', 'memory.db'))) throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+      return rename(from, to);
+    });
+    try {
+      expect(() => projectStateDir(ws)).toThrow(/Could not move memory\.db/);
+      expect(() => migrateProjectState(ws)).toThrow(LegacyStateNotMovedError);
+      expect(fs.existsSync(path.join(ws, '.cascade', 'memory.db'))).toBe(true);
+    } finally {
+      stuck.mockRestore();
+    }
+    expect(migrateProjectState(ws)).toContain('memory.db');
+    expect(fs.readFileSync(statePath(ws, STATE.memoryDb), 'utf-8')).toBe('sessions');
   });
 
   it('leaves a .cascade that is a symlink, and what it points at, alone', () => {

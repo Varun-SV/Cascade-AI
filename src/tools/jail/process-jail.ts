@@ -42,6 +42,7 @@ import ignoreFactory from 'ignore';
 import { fileIdentity, PROBE } from '../../utils/link-aliases.js';
 import { stripTrailingSlashes } from '../../utils/net.js';
 import { isWithin } from '../../utils/real-path.js';
+import { statePath } from '../../config/project-state.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -283,9 +284,50 @@ function noJailReason(): string {
 
 export class ProcessJail {
   private warned = false;
+  /** Guarded files a command changed that could not be put back (guardFiles), kept on disk too, for later runs. */
+  private unrestored = new Map<string, Guarded>();
   private gitChecks = new Map<string, { key: string; dirs: string[] }>();
 
   constructor(private readonly policy: JailPolicy) {}
+
+  /** Where the files that could not be put back are recorded, for later runs and other processes. */
+  private unrestoredRecord(): string {
+    return statePath(this.policy.workspaceRoot, 'jail-unrestored.json');
+  }
+
+  private keepUnrestored(failed: Map<string, Guarded>): void {
+    for (const [file, then] of failed) if (!this.unrestored.has(file)) this.unrestored.set(file, then);
+    this.saveUnrestored();
+  }
+
+  /** Try again to put back what could not be: why commands stay refused, or undefined once all is back. */
+  private retryUnrestored(): string | undefined {
+    try {
+      const recorded = JSON.parse(fs.readFileSync(this.unrestoredRecord(), 'utf8')) as Record<string, { link?: string; data?: string; mode?: number; absent?: boolean }>;
+      for (const [file, then] of Object.entries(recorded)) {
+        if (this.unrestored.has(file)) continue;
+        if (typeof then.link === 'string') this.unrestored.set(file, { link: then.link });
+        else if (typeof then.data === 'string' && typeof then.mode === 'number') this.unrestored.set(file, { data: Buffer.from(then.data, 'base64'), mode: then.mode });
+        else if (then.absent) this.unrestored.set(file, { absent: true });
+      }
+    } catch { /* none recorded */ }
+    if (!this.unrestored.size) return undefined;
+    this.unrestored = putBack(this.unrestored).failed;
+    this.saveUnrestored();
+    return this.unrestored.size ? unrestoredReason(this.unrestored) : undefined;
+  }
+
+  private saveUnrestored(): void {
+    try {
+      const record = this.unrestoredRecord();
+      if (!this.unrestored.size) { fs.rmSync(record, { force: true }); return; }
+      const out: Record<string, unknown> = {};
+      for (const [file, then] of this.unrestored) {
+        out[file] = 'data' in then ? { data: then.data.toString('base64'), mode: then.mode } : then;
+      }
+      fs.writeFileSync(record, JSON.stringify(out), { mode: 0o600 });
+    } catch { /* kept in this process */ }
+  }
 
   /**
    * How to launch `file args` from `cwd`: wrapped in the jail, or as it is
@@ -296,6 +338,10 @@ export class ProcessJail {
     if (mode === 'off') {
       return { ok: true, launch: { file, args, env: { ...process.env }, cwd: opts.cwd, jail: null } };
     }
+    // A file an earlier command changed, and that could not be put back,
+    // keeps every command and git call from running until it is.
+    const unrestored = this.retryUnrestored();
+    if (unrestored) return { ok: false, reason: `Commands are not run: ${unrestored}` };
     const env = scrubEnv(process.env, this.policy.secretValues());
     const available = await (this.policy.detect ?? detectJail)();
     const kind = mode === 'auto' ? available : (available === mode ? mode : null);
@@ -350,7 +396,7 @@ export class ProcessJail {
     // is looked at again when the command ends, and put back if changed —
     // and so is every symlink on the way to a git config file, which a
     // command could swap for a config naming a program for the git tool.
-    const restorePolicy = guardFiles([...policyFiles, ...new Set(gitConfig.flatMap((f) => symlinksAlong(f)))]);
+    const restorePolicy = guardFiles([...policyFiles, ...new Set(gitConfig.flatMap((f) => symlinksAlong(f)))], (failed) => this.keepUnrestored(failed));
 
     if (!opts.offline) {
       // What git's configuration holds goes to the model with anything a
@@ -721,7 +767,10 @@ export async function collectHidden(policy: JailPolicy, offline: boolean, nested
       // read, say — cannot be checked for what it holds, though a command
       // that knows a name in it can open it: hidden whole. One gone
       // meanwhile has nothing to hide.
-      if (relDir && (err as NodeJS.ErrnoException).code !== 'ENOENT') out.push({ path: dir, dir: true });
+      // The workspace itself cannot be hidden whole and still be worked
+      // in: commands are refused.
+      if (!relDir) throw new Error(`Commands are not run: the workspace folder ${dir} cannot be listed (${(err as Error).message}), so what it holds cannot be checked for files to hide.`);
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') out.push({ path: dir, dir: true });
       return;
     }
     if (link !== undefined) {
@@ -1331,42 +1380,65 @@ function symlinksAlong(file: string, seen = new Set<string>()): string[] {
   return out;
 }
 
+/** What a guarded file was: where it led, what it held, or that it was not there. */
+type Guarded = { link: string } | { data: Buffer; mode: number } | { absent: true };
+
 /**
  * Note what each file is now — its contents and mode, or where it leads if
- * a symlink — and return a check that puts back any that has changed since,
- * saying which. One not there now is left to whoever makes it.
+ * a symlink, or that it is not there (one a command makes there is removed:
+ * what it would hold decides what is protected as much as an edit would) —
+ * and return a check that puts back any that has changed since, saying
+ * which. One that cannot be put back is handed to `onFailed`.
  */
-function guardFiles(files: string[]): () => string | void {
-  const was = new Map<string, { link: string } | { data: Buffer; mode: number } | { absent: true }>();
+function guardFiles(files: string[], onFailed: (failed: Map<string, Guarded>) => void): () => string | void {
+  const was = new Map<string, Guarded>();
   for (const file of files) {
     try {
       const st = fs.lstatSync(file, { throwIfNoEntry: false });
-      // One not there is kept from being made: what a command would put
-      // there decides what is protected as much as an edit would.
       if (!st) was.set(file, { absent: true });
       else if (st.isSymbolicLink()) was.set(file, { link: fs.readlinkSync(file) });
       else if (st.isFile()) was.set(file, { data: fs.readFileSync(file), mode: st.mode & 0o7777 });
     } catch { /* unreadable: left to the read-only mount */ }
   }
   return () => {
-    const restored: string[] = [];
-    for (const [file, then] of was) {
-      try {
-        const st = fs.lstatSync(file, { throwIfNoEntry: false });
-        const same = 'absent' in then
-          ? !st
-          : 'link' in then
-            ? !!st?.isSymbolicLink() && fs.readlinkSync(file) === then.link
-            : !!st?.isFile() && (st.mode & 0o7777) === then.mode && fs.readFileSync(file).equals(then.data);
-        if (same) continue;
-        fs.rmSync(file, { force: true, recursive: true });
-        if ('absent' in then) { /* removed: it was not there */ } else if ('link' in then) fs.symlinkSync(then.link, file);
-        else fs.writeFileSync(file, then.data, { mode: then.mode });
-        restored.push(path.basename(file));
-      } catch { /* left as it is */ }
-    }
-    if (restored.length) return `${restored.join(', ')} decide${restored.length === 1 ? 's' : ''} what Cascade protects, and agents may not change ${restored.length === 1 ? 'it' : 'them'}: this command's change was undone.`;
+    const { restored, failed } = putBack(was);
+    if (failed.size) onFailed(failed);
+    const notes: string[] = [];
+    if (restored.length) notes.push(`${restored.join(', ')} decide${restored.length === 1 ? 's' : ''} what Cascade protects, and agents may not change ${restored.length === 1 ? 'it' : 'them'}: this command's change was undone.`);
+    if (failed.size) notes.push(unrestoredReason(failed));
+    if (notes.length) return notes.join(' ');
   };
+}
+
+/** Put each file back as `was` has it, where it differs: which were put back, and which could not be. */
+function putBack(was: ReadonlyMap<string, Guarded>): { restored: string[]; failed: Map<string, Guarded> } {
+  const restored: string[] = [];
+  const failed = new Map<string, Guarded>();
+  for (const [file, then] of was) {
+    try {
+      const st = fs.lstatSync(file, { throwIfNoEntry: false });
+      const same = 'absent' in then
+        ? !st
+        : 'link' in then
+          ? !!st?.isSymbolicLink() && fs.readlinkSync(file) === then.link
+          : !!st?.isFile() && (st.mode & 0o7777) === then.mode && fs.readFileSync(file).equals(then.data);
+      if (same) continue;
+      fs.rmSync(file, { force: true, recursive: true });
+      if ('absent' in then) { /* removed: it was not there */ } else if ('link' in then) fs.symlinkSync(then.link, file);
+      else fs.writeFileSync(file, then.data, { mode: then.mode });
+      restored.push(path.basename(file));
+    } catch {
+      failed.set(file, then);
+    }
+  }
+  return { restored, failed };
+}
+
+/** Why commands are refused while `failed` could not be put back. */
+function unrestoredReason(failed: ReadonlyMap<string, Guarded>): string {
+  const names = [...failed.keys()];
+  const one = names.length === 1;
+  return `${names.join(', ')} ${one ? 'was' : 'were'} changed by a command and could not be put back. ${one ? 'It decides' : 'They decide'} what Cascade protects or what the git tool runs, so no command or git call runs until ${one ? 'it is' : 'they are'} restored: make ${one ? 'it' : 'them'} writable again, or put ${one ? 'it' : 'them'} back by hand.`;
 }
 
 /** Put each folder's mode and times back as `folders` has them, where they differ. */

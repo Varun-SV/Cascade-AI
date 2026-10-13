@@ -92,17 +92,34 @@ export class WorkspaceGate {
 
   /**
    * Wait for a turn; the function returned ends it. `acrossProcesses` takes
-   * it against other processes using the workspace as well.
+   * it against other processes using the workspace as well. `signal` gives
+   * up the wait — the caller's run was cancelled — leaving nothing behind.
    */
-  async enter(mode: GateMode, acrossProcesses = false): Promise<() => void> {
-    const leave = await new Promise<() => void>((resolve) => {
-      this.queue.push({ mode, grant: () => resolve(this.leaver(mode)) });
+  async enter(mode: GateMode, acrossProcesses = false, signal?: AbortSignal): Promise<() => void> {
+    const leave = await new Promise<() => void>((resolve, reject) => {
+      if (signal?.aborted) { reject(cancelled(signal)); return; }
+      const entry = {
+        mode,
+        grant: () => {
+          signal?.removeEventListener('abort', giveUp);
+          resolve(this.leaver(mode));
+        },
+      };
+      const giveUp = () => {
+        const at = this.queue.indexOf(entry);
+        if (at === -1) return;
+        this.queue.splice(at, 1);
+        this.pump();
+        reject(cancelled(signal!));
+      };
+      signal?.addEventListener('abort', giveUp, { once: true });
+      this.queue.push(entry);
       this.pump();
     });
     if (!acrossProcesses || !this.markers) return leave;
     let release: () => void;
     try {
-      release = await (mode === 'alone' ? this.markers.alone() : this.markers.group(mode));
+      release = await (mode === 'alone' ? this.markers.alone(signal) : this.markers.group(mode, signal));
     } catch (err) {
       leave();
       throw err;
@@ -159,9 +176,10 @@ class Markers {
   }
 
   /** A marker for a `tools`, `commands` or `git` caller, once no other process has one it cannot run with, nor the lock. */
-  async group(mode: GroupMode): Promise<() => void> {
+  async group(mode: GroupMode, signal?: AbortSignal): Promise<() => void> {
     fs.mkdirSync(this.dir, { recursive: true });
     for (;;) {
+      if (signal?.aborted) throw cancelled(signal);
       const mine = withLock(this.mutex, 'take the workspace gate', () => {
         if (this.othersAlone() || this.others().some((other) => !fits(mode, other))) return null;
         const file = path.join(this.dir, `${mode}-${INSTANCE}-${++this.seq}`);
@@ -177,9 +195,10 @@ class Markers {
   }
 
   /** The lock — which keeps new callers of other processes out — and then every other process's callers gone. */
-  async alone(): Promise<() => void> {
+  async alone(signal?: AbortSignal): Promise<() => void> {
     fs.mkdirSync(this.dir, { recursive: true });
     for (;;) {
+      if (signal?.aborted) throw cancelled(signal);
       const took = withLock(this.mutex, 'take the workspace gate', () => {
         if (this.othersAlone()) return false;
         fs.writeFileSync(this.lock, OWNER);
@@ -190,7 +209,7 @@ class Markers {
     }
     this.hold(this.lock);
     try {
-      await until(() => this.others().length === 0);
+      await until(() => this.others().length === 0, signal);
     } catch (err) {
       this.drop(this.lock);
       throw err;
@@ -243,6 +262,14 @@ class Markers {
   private drop(file: string): void {
     this.held.delete(file);
     heartbeat.drop(file);
+    // The lock has one name for every process: it is removed only while it
+    // is still this one's. Taken over as stale — a holder stalled past
+    // STALE_MS — it is another's now, and removing it would let a third in.
+    if (file === this.lock) {
+      let holder = '';
+      try { holder = fs.readFileSync(file, 'utf8'); } catch { /* gone */ }
+      if (holder !== OWNER) return;
+    }
     fs.rmSync(file, { force: true });
   }
 }
@@ -375,6 +402,16 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function until(done: () => boolean): Promise<void> {
-  while (!done()) await sleep(POLL_MS);
+async function until(done: () => boolean, signal?: AbortSignal): Promise<void> {
+  while (!done()) {
+    if (signal?.aborted) throw cancelled(signal);
+    await sleep(POLL_MS);
+  }
+}
+
+/** Why a wait for the gate was given up: the caller's run was cancelled. */
+function cancelled(signal: AbortSignal): Error {
+  const err = new Error('The call was cancelled while it waited for its turn in the workspace.', { cause: signal.reason });
+  err.name = 'AbortError';
+  return err;
 }

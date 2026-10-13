@@ -658,6 +658,17 @@ describe('ToolRegistry — the files that decide what is protected', () => {
     await reg.execute('file_write', { path: 'sub/.cascadeignore', content: 'x' }, opts);
     await fs.rm(ws, { recursive: true, force: true });
   });
+
+  // With none there yet, a name only a case-insensitive filesystem takes
+  // for it — other letter case, a trailing dot — made the policy file.
+  it('refuses a name that is .cascadeignore on a case-insensitive filesystem, with none there yet', async () => {
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-policy-case-')));
+    const reg = new ToolRegistry(toolsConfig, ws);
+    for (const name of ['.CASCADEIGNORE', '.CascadeIgnore', '.cascadeignore.', '.cascadeignore ']) {
+      await expect(reg.execute('file_write', { path: name, content: '*' }, opts), name).rejects.toThrow(/may read it but not change it/);
+    }
+    await fs.rm(ws, { recursive: true, force: true });
+  });
 });
 
 // Git reads its configuration from .git, and it can name a program to run —
@@ -777,6 +788,30 @@ describe('ToolRegistry — a path changed while the call waited for its turn', (
       expect(enter.mock.calls.map((c) => c[0])).toEqual(['git']);
     } finally {
       enter.mockRestore();
+      await fs.rm(ws, { recursive: true, force: true });
+    }
+  });
+
+  // A call waiting behind a command ran once its turn came, though its run
+  // had been cancelled meanwhile.
+  it('gives up a call\'s wait for its turn when its run is cancelled, and runs nothing', async () => {
+    const { WorkspaceGate } = await import('./workspace-gate.js');
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cancel-wait-')));
+    try {
+      const reg = new ToolRegistry(toolsConfig, ws);
+      const command = await WorkspaceGate.for(ws).enter('commands');
+      const run = new AbortController();
+      const write = reg.execute('file_write', { path: 'late.txt', content: 'x' }, { ...opts, signal: run.signal });
+      write.catch(() => undefined);
+      await new Promise((r) => setTimeout(r, 50));
+      run.abort();
+      await expect(write).rejects.toThrow(/cancelled/);
+      command();
+      await new Promise((r) => setTimeout(r, 50));
+      await expect(fs.stat(path.join(ws, 'late.txt'))).rejects.toThrow();
+      // Nothing of it is left in the queue.
+      expect(WorkspaceGate.for(ws).idle()).toBe(true);
+    } finally {
       await fs.rm(ws, { recursive: true, force: true });
     }
   });

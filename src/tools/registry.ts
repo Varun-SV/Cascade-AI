@@ -422,7 +422,9 @@ export class ToolRegistry extends EventEmitter {
     let leave: () => void;
     for (;;) {
       const mode = modeFor();
-      leave = await this.gate.enter(mode, true);
+      // Given up when the run is cancelled: a call still waiting must not
+      // run once its turn comes.
+      leave = await this.gate.enter(mode, true, options.signal);
       try {
         check();
       } catch (err) {
@@ -431,6 +433,10 @@ export class ToolRegistry extends EventEmitter {
       }
       if (modeFor() === mode) break;
       leave();
+    }
+    if (options.signal?.aborted) {
+      leave();
+      throw new Error(`${toolName} was not run: its run was cancelled while it waited for its turn.`);
     }
     // Checked, marked and unmarked while the write runs alone: another
     // local-only write to the same file cannot share — and then lose — a
@@ -544,14 +550,21 @@ export class ToolRegistry extends EventEmitter {
   /**
    * Whether an absolute path is one of the files agents may read but not
    * change (`READ_ONLY_POLICY`): by name, through a symlink, or as the same
-   * file under another name — a hard link, or other letter case.
+   * file under another name — a hard link, or other letter case. By name
+   * as a case-insensitive filesystem (Windows, macOS) takes it too, letter
+   * case and trailing dots aside, so a file not there yet cannot be made
+   * under a name that is the policy file there.
    */
   private isPolicyFile(absPath: string): boolean {
     const real = realPathOf(absPath);
     const st = fs.statSync(absPath, { throwIfNoEntry: false });
+    const folded = (root: string, p: string) => path.relative(root, p).split(/[\\/]/)
+      .map((part) => withoutTrailingDotsOrSpaces(part).toLowerCase()).join('/');
     return READ_ONLY_POLICY.some((rel) => {
       const policy = path.join(this.workspaceRoot, rel);
       if (path.resolve(absPath) === policy || real === realPathOf(policy)) return true;
+      const named = rel.toLowerCase();
+      if (folded(this.workspaceRoot, path.resolve(absPath)) === named || folded(realPathOf(this.workspaceRoot), real) === named) return true;
       const other = st && fs.statSync(policy, { throwIfNoEntry: false });
       return !!other && other.dev === st.dev && other.ino === st.ino;
     });

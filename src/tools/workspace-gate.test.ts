@@ -320,4 +320,21 @@ describe('WorkspaceGate', () => {
       await fs.rm(dir, { recursive: true, force: true });
     }
   });
+
+  // A holder stalled past STALE_MS has its lock taken over; on waking, it
+  // removed the new owner's lock, and let a third process in.
+  it('leaves the lock alone at the end when another process has taken it over', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-gate-takeover-')));
+    try {
+      const gate = new WorkspaceGate(dir);
+      const leave = await gate.enter('alone', true);
+      const lock = path.join(statePath(dir, 'gate'), 'alone');
+      const other = `${process.ppid}.0123456789ab`;
+      await fs.writeFile(lock, other);
+      leave();
+      expect(await fs.readFile(lock, 'utf8')).toBe(other);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
 });

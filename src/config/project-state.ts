@@ -134,7 +134,7 @@ export function projectStateDir(workspacePath: string): string {
       // ask, rather than taken as done for the rest of the process. A
       // folder others can read is not left for later: nothing is kept there.
       prepared.delete(dir);
-      if (err instanceof StateNotPrivateError) throw err;
+      if (err instanceof StateNotPrivateError || err instanceof LegacyStateNotMovedError) throw err;
     }
   }
   return dir;
@@ -318,6 +318,18 @@ export class StateNotPrivateError extends Error {
   }
 }
 
+/**
+ * A legacy `.cascade/` that could not be moved, or not wholly: what it holds
+ * would otherwise be shadowed by fresh state made in its place — a new
+ * memory database, say — and never moved after.
+ */
+export class LegacyStateNotMovedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LegacyStateNotMovedError';
+  }
+}
+
 /** A path inside the workspace's state folder. */
 export function statePath(workspacePath: string, ...parts: string[]): string {
   return path.join(projectStateDir(workspacePath), ...parts);
@@ -400,11 +412,13 @@ function moveLegacyState(workspacePath: string, target: string): string[] {
     if (!fs.lstatSync(legacy).isDirectory()) return [];
     if (realRoot(legacy) === realRoot(target)) return [];
     entries = fs.readdirSync(legacy);
-  } catch {
-    return [];
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw new LegacyStateNotMovedError(`Could not read ${legacy} (${(err as Error).message}), where an earlier version kept this project's sessions and settings, so Cascade did not start: it would start afresh without them. Make the folder readable and start again.`);
   }
   fs.mkdirSync(target, { recursive: true, mode: 0o700 });
   const moved: string[] = [];
+  const stuck: string[] = [];
   for (const name of entries) {
     const from = path.join(legacy, name);
     const to = path.join(target, name);
@@ -412,9 +426,16 @@ function moveLegacyState(workspacePath: string, target: string): string[] {
     try {
       moveEntry(from, to);
       moved.push(name);
-    } catch { /* left where it is; tried again next time */ }
+    } catch (err) {
+      stuck.push(`${name} (${(err as Error).message})`);
+    }
   }
   try { if (fs.readdirSync(legacy).length === 0) fs.rmdirSync(legacy); } catch { /* not empty, or gone */ }
+  // Left where it is, it would be shadowed by what Cascade makes in its
+  // place and never moved after: refused, and tried again next time.
+  if (stuck.length) {
+    throw new LegacyStateNotMovedError(`Could not move ${stuck.join(', ')} from ${legacy} to ${target}, so Cascade did not start: it would start afresh beside them. Make them movable and start again.`);
+  }
   return moved;
 }
 

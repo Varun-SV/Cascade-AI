@@ -478,6 +478,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PATH entry outside the workspace, run isolated. The workspace gate treats
   markers it cannot list as an error and a lock it cannot read as held,
   where both read as nobody there.
+- **What can't be checked or put back now stops work rather than slipping
+  by.** Commands are refused when the workspace folder itself can't be
+  listed; a `.cascadeignore` or git-config symlink a command changed that
+  can't be put back keeps every command and git call from running — in later
+  runs too — until it is; and an old `.cascade/` entry that can't be moved
+  stops Cascade starting rather than being shadowed by fresh state. A name
+  that is `.cascadeignore` on a case-insensitive filesystem (`.CASCADEIGNORE`,
+  `.cascadeignore.`) can't be written either. The workspace gate's lock is
+  removed at the end only while it is still this process's, a call waiting
+  for its turn gives up when its run is cancelled, a call naming a local-only
+  file makes the subtask local-only before its approval is asked (so the
+  request skips the tier models), and facts learned after a command or
+  another tool whose reads aren't seen record their sources as unknown.
 
 ## 0.82.0 - 2026-09-22
 

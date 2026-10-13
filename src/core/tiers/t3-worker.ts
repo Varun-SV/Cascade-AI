@@ -360,6 +360,19 @@ export function missingVisualEvidence(
   }. Describing a picture is not producing one.`;
 }
 
+/**
+ * Tools whose reads of workspace files this worker sees — each passes
+ * through mayRead, which records the file as a source of what the subtask
+ * learns — or which read none. A fact learned after any other tool ran (a
+ * command, code search, an agent-written or outside tool) could come from
+ * any file, so its sources are recorded as unknown.
+ */
+const READS_SEEN = new Set([
+  'file_read', 'file_write', 'file_edit', 'file_delete', 'file_list', 'glob', 'grep',
+  'image_analyze', 'pdf_create', 'generate_document', 'transcribe_audio',
+  'web_search', 'web_fetch', 'peer_message',
+]);
+
 export class T3Worker extends BaseTier {
   protected router: CascadeRouter;
   private toolRegistry: ToolRegistry;
@@ -383,6 +396,8 @@ export class T3Worker extends BaseTier {
   private toolRecord: ToolRecordEntry[] = [];
   /** Workspace files this subtask read into a prompt: its facts' sources. */
   private readForModel = new Set<string>();
+  /** Whether it ran a tool whose reads are not seen (READS_SEEN): then its facts' sources are unknown. */
+  private readsUnseen = false;
   /**
    * What the subtasks this one depends on handed it. Their tool calls are in
    * THEIR records, so the self-test is shown this to tell a report of what
@@ -455,6 +470,7 @@ export class T3Worker extends BaseTier {
     this.taskId = taskId;
     this.toolRecord = [];
     this.readForModel = new Set();
+    this.readsUnseen = false;
     this.handedWork = [];
     this.setLabel(assignment.subtaskTitle);
     this.setStatus('ACTIVE');
@@ -1141,8 +1157,22 @@ export class T3Worker extends BaseTier {
    * go ahead. Every tool this worker runs goes through it — the one the
    * model called, and one a fallback runs in its place.
    */
+  /** Note that tool `name` ran: one whose reads are not seen leaves this subtask's facts' sources unknown. */
+  private noteRan(name: string): void {
+    if (!READS_SEEN.has(name)) this.readsUnseen = true;
+  }
+
   private async authorize(tc: ToolCall): Promise<string | null> {
     if (!this.toolRegistry.requiresApproval(tc.name)) return null;
+
+    // A call naming a local-only file makes the subtask local-only before
+    // anyone is asked, as the call itself would once it ran: its request —
+    // the path, and what it would write there — then goes to the user, not
+    // to the tier models, which may be cloud ones.
+    const named = typeof tc.input['path'] === 'string' ? tc.input['path'] : undefined;
+    if (named && !this.localOnlyMatch && !this.readDecision(path.resolve(this.artifactRoot(), named), 'model')) {
+      return `Tool ${tc.name} was not run: ${named} is local-only (privacy.paths), and no private model can take this subtask on.`;
+    }
 
     // ── Hierarchical permission escalation: T3 → T2 → T1 → User ──
     if (this.permissionEscalator) {
@@ -1240,6 +1270,7 @@ export class T3Worker extends BaseTier {
     const toolStartMs = Date.now();
 
     try {
+      this.noteRan(tc.name);
       const result = await this.toolRegistry.execute(tc.name, tc.input, {
         tierId: this.id,
         sessionId: this.taskId,
@@ -1360,6 +1391,7 @@ export class T3Worker extends BaseTier {
       this.log(`Adaptive fallback: trying alternative tool "${altTool}" for failed "${this.shownToolName(tc.name)}"`);
       this.sendStatusUpdate({ progressPct: 50, currentAction: `Fallback: trying ${altTool}`, status: 'IN_PROGRESS' });
       try {
+        this.noteRan(altTool);
         const result = await this.toolRegistry.execute(altTool, tc.input, {
           tierId: this.id,
           sessionId: this.taskId,
@@ -1390,6 +1422,7 @@ export class T3Worker extends BaseTier {
         );
         if (newToolName && !(await this.authorize({ ...tc, id: `${tc.id}-synthesized`, name: newToolName }))) {
           this.log(`Adaptive fallback: synthesized "${newToolName}", retrying`);
+          this.noteRan(newToolName);
           const result = await this.toolRegistry.execute(newToolName, tc.input, {
             tierId: this.id,
             sessionId: this.taskId,
@@ -1984,7 +2017,9 @@ ${output.slice(0, 4000)}`;
       if (!Array.isArray(facts)) return;
       // Where they came from: the files it was set to work on and those it
       // read, so a fact is set aside if one of them turns local-only later.
-      const sources = [...new Set([...this.privacyTargets(assignment), ...this.readForModel])];
+      // A command, or a tool whose reads are not seen, may have read any file:
+      // its facts' sources are unknown, and set aside as such (factMayLeave).
+      const sources = this.readsUnseen ? null : [...new Set([...this.privacyTargets(assignment), ...this.readForModel])];
       for (const f of facts.slice(0, 8)) {
         if (f && typeof f.entity === 'string' && typeof f.relation === 'string' && typeof f.value === 'string') {
           db.upsertFact(f.entity, f.relation, f.value, this.id, undefined, sources);
