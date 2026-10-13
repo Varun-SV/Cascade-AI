@@ -72,6 +72,11 @@ type Page = {
 /** A frame of the page, and where its iframe sits on the page's screen. */
 type Frame = {
   evaluate(expression: string): Promise<unknown>;
+  /** Playwright's queries in this frame. See `PRIVATE_SELECTOR`. */
+  locator?(selector: string): {
+    count(): Promise<number>;
+    nth(index: number): { boundingBox(opts?: { timeout?: number }): Promise<Box | null> };
+  };
   /** True once the frame has left the page. See `privateOnScreen`. */
   isDetached?(): boolean;
   frameElement?(): Promise<{
@@ -79,6 +84,8 @@ type Frame = {
     dispose?(): Promise<void>;
   }>;
 };
+/** A box on the page, in CSS pixels from its top left. */
+type Box = { x: number; y: number; width: number; height: number };
 /** One control on the page, as Playwright resolves it at the moment of acting. */
 type Locator = {
   count(): Promise<number>;
@@ -315,28 +322,21 @@ export const PRIVATE_FIELDS = [
   'input[name*="cvc" i]', 'input[name*="cvv" i]',
   'input[name*="cardnumber" i]', 'input[name*="card_number" i]', 'input[name*="card-number" i]',
 ].join(', ');
+/** Payment providers whose iframe holds a card form, by the address it loads. */
+const PAYMENT_HOSTS = [
+  'stripe', 'braintree', 'adyen', 'paypal', 'checkout.com', 'squareup', 'razorpay', 'klarna', 'recurly', 'chargebee', 'authorize.net',
+];
 /**
- * True when something private is on screen in this frame: a password, card or
- * one-time-code field, or a payment provider's iframe. Read in every frame
- * before a screenshot is taken; any "yes", or a frame on screen that cannot
- * answer, means no screenshot.
+ * Everything the privacy check looks for in a frame: a private field, or a
+ * payment provider's iframe. Asked through Playwright's own queries, which
+ * run in a world of their own and reach into open shadow roots — never
+ * through the page's JavaScript, whose `querySelectorAll`,
+ * `getBoundingClientRect` and `innerHeight` the page itself can redefine to
+ * hide a field from the check.
  */
-const PRIVATE_ON_SCREEN_EXPRESSION = `(() => {
-  const H = innerHeight, W = innerWidth;
-  const seen = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 && r.top < H && r.left < W; };
-  const FIELDS = ${JSON.stringify(PRIVATE_FIELDS)};
-  const PAYMENT = /stripe|braintree|adyen|paypal|checkout\\.com|squareup|razorpay|klarna|recurly|chargebee|authorize\\.net/i;
-  const roots = [document];
-  for (let i = 0; i < roots.length; i++) {
-    // Too many shadow roots to read: not a "no".
-    if (i >= 500) return null;
-    const root = roots[i];
-    for (const el of root.querySelectorAll(FIELDS)) if (seen(el)) return true;
-    for (const f of root.querySelectorAll('iframe')) if (PAYMENT.test(f.src || '') && seen(f)) return true;
-    for (const el of root.querySelectorAll('*')) if (el.shadowRoot) roots.push(el.shadowRoot);
-  }
-  return false;
-})()`;
+const PRIVATE_SELECTOR = [PRIVATE_FIELDS, ...PAYMENT_HOSTS.map((host) => `iframe[src*="${host}" i]`)].join(', ');
+/** Matches in one frame the check measures; past this it cannot say. */
+const PRIVACY_MATCH_LIMIT = 20;
 /** The page's scroll state, read without reaching into page globals twice. */
 const VIEWPORT_EXPRESSION = '({ width: innerWidth, height: innerHeight, scrollY: scrollY, scrollHeight: document.documentElement.scrollHeight })';
 /**
@@ -841,6 +841,11 @@ export class RemoteBrowserController {
   /**
    * What this controller can do beyond the six original actions. The tool
    * reads it to decide which actions and parameters to offer the model.
+   *
+   * Page views need Playwright 1.60's AI snapshot, with refs and boxes —
+   * the version this package installs. With an older one a page cannot be
+   * described: `observe` says so and the model goes on with CSS selectors,
+   * each click, entry and key press by which is put to the person.
    */
   readonly features = { pageView: true, screenshots: true, marked: true } as const;
 
@@ -3062,32 +3067,29 @@ export class RemoteBrowserController {
     page: Page,
     stoppable: <T>(work: Promise<T>) => Promise<T>,
   ): Promise<string | null> {
-    if (typeof page.evaluate !== 'function') return UNCHECKED_SHOT;
+    if (typeof page.frames !== 'function') return UNCHECKED_SHOT;
     // The screen's size from the browser, not from the page: a page can say
     // anything about its own innerHeight, and a height of 0 would put every
     // frame — a card form's included — off screen and unread.
     const screen = await this.screenSize(page);
     if (!screen) return UNCHECKED_SHOT;
-    try {
-      const found = await stoppable(within(page.evaluate(PRIVATE_ON_SCREEN_EXPRESSION)));
-      if (found !== false) return found === true ? PRIVATE_SHOT : UNCHECKED_SHOT;
-    } catch {
-      return UNCHECKED_SHOT;
-    }
-    const frames = typeof page.frames === 'function' ? page.frames().slice(1) : [];
-    if (frames.length > PRIVACY_FRAME_LIMIT) return UNCHECKED_SHOT;
+    const frames = page.frames();
+    if (frames.length - 1 > PRIVACY_FRAME_LIMIT) return UNCHECKED_SHOT;
     // Read side by side: each one is a round trip to a browser that may be in
     // another data centre.
-    const verdicts = await Promise.all(frames.map(async (frame): Promise<string | null> => {
-      // A frame judges "on screen" against its own little viewport, so a
-      // login iframe far below the fold reads as showing its password field.
-      // Only a frame whose iframe is itself on the page's screen counts.
-      if (!(await frameOnScreen(frame, screen))) return null;
+    const verdicts = await Promise.all(frames.map(async (frame, i): Promise<string | null> => {
+      const main = i === 0;
+      // A frame is seen only through its iframe, so only what lies inside
+      // that iframe's box on the page's screen counts — a login iframe far
+      // below the fold is not on screen, however its own page is scrolled.
+      const area = main ? { x: 0, y: 0, ...screen } : await frameArea(frame, screen);
+      if (!area) return null;
       try {
-        const found = await stoppable(within(frame.evaluate(PRIVATE_ON_SCREEN_EXPRESSION)));
-        return found === false ? null : found === true ? PRIVATE_SHOT : UNCHECKED_SHOT;
+        return await stoppable(within(privateIn(frame, area)));
       } catch {
-        return frame.isDetached?.() === true ? null : UNCHECKED_SHOT;
+        // A frame that went away mid-check has nothing to show; one still on
+        // the page that could not be read might.
+        return !main && frame.isDetached?.() === true ? null : UNCHECKED_SHOT;
       }
     }));
     return verdicts.find((v) => v === PRIVATE_SHOT) ?? verdicts.find((v) => v !== null) ?? null;
@@ -3408,27 +3410,56 @@ export function jpegSize(bytes: Uint8Array): { width: number; height: number } |
 }
 
 /**
- * Whether a frame's iframe is on the page's screen. Yes when that cannot be
- * told: the check it decides is a privacy check, and a frame it skips is a
- * frame it does not read.
+ * The part of the screen a frame's iframe covers, or null when it covers none
+ * of it. The whole screen when that cannot be told: the check it decides is a
+ * privacy check, and a frame it skips is a frame it does not read.
  */
-async function frameOnScreen(frame: Frame, screen: { width: number; height: number }): Promise<boolean> {
-  if (typeof frame.frameElement !== 'function') return true;
+async function frameArea(frame: Frame, screen: { width: number; height: number }): Promise<Box | null> {
+  const whole = { x: 0, y: 0, ...screen };
+  if (typeof frame.frameElement !== 'function') return whole;
   let element: Awaited<ReturnType<NonNullable<Frame['frameElement']>>> | undefined;
   try {
     element = await within(frame.frameElement());
     const box = await within(element.boundingBox());
-    if (!box) return false;
-    return box.width > 0 && box.height > 0
-      && box.x + box.width > 0 && box.y + box.height > 0
-      && box.x < screen.width && box.y < screen.height;
+    if (!box) return null;
+    const area = overlap(box, whole);
+    return area.width > 0 && area.height > 0 ? area : null;
   } catch {
-    return true;
+    return whole;
   } finally {
     // A handle keeps its element alive in the page until its document goes;
     // a single-page app keeps its document for the whole run.
     if (element?.dispose) await within(element.dispose()).catch(() => {});
   }
+}
+
+/**
+ * Whether a private field or a payment iframe of this frame lies within
+ * `area`, by Playwright's own queries and measurements. Boxes are on the
+ * page's screen, frames included.
+ */
+async function privateIn(frame: Frame, area: Box): Promise<string | null> {
+  if (typeof frame.locator !== 'function') return UNCHECKED_SHOT;
+  const found = frame.locator(PRIVATE_SELECTOR);
+  const count = await found.count();
+  if (count > PRIVACY_MATCH_LIMIT) return UNCHECKED_SHOT;
+  // A box that cannot be measured — a frame too busy to answer, say — is a
+  // field that may be on screen, not one that is not.
+  const boxes = await Promise.all(Array.from({ length: count }, (_, i) => found.nth(i).boundingBox({ timeout: 1_000 })));
+  return boxes.some((box) => box && box.width > 0 && box.height > 0 && overlap(box, area).width > 0 && overlap(box, area).height > 0)
+    ? PRIVATE_SHOT
+    : null;
+}
+
+/** The part two boxes share; zero-sized when they do not meet. */
+function overlap(a: Box, b: Box): Box {
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  return {
+    x, y,
+    width: Math.max(0, Math.min(a.x + a.width, b.x + b.width) - x),
+    height: Math.max(0, Math.min(a.y + a.height, b.y + b.height) - y),
+  };
 }
 
 /**

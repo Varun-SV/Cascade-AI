@@ -1313,6 +1313,16 @@ export class CascadeRouter extends EventEmitter {
         this.flushExplorationNote(tier, model.id, selectionTaskType);
       }
 
+      // Counted as each request goes out, for /why: a request that fails, or a
+      // stream retried as a plain call, has still sent its screenshot to the
+      // provider, and may still be billed for it.
+      const noteShots = (): void => {
+        if (!offeredShots || runGeneration !== this.runGeneration) return;
+        this.runScreenshots.sent += sentShots;
+        this.runScreenshots.leftOut += offeredShots - sentShots;
+      };
+      noteShots();
+
       if (model.isLocal) {
         // Apply a hard timeout to local inference calls so a slow/overloaded
         // model doesn't block the worker indefinitely.
@@ -1359,6 +1369,7 @@ export class CascadeRouter extends EventEmitter {
           // non-streaming call rather than letting a hung stream freeze the run.
           // The stalled attempt has been aborted by now, so this is the only
           // request in flight and the reservation taken above still covers it.
+          noteShots();
           result = await withTimeoutAbort(
             (signal) => provider.generate({ ...options, signal }),
             cloudTimeoutMs,
@@ -1374,12 +1385,6 @@ export class CascadeRouter extends EventEmitter {
           `Model ${model.id} inference timed out after ${cloudTimeoutMs}ms`,
           [options.signal, runAbort.signal],
         );
-      }
-
-      // Counted once the request has gone and come back, for /why.
-      if (offeredShots && runGeneration === this.runGeneration) {
-        this.runScreenshots.sent += sentShots;
-        this.runScreenshots.leftOut += offeredShots - sentShots;
       }
 
       // Recompute against the ROUTER's view of the model (which carries dataset

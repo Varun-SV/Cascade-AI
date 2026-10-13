@@ -184,7 +184,23 @@ describe('the router decides against the model it resolved', () => {
     expect(seen).toHaveLength(1);
     expect(JSON.stringify(seen[0])).toContain('"type":"image"');
     expect(JSON.stringify(seen[0])).not.toContain('Screenshot left out');
-    expect(router.getRunScreenshots()).toEqual({ sent: 1, leftOut: 0 });
+    // Each attempt counts: left out for the blind model, then sent.
+    expect(router.getRunScreenshots()).toEqual({ sent: 1, leftOut: 1 });
+  });
+
+  it('counts a screenshot each time it goes to a provider, a stream retried as a plain call included', async () => {
+    const { router } = await routerServing(CLAUDE);
+    const sends: string[] = [];
+    (router as unknown as { providers: Map<string, unknown> }).providers.set(`${CLAUDE.provider}:${CLAUDE.id}`, {
+      generateStream: async () => { sends.push('stream'); throw new Error('stream stalled'); },
+      generate: async () => {
+        sends.push('plain');
+        return { content: 'ok', finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimatedCostUsd: 0 } };
+      },
+    });
+    await router.generate('T3', withShot, () => {});
+    expect(sends).toEqual(['stream', 'plain']);
+    expect(router.getRunScreenshots()).toEqual({ sent: 2, leftOut: 0 });
   });
 
   it('leaves it out for a model whose provider row points at a gateway', async () => {

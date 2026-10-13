@@ -4585,24 +4585,34 @@ describe('page views and refs', () => {
       if (snapshotFails) throw new Error('snapshot timed out');
       return snapshot;
     };
-    const privacyCheck = (found: boolean | null | 'throws' | 'gone') => {
-      page.calls.push('privacy');
-      if (found === 'throws' || found === 'gone') throw new Error('Execution context was destroyed');
-      return found;
-    };
+    /**
+     * A frame as the privacy check reads it: through Playwright's queries,
+     * never the page's own JavaScript. What it finds is boxed at `y`.
+     */
+    const scanned = (found: boolean | null | 'throws' | 'gone', y: number) => ({
+      evaluate: async () => { throw new Error('the privacy check must not run in the page\'s own world'); },
+      locator: (selector: string) => ({
+        count: async () => {
+          page.calls.push('privacy');
+          if (!selector.includes('one-time-code') || !selector.includes('iframe[src*="stripe" i]')) throw new Error(`unexpected query ${selector}`);
+          if (found === 'throws' || found === 'gone' || found === null) throw new Error('Execution context was destroyed');
+          return found ? 1 : 0;
+        },
+        nth: () => ({ boundingBox: async () => ({ x: 10, y: y + 5, width: 100, height: 20 }) }),
+      }),
+    });
     extra['evaluate'] = async (expression: string) => {
       if (expression.startsWith('window.scrollBy')) { page.calls.push(`eval:${expression}`); return undefined; }
-      if (expression.includes('one-time-code')) return privacyCheck(privateOnScreen);
       return { width: 1280, height: 800, scrollY: 0, scrollHeight: 1600 };
     };
     extra['frames'] = () => [
-      { evaluate: async () => { throw new Error('the main frame is asked through page.evaluate'); } },
+      scanned(privateOnScreen, 0),
       ...subFrames.map((frame) => {
         const placed = frame !== null && typeof frame === 'object';
         const found = placed ? frame.found : frame;
         const y = placed ? frame.y : 100;
         return {
-          evaluate: async () => privacyCheck(found),
+          ...scanned(found, y),
           frameElement: async () => ({ boundingBox: async () => ({ x: 0, y, width: 200, height: 40 }) }),
           isDetached: () => found === 'gone',
         };
@@ -5002,11 +5012,57 @@ describe('page views and refs', () => {
     it('does not wait on a frame that never answers: no screenshot, and the step goes on', async () => {
       subFrames = [false];
       const frames = extra['frames'] as () => Array<Record<string, unknown>>;
-      extra['frames'] = () => frames().map((frame, i) => (i === 0 ? frame : { ...frame, evaluate: () => new Promise(() => {}) }));
+      extra['frames'] = () => frames().map((frame, i) => (i === 0 ? frame : {
+        ...frame,
+        locator: () => ({ count: () => new Promise<number>(() => {}), nth: () => ({ boundingBox: async () => null }) }),
+      }));
       const started = Date.now();
       const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
       expect(Date.now() - started).toBeLessThan(4_000);
       expect(out.ok).toBe(true);
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('could not be checked');
+    });
+
+    it('does not ask the page\'s own JavaScript, which the page can redefine', async () => {
+      // A page can make its own querySelectorAll find nothing and its own
+      // getBoundingClientRect say nothing is on screen. Playwright's queries
+      // run in a world the page cannot reach.
+      extra['evaluate'] = async (expression: string) => (
+        /password|one-time-code|getBoundingClientRect/.test(expression) ? false : { width: 1280, height: 800, scrollY: 0, scrollHeight: 1600 });
+      privateOnScreen = true;
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('a password, card or one-time-code field is on screen');
+    });
+
+    it('does not count a field scrolled out of sight inside a frame that is on screen', async () => {
+      // The frame's box is 100–140 on the page; its field is drawn further
+      // down, where the frame does not show it.
+      subFrames = [{ found: true, y: 100 }];
+      const frames = extra['frames'] as () => Array<Record<string, unknown>>;
+      extra['frames'] = () => frames().map((frame, i) => (i === 0 ? frame : {
+        ...frame,
+        locator: (selector: string) => ({
+          ...(frame['locator'] as (s: string) => Record<string, unknown>)(selector),
+          nth: () => ({ boundingBox: async () => ({ x: 10, y: 600, width: 100, height: 20 }) }),
+        }),
+      }));
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeDefined();
+    });
+
+    it('takes none when a field cannot be measured', async () => {
+      privateOnScreen = true;
+      const frames = extra['frames'] as () => Array<Record<string, unknown>>;
+      extra['frames'] = () => frames().map((frame, i) => (i !== 0 ? frame : {
+        ...frame,
+        locator: (selector: string) => ({
+          ...(frame['locator'] as (s: string) => Record<string, unknown>)(selector),
+          nth: () => ({ boundingBox: async () => { throw new Error('Timeout 1000ms exceeded.'); } }),
+        }),
+      }));
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
       expect(out.image).toBeUndefined();
       expect(out.view!.text).toContain('could not be checked');
     });
