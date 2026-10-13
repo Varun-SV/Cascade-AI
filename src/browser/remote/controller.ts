@@ -299,6 +299,20 @@ export interface RemoteBrowserControllerOptions {
    * its own trouble.
    */
   ready?: Promise<unknown>;
+  /**
+   * The platform's outbound-egress gate, when the host installs one. A
+   * `navigate` passes its destination here BEFORE opening it and returns the
+   * refusal as the action's failure, so a run cannot sweep a range of hosts or
+   * hammer one through the browser any more than through web_fetch. Metered per
+   * user by the host; absent where there is no shared actor to meter. The
+   * browser's other actions (click, fill, press) stay on the page navigate
+   * already cleared, so the gate sits on the one action that names a new host.
+   *
+   * Passed the acting run's id as well as the URL, because one controller is
+   * shared by every run on a deployment: the host keys the per-user limit off
+   * the run, not off a closure fixed when the controller was built.
+   */
+  checkEgress?: (url: string, runId: string) => import('../../tools/policy/egress-policy.js').EgressVerdict;
 }
 
 /** One run's browser, and the page it is working on. */
@@ -685,7 +699,11 @@ export class RemoteBrowserController {
     this.onLiveViewAll = options.onLiveView;
     this.onReleaseFailed = options.onReleaseFailed;
     this.ready = options.ready;
+    this.checkEgress = options.checkEgress;
   }
+
+  /** The host's egress gate, consulted before a navigate. See the option. */
+  private checkEgress: RemoteBrowserControllerOptions['checkEgress'];
 
   /**
    * The predecessor's teardown, until it has been waited for once.
@@ -2824,6 +2842,10 @@ export class RemoteBrowserController {
         const target = action.url ?? '';
         if (!/^https?:\/\//i.test(target)) {
           return { ok: false, detail: 'Only http and https addresses can be opened.' };
+        }
+        const verdict = this.checkEgress?.(target, runId);
+        if (verdict && !verdict.allow) {
+          return { ok: false, detail: `Refused to open ${target}: ${verdict.reason}`, ...(await where()) };
         }
         await stoppable(page.goto(target, { timeout: ACTION_TIMEOUT_MS, waitUntil: 'domcontentloaded' }));
         return { ok: true, detail: `Opened ${target}`, ...(await where()) };

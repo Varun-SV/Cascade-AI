@@ -158,6 +158,22 @@ export function todayKey(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+/**
+ * Refuse a run from a user the abuse ledger has suspended.
+ *
+ * Separate from the daily limit and raised the same way (an EntitlementError
+ * the socket turns into a refusal), so a suspended account cannot start a run
+ * at all — not merely have its egress blocked once it is going. Lifted only by
+ * an operator clearing the record.
+ */
+export function checkNotSuspended(store: CloudStore, userId: string): void {
+  if (store.isUserSuspended(userId)) {
+    throw new EntitlementError(
+      'This account is suspended for repeated policy violations. Contact support to restore access.',
+    );
+  }
+}
+
 export function checkDailyLimit(store: CloudStore, userId: string, plan: string): void {
   const limits = limitsForPlan(plan);
   const used = store.getUsage(userId, todayKey());

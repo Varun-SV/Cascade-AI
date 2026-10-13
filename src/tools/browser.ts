@@ -47,7 +47,7 @@ export class BrowserTool extends BaseTool {
 
   isDangerous(): boolean { return true; }
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     let playwright: typeof import('playwright');
     try {
       playwright = await import('playwright');
@@ -88,9 +88,14 @@ export class BrowserTool extends BaseTool {
     try {
       switch (action) {
         case 'navigate': {
-          await page.goto(input['url'] as string, { timeout });
+          const target = input['url'] as string;
+          const verdict = options.checkEgress?.(target);
+          if (verdict && !verdict.allow) {
+            return `Refused to open ${target}: ${verdict.reason}`;
+          }
+          await page.goto(target, { timeout });
           const title = await page.title();
-          return `Navigated to ${input['url']} (title: "${title}")`;
+          return `Navigated to ${target} (title: "${title}")`;
         }
         case 'click': {
           await page.click(input['selector'] as string, { timeout });

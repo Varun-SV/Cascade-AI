@@ -69,8 +69,17 @@ export class WebFetchTool extends BaseTool {
     required: ['url'],
   };
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const url = input['url'] as string;
+
+    // The platform's egress gate runs before the request, so a run cannot
+    // enumerate or sweep through web_fetch any more than through the browser.
+    // SafeFetch below still guards SSRF; this is the separate open-internet
+    // boundary the host meters per user.
+    const verdict = options.checkEgress?.(url);
+    if (verdict && !verdict.allow) {
+      return `Refused to fetch ${url}: ${verdict.reason}`;
+    }
 
     let resp: Response;
     try {

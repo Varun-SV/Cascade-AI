@@ -16,6 +16,7 @@ import {
 } from '#cascade-ai';
 import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ApprovalRequest, ProviderConfig, BrowserAllowance, BrowserInput } from '#cascade-ai';
 import { attachRemoteBrowser, providerRationsSessions } from './remote-browser.js';
+import { buildEgressGate } from './egress.js';
 import type { ClarificationAnswer } from '#cascade-ai';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -23,7 +24,7 @@ import { z, type ZodError } from 'zod';
 import type { CloudEnv } from './env.js';
 import { resolveRunMcpServers } from './mcp-oauth.js';
 import type { CloudAttachment, CloudStore } from './db.js';
-import { beginRun, checkDailyLimit, checkPendingMediaCap, claimBrowserSession, PENDING_MEDIA_TTL_MS, todayKey } from './entitlements.js';
+import { beginRun, checkDailyLimit, checkNotSuspended, checkPendingMediaCap, claimBrowserSession, PENDING_MEDIA_TTL_MS, todayKey } from './entitlements.js';
 import { getSkill } from './skills.js';
 import { tenantScratchDir } from './paths.js';
 import { pendingMediaDir, sweepPendingMedia } from './pending-media.js';
@@ -1428,6 +1429,9 @@ export async function runChatTurn(payload: ChatRunPayload, deps: ChatRunDeps): P
   // request shouldn't leave behind a user message with no reply.
   const user = store.getUserById(userId);
   const plan = user?.plan ?? 'free';
+  // A suspended account is refused up front — the whole point of suspension is
+  // that it does not get to try again. Cleared only by an operator.
+  checkNotSuspended(store, userId);
   checkDailyLimit(store, userId, plan);
   // Browser quota is intentionally NOT checked here. Browser Mode only grants
   // the model permission to use the capability; many runs never open a page.
@@ -1824,6 +1828,22 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   });
   const cascade: Cascade = createCascade(config, scratchDir);
 
+  // The platform's own outbound boundary, metered per user. Every tool that
+  // opens a caller-named host (web_fetch, the browser) passes its destination
+  // through this before the request, independent of whether a model refused —
+  // a run that launders a goal through sub-tasks still meets one rate limit for
+  // the whole run. A refusal is a strike; enough strikes suspend the account.
+  const egressGate = buildEgressGate({
+    store,
+    userId,
+    plan,
+    onStrike: (code, reason) =>
+      console.warn(`[egress ${conversation.id}] blocked (${code}) for user ${userId}: ${reason}`),
+    onSuspended: (code) =>
+      console.error(`[egress ${conversation.id}] user ${userId} SUSPENDED after repeated blocks (last: ${code})`),
+  });
+  cascade.setEgressGate(egressGate);
+
   cascade.setMediaSink(buildMediaSink({ env, store, userId, conversationId: conversation.id, socket }));
 
   // A hosted run has no browser of its own. This attaches one from whatever
@@ -1858,6 +1878,9 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     allowance: providerRationsSessions(config.tools?.remoteBrowser, env.CASCADE_DEPLOYMENT_MODE)
       ? browserAllowanceFor(store, userId)
       : undefined,
+    // The same per-user gate the tools use. attachRemoteBrowser registers it
+    // against this run's id so the shared controller can resolve it per action.
+    checkEgress: egressGate,
   });
   // The kill switch, alongside the live view that makes it meaningful. Scoped
   // to this run and removed with the run's other listeners below: a Stop is

@@ -481,6 +481,16 @@ export class CloudStore {
       );
       CREATE INDEX IF NOT EXISTS idx_pending_media_user ON pending_media(user_id);
       CREATE INDEX IF NOT EXISTS idx_pending_media_expiry ON pending_media(expires_at);
+
+      -- One row per user: the abuse ledger's record (strikes + suspension),
+      -- stored as JSON so the shape stays owned by the pure module that writes
+      -- it. Suspension persists across restarts; only an operator clears it.
+      CREATE TABLE IF NOT EXISTS abuse_records (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        record_json TEXT NOT NULL,
+        suspended_at INTEGER,
+        updated_at INTEGER NOT NULL
+      );
     `);
 
     // Additive columns — ALTER ... ADD COLUMN throws if the column already
@@ -1050,6 +1060,41 @@ export class CloudStore {
       | { browser_sessions: number }
       | undefined;
     return row?.browser_sessions ?? 0;
+  }
+
+  // ── Abuse ledger (per-user egress-policy strikes + suspension) ──
+
+  /** The stored abuse record JSON for a user, or null when they have none. */
+  getAbuseRecord(userId: string): string | null {
+    const row = this.db.prepare('SELECT record_json FROM abuse_records WHERE user_id = ?').get(userId) as
+      | { record_json: string }
+      | undefined;
+    return row?.record_json ?? null;
+  }
+
+  /**
+   * Persist a user's abuse record. `suspendedAt` is mirrored into its own column
+   * (NULL when not suspended) so a suspension can be found without parsing JSON.
+   */
+  saveAbuseRecord(userId: string, recordJson: string, suspendedAt: number | null): void {
+    this.db
+      .prepare(
+        `INSERT INTO abuse_records (user_id, record_json, suspended_at, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(user_id) DO UPDATE SET
+           record_json = excluded.record_json,
+           suspended_at = excluded.suspended_at,
+           updated_at = excluded.updated_at`,
+      )
+      .run(userId, recordJson, suspendedAt, Date.now());
+  }
+
+  /** True when the user carries a suspension an operator has not cleared. */
+  isUserSuspended(userId: string): boolean {
+    const row = this.db.prepare('SELECT suspended_at FROM abuse_records WHERE user_id = ?').get(userId) as
+      | { suspended_at: number | null }
+      | undefined;
+    return !!row?.suspended_at;
   }
 
   // ── Memories (per-user persistent facts) ──────

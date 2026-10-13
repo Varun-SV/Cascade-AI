@@ -337,6 +337,16 @@ export interface ToolExecuteOptions {
     content: string | Record<string, unknown>,
   ) => void;
   getPeerMessages?: () => Array<{ fromId: string; content: unknown; timestamp: string }>;
+  /**
+   * The platform's outbound-egress gate, when the host installs one. A tool
+   * that reaches a caller-named host on the open internet (web_fetch, the
+   * browser's navigate) passes the URL here BEFORE the request and honours a
+   * refusal, so the limit holds regardless of which worker, or which model,
+   * asked. A verdict of `allow: false` carries a reason to return to the model
+   * and a `code` the host records against the user (see the abuse ledger).
+   * Absent in a local run, where there is no shared actor to meter.
+   */
+  checkEgress?: (url: string) => import('./tools/policy/egress-policy.js').EgressVerdict;
 }
 
 // ── Tier System ───────────────────────────────

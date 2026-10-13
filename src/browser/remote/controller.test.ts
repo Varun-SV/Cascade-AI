@@ -284,6 +284,32 @@ describe('the six actions reach the page', () => {
     expect(out.ok).toBe(false);
     expect(page.calls).toEqual([]);
   });
+
+  it('refuses a navigate the egress gate blocks, and never opens the page', async () => {
+    const { provider } = fakeProvider();
+    const seen: Array<[string, string]> = [];
+    const c = new RemoteBrowserController({
+      provider,
+      checkEgress: (url, runId) => {
+        seen.push([url, runId]);
+        return { allow: false, code: 'host-spread', reason: 'too many hosts' };
+      },
+    });
+    const out = await c.controller({ kind: 'navigate', url: 'https://scan.test/1' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('too many hosts');
+    expect(page.calls).toEqual([]); // the gate ran before page.goto
+    // The gate was passed the URL and the acting run's id (ctx sessionId).
+    expect(seen).toEqual([['https://scan.test/1', 'run']]);
+  });
+
+  it('allows a navigate the egress gate permits', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider, checkEgress: () => ({ allow: true }) });
+    const out = await c.controller({ kind: 'navigate', url: 'https://ok.test/' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(true);
+    expect(page.calls).toEqual(['goto:https://ok.test/']);
+  });
 });
 
 describe('CDP handshake metadata', () => {
