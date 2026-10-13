@@ -42,6 +42,7 @@ import { ACTING_INTEGRITY_RULE, appendToolRecord, describeHandedWork, describeTo
 import { RedactionLayer } from '../audit/redaction.js';
 import { BROWSER_TOOL, BROWSER_WORKER_RULE } from './browser-planning.js';
 import { statePath, STATE } from '../../config/project-state.js';
+import { onTrustedPath, ownTsc } from '../../utils/trusted-exec.js';
 
 /**
  * Thrown by executeTool() when the underlying tool error indicates a condition
@@ -1135,6 +1136,64 @@ export class T3Worker extends BaseTier {
     return null;
   }
 
+  /**
+   * Ask for the approval `tc` needs, if any: why it was denied, or null to
+   * go ahead. Every tool this worker runs goes through it — the one the
+   * model called, and one a fallback runs in its place.
+   */
+  private async authorize(tc: ToolCall): Promise<string | null> {
+    if (!this.toolRegistry.requiresApproval(tc.name)) return null;
+
+    // ── Hierarchical permission escalation: T3 → T2 → T1 → User ──
+    if (this.permissionEscalator) {
+      const req: PermissionRequest = {
+        id: `${this.id}-${tc.id}`,
+        requestedBy: this.id,
+        parentT2Id: this.parentId ?? 'root',
+        toolName: tc.name,
+        input: tc.input,
+        isDangerous: this.toolRegistry.isDangerous(tc.name),
+        subtaskContext: this.assignment?.subtaskTitle ?? 'Unknown subtask',
+        sectionContext: this.assignment?.subtaskTitle ?? 'Unknown section',
+        localOnly: this.localOnlyMatch,
+      };
+      // The run's signal: a cancelled run withdraws the question rather
+      // than leaving it with an evaluator or on screen.
+      const decision = await this.permissionEscalator.requestPermission(req, this.signal);
+      return decision.approved ? null : `Tool ${tc.name} was denied (decided by ${decision.decidedBy}).`;
+    }
+
+    // ── Fallback: legacy direct approval event (used when escalator not wired) ──
+    if (this.sessionApprovals.has(tc.name)) {
+      return this.sessionApprovals.get(tc.name) ? null : `Tool ${tc.name} was denied by user.`;
+    }
+    // Time-box this fallback too (default 10 min → deny) so a missing or
+    // unanswered approval prompt can't hang the worker indefinitely.
+    const LEGACY_APPROVAL_TIMEOUT_MS = 600_000;
+    const legacyDecision = await new Promise<{ approved: boolean; always?: boolean }>((resolve) => {
+      const eventName = `tool:approval-response:${this.id}-${tc.id}`;
+      const timer = setTimeout(() => {
+        this.removeAllListeners(eventName);
+        resolve({ approved: false });
+      }, LEGACY_APPROVAL_TIMEOUT_MS);
+      timer.unref?.();
+      this.emit('tool:approval-request', {
+        id: `${this.id}-${tc.id}`,
+        tierId: this.id,
+        toolName: tc.name,
+        input: tc.input,
+        description: `T3 (${this.assignment?.subtaskTitle}) wants to run "${tc.name}"`,
+        isDangerous: this.toolRegistry.isDangerous(tc.name),
+      });
+      this.once(eventName, (d: { approved: boolean; always?: boolean }) => {
+        clearTimeout(timer);
+        resolve(d);
+      });
+    });
+    if (legacyDecision.always) this.sessionApprovals.set(tc.name, legacyDecision.approved);
+    return legacyDecision.approved ? null : `Tool ${tc.name} was denied by user.`;
+  }
+
   private async executeTool(tc: ToolCall): Promise<string> {
     // T3→T2 reinforcement: handle locally (record the request for the manager) —
     // it is a signal, not a real side-effecting tool, so it skips registry
@@ -1154,60 +1213,8 @@ export class T3Worker extends BaseTier {
       return validationError;
     }
 
-    const needsApproval = this.toolRegistry.requiresApproval(tc.name);
-
-    if (needsApproval) {
-      // ── Hierarchical permission escalation: T3 → T2 → T1 → User ──
-      if (this.permissionEscalator) {
-        const req: PermissionRequest = {
-          id: `${this.id}-${tc.id}`,
-          requestedBy: this.id,
-          parentT2Id: this.parentId ?? 'root',
-          toolName: tc.name,
-          input: tc.input,
-          isDangerous: this.toolRegistry.isDangerous(tc.name),
-          subtaskContext: this.assignment?.subtaskTitle ?? 'Unknown subtask',
-          sectionContext: this.assignment?.subtaskTitle ?? 'Unknown section',
-          localOnly: this.localOnlyMatch,
-        };
-        // The run's signal: a cancelled run withdraws the question rather
-        // than leaving it with an evaluator or on screen.
-        const decision = await this.permissionEscalator.requestPermission(req, this.signal);
-        if (!decision.approved) return `Tool ${tc.name} was denied (decided by ${decision.decidedBy}).`;
-      } else {
-        // ── Fallback: legacy direct approval event (used when escalator not wired) ──
-        if (this.sessionApprovals.has(tc.name)) {
-          const wasApproved = this.sessionApprovals.get(tc.name)!;
-          if (!wasApproved) return `Tool ${tc.name} was denied by user.`;
-        } else {
-          // Time-box this fallback too (default 10 min → deny) so a missing or
-          // unanswered approval prompt can't hang the worker indefinitely.
-          const LEGACY_APPROVAL_TIMEOUT_MS = 600_000;
-          const legacyDecision = await new Promise<{ approved: boolean; always?: boolean }>((resolve) => {
-            const eventName = `tool:approval-response:${this.id}-${tc.id}`;
-            const timer = setTimeout(() => {
-              this.removeAllListeners(eventName);
-              resolve({ approved: false });
-            }, LEGACY_APPROVAL_TIMEOUT_MS);
-            timer.unref?.();
-            this.emit('tool:approval-request', {
-              id: `${this.id}-${tc.id}`,
-              tierId: this.id,
-              toolName: tc.name,
-              input: tc.input,
-              description: `T3 (${this.assignment?.subtaskTitle}) wants to run "${tc.name}"`,
-              isDangerous: this.toolRegistry.isDangerous(tc.name),
-            });
-            this.once(eventName, (d: { approved: boolean; always?: boolean }) => {
-              clearTimeout(timer);
-              resolve(d);
-            });
-          });
-          if (legacyDecision.always) this.sessionApprovals.set(tc.name, legacyDecision.approved);
-          if (!legacyDecision.approved) return `Tool ${tc.name} was denied by user.`;
-        }
-      }
-    }
+    const denied = await this.authorize(tc);
+    if (denied) return denied;
 
     // Emit tool:use before execution so the TUI can display the active tool.
     //
@@ -1342,7 +1349,14 @@ export class T3Worker extends BaseTier {
   private async adaptiveFallback(tc: ToolCall, originalError: string): Promise<string> {
     // Strategy 1: alternative tool with overlapping purpose
     const altTool = this.findAlternativeTool(tc.name);
-    if (altTool) {
+    // The tool run in its place is checked as the one called would be: its
+    // input against its schema, and the approval it needs asked afresh. And
+    // never a step up — a known tool that needs no approval (a read) does
+    // not turn into one that does (a write) because it failed.
+    const alt = altTool ? { ...tc, id: `${tc.id}-fallback`, name: altTool } : null;
+    const stepUp = !!altTool && this.toolRegistry.hasTool?.(tc.name) !== false
+      && !this.toolRegistry.requiresApproval(tc.name) && this.toolRegistry.requiresApproval(altTool);
+    if (alt && altTool && !stepUp && !this.validateToolInput(alt) && !(await this.authorize(alt))) {
       this.log(`Adaptive fallback: trying alternative tool "${altTool}" for failed "${this.shownToolName(tc.name)}"`);
       this.sendStatusUpdate({ progressPct: 50, currentAction: `Fallback: trying ${altTool}`, status: 'IN_PROGRESS' });
       try {
@@ -1374,7 +1388,7 @@ export class T3Worker extends BaseTier {
           `Replacement for "${tc.name}" — original failed with: ${originalError.slice(0, 150)}`,
           this.assignment?.subtaskTitle ?? tc.name,
         );
-        if (newToolName) {
+        if (newToolName && !(await this.authorize({ ...tc, id: `${tc.id}-synthesized`, name: newToolName }))) {
           this.log(`Adaptive fallback: synthesized "${newToolName}", retrying`);
           const result = await this.toolRegistry.execute(newToolName, tc.input, {
             tierId: this.id,
@@ -1701,18 +1715,25 @@ ${assignment.expectedOutput}`;
         // semantic error, and a name carrying shell metacharacters was worse
         // than that. Nothing reaches a shell now.
         const ext = path.extname(absolutePath).toLowerCase();
-        // `node --check` runs the interpreter already executing this, so it
-        // needs no lookup and cannot be shadowed.
+        // Run with Cascade's own permissions, outside the process jail, so
+        // nothing the workspace holds may choose the program: TypeScript is
+        // checked by Cascade's own compiler (not `npx`, which runs a
+        // workspace's node_modules/.bin/tsc first, or fetches one), skipped
+        // when Cascade has none; `node --check` runs the interpreter already
+        // executing this; Python is found on PATH outside the workspace and
+        // run isolated (-I: no environment, user site or working directory
+        // on its import path), and compiles in memory — `py_compile` writes
+        // a .pyc into __pycache__, which nothing would mark local-only.
+        const tsc = ext === '.ts' || ext === '.tsx' ? ownTsc() : undefined;
+        const python = ext === '.py' ? onTrustedPath(['python3', 'python'], this.artifactRoot()) : undefined;
         const check: { cmd: string; args: string[] } | null =
-          ext === '.ts' || ext === '.tsx' ? { cmd: 'npx', args: ['tsc', '--noEmit', absolutePath] }
+          tsc ? { cmd: process.execPath, args: [tsc, '--noEmit', absolutePath] }
           : ext === '.js' || ext === '.jsx' ? { cmd: process.execPath, args: ['--check', absolutePath] }
-          // Compiled in memory: `py_compile` writes a .pyc into __pycache__,
-          // which outside the jail nothing marks local-only or moves.
-          : ext === '.py' ? { cmd: 'python', args: ['-c', 'import sys; compile(open(sys.argv[1], "rb").read(), sys.argv[1], "exec")', absolutePath] }
+          : python ? { cmd: python, args: ['-I', '-c', 'import sys; compile(open(sys.argv[1], "rb").read(), sys.argv[1], "exec")', absolutePath] }
           : null;
         if (check) {
           try {
-            await execFileAsync(check.cmd, check.args, { timeout: 10000 });
+            await execFileAsync(check.cmd, check.args, { timeout: 10000, cwd: this.artifactRoot() });
           } catch (err: unknown) {
             const code = (err as { code?: unknown }).code;
             // The checker not being installed says nothing about the artifact.

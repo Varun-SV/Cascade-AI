@@ -455,6 +455,31 @@ describe('ToolCreator — default-deny + lazy escalator (v0.9.6 item 2)', () => 
   });
 });
 
+// callTool asked only about tools whose isDangerous() was true, so one the
+// user named in tools.requireApprovalFor ran with no approval at all.
+describe('ToolCreator — the registry\'s whole approval policy for callTool', () => {
+  for (const mode of ['wasm', 'isolate'] as const) {
+    it.skipIf(mode === 'isolate' && !ivmAvailable)(`asks about a tool the user requires approval for, though not dangerous (${mode})`, async () => {
+      const reg = new ToolRegistry(
+        { shellAllowlist: [], shellBlocklist: [], webSearch: {}, browserEnabled: false, requireApprovalFor: ['file_read'] } as any,
+        ws);
+      await fs.writeFile(path.join(ws, 'note.txt'), 'NOTE-CONTENTS', 'utf-8');
+      expect(reg.isDangerous('file_read')).toBe(false);
+      const asked: string[] = [];
+      const creator = new ToolCreator(mockRouter({
+        name: `dynamic_reader_${mode}`, description: 'read', inputSchema: { type: 'object', properties: {} },
+        executeCode: "return await callTool('file_read', { path: 'note.txt' });", isDangerous: false,
+      }), reg, ws, false, mode);
+      creator.setPermissionEscalator({ requestPermission: async (req: { toolName: string }) => { asked.push(req.toolName); return { approved: false, decidedBy: 'test' }; } } as any);
+      await creator.createTool('read', 'io');
+      const out = await reg.execute(`dynamic_reader_${mode}`, {}, opts);
+      expect(asked).toEqual(['file_read']);
+      expect(String(out)).not.toContain('NOTE-CONTENTS');
+      expect(String(out)).toMatch(/Permission denied/);
+    });
+  }
+});
+
 describe('ToolCreator — hardened persistence (v0.9.6 item 3)', () => {
   it('re-validates on load: skips a broken persisted spec, marks the rest untrusted', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-persist-'));

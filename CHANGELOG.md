@@ -466,6 +466,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than leave the rest writable (every include is followed, where 64
   files were); and a Python artifact is checked by compiling it in memory, so
   the check leaves no `__pycache__` behind for a local-only file.
+- **No tool runs past the approval it needs.** An agent-written tool's
+  `callTool` asks about every tool the registry's approval policy covers —
+  `tools.requireApprovalFor` included — not only those marked dangerous. A
+  failed tool call's fallback no longer turns a tool that needs no approval
+  (a read) into one that does (a write), and the tool a fallback or a
+  synthesized replacement runs is validated and asked about as itself.
+  Checking an artifact never runs a compiler the workspace supplies: no
+  `npx tsc` (which prefers a workspace's `node_modules/.bin/tsc`, or fetches
+  one) — Cascade's own TypeScript, when it has one — and Python only from a
+  PATH entry outside the workspace, run isolated. The workspace gate treats
+  markers it cannot list as an error and a lock it cannot read as held,
+  where both read as nobody there.
 
 ## 0.82.0 - 2026-09-22
 

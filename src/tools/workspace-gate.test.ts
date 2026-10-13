@@ -281,4 +281,43 @@ describe('WorkspaceGate', () => {
       await fs.rm(dir, { recursive: true, force: true });
     }
   });
+  // Any failure to read the markers read as none there: with a folder that
+  // can be written but not listed, or a lock that is there but unreadable,
+  // two processes went in together.
+  it('refuses a turn when the markers cannot be listed, and waits on a lock it cannot read', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-gate-unreadable-')));
+    const markers = statePath(dir, 'gate');
+    await fs.mkdir(markers, { recursive: true });
+    const realReaddir = fsSync.readdirSync;
+    const realRead = fsSync.readFileSync;
+    const denied = (p: unknown) => Object.assign(new Error(`EACCES: permission denied, open '${String(p)}'`), { code: 'EACCES' });
+    try {
+      const gate = new WorkspaceGate(dir);
+      const listing = vi.spyOn(fsSync, 'readdirSync').mockImplementation(((p: fsSync.PathLike, o?: unknown) => {
+        if (String(p) === markers) throw denied(p);
+        return (realReaddir as (p: fsSync.PathLike, o?: unknown) => unknown)(p, o);
+      }) as typeof realReaddir);
+      await expect(gate.enter('alone', true)).rejects.toThrow(/Could not read the workspace gate/);
+      listing.mockRestore();
+      // Another process's lock, there but unreadable: held, until it goes stale.
+      const lock = path.join(markers, 'alone');
+      await fs.writeFile(lock, `${process.ppid}.0123456789ab`);
+      const reading = vi.spyOn(fsSync, 'readFileSync').mockImplementation(((p: fsSync.PathOrFileDescriptor, o?: unknown) => {
+        if (String(p) === lock) throw denied(p);
+        return (realRead as (p: fsSync.PathOrFileDescriptor, o?: unknown) => unknown)(p, o);
+      }) as typeof realRead);
+      let entered = false;
+      const shared = gate.enter('tools', true).then((leave) => { entered = true; return leave; });
+      await new Promise((r) => setTimeout(r, 150));
+      expect(entered).toBe(false);
+      const old = new Date(Date.now() - 60_000);
+      await fs.utimes(lock, old, old);
+      (await shared)();
+      expect(entered).toBe(true);
+      reading.mockRestore();
+    } finally {
+      vi.restoreAllMocks();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
 });

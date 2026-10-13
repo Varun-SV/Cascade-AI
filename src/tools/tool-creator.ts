@@ -318,7 +318,10 @@ class DynamicTool extends BaseTool {
       if (ended?.aborted) return `Not run: dynamic tool "${this.name}" had already ended.`;
       if (!registry.hasTool(toolName)) return `Tool not found: ${toolName}`;
 
-      if (registry.isDangerous(toolName)) {
+      // The registry's whole approval policy — the built-in list, the user's
+      // tools.requireApprovalFor, and isDangerous() — as a worker's own call
+      // goes by.
+      if (registry.requiresApproval(toolName)) {
         const escalator = this.getEscalator();
         if (!escalator) {
           return `Permission denied for "${toolName}": dynamic tool "${this.name}" has no approver available (default-deny).`;
@@ -329,7 +332,7 @@ class DynamicTool extends BaseTool {
           parentT2Id: options.tierId,
           toolName,
           input: toolInput,
-          isDangerous: true,
+          isDangerous: registry.isDangerous(toolName),
           subtaskContext: `Dynamic tool "${this.name}" (${this.trusted ? 'trusted' : 'UNTRUSTED'}) requesting access to "${toolName}"`,
           sectionContext: `Dynamic tool "${this.name}"`,
           forceReprompt: !this.trusted,

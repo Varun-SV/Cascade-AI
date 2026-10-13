@@ -201,7 +201,14 @@ class Markers {
   /** Whether another process holds the lock. */
   private othersAlone(): boolean {
     let holder: string;
-    try { holder = fs.readFileSync(this.lock, 'utf8'); } catch { return false; }
+    try {
+      holder = fs.readFileSync(this.lock, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      // There, but not readable: whose it is cannot be known, so it is
+      // held — until it goes stale, as any lock whose owner cannot be.
+      holder = '';
+    }
     if (holder === OWNER) return false;
     if (left(this.lock)) { fs.rmSync(this.lock, { force: true }); return false; }
     return true;
@@ -210,7 +217,13 @@ class Markers {
   /** The groups other processes have callers running in. */
   private others(): GroupMode[] {
     let names: string[];
-    try { names = fs.readdirSync(this.dir); } catch { return []; }
+    try {
+      names = fs.readdirSync(this.dir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      // Not listable is not empty: another process may hold a turn here.
+      throw new Error(`Could not read the workspace gate in ${this.dir} (${(err as Error).message}), so whether another Cascade process is using the workspace cannot be told.`);
+    }
     const found: GroupMode[] = [];
     for (const name of names) {
       const match = /^(tools|commands|git)-(.+)-\d+$/.exec(name);

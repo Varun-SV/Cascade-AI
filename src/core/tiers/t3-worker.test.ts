@@ -1116,6 +1116,68 @@ describe('privacy.paths, enforced when a file is read', () => {
     expect(bad.result.status).not.toBe('COMPLETED');
   });
 
+  // A failed read fell back to the first tool sharing a word with it —
+  // file_write — and ran it with no approval asked.
+  it('does not turn a failed read into a write, and asks afresh for the tool a fallback runs', async () => {
+    const { existsSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    let root = '';
+    const asked: string[] = [];
+    const escalator = { requestPermission: async (req: { id: string; toolName: string }) => { asked.push(req.toolName); return { requestId: req.id, approved: true, decidedBy: 'USER' }; } };
+    await run({
+      privateModel: true,
+      call: [{ id: 'tc-1', name: 'file_read', input: { path: 'made.txt', content: 'WRITTEN' } }],
+      setup: async (r) => { root = r; },
+      escalator,
+    });
+    expect(existsSync(join(root, 'made.txt'))).toBe(false);
+    expect(asked).not.toContain('file_write');
+    // A name no tool has may still find one — asked about as itself.
+    const denying = { requestPermission: async (req: { id: string; toolName: string }) => { asked.push(req.toolName); return { requestId: req.id, approved: false, decidedBy: 'USER' }; } };
+    await run({
+      privateModel: true,
+      call: [{ id: 'tc-1', name: 'write_file', input: { path: 'made.txt', content: 'WRITTEN' } }],
+      setup: async (r) => { root = r; },
+      escalator: denying,
+    });
+    expect(asked).toContain('file_write');
+    expect(existsSync(join(root, 'made.txt'))).toBe(false);
+  });
+
+  // Verification ran `npx tsc`, which runs a workspace's node_modules/.bin/tsc
+  // first, with Cascade's own permissions and outside the jail; and `python`
+  // from wherever PATH named, a folder in the workspace included.
+  it.skipIf(process.platform === 'win32')('never runs a compiler the workspace supplies to check an artifact', async () => {
+    const { writeFile, mkdir, chmod } = await import('node:fs/promises');
+    const { existsSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    let root = '';
+    const before = process.env['PATH'];
+    try {
+      await run({
+        privateModel: true,
+        call: [],
+        assignment: { files: ['tool.ts', 'tool.py'] },
+        setup: async (r) => {
+          root = r;
+          await writeFile(join(r, 'tool.ts'), 'export const x: number = 1;\n');
+          await writeFile(join(r, 'tool.py'), 'x = 1\n');
+          for (const [dir, name] of [['node_modules/.bin', 'tsc'], ['bin', 'python3'], ['bin', 'python']]) {
+            await mkdir(join(r, dir), { recursive: true });
+            await writeFile(join(r, dir, name), `#!/bin/sh\ntouch "${join(r, `ran-${name}`)}"\n`);
+            await chmod(join(r, dir, name), 0o755);
+          }
+          process.env['PATH'] = `${join(r, 'bin')}:${join(r, 'node_modules/.bin')}:${before ?? ''}`;
+        },
+      });
+    } finally {
+      process.env['PATH'] = before;
+    }
+    expect(existsSync(join(root, 'ran-tsc'))).toBe(false);
+    expect(existsSync(join(root, 'ran-python3'))).toBe(false);
+    expect(existsSync(join(root, 'ran-python'))).toBe(false);
+  });
+
   // A local-only subtask's new file is made in its private folder, so the
   // checks that looked for it in the workspace found nothing there.
   it('finds a local-only subtask\'s artifact where it was made, in its private folder', async () => {
