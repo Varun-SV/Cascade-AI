@@ -182,6 +182,26 @@ describe('WorkspaceGate', () => {
     (await tool)();
   });
 
+  // A command could swap a git config file for one naming a program, which
+  // the jail puts back only when the command ends.
+  it('keeps the git tool apart from commands, and its calls together', async () => {
+    const gate = new WorkspaceGate();
+    const events: string[] = [];
+    const command = await gate.enter('commands');
+    const git = gate.enter('git').then((leave) => { events.push('git'); return leave; });
+    await tick();
+    expect(events).toEqual([]);
+    command(); await tick();
+    expect(events).toEqual(['git']);
+    const second = await gate.enter('git');
+    const later = gate.enter('commands').then((leave) => { events.push('command'); return leave; });
+    await tick();
+    expect(events).toEqual(['git']);
+    (await git)(); second(); await tick();
+    expect(events).toEqual(['git', 'command']);
+    (await later)();
+  });
+
   it('ignores a second leave', async () => {
     const gate = new WorkspaceGate();
     const leave = await gate.enter('tools');

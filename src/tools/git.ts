@@ -32,6 +32,22 @@ function refusePathspecFile(operation: string, args: string[]): void {
   }
 }
 
+/**
+ * Refuse a push that names the program to run at the other end
+ * (`--receive-pack`, `--exec`): for a remote on this machine git runs it
+ * here, with the credentials this tool keeps in view. simple-git refuses
+ * the options written out; git also takes them cut short (`--rece`, `--ex`).
+ */
+function refusePackProgram(args: string[]): void {
+  for (const arg of args) {
+    if (arg === '--') return;
+    const name = arg.split('=')[0]!;
+    const program = (name.length >= '--rece'.length && '--receive-pack'.startsWith(name))
+      || (name.length >= '--e'.length && '--exec'.startsWith(name));
+    if (program) throw new Error(`git push ${name} is not allowed: it names a program for git to run.`);
+  }
+}
+
 /** Where the git tool looks for hooks: nowhere. */
 const NO_HOOKS = `core.hooksPath=${process.platform === 'win32' ? 'NUL' : '/dev/null'}`;
 
@@ -134,6 +150,7 @@ export class GitTool extends BaseTool {
           return `Checked out ${args.join(' ')}`;
         }
         case 'push': {
+          refusePackProgram(args);
           // The destination is asked what it has by this same jailed git.
           const lsRemote = (target: string) => git.raw(['ls-remote', '--end-of-options', target]).then((out) => out.trim(), () => null);
           const refused = await this.jail?.pushRefusal(cwd, args, offline, lsRemote);

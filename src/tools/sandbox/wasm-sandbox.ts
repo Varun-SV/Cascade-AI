@@ -43,12 +43,15 @@ export interface SandboxHost {
 export type SandboxOutcome =
   | { kind: 'ok'; value: string }
   | { kind: 'error'; message: string }
-  | { kind: 'timeout' };
+  | { kind: 'timeout' }
+  | { kind: 'cancelled' };
 
 export interface SandboxLimits {
   /** Wall-clock budget for the whole run, host calls included. */
   timeoutMs: number;
   memoryLimitBytes?: number;
+  /** Ends the run at once when it fires: the caller's run was cancelled. */
+  signal?: AbortSignal;
 }
 
 const DEFAULT_MEMORY_LIMIT_BYTES = 128 * 1024 * 1024;
@@ -107,6 +110,7 @@ export function runInWasmSandbox(
       if (done) return;
       done = true;
       clearTimeout(timer);
+      limits.signal?.removeEventListener('abort', cancel);
       void worker.terminate();
       // Before resolving: whoever reads the outcome can take it that nothing
       // the guest asked for will start from here on.
@@ -118,6 +122,9 @@ export function runInWasmSandbox(
     // cannot reach — a long native call — and a wait on the host.
     const timer = setTimeout(() => finish({ kind: 'timeout' }), limits.timeoutMs);
     timer.unref?.();
+    const cancel = () => finish({ kind: 'cancelled' });
+    if (limits.signal?.aborted) cancel();
+    else limits.signal?.addEventListener('abort', cancel, { once: true });
 
     worker.on('message', (msg: { kind?: string; id?: number; call?: string; payload?: string; outcome?: SandboxOutcome }) => {
       if (msg?.kind === 'done' && msg.outcome) {

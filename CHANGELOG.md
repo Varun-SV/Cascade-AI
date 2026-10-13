@@ -449,6 +449,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agent-written tool's `fetch` reads at most its limit of a response rather
   than the whole of it; and a worker's approval request is withdrawn when its
   run is cancelled.
+- **More that reached a command or an agent-written tool is closed off.**
+  An environment variable holding a configured provider key anywhere in its
+  value (`Bearer <key>`, a URL) is taken out of a command's environment, not
+  only one that is the key. The `git` tool refuses a push naming the program
+  to run at the other end (`--receive-pack`, `--exec`, however abbreviated),
+  which for a remote on this machine git runs here. A symlink on the way to
+  a git config file that a command replaces is put back when the command
+  ends, and the `git` tool no longer runs while a shell or `run_code`
+  command does, so it never reads one put there meanwhile. An agent-written
+  tool makes at most 100 calls to tools and `fetch` in a run, 4 at a time,
+  and is stopped as soon as its run is cancelled.
 
 ## 0.82.0 - 2026-09-22
 

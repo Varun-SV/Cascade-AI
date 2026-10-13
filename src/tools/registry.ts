@@ -418,7 +418,7 @@ export class ToolRegistry extends EventEmitter {
     // ran while this call waited could have done just that — and when that
     // check moves the subtask local-only, the turn it needs is taken instead.
     const modeFor = () => offline && (COMMAND_TOOLS.has(toolName) || CHANGE_TOOLS.has(toolName)) ? 'alone'
-      : COMMAND_TOOLS.has(toolName) ? 'commands' : 'tools';
+      : toolName === 'git' ? 'git' : COMMAND_TOOLS.has(toolName) ? 'commands' : 'tools';
     let leave: () => void;
     for (;;) {
       const mode = modeFor();

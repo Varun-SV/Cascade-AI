@@ -347,8 +347,10 @@ export class ProcessJail {
     frozen.push(...(await linkAliasesOf(frozen.map((f) => ({ path: f, dir: false })), this.policy.workspaceRoot)).map((h) => h.path).filter((f) => !frozen.includes(f)));
     // A mount keeps a file's contents, not its name: a command can still
     // remove a symlinked policy file and put another in its place. So each
-    // is looked at again when the command ends, and put back if changed.
-    const restorePolicy = guardFiles(policyFiles);
+    // is looked at again when the command ends, and put back if changed —
+    // and so is every symlink on the way to a git config file, which a
+    // command could swap for a config naming a program for the git tool.
+    const restorePolicy = guardFiles([...policyFiles, ...new Set(gitConfig.flatMap((f) => symlinksAlong(f)))]);
 
     if (!opts.offline) {
       // What git's configuration holds goes to the model with anything a
@@ -677,11 +679,12 @@ export class ProcessJail {
 
 /** `env` without provider keys: the known names, and any variable holding a configured secret. */
 export function scrubEnv(env: NodeJS.ProcessEnv, secretValues: string[]): NodeJS.ProcessEnv {
-  const secrets = new Set(secretValues.filter((v) => v && v.length >= 8));
+  const secrets = [...new Set(secretValues.filter((v) => v && v.length >= 8))];
   const out: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(env)) {
     if (SECRET_ENV_NAMES.includes(name.toUpperCase())) continue;
-    if (value !== undefined && secrets.has(value)) continue;
+    // Anywhere in the value: `Bearer <key>`, a URL holding it.
+    if (value !== undefined && secrets.some((secret) => value.includes(secret))) continue;
     out[name] = value;
   }
   return out;
@@ -1294,6 +1297,29 @@ function withoutUserinfo(line: string): string {
     at = end - 2;
   }
   return out + line.slice(from);
+}
+
+/**
+ * The symlinks met on the way to `file`, its own name included: each
+ * folder or file along it that is one, and those along where each leads.
+ */
+function symlinksAlong(file: string, seen = new Set<string>()): string[] {
+  const out: string[] = [];
+  const full = path.resolve(file);
+  let at = path.parse(full).root;
+  for (const part of full.slice(at.length).split(path.sep).filter(Boolean)) {
+    at = path.join(at, part);
+    if (seen.has(at)) continue;
+    const st = fs.lstatSync(at, { throwIfNoEntry: false });
+    if (!st) break;
+    if (!st.isSymbolicLink()) continue;
+    seen.add(at);
+    out.push(at);
+    try {
+      out.push(...symlinksAlong(path.resolve(path.dirname(at), fs.readlinkSync(at)), seen));
+    } catch { /* unreadable: the link itself is still kept */ }
+  }
+  return out;
 }
 
 /**

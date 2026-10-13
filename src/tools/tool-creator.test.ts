@@ -10,7 +10,8 @@ import path from 'node:path';
 
 import { ToolRegistry } from './registry.js';
 import { BaseTool } from './base.js';
-import { ToolCreator, normalizeToolSchema, readCapped, sandboxModeOf, type GeneratedToolSpec } from './tool-creator.js';
+import { DYNAMIC_HOST_CALLS, ToolCreator, hostCallBudget, normalizeToolSchema, readCapped, sandboxModeOf, type GeneratedToolSpec } from './tool-creator.js';
+import { runInWasmSandbox } from './sandbox/wasm-sandbox.js';
 import { generateDiff, diffSummary } from './diff.js';
 import { PermissionEscalator } from '../core/permissions/escalator.js';
 import { projectStateDir } from '../config/project-state.js';
@@ -519,5 +520,48 @@ describe('readCapped', () => {
     expect(await readCapped(new Response('héllo — ✓'), 100)).toBe('héllo — ✓');
     expect(await readCapped(new Response('héllo'), 2)).toBe('hé');
     expect(await readCapped(new Response(null), 10)).toBe('');
+  });
+});
+
+// A tool could start any number of host calls at once, each holding memory
+// and sockets on the main thread, outside the sandbox's cap.
+describe('hostCallBudget', () => {
+  it('runs a few at a time, and refuses the calls past its share', async () => {
+    const run = hostCallBudget(10, 3);
+    let running = 0;
+    let most = 0;
+    const call = () => run('refused', async () => {
+      running++; most = Math.max(most, running);
+      await new Promise((r) => setTimeout(r, 5));
+      running--;
+      return 'ran';
+    });
+    const results = await Promise.all(Array.from({ length: 12 }, call));
+    expect(most).toBe(3);
+    expect(results.filter((r) => r === 'ran')).toHaveLength(10);
+    expect(results.slice(10)).toEqual(['refused', 'refused']);
+    expect(DYNAMIC_HOST_CALLS).toBeGreaterThan(0);
+  });
+});
+
+// A cancelled run left a tool running until its own deadline.
+describe('the WebAssembly sandbox and a cancelled run', () => {
+  it('ends the run at once, and ends what it started', async () => {
+    const run = new AbortController();
+    let ended: AbortSignal | undefined;
+    const started = Date.now();
+    setTimeout(() => run.abort(), 300);
+    const outcome = await runInWasmSandbox('await fetch("https://example.com"); return "done";', {}, {
+      callTool: async () => '',
+      fetch: (_url, _init, signal) => { ended = signal; return new Promise(() => {}); },
+    }, { timeoutMs: 10_000, signal: run.signal });
+    expect(outcome).toEqual({ kind: 'cancelled' });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(ended?.aborted).toBe(true);
+  });
+
+  it('does not start one whose run was cancelled already', async () => {
+    const outcome = await runInWasmSandbox('return "ran";', {}, { callTool: async () => '', fetch: async () => '' }, { timeoutMs: 5_000, signal: AbortSignal.abort() });
+    expect(outcome).toEqual({ kind: 'cancelled' });
   });
 });

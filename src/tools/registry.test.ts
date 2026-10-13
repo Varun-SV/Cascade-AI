@@ -766,6 +766,21 @@ describe('ToolRegistry — a path changed while the call waited for its turn', (
     }
   });
 
+  it('gives the git tool a turn of its own, apart from shell and run_code', async () => {
+    const { WorkspaceGate } = await import('./workspace-gate.js');
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-git-turn-')));
+    const enter = vi.spyOn(WorkspaceGate.prototype, 'enter');
+    try {
+      const reg = new ToolRegistry(toolsConfig, ws);
+      // Refused on its arguments, after its turn was taken.
+      await expect(reg.execute('git', { operation: 'push', args: ['--ex=sh'] }, opts)).rejects.toThrow();
+      expect(enter.mock.calls.map((c) => c[0])).toEqual(['git']);
+    } finally {
+      enter.mockRestore();
+      await fs.rm(ws, { recursive: true, force: true });
+    }
+  });
+
   it('takes the turn a local-only write needs when the path became local-only meanwhile', async () => {
     const { WorkspaceGate } = await import('./workspace-gate.js');
     const { PrivacyPaths } = await import('../core/privacy/paths.js');

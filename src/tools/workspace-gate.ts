@@ -60,14 +60,19 @@ const OWNER = ownerToken(process.pid);
 
 /**
  * Who a caller runs with: `tools` — tool calls, with each other; `commands` —
- * commands, with each other; `alone` — with nobody.
+ * commands, with each other; `git` — the git tool's calls, with each other;
+ * `alone` — with nobody. The git tool runs apart from commands: one could
+ * swap a git config file for another that names a program for it to run,
+ * which the jail puts back when that command ends (process-jail.ts).
  */
-export type GateMode = 'tools' | 'commands' | 'alone';
+export type GateMode = 'tools' | 'commands' | 'git' | 'alone';
 
 const fits = (mode: GateMode, other: GateMode): boolean => mode !== 'alone' && mode === other;
 
+type GroupMode = Exclude<GateMode, 'alone'>;
+
 export class WorkspaceGate {
-  private running: Record<GateMode, number> = { tools: 0, commands: 0, alone: 0 };
+  private running: Record<GateMode, number> = { tools: 0, commands: 0, git: 0, alone: 0 };
   private queue: Array<{ mode: GateMode; grant: () => void }> = [];
   private readonly markers?: Markers;
 
@@ -153,8 +158,8 @@ class Markers {
     this.mutex = path.join(dir, 'mutex');
   }
 
-  /** A marker for a `tools` or `commands` caller, once no other process has one it cannot run with, nor the lock. */
-  async group(mode: 'tools' | 'commands'): Promise<() => void> {
+  /** A marker for a `tools`, `commands` or `git` caller, once no other process has one it cannot run with, nor the lock. */
+  async group(mode: GroupMode): Promise<() => void> {
     fs.mkdirSync(this.dir, { recursive: true });
     for (;;) {
       const mine = withLock(this.mutex, 'take the workspace gate', () => {
@@ -203,16 +208,16 @@ class Markers {
   }
 
   /** The groups other processes have callers running in. */
-  private others(): Array<'tools' | 'commands'> {
+  private others(): GroupMode[] {
     let names: string[];
     try { names = fs.readdirSync(this.dir); } catch { return []; }
-    const found: Array<'tools' | 'commands'> = [];
+    const found: GroupMode[] = [];
     for (const name of names) {
-      const match = /^(tools|commands)-(.+)-\d+$/.exec(name);
+      const match = /^(tools|commands|git)-(.+)-\d+$/.exec(name);
       if (!match || match[2] === INSTANCE) continue;
       const file = path.join(this.dir, name);
       if (left(file)) { fs.rmSync(file, { force: true }); continue; }
-      if (fs.existsSync(file)) found.push(match[1] as 'tools' | 'commands');
+      if (fs.existsSync(file)) found.push(match[1] as GroupMode);
     }
     return found;
   }

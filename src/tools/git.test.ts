@@ -75,6 +75,16 @@ describe('GitTool', () => {
     expect(mockGit.stash).not.toHaveBeenCalled();
   });
 
+  // simple-git refuses --receive-pack and --exec written out; git takes
+  // them cut short too, and for a remote on this machine runs the program.
+  it('refuses a push naming the program to run at the other end, however short', async () => {
+    const tool = new GitTool();
+    for (const args of [['--receive-pack=sh -c id', '../r'], ['--rece', 'sh -c id', '../r'], ['--exec=sh -c id', '../r'], ['--ex=sh -c id', '../r'], ['--e', 'sh', '../r']]) {
+      await expect(tool.execute({ operation: 'push', args }, opts), args.join(' ')).rejects.toThrow(/names a program for git to run/);
+    }
+    expect(mockGit.push).not.toHaveBeenCalled();
+  });
+
   it('still takes a path that only looks like the option, after --', async () => {
     mockGit.checkout.mockResolvedValue(undefined);
     const tool = new GitTool();

@@ -152,6 +152,36 @@ function capabilityKey(text: string): string {
 
 const DYNAMIC_TOOL_TIMEOUT_MS = 15_000;
 const DYNAMIC_FETCH_MAX = 1_000_000;
+/**
+ * Host calls (`callTool` and `fetch` together) one run of a tool may make,
+ * and how many may be under way at once — the rest wait their turn. What
+ * each holds on the main thread is outside the sandbox's memory cap.
+ */
+export const DYNAMIC_HOST_CALLS = 100;
+export const DYNAMIC_HOST_CONCURRENCY = 4;
+
+/**
+ * A budget for one run's host calls (see DYNAMIC_HOST_CALLS): `run(refused,
+ * fn)` runs `fn` when a turn comes, or gives `refused` once the run has
+ * made its share.
+ */
+export function hostCallBudget(total = DYNAMIC_HOST_CALLS, atOnce = DYNAMIC_HOST_CONCURRENCY) {
+  let started = 0;
+  let running = 0;
+  const waiting: Array<() => void> = [];
+  return async <T>(refused: T, fn: () => Promise<T>): Promise<T> => {
+    if (++started > total) return refused;
+    // A finishing call hands its turn straight to the next one waiting.
+    if (running >= atOnce) await new Promise<void>((resolve) => waiting.push(resolve));
+    else running++;
+    try {
+      return await fn();
+    } finally {
+      const next = waiting.shift();
+      if (next) next(); else running--;
+    }
+  };
+}
 
 /**
  * Validate that generated code compiles with the SAME async signature the sandbox
@@ -220,6 +250,10 @@ async function bridgeFetch(
   }
 }
 
+function cancelledMessage(name: string): string {
+  return `Dynamic tool "${name}" was stopped: its run was cancelled.`;
+}
+
 // ── Dynamic tool class factory ─────────────────
 
 class DynamicTool extends BaseTool {
@@ -276,7 +310,11 @@ class DynamicTool extends BaseTool {
     // end: nothing the guest asked for starts after that, a question still
     // waiting for an answer is withdrawn, and a tool still running is told to
     // stop, as a cancelled run tells it.
-    const callTool = async (toolName: string, toolInput: Record<string, unknown>, ended?: AbortSignal): Promise<string> => {
+    const budget = hostCallBudget();
+    const tooMany = `Not run: dynamic tool "${this.name}" made more than ${DYNAMIC_HOST_CALLS} calls to tools and fetch.`;
+    const callTool = (toolName: string, toolInput: Record<string, unknown>, ended?: AbortSignal): Promise<string> =>
+      budget(tooMany, () => callToolNow(toolName, toolInput, ended));
+    const callToolNow = async (toolName: string, toolInput: Record<string, unknown>, ended?: AbortSignal): Promise<string> => {
       if (ended?.aborted) return `Not run: dynamic tool "${this.name}" had already ended.`;
       if (!registry.hasTool(toolName)) return `Tool not found: ${toolName}`;
 
@@ -316,11 +354,12 @@ class DynamicTool extends BaseTool {
     // fetch is the guest's way off the machine. Asked at the moment of sending:
     // a local-only file read through callTool earlier in this same run makes
     // the caller local-only, and what the guest read must then stay here.
-    const sendOut: typeof bridgeFetch = async (url, init, ended) => (options.isOffline?.()
+    // The run's signal too: a cancelled run stops a request still going.
+    const sendOut: typeof bridgeFetch = (url, init, ended) => budget({ __error: tooMany }, async () => (options.isOffline?.()
       ? { __error: 'fetch is unavailable to a local-only subtask (privacy.paths).' }
       : ended?.aborted
         ? { __error: 'the dynamic tool had already ended.' }
-        : bridgeFetch(url, init, ended));
+        : bridgeFetch(url, init, ended && options.signal ? AbortSignal.any([ended, options.signal]) : (ended ?? options.signal))));
 
     // Choose the executor. 'isolate'/'auto' prefer the hard V8 isolate, and run
     // in the WebAssembly sandbox when isolated-vm isn't loadable ('isolate' says
@@ -328,13 +367,13 @@ class DynamicTool extends BaseTool {
     const mode = this.getSandboxMode();
     if (mode !== 'wasm') {
       const ivm = await loadIsolatedVm();
-      if (ivm) return this.runInIsolate(ivm, input, callTool, sendOut);
+      if (ivm) return this.runInIsolate(ivm, input, callTool, sendOut, options.signal);
       if (mode === 'isolate' && !ivmWarned) {
         ivmWarned = true;
         this.log('[tool-creator] isolated-vm is not available (not installed or failed to build) — dynamic tools run in the WebAssembly sandbox instead, which confines them the same way.');
       }
     }
-    return this.runInWasm(input, callTool, sendOut);
+    return this.runInWasm(input, callTool, sendOut, options.signal);
   }
 
   /**
@@ -351,6 +390,7 @@ class DynamicTool extends BaseTool {
     input: Record<string, unknown>,
     callTool: (name: string, input: Record<string, unknown>, ended?: AbortSignal) => Promise<string>,
     sendOut: typeof bridgeFetch,
+    cancelled?: AbortSignal,
   ): Promise<string> {
     const timeoutMs = Math.max(200, Number(process.env['CASCADE_DYNAMIC_TOOL_TIMEOUT_MS']) || DYNAMIC_TOOL_TIMEOUT_MS);
     const isolate = new ivm.Isolate({ memoryLimit: 128 });
@@ -413,7 +453,18 @@ class DynamicTool extends BaseTool {
         }, timeoutMs + 500);
         t.unref?.();
       });
-      return await Promise.race([runPromise, timeoutPromise]);
+      // A cancelled run ends the isolate at once, not at its deadline.
+      let stop: (() => void) | undefined;
+      const cancelPromise = new Promise<string>((resolve) => {
+        stop = () => { dispose(); resolve(cancelledMessage(this.name)); };
+        if (cancelled?.aborted) stop();
+        else cancelled?.addEventListener('abort', stop, { once: true });
+      });
+      try {
+        return await Promise.race([runPromise, timeoutPromise, cancelPromise]);
+      } finally {
+        if (stop) cancelled?.removeEventListener('abort', stop);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (/timed? out/i.test(msg)) {
@@ -434,6 +485,7 @@ class DynamicTool extends BaseTool {
     input: Record<string, unknown>,
     callTool: (name: string, input: Record<string, unknown>, ended?: AbortSignal) => Promise<string>,
     sendOut: typeof bridgeFetch,
+    cancelled?: AbortSignal,
   ): Promise<string> {
     const timeoutMs = Math.max(200, Number(process.env['CASCADE_DYNAMIC_TOOL_TIMEOUT_MS']) || DYNAMIC_TOOL_TIMEOUT_MS);
     const outcome = await runInWasmSandbox(this.executeCode, input, {
@@ -443,8 +495,9 @@ class DynamicTool extends BaseTool {
         if ('__error' in r) throw new Error(r.__error);
         return JSON.stringify(r);
       },
-    }, { timeoutMs });
+    }, { timeoutMs, ...(cancelled ? { signal: cancelled } : {}) });
     if (outcome.kind === 'ok') return outcome.value;
+    if (outcome.kind === 'cancelled') return cancelledMessage(this.name);
     if (outcome.kind === 'timeout') {
       return `Dynamic tool "${this.name}" timed out after ${timeoutMs}ms and was terminated.`;
     }

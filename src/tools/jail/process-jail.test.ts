@@ -57,7 +57,8 @@ describe('scrubEnv', () => {
   it('takes out provider keys by name and any variable holding a configured secret — nothing else', () => {
     const env = scrubEnv({
       PATH: '/usr/bin', ANTHROPIC_API_KEY: 'a', openai_api_key: 'b', CASCADE_DASHBOARD_SECRET: 'c',
-      MY_APP_KEY: SECRET, GITHUB_TOKEN: 'ghp_for_git_push', SHORT: 'x',
+      MY_APP_KEY: SECRET, CUSTOM_AUTH: `Bearer ${SECRET}`, PROXY_URL: `https://u:${SECRET}@proxy`,
+      GITHUB_TOKEN: 'ghp_for_git_push', SHORT: 'x',
     }, [SECRET, 'x']);
     expect(env).toEqual({ PATH: '/usr/bin', GITHUB_TOKEN: 'ghp_for_git_push', SHORT: 'x' });
   });
@@ -1765,6 +1766,27 @@ describe('ProcessJail.prepare — git configuration, policy files and stores', (
       expect(r.ok && r.launch.args.join(' ')).toContain(`--ro-bind ${config} ${config}`);
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // A symlinked config's target was frozen, the link itself not: a command
+  // could put a config naming a program in its place for the git tool.
+  it('puts back a symlink on the way to a git config that a command replaced', async () => {
+    const dir = await repo('linked');
+    const elsewhere = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-linked-target-')));
+    try {
+      const config = path.join(dir, '.git', 'config');
+      await fs.rename(config, path.join(elsewhere, 'config'));
+      await fs.symlink(path.join(elsewhere, 'config'), config);
+      const r = await new ProcessJail(policy({ workspaceRoot: dir, detect: bwrap })).prepare('sh', [], { cwd: dir, offline: false });
+      if (!r.ok) throw new Error(r.reason);
+      await fs.rm(config);
+      await fs.writeFile(config, '[diff]\n\texternal = /tmp/evil\n');
+      expect(await r.launch.done?.()).toMatch(/config/);
+      expect(await fs.readlink(config)).toBe(path.join(elsewhere, 'config'));
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+      await fs.rm(elsewhere, { recursive: true, force: true });
     }
   });
 
