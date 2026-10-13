@@ -1086,6 +1086,29 @@ describe('privacy.paths, enforced when a file is read', () => {
     }
   });
 
+  // A local-only subtask's new file is made in its private folder, so the
+  // checks that looked for it in the workspace found nothing there.
+  it('finds a local-only subtask\'s artifact where it was made, in its private folder', async () => {
+    const { existsSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    let root = '';
+    const { result } = await run({
+      privateModel: true,
+      call: [
+        { id: 'tc-1', name: 'file_read', input: { path: 'secret/plan.md' } },
+        { id: 'tc-2', name: 'file_write', input: { path: 'summary.md', content: 'The plan, summarized.\n' } },
+      ],
+      assignment: { files: ['summary.md'], acceptance: ['summary.md exists'] },
+      setup: async (r) => { root = r; },
+      escalator: { requestPermission: async (req: { id: string }) => ({ requestId: req.id, approved: true, decidedBy: 'USER' }) },
+    });
+    expect(existsSync(join(root, 'summary.md'))).toBe(false);
+    expect(existsSync(statePath(root, STATE.private, 'summary.md'))).toBe(true);
+    expect(result.status).toBe('COMPLETED');
+    expect(result.issues.join('\n')).not.toMatch(/not created|does not exist/);
+    expect(result.testResults.passed).toContain('summary.md exists');
+  });
+
   // The approval request carried the call's input to the T2 and T1
   // evaluators, whose models may be cloud ones.
   it('marks a local-only subtask\'s approval request, so no tier model is asked about it', async () => {

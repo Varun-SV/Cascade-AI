@@ -121,6 +121,29 @@ describe('generate_document — image embedding and reporting', () => {
     expect(await zipSignature('deck.pptx')).toBe('PK\x03\x04');
   }, 30_000);
 
+  // decodeURIComponent threw on a bare `%`, before the guarded block, and the
+  // renderer dropped the image without anything saying so.
+  it('embeds a file whose name has a % that is not an escape, and decodes one that is', async () => {
+    await fs.mkdir(path.join(workspace, 'images'), { recursive: true });
+    await fs.writeFile(path.join(workspace, 'images/100%.png'), png(16, 16));
+    await fs.writeFile(path.join(workspace, 'images/my chart.png'), png(16, 16));
+    const out = await tool().execute(
+      { path: 'deck.pptx', content: '# S\n\n![a](images/100%.png)\n\n![b](images/my%20chart.png)\n' },
+      OPTS,
+    );
+    expect(out).toContain('Embedded 2 image');
+    expect(out).not.toContain('Could NOT embed');
+  }, 30_000);
+
+  it('names a reference whose load failed in any other way', async () => {
+    const t = new GenerateDocumentTool(async () => { throw new Error('disk on fire'); });
+    t.setWorkspaceRoot(workspace);
+    t.setPathGuard(() => { throw new Error('guard unavailable'); });
+    const out = await t.execute({ path: 'deck.pptx', content: '# S\n\n![a](a.png)\n' }, OPTS);
+    expect(out).toContain('Could NOT embed 1 image');
+    expect(out).toContain('a.png (guard unavailable)');
+  }, 30_000);
+
   // An embedded file is copied into the document, which anything can read
   // later: a worker on a cloud model could copy a private image into an
   // ordinary deck, then pull it back out with a command.

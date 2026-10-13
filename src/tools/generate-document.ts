@@ -116,11 +116,14 @@ export class GenerateDocumentTool extends BaseTool {
     // and is readable by anything that can read it: a protected file is not
     // copied, nor a local-only one into a document that is not local-only.
     const mayCopy = this.readGate(options, { file: absPath });
-    const loadImageBytes = async (url: string): Promise<Uint8Array | null> => {
+    const loadImage = async (url: string): Promise<Uint8Array | null> => {
       if (/^(https?|ftp):\/\//i.test(url)) { skipped.push(`${url} (remote URL — download it into the workspace first)`); return null; }
       const local = url.replace(/^file:\/\//i, '').split('?')[0]!.split('#')[0]!;
       let source: string;
-      const named = decodeURIComponent(local);
+      // Percent-escapes as a URL has them; a name they do not decode —
+      // `100%.png` — is taken as written.
+      let named = local;
+      try { named = decodeURIComponent(local); } catch { /* not an escape: the name as it is */ }
       try {
         source = resolveInWorkspace(this.workspaceRoot, named);
       } catch {
@@ -144,6 +147,16 @@ export class GenerateDocumentTool extends BaseTool {
         return bytes;
       } catch {
         skipped.push(`${local} (not found in the workspace)`);
+        return null;
+      }
+    };
+    // The renderer drops an image whose load fails, without a word: any
+    // failure is named here instead, so the model can fix the reference.
+    const loadImageBytes = async (url: string): Promise<Uint8Array | null> => {
+      try {
+        return await loadImage(url);
+      } catch (err) {
+        skipped.push(`${url} (${err instanceof Error ? err.message : String(err)})`);
         return null;
       }
     };

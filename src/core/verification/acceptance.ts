@@ -41,7 +41,7 @@ export interface AcceptanceProbe {
    * is empty or holds a string is then left to the model, like anything
    * else this rung cannot see.
    */
-  allowed?(path: string): boolean;
+  allowed?(path: string): boolean | Promise<boolean>;
 }
 
 export interface AcceptanceOptions {
@@ -167,7 +167,7 @@ export async function evaluateAcceptance(
       continue;
     }
 
-    if (probe.allowed && !probe.allowed(file)) {
+    if (probe.allowed && !(await probe.allowed(file))) {
       results.push({ criterion, verdict: 'undecidable', detail: `${file} may not be read here (protected, or local-only) — deferred to output review` });
       continue;
     }

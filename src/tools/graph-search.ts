@@ -33,7 +33,9 @@ export class GraphSearchTool extends BaseTool {
   /**
    * @param privacy the project's privacy.paths rules, read at each call: a
    *   caller that is not local-only is shown only facts that may leave
-   *   (factMayLeave) — its model may be a cloud one.
+   *   (factMayLeave) — its model may be a cloud one. A fact's sources are
+   *   judged in the workspace the registry gives this tool, by every name
+   *   they have there.
    */
   constructor(private readonly source: GraphFactSource, private readonly privacy: () => FactPrivacy | undefined = () => undefined) {
     super();
@@ -45,7 +47,7 @@ export class GraphSearchTool extends BaseTool {
     const hops = typeof input['hops'] === 'number' ? Math.max(0, Math.min(3, input['hops'])) : 1;
 
     const privacy = options.isOffline?.() ? undefined : this.privacy();
-    const mayUse = (fact: Parameters<typeof factMayLeave>[0]) => factMayLeave(fact, privacy);
+    const mayUse = (fact: Parameters<typeof factMayLeave>[0]) => factMayLeave(fact, privacy, this.workspaceRoot);
     const retriever = new GraphRetriever({
       getAllFacts: () => this.source.getAllFacts().filter(mayUse),
       getFactsForEntities: (entities) => this.source.getFactsForEntities(entities).filter(mayUse),

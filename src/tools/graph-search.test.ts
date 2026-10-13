@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import os from 'node:os';
+import path from 'node:path';
 import { GraphSearchTool } from './graph-search.js';
 import type { GraphFactSource } from '../retrieval/graph.js';
 import type { WorldFact } from '../core/knowledge/world-state.js';
@@ -36,7 +38,7 @@ describe('GraphSearchTool', () => {
 });
 
 describe('GraphSearchTool — facts that may not leave', () => {
-  const rules = { hasPolicies: () => true, isLocalOnly: (p: string) => p.startsWith('secret/') };
+  const rules = { hasPolicies: () => true, isLocalOnly: (p: string) => p.startsWith('secret/'), coversFile: () => false };
   const facts = [
     { ...fact('Payments', 'uses', 'Stripe'), sources: ['src/pay.ts'] },
     { ...fact('Payments', 'settles', 'weekly'), sources: null },
@@ -54,5 +56,13 @@ describe('GraphSearchTool — facts that may not leave', () => {
     const out = await new GraphSearchTool(source(facts), () => rules).execute({ query: 'Payments' }, { isOffline: () => true } as never);
     expect(out).toContain('weekly');
     expect(out).toContain('ops team');
+  });
+
+  it('judges a source by every name it has in the workspace', async () => {
+    const linked = { ...rules, coversFile: (abs: string, root: string) => abs === path.join(root, 'src', 'pay.ts') };
+    const tool = new GraphSearchTool(source(facts), () => linked);
+    tool.setWorkspaceRoot(path.join(os.tmpdir(), 'ws'));
+    const out = await tool.execute({ query: 'Payments' }, opts);
+    expect(out).not.toContain('Stripe');
   });
 });

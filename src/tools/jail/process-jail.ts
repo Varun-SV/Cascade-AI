@@ -79,9 +79,11 @@ const LINKED_WALK_LIMIT = 50_000;
  * workspace. (When it is not, a command can open it by its real path anyway.)
  */
 export function reachesUnder(pattern: string, rel: string): boolean {
-  let p = pattern.trim();
-  if (!p || p.startsWith('#') || p.startsWith('!')) return false;
-  p = stripTrailingSlashes(p);
+  return gitignoreRules([pattern]).some((rule) => ruleReachesUnder(rule, rel));
+}
+
+function ruleReachesUnder(rule: string, rel: string): boolean {
+  const p = stripTrailingSlashes(rule);
   if (!p.includes('/')) return false;
   const segments = p.replace(/^\/+/, '').split('/');
   if (segments[0] === '**') return false;
@@ -95,11 +97,54 @@ export function reachesUnder(pattern: string, rel: string): boolean {
   return segments.length > names.length;
 }
 
-/** One path segment of a gitignore pattern against one name. A class (`[ab]`) is taken to match. */
+/**
+ * One path segment of a gitignore pattern against one name. A class (`[ab]`)
+ * is taken to match; a backslash makes the character after it literal.
+ */
 function segmentMatches(segment: string, name: string): boolean {
   if (segment.includes('[')) return true;
-  const source = segment.replace(/[.+^${}()|\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]');
+  const literal = (c: string) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  let source = '';
+  for (let i = 0; i < segment.length; i++) {
+    const c = segment[i]!;
+    if (c === '\\' && i + 1 < segment.length) source += literal(segment[++i]!);
+    else if (c === '*') source += '[^/]*';
+    else if (c === '?') source += '[^/]';
+    else source += literal(c);
+  }
   return new RegExp(`^${source}$`).test(name);
+}
+
+/**
+ * The rules in gitignore-style patterns, read as the privacy matcher reads
+ * them: a trailing line break dropped, and a trailing run of spaces unless
+ * its first is escaped (`secret\ `), as git does; leading whitespace and
+ * tabs kept; blank ones, comments, negations and one ending in a lone
+ * backslash (no rule at all) left out. Escapes stay in, as git's pathspec
+ * globs read them the same way.
+ */
+export function gitignoreRules(patterns: string[]): string[] {
+  const out: string[] = [];
+  for (const pattern of patterns) {
+    // The matcher's own test: a backslash with nothing to escape.
+    if (pattern.endsWith('\\') && !pattern.endsWith('\\\\')) continue;
+    let end = pattern.length;
+    while (end > 0 && (pattern[end - 1] === '\n' || pattern[end - 1] === '\r')) end--;
+    const rule = trimTrailingSpaces(pattern.slice(pattern.startsWith('\uFEFF') ? 1 : 0, end));
+    if (!rule || rule.startsWith('#') || rule.startsWith('!')) continue;
+    out.push(rule);
+  }
+  return out;
+}
+
+/** `line` without its trailing spaces, but for one escaped by an odd run of backslashes before it. */
+function trimTrailingSpaces(line: string): string {
+  let end = line.length;
+  while (end > 0 && line[end - 1] === ' ') end--;
+  if (end === line.length) return line;
+  let slashes = 0;
+  while (end - slashes > 0 && line[end - slashes - 1] === '\\') slashes++;
+  return line.slice(0, slashes % 2 === 1 ? end + 1 : end);
 }
 
 /**
@@ -878,10 +923,8 @@ async function linkAliasesOf(hidden: Hidden[], root: string): Promise<Hidden[]> 
  */
 export function toPathspecs(patterns: string[]): string[] {
   const out = new Set<string>();
-  for (const raw of patterns) {
-    let p = raw.trim();
-    if (!p || p.startsWith('#') || p.startsWith('!')) continue;
-    p = stripTrailingSlashes(p);
+  for (const rule of gitignoreRules(patterns)) {
+    let p = stripTrailingSlashes(rule);
     const anchored = p.startsWith('/') || p.includes('/');
     p = p.replace(/^\/+/, '');
     if (!p) continue;

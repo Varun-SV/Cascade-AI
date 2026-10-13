@@ -1703,7 +1703,10 @@ export class Cascade extends EventEmitter {
         try {
           const ws = this.worldStateDB;
           if (ws && ws.getAllFacts().length > 0) {
-            this.toolRegistry.register(new GraphSearchTool(ws, () => this.router.getPrivacyPaths()));
+            const graphSearch = new GraphSearchTool(ws, () => this.router.getPrivacyPaths());
+            // Where the facts' sources are judged by every name they have.
+            graphSearch.setWorkspaceRoot(this.toolRegistry.getWorkspaceRoot());
+            this.toolRegistry.register(graphSearch);
           }
         } catch (err) {
           console.error('Failed to register knowledge graph search:', err);

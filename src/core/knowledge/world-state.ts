@@ -36,6 +36,8 @@ export interface WorldFact {
 export interface FactPrivacy {
   hasPolicies(): boolean;
   isLocalOnly(relativePath: string): boolean;
+  /** The file at `absPath` is local-only by any of its names: a symlink's target, a hard link's other name. */
+  coversFile(absPath: string, root: string): boolean;
 }
 
 /**
@@ -43,13 +45,16 @@ export interface FactPrivacy {
  * plan, or a worker's search of the graph. With no privacy.paths rule, every
  * fact may. With any, a fact must say which files it came from, and none of
  * them may be local-only now: a fact saved before sources were recorded is
- * set aside, and so is one whose file has become local-only since. Nothing is
- * deleted; loosen the rules and they come back.
+ * set aside, and so is one whose file has become local-only since — under
+ * the name it was saved by, or, given the workspace, any other name the file
+ * has now (a symlink or hard link to a local-only file is that file). Nothing
+ * is deleted; loosen the rules and they come back.
  */
-export function factMayLeave(fact: WorldFact, privacy: FactPrivacy | undefined): boolean {
+export function factMayLeave(fact: WorldFact, privacy: FactPrivacy | undefined, workspaceRoot?: string): boolean {
   if (!privacy?.hasPolicies()) return true;
   if (!Array.isArray(fact.sources)) return false;
-  return !fact.sources.some((p) => privacy.isLocalOnly(p));
+  return !fact.sources.some((p) => privacy.isLocalOnly(p)
+    || (workspaceRoot !== undefined && privacy.coversFile(path.resolve(workspaceRoot, p), workspaceRoot)));
 }
 
 /** A fact's payload: its value and, when recorded, where it came from. Both encrypted. */
@@ -76,7 +81,7 @@ export class WorldStateDB {
   private dbPath: string;
   private encryptionKey!: Buffer;
   
-  constructor(private workspacePath: string, private debugMode = false) {
+  constructor(readonly workspacePath: string, private debugMode = false) {
     // In the project's state folder, outside the project (config/project-state.ts).
     const cascadeDir = projectStateDir(workspacePath);
     if (!fs.existsSync(cascadeDir)) {

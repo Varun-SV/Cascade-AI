@@ -258,7 +258,11 @@ describe('T1 decomposition consumes world-state v2 facts', () => {
 // become local-only, went into T1's plan all the same: nothing said where
 // they came from.
 describe('WorldStateDB — where a fact came from', () => {
-  const rules = (...localOnly: string[]) => ({ hasPolicies: () => true, isLocalOnly: (p: string) => localOnly.includes(p) });
+  const rules = (...localOnly: string[]) => ({
+    hasPolicies: () => true,
+    isLocalOnly: (p: string) => localOnly.includes(p),
+    coversFile: () => false,
+  });
 
   it('records the files a fact came from — none, for a fact saved without', () => {
     db.upsertFact('auth', 'uses', 'JWT', 't3', undefined, ['src/auth.ts', 'src/auth.ts']);
@@ -280,7 +284,22 @@ describe('WorldStateDB — where a fact came from', () => {
     expect(factMayLeave(recorded, rules('src/a.ts'))).toBe(false);
     // Without rules, all may: nothing was deleted, so loosening brings them back.
     expect(factMayLeave(older, undefined)).toBe(true);
-    expect(factMayLeave(recorded, { hasPolicies: () => false, isLocalOnly: () => true })).toBe(true);
+    expect(factMayLeave(recorded, { hasPolicies: () => false, isLocalOnly: () => true, coversFile: () => true })).toBe(true);
+  });
+
+  it('sets aside a fact whose source is now a link to a local-only file', async () => {
+    await fs.mkdir(path.join(ws, 'secret'));
+    await fs.writeFile(path.join(ws, 'secret', 'plan.md'), 'private');
+    await fs.symlink(path.join(ws, 'secret', 'plan.md'), path.join(ws, 'notes.md'));
+    await fs.link(path.join(ws, 'secret', 'plan.md'), path.join(ws, 'copy.md'));
+    await fs.writeFile(path.join(ws, 'public.md'), 'open');
+    const privacy = new PrivacyPaths([{ pattern: 'secret/', policy: 'local-only' }]);
+    const from = (source: string) => ({ entity: 'a', relation: 'r', value: 'v', sourceWorker: 't3', timestamp: 't', sources: [source] });
+    expect(factMayLeave(from('notes.md'), privacy, ws)).toBe(false);
+    expect(factMayLeave(from('copy.md'), privacy, ws)).toBe(false);
+    expect(factMayLeave(from('public.md'), privacy, ws)).toBe(true);
+    // Only the saved name is judged without the workspace to find it in.
+    expect(factMayLeave(from('notes.md'), privacy)).toBe(true);
   });
 
   it('brings a restored value back with where it came from', () => {

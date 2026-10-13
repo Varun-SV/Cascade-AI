@@ -780,13 +780,13 @@ export class T3Worker extends BaseTier {
       if (err instanceof Error && err.name === 'BudgetWrapUpError') {
         if (output) {
           issues.push(`Not self-checked: ${errMsg}`);
-          this.setStatus('COMPLETED', output);
-          this.peerBus?.publish(this.id, assignment.subtaskId, output, 'COMPLETED');
+          this.setStatus('COMPLETED', this.shareable(output, 'COMPLETED'));
+          this.publishOutcome(assignment.subtaskId, output, 'COMPLETED');
           return this.buildResult('COMPLETED', output, { checksRun, passed, failed }, issues, correctionAttempts);
         }
         issues.push(`Not finished: ${errMsg}`);
         this.setStatus('FAILED', '');
-        this.peerBus?.publish(this.id, assignment.subtaskId, '', 'FAILED');
+        this.publishOutcome(assignment.subtaskId, '', 'FAILED');
         return this.buildResult('FAILED', '', { checksRun, passed, failed }, issues, correctionAttempts);
       }
       // A budget stop is FAILED, never ESCALATED. The router has permanently
@@ -856,12 +856,6 @@ export class T3Worker extends BaseTier {
   }
 
   /**
-   * What this subtask's output may be shown as outside it — to siblings, and
-   * in the status, stream and tool events that reach the dashboard, its
-   * socket clients and the audit log: for a local-only subtask, only that it
-   * ran, the line the tiers above get at the T3→T2 boundary.
-   */
-  /**
    * A tool's name as events show it. A local-only subtask's model may name
    * one it was never given, and such a name could carry what it read: that
    * shows as a placeholder, a name from the fixed list it was given as is.
@@ -871,6 +865,12 @@ export class T3Worker extends BaseTier {
     return '[unknown tool — name withheld]';
   }
 
+  /**
+   * What this subtask's output may be shown as outside it — to siblings, and
+   * in the status, stream and tool events that reach the dashboard, its
+   * socket clients and the audit log: for a local-only subtask, only that it
+   * ran, the line the tiers above get at the T3→T2 boundary.
+   */
   private shareable(output: string, status: string): string {
     return this.localOnlyMatch
       ? `[local-only path — output withheld by privacy policy; status: ${status}]`
@@ -1506,6 +1506,30 @@ export class T3Worker extends BaseTier {
   }
 
   /**
+   * Where a file this subtask was to make is: in the workspace, or — for a
+   * local-only subtask, whose new files the registry makes in its private
+   * folder instead (ToolRegistry.privateOutput) — the private file of that
+   * name, when the workspace has none. `own` marks the latter: a local-only
+   * subtask's tools read that folder as `@private/…`, so its checks may too.
+   */
+  private async artifactLocation(target: string): Promise<{ abs: string; own: boolean }> {
+    const root = this.artifactRoot();
+    const abs = path.resolve(root, target);
+    if (!this.localOnlyMatch) return { abs, own: false };
+    const rel = path.relative(root, abs);
+    if (!rel || leavesBase(rel)) return { abs, own: false };
+    const exists = (p: string) => fs.lstat(p).then(() => true, () => false);
+    if (await exists(abs)) return { abs, own: false };
+    const moved = statePath(root, STATE.private, rel);
+    return (await exists(moved)) ? { abs: moved, own: true } : { abs, own: false };
+  }
+
+  /** Whether this worker may look into the file at `at` to check it (see `mayInspect`). */
+  private mayCheck(at: { abs: string; own: boolean }): boolean {
+    return at.own || this.mayInspect(at.abs);
+  }
+
+  /**
    * Whether a tool this worker runs may read a workspace file's contents —
    * privacy.paths, enforced at the read itself. The subtask's own description
    * decides at the start whether it is local-only; a file it reads on the way
@@ -1615,10 +1639,11 @@ ${assignment.expectedOutput}`;
     const execFileAsync = promisify(execFile);
 
     for (const artifactPath of artifactPaths) {
-      const absolutePath = path.resolve(this.artifactRoot(), artifactPath);
+      const location = await this.artifactLocation(artifactPath);
+      const absolutePath = location.abs;
       // Checked before anything touches it: a compiler's diagnostics quote
       // the source, and they go into the correction prompt.
-      if (!this.mayInspect(absolutePath)) continue;
+      if (!this.mayCheck(location)) continue;
       try {
         const stat = await fs.stat(absolutePath);
         if (!stat.isFile()) {
@@ -1789,7 +1814,7 @@ ${current}`,
   private async checkAcceptance(assignment: T2ToT3Assignment): Promise<AcceptanceResult[]> {
     const criteria = assignment.acceptance ?? [];
     if (!criteria.length) return [];
-    const resolve = (target: string) => path.resolve(this.artifactRoot(), target);
+    const resolve = (target: string) => this.artifactLocation(target);
     // The planner writes "file exists" criteria whether or not this run has a
     // tool that could create one (t1-administrator.ts / t2-manager.ts spell out
     // that shape in their prompts). Without this the deterministic rung graded
@@ -1802,16 +1827,16 @@ ${current}`,
       // Reading a file to grade it is reading it: the protected paths and
       // the privacy gate decide, as for any tool, so a criterion cannot probe
       // `.env` or a local-only file.
-      allowed: (target) => this.mayInspect(resolve(target)),
+      allowed: async (target) => this.mayCheck(await resolve(target)),
       stat: async (target) => {
         try {
-          const stat = await fs.stat(resolve(target));
+          const stat = await fs.stat((await resolve(target)).abs);
           return stat.isFile() ? { size: stat.size } : null;
         } catch { return null; }
       },
       read: async (target) => {
         try {
-          const content = await fs.readFile(resolve(target), 'utf-8');
+          const content = await fs.readFile((await resolve(target)).abs, 'utf-8');
           // A binary file read as utf-8 comes back full of replacement chars;
           // treating that as text would make "contains" answer nonsense.
           // U+FFFD is what a binary byte sequence decodes to as utf-8; treating

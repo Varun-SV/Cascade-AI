@@ -200,6 +200,13 @@ describe('reachesUnder', () => {
     expect(reachesUnder('# alias/x', 'alias')).toBe(false);
     expect(reachesUnder('a.b/x', 'axb')).toBe(false);
   });
+
+  it('reads escapes and trailing spaces as the privacy matcher does', () => {
+    expect(reachesUnder('my\\ dir/x', 'my dir')).toBe(true);
+    expect(reachesUnder('a\\*/x', 'a*')).toBe(true);
+    expect(reachesUnder('a\\*/x', 'ab')).toBe(false);
+    expect(reachesUnder('alias/x   ', 'alias')).toBe(true);
+  });
 });
 
 describe('toPathspecs', () => {
@@ -217,6 +224,31 @@ describe('toPathspecs', () => {
     expect(toPathspecs([`x${'/'.repeat(100_000)}y`]).length).toBeGreaterThan(0);
     expect(toPathspecs([`${'/'.repeat(100_000)}x`]).length).toBeGreaterThan(0);
     expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it('keeps an escaped trailing space, as git and the privacy matcher do, and drops the others', () => {
+    expect(toPathspecs(['secret\\ ', 'plain  ', 'two\\\\ ', '\t'])).toEqual([
+      ':(glob)**/secret\\ ', ':(glob)**/secret\\ /**',
+      ':(glob)**/plain', ':(glob)**/plain/**',
+      ':(glob)**/two\\\\', ':(glob)**/two\\\\/**',
+      ':(glob)**/\t', ':(glob)**/\t/**',
+    ]);
+    expect(toPathspecs(['   ', 'lone\\', '\uFEFF', 'line\r\n'])).toEqual([':(glob)**/line', ':(glob)**/line/**']);
+  });
+
+  // Windows cannot name a file with a trailing space.
+  it.skipIf(process.platform === 'win32')('gives git a pathspec that finds a staged file whose name ends in a space', async () => {
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-pathspec-'));
+    try {
+      execFileSync('git', ['-C', repo, 'init', '-q']);
+      await fs.writeFile(path.join(repo, 'secret '), 'x');
+      await fs.writeFile(path.join(repo, 'secret'), 'y');
+      execFileSync('git', ['-C', repo, 'add', '.']);
+      const listed = execFileSync('git', ['-C', repo, 'ls-files', '-z', '--', ...toPathspecs(['secret\\ '])], { encoding: 'utf8' });
+      expect(listed.split('\0').filter(Boolean)).toEqual(['secret ']);
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true });
+    }
   });
 });
 

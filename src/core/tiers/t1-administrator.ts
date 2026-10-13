@@ -623,7 +623,7 @@ In 3-5 terse bullets, flag the most important RISKS, GAPS, or over-/under-decomp
       // The plan goes to cloud models, the planner's and every tier's below:
       // facts are left out that may not leave (factMayLeave).
       const privacy = this.router.getPrivacyPaths?.();
-      const knowledge = db.getFormattedKnowledge(prompt, undefined, (fact) => factMayLeave(fact, privacy));
+      const knowledge = db.getFormattedKnowledge(prompt, undefined, (fact) => factMayLeave(fact, privacy, db.workspacePath));
       if (knowledge) {
         worldStateContext = `\n\nPROJECT KNOWLEDGE (relevant facts about this codebase):\n${knowledge}`;
       } else {
