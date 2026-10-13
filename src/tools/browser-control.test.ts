@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { describe, it, expect, vi } from 'vitest';
+import { toolReportedFailure } from '../core/tiers/integrity.js';
 import { BrowserControlTool, type BrowserAction, type BrowserController } from './browser-control.js';
 
 /** A controller that records what it was asked to do. */
@@ -277,12 +278,18 @@ describe('BrowserControlTool — page views', () => {
       ['hover with neither', { action: 'hover' }, 'a ref or a selector'],
       ['select_option without a value', { action: 'select_option', ref: 'e1' }, 'a value'],
       ['a sideways scroll', { action: 'scroll', direction: 'left' }, 'up" or "down'],
+      ['a ref passed as a selector', { action: 'click', selector: 'aria-ref=e14' }, 'not an aria-ref selector'],
+      ['a ref chained into a selector', { action: 'click', selector: 'main >> aria-ref = e14' }, 'not an aria-ref selector'],
+      ['a ref with a quote and a newline in it', { action: 'click', ref: 'e"1\nx' }, 'is not a ref'],
     ];
     for (const [name, input, wanted] of cases) {
       it(`refuses ${name}`, async () => {
         const { calls, tool } = viewTool();
-        expect(await tool.execute(input, {} as never)).toContain(wanted);
+        const out = await tool.execute(input, {} as never);
+        expect(out).toContain(wanted);
         expect(calls, 'a malformed call must never reach the page').toEqual([]);
+        // The run's record must read the refusal as a failure, not a result.
+        expect(toolReportedFailure('browser_control', out), out).toBe(true);
       });
     }
 
@@ -437,6 +444,57 @@ describe('BrowserControlTool — what a person approving sees', () => {
     const calm = new BrowserControlTool(rec.controller, undefined, { pageView: true });
     await calm.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
     expect(calm.forApproval({ action: 'press', ref: 'e2', key: 'Enter' }, 'run-1').alwaysAsk).toBe(false);
+  });
+
+  it('knows Enter by every name a host takes for it', async () => {
+    const tool = await seenTool();
+    for (const key of ['\n', '\r', 'Return', 'Shift+Return']) {
+      expect(tool.forApproval({ action: 'press', key }, 'run-1').alwaysAsk, JSON.stringify(key)).toBe(true);
+      expect(tool.forApproval({ action: 'press', ref: 'e9', key }, 'run-1').alwaysAsk, JSON.stringify(key)).toBe(true);
+    }
+  });
+
+  it('knows the words in the forms they are written on buttons', async () => {
+    const labels = [
+      'button "Submit payment"', 'button "Check out"', 'button "Checkout"', 'link "Buy now"',
+      'button "Place order"', 'button "Deleting…"', 'button "Remove from cart"', 'button "Confirm purchase"',
+      'button "Ｐａｙ"', 'button "P\u200bay now"', 'button "Pub\u00adlish"',
+    ];
+    const rec = recorder({ detail: 'ok', url: 'https://shop.example/', view: { text: '[Page view 1]', labels: Object.fromEntries(labels.map((l, i) => [`e${i + 1}`, l])) } });
+    const tool = new BrowserControlTool(rec.controller, undefined, { pageView: true });
+    await tool.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
+    labels.forEach((label, i) => {
+      expect(tool.forApproval({ action: 'click', ref: `e${i + 1}` }, 'run-1').alwaysAsk, label).toBe(true);
+    });
+  });
+
+  it('asks before choosing an option that does something irreversible', async () => {
+    const rec = recorder({ detail: 'ok', url: 'https://mail.example/', view: { text: '[Page view 1]', labels: { e4: 'combobox "Bulk action"', e5: 'combobox "Party size"' } } });
+    const tool = new BrowserControlTool(rec.controller, undefined, { pageView: true });
+    await tool.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
+    expect(tool.forApproval({ action: 'select_option', ref: 'e4', value: 'Delete selected' }, 'run-1').alwaysAsk).toBe(true);
+    expect(tool.forApproval({ action: 'select_option', ref: 'e5', value: '2 people' }, 'run-1').alwaysAsk).toBe(false);
+  });
+
+  it('shows what is acted on first, and a value only where the call uses one', async () => {
+    const tool = await seenTool();
+    const { input } = tool.forApproval({ action: 'click', ref: 'e14', value: 'x'.repeat(2_100) }, 'run-1');
+    expect(Object.keys(input).slice(0, 3)).toEqual(['action', 'target', 'site']);
+    expect(input).not.toHaveProperty('value');
+    expect(tool.forApproval({ action: 'fill', ref: 'e9', value: 'a@b.c' }, 'run-1').input['value']).toBe('a@b.c');
+  });
+
+  it('runs an approved action only on the site it was approved on', async () => {
+    const rec = recorder({ detail: 'ok', url: 'https://shop.example/cart', view: { text: '[Page view 1]', labels: { e14: 'button "Pay"' } } });
+    const tool = new BrowserControlTool(rec.controller, undefined, { pageView: true });
+    await tool.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
+    const input = { action: 'click', ref: 'e14' };
+    expect(tool.forApproval(input, 'run-1').input['site']).toBe('shop.example');
+    await tool.execute(input, { sessionId: 'run-1' } as never);
+    expect(rec.calls.at(-1)).toMatchObject({ kind: 'click', ref: 'e14', expectSite: 'shop.example' });
+    // Looking and reading carry no such condition.
+    await tool.execute({ action: 'extract_text' }, { sessionId: 'run-1' } as never);
+    expect(rec.calls.at(-1)).not.toHaveProperty('expectSite');
   });
 
   it('keeps the selector rule on a host without page views, and asks before an unaimed Enter', () => {

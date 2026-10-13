@@ -12,6 +12,7 @@ import { ToolRegistry } from './registry.js';
 import { ToolCreator, normalizeToolSchema, type GeneratedToolSpec } from './tool-creator.js';
 import { generateDiff, diffSummary } from './diff.js';
 import { PermissionEscalator } from '../core/permissions/escalator.js';
+import { BrowserControlTool } from './browser-control.js';
 
 const opts: any = { tierId: 't3-test' };
 let ws: string;
@@ -112,6 +113,33 @@ describe('ToolCreator — runtime tool generation', () => {
     const b = await creator.createTool('summarize a file thoroughly', 'ctx');
     expect(a).toBe(b);
     expect(calls).toBe(1);
+  });
+
+  it('a generated tool calling browser_control is asked about as the worker would be: the element named, and a payment always asked', async () => {
+    const reg = makeRegistry();
+    const browser = new BrowserControlTool(
+      async () => ({ ok: true, detail: 'ok', url: 'https://shop.example/', view: { text: '[Page view 1]', labels: { e14: 'button "Pay $42.00"' } } }),
+      undefined,
+      { pageView: true },
+    );
+    reg.register(browser);
+    await browser.execute({ action: 'observe' }, { sessionId: 'run-1', tierId: 't3' } as any);
+    const asked: any[] = [];
+    const escalator: any = { requestPermission: async (req: any) => { asked.push(req); return { approved: false, decidedBy: 'test' }; } };
+    const spec: GeneratedToolSpec = {
+      name: 'dynamic_checkout', description: 'pay for the cart',
+      inputSchema: {},
+      executeCode: "return await callTool('browser_control', { action: 'click', ref: 'e14' });",
+      isDangerous: true,
+    };
+    // Trusted: without the browser's own answer, an earlier "always" would cover it.
+    const creator = new ToolCreator(mockRouter(spec), reg, ws, true);
+    creator.setPermissionEscalator(escalator);
+    await creator.createTool('pay for the cart', 'shop');
+    await reg.execute('dynamic_checkout', {}, { ...opts, sessionId: 'run-1' });
+    expect(asked).toHaveLength(1);
+    expect(asked[0].forceReprompt).toBe(true);
+    expect(asked[0].input).toMatchObject({ action: 'click', ref: 'e14', target: 'button "Pay $42.00"', site: 'shop.example' });
   });
 
   it('dangerous generated tool routes its callTool through the escalator', async () => {

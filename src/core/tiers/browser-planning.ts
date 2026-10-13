@@ -71,16 +71,20 @@ export const PAGE_VIEWS_KEPT = 2;
  * including something that looks like a view.
  */
 export function foldOldPageViews(messages: ConversationMessage[], keep = PAGE_VIEWS_KEPT): ConversationMessage[] {
-  const viewing = new Set<string>();
-  for (const m of messages) {
-    for (const call of m.role === 'assistant' ? m.toolCalls ?? [] : []) {
-      if (call.name === BROWSER_TOOL && call.input['action'] !== 'extract_text') viewing.add(call.id);
-    }
-  }
   const marker = `\n\n${PAGE_VIEW_MARK} `;
   const withView: number[] = [];
+  // Each result is matched to its call by POSITION — a turn's calls, in order,
+  // to the tool results that follow it — not by id. Gemini names every call
+  // after its function, so all of a worker's browser calls share one id, and
+  // matching by id let an extract_text result, whose page text can contain
+  // anything, be read as a view. A result with no call before it is left
+  // alone.
+  let calls: Array<{ name: string; input: Record<string, unknown> }> = [];
   messages.forEach((m, i) => {
-    if (m.role === 'tool' && m.toolCallId && viewing.has(m.toolCallId)
+    if (m.role === 'assistant') { calls = [...(m.toolCalls ?? [])]; return; }
+    if (m.role !== 'tool') { calls = []; return; }
+    const call = calls.shift();
+    if (call?.name === BROWSER_TOOL && call.input['action'] !== 'extract_text'
       && typeof m.content === 'string' && m.content.includes(marker)) withView.push(i);
   });
   if (withView.length <= keep) return messages;

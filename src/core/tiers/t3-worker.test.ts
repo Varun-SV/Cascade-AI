@@ -526,6 +526,43 @@ describe('T3Worker.executeTool — unified provider-error classification (used t
   });
 });
 
+describe('T3Worker adaptive fallback never stands in a tool that needs approval', () => {
+  // A misspelled tool name needs no approval — nothing by that name exists —
+  // so the call reached the registry unasked, failed, and the fallback ran the
+  // name-similar tool with the same input and requireApproval: false.
+  function setup() {
+    const ran: string[] = [];
+    const gated = new Set(['browser_control', 'file_delete']);
+    const toolRegistry = makeToolRegistry({
+      getToolDefinitions: () => ['browser_control', 'file_delete', 'file_read'].map((name) => ({ name, description: name, inputSchema: {} })),
+      requiresApproval: (name: string) => gated.has(name),
+      isDangerous: (name: string) => gated.has(name),
+      execute: vi.fn(async (name: string) => {
+        if (!['browser_control', 'file_delete', 'file_read'].includes(name)) throw new Error(`Tool not found: ${name}`);
+        ran.push(name);
+        return 'done';
+      }),
+    } as unknown as Partial<ToolRegistry>);
+    const worker = new T3Worker(makeRouter(vi.fn()), toolRegistry, 't2-parent');
+    const executeTool = (tc: ToolCall) => (worker as unknown as { executeTool: (tc: ToolCall) => Promise<string> }).executeTool(tc);
+    return { ran, executeTool };
+  }
+
+  it('does not click on a page because the model misspelled the browser tool', async () => {
+    const { ran, executeTool } = setup();
+    const out = await executeTool({ id: 'tc-1', name: 'browser_click', input: { action: 'click', selector: '#pay' } });
+    expect(ran).toEqual([]);
+    expect(out).toContain('Tool not found');
+  });
+
+  it('does not land a failed file call on file_delete, but may still recover through a harmless sibling', async () => {
+    const { ran, executeTool } = setup();
+    const out = await executeTool({ id: 'tc-2', name: 'file_remove', input: { path: 'a.txt' } });
+    expect(ran).toEqual(['file_read']);
+    expect(out).toContain('[Fallback via file_read]');
+  });
+});
+
 describe('T3Worker.selfTest — fails closed, not open, when grading itself breaks', () => {
   function makeWorkerForSelfTest(generateImpl: CascadeRouter['generate']) {
     return new T3Worker(makeRouter(generateImpl), makeToolRegistry(), 't2-parent');
@@ -899,6 +936,17 @@ describe('a browser screenshot reaches the next request, once', () => {
     await worker.execute(makeAssignment({ subtaskTitle: 'Read the booking page' }), 'task-history');
     const history = (worker as unknown as { context: { getMessages(): ConversationMessage[] } }).context.getMessages();
     expect(hasImage(history)).toBe(false);
+  });
+
+  it('does not carry a picture left over from an earlier loop into the next one', async () => {
+    // The final step of one loop can hand over a picture no request ever
+    // takes; a correction round's first request must not inherit it.
+    const { sent, registry, router } = run(SEEING);
+    const worker = new T3Worker(router, registry, 't2-parent');
+    (worker as unknown as { pendingScreenshot?: ImageAttachment }).pendingScreenshot = IMAGE;
+    await worker.execute(makeAssignment({ subtaskTitle: 'Read the booking page' }), 'task-leftover');
+    expect(hasImage(sent[0]!)).toBe(false);
+    expect((worker as unknown as { pendingScreenshot?: ImageAttachment }).pendingScreenshot).toBeUndefined();
   });
 
   it('is not even taken for a model that cannot see it', async () => {

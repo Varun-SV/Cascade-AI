@@ -43,6 +43,33 @@ const BOOKING = [
   "  - button \"Reserve 7:30 pm\" [ref=e24] [box=0,1208,118,21]",
 ].join('\n');
 
+/**
+ * Fields whose values Playwright writes as text lines under them — a password
+ * and a one-time code with placeholders, each inside a clickable label — a
+ * checkbox whose name the browser builds from the text field inside it, and
+ * a button scrolled out of sight inside a 100px-tall iframe. Captured from
+ * Chromium through Playwright 1.62 with the fields filled.
+ */
+const FIELDS = [
+  "- generic [ref=e1] [box=8,8,1264,784]:",
+  "  - generic [ref=e2] [cursor=pointer] [box=8,9,250,17]:",
+  "    - text: Password",
+  "    - textbox \"Password\" [ref=e3] [box=73,8,185,21]:",
+  "      - /placeholder: At least 8 characters",
+  "      - text: hunter2secret",
+  "  - generic [ref=e4] [cursor=pointer] [box=262,9,223,17]:",
+  "    - text: Code",
+  "    - textbox \"Code\" [ref=e5] [box=300,8,185,21]:",
+  "      - /placeholder: 6 digits",
+  "      - text: \"493021\"",
+  "  - generic [ref=e7] [cursor=pointer] [box=8,137,254,17]:",
+  "    - 'checkbox \"Other: secret-other\" [ref=e8] [box=12,138,13,13]'",
+  "    - text: \"Other:\"",
+  "    - textbox \"Other reason\" [active] [ref=e9] [box=77,136,185,21]: secret-other",
+  "  - iframe [ref=e10] [box=266,47,204,104]:",
+  "    - button \"Deep in frame\" [ref=f1e3] [box=8,308,100,21]",
+].join('\n');
+
 /** Names built to break a naive parser or imitate the list's own syntax. */
 const TRICKY = [
   "- generic [active] [ref=f2e1] [box=8,8,1264,283]:",
@@ -147,6 +174,39 @@ describe('describePage', () => {
     expect(v.text).toContain('[e16] textbox "Notes" (filled, 17 chars, focused)');
     expect(view(TRICKY)!.text).toContain('textbox "No value" (empty)');
     expect(view(TRICKY)!.text).toContain('spinbutton "Qty" (filled, 1 char)');
+  });
+
+  it('never shows a value Playwright writes under its field, or a name built from one', () => {
+    const v = describePage({ snapshot: FIELDS, url: 'https://x.example/', title: 'Sign in', viewport: SCREEN, number: 1 })!;
+    const everything = `${v.text}\n${[...v.labels.values()].join('\n')}`;
+    for (const secret of ['hunter2secret', '493021', 'secret-other']) expect(everything).not.toContain(secret);
+    expect(v.text).toContain('[e2] clickable "Password Password"');
+    expect(v.text).toContain('[e3] textbox "Password" (filled, 13 chars)');
+    expect(v.text).toContain('[e5] textbox "Code" (filled, 6 chars)');
+    expect(v.text).toContain('[e8] checkbox "Other: •••"');
+  });
+
+  it('hides a value only where a name is built from it, not wherever the page repeats it', () => {
+    // A search box still holding its query, and the results page saying what
+    // was searched for: the page's own text, and the answer the model needs.
+    const snapshot = [
+      '- main [ref=e1] [box=0,0,1280,800]:',
+      '  - searchbox "Search" [ref=e2] [box=0,0,200,20]: Italian',
+      '  - heading "Results for Italian" [level=1] [ref=e3] [box=0,30,400,30]',
+      '  - link "Italian Bistro" [ref=e4] [box=0,70,200,20]',
+    ].join('\n');
+    const v = describePage({ snapshot, url: 'https://x.example/', title: 'Search', viewport: SCREEN, number: 1 })!;
+    expect(v.text).toContain('[e3] heading "Results for Italian"');
+    expect(v.text).toContain('[e4] link "Italian Bistro"');
+    expect(v.text).toContain('[e2] searchbox "Search" (filled, 7 chars)');
+  });
+
+  it('lists a control scrolled out of sight inside its frame as further down, and draws no box for it', () => {
+    const v = describePage({ snapshot: FIELDS, url: 'https://x.example/', title: 'Sign in', viewport: SCREEN, number: 1 })!;
+    const [onScreen, further] = v.text.split('Further down:');
+    expect(onScreen).not.toContain('f1e3');
+    expect(further).toContain('[f1e3] button "Deep in frame"');
+    expect(v.marks.map((m) => m.ref)).not.toContain('f1e3');
   });
 
   it('does not take a nameless field\'s value for its label', () => {
@@ -269,5 +329,14 @@ describe('clean', () => {
     // person reading the approval; a zero-width mark splits a word.
     expect(clean('\u202etnuocca eteleD', 80)).toBe('tnuocca eteleD');
     expect(clean('P\u200bay\ufeff now\u2066', 80)).toBe('Pay now');
+    // Full-width brackets and quotes are brackets and quotes.
+    expect(clean('\uff3be1\uff3d \uff02Pay\uff02', 80)).toBe("(e1) 'Pay'");
+    // Text hidden in tag characters.
+    expect(clean('Next\u{E0049}\u{E0047}\u{E004E}', 80)).toBe('Next');
+    // Cut by character: never half an emoji.
+    const cut = clean(`${'a'.repeat(78)}😀😀😀`, 80);
+    expect(cut).toBe(`${'a'.repeat(78)}😀…`);
+    expect(cut).toBe(cut.normalize());
+    expect(/[\ud800-\udbff](?![\udc00-\udfff])/.test(clean('lone \ud83d end', 80))).toBe(false);
   });
 });

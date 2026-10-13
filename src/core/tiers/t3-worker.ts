@@ -824,6 +824,8 @@ export class T3Worker extends BaseTier {
    * it would couple the worker to a tool that usually is not there.
    */
   private releaseBrowserControl(): void {
+    // A finished worker sends nothing more, so its last picture goes too.
+    this.pendingScreenshot = undefined;
     // Best-effort, and swallowing is deliberate. This runs in `execute`'s
     // finally, so anything thrown here REPLACES the worker's real result — a
     // registry without `getTool` turned every completed subtask into a
@@ -878,6 +880,11 @@ export class T3Worker extends BaseTier {
     let stalledArtifactIterations = 0;
     const MAX_ITERATIONS = 15;
     const requiresArtifact = this.requiresArtifact();
+    // A picture belongs to the step after the action that took it. One left
+    // over from a loop that ended — the final step's, say — would otherwise
+    // ride on the first request of the next loop (a correction round), after
+    // a prompt it has nothing to do with.
+    this.pendingScreenshot = undefined;
     // `tools` is reassigned when a dynamic tool is created — must be a let
     tools = [...tools];
 
@@ -1315,7 +1322,8 @@ export class T3Worker extends BaseTier {
           `Replacement for "${tc.name}" — original failed with: ${originalError.slice(0, 150)}`,
           this.assignment?.subtaskTitle ?? tc.name,
         );
-        if (newToolName) {
+        // Same rule for a synthesized tool: it runs here without a prompt.
+        if (newToolName && !this.toolRegistry.requiresApproval(newToolName) && !this.toolRegistry.isDangerous(newToolName)) {
           this.log(`Adaptive fallback: synthesized "${newToolName}", retrying`);
           const result = await this.toolRegistry.execute(newToolName, tc.input, {
             tierId: this.id,
@@ -1347,6 +1355,13 @@ export class T3Worker extends BaseTier {
 
     for (const tool of allTools) {
       if (tool.name === failedToolName) continue;
+      // Never a stand-in that needs approval. The fallback runs it without
+      // asking, so a misspelled name — `browser_click`, which needs no
+      // approval because no such tool exists — would reach `browser_control`
+      // and click on a signed-in page unasked, and a failed `file_write` could
+      // land on `file_delete`. The model gets the error and calls the real
+      // tool itself, through the prompt.
+      if (this.toolRegistry.requiresApproval(tool.name) || this.toolRegistry.isDangerous(tool.name)) continue;
       const toolWords = tool.name.toLowerCase().split(/[_\-\s]+/);
       const score = failedKeywords.filter(k => toolWords.includes(k)).length;
       if (score > bestScore && score >= 1) {

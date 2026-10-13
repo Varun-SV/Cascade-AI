@@ -126,6 +126,8 @@ const page = {
   closed: false,
   currentUrl: 'https://start.test/',
   navHandlers: [] as Array<(frame: unknown) => void>,
+  /** A new document's load, which `pushState` and its kin do not fire. */
+  loadHandlers: [] as Array<() => void>,
   calls: [] as string[],
   url() { return this.currentUrl; },
   async title() { return 'Title'; },
@@ -134,7 +136,10 @@ const page = {
     // Playwright reports the frame that moved. A real top-level navigation
     // reports the main frame; see `navigateSubframe` for the other kind.
     this.navHandlers.forEach((h) => h(MAIN_FRAME));
+    this.loadHandlers.forEach((h) => h());
   },
+  /** A history change: the main frame "navigates", the document stays. */
+  replaceState(u: string) { this.currentUrl = u; this.navHandlers.forEach((h) => h(MAIN_FRAME)); },
   /** An ad slot or embedded widget re-navigating itself. Not the page. */
   navigateSubframe() { this.navHandlers.forEach((h) => h(SUB_FRAME)); },
   mainFrame() { return MAIN_FRAME; },
@@ -144,7 +149,10 @@ const page = {
   keyboard: { press: async (k: string) => { page.calls.push(`key:${k}`); } },
   async waitForSelector(s: string) { this.calls.push(`wait:${s}`); },
   async innerText(s: string) { this.calls.push(`text:${s}`); return 'page text'; },
-  on(event: string, handler: (frame: unknown) => void) { if (event === 'framenavigated') this.navHandlers.push(handler); },
+  on(event: string, handler: (frame: unknown) => void) {
+    if (event === 'framenavigated') this.navHandlers.push(handler);
+    if (event === 'domcontentloaded') this.loadHandlers.push(handler as () => void);
+  },
   async close() { this.closed = true; this.closeCount += 1; },
   isClosed() { return this.closed; },
   context() { return pageContext; },
@@ -228,6 +236,7 @@ beforeEach(() => {
   page.currentUrl = 'https://start.test/';
   page.calls = [];
   page.navHandlers = [];
+  page.loadHandlers = [];
   browser.closed = false;
   browser.contexts = () => [defaultContext];
   defaultContext.closed = false;
@@ -2264,6 +2273,7 @@ describe('handing the browser to the person watching', () => {
       closed: false,
       currentUrl: 'https://login.test/popup',
       navHandlers: [] as Array<(frame: unknown) => void>,
+      loadHandlers: [] as Array<() => void>,
       calls: [] as string[],
       closeCount: 0,
       keyboard: { press: async (k: string) => { popup.calls.push(`key:${k}`); } },
@@ -4278,6 +4288,7 @@ describe('round 33 review regressions', () => {
       closed: false,
       currentUrl: url,
       navHandlers: [] as Array<(frame: unknown) => void>,
+      loadHandlers: [] as Array<() => void>,
       calls: [] as string[],
       closeCount: 0,
       keyboard: { press: async (k: string) => { popup.calls.push(`key:${k}`); } },
@@ -4664,8 +4675,66 @@ describe('page views and refs', () => {
     page.calls = [];
     const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
     expect(out.ok).toBe(true);
-    expect(page.calls).toEqual(['aria-ref=e14 click']);
+    // Described again first, to check e14 is still what the view called it.
+    expect(page.calls).toEqual([expect.stringMatching(/^snapshot:/), 'aria-ref=e14 click']);
     expect(out.detail).toBe('Clicked button "Reserve 7:30 pm" (e14)');
+  });
+
+  it('refuses a ref whose control the page has renamed since the view, and shows the page as it is', async () => {
+    // Playwright resolves a ref to its element whatever the element now says.
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    snapshot = BOOKING.replace('Reserve 7:30 pm', 'Cancel reservation');
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('e14 is now button "Cancel reservation", not button "Reserve 7:30 pm"');
+    expect(out.view!.text).toContain('[e14] button "Cancel reservation"');
+    expect(page.calls).not.toContain('aria-ref=e14 click');
+  });
+
+  it('checks the name only before an action that can set something off', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.calls = [];
+    await c.controller({ kind: 'hover', ref: 'e5' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'extract_text', ref: 'e14' }, ctx('run', 'w1'));
+    expect(page.calls.filter((x) => x.startsWith('snapshot:'))).toEqual([]);
+  });
+
+  it('keeps refs through a history change, which keeps the document', async () => {
+    // Map pages and scroll-spy docs call replaceState every few hundred ms.
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.replaceState('https://start.test/?at=2');
+    page.replaceState('https://start.test/?at=3');
+    const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(true);
+  });
+
+  it('reads a ref Playwright refuses as naming a gone frame as no longer on the page', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    extra['locator'] = (selector: string) => ({
+      ...locate(selector),
+      count: async () => { throw new Error(`Invalid frame in aria-ref selector "${selector}"`); },
+    });
+    const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out).toMatchObject({ ok: false, detail: expect.stringContaining('no longer on the page') });
+  });
+
+  it('does not act once the page has left the site it was approved on', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.currentUrl = 'https://elsewhere.test/pay';
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', selector: '#go', expectSite: 'start.test' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('no longer on start.test');
+    expect(page.calls).toEqual([]);
+    page.currentUrl = 'https://start.test/';
+    expect((await c.controller({ kind: 'click', selector: '#go', expectSite: 'start.test' }, ctx('run', 'w1'))).ok).toBe(true);
   });
 
   it('routes every ref action through the locator', async () => {
@@ -4679,7 +4748,7 @@ describe('page views and refs', () => {
     await c.controller({ kind: 'hover', ref: 'e5' }, ctx('run', 'w1'));
     await c.controller({ kind: 'scroll', ref: 'e14' }, ctx('run', 'w1'));
     const text = await c.controller({ kind: 'extract_text', ref: 'e14' }, ctx('run', 'w1'));
-    expect(page.calls).toEqual([
+    expect(page.calls.filter((x) => !x.startsWith('snapshot:'))).toEqual([
       'aria-ref=e9 fill=secret', 'aria-ref=e9 press=Enter', 'aria-ref=e14 waitFor', 'aria-ref=e11 selectOption=4 people',
       'aria-ref=e5 hover', 'aria-ref=e14 scrollIntoView', 'aria-ref=e14 innerText',
     ]);
@@ -4774,9 +4843,17 @@ describe('page views and refs', () => {
     await c.controller({ kind: 'scroll', direction: 'up', pageView: true }, ctx('run', 'w1'));
     await c.controller({ kind: 'scroll' }, ctx('run', 'w1'));
     expect(page.calls.filter((x) => x.startsWith('eval:'))).toEqual([
-      'eval:window.scrollBy(0, -1 * Math.round(innerHeight * 0.8))',
-      'eval:window.scrollBy(0, 1 * Math.round(innerHeight * 0.8))',
+      'eval:window.scrollBy({ top: -1 * Math.round(innerHeight * 0.8), behavior: \'instant\' })',
+      'eval:window.scrollBy({ top: 1 * Math.round(innerHeight * 0.8), behavior: \'instant\' })',
     ]);
+  });
+
+  it('says so when a scroll moved nothing, rather than that it scrolled', async () => {
+    // At the bottom already, or an app whose window never scrolls.
+    const evaluate = extra['evaluate'] as (e: string) => Promise<unknown>;
+    extra['evaluate'] = async (expression: string) => (expression === 'scrollY' ? 400 : evaluate(expression));
+    const out = await controller().controller({ kind: 'scroll' }, ctx('run', 'w1'));
+    expect(out.detail).toContain('Nothing moved');
   });
 
   it('chooses and hovers by selector through a locator too', async () => {
@@ -4878,6 +4955,60 @@ describe('page views and refs', () => {
       expect(out.image).toBeUndefined();
       expect(out.view!.text).toContain('could not be checked');
       expect(shots()).toEqual([]);
+    });
+
+    it('places frames on the screen the browser measures, not the one the page claims', async () => {
+      // A page can redefine innerHeight; at 0, every frame — a card form's
+      // included — would read as off screen and go unread.
+      const evaluate = extra['evaluate'] as (e: string) => Promise<unknown>;
+      extra['evaluate'] = async (expression: string) => (
+        expression.includes('one-time-code') || expression === 'scrollY' ? evaluate(expression) : { width: 1280, height: 0, scrollY: 0, scrollHeight: 0 });
+      subFrames = [{ found: true, y: 100 }];
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(cdp.sent).toContain('Page.getLayoutMetrics');
+    });
+
+    it('takes none when the browser cannot say how big the screen is', async () => {
+      const send = cdp.send;
+      cdp.send = async (method: string, params?: Record<string, unknown>) => {
+        if (method === 'Page.getLayoutMetrics') throw new Error('target closed');
+        return send(method, params);
+      };
+      try {
+        const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+        expect(out.image).toBeUndefined();
+        expect(out.view!.text).toContain('could not be checked');
+      } finally {
+        cdp.send = send;
+      }
+    });
+
+    it('lets go of each frame it measured', async () => {
+      const disposed: number[] = [];
+      subFrames = [false, false];
+      const frames = extra['frames'] as () => Array<Record<string, unknown>>;
+      extra['frames'] = () => frames().map((frame, i) => (i === 0 ? frame : {
+        ...frame,
+        frameElement: async () => ({
+          boundingBox: async () => ({ x: 0, y: 100, width: 200, height: 40 }),
+          dispose: async () => { disposed.push(i); },
+        }),
+      }));
+      await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(disposed.sort()).toEqual([1, 2]);
+    });
+
+    it('does not wait on a frame that never answers: no screenshot, and the step goes on', async () => {
+      subFrames = [false];
+      const frames = extra['frames'] as () => Array<Record<string, unknown>>;
+      extra['frames'] = () => frames().map((frame, i) => (i === 0 ? frame : { ...frame, evaluate: () => new Promise(() => {}) }));
+      const started = Date.now();
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(Date.now() - started).toBeLessThan(4_000);
+      expect(out.ok).toBe(true);
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('could not be checked');
     });
 
     it('takes none when a frame gives no answer', async () => {

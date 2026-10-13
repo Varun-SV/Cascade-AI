@@ -63,12 +63,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `marked` draws each ref on a copy of the screenshot, as an experiment.
   - /why counts the screenshots a run sent.
   - Hosted deployments set it with `REMOTE_BROWSER_VISION`.
-  Approval prompts now name the element and the site. A click on something
-  labelled pay, buy, order, delete, remove, send, transfer or publish asks
+  Approval prompts now name the element and the site. A click, entry or
+  choice on something labelled pay, buy, purchase, order, check out, delete,
+  remove, send, transfer or publish (in any of the forms buttons use) asks
   every time, even after "always allow". So does Enter or Space where it may
   submit a form, and, where pages are described, a click, fill or key press
-  on something the page view did not name. `scripts/browser-vision-eval/` has
-  ten test tasks and a runner to compare the settings.
+  on something the page view did not name. An approved action runs only on
+  the site it was approved on, and a ref whose control the page has renamed
+  since the view is refused. `scripts/browser-vision-eval/` has ten test
+  tasks and a runner to compare the settings.
 
 ### Changed
 - **A run with a budget plans within it, and always answers.** A per-run
@@ -113,6 +116,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/design/calm-direction.md`.
 
 ### Fixed
+- **A misspelled tool name no longer runs a tool that needs approval.** When
+  a call failed, the worker retried it with a tool whose name shared a word
+  with it, without asking — so `browser_click`, which needs no approval
+  because it does not exist, ran as `browser_control`, and a failed file call
+  could land on `file_delete`. The fallback now only stands in tools that
+  need no approval.
 - **A failed browser action no longer quotes the page back.** Playwright's
   errors print the elements they found, attributes and all — in the log it
   adds, and in the list of matches when a selector matched more than one — so

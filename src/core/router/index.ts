@@ -28,6 +28,7 @@ import { ProviderUnreachableError } from '../../providers/base.js';
 import type { BaseProvider } from '../../providers/base.js';
 import { ModelSelector } from './selector.js';
 import { countScreenshots, fitScreenshots } from './screenshots.js';
+import { hasDefaultEndpoint, sameCredentialEndpoint } from '../../config/endpoint-identity.js';
 import { FailoverManager, failureScopeOf } from './failover.js';
 import { normalizeEndpoint } from '../../utils/net.js';
 import { classifyProviderError, describeProviderError, enrichProviderError } from './provider-errors.js';
@@ -1106,7 +1107,7 @@ export class CascadeRouter extends EventEmitter {
     // that stood in for it here.
     const offeredShots = countScreenshots(options);
     const asOffered = options;
-    options = fitScreenshots(options, model, IMAGE_TOKENS_EACH);
+    options = fitScreenshots(options, model, IMAGE_TOKENS_EACH, { gateway: this.throughGateway(model) });
     const sentShots = countScreenshots(options);
 
     // Refuse a call whose INPUT alone cannot fit the remaining budget, before
@@ -2195,6 +2196,18 @@ export class CascadeRouter extends EventEmitter {
     if (!cfg?.apiKey) return `${resourceScope}#-`;
     const group = azure.findIndex((c) => c.apiKey === cfg.apiKey);
     return `${resourceScope}#k${group}`;
+  }
+
+  /**
+   * Whether this model is reached through an endpoint other than its
+   * provider's own — a gateway, whose list of models and whose idea of which
+   * of them can see are its own. Azure and the local types have no public
+   * endpoint to differ from.
+   */
+  private throughGateway(model: ModelInfo): boolean {
+    if (!hasDefaultEndpoint(model.provider)) return false;
+    const baseUrl = (this.config?.providers ?? []).find((c) => c.type === model.provider)?.baseUrl;
+    return Boolean(baseUrl?.trim()) && !sameCredentialEndpoint(model.provider, baseUrl, undefined);
   }
 
   private scopeFor(model: ModelInfo): string {

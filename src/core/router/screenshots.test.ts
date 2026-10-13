@@ -33,15 +33,21 @@ describe('screenshotTokens', () => {
     expect(screenshotTokens(model('openai', 'gpt-4o-mini'), 1280, 800)).toBe(2833 + 5667 * 6);
   });
 
-  it('applies Claude\'s downscaling to a large page', () => {
-    // A 1920×1080 page is billed as ~1.15 megapixels, not 2.
-    expect(screenshotTokens(CLAUDE, 1920, 1080)).toBeLessThanOrEqual(1534);
+  it('prices Claude at the high-resolution limits, so a large page is never underpriced', () => {
+    // Opus 4.7+ and Sonnet 5+ read a 1920×1080 page whole: ~2.8k tokens.
+    expect(screenshotTokens(CLAUDE, 1920, 1080)).toBe(2765);
+    // Down to 2576px on the long edge, at most 4,784 tokens.
+    expect(screenshotTokens(CLAUDE, 3840, 2160)).toBe(4784);
+    expect(screenshotRefusal(CLAUDE, { ...SHOT, screenshot: { width: 1920, height: 1080 } }, IMAGE_TOKENS_EACH)).toMatch(/cost more/);
   });
 
   it('cannot price a provider whose rule it does not know', () => {
     expect(screenshotTokens(model('openai-compatible', 'llava'), 1280, 800)).toBeNull();
     expect(screenshotTokens(model('ollama', 'llava'), 1280, 800)).toBeNull();
     expect(screenshotTokens(CLAUDE, 0, 800)).toBeNull();
+    expect(screenshotTokens(CLAUDE, Infinity, 800)).toBeNull();
+    expect(screenshotTokens(CLAUDE, Number.NaN, 800)).toBeNull();
+    expect(screenshotRefusal(CLAUDE, { ...SHOT, screenshot: { width: Infinity, height: 800 } }, IMAGE_TOKENS_EACH)).toMatch(/cost more/);
   });
 });
 
@@ -55,6 +61,11 @@ describe('screenshotRefusal', () => {
     expect(screenshotRefusal(model('anthropic', 'old', { isVisionCapable: false }), SHOT, IMAGE_TOKENS_EACH)).toMatch(/cannot view images/);
     expect(screenshotRefusal(model('openai-compatible', 'llava'), SHOT, IMAGE_TOKENS_EACH)).toMatch(/cannot view images/);
     expect(screenshotRefusal(model('ollama', 'llava', { isLocal: true }), SHOT, IMAGE_TOKENS_EACH)).toMatch(/cannot view images/);
+  });
+
+  it('keeps it from a model reached through a gateway, whose vision flag is the gateway\'s claim', () => {
+    expect(screenshotRefusal(model('openai', 'gpt-4o'), SHOT, IMAGE_TOKENS_EACH, { gateway: true })).toMatch(/through a gateway/);
+    expect(screenshotRefusal(model('openai', 'gpt-4o'), SHOT, IMAGE_TOKENS_EACH, { gateway: false })).toBeNull();
   });
 
   it('keeps it from a model it would overcharge', () => {
@@ -174,6 +185,20 @@ describe('the router decides against the model it resolved', () => {
     expect(JSON.stringify(seen[0])).toContain('"type":"image"');
     expect(JSON.stringify(seen[0])).not.toContain('Screenshot left out');
     expect(router.getRunScreenshots()).toEqual({ sent: 1, leftOut: 0 });
+  });
+
+  it('leaves it out for a model whose provider row points at a gateway', async () => {
+    const gpt4o = model('openai', 'gpt-4o');
+    for (const [baseUrl, sent] of [
+      [undefined, true],
+      ['https://api.openai.com/v1', true],
+      ['https://llm-gateway.corp.example/v1', false],
+    ] as const) {
+      const { router, seen } = await routerServing(gpt4o);
+      (router as unknown as { config: CascadeConfig }).config.providers = [{ type: 'openai', ...(baseUrl ? { baseUrl } : {}) }] as CascadeConfig['providers'];
+      await router.generate('T3', withShot);
+      expect(JSON.stringify(seen[0]).includes('"type":"image"'), String(baseUrl)).toBe(sent);
+    }
   });
 
   it('counts what it sent and what it left out, for /why, per run', async () => {

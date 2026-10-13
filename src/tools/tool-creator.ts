@@ -292,16 +292,23 @@ class DynamicTool extends BaseTool {
         if (!escalator) {
           return `Permission denied for "${toolName}": dynamic tool "${this.name}" has no approver available (default-deny).`;
         }
+        // What the person sees, and whether an earlier "always" may answer for
+        // them — as the worker asks it. A tool that offers neither is shown
+        // as called. Without this, a generated tool reached `browser_control`
+        // with no element named and no forced prompt before a payment.
+        const shown = (registry.getTool(toolName) as {
+          forApproval?: (input: Record<string, unknown>, sessionId: string) => { input: Record<string, unknown>; alwaysAsk: boolean };
+        } | undefined)?.forApproval?.(toolInput, options.sessionId);
         const req: PermissionRequest = {
           id: `dynamic-${this.name}-${toolName}-${Date.now()}`,
           requestedBy: `dynamic_tool:${this.name}`,
           parentT2Id: options.tierId,
           toolName,
-          input: toolInput,
+          input: shown?.input ?? toolInput,
           isDangerous: true,
           subtaskContext: `Dynamic tool "${this.name}" (${this.trusted ? 'trusted' : 'UNTRUSTED'}) requesting access to "${toolName}"`,
           sectionContext: `Dynamic tool "${this.name}"`,
-          forceReprompt: !this.trusted,
+          forceReprompt: !this.trusted || shown?.alwaysAsk === true,
         };
         const decision = await escalator.requestPermission(req);
         if (!decision.approved) {

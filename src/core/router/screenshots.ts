@@ -14,6 +14,8 @@
 //    - the model is not known to read images, or its provider's vision flag
 //      cannot be trusted (OpenAI-compatible endpoints report none; a local
 //      model gets no screenshots in this version);
+//    - the model is reached through a gateway rather than its provider's own
+//      endpoint: what the gateway lists as a vision model is its own claim;
 //    - one image would cost this model more than the budget check reserves for
 //      an image. Prices per image differ by an order of magnitude between
 //      models — gpt-4o-mini bills a 1280×800 page at about 37k tokens, where
@@ -47,13 +49,17 @@ const PATCH_PRICED: Array<[RegExp, number]> = [
  * Each provider's published rule, including the downscaling it does first.
  */
 export function screenshotTokens(model: ModelInfo, width: number, height: number): number | null {
-  if (!(width > 0 && height > 0)) return null;
+  if (!(Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0)) return null;
   const id = (model.baseModelId ?? model.id).toLowerCase();
   switch (model.provider) {
     case 'anthropic': {
-      // Long edge to 1568px, then to about 1.15 megapixels; ~750 px a token.
-      const scale = Math.min(1, 1568 / Math.max(width, height), Math.sqrt(1_150_000 / (width * height)));
-      return Math.ceil((width * scale * height * scale) / 750);
+      // ~750 px a token, after downscaling. Priced at the high-resolution
+      // limits (Opus 4.7 and later, Sonnet 5 and later): long edge to 2576px,
+      // then to about 3.75 megapixels, at most 4,784 tokens. Older models stop
+      // at 1568px and 1.15 megapixels, so this can only overstate their price
+      // — which keeps a screenshot out, never lets one in.
+      const scale = Math.min(1, 2576 / Math.max(width, height), Math.sqrt(3_750_000 / (width * height)));
+      return Math.min(4784, Math.ceil((width * scale * height * scale) / 750));
     }
     case 'gemini': {
       // 258 for a small image; otherwise 258 a 768px tile.
@@ -99,14 +105,29 @@ export function mayTakeScreenshots(model: ModelInfo | undefined, ceiling: number
   return screenshotRefusal(model, { type: 'base64', data: '', mimeType: 'image/jpeg', screenshot: { width: 1280, height: 800 } }, ceiling) === null;
 }
 
+/** How `model` is reached, where that bears on whether it may get a screenshot. */
+export interface ScreenshotRoute {
+  /** Through an endpoint other than the provider's own. See `screenshotRefusal`. */
+  gateway?: boolean;
+}
+
 /** Why a screenshot may not go to this model, or null when it may. */
-export function screenshotRefusal(model: ModelInfo, image: ImageAttachment, ceiling: number): string | null {
+export function screenshotRefusal(
+  model: ModelInfo,
+  image: ImageAttachment,
+  ceiling: number,
+  route: ScreenshotRoute = {},
+): string | null {
   if (!model.isVisionCapable || !PRICED_VISION.has(model.provider) || model.isLocal) {
     return 'Screenshot left out: this model cannot view images. Use the page view.';
   }
+  if (route.gateway) {
+    return 'Screenshot left out: this model is reached through a gateway, so whether it can view images, and at what price, cannot be checked. Use the page view.';
+  }
   const size = image.screenshot;
   const tokens = size ? screenshotTokens(model, size.width, size.height) : null;
-  if (tokens === null || tokens > ceiling) {
+  // Written so that a price that is not a number keeps the screenshot out.
+  if (tokens === null || !(tokens <= ceiling)) {
     return 'Screenshot left out: on this model one would cost more than a run allows for an image. Use the page view.';
   }
   return null;
@@ -116,13 +137,18 @@ export function screenshotRefusal(model: ModelInfo, image: ImageAttachment, ceil
  * The request as `model` may receive it: every screenshot it cannot take
  * replaced by a line saying why. The same object when nothing changed.
  */
-export function fitScreenshots(options: GenerateOptions, model: ModelInfo, ceiling: number): GenerateOptions {
+export function fitScreenshots(
+  options: GenerateOptions,
+  model: ModelInfo,
+  ceiling: number,
+  route: ScreenshotRoute = {},
+): GenerateOptions {
   let changed = false;
   const messages = options.messages.map((m) => {
     if (typeof m.content === 'string' || !m.content.some((b) => b.type === 'image' && b.image.screenshot)) return m;
     const content = m.content.map((block): MessageContent => {
       if (block.type !== 'image' || !block.image.screenshot) return block;
-      const refusal = screenshotRefusal(model, block.image, ceiling);
+      const refusal = screenshotRefusal(model, block.image, ceiling, route);
       if (!refusal) return block;
       changed = true;
       return { type: 'text', text: `[${refusal}]` };

@@ -58,6 +58,12 @@ export interface BrowserAction {
   /** wait_for */
   timeoutMs?: number;
   /**
+   * For an action on a control: the site (host) it was approved on. The host
+   * refuses it when the page has since moved to another site. Set by the tool
+   * where pages are described.
+   */
+  expectSite?: string;
+  /**
    * Describe the page after this action, as `observe` does. Set by the tool
    * when page views are on, for the actions that usually change the page.
    */
@@ -111,21 +117,29 @@ const VIEW_ACTIONS = [...BASIC_ACTIONS, 'observe', 'scroll', 'select_option', 'h
 /** Actions that come back with a fresh page view when views are on. */
 const VIEWED_AFTER = new Set<BrowserAction['kind']>(['navigate', 'click', 'press', 'scroll', 'hover', 'observe']);
 /**
- * Words on a control that mean the click may not be taken back. Acting on one
+ * Words on a control that mean the click may not be taken back, in the forms
+ * buttons use them ("Submit payment", "Check out", "Deleting…"). Acting on one
  * asks the person every time, however the run's earlier approvals were
- * answered.
+ * answered. "Sender settings" is not "send".
  */
-const IRREVERSIBLE = /\b(?:pay|buy|purchase|order|checkout|delete|remove|send|transfer|publish)\b/i;
+const IRREVERSIBLE =
+  /\b(?:pay(?:s|ment|ments)?|buy(?:s|ing)?|purchas(?:e|es|ing)|order(?:s|ing)?|check[\s-]?out|delet(?:e|es|ing)|remov(?:e|es|ing)|send(?:s|ing)?|transfer(?:s|ring)?|publish(?:es|ing)?)\b/i;
 /** Actions that can set off what a control is labelled to do. */
-const TRIGGERS = new Set(['click', 'fill', 'press']);
-/** Keys that submit a form or press the focused control, alone or with modifiers. */
-const SUBMIT_KEY = /(?:^|\+)(?:enter|numpadenter|space| )$/i;
-/** What an approval prompt shows of a call: the fields it runs with. */
-const SHOWN_FIELDS = ['action', 'url', 'ref', 'selector', 'value', 'key', 'direction', 'timeoutMs'] as const;
+const TRIGGERS = new Set(['click', 'fill', 'press', 'select_option']);
+/**
+ * Keys that submit a form or press the focused control, alone or with
+ * modifiers — under each name a host accepts: Playwright also takes "\n" and
+ * "\r" for Enter, and Electron "Return".
+ */
+const SUBMIT_KEY = /(?:^|\+)(?:enter|numpadenter|return|space| |\n|\r)$/i;
+/** What an approval prompt shows of a call: the fields it runs with, after what it acts on. */
+const SHOWN_FIELDS = ['url', 'ref', 'selector', 'key', 'direction', 'timeoutMs', 'value'] as const;
+/** Actions that use `value`. On any other, a value is dropped when it runs, so it is not shown. */
+const VALUE_ACTIONS = new Set(['fill', 'select_option']);
 /** Runs whose latest page view is remembered for approval prompts. */
 const REMEMBERED_RUNS = 64;
 /** What a ref looks like: Playwright's `e14`, or `f1e2` inside a frame. */
-const REF_PATTERN = /^[a-z]{0,3}\d{0,4}e\d{1,6}$/;
+const REF_PATTERN = /^[a-z]{0,3}\d{0,6}e\d{1,6}$/;
 
 /**
  * Who is asking, and how to stop them.
@@ -265,34 +279,47 @@ export class BrowserControlTool extends BaseTool {
     const label = ref && seen && Object.hasOwn(seen.labels, ref) ? seen.labels[ref] : undefined;
     const target = typeof label === 'string' ? label : undefined;
     const site = hostOf(action === 'navigate' ? input['url'] : seen?.url);
-    // Only what the call runs with. Anything else the model put in its input
-    // is dropped when it runs, and showing it would let the model write part
-    // of the prompt — a `target` of its own beside a selector, say.
-    const shown: Record<string, unknown> = {};
-    for (const k of SHOWN_FIELDS) if (input[k] !== undefined) shown[k] = input[k];
+    // Only what the call runs with, and what it acts on first: a long value
+    // cannot push the element and the site out of a prompt that shows the
+    // start. Anything else the model put in its input is dropped when it runs,
+    // and showing it would let the model write part of the prompt — a
+    // `target` of its own beside a selector, say.
+    const shown: Record<string, unknown> = { action: input['action'], ...(target ? { target } : {}), ...(site ? { site } : {}) };
+    for (const k of SHOWN_FIELDS) {
+      if (input[k] !== undefined && (k !== 'value' || VALUE_ACTIONS.has(action))) shown[k] = input[k];
+    }
 
     let alwaysAsk = false;
     if (TRIGGERS.has(action)) {
       const key = typeof input['key'] === 'string' ? input['key'] : '';
       const submits = action === 'press' && SUBMIT_KEY.test(key);
       const unaimed = action === 'press' && !ref && !selector;
-      alwaysAsk = IRREVERSIBLE.test(target ?? selector ?? '')
+      // What is chosen in a list says what it does as much as the list does.
+      const chosen = action === 'select_option' && typeof input['value'] === 'string' ? ` ${input['value']}` : '';
+      alwaysAsk = irreversible(`${target ?? selector ?? ''}${chosen}`)
         // Enter or Space can submit a form, or press whatever has focus. What
         // that does is not in a field's own label, so it counts as unknown
         // unless the key lands on a named control and nothing listed on the
         // page is one to ask about.
-        || (submits && (!target || Object.values(seen?.labels ?? {}).some((l) => IRREVERSIBLE.test(l))))
+        || (submits && (!target || Object.values(seen?.labels ?? {}).some(irreversible)))
         // Where pages are described, an action with no label from the view
         // has nothing to be judged by: a selector, or a ref the view did not
         // list. Keys other than Enter and Space sent to whatever has focus
         // only type.
         || (this.pageView && !target && !unaimed);
+      // The site the person is shown is the one the action must still be on
+      // when it runs; see `execute`.
+      if (site) this.approvedOn.set(input, site);
     }
-    return {
-      input: { ...shown, ...(target ? { target } : {}), ...(site ? { site } : {}) },
-      alwaysAsk,
-    };
+    return { input: shown, alwaysAsk };
   }
+
+  /**
+   * The site each approval prompt showed, by the input it was shown for — the
+   * same object the call then runs with. A page that moves to another site
+   * while the person decides is not acted on.
+   */
+  private approvedOn = new WeakMap<object, string>();
 
   /** Keep what this run's latest page view said, for `forApproval`. */
   private remember(sessionId: string, outcome: BrowserActionOutcome): void {
@@ -339,6 +366,11 @@ export class BrowserControlTool extends BaseTool {
     const missing = requiredFieldFor(kind, input);
     if (missing) return `Error: "${kind}" needs ${this.pageView && missing === 'a selector' ? 'a ref or a selector' : missing}.`;
 
+    // Where pages are described, an action on a control runs only on the
+    // site it was approved on — or, unprompted, the one the latest view was of.
+    const expectSite = this.pageView && TRIGGERS.has(kind)
+      ? this.approvedOn.get(input) ?? hostOf(this.seen.get(options?.sessionId ?? '')?.url)
+      : undefined;
     const action: BrowserAction = {
       kind,
       ...(typeof input['url'] === 'string' ? { url: input['url'] } : {}),
@@ -350,6 +382,7 @@ export class BrowserControlTool extends BaseTool {
       ...(typeof input['timeoutMs'] === 'number'
         ? { timeoutMs: Math.min(Math.max(input['timeoutMs'], 0), 30_000) }
         : {}),
+      ...(expectSite ? { expectSite } : {}),
       ...(this.pageView && VIEWED_AFTER.has(kind) ? { pageView: true as const } : {}),
       // Only when the worker can show one: a model that cannot see a picture
       // is not made to wait while one is taken.
@@ -470,7 +503,10 @@ function viewInputProblem(kind: BrowserAction['kind'], input: Record<string, unk
   const ref = input['ref'];
   if (ref !== undefined) {
     if (typeof ref !== 'string' || !REF_PATTERN.test(ref)) {
-      return `Error: "${String(ref)}" is not a ref. Refs look like e14 and come from the latest page view.`;
+      // Escaped as JSON: the ref is the model's, and a quote or newline in it
+      // must not end the quoted part early — the run's record reads this
+      // message as a failure by its shape.
+      return `Error: "${JSON.stringify(String(ref).slice(0, 40)).slice(1, -1)}" is not a ref. Refs look like e14 and come from the latest page view.`;
     }
     if (typeof input['selector'] === 'string' && input['selector'].length > 0) {
       return 'Error: give either ref or selector, not both.';
@@ -480,7 +516,22 @@ function viewInputProblem(kind: BrowserAction['kind'], input: Record<string, unk
   if (input['direction'] !== undefined && input['direction'] !== 'up' && input['direction'] !== 'down') {
     return 'Error: direction must be "up" or "down".';
   }
+  // Playwright reads `aria-ref=e14` as a selector too, and a ref passed that
+  // way skips the checks a ref gets: that it is from the latest view, of this
+  // page, and named in the approval prompt.
+  if (typeof input['selector'] === 'string' && /aria-ref\s*=/i.test(input['selector'])) {
+    return 'Error: use ref, not an aria-ref selector: pass "e14" as ref, from the latest page view.';
+  }
   return null;
+}
+
+/**
+ * Whether a label says the action may not be taken back. Read as a person
+ * sees it: full-width letters as plain ones, and with the invisible marks
+ * that can split a word ("P\u200bay") taken out.
+ */
+function irreversible(text: string): boolean {
+  return IRREVERSIBLE.test(text.normalize('NFKC').replace(/[\p{Cf}\u00ad]/gu, ''));
 }
 
 /** The field a given action cannot run without, or null when it has what it needs. */

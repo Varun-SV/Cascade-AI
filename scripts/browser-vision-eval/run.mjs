@@ -29,12 +29,13 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { TASKS } from './tasks.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const args = parseArgs(process.argv.slice(2));
-const sdk = await import(path.join(here, '..', '..', 'dist', 'index.js'));
+// A file URL, not a path: on Windows an absolute path is not something import() takes.
+const sdk = await import(pathToFileURL(path.join(here, '..', '..', 'dist', 'index.js')).href);
 
 /** Rough cost of one task run, in input tokens, by setting — for the estimate only. */
 const TOKENS_PER_RUN = { off: 40_000, list: 35_000, image: 50_000, marked: 50_000 };
@@ -160,11 +161,21 @@ async function evaluate() {
         for (let r = 0; r < repeats; r++) {
           const run = `${model}-${arm}-${task.id}-${r}-${Date.now()}`.replace(/[^a-z0-9-]/gi, '');
           const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-bve-'));
+          // The browser and nothing else. The model reads pages this test
+          // wrote, but it is still a model reading web pages, and your own
+          // config would otherwise hand it your shell, files and MCP servers.
           const config = {
             ...base,
             models: { ...base.models, t1: model, t2: model, t3: model },
             cascadeAuto: false,
-            tools: { ...base.tools, remoteBrowser: { provider: 'cdp', url: chrome.ws }, browserVision: arm },
+            enableToolCreation: false,
+            tools: {
+              ...base.tools,
+              enabledTools: [],
+              mcpServers: [],
+              remoteBrowser: { provider: 'cdp', url: chrome.ws },
+              browserVision: arm,
+            },
           };
           const cascade = new sdk.Cascade(config, workspace);
           const prompt = `Use the browser. Open ${site.url}/${task.page}?run=${run} and do this: ${task.prompt}`;
@@ -172,29 +183,35 @@ async function evaluate() {
           let output = '';
           let error = '';
           let usage = {};
-          let taskId = '';
+          // The runs this one opened in the browser, whether or not it returns:
+          // a run that throws must still give its session back, or every run
+          // after it finds the one CDP session taken.
+          const known = new Set(steps.keys());
           try {
             await cascade.init();
             cascade.setRemoteBrowserController(counted, (a) => controller.actorEnded(a), controller.features);
-            const result = await cascade.run({ prompt, approvalCallback: async () => ({ approved: true, always: true }) });
+            const result = await cascade.run({
+              prompt,
+              approvalCallback: async (request) => ({ approved: request.toolName === 'browser_control', always: false }),
+            });
             output = result.output;
             usage = result.usage ?? {};
-            taskId = result.taskId;
           } catch (err) {
             error = err instanceof Error ? err.message : String(err);
           }
+          const opened = [...steps.keys()].filter((k) => !known.has(k));
           const shots = cascade.getDecisionLog().find((d) => d.kind === 'browser')?.detail ?? '';
           const ok = task.check.done ? site.done.has(`${run}:${task.check.done}`) : task.check.answer.test(output);
           rows.push({
             model, arm, task: task.id, ok,
-            steps: [...steps.entries()].filter(([k]) => k === taskId).reduce((n, [, v]) => n + v, 0),
+            steps: opened.reduce((n, k) => n + (steps.get(k) ?? 0), 0),
             costUsd: usage.estimatedCostUsd ?? 0,
             tokens: usage.totalTokens ?? 0,
             seconds: Math.round((Date.now() - started) / 1000),
             shots, error,
           });
           console.log(`${ok ? 'PASS' : 'FAIL'}  ${model}  ${arm.padEnd(6)}  ${task.id.padEnd(11)}  $${(usage.estimatedCostUsd ?? 0).toFixed(4)}${error ? `  ${error}` : ''}`);
-          if (taskId) await controller.endRun(taskId).catch(() => {});
+          for (const id of opened) await controller.endRun(id).catch(() => {});
           fs.rmSync(workspace, { recursive: true, force: true });
         }
       }
@@ -204,7 +221,9 @@ async function evaluate() {
 
   const out = args.out ?? 'browser-vision-eval-results.md';
   fs.writeFileSync(out, summarise(rows));
-  fs.writeFileSync(out.replace(/\.md$/, '.json'), JSON.stringify(rows, null, 2));
+  // Beside the summary, never over it: `--out results` has no .md to replace.
+  const json = /\.md$/i.test(out) ? out.replace(/\.md$/i, '.json') : `${out}.json`;
+  fs.writeFileSync(json, JSON.stringify(rows, null, 2));
   console.log(`\nWrote ${out}`);
 }
 

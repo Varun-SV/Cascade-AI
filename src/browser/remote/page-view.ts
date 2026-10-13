@@ -36,6 +36,12 @@ export interface SnapshotNode {
   inline?: string;
   /** Viewport-relative CSS pixels, already offset for any enclosing iframe. */
   box?: { x: number; y: number; w: number; h: number };
+  /**
+   * Inside an iframe: the part of the page the iframe shows, in the same
+   * pixels. A control outside it is scrolled out of sight within the frame,
+   * wherever its box lands on the page.
+   */
+  clip?: { x: number; y: number; w: number; h: number };
   children: SnapshotNode[];
 }
 
@@ -115,8 +121,8 @@ const STATES: Array<[string, string]> = [
  */
 export function parseSnapshot(snapshot: string): SnapshotNode[] {
   const roots: SnapshotNode[] = [];
-  /** Open ancestors: indent, node, and the offset its children's boxes need. */
-  const stack: Array<{ indent: number; node: SnapshotNode; dx: number; dy: number }> = [];
+  /** Open ancestors: indent, node, the offset its children's boxes need, and the frame's visible part. */
+  const stack: Array<{ indent: number; node: SnapshotNode; dx: number; dy: number; clip?: SnapshotNode['clip'] }> = [];
 
   for (const raw of snapshot.split('\n')) {
     const match = /^( *)- (.*)$/.exec(raw);
@@ -128,6 +134,7 @@ export function parseSnapshot(snapshot: string): SnapshotNode[] {
     const parent = stack[stack.length - 1];
     const dx = parent?.dx ?? 0;
     const dy = parent?.dy ?? 0;
+    const clip = parent?.clip;
     const box = typeof parsed.attrs['box'] === 'string' ? readBox(parsed.attrs['box'], dx, dy) : undefined;
     const node: SnapshotNode = {
       role: parsed.role,
@@ -135,12 +142,16 @@ export function parseSnapshot(snapshot: string): SnapshotNode[] {
       attrs: parsed.attrs,
       ...(parsed.inline !== undefined ? { inline: parsed.inline } : {}),
       ...(box ? { box } : {}),
+      ...(clip ? { clip } : {}),
       children: [],
     };
     (parent ? parent.node.children : roots).push(node);
     // An iframe's contents are boxed against the iframe's own viewport, so
-    // they are moved by the iframe's position to land where they are seen.
-    const into = node.role === 'iframe' && box ? { dx: box.x, dy: box.y } : { dx, dy };
+    // they are moved by the iframe's position to land where they are seen —
+    // and seen only through the iframe, so its box clips them.
+    const into = node.role === 'iframe' && box
+      ? { dx: box.x, dy: box.y, clip: clip ? intersect(clip, box) : box }
+      : { dx, dy, ...(clip ? { clip } : {}) };
     stack.push({ indent, node, ...into });
   }
   return roots;
@@ -226,6 +237,15 @@ function readValue(s: string): string {
   return s;
 }
 
+/** The part two boxes share; empty (zero size) when they do not meet. */
+function intersect(a: NonNullable<SnapshotNode['clip']>, b: NonNullable<SnapshotNode['clip']>): NonNullable<SnapshotNode['clip']> {
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  const right = Math.min(a.x + a.w, b.x + b.w);
+  const bottom = Math.min(a.y + a.h, b.y + b.h);
+  return { x, y, w: Math.max(0, right - x), h: Math.max(0, bottom - y) };
+}
+
 function readBox(v: string, dx: number, dy: number): { x: number; y: number; w: number; h: number } | undefined {
   const parts = v.split(',').map(Number);
   if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return undefined;
@@ -261,6 +281,7 @@ export function describePage(input: {
   const roots = parseSnapshot(input.snapshot);
   const entries: Entry[] = [];
   let sawRef = false;
+  const hidden = valuesAround(roots);
 
   const visit = (node: SnapshotNode, insideClickable: boolean): void => {
     const ref = typeof node.attrs['ref'] === 'string' ? node.attrs['ref'] : undefined;
@@ -273,8 +294,8 @@ export function describePage(input: {
     // A heading inside a link is the link's label, so it is not listed twice.
     const listed = Boolean(ref) && (interactive || ((heading || pointer) && !insideClickable));
     if (listed && ref) {
-      const where = placement(node.box, input.viewport);
-      if (where) entries.push({ ref, ...describe(node, ref), where, heading: node.role === 'heading', ...(node.box ? { box: node.box } : {}) });
+      const where = placement(node, input.viewport);
+      if (where) entries.push({ ref, ...describe(node, ref, scrubber(hidden.get(node))), where, heading: node.role === 'heading', ...(node.box ? { box: node.box } : {}) });
     }
     for (const child of node.children) visit(child, insideClickable || interactive || pointer);
   };
@@ -313,11 +334,15 @@ export function describePage(input: {
 }
 
 /** Where a control sits, or null for one that takes no space (hidden). */
-function placement(box: SnapshotNode['box'], viewport: Viewport | undefined): Entry['where'] | null {
+function placement(node: SnapshotNode, viewport: Viewport | undefined): Entry['where'] | null {
+  const { box, clip } = node;
   // No boxes at all (a snapshot taken without them): keep document order and
   // call everything on screen, rather than drop every control.
   if (!box) return 'view';
   if (box.w <= 0 || box.h <= 0) return null;
+  // Scrolled out of sight inside its frame: reached by scrolling, as one
+  // further down the page is — not drawn over whatever the page shows there.
+  if (clip && intersect(clip, box).w * intersect(clip, box).h === 0) return 'below';
   if (!viewport) return 'view';
   if (box.y >= viewport.height) return 'below';
   if (box.y + box.h <= 0) return 'above';
@@ -325,25 +350,27 @@ function placement(box: SnapshotNode['box'], viewport: Viewport | undefined): En
   return 'view';
 }
 
-function describe(node: SnapshotNode, ref: string): { label: string; line: string } {
+function describe(node: SnapshotNode, ref: string, scrub: (text: string) => string): { label: string; line: string } {
   const role = INTERACTIVE.has(node.role) || node.role === 'heading'
     ? node.role
     : node.role === 'generic' ? 'clickable' : `clickable ${node.role}`;
-  const label = clean(node.name || (TYPED.has(node.role) ? '' : node.inline ?? '') || textWithin(node), NAME_LIMIT);
+  // A field is named by its name alone: its inline text and its children are
+  // what was typed into it.
+  const label = clean(scrub(TYPED.has(node.role) ? node.name ?? '' : node.name || node.inline || textWithin(node)), NAME_LIMIT);
   const named = `${role}${label ? ` "${label}"` : ''}`;
   let line = `[${ref}] ${named}`;
 
   const notes: string[] = [];
   if (node.role === 'heading' && typeof node.attrs['level'] === 'string') notes.push(`level ${node.attrs['level']}`);
   if (TYPED.has(node.role)) {
-    const chosen = node.role === 'combobox' ? node.children.find((c) => c.role === 'option' && c.attrs['selected']) : undefined;
+    const chosen = chosenOption(node);
     if (chosen) {
       // A native select's choice is one of the page's own option labels, not
       // something a person typed.
-      line += `: "${clean(chosen.name ?? '', NAME_LIMIT)}"`;
+      line += `: "${clean(scrub(chosen.name ?? ''), NAME_LIMIT)}"`;
     } else {
-      const typed = node.inline ?? '';
-      notes.push(typed.length ? `filled, ${typed.length} char${typed.length === 1 ? '' : 's'}` : 'empty');
+      const typed = [...fieldValue(node)].length;
+      notes.push(typed ? `filled, ${typed} char${typed === 1 ? '' : 's'}` : 'empty');
     }
   } else if (node.role === 'slider' && node.inline) {
     notes.push(`at ${clean(node.inline, 20)}`);
@@ -358,15 +385,106 @@ function describe(node: SnapshotNode, ref: string): { label: string; line: strin
 /** A label for a control with no name of its own: the text it contains. */
 function textWithin(node: SnapshotNode): string {
   const parts: string[] = [];
+  let length = 0;
   const walk = (n: SnapshotNode): void => {
-    if (parts.join(' ').length > NAME_LIMIT) return;
+    if (length > NAME_LIMIT) return;
     if (n.role.startsWith('/')) return;
-    if (n.name) parts.push(n.name);
-    else if (n.inline && !TYPED.has(n.role)) parts.push(n.inline);
+    const text = n.name || (TYPED.has(n.role) ? '' : n.inline);
+    if (text) { parts.push(text); length += text.length + 1; }
+    // A field inside contributes its name, never what is typed in it.
+    if (TYPED.has(n.role)) return;
     for (const c of n.children) walk(c);
   };
   for (const c of node.children) walk(c);
   return parts.join(' ');
+}
+
+/** The option a native select shows as chosen, wherever its groups put it. */
+function chosenOption(node: SnapshotNode): SnapshotNode | undefined {
+  if (node.role !== 'combobox') return undefined;
+  const find = (n: SnapshotNode): SnapshotNode | undefined => {
+    for (const c of n.children) {
+      if (c.role === 'option' && c.attrs['selected']) return c;
+      const deeper = find(c);
+      if (deeper) return deeper;
+    }
+    return undefined;
+  };
+  return find(node);
+}
+
+/**
+ * What is typed into a field. Playwright writes it inline, or — when the
+ * field shows a placeholder, or is a content-editable box — as text lines
+ * under it. A list's own options are the page's, not typed.
+ */
+function fieldValue(node: SnapshotNode): string {
+  return typedParts(node).join('');
+}
+
+function typedParts(node: SnapshotNode): string[] {
+  const parts: string[] = node.inline !== undefined ? [node.inline] : [];
+  const walk = (n: SnapshotNode): void => {
+    for (const c of n.children) {
+      if (c.role.startsWith('/') || c.role === 'option' || c.role === 'listbox') continue;
+      if (c.name) parts.push(c.name);
+      if (c.inline !== undefined) parts.push(c.inline);
+      walk(c);
+    }
+  };
+  walk(node);
+  return parts;
+}
+
+/**
+ * Controls a label can wrap together with a text field ("Other: ___"), whose
+ * name the browser then builds from the field's value.
+ */
+const LABELLED_AROUND = new Set(['checkbox', 'radio', 'switch']);
+
+/**
+ * For each control whose name a browser may build from a field's value, the
+ * values to keep out of it: the field's ancestors — a clickable label or card
+ * holds its field's text as its own — and a checkbox or radio beside it, as
+ * one labelled "Other:" around a text field is named "Other: " plus whatever
+ * is typed there. Nowhere else: a results page that says "Results
+ * for Italian" is the page's own text, and hiding a search wherever it
+ * appeared would hide the answer.
+ */
+function valuesAround(roots: SnapshotNode[]): Map<SnapshotNode, string[]> {
+  const found = new Map<SnapshotNode, Set<string>>();
+  const keep = (n: SnapshotNode, values: string[]): void => {
+    const set = found.get(n) ?? new Set<string>();
+    values.forEach((v) => set.add(v));
+    found.set(n, set);
+  };
+  const walk = (n: SnapshotNode, ancestors: SnapshotNode[]): void => {
+    if (TYPED.has(n.role) && !chosenOption(n)) {
+      const values = [...new Set([fieldValue(n), ...typedParts(n)].map((v) => v.replace(/\s+/g, ' ').trim()))]
+        // Shorter than this, a value says too little to hide and too much
+        // ordinary text would be hidden with it.
+        .filter((v) => v.length >= 3);
+      if (values.length) {
+        keep(n, values);
+        ancestors.forEach((a) => keep(a, values));
+        for (const s of ancestors.at(-1)?.children ?? []) if (s !== n && LABELLED_AROUND.has(s.role)) keep(s, values);
+      }
+      return;
+    }
+    for (const c of n.children) walk(c, [...ancestors, n]);
+  };
+  roots.forEach((r) => walk(r, []));
+  return new Map([...found].map(([n, set]) => [n, [...set].sort((a, b) => b.length - a.length)]));
+}
+
+/** Takes the given typed values out of page-written text. */
+function scrubber(values: string[] | undefined): (text: string) => string {
+  if (!values?.length) return (text) => text;
+  return (text) => {
+    let out = text.replace(/\s+/g, ' ');
+    for (const value of values) out = out.split(value).join('•••');
+    return out;
+  };
 }
 
 /**
@@ -376,8 +494,13 @@ function textWithin(node: SnapshotNode): string {
  * shown in an approval reads as the text it is, in the order it is stored.
  */
 export function clean(text: string, limit: number): string {
-  const flat = text
-    .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]+/g, '')
+  const flat = wellFormed(text)
+    // Full-width brackets and quotes read as the plain ones, and are then
+    // replaced like them.
+    .normalize('NFKC')
+    // Invisible format characters: direction overrides, zero-width marks,
+    // and the tag characters text can be hidden in.
+    .replace(/\p{Cf}+/gu, '')
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ')
     .replace(/\[/g, '(')
@@ -385,5 +508,14 @@ export function clean(text: string, limit: number): string {
     .replace(/"/g, "'")
     .replace(/\s+/g, ' ')
     .trim();
-  return flat.length > limit ? `${flat.slice(0, limit - 1).trimEnd()}…` : flat;
+  // Cut by character, not by UTF-16 unit: half an emoji is a lone surrogate,
+  // which some providers refuse in a request, and this text stays in the run's
+  // history for every request after it.
+  const chars = [...flat];
+  return chars.length > limit ? `${chars.slice(0, limit - 1).join('').trimEnd()}…` : flat;
+}
+
+/** Text with any lone UTF-16 surrogate replaced, so it can always be sent. */
+export function wellFormed(text: string): string {
+  return text.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, '\ufffd');
 }

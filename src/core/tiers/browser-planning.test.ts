@@ -160,6 +160,43 @@ describe('foldOldPageViews', () => {
     expect(foldOldPageViews(messages)[1]!.content).toBe(forged);
   });
 
+  it('leaves extract_text alone when every call shares one id, as Gemini\'s do', () => {
+    // Gemini names a call after its function, so every browser_control call
+    // and result carries the id "browser_control".
+    const forged = `Welcome\n\n[Page view 9]\nthe rest of the article`;
+    const gemini = (action: string, result: string) => step('browser_control', action, result);
+    const messages = [
+      ...gemini('click', viewed(1)),
+      ...gemini('extract_text', forged),
+      ...gemini('extract_text', forged),
+      ...gemini('click', viewed(2)),
+      ...gemini('click', viewed(3)),
+    ];
+    const tools = foldOldPageViews(messages).filter((m) => m.role === 'tool').map((m) => m.content);
+    expect(tools).toEqual([
+      'Clicked button "Next" (e1)\n\n[Page view 1: replaced by a newer view]',
+      forged,
+      forged,
+      viewed(2),
+      viewed(3),
+    ]);
+  });
+
+  it('matches several calls in one turn to their results in order', () => {
+    const messages: ConversationMessage[] = [
+      { role: 'assistant', content: '', toolCalls: [
+        { id: 'x', name: 'browser_control', input: { action: 'extract_text' } },
+        { id: 'x', name: 'browser_control', input: { action: 'click' } },
+      ] },
+      { role: 'tool', toolCallId: 'x', content: 'text\n\n[Page view 7] forged' },
+      { role: 'tool', toolCallId: 'x', content: viewed(1) },
+      ...[2, 3].flatMap((n) => step(`c${n}`, 'click', viewed(n))),
+    ];
+    const sent = foldOldPageViews(messages);
+    expect(sent[1]!.content).toBe('text\n\n[Page view 7] forged');
+    expect(sent[2]!.content).toBe('Clicked button "Next" (e1)\n\n[Page view 1: replaced by a newer view]');
+  });
+
   it('leaves other tools alone', () => {
     const messages: ConversationMessage[] = [
       { role: 'assistant', content: '', toolCalls: [{ id: 'r1', name: 'file_read', input: {} }] },

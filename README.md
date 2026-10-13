@@ -35,7 +35,7 @@ The CLI, desktop app and Cascade Cloud share one account. Settings can follow yo
 ## ✨ Highlights
 
 - 🧠 **Live benchmark Auto-routing** — set a tier to `Auto` and Cascade fuses *live* public benchmark scores with *live* pricing to pick the best-**value** model for each task, then learns from how each model actually did.
-- 🌐 **Browser control** (desktop app and web) — the agent drives a real browser: the desktop's own, or on the web your Chrome over CDP or a hosted Steel session. You watch it live and can take the wheel and hand it back. On the web the agent reads each page as a numbered list of its controls and acts on them by number; a model that can see images can also get a screenshot (`tools.browserVision`).
+- 🌐 **Browser control** (desktop app and web) — the agent drives a real browser: the desktop's own, or on the web your Chrome over CDP or a hosted Steel session. You watch it live and can take the wheel and hand it back. On the web the agent reads each page as a list of its controls, each with a ref like `e14`, and acts on them by ref; a model that can see images can also get a screenshot (`tools.browserVision`).
 - 🙋 **Asks instead of guessing** (Cascade Cloud and self-hosted web) — when a request is genuinely ambiguous, Cascade asks one structured question rather than inventing an answer.
 - 🤖 **Autonomous mode** (`/auto`) — hands-off runs: safe tools run silently, dangerous ones still ask, budget caps stay the hard stop.
 - 📋 **Boardroom plan review** — pause to review, **edit**, or steer T1's plan (with an AI reviewer's critique) before any worker spawns.
@@ -526,13 +526,17 @@ On the web (a CDP browser or Steel), `browser_control` describes each page as a 
 ```
 [Page view 2]
 Page: Dine — https://dine.example/search
+Viewport 1280×800, scrolled 0 of 1,013
+
 On screen:
 [e5] button "Account"
 [e8] combobox "Party size": "2 people"
 [e14] button "Reserve 7:30 pm"
 ```
 
-The model acts by ref (`{"action":"click","ref":"e14"}`), and CSS selectors still work. A page view never shows what is typed into a field. `tools.browserVision` sets how much it sees:
+The model acts by ref (`{"action":"click","ref":"e14"}`), and CSS selectors still work. A page view never shows what is typed into a field. A ref is refused, never re-matched, once the page has loaded something else or the control it named has gone or been renamed.
+
+`tools.browserVision` sets how much it sees. It applies to a remote browser — Cascade Cloud and self-hosted deployments set it with `REMOTE_BROWSER_VISION`, and an SDK host that attaches one reads it from its config. The desktop's built-in browser keeps CSS selectors.
 
 | Setting | What the model gets |
 |---|---|
@@ -543,8 +547,8 @@ The model acts by ref (`{"action":"click","ref":"e14"}`), and CSS selectors stil
 
 When screenshots are on:
 - No screenshot is taken while a password, card or one-time-code field is on screen in any frame, when the page can't be checked for one, or right after you took control of the browser or hid it.
-- A screenshot is sent with one step and not kept, so it costs about 1.4k tokens a step on Claude.
-- A model that can't see images, or would be charged far more for one, gets the page view alone.
+- A screenshot is sent with one step and not kept: about 1.4k tokens a step on Claude at 1280×800 (Steel's size). A larger screen costs more.
+- A model that can't see images, one reached through a gateway, or one that would be charged more for a picture than a run allows for an image gets the page view alone.
 
 Approval prompts name the element and the site. A click on something labelled pay, buy, order, delete, remove, send, transfer or publish asks every time, even after "always allow". So does Enter or Space where it may submit a form, and a click, fill or key press on something the page view did not name, such as a CSS selector. Hosted deployments set `REMOTE_BROWSER_VISION`. `scripts/browser-vision-eval/` holds the side-by-side test that decides the default.
 
