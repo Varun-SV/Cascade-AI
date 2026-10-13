@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { WorkspaceGate } from './workspace-gate.js';
+import { WorkspaceGate, heartbeat } from './workspace-gate.js';
 import { statePath, useProjectStateDir } from '../config/project-state.js';
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -42,6 +42,34 @@ describe('WorkspaceGate', () => {
       // Blocked past one heartbeat, as a long synchronous walk would.
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 6_500);
       expect(Date.now() - (await fs.stat(marker)).mtimeMs).toBeLessThan(5_000);
+      leave();
+    } finally {
+      release();
+      await fs.rm(ws, { recursive: true, force: true });
+      await fs.rm(own, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  // A heartbeat thread that ended was started again only by the next hold:
+  // a caller already holding the gate alone let its marker go stale.
+  it('starts the heartbeat again when it ends while the gate is held alone', async () => {
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-gate-restart-')));
+    const own = `${ws}-state`;
+    const release = useProjectStateDir(ws, own);
+    try {
+      const leave = await new WorkspaceGate(ws).enter('alone', true);
+      const lock = path.join(statePath(ws, 'gate'), 'alone');
+      const first = heartbeat.thread()!;
+      await first.terminate();
+      await tick();
+      const second = heartbeat.thread();
+      expect(second).toBeDefined();
+      expect(second).not.toBe(first);
+      const old = new Date(Date.now() - 60_000);
+      await fs.utimes(lock, old, old);
+      // Only the new thread can touch it while this loop is blocked.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 6_500);
+      expect(Date.now() - (await fs.stat(lock)).mtimeMs).toBeLessThan(5_000);
       leave();
     } finally {
       release();

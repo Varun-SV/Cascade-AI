@@ -184,11 +184,13 @@ describe('PrivacyPaths — what a local-only subtask wrote', () => {
     expect(new PrivacyPaths([], { workspaceRoot: root }).isLocalOnly('meanwhile.txt')).toBe(true);
     b.removeDerived(['b2.txt']);
 
-    // A lock left by a run that ended holding it is taken over once stale,
+    // A lock left by a run that ended holding it is taken over once stale —
+    // one naming no owner this run can ask after, once past STALE_LOCK_MS —
     // and each save lets go of its own.
     const lock = `${file}.lock`;
     await fs.writeFile(lock, '1');
-    const old = new Date(Date.now() - 60_000);
+    const { STALE_LOCK_MS } = await import('../../utils/file-lock.js');
+    const old = new Date(Date.now() - STALE_LOCK_MS - 60_000);
     await fs.utimes(lock, old, old);
     c.addDerived(['c.txt']);
     await expect(fs.stat(lock)).rejects.toThrow();

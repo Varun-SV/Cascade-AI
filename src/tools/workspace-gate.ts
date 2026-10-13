@@ -230,10 +230,18 @@ class Markers {
  * and a timer on its own loop would let its markers go stale and be taken
  * from it. One per process, started with the first marker held, and never
  * keeping the process alive.
+ *
+ * A thread that ends while markers are held is started again at once — up
+ * to RESTARTS_PER_MINUTE, so one that cannot start is not retried in a
+ * loop — and a timer on this loop touches them too, so markers go stale only
+ * if the thread is gone and the loop is busy past STALE_MS both. Exported
+ * for tests.
  */
-const heartbeat = new (class {
+class Heartbeat {
   private readonly files = new Set<string>();
   private worker?: Worker;
+  private backup?: ReturnType<typeof setInterval>;
+  private starts: number[] = [];
 
   hold(file: string): void {
     this.files.add(file);
@@ -246,17 +254,57 @@ const heartbeat = new (class {
   }
 
   private send(): void {
-    if (!this.worker) {
-      if (this.files.size === 0) return;
-      this.worker = new Worker(HEARTBEAT_SOURCE, { eval: true, workerData: HEARTBEAT_MS });
-      this.worker.unref();
-      // A thread that cannot start or dies leaves the next hold to start another.
-      this.worker.on('error', () => { this.worker = undefined; });
-      this.worker.on('exit', () => { this.worker = undefined; });
+    if (this.files.size === 0) {
+      if (this.backup) clearInterval(this.backup);
+      this.backup = undefined;
+    } else {
+      this.backup ??= setInterval(() => touch([...this.files]), HEARTBEAT_MS);
+      this.backup.unref?.();
+      this.start();
     }
-    this.worker.postMessage([...this.files]);
+    this.worker?.postMessage([...this.files]);
   }
-})();
+
+  private start(): void {
+    if (this.worker) return;
+    const now = Date.now();
+    this.starts = this.starts.filter((at) => now - at < 60_000);
+    if (this.starts.length >= RESTARTS_PER_MINUTE) return;
+    this.starts.push(now);
+    let worker: Worker;
+    try {
+      worker = new Worker(HEARTBEAT_SOURCE, { eval: true, workerData: HEARTBEAT_MS });
+    } catch {
+      return;
+    }
+    worker.unref();
+    const ended = () => {
+      if (this.worker !== worker) return;
+      this.worker = undefined;
+      if (this.files.size > 0) this.send();
+    };
+    worker.on('error', ended);
+    worker.on('exit', ended);
+    this.worker = worker;
+  }
+
+  /** The thread now running, if any. For tests. */
+  thread(): Worker | undefined {
+    return this.worker;
+  }
+}
+
+export const heartbeat = new Heartbeat();
+
+/** How often in a minute the heartbeat thread is started again before only the backup timer is left. */
+const RESTARTS_PER_MINUTE = 5;
+
+function touch(files: string[]): void {
+  const now = new Date();
+  for (const file of files) {
+    try { fs.utimesSync(file, now, now); } catch { /* removed meanwhile */ }
+  }
+}
 
 const HEARTBEAT_SOURCE = `
 const { parentPort, workerData } = require('node:worker_threads');
