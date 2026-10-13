@@ -265,5 +265,9 @@ describe('clean', () => {
   it('makes page text one bounded line without brackets or double quotes', () => {
     expect(clean('a\n\tb [x] "y"\u2028z', 80)).toBe("a b (x) 'y' z");
     expect(clean('x'.repeat(100), 10)).toBe(`${'x'.repeat(9)}…`);
+    // A direction override shows "Delete account" as something else to a
+    // person reading the approval; a zero-width mark splits a word.
+    expect(clean('\u202etnuocca eteleD', 80)).toBe('tnuocca eteleD');
+    expect(clean('P\u200bay\ufeff now\u2066', 80)).toBe('Pay now');
   });
 });

@@ -371,10 +371,13 @@ function textWithin(node: SnapshotNode): string {
 
 /**
  * Page-written text made safe to show: one line, bounded, and unable to
- * imitate the list's own syntax (`[ref]` and `"name"`).
+ * imitate the list's own syntax (`[ref]` and `"name"`). Invisible characters
+ * go too — direction overrides and zero-width marks — so what a person is
+ * shown in an approval reads as the text it is, in the order it is stored.
  */
 export function clean(text: string, limit: number): string {
   const flat = text
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]+/g, '')
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ')
     .replace(/\[/g, '(')

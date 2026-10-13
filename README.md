@@ -542,11 +542,11 @@ The model acts by ref (`{"action":"click","ref":"e14"}`), and CSS selectors stil
 | `marked` | Page views, plus a screenshot with each ref drawn on it (experimental) |
 
 When screenshots are on:
-- No screenshot is taken while a password, card or one-time-code field is on screen, or right after you took control of the browser or hid it.
+- No screenshot is taken while a password, card or one-time-code field is on screen in any frame, when the page can't be checked for one, or right after you took control of the browser or hid it.
 - A screenshot is sent with one step and not kept, so it costs about 1.4k tokens a step on Claude.
 - A model that can't see images, or would be charged far more for one, gets the page view alone.
 
-Approval prompts name the element and the site. A click on something labelled pay, buy, order, delete, remove, send, transfer or publish asks every time, even after "always allow". Hosted deployments set `REMOTE_BROWSER_VISION`. `scripts/browser-vision-eval/` holds the side-by-side test that decides the default.
+Approval prompts name the element and the site. A click on something labelled pay, buy, order, delete, remove, send, transfer or publish asks every time, even after "always allow". So does Enter or Space where it may submit a form, and a click, fill or key press on something the page view did not name, such as a CSS selector. Hosted deployments set `REMOTE_BROWSER_VISION`. `scripts/browser-vision-eval/` holds the side-by-side test that decides the default.
 
 MCP servers' tools, plugins and dynamic tools join this list at runtime.
 

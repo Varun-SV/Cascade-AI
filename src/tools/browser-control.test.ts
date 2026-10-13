@@ -398,6 +398,56 @@ describe('BrowserControlTool — what a person approving sees', () => {
     expect(tool.forApproval({ action: 'hover', ref: 'e14' }, 'run-1').alwaysAsk).toBe(false);
   });
 
+  it('shows only what the call runs with, never a target or site the model wrote', async () => {
+    const tool = await seenTool();
+    const { input } = tool.forApproval(
+      { action: 'click', selector: '#delete-account', target: 'button "Cancel"', site: 'safe.example', note: 'harmless' },
+      'run-1',
+    );
+    expect(input).toEqual({ action: 'click', selector: '#delete-account', site: 'shop.example' });
+    // A ref the view did not list names nothing, whatever the model says it is.
+    expect(tool.forApproval({ action: 'click', ref: 'e77', target: 'link "Help"' }, 'run-1').input).not.toHaveProperty('target');
+    expect(tool.forApproval({ action: 'click', ref: 'constructor' }, 'run-1').input).not.toHaveProperty('target');
+  });
+
+  it('asks every time when the view gives nothing to judge the target by', async () => {
+    const tool = await seenTool();
+    // A neutral selector can still be the Pay button.
+    expect(tool.forApproval({ action: 'click', selector: '.primary-action' }, 'run-1').alwaysAsk).toBe(true);
+    expect(tool.forApproval({ action: 'fill', selector: '#card', value: '4242' }, 'run-1').alwaysAsk).toBe(true);
+    // A ref the latest view did not list.
+    expect(tool.forApproval({ action: 'click', ref: 'e77' }, 'run-1').alwaysAsk).toBe(true);
+    // Enter or Space to whatever has focus, with or without modifiers.
+    for (const key of ['Enter', 'NumpadEnter', 'Space', ' ', 'Control+Enter', 'Meta+Enter']) {
+      expect(tool.forApproval({ action: 'press', key }, 'run-1').alwaysAsk, key).toBe(true);
+    }
+    // Other keys sent to whatever has focus only move or type.
+    for (const key of ['Tab', 'Escape', 'ArrowDown', 'a']) {
+      expect(tool.forApproval({ action: 'press', key }, 'run-1').alwaysAsk, key).toBe(false);
+    }
+  });
+
+  it('asks before Enter in a field on a page that lists something to ask about', async () => {
+    const tool = await seenTool();
+    // The field is harmless; the form it submits has a Pay button.
+    expect(tool.forApproval({ action: 'press', ref: 'e9', key: 'Enter' }, 'run-1').alwaysAsk).toBe(true);
+    expect(tool.forApproval({ action: 'press', ref: 'e9', key: 'Tab' }, 'run-1').alwaysAsk).toBe(false);
+
+    const rec = recorder({ detail: 'ok', url: 'https://search.example/', view: { text: '[Page view 1]', labels: { e2: 'searchbox "Search"', e3: 'button "Go"' } } });
+    const calm = new BrowserControlTool(rec.controller, undefined, { pageView: true });
+    await calm.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
+    expect(calm.forApproval({ action: 'press', ref: 'e2', key: 'Enter' }, 'run-1').alwaysAsk).toBe(false);
+  });
+
+  it('keeps the selector rule on a host without page views, and asks before an unaimed Enter', () => {
+    const tool = new BrowserControlTool(recorder({ detail: 'ok' }).controller);
+    expect(tool.forApproval({ action: 'click', selector: '#delete-account' }, 'run-1').alwaysAsk).toBe(true);
+    expect(tool.forApproval({ action: 'click', selector: '.primary-action' }, 'run-1').alwaysAsk).toBe(false);
+    expect(tool.forApproval({ action: 'press', key: 'Enter' }, 'run-1').alwaysAsk).toBe(true);
+    expect(tool.forApproval({ action: 'press', selector: '#q', key: 'Enter' }, 'run-1').alwaysAsk).toBe(true);
+    expect(tool.forApproval({ action: 'press', key: 'Tab' }, 'run-1').alwaysAsk).toBe(false);
+  });
+
   it('keeps each run\'s view to itself', async () => {
     const tool = await seenTool();
     expect(tool.forApproval({ action: 'click', ref: 'e14' }, 'run-2').input).toEqual({ action: 'click', ref: 'e14' });

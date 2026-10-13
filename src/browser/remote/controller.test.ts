@@ -4529,14 +4529,28 @@ describe('page views and refs', () => {
   /** What the fake page's AI snapshot says the page holds. */
   let snapshot = '';
   let snapshotFails = false;
-  /** What the privacy check finds in the page itself: a field on screen, or an error. */
-  let privateOnScreen: boolean | 'throws' = false;
-  /** What each sub-frame's privacy check finds, and where its iframe sits (on screen unless given). */
-  let subFrames: Array<boolean | 'throws' | { found: boolean; y: number }> = [];
+  /** What the privacy check finds in the page itself: a field on screen, an error, or no answer. */
+  let privateOnScreen: boolean | null | 'throws' = false;
+  /**
+   * What each sub-frame's privacy check finds, and where its iframe sits (on
+   * screen unless given). `gone` throws from a frame that has left the page;
+   * `throws` from one still on it.
+   */
+  let subFrames: Array<boolean | null | 'throws' | 'gone' | { found: boolean; y: number }> = [];
   let shotFails = false;
   /** Refs the fake page can still resolve, whatever the last view listed. */
   let liveRefs = new Set<string>();
   const extra = page as unknown as Record<string, unknown>;
+
+  /** A JPEG's headers: enough for its size to be read, as a real one's is. */
+  const jpeg = (width: number, height: number) => new Uint8Array([
+    0xff, 0xd8,
+    0xff, 0xe0, 0x00, 0x04, 0x00, 0x00,
+    0xff, 0xc0, 0x00, 0x0b, 0x08, height >> 8, height & 0xff, width >> 8, width & 0xff, 0x01, 0x01, 0x11, 0x00,
+    0xff, 0xd9,
+  ]);
+  let SHOT = jpeg(1280, 800);
+  const SHOT64 = Buffer.from(jpeg(1280, 800)).toString('base64');
 
   const BOOKING = [
     '- main [ref=e1] [box=0,0,1280,1600]:',
@@ -4553,15 +4567,16 @@ describe('page views and refs', () => {
     privateOnScreen = false;
     subFrames = [];
     shotFails = false;
+    SHOT = jpeg(1280, 800);
     liveRefs = new Set(['e5', 'e9', 'e11', 'e14']);
     extra['ariaSnapshot'] = async (opts: unknown) => {
       page.calls.push(`snapshot:${JSON.stringify(opts)}`);
       if (snapshotFails) throw new Error('snapshot timed out');
       return snapshot;
     };
-    const privacyCheck = (found: boolean | 'throws') => {
+    const privacyCheck = (found: boolean | null | 'throws' | 'gone') => {
       page.calls.push('privacy');
-      if (found === 'throws') throw new Error('Execution context was destroyed');
+      if (found === 'throws' || found === 'gone') throw new Error('Execution context was destroyed');
       return found;
     };
     extra['evaluate'] = async (expression: string) => {
@@ -4572,18 +4587,20 @@ describe('page views and refs', () => {
     extra['frames'] = () => [
       { evaluate: async () => { throw new Error('the main frame is asked through page.evaluate'); } },
       ...subFrames.map((frame) => {
-        const found = typeof frame === 'object' ? frame.found : frame;
-        const y = typeof frame === 'object' ? frame.y : 100;
+        const placed = frame !== null && typeof frame === 'object';
+        const found = placed ? frame.found : frame;
+        const y = placed ? frame.y : 100;
         return {
           evaluate: async () => privacyCheck(found),
           frameElement: async () => ({ boundingBox: async () => ({ x: 0, y, width: 200, height: 40 }) }),
+          isDetached: () => found === 'gone',
         };
       }),
     ];
     extra['screenshot'] = async (opts: unknown) => {
       page.calls.push(`shot:${JSON.stringify(opts)}`);
       if (shotFails) throw new Error('Target closed');
-      return new Uint8Array([1, 2, 3]);
+      return SHOT;
     };
     extra['waitForLoadState'] = async (state: string) => { page.calls.push(`settle:${state}`); };
     extra['locator'] = (selector: string) => {
@@ -4615,7 +4632,7 @@ describe('page views and refs', () => {
   const controller = () => new RemoteBrowserController({ provider: fakeProvider().provider, settleQuietMs: 0 });
 
   it('says what it offers, so the tool can offer refs and screenshots', () => {
-    expect(controller().features).toEqual({ pageView: true, screenshots: true });
+    expect(controller().features).toEqual({ pageView: true, screenshots: true, marked: true });
   });
 
   it('describes the page from Playwright\'s AI snapshot, with boxes', async () => {
@@ -4774,7 +4791,7 @@ describe('page views and refs', () => {
 
     it('takes a clean JPEG of the screen, with the view, when asked', async () => {
       const out = await controller().controller({ kind: 'observe', pageView: true, screenshot: true }, ctx('run', 'w1'));
-      expect(out.image).toEqual({ data: 'AQID', mimeType: 'image/jpeg', width: 1280, height: 800 });
+      expect(out.image).toEqual({ data: SHOT64, mimeType: 'image/jpeg', width: 1280, height: 800 });
       // CSS pixels, so a high-density screen does not double the bill; the
       // caret left alone, because hiding it means injecting a style.
       expect(shots()).toEqual(['shot:{"type":"jpeg","quality":80,"scale":"css","caret":"initial","timeout":5000}']);
@@ -4833,9 +4850,55 @@ describe('page views and refs', () => {
     });
 
     it('does not let a sub-frame that went away end every screenshot', async () => {
-      subFrames = ['throws'];
+      subFrames = ['gone'];
       const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
       expect(out.image).toBeDefined();
+    });
+
+    it('takes none when a frame on screen cannot answer, and says why', async () => {
+      subFrames = ['throws'];
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: the page could not be checked for password, card or one-time-code fields.');
+      expect(shots()).toEqual([]);
+    });
+
+    it('reads every frame, not just the first few', async () => {
+      // Twenty-five frames, the private one last: a cut-off used to leave it unread.
+      subFrames = [...Array.from({ length: 24 }, () => false), true];
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: a password, card or one-time-code field is on screen.');
+      expect(page.calls.filter((x) => x === 'privacy')).toHaveLength(26);
+    });
+
+    it('takes none of a page with more frames than it reads', async () => {
+      subFrames = Array.from({ length: 51 }, () => false);
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('could not be checked');
+      expect(shots()).toEqual([]);
+    });
+
+    it('takes none when a frame gives no answer', async () => {
+      // The check says neither yes nor no when it could not read everything.
+      privateOnScreen = null;
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      subFrames = [null];
+      privateOnScreen = false;
+      const framed = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run2', 'w1'));
+      expect(framed.image).toBeUndefined();
+    });
+
+    it('knows a private field by its autocomplete token anywhere in the attribute, and a password shown in clear', async () => {
+      const { PRIVATE_FIELDS } = await import('./controller.js');
+      // Token matches (~=), not prefix or whole-value: `section-pay billing cc-number`.
+      for (const token of ['cc-number', 'cc-csc', 'cc-exp', 'one-time-code', 'current-password', 'new-password']) {
+        expect(PRIVATE_FIELDS).toContain(`[autocomplete~="${token}" i]`);
+      }
+      expect(PRIVATE_FIELDS).not.toMatch(/autocomplete\^=|autocomplete="/);
+      expect(PRIVATE_FIELDS).toContain('input[name*="password" i]');
     });
 
     it('takes none when the page itself cannot be checked', async () => {
@@ -4909,12 +4972,28 @@ describe('page views and refs', () => {
     it('sends the clean picture when the marks cannot be drawn', async () => {
       // The fake CDP answers none of the drawing calls.
       const out = await controller().controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
-      expect(out.image?.data).toBe('AQID');
+      expect(out.image?.data).toBe(SHOT64);
     });
 
     it('draws nothing unless marks are asked for', async () => {
       await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
       expect(cdp.sent).not.toContain('Page.createIsolatedWorld');
+    });
+
+    it('gives the picture\'s own size, whatever the page says of itself', async () => {
+      // A page can redefine innerWidth; the router prices the image by this size.
+      extra['evaluate'] = async (expression: string) => (
+        expression.includes('one-time-code') ? false : { width: 320, height: 200, scrollY: 0, scrollHeight: 200 });
+      SHOT = jpeg(1920, 1080);
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toMatchObject({ width: 1920, height: 1080 });
+    });
+
+    it('takes none when the picture does not say its size', async () => {
+      SHOT = new Uint8Array([1, 2, 3]);
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: the picture could not be taken.');
     });
 
     it('cannot price a picture whose size it does not know, so takes none', async () => {
@@ -4944,6 +5023,27 @@ describe('a failed action is told without Playwright\'s call log', () => {
     ].join('\n'));
     expect(actionError(err)).toBe('locator.selectOption: Error: Element is not a <select> element');
     expect(actionError('plain')).toBe('plain');
+  });
+
+  it('drops the elements a strict-mode error lists, which come before any log', async () => {
+    // Captured from Playwright 1.62: a selector matching two fields quotes
+    // both, and a page that mirrors a field's value into its attribute shows
+    // what was typed.
+    const { actionError } = await import('./controller.js');
+    const err = new Error([
+      'locator.selectOption: Error: strict mode violation: locator(\'input\') resolved to 2 elements:',
+      '    1) <input name="user" value="alice"/> aka locator(\'input[name="user"]\')',
+      '    2) <input type="password" value="hunter2-secret"/> aka locator(\'input[type="password"]\')',
+      '',
+      'Call log:',
+      '  - waiting for locator(\'input\')',
+    ].join('\n'));
+    const said = actionError(err);
+    expect(said).toBe('locator.selectOption: Error: strict mode violation: locator(\'input\') resolved to 2 elements:');
+    expect(said).not.toContain('hunter2');
+    // An element in the reason itself keeps its tag and nothing else.
+    expect(actionError(new Error('Error: <input type="password" value="hunter2"> is not a <select> element')))
+      .toBe('Error: <input> is not a <select> element');
   });
 
   it('applies to what the model is told', async () => {

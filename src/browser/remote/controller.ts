@@ -72,6 +72,8 @@ type Page = {
 /** A frame of the page, and where its iframe sits on the page's screen. */
 type Frame = {
   evaluate(expression: string): Promise<unknown>;
+  /** True once the frame has left the page. See `privateOnScreen`. */
+  isDetached?(): boolean;
   frameElement?(): Promise<{ boundingBox(): Promise<{ x: number; y: number; width: number; height: number } | null> }>;
 };
 /** One control on the page, as Playwright resolves it at the moment of acting. */
@@ -275,21 +277,50 @@ const SCREENSHOT_QUALITY = 80;
 const SCREENSHOT_TIMEOUT_MS = 5_000;
 /** A screenshot this large (base64) is not sent: something is wrong with it. */
 const SCREENSHOT_MAX_CHARS = 2_000_000;
-/** Frames the privacy check reads before calling the page unsafe to picture. */
-const PRIVACY_FRAME_LIMIT = 20;
+/**
+ * Sub-frames the privacy check will read. A page with more is not pictured:
+ * every frame is read or none is, so a password field cannot sit in the one
+ * frame past a cut-off.
+ */
+const PRIVACY_FRAME_LIMIT = 50;
+/** Why a screenshot was skipped when something private is, or may be, on screen. */
+const PRIVATE_SHOT = 'No screenshot: a password, card or one-time-code field is on screen.';
+const UNCHECKED_SHOT = 'No screenshot: the page could not be checked for password, card or one-time-code fields.';
+/**
+ * `autocomplete` tokens that mark a private field. Matched as tokens, not as
+ * the whole attribute: `section-pay billing cc-number` is a card number too.
+ * A password field shown in clear by its "show" button is still marked
+ * `current-password` or `new-password`.
+ */
+const PRIVATE_AUTOCOMPLETE = [
+  'current-password', 'new-password', 'one-time-code',
+  'cc-name', 'cc-given-name', 'cc-additional-name', 'cc-family-name',
+  'cc-number', 'cc-exp', 'cc-exp-month', 'cc-exp-year', 'cc-csc', 'cc-type',
+];
+/** Fields that hold something private, by type, autocomplete token or name. */
+export const PRIVATE_FIELDS = [
+  'input[type="password" i]',
+  ...PRIVATE_AUTOCOMPLETE.map((token) => `[autocomplete~="${token}" i]`),
+  // Shown in clear, with no autocomplete to say so.
+  'input[name*="password" i]', 'input[name*="passwd" i]', 'input[id*="password" i]', 'input[aria-label*="password" i]',
+  'input[name*="cvc" i]', 'input[name*="cvv" i]',
+  'input[name*="cardnumber" i]', 'input[name*="card_number" i]', 'input[name*="card-number" i]',
+].join(', ');
 /**
  * True when something private is on screen in this frame: a password, card or
  * one-time-code field, or a payment provider's iframe. Read in every frame
- * before a screenshot is taken; any "yes", or a main frame that cannot answer,
- * means no screenshot.
+ * before a screenshot is taken; any "yes", or a frame on screen that cannot
+ * answer, means no screenshot.
  */
 const PRIVATE_ON_SCREEN_EXPRESSION = `(() => {
   const H = innerHeight, W = innerWidth;
   const seen = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 && r.top < H && r.left < W; };
-  const FIELDS = 'input[type="password" i], [autocomplete^="cc-" i], [autocomplete="one-time-code" i], input[name*="cvc" i], input[name*="cvv" i], input[name*="cardnumber" i], input[name*="card_number" i], input[name*="card-number" i]';
+  const FIELDS = ${JSON.stringify(PRIVATE_FIELDS)};
   const PAYMENT = /stripe|braintree|adyen|paypal|checkout\\.com|squareup|razorpay|klarna|recurly|chargebee|authorize\\.net/i;
   const roots = [document];
-  for (let i = 0; i < roots.length && i < 500; i++) {
+  for (let i = 0; i < roots.length; i++) {
+    // Too many shadow roots to read: not a "no".
+    if (i >= 500) return null;
     const root = roots[i];
     for (const el of root.querySelectorAll(FIELDS)) if (seen(el)) return true;
     for (const f of root.querySelectorAll('iframe')) if (PAYMENT.test(f.src || '') && seen(f)) return true;
@@ -795,7 +826,7 @@ export class RemoteBrowserController {
    * What this controller can do beyond the six original actions. The tool
    * reads it to decide which actions and parameters to offer the model.
    */
-  readonly features = { pageView: true, screenshots: true } as const;
+  readonly features = { pageView: true, screenshots: true, marked: true } as const;
 
   /**
    * The predecessor's teardown, until it has been waited for once.
@@ -2957,28 +2988,24 @@ export class RemoteBrowserController {
       held.skipShot = undefined;
       return { withheld: why };
     }
-    if (await this.privateOnScreen(page, stoppable, seen.viewport)) {
-      return { withheld: 'No screenshot: a password, card or one-time-code field is on screen.' };
-    }
+    const unsafe = await this.privateOnScreen(page, stoppable, seen.viewport);
+    if (unsafe) return { withheld: unsafe };
     try {
       const bytes = await stoppable(page.screenshot({
         type: 'jpeg', quality: SCREENSHOT_QUALITY, scale: 'css', caret: 'initial', timeout: SCREENSHOT_TIMEOUT_MS,
       }));
-      const clean = Buffer.from(bytes).toString('base64');
-      if (!clean || clean.length > SCREENSHOT_MAX_CHARS) return { withheld: 'No screenshot: the picture could not be taken.' };
+      const picture = Buffer.from(bytes);
+      // The size is read from the picture, not from the page: the router
+      // prices the image by it, and a page can say anything about its own
+      // innerWidth.
+      const size = jpegSize(picture);
+      const clean = picture.toString('base64');
+      if (!size || !clean || clean.length > SCREENSHOT_MAX_CHARS) return { withheld: 'No screenshot: the picture could not be taken.' };
       held.shotOf = looks;
-      const size = { width: Math.round(seen.viewport.width), height: Math.round(seen.viewport.height) };
       // The marks go on a copy; if they cannot be drawn, the clean picture is
       // still worth sending.
       const data = marked ? (await this.marked(page, clean, size, seen.view)) ?? clean : clean;
-      return {
-        image: {
-          data,
-          mimeType: 'image/jpeg',
-          width: Math.round(seen.viewport.width),
-          height: Math.round(seen.viewport.height),
-        },
-      };
+      return { image: { data, mimeType: 'image/jpeg', ...size } };
     } catch {
       return { withheld: 'No screenshot: the picture could not be taken.' };
     }
@@ -3004,32 +3031,42 @@ export class RemoteBrowserController {
   }
 
   /**
-   * Whether anything private is on screen, in any frame. Fails closed for the
-   * page itself — a page that cannot be checked is not pictured — and open for
-   * a sub-frame that went away mid-check, which would otherwise end every
-   * screenshot on a page with an ad slot.
+   * Why no screenshot may be taken — something private is, or may be, on
+   * screen in some frame — or null when one may. Fails closed: a page that
+   * cannot be checked, a frame on screen that cannot answer, or more frames
+   * than the check reads. Open only for a sub-frame that went away
+   * mid-check, which would otherwise end every screenshot on a page with an
+   * ad slot.
    */
   private async privateOnScreen(
     page: Page,
     stoppable: <T>(work: Promise<T>) => Promise<T>,
     viewport: Viewport,
-  ): Promise<boolean> {
-    if (typeof page.evaluate !== 'function') return true;
+  ): Promise<string | null> {
+    if (typeof page.evaluate !== 'function') return UNCHECKED_SHOT;
     try {
-      if ((await stoppable(page.evaluate(PRIVATE_ON_SCREEN_EXPRESSION))) !== false) return true;
+      const found = await stoppable(page.evaluate(PRIVATE_ON_SCREEN_EXPRESSION));
+      if (found !== false) return found === true ? PRIVATE_SHOT : UNCHECKED_SHOT;
     } catch {
-      return true;
+      return UNCHECKED_SHOT;
     }
-    const frames = typeof page.frames === 'function' ? page.frames().slice(1, PRIVACY_FRAME_LIMIT + 1) : [];
-    for (const frame of frames) {
+    const frames = typeof page.frames === 'function' ? page.frames().slice(1) : [];
+    if (frames.length > PRIVACY_FRAME_LIMIT) return UNCHECKED_SHOT;
+    // Read side by side: each one is a round trip to a browser that may be in
+    // another data centre.
+    const verdicts = await Promise.all(frames.map(async (frame): Promise<string | null> => {
       // A frame judges "on screen" against its own little viewport, so a
       // login iframe far below the fold reads as showing its password field.
       // Only a frame whose iframe is itself on the page's screen counts.
-      if (!(await frameOnScreen(frame, viewport))) continue;
-      const found = await stoppable(frame.evaluate(PRIVATE_ON_SCREEN_EXPRESSION)).catch(() => false);
-      if (found === true) return true;
-    }
-    return false;
+      if (!(await frameOnScreen(frame, viewport))) return null;
+      try {
+        const found = await stoppable(frame.evaluate(PRIVATE_ON_SCREEN_EXPRESSION));
+        return found === false ? null : found === true ? PRIVATE_SHOT : UNCHECKED_SHOT;
+      } catch {
+        return frame.isDetached?.() === true ? null : UNCHECKED_SHOT;
+      }
+    }));
+    return verdicts.find((v) => v === PRIVATE_SHOT) ?? verdicts.find((v) => v !== null) ?? null;
   }
 
   /** A view for the outcome, with its screenshot or the reason for none when one was asked for. */
@@ -3232,15 +3269,47 @@ function refusal(result: 'busy' | 'cancelled' | 'off' | 'human'): string {
 /**
  * A failed action, said in the words the model is shown.
  *
- * Playwright appends a call log to its errors, and the log quotes the element
- * it resolved — attributes and all, so `<input type="password" value="…">`
- * arrives with the password in it. Only the first part, the reason, is kept,
- * without the terminal colours it is written in.
+ * Playwright quotes the elements it found in its errors — attributes and all,
+ * so `<input type="password" value="…">` arrives with the password in it. The
+ * call log it appends does, and so does a strict-mode error, which lists every
+ * element a locator matched before any log. Only the first line, the reason,
+ * is kept, with any element in it cut to its tag and without the terminal
+ * colours it is written in.
  */
 export function actionError(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
   // eslint-disable-next-line no-control-regex
-  return message.split(/\n\s*Call log:/)[0]!.replace(/\u001b\[[0-9;]*m/g, '').trim();
+  const plain = message.replace(/\u001b\[[0-9;]*m/g, '');
+  const reason = plain.split('\n').map((line) => line.trim()).find((line) => line.length > 0) ?? '';
+  return reason.replace(/<([a-z][\w-]*)\b[^>]*>/gi, '<$1>');
+}
+
+/**
+ * A JPEG's size in pixels, from its frame header, or null when the bytes are
+ * not a JPEG that says.
+ */
+export function jpegSize(bytes: Uint8Array): { width: number; height: number } | null {
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
+  let at = 2;
+  while (at + 4 <= bytes.length) {
+    if (bytes[at] !== 0xff) return null;
+    const marker = bytes[at + 1]!;
+    // Fill bytes, and markers that carry no length.
+    if (marker === 0xff) { at += 1; continue; }
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { at += 2; continue; }
+    if (marker === 0xd9 || marker === 0xda) return null;
+    const length = (bytes[at + 2]! << 8) | bytes[at + 3]!;
+    if (length < 2) return null;
+    // Start-of-frame: every SOFn but the DHT (C4), JPG (C8) and DAC (CC) markers.
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      if (at + 9 > bytes.length) return null;
+      const height = (bytes[at + 5]! << 8) | bytes[at + 6]!;
+      const width = (bytes[at + 7]! << 8) | bytes[at + 8]!;
+      return width > 0 && height > 0 ? { width, height } : null;
+    }
+    at += 2 + length;
+  }
+  return null;
 }
 
 /**

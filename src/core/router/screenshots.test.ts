@@ -148,6 +148,34 @@ describe('the router decides against the model it resolved', () => {
     expect(JSON.stringify(seen[0])).toContain('Screenshot left out');
   });
 
+  it('gives the screenshot back when a model that cannot see it fails over to one that can', async () => {
+    const blind = model('anthropic', 'blind', { isVisionCapable: false });
+    const { router, seen } = await routerServing(blind);
+    const internals = router as unknown as {
+      providers: Map<string, unknown>;
+      selector: { selectForTier: (tier: string) => ModelInfo | null; removeModel: (id: string) => void };
+      deadModels: { record: () => boolean };
+    };
+    internals.providers.set(`${blind.provider}:${blind.id}`, {
+      generate: async () => { throw new Error('404 model not found'); },
+    });
+    internals.providers.set(`${CLAUDE.provider}:${CLAUDE.id}`, {
+      generate: async (options: GenerateOptions) => {
+        seen.push(options.messages);
+        return { content: 'ok', finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimatedCostUsd: 0 } };
+      },
+    });
+    internals.selector.selectForTier = () => CLAUDE;
+    internals.selector.removeModel = () => {};
+    internals.deadModels.record = () => false;
+
+    await router.generate('T3', withShot);
+    expect(seen).toHaveLength(1);
+    expect(JSON.stringify(seen[0])).toContain('"type":"image"');
+    expect(JSON.stringify(seen[0])).not.toContain('Screenshot left out');
+    expect(router.getRunScreenshots()).toEqual({ sent: 1, leftOut: 0 });
+  });
+
   it('counts what it sent and what it left out, for /why, per run', async () => {
     const seeing = await routerServing(CLAUDE);
     await seeing.router.generate('T3', withShot);

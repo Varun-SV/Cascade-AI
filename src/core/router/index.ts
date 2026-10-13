@@ -1101,7 +1101,11 @@ export class CascadeRouter extends EventEmitter {
     // here, against the model this call actually resolved to: failover, a
     // backoff and the local-only swap above can all have changed it since the
     // worker built the request.
+    // The request as the worker built it is kept for a retry on another
+    // model: one that can see the screenshot must get it back, not the line
+    // that stood in for it here.
     const offeredShots = countScreenshots(options);
+    const asOffered = options;
     options = fitScreenshots(options, model, IMAGE_TOKENS_EACH);
     const sentShots = countScreenshots(options);
 
@@ -1267,7 +1271,7 @@ export class CascadeRouter extends EventEmitter {
           // transient rebinding here would never be undone — one throttled
           // worker would move the tier's traffic, and its billing, to the
           // fallback indefinitely after the limit had cleared.
-          return this.generate(tier, { ...options, model: alt }, onChunk, requireVision);
+          return this.generate(tier, { ...asOffered, model: alt }, onChunk, requireVision);
         }
         // Nothing else can serve it: proceed rather than fail the run over a
         // condition that clears on its own.
@@ -1548,9 +1552,9 @@ export class CascadeRouter extends EventEmitter {
           // resolves right back to the pin, ignoring the fallback just bound
           // above and re-hitting the same rate-limited provider. Same fix
           // already applied to the model-not-found branch below.
-          const retryOpts = options.model && options.model.id === model.id
-            ? { ...options, model: undefined }
-            : options;
+          const retryOpts = asOffered.model && asOffered.model.id === model.id
+            ? { ...asOffered, model: undefined }
+            : asOffered;
           return this.generate(tier, retryOpts, onChunk, requireVision);
         }
       }
@@ -1612,9 +1616,9 @@ export class CascadeRouter extends EventEmitter {
           // Clear a per-subtask override that pointed at the dead model so the
           // recursive call resolves the tier's next-best model, and carry the
           // depth so the chain is bounded.
-          const base = options.model && options.model.id === model.id
-            ? { ...options, model: undefined }
-            : options;
+          const base = asOffered.model && asOffered.model.id === model.id
+            ? { ...asOffered, model: undefined }
+            : asOffered;
           const retryOpts = { ...base, _notFoundDepth: depth } as GenerateOptions;
           return this.generate(tier, retryOpts, onChunk, requireVision);
         }

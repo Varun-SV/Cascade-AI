@@ -56,7 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - It's taken clean, at 1280×800 on Steel, and sent with one step only, so
     it isn't kept in the history.
   - None is taken while a password, card or one-time-code field is on screen,
-    or right after you took control of the browser or hid it.
+    in any frame, or when the page can't be checked for one, or right after
+    you took control of the browser or hid it.
   - A model that can't see images, or would be charged far more than usual
     for one, gets the page view alone.
   - `marked` draws each ref on a copy of the screenshot, as an experiment.
@@ -64,7 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Hosted deployments set it with `REMOTE_BROWSER_VISION`.
   Approval prompts now name the element and the site. A click on something
   labelled pay, buy, order, delete, remove, send, transfer or publish asks
-  every time, even after "always allow". `scripts/browser-vision-eval/` has
+  every time, even after "always allow". So does Enter or Space where it may
+  submit a form, and, where pages are described, a click, fill or key press
+  on something the page view did not name. `scripts/browser-vision-eval/` has
   ten test tasks and a runner to compare the settings.
 
 ### Changed
@@ -110,10 +113,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/design/calm-direction.md`.
 
 ### Fixed
-- **A failed browser action no longer quotes the page back.** Playwright adds
-  a log to its errors that prints the element it found, attributes and all;
-  a failed choice on a password field printed the password to the model. The
-  reason is kept and the log dropped.
+- **A failed browser action no longer quotes the page back.** Playwright's
+  errors print the elements they found, attributes and all — in the log it
+  adds, and in the list of matches when a selector matched more than one — so
+  a failed choice on a password field printed the password to the model. Only
+  the first line, the reason, is kept.
 - **Maths in an answer is typeset, whichever way the model wrote it.** GPT
   and Gemini write `\(…\)` and `\[…\]`, which Markdown reads as escaped
   brackets, so an equation reached the web chat as
