@@ -62,6 +62,22 @@ export { CurrentPageTool, MAX_PAGE_TEXT_CHARS } from './tools/current-page.js';
 export { BrowserControlTool } from './tools/browser-control.js';
 export type { BrowserController, BrowserAction, BrowserActionOutcome } from './tools/browser-control.js';
 export { AskUserTool } from './tools/ask-user.js';
+// Abuse policy — the host meters outbound egress per user with these.
+export {
+  EgressGovernor,
+  normalizeHost,
+  DEFAULT_EGRESS_LIMITS,
+} from './tools/policy/egress-policy.js';
+export type { EgressVerdict, EgressDenyCode, EgressLimits, HostDenylist } from './tools/policy/egress-policy.js';
+export {
+  recordStrike,
+  isSuspended,
+  emptyRecord,
+  recentStrikeCount,
+  clearSuspension,
+  DEFAULT_ABUSE_POLICY,
+} from './tools/policy/abuse-ledger.js';
+export type { AbuseRecord, AbuseStrike, AbusePolicy } from './tools/policy/abuse-ledger.js';
 export type {
   ClarificationQuestion,
   ClarificationAnswer,

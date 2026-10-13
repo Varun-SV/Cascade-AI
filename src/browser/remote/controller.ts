@@ -307,8 +307,12 @@ export interface RemoteBrowserControllerOptions {
    * user by the host; absent where there is no shared actor to meter. The
    * browser's other actions (click, fill, press) stay on the page navigate
    * already cleared, so the gate sits on the one action that names a new host.
+   *
+   * Passed the acting run's id as well as the URL, because one controller is
+   * shared by every run on a deployment: the host keys the per-user limit off
+   * the run, not off a closure fixed when the controller was built.
    */
-  checkEgress?: (url: string) => import('../../tools/policy/egress-policy.js').EgressVerdict;
+  checkEgress?: (url: string, runId: string) => import('../../tools/policy/egress-policy.js').EgressVerdict;
 }
 
 /** One run's browser, and the page it is working on. */
@@ -2839,7 +2843,7 @@ export class RemoteBrowserController {
         if (!/^https?:\/\//i.test(target)) {
           return { ok: false, detail: 'Only http and https addresses can be opened.' };
         }
-        const verdict = this.checkEgress?.(target);
+        const verdict = this.checkEgress?.(target, runId);
         if (verdict && !verdict.allow) {
           return { ok: false, detail: `Refused to open ${target}: ${verdict.reason}`, ...(await where()) };
         }

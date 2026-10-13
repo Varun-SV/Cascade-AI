@@ -69,12 +69,22 @@ export class ToolRegistry extends EventEmitter {
   private workspaceRoot: string;
   /** Loaded plugins, keyed by plugin name */
   private plugins: Map<string, ToolPlugin> = new Map();
+  /** The host's outbound-egress gate, injected into every tool's options. */
+  private egressGate?: ToolExecuteOptions['checkEgress'];
 
   constructor(config: ToolsConfig, workspaceRoot: string = process.cwd()) {
     super();
     this.config = config;
     this.workspaceRoot = workspaceRoot;
     this.registerDefaults();
+  }
+
+  /**
+   * Install the host's egress gate. One per run (the registry is per-run), so
+   * the closure can carry the run's user. Consulted on every tool execute.
+   */
+  setEgressGate(gate: ToolExecuteOptions['checkEgress']): void {
+    this.egressGate = gate;
   }
 
   register(tool: BaseTool): void {
@@ -236,7 +246,15 @@ export class ToolRegistry extends EventEmitter {
       }
     }
 
-    return tool.execute(input, options);
+    // Hand every tool the host's egress gate, unless the caller already set one.
+    // One place, so a tool that opens a caller-named host on the open internet
+    // (web_fetch, the browser) cannot be registered without it. A tool whose
+    // destination is fixed by the operator (web_search's backend) ignores it.
+    const withGate = this.egressGate && !options.checkEgress
+      ? { ...options, checkEgress: this.egressGate }
+      : options;
+
+    return tool.execute(input, withGate);
   }
 
   private registerDefaults(): void {

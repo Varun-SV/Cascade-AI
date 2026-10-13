@@ -965,3 +965,40 @@ describe('CloudStore — claiming a browser session', () => {
     expect(store.getBrowserSessions(user.id, '2026-09-23')).toBe(0);
   });
 });
+
+describe('CloudStore — abuse records', () => {
+  let dir: string;
+  let store: CloudStore;
+  let userId: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-abuse-'));
+    store = new CloudStore(path.join(dir, 'cloud.db'));
+    userId = store.upsertUser({ provider: 'github', providerId: 'a1', email: null, name: null, avatar: null }).id;
+  });
+
+  afterEach(async () => {
+    store.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('starts with no record and not suspended', () => {
+    expect(store.getAbuseRecord(userId)).toBeNull();
+    expect(store.isUserSuspended(userId)).toBe(false);
+  });
+
+  it('round-trips a record and mirrors suspension into its own column', () => {
+    store.saveAbuseRecord(userId, JSON.stringify({ strikes: [{ at: 1, code: 'host-rate' }] }), null);
+    expect(store.getAbuseRecord(userId)).toContain('host-rate');
+    expect(store.isUserSuspended(userId)).toBe(false);
+
+    store.saveAbuseRecord(userId, JSON.stringify({ strikes: [], suspendedAt: 123 }), 123);
+    expect(store.isUserSuspended(userId)).toBe(true);
+  });
+
+  it('upserts in place rather than erroring on a second save', () => {
+    store.saveAbuseRecord(userId, JSON.stringify({ strikes: [] }), null);
+    store.saveAbuseRecord(userId, JSON.stringify({ strikes: [{ at: 2, code: 'total-rate' }] }), null);
+    expect(JSON.parse(store.getAbuseRecord(userId)!).strikes.length).toBe(1);
+  });
+});

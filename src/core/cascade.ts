@@ -17,7 +17,8 @@ import type { EscalationContext,
   StreamChunk,
   TaskComplexity,
   TierRole,
-  T3Result
+  T3Result,
+  ToolExecuteOptions
 } from '../types.js';
 import { CascadeRouter } from './router/index.js';
 import { budgetNote, directAnswerPrompt, plannedCallUsd, T2_CALLS_PER_SECTION, T3_CALLS_PER_SUBTASK } from './router/run-budget.js';
@@ -1031,6 +1032,20 @@ export class Cascade extends EventEmitter {
   setMediaSink(sink: AssetSink): void {
     this.mediaSink = sink;
     this.registerMediaTools(this.workspacePath);
+  }
+
+  /**
+   * Install the platform's outbound-egress gate for this run.
+   *
+   * A host that meters outbound traffic per user (Cascade Cloud) passes a
+   * closure that judges a caller-named URL and records a refusal against the
+   * user. The tool registry hands it to every tool that opens such a URL, so
+   * the limit holds no matter which worker or model raised the call. The remote
+   * browser controller takes the same gate on its own channel (see the cloud
+   * wiring). Absent in a local run, where there is no shared actor to meter.
+   */
+  setEgressGate(gate: ToolExecuteOptions['checkEgress']): void {
+    this.toolRegistry.setEgressGate(gate);
   }
 
   /**

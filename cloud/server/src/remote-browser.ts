@@ -34,6 +34,7 @@ import {
   type CascadeConfig,
   type RemoteBrowserProvider,
 } from '#cascade-ai';
+import { resolveRunEgress, registerRunGate, unregisterRunGate, type EgressGate } from './egress.js';
 
 /**
  * Only the slice this needs.
@@ -69,6 +70,13 @@ interface AttachOptions {
    * it when no session came of it. See `RemoteBrowserController.allowances`.
    */
   allowance?: BrowserAllowance;
+  /**
+   * The run owner's egress gate. Registered against the run's id while the run
+   * is live, so the shared controller — one instance for every run on the
+   * deployment — can resolve the right user's limit for each navigate. Absent
+   * on a self-hosted deployment with no per-user metering.
+   */
+  checkEgress?: EgressGate;
 }
 
 /** Attached browser, or null when the deployment has no provider configured. */
@@ -237,6 +245,10 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
       controller: new RemoteBrowserController({
         provider,
         ...(settings.maxSessions ? { maxSessions: settings.maxSessions } : {}),
+        // Shared across every run on the deployment, so the gate is resolved
+        // per acting run rather than captured here (which would freeze it to
+        // whichever user's run happened to build the controller first).
+        checkEgress: resolveRunEgress,
         // Logged here rather than through this attach's `warn`, deliberately.
         // The controller is module-scoped and outlives every run on it, so
         // closing over one run's callback would pin that run's socket for the
@@ -286,6 +298,11 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
     const id = (e as { taskId?: string }).taskId;
     if (!id) return;
     taskId = id;
+    // Make this run's egress gate resolvable by the shared controller for the
+    // life of the run. Removed in endRun so a finished run's id never resolves
+    // a stale gate. Keyed by the task id — the same control identity the
+    // controller passes back to its checkEgress.
+    if (opts.checkEgress) registerRunGate(id, opts.checkEgress);
     // Who holds the page, on the same one socket as everything else about it.
     //
     // Pushed rather than answered, because the interesting change is the one
@@ -379,6 +396,7 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
     async endRun() {
       // Only this run's session. The controller outlives the run.
       if (taskId) {
+        unregisterRunGate(taskId);
         await controller.endRun(taskId);
         controller.offLiveViewFor(taskId);
         controller.offControlFor(taskId);
