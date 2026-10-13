@@ -36,6 +36,7 @@ vi.mock('#cascade-ai', async (importOriginal) => {
   class FakeCascade extends EventEmitter {
     gateListenersAtRun: Record<string, number> = {};
     setMediaSink(): void { /* unused here */ }
+    setEgressGate(): void { /* the real one installs the per-user egress gate */ }
     setFeedbackSource(): void { /* unused here */ }
     resolvePlanApproval(): void { /* unused here */ }
     resolveContextApproval(): void { /* unused here */ }

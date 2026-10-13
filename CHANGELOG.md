@@ -174,6 +174,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It shows what the section was asked to do, what it has so far, and what
   each choice does to that work — on the web and in the desktop app.
 
+### Security
+- **An outbound-egress boundary the platform owns, not the model's own
+  refusal.** A model decides one call at a time from that call's text, so a
+  run that splits a goal into narrow sub-tasks can pass each worker a slice
+  that reads as harmless while the run as a whole is not. The platform now
+  judges the *shape* of the traffic a run actually emits — how many requests,
+  to how many hosts, how fast — which survives that decomposition, and refuses
+  a request that looks like enumeration or a sweep regardless of what asked
+  for it. The check runs on every tool that opens a caller-named host
+  (`web_fetch`, the browser's navigate) before the request, separately from
+  the existing SSRF guard, and carries an operator denylist hook. It inspects
+  no payload, by design. On Cascade Cloud it is metered per user: a blocked
+  request is a strike, and an account that collects enough strikes in an hour
+  is suspended and its further runs refused until an operator clears it.
+  Suspension persists across restarts. A local run, which has no shared actor
+  to meter, is unaffected.
+
 ## 0.82.0 - 2026-09-22
 
 ### Added
