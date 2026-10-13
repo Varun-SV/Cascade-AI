@@ -339,9 +339,11 @@ export class ProcessJail {
     const policyFiles = this.policy.readOnlyFiles?.() ?? [];
     // Through a symlink — what it leads to — and under every other name the
     // file has in the workspace (hard links), where a write would reach it.
-    const frozen = [...new Set([...policyFiles, ...gitConfig].flatMap((f) => {
+    const real = (f: string): string[] => {
       try { return fs.statSync(f).isFile() ? [fs.realpathSync(f)] : []; } catch { return []; }
-    }))];
+    };
+    const gitConfigReal = new Set(gitConfig.flatMap(real));
+    const frozen = [...new Set([...policyFiles, ...gitConfig].flatMap(real))];
     frozen.push(...(await linkAliasesOf(frozen.map((f) => ({ path: f, dir: false })), this.policy.workspaceRoot)).map((h) => h.path).filter((f) => !frozen.includes(f)));
     // A mount keeps a file's contents, not its name: a command can still
     // remove a symlinked policy file and put another in its place. So each
@@ -349,11 +351,22 @@ export class ProcessJail {
     const restorePolicy = guardFiles(policyFiles);
 
     if (!opts.offline) {
-      const done = async (): Promise<string | void> => restorePolicy();
+      // What git's configuration holds goes to the model with anything a
+      // command prints, and it can hold a credential: a token in a remote's
+      // URL, an `extraheader`. The command is shown each such file with
+      // those taken out (`withoutCredentials`); git still finds its
+      // remotes and settings there.
+      const scrubbed = scrubbedCopies(frozen.filter((f) => gitConfigReal.has(f)));
+      const done = async (): Promise<string | void> => {
+        try { return restorePolicy(); } finally { scrubbed.cleanup(); }
+      };
       if (kind === 'sandbox-exec') {
-        return { ok: true, launch: { file: 'sandbox-exec', args: ['-p', seatbeltProfile(hidden, frozen), file, ...args], env, cwd: opts.cwd, jail: kind, done } };
+        // No mount to put a copy in its place: a file that holds one is not
+        // readable at all.
+        const unreadable = [...scrubbed.copies.keys()].map((f) => ({ path: f, dir: false }));
+        return { ok: true, launch: { file: 'sandbox-exec', args: ['-p', seatbeltProfile([...hidden, ...unreadable], frozen), file, ...args], env, cwd: opts.cwd, jail: kind, done } };
       }
-      return { ok: true, launch: { file: 'bwrap', args: bwrapArgs(hidden, false, opts.cwd, file, args, undefined, frozen), env, cwd: opts.cwd, jail: kind, done } };
+      return { ok: true, launch: { file: 'bwrap', args: bwrapArgs(hidden, false, opts.cwd, file, args, undefined, frozen, scrubbed.copies), env, cwd: opts.cwd, jail: kind, done } };
     }
 
     // A local-only caller's command writes only into the workspace, where
@@ -606,9 +619,11 @@ export class ProcessJail {
       ? undefined
       : path.relative(this.policy.workspaceRoot, repo).split(path.sep).join('/');
     const located = await git(root, ['rev-parse', '--absolute-git-dir', '--git-common-dir']);
-    if (located === null) return [];
+    // Git could not say where the store is, so not what it holds either:
+    // the store the folder shows is hidden, as when git cannot tell below.
+    if (located === null) return knownStores(root);
     const [gitDir = '', common = ''] = located.split('\n').map((line) => line.trim());
-    if (!gitDir) return [];
+    if (!gitDir) return knownStores(root);
     const dirs = [...new Set([gitDir, path.resolve(root, common || gitDir)])];
 
     const key = [offline, specs.join('\0'), storeStamp(dirs)].join('|');
@@ -696,7 +711,16 @@ export async function collectHidden(policy: JailPolicy, offline: boolean, nested
    */
   const walk = async (dir: string, relDir: string, chain: string[], link?: string): Promise<void> => {
     let entries: fs.Dirent[];
-    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch (err) {
+      // A folder that cannot be listed — one that can be entered but not
+      // read, say — cannot be checked for what it holds, though a command
+      // that knows a name in it can open it: hidden whole. One gone
+      // meanwhile has nothing to hide.
+      if (relDir && (err as NodeJS.ErrnoException).code !== 'ENOENT') out.push({ path: dir, dir: true });
+      return;
+    }
     if (link !== undefined) {
       throughLinks += entries.length;
       if (throughLinks > linkedLimit) {
@@ -709,6 +733,8 @@ export async function collectHidden(policy: JailPolicy, offline: boolean, nested
       // A nested repository's store — a `.git` folder, or a submodule's
       // `.git` file naming one — for the caller to check.
       if (entry.name === '.git' && relDir) nestedRepos?.push(dir);
+      // …and a bare one, which is a store with no `.git` in it.
+      else if (entry.isDirectory() && entry.name !== '.git' && looksLikeBareRepo(abs)) nestedRepos?.push(abs);
       if (entry.isDirectory()) {
         if (rel === '.cascade') {
           const keep = CASCADE_DIR_KEPT.map((k) => path.join(abs, k)).filter((k) => fs.existsSync(k));
@@ -962,7 +988,10 @@ export function toPathspecs(patterns: string[]): string[] {
  * mounted over themselves read-only, which also keeps them from being
  * removed, renamed or linked.
  */
-export function bwrapArgs(hidden: Hidden[], offline: boolean, cwd: string, file: string, args: string[], layout?: WriteLayout, readOnly: string[] = []): string[] {
+export function bwrapArgs(
+  hidden: Hidden[], offline: boolean, cwd: string, file: string, args: string[],
+  layout?: WriteLayout, readOnly: string[] = [], replaced: ReadonlyMap<string, string> = new Map(),
+): string[] {
   const out = ['--die-with-parent', '--new-session', '--unshare-pid', '--cap-drop', 'ALL'];
   if (layout) {
     // The host read-only, the scratch folders private; then the workspace
@@ -979,7 +1008,8 @@ export function bwrapArgs(hidden: Hidden[], offline: boolean, cwd: string, file:
   } else {
     out.push('--bind', '/', '/');
   }
-  for (const p of readOnly) out.push('--ro-bind', p, p);
+  // A `replaced` file is shown as its copy, read-only, at its own path.
+  for (const p of readOnly) out.push('--ro-bind', replaced.get(p) ?? p, p);
   out.push('--dev', '/dev', '--proc', '/proc');
   if (offline) out.push('--unshare-net');
   for (const h of hidden) {
@@ -1194,30 +1224,108 @@ async function stampFiles(root: string, skip: string[], dirs?: Set<string>, fold
 }
 
 /**
+ * Copies of the git configuration `files` that hold a credential, with it
+ * taken out (`withoutCredentials`), keyed by the file they stand for; those
+ * that hold none are not copied. In a folder of their own, readable by this
+ * user alone, which `cleanup` removes.
+ */
+function scrubbedCopies(files: string[]): { copies: Map<string, string>; cleanup: () => void } {
+  const copies = new Map<string, string>();
+  let dir: string | undefined;
+  for (const file of files) {
+    let text: string;
+    try { text = fs.readFileSync(file, 'utf8'); } catch { continue; }
+    const clean = withoutCredentials(text);
+    if (clean === text) continue;
+    dir ??= fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-gitconfig-'));
+    const copy = path.join(dir, `${copies.size}.config`);
+    fs.writeFileSync(copy, clean, { mode: 0o600 });
+    copies.set(file, copy);
+  }
+  return { copies, cleanup: () => { if (dir) fs.rmSync(dir, { recursive: true, force: true }); } };
+}
+
+/**
+ * A git configuration file's text without the credentials it can hold: the
+ * user part of every URL (`https://user:token@host/` → `https://host/`), in
+ * values and in section names alike, and every key whose name says it holds
+ * a secret (`extraheader`, `password`, `token`, `secret`, `pass`), with the
+ * lines its value continues onto. The rest is kept as written.
+ */
+export function withoutCredentials(text: string): string {
+  const out: string[] = [];
+  // Whether the line before went on to this one, and if so whether it was dropped.
+  let continuing: 'kept' | 'dropped' | null = null;
+  for (const line of text.split('\n')) {
+    // A value ending in an unescaped backslash goes on to the next line.
+    const continues = endsEscaped(line);
+    const key: string | undefined = continuing ? undefined : /^\s*([A-Za-z][A-Za-z0-9-]*)\s*(=|$)/.exec(line)?.[1];
+    const drop: boolean = continuing === 'dropped' || (!!key && SECRET_GIT_KEY.test(key));
+    if (!drop) out.push(withoutUserinfo(line));
+    continuing = continues ? (drop ? 'dropped' : 'kept') : null;
+  }
+  return out.join('\n');
+}
+
+/** Keys in a git configuration that hold a secret, by their name. */
+const SECRET_GIT_KEY = /(extraheader|password|passwd|token|secret|^pass$|smtppass)/i;
+
+/** Whether `line` (a trailing `\r` aside) ends in an odd run of backslashes. */
+function endsEscaped(line: string): boolean {
+  let end = line.length;
+  if (line[end - 1] === '\r') end--;
+  let slashes = 0;
+  while (end - slashes > 0 && line[end - slashes - 1] === '\\') slashes++;
+  return slashes % 2 === 1;
+}
+
+/** `line` with the user part of each URL in it taken out: `https://user:token@host` → `https://host`. */
+function withoutUserinfo(line: string): string {
+  let out = '';
+  let from = 0;
+  for (let at = line.indexOf('://'); at !== -1; at = line.indexOf('://', at + 3)) {
+    const start = at + 3;
+    let end = start;
+    while (end < line.length && !/[\s/@"]/.test(line[end]!)) end++;
+    if (line[end] !== '@') continue;
+    out += line.slice(from, start);
+    from = end + 1;
+    // The next search starts just past the '@'.
+    at = end - 2;
+  }
+  return out + line.slice(from);
+}
+
+/**
  * Note what each file is now — its contents and mode, or where it leads if
  * a symlink — and return a check that puts back any that has changed since,
  * saying which. One not there now is left to whoever makes it.
  */
 function guardFiles(files: string[]): () => string | void {
-  const was = new Map<string, { link: string } | { data: Buffer; mode: number }>();
+  const was = new Map<string, { link: string } | { data: Buffer; mode: number } | { absent: true }>();
   for (const file of files) {
     try {
-      const st = fs.lstatSync(file);
-      if (st.isSymbolicLink()) was.set(file, { link: fs.readlinkSync(file) });
+      const st = fs.lstatSync(file, { throwIfNoEntry: false });
+      // One not there is kept from being made: what a command would put
+      // there decides what is protected as much as an edit would.
+      if (!st) was.set(file, { absent: true });
+      else if (st.isSymbolicLink()) was.set(file, { link: fs.readlinkSync(file) });
       else if (st.isFile()) was.set(file, { data: fs.readFileSync(file), mode: st.mode & 0o7777 });
-    } catch { /* not there */ }
+    } catch { /* unreadable: left to the read-only mount */ }
   }
   return () => {
     const restored: string[] = [];
     for (const [file, then] of was) {
       try {
         const st = fs.lstatSync(file, { throwIfNoEntry: false });
-        const same = 'link' in then
-          ? !!st?.isSymbolicLink() && fs.readlinkSync(file) === then.link
-          : !!st?.isFile() && (st.mode & 0o7777) === then.mode && fs.readFileSync(file).equals(then.data);
+        const same = 'absent' in then
+          ? !st
+          : 'link' in then
+            ? !!st?.isSymbolicLink() && fs.readlinkSync(file) === then.link
+            : !!st?.isFile() && (st.mode & 0o7777) === then.mode && fs.readFileSync(file).equals(then.data);
         if (same) continue;
         fs.rmSync(file, { force: true, recursive: true });
-        if ('link' in then) fs.symlinkSync(then.link, file);
+        if ('absent' in then) { /* removed: it was not there */ } else if ('link' in then) fs.symlinkSync(then.link, file);
         else fs.writeFileSync(file, then.data, { mode: then.mode });
         restored.push(path.basename(file));
       } catch { /* left as it is */ }
@@ -1371,10 +1479,42 @@ function storeStamp(dirs: string[]): string {
 
 async function gitDirsOf(root: string): Promise<string[]> {
   const located = await git(root, ['rev-parse', '--absolute-git-dir', '--git-common-dir']);
-  if (located === null) return [];
+  if (located === null) return knownStores(root);
   const [gitDir = '', common = ''] = located.split('\n').map((line) => line.trim());
-  if (!gitDir) return [];
+  if (!gitDir) return knownStores(root);
   return [...new Set([gitDir, path.resolve(root, common || gitDir)])];
+}
+
+/**
+ * Where a repository at `root` keeps its store, read from the folder alone,
+ * for when git cannot say — a malformed config, a check that timed out: its
+ * `.git` folder, the folder a `.git` file names, or `root` itself when it is
+ * a bare one. None when it is not a repository at all.
+ */
+function knownStores(root: string): string[] {
+  const dotGit = path.join(root, '.git');
+  const st = fs.lstatSync(dotGit, { throwIfNoEntry: false });
+  if (st?.isDirectory()) return [dotGit];
+  if (st?.isFile()) {
+    try {
+      const named = /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(dotGit, 'utf8'))?.[1];
+      return named ? [path.resolve(root, named)] : [dotGit];
+    } catch {
+      return [dotGit];
+    }
+  }
+  return looksLikeBareRepo(root) ? [root] : [];
+}
+
+/** Whether `dir` is laid out as a bare git repository: a HEAD file beside objects/ and refs/. */
+function looksLikeBareRepo(dir: string): boolean {
+  try {
+    return fs.statSync(path.join(dir, 'HEAD')).isFile()
+      && fs.statSync(path.join(dir, 'objects')).isDirectory()
+      && fs.statSync(path.join(dir, 'refs')).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 /** `git push` options that push refs wholesale rather than the ones named. */

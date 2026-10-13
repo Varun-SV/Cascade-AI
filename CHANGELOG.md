@@ -431,6 +431,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not count by itself — a resolver's search domain or a hosts entry can send
   it anywhere — so a provider reached that way (a compose service, a private
   DNS zone) is declared with `privateNetwork: true`.
+- **Commands see git's configuration without its credentials.** A token in a
+  remote's URL, or an `http.extraHeader`, was readable to every command, and
+  what a command prints goes to the model. On Linux a command now sees a copy
+  with the user part of each URL and every secret-named key taken out; on
+  macOS, where there is no mount to put the copy in place, a configuration
+  holding one is not readable to commands at all. The `git` tool keeps the
+  real file to push and pull with.
+- **The jail hides what it cannot look into.** A folder in the workspace that
+  can be entered but not listed is hidden whole, a bare repository nested in
+  the workspace has its store checked like any other, and a store git cannot
+  locate (a malformed config) is hidden rather than left in view. A policy
+  file such as `.cascadeignore` that a command creates where there was none is
+  removed when the command ends.
+- **T1 no longer falls back to the world-state log with `privacy.paths`
+  rules**, whose entries say nothing of the files they came from; an
+  agent-written tool's `fetch` reads at most its limit of a response rather
+  than the whole of it; and a worker's approval request is withdrawn when its
+  run is cancelled.
 
 ## 0.82.0 - 2026-09-22
 

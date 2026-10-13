@@ -169,6 +169,32 @@ export function isExecutableToolCode(code: string): boolean {
   }
 }
 
+/**
+ * A response body as text, at most `maxChars` of it: read as it arrives and
+ * the transfer cancelled once enough is in, so a huge response is never held
+ * whole on this thread. UTF-8 takes at most 4 bytes a character, which
+ * bounds what is read before decoding.
+ */
+export async function readCapped(resp: Response, maxChars: number): Promise<string> {
+  const reader = resp.body?.getReader();
+  if (!reader) return '';
+  const maxBytes = maxChars * 4;
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (bytes < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      bytes += value.byteLength;
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  const text = new TextDecoder().decode(Buffer.concat(chunks).subarray(0, maxBytes));
+  return text.length > maxChars ? text.slice(0, maxChars) : text;
+}
+
 /** Run an agent-supplied fetch on the MAIN thread through the SSRF guard, marshaling
  *  a minimal Response for the sandbox (a real Response can't cross into it). */
 async function bridgeFetch(
@@ -186,8 +212,7 @@ async function bridgeFetch(
     });
     const contentType = resp.headers.get('content-type') ?? '';
     let body = '';
-    try { body = await resp.text(); } catch { body = ''; }
-    if (body.length > DYNAMIC_FETCH_MAX) body = body.slice(0, DYNAMIC_FETCH_MAX);
+    try { body = await readCapped(resp, DYNAMIC_FETCH_MAX); } catch { body = ''; }
     return { ok: resp.ok, status: resp.status, statusText: resp.statusText, contentType, body };
   } catch (err) {
     // SSRF block / network error → reject the sandbox's fetch (like a real failure).

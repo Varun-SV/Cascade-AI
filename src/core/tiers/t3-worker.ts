@@ -1170,7 +1170,9 @@ export class T3Worker extends BaseTier {
           sectionContext: this.assignment?.subtaskTitle ?? 'Unknown section',
           localOnly: this.localOnlyMatch,
         };
-        const decision = await this.permissionEscalator.requestPermission(req);
+        // The run's signal: a cancelled run withdraws the question rather
+        // than leaving it with an evaluator or on screen.
+        const decision = await this.permissionEscalator.requestPermission(req, this.signal);
         if (!decision.approved) return `Tool ${tc.name} was denied (decided by ${decision.decidedBy}).`;
       } else {
         // ── Fallback: legacy direct approval event (used when escalator not wired) ──

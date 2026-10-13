@@ -341,4 +341,20 @@ describe('WorldStateDB — where a fact came from', () => {
     expect(without).toContain('hashes in vault');
     expect(without).toContain('keys weekly');
   });
+
+  // With no fact that may leave, T1 fell back to the linear log, whose
+  // entries say nothing of the files they came from.
+  it('does not fall back to the linear log with privacy.paths rules', async () => {
+    db.addEntry('t3', 'Completed: summarized secret/runbook.md');
+    const plan = async (privacy: PrivacyPaths | undefined) => {
+      const generate = vi.fn(async () => makeResult(PLAN_JSON));
+      const router = { generate, getModelForTier: () => undefined, getWorldStateDB: () => db, getPrivacyPaths: () => privacy } as unknown as CascadeRouter;
+      await new T1Administrator(router, makeToolRegistry(), {} as unknown as CascadeConfig).previewPlan('do something');
+      return generate.mock.calls[0]![1]!.messages[0]!.content as string;
+    };
+    const withRules = await plan(new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]));
+    expect(withRules).not.toContain('PROJECT WORLD STATE');
+    expect(withRules).not.toContain('summarized secret/runbook.md');
+    expect(await plan(undefined)).toContain('summarized secret/runbook.md');
+  });
 });

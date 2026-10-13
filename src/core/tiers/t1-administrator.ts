@@ -626,7 +626,10 @@ In 3-5 terse bullets, flag the most important RISKS, GAPS, or over-/under-decomp
       const knowledge = db.getFormattedKnowledge(prompt, undefined, (fact) => factMayLeave(fact, privacy, db.workspacePath));
       if (knowledge) {
         worldStateContext = `\n\nPROJECT KNOWLEDGE (relevant facts about this codebase):\n${knowledge}`;
-      } else {
+      } else if (!privacy?.hasPolicies()) {
+        // Not with privacy.paths rules: the log's entries say nothing of
+        // which files they came from, so none can be shown to be free of a
+        // local-only one — the check the facts above go through.
         const log = db.getFormattedState();
         if (log && log !== 'World State is currently empty.') {
           worldStateContext = `\n\nPROJECT WORLD STATE (Current architecture and recent changes):\n${log}`;

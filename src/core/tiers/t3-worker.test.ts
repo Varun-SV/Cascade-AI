@@ -171,11 +171,14 @@ describe('T3Worker', () => {
     const worker = new T3Worker(router, toolRegistry, 't2-parent');
     worker.setPermissionEscalator(escalator);
 
-    const result = await worker.execute(makeAssignment(), 'task-1');
+    const run = new AbortController();
+    const result = await worker.execute(makeAssignment(), 'task-1', run.signal);
 
     expect(result.status).toBe('COMPLETED');
     expect(result.output).toBe('Final summary');
     expect(requestPermission).toHaveBeenCalledOnce();
+    // The run's signal goes with the question, so a cancelled run withdraws it.
+    expect(requestPermission.mock.calls[0]?.[1]).toBe(run.signal);
     expect(requestPermission.mock.calls[0]?.[0]).toEqual(expect.objectContaining<Partial<PermissionRequest>>({
       parentT2Id: 't2-parent',
       toolName: 'file_write',

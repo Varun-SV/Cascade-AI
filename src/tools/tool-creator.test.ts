@@ -10,7 +10,7 @@ import path from 'node:path';
 
 import { ToolRegistry } from './registry.js';
 import { BaseTool } from './base.js';
-import { ToolCreator, normalizeToolSchema, sandboxModeOf, type GeneratedToolSpec } from './tool-creator.js';
+import { ToolCreator, normalizeToolSchema, readCapped, sandboxModeOf, type GeneratedToolSpec } from './tool-creator.js';
 import { generateDiff, diffSummary } from './diff.js';
 import { PermissionEscalator } from '../core/permissions/escalator.js';
 import { projectStateDir } from '../config/project-state.js';
@@ -495,5 +495,29 @@ describe('PermissionEscalator — forceReprompt bypasses the always-cache (v0.9.
     await esc.requestPermission({ ...base, id: '2' });                      // cache hit (no eval)
     await esc.requestPermission({ ...base, id: '3', forceReprompt: true }); // bypasses cache → evaluator
     expect(evals).toBe(2);
+  });
+});
+
+// A tool's fetch read the whole response before cutting it to size, so a
+// huge one was held whole on the main thread first.
+describe('readCapped', () => {
+  it('stops reading, and cancels the transfer, once it has enough', async () => {
+    let pulled = 0;
+    let cancelled = false;
+    const chunk = new TextEncoder().encode('x'.repeat(1024));
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) { pulled++; controller.enqueue(chunk); },
+      cancel() { cancelled = true; },
+    });
+    const text = await readCapped(new Response(body), 2_000);
+    expect(text).toBe('x'.repeat(2_000));
+    expect(pulled).toBeLessThanOrEqual(10);
+    expect(cancelled).toBe(true);
+  });
+
+  it('returns a short body whole, multi-byte characters included', async () => {
+    expect(await readCapped(new Response('héllo — ✓'), 100)).toBe('héllo — ✓');
+    expect(await readCapped(new Response('héllo'), 2)).toBe('hé');
+    expect(await readCapped(new Response(null), 10)).toBe('');
   });
 });

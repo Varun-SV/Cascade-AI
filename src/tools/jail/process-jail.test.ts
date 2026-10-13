@@ -1,7 +1,7 @@
 // The process jail for shell, run_code and git. The unit tests run
 // everywhere; the ones that launch real commands in bubblewrap run where it
 // works (Linux with unprivileged user namespaces, or as root).
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import net from 'node:net';
@@ -12,7 +12,7 @@ import { PrivacyPaths } from '../../core/privacy/paths.js';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { BUILT_IN_PROTECTED } from '../../config/ignore.js';
 import { projectStateDir, statePath } from '../../config/project-state.js';
-import { ProcessJail, bwrapArgs, collectHidden, detectJail, homeSecrets, reachesUnder, scrubEnv, seatbeltProfile, toPathspecs, unixSocketFilter, type JailKind, type JailPolicy, withIncludes } from './process-jail.js';
+import { ProcessJail, bwrapArgs, collectHidden, detectJail, homeSecrets, reachesUnder, scrubEnv, seatbeltProfile, toPathspecs, unixSocketFilter, type JailKind, type JailPolicy, withIncludes, withoutCredentials } from './process-jail.js';
 
 const SECRET = 'sk-live-JAILTEST-0123456789';
 const LOCAL = 'LOCAL-ONLY-LAUNCH-PLAN';
@@ -1678,6 +1678,159 @@ describe.skipIf(!bwrapWorks)('in bubblewrap: a local-only command\'s marks that 
     } finally {
       delete process.env['CASCADE_MARK_RETRY_MS'];
       await fs.rm(made, { force: true });
+    }
+  });
+});
+
+// ── What git's configuration shows a command, and stores git can't locate ──
+describe('withoutCredentials', () => {
+  it('takes the user part out of URLs and drops keys that hold a secret, with the lines they continue onto', () => {
+    const text = [
+      '[remote "origin"]',
+      '\turl = https://user:ghp_TOKEN@github.com/o/r.git',
+      '\tfetch = +refs/heads/*:refs/remotes/origin/*',
+      '[url "https://x-access-token:ghs_TOKEN@github.com/"]',
+      '\tinsteadOf = https://github.com/',
+      '[http "https://example.com/"]',
+      '\textraHeader = AUTHORIZATION: basic c2VjcmV0 \\',
+      '\t\tcontinued-secret',
+      '[sendemail]',
+      '\tsmtpPass = hunter2',
+      '[core]',
+      '\tdescription = a value that goes on \\',
+      '\t\ttoken = and is kept',
+      '\tautocrlf = input',
+    ].join('\n');
+    const clean = withoutCredentials(text);
+    expect(clean).not.toMatch(/ghp_TOKEN|ghs_TOKEN|c2VjcmV0|continued-secret|hunter2/);
+    expect(clean).toContain('\turl = https://github.com/o/r.git');
+    expect(clean).toContain('[url "https://github.com/"]');
+    expect(clean).toContain('\tfetch = +refs/heads/*:refs/remotes/origin/*');
+    expect(clean).toContain('\t\ttoken = and is kept');
+    expect(clean).toContain('\tautocrlf = input');
+  });
+
+  it('leaves a file with nothing to take out as it is, and scans in linear time', () => {
+    const plain = '[core]\n\tbare = false\n[remote "o"]\n\turl = git@github.com:o/r.git\n';
+    expect(withoutCredentials(plain)).toBe(plain);
+    const long = `url = ${'https://'.repeat(50_000)}`;
+    const started = Date.now();
+    withoutCredentials(long);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+});
+
+describe('ProcessJail.prepare — git configuration, policy files and stores', () => {
+  const bwrap = async (): Promise<JailKind | null> => 'bwrap';
+  const repo = async (name: string): Promise<string> => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), `cascade-jail-${name}-`)));
+    execFileSync('git', ['init', '-q', dir]);
+    return dir;
+  };
+
+  // A remote's URL holding a token was readable to every command, and what a
+  // command prints goes to the model.
+  it('shows a command a copy of git\'s config with its credentials taken out, and removes it after', async () => {
+    const dir = await repo('creds');
+    try {
+      execFileSync('git', ['-C', dir, 'remote', 'add', 'origin', 'https://user:ghp_SECRET@github.com/o/r.git']);
+      const config = path.join(dir, '.git', 'config');
+      const r = await new ProcessJail(policy({ workspaceRoot: dir, detect: bwrap })).prepare('sh', ['-c', 'ls'], { cwd: dir, offline: false });
+      if (!r.ok) throw new Error(r.reason);
+      const args = r.launch.args;
+      const at = args.findIndex((a, i) => a === config && args[i - 2] === '--ro-bind');
+      expect(at).toBeGreaterThan(0);
+      const copy = args[at - 1]!;
+      expect(copy).not.toBe(config);
+      const shown = fsSync.readFileSync(copy, 'utf8');
+      expect(shown).not.toContain('ghp_SECRET');
+      expect(shown).toContain('https://github.com/o/r.git');
+      expect(fsSync.statSync(copy).mode & 0o777).toBe(0o600);
+      expect(fsSync.readFileSync(config, 'utf8')).toContain('ghp_SECRET');
+      await r.launch.done?.();
+      expect(fsSync.existsSync(copy)).toBe(false);
+      // The git tool keeps the real one: it pushes with it.
+      const git = await new ProcessJail(policy({ workspaceRoot: dir, detect: bwrap })).prepare('git', [], { cwd: dir, offline: false, keepGit: true });
+      expect(git.ok && git.launch.args.join(' ')).not.toContain('cascade-gitconfig-');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('mounts a config with nothing to take out as itself', async () => {
+    const dir = await repo('plain');
+    try {
+      const config = path.join(dir, '.git', 'config');
+      const r = await new ProcessJail(policy({ workspaceRoot: dir, detect: bwrap })).prepare('sh', [], { cwd: dir, offline: false });
+      expect(r.ok && r.launch.args.join(' ')).toContain(`--ro-bind ${config} ${config}`);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // A policy file not there when a command started was left to whatever the
+  // command put there.
+  it('removes a policy file a command made where there was none', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-absent-')));
+    try {
+      const ignore = path.join(dir, '.cascadeignore');
+      const r = await new ProcessJail(policy({ workspaceRoot: dir, detect: bwrap, readOnlyFiles: () => [ignore] })).prepare('sh', [], { cwd: dir, offline: false });
+      if (!r.ok) throw new Error(r.reason);
+      await fs.writeFile(ignore, '!.env\n');
+      expect(await r.launch.done?.()).toMatch(/\.cascadeignore/);
+      expect(fsSync.existsSync(ignore)).toBe(false);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // When git could not say where the store was, nothing of it was hidden.
+  it('hides the store a folder shows when git cannot locate it', async () => {
+    const dir = await repo('broken');
+    try {
+      await fs.writeFile(path.join(dir, '.git', 'config'), '[core\n\tbroken');
+      const r = await new ProcessJail(policy({ workspaceRoot: dir, detect: bwrap })).prepare('sh', [], { cwd: dir, offline: false });
+      expect(r.ok && r.launch.args.join(' ')).toContain(`--tmpfs ${path.join(dir, '.git')}`);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('collectHidden — what it cannot look into', () => {
+  it('hands back a bare repository nested in the workspace for its store to be checked', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-bare-')));
+    try {
+      execFileSync('git', ['init', '-q', '--bare', path.join(dir, 'mirror.git')]);
+      const nested: string[] = [];
+      await collectHidden(policy({ workspaceRoot: dir }), false, nested);
+      expect(nested).toContain(path.join(dir, 'mirror.git'));
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // A folder that can be entered but not listed was skipped: what it held
+  // went unchecked, and a command knowing a name in it could open it.
+  it('hides a folder it cannot list whole, and passes over one gone meanwhile', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-unlistable-')));
+    const locked = path.join(dir, 'locked');
+    const gone = path.join(dir, 'gone');
+    await fs.mkdir(locked);
+    await fs.mkdir(gone);
+    const real = fsSync.promises.readdir;
+    const spy = vi.spyOn(fsSync.promises, 'readdir').mockImplementation(((p: fsSync.PathLike, o: unknown) => {
+      const code = p === locked ? 'EACCES' : p === gone ? 'ENOENT' : null;
+      if (code) return Promise.reject(Object.assign(new Error(code), { code }));
+      return (real as (p: fsSync.PathLike, o: unknown) => Promise<unknown>)(p, o);
+    }) as typeof real);
+    try {
+      const hidden = await collectHidden(policy({ workspaceRoot: dir }), false);
+      expect(hidden).toContainEqual({ path: locked, dir: true });
+      expect(hidden.map((h) => h.path)).not.toContain(gone);
+    } finally {
+      spy.mockRestore();
+      await fs.rm(dir, { recursive: true, force: true });
     }
   });
 });
