@@ -29,6 +29,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { Worker } from 'node:worker_threads';
 import { onProjectReleased, statePath, STATE } from '../config/project-state.js';
 import { withLock } from '../utils/file-lock.js';
 
@@ -139,7 +140,6 @@ class Markers {
   private readonly lock: string;
   private readonly mutex: string;
   private readonly held = new Set<string>();
-  private heartbeat?: ReturnType<typeof setInterval>;
   private seq = 0;
 
   constructor(private readonly dir: string) {
@@ -213,24 +213,63 @@ class Markers {
 
   private hold(file: string): void {
     this.held.add(file);
-    this.heartbeat ??= setInterval(() => {
-      const now = new Date();
-      for (const held of this.held) {
-        try { fs.utimesSync(held, now, now); } catch { /* removed meanwhile */ }
-      }
-    }, HEARTBEAT_MS);
-    this.heartbeat.unref?.();
+    heartbeat.hold(file);
   }
 
   private drop(file: string): void {
     this.held.delete(file);
+    heartbeat.drop(file);
     fs.rmSync(file, { force: true });
-    if (this.held.size === 0 && this.heartbeat) {
-      clearInterval(this.heartbeat);
-      this.heartbeat = undefined;
-    }
   }
 }
+
+/**
+ * Touches this process's held markers every HEARTBEAT_MS, from a thread of
+ * its own: a holder whose event loop is busy in synchronous work for longer
+ * than STALE_MS — walking a large git store, say — is alive all the same,
+ * and a timer on its own loop would let its markers go stale and be taken
+ * from it. One per process, started with the first marker held, and never
+ * keeping the process alive.
+ */
+const heartbeat = new (class {
+  private readonly files = new Set<string>();
+  private worker?: Worker;
+
+  hold(file: string): void {
+    this.files.add(file);
+    this.send();
+  }
+
+  drop(file: string): void {
+    this.files.delete(file);
+    this.send();
+  }
+
+  private send(): void {
+    if (!this.worker) {
+      if (this.files.size === 0) return;
+      this.worker = new Worker(HEARTBEAT_SOURCE, { eval: true, workerData: HEARTBEAT_MS });
+      this.worker.unref();
+      // A thread that cannot start or dies leaves the next hold to start another.
+      this.worker.on('error', () => { this.worker = undefined; });
+      this.worker.on('exit', () => { this.worker = undefined; });
+    }
+    this.worker.postMessage([...this.files]);
+  }
+})();
+
+const HEARTBEAT_SOURCE = `
+const { parentPort, workerData } = require('node:worker_threads');
+const fs = require('node:fs');
+let files = [];
+parentPort.on('message', (list) => { files = list; });
+setInterval(() => {
+  const now = new Date();
+  for (const file of files) {
+    try { fs.utimesSync(file, now, now); } catch { /* removed meanwhile */ }
+  }
+}, workerData);
+`;
 
 /** A marker not touched for longer than a holder ever leaves it: its process ended. */
 function stale(file: string): boolean {

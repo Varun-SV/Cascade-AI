@@ -27,6 +27,29 @@ describe('WorkspaceGate', () => {
     }
   });
 
+  // The heartbeat ran on the holder's own event loop: synchronous work longer
+  // than a marker lives let it go stale, and another process took it.
+  it('keeps its markers fresh while its event loop is busy', async () => {
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-gate-busy-')));
+    const own = `${ws}-state`;
+    const release = useProjectStateDir(ws, own);
+    try {
+      const leave = await new WorkspaceGate(ws).enter('tools', true);
+      const dir = statePath(ws, 'gate');
+      const marker = path.join(dir, (await fs.readdir(dir)).find((name) => name.startsWith('tools-'))!);
+      const old = new Date(Date.now() - 60_000);
+      await fs.utimes(marker, old, old);
+      // Blocked past one heartbeat, as a long synchronous walk would.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 6_500);
+      expect(Date.now() - (await fs.stat(marker)).mtimeMs).toBeLessThan(5_000);
+      leave();
+    } finally {
+      release();
+      await fs.rm(ws, { recursive: true, force: true });
+      await fs.rm(own, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it('lets shared callers in together, and one alone only once they have left', async () => {
     const gate = new WorkspaceGate();
     const events: string[] = [];

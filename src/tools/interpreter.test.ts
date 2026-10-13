@@ -18,3 +18,19 @@ describe('run_code — stopping', () => {
     expect(String(out)).toMatch(/Execution failed|abort/i);
   });
 });
+
+// A jail that threw while preparing left the script behind, in the folder
+// later commands are shown — and a local-only subtask's can hold what it read.
+describe('run_code — its script', () => {
+  it('is removed when the jail throws while preparing', async () => {
+    const { CodeInterpreterTool } = await import('./interpreter.js');
+    const { statePath, STATE } = await import('../config/project-state.js');
+    const tool = new CodeInterpreterTool();
+    tool.setWorkspaceRoot(ws);
+    tool.setProcessJail({ prepare: async () => { throw new Error('privacy record unreadable'); } } as never);
+    await expect(tool.execute({ language: 'nodejs', code: 'console.log("PRIVATE")' }, { tierId: 't3', sessionId: 's' } as never))
+      .rejects.toThrow(/privacy record unreadable/);
+    const tmp = statePath(ws, STATE.tmp);
+    expect(fs.existsSync(tmp) ? fs.readdirSync(tmp).filter((f) => f.startsWith('intp_')) : []).toEqual([]);
+  });
+});

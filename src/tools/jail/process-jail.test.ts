@@ -873,6 +873,20 @@ describe('what git push may send', () => {
     expect(remoteHas('refs/heads/main')).toBe(false);
   });
 
+  // Git took `--ta` for `--tags` and pushed every tag beside the branch
+  // named, unchecked.
+  it('checks every ref for an abbreviated bulk option', async () => {
+    g(repo, 'tag', 'with-plan');
+    try {
+      for (const flag of ['--ta', '--mirr', '--al']) {
+        await expect(push('origin', 'HEAD~1:refs/heads/public', flag), flag).rejects.toThrow(/refused/);
+      }
+      expect(remoteHas('refs/tags/with-plan')).toBe(false);
+    } finally {
+      g(repo, 'tag', '-d', 'with-plan');
+    }
+  });
+
   // A submodule's commits are not in this history: its private blob went
   // to the submodule's remote unchecked.
   it('refuses a push that would push submodules too', async () => {
@@ -1072,6 +1086,22 @@ describe('withIncludes', () => {
       expect(await fs.readFile(path.join(dir, 'sub', 'b.cfg'), 'utf8')).toBe('');
       expect(await fs.readFile(path.join(home, 'c.cfg'), 'utf8')).toBe('');
     } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // `~user/` was taken as a folder named `~user` beside the including file,
+  // so the file git really reads was left writable.
+  it.skipIf(process.platform === 'win32')('expands ~user/ as git does', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-includes-user-')));
+    const name = `.cascade-include-test-${process.pid}.cfg`;
+    const target = path.join(os.userInfo().homedir, name);
+    try {
+      const top = path.join(dir, 'config');
+      await fs.writeFile(top, `[include]\n\tpath = ~${os.userInfo().username}/${name}\n`);
+      expect(await withIncludes([top], path.join(dir, 'home'))).toEqual([top, target]);
+    } finally {
+      await fs.rm(target, { force: true });
       await fs.rm(dir, { recursive: true, force: true });
     }
   });

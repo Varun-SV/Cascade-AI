@@ -541,7 +541,10 @@ export class ProcessJail {
         }
         continue;
       }
-      if (PUSH_BULK_OPTIONS.has(arg)) { bulk = true; continue; }
+      // Git takes any unambiguous abbreviation (`--ta` for `--tags`); one
+      // that could also be another option is taken for the bulk one, which
+      // checks more.
+      if (PUSH_BULK_OPTIONS.some((option) => abbreviates(arg, option, '--a'.length))) { bulk = true; continue; }
       if (PUSH_OPTIONS_WITH_VALUE.has(arg)) { i++; continue; }
       if (arg.startsWith('-')) continue;
       positional.push(arg);
@@ -844,15 +847,16 @@ async function includesOf(file: string, home: string): Promise<string[]> {
   try { const st = fs.statSync(file); stamp = `${st.ino}:${st.mtimeMs}:${st.size}`; } catch { return []; }
   const cached = includeCache.get(file);
   if (cached?.stamp === stamp) return cached.targets;
+  // Expanded by git itself (`--path`): `~/`, `~user/` and `%(prefix)/` as it
+  // reads them when it loads the include. What is still relative after that
+  // is relative to the including file, as git takes an include.
   const listed = await new Promise<string>((resolve) => {
-    execFile('git', ['config', '--file', file, '--null', '--get-regexp', '^include(if\\..*)?\\.path$'],
-      { timeout: 10_000, windowsHide: true, maxBuffer: 1024 * 1024 }, (_err, stdout) => resolve(stdout ?? ''));
+    execFile('git', ['config', '--file', file, '--null', '--path', '--get-regexp', '^include(if\\..*)?\\.path$'],
+      { timeout: 10_000, windowsHide: true, maxBuffer: 1024 * 1024, env: { ...process.env, HOME: home } }, (_err, stdout) => resolve(stdout ?? ''));
   });
   const targets = listed.split('\0').filter(Boolean).flatMap((entry) => {
     const value = entry.slice(entry.indexOf('\n') + 1);
-    if (!value || value.startsWith('%(')) return [];
-    if (value.startsWith('~/')) return [path.join(home, value.slice(2))];
-    return [path.resolve(path.dirname(file), value)];
+    return value ? [path.resolve(path.dirname(file), value)] : [];
   });
   includeCache.set(file, { stamp, targets });
   return targets;
@@ -1374,7 +1378,7 @@ async function gitDirsOf(root: string): Promise<string[]> {
 }
 
 /** `git push` options that push refs wholesale rather than the ones named. */
-const PUSH_BULK_OPTIONS = new Set(['--all', '--branches', '--mirror', '--tags']);
+const PUSH_BULK_OPTIONS = ['--all', '--branches', '--mirror', '--tags'];
 
 /** `--recurse-submodules` values with which git push sends no submodule's commits. */
 const PUSH_NO_RECURSION = new Set(['no', 'false', 'off', '0', 'check']);

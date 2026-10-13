@@ -9,6 +9,7 @@ import { execFile, execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
+import type { ProcessJail } from './jail/process-jail.js';
 
 /** Detect the first available command from a candidate list. Returns null if none found. */
 function detectCommand(candidates: string[]): string | null {
@@ -82,54 +83,54 @@ export class CodeInterpreterTool extends BaseTool {
     const fileName = `intp_${randomUUID().slice(0, 8)}.${extension}`;
     const filePath = path.join(tmpDir, fileName);
 
-    // 1. Write the script
+    // 1. Write the script. It is removed however this call ends — a jail
+    //    that refuses or fails to prepare included: a local-only subtask's
+    //    script can hold what it read, and the folder is one later commands
+    //    see.
     fs.writeFileSync(filePath, code, 'utf-8');
+    let prepared: Awaited<ReturnType<ProcessJail['prepare']>> | undefined;
+    let output: string;
+    try {
+      // 2. Execute via execFile with an argv array — the interpreter and its
+      //    arguments are passed directly to the OS, never through a shell, so a
+      //    value like `"; rm -rf ~ #` in `args` is an inert string rather than a
+      //    second command. (Previously these were string-interpolated into an
+      //    `exec` command line.)
+      const execArgs = [filePath, ...args];
 
-    // 2. Execute via execFile with an argv array — the interpreter and its
-    //    arguments are passed directly to the OS, never through a shell, so a
-    //    value like `"; rm -rf ~ #` in `args` is an inert string rather than a
-    //    second command. (Previously these were string-interpolated into an
-    //    `exec` command line.)
-    const execArgs = [filePath, ...args];
+      // In the jail, when there is one (jail/process-jail.ts). The script lives
+      // under .cascade/tmp, which the jail leaves in view.
+      prepared = this.jail
+        ? await this.jail.prepare(cmdPrefix, execArgs, { cwd: this.workspaceRoot, offline: options.isOffline?.() === true })
+        : undefined;
+      if (prepared && !prepared.ok) throw new Error(prepared.reason);
+      const launch = prepared?.launch ?? { file: cmdPrefix, args: execArgs, cwd: this.workspaceRoot, env: process.env };
 
-    // In the jail, when there is one (jail/process-jail.ts). The script lives
-    // under .cascade/tmp, which the jail leaves in view.
-    const prepared = this.jail
-      ? await this.jail.prepare(cmdPrefix, execArgs, { cwd: this.workspaceRoot, offline: options.isOffline?.() === true })
-      : undefined;
-    if (prepared && !prepared.ok) {
-      try { fs.unlinkSync(filePath); } catch { /* already gone */ }
-      throw new Error(prepared.reason);
-    }
-    const launch = prepared?.launch ?? { file: cmdPrefix, args: execArgs, cwd: this.workspaceRoot, env: process.env };
-
-    // 3. Execute
-    const output = await new Promise<string>((resolve) => {
-      const startMs = Date.now();
-      execFile(launch.file, launch.args, { cwd: launch.cwd, env: launch.env, timeout: 30000, signal: options.signal }, (error, stdout, stderr) => {
-        const duration = Date.now() - startMs;
-
-        // 4. Cleanup (Always delete the script from the filesystem)
-        try {
-          if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
-          }
-        } catch (cleanupErr) {
-          console.error(`Failed to cleanup interpreter script ${filePath}:`, cleanupErr);
-        }
-
-        if (error) {
-          const timedOut = error.killed && duration >= 30000;
-          if (timedOut) {
-            resolve(`Execution timed out after 30s. Consider breaking the task into smaller pieces.\nPartial stdout: ${stdout}\nStderr: ${stderr}`);
+      // 3. Execute
+      output = await new Promise<string>((resolve) => {
+        const startMs = Date.now();
+        execFile(launch.file, launch.args, { cwd: launch.cwd, env: launch.env, timeout: 30000, signal: options.signal }, (error, stdout, stderr) => {
+          const duration = Date.now() - startMs;
+          if (error) {
+            const timedOut = error.killed && duration >= 30000;
+            if (timedOut) {
+              resolve(`Execution timed out after 30s. Consider breaking the task into smaller pieces.\nPartial stdout: ${stdout}\nStderr: ${stderr}`);
+            } else {
+              resolve(`Execution failed (${duration}ms):\nError: ${error.message}\nStderr: ${stderr}\nStdout: ${stdout}`);
+            }
           } else {
-            resolve(`Execution failed (${duration}ms):\nError: ${error.message}\nStderr: ${stderr}\nStdout: ${stdout}`);
+            resolve(`Execution successful (${duration}ms):\nStdout: ${stdout}\nStderr: ${stderr}`);
           }
-        } else {
-          resolve(`Execution successful (${duration}ms):\nStdout: ${stdout}\nStderr: ${stderr}`);
-        }
+        });
       });
-    });
+    } finally {
+      // 4. Cleanup, before the jail looks for what the command wrote.
+      try {
+        fs.rmSync(filePath, { force: true });
+      } catch (cleanupErr) {
+        console.error(`Failed to cleanup interpreter script ${filePath}:`, cleanupErr);
+      }
+    }
     const note = await prepared?.launch.done?.();
     return note ? `${output}\n\n[note] ${note}` : output;
   }

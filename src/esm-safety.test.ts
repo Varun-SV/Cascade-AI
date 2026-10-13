@@ -14,10 +14,10 @@
 //  CJS and ESM build targets, so there is never a reason for `src/` to use a
 //  dynamic `require(` outside a context that genuinely runs as CommonJS.
 //
-//  The one legitimate exception: tool-creator.ts's Worker harness source,
-//  which is eval'd inside a `new Worker(src, { eval: true })` with no
-//  `type: 'module'` — that is a real synchronous-CJS `require` provided by
-//  Node to the eval'd script, not the esbuild shim.
+//  The legitimate exceptions: Worker sources eval'd by `new Worker(src,
+//  { eval: true })` with no `type: 'module'` — tool-creator.ts's harness and
+//  workspace-gate.ts's heartbeat. Theirs is a real synchronous-CJS `require`
+//  provided by Node to the eval'd script, not the esbuild shim.
 
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -29,6 +29,7 @@ const srcDir = dirname(fileURLToPath(import.meta.url));
 
 const ALLOWED_DYNAMIC_REQUIRE_FILES = new Set([
   'tools/tool-creator.ts', // inside HARNESS_SRC: a real CJS eval'd Worker script, not esbuild output
+  'tools/workspace-gate.ts', // inside HEARTBEAT_SOURCE: likewise
 ]);
 
 describe('ESM build safety', () => {
