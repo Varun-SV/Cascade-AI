@@ -24,7 +24,7 @@ import path from 'node:path';
 import type { ProviderConfig } from '../types.js';
 import { GLOBAL_CREDENTIALS_FILE } from '../constants.js';
 import { normalizeAzureEndpoint } from './azure-endpoint.js';
-import { credentialEndpointsConflict } from './endpoint-identity.js';
+import { credentialEndpointsConflict, dropEndpointClaims } from './endpoint-identity.js';
 import { withLock } from '../utils/file-lock.js';
 
 interface CredentialsFile {
@@ -449,18 +449,27 @@ function fillFrom(existing: ProviderConfig, g: ProviderConfig): void {
   // a type that genuinely has no default (an Azure row naming only its
   // deployment must still adopt endpoint and key together).
   const endpointsDiffer = credentialEndpointsConflict(existing.type, existing.baseUrl, g.baseUrl);
+  // The global row's endpoint, with what it says about that endpoint: the
+  // workspace row's `local` and `privateNetwork` were said of another.
+  const adoptEndpoint = (url: string): void => {
+    if (url === existing.baseUrl) return;
+    existing.baseUrl = url;
+    dropEndpointClaims(existing);
+    if (g.local !== undefined) existing.local = g.local;
+    if (g.privateNetwork !== undefined) existing.privateNetwork = g.privateNetwork;
+  };
 
   if (!credentialled && !endpointsDiffer && g.apiKey) {
     existing.apiKey = g.apiKey;
-    if (g.baseUrl) existing.baseUrl = g.baseUrl;
+    if (g.baseUrl) adoptEndpoint(g.baseUrl);
   }
   // A bearer additionally REQUIRES a gateway: without one there is nowhere it
   // can be sent, so adopting it would only make the row look configured.
   if (!credentialled && !endpointsDiffer && !existing.apiKey && g.authToken && g.baseUrl) {
     existing.authToken = g.authToken;
-    existing.baseUrl = g.baseUrl;
+    adoptEndpoint(g.baseUrl);
   }
-  if (!credentialled && !existing.baseUrl && g.baseUrl) existing.baseUrl = g.baseUrl;
+  if (!credentialled && !existing.baseUrl && g.baseUrl) adoptEndpoint(g.baseUrl);
   if (!existing.apiVersion && g.apiVersion) existing.apiVersion = g.apiVersion;
   if (!existing.label && g.label) existing.label = g.label;
 }

@@ -127,3 +127,16 @@ export function credentialEndpointsConflict(
   if (credential === null) return true;
   return row !== credential;
 }
+
+/**
+ * Take off what a row says about the endpoint it is leaving: `local`, which
+ * prices its models (`isLocalEndpoint`), and `privateNetwork`, which lets a
+ * local-only subtask's files go to it (`isPrivateEndpoint`). Both take
+ * precedence over the URL, so carried to a new host they would make a paid
+ * service free and a public one private. Unset, both are read from the new
+ * URL again.
+ */
+export function dropEndpointClaims(row: { local?: boolean; privateNetwork?: boolean }): void {
+  delete row.local;
+  delete row.privateNetwork;
+}

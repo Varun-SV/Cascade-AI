@@ -525,7 +525,22 @@ export class ProcessJail {
       if (arg === '--') { positional.push(...args.slice(i + 1)); break; }
       if (arg === '--repo') { target = args[++i]; continue; }
       if (arg.startsWith('--repo=')) { target = arg.slice('--repo='.length); continue; }
+      // The last of `--delete` and `--no-delete` is the one git goes by. An
+      // abbreviation of `--delete` is left alone: taken for a push, it is
+      // checked as one.
       if (arg === '-d' || arg === '--delete') { deleting = true; continue; }
+      if (abbreviates(arg, '--no-delete', '--no-de'.length)) { deleting = false; continue; }
+      // A submodule's commits are not in this history, so a push that
+      // sends them is not one this can check. The git tool turns the
+      // configured default (push.recurseSubmodules) off.
+      const [name = '', inline] = splitOption(arg);
+      if (abbreviates(name, '--recurse-submodules', '--rec'.length)) {
+        const value = inline ?? args[++i] ?? '';
+        if (!PUSH_NO_RECURSION.has(value.toLowerCase())) {
+          return `git push was refused: --recurse-submodules=${value} pushes submodules too, and their history is not checked for protected or local-only (privacy.paths) files. Push each submodule from its own folder instead.`;
+        }
+        continue;
+      }
       if (PUSH_BULK_OPTIONS.has(arg)) { bulk = true; continue; }
       if (PUSH_OPTIONS_WITH_VALUE.has(arg)) { i++; continue; }
       if (arg.startsWith('-')) continue;
@@ -1360,6 +1375,20 @@ async function gitDirsOf(root: string): Promise<string[]> {
 
 /** `git push` options that push refs wholesale rather than the ones named. */
 const PUSH_BULK_OPTIONS = new Set(['--all', '--branches', '--mirror', '--tags']);
+
+/** `--recurse-submodules` values with which git push sends no submodule's commits. */
+const PUSH_NO_RECURSION = new Set(['no', 'false', 'off', '0', 'check']);
+
+/** Whether `arg` is `full` or an abbreviation of it git accepts — at least `min` long. */
+function abbreviates(arg: string, full: string, min: number): boolean {
+  return arg.length >= min && full.startsWith(arg);
+}
+
+/** A long option split at its first `=`: the name, and the value given inline. */
+function splitOption(arg: string): [string, string | undefined] {
+  const at = arg.indexOf('=');
+  return at === -1 ? [arg, undefined] : [arg.slice(0, at), arg.slice(at + 1)];
+}
 
 /** `git push` options that take their value as the next argument. */
 const PUSH_OPTIONS_WITH_VALUE = new Set(['-o', '--push-option', '--receive-pack', '--exec']);

@@ -88,6 +88,9 @@ export class GrepTool extends BaseTool {
     const allowed = stateRoot
       ? (abs: string) => isWithin(realPathOf(abs), realPathOf(stateRoot))
       : (abs: string) => !this.isProtectedPath(abs) && mayRead(abs);
+    // A file whose lines, or whose name as a match, the result carries: a
+    // source of what the caller learns from it.
+    const carried = (abs: string) => options.noteRead?.(abs);
 
     // Try ripgrep first
     try {
@@ -99,13 +102,14 @@ export class GrepTool extends BaseTool {
         context,
         caseInsensitive,
         allowed,
+        carried,
       );
       return result;
     } catch {
       // ripgrep not available — fall back to Node.js scan
     }
 
-    return this.nodeScan(pattern, searchPath, globPattern, outputMode, context, caseInsensitive, allowed);
+    return this.nodeScan(pattern, searchPath, globPattern, outputMode, context, caseInsensitive, allowed, carried);
   }
 
   private async runRipgrep(
@@ -116,6 +120,7 @@ export class GrepTool extends BaseTool {
     context: number,
     caseInsensitive: boolean,
     shown: (absPath: string) => boolean,
+    carried: (absPath: string) => void,
   ): Promise<string> {
     const args: string[] = ['--no-heading'];
     if (caseInsensitive) args.push('-i');
@@ -138,7 +143,12 @@ export class GrepTool extends BaseTool {
       maxBuffer: 2 * 1024 * 1024,
     });
 
-    const allowed = (file: string): boolean => shown(path.resolve(searchPath, file));
+    const allowed = (file: string): boolean => {
+      const abs = path.resolve(searchPath, file);
+      if (!shown(abs)) return false;
+      carried(abs);
+      return true;
+    };
     let lines: string[];
     if (outputMode === 'files_with_matches') {
       // Each name exactly as it is — one may end in a space — up to its NUL;
@@ -187,6 +197,7 @@ export class GrepTool extends BaseTool {
     context: number,
     caseInsensitive: boolean,
     shown: (absPath: string) => boolean,
+    carried: (absPath: string) => void,
   ): Promise<string> {
     const flags = caseInsensitive ? 'gi' : 'g';
     let regex: RegExp;
@@ -230,6 +241,7 @@ export class GrepTool extends BaseTool {
       }
 
       if (matchingLines.length === 0) continue;
+      carried(abs);
       totalCount += matchingLines.length;
 
       if (outputMode === 'files_with_matches') {

@@ -24,7 +24,7 @@
 //  allowed to read absence as a claim about scope.
 
 import { applyProviderApiKey } from './index.js';
-import { hasDefaultEndpoint, sameCredentialEndpoint } from './endpoint-identity.js';
+import { dropEndpointClaims, hasDefaultEndpoint, sameCredentialEndpoint } from './endpoint-identity.js';
 
 /** A provider row, as every settings surface manipulates it. */
 export interface WritableProvider {
@@ -34,6 +34,8 @@ export interface WritableProvider {
   baseUrl?: string;
   /** See `isLocalEndpoint` in core/router/pricing.ts. */
   local?: boolean;
+  /** See `isPrivateEndpoint` in core/router/endpoint.ts. */
+  privateNetwork?: boolean;
 }
 
 /**
@@ -137,7 +139,7 @@ export function applyProviderCredential(
       existing.baseUrl = undefined;
       existing.apiKey = undefined;
       existing.authToken = undefined;
-      delete existing.local;
+      dropEndpointClaims(existing);
     }
     return { written: false, reason: 'unroutable' };
   }
@@ -163,7 +165,7 @@ export function applyProviderCredential(
     // provider. `isLocalEndpoint()` gives an explicit `local` precedence over
     // inference from the URL, so carrying it across a host change prices every
     // model at the new endpoint as free and slips the budget caps.
-    delete existing.local;
+    dropEndpointClaims(existing);
   }
   // Cleared BEFORE the write, so `applyProviderApiKey` cannot re-attach it.
   if (existing && nextBaseUrl === undefined) existing.baseUrl = undefined;
@@ -226,7 +228,7 @@ export function applyEndpointEdit(
   // `applyProviderCredential`; `cascade link` has done this since the same
   // defect was found on its side.
   if (!sameCredentialEndpoint(existing.type, existing.baseUrl, nextBaseUrl)) {
-    delete existing.local;
+    dropEndpointClaims(existing);
   }
   existing.baseUrl = nextBaseUrl || undefined;
 }

@@ -138,7 +138,11 @@ export class GitTool extends BaseTool {
           const lsRemote = (target: string) => git.raw(['ls-remote', '--end-of-options', target]).then((out) => out.trim(), () => null);
           const refused = await this.jail?.pushRefusal(cwd, args, offline, lsRemote);
           if (refused) throw new Error(refused);
-          await git.push(args);
+          // Submodules are not pushed: pushRefusal checks this repository's
+          // history alone. First, so an explicit value after it — which
+          // pushRefusal allows only when it pushes none either — still wins
+          // over configuration (push.recurseSubmodules, submodule.recurse).
+          await git.push(['--recurse-submodules=no', ...args]);
           return 'Pushed';
         }
         case 'pull': {

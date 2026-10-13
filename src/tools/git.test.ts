@@ -38,7 +38,7 @@ describe('GitTool', () => {
     mockGit.push.mockResolvedValue({});
     const tool = new GitTool();
     await tool.execute({ operation: 'push', args: ['origin', 'main', '--force'] }, opts);
-    expect(mockGit.push).toHaveBeenCalledWith(['origin', 'main', '--force']);
+    expect(mockGit.push).toHaveBeenCalledWith(['--recurse-submodules=no', 'origin', 'main', '--force']);
   });
 
   it('surfaces simple-git errors verbatim', async () => {

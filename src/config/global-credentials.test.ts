@@ -72,6 +72,25 @@ describe('global credentials store', () => {
     expect(merged.find((p) => p.type === 'gemini')?.apiKey).toBe('global-gemini');
   });
 
+  // The workspace row's `local` and `privateNetwork` were said of its own
+  // endpoint; adopting the global row's, they went along and outranked it.
+  it('takes the global row\u2019s endpoint claims with its endpoint', () => {
+    const merged = mergeGlobalCredentials(
+      [{ type: 'ollama', privateNetwork: true, local: true }],
+      [{ type: 'ollama', baseUrl: 'https://ollama.example.com' }],
+    );
+    const row = merged.find((p) => p.type === 'ollama')!;
+    expect(row.baseUrl).toBe('https://ollama.example.com');
+    expect(row.privateNetwork).toBeUndefined();
+    expect(row.local).toBeUndefined();
+
+    const declared = mergeGlobalCredentials(
+      [{ type: 'ollama' }],
+      [{ type: 'ollama', baseUrl: 'http://ollama:11434', privateNetwork: true }],
+    );
+    expect(declared.find((p) => p.type === 'ollama')?.privateNetwork).toBe(true);
+  });
+
   it('never sends one Azure resource\u2019s key to a different resource', () => {
     // Azure keys are resource-scoped, and a deployment name is only unique
     // WITHIN a resource. Keying the merge on the deployment name alone meant

@@ -140,7 +140,10 @@ export class ToolRegistry extends EventEmitter {
   /**
    * Lets a local-only subtask's command or write run alone
    * (workspace-gate.ts); one per workspace, looked up when entered, since a
-   * host forgets an idle one when its last run there ends.
+   * host forgets an idle one when its last run there ends. Always entered
+   * across processes too: another process may load a privacy rule this one
+   * has not and start local-only work it cannot know of, and its caller
+   * going alone waits only for the callers whose markers it can see.
    */
   private get gate(): WorkspaceGate {
     return WorkspaceGate.for(this.workspaceRoot);
@@ -419,7 +422,7 @@ export class ToolRegistry extends EventEmitter {
     let leave: () => void;
     for (;;) {
       const mode = modeFor();
-      leave = await this.gate.enter(mode, this.acrossProcesses());
+      leave = await this.gate.enter(mode, true);
       try {
         check();
       } catch (err) {
@@ -460,20 +463,12 @@ export class ToolRegistry extends EventEmitter {
    * before it is marked.
    */
   async whileShared<T>(fn: () => Promise<T>): Promise<T> {
-    const leave = await this.gate.enter('tools', this.acrossProcesses());
+    const leave = await this.gate.enter('tools', true);
     try {
       return await fn();
     } finally {
       leave();
     }
-  }
-
-  /**
-   * Whether the gate is taken against other processes too: where there is
-   * local-only work — configured or recorded — to keep their reads from.
-   */
-  private acrossProcesses(): boolean {
-    return this.privacyPaths?.hasPolicies() === true;
   }
 
   /**

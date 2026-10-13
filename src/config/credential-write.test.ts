@@ -323,6 +323,23 @@ describe('applyEndpointEdit — shared by both desktop save paths', () => {
 
     expect(row.local).toBe(true);
   });
+
+  // `privateNetwork` lets a local-only subtask's files go to the endpoint,
+  // and like `local` it outranks the URL: kept across a move, a public host
+  // was taken for a private one.
+  it('drops `privateNetwork` with the endpoint it was said of, and keeps it otherwise', () => {
+    const moved = { type: 'ollama', baseUrl: 'http://ollama:11434', privateNetwork: true };
+    applyEndpointEdit(moved, 'https://ollama.example.com', undefined);
+    expect(moved.privateNetwork).toBeUndefined();
+
+    const stayed = { type: 'ollama', baseUrl: 'http://ollama:11434', privateNetwork: true };
+    applyEndpointEdit(stayed, 'http://ollama:11434/', undefined);
+    expect(stayed.privateNetwork).toBe(true);
+
+    const keyed = [{ type: 'openai-compatible', apiKey: 'k', baseUrl: 'http://vllm:8000/v1', privateNetwork: true }];
+    applyProviderCredential(keyed, 'openai-compatible', 'groq-key', { kind: 'at', baseUrl: 'https://api.groq.com/openai/v1' });
+    expect(keyed[0]?.privateNetwork).toBeUndefined();
+  });
 });
 
 describe('endpointFromSettingsPayload — presence of the KEY is the signal', () => {

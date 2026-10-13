@@ -866,6 +866,30 @@ describe('what git push may send', () => {
     expect(remoteHas('refs/heads/public')).toBe(false);
   });
 
+  // Git goes by the last of --delete and --no-delete: the pair pushes.
+  it('checks a push whose --delete a later --no-delete undoes', async () => {
+    await expect(push('--delete', '--no-delete', 'origin', 'main')).rejects.toThrow(/refused/);
+    await expect(push('-d', '--no-del', 'origin', 'main')).rejects.toThrow(/refused/);
+    expect(remoteHas('refs/heads/main')).toBe(false);
+  });
+
+  // A submodule's commits are not in this history: its private blob went
+  // to the submodule's remote unchecked.
+  it('refuses a push that would push submodules too', async () => {
+    for (const args of [
+      ['--recurse-submodules=on-demand', 'origin', 'HEAD~1:refs/heads/public'],
+      ['--recurse-sub=only', 'origin', 'HEAD~1:refs/heads/public'],
+      ['--recurse-submodules', 'on-demand', 'origin', 'HEAD~1:refs/heads/public'],
+    ]) {
+      await expect(push(...args), args.join(' ')).rejects.toThrow(/submodules/);
+    }
+    expect(remoteHas('refs/heads/public')).toBe(false);
+    // One that only checks them pushes none.
+    await push('--recurse-submodules=check', 'origin', 'HEAD~1:refs/heads/public');
+    expect(remoteHas('refs/heads/public')).toBe(true);
+    g(bare, 'update-ref', '-d', 'refs/heads/public');
+  });
+
   it('lets a push through once the remote already has what it holds', async () => {
     // Sent some other way (the user, outside Cascade), and fetched since.
     g(repo, 'push', '-q', 'origin', 'main');

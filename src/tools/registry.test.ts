@@ -616,6 +616,26 @@ describe('ToolRegistry — another process using the workspace', () => {
     expect(done).toBe(true);
     await fs.rm(ws, { recursive: true, force: true });
   });
+
+  // A process with no privacy rule of its own left no marker, so another
+  // that loaded one later went alone without waiting for its reads.
+  it('waits, and leaves its marker for the other, with no privacy rule of its own', async () => {
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-other-process-')));
+    await fs.writeFile(path.join(ws, 'notes.md'), 'public\n');
+    const { statePath } = await import('../config/project-state.js');
+    const gate = statePath(ws, 'gate');
+    const reg = new ToolRegistry(toolsConfig, ws);
+    const seen = await reg.whileShared(async () => fs.readdir(gate));
+    expect(seen.some((name) => name.startsWith('tools-'))).toBe(true);
+    await fs.writeFile(path.join(gate, 'alone'), String(process.ppid));
+    let done = false;
+    const read = reg.execute('file_read', { path: 'notes.md' }, opts).then(() => { done = true; });
+    await new Promise((r) => setTimeout(r, 150));
+    expect(done).toBe(false);
+    await fs.rm(path.join(gate, 'alone'));
+    await read;
+    await fs.rm(ws, { recursive: true, force: true });
+  });
 });
 
 // An approved write could take a rule out of `.cascadeignore`, and the next

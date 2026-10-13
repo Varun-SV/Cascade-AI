@@ -17,9 +17,9 @@
 //  writes, take it alone. First come, first served: a caller waiting holds
 //  back those behind it that it cannot run with, so it is not starved.
 //
-//  One gate per workspace in a process, however many registries use it; and,
-//  where local-only work can happen, one across processes too — two runs in
-//  one workspace are as likely in two windows as in one. That part is kept
+//  One gate per workspace in a process, however many registries use it; and
+//  one across processes too — two runs in one workspace are as likely in two
+//  windows as in one, and either may be the one with local-only work. That part is kept
 //  in marker files in the project's state folder (`gate/`), out of reach of
 //  commands and file tools: each caller leaves one, named for its group and
 //  its process, while it runs, and the caller going alone holds the lock

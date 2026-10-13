@@ -282,8 +282,10 @@ export function stateNotices(workspacePath: string): string[] {
 }
 
 /**
- * Make each folder, outermost first, readable by this user alone — tightening
- * one that already exists, since `mkdir`'s mode does not.
+ * Make each folder, outermost first, this user's alone and usable by them —
+ * mode 700, set on one that already exists too, since `mkdir`'s mode does
+ * not: tightened when others have access, and given back what the owner
+ * needs to keep state in it (a folder restored as 500, say).
  */
 function makePrivate(dirs: string[]): void {
   for (const dir of dirs) {
@@ -294,14 +296,14 @@ function makePrivate(dirs: string[]): void {
     // its mode: its owner can read and replace what is kept in it.
     const uid = process.getuid?.();
     const own = uid === undefined || st.uid === uid;
-    if (own && (st.mode & 0o077) === 0) continue;
-    // This user's own is tightened.
+    if (own && (st.mode & 0o777) === 0o700) continue;
     if (own) {
-      try { fs.chmodSync(dir, st.mode & 0o700); } catch { /* checked below */ }
+      try { fs.chmodSync(dir, 0o700); } catch { /* checked below */ }
     }
-    if (!own || (fs.statSync(dir).mode & 0o077) !== 0) {
+    if (!own || (fs.statSync(dir).mode & 0o777) !== 0o700) {
+      const why = !own ? 'owned by another account' : (st.mode & 0o077) !== 0 ? 'open to other users' : 'not usable by this user';
       throw new StateNotPrivateError(
-        `Cascade's state folder ${dir} is ${own ? 'open to other users' : 'owned by another account'} (mode ${(st.mode & 0o777).toString(8)}) and could not be made private. `
+        `Cascade's state folder ${dir} is ${why} (mode ${(st.mode & 0o777).toString(8)}) and could not be made private. `
         + 'Make it this user\'s own, with no group or other access (chmod 700), and try again.',
       );
     }

@@ -19,7 +19,7 @@ import chalk from 'chalk';
 import { ConfigManager } from '../../config/index.js';
 import { normalizeAzureEndpoint, sameAzureEndpoint } from '../../config/azure-endpoint.js';
 import { resolveAzureRouting } from '../../config/azure-routing.js';
-import { hasDefaultEndpoint } from '../../config/endpoint-identity.js';
+import { dropEndpointClaims, hasDefaultEndpoint } from '../../config/endpoint-identity.js';
 import {
   discoverCredentials,
   maskSecret,
@@ -518,7 +518,7 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
   // nowhere.
   if (cred.kind !== 'bearer' && !cred.baseUrl && hasDefaultEndpoint(cred.provider) && next.baseUrl) {
     delete next.baseUrl;
-    delete next.local;
+    dropEndpointClaims(next);
   }
   if (cred.baseUrl) {
     next.baseUrl = cred.baseUrl;
@@ -528,7 +528,7 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
     // `local` precedence over the URL, so every model from that paid service
     // would be priced at zero and slip the budget caps entirely. Dropping it
     // lets it be recomputed from the new URL, in both directions.
-    delete next.local;
+    dropEndpointClaims(next);
   }
   // Azure's routing is as required as its key; discovery only reports the
   // credential as usable when it carried both.

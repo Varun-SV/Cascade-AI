@@ -166,6 +166,27 @@ describe('a project\'s state folder', () => {
     }
   });
 
+  // One closed to others but not usable by its owner — restored as 500, say
+  // — was taken as private, and every write of state then failed.
+  it('gives its own state folder back what the owner needs to keep state there', () => {
+    if (process.platform === 'win32') return;
+    for (const mode of [0o500, 0o600, 0o000]) {
+      const ws = tempDir('cascade-state-closed-');
+      const own = `${ws}-state`;
+      made.push(own);
+      fs.mkdirSync(own);
+      fs.chmodSync(own, mode);
+      const release = useProjectStateDir(ws, own);
+      try {
+        expect(projectStateDir(ws)).toBe(own);
+        expect(fs.statSync(own).mode & 0o777, mode.toString(8)).toBe(0o700);
+        fs.writeFileSync(statePath(ws, STATE.config), '{}');
+      } finally {
+        release();
+      }
+    }
+  });
+
   it('is where @private/ and @screenshots/ tool paths lead, and nothing else is', () => {
     const ws = tempDir('cascade-state-prefix-');
     expect(statePathFor(ws, '@private/notes/a.md')).toBe(path.join(projectStateDir(ws), 'private', 'notes', 'a.md'));

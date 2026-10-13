@@ -147,6 +147,23 @@ describe('File tools — reading only what the running tier allows', () => {
     }
   });
 
+  // What a directory search returned was never recorded as where the
+  // caller's facts came from, so they outlived the file turning local-only.
+  it('grep tells the caller which files its result carries something of', async () => {
+    const { GrepTool } = await import('./grep.js');
+    await fs.writeFile(path.join(workspace, 'hit.md'), 'MARK here\n');
+    await fs.writeFile(path.join(workspace, 'miss.md'), 'nothing\n');
+    await fs.writeFile(path.join(workspace, 'held.md'), 'MARK withheld\n');
+    const tool = new GrepTool();
+    tool.setWorkspaceRoot(workspace);
+    for (const mode of ['content', 'files_with_matches', 'count']) {
+      const noted: string[] = [];
+      const scan = { ...opts, mayRead: (abs: string) => !abs.endsWith('held.md'), noteRead: (abs: string) => noted.push(abs) };
+      await tool.execute({ pattern: 'MARK', output_mode: mode }, scan as never);
+      expect(noted, mode).toEqual([path.join(workspace, 'hit.md')]);
+    }
+  });
+
   // A name ending in a space was trimmed before the check, so the check was
   // of another name — one nothing marked — and the real one was listed.
   it.skipIf(process.platform === 'win32')('grep lists a file by its exact name, a trailing space included', async () => {

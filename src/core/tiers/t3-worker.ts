@@ -1239,6 +1239,7 @@ export class T3Worker extends BaseTier {
         // still pays for an image nobody will see.
         ...(this.signal ? { signal: this.signal } : {}),
         mayRead: this.mayRead,
+        noteRead: this.noteRead,
         isOffline: this.isOffline,
         saveSnapshot: async (path, content) => {
           this.store?.addFileSnapshot(this.taskId, path, content);
@@ -1349,6 +1350,7 @@ export class T3Worker extends BaseTier {
           requireApproval: false,
           ...(this.signal ? { signal: this.signal } : {}),
           mayRead: this.mayRead,
+          noteRead: this.noteRead,
           isOffline: this.isOffline,
         });
         const str = typeof result === 'string' ? result : JSON.stringify(result);
@@ -1378,6 +1380,7 @@ export class T3Worker extends BaseTier {
             requireApproval: false,
             ...(this.signal ? { signal: this.signal } : {}),
             mayRead: this.mayRead,
+            noteRead: this.noteRead,
             isOffline: this.isOffline,
           });
           const str = typeof result === 'string' ? result : JSON.stringify(result);
@@ -1542,12 +1545,14 @@ export class T3Worker extends BaseTier {
    */
   private readonly mayRead = (absPath: string, to: ReadDestination): boolean => {
     const allowed = this.readDecision(absPath, to);
-    // Kept as a source of what this subtask learns (extractAndStoreFacts).
-    if (allowed && to === 'model') {
-      const rel = path.relative(this.artifactRoot(), absPath);
-      if (rel && !leavesBase(rel)) this.readForModel.add(rel.split(path.sep).join('/'));
-    }
+    if (allowed && to === 'model') this.noteRead(absPath);
     return allowed;
+  };
+
+  /** Keep a file as a source of what this subtask learns (extractAndStoreFacts): one read into a prompt. */
+  private readonly noteRead = (absPath: string): void => {
+    const rel = path.relative(this.artifactRoot(), absPath);
+    if (rel && !leavesBase(rel)) this.readForModel.add(rel.split(path.sep).join('/'));
   };
 
   private readDecision(absPath: string, to: ReadDestination): boolean {

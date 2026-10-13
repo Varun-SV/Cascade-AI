@@ -356,6 +356,12 @@ export interface ToolExecuteOptions {
    */
   mayRead?: (absPath: string, to: ReadDestination) => boolean;
   /**
+   * Told of each file a result carries something of that was asked about
+   * only as a 'scan' — a search's matching lines, or that it matched — so
+   * the tier running the call knows where what it learns came from.
+   */
+  noteRead?: (absPath: string) => void;
+  /**
    * True once the tier running the call is local-only (privacy.paths):
    * nothing it knows may leave this machine, so tools that send what they are
    * given elsewhere are refused. A function, asked at the moment of sending:
