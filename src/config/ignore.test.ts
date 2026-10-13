@@ -57,6 +57,12 @@ describe('CascadeIgnore', () => {
     }
   });
 
+  // An unreadable file read as none, which left what it protects open.
+  it('refuses a .cascadeignore it cannot read rather than take it for none', async () => {
+    await fs.mkdir(path.join(dir, '.cascadeignore'));
+    await expect(new CascadeIgnore().load(dir)).rejects.toThrow(/Could not read .*\.cascadeignore/);
+  });
+
   it('adds the workspace file\'s patterns and skips comments and blank lines', async () => {
     await fs.writeFile(
       path.join(dir, '.cascadeignore'),

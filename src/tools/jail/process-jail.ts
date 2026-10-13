@@ -840,19 +840,28 @@ export async function gitConfigFiles(
   return [...repo, ...globalGitConfigFiles(home, configHome), '/etc/gitconfig'];
 }
 
+/** The most git config files, includes and all, frozen for one command (see withIncludes). */
+const INCLUDE_LIMIT = 1_000;
+
 /**
  * `files` and every file their `include.path` and `includeIf.*.path`
  * entries name, whatever the condition — one not in force now may be
  * later — followed into what those include in turn, as git does. What such
  * a file says git reads as its own configuration, so it is frozen with the
  * rest; one not there yet is made empty first, so no command can make it.
+ * More than `limit` files throws rather than leave the rest unfrozen.
  */
-export async function withIncludes(files: string[], home = os.homedir()): Promise<string[]> {
+export async function withIncludes(files: string[], home = os.homedir(), limit = INCLUDE_LIMIT): Promise<string[]> {
   const out = new Set<string>();
   const queue = [...files];
-  for (let depth = 0; queue.length && depth < 64; depth++) {
+  while (queue.length) {
     const file = queue.shift()!;
     if (out.has(file)) continue;
+    // Every file git would read is frozen, or no command runs: one left out
+    // could be rewritten to name a program for the git tool.
+    if (out.size >= limit) {
+      throw new Error(`git's configuration includes more than ${limit} files, too many to keep from commands, so the command was not run.`);
+    }
     out.add(file);
     if (!fs.existsSync(file)) continue;
     for (const target of await includesOf(file, home)) {

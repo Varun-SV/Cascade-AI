@@ -1091,6 +1091,22 @@ describe('withIncludes', () => {
     }
   });
 
+  // Only the first 64 files were followed: the rest stayed writable.
+  it('follows every sibling include, and refuses past its limit rather than leave some out', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-includes-many-')));
+    try {
+      const top = path.join(dir, 'config');
+      const names = Array.from({ length: 70 }, (_, i) => path.join(dir, `inc${i}.cfg`));
+      await fs.writeFile(top, names.map((n) => `[include]\n\tpath = ${n}\n`).join(''));
+      const files = await withIncludes([top], dir);
+      expect(files).toHaveLength(71);
+      expect(files).toEqual(expect.arrayContaining(names));
+      await expect(withIncludes([top], dir, 50)).rejects.toThrow(/more than 50 files/);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   // `~user/` was taken as a folder named `~user` beside the including file,
   // so the file git really reads was left writable.
   it.skipIf(process.platform === 'win32')('expands ~user/ as git does', async () => {

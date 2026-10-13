@@ -1706,7 +1706,9 @@ ${assignment.expectedOutput}`;
         const check: { cmd: string; args: string[] } | null =
           ext === '.ts' || ext === '.tsx' ? { cmd: 'npx', args: ['tsc', '--noEmit', absolutePath] }
           : ext === '.js' || ext === '.jsx' ? { cmd: process.execPath, args: ['--check', absolutePath] }
-          : ext === '.py' ? { cmd: 'python', args: ['-m', 'py_compile', absolutePath] }
+          // Compiled in memory: `py_compile` writes a .pyc into __pycache__,
+          // which outside the jail nothing marks local-only or moves.
+          : ext === '.py' ? { cmd: 'python', args: ['-c', 'import sys; compile(open(sys.argv[1], "rb").read(), sys.argv[1], "exec")', absolutePath] }
           : null;
         if (check) {
           try {

@@ -460,6 +460,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command does, so it never reads one put there meanwhile. An agent-written
   tool makes at most 100 calls to tools and `fetch` in a run, 4 at a time,
   and is stopped as soon as its run is cancelled.
+- **What fails is refused, not passed over.** A `.cascadeignore` that is
+  there but cannot be read stops Cascade starting rather than reading as
+  none; a git configuration including more than 1,000 files refuses commands
+  rather than leave the rest writable (every include is followed, where 64
+  files were); and a Python artifact is checked by compiling it in memory, so
+  the check leaves no `__pycache__` behind for a local-only file.
 
 ## 0.82.0 - 2026-09-22
 

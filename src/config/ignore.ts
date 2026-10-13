@@ -83,8 +83,12 @@ export class CascadeIgnore {
       const lines = content.split('\n').filter((l) => l.trim() && !l.startsWith('#'));
       this.add(lines);
       this.loaded = true;
-    } catch {
-      // No .cascadeignore file — only built-in defaults apply
+    } catch (err) {
+      // No .cascadeignore file — only built-in defaults apply. One that is
+      // there but cannot be read is not taken for none: what it protects
+      // would be open to every tool.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw new Error(`Could not read ${filePath} (${(err as Error).message}), so the paths it protects could not be kept from agents. Fix its permissions, or remove it.`);
     }
   }
 

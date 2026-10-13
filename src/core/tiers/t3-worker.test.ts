@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { describe, expect, it, vi } from 'vitest';
 import type {
   GenerateResult,
@@ -1087,6 +1088,32 @@ describe('privacy.paths, enforced when a file is read', () => {
       expect(released, JSON.stringify(assignment)).toBe(true);
       if (assignment.acceptance) expect(result.testResults.checksRun).toContain('out.md exists');
     }
+  });
+
+  // `py_compile` wrote a .pyc of the artifact into __pycache__, outside the
+  // jail, where nothing marked it local-only.
+  it.skipIf(spawnSync('python', ['--version']).status !== 0)('checks a Python artifact without writing bytecode', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    const { existsSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    let root = '';
+    const ok = await run({
+      privateModel: true,
+      call: [],
+      assignment: { files: ['tool.py'] },
+      setup: async (r) => { root = r; await writeFile(join(r, 'tool.py'), 'SECRET = "x"\nprint(SECRET)\n'); },
+    });
+    expect(ok.result.issues.join('\n')).not.toMatch(/Semantic error/);
+    expect(existsSync(join(root, '__pycache__'))).toBe(false);
+    const bad = await run({
+      privateModel: true,
+      call: [],
+      assignment: { files: ['bad.py'] },
+      setup: async (r) => { await writeFile(join(r, 'bad.py'), 'def broken(:\n'); },
+    });
+    // The check still runs: a syntax error is not accepted.
+    expect(ok.result.status).toBe('COMPLETED');
+    expect(bad.result.status).not.toBe('COMPLETED');
   });
 
   // A local-only subtask's new file is made in its private folder, so the
