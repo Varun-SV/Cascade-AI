@@ -31,7 +31,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { onProjectReleased, statePath, STATE } from '../config/project-state.js';
-import { withLock } from '../utils/file-lock.js';
+import { ownerState, ownerToken, withLock } from '../utils/file-lock.js';
 
 /** How often a held marker is touched, and how long one untouched counts as left by a process that ended. */
 const HEARTBEAT_MS = 5_000;
@@ -51,6 +51,12 @@ onProjectReleased((root) => {
 
 /** This process's name in marker files: a process ID alone repeats across PID namespaces sharing a volume. */
 const INSTANCE = `${process.pid}.${crypto.randomBytes(6).toString('hex')}`;
+/**
+ * What this process's markers hold: who left them (file-lock.ts), so another
+ * process removes one only once its owner is gone, or — where that cannot be
+ * known — once it has gone untouched for STALE_MS.
+ */
+const OWNER = ownerToken(process.pid);
 
 /**
  * Who a caller runs with: `tools` — tool calls, with each other; `commands` —
@@ -154,7 +160,7 @@ class Markers {
       const mine = withLock(this.mutex, 'take the workspace gate', () => {
         if (this.othersAlone() || this.others().some((other) => !fits(mode, other))) return null;
         const file = path.join(this.dir, `${mode}-${INSTANCE}-${++this.seq}`);
-        fs.writeFileSync(file, '');
+        fs.writeFileSync(file, OWNER);
         return file;
       });
       if (mine) {
@@ -171,7 +177,7 @@ class Markers {
     for (;;) {
       const took = withLock(this.mutex, 'take the workspace gate', () => {
         if (this.othersAlone()) return false;
-        fs.writeFileSync(this.lock, INSTANCE);
+        fs.writeFileSync(this.lock, OWNER);
         return true;
       });
       if (took) break;
@@ -191,8 +197,8 @@ class Markers {
   private othersAlone(): boolean {
     let holder: string;
     try { holder = fs.readFileSync(this.lock, 'utf8'); } catch { return false; }
-    if (holder === INSTANCE) return false;
-    if (stale(this.lock)) { fs.rmSync(this.lock, { force: true }); return false; }
+    if (holder === OWNER) return false;
+    if (left(this.lock)) { fs.rmSync(this.lock, { force: true }); return false; }
     return true;
   }
 
@@ -205,7 +211,7 @@ class Markers {
       const match = /^(tools|commands)-(.+)-\d+$/.exec(name);
       if (!match || match[2] === INSTANCE) continue;
       const file = path.join(this.dir, name);
-      if (stale(file)) { fs.rmSync(file, { force: true }); continue; }
+      if (left(file)) { fs.rmSync(file, { force: true }); continue; }
       if (fs.existsSync(file)) found.push(match[1] as 'tools' | 'commands');
     }
     return found;
@@ -232,15 +238,17 @@ class Markers {
  * keeping the process alive.
  *
  * A thread that ends while markers are held is started again at once — up
- * to RESTARTS_PER_MINUTE, so one that cannot start is not retried in a
- * loop — and a timer on this loop touches them too, so markers go stale only
- * if the thread is gone and the loop is busy past STALE_MS both. Exported
- * for tests.
+ * to RESTARTS_PER_MINUTE, then again as each minute's window clears, so one
+ * that cannot start is not retried in a loop nor given up on — and a timer
+ * on this loop touches them too. Another process on this host and in this
+ * PID namespace asks whether the holder is running (`left`); only one that
+ * cannot ask goes by the heartbeat alone. Exported for tests.
  */
 class Heartbeat {
   private readonly files = new Set<string>();
   private worker?: Worker;
   private backup?: ReturnType<typeof setInterval>;
+  private retry?: ReturnType<typeof setTimeout>;
   private starts: number[] = [];
 
   hold(file: string): void {
@@ -256,7 +264,9 @@ class Heartbeat {
   private send(): void {
     if (this.files.size === 0) {
       if (this.backup) clearInterval(this.backup);
+      if (this.retry) clearTimeout(this.retry);
       this.backup = undefined;
+      this.retry = undefined;
     } else {
       this.backup ??= setInterval(() => touch([...this.files]), HEARTBEAT_MS);
       this.backup.unref?.();
@@ -269,7 +279,15 @@ class Heartbeat {
     if (this.worker) return;
     const now = Date.now();
     this.starts = this.starts.filter((at) => now - at < 60_000);
-    if (this.starts.length >= RESTARTS_PER_MINUTE) return;
+    if (this.starts.length >= RESTARTS_PER_MINUTE) {
+      // Tried again once the oldest start leaves the window, not given up on.
+      this.retry ??= setTimeout(() => {
+        this.retry = undefined;
+        if (this.files.size > 0) this.send();
+      }, 60_000 - (now - this.starts[0]!) + 1);
+      this.retry.unref?.();
+      return;
+    }
     this.starts.push(now);
     let worker: Worker;
     try {
@@ -319,10 +337,20 @@ setInterval(() => {
 }, workerData);
 `;
 
-/** A marker not touched for longer than a holder ever leaves it: its process ended. */
-function stale(file: string): boolean {
+/**
+ * Whether a marker was left by a process that ended: at once when its owner
+ * is known to be gone, never while it is known to be running — however long
+ * its heartbeat has been held up — and otherwise once it has gone untouched
+ * for longer than a holder ever leaves it. Exported for tests.
+ */
+export function left(file: string): boolean {
   const st = fs.statSync(file, { throwIfNoEntry: false });
-  return !!st && Date.now() - st.mtimeMs > STALE_MS;
+  if (!st) return false;
+  let owner = '';
+  try { owner = fs.readFileSync(file, 'utf8'); } catch { /* removed meanwhile */ }
+  const state = ownerState(owner);
+  if (state !== 'unknown') return state === 'dead';
+  return Date.now() - st.mtimeMs > STALE_MS;
 }
 
 function sleep(ms: number): Promise<void> {

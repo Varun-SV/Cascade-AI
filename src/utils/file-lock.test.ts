@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -66,6 +66,29 @@ describe('withLock', () => {
       fs.utimesSync(lock, new Date(), new Date());
       expect(withLock(lock, 'save', () => 'ran')).toBe('ran');
     } finally {
+      owner.kill('SIGKILL');
+    }
+  }, 15_000);
+
+  // A start time that could not be read was taken for a different one, and
+  // the lock of a live owner was taken over at once.
+  it.skipIf(!fs.existsSync('/proc/self/stat'))('waits on a live owner whose start time cannot be read now', async () => {
+    const owner = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
+    try {
+      await new Promise((r) => owner.once('spawn', r));
+      const token = ownerToken(owner.pid!);
+      expect(JSON.parse(token).started).not.toBe('');
+      fs.writeFileSync(lock, token);
+      // From here on, procfs will not show that process's stat to this one.
+      const real = fs.readFileSync;
+      vi.spyOn(fs, 'readFileSync').mockImplementation(((p: fs.PathOrFileDescriptor, o?: never) => {
+        if (String(p) === `/proc/${owner.pid}/stat`) throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+        return real(p, o);
+      }) as never);
+      expect(() => withLock(lock, 'save', () => 'ran')).toThrow(/Could not save/);
+      expect(fs.readFileSync(lock, 'utf8')).toBe(token);
+    } finally {
+      vi.restoreAllMocks();
       owner.kill('SIGKILL');
     }
   }, 15_000);

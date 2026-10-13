@@ -1,8 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { spawn } from 'node:child_process';
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { WorkspaceGate, heartbeat } from './workspace-gate.js';
+import { WorkspaceGate, heartbeat, left } from './workspace-gate.js';
+import { ownerToken } from '../utils/file-lock.js';
 import { statePath, useProjectStateDir } from '../config/project-state.js';
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -77,6 +80,57 @@ describe('WorkspaceGate', () => {
       await fs.rm(own, { recursive: true, force: true });
     }
   }, 20_000);
+
+  // Held up past STALE_MS — no heartbeat thread left, its loop blocked — a
+  // holder's marker was taken from it by age alone.
+  it.skipIf(!fsSync.existsSync('/proc/self/stat'))('takes no marker from a holder it can see running, however old', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-gate-owner-'));
+    const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
+    try {
+      await new Promise((r) => holder.once('spawn', r));
+      const marker = path.join(dir, 'alone');
+      await fs.writeFile(marker, ownerToken(holder.pid!));
+      const old = new Date(Date.now() - 120_000);
+      await fs.utimes(marker, old, old);
+      expect(left(marker)).toBe(false);
+      holder.kill('SIGKILL');
+      await new Promise((r) => holder.once('exit', r));
+      expect(left(marker)).toBe(true);
+      // One whose owner cannot be asked after goes by its heartbeat.
+      await fs.writeFile(marker, 'written by an older Cascade');
+      expect(left(marker)).toBe(false);
+      await fs.utimes(marker, old, old);
+      expect(left(marker)).toBe(true);
+    } finally {
+      holder.kill('SIGKILL');
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // After five starts in a minute the thread was given up on for good.
+  it('starts the heartbeat again once the minute\'s restarts have cleared', async () => {
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-gate-retry-')));
+    const own = `${ws}-state`;
+    const release = useProjectStateDir(ws, own);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const leave = await new WorkspaceGate(ws).enter('alone', true);
+      for (let i = 0; i < 10 && heartbeat.thread(); i++) {
+        const thread = heartbeat.thread()!;
+        await thread.terminate();
+        await new Promise((r) => setImmediate(r));
+      }
+      expect(heartbeat.thread(), 'restarts used up').toBeUndefined();
+      vi.advanceTimersByTime(61_000);
+      expect(heartbeat.thread()).toBeDefined();
+      leave();
+    } finally {
+      vi.useRealTimers();
+      release();
+      await fs.rm(ws, { recursive: true, force: true });
+      await fs.rm(own, { recursive: true, force: true });
+    }
+  });
 
   it('lets shared callers in together, and one alone only once they have left', async () => {
     const gate = new WorkspaceGate();
@@ -180,7 +234,7 @@ describe('WorkspaceGate', () => {
       const lone = gate.enter('alone', true).then((leave) => { alone = true; return leave; });
       await new Promise((r) => setTimeout(r, 100));
       expect(alone).toBe(false);
-      expect(await fs.readFile(path.join(markers, 'alone'), 'utf8'), 'holding the lock while it waits').toMatch(new RegExp(`^${process.pid}\\.`));
+      expect(JSON.parse(await fs.readFile(path.join(markers, 'alone'), 'utf8')).pid, 'holding the lock while it waits').toBe(process.pid);
       await fs.rm(path.join(markers, `tools-${other}-1`));
       const leave = await lone;
       leave();

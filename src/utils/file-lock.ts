@@ -95,17 +95,38 @@ function reclaim(lock: string, found: fs.Stats): void {
 const GUARD_STALE_MS = 30_000;
 
 /**
- * Whether the lock holding `token` was left by a process that ended: one
- * this process can see is asked after; one it cannot see — or a token it
- * cannot read — is judged by age. So is a running owner whose start time
- * cannot be read (no /proc): its PID may since have gone to another process.
+ * Whether the lock holding `token` was left by a process that ended: at once
+ * when its owner is known to be gone; never while it is known to be running;
+ * and, when that cannot be known, once it is older than `staleMs`.
  */
 function left(token: string, st: fs.Stats, staleMs = STALE_LOCK_MS): boolean {
-  const old = Date.now() - st.mtimeMs > staleMs;
+  const state = ownerState(token);
+  if (state === 'dead') return true;
+  if (state === 'alive') return false;
+  return Date.now() - st.mtimeMs > staleMs;
+}
+
+/**
+ * What can be known of the process that wrote `token` (see `ownerToken`):
+ * `dead` only when it is confirmed gone — no process has its PID, or the one
+ * that has it started at another time — `alive` only when it is confirmed
+ * there, and `unknown` otherwise: another host or PID namespace, a token
+ * that cannot be read, or a start time that cannot be (no /proc, or one this
+ * process may not read), since its PID may have gone to another process.
+ */
+export function ownerState(token: string): 'alive' | 'dead' | 'unknown' {
   const owner = parseToken(token);
-  if (!owner || owner.host !== HOST || owner.ns !== PID_NAMESPACE) return old;
-  if (!running(owner.pid, owner.started)) return true;
-  return owner.started === '' && old;
+  if (!owner || owner.host !== HOST || owner.ns !== PID_NAMESPACE) return 'unknown';
+  try {
+    process.kill(owner.pid, 0);
+  } catch (err) {
+    // EPERM: there, and another user's.
+    if ((err as NodeJS.ErrnoException).code !== 'EPERM') return 'dead';
+  }
+  if (owner.started === '') return 'unknown';
+  const started = startedAt(owner.pid);
+  if (started === '') return 'unknown';
+  return started === owner.started ? 'alive' : 'dead';
 }
 
 const HOST = os.hostname();
@@ -115,7 +136,7 @@ const PID_NAMESPACE = (() => { try { return fs.readlinkSync('/proc/self/ns/pid')
 /**
  * What a lock taken by process `pid` holds: where it runs, which process it
  * is — its start time tells it from a later one given the same PID — and a
- * nonce of its own. Exported for tests.
+ * nonce of its own. The workspace gate's markers hold one too.
  */
 export function ownerToken(pid: number): string {
   return JSON.stringify({ host: HOST, ns: PID_NAMESPACE, pid, started: startedAt(pid), nonce: crypto.randomBytes(8).toString('hex') });
@@ -130,17 +151,6 @@ function parseToken(token: string): { host: string; ns: string; pid: number; sta
   } catch {
     return null;
   }
-}
-
-/** Whether process `pid` is running and is the one that started at `started` (where that can be read). */
-function running(pid: number, started: string): boolean {
-  try {
-    process.kill(pid, 0);
-  } catch (err) {
-    // EPERM: there, and another user's.
-    if ((err as NodeJS.ErrnoException).code !== 'EPERM') return false;
-  }
-  return started === '' || startedAt(pid) === started;
 }
 
 /** When process `pid` started, in clock ticks since boot (Linux); '' where that cannot be read. */
