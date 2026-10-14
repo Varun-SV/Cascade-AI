@@ -13,13 +13,13 @@ The file-delivery model depends on runtime: browser-side rendering and downloads
 
 **Important:** saving Markdown into a file merely named `report.docx` does not create a Word document. In CLI/desktop workspaces, use `generate_document` or the appropriate PDF tool; in cloud web, designated `file:filename.ext` blocks are rendered for download.
 
-```text
-```file:report.md
-# Findings
-- Result one
-- Result two
-```
-```
+Here is a hosted file block example:
+
+    ```file:report.md
+    # Findings
+    - Result one
+    - Result two
+    ```
 
 (The above is the file-block format models can emit for the hosted interface.) The hosted browser can offer immediate downloads without server storage; saving to the user's Files library consumes the applicable storage allowance.
 
