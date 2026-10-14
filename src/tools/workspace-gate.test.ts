@@ -337,4 +337,37 @@ describe('WorkspaceGate', () => {
       await fs.rm(dir, { recursive: true, force: true });
     }
   });
+
+  // Marks a process could not save kept only it right; another, reading
+  // the record, took the files for public.
+  it('keeps out of a workspace while another process holds unsaved marks, and refuses once it ended with them', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-gate-pending-')));
+    const markers = statePath(dir, 'gate');
+    await fs.mkdir(markers, { recursive: true });
+    try {
+      const gate = new WorkspaceGate(dir);
+      const marker = path.join(markers, 'pending-other.0123456789ab-1');
+      await fs.writeFile(`${marker}.paths`, JSON.stringify(['secret/notes.md']));
+      await fs.writeFile(marker, ownerToken(process.pid));
+      let entered = false;
+      const waiting = gate.enter('tools', true).then((leave) => { entered = true; leave(); }, (err: Error) => err);
+      await new Promise((r) => setTimeout(r, 150));
+      expect(entered).toBe(false);
+      // Its process gone: refused, naming the file, never taken as gone.
+      await fs.writeFile(marker, `${process.ppid}.0123456789ab`);
+      const old = new Date(Date.now() - 60_000);
+      await fs.utimes(marker, old, old);
+      expect(String(await waiting)).toMatch(/could record that secret\/notes\.md is local-only/);
+      expect(fsSync.existsSync(marker)).toBe(true);
+      // This process's own marker keeps others out, not itself.
+      await fs.rm(marker);
+      await fs.rm(`${marker}.paths`);
+      const release = gate.holdPending(['mine.txt']);
+      (await gate.enter('tools', true))();
+      release();
+      expect((await fs.readdir(markers)).filter((n) => n.startsWith('pending-'))).toEqual([]);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
 });

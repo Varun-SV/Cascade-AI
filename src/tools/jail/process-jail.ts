@@ -46,6 +46,7 @@ import { statePath } from '../../config/project-state.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export type ProcessJailMode = 'auto' | 'bwrap' | 'sandbox-exec' | 'off';
 export type JailKind = 'bwrap' | 'sandbox-exec';
@@ -197,6 +198,12 @@ export interface JailPolicy {
   taint?: (rels: string[]) => void;
   /** Write marks `taint` could hold only in memory — its save failed — to the record; throws if it still cannot. */
   saveMarks?: () => void;
+  /**
+   * Keep other processes out of the workspace until marks this process
+   * could not save are saved (WorkspaceGate.holdPending), trying again in
+   * the background.
+   */
+  holdPending?: (rels: string[]) => void;
   log: (msg: string) => void;
   /** Which jailer this machine has; injectable for tests. */
   detect?: () => Promise<JailKind | null>;
@@ -246,6 +253,8 @@ export interface Hidden {
   keep?: string[];
   /** …and what is mounted back read-only. */
   keepReadOnly?: string[];
+  /** A daemon's socket, or the folder it is in: connecting to it is refused too, where that is a separate rule (sandbox-exec). */
+  socket?: boolean;
 }
 
 export interface PrepareOptions {
@@ -377,6 +386,10 @@ export class ProcessJail {
       }
       hidden.push(...secretsToHide(this.policy.hiddenSecrets?.() ?? []));
     }
+    // A container daemon's socket reaches a process outside the jail that
+    // will mount the host for whoever asks — every masked path included.
+    // A local-only command has no Unix sockets at all (unixSocketFilter).
+    if (!opts.offline) hidden.push(...secretsToHide(hostControlSockets()).map((h) => ({ ...h, socket: true })));
     // Read-only besides: what decides what is protected, and — to every
     // command but the git tool's — git's own configuration, where a command
     // could name a program for the git tool to run with the credentials it
@@ -955,6 +968,26 @@ export function globalGitConfigFiles(home = os.homedir(), configHome = process.e
 }
 
 /** Those of `paths` that are there, as masks: a folder whole, and what a symlink among them leads to. */
+/**
+ * Where the daemons that run containers listen, for this user and for the
+ * machine: Docker (rootful, rootless, Docker Desktop, Colima, Rancher
+ * Desktop), Podman, containerd, CRI-O, LXD and BuildKit, and a socket
+ * DOCKER_HOST names. Any of them will start a container with the host's
+ * root mounted, for whoever can connect.
+ */
+export function hostControlSockets(env: NodeJS.ProcessEnv = process.env, home = os.homedir()): string[] {
+  const runtime = env['XDG_RUNTIME_DIR'] || (typeof process.getuid === 'function' ? `/run/user/${process.getuid()}` : '');
+  const out = [
+    '/var/run/docker.sock', '/run/docker.sock', '/run/podman', '/run/containerd', '/run/crio',
+    '/var/snap/lxd/common/lxd/unix.socket', '/var/lib/lxd/unix.socket', '/run/buildkit',
+    path.join(home, '.docker', 'run'), path.join(home, '.colima'), path.join(home, '.rd'), path.join(home, '.lima'),
+  ];
+  if (runtime) out.push(path.join(runtime, 'docker.sock'), path.join(runtime, 'podman'), path.join(runtime, 'containerd'), path.join(runtime, 'buildkit'));
+  const dockerHost = env['DOCKER_HOST'];
+  if (dockerHost?.startsWith('unix://')) out.push(dockerHost.slice('unix://'.length));
+  return out;
+}
+
 function secretsToHide(paths: string[]): Hidden[] {
   const out: Hidden[] = [];
   for (const p of paths) {
@@ -1095,6 +1128,11 @@ export function seatbeltProfile(hidden: Hidden[], readOnly: string[] = []): stri
   if (hidden.length) {
     const filters = hidden.map((h) => (h.dir ? `(subpath ${quote(h.path)})` : `(literal ${quote(h.path)})`));
     lines.push(`(deny file-read* file-write* ${filters.join(' ')})`);
+    // Connecting to a Unix socket is a network rule here, not a file one.
+    const sockets = hidden.filter((h) => h.socket);
+    if (sockets.length) {
+      lines.push(`(deny network-outbound ${sockets.map((h) => `(remote unix-socket (${h.dir ? 'path-prefix' : 'path-literal'} ${quote(h.path)}))`).join(' ')})`);
+    }
     // A later rule wins: the kept parts of a hidden directory are allowed again.
     const keptReadOnly = hidden.flatMap((h) => h.keepReadOnly ?? []);
     if (keptReadOnly.length) lines.push(`(allow file-read* ${keptReadOnly.map((k) => `(subpath ${quote(k)})`).join(' ')})`);
@@ -1483,7 +1521,7 @@ const MARK_RETRY_MS = 30_000;
  * is set aside in its private folder, where no cloud worker can read it;
  * the note says where. Throws, naming the files, when even that fails.
  */
-async function recordMarks(
+export async function recordMarks(
   policy: JailPolicy, marked: string[], remaining: string[], root: string, own: string | undefined,
 ): Promise<string | void> {
   const deadline = Date.now() + (Number(process.env['CASCADE_MARK_RETRY_MS']) || MARK_RETRY_MS);
@@ -1502,6 +1540,11 @@ async function recordMarks(
     }
   }
   const why = failure instanceof Error ? failure.message : String(failure);
+  // Held in memory, these marks keep this process right; every other one
+  // reads the record, which lacks them — deletions and links included,
+  // which nothing below sets aside. So other processes are kept out until
+  // the record has them.
+  policy.holdPending?.(marked);
   const stuck = own ? remaining.filter((rel) => !moveInto(path.join(root, rel), path.join(own, rel))) : remaining;
   if (stuck.length) {
     throw new Error(`Could not record what a local-only command wrote as local-only (${why}), nor set it aside: ${stuck.join(', ')}. Keep other Cascade runs out of this project until privacy-derived.json can be written.`);
@@ -1645,6 +1688,59 @@ function splitOption(arg: string): [string, string | undefined] {
 const PUSH_OPTIONS_WITH_VALUE = new Set(['-o', '--push-option', '--receive-pack', '--exec']);
 
 /** The remote a bare `git push` goes to: the branch's push remote, the default one, its upstream's, or origin. */
+/** The hooks a repository runs as it receives a push: each can run anything, as whoever pushes. */
+const RECEIVE_HOOKS = ['pre-receive', 'update', 'post-receive', 'post-update', 'push-to-checkout', 'reference-transaction', 'proc-receive'];
+
+/**
+ * The receive hooks a `git push` with `args` from `cwd` would run, because
+ * its destination is a repository on this machine: there git runs the
+ * receiving side here, with whatever the pusher has in view — the git tool
+ * keeps the home credentials and the network, and a command could have
+ * written the hook. Empty when the destination is elsewhere, or has none.
+ */
+export async function localReceiveHooks(cwd: string, args: string[]): Promise<string[]> {
+  let target: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === '--') { target ??= args[i + 1]; break; }
+    if (arg.startsWith('--repo=')) { target = arg.slice('--repo='.length); continue; }
+    if (arg === '--repo') { target = args[++i]; continue; }
+    if (PUSH_OPTIONS_WITH_VALUE.has(arg)) { i++; continue; }
+    if (arg.startsWith('-')) continue;
+    target ??= arg;
+  }
+  target ??= await defaultPushRemote(cwd);
+  const remotes = (await git(cwd, ['remote']))?.split('\n').map((r) => r.trim()) ?? [];
+  const urls = remotes.includes(target)
+    ? (await git(cwd, ['remote', 'get-url', '--push', '--all', target]))?.split('\n').map((u) => u.trim()).filter(Boolean) ?? []
+    : [target];
+  const found: string[] = [];
+  for (const url of urls) {
+    let dest: string;
+    if (url.startsWith('file://')) {
+      try { dest = fileURLToPath(url); } catch { continue; }
+    } else if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
+      continue;
+    } else {
+      dest = path.resolve(cwd, url);
+      if (!fs.existsSync(dest)) continue;
+    }
+    const store = knownStores(dest)[0];
+    if (!store) continue;
+    // Where it looks for hooks: core.hooksPath as git there reads it — its
+    // own configuration, the user's and the system's — or its hooks folder.
+    const hooksPath = await git(dest, ['config', '--path', '--get', 'core.hooksPath']);
+    const dir = hooksPath ? path.resolve(dest, hooksPath) : path.join(store, 'hooks');
+    for (const hook of RECEIVE_HOOKS) {
+      const file = path.join(dir, hook);
+      try {
+        if (fs.statSync(file).isFile() && (process.platform === 'win32' || (fs.accessSync(file, fs.constants.X_OK), true))) found.push(file);
+      } catch { /* none */ }
+    }
+  }
+  return found;
+}
+
 async function defaultPushRemote(cwd: string): Promise<string> {
   const branch = await git(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
   const read = (key: string) => git(cwd, ['config', '--get', key]);

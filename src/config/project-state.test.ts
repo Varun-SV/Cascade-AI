@@ -316,6 +316,26 @@ describe('moving it on first use', () => {
     expect(fs.readFileSync(statePath(ws, STATE.memoryDb), 'utf-8')).toBe('sessions');
   });
 
+  // A relative symlink moved into the state folder led somewhere else from
+  // there — config.json to the machine's credential store, which saving the
+  // config then wrote over.
+  it.skipIf(process.platform === 'win32')('moves no symlink out of .cascade/, at its top or inside a folder', () => {
+    const ws = tempDir('cascade-legacy-links-');
+    const outside = tempDir('cascade-legacy-links-target-');
+    fs.writeFileSync(path.join(outside, 'credentials.json'), '{"keys":1}');
+    fs.mkdirSync(path.join(ws, '.cascade', 'resume'), { recursive: true });
+    fs.symlinkSync(path.join(outside, 'credentials.json'), path.join(ws, '.cascade', 'config.json'));
+    fs.writeFileSync(path.join(ws, '.cascade', 'resume', 'run.json'), '{}');
+    fs.symlinkSync(path.join(outside, 'credentials.json'), path.join(ws, '.cascade', 'resume', 'link.json'));
+    const moved = migrateProjectState(ws);
+    expect(moved).toContain('resume');
+    expect(moved).not.toContain('config.json');
+    expect(fs.existsSync(statePath(ws, 'config.json'))).toBe(false);
+    expect(fs.existsSync(statePath(ws, 'resume', 'run.json'))).toBe(true);
+    expect(() => fs.lstatSync(statePath(ws, 'resume', 'link.json'))).toThrow();
+    expect(fs.readFileSync(path.join(outside, 'credentials.json'), 'utf8')).toBe('{"keys":1}');
+  });
+
   it('leaves a .cascade that is a symlink, and what it points at, alone', () => {
     const ws = tempDir('cascade-legacy-link-');
     const elsewhere = tempDir('cascade-legacy-target-');

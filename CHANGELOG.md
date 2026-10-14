@@ -491,6 +491,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file makes the subtask local-only before its approval is asked (so the
   request skips the tier models), and facts learned after a command or
   another tool whose reads aren't seen record their sources as unknown.
+- **Fewer ways around the jail and the privacy rules.** Container daemons'
+  sockets (Docker, Podman, containerd, CRI-O, LXD, BuildKit) are hidden from
+  a cloud worker's commands, which could otherwise have a daemon mount the
+  host for them. The `git` tool refuses to push to a repository on this
+  machine that has receive hooks, which would run with the credentials it
+  keeps. Every tool is refused once the workspace folder has been moved or
+  replaced — by a symlink to `/`, say — since the run started. A protected
+  or local-only name that is a symlink covers the file it leads to under its
+  other names too, and a file with several names counts as protected when a
+  folder could not be searched for them. An agent-written tool's call
+  naming a local-only file makes the subtask local-only before approval is
+  asked. Artifact checks run Python only from a folder this user cannot
+  write to. Marks a local-only command made that cannot be saved keep other
+  Cascade processes out of the workspace until they are — and refuse them,
+  naming the files, should this process end first. Symlinks are no longer
+  carried out of an old `.cascade/` into the state folder, where a relative
+  one would lead somewhere else.
 
 ## 0.82.0 - 2026-09-22
 

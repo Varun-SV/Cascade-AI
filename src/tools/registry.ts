@@ -102,6 +102,17 @@ const WRITE_TOOLS = new Set(['file_write', 'file_edit', 'generate_document', 'pd
 const CREATE_TOOLS = new Set(['file_write', 'generate_document', 'pdf_create']);
 
 /** A name as Windows keeps it: without trailing dots and spaces. A loop, not a regex, which would take quadratic time on a long run of them. */
+/** A folder's real path and identity (device and inode); undefined when it is not there. */
+function folderIdentity(dir: string): { real: string; id: string } | undefined {
+  try {
+    const real = fs.realpathSync(dir);
+    const st = fs.statSync(real);
+    return st.isDirectory() ? { real, id: `${st.dev}:${st.ino}` } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function withoutTrailingDotsOrSpaces(name: string): string {
   let end = name.length;
   while (end > 0 && (name[end - 1] === '.' || name[end - 1] === ' ')) end--;
@@ -110,6 +121,9 @@ function withoutTrailingDotsOrSpaces(name: string): string {
 
 /** Built-in tools that change or remove the file their `path` input names. */
 const CHANGE_TOOLS = new Set([...WRITE_TOOLS, 'file_delete']);
+
+/** How often marks a local-only command made, that could not be saved, are tried again (holdPending). */
+const PENDING_RETRY_MS = 5_000;
 
 /** Built-in tools that run programs, in the process jail. */
 const COMMAND_TOOLS = new Set(['shell', 'run_code', 'git']);
@@ -122,6 +136,8 @@ export class ToolRegistry extends EventEmitter {
   /** The workspace's `.cascadeignore`. */
   private ignoreMatcher: Ignore = ignore();
   private workspaceRoot: string;
+  /** What the workspace folder was when this registry started: its real path and identity (checkRoot). */
+  private rootIdentity: { real: string; id: string } | undefined;
   /** Loaded plugins, keyed by plugin name */
   private plugins: Map<string, ToolPlugin> = new Map();
   /**
@@ -157,6 +173,7 @@ export class ToolRegistry extends EventEmitter {
     super();
     this.config = config;
     this.workspaceRoot = workspaceRoot;
+    this.rootIdentity = folderIdentity(workspaceRoot);
     this.aliases = this.newAliases();
     this.processJail = new ProcessJail({
       mode: config.processJail ?? 'auto',
@@ -184,6 +201,15 @@ export class ToolRegistry extends EventEmitter {
       secretValues: () => this.secretValues(),
       taint: (rels) => this.markLocalOnly(rels),
       saveMarks: () => this.privacyPaths?.saveUnsaved(),
+      holdPending: (rels) => {
+        const release = this.gate.holdPending(rels);
+        const retry = setInterval(() => {
+          try { this.privacyPaths?.saveUnsaved(); } catch { return; }
+          clearInterval(retry);
+          release();
+        }, PENDING_RETRY_MS);
+        retry.unref?.();
+      },
       log: (msg) => { this.emit('log', msg); },
     });
     this.registerDefaults();
@@ -355,6 +381,20 @@ export class ToolRegistry extends EventEmitter {
     return this.tools.get(toolName)?.isDangerous() ?? false;
   }
 
+  /**
+   * Refuse to go on once the workspace folder is not the one this registry
+   * started with: a command that renamed it and left a symlink to `/` in
+   * its place would have every path the tools resolve under that name land
+   * on the host. Pinned by real path and identity — when the folder first
+   * exists, for one made after this.
+   */
+  private checkRoot(): void {
+    const now = folderIdentity(this.workspaceRoot);
+    if (!this.rootIdentity) { this.rootIdentity = now; return; }
+    if (now && now.real === this.rootIdentity.real && now.id === this.rootIdentity.id) return;
+    throw new Error(`The workspace folder ${this.workspaceRoot} is no longer the folder this run started in — it was moved, removed or replaced — so no tool runs.`);
+  }
+
   async execute(
     toolName: string,
     input: Record<string, unknown>,
@@ -362,6 +402,7 @@ export class ToolRegistry extends EventEmitter {
   ): Promise<string> {
     const tool = this.tools.get(toolName);
     if (!tool) throw new Error(`Tool not found: ${toolName}`);
+    this.checkRoot();
 
     if (options.isOffline?.() && !this.keepsToMachine(toolName, tool)) {
       throw new Error(`${toolName} is unavailable to a local-only subtask (privacy.paths): it would send what the subtask knows off this machine.`);
@@ -437,6 +478,14 @@ export class ToolRegistry extends EventEmitter {
     if (options.signal?.aborted) {
       leave();
       throw new Error(`${toolName} was not run: its run was cancelled while it waited for its turn.`);
+    }
+    // Again once the turn is taken: a command that ran meanwhile may have
+    // replaced the folder.
+    try {
+      this.checkRoot();
+    } catch (err) {
+      leave();
+      throw err;
     }
     // Checked, marked and unmarked while the write runs alone: another
     // local-only write to the same file cannot share — and then lose — a

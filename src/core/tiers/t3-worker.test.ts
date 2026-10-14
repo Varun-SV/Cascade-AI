@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { onTrustedPath } from '../../utils/trusted-exec.js';
 import { describe, expect, it, vi } from 'vitest';
 import type {
   GenerateResult,
@@ -1092,7 +1092,7 @@ describe('privacy.paths, enforced when a file is read', () => {
 
   // `py_compile` wrote a .pyc of the artifact into __pycache__, outside the
   // jail, where nothing marked it local-only.
-  it.skipIf(spawnSync('python', ['--version']).status !== 0)('checks a Python artifact without writing bytecode', async () => {
+  it.skipIf(!onTrustedPath(['python3', 'python'], os.tmpdir()))('checks a Python artifact without writing bytecode', async () => {
     const { writeFile } = await import('node:fs/promises');
     const { existsSync } = await import('node:fs');
     const { join } = await import('node:path');

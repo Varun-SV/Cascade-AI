@@ -9,7 +9,7 @@ import path from 'node:path';
 import { simpleGit, type SimpleGit } from 'simple-git';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
-import { globalGitConfigFiles, type Launch } from './jail/process-jail.js';
+import { globalGitConfigFiles, localReceiveHooks, type Launch } from './jail/process-jail.js';
 import { listGitConfig, unjailedSettings } from './git-hermetic.js';
 import { resolveInWorkspace } from './utils/workspace-path.js';
 
@@ -151,6 +151,12 @@ export class GitTool extends BaseTool {
         }
         case 'push': {
           refusePackProgram(args);
+          // A repository on this machine receives the push here: its hooks
+          // would run with what this tool keeps in view.
+          const hooks = await localReceiveHooks(cwd, args);
+          if (hooks.length) {
+            throw new Error(`git push was refused: its destination is a repository on this machine whose receive hooks (${hooks.map((h) => path.basename(h)).join(', ')}) would run here, with the credentials this tool keeps in view.`);
+          }
           // The destination is asked what it has by this same jailed git.
           const lsRemote = (target: string) => git.raw(['ls-remote', '--end-of-options', target]).then((out) => out.trim(), () => null);
           const refused = await this.jail?.pushRefusal(cwd, args, offline, lsRemote);

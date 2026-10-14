@@ -133,6 +133,18 @@ export class WorkspaceGate {
     };
   }
 
+  /**
+   * Keep every other process out of the workspace until the function
+   * returned is called: this one holds marks a local-only command made that
+   * the privacy record does not have yet, so another process, reading the
+   * record, would take those files for public. Should this process end
+   * first, the marker stays, and other processes refuse to go on — naming
+   * the files — rather than take it as gone.
+   */
+  holdPending(paths: string[]): () => void {
+    return this.markers?.pending(paths) ?? (() => {});
+  }
+
   /** Whether no one is in the gate or waiting for it. */
   idle(): boolean {
     return this.queue.length === 0 && Object.values(this.running).every((n) => n === 0);
@@ -181,7 +193,7 @@ class Markers {
     for (;;) {
       if (signal?.aborted) throw cancelled(signal);
       const mine = withLock(this.mutex, 'take the workspace gate', () => {
-        if (this.othersAlone() || this.others().some((other) => !fits(mode, other))) return null;
+        if (this.othersAlone() || this.othersPending() || this.others().some((other) => !fits(mode, other))) return null;
         const file = path.join(this.dir, `${mode}-${INSTANCE}-${++this.seq}`);
         fs.writeFileSync(file, OWNER);
         return file;
@@ -194,13 +206,52 @@ class Markers {
     }
   }
 
+  /** A marker that keeps every other process out — see WorkspaceGate.holdPending — with the paths it is for beside it. */
+  pending(paths: string[]): () => void {
+    fs.mkdirSync(this.dir, { recursive: true });
+    const file = path.join(this.dir, `pending-${INSTANCE}-${++this.seq}`);
+    fs.writeFileSync(`${file}.paths`, JSON.stringify(paths));
+    fs.writeFileSync(file, OWNER);
+    this.hold(file);
+    return () => {
+      this.drop(file);
+      fs.rmSync(`${file}.paths`, { force: true });
+    };
+  }
+
+  /**
+   * Whether another process holds a pending marker: it is waited for while
+   * it runs. One whose process ended is never taken as gone — the marks it
+   * held were never recorded — and refuses every turn, naming its files.
+   */
+  private othersPending(): boolean {
+    let names: string[];
+    try {
+      names = fs.readdirSync(this.dir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw new Error(`Could not read the workspace gate in ${this.dir} (${(err as Error).message}), so whether another Cascade process is using the workspace cannot be told.`);
+    }
+    let waiting = false;
+    for (const name of names) {
+      const match = /^pending-(.+)-\d+$/.exec(name);
+      if (!match || match[1] === INSTANCE) continue;
+      const file = path.join(this.dir, name);
+      if (!left(file)) { waiting = true; continue; }
+      let paths: string[] = [];
+      try { paths = JSON.parse(fs.readFileSync(`${file}.paths`, 'utf8')) as string[]; } catch { /* unreadable */ }
+      throw new Error(`A Cascade process ended before it could record that ${paths.length ? paths.join(', ') : 'some files'} ${paths.length === 1 ? 'is' : 'are'} local-only (privacy.paths), so nothing runs in this workspace until they are: add them to the project's privacy-derived.json, then remove ${file}.`);
+    }
+    return waiting;
+  }
+
   /** The lock — which keeps new callers of other processes out — and then every other process's callers gone. */
   async alone(signal?: AbortSignal): Promise<() => void> {
     fs.mkdirSync(this.dir, { recursive: true });
     for (;;) {
       if (signal?.aborted) throw cancelled(signal);
       const took = withLock(this.mutex, 'take the workspace gate', () => {
-        if (this.othersAlone()) return false;
+        if (this.othersAlone() || this.othersPending()) return false;
         fs.writeFileSync(this.lock, OWNER);
         return true;
       });
@@ -209,7 +260,7 @@ class Markers {
     }
     this.hold(this.lock);
     try {
-      await until(() => this.others().length === 0, signal);
+      await until(() => this.others().length === 0 && !this.othersPending(), signal);
     } catch (err) {
       this.drop(this.lock);
       throw err;

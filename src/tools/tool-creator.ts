@@ -322,6 +322,15 @@ class DynamicTool extends BaseTool {
       // tools.requireApprovalFor, and isDangerous() — as a worker's own call
       // goes by.
       if (registry.requiresApproval(toolName)) {
+        // A nested call naming a local-only file makes the caller local-only
+        // before anyone is asked, as a worker's own call does: its request
+        // then goes to the user, not to the tier models, and no approval a
+        // model gave earlier answers it.
+        const named = typeof toolInput['path'] === 'string' ? toolInput['path'] : undefined;
+        if (named && options.isOffline?.() !== true && options.mayRead
+          && !options.mayRead(path.resolve(registry.getWorkspaceRoot(), named), 'model')) {
+          return `Not run: ${named} is local-only (privacy.paths), and no private model can take this subtask on.`;
+        }
         const escalator = this.getEscalator();
         if (!escalator) {
           return `Permission denied for "${toolName}": dynamic tool "${this.name}" has no approver available (default-deny).`;

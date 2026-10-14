@@ -12,7 +12,7 @@ import { PrivacyPaths } from '../../core/privacy/paths.js';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { BUILT_IN_PROTECTED } from '../../config/ignore.js';
 import { projectStateDir, statePath } from '../../config/project-state.js';
-import { ProcessJail, bwrapArgs, collectHidden, detectJail, homeSecrets, reachesUnder, scrubEnv, seatbeltProfile, toPathspecs, unixSocketFilter, type JailKind, type JailPolicy, withIncludes, withoutCredentials } from './process-jail.js';
+import { ProcessJail, bwrapArgs, collectHidden, detectJail, homeSecrets, reachesUnder, scrubEnv, seatbeltProfile, toPathspecs, unixSocketFilter, type JailKind, type JailPolicy, withIncludes, withoutCredentials, hostControlSockets, localReceiveHooks, recordMarks } from './process-jail.js';
 
 const SECRET = 'sk-live-JAILTEST-0123456789';
 const LOCAL = 'LOCAL-ONLY-LAUNCH-PLAN';
@@ -1921,6 +1921,80 @@ describe('collectHidden — what it cannot look into', () => {
     } finally {
       spy.mockRestore();
       await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Container daemons, receive hooks, and marks that could not be saved ──
+describe('host-control sockets', () => {
+  // An approved cloud command could ask Docker to mount the host for it,
+  // masked paths and all.
+  it('hides container daemons\' sockets from a cloud worker\'s commands, and denies connecting to them on macOS', async () => {
+    const runtime = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-runtime-')));
+    const before = process.env['XDG_RUNTIME_DIR'];
+    try {
+      await fs.writeFile(path.join(runtime, 'docker.sock'), '');
+      process.env['XDG_RUNTIME_DIR'] = runtime;
+      expect(hostControlSockets()).toContain(path.join(runtime, 'docker.sock'));
+      expect(hostControlSockets({ DOCKER_HOST: 'unix:///srv/d.sock' }, '/h')).toContain('/srv/d.sock');
+      const r = await new ProcessJail(policy({ detect: async () => 'bwrap' })).prepare('sh', [], { cwd: ws, offline: false });
+      expect(r.ok && r.launch.args.join(' ')).toContain(`--ro-bind /dev/null ${path.join(runtime, 'docker.sock')}`);
+      expect(seatbeltProfile([{ path: '/var/run/docker.sock', dir: false, socket: true }]))
+        .toContain('(deny network-outbound (remote unix-socket (path-literal "/var/run/docker.sock")))');
+    } finally {
+      if (before === undefined) delete process.env['XDG_RUNTIME_DIR']; else process.env['XDG_RUNTIME_DIR'] = before;
+      await fs.rm(runtime, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('localReceiveHooks', () => {
+  // A push to a repository on this machine runs its receive hooks here,
+  // with what the git tool keeps in view; a command could have written one.
+  it('finds the receive hooks a push to a repository on this machine would run', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-hooks-')));
+    try {
+      const repo = path.join(dir, 'repo');
+      const bare = path.join(dir, 'remote.git');
+      execFileSync('git', ['init', '-q', repo]);
+      execFileSync('git', ['init', '-q', '--bare', bare]);
+      execFileSync('git', ['-C', repo, 'remote', 'add', 'origin', bare]);
+      execFileSync('git', ['-C', repo, 'remote', 'add', 'away', 'https://example.com/r.git']);
+      expect(await localReceiveHooks(repo, ['origin', 'main'])).toEqual([]);
+      await fs.writeFile(path.join(bare, 'hooks', 'pre-receive'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      expect(await localReceiveHooks(repo, ['origin', 'main'])).toEqual([path.join(bare, 'hooks', 'pre-receive')]);
+      expect(await localReceiveHooks(repo, [])).toEqual([path.join(bare, 'hooks', 'pre-receive')]);
+      expect(await localReceiveHooks(repo, [`file://${bare}`, 'main'])).toHaveLength(1);
+      expect(await localReceiveHooks(repo, ['away', 'main'])).toEqual([]);
+      // Wherever its configuration says hooks are.
+      await fs.rm(path.join(bare, 'hooks', 'pre-receive'));
+      await fs.mkdir(path.join(dir, 'elsewhere'));
+      await fs.writeFile(path.join(dir, 'elsewhere', 'update'), '#!/bin/sh\n', { mode: 0o755 });
+      execFileSync('git', ['-C', bare, 'config', 'core.hooksPath', path.join(dir, 'elsewhere')]);
+      expect(await localReceiveHooks(repo, ['origin'])).toEqual([path.join(dir, 'elsewhere', 'update')]);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('recordMarks', () => {
+  // Marks a local-only command made, that could not be saved, kept only
+  // this process right: another read the record without them.
+  it('keeps other processes out when a local-only command\'s marks cannot be saved', async () => {
+    const before = process.env['CASCADE_MARK_RETRY_MS'];
+    process.env['CASCADE_MARK_RETRY_MS'] = '20';
+    try {
+      const held: string[][] = [];
+      const fail = () => { throw new Error('EROFS'); };
+      await recordMarks(policy({ taint: fail, saveMarks: fail, holdPending: (rels) => held.push(rels) }), ['gone.txt', 'made.txt'], [], ws, undefined);
+      expect(held).toEqual([['gone.txt', 'made.txt']]);
+      // Saved at once: nothing held.
+      const none: string[][] = [];
+      await recordMarks(policy({ taint: () => {}, holdPending: (rels) => none.push(rels) }), ['a.txt'], [], ws, undefined);
+      expect(none).toEqual([]);
+    } finally {
+      if (before === undefined) delete process.env['CASCADE_MARK_RETRY_MS']; else process.env['CASCADE_MARK_RETRY_MS'] = before;
     }
   });
 });

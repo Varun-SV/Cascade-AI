@@ -29,42 +29,58 @@ export function fileIdentity(st: fs.Stats): string {
 /**
  * The identities of the files under `root` that `covered` names and that
  * have more than one name — the only ones another name can reach. A
- * directory covered whole is searched to the bottom.
+ * directory covered whole is searched to the bottom. `complete` is false
+ * when a folder could not be listed: a covered file in it could not be
+ * found, and its other names not known.
  */
-export function coveredLinkIdentities(root: string, covered: (rel: string) => boolean): Set<string> {
+export function coveredLinkIdentities(root: string, covered: (rel: string) => boolean): { ids: Set<string>; complete: boolean } {
   const ids = new Set<string>();
+  let complete = true;
+  const list = (dir: string): fs.Dirent[] => {
+    try {
+      return fs.readdirSync(dir, { withFileTypes: true });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') complete = false;
+      return [];
+    }
+  };
+  // A covered name that is a symlink covers what it leads to: the file
+  // there, under any other name it has, or a folder, whole. Each folder is
+  // entered once, so a link back to one already searched ends there.
+  const entered = new Set<string>();
   const record = (abs: string) => {
     try {
-      const st = fs.lstatSync(abs);
+      const st = fs.statSync(abs);
       if (st.isFile() && st.nlink > 1) ids.add(fileIdentity(st));
-    } catch { /* gone meanwhile */ }
+      else if (st.isDirectory()) all(abs);
+    } catch { /* gone meanwhile, or a link to nothing */ }
   };
   const all = (dir: string) => {
-    let entries: fs.Dirent[];
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
+    let real: string;
+    try { real = fs.realpathSync(dir); } catch { return; }
+    if (entered.has(real)) return;
+    entered.add(real);
+    for (const e of list(dir)) {
       const abs = path.join(dir, e.name);
       if (e.isDirectory()) all(abs);
-      else if (e.isFile()) record(abs);
+      else if (e.isFile() || e.isSymbolicLink()) record(abs);
     }
   };
   const walk = (dir: string, relDir: string) => {
-    let entries: fs.Dirent[];
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
+    for (const e of list(dir)) {
       const rel = relDir ? `${relDir}/${e.name}` : e.name;
       const abs = path.join(dir, e.name);
       if (e.isDirectory()) {
         if (UNSEARCHED.has(e.name)) continue;
         if (covered(`${rel}/`) || covered(`${rel}/${PROBE}`)) all(abs);
         else walk(abs, rel);
-      } else if (e.isFile() && covered(rel)) {
+      } else if ((e.isFile() || e.isSymbolicLink()) && (covered(rel) || covered(`${rel}/`))) {
         record(abs);
       }
     }
   };
   walk(root, '');
-  return ids;
+  return { ids, complete };
 }
 
 /**
@@ -73,7 +89,7 @@ export function coveredLinkIdentities(root: string, covered: (rel: string) => bo
  * with several names changed since: making a link changes the file's ctime.
  */
 export class LinkAliases {
-  private found?: { at: number; ids: Set<string> };
+  private found?: { at: number; ids: Set<string>; complete: boolean };
   /** The change a file was last looked again for: one search covers it. */
   private searchedFor = new Map<string, number>();
 
@@ -87,9 +103,11 @@ export class LinkAliases {
     // A second of slack, for filesystems that keep whole seconds.
     const changedSince = !this.found || st.ctimeMs >= this.found.at - 1000;
     if (changedSince && this.searchedFor.get(id) !== st.ctimeMs) {
-      this.found = { at: Date.now(), ids: coveredLinkIdentities(this.root, this.covered) };
+      this.found = { at: Date.now(), ...coveredLinkIdentities(this.root, this.covered) };
       this.searchedFor.set(id, st.ctimeMs);
     }
-    return this.found!.ids.has(id);
+    // A search that could not look everywhere cannot say this file with
+    // several names is none of the covered ones: it is taken as one.
+    return this.found!.ids.has(id) || !this.found!.complete;
   }
 }

@@ -28,8 +28,11 @@ export function ownTsc(): string | undefined {
 
 /**
  * The first of `names` found on PATH, skipping entries that are relative
- * (they resolve against the working directory) or that lie inside
- * `untrusted`, by real path; undefined when there is none.
+ * (they resolve against the working directory), that lie inside
+ * `untrusted`, by real path, or that this user can write to — a folder
+ * such as ~/.local/bin, or the program itself — since a jailed command,
+ * which runs as this user, could put its own program there; undefined when
+ * there is none.
  */
 export function onTrustedPath(names: string[], untrusted: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
   const root = realOr(untrusted);
@@ -38,14 +41,14 @@ export function onTrustedPath(names: string[], untrusted: string, env: NodeJS.Pr
     : [''];
   for (const dir of (env['PATH'] ?? '').split(path.delimiter)) {
     if (!dir || !path.isAbsolute(dir)) continue;
-    if (isWithin(realOr(dir), root)) continue;
+    if (isWithin(realOr(dir), root) || writable(dir)) continue;
     for (const name of names) {
       for (const ext of exts) {
         const file = path.join(dir, name + ext);
         try {
           if (!fs.statSync(file).isFile()) continue;
           // Where it really is decides, as for the folder.
-          if (isWithin(realOr(file), root)) continue;
+          if (isWithin(realOr(file), root) || writable(file) || writable(path.dirname(realOr(file)))) continue;
           if (process.platform !== 'win32') fs.accessSync(file, fs.constants.X_OK);
           return file;
         } catch { /* not here */ }
@@ -53,6 +56,17 @@ export function onTrustedPath(names: string[], untrusted: string, env: NodeJS.Pr
     }
   }
   return undefined;
+}
+
+/** Whether this user may write to `p` (on Windows, where access() says little, never taken as so). */
+function writable(p: string): boolean {
+  if (process.platform === 'win32') return false;
+  try {
+    fs.accessSync(p, fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function realOr(p: string): string {

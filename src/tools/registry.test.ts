@@ -816,6 +816,27 @@ describe('ToolRegistry — a path changed while the call waited for its turn', (
     }
   });
 
+  // A command that renamed the workspace and left a symlink to the host in
+  // its place had every path the tools resolve land there.
+  it.skipIf(process.platform === 'win32')('refuses every tool once the workspace folder was replaced', async () => {
+    const base = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-root-pin-')));
+    const ws = path.join(base, 'ws');
+    const host = path.join(base, 'host');
+    try {
+      await fs.mkdir(ws);
+      await fs.mkdir(host);
+      await fs.writeFile(path.join(ws, 'a.txt'), 'mine');
+      await fs.writeFile(path.join(host, 'environ'), 'SECRET=1');
+      const reg = new ToolRegistry(toolsConfig, ws);
+      expect(await reg.execute('file_read', { path: 'a.txt' }, opts)).toContain('mine');
+      await fs.rename(ws, path.join(base, 'moved'));
+      await fs.symlink(host, ws);
+      await expect(reg.execute('file_read', { path: 'environ' }, opts)).rejects.toThrow(/no longer the folder this run started in/);
+    } finally {
+      await fs.rm(base, { recursive: true, force: true });
+    }
+  });
+
   it('takes the turn a local-only write needs when the path became local-only meanwhile', async () => {
     const { WorkspaceGate } = await import('./workspace-gate.js');
     const { PrivacyPaths } = await import('../core/privacy/paths.js');

@@ -590,3 +590,25 @@ describe('the WebAssembly sandbox and a cancelled run', () => {
     expect(outcome).toEqual({ kind: 'cancelled' });
   });
 });
+
+// A generated tool's nested call naming a local-only file went to the tier
+// models — cloud ones — as an ordinary request.
+describe('ToolCreator — a nested call naming a local-only file', () => {
+  it('makes the caller local-only before asking, or refuses when it cannot be', async () => {
+    const reg = makeRegistry();
+    const asked: Array<{ toolName: string; localOnly?: boolean }> = [];
+    const creator = new ToolCreator(mockRouter({
+      name: 'dynamic_private_edit', description: 'edit', inputSchema: { type: 'object', properties: {} },
+      executeCode: "return await callTool('file_write', { path: 'secret/plan.md', content: 'x' });", isDangerous: true,
+    }), reg, ws, false, 'wasm');
+    creator.setPermissionEscalator({ requestPermission: async (req: { toolName: string; localOnly?: boolean }) => { asked.push(req); return { approved: false, decidedBy: 'USER' }; } } as any);
+    await creator.createTool('edit', 'io');
+    let local = false;
+    await reg.execute('dynamic_private_edit', {}, { ...opts, isOffline: () => local, mayRead: (abs: string) => { if (abs.includes('secret')) local = true; return true; } });
+    expect(asked.find((r) => r.toolName === 'file_write')?.localOnly).toBe(true);
+    asked.length = 0;
+    const out = await reg.execute('dynamic_private_edit', {}, { ...opts, isOffline: () => false, mayRead: () => false });
+    expect(String(out)).toMatch(/is local-only/);
+    expect(asked.filter((r) => r.toolName === 'file_write')).toEqual([]);
+  });
+});

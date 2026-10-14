@@ -423,8 +423,14 @@ function moveLegacyState(workspacePath: string, target: string): string[] {
     const from = path.join(legacy, name);
     const to = path.join(target, name);
     if (fs.existsSync(to)) continue;
+    // A symlink is not moved: one that is relative leads somewhere else
+    // from the state folder — `config.json -> ../../credentials.json` would
+    // lead to the machine's credential store, which saving the config would
+    // then write over. It stays where it is.
+    if (fs.lstatSync(from, { throwIfNoEntry: false })?.isSymbolicLink()) continue;
     try {
       moveEntry(from, to);
+      dropLinks(to);
       moved.push(name);
     } catch (err) {
       stuck.push(`${name} (${(err as Error).message})`);
@@ -437,6 +443,17 @@ function moveLegacyState(workspacePath: string, target: string): string[] {
     throw new LegacyStateNotMovedError(`Could not move ${stuck.join(', ')} from ${legacy} to ${target}, so Cascade did not start: it would start afresh beside them. Make them movable and start again.`);
   }
   return moved;
+}
+
+/** Remove the symlinks under a folder moved out of `.cascade/`, which would lead somewhere else from here. */
+function dropLinks(dir: string): void {
+  if (!fs.lstatSync(dir, { throwIfNoEntry: false })?.isDirectory()) return;
+  for (const name of fs.readdirSync(dir)) {
+    const p = path.join(dir, name);
+    const st = fs.lstatSync(p);
+    if (st.isSymbolicLink()) fs.rmSync(p, { force: true });
+    else if (st.isDirectory()) dropLinks(p);
+  }
 }
 
 function moveEntry(from: string, to: string): void {
