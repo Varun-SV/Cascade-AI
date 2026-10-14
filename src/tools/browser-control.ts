@@ -64,9 +64,10 @@ export interface BrowserAction {
    */
   expectSite?: string;
   /**
-   * For an action on a control: the document it was planned and approved on,
-   * as the host last reported it (`BrowserActionOutcome.document`). The host
-   * refuses it when the page has since loaded another — on the same site too.
+   * For an action on a control: the page it was planned and approved on, as
+   * the host last reported it (`BrowserActionOutcome.document`). The host
+   * refuses it when the page has since loaded another — on the same site too
+   * — or, for one not aimed at a ref, moved to another address.
    */
   expectDocument?: string;
   /**
@@ -92,8 +93,9 @@ export interface BrowserActionOutcome {
   url?: string;
   title?: string;
   /**
-   * Which document the page is on — the one `view` describes, when there is
-   * one. Opaque: the tool only hands it back as `expectDocument`.
+   * Which document the page is on, and at what address — the ones `view`
+   * describes, when there is one. Opaque: the tool only hands it back as
+   * `expectDocument`.
    */
   document?: string;
   /**

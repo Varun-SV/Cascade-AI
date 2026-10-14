@@ -186,6 +186,25 @@ describe('describePage', () => {
     expect(v.text).toContain('[e8] checkbox "Other: •••"');
   });
 
+  it('hides a short value too, where it stands as a word or number of its own', () => {
+    // Two digits of a code, an age, initials: short, and no less private.
+    const snapshot = [
+      '- main [ref=e1] [box=0,0,1280,800]:',
+      '  - generic [ref=e2] [box=0,0,400,20]:',
+      '    - \'checkbox "Other: 42 of 420" [ref=e3] [box=0,0,13,13]\'',
+      '    - textbox "Other reason" [ref=e4] [box=20,0,185,21]: "42"',
+      '  - generic [ref=e5] [box=0,40,400,20]:',
+      '    - \'checkbox "Initials: AB, ABBA" [ref=e6] [box=0,40,13,13]\'',
+      '    - textbox "Initials" [ref=e7] [box=20,40,185,21]: AB',
+    ].join('\n');
+    const v = view(snapshot)!;
+    const everything = `${v.text}\n${[...v.labels.values()].join('\n')}`;
+    // Where it stands alone, gone; inside a longer word or number, left.
+    expect(v.text).toContain('[e3] checkbox "Other: ••• of 420"');
+    expect(v.text).toContain('[e6] checkbox "Initials: •••, ABBA"');
+    expect(everything).not.toMatch(/(?<![\p{L}\p{N}])(?:42|AB)(?![\p{L}\p{N}])/u);
+  });
+
   it('hides a value only where a name is built from it, not wherever the page repeats it', () => {
     // A search box still holding its query, and the results page saying what
     // was searched for: the page's own text, and the answer the model needs.

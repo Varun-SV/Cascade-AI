@@ -2973,7 +2973,14 @@ export class RemoteBrowserController {
     held: RunBrowser,
     stoppable: <T>(work: Promise<T>) => Promise<T>,
     settle: boolean,
-  ): Promise<{ view: PageView; viewport: Viewport | undefined; document: string } | null> {
+    /**
+     * False for a look the model is not shown: the refs stay those of the
+     * view it was, until `keep` is called when the view is handed to it after
+     * all. Acting on labels the model and the person approving never saw is
+     * what the refs' check exists to prevent.
+     */
+    show = true,
+  ): Promise<{ view: PageView; viewport: Viewport | undefined; document: string; keep: () => void } | null> {
     // The CURRENT page: a click may have moved the run to a popup.
     const page = held.page;
     if (typeof page.ariaSnapshot !== 'function') return null;
@@ -2984,25 +2991,32 @@ export class RemoteBrowserController {
         }
         if (this.settleQuietMs > 0) await new Promise((r) => setTimeout(r, this.settleQuietMs));
       }
-      // Read before the snapshot, so a load landing in between makes the view
-      // stale rather than credits it to the new document.
+      // Read before the snapshot, so a load or a route change landing in
+      // between makes the view stale rather than credits it to the new page.
       const documents = held.documents ?? 0;
-      const document = documentOf(held);
+      const url = page.url();
+      const document = placeOf(held, url);
       const snapshot = await stoppable(page.ariaSnapshot({ mode: 'ai', boxes: true, timeout: SNAPSHOT_TIMEOUT_MS }));
       const viewport = typeof page.evaluate === 'function'
         ? readViewport(await stoppable(within(page.evaluate(VIEWPORT_EXPRESSION))).catch(() => undefined))
         : undefined;
       const view = describePage({
         snapshot,
-        url: page.url(),
+        url,
         title: await within(page.title()).catch(() => ''),
         viewport,
         number: (held.views ?? 0) + 1,
       });
       if (!view) return null;
-      held.views = (held.views ?? 0) + 1;
-      held.view = { page, documents, labels: view.labels };
-      return { view, viewport, document };
+      let kept = false;
+      const keep = (): void => {
+        if (kept) return;
+        kept = true;
+        held.views = (held.views ?? 0) + 1;
+        held.view = { page, documents, labels: view.labels };
+      };
+      if (show) keep();
+      return { view, viewport, document, keep };
     } catch {
       return null;
     }
@@ -3047,7 +3061,7 @@ export class RemoteBrowserController {
       // password or code field on screen, in between is not sent: it is
       // checked again now, and a picture either check doubts is dropped. The
       // document is the one the view describes, so the two go together.
-      if (held.page !== page || documentOf(held) !== seen.document) {
+      if (held.page !== page || !sameDocument(seen.document, held)) {
         return { withheld: 'No screenshot: the page changed while it was being looked at.' };
       }
       const after = await this.privateOnScreen(page, stoppable);
@@ -3210,10 +3224,10 @@ export class RemoteBrowserController {
     };
     const timeout = Math.min(action.timeoutMs ?? 10_000, ACTION_TIMEOUT_MS);
     /**
-     * The document this action ran on, once the checks below have let it. A
-     * refusal says where the page is but not which document it holds: the
-     * model has not seen that one, and an action bound to it would be planned
-     * against a page it never looked at. See `expectDocument`.
+     * The document and address this action ran on, once the checks below
+     * have let it. A refusal says where the page is but not which document it
+     * holds: the model has not seen that one, and an action bound to it would
+     * be planned against a page it never looked at. See `expectDocument`.
      */
     let actedOn: string | undefined;
     const where = async (): Promise<{ url: string; title: string; document?: string }> => {
@@ -3244,14 +3258,21 @@ export class RemoteBrowserController {
     // And on the page it was planned and approved on: the same site can load
     // another page under a selector while the person decides — /cart to
     // /account — and the selector would find whatever that page has there.
-    if (action.expectDocument && documentOf(held) !== action.expectDocument) {
-      return {
-        ok: false,
-        detail: 'The page has loaded something else since it was last looked at, so this was not done. Call observe to see it now.',
-        ...(await where()),
-      };
+    // An app can do the same without loading anything, by changing its route,
+    // so an action not aimed at a ref must also still be at the address it
+    // was planned at. A ref needs only its document: its label is checked
+    // below, and it stays good while a map or a feed rewrites the address.
+    if (action.expectDocument) {
+      const moved = !sameDocument(action.expectDocument, held)
+        ? 'The page has loaded something else since it was last looked at, so this was not done. Call observe to see it now.'
+        : !action.ref && !samePlace(action.expectDocument, held, page.url())
+          // A page that rewrites its address as it goes — a map, a feed —
+          // does so again before the next try; a ref is not held to it.
+          ? 'The page has moved to another address since it was last looked at, so this was not done. Call observe and act on a ref from it.'
+          : undefined;
+      if (moved) return { ok: false, detail: moved, ...(await where()) };
     }
-    actedOn = documentOf(held);
+    actedOn = placeOf(held, page.url());
 
     // A ref names a control from the latest page view, and only from it. It is
     // refused rather than re-matched when that view no longer describes the
@@ -3282,9 +3303,13 @@ export class RemoteBrowserController {
       // action that can set something off, the page is described again and
       // the ref must still be called what the view called it.
       if (CHANGES_THE_PAGE.has(action.kind)) {
-        const now = await this.pageView(held, stoppable, false);
+        // Not kept unless it is sent: a fill that goes ahead says nothing of
+        // the page, so its refs must stay the ones the model, and the person
+        // approving its next step, were shown.
+        const now = await this.pageView(held, stoppable, false, false);
         const current = now?.view.labels.get(action.ref);
         if (current !== shown) {
+          now?.keep();
           return {
             ok: false,
             detail: !now
@@ -3552,6 +3577,36 @@ function within<T>(work: Promise<T>, ms = PAGE_CHECK_TIMEOUT_MS): Promise<T> {
  */
 function documentOf(held: RunBrowser): string {
   return `${held.pageSerial ?? 0}:${held.documents ?? 0}:${held.loads ?? 0}`;
+}
+
+/**
+ * What an outcome reports as `document`: the document, and the address it was
+ * at. Opaque to the tool, which only hands it back as `expectDocument`.
+ */
+function placeOf(held: RunBrowser, url: string): string {
+  return JSON.stringify([documentOf(held), url]);
+}
+
+function readPlace(token: string): [string, string] | null {
+  try {
+    const place: unknown = JSON.parse(token);
+    return Array.isArray(place) && place.length === 2 && place.every((p) => typeof p === 'string')
+      ? place as [string, string]
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The run is still on the document `token` was taken of. Unreadable is no. */
+function sameDocument(token: string, held: RunBrowser): boolean {
+  return readPlace(token)?.[0] === documentOf(held);
+}
+
+/** And at the same address, a route change by `pushState` included. */
+function samePlace(token: string, held: RunBrowser, url: string): boolean {
+  const place = readPlace(token);
+  return place !== null && place[0] === documentOf(held) && place[1] === url;
 }
 
 /** The host of an http(s) address — what a person approving is shown as the site. */

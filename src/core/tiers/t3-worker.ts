@@ -984,6 +984,15 @@ export class T3Worker extends BaseTier {
           this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: this.isPresenter });
         },
       );
+      // Pictures are taken for the model that is answering. After a failover
+      // that is another model, one that may see them where the first could
+      // not, or the other way round. The router still decides, per request,
+      // whether one is sent.
+      if (result.servedBy) {
+        const served = this.router.getAvailableModels?.()
+          .find((m) => m.provider === result.servedBy!.provider && m.id === result.servedBy!.id);
+        if (served) this.seesScreenshots = mayTakeScreenshots(served, IMAGE_TOKENS_EACH);
+      }
 
       // For text-tool mode: parse <tool_call> blocks and inject as native tool calls
       let effectiveToolCalls = result.toolCalls ?? [];
@@ -1189,6 +1198,11 @@ export class T3Worker extends BaseTier {
 
     this.emit('tool:call', { id: tc.id, tierId: this.id, toolName: tc.name, input: tc.input });
     const toolStartMs = Date.now();
+    // A picture is of the page after the last browser action. One that ran
+    // since and sent none — a fill, or a page whose picture was withheld —
+    // leaves the older picture showing a page that is no longer there, under
+    // a caption that says otherwise. Reading the page changes nothing.
+    if (tc.name === 'browser_control' && tc.input['action'] !== 'extract_text') this.pendingScreenshot = undefined;
 
     try {
       const result = await this.toolRegistry.execute(tc.name, tc.input, {

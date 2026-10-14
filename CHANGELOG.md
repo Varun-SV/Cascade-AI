@@ -74,8 +74,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   submit a form, and, where pages are described, a click, fill or key press
   on something the page view did not name. An approved action runs only on
   the page it was approved on: not after the page moved to another site, or
-  to another page of the same one. A ref whose control the page has renamed
-  since the view is refused too. `scripts/browser-vision-eval/` has ten test
+  to another page of the same one. One by selector also stops if an app has
+  changed its route. A ref whose control the page has renamed since the view
+  is refused too. `scripts/browser-vision-eval/` has ten test
   tasks and a runner to compare the settings.
 
 ### Changed

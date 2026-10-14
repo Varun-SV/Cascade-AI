@@ -949,6 +949,71 @@ describe('a browser screenshot reaches the next request, once', () => {
     expect((worker as unknown as { pendingScreenshot?: ImageAttachment }).pendingScreenshot).toBeUndefined();
   });
 
+  it('does not let an older picture stand for a page a later step changed', async () => {
+    // One turn, two steps: a look that takes a picture, then a fill that
+    // takes none. The picture shows the page before the fill.
+    const sent: ConversationMessage[][] = [];
+    let call = 0;
+    const generate = vi.fn(async (_tier: string, options: { messages: ConversationMessage[] }) => {
+      sent.push(options.messages);
+      call += 1;
+      if (call === 1) {
+        return makeResult('', [
+          { id: 'c1', name: 'browser_control', input: { action: 'observe' } },
+          { id: 'c2', name: 'browser_control', input: { action: 'fill', ref: 'e9', value: 'Ada' } },
+        ]);
+      }
+      if (call === 2) {
+        return makeResult('', [
+          { id: 'c3', name: 'browser_control', input: { action: 'click', ref: 'e14' } },
+          { id: 'c4', name: 'browser_control', input: { action: 'extract_text' } },
+        ]);
+      }
+      return makeResult('Booked.');
+    });
+    const router = { generate, getModelForTier: () => SEEING } as unknown as CascadeRouter;
+    const registry = makeToolRegistry({
+      getToolDefinitions: () => [{ name: 'browser_control', description: 'Browse', inputSchema: {} }],
+      execute: vi.fn(async (_name: string, input: { action: string }, options: { attachImage?: (i: ImageAttachment) => void }) => {
+        if (input.action === 'observe' || input.action === 'click') options.attachImage?.(IMAGE);
+        return 'ok';
+      }),
+    } as unknown as Partial<ToolRegistry>);
+    const worker = new T3Worker(router, registry, 't2-parent');
+    await worker.execute(makeAssignment({ subtaskTitle: 'Book a table' }), 'task-stale');
+    expect(hasImage(sent[1]!)).toBe(false);
+    // Reading the page changes nothing: the click's picture still stands.
+    expect(hasImage(sent[2]!)).toBe(true);
+  });
+
+  it('takes pictures for the model that answers after a failover', async () => {
+    // Asked of a model that cannot see; answered by one that can.
+    const blind = { ...SEEING, id: 'blind', isVisionCapable: false } as ModelInfo;
+    const sent: ConversationMessage[][] = [];
+    let call = 0;
+    const generate = vi.fn(async (_tier: string, options: { messages: ConversationMessage[] }) => {
+      sent.push(options.messages);
+      call += 1;
+      const served = { servedBy: { provider: SEEING.provider, id: SEEING.id } };
+      if (call <= 2) return { ...makeResult('', [{ id: `c${call}`, name: 'browser_control', input: { action: 'observe' } }]), ...served };
+      return { ...makeResult('The page shows a booking form.'), ...served };
+    });
+    const router = { generate, getModelForTier: () => blind, getAvailableModels: () => [blind, SEEING] } as unknown as CascadeRouter;
+    const offered: boolean[] = [];
+    const registry = makeToolRegistry({
+      getToolDefinitions: () => [{ name: 'browser_control', description: 'Browse', inputSchema: {} }],
+      execute: vi.fn(async (_name: string, _input: unknown, options: { attachImage?: (i: ImageAttachment) => void }) => {
+        offered.push(typeof options.attachImage === 'function');
+        options.attachImage?.(IMAGE);
+        return 'Looked at the page.';
+      }),
+    } as unknown as Partial<ToolRegistry>);
+    const worker = new T3Worker(router, registry, 't2-parent');
+    await worker.execute(makeAssignment({ subtaskTitle: 'Read the booking page' }), 'task-failover');
+    expect(offered).toEqual([true, true]);
+    expect(hasImage(sent[1]!)).toBe(true);
+  });
+
   it('is not even taken for a model that cannot see it', async () => {
     const { sent, offered, registry, router } = run({ ...SEEING, id: 'blind', isVisionCapable: false });
     const worker = new T3Worker(router, registry, 't2-parent');

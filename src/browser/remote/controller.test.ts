@@ -4774,8 +4774,8 @@ describe('page views and refs', () => {
     expect(out.ok).toBe(false);
     expect(out.detail).toContain('The page has loaded something else since it was last looked at');
     expect(page.calls).toEqual([]);
-    // Not told which document is up now: the next try is planned against it
-    // only once the page has been looked at.
+    // Told where the page is, but not which document is up: the next try is
+    // planned against it only once the page has been looked at.
     expect(out.url).toBe('https://start.test/account');
     expect(out).not.toHaveProperty('document');
     const looked = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
@@ -4813,14 +4813,51 @@ describe('page views and refs', () => {
     expect(page.calls).toEqual([]);
   });
 
-  it('acts when the page changed only its address, or a frame in it loaded', async () => {
+  it('acts when only a frame in the page loaded', async () => {
     const c = controller();
     const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
-    page.replaceState('https://start.test/?step=2');
     page.navigateSubframe();
     page.requestNavigation(SUB_FRAME);
     const out = await c.controller({ kind: 'click', selector: '#go', expectDocument: seen.document }, ctx('run', 'w1'));
     expect(out.ok).toBe(true);
+  });
+
+  it('does not act by selector after an app moved to another route, but does by ref', async () => {
+    // pushState from /cart to /account: no load, the same document, and a
+    // selector that finds what the new route put there.
+    const c = controller();
+    const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.replaceState('https://start.test/account');
+    page.calls = [];
+    const bySelector = await c.controller(
+      { kind: 'click', selector: '.primary-action', expectDocument: seen.document }, ctx('run', 'w1'));
+    expect(bySelector.ok).toBe(false);
+    expect(bySelector.detail).toContain('The page has moved to another address since it was last looked at, so this was not done. Call observe and act on a ref from it.');
+    const unaimed = await c.controller({ kind: 'press', key: 'Enter', expectDocument: seen.document }, ctx('run', 'w1'));
+    expect(unaimed.ok).toBe(false);
+    expect(page.calls.filter((x) => !x.startsWith('snapshot:'))).toEqual([]);
+    // A ref is checked by its label instead, which a route change that left
+    // the control as it was does not touch.
+    const byRef = await c.controller({ kind: 'click', ref: 'e5', expectDocument: seen.document }, ctx('run', 'w1'));
+    expect(byRef.ok).toBe(true);
+  });
+
+  it('keeps the refs the model was shown when a check looked at the page again', async () => {
+    // A fill by ref looks at the page first. Meanwhile e5 became "Pay". The
+    // fill goes ahead and says nothing of the page, so the next step must
+    // still be judged against "Account" — and refused for not being it.
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    snapshot = BOOKING.replace('button "Account"', 'button "Pay $42.00"');
+    const filled = await c.controller({ kind: 'fill', ref: 'e9', value: 'x' }, ctx('run', 'w1'));
+    expect(filled.ok).toBe(true);
+    expect(filled.view).toBeUndefined();
+    const clicked = await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'));
+    expect(clicked.ok).toBe(false);
+    expect(clicked.detail).toContain('e5 is now button "Pay $42.00", not button "Account"');
+    // Shown now, so it is what the next step is judged by.
+    expect(clicked.view!.text).toContain('[e5] button "Pay $42.00"');
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(true);
   });
 
   it('says which document a view was of, not one that loaded after it', async () => {

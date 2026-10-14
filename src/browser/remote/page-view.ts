@@ -468,9 +468,7 @@ function valuesAround(roots: SnapshotNode[]): Map<SnapshotNode, string[]> {
   const walk = (n: SnapshotNode, ancestors: SnapshotNode[]): void => {
     if (TYPED.has(n.role) && !chosenOption(n)) {
       const values = [...new Set([fieldValue(n), ...typedParts(n)].map((v) => v.replace(/\s+/g, ' ').trim()))]
-        // Shorter than this, a value says too little to hide and too much
-        // ordinary text would be hidden with it.
-        .filter((v) => v.length >= 3);
+        .filter((v) => v.length > 0);
       if (values.length) {
         keep(n, values);
         ancestors.forEach((a) => keep(a, values));
@@ -484,12 +482,24 @@ function valuesAround(roots: SnapshotNode[]): Map<SnapshotNode, string[]> {
   return new Map([...found].map(([n, set]) => [n, [...set].sort((a, b) => b.length - a.length)]));
 }
 
-/** Takes the given typed values out of page-written text. */
+/** Below this length a typed value is hidden only where it stands alone. */
+const SHORT_VALUE = 3;
+
+/**
+ * Takes the given typed values out of page-written text. A short one — an
+ * age, initials, two digits of a code — goes where it stands as a word or
+ * number of its own: inside a longer one it says nothing, and hiding it there
+ * would hide the page's own words.
+ */
 function scrubber(values: string[] | undefined): (text: string) => string {
   if (!values?.length) return (text) => text;
+  const short = values
+    .filter((v) => v.length < SHORT_VALUE)
+    .map((v) => new RegExp(`(?<![\\p{L}\\p{N}])${v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'gu'));
   return (text) => {
     let out = text.replace(/\s+/g, ' ');
-    for (const value of values) out = out.split(value).join('•••');
+    for (const value of values) if (value.length >= SHORT_VALUE) out = out.split(value).join('•••');
+    for (const pattern of short) out = out.replace(pattern, '•••');
     return out;
   };
 }

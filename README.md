@@ -550,7 +550,7 @@ When screenshots are on:
 - A screenshot is sent with one step and not kept: about 1.4k tokens a step on Claude at 1280×800 (Steel's size). A larger screen costs more. A step that leaves the page looking exactly as it did in the last one sends none.
 - A model that can't see images, one reached through a gateway, or one that would be charged more for a picture than a run allows for an image gets the page view alone.
 
-Approval prompts name the element and the site. A click on something labelled pay, buy, order, delete, remove, send, transfer or publish asks every time, even after "always allow". So does Enter or Space where it may submit a form, and a click, fill or key press on something the page view did not name, such as a CSS selector. An approved action runs only on the page it was approved on, not after the page has moved to another, even on the same site. Hosted deployments set `REMOTE_BROWSER_VISION`. `scripts/browser-vision-eval/` holds the side-by-side test that decides the default.
+Approval prompts name the element and the site. A click on something labelled pay, buy, order, delete, remove, send, transfer or publish asks every time, even after "always allow". So does Enter or Space where it may submit a form, and a click, fill or key press on something the page view did not name, such as a CSS selector. An approved action runs only on the page it was approved on, not after the page has moved to another, even on the same site; one by CSS selector also stops when an app changes its route. Hosted deployments set `REMOTE_BROWSER_VISION`. `scripts/browser-vision-eval/` holds the side-by-side test that decides the default.
 
 MCP servers' tools, plugins and dynamic tools join this list at runtime.
 
