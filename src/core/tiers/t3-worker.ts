@@ -1757,10 +1757,15 @@ ${assignment.expectedOutput}`;
         // run isolated (-I: no environment, user site or working directory
         // on its import path), and compiles in memory — `py_compile` writes
         // a .pyc into __pycache__, which nothing would mark local-only.
+        // TypeScript checks the file alone (--noResolve): following its
+        // imports and `/// <reference>`s would compile files nobody asked
+        // the protected paths or privacy.paths about, and its diagnostics —
+        // which go back to the model — can quote what they hold. A module it
+        // cannot find that way is no error in the file.
         const tsc = ext === '.ts' || ext === '.tsx' ? ownTsc() : undefined;
         const python = ext === '.py' ? onTrustedPath(['python3', 'python'], this.artifactRoot()) : undefined;
         const check: { cmd: string; args: string[] } | null =
-          tsc ? { cmd: process.execPath, args: [tsc, '--noEmit', absolutePath] }
+          tsc ? { cmd: process.execPath, args: [tsc, '--noEmit', '--noResolve', '--pretty', 'false', absolutePath] }
           : ext === '.js' || ext === '.jsx' ? { cmd: process.execPath, args: ['--check', absolutePath] }
           : python ? { cmd: python, args: ['-I', '-c', 'import sys; compile(open(sys.argv[1], "rb").read(), sys.argv[1], "exec")', absolutePath] }
           : null;
@@ -1776,6 +1781,14 @@ ${assignment.expectedOutput}`;
             // TypeScript artifact. A missing toolchain skips the check.
             if (code === 'ENOENT' || code === 'EINVAL') continue;
             const e = err as { stderr?: string; stdout?: string };
+            if (tsc) {
+              // Only modules it was told not to look for: nothing wrong.
+              // No diagnostics at all: tsc itself failed, which is said.
+              const errors = tscErrors(e.stdout ?? '');
+              if (errors.length) issues.push(`Semantic error in ${artifactPath}:\n${errors.join('\n')}`);
+              else if (!e.stdout?.trim()) issues.push(`Semantic error in ${artifactPath}:\n${e.stderr || String(err)}`);
+              continue;
+            }
             issues.push(`Semantic error in ${artifactPath}:\n${e.stderr || String(err)}\n${e.stdout || ''}`);
           }
         }
@@ -2151,4 +2164,20 @@ Begin execution now.`;
   private isFileOperation(toolName: string): boolean {
     return ['file_write', 'file_edit', 'file_delete'].includes(toolName);
   }
+}
+
+/**
+ * The errors in tsc's output (`--pretty false`) other than an import it
+ * was told not to follow (`--noResolve`): TS2307 and TS2792, "Cannot find
+ * module". Lines that continue an error go with it.
+ */
+export function tscErrors(out: string): string[] {
+  const errors: string[] = [];
+  let keep = false;
+  for (const line of out.split('\n')) {
+    const error = /\berror TS(\d+):/.exec(line);
+    if (error) keep = error[1] !== '2307' && error[1] !== '2792';
+    if (keep && line.trim()) errors.push(line);
+  }
+  return errors;
 }

@@ -191,6 +191,27 @@ describe('ToolCreator — the WebAssembly sandbox', () => {
     expect(sandboxModeOf('worker')).toBe('wasm');
   });
 
+  // A tool calling itself, or two calling each other, started a sandbox
+  // with a fresh budget of calls at every turn, until the outer deadline.
+  it('runs no agent-written tool from another one\'s callTool, or from its own', async () => {
+    const { reg, creator } = await wasmTool('dynamic_w_self', "return await callTool('dynamic_w_self', {});");
+    expect(await reg.execute('dynamic_w_self', {}, opts)).toMatch(/was called from dynamic tool "dynamic_w_self".*do not call each other/);
+    creator.registerSpec({ name: 'dynamic_w_other', description: 'o', inputSchema: {}, executeCode: "return await callTool('dynamic_w_self', {});", isDangerous: false }, true);
+    expect(await reg.execute('dynamic_w_other', {}, opts)).toMatch(/was called from dynamic tool "dynamic_w_other"/);
+  });
+
+  // Ids made from the time alone were the same for two calls in one
+  // millisecond, and the escalator keeps pending requests by id.
+  it('gives each approval request of a run its own id', async () => {
+    const ids: string[] = [];
+    const { creator, reg } = await wasmTool('dynamic_w_twice',
+      "return (await Promise.all([callTool('file_delete', { path: 'a' }), callTool('file_delete', { path: 'b' })])).join(' | ');", true);
+    creator.setPermissionEscalator({ requestPermission: async (req: { id: string }) => { ids.push(req.id); return { approved: false, decidedBy: 'test' }; } } as never);
+    await reg.execute('dynamic_w_twice', {}, opts);
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(2);
+  });
+
   it('reaches a registered tool through callTool', async () => {
     await fs.writeFile(path.join(ws, 'wasm-seed.txt'), 'wasm-seed-content', 'utf-8');
     const { reg } = await wasmTool('dynamic_w_read', "return await callTool('file_read', { path: 'wasm-seed.txt' });");

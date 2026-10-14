@@ -13,7 +13,7 @@ import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import { PeerBus } from '../peer/bus.js';
 import { PermissionEscalator } from '../permissions/escalator.js';
-import { T3Worker, buildWorkerRules, canProduceFiles, canProduceNonDiskDeliverables, hasFileWritingTool, missingVisualEvidence, shouldRequireArtifact } from './t3-worker.js';
+import { T3Worker, buildWorkerRules, canProduceFiles, canProduceNonDiskDeliverables, hasFileWritingTool, missingVisualEvidence, shouldRequireArtifact, tscErrors } from './t3-worker.js';
 import { ACTING_INTEGRITY_RULE } from './integrity.js';
 import os from 'node:os';
 import path from 'node:path';
@@ -1114,6 +1114,43 @@ describe('privacy.paths, enforced when a file is read', () => {
     // The check still runs: a syntax error is not accepted.
     expect(ok.result.status).toBe('COMPLETED');
     expect(bad.result.status).not.toBe('COMPLETED');
+  });
+
+  // tsc followed the artifact's imports into files nobody had asked about —
+  // a local-only one, say — and quoted them in the errors the model reads.
+  it('checks a TypeScript artifact alone, not the files it imports', async () => {
+    const { writeFile, mkdir } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const checked = await run({
+      privateModel: true,
+      call: [],
+      assignment: { files: ['out.ts'] },
+      setup: async (r) => {
+        await mkdir(join(r, 'secret'), { recursive: true });
+        await writeFile(join(r, 'secret', 'plan.ts'), 'export const plan: "LAUNCH-PLAN-SECRET" = "other";\n');
+        await writeFile(join(r, 'out.ts'), "import { plan } from './secret/plan';\nexport const shown = plan;\n");
+      },
+    });
+    // What the checks found goes back to the model in a correction prompt.
+    const seen = [...checked.calls.map((c) => c.text), ...checked.result.issues].join('\n');
+    expect(seen).not.toMatch(/LAUNCH-PLAN-SECRET|secret\/plan\.ts|Semantic error/);
+    // An error in the file itself is still found.
+    const bad = await run({
+      privateModel: true,
+      call: [],
+      assignment: { files: ['bad.ts'] },
+      setup: async (r) => { await writeFile(join(r, 'bad.ts'), 'export const n: number = "text";\n'); },
+    });
+    expect(bad.result.status).not.toBe('COMPLETED');
+  }, 60_000);
+
+  it('reads tsc\'s errors, leaving out modules it was told not to look for', () => {
+    expect(tscErrors([
+      "out.ts(1,22): error TS2307: Cannot find module './secret/plan' or its corresponding type declarations.",
+      "out.ts(2,7): error TS2322: Type 'string' is not assignable to type 'number'.",
+      '  more about it',
+    ].join('\n'))).toEqual(["out.ts(2,7): error TS2322: Type 'string' is not assignable to type 'number'.", '  more about it']);
+    expect(tscErrors("a.ts(1,1): error TS2792: Cannot find module 'x'.\n")).toEqual([]);
   });
 
   // The approval request for a call naming a local-only file went to the

@@ -523,6 +523,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inside a symlinked folder outside the workspace (`.env` in `shared/`). A
   local-only write's mark stays unless the file's contents are unchanged,
   not just its times, which some filesystems keep to the second.
+- **Commands reach less of the machine, and fail closed where they can't be
+  checked.** Run as root, a command sees the system read-only apart from the
+  workspace, the temporary folders and the home folder, since root could
+  otherwise rewrite the programs Cascade itself runs; on macOS, Cascade run
+  as root runs no commands. Commands other than the `git` tool's no longer
+  reach the session's D-Bus, systemd's sockets (`systemd-run --user` would
+  start a program outside the jail) or the ssh and gpg agents. When a hidden
+  folder can't be read through, every other file in the workspace with
+  several names is hidden too, bar installed packages. An agent-written tool
+  can't call another one or itself, and each of its approval requests gets
+  its own id. A TypeScript artifact is checked on its own, without the files
+  it imports, so the errors the model sees quote nothing it wasn't allowed
+  to read. A project moved on its disk whose old state can't be looked for
+  or moved stops opening rather than start afresh and leave it behind.
 
 ## 0.82.0 - 2026-09-22
 

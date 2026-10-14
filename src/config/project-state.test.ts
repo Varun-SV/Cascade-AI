@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ConfigManager } from './index.js';
-import { globalDir, LegacyStateNotMovedError, migrateProjectState, projectStateDir, stateNotices, statePath, statePathFor, STATE, useProjectStateDir } from './project-state.js';
+import { globalDir, LegacyStateNotMovedError, MovedStateNotFollowedError, migrateProjectState, projectStateDir, stateNotices, statePath, statePathFor, STATE, useProjectStateDir } from './project-state.js';
 import { writeProjectConfig } from './write-config.js';
 
 const made: string[] = [];
@@ -379,6 +379,33 @@ describe('a project that moves', () => {
     const mgr = new ConfigManager(after);
     await mgr.load();
     expect(mgr.getConfig().providers.find((p) => p.type === 'anthropic')?.apiKey).toBe('sk-own');
+  });
+
+  // A rename of its state folder that failed was swallowed: a fresh folder
+  // was made under the new name, found on every later open, and the state
+  // left behind for good.
+  it('stops, and tries again, when its state cannot be moved or looked for', () => {
+    const before = tempDir('cascade-moving-stuck-');
+    fs.writeFileSync(statePath(before, STATE.privacyDerived), JSON.stringify({ version: 1, paths: ['kept.md'] }));
+    const oldDir = projectStateDir(before);
+    const after = `${before}-renamed`;
+    fs.renameSync(before, after);
+    made.push(after);
+    const failing = vi.spyOn(fs, 'renameSync').mockImplementation(() => { throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' }); });
+    try {
+      expect(() => projectStateDir(after)).toThrow(MovedStateNotFollowedError);
+    } finally {
+      failing.mockRestore();
+    }
+    const unlisted = vi.spyOn(fs, 'readdirSync').mockImplementationOnce(() => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }); });
+    try {
+      expect(() => projectStateDir(after)).toThrow(/could not look in .*projects/);
+    } finally {
+      unlisted.mockRestore();
+    }
+    // Nothing was made in its place; the next open moves it.
+    expect(fs.readFileSync(statePath(after, STATE.privacyDerived), 'utf-8')).toContain('kept.md');
+    expect(fs.existsSync(oldDir)).toBe(false);
   });
 
   // The folder moved but its own keys stayed filed under the old name, for

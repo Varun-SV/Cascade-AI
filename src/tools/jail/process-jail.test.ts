@@ -12,7 +12,7 @@ import { PrivacyPaths } from '../../core/privacy/paths.js';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { BUILT_IN_PROTECTED } from '../../config/ignore.js';
 import { projectStateDir, statePath } from '../../config/project-state.js';
-import { ProcessJail, bwrapArgs, collectHidden, detectJail, homeSecrets, reachesUnder, scrubEnv, seatbeltProfile, toPathspecs, unixSocketFilter, type JailKind, type JailPolicy, withIncludes, withoutCredentials, hostControlSockets, localReceiveHooks, recordMarks } from './process-jail.js';
+import { ProcessJail, bwrapArgs, collectHidden, detectJail, homeSecrets, reachesUnder, scrubEnv, seatbeltProfile, toPathspecs, unixSocketFilter, type JailKind, type JailPolicy, withIncludes, withoutCredentials, hostControlSockets, localReceiveHooks, recordMarks, rootLayout, sessionSockets } from './process-jail.js';
 
 const SECRET = 'sk-live-JAILTEST-0123456789';
 const LOCAL = 'LOCAL-ONLY-LAUNCH-PLAN';
@@ -197,6 +197,43 @@ describe('collectHidden — a rule that reaches through a symlinked folder', () 
       await fs.symlink(path.join(d, 'data'), path.join(d, 'alias'));
     }, 0);
     await fs.rm(dir, { recursive: true, force: true });
+  });
+});
+
+// A protected file in a folder that can be entered but not listed, with a
+// name elsewhere in the workspace: the folder was hidden whole, but the
+// search for its files' other names could not look in, and found none.
+describe('collectHidden — other names of files in a folder it cannot list', () => {
+  it('hides every file with other names, bar installed packages, when a hidden folder cannot be read through', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-unlisted-')));
+    const locked = path.join(dir, 'locked');
+    try {
+      await fs.mkdir(locked);
+      await fs.writeFile(path.join(locked, 'creds.txt'), SECRET);
+      await fs.link(path.join(locked, 'creds.txt'), path.join(dir, 'public.txt'));
+      await fs.mkdir(path.join(dir, 'node_modules', 'pkg'), { recursive: true });
+      await fs.writeFile(path.join(dir, 'node_modules', 'pkg', 'a.js'), 'x');
+      await fs.link(path.join(dir, 'node_modules', 'pkg', 'a.js'), path.join(dir, 'node_modules', 'pkg', 'b.js'));
+      await fs.writeFile(path.join(dir, 'plain.txt'), 'x');
+      const readdir = fs.readdir.bind(fs);
+      const denied = vi.spyOn(fsSync.promises, 'readdir').mockImplementation((async (p: string, o?: object) => {
+        if (path.resolve(String(p)) === locked) throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+        return readdir(p, o as never);
+      }) as never);
+      let hidden;
+      try {
+        hidden = await collectHidden(policy({ workspaceRoot: dir }), false);
+      } finally {
+        denied.mockRestore();
+      }
+      const paths = hidden.map((h) => h.path);
+      expect(hidden).toContainEqual({ path: locked, dir: true });
+      expect(paths).toContain(path.join(dir, 'public.txt'));
+      expect(paths).not.toContain(path.join(dir, 'plain.txt'));
+      expect(paths.some((p) => p.includes('node_modules'))).toBe(false);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -424,12 +461,18 @@ describe('ProcessJail.prepare — which way a command runs', () => {
   // workspace, nor a process namespace to end a child left running: what a
   // local-only command writes could land where it cannot be marked.
   it('sandbox-exec: refuses a local-only caller, and wraps a cloud one', async () => {
-    const jail = new ProcessJail(policy({ detect: async () => 'sandbox-exec' }));
-    const offline = await jail.prepare('/bin/sh', ['-c', 'true'], { cwd: ws, offline: true });
-    expect(offline.ok).toBe(false);
-    expect(!offline.ok && offline.reason).toMatch(/cannot run commands on macOS/);
-    const online = await jail.prepare('/bin/sh', ['-c', 'true'], { cwd: ws, offline: false });
-    expect(online.ok && online.launch.file).toBe('sandbox-exec');
+    // As an ordinary user: as root it runs none (see 'commands run as root').
+    const getuid = vi.spyOn(process, 'getuid').mockReturnValue(501);
+    try {
+      const jail = new ProcessJail(policy({ detect: async () => 'sandbox-exec' }));
+      const offline = await jail.prepare('/bin/sh', ['-c', 'true'], { cwd: ws, offline: true });
+      expect(offline.ok).toBe(false);
+      expect(!offline.ok && offline.reason).toMatch(/cannot run commands on macOS/);
+      const online = await jail.prepare('/bin/sh', ['-c', 'true'], { cwd: ws, offline: false });
+      expect(online.ok && online.launch.file).toBe('sandbox-exec');
+    } finally {
+      getuid.mockRestore();
+    }
   });
 
   it('loads the socket filter for a local-only caller, through a shell that opens it', async () => {
@@ -1946,6 +1989,40 @@ describe('collectHidden — what it cannot look into', () => {
   });
 });
 
+// The user's session bus reaches systemd, which starts a unit outside the
+// jail for whoever asks (`systemd-run --user`); the ssh agent signs as the
+// user. Neither was hidden from a cloud worker's commands.
+describe('session sockets', () => {
+  it('hides the session bus, systemd and the agents from commands, but not from the git tool\'s git', async () => {
+    const runtime = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-session-')));
+    const saved = { ...process.env };
+    try {
+      await fs.writeFile(path.join(runtime, 'bus'), '');
+      await fs.mkdir(path.join(runtime, 'systemd'));
+      await fs.writeFile(path.join(runtime, 'agent.sock'), '');
+      process.env['XDG_RUNTIME_DIR'] = runtime;
+      process.env['SSH_AUTH_SOCK'] = path.join(runtime, 'agent.sock');
+      expect(sessionSockets({ DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/7/bus,guid=x;unix:abstract=/tmp/dbus-1' })).toContain('/run/user/7/bus');
+      const jail = new ProcessJail(policy({ detect: async () => 'bwrap' }));
+      const sh = await jail.prepare('sh', [], { cwd: ws, offline: false });
+      if (!sh.ok) throw new Error(sh.reason);
+      await sh.launch.done?.();
+      const args = sh.launch.args.join(' ');
+      expect(args).toContain(`--ro-bind /dev/null ${path.join(runtime, 'bus')}`);
+      expect(args).toContain(`--tmpfs ${path.join(runtime, 'systemd')}`);
+      expect(args).toContain(`--ro-bind /dev/null ${path.join(runtime, 'agent.sock')}`);
+      const git = await jail.prepare('git', [], { cwd: ws, offline: false, keepGit: true, confinesItself: true });
+      if (!git.ok) throw new Error(git.reason);
+      await git.launch.done?.();
+      expect(git.launch.args.join(' ')).not.toContain(path.join(runtime, 'agent.sock'));
+    } finally {
+      for (const name of Object.keys(process.env)) if (!(name in saved)) delete process.env[name];
+      Object.assign(process.env, saved);
+      await fs.rm(runtime, { recursive: true, force: true });
+    }
+  });
+});
+
 // ── Container daemons, receive hooks, and marks that could not be saved ──
 describe('host-control sockets', () => {
   // An approved cloud command could ask Docker to mount the host for it,
@@ -2065,6 +2142,36 @@ describe('programs Cascade starts', () => {
       await sh.launch.done?.();
       expect(sh.launch.env['PATH']).toBe(process.env['PATH']);
     });
+  });
+});
+
+// As root, a command could rewrite /usr/bin/git, which Cascade runs
+// outside the jail, or anything else root owns.
+describe('commands run as root', () => {
+  it('see the system read-only, bar the workspace, the temporary folders and home', async () => {
+    const layout = rootLayout(ws, os.homedir());
+    expect(layout.writable).toEqual(expect.arrayContaining([ws, '/tmp', os.homedir()]));
+    expect(layout.writable).not.toContain('/usr');
+    const args = bwrapArgs([], false, ws, 'sh', [], layout);
+    expect(args.slice(args.indexOf('--ro-bind'), args.indexOf('--ro-bind') + 3)).toEqual(['--ro-bind', '/', '/']);
+    expect(args.join(' ')).toContain(`--bind ${ws} ${ws}`);
+    // Launched as the user it runs as: root here, or not.
+    const r = await new ProcessJail(policy({ detect: async () => 'bwrap' })).prepare('sh', [], { cwd: ws, offline: false });
+    if (!r.ok) throw new Error(r.reason);
+    await r.launch.done?.();
+    const root = process.getuid?.() === 0;
+    expect(r.launch.args.join(' ').includes('--ro-bind / /')).toBe(root);
+    expect(r.launch.args.join(' ').includes('--bind / /')).toBe(!root);
+  });
+
+  it('are not run on macOS, which has no read-only view to give them', async () => {
+    const getuid = vi.spyOn(process, 'getuid').mockReturnValue(0);
+    try {
+      const r = await new ProcessJail(policy({ detect: async () => 'sandbox-exec' })).prepare('/bin/sh', [], { cwd: ws, offline: false });
+      expect(!r.ok && r.reason).toMatch(/running as root/);
+    } finally {
+      getuid.mockRestore();
+    }
   });
 });
 

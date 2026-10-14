@@ -470,6 +470,13 @@ export class ProcessJail {
     if (!jailer) {
       return { ok: false, reason: `${kind} was found only in folders a command could change (or not at all), so the command was not run.` };
     }
+    // As root a command could rewrite any program on the machine — the
+    // ones Cascade starts outside the jail too, its jailer and git among
+    // them. bubblewrap shows it the system read-only (`rootLayout`);
+    // sandbox-exec has no such view, so nothing is run.
+    if (asRoot() && kind === 'sandbox-exec') {
+      return { ok: false, reason: 'Cascade is running as root, and on macOS a command run as root could change the programs Cascade itself runs, so the command was not run. Run Cascade as an ordinary user.' };
+    }
     if (opts.offline && kind === 'sandbox-exec') {
       return { ok: false, reason: 'A local-only subtask (privacy.paths) cannot run commands on macOS: sandbox-exec cannot stop a command from hard-linking a file outside the workspace in and writing to it, nor end a child it leaves running, so what it writes could not all be marked local-only.' };
     }
@@ -488,6 +495,10 @@ export class ProcessJail {
     // will mount the host for whoever asks — every masked path included.
     // A local-only command has no Unix sockets at all (unixSocketFilter).
     if (!opts.offline) hidden.push(...secretsToHide(hostControlSockets()).map((h) => ({ ...h, socket: true })));
+    // The service managers and agents of the user's session start programs
+    // outside the jail, or sign with the user's keys, for whoever connects;
+    // the git tool's git keeps them, for its credential helper and ssh.
+    if (!opts.offline && !opts.keepGit) hidden.push(...secretsToHide(sessionSockets()).map((h) => ({ ...h, socket: true })));
     // Read-only besides: what decides what is protected, and — to every
     // command but the git tool's — git's own configuration, where a command
     // could name a program for the git tool to run with the credentials it
@@ -525,7 +536,8 @@ export class ProcessJail {
         const unreadable = [...scrubbed.copies.keys()].map((f) => ({ path: f, dir: false }));
         return { ok: true, launch: { file: jailer, args: ['-p', seatbeltProfile([...hidden, ...unreadable], frozen), file, ...args], env, cwd: opts.cwd, jail: kind, done } };
       }
-      return { ok: true, launch: { file: jailer, args: bwrapArgs(hidden, false, opts.cwd, file, args, undefined, frozen, scrubbed.copies), env, cwd: opts.cwd, jail: kind, done } };
+      const layout = asRoot() ? rootLayout(this.policy.workspaceRoot) : undefined;
+      return { ok: true, launch: { file: jailer, args: bwrapArgs(hidden, false, opts.cwd, file, args, layout, frozen, scrubbed.copies), env, cwd: opts.cwd, jail: kind, done } };
     }
 
     // A local-only caller's command writes only into the workspace, where
@@ -1069,7 +1081,25 @@ export function globalGitConfigFiles(home = os.homedir(), configHome = process.e
   return [path.join(configHome ? path.resolve(configHome) : path.join(home, '.config'), 'git', 'config'), path.join(home, '.gitconfig')];
 }
 
-/** Those of `paths` that are there, as masks: a folder whole, and what a symlink among them leads to. */
+/**
+ * Where the user's session listens for requests that run a program outside
+ * any jail or use the user's keys: D-Bus (the session bus and the system
+ * one), whose systemd will start a unit for a caller — `systemd-run
+ * --user` — and systemd's own sockets; the ssh and gpg agents. A bus
+ * address in the abstract namespace has no file to hide.
+ */
+export function sessionSockets(env: NodeJS.ProcessEnv = process.env): string[] {
+  const runtime = env['XDG_RUNTIME_DIR'] || (typeof process.getuid === 'function' ? `/run/user/${process.getuid()}` : '');
+  const out = ['/run/dbus/system_bus_socket', '/var/run/dbus/system_bus_socket', '/run/systemd/private'];
+  if (runtime) out.push(path.join(runtime, 'bus'), path.join(runtime, 'systemd'), path.join(runtime, 'gnupg'), path.join(runtime, 'keyring'));
+  for (const address of (env['DBUS_SESSION_BUS_ADDRESS'] ?? '').split(';')) {
+    const at = /(?:^|[:,])path=([^,]+)/.exec(address)?.[1];
+    if (at) out.push(decodeURIComponent(at));
+  }
+  if (env['SSH_AUTH_SOCK']) out.push(env['SSH_AUTH_SOCK']);
+  return out;
+}
+
 /**
  * Where the daemons that run containers listen, for this user and for the
  * machine: Docker (rootful, rootless, Docker Desktop, Colima, Rancher
@@ -1108,6 +1138,13 @@ function secretsToHide(paths: string[]): Hidden[] {
  */
 async function linkAliasesOf(hidden: Hidden[], root: string): Promise<Hidden[]> {
   const ids = new Set<string>();
+  // A hidden folder on the workspace's disk that can't be read through may
+  // hold a file with a name in the workspace too, which no inode says: then
+  // every file there with other names is taken as one (`unknown`). One on
+  // another disk can share no file with it.
+  let rootDev: number | undefined;
+  try { rootDev = fs.statSync(root).dev; } catch { /* checked as it comes */ }
+  let unknown = false;
   const note = async (abs: string) => {
     try {
       const st = await fs.promises.lstat(abs);
@@ -1116,7 +1153,13 @@ async function linkAliasesOf(hidden: Hidden[], root: string): Promise<Hidden[]> 
   };
   const everything = async (dir: string, keep: Set<string>): Promise<void> => {
     let entries: fs.Dirent[];
-    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+      try { if (fs.statSync(dir).dev === rootDev) unknown = true; } catch { /* gone meanwhile */ }
+      return;
+    }
     for (const e of entries) {
       const abs = path.join(dir, e.name);
       if (keep.has(abs)) continue;
@@ -1125,10 +1168,11 @@ async function linkAliasesOf(hidden: Hidden[], root: string): Promise<Hidden[]> 
     }
   };
   for (const h of hidden) {
+    if (h.socket) continue;
     if (h.dir) await everything(h.path, new Set(h.keep ?? []));
     else await note(h.path);
   }
-  if (ids.size === 0) return [];
+  if (ids.size === 0 && !unknown) return [];
 
   const masked = new Set(hidden.map((h) => h.path));
   const aliases: Hidden[] = [];
@@ -1145,7 +1189,9 @@ async function linkAliasesOf(hidden: Hidden[], root: string): Promise<Hidden[]> 
       if (!e.isFile()) continue;
       try {
         const st = await fs.promises.lstat(abs);
-        if (st.nlink > 1 && ids.has(fileIdentity(st))) aliases.push({ path: abs, dir: false });
+        // Installed packages stay in view (pnpm links them in from its store).
+        const linked = ids.has(fileIdentity(st)) || (unknown && !abs.split(path.sep).includes('node_modules'));
+        if (st.nlink > 1 && linked) aliases.push({ path: abs, dir: false });
       } catch { /* gone meanwhile */ }
     }
   };
@@ -1741,6 +1787,24 @@ async function repoGitDirs(cwd: string): Promise<string[] | null> {
   const dirs = located.split('\n').map((line) => line.trim()).filter(Boolean);
   if (dirs.length === 0) return null;
   return [...new Set(dirs.map((dir) => { try { return fs.realpathSync(dir); } catch { return dir; } }))];
+}
+
+/** Whether Cascade runs as root, who can write to every file on the machine. */
+function asRoot(): boolean {
+  return process.platform !== 'win32' && process.getuid?.() === 0;
+}
+
+/**
+ * What a command run as root may write to: the workspace, the temporary
+ * folders and the home folder. The rest of the machine is read-only to it —
+ * the programs Cascade starts outside the jail (`onTrustedPath`), the
+ * libraries they load, what cron, systemd and the dynamic loader read in
+ * /etc and /var — since root, as their owner, could otherwise rewrite them.
+ */
+export function rootLayout(workspaceRoot: string, home = os.homedir()): WriteLayout {
+  const writable = [workspaceRoot, os.tmpdir(), '/tmp', '/var/tmp', home]
+    .filter((dir, i, all) => all.indexOf(dir) === i && fs.existsSync(dir));
+  return { writable, readOnly: [], scratch: [] };
 }
 
 /** A git directory's configuration files: its own and its worktree's. */

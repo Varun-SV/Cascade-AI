@@ -80,8 +80,9 @@ export function onTrustedPath(names: string[], untrusted: string | string[] = []
 /**
  * Whether a command running as this user could change `p`. On Windows,
  * where access() says little, never taken as so. Root can write to every
- * folder, so there only the system's own program folders count as not —
- * though a command run as root could change those too.
+ * folder, so there only the system's own program folders count as not:
+ * the process jail shows a command run as root the system read-only
+ * (`rootLayout`), and runs none as root where it can't (macOS).
  */
 function alterable(p: string, dir: boolean): boolean {
   if (process.platform === 'win32') return false;

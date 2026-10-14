@@ -16,6 +16,7 @@
 //  - Tools are session-scoped and not persisted
 //
 
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { statePath, STATE } from '../config/project-state.js';
@@ -302,6 +303,12 @@ class DynamicTool extends BaseTool {
 
   async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const registry = this.registry;
+    // Called from another agent-written tool's code — or its own — each call
+    // would start another sandbox with a fresh budget, round and round until
+    // the outer deadline: refused.
+    if (options.dynamicTool) {
+      return `Not run: dynamic tool "${this.name}" was called from dynamic tool "${options.dynamicTool}", and agent-written tools do not call each other or themselves.`;
+    }
 
     // callTool runs on the MAIN thread (the sandbox bridges to it). Dangerous tools
     // require escalation; when NO approver is available we DEFAULT-DENY rather than
@@ -336,7 +343,9 @@ class DynamicTool extends BaseTool {
           return `Permission denied for "${toolName}": dynamic tool "${this.name}" has no approver available (default-deny).`;
         }
         const req: PermissionRequest = {
-          id: `dynamic-${this.name}-${toolName}-${Date.now()}`,
+          // Unique to the call: two from one run in the same millisecond
+          // would otherwise share it, and the answer to one end both.
+          id: `dynamic-${this.name}-${toolName}-${randomUUID()}`,
           requestedBy: `dynamic_tool:${this.name}`,
           parentT2Id: options.tierId,
           toolName,
@@ -356,7 +365,7 @@ class DynamicTool extends BaseTool {
 
       try {
         const signal = ended && options.signal ? AbortSignal.any([ended, options.signal]) : (ended ?? options.signal);
-        const result = await registry.execute(toolName, toolInput, { ...options, ...(signal ? { signal } : {}) });
+        const result = await registry.execute(toolName, toolInput, { ...options, dynamicTool: this.name, ...(signal ? { signal } : {}) });
         return typeof result === 'string' ? result : JSON.stringify(result);
       } catch (err) {
         return `Error calling ${toolName}: ${err instanceof Error ? err.message : String(err)}`;

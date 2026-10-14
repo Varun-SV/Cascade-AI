@@ -134,7 +134,7 @@ export function projectStateDir(workspacePath: string): string {
       // ask, rather than taken as done for the rest of the process. A
       // folder others can read is not left for later: nothing is kept there.
       prepared.delete(dir);
-      if (err instanceof StateNotPrivateError || err instanceof LegacyStateNotMovedError) throw err;
+      if (err instanceof StateNotPrivateError || err instanceof LegacyStateNotMovedError || err instanceof MovedStateNotFollowedError) throw err;
     }
   }
   return dir;
@@ -248,17 +248,38 @@ function followMove(root: string, dir: string): void {
   const now = identityOf(root);
   if (!now) return;
   const projects = path.dirname(dir);
+  // What can't be looked through, or moved, stops here rather than leave
+  // the state behind: the folder made in its place would be found on every
+  // later open, and the move never tried again.
+  const stuck = (what: string, err: unknown) => new MovedStateNotFollowedError(
+    `Cascade could not ${what} (${(err as Error).message}), so it did not start this project with fresh state. Fix that and open it again.`,
+  );
   let names: string[];
-  try { names = fs.readdirSync(projects); } catch { return; }
+  try {
+    names = fs.readdirSync(projects);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw stuck(`look in ${projects} for this project's state from before it moved`, err);
+  }
   const orphans: string[] = [];
   for (const name of names) {
     const other = path.join(projects, name);
+    try {
+      fs.accessSync(path.join(other, IDENTITY_FILE), fs.constants.R_OK);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw stuck(`read ${path.join(other, IDENTITY_FILE)} to tell whether it is this project's state from before it moved`, err);
+    }
     const was = readIdentity(other);
     if (!was || was.path === root) continue;
     const there = identityOf(was.path);
     if (there && sameFolder(there, was)) continue; // still where it was
     if (sameFolder(was, now)) {
-      fs.renameSync(other, dir);
+      try {
+        fs.renameSync(other, dir);
+      } catch (err) {
+        throw stuck(`move this project's state from ${other}, where it was before the project moved, to ${dir}`, err);
+      }
       // Its own keys follow once it is recorded where it is (moveOwnKeys).
       recordIdentity(root, dir, name);
       notices.set(dir, [...(notices.get(dir) ?? []), `Cascade found this project's state from ${was.path}, where it was before it moved, and uses it here.`]);
@@ -327,6 +348,18 @@ export class LegacyStateNotMovedError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'LegacyStateNotMovedError';
+  }
+}
+
+/**
+ * A project moved on its disk whose state folder, under its old name, could
+ * not be looked for or moved: opening it with a fresh one would leave that
+ * state behind for good.
+ */
+export class MovedStateNotFollowedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MovedStateNotFollowedError';
   }
 }
 

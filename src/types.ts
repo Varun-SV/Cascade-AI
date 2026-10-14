@@ -346,6 +346,12 @@ export interface ToolExecuteOptions {
    */
   onProgress?: (note: string) => void;
   /**
+   * The agent-written tool whose code made this call, through its
+   * `callTool`. Such a tool does not call another, or itself: each would
+   * start a sandbox of its own with a fresh budget of calls.
+   */
+  dynamicTool?: string;
+  /**
    * Asked before a tool reads a workspace file's contents into what it
    * returns ('model': the result goes to the model running the call), sends
    * them to an outside service it calls itself ('service'), or copies them
