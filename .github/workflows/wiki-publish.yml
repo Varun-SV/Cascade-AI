@@ -1,0 +1,64 @@
+name: Wiki Publish
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/wiki/**"
+      - ".github/workflows/wiki-publish.yml"
+      - "scripts/wiki-weekly-digest.mjs"
+  schedule:
+    # Friday 09:00 Asia/Kolkata (UTC+05:30).
+    - cron: "30 3 * * 5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wiki-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Sync reviewed documentation to GitHub Wiki
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout main with history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Publish managed pages and weekly code digest
+        shell: bash
+        env:
+          WIKI_PUSH_TOKEN: ${{ secrets.WIKI_PUSH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${WIKI_PUSH_TOKEN}" ]]; then
+            echo "::error::Missing WIKI_PUSH_TOKEN. Add an Actions secret with write permission to this repository's GitHub Wiki git remote."
+            exit 1
+          fi
+
+          WIKI_DIR="${RUNNER_TEMP}/cascade-wiki"
+          # A GitHub Wiki is a separate Git repository and needs an initial Home page.
+          GIT_TERMINAL_PROMPT=0 git clone --quiet             "https://x-access-token:${WIKI_PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git"             "${WIKI_DIR}"
+          git -C "${WIKI_DIR}" config user.name "cascade-wiki-bot"
+          git -C "${WIKI_DIR}" config user.email "cascade-wiki-bot@users.noreply.github.com"
+
+          # Overlay only managed root-level Markdown pages. Do not delete independent wiki pages.
+          for source in docs/wiki/*.md; do
+            cp "${source}" "${WIKI_DIR}/$(basename "${source}")"
+          done
+          node scripts/wiki-weekly-digest.mjs "${WIKI_DIR}/Weekly-Code-Changes.md"
+
+          git -C "${WIKI_DIR}" add -A
+          if git -C "${WIKI_DIR}" diff --cached --quiet; then
+            echo "Wiki is already up to date."
+            exit 0
+          fi
+
+          git -C "${WIKI_DIR}" commit -m "docs: sync wiki from main (${GITHUB_SHA:0:8})"
+          git -C "${WIKI_DIR}" push --quiet origin HEAD
+          echo "Published reviewed wiki pages to ${GITHUB_REPOSITORY}.wiki.git"
