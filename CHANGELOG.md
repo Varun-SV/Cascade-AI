@@ -72,7 +72,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remove, send, transfer or publish (in any of the forms buttons use) asks
   every time, even after "always allow". So does Enter or Space where it may
   submit a form, and, where pages are described, a click, fill or key press
-  on something the page view did not name. An approved action runs only on
+  on something the page view did not name, or named only in part because the
+  name was too long to show. An approved action runs only on
   the page it was approved on: not after the page moved to another site, or
   to another page of the same one. One by selector also stops if an app has
   changed its route. A ref whose control the page has renamed since the view

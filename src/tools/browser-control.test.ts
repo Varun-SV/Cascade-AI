@@ -468,6 +468,25 @@ describe('BrowserControlTool — what a person approving sees', () => {
     });
   });
 
+  it('asks every time about a control whose name the page view cut short', async () => {
+    // A long benign start, and the part that matters past the cut.
+    const long = 'button "Continue to review the items in your basket and the delivery options you picked, the…"';
+    const rec = recorder({ detail: 'ok', url: 'https://shop.example/', view: { text: '[Page view 1]', labels: { e3: long, e4: 'button "Loading..."', e5: 'searchbox "Search"' } } });
+    const tool = new BrowserControlTool(rec.controller, undefined, { pageView: true });
+    await tool.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
+    expect(tool.forApproval({ action: 'click', ref: 'e3' }, 'run-1').alwaysAsk).toBe(true);
+    // A page's own ellipsis reads as three dots in the view: not a cut.
+    expect(tool.forApproval({ action: 'click', ref: 'e4' }, 'run-1').alwaysAsk).toBe(false);
+    // Enter in a named field may press that button.
+    expect(tool.forApproval({ action: 'press', ref: 'e5', key: 'Enter' }, 'run-1').alwaysAsk).toBe(true);
+
+    const links = recorder({ detail: 'ok', url: 'https://news.example/', view: { text: '[Page view 1]', labels: { e2: 'link "A very long headline about the economy that goes on and on and on past the limit of…"', e5: 'searchbox "Search"' } } });
+    const reader = new BrowserControlTool(links.controller, undefined, { pageView: true });
+    await reader.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
+    // A cut link is not what Enter in a search box submits.
+    expect(reader.forApproval({ action: 'press', ref: 'e5', key: 'Enter' }, 'run-1').alwaysAsk).toBe(false);
+  });
+
   it('asks before choosing an option that does something irreversible', async () => {
     const rec = recorder({ detail: 'ok', url: 'https://mail.example/', view: { text: '[Page view 1]', labels: { e4: 'combobox "Bulk action"', e5: 'combobox "Party size"' } } });
     const tool = new BrowserControlTool(rec.controller, undefined, { pageView: true });

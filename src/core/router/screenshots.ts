@@ -100,9 +100,9 @@ export function screenshotTokens(model: ModelInfo, width: number, height: number
  * worker's question, asked so it does not have one taken for nothing. The
  * router still decides per request, against the model it resolves.
  */
-export function mayTakeScreenshots(model: ModelInfo | undefined, ceiling: number): boolean {
+export function mayTakeScreenshots(model: ModelInfo | undefined, ceiling: number, route: ScreenshotRoute = {}): boolean {
   if (!model) return false;
-  return screenshotRefusal(model, { type: 'base64', data: '', mimeType: 'image/jpeg', screenshot: { width: 1280, height: 800 } }, ceiling) === null;
+  return screenshotRefusal(model, { type: 'base64', data: '', mimeType: 'image/jpeg', screenshot: { width: 1280, height: 800 } }, ceiling, route) === null;
 }
 
 /** How `model` is reached, where that bears on whether it may get a screenshot. */

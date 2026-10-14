@@ -303,6 +303,10 @@ export class BrowserControlTool extends BaseTool {
     }
 
     let alwaysAsk = false;
+    // A name the page view cut short may end in anything — "…, then delete
+    // the account". The view's names are NFKC'd, which turns a page's own
+    // ellipsis into three dots, so the only "…" one can end in is the cut.
+    const cut = (label: string): boolean => label.endsWith('…"');
     if (TRIGGERS.has(action)) {
       const key = typeof input['key'] === 'string' ? input['key'] : '';
       const submits = action === 'press' && SUBMIT_KEY.test(key);
@@ -314,12 +318,14 @@ export class BrowserControlTool extends BaseTool {
         // that does is not in a field's own label, so it counts as unknown
         // unless the key lands on a named control and nothing listed on the
         // page is one to ask about.
-        || (submits && (!target || Object.values(seen?.labels ?? {}).some(irreversible)))
+        || (submits && (!target || Object.values(seen?.labels ?? {}).some((l) => irreversible(l) || (cut(l) && l.startsWith('button ')))))
         // Where pages are described, an action with no label from the view
         // has nothing to be judged by: a selector, or a ref the view did not
         // list. Keys other than Enter and Space sent to whatever has focus
         // only type.
-        || (this.pageView && !target && !unaimed);
+        || (this.pageView && !target && !unaimed)
+        // Nor does one whose label the view cut short.
+        || (target !== undefined && cut(target));
       // The site the person is shown is the one the action must still be on
       // when it runs, and the page the latest view was of the one it must
       // still be on; see `execute`.

@@ -823,6 +823,22 @@ export class T3Worker extends BaseTier {
    * is no such tool and this is a no-op. Importing the class to instanceof-check
    * it would couple the worker to a tool that usually is not there.
    */
+  /**
+   * Whether a page screenshot could reach `model` — by the model and by the
+   * route to it: one reached through a gateway never gets one, so none is
+   * taken for it.
+   */
+  private mayBeShown(model: ModelInfo | undefined): boolean {
+    if (!model) return false;
+    let gateway = false;
+    try {
+      gateway = this.router.throughGateway?.(model) === true;
+    } catch {
+      // Asked only to save a picture's cost; the router still decides.
+    }
+    return mayTakeScreenshots(model, IMAGE_TOKENS_EACH, { gateway });
+  }
+
   private releaseBrowserControl(): void {
     // A finished worker sends nothing more, so its last picture goes too.
     this.pendingScreenshot = undefined;
@@ -910,7 +926,7 @@ export class T3Worker extends BaseTier {
     // Detect tool-use mode against the EFFECTIVE model (per-subtask override if
     // any, else the tier default).
     const effectiveModel = subtaskModel ?? this.router.getModelForTier('T3');
-    this.seesScreenshots = mayTakeScreenshots(effectiveModel, IMAGE_TOKENS_EACH);
+    this.seesScreenshots = this.mayBeShown(effectiveModel);
     // Tag this node with the model actually serving it — including a Cascade
     // Auto per-subtask override — so the desktop can show model-per-task.
     if (effectiveModel) this.setServingModel(`${effectiveModel.provider}:${effectiveModel.id}`);
@@ -991,7 +1007,7 @@ export class T3Worker extends BaseTier {
       if (result.servedBy) {
         const served = this.router.getAvailableModels?.()
           .find((m) => m.provider === result.servedBy!.provider && m.id === result.servedBy!.id);
-        if (served) this.seesScreenshots = mayTakeScreenshots(served, IMAGE_TOKENS_EACH);
+        if (served) this.seesScreenshots = this.mayBeShown(served);
       }
 
       // For text-tool mode: parse <tool_call> blocks and inject as native tool calls

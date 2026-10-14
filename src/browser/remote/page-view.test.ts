@@ -186,6 +186,20 @@ describe('describePage', () => {
     expect(v.text).toContain('[e8] checkbox "Other: •••"');
   });
 
+  it('marks a cut name with the only ellipsis a name in it can end in', () => {
+    // The approval check reads a name ending in "…" as cut: a page's own
+    // ellipsis must not look like one, and a long name must end in one.
+    const snapshot = [
+      '- main [ref=e1] [box=0,0,1280,800]:',
+      '  - button "Loading\u2026" [ref=e2] [box=0,0,100,20]',
+      `  - button "${'Continue to review your basket and the delivery options '.repeat(2)}then delete the account" [ref=e3] [box=0,30,100,20]`,
+    ].join('\n');
+    const v = view(snapshot)!;
+    expect(v.labels.get('e2')).toBe('button "Loading..."');
+    expect(v.labels.get('e3')).toMatch(/…"$/);
+    expect(v.labels.get('e3')).not.toContain('delete');
+  });
+
   it('hides a short value too, where it stands as a word or number of its own', () => {
     // Two digits of a code, an age, initials: short, and no less private.
     const snapshot = [

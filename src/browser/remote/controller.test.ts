@@ -4559,6 +4559,8 @@ describe('page views and refs', () => {
    */
   let subFrames: Array<boolean | null | 'throws' | 'gone' | { found: boolean; y: number }> = [];
   let shotFails = false;
+  /** A private field found only by its label, not by any attribute. */
+  let labelledOnly = false;
   /** Refs the fake page can still resolve, whatever the last view listed. */
   let liveRefs = new Set<string>();
   const extra = page as unknown as Record<string, unknown>;
@@ -4592,6 +4594,7 @@ describe('page views and refs', () => {
     privateOnScreen = false;
     subFrames = [];
     shotFails = false;
+    labelledOnly = false;
     SHOT = jpeg(1280, 800);
     liveRefs = new Set(['e5', 'e9', 'e11', 'e14']);
     extra['ariaSnapshot'] = async (opts: unknown) => {
@@ -4605,12 +4608,19 @@ describe('page views and refs', () => {
      */
     const scanned = (found: boolean | null | 'throws' | 'gone', y: number) => ({
       evaluate: async () => { throw new Error('the privacy check must not run in the page\'s own world'); },
+      getByLabel: (label: RegExp) => ({
+        count: async () => {
+          if (!label.test('Verification code')) throw new Error(`unexpected label ${label}`);
+          return found === true && labelledOnly ? 1 : 0;
+        },
+        nth: () => ({ boundingBox: async () => ({ x: 10, y: y + 5, width: 100, height: 20 }) }),
+      }),
       locator: (selector: string) => ({
         count: async () => {
           page.calls.push('privacy');
           if (!selector.includes('one-time-code') || !selector.includes('iframe[src*="stripe" i]')) throw new Error(`unexpected query ${selector}`);
           if (found === 'throws' || found === 'gone' || found === null) throw new Error('Execution context was destroyed');
-          return found ? 1 : 0;
+          return found && !labelledOnly ? 1 : 0;
         },
         nth: () => ({ boundingBox: async () => ({ x: 10, y: y + 5, width: 100, height: 20 }) }),
       }),
@@ -5289,6 +5299,33 @@ describe('page views and refs', () => {
       }
       expect(PRIVATE_FIELDS).not.toMatch(/autocomplete\^=|autocomplete="/);
       expect(PRIVATE_FIELDS).toContain('input[name*="password" i]');
+    });
+
+    it('knows a one-time code without its autocomplete token, by name, id or label', async () => {
+      const { PRIVATE_FIELDS, PRIVATE_LABEL } = await import('./controller.js');
+      for (const field of ['input[name*="otp" i]', 'input[id*="verification" i]', 'input[name*="2fa" i]', 'input[maxlength="1"][inputmode="numeric" i]']) {
+        expect(PRIVATE_FIELDS).toContain(field);
+      }
+      for (const label of ['Verification code', 'One-time password', 'Enter your OTP', '2FA code', 'Security code', 'PIN', 'Two-step code']) {
+        expect(label).toMatch(PRIVATE_LABEL);
+      }
+      for (const label of ['Promo code', 'Postal code', 'Search', 'Your name', 'Spinach']) expect(label).not.toMatch(PRIVATE_LABEL);
+    });
+
+    it('withholds it for a field known only by its label', async () => {
+      privateOnScreen = true;
+      labelledOnly = true;
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: a password, card or one-time-code field is on screen.');
+    });
+
+    it('takes none in a frame it cannot ask by label', async () => {
+      const frames = extra['frames'] as () => Array<Record<string, unknown>>;
+      extra['frames'] = () => frames().map(({ getByLabel: _unused, ...frame }) => frame);
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('could not be checked');
     });
 
     it('takes none when the page itself cannot be checked', async () => {

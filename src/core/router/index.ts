@@ -2207,9 +2207,10 @@ export class CascadeRouter extends EventEmitter {
    * Whether this model is reached through an endpoint other than its
    * provider's own — a gateway, whose list of models and whose idea of which
    * of them can see are its own. Azure and the local types have no public
-   * endpoint to differ from.
+   * endpoint to differ from. Public so a worker can tell, before it has a
+   * picture taken, that this route would drop it.
    */
-  private throughGateway(model: ModelInfo): boolean {
+  throughGateway(model: ModelInfo): boolean {
     if (!hasDefaultEndpoint(model.provider)) return false;
     const baseUrl = (this.config?.providers ?? []).find((c) => c.type === model.provider)?.baseUrl;
     return Boolean(baseUrl?.trim()) && !sameCredentialEndpoint(model.provider, baseUrl, undefined);

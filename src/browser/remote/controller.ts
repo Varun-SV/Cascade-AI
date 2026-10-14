@@ -74,10 +74,9 @@ type Page = {
 type Frame = {
   evaluate(expression: string): Promise<unknown>;
   /** Playwright's queries in this frame. See `PRIVATE_SELECTOR`. */
-  locator?(selector: string): {
-    count(): Promise<number>;
-    nth(index: number): { boundingBox(opts?: { timeout?: number }): Promise<Box | null> };
-  };
+  locator?(selector: string): FoundFields;
+  /** And by label. See `PRIVATE_LABEL`. */
+  getByLabel?(text: RegExp): FoundFields;
   /** True once the frame has left the page. See `privateOnScreen`. */
   isDetached?(): boolean;
   frameElement?(): Promise<{
@@ -87,6 +86,11 @@ type Frame = {
 };
 /** A box on the page, in CSS pixels from its top left. */
 type Box = { x: number; y: number; width: number; height: number };
+/** What one of the privacy check's queries found in a frame. */
+type FoundFields = {
+  count(): Promise<number>;
+  nth(index: number): { boundingBox(opts?: { timeout?: number }): Promise<Box | null> };
+};
 /** One control on the page, as Playwright resolves it at the moment of acting. */
 type Locator = {
   count(): Promise<number>;
@@ -324,7 +328,20 @@ export const PRIVATE_FIELDS = [
   'input[name*="password" i]', 'input[name*="passwd" i]', 'input[id*="password" i]', 'input[aria-label*="password" i]',
   'input[name*="cvc" i]', 'input[name*="cvv" i]',
   'input[name*="cardnumber" i]', 'input[name*="card_number" i]', 'input[name*="card-number" i]',
+  // A one-time code by its name: sites often leave out the autocomplete
+  // token. Generous on purpose — a picture withheld for a field named
+  // "footprint" costs a step; a code sent to the model costs an account.
+  ...['otp', 'one-time', 'onetime', 'one_time', 'verification', 'passcode', '2fa', 'mfa', 'totp', 'securitycode', 'security_code', 'security-code', 'authcode', 'auth_code', 'auth-code']
+    .flatMap((word) => [`input[name*="${word}" i]`, `input[id*="${word}" i]`]),
+  'input[placeholder*="verification code" i]', 'input[placeholder*="one-time" i]',
+  // One box per digit.
+  'input[maxlength="1"][inputmode="numeric" i]',
 ].join(', ');
+/**
+ * Fields known only by their label — a `<label>`, `aria-label` or
+ * `aria-labelledby` — and no name or id that says what they hold.
+ */
+export const PRIVATE_LABEL = /password|passcode|one[\s-]?time|verification code|verify code|security code|auth(?:entication|orization)? code|access code|sign[\s-]?in code|login code|\botp\b|\b2fa\b|two[\s-]?(?:factor|step)|\bmfa\b|\bpin\b|card number|\bcvc\b|\bcvv\b/i;
 /** Payment providers whose iframe holds a card form, by the address it loads. */
 const PAYMENT_HOSTS = [
   'stripe', 'braintree', 'adyen', 'paypal', 'checkout.com', 'squareup', 'razorpay', 'klarna', 'recurly', 'chargebee', 'authorize.net',
@@ -3532,16 +3549,18 @@ async function frameArea(frame: Frame, screen: { width: number; height: number }
  * page's screen, frames included.
  */
 async function privateIn(frame: Frame, area: Box): Promise<string | null> {
-  if (typeof frame.locator !== 'function') return UNCHECKED_SHOT;
-  const found = frame.locator(PRIVATE_SELECTOR);
-  const count = await found.count();
-  if (count > PRIVACY_MATCH_LIMIT) return UNCHECKED_SHOT;
-  // A box that cannot be measured — a frame too busy to answer, say — is a
-  // field that may be on screen, not one that is not.
-  const boxes = await Promise.all(Array.from({ length: count }, (_, i) => found.nth(i).boundingBox({ timeout: 1_000 })));
-  return boxes.some((box) => box && box.width > 0 && box.height > 0 && overlap(box, area).width > 0 && overlap(box, area).height > 0)
-    ? PRIVATE_SHOT
-    : null;
+  if (typeof frame.locator !== 'function' || typeof frame.getByLabel !== 'function') return UNCHECKED_SHOT;
+  for (const found of [frame.locator(PRIVATE_SELECTOR), frame.getByLabel(PRIVATE_LABEL)]) {
+    const count = await found.count();
+    if (count > PRIVACY_MATCH_LIMIT) return UNCHECKED_SHOT;
+    // A box that cannot be measured — a frame too busy to answer, say — is a
+    // field that may be on screen, not one that is not.
+    const boxes = await Promise.all(Array.from({ length: count }, (_, i) => found.nth(i).boundingBox({ timeout: 1_000 })));
+    if (boxes.some((box) => box && box.width > 0 && box.height > 0 && overlap(box, area).width > 0 && overlap(box, area).height > 0)) {
+      return PRIVATE_SHOT;
+    }
+  }
+  return null;
 }
 
 /** The part two boxes share; zero-sized when they do not meet. */

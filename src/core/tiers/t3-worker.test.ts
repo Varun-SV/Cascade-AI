@@ -1014,6 +1014,15 @@ describe('a browser screenshot reaches the next request, once', () => {
     expect(hasImage(sent[1]!)).toBe(true);
   });
 
+  it('is not even taken for a model reached through a gateway, which never gets one', async () => {
+    const { offered, registry, router } = run(SEEING);
+    (router as unknown as { throughGateway: (m: ModelInfo) => boolean }).throughGateway = (m) => m.id === SEEING.id;
+    const worker = new T3Worker(router, registry, 't2-parent');
+    await worker.execute(makeAssignment({ subtaskTitle: 'Read the booking page' }), 'task-gateway');
+    expect(offered.length).toBeGreaterThan(0);
+    expect(offered.every((o) => o === false)).toBe(true);
+  });
+
   it('is not even taken for a model that cannot see it', async () => {
     const { sent, offered, registry, router } = run({ ...SEEING, id: 'blind', isVisionCapable: false });
     const worker = new T3Worker(router, registry, 't2-parent');
