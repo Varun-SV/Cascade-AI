@@ -353,6 +353,12 @@ export interface ToolExecuteOptions {
    * audit log; the worker sends it once and lets it go.
    */
   attachImage?: (image: ImageAttachment) => void;
+  /**
+   * The page looks exactly as in the last picture a tool handed over, so no
+   * new one was taken: that one still stands for the page, if it has not
+   * gone to the model yet. Present with `attachImage`.
+   */
+  keepImage?: () => void;
 }
 
 // ── Tier System ───────────────────────────────

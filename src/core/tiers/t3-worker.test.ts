@@ -986,6 +986,36 @@ describe('a browser screenshot reaches the next request, once', () => {
     expect(hasImage(sent[2]!)).toBe(true);
   });
 
+  it('keeps an earlier picture when a later step in the turn leaves the page looking the same', async () => {
+    // observe, then hover: the hover sends no picture because the page looks
+    // as in the one the observe took — which must still reach the model.
+    const sent: ConversationMessage[][] = [];
+    let call = 0;
+    const generate = vi.fn(async (_tier: string, options: { messages: ConversationMessage[] }) => {
+      sent.push(options.messages);
+      call += 1;
+      if (call === 1) {
+        return makeResult('', [
+          { id: 'c1', name: 'browser_control', input: { action: 'observe' } },
+          { id: 'c2', name: 'browser_control', input: { action: 'hover', ref: 'e5' } },
+        ]);
+      }
+      return makeResult('The menu shows three items.');
+    });
+    const router = { generate, getModelForTier: () => SEEING } as unknown as CascadeRouter;
+    const registry = makeToolRegistry({
+      getToolDefinitions: () => [{ name: 'browser_control', description: 'Browse', inputSchema: {} }],
+      execute: vi.fn(async (_name: string, input: { action: string }, options: { attachImage?: (i: ImageAttachment) => void; keepImage?: () => void }) => {
+        if (input.action === 'observe') options.attachImage?.(IMAGE);
+        else options.keepImage?.();
+        return 'ok';
+      }),
+    } as unknown as Partial<ToolRegistry>);
+    const worker = new T3Worker(router, registry, 't2-parent');
+    await worker.execute(makeAssignment({ subtaskTitle: 'Open the menu' }), 'task-kept');
+    expect(hasImage(sent[1]!)).toBe(true);
+  });
+
   it('takes pictures for the model that answers after a failover', async () => {
     // Asked of a model that cannot see; answered by one that can.
     const blind = { ...SEEING, id: 'blind', isVisionCapable: false } as ModelInfo;

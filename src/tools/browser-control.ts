@@ -109,6 +109,11 @@ export interface BrowserActionOutcome {
    * the next request (see `ToolExecuteOptions.attachImage`).
    */
   image?: { data: string; mimeType: 'image/jpeg'; width: number; height: number };
+  /**
+   * No new screenshot, because the page looks exactly as it did in the last
+   * one the host sent. That one still shows it.
+   */
+  imageUnchanged?: true;
 }
 
 /** What a host's controller can do beyond the original six actions. */
@@ -448,6 +453,8 @@ export class BrowserControlTool extends BaseTool {
         screenshot: { width: outcome.image.width, height: outcome.image.height },
       });
       shown = '\n\nA screenshot of the page goes with this step.';
+    } else if (outcome.imageUnchanged) {
+      options?.keepImage?.();
     }
     return `${outcome.ok ? '' : 'Failed: '}${outcome.detail}${where}${shown}`;
   }

@@ -1217,7 +1217,10 @@ export class T3Worker extends BaseTier {
     // A picture is of the page after the last browser action. One that ran
     // since and sent none — a fill, or a page whose picture was withheld —
     // leaves the older picture showing a page that is no longer there, under
-    // a caption that says otherwise. Reading the page changes nothing.
+    // a caption that says otherwise. Reading the page changes nothing, and a
+    // step that leaves the pixels as they were says so (`keepImage`): the
+    // older picture is then still the page, and the only one there is.
+    const earlier = this.pendingScreenshot;
     if (tc.name === 'browser_control' && tc.input['action'] !== 'extract_text') this.pendingScreenshot = undefined;
 
     try {
@@ -1240,7 +1243,10 @@ export class T3Worker extends BaseTier {
           return msgs;
         },
         // The newest wins: one picture per step, of the page as it is now.
-        ...(this.seesScreenshots ? { attachImage: (image: ImageAttachment) => { this.pendingScreenshot = image; } } : {}),
+        ...(this.seesScreenshots ? {
+          attachImage: (image: ImageAttachment) => { this.pendingScreenshot = image; },
+          keepImage: () => { this.pendingScreenshot ??= earlier; },
+        } : {}),
       });
       if (this.audit) {
         this.audit.toolCall(this.id, tc.name, tc.input);

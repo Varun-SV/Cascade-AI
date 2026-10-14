@@ -5060,6 +5060,8 @@ describe('page views and refs', () => {
       await c.controller({ kind: 'click', selector: '#a', pageView: true, screenshot: true }, ctx('run', 'w1'));
       const again = await c.controller({ kind: 'click', selector: '#b', pageView: true, screenshot: true }, ctx('run', 'w1'));
       expect(again.image).toBeUndefined();
+      // Said in a way the tool can act on: the last picture still stands.
+      expect(again.imageUnchanged).toBe(true);
       // Told, so the model does not wait for a picture or think it lost one.
       expect(again.view!.text).toContain('No new screenshot: the page looks as it did in the last one. Call observe for a fresh one.');
       const asked = await c.controller({ kind: 'observe', pageView: true, screenshot: true }, ctx('run', 'w1'));
@@ -5115,8 +5117,24 @@ describe('page views and refs', () => {
       expect(out.view!.text).toContain('No screenshot: the page changed while it was being looked at.');
     });
 
-    it('keeps a picture taken while the page changed only its address, or a frame in it loaded', async () => {
-      for (const meanwhile of [() => page.replaceState('https://start.test/?slide=2'), () => page.requestNavigation(SUB_FRAME)]) {
+    it('drops a picture taken as an app moved to another route', async () => {
+      // /cart's controls with /account's pixels: a page the list does not describe.
+      for (const route of ['https://start.test/account', 'https://start.test/#/account']) {
+        page.currentUrl = 'https://start.test/';
+        extra['screenshot'] = async () => { page.replaceState(route); return SHOT; };
+        const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+        expect(out.image, route).toBeUndefined();
+        expect(out.view!.text).toContain('No screenshot: the page changed while it was being looked at.');
+      }
+    });
+
+    it('keeps a picture taken while the page changed only its query or place, or a frame in it loaded', async () => {
+      // A feed's ?at=, a scroll-spy's #section: the same page, as described.
+      for (const meanwhile of [
+        () => page.replaceState('https://start.test/?slide=2'),
+        () => page.replaceState('https://start.test/#pricing'),
+        () => page.requestNavigation(SUB_FRAME),
+      ]) {
         extra['screenshot'] = async () => { meanwhile(); return SHOT; };
         const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
         expect(out.image).toBeDefined();

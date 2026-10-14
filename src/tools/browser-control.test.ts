@@ -503,6 +503,16 @@ describe('BrowserControlTool — what a person approving sees', () => {
     expect(tool.forApproval({ action: 'fill', ref: 'e9', value: 'a@b.c' }, 'run-1').input['value']).toBe('a@b.c');
   });
 
+  it('says the last picture still stands when the page looks the same', async () => {
+    const rec = recorder({ detail: 'ok', imageUnchanged: true, view: { text: '[Page view 2]', labels: {} } });
+    const tool = new BrowserControlTool(rec.controller, undefined, { pageView: true, screenshots: true });
+    const keepImage = vi.fn();
+    const attachImage = vi.fn();
+    await tool.execute({ action: 'hover', ref: 'e5' }, { sessionId: 'run-1', attachImage, keepImage } as never);
+    expect(keepImage).toHaveBeenCalledTimes(1);
+    expect(attachImage).not.toHaveBeenCalled();
+  });
+
   it('runs an approved action only on the site it was approved on', async () => {
     const rec = recorder({ detail: 'ok', url: 'https://shop.example/cart', view: { text: '[Page view 1]', labels: { e14: 'button "Pay"' } } });
     const tool = new BrowserControlTool(rec.controller, undefined, { pageView: true });

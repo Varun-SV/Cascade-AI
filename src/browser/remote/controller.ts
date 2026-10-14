@@ -3077,8 +3077,10 @@ export class RemoteBrowserController {
       // it a moment later. A page that loaded another document, or put a
       // password or code field on screen, in between is not sent: it is
       // checked again now, and a picture either check doubts is dropped. The
-      // document is the one the view describes, so the two go together.
-      if (held.page !== page || !sameDocument(seen.document, held)) {
+      // document is the one the view describes, so the two go together — and
+      // so is the route: an app that moved from /cart to /account in between
+      // would send the account's pixels with the cart's controls.
+      if (held.page !== page || !sameDocument(seen.document, held) || !sameRoute(seen.document, page.url())) {
         return { withheld: 'No screenshot: the page changed while it was being looked at.' };
       }
       const after = await this.privateOnScreen(page, stoppable);
@@ -3191,12 +3193,12 @@ export class RemoteBrowserController {
     stoppable: <T>(work: Promise<T>) => Promise<T>,
     seen: { view: PageView; viewport: Viewport | undefined; document: string },
     action: BrowserAction,
-  ): Promise<Pick<BrowserActionOutcome, 'view' | 'image'>> {
+  ): Promise<Pick<BrowserActionOutcome, 'view' | 'image' | 'imageUnchanged'>> {
     const view = viewOutcome(seen.view);
     if (!action.screenshot) return { view };
     // Asked for by name, a picture is sent even of an unchanged page.
     const shot = await this.screenshot(held, stoppable, seen, action.kind === 'observe', action.marked === true);
-    if ('unchanged' in shot) return { view: { ...view, text: `${view.text}\n\n${UNCHANGED_SHOT}` } };
+    if ('unchanged' in shot) return { view: { ...view, text: `${view.text}\n\n${UNCHANGED_SHOT}` }, imageUnchanged: true };
     if ('withheld' in shot) return { view: { ...view, text: `${view.text}\n\n${shot.withheld}` } };
     return { view, image: shot.image };
   }
@@ -3620,6 +3622,26 @@ function readPlace(token: string): [string, string] | null {
 /** The run is still on the document `token` was taken of. Unreadable is no. */
 function sameDocument(token: string, held: RunBrowser): boolean {
   return readPlace(token)?.[0] === documentOf(held);
+}
+
+/**
+ * And on the same route: the same path, and the same hash where it names one
+ * (`#/account`). Not the query, nor a hash that marks a place in the page —
+ * a feed or a scroll-spy rewrites those as it goes, and a picture taken then
+ * still shows the page the view describes.
+ */
+function sameRoute(token: string, url: string): boolean {
+  const place = readPlace(token);
+  return place !== null && routeOf(place[1]) === routeOf(url);
+}
+
+function routeOf(url: string): string {
+  try {
+    const at = new URL(url);
+    return `${at.origin}${at.pathname}${/^#!?\//.test(at.hash) ? at.hash : ''}`;
+  } catch {
+    return url;
+  }
 }
 
 /** And at the same address, a route change by `pushState` included. */
