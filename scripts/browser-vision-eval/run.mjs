@@ -37,6 +37,12 @@ const args = parseArgs(process.argv.slice(2));
 // A file URL, not a path: on Windows an absolute path is not something import() takes.
 const sdk = await import(pathToFileURL(path.join(here, '..', '..', 'dist', 'index.js')).href);
 
+/**
+ * A run that would not have tested the browser alone. Ends the whole test.
+ * Up here because a class, unlike a function, exists only from its line on.
+ */
+class IsolationError extends Error {}
+
 /** Rough cost of one task run, in input tokens, by setting — for the estimate only. */
 const TOKENS_PER_RUN = { off: 40_000, list: 35_000, image: 50_000, marked: 50_000 };
 
@@ -154,6 +160,35 @@ async function evaluate() {
     return controller.controller(action, context);
   };
 
+  // The browser and nothing else. `enabledTools: []` keeps out the built-in
+  // tools, but generation tools (images, speech, documents) register outside
+  // that list wherever your config can reach their APIs. They are found here,
+  // once, and named in `disabledTools` for every run — and each run checks
+  // that browser_control is all it was given.
+  const isolated = (model, arm, disabled) => ({
+    ...base,
+    models: { ...base.models, t1: model, t2: model, t3: model },
+    cascadeAuto: false,
+    enableToolCreation: false,
+    tools: {
+      ...base.tools,
+      enabledTools: [],
+      disabledTools: disabled,
+      mcpServers: [],
+      remoteBrowser: { provider: 'cdp', url: chrome.ws },
+      browserVision: arm,
+    },
+  });
+  // They register as a Cascade is built, so building one is enough: nothing
+  // is initialised, and a model that cannot be reached is each run's to report.
+  const probeSpace = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-bve-'));
+  const probe = new sdk.Cascade(isolated(models[0], arms[0], base.tools?.disabledTools ?? []), probeSpace);
+  const disabled = [
+    ...(base.tools?.disabledTools ?? []),
+    ...probe.getToolRegistry().getToolDefinitions().map((d) => d.name).filter((n) => n !== 'browser_control'),
+  ];
+  fs.rmSync(probeSpace, { recursive: true, force: true });
+
   const rows = [];
   for (const model of models) {
     for (const arm of arms) {
@@ -164,20 +199,7 @@ async function evaluate() {
           // The browser and nothing else. The model reads pages this test
           // wrote, but it is still a model reading web pages, and your own
           // config would otherwise hand it your shell, files and MCP servers.
-          const config = {
-            ...base,
-            models: { ...base.models, t1: model, t2: model, t3: model },
-            cascadeAuto: false,
-            enableToolCreation: false,
-            tools: {
-              ...base.tools,
-              enabledTools: [],
-              mcpServers: [],
-              remoteBrowser: { provider: 'cdp', url: chrome.ws },
-              browserVision: arm,
-            },
-          };
-          const cascade = new sdk.Cascade(config, workspace);
+          const cascade = new sdk.Cascade(isolated(model, arm, disabled), workspace);
           const prompt = `Use the browser. Open ${site.url}/${task.page}?run=${run} and do this: ${task.prompt}`;
           const started = Date.now();
           let output = '';
@@ -190,6 +212,10 @@ async function evaluate() {
           try {
             await cascade.init();
             cascade.setRemoteBrowserController(counted, (a) => controller.actorEnded(a), controller.features);
+            const offered = cascade.getToolRegistry().getToolDefinitions().map((d) => d.name);
+            if (offered.some((n) => n !== 'browser_control')) {
+              throw new IsolationError(`This run would offer ${offered.filter((n) => n !== 'browser_control').join(', ')} besides the browser.`);
+            }
             const result = await cascade.run({
               prompt,
               approvalCallback: async (request) => ({ approved: request.toolName === 'browser_control', always: false }),
@@ -197,10 +223,15 @@ async function evaluate() {
             output = result.output;
             usage = result.usage ?? {};
           } catch (err) {
+            // Not a result: the comparison would not be of the browser alone.
+            if (err instanceof IsolationError) throw err;
             error = err instanceof Error ? err.message : String(err);
           }
           const opened = [...steps.keys()].filter((k) => !known.has(k));
           const shots = cascade.getDecisionLog().find((d) => d.kind === 'browser')?.detail ?? '';
+          // The page reports a finished task with a request of its own, which
+          // can land after the model's last word: wait for it a moment.
+          if (task.check.done) await reported(`${run}:${task.check.done}`);
           const ok = task.check.done ? site.done.has(`${run}:${task.check.done}`) : task.check.answer.test(output);
           rows.push({
             model, arm, task: task.id, ok,
@@ -225,6 +256,13 @@ async function evaluate() {
   const json = /\.md$/i.test(out) ? out.replace(/\.md$/i, '.json') : `${out}.json`;
   fs.writeFileSync(json, JSON.stringify(rows, null, 2));
   console.log(`\nWrote ${out}`);
+}
+
+/** Wait up to two seconds for the page's report that `key` was done. */
+async function reported(key) {
+  for (let waited = 0; waited < 2_000 && !site.done.has(key); waited += 100) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
 }
 
 function summarise(rows) {
@@ -294,17 +332,25 @@ async function launchChromium(executable) {
     '--headless=new', '--no-sandbox', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1',
     `--user-data-dir=${profile}`, '--window-size=1280,800', 'about:blank',
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  // A browser that never says where it listens is not left behind, nor is
+  // its profile: the caller gets no handle to clean up after a failed start.
+  let started = false;
+  const abandon = () => {
+    if (started) return;
+    child.kill('SIGKILL');
+    try { fs.rmSync(profile, { recursive: true, force: true }); } catch { /* the exit may still be writing it */ }
+  };
   const ws = await new Promise((resolve, reject) => {
     let err = '';
-    const timer = setTimeout(() => reject(new Error(`Chromium did not start: ${err.slice(-400)}`)), 15_000);
+    const timer = setTimeout(() => { abandon(); reject(new Error(`Chromium did not start: ${err.slice(-400)}`)); }, 15_000);
     child.stderr.on('data', (d) => {
       err += d;
       const m = /DevTools listening on (ws:\/\/\S+)/.exec(err);
-      if (m) { clearTimeout(timer); resolve(m[1]); }
+      if (m) { clearTimeout(timer); started = true; resolve(m[1]); }
     });
-    child.on('exit', (code) => { clearTimeout(timer); reject(new Error(`Chromium exited (${code}): ${err.slice(-400)}`)); });
+    child.on('exit', (code) => { clearTimeout(timer); abandon(); reject(new Error(`Chromium exited (${code}): ${err.slice(-400)}`)); });
     // No such binary: say so, with the way to name another.
-    child.on('error', (e) => { clearTimeout(timer); reject(new Error(`Chromium could not start (${e.message}). Name one with --chromium <path>.`)); });
+    child.on('error', (e) => { clearTimeout(timer); abandon(); reject(new Error(`Chromium could not start (${e.message}). Name one with --chromium <path>.`)); });
   });
   const kill = async () => {
     // Chromium keeps writing its profile until it has gone; removing it sooner

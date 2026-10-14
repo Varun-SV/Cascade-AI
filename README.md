@@ -536,7 +536,7 @@ On screen:
 
 The model acts by ref (`{"action":"click","ref":"e14"}`), and CSS selectors still work. A page view never shows what is typed into a field. A ref is refused, never re-matched, once the page has loaded something else or the control it named has gone or been renamed.
 
-`tools.browserVision` sets how much it sees. It applies to a remote browser — Cascade Cloud and self-hosted deployments set it with `REMOTE_BROWSER_VISION`, and an SDK host that attaches one reads it from its config. The desktop's built-in browser keeps CSS selectors. Page views need Playwright 1.60 or later, the version Cascade installs; with an older one the agent reads page text and uses CSS selectors.
+`tools.browserVision` sets how much it sees. It applies to a remote browser — Cascade Cloud and self-hosted deployments set it with `REMOTE_BROWSER_VISION`, and an SDK host that attaches one reads it from its config. The desktop's built-in browser keeps CSS selectors. Page views need Playwright 1.60 or later, the version Cascade installs; with an older one the agent is offered the original actions only, and reads page text and uses CSS selectors.
 
 | Setting | What the model gets |
 |---|---|

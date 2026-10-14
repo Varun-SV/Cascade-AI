@@ -88,6 +88,14 @@ export const PAGE_VIEW_MARK = '[Page view';
  * an ordinary large page writes a few hundred thousand characters.
  */
 export const SNAPSHOT_MAX_CHARS = 1_000_000;
+/**
+ * The longest view, in characters. The worker keeps a tool result under
+ * 12,000 by cutting out its middle; a view that size would lose controls from
+ * the middle of its list, unsaid, while their refs stayed good. Kept under it
+ * here instead, with room for the step's own words, and what does not fit is
+ * counted as not listed.
+ */
+export const VIEW_MAX_CHARS = 10_000;
 
 /** Roles a person acts on. Anything else is listed only if it looks clickable. */
 const INTERACTIVE = new Set([
@@ -319,8 +327,6 @@ export function describePage(input: {
   const view = entries.filter((e) => e.where === 'view');
   const below = entries.filter((e) => e.where === 'below');
   const above = entries.filter((e) => e.where === 'above');
-  const shownView = view.slice(0, VIEW_LIMIT);
-  const shownBelow = below.slice(0, BELOW_LIMIT);
 
   const lines: string[] = [`${PAGE_VIEW_MARK} ${input.number}]`];
   const title = clean(input.title, 120);
@@ -329,6 +335,19 @@ export function describePage(input: {
     const v = input.viewport;
     lines.push(`Viewport ${v.width}×${v.height}, scrolled ${Math.round(v.scrollY).toLocaleString('en-US')} of ${Math.round(v.scrollHeight).toLocaleString('en-US')}`);
   }
+  // Room for the headings and the "Not listed" line, which are short.
+  let room = VIEW_MAX_CHARS - lines.join('\n').length - 200;
+  const fit = (list: Entry[], limit: number): Entry[] => {
+    const out: Entry[] = [];
+    for (const e of list.slice(0, limit)) {
+      if (e.line.length + 1 > room) break;
+      room -= e.line.length + 1;
+      out.push(e);
+    }
+    return out;
+  };
+  const shownView = fit(view, VIEW_LIMIT);
+  const shownBelow = fit(below, BELOW_LIMIT);
   lines.push('', 'On screen:');
   if (shownView.length) lines.push(...shownView.map((e) => e.line));
   else lines.push('(no controls on screen)');

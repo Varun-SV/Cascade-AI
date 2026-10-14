@@ -50,7 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   types, chooses and hovers by ref instead of guessing CSS selectors, which
   still work. New actions: `observe`, `scroll`, `select_option` and `hover`.
   A page view never shows what is typed into a field. Only the two newest
-  views are sent whole; older ones fold to a line.
+  views are sent whole; older ones fold to a line. Page views need
+  Playwright 1.60 or later, which Cascade installs; a host that brings an
+  older one gets the original actions only.
   `tools.browserVision` (`off`, `list` by default, `image`, `marked`) adds a
   screenshot for models that can see images:
   - It's taken clean, at 1280×800 on Steel, and sent with one step only, so

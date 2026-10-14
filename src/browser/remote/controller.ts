@@ -32,6 +32,8 @@ import type {
 } from '../../tools/browser-control.js';
 import type { RemoteBrowserProvider, RemoteBrowserSession } from './provider.js';
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { BrowserLease } from '../lease.js';
 import { describePage, wellFormed, type PageView, type Viewport } from './page-view.js';
 import { drawMarks } from './marks.js';
@@ -77,6 +79,8 @@ type Frame = {
   locator?(selector: string): FoundFields;
   /** And by label. See `PRIVATE_LABEL`. */
   getByLabel?(text: RegExp): FoundFields;
+  /** And by placeholder. See `PRIVATE_PLACEHOLDER`. */
+  getByPlaceholder?(text: RegExp): FoundFields;
   /** True once the frame has left the page. See `privateOnScreen`. */
   isDetached?(): boolean;
   frameElement?(): Promise<{
@@ -300,6 +304,8 @@ const SCREENSHOT_TIMEOUT_MS = 5_000;
 const PAGE_CHECK_TIMEOUT_MS = 2_000;
 /** A screenshot this large (base64) is not sent: something is wrong with it. */
 const SCREENSHOT_MAX_CHARS = 2_000_000;
+/** How long drawing the refs on a copy may take before the clean picture goes. */
+const MARKS_TIMEOUT_MS = 3_000;
 /**
  * Sub-frames the privacy check will read. A page with more is not pictured:
  * every frame is read or none is, so a password field cannot sit in the one
@@ -342,6 +348,11 @@ export const PRIVATE_FIELDS = [
  * `aria-labelledby` — and no name or id that says what they hold.
  */
 export const PRIVATE_LABEL = /password|passcode|one[\s-]?time|verification code|verify code|security code|auth(?:entication|orization)? code|access code|sign[\s-]?in code|login code|\botp\b|\b2fa\b|two[\s-]?(?:factor|step)|\bmfa\b|\bpin\b|card number|\bcvc\b|\bcvv\b/i;
+/**
+ * Placeholders that say the same, and the digits a card field shows before
+ * one is typed: "Card number", "1234 1234 1234 1234", "•••• ••••".
+ */
+export const PRIVATE_PLACEHOLDER = new RegExp(`${PRIVATE_LABEL.source}|\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}|[•*x]{4}[\\s-]?[•*x]{4}`, 'i');
 /** Payment providers whose iframe holds a card form, by the address it loads. */
 const PAYMENT_HOSTS = [
   'stripe', 'braintree', 'adyen', 'paypal', 'checkout.com', 'squareup', 'razorpay', 'klarna', 'recurly', 'chargebee', 'authorize.net',
@@ -871,12 +882,16 @@ export class RemoteBrowserController {
    * What this controller can do beyond the six original actions. The tool
    * reads it to decide which actions and parameters to offer the model.
    *
-   * Page views need Playwright 1.60's AI snapshot, with refs and boxes —
-   * the version this package installs. With an older one a page cannot be
-   * described: `observe` says so and the model goes on with CSS selectors,
-   * each click, entry and key press by which is put to the person.
+   * Page views need Playwright 1.60's AI snapshot, with refs and boxes — the
+   * version this package installs. A host that brings an older one (the peer
+   * range allows it, so as not to break an install) gets none of it: the
+   * model is offered the six actions and CSS selectors, rather than refs and
+   * an `observe` that could only fail.
    */
-  readonly features = { pageView: true, screenshots: true, marked: true } as const;
+  readonly features: { pageView: boolean; screenshots: boolean; marked: boolean } = (() => {
+    const views = pageViewsIn(installedPlaywright());
+    return { pageView: views, screenshots: views, marked: views };
+  })();
 
   /**
    * The predecessor's teardown, until it has been waited for once.
@@ -3093,7 +3108,10 @@ export class RemoteBrowserController {
       const clean = picture.toString('base64');
       if (!size || !clean || clean.length > SCREENSHOT_MAX_CHARS) return { withheld: 'No screenshot: the picture could not be taken.' };
       // Asked for by name, a picture is sent even of an unchanged page.
-      const print = createHash('sha256').update(picture).digest('base64');
+      // With marks, the picture sent is the marked one: the same pixels with
+      // other refs on them — an app that swapped its controls for identical
+      // ones — is another picture.
+      const print = createHash('sha256').update(picture).update(marked ? JSON.stringify(seen.view.marks) : '').digest('base64');
       if (!always && held.shotOf === print) return { unchanged: true };
       held.shotOf = print;
       // The marks go on a copy; if they cannot be drawn, the clean picture is
@@ -3112,15 +3130,13 @@ export class RemoteBrowserController {
     size: { width: number; height: number },
     view: PageView,
   ): Promise<string | null> {
-    let cdp: CDPSession | undefined;
+    // Bounded like the picture it draws on: a page whose renderer is stuck
+    // must not hold the step. Past it the clean picture goes instead.
     try {
-      cdp = await page.context().newCDPSession(page);
-      const drawn = await drawMarks(cdp, { data, ...size }, view.marks);
+      const drawn = await this.withPageCdp(page, (cdp) => within(drawMarks(cdp, { data, ...size }, view.marks), MARKS_TIMEOUT_MS));
       return drawn && drawn.length <= SCREENSHOT_MAX_CHARS ? drawn : null;
     } catch {
       return null;
-    } finally {
-      await cdp?.detach().catch(() => {});
     }
   }
 
@@ -3605,8 +3621,10 @@ async function frameArea(frame: Frame, screen: { width: number; height: number }
  * page's screen, frames included.
  */
 async function privateIn(frame: Frame, area: Box): Promise<string | null> {
-  if (typeof frame.locator !== 'function' || typeof frame.getByLabel !== 'function') return UNCHECKED_SHOT;
-  for (const found of [frame.locator(PRIVATE_SELECTOR), frame.getByLabel(PRIVATE_LABEL)]) {
+  if (typeof frame.locator !== 'function' || typeof frame.getByLabel !== 'function' || typeof frame.getByPlaceholder !== 'function') {
+    return UNCHECKED_SHOT;
+  }
+  for (const found of [frame.locator(PRIVATE_SELECTOR), frame.getByLabel(PRIVATE_LABEL), frame.getByPlaceholder(PRIVATE_PLACEHOLDER)]) {
     const count = await found.count();
     if (count > PRIVACY_MATCH_LIMIT) return UNCHECKED_SHOT;
     // A box that cannot be measured — a frame too busy to answer, say — is a
@@ -3852,6 +3870,31 @@ function scrollDelta(n: unknown): number {
  * kind of wrong advice that costs an afternoon.
  */
 type CdpConnectOptions = { headers?: Record<string, string> };
+
+/**
+ * The version of the Playwright this package would load, or undefined when
+ * there is none it can find. Read from its package.json, resolved from here
+ * the way `import('playwright')` resolves it, in the CommonJS builds as well
+ * as the ES module ones.
+ */
+function installedPlaywright(): string | undefined {
+  try {
+    const from = typeof __filename === 'string' ? __filename : fileURLToPath(import.meta.url);
+    const version = (createRequire(from)('playwright/package.json') as { version?: unknown }).version;
+    return typeof version === 'string' ? version : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Whether a Playwright of `version` writes the AI snapshot page views read: 1.60 or later. */
+export function pageViewsIn(version: string | undefined): boolean {
+  const m = /^(\d+)\.(\d+)\./.exec(version ?? '');
+  if (!m) return false;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  return major > 1 || (major === 1 && minor >= 60);
+}
 
 async function loadPlaywright(): Promise<{ chromium: { connectOverCDP(url: string, opts?: CdpConnectOptions): Promise<unknown> } }> {
   try {

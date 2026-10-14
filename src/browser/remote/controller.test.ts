@@ -4580,6 +4580,8 @@ describe('page views and refs', () => {
   let shotFails = false;
   /** A private field found only by its label, not by any attribute. */
   let labelledOnly = false;
+  /** One found only by its placeholder. */
+  let placeholderOnly = false;
   /** Refs the fake page can still resolve, whatever the last view listed. */
   let liveRefs = new Set<string>();
   const extra = page as unknown as Record<string, unknown>;
@@ -4614,6 +4616,7 @@ describe('page views and refs', () => {
     subFrames = [];
     shotFails = false;
     labelledOnly = false;
+    placeholderOnly = false;
     SHOT = jpeg(1280, 800);
     liveRefs = new Set(['e5', 'e9', 'e11', 'e14']);
     extra['ariaSnapshot'] = async (opts: unknown) => {
@@ -4634,12 +4637,19 @@ describe('page views and refs', () => {
         },
         nth: () => ({ boundingBox: async () => ({ x: 10, y: y + 5, width: 100, height: 20 }) }),
       }),
+      getByPlaceholder: (text: RegExp) => ({
+        count: async () => {
+          if (!text.test('Card number')) throw new Error(`unexpected placeholder ${text}`);
+          return found === true && placeholderOnly ? 1 : 0;
+        },
+        nth: () => ({ boundingBox: async () => ({ x: 10, y: y + 5, width: 100, height: 20 }) }),
+      }),
       locator: (selector: string) => ({
         count: async () => {
           page.calls.push('privacy');
           if (!selector.includes('one-time-code') || !selector.includes('iframe[src*="stripe" i]')) throw new Error(`unexpected query ${selector}`);
           if (found === 'throws' || found === 'gone' || found === null) throw new Error('Execution context was destroyed');
-          return found && !labelledOnly ? 1 : 0;
+          return found && !labelledOnly && !placeholderOnly ? 1 : 0;
         },
         nth: () => ({ boundingBox: async () => ({ x: 10, y: y + 5, width: 100, height: 20 }) }),
       }),
@@ -4694,6 +4704,12 @@ describe('page views and refs', () => {
   });
 
   const controller = () => new RemoteBrowserController({ provider: fakeProvider().provider, settleQuietMs: 0 });
+
+  it('offers page views only with a Playwright that can write them', async () => {
+    const { pageViewsIn } = await import('./controller.js');
+    for (const version of ['1.60.0', '1.62.1', '1.60.0-beta-1', '2.0.0']) expect(pageViewsIn(version), version).toBe(true);
+    for (const version of ['1.59.3', '1.40.0', '0.99.0', 'next', '', undefined]) expect(pageViewsIn(version), String(version)).toBe(false);
+  });
 
   it('says what it offers, so the tool can offer refs and screenshots', () => {
     expect(controller().features).toEqual({ pageView: true, screenshots: true, marked: true });
@@ -5440,6 +5456,27 @@ describe('page views and refs', () => {
       });
     });
 
+    it('withholds it for a card field known only by its placeholder', async () => {
+      const { PRIVATE_PLACEHOLDER } = await import('./controller.js');
+      for (const text of ['Card number', '1234 1234 1234 1234', '•••• •••• •••• ••••', 'CVC', 'Password', 'Enter code (OTP)']) {
+        expect(text).toMatch(PRIVATE_PLACEHOLDER);
+      }
+      for (const text of ['Search', 'Your email', 'Promo code', 'MM / YY', 'Postal code']) expect(text).not.toMatch(PRIVATE_PLACEHOLDER);
+      privateOnScreen = true;
+      placeholderOnly = true;
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: a password, card or one-time-code field is on screen.');
+      // And none in a frame it cannot ask by placeholder.
+      privateOnScreen = false;
+      placeholderOnly = false;
+      const frames = extra['frames'] as () => Array<Record<string, unknown>>;
+      extra['frames'] = () => frames().map(({ getByPlaceholder: _unused, ...frame }) => frame);
+      const blind = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run2', 'w1'));
+      expect(blind.image).toBeUndefined();
+      expect(blind.view!.text).toContain('could not be checked');
+    });
+
     it('takes none in a frame it cannot ask by label', async () => {
       const frames = extra['frames'] as () => Array<Record<string, unknown>>;
       extra['frames'] = () => frames().map(({ getByLabel: _unused, ...frame }) => frame);
@@ -5520,6 +5557,49 @@ describe('page views and refs', () => {
       // The fake CDP answers none of the drawing calls.
       const out = await controller().controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
       expect(out.image?.data).toBe(SHOT64);
+    });
+
+    it('sends the clean picture when drawing the marks never finishes', async () => {
+      // A renderer that is stuck: the drawing call never answers.
+      const send = cdp.send;
+      cdp.send = async (method: string, params?: Record<string, unknown>) => {
+        if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'MAIN' } } };
+        if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 };
+        if (method === 'Runtime.evaluate') return new Promise(() => {});
+        return send(method, params);
+      };
+      try {
+        const started = Date.now();
+        const out = await controller().controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
+        expect(out.image?.data).toBe(SHOT64);
+        expect(Date.now() - started).toBeLessThan(6_000);
+      } finally {
+        cdp.send = send;
+      }
+    }, 10_000);
+
+    it('sends a new marked picture when the refs on the same pixels changed', async () => {
+      // An app swapped its controls for identical ones: the same picture, new refs.
+      const send = cdp.send;
+      cdp.send = async (method: string, params?: Record<string, unknown>) => {
+        if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'MAIN' } } };
+        if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 };
+        if (method === 'Runtime.evaluate') return { result: { value: Buffer.from(String(params?.['expression']).slice(-40)).toString('base64') } };
+        return send(method, params);
+      };
+      try {
+        const c = controller();
+        await c.controller({ kind: 'click', selector: '#a', pageView: true, screenshot: true, marked: true }, ctx('run', 'w1'));
+        const same = await c.controller({ kind: 'click', selector: '#b', pageView: true, screenshot: true, marked: true }, ctx('run', 'w1'));
+        expect(same.imageUnchanged).toBe(true);
+        snapshot = BOOKING.replace('[ref=e5]', '[ref=e50]');
+        liveRefs.add('e50');
+        const swapped = await c.controller({ kind: 'click', selector: '#c', pageView: true, screenshot: true, marked: true }, ctx('run', 'w1'));
+        expect(swapped.image).toBeDefined();
+        expect(swapped.imageUnchanged).toBeUndefined();
+      } finally {
+        cdp.send = send;
+      }
     });
 
     it('draws nothing unless marks are asked for', async () => {

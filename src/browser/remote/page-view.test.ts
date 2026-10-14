@@ -186,6 +186,24 @@ describe('describePage', () => {
     expect(v.text).toContain('[e8] checkbox "Other: •••"');
   });
 
+  it('keeps the view under its length, counting what does not fit as not listed', async () => {
+    // 120 controls with long names: past the worker's cut, its middle would
+    // go unsaid while every ref stayed good.
+    const { VIEW_MAX_CHARS } = await import('./page-view.js');
+    const long = 'Add to basket the deluxe edition with every extra and the long description';
+    // 80 on screen and 40 further down: the most a view lists.
+    const rows = Array.from({ length: 120 }, (_, i) => `  - button "${long} ${i}" [disabled] [ref=e${i + 2}] [box=0,${i < 80 ? i * 5 : 1000 + i * 5},100,4]`);
+    const v = view(['- main [ref=e1] [box=0,0,1280,2000]:', ...rows].join('\n'))!;
+    expect(v.text.length).toBeLessThanOrEqual(VIEW_MAX_CHARS);
+    const listed = [...v.text.matchAll(/^\[(e\d+)\]/gm)].map((m) => m[1]!);
+    const further = listed.filter((r) => Number(r.slice(1)) - 2 >= 80).length;
+    expect(listed.length).toBeLessThan(120);
+    // Only what is shown can be acted on, or marked.
+    expect([...v.labels.keys()].sort()).toEqual([...listed].sort());
+    expect(v.marks.every((m) => listed.includes(m.ref))).toBe(true);
+    expect(v.text).toContain(`${40 - further} further down`);
+  });
+
   it('does not read a snapshot past its limit, and says what to do instead', async () => {
     const { SNAPSHOT_MAX_CHARS } = await import('./page-view.js');
     const huge = '- main [ref=e1]:\n' + '  - button "Go" [ref=e2] [box=0,0,10,10]\n'.repeat(Math.ceil(SNAPSHOT_MAX_CHARS / 40) + 10);
