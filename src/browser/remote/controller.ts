@@ -3154,14 +3154,68 @@ export class RemoteBrowserController {
       const area = main ? { x: 0, y: 0, ...screen } : await frameArea(frame, screen);
       if (!area) return null;
       try {
-        return await stoppable(within(privateIn(frame, area)));
+        return await stoppable(within(privateIn(frame, area)))
+          // A frame in a process of its own is out of the page's DOM below.
+          ?? (main ? null : await stoppable(this.closedInOwnFrame(page, frame)));
       } catch {
         // A frame that went away mid-check has nothing to show; one still on
         // the page that could not be read might.
         return !main && frame.isDetached?.() === true ? null : UNCHECKED_SHOT;
       }
     }));
-    return verdicts.find((v) => v === PRIVATE_SHOT) ?? verdicts.find((v) => v !== null) ?? null;
+    const found = verdicts.find((v) => v === PRIVATE_SHOT) ?? verdicts.find((v) => v !== null);
+    if (found) return found;
+    // Playwright's queries do not reach into a closed shadow root, so a field
+    // there passes them unseen. The browser's own DOM does show it: any text
+    // field in one, on screen, is a field this check cannot vouch for.
+    try {
+      return await stoppable(this.withPageCdp(page, (cdp) => closedFieldOn(cdp, { x: 0, y: 0, ...screen }))) ? UNCHECKED_SHOT : null;
+    } catch {
+      return UNCHECKED_SHOT;
+    }
+  }
+
+  /**
+   * For a frame Chrome runs in a process of its own — a cross-site iframe —
+   * the same closed-shadow-root check, in its own DOM. Its fields' boxes are
+   * in its own coordinates, so any shown at all counts: the frame itself is
+   * on screen. Null for a frame in the page's process, which the page's
+   * check covers.
+   */
+  private async closedInOwnFrame(page: Page, frame: Frame): Promise<string | null> {
+    let cdp: CDPSession | undefined;
+    const opening = page.context().newCDPSession(frame as unknown as Page);
+    try {
+      cdp = await within(opening).catch((err: unknown) => {
+        opening.then((late) => late.detach()).catch(() => {});
+        throw err;
+      });
+    } catch (err) {
+      if (err instanceof Error && /does not have a separate CDP session/.test(err.message)) return null;
+      return UNCHECKED_SHOT;
+    }
+    try {
+      return await closedFieldOn(cdp, null) ? UNCHECKED_SHOT : null;
+    } catch {
+      return UNCHECKED_SHOT;
+    } finally {
+      await within(cdp.detach()).catch(() => {});
+    }
+  }
+
+  /** Run `work` on a CDP session of the page's own, detached after. */
+  private async withPageCdp<T>(page: Page, work: (cdp: CDPSession) => Promise<T>): Promise<T> {
+    let cdp: CDPSession | undefined;
+    const opening = page.context().newCDPSession(page);
+    try {
+      cdp = await within(opening).catch((err) => {
+        opening.then((late) => late.detach()).catch(() => {});
+        throw err;
+      });
+      return await work(cdp);
+    } finally {
+      if (cdp) await within(cdp.detach()).catch(() => {});
+    }
   }
 
   /** The page's screen in CSS pixels, as the browser measures it, or null. */
@@ -3563,6 +3617,73 @@ async function privateIn(frame: Frame, area: Box): Promise<string | null> {
     }
   }
   return null;
+}
+
+/** A node of the DOM as CDP's `DOM.getDocument` gives it. */
+type DomNode = {
+  nodeId: number;
+  nodeType?: number;
+  nodeName?: string;
+  attributes?: string[];
+  children?: DomNode[];
+  shadowRoots?: Array<DomNode & { shadowRootType?: string }>;
+  contentDocument?: DomNode;
+};
+/** Inputs that take no typed text: nothing for a picture to give away. */
+const NOT_TYPED = new Set(['hidden', 'checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'range', 'color', 'file']);
+
+/** A field someone types into: an input of a typed kind, a text area, an editable element. */
+function typedField(node: DomNode): boolean {
+  if (node.nodeType !== undefined && node.nodeType !== 1) return false;
+  const attrs = new Map<string, string>();
+  for (let i = 0; i + 1 < (node.attributes?.length ?? 0); i += 2) attrs.set(node.attributes![i]!.toLowerCase(), node.attributes![i + 1]!);
+  const editable = attrs.get('contenteditable');
+  if (editable !== undefined && editable.toLowerCase() !== 'false') return true;
+  const name = node.nodeName?.toUpperCase();
+  return name === 'TEXTAREA' || (name === 'INPUT' && !NOT_TYPED.has((attrs.get('type') ?? 'text').toLowerCase()));
+}
+
+/**
+ * Whether a text field inside a closed shadow root is shown within `area`
+ * (anywhere at all when null), by the browser's own DOM. Reaches every
+ * shadow root, closed ones included, and the documents of iframes in the
+ * same process. Throws when it cannot tell.
+ */
+async function closedFieldOn(cdp: CDPSession, area: Box | null): Promise<boolean> {
+  const { root } = await within(cdp.send('DOM.getDocument', { depth: -1, pierce: true })) as { root?: DomNode };
+  if (!root || typeof root.nodeId !== 'number') throw new Error('The browser did not describe the page.');
+  const fields: number[] = [];
+  // A stack, not recursion: a page decides how deep its DOM goes.
+  const stack: Array<[DomNode, boolean]> = [[root, false]];
+  while (stack.length) {
+    const [node, closed] = stack.pop()!;
+    if (closed && typedField(node)) fields.push(node.nodeId);
+    for (const child of node.children ?? []) stack.push([child, closed]);
+    for (const shadow of node.shadowRoots ?? []) stack.push([shadow, closed || shadow.shadowRootType === 'closed']);
+    if (node.contentDocument) stack.push([node.contentDocument, closed]);
+  }
+  if (fields.length > PRIVACY_MATCH_LIMIT) throw new Error('Too many fields to measure.');
+  for (const nodeId of fields) {
+    let quad: number[] | undefined;
+    try {
+      const box = await within(cdp.send('DOM.getBoxModel', { nodeId })) as { model?: { border?: number[] } };
+      quad = box.model?.border;
+    } catch (err) {
+      // Not laid out — display: none — is not on screen. Anything else is
+      // not known to be off it.
+      if (err instanceof Error && /Could not compute box model/.test(err.message)) continue;
+      throw err;
+    }
+    if (!quad || quad.length < 8) throw new Error('A field could not be measured.');
+    const xs = [quad[0]!, quad[2]!, quad[4]!, quad[6]!];
+    const ys = [quad[1]!, quad[3]!, quad[5]!, quad[7]!];
+    const box = { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
+    if (box.width <= 0 || box.height <= 0) continue;
+    if (!area) return true;
+    const shared = overlap(box, area);
+    if (shared.width > 0 && shared.height > 0) return true;
+  }
+  return false;
 }
 
 /** The part two boxes share; zero-sized when they do not meet. */

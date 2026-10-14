@@ -82,6 +82,12 @@ const NAME_LIMIT = 80;
  * a view and fold an old one away (`foldOldPageViews`).
  */
 export const PAGE_VIEW_MARK = '[Page view';
+/**
+ * The longest snapshot read. The page decides how big its snapshot is, and
+ * reading one means building its whole tree before the limits above apply;
+ * an ordinary large page writes a few hundred thousand characters.
+ */
+export const SNAPSHOT_MAX_CHARS = 1_000_000;
 
 /** Roles a person acts on. Anything else is listed only if it looks clickable. */
 const INTERACTIVE = new Set([
@@ -283,6 +289,7 @@ export function describePage(input: {
   /** Counts views within a run, so the model can tell a fresh one from an old one. */
   number: number;
 }): PageView | null {
+  if (input.snapshot.length > SNAPSHOT_MAX_CHARS) return tooBig(input);
   const roots = parseSnapshot(input.snapshot);
   const entries: Entry[] = [];
   const hidden = valuesAround(roots);
@@ -387,6 +394,18 @@ function describe(node: SnapshotNode, ref: string, scrub: (text: string) => stri
   }
   if (notes.length) line += ` (${notes.join(', ')})`;
   return { label: named, line };
+}
+
+/** The view of a page too big to list: where it is, and what to do instead. */
+function tooBig(input: { url: string; title: string; viewport: Viewport | undefined; number: number }): PageView {
+  const title = clean(input.title, 120);
+  const lines = [`${PAGE_VIEW_MARK} ${input.number}]`, `Page: ${title ? `${title} — ` : ''}${clean(input.url, 300)}`];
+  if (input.viewport) {
+    const v = input.viewport;
+    lines.push(`Viewport ${v.width}×${v.height}, scrolled ${Math.round(v.scrollY).toLocaleString('en-US')} of ${Math.round(v.scrollHeight).toLocaleString('en-US')}`);
+  }
+  lines.push('', 'This page is too large to list its controls. Use extract_text to read it, and CSS selectors to act on it.');
+  return { text: lines.join('\n'), labels: new Map(), marks: [] };
 }
 
 /** A label for a control with no name of its own: the text it contains. */

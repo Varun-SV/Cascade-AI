@@ -186,6 +186,16 @@ describe('describePage', () => {
     expect(v.text).toContain('[e8] checkbox "Other: •••"');
   });
 
+  it('does not read a snapshot past its limit, and says what to do instead', async () => {
+    const { SNAPSHOT_MAX_CHARS } = await import('./page-view.js');
+    const huge = '- main [ref=e1]:\n' + '  - button "Go" [ref=e2] [box=0,0,10,10]\n'.repeat(Math.ceil(SNAPSHOT_MAX_CHARS / 40) + 10);
+    const started = Date.now();
+    const v = view(huge)!;
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(v.text).toContain('This page is too large to list its controls. Use extract_text to read it, and CSS selectors to act on it.');
+    expect(v.labels.size).toBe(0);
+  });
+
   it('marks a cut name with the only ellipsis a name in it can end in', () => {
     // The approval check reads a name ending in "…" as cut: a page's own
     // ellipsis must not look like one, and a long name must end in one.

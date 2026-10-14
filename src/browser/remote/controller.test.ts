@@ -35,9 +35,19 @@ function fakeCdp() {
     layout: { clientWidth: 1280, clientHeight: 800 },
     /** Answer with the deprecated device-pixel field only. See below. */
     legacyOnly: false,
+    /** What `DOM.getDocument` answers: the page's DOM, shadow roots included. */
+    dom: { nodeId: 1, nodeType: 9, nodeName: '#document', children: [] } as unknown,
+    /** `DOM.getBoxModel`'s border quad for each node; absent means not laid out. */
+    boxes: new Map<number, number[]>(),
     async send(method: string, params?: Record<string, unknown>) {
       session.sent.push(method);
       session.calls.push({ method, ...(params ? { params } : {}) });
+      if (method === 'DOM.getDocument') return { root: session.dom };
+      if (method === 'DOM.getBoxModel') {
+        const border = session.boxes.get(params?.['nodeId'] as number);
+        if (!border) throw new Error('Protocol error (DOM.getBoxModel): Could not compute box model.');
+        return { model: { border } };
+      }
       // A STARTED SCREENCAST DRAWS AT ONCE. Chrome emits its first frame as
       // soon as capture begins, whatever the page is doing, and this PR relies
       // on that in three places — the unwatch/watch pair that recovers an idle
@@ -96,6 +106,8 @@ let cdpCreated = 0;
 let cdpGate: Promise<void> | null = null;
 /** Make CDP session creation itself fail, before Page.startScreencast. */
 let cdpFailure: Error | null = null;
+/** A sub-frame's own CDP session, for one Chrome runs out of process. */
+let frameCdp: ((frame: unknown) => Promise<unknown>) | null = null;
 /**
  * Give each attach its OWN session, and keep them.
  *
@@ -181,7 +193,13 @@ function fakeContext(pageForThisContext: typeof page) {
     pageList: [pageForThisContext] as Array<typeof page>,
     pages: () => c.pageList,
     newPage: async () => pageForThisContext,
-    newCDPSession: async () => {
+    newCDPSession: async (target?: { goto?: unknown }) => {
+      // A frame — no `goto` — has a session of its own only when Chrome runs
+      // it in a process of its own. Playwright refuses the rest.
+      if (target && typeof target.goto !== 'function') {
+        if (frameCdp) return frameCdp(target);
+        throw new Error('This frame does not have a separate CDP session, it is a part of the parent frame\'s session');
+      }
       cdpCreated += 1;
       if (cdpGate) await cdpGate;
       if (cdpFailure) throw cdpFailure;
@@ -253,6 +271,7 @@ beforeEach(() => {
   defaultContext.pageList = [page];
   createdContexts.length = 0;
   cdp = fakeCdp();
+  frameCdp = null;
   cdpCreated = 0;
   cdpPerAttach = false;
   silentNewCdp = false;
@@ -5336,6 +5355,89 @@ describe('page views and refs', () => {
       const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
       expect(out.image).toBeUndefined();
       expect(out.view!.text).toContain('No screenshot: a password, card or one-time-code field is on screen.');
+    });
+
+    describe('in a closed shadow root, which Playwright cannot reach', () => {
+      /** A document whose one element holds `inside` behind a shadow root of `mode`. */
+      const shadowed = (inside: Record<string, unknown>, mode = 'closed') => ({
+        nodeId: 1, nodeType: 9, nodeName: '#document', children: [
+          { nodeId: 2, nodeType: 1, nodeName: 'DIV', shadowRoots: [
+            { nodeId: 3, nodeType: 11, nodeName: '#document-fragment', shadowRootType: mode, children: [{ nodeId: 4, nodeType: 1, ...inside }] },
+          ] },
+        ],
+      });
+      const ON_SCREEN = [10, 300, 200, 300, 200, 320, 10, 320];
+
+      it('takes none while a text field there is on screen', async () => {
+        // Playwright's queries found nothing; the browser's own DOM shows the field.
+        cdp.dom = shadowed({ nodeName: 'INPUT', attributes: ['value', '493021'] });
+        cdp.boxes.set(4, ON_SCREEN);
+        const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+        expect(out.image).toBeUndefined();
+        expect(out.view!.text).toContain('No screenshot: the page could not be checked for password, card or one-time-code fields.');
+        expect(cdp.calls).toContainEqual({ method: 'DOM.getDocument', params: { depth: -1, pierce: true } });
+      });
+
+      it('looks inside an iframe of the same process, and at editable text', async () => {
+        cdp.dom = { nodeId: 1, nodeType: 9, nodeName: '#document', children: [
+          { nodeId: 5, nodeType: 1, nodeName: 'IFRAME', contentDocument: shadowed({ nodeName: 'DIV', attributes: ['contenteditable', ''] }) },
+        ] };
+        cdp.boxes.set(4, ON_SCREEN);
+        const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+        expect(out.image).toBeUndefined();
+      });
+
+      it('still pictures a page whose field there is off screen, not laid out, not typed into, or in an open root', async () => {
+        const cases: Array<[Record<string, unknown>, number[] | undefined, string?]> = [
+          [{ nodeName: 'INPUT' }, [10, 2000, 200, 2000, 200, 2020, 10, 2020]],
+          [{ nodeName: 'INPUT' }, undefined],
+          [{ nodeName: 'INPUT', attributes: ['type', 'checkbox'] }, ON_SCREEN],
+          [{ nodeName: 'INPUT', attributes: ['type', 'hidden'] }, ON_SCREEN],
+          // An open root is Playwright's to read, and it found nothing there.
+          [{ nodeName: 'INPUT' }, ON_SCREEN, 'open'],
+        ];
+        for (const [inside, box, mode] of cases) {
+          cdp.dom = shadowed(inside, mode);
+          cdp.boxes = new Map(box ? [[4, box]] : []);
+          const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+          expect(out.image, JSON.stringify([inside, box, mode])).toBeDefined();
+        }
+      });
+
+      it('takes none when the browser cannot describe the page', async () => {
+        const send = cdp.send;
+        cdp.send = async (method: string, params?: Record<string, unknown>) => {
+          if (method === 'DOM.getDocument') throw new Error('target closed');
+          return send(method, params);
+        };
+        try {
+          const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+          expect(out.image).toBeUndefined();
+          expect(out.view!.text).toContain('could not be checked');
+        } finally {
+          cdp.send = send;
+        }
+      });
+
+      it('looks in a cross-site frame through a session of its own', async () => {
+        subFrames = [false];
+        const own = fakeCdp();
+        own.dom = shadowed({ nodeName: 'TEXTAREA' });
+        // Its own coordinates: anywhere at all counts, the frame being on screen.
+        own.boxes.set(4, [0, 900, 50, 900, 50, 920, 0, 920]);
+        frameCdp = async () => own;
+        const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+        expect(out.image).toBeUndefined();
+        expect(own.detached).toBe(true);
+        // One that cannot be opened for another reason is not let through.
+        frameCdp = async () => { throw new Error('Target closed'); };
+        const failed = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run2', 'w1'));
+        expect(failed.image).toBeUndefined();
+        // And an empty one is.
+        frameCdp = async () => fakeCdp();
+        const empty = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run3', 'w1'));
+        expect(empty.image).toBeDefined();
+      });
     });
 
     it('takes none in a frame it cannot ask by label', async () => {
