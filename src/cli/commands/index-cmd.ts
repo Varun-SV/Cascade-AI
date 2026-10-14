@@ -54,10 +54,7 @@ export async function indexCommand(dirPath?: string): Promise<void> {
     // Local-only files stay out: indexing would send them to the embedder.
     isIgnored: (abs) => ignore.isIgnored(abs, workspace) || privacy.coversFile(abs, workspace),
     // …and so does what a local-only command in a run is writing meanwhile.
-    whileReading: async (read) => {
-      const leave = await WorkspaceGate.for(workspace).enter('tools', privacy.hasPolicies());
-      try { return await read(); } finally { leave(); }
-    },
+    whileReading: whileReadingIn(workspace),
   });
 
   console.log(chalk.magenta(`\n  ◈ Indexing ${workspace}\n`));
@@ -77,4 +74,16 @@ export async function indexCommand(dirPath?: string): Promise<void> {
   }
   console.log('');
   db.close();
+}
+
+/**
+ * Each file read with the workspace's tool calls, in this process and every
+ * other: never while a command — which could swap a file the index checked
+ * for a symlink to `.env` — or a local-only one's writes are under way.
+ */
+export function whileReadingIn(workspace: string): <T>(read: () => Promise<T>) => Promise<T> {
+  return async (read) => {
+    const leave = await WorkspaceGate.for(workspace).enter('tools', true);
+    try { return await read(); } finally { leave(); }
+  };
 }

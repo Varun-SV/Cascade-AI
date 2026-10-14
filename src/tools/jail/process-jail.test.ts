@@ -189,6 +189,23 @@ describe('collectHidden — a rule that reaches through a symlinked folder', () 
     }
   });
 
+  // node_modules was never walked, so a rule naming a path in it by that
+  // name hid nothing from commands.
+  it('walks installed packages for a rule that names a path in them, and only then', async () => {
+    const build = async (d: string) => {
+      await fs.mkdir(path.join(d, 'node_modules', 'private-pkg'), { recursive: true });
+      await fs.writeFile(path.join(d, 'node_modules', 'private-pkg', 'index.js'), LOCAL);
+      await fs.mkdir(path.join(d, 'node_modules', 'certs'), { recursive: true });
+      await fs.writeFile(path.join(d, 'node_modules', 'certs', 'bundle.pem'), 'a bundle the package needs');
+    };
+    const named = await withRule('node_modules/private-pkg/**', build);
+    expect(named.hidden.map((h) => h.path)).toContain(path.join(named.dir, 'node_modules', 'private-pkg'));
+    await fs.rm(named.dir, { recursive: true, force: true });
+    const unnamed = await withRule('secret/**', build);
+    expect(unnamed.hidden.some((h) => h.path.includes('node_modules'))).toBe(false);
+    await fs.rm(unnamed.dir, { recursive: true, force: true });
+  });
+
   it('reads no linked folder that no rule reaches into by name', async () => {
     // A limit of zero would refuse at the first linked entry read.
     const { dir } = await withRule('secret/**', async (d) => {
@@ -481,6 +498,24 @@ describe('ProcessJail.prepare — which way a command runs', () => {
     expect(r.ok && r.launch.args.slice(0, 2)).toEqual(['-c', 'jailer=$1; shift; exec "$jailer" --seccomp 9 "$@" 9<"$0"']);
     expect(r.ok && r.launch.args[3]).toBe('bwrap');
     expect(r.ok && r.launch.args).toContain('--unshare-net');
+  });
+
+  // The filter sat in a folder of its own in /tmp, where a cloud worker's
+  // command could replace it with one letting every socket through for the
+  // next local-only command.
+  it('keeps the socket filter where no command can reach it, and writes it again when it is not the filter', async () => {
+    const jail = new ProcessJail(policy({ detect: bwrap }));
+    const first = await jail.prepare('sh', [], { cwd: ws, offline: true });
+    if (!first.ok) throw new Error(first.reason);
+    const file = first.launch.args[2]!;
+    expect(file.startsWith(`${projectStateDir(ws)}${path.sep}`)).toBe(true);
+    expect((await fs.readFile(file)).equals(unixSocketFilter()!)).toBe(true);
+    await first.launch.done?.();
+    await fs.writeFile(file, 'allow everything');
+    const second = await jail.prepare('sh', [], { cwd: ws, offline: true });
+    if (!second.ok) throw new Error(second.reason);
+    await second.launch.done?.();
+    expect((await fs.readFile(file)).equals(unixSocketFilter()!)).toBe(true);
   });
 });
 
@@ -1127,6 +1162,34 @@ describe('git on Windows gets the scrubbed environment', () => {
     expect(seen).toMatch(/^GIT_CONFIG_NOSYSTEM=1$/m);
     await fs.rm(repo, { recursive: true, force: true });
     await fs.rm(script, { force: true });
+  });
+});
+
+// With no jailer, nothing kept git from changing .cascadeignore: a checkout
+// of an older commit brought back the rules it had, for the next run.
+describe('git with no jailer and the files that decide what is protected', () => {
+  it('puts .cascadeignore back when a git call changes it, and says so', async () => {
+    const { GitTool } = await import('../git.js');
+    const repo = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-nojail-policy-')));
+    const g = (...args: string[]) => execFileSync('git', ['-C', repo, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' });
+    try {
+      g('init', '-q');
+      await fs.writeFile(path.join(repo, '.cascadeignore'), 'nothing\n');
+      g('add', '.'); g('commit', '-qm', 'loose');
+      const loose = g('rev-parse', 'HEAD').trim();
+      await fs.writeFile(path.join(repo, '.cascadeignore'), 'secret/\n');
+      g('add', '.'); g('commit', '-qm', 'strict');
+      const tool = new GitTool();
+      tool.setWorkspaceRoot(repo);
+      tool.setProcessJail(new ProcessJail(policy({ workspaceRoot: repo, detect: async () => null, readOnlyFiles: () => [path.join(repo, '.cascadeignore')] })));
+      await expect(tool.execute({ operation: 'checkout', args: [loose, '--', '.cascadeignore'] }, { tierId: 't3', sessionId: 's' }))
+        .rejects.toThrow(/changed what it may not: \.cascadeignore decides what Cascade protects/);
+      expect(await fs.readFile(path.join(repo, '.cascadeignore'), 'utf8')).toBe('secret/\n');
+      // A call that leaves it alone says nothing.
+      expect(await tool.execute({ operation: 'status' }, { tierId: 't3', sessionId: 's' })).toBeTruthy();
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true });
+    }
   });
 });
 

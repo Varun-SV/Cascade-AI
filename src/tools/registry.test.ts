@@ -489,6 +489,31 @@ describe('ToolRegistry — a local-only write that does not happen', () => {
   });
 });
 
+// A hard link in the workspace to a file in Cascade's own folder passed for
+// a workspace file: the search for other names looked in the workspace only.
+describe('ToolRegistry — a link to Cascade\'s own files', () => {
+  it('keeps a hard link to the keys out of reach of the file tools', async () => {
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-link-own-')));
+    const own = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-link-own-global-')));
+    const saved = process.env['CASCADE_GLOBAL_DIR'];
+    process.env['CASCADE_GLOBAL_DIR'] = own;
+    try {
+      await fs.writeFile(path.join(own, 'credentials.json'), '{"providers":[{"apiKey":"SECRET-KEY"}]}');
+      await fs.link(path.join(own, 'credentials.json'), path.join(ws, 'notes.txt'));
+      await fs.writeFile(path.join(ws, 'readme.md'), 'public');
+      const reg = new ToolRegistry(toolsConfig, ws);
+      await expect(reg.execute('file_read', { path: 'notes.txt' }, opts)).rejects.toThrow(/protected/);
+      expect(await reg.execute('file_read', { path: 'readme.md' }, opts)).toContain('public');
+      const { CascadeIgnore } = await import('../config/ignore.js');
+      expect(new CascadeIgnore().isIgnored(path.join(ws, 'notes.txt'), ws)).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env['CASCADE_GLOBAL_DIR']; else process.env['CASCADE_GLOBAL_DIR'] = saved;
+      await fs.rm(ws, { recursive: true, force: true });
+      await fs.rm(own, { recursive: true, force: true });
+    }
+  });
+});
+
 // A workspace that holds Cascade's own folder — a home folder opened as a
 // project — had it in reach of every file tool: the keys, and every project's
 // state, local-only outputs included.

@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { WorkspaceGate, heartbeat, left } from './workspace-gate.js';
 import { ownerToken } from '../utils/file-lock.js';
-import { statePath, useProjectStateDir } from '../config/project-state.js';
+import { statePath, STATE, useProjectStateDir } from '../config/project-state.js';
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -173,13 +173,43 @@ describe('WorkspaceGate', () => {
     expect(events).toEqual([]);
     tool1(); tool2(); await tick();
     expect(events).toEqual(['command']);
-    const second = await gate.enter('commands');
     const tool = gate.enter('tools').then((leave) => { events.push('tool'); return leave; });
     await tick();
     expect(events).toEqual(['command']);
-    (await command)(); second(); await tick();
+    (await command)(); await tick();
     expect(events).toEqual(['command', 'tool']);
     (await tool)();
+  });
+
+  // The jail takes what it puts back when a command ends as it finds it
+  // when the command starts: a second command started while a first had
+  // swapped .cascadeignore took the swapped one, and wrote it back after.
+  it('runs commands one at a time, in this process and across processes', async () => {
+    const gate = new WorkspaceGate();
+    const events: string[] = [];
+    const first = await gate.enter('commands');
+    const second = gate.enter('commands').then((leave) => { events.push('second'); return leave; });
+    await tick();
+    expect(events).toEqual([]);
+    first(); await tick();
+    expect(events).toEqual(['second']);
+    (await second)();
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-gate-commands-'));
+    try {
+      const markers = statePath(dir, STATE.gate);
+      await fs.mkdir(markers, { recursive: true });
+      const other = `${process.pid}.0123456789ab`;
+      await fs.writeFile(path.join(markers, `commands-${other}-1`), '');
+      let ran = false;
+      const mine = new WorkspaceGate(dir).enter('commands', true).then((leave) => { ran = true; return leave; });
+      await new Promise((r) => setTimeout(r, 100));
+      expect(ran).toBe(false);
+      await fs.rm(path.join(markers, `commands-${other}-1`));
+      (await mine)();
+      expect(ran).toBe(true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 
   // A command could swap a git config file for one naming a program, which

@@ -29,11 +29,13 @@ export function fileIdentity(st: fs.Stats): string {
 /**
  * The identities of the files under `root` that `covered` names and that
  * have more than one name — the only ones another name can reach. A
- * directory covered whole is searched to the bottom. `complete` is false
- * when a folder could not be listed: a covered file in it could not be
- * found, and its other names not known.
+ * directory covered whole is searched to the bottom, and so is each of
+ * `wholeDirs`, wherever it is: Cascade's own folders, outside the
+ * workspace, whose files a link in it would otherwise pass for its own.
+ * `complete` is false when a folder could not be listed: a covered file in
+ * it could not be found, and its other names not known.
  */
-export function coveredLinkIdentities(root: string, covered: (rel: string) => boolean): { ids: Set<string>; complete: boolean } {
+export function coveredLinkIdentities(root: string, covered: (rel: string) => boolean, wholeDirs: string[] = []): { ids: Set<string>; complete: boolean } {
   const ids = new Set<string>();
   let complete = true;
   const list = (dir: string): fs.Dirent[] => {
@@ -80,6 +82,7 @@ export function coveredLinkIdentities(root: string, covered: (rel: string) => bo
     }
   };
   walk(root, '');
+  for (const dir of wholeDirs) all(dir);
   return { ids, complete };
 }
 
@@ -93,7 +96,11 @@ export class LinkAliases {
   /** The change a file was last looked again for: one search covers it. */
   private searchedFor = new Map<string, number>();
 
-  constructor(private readonly root: string, private readonly covered: (rel: string) => boolean) {}
+  constructor(
+    private readonly root: string,
+    private readonly covered: (rel: string) => boolean,
+    private readonly wholeDirs: () => string[] = () => [],
+  ) {}
 
   isAlias(absPath: string): boolean {
     let st: fs.Stats;
@@ -103,7 +110,7 @@ export class LinkAliases {
     // A second of slack, for filesystems that keep whole seconds.
     const changedSince = !this.found || st.ctimeMs >= this.found.at - 1000;
     if (changedSince && this.searchedFor.get(id) !== st.ctimeMs) {
-      this.found = { at: Date.now(), ...coveredLinkIdentities(this.root, this.covered) };
+      this.found = { at: Date.now(), ...coveredLinkIdentities(this.root, this.covered, this.wholeDirs()) };
       this.searchedFor.set(id, st.ctimeMs);
     }
     // A search that could not look everywhere cannot say this file with

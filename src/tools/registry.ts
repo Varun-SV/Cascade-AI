@@ -347,7 +347,9 @@ export class ToolRegistry extends EventEmitter {
   }
 
   private newAliases(): LinkAliases {
-    return new LinkAliases(this.workspaceRoot, (rel) => this.builtInMatcher.ignores(rel) || this.ignoreMatcher.ignores(rel));
+    // Cascade's own folders too: a link in the workspace to the keys or a
+    // project's state is that file under another name.
+    return new LinkAliases(this.workspaceRoot, (rel) => this.builtInMatcher.ignores(rel) || this.ignoreMatcher.ignores(rel), () => [globalDir(), projectStateDir(this.workspaceRoot)]);
   }
 
   getToolDefinitions(): ToolDefinition[] {

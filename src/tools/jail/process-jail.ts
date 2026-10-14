@@ -63,7 +63,7 @@ export const SECRET_ENV_NAMES: readonly string[] = [
   'CASCADE_DASHBOARD_SECRET',
 ];
 
-/** Directories never walked for paths to hide: git's own store, and installed packages. */
+/** Directories not walked for paths to hide: git's own store, and installed packages unless a rule names a path in them. */
 const UNWALKED_DIRS = new Set(['.git', 'node_modules']);
 
 /**
@@ -461,7 +461,10 @@ export class ProcessJail {
         this.warned = true;
         this.policy.log('[jail] No process jail is available (bubblewrap on Linux, sandbox-exec on macOS): the git tool runs with provider keys removed from its environment and no configuration that can start a program, and shell and code commands are refused until tools.processJail is "off".');
       }
-      return { ok: true, launch: { file, args, env, cwd: opts.cwd, jail: null, unconfined: true } };
+      // No mount keeps git from changing .cascadeignore — a checkout of
+      // another commit would — so it is put back as it was when git ends.
+      const restorePolicy = guardFiles(this.policy.readOnlyFiles?.() ?? [], (failed) => this.keepUnrestored(failed));
+      return { ok: true, launch: { file, args, env, cwd: opts.cwd, jail: null, unconfined: true, done: async () => restorePolicy() } };
     }
 
     // The jailer itself runs with everything Cascade can reach; one a
@@ -627,7 +630,7 @@ export class ProcessJail {
 
     // bubblewrap reads a seccomp filter from a file descriptor; the shell
     // opens the filter's file as fd 9 and execs bubblewrap with it.
-    const filter = unixSocketFilterFile();
+    const filter = unixSocketFilterFile(this.policy.workspaceRoot);
     if (!filter) {
       return { ok: false, reason: `A local-only subtask (privacy.paths) cannot run commands on ${process.arch}: the filter that keeps them off host sockets is built for x64 and arm64 only.` };
     }
@@ -920,7 +923,12 @@ export async function collectHidden(policy: JailPolicy, offline: boolean, nested
           continue;
         }
         if (hide(`${rel}/`) || hide(`${rel}/${PROBE}`)) { out.push({ path: abs, dir: true }); continue; }
-        if (UNWALKED_DIRS.has(entry.name) || chain.includes(abs)) continue;
+        if (chain.includes(abs)) continue;
+        // Installed packages are walked only for a rule that names a path
+        // in them by their folder's name (`node_modules/pkg/**`): the
+        // secret-file patterns that match at any depth would hide what
+        // packages ship and need, certificate bundles among them.
+        if (UNWALKED_DIRS.has(entry.name) && (entry.name === '.git' || !patterns.some((p) => reachesUnder(p, rel)))) continue;
         await walk(abs, rel, [...chain, abs], link);
       } else if (entry.isSymbolicLink()) {
         // A command follows a symlink, so what it leads to is hidden with
@@ -1355,17 +1363,23 @@ export function unixSocketFilter(arch: string = process.arch): Buffer | null {
   return buf;
 }
 
-let filterFile: string | null | undefined;
-
-/** The filter written once to a file of this process's own, for the shell to open. */
-function unixSocketFilterFile(): string | null {
-  if (filterFile !== undefined) return filterFile;
+/**
+ * The filter in a file for the shell to open, in the workspace's state
+ * folder — hidden from every command, where none can swap in a program
+ * that lets sockets through for the next local-only one — and written
+ * again whenever it is not the filter, so what a launch opens is.
+ */
+function unixSocketFilterFile(workspaceRoot: string): string | null {
   const program = unixSocketFilter();
-  if (!program) return (filterFile = null);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-jail-'));
-  const file = path.join(dir, 'unix-sockets.bpf');
-  fs.writeFileSync(file, program, { mode: 0o600 });
-  return (filterFile = file);
+  if (!program) return null;
+  const file = statePath(workspaceRoot, 'jail-unix-sockets.bpf');
+  try {
+    if (fs.readFileSync(file).equals(program)) return file;
+  } catch { /* not there yet */ }
+  const next = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(next, program, { mode: 0o600 });
+  fs.renameSync(next, file);
+  return file;
 }
 
 let detected: Promise<JailKind | null> | undefined;

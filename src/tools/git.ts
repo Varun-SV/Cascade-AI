@@ -201,7 +201,11 @@ export class GitTool extends BaseTool {
         : '';
       throw new Error(`git ${operation} failed: ${message}${hint}`);
     } finally {
-      await done();
+      // A file that decides what Cascade protects, changed by this call —
+      // a checkout restoring another .cascadeignore — is put back, and the
+      // call reported as not done as asked.
+      const note = await done();
+      if (note) throw new Error(`git ${operation} changed what it may not: ${note}`);
     }
   }
 
@@ -247,7 +251,7 @@ export class GitTool extends BaseTool {
    * (gitWithEnv). `done` removes the script, and marks what a local-only
    * caller's git changed local-only (Launch.done).
    */
-  private async gitFor(cwd: string, offline: boolean, operation?: string): Promise<{ git: SimpleGit; done: () => Promise<void>; unconfined?: true }> {
+  private async gitFor(cwd: string, offline: boolean, operation?: string): Promise<{ git: SimpleGit; done: () => Promise<string | void>; unconfined?: true }> {
     // No hooks, ever: a command could have written one — into .git/hooks, or
     // a husky folder in the workspace — for the next commit here to run with
     // the credentials this tool keeps in view.
@@ -262,8 +266,9 @@ export class GitTool extends BaseTool {
     if (launch.unconfined) return this.unjailedGit(cwd, launch, operation);
     const retrust = await this.checkUntrustedConfig(cwd, launch);
     const finish = async () => {
-      await launch.done?.();
+      const note = await launch.done?.();
       this.jail?.retrustGitConfigs(retrust);
+      return note;
     };
     if (process.platform === 'win32') return { git: gitWithEnv(cwd, launch.env, [NO_HOOKS]), done: finish };
     const unset = Object.keys(process.env).filter((name) => !(name in launch.env) && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name));
@@ -290,7 +295,7 @@ export class GitTool extends BaseTool {
       git,
       done: async () => {
         fs.rmSync(dir, { recursive: true, force: true });
-        await finish();
+        return finish();
       },
     };
   }
@@ -327,7 +332,7 @@ export class GitTool extends BaseTool {
    * program (git-hermetic.ts), or not at all while the repository's own
    * configuration names one.
    */
-  private async unjailedGit(cwd: string, launch: Launch, operation?: string): Promise<{ git: SimpleGit; done: () => Promise<void>; unconfined: true }> {
+  private async unjailedGit(cwd: string, launch: Launch, operation?: string): Promise<{ git: SimpleGit; done: () => Promise<string | void>; unconfined: true }> {
     const listed = await listGitConfig(cwd, launch.env);
     if (listed === null) {
       throw new Error('No process jail is available, and git could not list its configuration here to run without the settings that start programs (this needs git 2.26 or newer). Set tools.processJail to "off" to run git as it is.');
@@ -337,7 +342,7 @@ export class GitTool extends BaseTool {
     if (operation === 'commit' && settings.signsCommits) {
       throw new Error('Your git configuration signs commits, which runs gpg or ssh-keygen, and without a process jail git runs no program: the commit was not made. Commit it yourself, or set tools.processJail to "off".');
     }
-    return { git: gitWithEnv(cwd, settings.env, [], true), done: async () => { await launch.done?.(); }, unconfined: true };
+    return { git: gitWithEnv(cwd, settings.env, [], true), done: async () => launch.done?.(), unconfined: true };
   }
 
   private formatStatus(status: Awaited<ReturnType<SimpleGit['status']>>): string {

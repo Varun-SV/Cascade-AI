@@ -60,14 +60,16 @@ const OWNER = ownerToken(process.pid);
 
 /**
  * Who a caller runs with: `tools` — tool calls, with each other; `commands` —
- * commands, with each other; `git` — the git tool's calls, with each other;
+ * commands, one at a time; `git` — the git tool's calls, with each other;
  * `alone` — with nobody. The git tool runs apart from commands: one could
  * swap a git config file for another that names a program for it to run,
- * which the jail puts back when that command ends (process-jail.ts).
+ * which the jail puts back when that command ends (process-jail.ts). And a
+ * command runs apart from other commands: the jail takes what it puts back
+ * when one starts, which a command already running could have swapped.
  */
 export type GateMode = 'tools' | 'commands' | 'git' | 'alone';
 
-const fits = (mode: GateMode, other: GateMode): boolean => mode !== 'alone' && mode === other;
+const fits = (mode: GateMode, other: GateMode): boolean => mode !== 'alone' && mode !== 'commands' && mode === other;
 
 type GroupMode = Exclude<GateMode, 'alone'>;
 

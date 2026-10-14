@@ -537,6 +537,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it imports, so the errors the model sees quote nothing it wasn't allowed
   to read. A project moved on its disk whose old state can't be looked for
   or moved stops opening rather than start afresh and leave it behind.
+- **Commands run one at a time in a workspace**, across processes too: the
+  jail takes what it puts back when a command ends as it finds it when the
+  command starts, which a command already running could have swapped. A
+  hard link in the workspace to one of Cascade's own files (the keys, a
+  project's state) is protected as that file. Without a jailer, a `git`
+  call that changes `.cascadeignore` (a checkout of an older commit) has
+  the change undone and fails saying so. The filter that keeps local-only
+  commands off Unix sockets is kept in the project's state folder, out of
+  every command's reach, and written again whenever it isn't the filter.
+  `cascade index` reads each file in the workspace gate across processes,
+  privacy rules or not. A rule naming a path inside `node_modules` hides it
+  from commands too.
 
 ## 0.82.0 - 2026-09-22
 
