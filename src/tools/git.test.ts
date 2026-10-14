@@ -85,6 +85,18 @@ describe('GitTool', () => {
     expect(mockGit.push).not.toHaveBeenCalled();
   });
 
+  // A signed push runs gpg with the user's key; the agent does not ask for one.
+  it('refuses a push asking to be signed, however short', async () => {
+    const tool = new GitTool();
+    for (const args of [['--signed', 'origin'], ['--signed=if-asked', 'origin'], ['--sig', 'origin'], ['--si=true', 'origin']]) {
+      await expect(tool.execute({ operation: 'push', args }, opts), args.join(' ')).rejects.toThrow(/signing runs gpg/);
+    }
+    expect(mockGit.push).not.toHaveBeenCalled();
+    mockGit.push.mockResolvedValue({});
+    await tool.execute({ operation: 'push', args: ['--no-signed', 'origin'] }, opts);
+    expect(mockGit.push).toHaveBeenCalled();
+  });
+
   it('still takes a path that only looks like the option, after --', async () => {
     mockGit.checkout.mockResolvedValue(undefined);
     const tool = new GitTool();

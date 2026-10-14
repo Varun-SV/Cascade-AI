@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { onTrustedPath, ownTsc } from './trusted-exec.js';
+import { onTrustedPath, ownTsc, trustedDirs } from './trusted-exec.js';
 
 describe.skipIf(process.platform === 'win32')('onTrustedPath', () => {
   it('skips PATH entries inside the workspace (through a symlink too), relative ones, and ones this user can write to', async () => {
@@ -20,8 +20,10 @@ describe.skipIf(process.platform === 'win32')('onTrustedPath', () => {
       // command could put a program there.
       expect(onTrustedPath(['tool'], ws, { PATH })).toBeUndefined();
       expect(onTrustedPath(['tool'], ws, { PATH: path.join(ws, 'bin') })).toBeUndefined();
-      // A system folder this user cannot write to is taken.
-      if (process.getuid?.() !== 0) expect(onTrustedPath(['sh'], ws, { PATH: '/bin' })).toBe('/bin/sh');
+      // A system folder this user cannot write to is taken — as root, who
+      // can write to every folder, only the system's own program folders.
+      expect(onTrustedPath(['sh'], ws, { PATH: '/bin' })).toBe('/bin/sh');
+      expect(trustedDirs(ws, { PATH: [outside, '/usr/bin', 'bin', path.join(ws, 'bin')].join(path.delimiter) })).toEqual(['/usr/bin']);
     } finally {
       await fs.rm(base, { recursive: true, force: true });
     }

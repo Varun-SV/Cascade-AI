@@ -508,6 +508,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   naming the files, should this process end first. Symlinks are no longer
   carried out of an old `.cascade/` into the state folder, where a relative
   one would lead somewhere else.
+- **Programs Cascade starts come from folders commands can't write to.**
+  bubblewrap, ripgrep and the jail's own git calls, which run outside any
+  jail, and the `git` tool's git with everything it starts (ssh, gpg, a
+  credential helper), are taken only from PATH folders this user can't
+  write to — as root, only the system's program folders — so a command
+  can't leave its own `git` or `bwrap` in `~/.local/bin` for the next call.
+  The `git` tool checks a repository's own configuration as it does without
+  a jail — naming no program — when that configuration was made or changed
+  since Cascade first saw it other than by the tool itself, as a repository
+  a command creates is; it refuses `git push --signed`; a push to a local
+  repository looks for receive hooks under a relative `core.hooksPath` in
+  its git directory, where they run. Commands no longer see a protected file
+  inside a symlinked folder outside the workspace (`.env` in `shared/`). A
+  local-only write's mark stays unless the file's contents are unchanged,
+  not just its times, which some filesystems keep to the second.
 
 ## 0.82.0 - 2026-09-22
 

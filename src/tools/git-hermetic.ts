@@ -137,6 +137,13 @@ export function parseScopedConfig(listed: string): GitSetting[] {
  */
 const OUTSIDE_SCOPES = new Set(['system', 'global', 'command']);
 
+/** The settings in the repository's own configuration, of those git lists (`listed`), that are not words. */
+export function repositoryPrograms(listed: string): string[] {
+  return [...new Set(parseScopedConfig(listed)
+    .filter((s) => !OUTSIDE_SCOPES.has(s.scope) && !isPlainGitSetting(s.key))
+    .map((s) => s.key))];
+}
+
 const TRUE = /^(true|yes|on|1)$/i;
 
 export type UnjailedGit =
@@ -156,9 +163,7 @@ export type UnjailedGit =
 export function unjailedSettings(listed: string, env: NodeJS.ProcessEnv): UnjailedGit {
   const settings = parseScopedConfig(listed);
 
-  const programs = [...new Set(settings
-    .filter((s) => !OUTSIDE_SCOPES.has(s.scope) && !isPlainGitSetting(s.key))
-    .map((s) => s.key))];
+  const programs = repositoryPrograms(listed);
   if (programs.length > 0) {
     const named = programs.slice(0, 5).join(', ') + (programs.length > 5 ? `, and ${programs.length - 5} more` : '');
     return {

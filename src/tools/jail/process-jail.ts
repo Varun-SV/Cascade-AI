@@ -38,10 +38,12 @@
 //  `node_modules/` and `dist/`, which builds and tests have to read.
 
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import ignoreFactory from 'ignore';
 import { fileIdentity, PROBE } from '../../utils/link-aliases.js';
 import { stripTrailingSlashes } from '../../utils/net.js';
 import { isWithin } from '../../utils/real-path.js';
+import { onTrustedPath, trustedDirs } from '../../utils/trusted-exec.js';
 import { statePath } from '../../config/project-state.js';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -66,8 +68,9 @@ const UNWALKED_DIRS = new Set(['.git', 'node_modules']);
 
 /**
  * Entries read through symlinked folders before commands are refused rather
- * than run with a rule unchecked. Only folders a rule reaches into by the
- * link's own name are read this way (`reachesUnder`).
+ * than run with a rule unchecked. Only folders outside the workspace, and
+ * ones a rule reaches into by the link's own name (`reachesUnder`), are
+ * read this way.
  */
 const LINKED_WALK_LIMIT = 50_000;
 
@@ -207,6 +210,8 @@ export interface JailPolicy {
   log: (msg: string) => void;
   /** Which jailer this machine has; injectable for tests. */
   detect?: () => Promise<JailKind | null>;
+  /** Where a program Cascade starts itself is (`onTrustedPath`); injectable for tests. */
+  program?: (name: string) => string | undefined;
 }
 
 export interface Launch {
@@ -297,7 +302,88 @@ export class ProcessJail {
   private unrestored = new Map<string, Guarded>();
   private gitChecks = new Map<string, { key: string; dirs: string[] }>();
 
+  /**
+   * The repository configuration files the git tool runs as they are: by
+   * path, what each held when trusted (`fingerprintOf`).
+   */
+  private gitTrust?: Map<string, string>;
+
   constructor(private readonly policy: JailPolicy) {}
+
+  private gitTrustRecord(): string {
+    return statePath(this.policy.workspaceRoot, 'git-config-trust.json');
+  }
+
+  /**
+   * The repositories' configuration files trusted, read from the record
+   * once. With no record yet — before the first command — those of the
+   * workspace's repository and the ones nested in it now are: no command
+   * has run to write them, and while one runs it cannot change them (they
+   * are frozen). A repository a command makes later, or a configuration
+   * changed since other than by the git tool (a folder renamed over it), is
+   * not on it.
+   */
+  private async trustGitConfigs(nested: string[]): Promise<Map<string, string>> {
+    if (this.gitTrust) return this.gitTrust;
+    const record = this.gitTrustRecord();
+    let trust: Map<string, string>;
+    try {
+      trust = new Map(Object.entries(JSON.parse(fs.readFileSync(record, 'utf8')) as Record<string, string>));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        // One that can't be read trusts nothing, and is left for the user.
+        this.gitTrust = new Map();
+        return this.gitTrust;
+      }
+      trust = new Map();
+      for (const repo of [this.policy.workspaceRoot, ...nested]) {
+        for (const file of repoConfigFiles(await repoGitDirs(repo) ?? [])) {
+          const id = fingerprintOf(file);
+          if (id) trust.set(file, id);
+        }
+      }
+      this.saveGitTrust(trust);
+    }
+    this.gitTrust = trust;
+    return trust;
+  }
+
+  private saveGitTrust(trust: Map<string, string>): void {
+    try {
+      fs.writeFileSync(this.gitTrustRecord(), JSON.stringify(Object.fromEntries(trust)), { mode: 0o600 });
+    } catch { /* kept in this process */ }
+  }
+
+  /**
+   * The configuration files `cwd`'s repository reads as its own, split into
+   * those trusted (`trustGitConfigs`) and not; all of them untrusted when
+   * git cannot say where they are.
+   */
+  async gitConfigTrust(cwd: string): Promise<{ trusted: string[]; untrusted: string[] }> {
+    if (this.policy.mode === 'off') return { trusted: [], untrusted: [] };
+    const trust = await this.trustGitConfigs([]);
+    const dirs = await repoGitDirs(cwd);
+    // Not a repository, or one git cannot read: its configuration is checked.
+    if (dirs === null) return { trusted: [], untrusted: [cwd] };
+    const files = repoConfigFiles(dirs).filter((f) => fs.existsSync(f));
+    const trusted = files.filter((f) => trust.get(f) === fingerprintOf(f));
+    return { trusted, untrusted: files.filter((f) => !trusted.includes(f)) };
+  }
+
+  /**
+   * Trust `files` as they are now: the git tool's own call, run with no
+   * command beside it, rewrote them (`git push -u` does, by renaming a new
+   * file into place).
+   */
+  retrustGitConfigs(files: string[]): void {
+    if (!this.gitTrust || files.length === 0) return;
+    for (const file of files) {
+      const id = fingerprintOf(file);
+      if (id) this.gitTrust.set(file, id);
+      else this.gitTrust.delete(file);
+    }
+    this.saveGitTrust(this.gitTrust);
+  }
 
   /** Where the files that could not be put back are recorded, for later runs and other processes. */
   private unrestoredRecord(): string {
@@ -352,6 +438,11 @@ export class ProcessJail {
     const unrestored = this.retryUnrestored();
     if (unrestored) return { ok: false, reason: `Commands are not run: ${unrestored}` };
     const env = scrubEnv(process.env, this.policy.secretValues());
+    // The git tool's git, and what it starts — ssh, gpg, a credential
+    // helper — run with the credentials it keeps in view, so they come only
+    // from folders no command can write to: one could otherwise leave its
+    // own `git` or `ssh` in ~/.local/bin for the next push to run.
+    if (opts.keepGit) env['PATH'] = trustedDirs(this.policy.workspaceRoot).join(path.delimiter);
     const available = await (this.policy.detect ?? detectJail)();
     const kind = mode === 'auto' ? available : (available === mode ? mode : null);
 
@@ -373,6 +464,12 @@ export class ProcessJail {
       return { ok: true, launch: { file, args, env, cwd: opts.cwd, jail: null, unconfined: true } };
     }
 
+    // The jailer itself runs with everything Cascade can reach; one a
+    // command left on PATH would run every later command unjailed.
+    const jailer = (this.policy.program ?? ((name: string) => onTrustedPath([name], this.policy.workspaceRoot)))(kind);
+    if (!jailer) {
+      return { ok: false, reason: `${kind} was found only in folders a command could change (or not at all), so the command was not run.` };
+    }
     if (opts.offline && kind === 'sandbox-exec') {
       return { ok: false, reason: 'A local-only subtask (privacy.paths) cannot run commands on macOS: sandbox-exec cannot stop a command from hard-linking a file outside the workspace in and writing to it, nor end a child it leaves running, so what it writes could not all be marked local-only.' };
     }
@@ -380,6 +477,7 @@ export class ProcessJail {
     // are found on the way: each store is checked as the workspace's own is.
     const nested: string[] = [];
     const hidden = await collectHidden(this.policy, opts.offline, nested);
+    await this.trustGitConfigs(nested);
     if (!opts.keepGit) {
       for (const repo of [this.policy.workspaceRoot, ...nested]) {
         for (const dir of await this.gitDirsToHide(opts.offline, repo)) hidden.push({ path: dir, dir: true });
@@ -425,9 +523,9 @@ export class ProcessJail {
         // No mount to put a copy in its place: a file that holds one is not
         // readable at all.
         const unreadable = [...scrubbed.copies.keys()].map((f) => ({ path: f, dir: false }));
-        return { ok: true, launch: { file: 'sandbox-exec', args: ['-p', seatbeltProfile([...hidden, ...unreadable], frozen), file, ...args], env, cwd: opts.cwd, jail: kind, done } };
+        return { ok: true, launch: { file: jailer, args: ['-p', seatbeltProfile([...hidden, ...unreadable], frozen), file, ...args], env, cwd: opts.cwd, jail: kind, done } };
       }
-      return { ok: true, launch: { file: 'bwrap', args: bwrapArgs(hidden, false, opts.cwd, file, args, undefined, frozen, scrubbed.copies), env, cwd: opts.cwd, jail: kind, done } };
+      return { ok: true, launch: { file: jailer, args: bwrapArgs(hidden, false, opts.cwd, file, args, undefined, frozen, scrubbed.copies), env, cwd: opts.cwd, jail: kind, done } };
     }
 
     // A local-only caller's command writes only into the workspace, where
@@ -525,7 +623,7 @@ export class ProcessJail {
     return {
       ok: true,
       launch: {
-        file: '/bin/sh', args: ['-c', 'exec bwrap --seccomp 9 "$@" 9<"$0"', filter, ...jailArgs],
+        file: '/bin/sh', args: ['-c', 'jailer=$1; shift; exec "$jailer" --seccomp 9 "$@" 9<"$0"', filter, jailer, ...jailArgs],
         // Where to write outputs directly, for a command that knows to.
         env: own ? { ...env, CASCADE_PRIVATE_DIR: own } : env,
         cwd: opts.cwd, jail: kind, done,
@@ -789,7 +887,7 @@ export async function collectHidden(policy: JailPolicy, offline: boolean, nested
     if (link !== undefined) {
       throughLinks += entries.length;
       if (throughLinks > linkedLimit) {
-        throw new Error(`Commands are not run: "${link}" is a symlinked folder a privacy rule reaches into by that name, and it leads to more than ${linkedLimit.toLocaleString('en-US')} files to check.`);
+        throw new Error(`Commands are not run: "${link}" is a symlinked folder in which a protection or privacy rule can name a file by that name, and it leads to more than ${linkedLimit.toLocaleString('en-US')} files to check.`);
       }
     }
     for (const entry of entries) {
@@ -824,13 +922,17 @@ export async function collectHidden(policy: JailPolicy, offline: boolean, nested
         if (target?.dir) {
           if (hide(`${rel}/`) || hide(`${rel}/${PROBE}`)) {
             out.push({ path: target.real, dir: true });
-          } else if (!UNWALKED_DIRS.has(entry.name) && !chain.includes(target.real) && patterns.some((p) => reachesUnder(p, rel))) {
+          } else if (!UNWALKED_DIRS.has(entry.name) && !chain.includes(target.real)) {
             // A rule naming something inside it by the link's name —
             // `alias/secret.txt` for `alias -> data` — is met by no other
             // walk: the one of `data` goes by `data/secret.txt`. So it is
             // walked again under this name, and what a rule matches there is
-            // hidden where it really is, which hides it by both names.
-            await walk(target.real, rel, [...chain, target.real], link ?? rel);
+            // hidden where it really is, which hides it by both names. A
+            // folder outside the workspace is met by no other walk at all,
+            // so it is walked for every rule — `.env` at any depth too.
+            if (!isWithin(target.real, root) || patterns.some((p) => reachesUnder(p, rel))) {
+              await walk(target.real, rel, [...chain, target.real], link ?? rel);
+            }
           }
         } else if (hide(rel)) {
           out.push({ path: abs, dir: false });
@@ -898,7 +1000,7 @@ export async function gitConfigFiles(
   root: string, home = os.homedir(), configHome = process.env['XDG_CONFIG_HOME'], nested: string[] = [],
 ): Promise<string[]> {
   const dirs = [...new Set((await Promise.all([root, ...nested].map(gitDirsOf))).flat())];
-  const repo = dirs.flatMap((dir) => [path.join(dir, 'config'), path.join(dir, 'config.worktree')]);
+  const repo = repoConfigFiles(dirs);
   return [...repo, ...globalGitConfigFiles(home, configHome), '/etc/gitconfig'];
 }
 
@@ -951,7 +1053,7 @@ async function includesOf(file: string, home: string): Promise<string[]> {
   // reads them when it loads the include. What is still relative after that
   // is relative to the including file, as git takes an include.
   const listed = await new Promise<string>((resolve) => {
-    execFile('git', ['config', '--file', file, '--null', '--path', '--get-regexp', '^include(if\\..*)?\\.path$'],
+    execFile(trustedGit(), ['config', '--file', file, '--null', '--path', '--get-regexp', '^include(if\\..*)?\\.path$'],
       { timeout: 10_000, windowsHide: true, maxBuffer: 1024 * 1024, env: { ...process.env, HOME: home } }, (_err, stdout) => resolve(stdout ?? ''));
   });
   const targets = listed.split('\0').filter(Boolean).flatMap((entry) => {
@@ -1232,7 +1334,8 @@ let detected: Promise<JailKind | null> | undefined;
 export function detectJail(): Promise<JailKind | null> {
   detected ??= (async () => {
     if (process.platform === 'linux') {
-      const ok = await runs('bwrap', bwrapArgs([], true, '/', 'true', []));
+      const bwrap = onTrustedPath(['bwrap']);
+      const ok = bwrap !== undefined && await runs(bwrap, bwrapArgs([], true, '/', 'true', []));
       return ok ? 'bwrap' : null;
     }
     if (process.platform === 'darwin') {
@@ -1240,7 +1343,8 @@ export function detectJail(): Promise<JailKind | null> {
         { path: '/nonexistent/cascade-probe', dir: false },
         { path: '/nonexistent/cascade-dir', dir: true, keep: ['/nonexistent/cascade-dir/tmp'] },
       ], ['/nonexistent/cascade-read-only']);
-      const ok = await runs('sandbox-exec', ['-p', probe, '/usr/bin/true']);
+      const sandboxExec = onTrustedPath(['sandbox-exec']);
+      const ok = sandboxExec !== undefined && await runs(sandboxExec, ['-p', probe, '/usr/bin/true']);
       return ok ? 'sandbox-exec' : null;
     }
     return null;
@@ -1627,6 +1731,35 @@ function storeStamp(dirs: string[]): string {
   return stamps.join(',');
 }
 
+/**
+ * The git directory of the repository `cwd` is in, and its common one, by
+ * real path — the same from any folder in it — or null when git cannot say.
+ */
+async function repoGitDirs(cwd: string): Promise<string[] | null> {
+  const located = await git(cwd, ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir']);
+  if (located === null) return null;
+  const dirs = located.split('\n').map((line) => line.trim()).filter(Boolean);
+  if (dirs.length === 0) return null;
+  return [...new Set(dirs.map((dir) => { try { return fs.realpathSync(dir); } catch { return dir; } }))];
+}
+
+/** A git directory's configuration files: its own and its worktree's. */
+function repoConfigFiles(gitDirs: string[]): string[] {
+  return gitDirs.filter(Boolean).flatMap((dir) => [path.join(dir, 'config'), path.join(dir, 'config.worktree')]);
+}
+
+/**
+ * What `file` holds, as a hash — what git reads from it, whichever file it
+ * is (an inode can be used again) — or undefined when it is no file.
+ */
+function fingerprintOf(file: string): string | undefined {
+  try {
+    return fs.statSync(file).isFile() ? createHash('sha256').update(fs.readFileSync(file)).digest('hex') : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function gitDirsOf(root: string): Promise<string[]> {
   const located = await git(root, ['rev-parse', '--absolute-git-dir', '--git-common-dir']);
   if (located === null) return knownStores(root);
@@ -1728,14 +1861,23 @@ export async function localReceiveHooks(cwd: string, args: string[]): Promise<st
     const store = knownStores(dest)[0];
     if (!store) continue;
     // Where it looks for hooks: core.hooksPath as git there reads it — its
-    // own configuration, the user's and the system's — or its hooks folder.
+    // own configuration, the user's and the system's — or its hooks folder,
+    // in the common store for a linked worktree. Receive hooks run in the
+    // store, which a relative core.hooksPath is taken from; the worktree is
+    // looked in too, rather than miss one.
     const hooksPath = await git(dest, ['config', '--path', '--get', 'core.hooksPath']);
-    const dir = hooksPath ? path.resolve(dest, hooksPath) : path.join(store, 'hooks');
-    for (const hook of RECEIVE_HOOKS) {
-      const file = path.join(dir, hook);
-      try {
-        if (fs.statSync(file).isFile() && (process.platform === 'win32' || (fs.accessSync(file, fs.constants.X_OK), true))) found.push(file);
-      } catch { /* none */ }
+    const common = await git(dest, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+    const stores = [...new Set([store, ...(common ? [common] : [])])];
+    const dirs = hooksPath
+      ? [...new Set([...stores, dest].map((base) => path.resolve(base, hooksPath)))]
+      : stores.map((s) => path.join(s, 'hooks'));
+    for (const dir of dirs) {
+      for (const hook of RECEIVE_HOOKS) {
+        const file = path.join(dir, hook);
+        try {
+          if (fs.statSync(file).isFile() && (process.platform === 'win32' || (fs.accessSync(file, fs.constants.X_OK), true))) found.push(file);
+        } catch { /* none */ }
+      }
     }
   }
   return found;
@@ -1751,13 +1893,22 @@ async function defaultPushRemote(cwd: string): Promise<string> {
 }
 
 /**
+ * git as the jail runs it outside any jail: from a folder no command can
+ * write to (`onTrustedPath`), or a name that runs nothing when there is
+ * none, so the call fails as it would with git missing.
+ */
+export function trustedGit(): string {
+  return onTrustedPath(['git']) ?? path.join(os.tmpdir(), 'cascade-no-trusted-git', 'git');
+}
+
+/**
  * git's output in `cwd`, or null when it failed — not a repository, or git
  * missing. Run outside any jail, so with nothing its configuration names to
  * start: an fsmonitor as the index is read, gpg to show a signature.
  */
 function git(cwd: string, args: string[]): Promise<string | null> {
   return new Promise((resolve) => {
-    execFile('git', ['-c', 'core.fsmonitor=false', '-c', 'log.showSignature=false', '-C', cwd, ...args], { timeout: 20_000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+    execFile(trustedGit(), ['-c', 'core.fsmonitor=false', '-c', 'log.showSignature=false', '-C', cwd, ...args], { timeout: 20_000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
       resolve(err ? null : stdout.trim());
     });
   });

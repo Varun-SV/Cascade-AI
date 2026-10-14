@@ -9,8 +9,8 @@ import path from 'node:path';
 import { simpleGit, type SimpleGit } from 'simple-git';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
-import { globalGitConfigFiles, localReceiveHooks, type Launch } from './jail/process-jail.js';
-import { listGitConfig, unjailedSettings } from './git-hermetic.js';
+import { globalGitConfigFiles, localReceiveHooks, trustedGit, type Launch } from './jail/process-jail.js';
+import { listGitConfig, repositoryPrograms, unjailedSettings } from './git-hermetic.js';
 import { resolveInWorkspace } from './utils/workspace-path.js';
 
 /**
@@ -37,6 +37,9 @@ function refusePathspecFile(operation: string, args: string[]): void {
  * (`--receive-pack`, `--exec`): for a remote on this machine git runs it
  * here, with the credentials this tool keeps in view. simple-git refuses
  * the options written out; git also takes them cut short (`--rece`, `--ex`).
+ * And one that asks to be signed (`--signed`, `--si`), which runs gpg with
+ * the user's key: a push the user's own configuration signs (push.gpgSign)
+ * still is.
  */
 function refusePackProgram(args: string[]): void {
   for (const arg of args) {
@@ -45,6 +48,9 @@ function refusePackProgram(args: string[]): void {
     const program = (name.length >= '--rece'.length && '--receive-pack'.startsWith(name))
       || (name.length >= '--e'.length && '--exec'.startsWith(name));
     if (program) throw new Error(`git push ${name} is not allowed: it names a program for git to run.`);
+    if (name.length >= '--si'.length && '--signed'.startsWith(name)) {
+      throw new Error(`git push ${name} is not allowed: signing runs gpg with your key. A push your git configuration signs (push.gpgSign) is signed as it says.`);
+    }
   }
 }
 
@@ -254,13 +260,20 @@ export class GitTool extends BaseTool {
     if (!prepared.ok) throw new Error(prepared.reason);
     const { launch } = prepared;
     if (launch.unconfined) return this.unjailedGit(cwd, launch, operation);
-    if (process.platform === 'win32') return { git: gitWithEnv(cwd, launch.env, [NO_HOOKS]), done: async () => { await launch.done?.(); } };
+    const retrust = await this.checkUntrustedConfig(cwd, launch);
+    const finish = async () => {
+      await launch.done?.();
+      this.jail?.retrustGitConfigs(retrust);
+    };
+    if (process.platform === 'win32') return { git: gitWithEnv(cwd, launch.env, [NO_HOOKS]), done: finish };
     const unset = Object.keys(process.env).filter((name) => !(name in launch.env) && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name));
+    // What the jail set differently — PATH, to folders no command can write to.
+    const changed = Object.entries(launch.env).filter(([name, value]) => value !== undefined && process.env[name] !== value && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name));
     // Global and system configuration files that were not there when Cascade
     // started are not read: commands cannot change the ones that were (the
     // jail keeps them read-only), but could make one that was not.
     const config = hermetic ? {} : this.configAtStart;
-    if (!launch.jail && unset.length === 0 && !hermetic && Object.keys(config).length === 0) return plain;
+    if (!launch.jail && unset.length === 0 && changed.length === 0 && !hermetic && Object.keys(config).length === 0) return { ...plain, done: finish };
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-git-'));
     const script = path.join(dir, 'git');
@@ -268,7 +281,7 @@ export class GitTool extends BaseTool {
     fs.writeFileSync(script, [
       '#!/bin/sh',
       ...(unset.length ? [`unset ${unset.join(' ')}`] : []),
-      ...Object.entries({ ...config, ...hermetic?.env }).map(([name, value]) => `export ${name}=${quote(value)}`),
+      ...Object.entries({ ...Object.fromEntries(changed), ...config, ...hermetic?.env }).map(([name, value]) => `export ${name}=${quote(value as string)}`),
       `exec ${[launch.file, ...launch.args].map(quote).join(' ')} "$@"`,
       '',
     ].join('\n'), { mode: 0o700 });
@@ -277,9 +290,36 @@ export class GitTool extends BaseTool {
       git,
       done: async () => {
         fs.rmSync(dir, { recursive: true, force: true });
-        await launch.done?.();
+        await finish();
       },
     };
+  }
+
+  /**
+   * A repository whose configuration the jail does not trust — made after
+   * Cascade first looked, by a command perhaps, or changed since — gets the
+   * check git gets without a jail: nothing in its own configuration may name
+   * a program, which git would run here with the credentials this tool keeps
+   * in view. Returns the files to trust after the call, which then changes
+   * them only through git itself.
+   */
+  private async checkUntrustedConfig(cwd: string, launch: Launch): Promise<string[]> {
+    const { trusted, untrusted } = await this.jail!.gitConfigTrust(cwd);
+    if (untrusted.length === 0) return trusted;
+    const refuse = async (reason: string): Promise<never> => {
+      await launch.done?.();
+      throw new Error(reason);
+    };
+    const listed = await listGitConfig(cwd, launch.env);
+    if (listed === null) return refuse('git could not list this repository\'s configuration, which was made or changed since Cascade first saw it, to check that it names no program, so git was not run.');
+    // core.hooksPath, which husky sets, is overridden here (NO_HOOKS).
+    const programs = repositoryPrograms(listed).filter((key) => key.toLowerCase() !== 'core.hookspath');
+    if (programs.length) {
+      const named = programs.slice(0, 5).join(', ') + (programs.length > 5 ? `, and ${programs.length - 5} more` : '');
+      return refuse(`This repository's git configuration was made or changed since Cascade first saw it, other than by this tool, so a command could have written it, and it has settings that can start a program: ${named}. ` +
+        'git would run that program with the credentials this tool keeps in view, so it was not run. Remove them; or, if you set them yourself, restart Cascade after deleting git-config-trust.json from the project\'s state folder, which trusts the configuration as it is then.');
+    }
+    return [...trusted, ...untrusted];
   }
 
   /**
@@ -344,7 +384,7 @@ async function hermeticSettings(cwd: string): Promise<{ args: string[]; env: Rec
 /** One `git config` value in `cwd`, or '' when there is none. */
 function gitConfigValue(cwd: string, args: string[]): Promise<string> {
   return new Promise((resolve) => {
-    execFile('git', ['-C', cwd, 'config', ...args], { timeout: 5_000, windowsHide: true }, (err, stdout) => {
+    execFile(trustedGit(), ['-C', cwd, 'config', ...args], { timeout: 5_000, windowsHide: true }, (err, stdout) => {
       resolve(err ? '' : stdout.trim());
     });
   });

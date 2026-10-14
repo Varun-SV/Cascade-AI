@@ -49,6 +49,8 @@ function policy(over: Partial<JailPolicy> = {}): JailPolicy {
     hiddenDirs: [],
     secretValues: () => [SECRET],
     log: () => {},
+    // The jailer a test names, found as spawn finds it.
+    program: (name) => name,
     ...over,
   };
 }
@@ -166,7 +168,25 @@ describe('collectHidden — a rule that reaches through a symlinked folder', () 
       await fs.mkdir(path.join(d, 'data'));
       for (let i = 0; i < 20; i++) await fs.writeFile(path.join(d, 'data', `f${i}`), '');
       await fs.symlink(path.join(d, 'data'), path.join(d, 'alias'));
-    }, 10)).rejects.toThrow(/"alias" is a symlinked folder a privacy rule reaches into/);
+    }, 10)).rejects.toThrow(/"alias" is a symlinked folder in which a protection or privacy rule can name a file/);
+  });
+
+  it('walks a linked folder outside the workspace for every rule, `.env` at any depth too', async () => {
+    // No other walk meets what it holds: the workspace's is of the workspace.
+    const outside = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-outside-')));
+    try {
+      await fs.mkdir(path.join(outside, 'sub'));
+      await fs.writeFile(path.join(outside, 'sub', '.env'), `KEY=${SECRET}`);
+      await fs.writeFile(path.join(outside, 'open.txt'), 'fine');
+      const { dir, hidden } = await withRule('secret/**', async (d) => {
+        await fs.symlink(outside, path.join(d, 'shared'));
+      });
+      expect(hidden).toContainEqual({ path: path.join(outside, 'sub', '.env'), dir: false });
+      expect(hidden.some((h) => h.path.endsWith('open.txt'))).toBe(false);
+      await fs.rm(dir, { recursive: true, force: true });
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
   });
 
   it('reads no linked folder that no rule reaches into by name', async () => {
@@ -415,7 +435,8 @@ describe('ProcessJail.prepare — which way a command runs', () => {
   it('loads the socket filter for a local-only caller, through a shell that opens it', async () => {
     const r = await new ProcessJail(policy({ detect: bwrap })).prepare('sh', ['-c', 'ls'], { cwd: ws, offline: true });
     expect(r.ok && r.launch.file).toBe('/bin/sh');
-    expect(r.ok && r.launch.args.slice(0, 2)).toEqual(['-c', 'exec bwrap --seccomp 9 "$@" 9<"$0"']);
+    expect(r.ok && r.launch.args.slice(0, 2)).toEqual(['-c', 'jailer=$1; shift; exec "$jailer" --seccomp 9 "$@" 9<"$0"']);
+    expect(r.ok && r.launch.args[3]).toBe('bwrap');
     expect(r.ok && r.launch.args).toContain('--unshare-net');
   });
 });
@@ -1972,6 +1993,14 @@ describe('localReceiveHooks', () => {
       await fs.writeFile(path.join(dir, 'elsewhere', 'update'), '#!/bin/sh\n', { mode: 0o755 });
       execFileSync('git', ['-C', bare, 'config', 'core.hooksPath', path.join(dir, 'elsewhere')]);
       expect(await localReceiveHooks(repo, ['origin'])).toEqual([path.join(dir, 'elsewhere', 'update')]);
+      // A relative one, in a repository with a worktree, is taken from its
+      // store, where receive hooks run: `custom` is `.git/custom` there.
+      const other = path.join(dir, 'other');
+      execFileSync('git', ['init', '-q', other]);
+      execFileSync('git', ['-C', other, 'config', 'core.hooksPath', 'custom']);
+      await fs.mkdir(path.join(other, '.git', 'custom'));
+      await fs.writeFile(path.join(other, '.git', 'custom', 'pre-receive'), '#!/bin/sh\n', { mode: 0o755 });
+      expect(await localReceiveHooks(repo, [other, 'main'])).toEqual([path.join(other, '.git', 'custom', 'pre-receive')]);
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
@@ -1995,6 +2024,116 @@ describe('recordMarks', () => {
       expect(none).toEqual([]);
     } finally {
       if (before === undefined) delete process.env['CASCADE_MARK_RETRY_MS']; else process.env['CASCADE_MARK_RETRY_MS'] = before;
+    }
+  });
+});
+
+// What Cascade starts itself — the jailer, the git tool's git and what that
+// runs (ssh, gpg) — runs with more than a command may reach. A command could
+// leave its own program in a folder on PATH it can write to, ~/.local/bin.
+describe('programs Cascade starts', () => {
+  const withPath = async (run: (dir: string) => Promise<void>) => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-path-')));
+    const saved = process.env['PATH'];
+    try {
+      await run(dir);
+    } finally {
+      process.env['PATH'] = saved;
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('takes no jailer from a folder a command could write to', async () => {
+    await withPath(async (dir) => {
+      await fs.writeFile(path.join(dir, 'bwrap'), '#!/bin/sh\n', { mode: 0o755 });
+      process.env['PATH'] = dir;
+      const r = await new ProcessJail(policy({ detect: async () => 'bwrap', program: undefined })).prepare('sh', [], { cwd: ws, offline: false });
+      expect(!r.ok && r.reason).toMatch(/bwrap was found only in folders a command could change/);
+    });
+  });
+
+  it("gives the git tool's git a PATH of folders no command can write to, and other commands theirs", async () => {
+    await withPath(async (dir) => {
+      process.env['PATH'] = [dir, '/usr/bin'].join(path.delimiter);
+      const jail = new ProcessJail(policy({ detect: async () => 'bwrap' }));
+      const git = await jail.prepare('git', [], { cwd: ws, offline: false, keepGit: true, confinesItself: true });
+      if (!git.ok) throw new Error(git.reason);
+      await git.launch.done?.();
+      expect(git.launch.env['PATH']).toBe('/usr/bin');
+      const sh = await jail.prepare('sh', [], { cwd: ws, offline: false });
+      if (!sh.ok) throw new Error(sh.reason);
+      await sh.launch.done?.();
+      expect(sh.launch.env['PATH']).toBe(process.env['PATH']);
+    });
+  });
+});
+
+// The jail freezes a repository's configuration while a command runs, so
+// none can name a program there for the git tool to run with the
+// credentials it keeps. One a command makes — a new repository — was not
+// there to freeze.
+describe('repository configuration the git tool trusts', () => {
+  const g = (repo: string, ...args: string[]) => execFileSync('git', ['-C', repo, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' });
+  // A jailer that runs the command as it is: what is tested is the git tool's check.
+  const passThrough = async (dir: string) => {
+    const file = path.join(dir, 'jailer');
+    await fs.writeFile(file, '#!/bin/sh\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n', { mode: 0o755 });
+    return file;
+  };
+
+  it('trusts the repositories there before any command, not one made after, and checks that one as without a jail', async () => {
+    const { GitTool } = await import('../git.js');
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-trust-')));
+    const tools = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-jail-trust-bin-')));
+    const marker = path.join(tools, 'ran');
+    try {
+      g(root, 'init', '-q');
+      await fs.writeFile(path.join(root, 'a.md'), 'a\n');
+      g(root, 'add', '.'); g(root, 'commit', '-qm', 'a');
+      const jailer = await passThrough(tools);
+      const jail = new ProcessJail(policy({ workspaceRoot: root, detect: async () => 'bwrap', program: () => jailer }));
+      const tool = new GitTool();
+      tool.setWorkspaceRoot(root);
+      tool.setProcessJail(jail);
+      // The workspace's own repository, there before any command: trusted.
+      expect(await tool.execute({ operation: 'status' }, { tierId: 't3', sessionId: 's' })).toMatch(/clean|Branch/);
+      expect((await jail.gitConfigTrust(root)).untrusted).toEqual([]);
+
+      // A command makes a repository naming a diff program.
+      const made = path.join(root, 'made');
+      g(root, 'init', '-q', made);
+      await fs.writeFile(path.join(made, 'x.md'), 'x\n');
+      g(made, 'add', '.'); g(made, 'commit', '-qm', 'x');
+      await fs.writeFile(path.join(made, 'x.md'), 'y\n');
+      // husky's hooks folder is no program here: the tool runs no hooks.
+      g(made, 'config', 'core.hooksPath', '.husky');
+      expect(await tool.execute({ operation: 'status', cwd: 'made' }, { tierId: 't3', sessionId: 's' })).toMatch(/Modified/);
+      g(made, 'config', 'diff.external', `sh -c 'touch ${marker}'`);
+      expect((await jail.gitConfigTrust(made)).untrusted).toEqual([path.join(made, '.git', 'config')]);
+      await expect(tool.execute({ operation: 'diff', args: ['--ext-diff'], cwd: 'made' }, { tierId: 't3', sessionId: 's' }))
+        .rejects.toThrow(/made or changed since Cascade first saw it.*diff\.external/);
+      expect(fsSync.existsSync(marker)).toBe(false);
+
+      // Without it, git runs there, and the configuration is trusted from then on.
+      g(made, 'config', '--unset', 'diff.external');
+      await tool.execute({ operation: 'diff', cwd: 'made' }, { tierId: 't3', sessionId: 's' });
+      expect((await jail.gitConfigTrust(made)).untrusted).toEqual([]);
+      // Changed other than by git itself, it is not: a command renamed a
+      // folder over it, say.
+      const config = path.join(made, '.git', 'config');
+      await fs.appendFile(config, '# changed\n');
+      expect((await jail.gitConfigTrust(made)).untrusted).toEqual([config]);
+
+      // The record carries over to the next run, which adds nothing to it.
+      const next = new ProcessJail(policy({ workspaceRoot: root, detect: async () => 'bwrap', program: () => jailer }));
+      const r = await next.prepare('true', [], { cwd: root, offline: false });
+      if (r.ok) await r.launch.done?.();
+      expect((await next.gitConfigTrust(made)).untrusted).toEqual([config]);
+      expect((await next.gitConfigTrust(root)).untrusted).toEqual([]);
+    } finally {
+      await fs.rm(statePath(root, 'git-config-trust.json'), { force: true });
+      await fs.rm(root, { recursive: true, force: true });
+      await fs.rm(tools, { recursive: true, force: true });
     }
   });
 });

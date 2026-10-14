@@ -13,6 +13,7 @@ import { WithheldError } from './file.js';
 import { resolveInWorkspace } from './utils/workspace-path.js';
 import { statePathFor } from '../config/project-state.js';
 import { isWithin, realPathOf } from '../utils/real-path.js';
+import { onTrustedPath } from '../utils/trusted-exec.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -138,7 +139,11 @@ export class GrepTool extends BaseTool {
     // An absolute path, so no name printed can begin like a `--` separator.
     args.push('--with-filename', '--null', '--', pattern, path.resolve(searchPath));
 
-    const { stdout } = await execFileAsync('rg', args, {
+    // ripgrep runs outside any jail, so only one no command could have put
+    // on PATH (onTrustedPath); with none, the Node.js scan answers.
+    const rg = onTrustedPath(['rg'], this.workspaceRoot);
+    if (!rg) throw new Error('No ripgrep from a folder commands cannot write to.');
+    const { stdout } = await execFileAsync(rg, args, {
       timeout: 15_000,
       maxBuffer: 2 * 1024 * 1024,
     });

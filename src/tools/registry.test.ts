@@ -441,6 +441,33 @@ describe('ToolRegistry — a local-only write that does not happen', () => {
     await fs.rm(ws, { recursive: true, force: true });
   });
 
+  // Times kept to the second gave a write in place the stamp the file had
+  // before it — same inode, same size — and the mark came off what it wrote.
+  it('keeps the mark of a write in place that leaves the file\'s times and size as they were', async () => {
+    const { PrivacyPaths } = await import('../core/privacy/paths.js');
+    const nodeFs = (await import('node:fs')).default;
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-unmark3-')));
+    const file = path.join(ws, 'readme.md');
+    await fs.writeFile(file, 'public\n');
+    const privacy = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }], { workspaceRoot: ws });
+    const reg = new ToolRegistry(toolsConfig, ws);
+    reg.setPrivacyPaths(privacy);
+    const statSync = nodeFs.statSync.bind(nodeFs);
+    const coarse = vi.spyOn(nodeFs, 'statSync').mockImplementation(((p: string, o?: object) => {
+      const st = statSync(p, o as never);
+      if (st && path.resolve(String(p)) === file) Object.assign(st, { mtimeMs: 0, ctimeMs: 0 });
+      return st;
+    }) as typeof nodeFs.statSync);
+    try {
+      await reg.execute('file_edit', { path: 'readme.md', old_string: 'public', new_string: 'SECRET' }, { ...opts, isOffline: () => true });
+    } finally {
+      coarse.mockRestore();
+    }
+    expect(await fs.readFile(file, 'utf8')).toBe('SECRET\n');
+    expect(privacy.isLocalOnly('readme.md')).toBe(true);
+    await fs.rm(ws, { recursive: true, force: true });
+  });
+
   // Marked before the gate, two writes to one file shared a mark: the first,
   // failing, took it off while the second went on to write.
   it('keeps the mark of a write that happened when another to the same file failed', async () => {

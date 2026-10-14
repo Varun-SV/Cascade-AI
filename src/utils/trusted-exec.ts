@@ -3,10 +3,12 @@
 // ─────────────────────────────────────────────
 //
 //  Checking an agent's artifact runs a compiler with Cascade's own
-//  permissions. Which one runs must not be the workspace's to decide: a
-//  `node_modules/.bin/tsc` that `npx` prefers, or a `python` the agent left
-//  on a PATH entry inside the workspace, would run with everything Cascade
-//  can reach.
+//  permissions, and the jailer, ripgrep and the git calls the jail makes
+//  run outside any jail; the git tool's git, and what it starts (ssh, gpg),
+//  run with the credentials it keeps in view. Which program runs must not
+//  be an approved command's to decide: a `node_modules/.bin/tsc` that `npx`
+//  prefers, or a `git` a command left in ~/.local/bin, would run with
+//  everything Cascade can reach.
 
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
@@ -26,29 +28,46 @@ export function ownTsc(): string | undefined {
   }
 }
 
+/** Where programs are installed for every user; as root, the only folders taken (see `alterable`). */
+const SYSTEM_BIN = ['/usr/local/sbin', '/usr/local/bin', '/usr/sbin', '/usr/bin', '/sbin', '/bin'];
+
 /**
- * The first of `names` found on PATH, skipping entries that are relative
- * (they resolve against the working directory), that lie inside
- * `untrusted`, by real path, or that this user can write to — a folder
- * such as ~/.local/bin, or the program itself — since a jailed command,
- * which runs as this user, could put its own program there; undefined when
- * there is none.
+ * PATH's entries a program may be taken from, in order: not relative (they
+ * resolve against the working directory), not inside any of `untrusted`, by
+ * real path, and not ones this user can change — a folder such as
+ * ~/.local/bin — since a jailed command, which runs as this user, could put
+ * its own program there.
  */
-export function onTrustedPath(names: string[], untrusted: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
-  const root = realOr(untrusted);
+export function trustedDirs(untrusted: string | string[] = [], env: NodeJS.ProcessEnv = process.env): string[] {
+  const roots = (Array.isArray(untrusted) ? untrusted : [untrusted]).map(realOr);
+  const out: string[] = [];
+  for (const dir of (env['PATH'] ?? '').split(path.delimiter)) {
+    if (!dir || !path.isAbsolute(dir) || out.includes(dir)) continue;
+    const real = realOr(dir);
+    if (roots.some((root) => isWithin(real, root)) || alterable(dir, true)) continue;
+    out.push(dir);
+  }
+  return out;
+}
+
+/**
+ * The first of `names` found in `trustedDirs`, itself one this user cannot
+ * change, where it really is; undefined when there is none.
+ */
+export function onTrustedPath(names: string[], untrusted: string | string[] = [], env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const roots = (Array.isArray(untrusted) ? untrusted : [untrusted]).map(realOr);
   const exts = process.platform === 'win32'
     ? (env['PATHEXT'] ?? '.EXE;.CMD;.BAT').split(';').filter(Boolean)
     : [''];
-  for (const dir of (env['PATH'] ?? '').split(path.delimiter)) {
-    if (!dir || !path.isAbsolute(dir)) continue;
-    if (isWithin(realOr(dir), root) || writable(dir)) continue;
+  for (const dir of trustedDirs(untrusted, env)) {
     for (const name of names) {
       for (const ext of exts) {
         const file = path.join(dir, name + ext);
         try {
           if (!fs.statSync(file).isFile()) continue;
           // Where it really is decides, as for the folder.
-          if (isWithin(realOr(file), root) || writable(file) || writable(path.dirname(realOr(file)))) continue;
+          const real = realOr(file);
+          if (roots.some((root) => isWithin(real, root)) || alterable(file, false) || alterable(path.dirname(real), true)) continue;
           if (process.platform !== 'win32') fs.accessSync(file, fs.constants.X_OK);
           return file;
         } catch { /* not here */ }
@@ -58,9 +77,18 @@ export function onTrustedPath(names: string[], untrusted: string, env: NodeJS.Pr
   return undefined;
 }
 
-/** Whether this user may write to `p` (on Windows, where access() says little, never taken as so). */
-function writable(p: string): boolean {
+/**
+ * Whether a command running as this user could change `p`. On Windows,
+ * where access() says little, never taken as so. Root can write to every
+ * folder, so there only the system's own program folders count as not —
+ * though a command run as root could change those too.
+ */
+function alterable(p: string, dir: boolean): boolean {
   if (process.platform === 'win32') return false;
+  if (process.getuid?.() === 0) {
+    const real = realOr(p);
+    return !SYSTEM_BIN.includes(dir ? real : path.dirname(real));
+  }
   try {
     fs.accessSync(p, fs.constants.W_OK);
     return true;

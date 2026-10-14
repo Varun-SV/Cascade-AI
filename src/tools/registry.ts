@@ -2,6 +2,7 @@
 //  Cascade AI — Tool Registry
 // ─────────────────────────────────────────────
 
+import { createHash, randomUUID } from 'node:crypto';
 import EventEmitter from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -771,8 +772,21 @@ export class ToolRegistry extends EventEmitter {
 /** A path's identity and last change, or 'absent' — to tell whether a tool changed it. */
 function stampOf(p: string): string {
   const st = fs.statSync(p, { throwIfNoEntry: false });
-  return st ? `${st.ino}:${st.size}:${st.mtimeMs}:${st.ctimeMs}` : 'absent';
+  if (!st) return 'absent';
+  if (!st.isFile()) return `${st.ino}:${st.isDirectory() ? 'dir' : 'other'}`;
+  // A file's contents decide, not its times: a filesystem that keeps them
+  // to the second gives a write in place the stamp it had. One too big to
+  // read again, or that can't be read, never counts as unchanged.
+  if (st.size > STAMP_HASH_LIMIT) return randomUUID();
+  try {
+    return `${st.ino}:${createHash('sha256').update(fs.readFileSync(p)).digest('hex')}`;
+  } catch {
+    return randomUUID();
+  }
 }
+
+/** The largest file whose contents `stampOf` compares (64 MiB). */
+const STAMP_HASH_LIMIT = 64 * 1024 * 1024;
 
 /** A relative path in the slash-separated form the privacy record keeps. */
 function posix(rel: string): string {
