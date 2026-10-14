@@ -43,13 +43,18 @@ jobs:
 
           WIKI_DIR="${RUNNER_TEMP}/cascade-wiki"
           # A GitHub Wiki is a separate Git repository and needs an initial Home page.
-          GIT_TERMINAL_PROMPT=0 git clone --quiet             "https://x-access-token:${WIKI_PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git"             "${WIKI_DIR}"
+          GIT_TERMINAL_PROMPT=0 git clone --quiet "https://x-access-token:${WIKI_PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" "${WIKI_DIR}"
           git -C "${WIKI_DIR}" config user.name "cascade-wiki-bot"
           git -C "${WIKI_DIR}" config user.email "cascade-wiki-bot@users.noreply.github.com"
 
           # Overlay only managed root-level Markdown pages. Do not delete independent wiki pages.
           for source in docs/wiki/*.md; do
-            cp "${source}" "${WIKI_DIR}/$(basename "${source}")"
+            page="$(basename "${source}")"
+            # Keep the existing generated digest when this week has no code changes.
+            if [[ "${page}" == "Weekly-Code-Changes.md" && -f "${WIKI_DIR}/${page}" ]]; then
+              continue
+            fi
+            cp "${source}" "${WIKI_DIR}/${page}"
           done
           node scripts/wiki-weekly-digest.mjs "${WIKI_DIR}/Weekly-Code-Changes.md"
 
