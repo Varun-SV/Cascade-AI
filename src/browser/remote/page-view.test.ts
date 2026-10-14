@@ -308,10 +308,20 @@ describe('describePage', () => {
     expect(v.labels.size).toBe(0);
   });
 
-  it('is null for a snapshot with no refs — an older Playwright', () => {
+  it('is null for a snapshot that names controls without refs — an older Playwright', () => {
     // `mode: 'ai'` unknown to it, so it wrote the default snapshot.
     expect(view('- main:\n  - button "Go"\n  - link "Home":\n    - /url: /')).toBeNull();
-    expect(view('')).toBeNull();
+  });
+
+  it('describes a page with nothing to act on, so a screenshot can still show it', () => {
+    // A canvas, an image, or a page still blank: no refs, and no controls
+    // that should have had one.
+    for (const snapshot of ['', '- img "Sales by month"', '- main [ref=e1]:\n  - img "Chart" [ref=e2]']) {
+      const v = view(snapshot);
+      expect(v).not.toBeNull();
+      expect(v!.text).toContain('(no controls on screen)');
+      expect(v!.labels.size).toBe(0);
+    }
   });
 
   it('lists everything as on screen when the snapshot has no boxes', () => {

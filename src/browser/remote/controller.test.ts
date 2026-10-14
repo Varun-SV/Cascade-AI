@@ -128,15 +128,23 @@ const page = {
   navHandlers: [] as Array<(frame: unknown) => void>,
   /** A new document's load, which `pushState` and its kin do not fire. */
   loadHandlers: [] as Array<() => void>,
+  /** Requests the page makes; a navigation's is the first sign of a new document. */
+  requestHandlers: [] as Array<(request: unknown) => void>,
   calls: [] as string[],
   url() { return this.currentUrl; },
   async title() { return 'Title'; },
   async goto(u: string) {
-    this.calls.push(`goto:${u}`); this.currentUrl = u;
+    this.calls.push(`goto:${u}`);
+    this.requestNavigation();
+    this.currentUrl = u;
     // Playwright reports the frame that moved. A real top-level navigation
     // reports the main frame; see `navigateSubframe` for the other kind.
     this.navHandlers.forEach((h) => h(MAIN_FRAME));
     this.loadHandlers.forEach((h) => h());
+  },
+  /** A navigation asked for and not yet answered: the old document is still up. */
+  requestNavigation(frame: unknown = MAIN_FRAME) {
+    this.requestHandlers.forEach((h) => h({ isNavigationRequest: () => true, frame: () => frame }));
   },
   /** A history change: the main frame "navigates", the document stays. */
   replaceState(u: string) { this.currentUrl = u; this.navHandlers.forEach((h) => h(MAIN_FRAME)); },
@@ -152,6 +160,7 @@ const page = {
   on(event: string, handler: (frame: unknown) => void) {
     if (event === 'framenavigated') this.navHandlers.push(handler);
     if (event === 'domcontentloaded') this.loadHandlers.push(handler as () => void);
+    if (event === 'request') this.requestHandlers.push(handler);
   },
   async close() { this.closed = true; this.closeCount += 1; },
   isClosed() { return this.closed; },
@@ -237,6 +246,7 @@ beforeEach(() => {
   page.calls = [];
   page.navHandlers = [];
   page.loadHandlers = [];
+  page.requestHandlers = [];
   browser.closed = false;
   browser.contexts = () => [defaultContext];
   defaultContext.closed = false;
@@ -4553,10 +4563,14 @@ describe('page views and refs', () => {
   let liveRefs = new Set<string>();
   const extra = page as unknown as Record<string, unknown>;
 
-  /** A JPEG's headers: enough for its size to be read, as a real one's is. */
-  const jpeg = (width: number, height: number) => new Uint8Array([
+  /**
+   * A JPEG's headers: enough for its size to be read, as a real one's is.
+   * `shade` stands for what is in the picture: two of the same size and shade
+   * are the same picture.
+   */
+  const jpeg = (width: number, height: number, shade = 0) => new Uint8Array([
     0xff, 0xd8,
-    0xff, 0xe0, 0x00, 0x04, 0x00, 0x00,
+    0xff, 0xe0, 0x00, 0x04, 0x00, shade,
     0xff, 0xc0, 0x00, 0x0b, 0x08, height >> 8, height & 0xff, width >> 8, width & 0xff, 0x01, 0x01, 0x11, 0x00,
     0xff, 0xd9,
   ]);
@@ -4747,6 +4761,84 @@ describe('page views and refs', () => {
     expect((await c.controller({ kind: 'click', selector: '#go', expectSite: 'start.test' }, ctx('run', 'w1'))).ok).toBe(true);
   });
 
+  it('does not act on a page of the same site that loaded since it was planned and approved', async () => {
+    // Approved on /cart; while the person decided, the site moved to /account,
+    // where the same selector finds something else.
+    const c = controller();
+    const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(seen.document).toEqual(expect.any(String));
+    await page.goto('https://start.test/account');
+    page.calls = [];
+    const out = await c.controller(
+      { kind: 'click', selector: '.primary-action', expectSite: 'start.test', expectDocument: seen.document }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('The page has loaded something else since it was last looked at');
+    expect(page.calls).toEqual([]);
+    // Not told which document is up now: the next try is planned against it
+    // only once the page has been looked at.
+    expect(out.url).toBe('https://start.test/account');
+    expect(out).not.toHaveProperty('document');
+    const looked = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(looked.document).not.toBe(seen.document);
+    expect((await c.controller(
+      { kind: 'click', selector: '.primary-action', expectDocument: looked.document }, ctx('run', 'w1'))).ok).toBe(true);
+  });
+
+  it('names the document an action ran on, not one it set off', async () => {
+    // A region picker that loads another page as soon as it is changed: the
+    // model has not seen that page, so what it plans next is not run there.
+    const c = controller();
+    const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    extra['locator'] = (selector: string) => ({
+      ...locate(selector),
+      selectOption: async () => { page.loadHandlers.forEach((h) => h()); },
+    });
+    const chose = await c.controller(
+      { kind: 'select_option', selector: '#region', value: 'EU', expectDocument: seen.document }, ctx('run', 'w1'));
+    expect(chose.ok).toBe(true);
+    expect(chose.document).toBe(seen.document);
+    const next = await c.controller({ kind: 'click', selector: '#go', expectDocument: chose.document }, ctx('run', 'w1'));
+    expect(next.ok).toBe(false);
+  });
+
+  it('does not act while the page is on its way to another document', async () => {
+    // Asked for, not yet loaded: the next page can be up, half built, any moment.
+    const c = controller();
+    const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.requestNavigation();
+    page.calls = [];
+    const out = await c.controller({ kind: 'fill', selector: '#q', value: 'x', expectDocument: seen.document }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(page.calls).toEqual([]);
+  });
+
+  it('acts when the page changed only its address, or a frame in it loaded', async () => {
+    const c = controller();
+    const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.replaceState('https://start.test/?step=2');
+    page.navigateSubframe();
+    page.requestNavigation(SUB_FRAME);
+    const out = await c.controller({ kind: 'click', selector: '#go', expectDocument: seen.document }, ctx('run', 'w1'));
+    expect(out.ok).toBe(true);
+  });
+
+  it('says which document a view was of, not one that loaded after it', async () => {
+    // The model plans against the view; a load landing after the snapshot
+    // must not lend the view the new document's name.
+    const c = controller();
+    const snap = extra['ariaSnapshot'] as (o: unknown) => Promise<string>;
+    extra['ariaSnapshot'] = async (o: unknown) => {
+      const text = await snap(o);
+      page.loadHandlers.forEach((h) => h());
+      return text;
+    };
+    const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    extra['ariaSnapshot'] = snap;
+    const out = await c.controller({ kind: 'click', selector: '#go', expectDocument: seen.document }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+  });
+
   it('routes every ref action through the locator', async () => {
     const c = controller();
     await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
@@ -4841,11 +4933,29 @@ describe('page views and refs', () => {
     expect(clicked.view).toBeUndefined();
   });
 
-  it('treats a snapshot without refs as no view at all', async () => {
+  it('treats a snapshot that names controls without refs as no view at all', async () => {
     // An older Playwright ignores `mode: 'ai'` and writes the plain snapshot.
     snapshot = '- main:\n  - button "Go"';
     const out = await controller().controller({ kind: 'observe' }, ctx('run', 'w1'));
     expect(out.ok).toBe(false);
+  });
+
+  it('describes, and pictures, a page with nothing to act on', async () => {
+    // A chart drawn on a canvas, an image, a page still blank: what a picture
+    // is most for.
+    const c = controller();
+    for (const nothing of ['', '- img "Sales by month" [ref=e1] [box=0,0,1280,800]']) {
+      snapshot = nothing;
+      const observed = await c.controller({ kind: 'observe', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      expect(observed.ok).toBe(true);
+      expect(observed.view!.text).toContain('(no controls on screen)');
+      expect(observed.image).toBeDefined();
+    }
+    SHOT = jpeg(1280, 800, 1);
+    const opened = await c.controller(
+      { kind: 'navigate', url: 'https://charts.test/', pageView: true, screenshot: true }, ctx('run', 'w1'));
+    expect(opened.view!.text).toContain('(no controls on screen)');
+    expect(opened.image).toBeDefined();
   });
 
   it('scrolls by a fixed expression the model cannot write into', async () => {
@@ -4903,13 +5013,67 @@ describe('page views and refs', () => {
       await c.controller({ kind: 'click', selector: '#a', pageView: true, screenshot: true }, ctx('run', 'w1'));
       const again = await c.controller({ kind: 'click', selector: '#b', pageView: true, screenshot: true }, ctx('run', 'w1'));
       expect(again.image).toBeUndefined();
-      expect(again.view!.text).not.toContain('No screenshot');
+      // Told, so the model does not wait for a picture or think it lost one.
+      expect(again.view!.text).toContain('No new screenshot: the page looks as it did in the last one. Call observe for a fresh one.');
       const asked = await c.controller({ kind: 'observe', pageView: true, screenshot: true }, ctx('run', 'w1'));
       expect(asked.image).toBeDefined();
       snapshot = BOOKING.replace('Account', 'Signed in');
+      SHOT = jpeg(1280, 800, 1);
       const changed = await c.controller({ kind: 'click', selector: '#c', pageView: true, screenshot: true }, ctx('run', 'w1'));
       expect(changed.image).toBeDefined();
-      expect(shots()).toHaveLength(3);
+      expect(shots()).toHaveLength(4);
+    });
+
+    it('sends a new picture when only the pixels changed — a chart, a map, a carousel', async () => {
+      // Not a word of the page view changes: the same list, the same page.
+      const c = controller();
+      const first = await c.controller({ kind: 'click', selector: '#next', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      SHOT = jpeg(1280, 800, 7);
+      const next = await c.controller({ kind: 'click', selector: '#next', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      const list = (text: string) => text.slice(text.indexOf('\n') + 1);
+      expect(list(next.view!.text)).toBe(list(first.view!.text));
+      expect(next.image).toBeDefined();
+      expect(next.image!.data).not.toBe(first.image!.data);
+    });
+
+    it('drops a picture taken as a password field came on screen', async () => {
+      // Checked clean, then the page put up a code form before the capture
+      // finished: the picture is of the form.
+      extra['screenshot'] = async () => { page.calls.push('shot:'); privateOnScreen = true; return SHOT; };
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: a password, card or one-time-code field is on screen.');
+    });
+
+    it('drops a picture taken as the page loaded another document, or set off to', async () => {
+      for (const meanwhile of [() => page.loadHandlers.forEach((h) => h()), () => page.requestNavigation()]) {
+        extra['screenshot'] = async () => { meanwhile(); return SHOT; };
+        const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+        expect(out.image).toBeUndefined();
+        expect(out.view!.text).toContain('No screenshot: the page changed while it was being looked at.');
+      }
+    });
+
+    it('drops a picture of a document that loaded after the view was taken', async () => {
+      // The picture goes with the view; of another document, it would show
+      // a page the list does not describe.
+      const snap = extra['ariaSnapshot'] as (o: unknown) => Promise<string>;
+      extra['ariaSnapshot'] = async (o: unknown) => {
+        const text = await snap(o);
+        page.loadHandlers.forEach((h) => h());
+        return text;
+      };
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: the page changed while it was being looked at.');
+    });
+
+    it('keeps a picture taken while the page changed only its address, or a frame in it loaded', async () => {
+      for (const meanwhile of [() => page.replaceState('https://start.test/?slide=2'), () => page.requestNavigation(SUB_FRAME)]) {
+        extra['screenshot'] = async () => { meanwhile(); return SHOT; };
+        const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+        expect(out.image).toBeDefined();
+      }
     });
 
     it('withholds it while a password, card or one-time-code field is on screen', async () => {
@@ -4933,7 +5097,8 @@ describe('page views and refs', () => {
       subFrames = [{ found: true, y: 1000 }];
       const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
       expect(out.image).toBeDefined();
-      expect(page.calls.filter((x) => x === 'privacy')).toHaveLength(1);
+      // The page itself, before the picture and again after it.
+      expect(page.calls.filter((x) => x === 'privacy')).toHaveLength(2);
     });
 
     it('does not let a sub-frame that went away end every screenshot', async () => {
@@ -5006,7 +5171,8 @@ describe('page views and refs', () => {
         }),
       }));
       await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
-      expect(disposed.sort()).toEqual([1, 2]);
+      // Measured before the picture and after it, and let go each time.
+      expect(disposed.sort()).toEqual([1, 1, 2, 2]);
     });
 
     it('does not wait on a frame that never answers: no screenshot, and the step goes on', async () => {

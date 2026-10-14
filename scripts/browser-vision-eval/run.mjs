@@ -303,6 +303,8 @@ async function launchChromium(executable) {
       if (m) { clearTimeout(timer); resolve(m[1]); }
     });
     child.on('exit', (code) => { clearTimeout(timer); reject(new Error(`Chromium exited (${code}): ${err.slice(-400)}`)); });
+    // No such binary: say so, with the way to name another.
+    child.on('error', (e) => { clearTimeout(timer); reject(new Error(`Chromium could not start (${e.message}). Name one with --chromium <path>.`)); });
   });
   const kill = async () => {
     // Chromium keeps writing its profile until it has gone; removing it sooner
@@ -310,7 +312,13 @@ async function launchChromium(executable) {
     const gone = new Promise((r) => child.once('exit', r));
     child.kill();
     await Promise.race([gone, new Promise((r) => setTimeout(r, 5_000))]);
-    fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    // Its helper processes can outlive it for a moment. A temporary profile
+    // left behind is not worth failing a finished run over.
+    try {
+      fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+    } catch (e) {
+      console.warn(`Could not remove the temporary profile ${profile}: ${e.message}`);
+    }
   };
   return { ws, kill };
 }

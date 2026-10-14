@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { toolReportedFailure } from '../core/tiers/integrity.js';
-import { BrowserControlTool, type BrowserAction, type BrowserController } from './browser-control.js';
+import { BrowserControlTool, type BrowserAction, type BrowserActionOutcome, type BrowserController } from './browser-control.js';
 
 /** A controller that records what it was asked to do. */
 function recorder(outcome: Partial<Awaited<ReturnType<BrowserController>>> = {}) {
@@ -495,6 +495,42 @@ describe('BrowserControlTool — what a person approving sees', () => {
     // Looking and reading carry no such condition.
     await tool.execute({ action: 'extract_text' }, { sessionId: 'run-1' } as never);
     expect(rec.calls.at(-1)).not.toHaveProperty('expectSite');
+  });
+
+  it('runs an approved action only on the page it was approved on, not just the site', async () => {
+    // /cart to /account on the same site, while the person decides: the
+    // selector would find what the new page has there.
+    const outcome: Partial<BrowserActionOutcome> = {
+      detail: 'ok', url: 'https://shop.example/cart', document: 'cart', view: { text: '[Page view 1]', labels: { e14: 'button "Pay"' } },
+    };
+    const calls: BrowserAction[] = [];
+    const controller: BrowserController = async (action) => { calls.push(action); return { ok: true, ...outcome } as BrowserActionOutcome; };
+    const tool = new BrowserControlTool(controller, undefined, { pageView: true });
+    await tool.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
+    const input = { action: 'click', selector: '.primary-action' };
+    tool.forApproval(input, 'run-1');
+    // Another step of the run reports the page moved on before this one runs.
+    Object.assign(outcome, { url: 'https://shop.example/account', document: 'account' });
+    await tool.execute({ action: 'extract_text' }, { sessionId: 'run-1' } as never);
+    await tool.execute(input, { sessionId: 'run-1' } as never);
+    expect(calls.at(-1)).toMatchObject({ kind: 'click', expectSite: 'shop.example', expectDocument: 'cart' });
+    // Unprompted, the page the latest view was of.
+    await tool.execute({ action: 'click', selector: '.primary-action' }, { sessionId: 'run-1' } as never);
+    expect(calls.at(-1)).toMatchObject({ expectDocument: 'account' });
+    // An outcome that does not say keeps the last word.
+    delete outcome.document;
+    await tool.execute({ action: 'extract_text' }, { sessionId: 'run-1' } as never);
+    await tool.execute({ action: 'fill', selector: '#q', value: 'x' }, { sessionId: 'run-1' } as never);
+    expect(calls.at(-1)).toMatchObject({ expectDocument: 'account' });
+    // Looking and reading carry no such condition, and nor does a host
+    // without page views.
+    await tool.execute({ action: 'extract_text' }, { sessionId: 'run-1' } as never);
+    expect(calls.at(-1)).not.toHaveProperty('expectDocument');
+    const basic = new BrowserControlTool(controller);
+    Object.assign(outcome, { document: 'cart' });
+    await basic.execute({ action: 'navigate', url: 'https://shop.example/' }, { sessionId: 'run-1' } as never);
+    await basic.execute({ action: 'click', selector: '#go' }, { sessionId: 'run-1' } as never);
+    expect(calls.at(-1)).not.toHaveProperty('expectDocument');
   });
 
   it('keeps the selector rule on a host without page views, and asks before an unaimed Enter', () => {

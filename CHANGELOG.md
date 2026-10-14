@@ -54,10 +54,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tools.browserVision` (`off`, `list` by default, `image`, `marked`) adds a
   screenshot for models that can see images:
   - It's taken clean, at 1280×800 on Steel, and sent with one step only, so
-    it isn't kept in the history.
+    it isn't kept in the history. A step that leaves the page looking exactly
+    as it did in the last screenshot sends none and says so. A page with
+    nothing to act on, like a chart drawn on a canvas, still gets one.
   - None is taken while a password, card or one-time-code field is on screen,
     in any frame, or when the page can't be checked for one, or right after
-    you took control of the browser or hid it.
+    you took control of the browser or hid it. The page is checked again once
+    the picture is taken. A picture taken as such a field came up, or as the
+    page went to another, is dropped.
   - A model that can't see images, or would be charged far more than usual
     for one, gets the page view alone.
   - `marked` draws each ref on a copy of the screenshot, as an experiment.
@@ -69,8 +73,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every time, even after "always allow". So does Enter or Space where it may
   submit a form, and, where pages are described, a click, fill or key press
   on something the page view did not name. An approved action runs only on
-  the site it was approved on, and a ref whose control the page has renamed
-  since the view is refused. `scripts/browser-vision-eval/` has ten test
+  the page it was approved on: not after the page moved to another site, or
+  to another page of the same one. A ref whose control the page has renamed
+  since the view is refused too. `scripts/browser-vision-eval/` has ten test
   tasks and a runner to compare the settings.
 
 ### Changed

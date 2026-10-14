@@ -64,6 +64,12 @@ export interface BrowserAction {
    */
   expectSite?: string;
   /**
+   * For an action on a control: the document it was planned and approved on,
+   * as the host last reported it (`BrowserActionOutcome.document`). The host
+   * refuses it when the page has since loaded another — on the same site too.
+   */
+  expectDocument?: string;
+  /**
    * Describe the page after this action, as `observe` does. Set by the tool
    * when page views are on, for the actions that usually change the page.
    */
@@ -85,6 +91,11 @@ export interface BrowserActionOutcome {
   /** Where the page ended up, when the host can tell. */
   url?: string;
   title?: string;
+  /**
+   * Which document the page is on — the one `view` describes, when there is
+   * one. Opaque: the tool only hands it back as `expectDocument`.
+   */
+  document?: string;
   /**
    * The page as it is after the action: the list the model reads, and the
    * name each ref in it stands for.
@@ -219,7 +230,7 @@ export class BrowserControlTool extends BaseTool {
    * on. The approval prompt names the element from it, so a person approves
    * `button "Pay $42.00"` on `shop.example` rather than `e14`.
    */
-  private seen = new Map<string, { labels: Record<string, string>; url?: string }>();
+  private seen = new Map<string, { labels: Record<string, string>; url?: string; document?: string }>();
 
   constructor(controller: BrowserController, release?: BrowserActorRelease, features: BrowserControlFeatures = {}) {
     super();
@@ -308,18 +319,23 @@ export class BrowserControlTool extends BaseTool {
         // only type.
         || (this.pageView && !target && !unaimed);
       // The site the person is shown is the one the action must still be on
-      // when it runs; see `execute`.
-      if (site) this.approvedOn.set(input, site);
+      // when it runs, and the page the latest view was of the one it must
+      // still be on; see `execute`.
+      this.approvedOn.set(input, {
+        ...(site ? { site } : {}),
+        ...(seen?.document ? { document: seen.document } : {}),
+      });
     }
     return { input: shown, alwaysAsk };
   }
 
   /**
-   * The site each approval prompt showed, by the input it was shown for — the
-   * same object the call then runs with. A page that moves to another site
-   * while the person decides is not acted on.
+   * The site each approval prompt showed, and the document it was of, by the
+   * input it was shown for — the same object the call then runs with. A page
+   * that moves to another site, or loads another page, while the person
+   * decides is not acted on.
    */
-  private approvedOn = new WeakMap<object, string>();
+  private approvedOn = new WeakMap<object, { site?: string; document?: string }>();
 
   /** Keep what this run's latest page view said, for `forApproval`. */
   private remember(sessionId: string, outcome: BrowserActionOutcome): void {
@@ -329,6 +345,7 @@ export class BrowserControlTool extends BaseTool {
     this.seen.set(sessionId, {
       labels: outcome.view?.labels ?? prior?.labels ?? {},
       ...(outcome.url ?? prior?.url ? { url: outcome.url ?? prior?.url } : {}),
+      ...(outcome.document ?? prior?.document ? { document: outcome.document ?? prior?.document } : {}),
     });
     // Bounded: a long-lived host serves many runs, and each one's view is
     // only worth keeping while it is current.
@@ -367,10 +384,13 @@ export class BrowserControlTool extends BaseTool {
     if (missing) return `Error: "${kind}" needs ${this.pageView && missing === 'a selector' ? 'a ref or a selector' : missing}.`;
 
     // Where pages are described, an action on a control runs only on the
-    // site it was approved on — or, unprompted, the one the latest view was of.
-    const expectSite = this.pageView && TRIGGERS.has(kind)
-      ? this.approvedOn.get(input) ?? hostOf(this.seen.get(options?.sessionId ?? '')?.url)
-      : undefined;
+    // site and page it was approved on — or, unprompted, the ones the latest
+    // view was of.
+    const bound = this.pageView && TRIGGERS.has(kind);
+    const approved = bound ? this.approvedOn.get(input) : undefined;
+    const latest = bound ? this.seen.get(options?.sessionId ?? '') : undefined;
+    const expectSite = approved?.site ?? hostOf(latest?.url);
+    const expectDocument = approved ? approved.document : latest?.document;
     const action: BrowserAction = {
       kind,
       ...(typeof input['url'] === 'string' ? { url: input['url'] } : {}),
@@ -383,6 +403,7 @@ export class BrowserControlTool extends BaseTool {
         ? { timeoutMs: Math.min(Math.max(input['timeoutMs'], 0), 30_000) }
         : {}),
       ...(expectSite ? { expectSite } : {}),
+      ...(expectDocument ? { expectDocument } : {}),
       ...(this.pageView && VIEWED_AFTER.has(kind) ? { pageView: true as const } : {}),
       // Only when the worker can show one: a model that cannot see a picture
       // is not made to wait while one is taken.

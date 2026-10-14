@@ -31,6 +31,7 @@ import type {
   BrowserActionOutcome,
 } from '../../tools/browser-control.js';
 import type { RemoteBrowserProvider, RemoteBrowserSession } from './provider.js';
+import { createHash } from 'node:crypto';
 import { BrowserLease } from '../lease.js';
 import { describePage, wellFormed, type PageView, type Viewport } from './page-view.js';
 import { drawMarks } from './marks.js';
@@ -279,6 +280,8 @@ const SETTLE_LOAD_MS = 2_000;
 const SETTLE_QUIET_MS = 300;
 /** The snapshot's own ceiling. A huge page fails over to text, not a hang. */
 const SNAPSHOT_TIMEOUT_MS = 5_000;
+/** Why no new screenshot goes with a step: it would show what the last one did. */
+const UNCHANGED_SHOT = 'No new screenshot: the page looks as it did in the last one. Call observe for a fresh one.';
 /** Why a screenshot was skipped after the person watching hid the page. */
 const HIDDEN_SHOT = 'No screenshot this time: the person watching had hidden the page.';
 /** A screenshot's encoding. JPEG at 80 reads text cleanly at a fifth of PNG's size. */
@@ -620,13 +623,22 @@ interface RunBrowser {
    * and hash changes keep the document, and the refs, as they were.
    */
   documents?: number;
+  /**
+   * Main-frame navigation requests: a new document on its way, before it has
+   * loaded enough to count in `documents`. See `documentOf`.
+   */
+  loads?: number;
   /** Views shown so far, so each one can say which it is. */
   views?: number;
   /**
-   * The page view the last screenshot went with. An action that leaves the
-   * page looking the same sends no second picture of it.
+   * A digest of the last screenshot sent. An action that leaves the page
+   * looking the same — the same pixels, not just the same controls: a chart,
+   * a map or a carousel changes without a word of its page view changing —
+   * sends no second picture of it.
    */
   shotOf?: string;
+  /** Pages this run has moved to, a popup included. See `documentOf`. */
+  pageSerial?: number;
   /**
    * Why the next screenshot is skipped, when something since the last one
    * says a picture could catch what a person wanted kept private: they took
@@ -2855,6 +2867,17 @@ export class RemoteBrowserController {
     page.on('domcontentloaded', (() => {
       if (held.page === page) held.documents = (held.documents ?? 0) + 1;
     }) as (...args: never[]) => void);
+    // Earlier than that: the request for one. Between it and the load above,
+    // the page can show the next document half-built under the old one's
+    // selectors. A history change makes no request, so it is not counted.
+    page.on('request', ((request: { isNavigationRequest?(): boolean; frame?(): unknown }) => {
+      if (held.page !== page) return;
+      try {
+        if (request.isNavigationRequest?.() && request.frame?.() === page.mainFrame()) held.loads = (held.loads ?? 0) + 1;
+      } catch {
+        // A service worker's request has no frame, and is no navigation.
+      }
+    }) as (...args: never[]) => void);
     page.on('framenavigated', ((frame: unknown) => {
       if (held.page !== page || frame !== page.mainFrame()) return;
       held.generation += 1;
@@ -2902,6 +2925,7 @@ export class RemoteBrowserController {
 
     held.page = next;
     held.generation += 1;
+    held.pageSerial = (held.pageSerial ?? 0) + 1;
     held.viewport = undefined;
     held.metricsStale = true;
     this.trackPageNavigation(runId, held, next);
@@ -2941,14 +2965,15 @@ export class RemoteBrowserController {
    * Describe the run's page as it is now, and remember what was shown.
    *
    * Null when the page cannot be described — no AI snapshot in this
-   * Playwright, a snapshot that failed, or one with no refs in it. The caller
+   * Playwright, a snapshot that failed, or one that names controls without
+   * refs. A page with nothing to act on is described, as such. The caller
    * then says so rather than presenting an empty list as the page.
    */
   private async pageView(
     held: RunBrowser,
     stoppable: <T>(work: Promise<T>) => Promise<T>,
     settle: boolean,
-  ): Promise<{ view: PageView; viewport: Viewport | undefined } | null> {
+  ): Promise<{ view: PageView; viewport: Viewport | undefined; document: string } | null> {
     // The CURRENT page: a click may have moved the run to a popup.
     const page = held.page;
     if (typeof page.ariaSnapshot !== 'function') return null;
@@ -2962,6 +2987,7 @@ export class RemoteBrowserController {
       // Read before the snapshot, so a load landing in between makes the view
       // stale rather than credits it to the new document.
       const documents = held.documents ?? 0;
+      const document = documentOf(held);
       const snapshot = await stoppable(page.ariaSnapshot({ mode: 'ai', boxes: true, timeout: SNAPSHOT_TIMEOUT_MS }));
       const viewport = typeof page.evaluate === 'function'
         ? readViewport(await stoppable(within(page.evaluate(VIEWPORT_EXPRESSION))).catch(() => undefined))
@@ -2976,7 +3002,7 @@ export class RemoteBrowserController {
       if (!view) return null;
       held.views = (held.views ?? 0) + 1;
       held.view = { page, documents, labels: view.labels };
-      return { view, viewport };
+      return { view, viewport, document };
     } catch {
       return null;
     }
@@ -2996,14 +3022,11 @@ export class RemoteBrowserController {
   private async screenshot(
     held: RunBrowser,
     stoppable: <T>(work: Promise<T>) => Promise<T>,
-    seen: { view: PageView; viewport: Viewport | undefined },
+    seen: { view: PageView; viewport: Viewport | undefined; document: string },
     always: boolean,
     marked: boolean,
-  ): Promise<{ image: NonNullable<BrowserActionOutcome['image']> } | { withheld: string } | null> {
+  ): Promise<{ image: NonNullable<BrowserActionOutcome['image']> } | { withheld: string } | { unchanged: true }> {
     const page = held.page;
-    // The view without its number: the same page twice reads the same.
-    const looks = seen.view.text.slice(seen.view.text.indexOf('\n') + 1);
-    if (!always && held.shotOf === looks) return null;
     if (typeof page.screenshot !== 'function' || !seen.viewport) {
       return { withheld: 'No screenshot: this browser cannot take one.' };
     }
@@ -3019,6 +3042,16 @@ export class RemoteBrowserController {
       const bytes = await stoppable(page.screenshot({
         type: 'jpeg', quality: SCREENSHOT_QUALITY, scale: 'css', caret: 'initial', timeout: SCREENSHOT_TIMEOUT_MS,
       }));
+      // The check above was of the page before the picture; the picture is of
+      // it a moment later. A page that loaded another document, or put a
+      // password or code field on screen, in between is not sent: it is
+      // checked again now, and a picture either check doubts is dropped. The
+      // document is the one the view describes, so the two go together.
+      if (held.page !== page || documentOf(held) !== seen.document) {
+        return { withheld: 'No screenshot: the page changed while it was being looked at.' };
+      }
+      const after = await this.privateOnScreen(page, stoppable);
+      if (after) return { withheld: after };
       const picture = Buffer.from(bytes);
       // The size is read from the picture, not from the page: the router
       // prices the image by it, and a page can say anything about its own
@@ -3026,7 +3059,10 @@ export class RemoteBrowserController {
       const size = jpegSize(picture);
       const clean = picture.toString('base64');
       if (!size || !clean || clean.length > SCREENSHOT_MAX_CHARS) return { withheld: 'No screenshot: the picture could not be taken.' };
-      held.shotOf = looks;
+      // Asked for by name, a picture is sent even of an unchanged page.
+      const print = createHash('sha256').update(picture).digest('base64');
+      if (!always && held.shotOf === print) return { unchanged: true };
+      held.shotOf = print;
       // The marks go on a copy; if they cannot be drawn, the clean picture is
       // still worth sending.
       const data = marked ? (await this.marked(page, clean, size, seen.view)) ?? clean : clean;
@@ -3122,14 +3158,14 @@ export class RemoteBrowserController {
   private async pictured(
     held: RunBrowser,
     stoppable: <T>(work: Promise<T>) => Promise<T>,
-    seen: { view: PageView; viewport: Viewport | undefined },
+    seen: { view: PageView; viewport: Viewport | undefined; document: string },
     action: BrowserAction,
   ): Promise<Pick<BrowserActionOutcome, 'view' | 'image'>> {
     const view = viewOutcome(seen.view);
     if (!action.screenshot) return { view };
-    // Asked for by name, a picture is taken even of an unchanged page.
+    // Asked for by name, a picture is sent even of an unchanged page.
     const shot = await this.screenshot(held, stoppable, seen, action.kind === 'observe', action.marked === true);
-    if (!shot) return { view };
+    if ('unchanged' in shot) return { view: { ...view, text: `${view.text}\n\n${UNCHANGED_SHOT}` } };
     if ('withheld' in shot) return { view: { ...view, text: `${view.text}\n\n${shot.withheld}` } };
     return { view, image: shot.image };
   }
@@ -3173,9 +3209,16 @@ export class RemoteBrowserController {
       }
     };
     const timeout = Math.min(action.timeoutMs ?? 10_000, ACTION_TIMEOUT_MS);
-    const where = async (): Promise<{ url: string; title: string }> => {
+    /**
+     * The document this action ran on, once the checks below have let it. A
+     * refusal says where the page is but not which document it holds: the
+     * model has not seen that one, and an action bound to it would be planned
+     * against a page it never looked at. See `expectDocument`.
+     */
+    let actedOn: string | undefined;
+    const where = async (): Promise<{ url: string; title: string; document?: string }> => {
       const current = held.page;
-      return { url: current.url(), title: await current.title().catch(() => '') };
+      return { url: current.url(), title: await current.title().catch(() => ''), ...(actedOn ? { document: actedOn } : {}) };
     };
 
     // Same rule as the desktop: an action planned against one page must not run
@@ -3198,6 +3241,17 @@ export class RemoteBrowserController {
         ...(await where()),
       };
     }
+    // And on the page it was planned and approved on: the same site can load
+    // another page under a selector while the person decides — /cart to
+    // /account — and the selector would find whatever that page has there.
+    if (action.expectDocument && documentOf(held) !== action.expectDocument) {
+      return {
+        ok: false,
+        detail: 'The page has loaded something else since it was last looked at, so this was not done. Call observe to see it now.',
+        ...(await where()),
+      };
+    }
+    actedOn = documentOf(held);
 
     // A ref names a control from the latest page view, and only from it. It is
     // refused rather than re-matched when that view no longer describes the
@@ -3239,7 +3293,7 @@ export class RemoteBrowserController {
                 ? `${action.ref} is now ${current}, not ${shown} as the page view said, so it was not used. The page as it is now:`
                 : `${action.ref} (${shown}) has changed or gone since the page view, so it was not used. The page as it is now:`,
             ...(await where()),
-            ...(now ? { view: viewOutcome(now.view) } : {}),
+            ...(now ? { view: viewOutcome(now.view), document: now.document } : {}),
           };
         }
       }
@@ -3262,7 +3316,15 @@ export class RemoteBrowserController {
       if (!action.pageView) return outcome;
       const seen = await this.pageView(held, stoppable, settle);
       if (!seen) return outcome;
-      return { ...outcome, ...(await this.pictured(held, stoppable, seen, action)) };
+      // Where the page is now that it has settled: a click that loads another
+      // page has usually not committed by the time it returns. The document is
+      // the one the view describes, which is what the model plans against.
+      return {
+        ...outcome,
+        ...(await where()),
+        document: seen.document,
+        ...(await this.pictured(held, stoppable, seen, action)),
+      };
     };
 
     switch (action.kind) {
@@ -3314,7 +3376,13 @@ export class RemoteBrowserController {
             ...(await where()),
           };
         }
-        return { ok: true, detail: 'Looked at the page.', ...(await where()), ...(await this.pictured(held, stoppable, seen, action)) };
+        return {
+          ok: true,
+          detail: 'Looked at the page.',
+          ...(await where()),
+          document: seen.document,
+          ...(await this.pictured(held, stoppable, seen, action)),
+        };
       }
       case 'scroll': {
         if (target) {
@@ -3474,6 +3542,16 @@ function within<T>(work: Promise<T>, ms = PAGE_CHECK_TIMEOUT_MS): Promise<T> {
     work,
     new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('The page did not answer in time.')), ms); }),
   ]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Which page, and which document in it, the run is on: the page's place in the
+ * run's popups, and the documents it has loaded or asked for. A history change
+ * keeps it; a new document, one on its way, or a popup does not. Opaque to
+ * everything but a comparison.
+ */
+function documentOf(held: RunBrowser): string {
+  return `${held.pageSerial ?? 0}:${held.documents ?? 0}:${held.loads ?? 0}`;
 }
 
 /** The host of an http(s) address — what a person approving is shown as the site. */

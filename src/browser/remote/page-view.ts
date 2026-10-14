@@ -266,9 +266,14 @@ interface Entry {
 }
 
 /**
- * Build the view the model reads, or null when the snapshot has no refs — an
- * older Playwright, or a page with nothing in it — so the caller can fall back
- * to text and selectors instead of showing an empty list as if it were true.
+ * Build the view the model reads, or null when the snapshot names controls
+ * but gives none of them a ref — a Playwright that wrote its default snapshot
+ * for `mode: 'ai'` — so the caller falls back to text and selectors instead
+ * of showing an empty list as if it were true.
+ *
+ * A page with no controls at all — a canvas, an image, nothing yet — has a
+ * view all the same, one that says so: it is still a page a screenshot can
+ * show.
  */
 export function describePage(input: {
   snapshot: string;
@@ -280,13 +285,15 @@ export function describePage(input: {
 }): PageView | null {
   const roots = parseSnapshot(input.snapshot);
   const entries: Entry[] = [];
-  let sawRef = false;
   const hidden = valuesAround(roots);
+  let sawRef = false;
+  let sawControl = false;
 
   const visit = (node: SnapshotNode, insideClickable: boolean): void => {
     const ref = typeof node.attrs['ref'] === 'string' ? node.attrs['ref'] : undefined;
-    if (ref) sawRef = true;
     const interactive = INTERACTIVE.has(node.role);
+    if (ref) sawRef = true;
+    if (interactive) sawControl = true;
     const pointer = node.attrs['cursor'] === 'pointer';
     const heading = node.role === 'heading' && Number(node.attrs['level'] ?? 6) <= 3;
     // A clickable wrapper's own parts are not separate targets — unless they
@@ -300,7 +307,7 @@ export function describePage(input: {
     for (const child of node.children) visit(child, insideClickable || interactive || pointer);
   };
   for (const root of roots) visit(root, false);
-  if (!sawRef) return null;
+  if (sawControl && !sawRef) return null;
 
   const view = entries.filter((e) => e.where === 'view');
   const below = entries.filter((e) => e.where === 'below');
