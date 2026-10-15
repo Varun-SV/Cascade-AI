@@ -239,7 +239,7 @@ const FETCH_BLOCKED_PORTS: ReadonlySet<string> = new Set([
 const PROBE_PATH = '/v1/sessions';
 
 /** The page size a session is created at. See `createSession`. */
-export const STEEL_VIEWPORT = { width: 1280, height: 800 } as const;
+const STEEL_VIEWPORT = { width: 1280, height: 800 } as const;
 
 /**
  * A URL or path with its trailing slashes removed.

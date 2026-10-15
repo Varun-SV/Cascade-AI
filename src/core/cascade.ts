@@ -1105,12 +1105,8 @@ export class Cascade extends EventEmitter {
    * real browser to drive, so it never has to be refused in the CLI or a hosted
    * run — it is simply not there.
    */
-  setBrowserController(
-    controller: BrowserController,
-    release?: BrowserActorRelease,
-    features?: BrowserControlFeatures,
-  ): void {
-    this.registerBrowserControl(controller, release, this.config.tools?.agentBrowserControl === true, features);
+  setBrowserController(controller: BrowserController, release?: BrowserActorRelease): void {
+    this.registerBrowserControl(controller, release, this.config.tools?.agentBrowserControl === true);
   }
 
   /**

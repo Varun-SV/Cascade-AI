@@ -521,7 +521,7 @@ const VIEW_SCHEMA = {
 };
 
 /** The host of an http(s) address, or undefined. */
-function hostOf(url: unknown): string | undefined {
+export function hostOf(url: unknown): string | undefined {
   if (typeof url !== 'string') return undefined;
   try {
     const u = new URL(url);

@@ -36,8 +36,8 @@ const WORLD = 'cascade-marks';
 /**
  * Draws the marks, as source for `Runtime.evaluate`. Plain JavaScript: it runs
  * in the page's renderer, not in Node. The label goes above the box when there
- * is room, else inside it, else below or to the right, wherever it does not
- * cover a label already placed.
+ * is room, else inside it, else below it, else above at its right edge,
+ * wherever it does not cover a label already placed.
  */
 const DRAW = `async ({ data, marks, width, height }) => {
   const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));

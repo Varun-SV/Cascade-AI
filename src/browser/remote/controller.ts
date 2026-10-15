@@ -25,10 +25,11 @@
 //  stop it. That is why a provider with no live view is a weaker configuration,
 //  and why the caller is told rather than left to assume.
 
-import type {
-  BrowserAction,
-  BrowserActionContext,
-  BrowserActionOutcome,
+import {
+  hostOf,
+  type BrowserAction,
+  type BrowserActionContext,
+  type BrowserActionOutcome,
 } from '../../tools/browser-control.js';
 import type { RemoteBrowserProvider, RemoteBrowserSession } from './provider.js';
 import { createHash } from 'node:crypto';
@@ -3055,9 +3056,9 @@ export class RemoteBrowserController {
   }
 
   /**
-   * A picture of the run's page to go with a page view, or the reason there
-   * is none. Null when nothing needs saying — the page looks as it did in the
-   * last picture.
+   * A picture of the run's page to go with a page view, the reason there is
+   * none, or word that the page looks exactly as it did in the last picture
+   * sent (`unchanged`).
    *
    * Taken clean: nothing is drawn on or injected into the page, and Chrome
    * captures what is on screen. Withheld, and the model told why, while the
@@ -3225,6 +3226,7 @@ export class RemoteBrowserController {
     const opening = page.context().newCDPSession(page);
     try {
       cdp = await within(opening).catch((err) => {
+        // Given up on, it may still open: closed when it does.
         opening.then((late) => late.detach()).catch(() => {});
         throw err;
       });
@@ -3236,24 +3238,17 @@ export class RemoteBrowserController {
 
   /** The page's screen in CSS pixels, as the browser measures it, or null. */
   private async screenSize(page: Page): Promise<{ width: number; height: number } | null> {
-    let cdp: CDPSession | undefined;
-    const opening = page.context().newCDPSession(page);
     try {
-      cdp = await within(opening).catch((err) => {
-        // Given up on, it may still open: closed when it does.
-        opening.then((late) => late.detach()).catch(() => {});
-        throw err;
+      return await this.withPageCdp(page, async (cdp) => {
+        const metrics = await within(cdp.send('Page.getLayoutMetrics')) as {
+          cssVisualViewport?: { clientWidth?: number; clientHeight?: number };
+        };
+        const width = metrics?.cssVisualViewport?.clientWidth;
+        const height = metrics?.cssVisualViewport?.clientHeight;
+        return typeof width === 'number' && typeof height === 'number' && width > 0 && height > 0 ? { width, height } : null;
       });
-      const metrics = await within(cdp.send('Page.getLayoutMetrics')) as {
-        cssVisualViewport?: { clientWidth?: number; clientHeight?: number };
-      };
-      const width = metrics?.cssVisualViewport?.clientWidth;
-      const height = metrics?.cssVisualViewport?.clientHeight;
-      return typeof width === 'number' && typeof height === 'number' && width > 0 && height > 0 ? { width, height } : null;
     } catch {
       return null;
-    } finally {
-      if (cdp) await within(cdp.detach()).catch(() => {});
     }
   }
 
@@ -3337,7 +3332,7 @@ export class RemoteBrowserController {
     // Approved on one site, run on that site. A page that moved to another
     // while the person was deciding is not acted on: what they approved was
     // shown with the site's name.
-    if (action.expectSite && siteOf(page.url()) !== action.expectSite) {
+    if (action.expectSite && hostOf(page.url()) !== action.expectSite) {
       return {
         ok: false,
         detail: `The page is no longer on ${action.expectSite}, where this was approved, so it was not done. Call observe to see where it is now.`,
@@ -3567,7 +3562,7 @@ export function actionError(err: unknown): string {
  * A JPEG's size in pixels, from its frame header, or null when the bytes are
  * not a JPEG that says.
  */
-export function jpegSize(bytes: Uint8Array): { width: number; height: number } | null {
+function jpegSize(bytes: Uint8Array): { width: number; height: number } | null {
   if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
   let at = 2;
   while (at + 4 <= bytes.length) {
@@ -3789,15 +3784,6 @@ function samePlace(token: string, held: RunBrowser, url: string): boolean {
   return place !== null && place[0] === documentOf(held) && place[1] === url;
 }
 
-/** The host of an http(s) address — what a person approving is shown as the site. */
-function siteOf(url: string): string | undefined {
-  try {
-    const u = new URL(url);
-    return u.protocol === 'http:' || u.protocol === 'https:' ? u.host : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 /** Why a ref cannot be used now, or null when it can. */
 function refRefusal(held: RunBrowser, ref: string): string | null {

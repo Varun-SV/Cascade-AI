@@ -53,7 +53,7 @@ export const BROWSER_ROUTING_RULE =
   + '(one agent drives the browser), unless the user also asks for substantial work beyond it.';
 
 /** Page views kept whole in what a worker sends. Older ones fold to one line. */
-export const PAGE_VIEWS_KEPT = 2;
+const PAGE_VIEWS_KEPT = 2;
 
 /**
  * Fold every page view but the newest few down to one line, for sending.
@@ -70,7 +70,7 @@ export const PAGE_VIEWS_KEPT = 2;
  * view — `extract_text` carries the page's own words, which may say anything,
  * including something that looks like a view.
  */
-export function foldOldPageViews(messages: ConversationMessage[], keep = PAGE_VIEWS_KEPT): ConversationMessage[] {
+export function foldOldPageViews(messages: ConversationMessage[]): ConversationMessage[] {
   const marker = `\n\n${PAGE_VIEW_MARK} `;
   const withView: number[] = [];
   // Each result is matched to its call by POSITION — a turn's calls, in order,
@@ -87,8 +87,8 @@ export function foldOldPageViews(messages: ConversationMessage[], keep = PAGE_VI
     if (call?.name === BROWSER_TOOL && call.input['action'] !== 'extract_text'
       && typeof m.content === 'string' && m.content.includes(marker)) withView.push(i);
   });
-  if (withView.length <= keep) return messages;
-  const fold = new Set(withView.slice(0, withView.length - keep));
+  if (withView.length <= PAGE_VIEWS_KEPT) return messages;
+  const fold = new Set(withView.slice(0, withView.length - PAGE_VIEWS_KEPT));
   return messages.map((m, i) => {
     if (!fold.has(i)) return m;
     const content = m.content as string;

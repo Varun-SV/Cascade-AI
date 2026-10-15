@@ -328,13 +328,7 @@ export function describePage(input: {
   const below = entries.filter((e) => e.where === 'below');
   const above = entries.filter((e) => e.where === 'above');
 
-  const lines: string[] = [`${PAGE_VIEW_MARK} ${input.number}]`];
-  const title = clean(input.title, 120);
-  lines.push(`Page: ${title ? `${title} — ` : ''}${clean(input.url, 300)}`);
-  if (input.viewport) {
-    const v = input.viewport;
-    lines.push(`Viewport ${v.width}×${v.height}, scrolled ${Math.round(v.scrollY).toLocaleString('en-US')} of ${Math.round(v.scrollHeight).toLocaleString('en-US')}`);
-  }
+  const lines = viewHeader(input);
   // Room for the headings and the "Not listed" line, which are short.
   let room = VIEW_MAX_CHARS - lines.join('\n').length - 200;
   const fit = (list: Entry[], limit: number): Entry[] => {
@@ -415,14 +409,22 @@ function describe(node: SnapshotNode, ref: string, scrub: (text: string) => stri
   return { label: named, line };
 }
 
-/** The view of a page too big to list: where it is, and what to do instead. */
-function tooBig(input: { url: string; title: string; viewport: Viewport | undefined; number: number }): PageView {
+type ViewPlace = { url: string; title: string; viewport: Viewport | undefined; number: number };
+
+/** A view's first lines: which view it is, the page, and where it is scrolled to. */
+function viewHeader(input: ViewPlace): string[] {
   const title = clean(input.title, 120);
   const lines = [`${PAGE_VIEW_MARK} ${input.number}]`, `Page: ${title ? `${title} — ` : ''}${clean(input.url, 300)}`];
   if (input.viewport) {
     const v = input.viewport;
     lines.push(`Viewport ${v.width}×${v.height}, scrolled ${Math.round(v.scrollY).toLocaleString('en-US')} of ${Math.round(v.scrollHeight).toLocaleString('en-US')}`);
   }
+  return lines;
+}
+
+/** The view of a page too big to list: where it is, and what to do instead. */
+function tooBig(input: ViewPlace): PageView {
+  const lines = viewHeader(input);
   lines.push('', 'This page is too large to list its controls. Use extract_text to read it, and CSS selectors to act on it.');
   return { text: lines.join('\n'), labels: new Map(), marks: [] };
 }

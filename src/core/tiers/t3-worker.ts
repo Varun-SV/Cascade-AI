@@ -824,14 +824,6 @@ export class T3Worker extends BaseTier {
   }
 
   /**
-   * End this worker's hold on the shared browser.
-   *
-   * Duck-typed rather than imported: `browser_control` is registered only by a
-   * host that HAS a browser (the desktop), so in the CLI and hosted runs there
-   * is no such tool and this is a no-op. Importing the class to instanceof-check
-   * it would couple the worker to a tool that usually is not there.
-   */
-  /**
    * Whether a page screenshot could reach `model` — by the model and by the
    * route to it: one reached through a gateway never gets one, so none is
    * taken for it.
@@ -847,6 +839,14 @@ export class T3Worker extends BaseTier {
     return mayTakeScreenshots(model, IMAGE_TOKENS_EACH, { gateway });
   }
 
+  /**
+   * End this worker's hold on the shared browser.
+   *
+   * Duck-typed rather than imported: `browser_control` is registered only by a
+   * host that HAS a browser (the desktop), so in the CLI and hosted runs there
+   * is no such tool and this is a no-op. Importing the class to instanceof-check
+   * it would couple the worker to a tool that usually is not there.
+   */
   private releaseBrowserControl(): void {
     // A finished worker sends nothing more, so its last picture goes too.
     this.pendingScreenshot = undefined;
