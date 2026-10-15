@@ -487,6 +487,53 @@ describe('BrowserControlTool — what a person approving sees', () => {
     expect(reader.forApproval({ action: 'press', ref: 'e5', key: 'Enter' }, 'run-1').alwaysAsk).toBe(false);
   });
 
+  it('asks about Enter or Space anywhere in a key combination', async () => {
+    // Playwright presses each key of "Enter+x" in turn: Enter goes first.
+    const tool = await seenTool();
+    for (const key of ['Enter+x', 'Enter+Shift', 'Space+x', 'Control+Enter+a', ' ']) {
+      expect(tool.forApproval({ action: 'press', ref: 'e9', key }, 'run-1').alwaysAsk, JSON.stringify(key)).toBe(true);
+    }
+    const rec = recorder({ detail: 'ok', url: 'https://search.example/', view: { text: '[Page view 1]', labels: { e2: 'searchbox "Search"' } } });
+    const calm = new BrowserControlTool(rec.controller, undefined, { pageView: true });
+    await calm.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
+    for (const key of ['Control++', 'Shift+Tab', 'a+b']) {
+      expect(calm.forApproval({ action: 'press', ref: 'e2', key }, 'run-1').alwaysAsk, key).toBe(false);
+    }
+  });
+
+  it('asks about a control the view lists without a name, or with typed text taken out of it', async () => {
+    // An icon-only button, and one a page pre-filled a field to hollow out.
+    const rec = recorder({ detail: 'ok', url: 'https://mail.example/', view: { text: '[Page view 1]', labels: {
+      e2: 'button', e3: 'link', e4: 'button "••• account"', e5: 'button "Save"', e6: 'searchbox "Search"',
+    } } });
+    const tool = new BrowserControlTool(rec.controller, undefined, { pageView: true });
+    await tool.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
+    expect(tool.forApproval({ action: 'click', ref: 'e2' }, 'run-1').alwaysAsk).toBe(true);
+    expect(tool.forApproval({ action: 'click', ref: 'e3' }, 'run-1').alwaysAsk).toBe(true);
+    expect(tool.forApproval({ action: 'click', ref: 'e4' }, 'run-1').alwaysAsk).toBe(true);
+    expect(tool.forApproval({ action: 'click', ref: 'e5' }, 'run-1').alwaysAsk).toBe(false);
+    // Enter in a named field may press that hollowed-out button.
+    expect(tool.forApproval({ action: 'press', ref: 'e6', key: 'Enter' }, 'run-1').alwaysAsk).toBe(true);
+  });
+
+  it('reads a label as a person does: no marks, invisible letters or lookalikes in the way', async () => {
+    const labels = [
+      'button "\u0420ay now"', 'button "D\u0435lete"', 'button "Pa\u0301y"', 'button "Pay\uFE0F"', 'button "De\u034Flete"',
+      'button "\u3164Pay"', 'button "Paying…"', 'button "Allow"', 'button "Approve"', 'button "Authorize app"', 'button "Confirm"',
+      'link "Withdraw funds"', 'button "Subscribe"', 'button "Donate $5"', 'button "\u0391llow"',
+    ];
+    const rec = recorder({ detail: 'ok', url: 'https://shop.example/', view: { text: '[Page view 1]', labels: Object.fromEntries(labels.map((l, i) => [`e${i + 1}`, l])) } });
+    const tool = new BrowserControlTool(rec.controller, undefined, { pageView: true });
+    await tool.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
+    labels.forEach((label, i) => {
+      expect(tool.forApproval({ action: 'click', ref: `e${i + 1}` }, 'run-1').alwaysAsk, label).toBe(true);
+    });
+    const calm = recorder({ detail: 'ok', url: 'https://shop.example/', view: { text: '[Page view 1]', labels: { e1: 'button "Display"', e2: 'link "Allowance calculator"', e3: 'button "Payload"' } } });
+    const reader = new BrowserControlTool(calm.controller, undefined, { pageView: true });
+    await reader.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
+    for (const ref of ['e1', 'e2', 'e3']) expect(reader.forApproval({ action: 'click', ref }, 'run-1').alwaysAsk, ref).toBe(false);
+  });
+
   it('asks before choosing an option that does something irreversible', async () => {
     const rec = recorder({ detail: 'ok', url: 'https://mail.example/', view: { text: '[Page view 1]', labels: { e4: 'combobox "Bulk action"', e5: 'combobox "Party size"' } } });
     const tool = new BrowserControlTool(rec.controller, undefined, { pageView: true });

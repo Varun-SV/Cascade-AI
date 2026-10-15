@@ -71,11 +71,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Hosted deployments set it with `REMOTE_BROWSER_VISION`.
   Approval prompts now name the element and the site. A click, entry or
   choice on something labelled pay, buy, purchase, order, check out, delete,
-  remove, send, transfer or publish (in any of the forms buttons use) asks
-  every time, even after "always allow". So does Enter or Space where it may
-  submit a form, and, where pages are described, a click, fill or key press
-  on something the page view did not name, or named only in part because the
-  name was too long to show. An approved action runs only on
+  remove, send, transfer, publish, confirm, approve, authorize, allow,
+  withdraw, subscribe or donate (in any of the forms buttons use, and read
+  past accents, invisible characters and lookalike letters) asks every time,
+  even after "always allow". So does Enter or Space where it may submit a
+  form, alone or in a key combination, and, where pages are described, a
+  click, fill or key press on something the page view did not name — a
+  selector, an icon-only control — or named only in part, because the name
+  was too long to show or had typed text taken out of it. Text typed into a
+  text box is kept out of the names of other controls too, a button named
+  after the field included. An approved action runs only on
   the page it was approved on: not after the page moved to another site, or
   to another page of the same one. One by selector also stops if an app has
   changed its route. A ref whose control the page has renamed since the view

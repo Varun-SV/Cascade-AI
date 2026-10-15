@@ -301,7 +301,14 @@ async function serveSite() {
   const root = path.join(here, 'site');
   const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css' };
   const server = http.createServer((req, res) => {
-    const url = new URL(req.url, 'http://x');
+    let url;
+    try {
+      url = new URL(req.url, 'http://x');
+    } catch {
+      res.statusCode = 400;
+      res.end();
+      return;
+    }
     if (req.method === 'POST' && url.pathname === '/done') {
       let body = '';
       req.on('data', (c) => { body += c; });
@@ -334,8 +341,11 @@ async function launchChromium(executable) {
     binary = chromium.executablePath();
   }
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-bve-chrome-'));
+  // Chrome's sandbox does not start as root, which a container often is;
+  // everywhere else it stays on.
+  const sandbox = process.getuid?.() === 0 ? ['--no-sandbox'] : [];
   const child = spawn(binary, [
-    '--headless=new', '--no-sandbox', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1',
+    '--headless=new', ...sandbox, '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1',
     `--user-data-dir=${profile}`, '--window-size=1280,800', 'about:blank',
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
   // A browser that never says where it listens is not left behind, nor is

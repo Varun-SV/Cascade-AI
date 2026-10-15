@@ -4771,6 +4771,17 @@ describe('page views and refs', () => {
     expect(page.calls.filter((x) => x.startsWith('snapshot:'))).toEqual([]);
   });
 
+  it('does not wait forever on a page too busy to say whether a ref is there', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    extra['locator'] = (selector: string) => ({ ...locate(selector), count: () => new Promise(() => {}) });
+    const started = Date.now();
+    const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 10_000);
+
   it('keeps refs through a history change, which keeps the document', async () => {
     // Map pages and scroll-spy docs call replaceState every few hundred ms.
     const c = controller();
@@ -5420,6 +5431,35 @@ describe('page views and refs', () => {
         }
       });
 
+      it('does not read a DOM larger than it can safely take in one message', async () => {
+        // The browser's own count, read first: past the bound the page is
+        // not read, and counts as unchecked.
+        const send = cdp.send;
+        cdp.send = async (method: string, params?: Record<string, unknown>) => {
+          if (method === 'Performance.getMetrics') return { metrics: [{ name: 'Nodes', value: 400_000 }] };
+          return send(method, params);
+        };
+        try {
+          const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+          expect(out.image).toBeUndefined();
+          expect(out.view!.text).toContain('could not be checked');
+          expect(cdp.sent).not.toContain('DOM.getDocument');
+        } finally {
+          cdp.send = send;
+        }
+        // An ordinary count is read through.
+        cdp.send = async (method: string, params?: Record<string, unknown>) => {
+          if (method === 'Performance.getMetrics') return { metrics: [{ name: 'Nodes', value: 4_000 }] };
+          return send(method, params);
+        };
+        try {
+          const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run2', 'w1'));
+          expect(out.image).toBeDefined();
+        } finally {
+          cdp.send = send;
+        }
+      });
+
       it('takes none when the browser cannot describe the page', async () => {
         const send = cdp.send;
         cdp.send = async (method: string, params?: Record<string, unknown>) => {
@@ -5650,6 +5690,16 @@ describe('a failed action is told without Playwright\'s call log', () => {
     ].join('\n'));
     expect(actionError(err)).toBe('locator.selectOption: Error: Element is not a <select> element');
     expect(actionError('plain')).toBe('plain');
+  });
+
+  it('stays quick and short on a reason built to be slow to clean', async () => {
+    // Playwright repeats the selector in its first line: thousands of
+    // unclosed "<a" used to take seconds to scan.
+    const { actionError } = await import('./controller.js');
+    const started = Date.now();
+    const said = actionError(new Error(`locator.waitFor: Timeout waiting for ${'<a'.repeat(100_000)}`));
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(said.length).toBeLessThanOrEqual(500);
   });
 
   it('drops the elements a strict-mode error lists, which come before any log', async () => {

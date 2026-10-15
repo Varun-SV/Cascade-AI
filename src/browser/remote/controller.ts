@@ -305,6 +305,8 @@ const SCREENSHOT_TIMEOUT_MS = 5_000;
 const PAGE_CHECK_TIMEOUT_MS = 2_000;
 /** A screenshot this large (base64) is not sent: something is wrong with it. */
 const SCREENSHOT_MAX_CHARS = 2_000_000;
+/** The longest error reason passed on: Playwright repeats the selector in it. */
+const ERROR_MAX_CHARS = 500;
 /** How long drawing the refs on a copy may take before the clean picture goes. */
 const MARKS_TIMEOUT_MS = 3_000;
 /**
@@ -3371,7 +3373,8 @@ export class RemoteBrowserController {
       // A ref from a document the page has left either matches nothing or is
       // refused by Playwright as naming a frame that is gone. Both say the
       // same thing.
-      const present = await stoppable(target.count()).catch(() => 0);
+      // Bounded: Playwright's count waits on a page that may never answer.
+      const present = await stoppable(within(target.count())).catch(() => 0);
       if (present === 0) {
         return {
           ok: false,
@@ -3503,7 +3506,7 @@ export class RemoteBrowserController {
           // smoothly has arrived by the time the view is taken.
           const sign = action.direction === 'up' ? -1 : 1;
           const before = await stoppable(within(page.evaluate('scrollY'))).catch(() => undefined);
-          await stoppable(page.evaluate(`window.scrollBy({ top: ${sign} * Math.round(innerHeight * 0.8), behavior: 'instant' })`));
+          await stoppable(within(page.evaluate(`window.scrollBy({ top: ${sign} * Math.round(innerHeight * 0.8), behavior: 'instant' })`)));
           const after = await stoppable(within(page.evaluate('scrollY'))).catch(() => undefined);
           if (typeof before === 'number' && before === after) {
             return finish({
@@ -3555,7 +3558,9 @@ export function actionError(err: unknown): string {
   // eslint-disable-next-line no-control-regex
   const plain = message.replace(/\u001b\[[0-9;]*m/g, '');
   const reason = plain.split('\n').map((line) => line.trim()).find((line) => line.length > 0) ?? '';
-  return reason.replace(/<([a-z][\w-]*)\b[^>]*>/gi, '<$1>');
+  // Bounded, and no "<" inside a tag: a selector of thousands of unclosed
+  // "<a" is quick to write and slow to scan.
+  return reason.slice(0, ERROR_MAX_CHARS).replace(/<([a-z][\w-]*)\b[^<>]*>/gi, '<$1>');
 }
 
 /**
@@ -3632,6 +3637,13 @@ async function privateIn(frame: Frame, area: Box): Promise<string | null> {
   return null;
 }
 
+/**
+ * The most DOM nodes, text included, the closed-shadow-root check reads in
+ * one message. A large real page has tens of thousands.
+ */
+const DOM_READ_MAX_NODES = 300_000;
+class DomTooLarge extends Error {}
+
 /** A node of the DOM as CDP's `DOM.getDocument` gives it. */
 type DomNode = {
   nodeId: number;
@@ -3663,6 +3675,19 @@ function typedField(node: DomNode): boolean {
  * same process. Throws when it cannot tell.
  */
 async function closedFieldOn(cdp: CDPSession, area: Box | null): Promise<boolean> {
+  // The whole DOM comes back in one message, and the page decides its size:
+  // past a bound it is not read, and the page counts as unchecked.
+  try {
+    await within(cdp.send('Performance.enable'));
+    const { metrics } = await within(cdp.send('Performance.getMetrics')) as { metrics?: Array<{ name?: string; value?: number }> };
+    const nodes = metrics?.find((m) => m.name === 'Nodes')?.value;
+    if (typeof nodes === 'number' && nodes > DOM_READ_MAX_NODES) throw new DomTooLarge();
+  } catch (err) {
+    if (err instanceof DomTooLarge) throw err;
+    // A browser that cannot say leaves the read to its own timeout.
+  } finally {
+    await within(cdp.send('Performance.disable')).catch(() => {});
+  }
   const { root } = await within(cdp.send('DOM.getDocument', { depth: -1, pierce: true })) as { root?: DomNode };
   if (!root || typeof root.nodeId !== 'number') throw new Error('The browser did not describe the page.');
   const fields: number[] = [];

@@ -141,7 +141,15 @@ const VIEWED_AFTER = new Set<BrowserAction['kind']>(['navigate', 'click', 'press
  * answered. "Sender settings" is not "send".
  */
 const IRREVERSIBLE =
-  /\b(?:pay(?:s|ment|ments)?|buy(?:s|ing)?|purchas(?:e|es|ing)|order(?:s|ing)?|check[\s-]?out|delet(?:e|es|ing)|remov(?:e|es|ing)|send(?:s|ing)?|transfer(?:s|ring)?|publish(?:es|ing)?)\b/i;
+  /\b(?:pa(?:y|ys|ying|id|yment|yments)|buy(?:s|ing)?|purchas(?:e|es|ing)|order(?:s|ing)?|check[\s-]?out|delet(?:e|es|ing)|remov(?:e|es|ing)|send(?:s|ing)?|transfer(?:s|ring)?|publish(?:es|ing)?|confirm(?:s|ing)?|approv(?:e|es|ing)|authori[sz](?:e|es|ing)|allow(?:s|ing)?|withdraw(?:s|al|ing)?|subscrib(?:e|es|ing)|donat(?:e|es|ing))\b/i;
+/**
+ * Letters from other scripts drawn like Latin ones — "Рay" with a Cyrillic Р
+ * reads as "Pay" — folded to the Latin letter they pass for.
+ */
+const LOOKALIKES: Record<string, string> = Object.fromEntries([
+  ...[...'АВЕКМНОРСТХаеорсухіјѕԁԛԝӏ'].map((c, i) => [c, 'ABEKMHOPCTXaeopcyxijsdqwl'[i]!]),
+  ...[...'ΑΒΕΖΗΙΚΜΝΟΡΤΥΧοαρυνκιτ'].map((c, i) => [c, 'ABEZHIKMNOPTYXoapuvkit'[i]!]),
+]);
 /** Actions that can set off what a control is labelled to do. */
 const TRIGGERS = new Set(['click', 'fill', 'press', 'select_option']);
 /**
@@ -149,7 +157,20 @@ const TRIGGERS = new Set(['click', 'fill', 'press', 'select_option']);
  * modifiers — under each name a host accepts: Playwright also takes "\n" and
  * "\r" for Enter, and Electron "Return".
  */
-const SUBMIT_KEY = /(?:^|\+)(?:enter|numpadenter|return|space| |\n|\r)$/i;
+const SUBMIT_KEY = /^(?:enter|numpadenter|return|space| |\n|\r)$/i;
+
+/**
+ * The keys a combination presses, each of which Playwright presses down in
+ * turn: "Enter+x" presses Enter, whatever comes after it. "+" itself is a key
+ * — "Control++" ends in it — and a lone space is the Space key.
+ */
+function keyParts(key: string): string[] {
+  if (key === '+') return ['+'];
+  const trailing = key.endsWith('++');
+  const parts = (trailing ? key.slice(0, -2) : key).split('+');
+  // A single character is a key as it stands: " " is Space, "\n" is Enter.
+  return [...parts.map((p) => (p.length === 1 ? p : p.trim())), ...(trailing ? ['+'] : [])];
+}
 /** What an approval prompt shows of a call: the fields it runs with, after what it acts on. */
 const SHOWN_FIELDS = ['url', 'ref', 'selector', 'key', 'direction', 'timeoutMs', 'value'] as const;
 /** Actions that use `value`. On any other, a value is dropped when it runs, so it is not shown. */
@@ -311,10 +332,17 @@ export class BrowserControlTool extends BaseTool {
     // A name the page view cut short may end in anything — "…, then delete
     // the account". The view's names are NFKC'd, which turns a page's own
     // ellipsis into three dots, so the only "…" one can end in is the cut.
-    const cut = (label: string): boolean => label.endsWith('…"');
+    // Nor can one with typed text taken out of it: what was taken may have
+    // been the word that mattered — a page can fill a field with "Delete" to
+    // take it out of "Delete account".
+    const cut = (label: string): boolean => label.endsWith('…"') || label.includes('•••');
+    // A control the view lists without a name — an icon-only button reads as
+    // just `button` — is labelled, but not named: nothing says what it does.
+    // Names are the only double quotes a label holds; page text has none.
+    const named = target !== undefined && target.includes('"');
     if (TRIGGERS.has(action)) {
       const key = typeof input['key'] === 'string' ? input['key'] : '';
-      const submits = action === 'press' && SUBMIT_KEY.test(key);
+      const submits = action === 'press' && keyParts(key).some((part) => SUBMIT_KEY.test(part));
       const unaimed = action === 'press' && !ref && !selector;
       // What is chosen in a list says what it does as much as the list does.
       const chosen = action === 'select_option' && typeof input['value'] === 'string' ? ` ${input['value']}` : '';
@@ -323,12 +351,12 @@ export class BrowserControlTool extends BaseTool {
         // that does is not in a field's own label, so it counts as unknown
         // unless the key lands on a named control and nothing listed on the
         // page is one to ask about.
-        || (submits && (!target || Object.values(seen?.labels ?? {}).some((l) => irreversible(l) || (cut(l) && l.startsWith('button ')))))
-        // Where pages are described, an action with no label from the view
-        // has nothing to be judged by: a selector, or a ref the view did not
-        // list. Keys other than Enter and Space sent to whatever has focus
-        // only type.
-        || (this.pageView && !target && !unaimed)
+        || (submits && (!named || Object.values(seen?.labels ?? {}).some((l) => irreversible(l) || (cut(l) && l.startsWith('button ')))))
+        // Where pages are described, an action with no name from the view
+        // has nothing to be judged by: a selector, a ref the view did not
+        // list, or an unnamed control. Keys other than Enter and Space sent
+        // to whatever has focus only type.
+        || (this.pageView && !named && !unaimed)
         // Nor does one whose label the view cut short.
         || (target !== undefined && cut(target));
       // The site the person is shown is the one the action must still be on
@@ -567,7 +595,13 @@ function viewInputProblem(kind: BrowserAction['kind'], input: Record<string, unk
  * that can split a word ("P\u200bay") taken out.
  */
 function irreversible(text: string): boolean {
-  return IRREVERSIBLE.test(text.normalize('NFKC').replace(/[\p{Cf}\u00ad]/gu, ''));
+  // Compatibility forms to plain ones, accents and other marks off, invisible
+  // characters out — joiners, fillers, variation selectors — and lookalikes
+  // to the Latin letters they imitate: what is left is what a person reads.
+  const plain = text.normalize('NFKD')
+    .replace(/[\p{M}\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, '')
+    .replace(/[\u0370-\u03ff\u0400-\u052f]/g, (c) => LOOKALIKES[c] ?? c);
+  return IRREVERSIBLE.test(plain);
 }
 
 /** The field a given action cannot run without, or null when it has what it needs. */

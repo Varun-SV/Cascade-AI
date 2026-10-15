@@ -228,6 +228,53 @@ describe('describePage', () => {
     expect(v.labels.get('e3')).not.toContain('delete');
   });
 
+  it('keeps what is typed into a text box out of any control named after it, but not a search', () => {
+    // Captured from Chromium: a button labelled by a field, a radio whose label
+    // holds a field, and the results a search box's query is about.
+    const snapshot = [
+      '- generic [ref=e1] [box=0,0,1280,800]:',
+      '  - \'radio "Other: Otherval77" [ref=e7] [box=0,0,13,13]\'',
+      '  - generic [ref=e8] [box=20,0,300,20]:',
+      '    - text: "Other:"',
+      '    - textbox [ref=e9] [box=60,0,185,21]: Otherval77',
+      '  - textbox "To" [ref=e10] [box=0,40,185,21]: bob@secret.com',
+      '  - button "Send to bob@secret.com" [ref=e11] [box=200,40,100,21]: x',
+      '  - searchbox [ref=e12] [box=0,80,185,21]: Italian food',
+      '  - link "Italian food near you" [ref=e13] [box=0,120,185,21]',
+      '  - heading "Signed in as bob@secret.com" [level=2] [ref=e14] [box=0,160,400,30]',
+    ].join('\n');
+    const v = view(snapshot)!;
+    expect(v.labels.get('e7')).toBe('radio "Other: •••"');
+    expect(v.labels.get('e11')).toBe('button "Send to •••"');
+    expect(v.labels.get('e13')).toBe('link "Italian food near you"');
+    // A heading is the page's own text, as the page wrote it.
+    expect(v.labels.get('e14')).toBe('heading "Signed in as bob@secret.com"');
+  });
+
+  it('stays quick on a page built to make hiding typed values slow', () => {
+    // Thousands of fields with distinct values, and a control holding a vast
+    // amount of text: each value used to be its own pass over all of it.
+    const fields = Array.from({ length: 3000 }, (_, i) => `    - textbox [ref=f${i}] [box=0,0,10,10]: v${String(i).padStart(4, '0')}`);
+    const snapshot = [
+      '- generic [ref=e1] [cursor=pointer] [box=0,0,1280,800]:',
+      `  - text: ${'lorem ipsum '.repeat(25_000)}`,
+      '  - generic [ref=e2]:',
+      ...fields,
+    ].join('\n');
+    const started = Date.now();
+    const v = view(snapshot)!;
+    expect(Date.now() - started).toBeLessThan(1_500);
+    // Too many to hide one by one: the name is hidden whole.
+    expect(v.text).toContain('[e1] clickable "•••"');
+    // Thousands of filled fields under one parent: looking for each one's
+    // labelled siblings again was quadratic.
+    let flat = `- generic [ref=e1] [cursor=pointer]:\n  - text: ${'word '.repeat(30_000).trim()}\n`;
+    for (let i = 0; i < 20_000; i++) flat += `  - textbox [ref=e${i + 2}]: "${String.fromCharCode(0x4e00 + i)}"\n`;
+    const again = Date.now();
+    describePage({ snapshot: flat, url: 'https://x.example/', title: 't', viewport: SCREEN, number: 1 });
+    expect(Date.now() - again).toBeLessThan(1_500);
+  });
+
   it('hides a short value too, where it stands as a word or number of its own', () => {
     // Two digits of a code, an age, initials: short, and no less private.
     const snapshot = [

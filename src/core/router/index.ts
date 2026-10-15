@@ -443,6 +443,12 @@ function explorationKey(tier: string, modelId: string, taskType?: string): strin
   return `${tier}\u0000${modelId}\u0000${taskType ?? ''}`;
 }
 
+/** The variable each provider's SDK takes its address from when given none. */
+const BASE_URL_ENV: Partial<Record<ProviderType, string>> = {
+  openai: 'OPENAI_BASE_URL',
+  anthropic: 'ANTHROPIC_BASE_URL',
+};
+
 export class CascadeRouter extends EventEmitter {
   private selector!: ModelSelector;
   private failover!: FailoverManager;
@@ -2212,7 +2218,11 @@ export class CascadeRouter extends EventEmitter {
    */
   throughGateway(model: ModelInfo): boolean {
     if (!hasDefaultEndpoint(model.provider)) return false;
-    const baseUrl = (this.config?.providers ?? []).find((c) => c.type === model.provider)?.baseUrl;
+    const configured = (this.config?.providers ?? []).find((c) => c.type === model.provider)?.baseUrl;
+    // With none configured, the provider's SDK reads its own variable — and
+    // goes wherever that points.
+    const fromEnv = BASE_URL_ENV[model.provider];
+    const baseUrl = configured?.trim() ? configured : fromEnv ? process.env[fromEnv] : undefined;
     return Boolean(baseUrl?.trim()) && !sameCredentialEndpoint(model.provider, baseUrl, undefined);
   }
 

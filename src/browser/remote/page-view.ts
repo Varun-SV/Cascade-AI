@@ -271,12 +271,17 @@ function readBox(v: string, dx: number, dy: number): { x: number; y: number; w: 
 
 interface Entry {
   ref: string;
+  node: SnapshotNode;
   box?: SnapshotNode['box'];
   heading: boolean;
+  where: 'view' | 'below' | 'above';
+}
+
+/** An entry as the view shows it. */
+interface Shown extends Entry {
   /** `button "Pay"` — the role and name, without the ref or states. */
   label: string;
   line: string;
-  where: 'view' | 'below' | 'above';
 }
 
 /**
@@ -301,6 +306,7 @@ export function describePage(input: {
   const roots = parseSnapshot(input.snapshot);
   const entries: Entry[] = [];
   const hidden = valuesAround(roots);
+  const typedAnywhere = textboxValues(roots);
   let sawRef = false;
   let sawControl = false;
 
@@ -317,7 +323,8 @@ export function describePage(input: {
     const listed = Boolean(ref) && (interactive || ((heading || pointer) && !insideClickable));
     if (listed && ref) {
       const where = placement(node, input.viewport);
-      if (where) entries.push({ ref, ...describe(node, ref, scrubber(hidden.get(node))), where, heading: node.role === 'heading', ...(node.box ? { box: node.box } : {}) });
+      // Described only if it is shown: a page can list thousands.
+      if (where) entries.push({ ref, node, where, heading: node.role === 'heading', ...(node.box ? { box: node.box } : {}) });
     }
     for (const child of node.children) visit(child, insideClickable || interactive || pointer);
   };
@@ -331,12 +338,18 @@ export function describePage(input: {
   const lines = viewHeader(input);
   // Room for the headings and the "Not listed" line, which are short.
   let room = VIEW_MAX_CHARS - lines.join('\n').length - 200;
-  const fit = (list: Entry[], limit: number): Entry[] => {
-    const out: Entry[] = [];
+  const fit = (list: Entry[], limit: number): Shown[] => {
+    const out: Shown[] = [];
     for (const e of list.slice(0, limit)) {
-      if (e.line.length + 1 > room) break;
-      room -= e.line.length + 1;
-      out.push(e);
+      // Around a field, everything typed in it; anywhere else, what is typed
+      // into a text box — a button can be named after one ("Send to …"), a
+      // radio after the field its label holds — though not into a search, whose
+      // words are what the results are about. Headings are the page's own.
+      const values = [...(hidden.get(e.node) ?? []), ...(e.heading ? [] : typedAnywhere)];
+      const shown = { ...e, ...describe(e.node, e.ref, scrubber(values)) };
+      if (shown.line.length + 1 > room) break;
+      room -= shown.line.length + 1;
+      out.push(shown);
     }
     return out;
   };
@@ -383,7 +396,10 @@ function describe(node: SnapshotNode, ref: string, scrub: (text: string) => stri
     : node.role === 'generic' ? 'clickable' : `clickable ${node.role}`;
   // A field is named by its name alone: its inline text and its children are
   // what was typed into it.
-  const label = clean(scrub(TYPED.has(node.role) ? node.name ?? '' : node.name || node.inline || textWithin(node)), NAME_LIMIT);
+  // Cut long before the name is: scrubbing reads all of what it is given,
+  // and a page decides how much text a control holds.
+  const raw = TYPED.has(node.role) ? node.name ?? '' : node.name || node.inline || textWithin(node);
+  const label = clean(scrub(raw.slice(0, SCRUB_TEXT_MAX)), NAME_LIMIT);
   const named = `${role}${label ? ` "${label}"` : ''}`;
   let line = `[${ref}] ${named}`;
 
@@ -394,7 +410,7 @@ function describe(node: SnapshotNode, ref: string, scrub: (text: string) => stri
     if (chosen) {
       // A native select's choice is one of the page's own option labels, not
       // something a person typed.
-      line += `: "${clean(scrub(chosen.name ?? ''), NAME_LIMIT)}"`;
+      line += `: "${clean(scrub((chosen.name ?? '').slice(0, SCRUB_TEXT_MAX)), NAME_LIMIT)}"`;
     } else {
       const typed = [...fieldValue(node)].length;
       notes.push(typed ? `filled, ${typed} char${typed === 1 ? '' : 's'}` : 'empty');
@@ -505,6 +521,14 @@ function valuesAround(roots: SnapshotNode[]): Map<SnapshotNode, string[]> {
     values.forEach((v) => set.add(v));
     found.set(n, set);
   };
+  // Each parent's checkboxes and radios, found once: a page can give one
+  // parent thousands of fields, and looking again for each is quadratic.
+  const labelled = new Map<SnapshotNode, SnapshotNode[]>();
+  const labelledIn = (parent: SnapshotNode): SnapshotNode[] => {
+    let list = labelled.get(parent);
+    if (!list) labelled.set(parent, list = parent.children.filter((c) => LABELLED_AROUND.has(c.role)));
+    return list;
+  };
   const walk = (n: SnapshotNode, ancestors: SnapshotNode[]): void => {
     if (TYPED.has(n.role) && !chosenOption(n)) {
       const values = [...new Set([fieldValue(n), ...typedParts(n)].map((v) => v.replace(/\s+/g, ' ').trim()))]
@@ -512,7 +536,8 @@ function valuesAround(roots: SnapshotNode[]): Map<SnapshotNode, string[]> {
       if (values.length) {
         keep(n, values);
         ancestors.forEach((a) => keep(a, values));
-        for (const s of ancestors.at(-1)?.children ?? []) if (s !== n && LABELLED_AROUND.has(s.role)) keep(s, values);
+        const parent = ancestors.at(-1);
+        if (parent) for (const s of labelledIn(parent)) if (s !== n) keep(s, values);
       }
       return;
     }
@@ -524,6 +549,13 @@ function valuesAround(roots: SnapshotNode[]): Map<SnapshotNode, string[]> {
 
 /** Below this length a typed value is hidden only where it stands alone. */
 const SHORT_VALUE = 3;
+/** How much of a control's text is read for its name, before it is cut to `NAME_LIMIT`. */
+const SCRUB_TEXT_MAX = 2_000;
+/**
+ * Past this many typed values around one control, its name is hidden whole
+ * rather than value by value: each value is a pass over the text.
+ */
+const SCRUB_VALUES_MAX = 256;
 
 /**
  * Takes the given typed values out of page-written text. A short one — an
@@ -532,16 +564,39 @@ const SHORT_VALUE = 3;
  * would hide the page's own words.
  */
 function scrubber(values: string[] | undefined): (text: string) => string {
-  if (!values?.length) return (text) => text;
-  const short = values
-    .filter((v) => v.length < SHORT_VALUE)
-    .map((v) => new RegExp(`(?<![\\p{L}\\p{N}])${v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'gu'));
-  return (text) => {
-    let out = text.replace(/\s+/g, ' ');
-    for (const value of values) if (value.length >= SHORT_VALUE) out = out.split(value).join('•••');
-    for (const pattern of short) out = out.replace(pattern, '•••');
-    return out;
+  const unique = [...new Set(values ?? [])].filter((v) => v.length > 0);
+  if (!unique.length) return (text) => text;
+  if (unique.length > SCRUB_VALUES_MAX) return () => '•••';
+  // One pass for all of them, the longest first where two start together.
+  const escape = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const long = unique.filter((v) => v.length >= SHORT_VALUE).sort((a, b) => b.length - a.length).map(escape);
+  const short = unique.filter((v) => v.length < SHORT_VALUE).sort((a, b) => b.length - a.length).map(escape);
+  const pattern = new RegExp([
+    ...(long.length ? [`(?:${long.join('|')})`] : []),
+    ...(short.length ? [`(?<![\\p{L}\\p{N}])(?:${short.join('|')})(?![\\p{L}\\p{N}])`] : []),
+  ].join('|'), 'gu');
+  return (text) => text.replace(/\s+/g, ' ').replace(pattern, '•••');
+}
+
+/**
+ * What is typed into the page's text boxes, long enough to hide by itself.
+ * Not searches or comboboxes: a query, or a choice from a list, is what the
+ * page goes on to show, and hiding it everywhere would hide the answer.
+ */
+function textboxValues(roots: SnapshotNode[]): string[] {
+  const found = new Set<string>();
+  const walk = (n: SnapshotNode): void => {
+    if (n.role === 'textbox') {
+      for (const v of [fieldValue(n), ...typedParts(n)]) {
+        const value = v.replace(/\s+/g, ' ').trim();
+        if (value.length >= SHORT_VALUE) found.add(value);
+      }
+      return;
+    }
+    for (const c of n.children) walk(c);
   };
+  roots.forEach(walk);
+  return [...found];
 }
 
 /**
