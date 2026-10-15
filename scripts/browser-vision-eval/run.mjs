@@ -170,6 +170,9 @@ async function evaluate() {
     models: { ...base.models, t1: model, t2: model, t3: model },
     cascadeAuto: false,
     enableToolCreation: false,
+    // These two register their tools as a run starts, outside both lists.
+    plugins: [],
+    codeIndex: { ...base.codeIndex, enabled: false },
     tools: {
       ...base.tools,
       enabledTools: [],
@@ -224,7 +227,10 @@ async function evaluate() {
             usage = result.usage ?? {};
           } catch (err) {
             // Not a result: the comparison would not be of the browser alone.
-            if (err instanceof IsolationError) throw err;
+            if (err instanceof IsolationError) {
+              fs.rmSync(workspace, { recursive: true, force: true });
+              throw err;
+            }
             error = err instanceof Error ? err.message : String(err);
           }
           const opened = [...steps.keys()].filter((k) => !known.has(k));

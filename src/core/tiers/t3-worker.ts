@@ -379,6 +379,14 @@ export class T3Worker extends BaseTier {
    * picture per step rather than every picture on every step.
    */
   private pendingScreenshot: ImageAttachment | undefined;
+  /**
+   * The newest picture a tool handed over, until a request has carried it.
+   * A later browser step clears the pending one — it may have changed the
+   * page — so a step that then reports the page looking exactly as in that
+   * picture (`keepImage`) puts this one back: it is still the page, and the
+   * model has not yet been shown it.
+   */
+  private undeliveredScreenshot: ImageAttachment | undefined;
   private store?: MemoryStore;
   private audit?: AuditLogger;
   private tools: ToolDefinition[] = [];
@@ -842,6 +850,7 @@ export class T3Worker extends BaseTier {
   private releaseBrowserControl(): void {
     // A finished worker sends nothing more, so its last picture goes too.
     this.pendingScreenshot = undefined;
+    this.undeliveredScreenshot = undefined;
     // Best-effort, and swallowing is deliberate. This runs in `execute`'s
     // finally, so anything thrown here REPLACES the worker's real result — a
     // registry without `getTool` turned every completed subtask into a
@@ -901,6 +910,7 @@ export class T3Worker extends BaseTier {
     // ride on the first request of the next loop (a correction round), after
     // a prompt it has nothing to do with.
     this.pendingScreenshot = undefined;
+    this.undeliveredScreenshot = undefined;
     // `tools` is reassigned when a dynamic tool is created — must be a let
     tools = [...tools];
 
@@ -974,6 +984,7 @@ export class T3Worker extends BaseTier {
       // cannot see it.
       const screenshot = this.pendingScreenshot;
       this.pendingScreenshot = undefined;
+      if (screenshot) this.undeliveredScreenshot = undefined;
       const options: GenerateOptions = {
         messages: withScreenshot(foldOldPageViews(this.context.getMessages()), screenshot),
         systemPrompt: this.systemPromptOverride + systemPrompt
@@ -1219,8 +1230,7 @@ export class T3Worker extends BaseTier {
     // leaves the older picture showing a page that is no longer there, under
     // a caption that says otherwise. Reading the page changes nothing, and a
     // step that leaves the pixels as they were says so (`keepImage`): the
-    // older picture is then still the page, and the only one there is.
-    const earlier = this.pendingScreenshot;
+    // last picture not yet shown is then still the page.
     if (tc.name === 'browser_control' && tc.input['action'] !== 'extract_text') this.pendingScreenshot = undefined;
 
     try {
@@ -1244,8 +1254,8 @@ export class T3Worker extends BaseTier {
         },
         // The newest wins: one picture per step, of the page as it is now.
         ...(this.seesScreenshots ? {
-          attachImage: (image: ImageAttachment) => { this.pendingScreenshot = image; },
-          keepImage: () => { this.pendingScreenshot ??= earlier; },
+          attachImage: (image: ImageAttachment) => { this.pendingScreenshot = image; this.undeliveredScreenshot = image; },
+          keepImage: () => { this.pendingScreenshot ??= this.undeliveredScreenshot; },
         } : {}),
       });
       if (this.audit) {
