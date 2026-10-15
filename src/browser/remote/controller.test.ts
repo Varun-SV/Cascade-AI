@@ -4691,7 +4691,9 @@ describe('page views and refs', () => {
         fill: record('fill'),
         press: record('press'),
         hover: record('hover'),
-        selectOption: record('selectOption'),
+        selectOption: async (option: unknown) => {
+          page.calls.push(`${selector} selectOption=${typeof option === 'string' ? option : `label:${(option as { label: string }).label}`}`);
+        },
         scrollIntoViewIfNeeded: record('scrollIntoView'),
         waitFor: record('waitFor'),
         innerText: record('innerText'),
@@ -4759,6 +4761,20 @@ describe('page views and refs', () => {
     expect(out.ok).toBe(false);
     expect(out.detail).toContain('e14 is now button "Cancel reservation", not button "Reserve 7:30 pm"');
     expect(out.view!.text).toContain('[e14] button "Cancel reservation"');
+    expect(page.calls).not.toContain('aria-ref=e14 click');
+  });
+
+  it('refuses a ref renamed only past what its label shows', async () => {
+    // Both names cut to the same label; the words that differ come after it.
+    const start = 'Review the plan, the billing details and the terms of service before you choose to ';
+    snapshot = BOOKING.replace('Reserve 7:30 pm', `${start}keep the subscription`);
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    snapshot = BOOKING.replace('Reserve 7:30 pm', `${start}cancel the subscription`);
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/^e14 \(button "Review the plan.*…"\) has changed or gone since the page view, so it was not used/);
     expect(page.calls).not.toContain('aria-ref=e14 click');
   });
 
@@ -4944,7 +4960,8 @@ describe('page views and refs', () => {
     await c.controller({ kind: 'scroll', ref: 'e14' }, ctx('run', 'w1'));
     const text = await c.controller({ kind: 'extract_text', ref: 'e14' }, ctx('run', 'w1'));
     expect(page.calls.filter((x) => !x.startsWith('snapshot:'))).toEqual([
-      'aria-ref=e9 fill=secret', 'aria-ref=e9 press=Enter', 'aria-ref=e14 waitFor', 'aria-ref=e11 selectOption=4 people',
+      // An option on a ref by its text alone: its value is not shown to anyone.
+      'aria-ref=e9 fill=secret', 'aria-ref=e9 press=Enter', 'aria-ref=e14 waitFor', 'aria-ref=e11 selectOption=label:4 people',
       'aria-ref=e5 hover', 'aria-ref=e14 scrollIntoView', 'aria-ref=e14 innerText',
     ]);
     expect(text.detail).toBe('located text');
@@ -5374,6 +5391,15 @@ describe('page views and refs', () => {
         expect(label).toMatch(PRIVATE_LABEL);
       }
       for (const label of ['Promo code', 'Postal code', 'Search', 'Your name', 'Spinach']) expect(label).not.toMatch(PRIVATE_LABEL);
+    });
+
+    it('knows a PIN by its name or id as a word of it, not inside another word', async () => {
+      const { PRIVATE_FIELDS } = await import('./controller.js');
+      for (const field of ['input[name$="pin" i]', 'input[id$="pin" i]', 'input[name*="pin_" i]', 'input[id*="pin-" i]', 'input[name*="pin]" i]']) {
+        expect(PRIVATE_FIELDS).toContain(field);
+      }
+      // "shipping", "spinner": the bare word is never matched anywhere in a name.
+      expect(PRIVATE_FIELDS).not.toContain('*="pin" i]');
     });
 
     it('withholds it for a field known only by its label', async () => {

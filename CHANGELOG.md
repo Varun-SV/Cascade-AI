@@ -49,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   like `e14`, from Playwright's own accessibility snapshot. The model clicks,
   types, chooses and hovers by ref instead of guessing CSS selectors, which
   still work. New actions: `observe`, `scroll`, `select_option` and `hover`.
+  A select is listed with its options, and on a ref `select_option` takes
+  one by its text, never by a value the page hides in it.
   A page view never shows what is typed into a field. Only the two newest
   views are sent whole; older ones fold to a line. Page views need
   Playwright 1.60 or later, which Cascade installs; a host that brings an
@@ -59,7 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     it isn't kept in the history. A step that leaves the page looking exactly
     as it did in the last screenshot sends none and says so. A page with
     nothing to act on, like a chart drawn on a canvas, still gets one.
-  - None is taken while a password, card or one-time-code field is on screen,
+  - None is taken while a password, PIN, card or one-time-code field is on screen,
     in any frame, or when the page can't be checked for one, or right after
     you took control of the browser or hid it. The page is checked again once
     the picture is taken. A picture taken as such a field came up, or as the
@@ -84,7 +86,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the page it was approved on: not after the page moved to another site, or
   to another page of the same one. One by selector also stops if an app has
   changed its route. A ref whose control the page has renamed since the view
-  is refused too. `scripts/browser-vision-eval/` has ten test
+  is refused too, even where only the part of its name the view cut off
+  changed. `scripts/browser-vision-eval/` has ten test
   tasks and a runner to compare the settings.
 
 ### Changed

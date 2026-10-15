@@ -371,9 +371,17 @@ async function launchChromium(executable) {
   const kill = async () => {
     // Chromium keeps writing its profile until it has gone; removing it sooner
     // races that.
-    const gone = new Promise((r) => child.once('exit', r));
+    const exited = child.exitCode !== null || child.signalCode !== null;
+    const gone = exited ? Promise.resolve(true) : new Promise((r) => child.once('exit', () => r(true)));
+    const waited = (ms) => new Promise((r) => setTimeout(r, ms, false).unref());
     child.kill();
-    await Promise.race([gone, new Promise((r) => setTimeout(r, 5_000))]);
+    // One that is wedged, or ignores the request, is not left running — nor
+    // its pipe, which would keep this process from ending.
+    if (!(await Promise.race([gone, waited(5_000)]))) {
+      child.kill('SIGKILL');
+      await Promise.race([gone, waited(5_000)]);
+    }
+    child.stderr.destroy();
     // Its helper processes can outlive it for a moment. A temporary profile
     // left behind is not worth failing a finished run over.
     try {

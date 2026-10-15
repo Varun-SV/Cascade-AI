@@ -26,6 +26,8 @@
 //  Pure, so the parsing is tested against snapshots captured from a real
 //  Chromium rather than against the controller's fakes.
 
+import { createHash } from 'node:crypto';
+
 /** One line of the snapshot, as a tree. */
 export interface SnapshotNode {
   role: string;
@@ -64,6 +66,12 @@ export interface PageView {
    */
   labels: Map<string, string>;
   /**
+   * What each listed ref is, in full — a digest of its role and all of its
+   * name, not the cut one `labels` shows. A control renamed only past the cut
+   * keeps its label; this is how it is told apart. Never shown.
+   */
+  identities: Map<string, string>;
+  /**
    * Where each control listed on screen is, for drawing its ref (`marked`).
    * Headings are listed to orient the model but not boxed: nothing to press.
    */
@@ -76,6 +84,9 @@ export const VIEW_LIMIT = 80;
 export const BELOW_LIMIT = 40;
 /** Longest name kept for one control. */
 const NAME_LIMIT = 80;
+/** A select's options listed with it, at most, and the longest name kept for each. */
+const OPTIONS_SHOWN = 10;
+const OPTION_NAME_LIMIT = 40;
 
 /**
  * Opens every view in a tool result. A line of its own, so the worker can find
@@ -281,6 +292,8 @@ interface Entry {
 interface Shown extends Entry {
   /** `button "Pay"` — the role and name, without the ref or states. */
   label: string;
+  /** See `PageView.identities`. */
+  identity: string;
   line: string;
 }
 
@@ -369,6 +382,7 @@ export function describePage(input: {
   return {
     text: lines.join('\n'),
     labels: new Map([...shownView, ...shownBelow].map((e) => [e.ref, e.label])),
+    identities: new Map([...shownView, ...shownBelow].map((e) => [e.ref, e.identity])),
     marks: shownView.flatMap((e) => (e.box && !e.heading ? [{ ref: e.ref, x: e.box.x, y: e.box.y, w: e.box.w, h: e.box.h }] : [])),
   };
 }
@@ -390,16 +404,23 @@ function placement(node: SnapshotNode, viewport: Viewport | undefined): Entry['w
   return 'view';
 }
 
-function describe(node: SnapshotNode, ref: string, scrub: (text: string) => string): { label: string; line: string } {
+function describe(node: SnapshotNode, ref: string, scrub: (text: string) => string): { label: string; identity: string; line: string } {
   const role = INTERACTIVE.has(node.role) || node.role === 'heading'
     ? node.role
     : node.role === 'generic' ? 'clickable' : `clickable ${node.role}`;
   // A field is named by its name alone: its inline text and its children are
   // what was typed into it.
-  // Cut long before the name is: scrubbing reads all of what it is given,
-  // and a page decides how much text a control holds.
-  const raw = TYPED.has(node.role) ? node.name ?? '' : node.name || node.inline || textWithin(node);
-  const label = clean(scrub(raw.slice(0, SCRUB_TEXT_MAX)), NAME_LIMIT);
+  const raw = TYPED.has(node.role) ? node.name ?? '' : node.name || node.inline || textWithin(node, IDENTITY_TEXT_MAX);
+  const scrubbed = scrub(raw);
+  const label = clean(scrubbed, NAME_LIMIT);
+  // All of the name, where the label is cut: a control that keeps the label's
+  // first eighty characters can still have become another. What scrubbing
+  // reads is compared as scrubbed — a value typed since is not a new name —
+  // and the rest as the page wrote it.
+  const identity = createHash('sha256')
+    .update(`${node.role}\0${scrubbed}\0`)
+    .update(raw.length > SCRUB_TEXT_MAX ? raw.slice(SCRUB_TEXT_MAX, IDENTITY_TEXT_MAX) : '')
+    .digest('base64');
   const named = `${role}${label ? ` "${label}"` : ''}`;
   let line = `[${ref}] ${named}`;
 
@@ -410,7 +431,13 @@ function describe(node: SnapshotNode, ref: string, scrub: (text: string) => stri
     if (chosen) {
       // A native select's choice is one of the page's own option labels, not
       // something a person typed.
-      line += `: "${clean(scrub((chosen.name ?? '').slice(0, SCRUB_TEXT_MAX)), NAME_LIMIT)}"`;
+      line += `: "${clean(scrub(chosen.name ?? ''), NAME_LIMIT)}"`;
+      // And what else it offers, by the text select_option takes: a closed
+      // select's options take no space, so they are not listed on their own.
+      const options = optionsOf(node);
+      const listed = options.slice(0, OPTIONS_SHOWN).map((o) => `"${clean(scrub(o.name ?? ''), OPTION_NAME_LIMIT)}"`);
+      if (options.length > OPTIONS_SHOWN) listed.push(`and ${options.length - OPTIONS_SHOWN} more`);
+      notes.push(`options ${listed.join(', ')}`);
     } else {
       const typed = [...fieldValue(node)].length;
       notes.push(typed ? `filled, ${typed} char${typed === 1 ? '' : 's'}` : 'empty');
@@ -422,7 +449,7 @@ function describe(node: SnapshotNode, ref: string, scrub: (text: string) => stri
     if (node.attrs[attr] === true || node.attrs[attr] === 'true') notes.push(word);
   }
   if (notes.length) line += ` (${notes.join(', ')})`;
-  return { label: named, line };
+  return { label: named, identity, line };
 }
 
 type ViewPlace = { url: string; title: string; viewport: Viewport | undefined; number: number };
@@ -442,15 +469,18 @@ function viewHeader(input: ViewPlace): string[] {
 function tooBig(input: ViewPlace): PageView {
   const lines = viewHeader(input);
   lines.push('', 'This page is too large to list its controls. Use extract_text to read it, and CSS selectors to act on it.');
-  return { text: lines.join('\n'), labels: new Map(), marks: [] };
+  return { text: lines.join('\n'), labels: new Map(), identities: new Map(), marks: [] };
 }
 
-/** A label for a control with no name of its own: the text it contains. */
-function textWithin(node: SnapshotNode): string {
+/**
+ * A label for a control with no name of its own: the text it contains, read
+ * until it is longer than `limit`.
+ */
+function textWithin(node: SnapshotNode, limit: number): string {
   const parts: string[] = [];
   let length = 0;
   const walk = (n: SnapshotNode): void => {
-    if (length > NAME_LIMIT) return;
+    if (length > limit) return;
     if (n.role.startsWith('/')) return;
     const text = n.name || (TYPED.has(n.role) ? '' : n.inline);
     if (text) { parts.push(text); length += text.length + 1; }
@@ -462,18 +492,22 @@ function textWithin(node: SnapshotNode): string {
   return parts.join(' ');
 }
 
-/** The option a native select shows as chosen, wherever its groups put it. */
+/** The option a native select shows as chosen. */
 function chosenOption(node: SnapshotNode): SnapshotNode | undefined {
-  if (node.role !== 'combobox') return undefined;
-  const find = (n: SnapshotNode): SnapshotNode | undefined => {
+  return node.role === 'combobox' ? optionsOf(node).find((o) => o.attrs['selected']) : undefined;
+}
+
+/** A list's options, wherever its groups put them. */
+function optionsOf(node: SnapshotNode): SnapshotNode[] {
+  const found: SnapshotNode[] = [];
+  const walk = (n: SnapshotNode): void => {
     for (const c of n.children) {
-      if (c.role === 'option' && c.attrs['selected']) return c;
-      const deeper = find(c);
-      if (deeper) return deeper;
+      if (c.role === 'option') found.push(c);
+      else walk(c);
     }
-    return undefined;
   };
-  return find(node);
+  walk(node);
+  return found;
 }
 
 /**
@@ -549,8 +583,14 @@ function valuesAround(roots: SnapshotNode[]): Map<SnapshotNode, string[]> {
 
 /** Below this length a typed value is hidden only where it stands alone. */
 const SHORT_VALUE = 3;
-/** How much of a control's text is read for its name, before it is cut to `NAME_LIMIT`. */
+/**
+ * How much of a control's text is scrubbed for its name, before it is cut to
+ * `NAME_LIMIT`: scrubbing reads all of what it is given, and a page decides
+ * how much text a control holds.
+ */
 const SCRUB_TEXT_MAX = 2_000;
+/** How much of a control's text its identity covers. See `PageView.identities`. */
+const IDENTITY_TEXT_MAX = 100_000;
 /**
  * Past this many typed values around one control, its name is hidden whole
  * rather than value by value: each value is a pass over the text.
@@ -558,14 +598,15 @@ const SCRUB_TEXT_MAX = 2_000;
 const SCRUB_VALUES_MAX = 256;
 
 /**
- * Takes the given typed values out of page-written text. A short one — an
- * age, initials, two digits of a code — goes where it stands as a word or
- * number of its own: inside a longer one it says nothing, and hiding it there
- * would hide the page's own words.
+ * Takes the given typed values out of page-written text, of which it returns
+ * the first `SCRUB_TEXT_MAX` characters. A short one — an age, initials, two
+ * digits of a code — goes where it stands as a word or number of its own:
+ * inside a longer one it says nothing, and hiding it there would hide the
+ * page's own words.
  */
 function scrubber(values: string[] | undefined): (text: string) => string {
   const unique = [...new Set(values ?? [])].filter((v) => v.length > 0);
-  if (!unique.length) return (text) => text;
+  if (!unique.length) return (text) => text.slice(0, SCRUB_TEXT_MAX);
   if (unique.length > SCRUB_VALUES_MAX) return () => '•••';
   // One pass for all of them, the longest first where two start together.
   const escape = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -575,7 +616,52 @@ function scrubber(values: string[] | undefined): (text: string) => string {
     ...(long.length ? [`(?:${long.join('|')})`] : []),
     ...(short.length ? [`(?<![\\p{L}\\p{N}])(?:${short.join('|')})(?![\\p{L}\\p{N}])`] : []),
   ].join('|'), 'gu');
-  return (text) => text.replace(/\s+/g, ' ').replace(pattern, '•••');
+  return (text) => {
+    const read = text.slice(0, SCRUB_TEXT_MAX).replace(/\s+/g, ' ');
+    // Where the text is cut, a value can start before the cut and go on past
+    // it, so it is never there whole to be matched. Whatever at the end could
+    // be the start of one goes, and everything after it.
+    const until = text.length > SCRUB_TEXT_MAX ? runsOffAt(read, unique) : read.length;
+    let out = '';
+    let from = 0;
+    for (const m of read.matchAll(pattern)) {
+      if (m.index >= until) break;
+      out += `${read.slice(from, m.index)}•••`;
+      from = m.index + m[0].length;
+    }
+    if (until === read.length) return out + read.slice(from);
+    return from < read.length ? `${out}${read.slice(from, Math.max(from, until))}•••` : out;
+  };
+}
+
+/**
+ * Where the end of `text` could be the start of one of `values`: the earliest
+ * point from which what is left begins a value. Its length when none does.
+ */
+function runsOffAt(text: string, values: string[]): number {
+  let at = text.length;
+  for (const value of values) at = Math.min(at, text.length - overlap(text, value));
+  return at;
+}
+
+/**
+ * The longest end of `text` that `value` starts with. Linear in the shorter
+ * of the two (Knuth–Morris–Pratt): a page decides both.
+ */
+function overlap(text: string, value: string): number {
+  const p = value.slice(0, text.length);
+  const back = new Array<number>(p.length).fill(0);
+  for (let i = 1, k = 0; i < p.length; i++) {
+    while (k > 0 && p[i] !== p[k]) k = back[k - 1]!;
+    if (p[i] === p[k]) k++;
+    back[i] = k;
+  }
+  let k = 0;
+  for (let i = text.length - p.length; i < text.length; i++) {
+    while (k > 0 && (k === p.length || text[i] !== p[k])) k = back[k - 1]!;
+    if (text[i] === p[k]) k++;
+  }
+  return k;
 }
 
 /**

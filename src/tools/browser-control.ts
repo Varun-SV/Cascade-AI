@@ -49,7 +49,7 @@ export interface BrowserAction {
    * The host refuses one that view did not list.
    */
   ref?: string;
-  /** fill; select_option — the option's value or visible text */
+  /** fill; select_option — the option's text (or, with a selector, its value) */
   value?: string;
   /** press — a single key name, e.g. "Enter" or "Tab" */
   key?: string;
@@ -345,6 +345,9 @@ export class BrowserControlTool extends BaseTool {
       const submits = action === 'press' && keyParts(key).some((part) => SUBMIT_KEY.test(part));
       const unaimed = action === 'press' && !ref && !selector;
       // What is chosen in a list says what it does as much as the list does.
+      // On a ref it is chosen by its text alone (see the controller), so these
+      // are the option's own words, not a value nobody is shown; a selector
+      // is asked about every time anyway.
       const chosen = action === 'select_option' && typeof input['value'] === 'string' ? ` ${input['value']}` : '';
       alwaysAsk = irreversible(`${target ?? selector ?? ''}${chosen}`)
         // Enter or Space can submit a form, or press whatever has focus. What
@@ -540,7 +543,7 @@ const VIEW_SCHEMA = {
       type: 'string',
       description: 'A CSS selector, when the page view does not list what you need. Same actions as ref. Optional for extract_text (defaults to the whole page).',
     },
-    value: { type: 'string', description: 'For fill: the text to type. For select_option: the option to choose, by its value or visible text.' },
+    value: { type: 'string', description: 'For fill: the text to type. For select_option: the option to choose, by its text as the page shows it (with a selector, its value also works).' },
     key: { type: 'string', description: 'For press: a key name such as "Enter", "Tab" or "Escape".' },
     direction: { type: 'string', enum: ['up', 'down'], description: 'For scroll without a ref: which way to move, about one screen (default down).' },
     timeoutMs: { type: 'number', description: 'For wait_for: how long to wait before giving up (default 10000, max 30000).' },

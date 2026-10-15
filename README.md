@@ -530,11 +530,11 @@ Viewport 1280×800, scrolled 0 of 1,013
 
 On screen:
 [e5] button "Account"
-[e8] combobox "Party size": "2 people"
+[e8] combobox "Party size": "2 people" (options "1 person", "2 people", "4 people")
 [e14] button "Reserve 7:30 pm"
 ```
 
-The model acts by ref (`{"action":"click","ref":"e14"}`), and CSS selectors still work. A page view never shows what is typed into a field. A ref is refused, never re-matched, once the page has loaded something else or the control it named has gone or been renamed.
+The model acts by ref (`{"action":"click","ref":"e14"}`), and CSS selectors still work. On a ref, `select_option` chooses an option by its text as the view lists it, never by the value hidden in the page. A page view never shows what is typed into a field. A ref is refused, never re-matched, once the page has loaded something else or the control it named has gone or been renamed, even past the part of its name the view shows.
 
 `tools.browserVision` sets how much it sees. It applies to a remote browser — Cascade Cloud and self-hosted deployments set it with `REMOTE_BROWSER_VISION`, and an SDK host that attaches one reads it from its config. The desktop's built-in browser keeps CSS selectors. Page views need Playwright 1.60 or later, the version Cascade installs; with an older one the agent is offered the original actions only, and reads page text and uses CSS selectors.
 

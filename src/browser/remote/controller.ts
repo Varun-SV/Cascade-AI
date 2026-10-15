@@ -103,7 +103,7 @@ type Locator = {
   fill(value: string, opts?: { timeout?: number }): Promise<void>;
   press(key: string, opts?: { timeout?: number }): Promise<void>;
   hover(opts?: { timeout?: number }): Promise<void>;
-  selectOption(value: string, opts?: { timeout?: number }): Promise<unknown>;
+  selectOption(value: string | { label: string }, opts?: { timeout?: number }): Promise<unknown>;
   scrollIntoViewIfNeeded(opts?: { timeout?: number }): Promise<void>;
   waitFor(opts?: { state?: 'visible'; timeout?: number }): Promise<void>;
   innerText(opts?: { timeout?: number }): Promise<string>;
@@ -342,6 +342,10 @@ export const PRIVATE_FIELDS = [
   // "footprint" costs a step; a code sent to the model costs an account.
   ...['otp', 'one-time', 'onetime', 'one_time', 'verification', 'passcode', '2fa', 'mfa', 'totp', 'securitycode', 'security_code', 'security-code', 'authcode', 'auth_code', 'auth-code']
     .flatMap((word) => [`input[name*="${word}" i]`, `input[id*="${word}" i]`]),
+  // A PIN by its name, as a word of it — `pin`, `card_pin`, `atmPin`,
+  // `pin-input`, `user[pin]` — not the "pin" inside "shipping" or "spinner".
+  ...['$="pin"', '*="pin_"', '*="pin-"', '*="pin]"', '*="pinnumber"']
+    .flatMap((match) => [`input[name${match} i]`, `input[id${match} i]`]),
   'input[placeholder*="verification code" i]', 'input[placeholder*="one-time" i]',
   // One box per digit.
   'input[maxlength="1"][inputmode="numeric" i]',
@@ -646,7 +650,7 @@ interface RunBrowser {
    * each one is called, and the page and document they belong to. A ref is
    * good only while all of these still hold — see `refRefusal`.
    */
-  view?: { page: Page; documents: number; labels: Map<string, string> };
+  view?: { page: Page; documents: number; labels: Map<string, string>; identities: Map<string, string> };
   /**
    * Main documents loaded into the current page: bumped by a load, not by a
    * history change. A view's refs belong to the document it was taken of —
@@ -3048,7 +3052,7 @@ export class RemoteBrowserController {
         if (kept) return;
         kept = true;
         held.views = (held.views ?? 0) + 1;
-        held.view = { page, documents, labels: view.labels };
+        held.view = { page, documents, labels: view.labels, identities: view.identities };
       };
       if (show) keep();
       return { view, viewport, document, keep };
@@ -3388,20 +3392,21 @@ export class RemoteBrowserController {
       // subscription" to "Cancel subscription" — would have the click land on
       // what the model, and the person approving, never saw. So before an
       // action that can set something off, the page is described again and
-      // the ref must still be called what the view called it.
+      // the ref must still be called what the view called it: all of its
+      // name, not only the part a label shows.
       if (CHANGES_THE_PAGE.has(action.kind)) {
         // Not kept unless it is sent: a fill that goes ahead says nothing of
         // the page, so its refs must stay the ones the model, and the person
         // approving its next step, were shown.
         const now = await this.pageView(held, stoppable, false, false);
         const current = now?.view.labels.get(action.ref);
-        if (current !== shown) {
+        if (current !== shown || now?.view.identities.get(action.ref) !== held.view!.identities.get(action.ref)) {
           now?.keep();
           return {
             ok: false,
             detail: !now
               ? `Could not check that ${action.ref} is still ${shown}, so it was not used. Call observe for a fresh page view.`
-              : current
+              : current && current !== shown
                 ? `${action.ref} is now ${current}, not ${shown} as the page view said, so it was not used. The page as it is now:`
                 : `${action.ref} (${shown}) has changed or gone since the page view, so it was not used. The page as it is now:`,
             ...(await where()),
@@ -3520,7 +3525,10 @@ export class RemoteBrowserController {
         return finish({ ok: true, detail: how, ...(await where()) }, false);
       }
       case 'select_option':
-        await stoppable(target!.selectOption(action.value ?? '', { timeout }));
+        // On a ref, by the option's text alone. Playwright otherwise takes an
+        // option's value too, which nobody is shown: `1` can be the value of
+        // "Delete account", and the approval would be asked about `1`.
+        await stoppable(target!.selectOption(action.ref ? { label: action.value ?? '' } : action.value ?? '', { timeout }));
         return { ok: true, detail: `Chose "${action.value}" in ${named}`, ...(await where()) };
       case 'hover':
         await stoppable(target!.hover({ timeout }));

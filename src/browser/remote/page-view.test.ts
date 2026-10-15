@@ -348,8 +348,75 @@ describe('describePage', () => {
     expect(v.text).toContain('slider "Volume" (at 40)');
   });
 
-  it('leaves out what takes no space — a closed select\'s options', () => {
-    expect(view(BOOKING)!.text).not.toContain('option');
+  it('leaves out what takes no space — a closed select\'s options — but names them with their select', () => {
+    const v = view(BOOKING)!;
+    expect(v.text).not.toMatch(/^\[\w+\] option/m);
+    expect(v.text).toContain('[e11] combobox "Party size": "2 people" (options "1 person", "2 people")');
+  });
+
+  it('names a select\'s options by the text select_option takes, and counts the rest', () => {
+    const options = Array.from({ length: 12 }, (_, i) => `    - option "Choice ${i + 1}"${i === 2 ? ' [selected]' : ''} [box=0,0,0,0]`);
+    const v = view([
+      '- main [ref=e1] [box=0,0,1280,800]:',
+      '  - combobox "Pick one" [ref=e2] [box=0,0,100,20]:',
+      '    - group "First":',
+      ...options,
+    ].join('\n'))!;
+    const listed = Array.from({ length: 10 }, (_, i) => `"Choice ${i + 1}"`).join(', ');
+    expect(v.text).toContain(`[e2] combobox "Pick one": "Choice 3" (options ${listed}, and 2 more)`);
+  });
+
+  it('tells apart controls whose names differ only past what a label shows', () => {
+    const start = 'Review the plan, the billing details and the terms of service before you choose to ';
+    const at = (end: string) => view([
+      '- main [ref=e1] [box=0,0,1280,800]:',
+      `  - button "${start}${end}" [ref=e2] [box=0,0,100,20]`,
+      '  - generic [ref=e3] [cursor=pointer] [box=0,30,100,20]:',
+      `    - text: ${start}`,
+      `    - text: ${end}`,
+    ].join('\n'))!;
+    const keep = at('keep the subscription');
+    const cancel = at('cancel the subscription');
+    // The same label: both are cut before the words that differ.
+    expect(keep.labels.get('e2')).toBe(cancel.labels.get('e2'));
+    expect(keep.labels.get('e3')).toBe(cancel.labels.get('e3'));
+    expect(keep.identities.get('e2')).not.toBe(cancel.identities.get('e2'));
+    // A nameless control too, by all of the text it holds.
+    expect(keep.identities.get('e3')).not.toBe(cancel.identities.get('e3'));
+    expect(at('keep the subscription').identities).toEqual(keep.identities);
+  });
+
+  it('keeps a control the same when only what is typed into the page has changed', () => {
+    const at = (typed: string) => view([
+      '- main [ref=e1] [box=0,0,1280,800]:',
+      `  - 'radio "Other: ${typed}" [ref=e2] [box=0,0,13,13]'`,
+      `  - textbox "Other reason" [ref=e3] [box=20,0,185,21]: ${typed}`,
+    ].join('\n'))!;
+    expect(at('Bobby').labels.get('e2')).toBe('radio "Other: •••"');
+    expect(at('Bobby').identities.get('e2')).toBe(at('Alice').identities.get('e2'));
+  });
+
+  it('hides a typed value that runs on past the end of the text it scrubs', () => {
+    // Longer than what is scrubbed of a name, so never there whole to match.
+    const typed = 'confidential-note-'.repeat(200);
+    const v = view([
+      '- main [ref=e1] [box=0,0,1280,800]:',
+      `  - textbox "Note" [ref=e2] [box=0,0,185,21]: ${typed}`,
+      `  - button "Send ${typed}" [ref=e3] [box=0,30,100,20]`,
+    ].join('\n'))!;
+    expect(v.labels.get('e3')).toBe('button "Send •••"');
+    expect(v.text).not.toContain('confidential');
+    // Nor one that a long value before it brings into what is shown.
+    const first = 'first-secret-'.repeat(153);
+    const second = 'second-secret-'.repeat(200);
+    const both = view([
+      '- main [ref=e1] [box=0,0,1280,800]:',
+      `  - textbox "A" [ref=e2] [box=0,0,185,21]: ${first}`,
+      `  - textbox "B" [ref=e3] [box=0,30,185,21]: ${second}`,
+      `  - button "${first} ${second}" [ref=e4] [box=0,60,100,20]`,
+    ].join('\n'))!;
+    expect(both.labels.get('e4')).toBe('button "••• •••"');
+    expect(both.text).not.toMatch(/secret|second|sec/);
   });
 
   it('keeps page-written text from imitating an entry', () => {
