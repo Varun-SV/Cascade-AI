@@ -50,7 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   types, chooses and hovers by ref instead of guessing CSS selectors, which
   still work. New actions: `observe`, `scroll`, `select_option` and `hover`.
   A select is listed with its options, and on a ref `select_option` takes
-  one by its text, never by a value the page hides in it.
+  one by its text, never by a value the page hides in it; text the view
+  shortened or rewrote still picks the option it came from.
   A page view never shows what is typed into a field. Only the two newest
   views are sent whole; older ones fold to a line. Page views need
   Playwright 1.60 or later, which Cascade installs; a host that brings an
@@ -65,7 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     in any frame, or when the page can't be checked for one, or right after
     you took control of the browser or hid it. The page is checked again once
     the picture is taken. A picture taken as such a field came up, or as the
-    page went to another, is dropped.
+    page went to another or scrolled, is dropped.
   - A model that can't see images, or would be charged far more than usual
     for one, gets the page view alone.
   - `marked` draws each ref on a copy of the screenshot, as an experiment.
@@ -87,7 +88,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to another page of the same one. One by selector also stops if an app has
   changed its route. A ref whose control the page has renamed since the view
   is refused too, even where only the part of its name the view cut off
-  changed. `scripts/browser-vision-eval/` has ten test
+  changed, and so is a ref inside an iframe once a frame on the page has
+  loaded another document. A page view taken while an app changed its route
+  is taken again. `scripts/browser-vision-eval/` has ten test
   tasks and a runner to compare the settings.
 
 ### Changed

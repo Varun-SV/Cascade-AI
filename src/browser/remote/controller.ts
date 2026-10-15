@@ -333,10 +333,10 @@ const PRIVATE_AUTOCOMPLETE = [
 export const PRIVATE_FIELDS = [
   'input[type="password" i]',
   ...PRIVATE_AUTOCOMPLETE.map((token) => `[autocomplete~="${token}" i]`),
-  // Shown in clear, with no autocomplete to say so.
-  'input[name*="password" i]', 'input[name*="passwd" i]', 'input[id*="password" i]', 'input[aria-label*="password" i]',
-  'input[name*="cvc" i]', 'input[name*="cvv" i]',
-  'input[name*="cardnumber" i]', 'input[name*="card_number" i]', 'input[name*="card-number" i]',
+  // Shown in clear, with no autocomplete to say so, by name or id.
+  ...['password', 'passwd', 'cvc', 'cvv', 'cardnumber', 'card_number', 'card-number']
+    .flatMap((word) => [`input[name*="${word}" i]`, `input[id*="${word}" i]`]),
+  'input[aria-label*="password" i]',
   // A one-time code by its name: sites often leave out the autocomplete
   // token. Generous on purpose — a picture withheld for a field named
   // "footprint" costs a step; a code sent to the model costs an account.
@@ -650,7 +650,15 @@ interface RunBrowser {
    * each one is called, and the page and document they belong to. A ref is
    * good only while all of these still hold — see `refRefusal`.
    */
-  view?: { page: Page; documents: number; labels: Map<string, string>; identities: Map<string, string> };
+  view?: {
+    page: Page;
+    documents: number;
+    frames: number;
+    labels: Map<string, string>;
+    identities: Map<string, string>;
+    options: PageView['options'];
+    framed: PageView['framed'];
+  };
   /**
    * Main documents loaded into the current page: bumped by a load, not by a
    * history change. A view's refs belong to the document it was taken of —
@@ -663,6 +671,13 @@ interface RunBrowser {
    * loaded enough to count in `documents`. See `documentOf`.
    */
   loads?: number;
+  /**
+   * Navigations in the page's frames, the main one aside. Playwright keeps a
+   * frame's refs across the documents it loads: once the frame has loaded
+   * another, the next snapshot gives its controls the same refs (`f1e2`) as
+   * the old one's. See `refRefusal`.
+   */
+  frames?: number;
   /** Views shown so far, so each one can say which it is. */
   views?: number;
   /**
@@ -2918,7 +2933,11 @@ export class RemoteBrowserController {
       }
     }) as (...args: never[]) => void);
     page.on('framenavigated', ((frame: unknown) => {
-      if (held.page !== page || frame !== page.mainFrame()) return;
+      if (held.page !== page) return;
+      if (frame !== page.mainFrame()) {
+        held.frames = (held.frames ?? 0) + 1;
+        return;
+      }
       held.generation += 1;
 
       // A different main document is also a different claim of SIGHT. The CDP
@@ -3030,12 +3049,25 @@ export class RemoteBrowserController {
         }
         if (this.settleQuietMs > 0) await new Promise((r) => setTimeout(r, this.settleQuietMs));
       }
-      // Read before the snapshot, so a load or a route change landing in
-      // between makes the view stale rather than credits it to the new page.
-      const documents = held.documents ?? 0;
-      const url = page.url();
-      const document = placeOf(held, url);
-      const snapshot = await stoppable(page.ariaSnapshot({ mode: 'ai', boxes: true, timeout: SNAPSHOT_TIMEOUT_MS }));
+      // Read before the snapshot, so a load landing in between makes the view
+      // stale rather than credits it to the new page.
+      let documents = held.documents ?? 0;
+      let frames = held.frames ?? 0;
+      let url = page.url();
+      let document = placeOf(held, url);
+      let snapshot = await stoppable(page.ariaSnapshot({ mode: 'ai', boxes: true, timeout: SNAPSHOT_TIMEOUT_MS }));
+      // A route change has no load to make it stale: an app that went from
+      // /cart to /account during the snapshot would have the account's
+      // controls listed as the cart's. It is taken again; an app still moving
+      // after that is not described.
+      if (routeOf(page.url()) !== routeOf(url)) {
+        documents = held.documents ?? 0;
+        frames = held.frames ?? 0;
+        url = page.url();
+        document = placeOf(held, url);
+        snapshot = await stoppable(page.ariaSnapshot({ mode: 'ai', boxes: true, timeout: SNAPSHOT_TIMEOUT_MS }));
+        if (routeOf(page.url()) !== routeOf(url)) return null;
+      }
       const viewport = typeof page.evaluate === 'function'
         ? readViewport(await stoppable(within(page.evaluate(VIEWPORT_EXPRESSION))).catch(() => undefined))
         : undefined;
@@ -3052,7 +3084,9 @@ export class RemoteBrowserController {
         if (kept) return;
         kept = true;
         held.views = (held.views ?? 0) + 1;
-        held.view = { page, documents, labels: view.labels, identities: view.identities };
+        held.view = {
+          page, documents, frames, labels: view.labels, identities: view.identities, options: view.options, framed: view.framed,
+        };
       };
       if (show) keep();
       return { view, viewport, document, keep };
@@ -3104,6 +3138,15 @@ export class RemoteBrowserController {
       // would send the account's pixels with the cart's controls.
       if (held.page !== page || !sameDocument(seen.document, held) || !sameRoute(seen.document, page.url())) {
         return { withheld: 'No screenshot: the page changed while it was being looked at.' };
+      }
+      // Nor one scrolled in between: the view's boxes, and the marks drawn
+      // from them, are of where it was.
+      const scrolled = typeof page.evaluate === 'function'
+        ? readViewport(await stoppable(within(page.evaluate(VIEWPORT_EXPRESSION))).catch(() => undefined))
+        : undefined;
+      if (!scrolled || scrolled.scrollY !== seen.viewport.scrollY
+        || scrolled.width !== seen.viewport.width || scrolled.height !== seen.viewport.height) {
+        return { withheld: 'No screenshot: the page moved while it was being looked at.' };
       }
       const after = await this.privateOnScreen(page, stoppable);
       if (after) return { withheld: after };
@@ -3399,6 +3442,19 @@ export class RemoteBrowserController {
         // the page, so its refs must stay the ones the model, and the person
         // approving its next step, were shown.
         const now = await this.pageView(held, stoppable, false, false);
+        // A frame that loaded another document before this look would have
+        // its new controls under the old refs, with the old names perhaps.
+        if (frameMoved(held, action.ref)) {
+          if (!now) return { ok: false, detail: FRAME_MOVED(action.ref), ...(await where()) };
+          now.keep();
+          return {
+            ok: false,
+            detail: `A frame on the page has loaded something else since the page view, so ${action.ref} was not used. The page as it is now:`,
+            ...(await where()),
+            view: viewOutcome(now.view),
+            document: now.document,
+          };
+        }
         const current = now?.view.labels.get(action.ref);
         if (current !== shown || now?.view.identities.get(action.ref) !== held.view!.identities.get(action.ref)) {
           now?.keep();
@@ -3489,7 +3545,9 @@ export class RemoteBrowserController {
         if (!seen) {
           return {
             ok: false,
-            detail: 'This browser cannot list the page\'s controls. Use extract_text to read the page and CSS selectors to act on it.',
+            // No AI snapshot in this Playwright, one that failed, or an app
+            // whose route would not hold still for one.
+            detail: 'The page\'s controls could not be listed. Use extract_text to read the page and CSS selectors to act on it.',
             ...(await where()),
           };
         }
@@ -3524,12 +3582,28 @@ export class RemoteBrowserController {
         const how = target ? `Scrolled to ${named}` : `Scrolled ${action.direction === 'up' ? 'up' : 'down'}`;
         return finish({ ok: true, detail: how, ...(await where()) }, false);
       }
-      case 'select_option':
+      case 'select_option': {
+        if (!action.ref) {
+          await stoppable(target!.selectOption(action.value ?? '', { timeout }));
+          return { ok: true, detail: `Chose "${action.value}" in ${named}`, ...(await where()) };
+        }
         // On a ref, by the option's text alone. Playwright otherwise takes an
         // option's value too, which nobody is shown: `1` can be the value of
-        // "Delete account", and the approval would be asked about `1`.
-        await stoppable(target!.selectOption(action.ref ? { label: action.value ?? '' } : action.value ?? '', { timeout }));
+        // "Delete account", and the approval would be asked about `1`. The
+        // text the view showed is turned back into the label it came from;
+        // one it did not show is taken as a label as it is.
+        const shown = (held.view!.options.get(action.ref) ?? []).filter((o) => o.shown === action.value);
+        const labels = [...new Set(shown.map((o) => o.label))];
+        if (labels.length > 1) {
+          return {
+            ok: false,
+            detail: `More than one option in ${named} reads "${action.value}" in the page view, so none was chosen. Use extract_text to read them in full.`,
+            ...(await where()),
+          };
+        }
+        await stoppable(target!.selectOption({ label: labels[0] ?? action.value ?? '' }, { timeout }));
         return { ok: true, detail: `Chose "${action.value}" in ${named}`, ...(await where()) };
+      }
       case 'hover':
         await stoppable(target!.hover({ timeout }));
         return finish({ ok: true, detail: `Hovered over ${named}`, ...(await where()) }, false);
@@ -3824,10 +3898,23 @@ function refRefusal(held: RunBrowser, ref: string): string | null {
   if (held.view.page !== held.page || held.view.documents !== (held.documents ?? 0)) {
     return `${ref} is from an earlier page. Call observe for a fresh page view.`;
   }
+  if (frameMoved(held, ref)) return FRAME_MOVED(ref);
   if (!held.view.labels.has(ref)) return `${ref} is not in the latest page view. Use a ref from it, or call observe again.`;
   if (typeof held.page.locator !== 'function') return 'This browser cannot act on refs. Use a CSS selector.';
   return null;
 }
+
+/**
+ * Whether a frame on the page has loaded another document since the view, for
+ * a ref inside one. Which frame is not known — the view says only that the
+ * ref is in one — so any frame's load counts.
+ */
+function frameMoved(held: RunBrowser, ref: string): boolean {
+  return held.view?.framed.has(ref) === true && held.view.frames !== (held.frames ?? 0);
+}
+
+const FRAME_MOVED = (ref: string): string =>
+  `A frame on the page has loaded something else since the page view, so ${ref} may not be what it was. Call observe for a fresh page view.`;
 
 /** Actions on a ref that can set off what its control does. See `perform`. */
 const CHANGES_THE_PAGE = new Set<BrowserAction['kind']>(['click', 'fill', 'press', 'select_option']);

@@ -4778,6 +4778,108 @@ describe('page views and refs', () => {
     expect(page.calls).not.toContain('aria-ref=e14 click');
   });
 
+  it('refuses a ref inside a frame once a frame has loaded something else', async () => {
+    // Playwright numbers a frame's refs within its document: the next
+    // snapshot gives the new document's controls the old refs.
+    // After its first document, the page's own refs carry a prefix too:
+    // which are in a frame is told by the snapshot, not the ref.
+    snapshot = `${BOOKING}\n  - button "Book" [ref=f4e30] [box=0,200,60,20]\n  - iframe [ref=e20] [box=0,300,400,100]:\n    - button "Pay" [ref=f1e2] [box=8,308,40,20]`;
+    liveRefs.add('f1e2');
+    liveRefs.add('f4e30');
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.navigateSubframe();
+    page.calls = [];
+    for (const kind of ['hover', 'click'] as const) {
+      const out = await c.controller({ kind, ref: 'f1e2' }, ctx('run', 'w1'));
+      expect(out.ok, kind).toBe(false);
+      expect(out.detail, kind).toContain('A frame on the page has loaded something else since the page view, so f1e2 may not be what it was');
+    }
+    expect(page.calls.filter((x) => x.startsWith('aria-ref=f1e2'))).toEqual([]);
+    // The page's own controls are in no frame.
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(true);
+    expect((await c.controller({ kind: 'click', ref: 'f4e30' }, ctx('run', 'w1'))).ok).toBe(true);
+  });
+
+  it('refuses a ref inside a frame that loads something else while it is checked', async () => {
+    snapshot = `${BOOKING}\n  - iframe [ref=e20] [box=0,300,400,100]:\n    - button "Pay" [ref=f1e2] [box=8,308,40,20]`;
+    liveRefs.add('f1e2');
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const look = extra['ariaSnapshot'] as (opts: unknown) => Promise<string>;
+    extra['ariaSnapshot'] = async (opts: unknown) => { page.navigateSubframe(); return look(opts); };
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', ref: 'f1e2' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('A frame on the page has loaded something else since the page view');
+    expect(page.calls).not.toContain('aria-ref=f1e2 click');
+  });
+
+  it('looks again when an app changes its route while the page is described', async () => {
+    const c = controller();
+    const look = extra['ariaSnapshot'] as (opts: unknown) => Promise<string>;
+    let moves = 1;
+    extra['ariaSnapshot'] = async (opts: unknown) => {
+      const said = await look(opts);
+      // The cart was described; the app is at the account by the time it is done.
+      if (moves-- > 0) {
+        page.replaceState('https://start.test/account');
+        snapshot = BOOKING.replace('Reserve 7:30 pm', 'Delete account');
+      }
+      return said;
+    };
+    const out = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(page.calls.filter((x) => x.startsWith('snapshot:'))).toHaveLength(2);
+    expect(out.view!.text).toContain('https://start.test/account');
+    expect(out.view!.text).toContain('[e14] button "Delete account"');
+    // One that will not hold still is not described at all.
+    extra['ariaSnapshot'] = async (opts: unknown) => {
+      const said = await look(opts);
+      page.replaceState(`https://start.test/step/${Math.random()}`);
+      return said;
+    };
+    const moving = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(moving.ok).toBe(false);
+    expect(moving.view).toBeUndefined();
+  });
+
+  it('chooses an option by the text the view showed, as the page labels it', async () => {
+    const long = 'Join the waiting list and we will text you when a table is free';
+    snapshot = BOOKING.replace('    - option "2 people" [selected] [box=0,0,0,0]', [
+      '    - option "2 people" [selected] [box=0,0,0,0]',
+      '    - option "Continue [recommended]" [box=0,0,0,0]',
+      `    - option "${long}" [box=0,0,0,0]`,
+    ].join('\n'));
+    const c = controller();
+    const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const shown = /\[e11\][^\n]*\(options "2 people", "Continue \(recommended\)", "([^"]+)"\)/.exec(seen.view!.text);
+    expect(shown?.[1]).toMatch(/^Join the waiting list.*…$/);
+    page.calls = [];
+    for (const value of ['Continue (recommended)', shown![1]!, '6 people']) {
+      expect((await c.controller({ kind: 'select_option', ref: 'e11', value }, ctx('run', 'w1'))).ok, value).toBe(true);
+    }
+    // One the view did not show goes as it is: it can only be an option's text.
+    expect(page.calls.filter((x) => x.includes('selectOption'))).toEqual([
+      'aria-ref=e11 selectOption=label:Continue [recommended]',
+      `aria-ref=e11 selectOption=label:${long}`,
+      'aria-ref=e11 selectOption=label:6 people',
+    ]);
+  });
+
+  it('chooses no option where two read the same in the view', async () => {
+    snapshot = BOOKING.replace('    - option "2 people" [selected] [box=0,0,0,0]', [
+      '    - option "Keep [all]" [selected] [box=0,0,0,0]',
+      '    - option "Keep (all)" [box=0,0,0,0]',
+    ].join('\n'));
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.calls = [];
+    const out = await c.controller({ kind: 'select_option', ref: 'e11', value: 'Keep (all)' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('More than one option in combobox "Party size" (e11) reads "Keep (all)"');
+    expect(page.calls.filter((x) => x.includes('selectOption'))).toEqual([]);
+  });
+
   it('checks the name only before an action that can set something off', async () => {
     const c = controller();
     await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
@@ -5400,6 +5502,25 @@ describe('page views and refs', () => {
       }
       // "shipping", "spinner": the bare word is never matched anywhere in a name.
       expect(PRIVATE_FIELDS).not.toContain('*="pin" i]');
+    });
+
+    it('knows a card number or code by its id as well as its name', async () => {
+      const { PRIVATE_FIELDS } = await import('./controller.js');
+      for (const word of ['card-number', 'card_number', 'cardnumber', 'cvc', 'cvv', 'passwd']) {
+        expect(PRIVATE_FIELDS).toContain(`input[id*="${word}" i]`);
+        expect(PRIVATE_FIELDS).toContain(`input[name*="${word}" i]`);
+      }
+    });
+
+    it('withholds a picture of a page that scrolled between its view and the picture', async () => {
+      // The view's boxes, and the marks drawn from them, are of where it was.
+      let scrollY = 0;
+      extra['evaluate'] = async () => ({ width: 1280, height: 800, scrollY, scrollHeight: 1600 });
+      const shoot = extra['screenshot'] as (opts: unknown) => Promise<Uint8Array>;
+      extra['screenshot'] = async (opts: unknown) => { scrollY = 400; return shoot(opts); };
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: the page moved while it was being looked at.');
     });
 
     it('withholds it for a field known only by its label', async () => {

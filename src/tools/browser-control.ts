@@ -349,6 +349,10 @@ export class BrowserControlTool extends BaseTool {
       // are the option's own words, not a value nobody is shown; a selector
       // is asked about every time anyway.
       const chosen = action === 'select_option' && typeof input['value'] === 'string' ? ` ${input['value']}` : '';
+      // An option's text the view cut short, or took typed text out of, is
+      // chosen as the option it came from — whose missing words may be the
+      // ones that matter.
+      const chosenCut = chosen.endsWith('…') || chosen.includes('•••');
       alwaysAsk = irreversible(`${target ?? selector ?? ''}${chosen}`)
         // Enter or Space can submit a form, or press whatever has focus. What
         // that does is not in a field's own label, so it counts as unknown
@@ -361,7 +365,8 @@ export class BrowserControlTool extends BaseTool {
         // to whatever has focus only type.
         || (this.pageView && !named && !unaimed)
         // Nor does one whose label the view cut short.
-        || (target !== undefined && cut(target));
+        || (target !== undefined && cut(target))
+        || chosenCut;
       // The site the person is shown is the one the action must still be on
       // when it runs, and the page the latest view was of the one it must
       // still be on; see `execute`.

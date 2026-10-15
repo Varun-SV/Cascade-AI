@@ -72,6 +72,19 @@ export interface PageView {
    */
   identities: Map<string, string>;
   /**
+   * Each listed select's options as the view shows them, and as the page
+   * labels them: select_option is given the first, Playwright needs the
+   * second — a name cut short, or with its brackets made parentheses, is no
+   * option's label.
+   */
+  options: Map<string, Array<{ shown: string; label: string }>>;
+  /**
+   * The listed refs inside an iframe. Not told by the ref: Playwright gives
+   * every document after the first its own prefix (`f4e2`), the page's own
+   * included.
+   */
+  framed: Set<string>;
+  /**
    * Where each control listed on screen is, for drawing its ref (`marked`).
    * Headings are listed to orient the model but not boxed: nothing to press.
    */
@@ -283,6 +296,8 @@ function readBox(v: string, dx: number, dy: number): { x: number; y: number; w: 
 interface Entry {
   ref: string;
   node: SnapshotNode;
+  /** Inside an iframe. See `PageView.framed`. */
+  framed: boolean;
   box?: SnapshotNode['box'];
   heading: boolean;
   where: 'view' | 'below' | 'above';
@@ -294,6 +309,8 @@ interface Shown extends Entry {
   label: string;
   /** See `PageView.identities`. */
   identity: string;
+  /** See `PageView.options`. */
+  options?: Array<{ shown: string; label: string }>;
   line: string;
 }
 
@@ -323,7 +340,7 @@ export function describePage(input: {
   let sawRef = false;
   let sawControl = false;
 
-  const visit = (node: SnapshotNode, insideClickable: boolean): void => {
+  const visit = (node: SnapshotNode, insideClickable: boolean, framed: boolean): void => {
     const ref = typeof node.attrs['ref'] === 'string' ? node.attrs['ref'] : undefined;
     const interactive = INTERACTIVE.has(node.role);
     if (ref) sawRef = true;
@@ -337,11 +354,11 @@ export function describePage(input: {
     if (listed && ref) {
       const where = placement(node, input.viewport);
       // Described only if it is shown: a page can list thousands.
-      if (where) entries.push({ ref, node, where, heading: node.role === 'heading', ...(node.box ? { box: node.box } : {}) });
+      if (where) entries.push({ ref, node, framed, where, heading: node.role === 'heading', ...(node.box ? { box: node.box } : {}) });
     }
-    for (const child of node.children) visit(child, insideClickable || interactive || pointer);
+    for (const child of node.children) visit(child, insideClickable || interactive || pointer, framed || node.role === 'iframe');
   };
-  for (const root of roots) visit(root, false);
+  for (const root of roots) visit(root, false, false);
   if (sawControl && !sawRef) return null;
 
   const view = entries.filter((e) => e.where === 'view');
@@ -383,6 +400,8 @@ export function describePage(input: {
     text: lines.join('\n'),
     labels: new Map([...shownView, ...shownBelow].map((e) => [e.ref, e.label])),
     identities: new Map([...shownView, ...shownBelow].map((e) => [e.ref, e.identity])),
+    options: new Map([...shownView, ...shownBelow].flatMap((e) => (e.options ? [[e.ref, e.options] as const] : []))),
+    framed: new Set([...shownView, ...shownBelow].filter((e) => e.framed).map((e) => e.ref)),
     marks: shownView.flatMap((e) => (e.box && !e.heading ? [{ ref: e.ref, x: e.box.x, y: e.box.y, w: e.box.w, h: e.box.h }] : [])),
   };
 }
@@ -404,7 +423,11 @@ function placement(node: SnapshotNode, viewport: Viewport | undefined): Entry['w
   return 'view';
 }
 
-function describe(node: SnapshotNode, ref: string, scrub: (text: string) => string): { label: string; identity: string; line: string } {
+function describe(
+  node: SnapshotNode,
+  ref: string,
+  scrub: (text: string) => string,
+): { label: string; identity: string; options?: Shown['options']; line: string } {
   const role = INTERACTIVE.has(node.role) || node.role === 'heading'
     ? node.role
     : node.role === 'generic' ? 'clickable' : `clickable ${node.role}`;
@@ -425,6 +448,7 @@ function describe(node: SnapshotNode, ref: string, scrub: (text: string) => stri
   let line = `[${ref}] ${named}`;
 
   const notes: string[] = [];
+  let listedOptions: Shown['options'];
   if (node.role === 'heading' && typeof node.attrs['level'] === 'string') notes.push(`level ${node.attrs['level']}`);
   if (TYPED.has(node.role)) {
     const chosen = chosenOption(node);
@@ -435,7 +459,9 @@ function describe(node: SnapshotNode, ref: string, scrub: (text: string) => stri
       // And what else it offers, by the text select_option takes: a closed
       // select's options take no space, so they are not listed on their own.
       const options = optionsOf(node);
-      const listed = options.slice(0, OPTIONS_SHOWN).map((o) => `"${clean(scrub(o.name ?? ''), OPTION_NAME_LIMIT)}"`);
+      listedOptions = options.slice(0, OPTIONS_SHOWN)
+        .map((o) => ({ shown: clean(scrub(o.name ?? ''), OPTION_NAME_LIMIT), label: o.name ?? '' }));
+      const listed = listedOptions.map((o) => `"${o.shown}"`);
       if (options.length > OPTIONS_SHOWN) listed.push(`and ${options.length - OPTIONS_SHOWN} more`);
       notes.push(`options ${listed.join(', ')}`);
     } else {
@@ -449,7 +475,7 @@ function describe(node: SnapshotNode, ref: string, scrub: (text: string) => stri
     if (node.attrs[attr] === true || node.attrs[attr] === 'true') notes.push(word);
   }
   if (notes.length) line += ` (${notes.join(', ')})`;
-  return { label: named, identity, line };
+  return { label: named, identity, ...(listedOptions ? { options: listedOptions } : {}), line };
 }
 
 type ViewPlace = { url: string; title: string; viewport: Viewport | undefined; number: number };
@@ -469,7 +495,7 @@ function viewHeader(input: ViewPlace): string[] {
 function tooBig(input: ViewPlace): PageView {
   const lines = viewHeader(input);
   lines.push('', 'This page is too large to list its controls. Use extract_text to read it, and CSS selectors to act on it.');
-  return { text: lines.join('\n'), labels: new Map(), identities: new Map(), marks: [] };
+  return { text: lines.join('\n'), labels: new Map(), identities: new Map(), options: new Map(), framed: new Set(), marks: [] };
 }
 
 /**

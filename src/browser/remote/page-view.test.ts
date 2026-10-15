@@ -354,6 +354,19 @@ describe('describePage', () => {
     expect(v.text).toContain('[e11] combobox "Party size": "2 people" (options "1 person", "2 people")');
   });
 
+  it('tells which refs are inside a frame by where they are, not by their prefix', () => {
+    const v = view([
+      '- main [ref=f4e1] [box=0,0,1280,800]:',
+      '  - button "Book" [ref=f4e2] [box=0,0,60,20]',
+      '  - iframe [ref=f4e3] [box=0,40,400,100]:',
+      '    - button "Pay" [ref=f5e2] [box=8,48,40,20]',
+      '    - iframe [ref=f5e3] [box=8,80,200,50]:',
+      '      - link "Terms" [ref=f6e2] [box=16,88,40,20]',
+    ].join('\n'))!;
+    expect([...v.framed].sort()).toEqual(['f5e2', 'f6e2']);
+    expect(v.labels.has('f4e2')).toBe(true);
+  });
+
   it('names a select\'s options by the text select_option takes, and counts the rest', () => {
     const options = Array.from({ length: 12 }, (_, i) => `    - option "Choice ${i + 1}"${i === 2 ? ' [selected]' : ''} [box=0,0,0,0]`);
     const v = view([

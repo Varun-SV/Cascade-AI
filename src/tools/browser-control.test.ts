@@ -540,6 +540,10 @@ describe('BrowserControlTool — what a person approving sees', () => {
     await tool.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
     expect(tool.forApproval({ action: 'select_option', ref: 'e4', value: 'Delete selected' }, 'run-1').alwaysAsk).toBe(true);
     expect(tool.forApproval({ action: 'select_option', ref: 'e5', value: '2 people' }, 'run-1').alwaysAsk).toBe(false);
+    // Text the view cut short, or took typed text out of, is chosen as the
+    // option it came from, whose missing words may be the ones that matter.
+    expect(tool.forApproval({ action: 'select_option', ref: 'e5', value: 'Keep my settings and then also del…' }, 'run-1').alwaysAsk).toBe(true);
+    expect(tool.forApproval({ action: 'select_option', ref: 'e5', value: 'Send to •••' }, 'run-1').alwaysAsk).toBe(true);
   });
 
   it('shows what is acted on first, and a value only where the call uses one', async () => {
