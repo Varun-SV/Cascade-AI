@@ -184,11 +184,11 @@ describe('WorkspaceGate', () => {
   // The jail takes what it puts back when a command ends as it finds it
   // when the command starts: a second command started while a first had
   // swapped .cascadeignore took the swapped one, and wrote it back after.
-  it('runs commands one at a time, in this process and across processes', async () => {
+  it.each(['commands', 'git'] as const)('runs %s one at a time, in this process and across processes', async (mode) => {
     const gate = new WorkspaceGate();
     const events: string[] = [];
-    const first = await gate.enter('commands');
-    const second = gate.enter('commands').then((leave) => { events.push('second'); return leave; });
+    const first = await gate.enter(mode);
+    const second = gate.enter(mode).then((leave) => { events.push('second'); return leave; });
     await tick();
     expect(events).toEqual([]);
     first(); await tick();
@@ -199,12 +199,12 @@ describe('WorkspaceGate', () => {
       const markers = statePath(dir, STATE.gate);
       await fs.mkdir(markers, { recursive: true });
       const other = `${process.pid}.0123456789ab`;
-      await fs.writeFile(path.join(markers, `commands-${other}-1`), '');
+      await fs.writeFile(path.join(markers, `${mode}-${other}-1`), '');
       let ran = false;
-      const mine = new WorkspaceGate(dir).enter('commands', true).then((leave) => { ran = true; return leave; });
+      const mine = new WorkspaceGate(dir).enter(mode, true).then((leave) => { ran = true; return leave; });
       await new Promise((r) => setTimeout(r, 100));
       expect(ran).toBe(false);
-      await fs.rm(path.join(markers, `commands-${other}-1`));
+      await fs.rm(path.join(markers, `${mode}-${other}-1`));
       (await mine)();
       expect(ran).toBe(true);
     } finally {
@@ -214,7 +214,7 @@ describe('WorkspaceGate', () => {
 
   // A command could swap a git config file for one naming a program, which
   // the jail puts back only when the command ends.
-  it('keeps the git tool apart from commands, and its calls together', async () => {
+  it('keeps the git tool apart from commands', async () => {
     const gate = new WorkspaceGate();
     const events: string[] = [];
     const command = await gate.enter('commands');
@@ -223,11 +223,10 @@ describe('WorkspaceGate', () => {
     expect(events).toEqual([]);
     command(); await tick();
     expect(events).toEqual(['git']);
-    const second = await gate.enter('git');
     const later = gate.enter('commands').then((leave) => { events.push('command'); return leave; });
     await tick();
     expect(events).toEqual(['git']);
-    (await git)(); second(); await tick();
+    (await git)(); await tick();
     expect(events).toEqual(['git', 'command']);
     (await later)();
   });

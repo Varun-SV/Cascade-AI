@@ -136,6 +136,7 @@ export class ToolRegistry extends EventEmitter {
   private readonly builtInMatcher: Ignore = ignore().add([...BUILT_IN_PROTECTED]);
   /** The workspace's `.cascadeignore`. */
   private ignoreMatcher: Ignore = ignore();
+  private ignorePatterns: string[] = [];
   private workspaceRoot: string;
   /** What the workspace folder was when this registry started: its real path and identity (checkRoot). */
   private rootIdentity: { real: string; id: string } | undefined;
@@ -343,13 +344,14 @@ export class ToolRegistry extends EventEmitter {
     // Using the library eliminates the old substring bug where `node_modules`
     // would also match `mynodemodules.js`.
     this.ignoreMatcher = ignore().add(patterns);
+    this.ignorePatterns = [...patterns];
     this.aliases = this.newAliases();
   }
 
   private newAliases(): LinkAliases {
     // Cascade's own folders too: a link in the workspace to the keys or a
     // project's state is that file under another name.
-    return new LinkAliases(this.workspaceRoot, (rel) => this.builtInMatcher.ignores(rel) || this.ignoreMatcher.ignores(rel), () => [globalDir(), projectStateDir(this.workspaceRoot)]);
+    return new LinkAliases(this.workspaceRoot, (rel) => this.builtInMatcher.ignores(rel) || this.ignoreMatcher.ignores(rel), () => [globalDir(), projectStateDir(this.workspaceRoot)], () => [...BUILT_IN_PROTECTED, ...this.ignorePatterns]);
   }
 
   getToolDefinitions(): ToolDefinition[] {

@@ -244,6 +244,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each choice does to that work — on the web and in the desktop app.
 
 ### Security
+- Hard-link aliases of protected or local-only dependency files stay protected,
+  including explicit rules through symlinked dependency folders, mixed-case
+  rules and `**/` prefixes. Commands refuse cyclic symlinks reached by such
+  rules. Git calls run one at a time across processes, so overlapping policy
+  snapshots cannot restore weaker `.cascadeignore` rules.
 - **Reading a provider's error no longer slows down on a crafted message.**
   Two patterns for "model … not found" were tried again from every
   "model " in the message, so one made of them took time growing with its

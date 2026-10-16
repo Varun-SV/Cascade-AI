@@ -111,7 +111,7 @@ export class CascadeIgnore {
       let aliases = this.aliases.get(workspacePath);
       if (!aliases) {
         const root = workspacePath;
-        aliases = new LinkAliases(root, (rel) => this.builtIn.ignores(rel) || this.ig.ignores(rel), () => [globalDir(), projectStateDir(root)]);
+        aliases = new LinkAliases(root, (rel) => this.builtIn.ignores(rel) || this.ig.ignores(rel), () => [globalDir(), projectStateDir(root)], () => this.getPatterns());
         this.aliases.set(workspacePath, aliases);
       }
       return aliases.isAlias(path.isAbsolute(filePath) ? filePath : path.join(workspacePath, filePath));

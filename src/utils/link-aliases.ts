@@ -10,9 +10,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-
-/** Directories not searched for covered files: git's own store, and installed packages. */
-const UNSEARCHED = new Set(['.git', 'node_modules']);
+import { reachesUnder } from './ignore-patterns.js';
 
 /**
  * A name no pattern is likely to name: when a directory's hypothetical child
@@ -35,7 +33,7 @@ export function fileIdentity(st: fs.Stats): string {
  * `complete` is false when a folder could not be listed: a covered file in
  * it could not be found, and its other names not known.
  */
-export function coveredLinkIdentities(root: string, covered: (rel: string) => boolean, wholeDirs: string[] = []): { ids: Set<string>; complete: boolean } {
+export function coveredLinkIdentities(root: string, covered: (rel: string) => boolean, wholeDirs: string[] = [], patterns: string[] = []): { ids: Set<string>; complete: boolean } {
   const ids = new Set<string>();
   let complete = true;
   const list = (dir: string): fs.Dirent[] => {
@@ -68,20 +66,34 @@ export function coveredLinkIdentities(root: string, covered: (rel: string) => bo
       else if (e.isFile() || e.isSymbolicLink()) record(abs);
     }
   };
-  const walk = (dir: string, relDir: string) => {
+  const walk = (dir: string, relDir: string, chain: string[]) => {
     for (const e of list(dir)) {
       const rel = relDir ? `${relDir}/${e.name}` : e.name;
       const abs = path.join(dir, e.name);
       if (e.isDirectory()) {
-        if (UNSEARCHED.has(e.name)) continue;
         if (covered(`${rel}/`) || covered(`${rel}/${PROBE}`)) all(abs);
-        else walk(abs, rel);
+        // File tools protect secret-named package files too. This walk is
+        // lazy, only needed when a file with multiple names is checked.
+        else if (e.name !== '.git') walk(abs, rel, [...chain, abs]);
       } else if ((e.isFile() || e.isSymbolicLink()) && (covered(rel) || covered(`${rel}/`))) {
         record(abs);
+      } else if (e.isSymbolicLink() && patterns.some((p) => reachesUnder(p, rel))) {
+        // The same target can have different policies under different
+        // names. Only the current branch detects cycles, not other walks.
+        try {
+          if (!fs.statSync(abs).isDirectory()) continue;
+          const real = fs.realpathSync(abs);
+          if (chain.includes(real)) { complete = false; continue; }
+          walk(real, rel, [...chain, real]);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') complete = false;
+        }
       }
     }
   };
-  walk(root, '');
+  let realRoot = root;
+  try { realRoot = fs.realpathSync(root); } catch { /* listing reports failures */ }
+  walk(realRoot, '', [realRoot]);
   for (const dir of wholeDirs) all(dir);
   return { ids, complete };
 }
@@ -100,6 +112,7 @@ export class LinkAliases {
     private readonly root: string,
     private readonly covered: (rel: string) => boolean,
     private readonly wholeDirs: () => string[] = () => [],
+    private readonly patterns: () => string[] = () => [],
   ) {}
 
   isAlias(absPath: string): boolean {
@@ -110,7 +123,7 @@ export class LinkAliases {
     // A second of slack, for filesystems that keep whole seconds.
     const changedSince = !this.found || st.ctimeMs >= this.found.at - 1000;
     if (changedSince && this.searchedFor.get(id) !== st.ctimeMs) {
-      this.found = { at: Date.now(), ...coveredLinkIdentities(this.root, this.covered, this.wholeDirs()) };
+      this.found = { at: Date.now(), ...coveredLinkIdentities(this.root, this.covered, this.wholeDirs(), this.patterns()) };
       this.searchedFor.set(id, st.ctimeMs);
     }
     // A search that could not look everywhere cannot say this file with

@@ -38,6 +38,28 @@ describe('PrivacyPaths', () => {
 });
 
 describe('PrivacyPaths.coversFile — a file on disk, under any name it has', () => {
+  it.each(['node_modules/private-pkg/**', 'NODE_MODULES/private-pkg/**', '**/node_modules/private-pkg/**'])('covers a hard-link alias of %s in a linked dependency folder', async (pattern) => {
+    const fs = await import('node:fs/promises');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-private-deps-')));
+    const deps = `${root}-deps`;
+    try {
+      await fs.mkdir(path.join(deps, 'private-pkg'), { recursive: true });
+      await fs.writeFile(path.join(deps, 'private-pkg', 'plan.txt'), 'private');
+      await fs.link(path.join(deps, 'private-pkg', 'plan.txt'), path.join(root, 'public.txt'));
+      await fs.symlink(deps, path.join(root, 'node_modules'), 'junction');
+      await fs.writeFile(path.join(root, 'normal.txt'), 'public');
+      await fs.link(path.join(root, 'normal.txt'), path.join(root, 'copy.txt'));
+      const privacy = new PrivacyPaths([{ pattern, policy: 'local-only' }]);
+      expect(privacy.coversFile(path.join(root, 'public.txt'), root)).toBe(true);
+      expect(privacy.coversFile(path.join(root, 'copy.txt'), root)).toBe(false);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+      await fs.rm(deps, { recursive: true, force: true });
+    }
+  });
+
   it('covers a file by its path in the workspace, and one reached through a symlink', async () => {
     const fs = await import('node:fs/promises');
     const os = await import('node:os');

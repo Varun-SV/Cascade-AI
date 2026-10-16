@@ -42,6 +42,8 @@ import { createHash } from 'node:crypto';
 import ignoreFactory from 'ignore';
 import { fileIdentity, PROBE } from '../../utils/link-aliases.js';
 import { stripTrailingSlashes } from '../../utils/net.js';
+import { reachesUnder, gitignoreRules } from '../../utils/ignore-patterns.js';
+export { reachesUnder, gitignoreRules } from '../../utils/ignore-patterns.js';
 import { isWithin } from '../../utils/real-path.js';
 import { onTrustedPath, trustedDirs } from '../../utils/trusted-exec.js';
 import { statePath } from '../../config/project-state.js';
@@ -73,84 +75,6 @@ const UNWALKED_DIRS = new Set(['.git', 'node_modules']);
  * read this way.
  */
 const LINKED_WALK_LIMIT = 50_000;
-
-/**
- * Whether a gitignore-style pattern could name something inside `rel/` by
- * that name: `alias/secret.txt` inside `alias`.
- *
- * Only an anchored pattern can. One that matches a name wherever it is, such
- * as `.env` or one starting with `**`, meets the same file by its real name
- * in the walk of the folder the link leads to, when that folder is in the
- * workspace. (When it is not, a command can open it by its real path anyway.)
- */
-export function reachesUnder(pattern: string, rel: string): boolean {
-  return gitignoreRules([pattern]).some((rule) => ruleReachesUnder(rule, rel));
-}
-
-function ruleReachesUnder(rule: string, rel: string): boolean {
-  const p = stripTrailingSlashes(rule);
-  if (!p.includes('/')) return false;
-  const segments = p.replace(/^\/+/, '').split('/');
-  if (segments[0] === '**') return false;
-  const names = rel.split('/');
-  for (let i = 0; i < names.length; i++) {
-    const segment = segments[i];
-    if (segment === undefined) return false;
-    if (segment === '**') return true;
-    if (!segmentMatches(segment, names[i]!)) return false;
-  }
-  return segments.length > names.length;
-}
-
-/**
- * One path segment of a gitignore pattern against one name. A class (`[ab]`)
- * is taken to match; a backslash makes the character after it literal.
- */
-function segmentMatches(segment: string, name: string): boolean {
-  if (segment.includes('[')) return true;
-  const literal = (c: string) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  let source = '';
-  for (let i = 0; i < segment.length; i++) {
-    const c = segment[i]!;
-    if (c === '\\' && i + 1 < segment.length) source += literal(segment[++i]!);
-    else if (c === '*') source += '[^/]*';
-    else if (c === '?') source += '[^/]';
-    else source += literal(c);
-  }
-  return new RegExp(`^${source}$`).test(name);
-}
-
-/**
- * The rules in gitignore-style patterns, read as the privacy matcher reads
- * them: a trailing line break dropped, and a trailing run of spaces unless
- * its first is escaped (`secret\ `), as git does; leading whitespace and
- * tabs kept; blank ones, comments, negations and one ending in a lone
- * backslash (no rule at all) left out. Escapes stay in, as git's pathspec
- * globs read them the same way.
- */
-export function gitignoreRules(patterns: string[]): string[] {
-  const out: string[] = [];
-  for (const pattern of patterns) {
-    // The matcher's own test: a backslash with nothing to escape.
-    if (pattern.endsWith('\\') && !pattern.endsWith('\\\\')) continue;
-    let end = pattern.length;
-    while (end > 0 && (pattern[end - 1] === '\n' || pattern[end - 1] === '\r')) end--;
-    const rule = trimTrailingSpaces(pattern.slice(pattern.startsWith('\uFEFF') ? 1 : 0, end));
-    if (!rule || rule.startsWith('#') || rule.startsWith('!')) continue;
-    out.push(rule);
-  }
-  return out;
-}
-
-/** `line` without its trailing spaces, but for one escaped by an odd run of backslashes before it. */
-function trimTrailingSpaces(line: string): string {
-  let end = line.length;
-  while (end > 0 && line[end - 1] === ' ') end--;
-  if (end === line.length) return line;
-  let slashes = 0;
-  while (end - slashes > 0 && line[end - slashes - 1] === '\\') slashes++;
-  return line.slice(0, slashes % 2 === 1 ? end + 1 : end);
-}
 
 /**
  * Cascade's folder is hidden whole, so a file Cascade writes there while a
@@ -942,7 +866,9 @@ export async function collectHidden(policy: JailPolicy, offline: boolean, nested
         if (target?.dir) {
           if (hide(`${rel}/`) || hide(`${rel}/${PROBE}`)) {
             out.push({ path: target.real, dir: true });
-          } else if (!UNWALKED_DIRS.has(entry.name) && !chain.includes(target.real)) {
+          } else if (chain.includes(target.real) && patterns.some((p) => reachesUnder(p, rel))) {
+            throw new Error(`Commands are not run: a protection or privacy rule reaches through the cyclic symlink "${rel}", so its paths could not all be hidden.`);
+          } else if (!chain.includes(target.real) && (!UNWALKED_DIRS.has(entry.name) || (entry.name !== '.git' && patterns.some((p) => reachesUnder(p, rel))))) {
             // A rule naming something inside it by the link's name —
             // `alias/secret.txt` for `alias -> data` — is met by no other
             // walk: the one of `data` goes by `data/secret.txt`. So it is

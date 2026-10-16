@@ -153,14 +153,11 @@ describe('collectHidden — a rule that reaches through a symlinked folder', () 
     await fs.rm(dir, { recursive: true, force: true });
   });
 
-  it('does not go round a link back to a folder it is already in', async () => {
-    // `**` reaches under the link at every depth, so only the guard stops it.
-    const { dir, hidden } = await withRule('loop/**/x.txt', async (d) => {
-      await fs.symlink(d, path.join(d, 'loop'));
+  it('refuses a cyclic alias rule rather than leave the paths it names visible', async () => {
+    await expect(withRule('loop/**/x.txt', async (d) => {
+      await fs.symlink(d, path.join(d, 'loop'), 'junction');
       await fs.writeFile(path.join(d, 'x.txt'), LOCAL);
-    });
-    expect(Array.isArray(hidden)).toBe(true);
-    await fs.rm(dir, { recursive: true, force: true });
+    })).rejects.toThrow(/cyclic symlink/);
   });
 
   it('refuses commands rather than leave a rule unchecked in a folder too big to read', async () => {
@@ -214,6 +211,24 @@ describe('collectHidden — a rule that reaches through a symlinked folder', () 
       await fs.symlink(path.join(d, 'data'), path.join(d, 'alias'));
     }, 0);
     await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it.each(['node_modules/private-pkg/**', 'NODE_MODULES/private-pkg/**', '**/node_modules/private-pkg/**'])('masks an explicit dependency rule %s through a symlinked node_modules', async (pattern) => {
+    const outside = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-linked-deps-')));
+    try {
+      await fs.mkdir(path.join(outside, 'private-pkg'));
+      await fs.writeFile(path.join(outside, 'private-pkg', 'index.js'), LOCAL);
+      const { dir, hidden } = await withRule(pattern, async (d) => {
+        await fs.symlink(outside, path.join(d, 'node_modules'), 'junction');
+      });
+      try {
+        expect(hidden).toContainEqual({ path: path.join(outside, 'private-pkg'), dir: true });
+      } finally {
+        await fs.rm(dir, { recursive: true, force: true });
+      }
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
   });
 });
 

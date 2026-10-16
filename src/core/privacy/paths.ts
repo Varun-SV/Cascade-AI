@@ -247,7 +247,7 @@ export class PrivacyPaths {
     if (real !== absPath && this.isLocalOnly(relativeWithin(realPathOf(root), real))) return true;
     // A hard link to a local-only file is that file under another name.
     let aliases = this.aliases.get(root);
-    if (!aliases) this.aliases.set(root, aliases = new LinkAliases(root, (rel) => this.isLocalOnly(rel)));
+    if (!aliases) this.aliases.set(root, aliases = new LinkAliases(root, (rel) => this.isLocalOnly(rel), () => [], () => this.localOnlyPatterns()));
     return aliases.isAlias(absPath);
   }
 

@@ -915,4 +915,20 @@ describe('ToolRegistry — a path changed while the call waited for its turn', (
       await fs.rm(ws, { recursive: true, force: true });
     }
   });
+
+  it('refuses a hard-link alias of an explicitly ignored dependency file', async () => {
+    const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-dependency-alias-')));
+    try {
+      await fs.mkdir(path.join(ws, 'node_modules', 'private-pkg'), { recursive: true });
+      await fs.writeFile(path.join(ws, 'node_modules', 'private-pkg', 'plan.txt'), 'private');
+      await fs.link(path.join(ws, 'node_modules', 'private-pkg', 'plan.txt'), path.join(ws, 'public.txt'));
+      await fs.writeFile(path.join(ws, 'readme.txt'), 'public');
+      const reg = new ToolRegistry(toolsConfig, ws);
+      reg.setIgnoredPaths(['node_modules/private-pkg/**']);
+      await expect(reg.execute('file_read', { path: 'public.txt' }, opts)).rejects.toThrow(/protected|ignored/i);
+      expect(await reg.execute('file_read', { path: 'readme.txt' }, opts)).toContain('public');
+    } finally {
+      await fs.rm(ws, { recursive: true, force: true });
+    }
+  });
 });

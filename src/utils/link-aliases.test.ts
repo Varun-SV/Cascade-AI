@@ -7,6 +7,40 @@ import { coveredLinkIdentities, LinkAliases } from './link-aliases.js';
 const tmp = (name: string) => fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), name)));
 
 describe('coveredLinkIdentities', () => {
+  it('recognizes hard links to covered dependency files and leaves unrelated links readable', () => {
+    const root = tmp('cascade-links-dependencies-');
+    try {
+      fs.mkdirSync(path.join(root, 'node_modules', 'private-pkg'), { recursive: true });
+      fs.writeFileSync(path.join(root, 'node_modules', 'private-pkg', 'plan.txt'), 'private');
+      fs.linkSync(path.join(root, 'node_modules', 'private-pkg', 'plan.txt'), path.join(root, 'public.txt'));
+      fs.writeFileSync(path.join(root, 'normal.txt'), 'public');
+      fs.linkSync(path.join(root, 'normal.txt'), path.join(root, 'copy.txt'));
+      const aliases = new LinkAliases(root, (rel) => rel.startsWith('node_modules/private-pkg/'));
+      expect(aliases.isAlias(path.join(root, 'public.txt'))).toBe(true);
+      expect(aliases.isAlias(path.join(root, 'copy.txt'))).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('finds a covered child through a directory alias without treating unrelated cycles as private', () => {
+    const root = tmp('cascade-links-directory-alias-');
+    try {
+      fs.mkdirSync(path.join(root, 'data'));
+      fs.writeFileSync(path.join(root, 'data', 'plan.txt'), 'private');
+      fs.linkSync(path.join(root, 'data', 'plan.txt'), path.join(root, 'public.txt'));
+      fs.symlinkSync(path.join(root, 'data'), path.join(root, 'alias'), 'junction');
+      fs.symlinkSync(root, path.join(root, 'data', 'loop'), 'junction');
+      fs.writeFileSync(path.join(root, 'normal.txt'), 'public');
+      fs.linkSync(path.join(root, 'normal.txt'), path.join(root, 'copy.txt'));
+      const aliases = new LinkAliases(root, (rel) => rel === 'alias/plan.txt', () => [], () => ['alias/plan.txt']);
+      expect(aliases.isAlias(path.join(root, 'public.txt'))).toBe(true);
+      expect(aliases.isAlias(path.join(root, 'copy.txt'))).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   // A covered name that is a symlink was skipped: the file it leads to,
   // under another name, read as public.
   it.skipIf(process.platform === 'win32')('follows a covered symlink to the file it leads to, and that file\'s other names', () => {
