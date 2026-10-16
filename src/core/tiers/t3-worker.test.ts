@@ -1,6 +1,8 @@
+import { onTrustedPath } from '../../utils/trusted-exec.js';
 import { describe, expect, it, vi } from 'vitest';
 import type {
   GenerateResult,
+  ModelInfo,
   PermissionDecision,
   PermissionRequest,
   T2ToT3Assignment,
@@ -11,8 +13,11 @@ import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import { PeerBus } from '../peer/bus.js';
 import { PermissionEscalator } from '../permissions/escalator.js';
-import { T3Worker, buildWorkerRules, canProduceFiles, canProduceNonDiskDeliverables, hasFileWritingTool, missingVisualEvidence, shouldRequireArtifact } from './t3-worker.js';
+import { T3Worker, buildWorkerRules, canProduceFiles, canProduceNonDiskDeliverables, hasFileWritingTool, missingVisualEvidence, shouldRequireArtifact, tscErrors } from './t3-worker.js';
 import { ACTING_INTEGRITY_RULE } from './integrity.js';
+import os from 'node:os';
+import path from 'node:path';
+import { statePath, STATE } from '../../config/project-state.js';
 
 function makeResult(
   content: string,
@@ -167,11 +172,14 @@ describe('T3Worker', () => {
     const worker = new T3Worker(router, toolRegistry, 't2-parent');
     worker.setPermissionEscalator(escalator);
 
-    const result = await worker.execute(makeAssignment(), 'task-1');
+    const run = new AbortController();
+    const result = await worker.execute(makeAssignment(), 'task-1', run.signal);
 
     expect(result.status).toBe('COMPLETED');
     expect(result.output).toBe('Final summary');
     expect(requestPermission).toHaveBeenCalledOnce();
+    // The run's signal goes with the question, so a cancelled run withdraws it.
+    expect(requestPermission.mock.calls[0]?.[1]).toBe(run.signal);
     expect(requestPermission.mock.calls[0]?.[0]).toEqual(expect.objectContaining<Partial<PermissionRequest>>({
       parentT2Id: 't2-parent',
       toolName: 'file_write',
@@ -839,5 +847,782 @@ describe('tool status display', () => {
     await worker.execute(makeAssignment(), 'task-real-tool');
 
     expect(statuses).toContain('Using tool: file_write');
+  });
+});
+
+describe('privacy.paths, enforced when a file is read', () => {
+  // The subtask's description said nothing about the private file, so the
+  // worker started on a cloud model — and used to stay there, carrying what
+  // it read into its next call.
+  const SECRET = 'TOP-SECRET-LAUNCH-PLAN';
+
+  async function workspace(): Promise<string> {
+    const { mkdtemp, mkdir, writeFile } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const root = await mkdtemp(join(tmpdir(), 'cascade-privacy-'));
+    await mkdir(join(root, 'secret'));
+    await writeFile(join(root, 'secret', 'plan.md'), `${SECRET}\n`);
+    await writeFile(join(root, 'notes.md'), `public notes, not the ${'launch'} plan\n`);
+    return root;
+  }
+
+  async function run(opts: {
+    privateModel: boolean;
+    call: ToolCall | ToolCall[];
+    assignment?: Partial<T2ToT3Assignment>;
+    setup?: (root: string) => Promise<void>;
+    escalator?: unknown;
+  }) {
+    const { ToolRegistry } = await import('../../tools/registry.js');
+    const { PrivacyPaths } = await import('../privacy/paths.js');
+    const root = await workspace();
+    await opts.setup?.(root);
+    const registry = new ToolRegistry(
+      { shellAllowlist: [], shellBlocklist: [], webSearch: {}, browserEnabled: false, requireApprovalFor: [] } as never,
+      root,
+    );
+    const calls: Array<{ forceLocal: boolean; text: string }> = [];
+    let turns = 0;
+    const router = {
+      getModelForTier: () => undefined,
+      getPrivacyPaths: () => new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]),
+      hasPrivateModel: () => opts.privateModel,
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }>; forceLocal?: boolean }) => {
+        calls.push({ forceLocal: options.forceLocal === true, text: JSON.stringify(options.messages) });
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        turns += 1;
+        const sequence = Array.isArray(opts.call) ? opts.call : [opts.call];
+        return turns <= sequence.length ? makeResult('', [sequence[turns - 1]!], 'tool_use') : makeResult('Summary written.');
+      }),
+    } as unknown as CascadeRouter;
+    const worker = new T3Worker(router, registry, 't2-parent');
+    if (opts.escalator) worker.setPermissionEscalator(opts.escalator as never);
+    const logs: string[] = [];
+    worker.on('log', (e: { message?: string }) => { if (e?.message) logs.push(e.message); });
+    const result = await worker.execute(makeAssignment({
+      subtaskTitle: 'Summarize', description: 'Summarize what the team is planning', expectedOutput: 'A short summary',
+      ...opts.assignment,
+    }), 'task-privacy');
+    return { calls, result, logs };
+  }
+
+  it('moves the subtask to a private model before what it read reaches any model', async () => {
+    const { calls, result } = await run({
+      privateModel: true,
+      call: { id: 'tc-1', name: 'file_read', input: { path: 'secret/plan.md' } },
+    });
+    expect(calls[0]?.forceLocal, 'nothing private was read yet').toBe(false);
+    const carrying = calls.filter((c) => c.text.includes(SECRET));
+    expect(carrying.length).toBeGreaterThan(0);
+    expect(carrying.every((c) => c.forceLocal)).toBe(true);
+    // …and the tiers above are told only that it ran, not what it said.
+    expect(result.localOnly).toBe(true);
+  });
+
+  it('refuses the read when no private model could take the subtask on', async () => {
+    const { calls, result } = await run({
+      privateModel: false,
+      call: { id: 'tc-1', name: 'file_read', input: { path: 'secret/plan.md' } },
+    });
+    expect(calls.some((c) => c.text.includes(SECRET))).toBe(false);
+    expect(calls.some((c) => c.text.includes('is local-only (privacy.paths)'))).toBe(true);
+    expect(result.localOnly).toBeFalsy();
+  });
+
+  it('keeps a local-only file out of a grep across the workspace, and the rest in', async () => {
+    const { calls } = await run({
+      privateModel: false,
+      call: { id: 'tc-1', name: 'grep', input: { pattern: 'plan', output_mode: 'content' } },
+    });
+    const seen = calls.map((c) => c.text).join('\n');
+    expect(seen).toContain('public notes');
+    expect(seen).not.toContain(SECRET);
+  });
+
+  // Given one file, rg prints its lines without naming it — so nothing
+  // told them from anyone else's, and they went through unchecked.
+  it('keeps a local-only file out of a grep of that one file', async () => {
+    const { calls } = await run({
+      privateModel: false,
+      call: { id: 'tc-1', name: 'grep', input: { pattern: 'PLAN', path: 'secret/plan.md', output_mode: 'content' } },
+    });
+    expect(calls.some((c) => c.text.includes(SECRET))).toBe(false);
+  });
+
+  it('lets a grep of a local-only file show it once the subtask can go private', async () => {
+    const { calls, result } = await run({
+      privateModel: true,
+      call: { id: 'tc-1', name: 'grep', input: { pattern: 'PLAN', path: 'secret/plan.md', output_mode: 'content' } },
+    });
+    expect(calls.filter((c) => c.text.includes(SECRET)).every((c) => c.forceLocal)).toBe(true);
+    expect(result.localOnly).toBe(true);
+  });
+
+  // A search moved the subtask only when a local-only file matched, so the
+  // cloud model was told "No matches found" whenever one did not — a fact
+  // about the file, learnt without ever leaving the cloud.
+  // The criterion was graded by reading the file directly — whether it
+  // exists, is empty, holds a string — for a worker still on a cloud model.
+  it('treats a local-only file an acceptance criterion checks as one the assignment names', async () => {
+    const { calls, result } = await run({
+      privateModel: true,
+      call: { id: 'tc-1', name: 'file_read', input: { path: 'notes.md' } },
+      assignment: { acceptance: ['secret/plan.md contains "LAUNCH"'] },
+    });
+    expect(calls[0]?.forceLocal).toBe(true);
+    expect(result.localOnly).toBe(true);
+  });
+
+  // Only a declared file with an extension counted, as artifact checks
+  // go, so one named `secret/token` started the subtask on a cloud model.
+  it('counts every file the assignment declares, one without an extension too', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const { calls, result } = await run({
+      privateModel: true,
+      call: { id: 'tc-1', name: 'file_read', input: { path: 'notes.md' } },
+      assignment: { files: ['secret/token'] },
+      setup: (root) => writeFile(join(root, 'secret', 'token'), 'tok\n'),
+    });
+    expect(calls[0]?.forceLocal).toBe(true);
+    expect(result.localOnly).toBe(true);
+  });
+
+  // A change went through for a cloud model's call: it could overwrite or
+  // delete a local-only file unseen, and learn from the answer whether it
+  // was there.
+  it('asks about a change to a local-only file as it does a read', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const escalator = { requestPermission: async (req: { id: string }) => ({ requestId: req.id, approved: true, decidedBy: 'USER' }) };
+    for (const call of [
+      { id: 'tc-1', name: 'file_write', input: { path: 'secret/plan.md', content: 'overwritten' } },
+      { id: 'tc-1', name: 'file_delete', input: { path: 'secret/plan.md' } },
+    ]) {
+      let root = '';
+      const refused = await run({ privateModel: false, call, escalator, setup: async (r) => { root = r; } });
+      expect(await readFile(join(root, 'secret', 'plan.md'), 'utf8'), call.name).toBe(`${SECRET}\n`);
+      expect(refused.calls.some((c) => c.text.includes('is local-only (privacy.paths)')), call.name).toBe(true);
+      expect(refused.result.localOnly, call.name).toBeFalsy();
+      const moved = await run({ privateModel: true, call, escalator });
+      expect(moved.result.localOnly, call.name).toBe(true);
+      expect(moved.calls.slice(1).every((c) => c.forceLocal), call.name).toBe(true);
+    }
+  });
+
+  // file_list and glob checked only the protected paths, so a local-only
+  // file's name — which a local-only subtask could have chosen to carry
+  // what it read — was listed to any worker.
+  it('leaves local-only files out of file_list and glob, directories covered whole included', async () => {
+    for (const call of [
+      { id: 'tc-1', name: 'file_list', input: { path: '.' } },
+      { id: 'tc-1', name: 'file_list', input: { path: 'secret' } },
+      { id: 'tc-1', name: 'glob', input: { pattern: '**/*.md' } },
+    ]) {
+      const { calls, result } = await run({ privateModel: true, call });
+      const answer = calls[1]?.text ?? '';
+      expect(answer, call.name).not.toMatch(/\[DIR\] secret|plan\.md/);
+      expect(result.localOnly, 'a listing does not move the subtask').toBeFalsy();
+      if (call.input.path !== 'secret') expect(answer, call.name).toContain('notes.md');
+    }
+  });
+
+  // The decision at the start went by the names the assignment gave, and
+  // verification then ran `node --check` on what the name led to — its
+  // diagnostics, quoting the source, went into the next prompt.
+  it('judges an artifact by what it is: a link to a local-only file makes the subtask local-only', async () => {
+    const { link } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const { calls, result } = await run({
+      privateModel: true,
+      call: { id: 'tc-1', name: 'file_read', input: { path: 'notes.md' } },
+      assignment: { files: ['out.js'] },
+      setup: (root) => link(join(root, 'secret', 'plan.md'), join(root, 'out.js')),
+    });
+    expect(calls[0]?.forceLocal).toBe(true);
+    expect(result.localOnly).toBe(true);
+  });
+
+  it('does not check an artifact that is a protected file under another name', async () => {
+    const { symlink, writeFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const { calls, result } = await run({
+      privateModel: true,
+      call: { id: 'tc-1', name: 'file_read', input: { path: 'notes.md' } },
+      assignment: { files: ['out.js'], acceptance: ['.env contains "sk-leak"'] },
+      setup: async (root) => {
+        await writeFile(join(root, '.env'), 'API_KEY sk-leak-0123456789 !!\n');
+        await symlink(join(root, '.env'), join(root, 'out.js'));
+      },
+    });
+    const seen = calls.map((c) => c.text).join('\n');
+    expect(seen).not.toContain('sk-leak-0123456789');
+    // …nor graded by reading it: whether `.env` holds a string is its contents.
+    expect(result.testResults.checksRun).not.toContain('.env contains "sk-leak"');
+  });
+
+  // verifyArtifacts read the files itself, outside the workspace gate, so it
+  // could read what a local-only command was writing before it was marked.
+  it('checks its artifacts only while no local-only command runs', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const { WorkspaceGate } = await import('../../tools/workspace-gate.js');
+    // Checked by artifact, then by acceptance criterion, each on its own.
+    for (const assignment of [{ files: ['out.md'] }, { acceptance: ['out.md exists'] }]) {
+      let released = false;
+      const { result } = await run({
+        privateModel: true,
+        call: [],
+        assignment,
+        setup: async (root) => {
+          await writeFile(join(root, 'out.md'), 'done\n');
+          const leave = await WorkspaceGate.for(root).enter('alone');
+          setTimeout(() => { released = true; leave(); }, 300);
+        },
+      });
+      expect(released, JSON.stringify(assignment)).toBe(true);
+      if (assignment.acceptance) expect(result.testResults.checksRun).toContain('out.md exists');
+    }
+  });
+
+  // `py_compile` wrote a .pyc of the artifact into __pycache__, outside the
+  // jail, where nothing marked it local-only.
+  it.skipIf(!onTrustedPath(['python3', 'python'], os.tmpdir()))('checks a Python artifact without writing bytecode', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    const { existsSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    let root = '';
+    const ok = await run({
+      privateModel: true,
+      call: [],
+      assignment: { files: ['tool.py'] },
+      setup: async (r) => { root = r; await writeFile(join(r, 'tool.py'), 'SECRET = "x"\nprint(SECRET)\n'); },
+    });
+    expect(ok.result.issues.join('\n')).not.toMatch(/Semantic error/);
+    expect(existsSync(join(root, '__pycache__'))).toBe(false);
+    const bad = await run({
+      privateModel: true,
+      call: [],
+      assignment: { files: ['bad.py'] },
+      setup: async (r) => { await writeFile(join(r, 'bad.py'), 'def broken(:\n'); },
+    });
+    // The check still runs: a syntax error is not accepted.
+    expect(ok.result.status).toBe('COMPLETED');
+    expect(bad.result.status).not.toBe('COMPLETED');
+  });
+
+  // tsc followed the artifact's imports into files nobody had asked about —
+  // a local-only one, say — and quoted them in the errors the model reads.
+  it('checks a TypeScript artifact alone, not the files it imports', async () => {
+    const { writeFile, mkdir } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const checked = await run({
+      privateModel: true,
+      call: [],
+      assignment: { files: ['out.ts'] },
+      setup: async (r) => {
+        await mkdir(join(r, 'secret'), { recursive: true });
+        await writeFile(join(r, 'secret', 'plan.ts'), 'export const plan: "LAUNCH-PLAN-SECRET" = "other";\n');
+        await writeFile(join(r, 'out.ts'), "import { plan } from './secret/plan';\nexport const shown = plan;\n");
+      },
+    });
+    // What the checks found goes back to the model in a correction prompt.
+    const seen = [...checked.calls.map((c) => c.text), ...checked.result.issues].join('\n');
+    expect(seen).not.toMatch(/LAUNCH-PLAN-SECRET|secret\/plan\.ts|Semantic error/);
+    // An error in the file itself is still found.
+    const bad = await run({
+      privateModel: true,
+      call: [],
+      assignment: { files: ['bad.ts'] },
+      setup: async (r) => { await writeFile(join(r, 'bad.ts'), 'export const n: number = "text";\n'); },
+    });
+    expect(bad.result.status).not.toBe('COMPLETED');
+  }, 60_000);
+
+  it('reads tsc\'s errors, leaving out modules it was told not to look for', () => {
+    expect(tscErrors([
+      "out.ts(1,22): error TS2307: Cannot find module './secret/plan' or its corresponding type declarations.",
+      "out.ts(2,7): error TS2322: Type 'string' is not assignable to type 'number'.",
+      '  more about it',
+    ].join('\n'))).toEqual(["out.ts(2,7): error TS2322: Type 'string' is not assignable to type 'number'.", '  more about it']);
+    expect(tscErrors("a.ts(1,1): error TS2792: Cannot find module 'x'.\n")).toEqual([]);
+  });
+
+  // The approval request for a call naming a local-only file went to the
+  // tier models — cloud ones — before the call moved the subtask private.
+  it('becomes local-only before asking about a call that names a local-only file', async () => {
+    const asked: Array<{ toolName: string; localOnly?: boolean }> = [];
+    const escalator = { requestPermission: async (req: { id: string; toolName: string; localOnly?: boolean }) => { asked.push(req); return { requestId: req.id, approved: false, decidedBy: 'USER' }; } };
+    const { result } = await run({
+      privateModel: true,
+      call: [{ id: 'tc-1', name: 'file_edit', input: { path: 'secret/plan.md', old_string: 'PLAN', new_string: 'NEW' } }],
+      escalator,
+    });
+    expect(asked).toEqual([expect.objectContaining({ toolName: 'file_edit', localOnly: true })]);
+    expect(result.localOnly).toBe(true);
+  });
+
+  // A failed read fell back to the first tool sharing a word with it —
+  // file_write — and ran it with no approval asked.
+  it('does not turn a failed read into a write, and asks afresh for the tool a fallback runs', async () => {
+    const { existsSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    let root = '';
+    const asked: string[] = [];
+    const escalator = { requestPermission: async (req: { id: string; toolName: string }) => { asked.push(req.toolName); return { requestId: req.id, approved: true, decidedBy: 'USER' }; } };
+    await run({
+      privateModel: true,
+      call: [{ id: 'tc-1', name: 'file_read', input: { path: 'made.txt', content: 'WRITTEN' } }],
+      setup: async (r) => { root = r; },
+      escalator,
+    });
+    expect(existsSync(join(root, 'made.txt'))).toBe(false);
+    expect(asked).not.toContain('file_write');
+    // A name no tool has may still find one — asked about as itself.
+    const denying = { requestPermission: async (req: { id: string; toolName: string }) => { asked.push(req.toolName); return { requestId: req.id, approved: false, decidedBy: 'USER' }; } };
+    await run({
+      privateModel: true,
+      call: [{ id: 'tc-1', name: 'write_file', input: { path: 'made.txt', content: 'WRITTEN' } }],
+      setup: async (r) => { root = r; },
+      escalator: denying,
+    });
+    expect(asked).toContain('file_write');
+    expect(existsSync(join(root, 'made.txt'))).toBe(false);
+  });
+
+  // Verification ran `npx tsc`, which runs a workspace's node_modules/.bin/tsc
+  // first, with Cascade's own permissions and outside the jail; and `python`
+  // from wherever PATH named, a folder in the workspace included.
+  it.skipIf(process.platform === 'win32')('never runs a compiler the workspace supplies to check an artifact', async () => {
+    const { writeFile, mkdir, chmod } = await import('node:fs/promises');
+    const { existsSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    let root = '';
+    const before = process.env['PATH'];
+    try {
+      await run({
+        privateModel: true,
+        call: [],
+        assignment: { files: ['tool.ts', 'tool.py'] },
+        setup: async (r) => {
+          root = r;
+          await writeFile(join(r, 'tool.ts'), 'export const x: number = 1;\n');
+          await writeFile(join(r, 'tool.py'), 'x = 1\n');
+          for (const [dir, name] of [['node_modules/.bin', 'tsc'], ['bin', 'python3'], ['bin', 'python']]) {
+            await mkdir(join(r, dir), { recursive: true });
+            await writeFile(join(r, dir, name), `#!/bin/sh\ntouch "${join(r, `ran-${name}`)}"\n`);
+            await chmod(join(r, dir, name), 0o755);
+          }
+          process.env['PATH'] = `${join(r, 'bin')}:${join(r, 'node_modules/.bin')}:${before ?? ''}`;
+        },
+      });
+    } finally {
+      process.env['PATH'] = before;
+    }
+    expect(existsSync(join(root, 'ran-tsc'))).toBe(false);
+    expect(existsSync(join(root, 'ran-python3'))).toBe(false);
+    expect(existsSync(join(root, 'ran-python'))).toBe(false);
+  });
+
+  // A local-only subtask's new file is made in its private folder, so the
+  // checks that looked for it in the workspace found nothing there.
+  it('finds a local-only subtask\'s artifact where it was made, in its private folder', async () => {
+    const { existsSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    let root = '';
+    const { result } = await run({
+      privateModel: true,
+      call: [
+        { id: 'tc-1', name: 'file_read', input: { path: 'secret/plan.md' } },
+        { id: 'tc-2', name: 'file_write', input: { path: 'summary.md', content: 'The plan, summarized.\n' } },
+      ],
+      assignment: { files: ['summary.md'], acceptance: ['summary.md exists'] },
+      setup: async (r) => { root = r; },
+      escalator: { requestPermission: async (req: { id: string }) => ({ requestId: req.id, approved: true, decidedBy: 'USER' }) },
+    });
+    expect(existsSync(join(root, 'summary.md'))).toBe(false);
+    expect(existsSync(statePath(root, STATE.private, 'summary.md'))).toBe(true);
+    expect(result.status).toBe('COMPLETED');
+    expect(result.issues.join('\n')).not.toMatch(/not created|does not exist/);
+    expect(result.testResults.passed).toContain('summary.md exists');
+  });
+
+  // The approval request carried the call's input to the T2 and T1
+  // evaluators, whose models may be cloud ones.
+  it('marks a local-only subtask\'s approval request, so no tier model is asked about it', async () => {
+    const asked: Array<{ toolName: string; localOnly?: boolean }> = [];
+    const escalator = {
+      requestPermission: async (req: { id: string; toolName: string; localOnly?: boolean }) => {
+        asked.push(req);
+        return { requestId: req.id, approved: false, decidedBy: 'USER' };
+      },
+    };
+    const write = { id: 'tc-2', name: 'file_write', input: { path: 'summary.md', content: 'x' } };
+    await run({ privateModel: true, call: write, escalator });
+    expect(asked.find((r) => r.toolName === 'file_write')?.localOnly).toBe(false);
+    asked.length = 0;
+    await run({ privateModel: true, call: [{ id: 'tc-1', name: 'file_read', input: { path: 'secret/plan.md' } }, write], escalator });
+    expect(asked.find((r) => r.toolName === 'file_write')?.localOnly).toBe(true);
+  });
+
+  it('asks about a file the grep names before searching it, match or not', async () => {
+    const { calls, result } = await run({
+      privateModel: true,
+      call: { id: 'tc-1', name: 'grep', input: { pattern: 'NOT-IN-THE-PLAN', path: 'secret/plan.md' } },
+    });
+    expect(result.localOnly).toBe(true);
+    const answer = calls.find((c) => c.text.includes('No matches found'));
+    expect(answer?.forceLocal).toBe(true);
+  });
+
+  it('leaves local-only files out of a search across the workspace, whether or not they would match', async () => {
+    for (const pattern of ['PLAN', 'NOT-IN-THE-PLAN']) {
+      const { calls, result } = await run({
+        privateModel: true,
+        call: { id: 'tc-1', name: 'grep', input: { pattern, output_mode: 'content' } },
+      });
+      expect(result.localOnly, pattern).toBeFalsy();
+      expect(calls.some((c) => c.text.includes(SECRET)), pattern).toBe(false);
+    }
+  });
+
+  // Reading the file moved the worker onto a private model — and its next
+  // call could still put what it read in a URL for web_fetch to send.
+  it('keeps what it read from leaving through a tool once it has gone local-only', async () => {
+    const { ToolRegistry } = await import('../../tools/registry.js');
+    const { PrivacyPaths } = await import('../privacy/paths.js');
+    const root = await workspace();
+    const registry = new ToolRegistry(
+      { shellAllowlist: [], shellBlocklist: [], webSearch: {}, browserEnabled: false, requireApprovalFor: [] } as never,
+      root,
+    );
+    const seen: string[] = [];
+    let turns = 0;
+    const router = {
+      getModelForTier: () => undefined,
+      getPrivacyPaths: () => new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]),
+      hasPrivateModel: () => true,
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> }) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        seen.push(content);
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        turns += 1;
+        if (turns === 1) return makeResult('', [{ id: 'tc-1', name: 'file_read', input: { path: 'secret/plan.md' } }], 'tool_use');
+        if (turns === 2) return makeResult('', [{ id: 'tc-2', name: 'web_fetch', input: { url: `https://example.com/?q=${SECRET}` } }], 'tool_use');
+        return makeResult('Done.');
+      }),
+    } as unknown as CascadeRouter;
+    const worker = new T3Worker(router, registry, 't2-parent');
+    const result = await worker.execute(makeAssignment({ description: 'Summarize the plan' }), 'task-egress');
+    expect(result.localOnly).toBe(true);
+    expect(seen.join('\n')).toContain('web_fetch is unavailable to a local-only subtask');
+  });
+
+  // Peers and the tiers above got a placeholder, while the status, stream and
+  // tool events — which the dashboard broadcasts to its socket clients and
+  // the audit log records — carried the output itself.
+  it('keeps what it read out of the events its work emits', async () => {
+    const { ToolRegistry } = await import('../../tools/registry.js');
+    const { PrivacyPaths } = await import('../privacy/paths.js');
+    const root = await workspace();
+    const registry = new ToolRegistry(
+      { shellAllowlist: [], shellBlocklist: [], webSearch: {}, browserEnabled: false, requireApprovalFor: [] } as never,
+      root,
+    );
+    let turns = 0;
+    const router = {
+      getModelForTier: () => undefined,
+      getPrivacyPaths: () => new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]),
+      hasPrivateModel: () => true,
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> }, onChunk?: (c: { text: string }) => void) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        turns += 1;
+        if (turns === 1) return makeResult('', [{ id: 'tc-1', name: 'file_read', input: { path: 'secret/plan.md' } }], 'tool_use');
+        if (turns === 2) return makeResult('', [{ id: 'tc-2', name: 'file_read', input: { path: 'notes.md', note: SECRET } }], 'tool_use');
+        // A name it was never given, and a value the schema refuses, each
+        // chosen to carry what it read.
+        if (turns === 3) return makeResult('', [{ id: 'tc-3', name: `read_${SECRET}`, input: {} }], 'tool_use');
+        if (turns === 4) return makeResult('', [{ id: 'tc-4', name: 'grep', input: { pattern: 'x', output_mode: SECRET } }], 'tool_use');
+        onChunk?.({ text: `The plan: ${SECRET}` });
+        return makeResult(`The plan: ${SECRET}`);
+      }),
+    } as unknown as CascadeRouter;
+    const worker = new T3Worker(router, registry, 't2-parent');
+    const events: string[] = [];
+    for (const name of ['tier:status', 'status', 'stream:token', 'tool:call', 'tool:result', 'log', 'message']) {
+      worker.on(name, (e: unknown) => { events.push(`${name} ${JSON.stringify(e)}`); });
+    }
+    const result = await worker.execute(makeAssignment({ description: 'Summarize the plan' }), 'task-events');
+    expect(result.localOnly).toBe(true);
+    expect(result.output).toContain(SECRET);
+    expect(events.filter((e) => e.includes(SECRET))).toEqual([]);
+    expect(events.some((e) => e.startsWith('tier:status') && e.includes('output withheld by privacy policy'))).toBe(true);
+    expect(events.some((e) => e.startsWith('tool:result'))).toBe(true);
+    // Once local-only, a name from the list it was given still shows.
+    expect(events.some((e) => e.startsWith('tool:call') && e.includes('"id":"tc-2"') && e.includes('"toolName":"file_read"')), 'a name it was given shows').toBe(true);
+    expect(events.some((e) => e.includes('name withheld'))).toBe(true);
+  });
+
+  // The request was still shaped for the cloud model it started on: native
+  // tool definitions and no text-tool contract, handed to a local model that
+  // cannot use either once the router swapped it in.
+  it('speaks the private model\'s tool protocol once a read moves the subtask to it', async () => {
+    const { ToolRegistry } = await import('../../tools/registry.js');
+    const { PrivacyPaths } = await import('../privacy/paths.js');
+    const root = await workspace();
+    const registry = new ToolRegistry(
+      { shellAllowlist: [], shellBlocklist: [], webSearch: {}, browserEnabled: false, requireApprovalFor: [] } as never,
+      root,
+    );
+    const cloud = { id: 'cloud-1', provider: 'anthropic', supportsToolUse: true } as unknown as ModelInfo;
+    const local = { id: 'llama-local', provider: 'ollama', supportsToolUse: false } as unknown as ModelInfo;
+    const requests: Array<{ model?: ModelInfo; tools?: unknown; systemPrompt?: string }> = [];
+    let turns = 0;
+    const router = {
+      getModelForTier: () => cloud,
+      getPrivacyPaths: () => new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]),
+      hasPrivateModel: () => true,
+      getPrivateModel: () => local,
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }>; model?: ModelInfo; tools?: unknown; systemPrompt?: string }) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        requests.push({ model: options.model, tools: options.tools, systemPrompt: options.systemPrompt });
+        turns += 1;
+        if (turns === 1) return makeResult('', [{ id: 'tc-1', name: 'file_read', input: { path: 'secret/plan.md' } }], 'tool_use');
+        return makeResult('Summary written.');
+      }),
+    } as unknown as CascadeRouter;
+    const worker = new T3Worker(router, registry, 't2-parent');
+    const result = await worker.execute(makeAssignment({ description: 'Summarize the plan' }), 'task-protocol');
+    expect(result.localOnly).toBe(true);
+    expect(requests[0]?.tools, 'the cloud model is sent native tools').toBeDefined();
+    const after = requests[1]!;
+    expect(after.model?.id).toBe('llama-local');
+    expect(after.tools).toBeUndefined();
+    expect(after.systemPrompt).toContain('TOOL USE INSTRUCTIONS');
+  });
+
+  // Copying is not reading: the private bytes would land in a file anything
+  // can read later, whatever model the worker is on.
+  it('copies a local-only image only into a document that is itself local-only', async () => {
+    const { ToolRegistry } = await import('../../tools/registry.js');
+    const { GenerateDocumentTool } = await import('../../tools/generate-document.js');
+    const { PrivacyPaths } = await import('../privacy/paths.js');
+    const { writeFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const root = await workspace();
+    const png = Buffer.alloc(33);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    png.writeUInt32BE(13, 8); png.write('IHDR', 12, 'latin1'); png.writeUInt32BE(8, 16); png.writeUInt32BE(8, 20); png[24] = 8; png[25] = 6;
+    await writeFile(join(root, 'secret', 'diagram.png'), png);
+    const registry = new ToolRegistry(
+      { shellAllowlist: [], shellBlocklist: [], webSearch: {}, browserEnabled: false, requireApprovalFor: [] } as never,
+      root,
+    );
+    const doc = new GenerateDocumentTool();
+    doc.setWorkspaceRoot(root);
+    registry.register(doc);
+    const seen: string[] = [];
+    let turns = 0;
+    const router = {
+      getModelForTier: () => undefined,
+      getPrivacyPaths: () => new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]),
+      hasPrivateModel: () => true,
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> }) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        seen.push(content);
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        turns += 1;
+        if (turns === 1) return makeResult('', [{ id: 'tc-1', name: 'generate_document', input: { path: 'deck.pptx', content: '# S\n\n![d](secret/diagram.png)\n' } }], 'tool_use');
+        if (turns === 2) return makeResult('', [{ id: 'tc-2', name: 'generate_document', input: { path: 'secret/deck.pptx', content: '# S\n\n![d](secret/diagram.png)\n' } }], 'tool_use');
+        return makeResult('Done.');
+      }),
+    } as unknown as CascadeRouter;
+    const worker = new T3Worker(router, registry, 't2-parent');
+    // generate_document writes files, so it asks first.
+    worker.setPermissionEscalator({ requestPermission: async () => ({ requestId: 'r', approved: true, decidedBy: 'test' }) } as never);
+    const result = await worker.execute(makeAssignment(), 'task-copy');
+    const log = seen.join('\n');
+    expect(log).toContain('secret/diagram.png (local-only');
+    expect(log).toContain('Embedded 1 image');
+    // Writing into a local-only path moves the subtask, as reading one would.
+    expect(result.localOnly).toBe(true);
+  }, 30_000);
+
+  it('lets a local-only subtask neither message its peers nor ask for more workers', async () => {
+    const bus = new PeerBus();
+    const send = vi.spyOn(bus, 'send');
+    const registry = makeToolRegistry({
+      getToolDefinitions: () => [{ name: 'peer_message', description: 'Message a peer', inputSchema: {} }],
+      execute: vi.fn(async (_name: string, _input: unknown, options: { sendPeerSync?: (...a: unknown[]) => void }) => {
+        options.sendPeerSync?.('t3-other', 'info', SECRET);
+        return 'sent';
+      }),
+    } as unknown as Partial<ToolRegistry>);
+    let turns = 0;
+    const seen: string[] = [];
+    const router = {
+      getModelForTier: () => undefined,
+      getPrivacyPaths: () => ({ hasPolicies: () => true, anyLocalOnly: () => true, coversFile: () => true }),
+      getReinforcementsConfig: () => ({ enabled: true, maxPerSection: 4 }),
+      hasPrivateModel: () => true,
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> }) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        seen.push(content);
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        turns += 1;
+        if (turns === 1) {
+          return makeResult('', [
+            { id: 'tc-1', name: 'peer_message', input: { to: 't3-other', content: SECRET } },
+            { id: 'tc-2', name: 'request_workers', input: { subtasks: [{ title: 'more', description: SECRET }] } },
+          ], 'tool_use');
+        }
+        return makeResult('Done.');
+      }),
+    } as unknown as CascadeRouter;
+    const worker = new T3Worker(router, registry, 't2-parent');
+    worker.setPeerBus(bus);
+    const result = await worker.execute(makeAssignment({ description: 'Summarize secret/plan.md' }), 'task-local');
+
+    expect(send).not.toHaveBeenCalled();
+    expect(result.reinforcements ?? []).toEqual([]);
+    expect(seen.join('\n')).toContain('cannot message its peers');
+    expect(seen.join('\n')).toContain('request_workers is unavailable to a local-only subtask');
+  });
+
+  // Blocking peer_message left the automatic publication at the end of every
+  // subtask: a dependent sibling waiting on this one got its raw output, and
+  // put it in front of whatever model it was on. The knowledge graph was the
+  // same leak with a delay — facts distilled from the output, searchable by
+  // any later worker.
+  it('tells siblings and the knowledge graph only that a local-only subtask ran', async () => {
+    const bus = new PeerBus();
+    const registry = makeToolRegistry({ getToolDefinitions: () => [] } as unknown as Partial<ToolRegistry>);
+    const prompts: string[] = [];
+    const db = { addEntry: vi.fn(), addFacts: vi.fn(), addFact: vi.fn() };
+    const router = {
+      getModelForTier: () => undefined,
+      getPrivacyPaths: () => ({ hasPolicies: () => true, anyLocalOnly: () => true, coversFile: () => true }),
+      hasPrivateModel: () => true,
+      getWorldStateDB: () => db,
+      getKnowledgeConfig: () => ({ factsExtraction: true }),
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> }) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        prompts.push(content);
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        if (content.includes('Extract durable project facts')) {
+          return makeResult(`[{"entity":"launch","relation":"is","value":"${SECRET}"}]`);
+        }
+        return makeResult(`The plan says ${SECRET}.`);
+      }),
+    } as unknown as CascadeRouter;
+    const worker = new T3Worker(router, registry, 't2-parent');
+    worker.setPeerBus(bus);
+    const published = bus.waitFor('subtask-1', 30_000);
+    const result = await worker.execute(makeAssignment({ description: 'Summarize secret/plan.md' }), 'task-local-publish');
+
+    expect(result.localOnly).toBe(true);
+    const peer = await published;
+    expect(peer.status).toBe('COMPLETED');
+    expect(peer.output).not.toContain(SECRET);
+    expect(peer.output).toContain('output withheld by privacy policy');
+    expect(prompts.some((p) => p.includes('Extract durable project facts'))).toBe(false);
+    expect(JSON.stringify(db.addEntry.mock.calls)).not.toContain(SECRET);
+    // Nor its length, which a planner on a cloud model reads.
+    expect(JSON.stringify(db.addEntry.mock.calls)).not.toMatch(/length|\d+ chars/i);
+    expect(JSON.stringify(db.addEntry.mock.calls)).toContain('Output withheld (local-only)');
+  });
+});
+
+// A local-only subtask's new document is written to its private folder,
+// outside the project, where no pattern covers it: a local-only image was
+// refused a place in it, as though it were a public file.
+describe('T3Worker — copying into its private folder', () => {
+  it('lets a local-only file into a document in the private folder, and not into a public one', () => {
+    const ws = path.join(os.tmpdir(), 'cascade-copy-private');
+    const privacy = { hasPolicies: () => true, anyLocalOnly: () => true, coversFile: (abs: string) => abs.includes(`${path.sep}secret${path.sep}`) };
+    const router = { getPrivacyPaths: () => privacy, hasPrivateModel: () => true } as unknown as CascadeRouter;
+    const registry = makeToolRegistry({ getToolDefinitions: () => [], getWorkspaceRoot: () => ws } as unknown as Partial<ToolRegistry>);
+    const worker = new T3Worker(router, registry, 't2-parent');
+    const mayRead = (worker as unknown as { mayRead: (abs: string, to: unknown) => boolean }).mayRead;
+    const image = path.join(ws, 'secret', 'diagram.png');
+    expect(mayRead(image, { file: statePath(ws, STATE.private, 'deck.pptx') })).toBe(true);
+    expect(mayRead(image, { file: path.join(ws, 'deck.pptx') })).toBe(false);
+    expect(mayRead(image, { file: `${statePath(ws, STATE.private)}-elsewhere${path.sep}deck.pptx` })).toBe(false);
+  });
+});
+
+// A fact must say where it came from, so it can be set aside if that file
+// turns local-only later (world-state factMayLeave).
+describe('T3Worker — where its facts came from', () => {
+  it('records the files it was set to work on and those it read into a prompt', async () => {
+    const ws = path.join(os.tmpdir(), 'cascade-fact-sources');
+    const db = { upsertFact: vi.fn() };
+    const router = {
+      getPrivacyPaths: () => ({ hasPolicies: () => true, coversFile: (abs: string) => abs.includes(`${path.sep}secret${path.sep}`) }),
+      hasPrivateModel: () => false,
+      generate: vi.fn(async () => makeResult('[{"entity":"auth","relation":"uses","value":"JWT"}]')),
+    } as unknown as CascadeRouter;
+    const registry = makeToolRegistry({ getToolDefinitions: () => [], getWorkspaceRoot: () => ws } as unknown as Partial<ToolRegistry>);
+    const worker = new T3Worker(router, registry, 't2-parent');
+    const mayRead = (worker as unknown as { mayRead: (abs: string, to: unknown) => boolean }).mayRead;
+    expect(mayRead(path.join(ws, 'src', 'auth.ts'), 'model')).toBe(true);
+    // Not read into a prompt: a name seen by a search, and a read refused.
+    expect(mayRead(path.join(ws, 'src', 'other.ts'), 'scan')).toBe(true);
+    expect(mayRead(path.join(ws, 'secret', 'plan.md'), 'model')).toBe(false);
+
+    await (worker as unknown as { extractAndStoreFacts: (db: unknown, a: T2ToT3Assignment, out: string) => Promise<void> })
+      .extractAndStoreFacts(db, makeAssignment({ files: ['README.md'] }), 'The auth module uses JWT.');
+    expect(db.upsertFact).toHaveBeenCalledWith('auth', 'uses', 'JWT', worker.id, undefined, ['README.md', 'src/auth.ts']);
+  });
+
+  // A command's reads are not seen, so its facts were recorded as coming
+  // from the named files alone — and kept once another turned local-only.
+  it('records its facts\' sources as unknown once a tool whose reads are not seen has run', async () => {
+    const db = { upsertFact: vi.fn() };
+    const router = {
+      getPrivacyPaths: () => ({ hasPolicies: () => true, coversFile: () => false }),
+      hasPrivateModel: () => false,
+      generate: vi.fn(async () => makeResult('[{"entity":"auth","relation":"uses","value":"JWT"}]')),
+    } as unknown as CascadeRouter;
+    const registry = makeToolRegistry({ getToolDefinitions: () => [], getWorkspaceRoot: () => os.tmpdir() } as unknown as Partial<ToolRegistry>);
+    const worker = new T3Worker(router, registry, 't2-parent');
+    const internals = worker as unknown as {
+      noteRan: (name: string) => void;
+      extractAndStoreFacts: (db: unknown, a: T2ToT3Assignment, out: string) => Promise<void>;
+    };
+    internals.noteRan('file_read');
+    await internals.extractAndStoreFacts(db, makeAssignment({ files: ['README.md'] }), 'The auth module uses JWT.');
+    expect(db.upsertFact).toHaveBeenLastCalledWith('auth', 'uses', 'JWT', worker.id, undefined, ['README.md']);
+    for (const tool of ['shell', 'run_code', 'git', 'code_search']) {
+      const fresh = new T3Worker(router, registry, 't2-parent') as unknown as typeof internals;
+      fresh.noteRan(tool);
+      await fresh.extractAndStoreFacts(db, makeAssignment({ files: ['README.md'] }), 'The auth module uses JWT.');
+      expect(db.upsertFact, tool).toHaveBeenLastCalledWith('auth', 'uses', 'JWT', expect.any(String), undefined, null);
+    }
   });
 });

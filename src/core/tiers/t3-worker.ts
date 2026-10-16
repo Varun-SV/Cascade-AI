@@ -9,6 +9,7 @@ import type {
   GenerateOptions,
   ModelInfo,
   PermissionRequest,
+  ReadDestination,
   T2ToT3Assignment,
   T3Result,
   TaskType,
@@ -32,6 +33,7 @@ import {
   buildTextToolReminder,
 } from '../../tools/text-tool-parser.js';
 import { truncateForContext } from '../../utils/truncate.js';
+import { leavesBase } from '../../utils/real-path.js';
 import { classifyProviderError } from '../router/provider-errors.js';
 import {
   evaluateAcceptance, failures, undecided, type AcceptanceResult,
@@ -39,6 +41,8 @@ import {
 import { ACTING_INTEGRITY_RULE, appendToolRecord, describeHandedWork, describeToolRecord, recordToolCall, type HandedWork, type ToolRecordEntry } from './integrity.js';
 import { RedactionLayer } from '../audit/redaction.js';
 import { BROWSER_TOOL, BROWSER_WORKER_RULE } from './browser-planning.js';
+import { statePath, STATE } from '../../config/project-state.js';
+import { onTrustedPath, ownTsc } from '../../utils/trusted-exec.js';
 
 /**
  * Thrown by executeTool() when the underlying tool error indicates a condition
@@ -356,6 +360,19 @@ export function missingVisualEvidence(
   }. Describing a picture is not producing one.`;
 }
 
+/**
+ * Tools whose reads of workspace files this worker sees — each passes
+ * through mayRead, which records the file as a source of what the subtask
+ * learns — or which read none. A fact learned after any other tool ran (a
+ * command, code search, an agent-written or outside tool) could come from
+ * any file, so its sources are recorded as unknown.
+ */
+const READS_SEEN = new Set([
+  'file_read', 'file_write', 'file_edit', 'file_delete', 'file_list', 'glob', 'grep',
+  'image_analyze', 'pdf_create', 'generate_document', 'transcribe_audio',
+  'web_search', 'web_fetch', 'peer_message',
+]);
+
 export class T3Worker extends BaseTier {
   protected router: CascadeRouter;
   private toolRegistry: ToolRegistry;
@@ -377,6 +394,10 @@ export class T3Worker extends BaseTier {
    * See describeToolRecord.
    */
   private toolRecord: ToolRecordEntry[] = [];
+  /** Workspace files this subtask read into a prompt: its facts' sources. */
+  private readForModel = new Set<string>();
+  /** Whether it ran a tool whose reads are not seen (READS_SEEN): then its facts' sources are unknown. */
+  private readsUnseen = false;
   /**
    * What the subtasks this one depends on handed it. Their tool calls are in
    * THEIR records, so the self-test is shown this to tell a report of what
@@ -448,6 +469,8 @@ export class T3Worker extends BaseTier {
     this.assignment = assignment;
     this.taskId = taskId;
     this.toolRecord = [];
+    this.readForModel = new Set();
+    this.readsUnseen = false;
     this.handedWork = [];
     this.setLabel(assignment.subtaskTitle);
     this.setStatus('ACTIVE');
@@ -455,8 +478,12 @@ export class T3Worker extends BaseTier {
     // ── Per-path privacy tier ──────────────────
     // A subtask touching a local-only path runs on private models only and
     // its raw output is withheld from the tiers above (see privacy/paths.ts).
+    // Judged by what each target is, not only its name: an artifact that is
+    // a symlink or hard link to a local-only file is that file.
     const privacy = this.router.getPrivacyPaths?.();
-    this.localOnlyMatch = !!privacy?.hasPolicies() && privacy.anyLocalOnly(this.extractArtifactPaths(assignment));
+    const root = this.artifactRoot();
+    this.localOnlyMatch = !!privacy?.hasPolicies()
+      && this.privacyTargets(assignment).some((target) => privacy.coversFile(path.resolve(root, target), root));
     if (this.localOnlyMatch) {
       this.log('Privacy: subtask touches a local-only path — forcing a private model; raw output will be withheld upstream.');
     }
@@ -609,7 +636,7 @@ export class T3Worker extends BaseTier {
           issues.push(...retryArtifactCheck.issues);
           this.setStatus('FAILED');
           // ── Publish failure to peers ──
-          this.peerBus?.publish(this.id, assignment.subtaskId, output, 'ESCALATED');
+          this.publishOutcome(assignment.subtaskId, output, 'ESCALATED');
           return this.buildResult('ESCALATED', output, { checksRun, passed, failed }, issues, correctionAttempts);
         }
       }
@@ -656,7 +683,7 @@ export class T3Worker extends BaseTier {
           checksRun.push(...acceptanceResults.map((r) => r.criterion));
           failed.push(...recheck);
           this.setStatus('FAILED');
-          this.peerBus?.publish(this.id, assignment.subtaskId, output, 'ESCALATED');
+          this.publishOutcome(assignment.subtaskId, output, 'ESCALATED');
           return this.buildResult('ESCALATED', output, { checksRun, passed, failed }, issues, correctionAttempts);
         }
       }
@@ -690,7 +717,7 @@ export class T3Worker extends BaseTier {
         if (retest.failed.length > 0) {
           failed.push(...retest.failed);
           this.setStatus('FAILED');
-          this.peerBus?.publish(this.id, assignment.subtaskId, output, 'ESCALATED');
+          this.publishOutcome(assignment.subtaskId, output, 'ESCALATED');
           return this.buildResult('ESCALATED', output, { checksRun, passed, failed }, issues, correctionAttempts);
         }
       }
@@ -719,22 +746,28 @@ export class T3Worker extends BaseTier {
       const db = this.router.getWorldStateDB?.();
       if (db) {
         try {
-          db.addEntry(this.id, `Completed: ${assignment.subtaskTitle}. Output length: ${output.length} chars.`);
+          // Nothing about a local-only output, its length included: a planner
+          // on a cloud model reads these entries.
+          db.addEntry(this.id, this.localOnlyMatch
+            ? `Completed: ${assignment.subtaskTitle}. Output withheld (local-only).`
+            : `Completed: ${assignment.subtaskTitle}. Output length: ${output.length} chars.`);
         } catch (e) {
           this.log('Failed to write to World State DB');
         }
         // world-state v2: distill the output into queryable facts (best-effort,
         // never blocks or fails the subtask). Skipped when disabled in config.
-        if (this.router.getKnowledgeConfig?.().factsExtraction !== false) {
+        // Facts land in the knowledge graph, which any later worker can
+        // search, whatever model it is on — so none from a local-only output.
+        if (this.router.getKnowledgeConfig?.().factsExtraction !== false && !this.localOnlyMatch) {
           await this.extractAndStoreFacts(db, assignment, output);
         }
       }
 
-      this.setStatus('COMPLETED', output);
-      this.sendStatusUpdate({ progressPct: 100, currentAction: 'Subtask complete', status: 'IN_PROGRESS', output });
+      this.setStatus('COMPLETED', this.shareable(output, 'COMPLETED'));
+      this.sendStatusUpdate({ progressPct: 100, currentAction: 'Subtask complete', status: 'IN_PROGRESS', output: this.shareable(output, 'COMPLETED') });
 
       // ── Publish success to peers ─────────────
-      this.peerBus?.publish(this.id, assignment.subtaskId, output, 'COMPLETED');
+      this.publishOutcome(assignment.subtaskId, output, 'COMPLETED');
 
       return this.buildResult('COMPLETED', output, { checksRun, passed, failed }, issues, correctionAttempts);
     } catch (err) {
@@ -745,15 +778,15 @@ export class T3Worker extends BaseTier {
       if (err instanceof WorkerStallError) {
         issues.push(`Stalled: ${errMsg}`);
         const finalOutput = err.partialOutput || output || errMsg;
-        this.setStatus('FAILED', finalOutput);
-        this.peerBus?.publish(this.id, assignment.subtaskId, finalOutput, 'FAILED');
+        this.setStatus('FAILED', this.shareable(finalOutput, 'FAILED'));
+        this.publishOutcome(assignment.subtaskId, finalOutput, 'FAILED');
         return this.buildResult('ESCALATED', finalOutput, { checksRun, passed, failed }, issues, correctionAttempts);
       }
       if (err instanceof CriticalToolError) {
         issues.push(`[CRITICAL_TOOL_ERROR] ${err.toolName}: ${errMsg}`);
         const finalOutput = output || `Tool "${err.toolName}" failed unrecoverably: ${errMsg}`;
-        this.setStatus('FAILED', finalOutput);
-        this.peerBus?.publish(this.id, assignment.subtaskId, finalOutput, 'FAILED');
+        this.setStatus('FAILED', this.shareable(finalOutput, 'FAILED'));
+        this.publishOutcome(assignment.subtaskId, finalOutput, 'FAILED');
         return this.buildResult('ESCALATED', finalOutput, { checksRun, passed, failed }, issues, correctionAttempts);
       }
       // Wrapping up (router/run-budget.ts): the rest of the budget writes the
@@ -764,13 +797,13 @@ export class T3Worker extends BaseTier {
       if (err instanceof Error && err.name === 'BudgetWrapUpError') {
         if (output) {
           issues.push(`Not self-checked: ${errMsg}`);
-          this.setStatus('COMPLETED', output);
-          this.peerBus?.publish(this.id, assignment.subtaskId, output, 'COMPLETED');
+          this.setStatus('COMPLETED', this.shareable(output, 'COMPLETED'));
+          this.publishOutcome(assignment.subtaskId, output, 'COMPLETED');
           return this.buildResult('COMPLETED', output, { checksRun, passed, failed }, issues, correctionAttempts);
         }
         issues.push(`Not finished: ${errMsg}`);
         this.setStatus('FAILED', '');
-        this.peerBus?.publish(this.id, assignment.subtaskId, '', 'FAILED');
+        this.publishOutcome(assignment.subtaskId, '', 'FAILED');
         return this.buildResult('FAILED', '', { checksRun, passed, failed }, issues, correctionAttempts);
       }
       // A budget stop is FAILED, never ESCALATED. The router has permanently
@@ -781,14 +814,14 @@ export class T3Worker extends BaseTier {
       if (err instanceof Error && err.name === 'BudgetExceededError') {
         issues.push(errMsg);
         const stopped = output || errMsg;
-        this.setStatus('FAILED', stopped);
-        this.peerBus?.publish(this.id, assignment.subtaskId, stopped, 'FAILED');
+        this.setStatus('FAILED', this.shareable(stopped, 'FAILED'));
+        this.publishOutcome(assignment.subtaskId, stopped, 'FAILED');
         return this.buildResult('FAILED', stopped, { checksRun, passed, failed }, issues, correctionAttempts);
       }
       issues.push(`Execution error: ${errMsg}`);
       const finalOutput = output || errMsg;
-      this.setStatus('FAILED', finalOutput);
-      this.peerBus?.publish(this.id, assignment.subtaskId, finalOutput, 'FAILED');
+      this.setStatus('FAILED', this.shareable(finalOutput, 'FAILED'));
+      this.publishOutcome(assignment.subtaskId, finalOutput, 'FAILED');
       return this.buildResult('ESCALATED', finalOutput, { checksRun, passed, failed }, issues, correctionAttempts);
     } finally {
       // This worker will never ask for the browser again, whether it completed,
@@ -826,7 +859,39 @@ export class T3Worker extends BaseTier {
   }
 
   sendToPeer(toId: string, content: unknown): void {
+    if (this.localOnlyMatch) throw new Error('A local-only subtask (privacy.paths) cannot share its output with peers.');
     this.peerBus?.send(this.id, toId, 'SHARE_OUTPUT', this.assignment?.subtaskId ?? '', content);
+  }
+
+  /**
+   * Tell the siblings how this subtask ended. A dependent sibling puts what
+   * arrives here into its own context, and may be on a cloud model — so a
+   * local-only subtask publishes only that it ran.
+   */
+  private publishOutcome(subtaskId: string, output: string, status: 'COMPLETED' | 'FAILED' | 'ESCALATED'): void {
+    this.peerBus?.publish(this.id, subtaskId, this.shareable(output, status), status);
+  }
+
+  /**
+   * A tool's name as events show it. A local-only subtask's model may name
+   * one it was never given, and such a name could carry what it read: that
+   * shows as a placeholder, a name from the fixed list it was given as is.
+   */
+  private shownToolName(name: string): string {
+    if (!this.localOnlyMatch || this.tools.some((t) => t.name === name) || this.toolRegistry.hasTool?.(name) === true) return name;
+    return '[unknown tool — name withheld]';
+  }
+
+  /**
+   * What this subtask's output may be shown as outside it — to siblings, and
+   * in the status, stream and tool events that reach the dashboard, its
+   * socket clients and the audit log: for a local-only subtask, only that it
+   * ran, the line the tiers above get at the T3→T2 boundary.
+   */
+  private shareable(output: string, status: string): string {
+    return this.localOnlyMatch
+      ? `[local-only path — output withheld by privacy policy; status: ${status}]`
+      : output;
   }
 
   async requestFromPeer(peerId: string, subtaskId: string): Promise<string> {
@@ -887,11 +952,33 @@ export class T3Worker extends BaseTier {
 
     // Detect tool-use mode against the EFFECTIVE model (per-subtask override if
     // any, else the tier default).
-    const effectiveModel = subtaskModel ?? this.router.getModelForTier('T3');
+    let effectiveModel = subtaskModel ?? this.router.getModelForTier('T3');
     // Tag this node with the model actually serving it — including a Cascade
     // Auto per-subtask override — so the desktop can show model-per-task.
     if (effectiveModel) this.setServingModel(`${effectiveModel.provider}:${effectiveModel.id}`);
-    const useTextTools = effectiveModel?.supportsToolUse === false && tools.length > 0;
+    let useTextTools = effectiveModel?.supportsToolUse === false && tools.length > 0;
+    // Once local-only (from the start, or when a read flips it mid-loop), the
+    // subtask is served by a private model, which may speak a different tool
+    // protocol from the one chosen above. Resolved here rather than left to
+    // the router's swap, which happens after the request is already shaped for
+    // the cloud model: a tool-less local model would be handed native tool
+    // definitions and no text-tool contract.
+    let resolvedPrivately = false;
+    const servePrivately = (): void => {
+      resolvedPrivately = true;
+      const privateModel = this.router.getPrivateModel?.({ current: effectiveModel, tools: tools.length > 0 });
+      // None: leave the request as it is, and forceLocal makes the router refuse it.
+      if (!privateModel) return;
+      subtaskModel = privateModel;
+      subtaskTaskType = undefined;
+      effectiveModel = privateModel;
+      this.setServingModel(`${privateModel.provider}:${privateModel.id}`);
+      const textTools = privateModel.supportsToolUse === false && tools.length > 0;
+      if (textTools !== useTextTools) {
+        useTextTools = textTools;
+        sentFullTextContract = false;
+      }
+    };
     // Token economy for text-tool models: the FULL per-parameter contract goes
     // out only on the first call (and again whenever the tool list changes,
     // e.g. a dynamic tool was created mid-run — the system prompt is rebuilt
@@ -917,6 +1004,8 @@ export class T3Worker extends BaseTier {
           content: `USER INTERVENTION (mid-run steering — follow this over prior instructions where they conflict):\n${g.text}`,
         });
       }
+
+      if (this.localOnlyMatch && !resolvedPrivately) servePrivately();
 
       let textToolSuffix = '';
       if (useTextTools) {
@@ -953,7 +1042,8 @@ export class T3Worker extends BaseTier {
         'T3',
         options,
         (chunk) => {
-          this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: this.isPresenter });
+          // A local-only subtask's words stay out of the event stream.
+          if (!this.localOnlyMatch) this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: this.isPresenter });
         },
       );
 
@@ -1062,6 +1152,78 @@ export class T3Worker extends BaseTier {
     return null;
   }
 
+  /**
+   * Ask for the approval `tc` needs, if any: why it was denied, or null to
+   * go ahead. Every tool this worker runs goes through it — the one the
+   * model called, and one a fallback runs in its place.
+   */
+  /** Note that tool `name` ran: one whose reads are not seen leaves this subtask's facts' sources unknown. */
+  private noteRan(name: string): void {
+    if (!READS_SEEN.has(name)) this.readsUnseen = true;
+  }
+
+  private async authorize(tc: ToolCall): Promise<string | null> {
+    if (!this.toolRegistry.requiresApproval(tc.name)) return null;
+
+    // A call naming a local-only file makes the subtask local-only before
+    // anyone is asked, as the call itself would once it ran: its request —
+    // the path, and what it would write there — then goes to the user, not
+    // to the tier models, which may be cloud ones.
+    const named = typeof tc.input['path'] === 'string' ? tc.input['path'] : undefined;
+    if (named && !this.localOnlyMatch && !this.readDecision(path.resolve(this.artifactRoot(), named), 'model')) {
+      return `Tool ${tc.name} was not run: ${named} is local-only (privacy.paths), and no private model can take this subtask on.`;
+    }
+
+    // ── Hierarchical permission escalation: T3 → T2 → T1 → User ──
+    if (this.permissionEscalator) {
+      const req: PermissionRequest = {
+        id: `${this.id}-${tc.id}`,
+        requestedBy: this.id,
+        parentT2Id: this.parentId ?? 'root',
+        toolName: tc.name,
+        input: tc.input,
+        isDangerous: this.toolRegistry.isDangerous(tc.name),
+        subtaskContext: this.assignment?.subtaskTitle ?? 'Unknown subtask',
+        sectionContext: this.assignment?.subtaskTitle ?? 'Unknown section',
+        localOnly: this.localOnlyMatch,
+      };
+      // The run's signal: a cancelled run withdraws the question rather
+      // than leaving it with an evaluator or on screen.
+      const decision = await this.permissionEscalator.requestPermission(req, this.signal);
+      return decision.approved ? null : `Tool ${tc.name} was denied (decided by ${decision.decidedBy}).`;
+    }
+
+    // ── Fallback: legacy direct approval event (used when escalator not wired) ──
+    if (this.sessionApprovals.has(tc.name)) {
+      return this.sessionApprovals.get(tc.name) ? null : `Tool ${tc.name} was denied by user.`;
+    }
+    // Time-box this fallback too (default 10 min → deny) so a missing or
+    // unanswered approval prompt can't hang the worker indefinitely.
+    const LEGACY_APPROVAL_TIMEOUT_MS = 600_000;
+    const legacyDecision = await new Promise<{ approved: boolean; always?: boolean }>((resolve) => {
+      const eventName = `tool:approval-response:${this.id}-${tc.id}`;
+      const timer = setTimeout(() => {
+        this.removeAllListeners(eventName);
+        resolve({ approved: false });
+      }, LEGACY_APPROVAL_TIMEOUT_MS);
+      timer.unref?.();
+      this.emit('tool:approval-request', {
+        id: `${this.id}-${tc.id}`,
+        tierId: this.id,
+        toolName: tc.name,
+        input: tc.input,
+        description: `T3 (${this.assignment?.subtaskTitle}) wants to run "${tc.name}"`,
+        isDangerous: this.toolRegistry.isDangerous(tc.name),
+      });
+      this.once(eventName, (d: { approved: boolean; always?: boolean }) => {
+        clearTimeout(timer);
+        resolve(d);
+      });
+    });
+    if (legacyDecision.always) this.sessionApprovals.set(tc.name, legacyDecision.approved);
+    return legacyDecision.approved ? null : `Tool ${tc.name} was denied by user.`;
+  }
+
   private async executeTool(tc: ToolCall): Promise<string> {
     // T3→T2 reinforcement: handle locally (record the request for the manager) —
     // it is a signal, not a real side-effecting tool, so it skips registry
@@ -1077,61 +1239,12 @@ export class T3Worker extends BaseTier {
     // pass an out-of-range enum value, which otherwise fails opaquely at run time.
     const validationError = this.validateToolInput(tc);
     if (validationError) {
-      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: tc.name, error: validationError, durationMs: 0 });
+      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), error: this.shareable(validationError, 'tool error'), durationMs: 0 });
       return validationError;
     }
 
-    const needsApproval = this.toolRegistry.requiresApproval(tc.name);
-
-    if (needsApproval) {
-      // ── Hierarchical permission escalation: T3 → T2 → T1 → User ──
-      if (this.permissionEscalator) {
-        const req: PermissionRequest = {
-          id: `${this.id}-${tc.id}`,
-          requestedBy: this.id,
-          parentT2Id: this.parentId ?? 'root',
-          toolName: tc.name,
-          input: tc.input,
-          isDangerous: this.toolRegistry.isDangerous(tc.name),
-          subtaskContext: this.assignment?.subtaskTitle ?? 'Unknown subtask',
-          sectionContext: this.assignment?.subtaskTitle ?? 'Unknown section',
-        };
-        const decision = await this.permissionEscalator.requestPermission(req);
-        if (!decision.approved) return `Tool ${tc.name} was denied (decided by ${decision.decidedBy}).`;
-      } else {
-        // ── Fallback: legacy direct approval event (used when escalator not wired) ──
-        if (this.sessionApprovals.has(tc.name)) {
-          const wasApproved = this.sessionApprovals.get(tc.name)!;
-          if (!wasApproved) return `Tool ${tc.name} was denied by user.`;
-        } else {
-          // Time-box this fallback too (default 10 min → deny) so a missing or
-          // unanswered approval prompt can't hang the worker indefinitely.
-          const LEGACY_APPROVAL_TIMEOUT_MS = 600_000;
-          const legacyDecision = await new Promise<{ approved: boolean; always?: boolean }>((resolve) => {
-            const eventName = `tool:approval-response:${this.id}-${tc.id}`;
-            const timer = setTimeout(() => {
-              this.removeAllListeners(eventName);
-              resolve({ approved: false });
-            }, LEGACY_APPROVAL_TIMEOUT_MS);
-            timer.unref?.();
-            this.emit('tool:approval-request', {
-              id: `${this.id}-${tc.id}`,
-              tierId: this.id,
-              toolName: tc.name,
-              input: tc.input,
-              description: `T3 (${this.assignment?.subtaskTitle}) wants to run "${tc.name}"`,
-              isDangerous: this.toolRegistry.isDangerous(tc.name),
-            });
-            this.once(eventName, (d: { approved: boolean; always?: boolean }) => {
-              clearTimeout(timer);
-              resolve(d);
-            });
-          });
-          if (legacyDecision.always) this.sessionApprovals.set(tc.name, legacyDecision.approved);
-          if (!legacyDecision.approved) return `Tool ${tc.name} was denied by user.`;
-        }
-      }
-    }
+    const denied = await this.authorize(tc);
+    if (denied) return denied;
 
     // Emit tool:use before execution so the TUI can display the active tool.
     //
@@ -1148,15 +1261,16 @@ export class T3Worker extends BaseTier {
     if (this.toolRegistry.hasTool?.(tc.name) !== false) {
       this.sendStatusUpdate({
         progressPct: 50,
-        currentAction: `Using tool: ${tc.name}`,
+        currentAction: `Using tool: ${this.shownToolName(tc.name)}`,
         status: 'IN_PROGRESS',
       });
     }
 
-    this.emit('tool:call', { id: tc.id, tierId: this.id, toolName: tc.name, input: tc.input });
+    this.emit('tool:call', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), input: this.localOnlyMatch ? {} : tc.input });
     const toolStartMs = Date.now();
 
     try {
+      this.noteRan(tc.name);
       const result = await this.toolRegistry.execute(tc.name, tc.input, {
         tierId: this.id,
         sessionId: this.taskId,
@@ -1164,10 +1278,17 @@ export class T3Worker extends BaseTier {
         // Media generation can run for a minute; without this a cancelled run
         // still pays for an image nobody will see.
         ...(this.signal ? { signal: this.signal } : {}),
+        mayRead: this.mayRead,
+        noteRead: this.noteRead,
+        isOffline: this.isOffline,
         saveSnapshot: async (path, content) => {
           this.store?.addFileSnapshot(this.taskId, path, content);
         },
         sendPeerSync: (to, syncType, content) => {
+          // Peers may run on cloud models: what a local-only subtask knows stays here.
+          if (this.localOnlyMatch) {
+            throw new Error('A local-only subtask (privacy.paths) cannot message its peers.');
+          }
           this.peerBus?.send(this.id, to, syncType, this.assignment?.subtaskId ?? '', content);
         },
         getPeerMessages: () => {
@@ -1183,12 +1304,12 @@ export class T3Worker extends BaseTier {
         }
       }
       const durationMs = Date.now() - toolStartMs;
-      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: tc.name, output: typeof result === 'string' ? result : JSON.stringify(result), durationMs });
+      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), output: this.shareable(typeof result === 'string' ? result : JSON.stringify(result), 'tool result'), durationMs });
       return typeof result === 'string' ? result : JSON.stringify(result);
     } catch (err) {
       const durationMs = Date.now() - toolStartMs;
       const errMsg = err instanceof Error ? err.message : String(err);
-      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: tc.name, error: errMsg, durationMs });
+      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), error: this.shareable(errMsg, 'tool error'), durationMs });
       // Unrecoverable/systemic conditions (rate-limit, auth, quota, AND a 404
       // "model not found" — the shared classifier this reuses is the same one
       // `router/index.ts` uses for chat-tier failover, so a dead image model
@@ -1259,15 +1380,26 @@ export class T3Worker extends BaseTier {
   private async adaptiveFallback(tc: ToolCall, originalError: string): Promise<string> {
     // Strategy 1: alternative tool with overlapping purpose
     const altTool = this.findAlternativeTool(tc.name);
-    if (altTool) {
-      this.log(`Adaptive fallback: trying alternative tool "${altTool}" for failed "${tc.name}"`);
+    // The tool run in its place is checked as the one called would be: its
+    // input against its schema, and the approval it needs asked afresh. And
+    // never a step up — a known tool that needs no approval (a read) does
+    // not turn into one that does (a write) because it failed.
+    const alt = altTool ? { ...tc, id: `${tc.id}-fallback`, name: altTool } : null;
+    const stepUp = !!altTool && this.toolRegistry.hasTool?.(tc.name) !== false
+      && !this.toolRegistry.requiresApproval(tc.name) && this.toolRegistry.requiresApproval(altTool);
+    if (alt && altTool && !stepUp && !this.validateToolInput(alt) && !(await this.authorize(alt))) {
+      this.log(`Adaptive fallback: trying alternative tool "${altTool}" for failed "${this.shownToolName(tc.name)}"`);
       this.sendStatusUpdate({ progressPct: 50, currentAction: `Fallback: trying ${altTool}`, status: 'IN_PROGRESS' });
       try {
+        this.noteRan(altTool);
         const result = await this.toolRegistry.execute(altTool, tc.input, {
           tierId: this.id,
           sessionId: this.taskId,
           requireApproval: false,
           ...(this.signal ? { signal: this.signal } : {}),
+          mayRead: this.mayRead,
+          noteRead: this.noteRead,
+          isOffline: this.isOffline,
         });
         const str = typeof result === 'string' ? result : JSON.stringify(result);
         if (!str.startsWith('Tool error:') && !str.startsWith('Error:')) {
@@ -1277,8 +1409,10 @@ export class T3Worker extends BaseTier {
       } catch { /* fall through to next strategy */ }
     }
 
-    // Strategy 2: synthesize a new tool via ToolCreator
-    if (this.toolCreator) {
+    // Strategy 2: synthesize a new tool via ToolCreator. Not for a local-only
+    // subtask: the request, error text and all, goes to a model this worker
+    // does not choose.
+    if (this.toolCreator && !this.localOnlyMatch) {
       this.log(`Adaptive fallback: requesting dynamic tool synthesis for "${tc.name}"`);
       this.sendStatusUpdate({ progressPct: 55, currentAction: `Synthesizing fallback tool for: ${tc.name}`, status: 'IN_PROGRESS' });
       try {
@@ -1286,13 +1420,17 @@ export class T3Worker extends BaseTier {
           `Replacement for "${tc.name}" — original failed with: ${originalError.slice(0, 150)}`,
           this.assignment?.subtaskTitle ?? tc.name,
         );
-        if (newToolName) {
+        if (newToolName && !(await this.authorize({ ...tc, id: `${tc.id}-synthesized`, name: newToolName }))) {
           this.log(`Adaptive fallback: synthesized "${newToolName}", retrying`);
+          this.noteRan(newToolName);
           const result = await this.toolRegistry.execute(newToolName, tc.input, {
             tierId: this.id,
             sessionId: this.taskId,
             requireApproval: false,
             ...(this.signal ? { signal: this.signal } : {}),
+            mayRead: this.mayRead,
+            noteRead: this.noteRead,
+            isOffline: this.isOffline,
           });
           const str = typeof result === 'string' ? result : JSON.stringify(result);
           if (!str.startsWith('Tool error:')) {
@@ -1419,6 +1557,113 @@ export class T3Worker extends BaseTier {
     return this.toolRegistry.getWorkspaceRoot?.() ?? process.cwd();
   }
 
+  /**
+   * Where a file this subtask was to make is: in the workspace, or — for a
+   * local-only subtask, whose new files the registry makes in its private
+   * folder instead (ToolRegistry.privateOutput) — the private file of that
+   * name, when the workspace has none. `own` marks the latter: a local-only
+   * subtask's tools read that folder as `@private/…`, so its checks may too.
+   */
+  private async artifactLocation(target: string): Promise<{ abs: string; own: boolean }> {
+    const root = this.artifactRoot();
+    const abs = path.resolve(root, target);
+    if (!this.localOnlyMatch) return { abs, own: false };
+    const rel = path.relative(root, abs);
+    if (!rel || leavesBase(rel)) return { abs, own: false };
+    const exists = (p: string) => fs.lstat(p).then(() => true, () => false);
+    if (await exists(abs)) return { abs, own: false };
+    const moved = statePath(root, STATE.private, rel);
+    return (await exists(moved)) ? { abs: moved, own: true } : { abs, own: false };
+  }
+
+  /** Whether this worker may look into the file at `at` to check it (see `mayInspect`). */
+  private mayCheck(at: { abs: string; own: boolean }): boolean {
+    return at.own || this.mayInspect(at.abs);
+  }
+
+  /**
+   * Whether a tool this worker runs may read a workspace file's contents —
+   * privacy.paths, enforced at the read itself. The subtask's own description
+   * decides at the start whether it is local-only; a file it reads on the way
+   * can decide it later. Reading a local-only file makes the subtask
+   * local-only from then on — every call after it goes to a private model,
+   * and its raw output is withheld from the tiers above — or, when no private
+   * model is available, is refused. Contents bound for an outside service
+   * are refused either way, and so is a copy into a file that is not itself
+   * local-only: anything could read that file later.
+   */
+  private readonly mayRead = (absPath: string, to: ReadDestination): boolean => {
+    const allowed = this.readDecision(absPath, to);
+    if (allowed && to === 'model') this.noteRead(absPath);
+    return allowed;
+  };
+
+  /** Keep a file as a source of what this subtask learns (extractAndStoreFacts): one read into a prompt. */
+  private readonly noteRead = (absPath: string): void => {
+    const rel = path.relative(this.artifactRoot(), absPath);
+    if (rel && !leavesBase(rel)) this.readForModel.add(rel.split(path.sep).join('/'));
+  };
+
+  private readDecision(absPath: string, to: ReadDestination): boolean {
+    const privacy = this.router.getPrivacyPaths?.();
+    const root = this.artifactRoot();
+    if (!privacy?.hasPolicies() || !privacy.coversFile(absPath, root)) return true;
+    const rel = path.relative(root, absPath) || absPath;
+    if (to === 'service') {
+      this.log(`Privacy: ${rel} is local-only — not sent to an outside service.`);
+      return false;
+    }
+    if (typeof to === 'object') {
+      // Its private folder is local-only whole: nothing but a local-only
+      // subtask can reach what is there.
+      const own = statePath(root, STATE.private);
+      if (privacy.coversFile(to.file, root) || to.file.startsWith(own + path.sep)) return true;
+      this.log(`Privacy: ${rel} is local-only — not copied into ${path.relative(root, to.file) || to.file}, which is not.`);
+      return false;
+    }
+    if (this.localOnlyMatch) return true;
+    // A search that did not name the file: skipped, not a reason to move.
+    if (to === 'scan') return false;
+    if (!this.router.hasPrivateModel?.()) {
+      this.log(`Privacy: ${rel} is local-only and no private model is available — the read was refused.`);
+      return false;
+    }
+    this.localOnlyMatch = true;
+    this.log(`Privacy: read ${rel}, a local-only path — this subtask now runs on a private model only, and its raw output will be withheld upstream.`);
+    return true;
+  }
+
+  /**
+   * Whether this worker may look into a workspace file itself — to verify
+   * or grade it — rather than through a tool: what it finds goes into its
+   * next prompt, so the file must be one a tool could read. A protected
+   * file is not; a local-only one decides as for `file_read`.
+   */
+  private mayInspect(absPath: string): boolean {
+    if (this.toolRegistry.isProtected?.(absPath)) {
+      this.log(`Verification: ${path.relative(this.artifactRoot(), absPath) || absPath} is protected — not read to check it.`);
+      return false;
+    }
+    return this.mayRead(absPath, 'model');
+  }
+
+  /** Whether nothing this worker knows may leave the machine; see `ToolExecuteOptions.isOffline`. */
+  private readonly isOffline = (): boolean => this.localOnlyMatch;
+
+  /**
+   * The paths an assignment names, for the privacy decision made before any
+   * work: its files and prose, and the files its acceptance criteria check,
+   * which the worker reads to grade itself.
+   */
+  private privacyTargets(assignment: T2ToT3Assignment): string[] {
+    const criteria = (assignment.acceptance ?? []).join('\n');
+    const named = criteria.match(new RegExp(ARTIFACT_FILE_RE.source, 'gi')) ?? [];
+    // Every file it declares, with an extension or not (`Dockerfile`,
+    // `secrets/token`) — not only those artifact checks would verify.
+    const declared = (assignment.files ?? []).map((f) => f.trim()).filter(Boolean);
+    return [...new Set([...declared, ...this.extractArtifactPaths(assignment), ...named.map((m) => m.trim())])];
+  }
+
   private extractArtifactPaths(assignment: T2ToT3Assignment): string[] {
     // Spec-declared files verify deterministically; regex over the prose is
     // the fallback for plans that didn't declare them.
@@ -1429,7 +1674,16 @@ ${assignment.expectedOutput}`;
     return [...new Set([...declared, ...matches.map((m) => m.trim())])];
   }
 
+  /**
+   * Its reads hold the workspace gate like a tool call's: a local-only
+   * command may be writing one of these files, not yet marked.
+   */
   private async verifyArtifacts(assignment: T2ToT3Assignment): Promise<{ ok: boolean; issues: string[] }> {
+    const check = () => this.checkArtifacts(assignment);
+    return this.toolRegistry.whileShared ? this.toolRegistry.whileShared(check) : check();
+  }
+
+  private async checkArtifacts(assignment: T2ToT3Assignment): Promise<{ ok: boolean; issues: string[] }> {
     const artifactPaths = this.extractArtifactPaths(assignment);
     if (!artifactPaths.length) return { ok: true, issues: [] };
 
@@ -1439,7 +1693,11 @@ ${assignment.expectedOutput}`;
     const execFileAsync = promisify(execFile);
 
     for (const artifactPath of artifactPaths) {
-      const absolutePath = path.resolve(this.artifactRoot(), artifactPath);
+      const location = await this.artifactLocation(artifactPath);
+      const absolutePath = location.abs;
+      // Checked before anything touches it: a compiler's diagnostics quote
+      // the source, and they go into the correction prompt.
+      if (!this.mayCheck(location)) continue;
       try {
         const stat = await fs.stat(absolutePath);
         if (!stat.isFile()) {
@@ -1490,16 +1748,30 @@ ${assignment.expectedOutput}`;
         // semantic error, and a name carrying shell metacharacters was worse
         // than that. Nothing reaches a shell now.
         const ext = path.extname(absolutePath).toLowerCase();
-        // `node --check` runs the interpreter already executing this, so it
-        // needs no lookup and cannot be shadowed.
+        // Run with Cascade's own permissions, outside the process jail, so
+        // nothing the workspace holds may choose the program: TypeScript is
+        // checked by Cascade's own compiler (not `npx`, which runs a
+        // workspace's node_modules/.bin/tsc first, or fetches one), skipped
+        // when Cascade has none; `node --check` runs the interpreter already
+        // executing this; Python is found on PATH outside the workspace and
+        // run isolated (-I: no environment, user site or working directory
+        // on its import path), and compiles in memory — `py_compile` writes
+        // a .pyc into __pycache__, which nothing would mark local-only.
+        // TypeScript checks the file alone (--noResolve): following its
+        // imports and `/// <reference>`s would compile files nobody asked
+        // the protected paths or privacy.paths about, and its diagnostics —
+        // which go back to the model — can quote what they hold. A module it
+        // cannot find that way is no error in the file.
+        const tsc = ext === '.ts' || ext === '.tsx' ? ownTsc() : undefined;
+        const python = ext === '.py' ? onTrustedPath(['python3', 'python'], this.artifactRoot()) : undefined;
         const check: { cmd: string; args: string[] } | null =
-          ext === '.ts' || ext === '.tsx' ? { cmd: 'npx', args: ['tsc', '--noEmit', absolutePath] }
+          tsc ? { cmd: process.execPath, args: [tsc, '--noEmit', '--noResolve', '--pretty', 'false', absolutePath] }
           : ext === '.js' || ext === '.jsx' ? { cmd: process.execPath, args: ['--check', absolutePath] }
-          : ext === '.py' ? { cmd: 'python', args: ['-m', 'py_compile', absolutePath] }
+          : python ? { cmd: python, args: ['-I', '-c', 'import sys; compile(open(sys.argv[1], "rb").read(), sys.argv[1], "exec")', absolutePath] }
           : null;
         if (check) {
           try {
-            await execFileAsync(check.cmd, check.args, { timeout: 10000 });
+            await execFileAsync(check.cmd, check.args, { timeout: 10000, cwd: this.artifactRoot() });
           } catch (err: unknown) {
             const code = (err as { code?: unknown }).code;
             // The checker not being installed says nothing about the artifact.
@@ -1509,6 +1781,14 @@ ${assignment.expectedOutput}`;
             // TypeScript artifact. A missing toolchain skips the check.
             if (code === 'ENOENT' || code === 'EINVAL') continue;
             const e = err as { stderr?: string; stdout?: string };
+            if (tsc) {
+              // Only modules it was told not to look for: nothing wrong.
+              // No diagnostics at all: tsc itself failed, which is said.
+              const errors = tscErrors(e.stdout ?? '');
+              if (errors.length) issues.push(`Semantic error in ${artifactPath}:\n${errors.join('\n')}`);
+              else if (!e.stdout?.trim()) issues.push(`Semantic error in ${artifactPath}:\n${e.stderr || String(err)}`);
+              continue;
+            }
             issues.push(`Semantic error in ${artifactPath}:\n${e.stderr || String(err)}\n${e.stdout || ''}`);
           }
         }
@@ -1570,7 +1850,7 @@ Is this output sufficient and correct? Respond with ONLY a JSON object:
           break; // sufficient
         }
 
-        this.log(`T2-Critic rejected output: ${parsed.notes}`);
+        this.log(this.localOnlyMatch ? 'T2-Critic rejected output (notes withheld: local-only subtask).' : `T2-Critic rejected output: ${parsed.notes}`);
         
         const improved = await this.generateTracked('T3', {
           messages: [{
@@ -1610,23 +1890,29 @@ ${current}`,
   private async checkAcceptance(assignment: T2ToT3Assignment): Promise<AcceptanceResult[]> {
     const criteria = assignment.acceptance ?? [];
     if (!criteria.length) return [];
-    const resolve = (target: string) => path.resolve(this.artifactRoot(), target);
+    const resolve = (target: string) => this.artifactLocation(target);
     // The planner writes "file exists" criteria whether or not this run has a
     // tool that could create one (t1-administrator.ts / t2-manager.ts spell out
     // that shape in their prompts). Without this the deterministic rung graded
     // a hosted worker on a filesystem it had no way to touch — see
     // canProduceFiles() above for why that ends as a failed node.
     const workerCanWriteFiles = canProduceFiles(this.tools.map((t) => t.name));
-    return evaluateAcceptance(criteria, assignment.files ?? [], {
+    // Under the workspace gate, like verifyArtifacts: a local-only command
+    // may be writing one of these files, not yet marked.
+    const grade = () => evaluateAcceptance(criteria, assignment.files ?? [], {
+      // Reading a file to grade it is reading it: the protected paths and
+      // the privacy gate decide, as for any tool, so a criterion cannot probe
+      // `.env` or a local-only file.
+      allowed: async (target) => this.mayCheck(await resolve(target)),
       stat: async (target) => {
         try {
-          const stat = await fs.stat(resolve(target));
+          const stat = await fs.stat((await resolve(target)).abs);
           return stat.isFile() ? { size: stat.size } : null;
         } catch { return null; }
       },
       read: async (target) => {
         try {
-          const content = await fs.readFile(resolve(target), 'utf-8');
+          const content = await fs.readFile((await resolve(target)).abs, 'utf-8');
           // A binary file read as utf-8 comes back full of replacement chars;
           // treating that as text would make "contains" answer nonsense.
           // U+FFFD is what a binary byte sequence decodes to as utf-8; treating
@@ -1635,6 +1921,7 @@ ${current}`,
         } catch { return null; }
       },
     }, { workerCanWriteFiles });
+    return this.toolRegistry.whileShared ? this.toolRegistry.whileShared(grade) : grade();
   }
 
   private async selfTest(
@@ -1741,9 +2028,14 @@ ${output.slice(0, 4000)}`;
       if (!match) return;
       const facts = JSON.parse(match[0]);
       if (!Array.isArray(facts)) return;
+      // Where they came from: the files it was set to work on and those it
+      // read, so a fact is set aside if one of them turns local-only later.
+      // A command, or a tool whose reads are not seen, may have read any file:
+      // its facts' sources are unknown, and set aside as such (factMayLeave).
+      const sources = this.readsUnseen ? null : [...new Set([...this.privacyTargets(assignment), ...this.readForModel])];
       for (const f of facts.slice(0, 8)) {
         if (f && typeof f.entity === 'string' && typeof f.relation === 'string' && typeof f.value === 'string') {
-          db.upsertFact(f.entity, f.relation, f.value, this.id);
+          db.upsertFact(f.entity, f.relation, f.value, this.id, undefined, sources);
         }
       }
     } catch {
@@ -1819,6 +2111,10 @@ Begin execution now.`;
     if (this.reinforcementDepth !== 0) {
       return 'request_workers is unavailable to reinforcement workers — complete your assigned subtask.';
     }
+    // The new workers' descriptions go up to the manager, above the privacy line.
+    if (this.localOnlyMatch) {
+      return 'request_workers is unavailable to a local-only subtask (privacy.paths) — complete your assigned subtask.';
+    }
     const max = this.router.getReinforcementsConfig?.()?.maxPerSection ?? 4;
     const raw = Array.isArray((input as { subtasks?: unknown }).subtasks)
       ? (input as { subtasks: unknown[] }).subtasks
@@ -1868,4 +2164,20 @@ Begin execution now.`;
   private isFileOperation(toolName: string): boolean {
     return ['file_write', 'file_edit', 'file_delete'].includes(toolName);
   }
+}
+
+/**
+ * The errors in tsc's output (`--pretty false`) other than an import it
+ * was told not to follow (`--noResolve`): TS2307 and TS2792, "Cannot find
+ * module". Lines that continue an error go with it.
+ */
+export function tscErrors(out: string): string[] {
+  const errors: string[] = [];
+  let keep = false;
+  for (const line of out.split('\n')) {
+    const error = /\berror TS(\d+):/.exec(line);
+    if (error) keep = error[1] !== '2307' && error[1] !== '2792';
+    if (keep && line.trim()) errors.push(line);
+  }
+  return errors;
 }

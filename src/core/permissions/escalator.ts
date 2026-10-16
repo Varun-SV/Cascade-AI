@@ -36,6 +36,11 @@ type T1Evaluator = (req: PermissionRequest) => Promise<PermissionDecision | null
  * 5. Emit `permission:user-required` → wait for external decision via
  *    `resolveUserDecision()`; an "always" answer caches task-wide.
  */
+/** The answer to a request its caller withdrew before it was decided. */
+function withdrawn(req: PermissionRequest): PermissionDecision {
+  return { requestId: req.id, approved: false, decidedBy: 'USER', reasoning: 'Withdrawn: the caller stopped before it was decided' };
+}
+
 export class PermissionEscalator extends EventEmitter {
   /**
    * Session cache keyed by `${t2Id}:${toolName}`.
@@ -50,6 +55,8 @@ export class PermissionEscalator extends EventEmitter {
    * doc comment: "task-wide for T1").
    */
   private taskWideCache = new Map<string, boolean>();
+  /** The cache entries a T2 or T1 model made (`session:<key>`, `task:<tool>`), as against a person or a rule. */
+  private modelDecided = new Set<string>();
 
   private t2Evaluator?: T2Evaluator;
   private t1Evaluator?: T1Evaluator;
@@ -88,13 +95,26 @@ export class PermissionEscalator extends EventEmitter {
    * Main entry point. Called by T3Worker instead of emitting `tool:approval-request`.
    * Returns a PermissionDecision from whichever tier was able to decide.
    */
-  async requestPermission(req: PermissionRequest): Promise<PermissionDecision> {
+  async requestPermission(req: PermissionRequest, signal?: AbortSignal): Promise<PermissionDecision> {
+    const decision = await this.decide(req, signal);
+    // A decision reached after the caller stopped waiting grants nothing:
+    // what it would have allowed is no longer running to use it.
+    return signal?.aborted && decision.approved ? withdrawn(req) : decision;
+  }
+
+  private async decide(req: PermissionRequest, signal?: AbortSignal): Promise<PermissionDecision> {
+    if (signal?.aborted) return withdrawn(req);
     // ── 1. Check the task-wide cache (USER/T1 "always") ────────────
     // Checked BEFORE the per-T2 cache so a grant covers every sibling worker
     // in the run, regardless of which T2 section raises the same tool next.
     // Untrusted callers (forceReprompt) skip the cache so a prior `always`
     // decision can't silently auto-approve their dangerous actions.
-    if (!req.forceReprompt && this.taskWideCache.has(req.toolName)) {
+    // A model's "always" does not stand for a local-only caller, whose
+    // requests those models never see: only a person's grant — or a refusal,
+    // which costs nothing to honour — carries over to it.
+    const stands = (approved: boolean, byModel: boolean) => !(req.localOnly && byModel && approved);
+    if (!req.forceReprompt && this.taskWideCache.has(req.toolName)
+      && stands(this.taskWideCache.get(req.toolName)!, this.modelDecided.has(`task:${req.toolName}`))) {
       return {
         requestId: req.id,
         approved: this.taskWideCache.get(req.toolName)!,
@@ -109,7 +129,8 @@ export class PermissionEscalator extends EventEmitter {
     // ── 1b. Check the per-T2 session cache ────────────
     // Untrusted callers (forceReprompt) skip the cache so a prior `always`
     // decision can't silently auto-approve their dangerous actions.
-    if (!req.forceReprompt && this.sessionCache.has(cacheKey)) {
+    if (!req.forceReprompt && this.sessionCache.has(cacheKey)
+      && stands(this.sessionCache.get(cacheKey)!, this.modelDecided.has(`session:${cacheKey}`))) {
       return {
         requestId: req.id,
         approved: this.sessionCache.get(cacheKey)!,
@@ -145,11 +166,20 @@ export class PermissionEscalator extends EventEmitter {
     }
 
     // ── 3. Ask T2 evaluator ───────────────────
-    if (this.t2Evaluator) {
+    // Not for a local-only caller: the evaluators put the input in a prompt
+    // for a model that may be a cloud one.
+    if (this.t2Evaluator && !req.localOnly) {
       try {
         const t2Decision = await this.t2Evaluator(req);
+        // The caller may have stopped waiting while the model thought. Its
+        // answer is not cached: an "always" reached for a call that no
+        // longer exists would approve the next one in its place.
+        if (signal?.aborted) return withdrawn(req);
         if (t2Decision !== null) {
-          if (t2Decision.always) this.sessionCache.set(cacheKey, t2Decision.approved);
+          if (t2Decision.always) {
+            this.sessionCache.set(cacheKey, t2Decision.approved);
+            this.modelDecided.add(`session:${cacheKey}`);
+          }
           return t2Decision;
         }
       } catch {
@@ -158,11 +188,15 @@ export class PermissionEscalator extends EventEmitter {
     }
 
     // ── 4. Ask T1 evaluator ───────────────────
-    if (this.t1Evaluator) {
+    if (this.t1Evaluator && !req.localOnly) {
       try {
         const t1Decision = await this.t1Evaluator(req);
+        if (signal?.aborted) return withdrawn(req);
         if (t1Decision !== null) {
-          if (t1Decision.always) this.taskWideCache.set(req.toolName, t1Decision.approved);
+          if (t1Decision.always) {
+            this.taskWideCache.set(req.toolName, t1Decision.approved);
+            this.modelDecided.add(`task:${req.toolName}`);
+          }
           return t1Decision;
         }
       } catch {
@@ -171,7 +205,7 @@ export class PermissionEscalator extends EventEmitter {
     }
 
     // ── 5. Escalate to user ───────────────────
-    return this.waitForUserDecision(req);
+    return this.waitForUserDecision(req, signal);
   }
 
   /**
@@ -195,15 +229,26 @@ export class PermissionEscalator extends EventEmitter {
     resolver(decision);
   }
 
-  private waitForUserDecision(req: PermissionRequest): Promise<PermissionDecision> {
+  private waitForUserDecision(req: PermissionRequest, signal?: AbortSignal): Promise<PermissionDecision> {
+    // Nobody to ask for: a listener added to a signal already aborted never
+    // fires, so the question would sit on screen for a call that has gone.
+    if (signal?.aborted) return Promise.resolve(withdrawn(req));
     return new Promise<PermissionDecision>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
+      // The caller stopped waiting: the question is taken back, unanswered.
+      const onAbort = () => {
+        if (!this.pendingUserDecisions.delete(req.id)) return;
+        if (timer) clearTimeout(timer);
+        resolve(withdrawn(req));
+      };
       const wrappedResolver = (decision: PermissionDecision) => {
         if (timer) clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
         if (decision.always) {
           // Task-wide: a user's "Always" should cover every sibling worker in
           // this run, not just future requests under the same parent T2.
           this.taskWideCache.set(req.toolName, decision.approved);
+          this.modelDecided.delete(`task:${req.toolName}`);
         }
         resolve(decision);
       };
@@ -228,6 +273,7 @@ export class PermissionEscalator extends EventEmitter {
         timer.unref?.();
       }
 
+      signal?.addEventListener('abort', onAbort, { once: true });
       // Emit event so cascade.ts / REPL can pick it up
       this.emit('permission:user-required', req);
     });

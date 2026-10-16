@@ -285,7 +285,7 @@ const TOOL_FAILURE: Record<string, RegExp> = {
   ask_user: /^(?:Error: ask_user needs |(?:There is nobody watching this run to answer|The run was stopped while the question was open|They saw the questions and chose not to answer|They did not answer in time)\. Proceed on your best reading)/,
   // An empty transcript is no transcript: whatever the output says was in the
   // audio, this call did not hear it.
-  transcribe_audio: new RegExp(String.raw`^(?:Could not read the audio file at |Provide a "path" to the audio file|\S+ returned an empty transcript — |${MEDIA_UNAVAILABLE})`),
+  transcribe_audio: new RegExp(String.raw`^(?:Could not read the audio file at |Provide a "path" to the audio file|\S+ returned an empty transcript — |Refused: .* is local-only \(privacy\.paths\)|${MEDIA_UNAVAILABLE})`),
 };
 
 /**

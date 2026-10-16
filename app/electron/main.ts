@@ -112,8 +112,9 @@ async function startBackend(): Promise<void> {
   const workspace = getWorkspacePath();
 
   // STEP 1 — Load the shared Cascade config FIRST, in its own guard. This is the
-  // same .cascade/config.json the `cascade` CLI uses, so API keys, per-tier
-  // models, and budget settings are unified across desktop + CLI. Keeping this
+  // same project config the `cascade` CLI uses (kept outside the project, in
+  // ~/.cascade-ai/projects/), with the same machine-wide keys, so per-tier
+  // models and budget settings are unified across desktop + CLI. Keeping this
   // independent of the dashboard server means Settings can ALWAYS persist (the
   // `cascade:updateSettings` IPC only needs configManager/cascadeConfig), even
   // when the socket backend itself fails to come up.

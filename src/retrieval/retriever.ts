@@ -22,6 +22,12 @@ export interface RetrieverSearchOptions {
   rrfK?: number;
   /** Rerank the fused candidates when a reranker is configured (default true). */
   rerank?: boolean;
+  /**
+   * Sources to leave out. Applied before the reranker, which sends each
+   * candidate's text to a model: a source that must not be shown must not be
+   * sent there either.
+   */
+  exclude?: (sourceId: string) => boolean;
   /** Abort the query embedding when the run is cancelled. */
   signal?: AbortSignal;
 }
@@ -240,8 +246,20 @@ export class Retriever {
     opts.signal?.throwIfAborted();
     const candidates = opts.candidates ?? 30;
     const k = opts.k ?? 6;
-    const base = { namespace: opts.namespace, k: candidates, sourceIds: opts.sourceIds };
-    const lexical = this.store.lexicalSearch(query, base);
+    const base = { namespace: opts.namespace, sourceIds: opts.sourceIds };
+    const exclude = opts.exclude;
+    // Each stage's best `candidates` among the sources allowed. Left-out
+    // sources take places in what the store returns — every one of them, in
+    // an index built before a file became local-only — so the search widens
+    // until enough allowed ones remain or the store has no more.
+    const allowedTop = (search: (n: number) => ScoredChunk[]): ScoredChunk[] => {
+      for (let n = candidates; ; n *= 4) {
+        const found = search(n);
+        const kept = exclude ? found.filter((c) => !exclude(c.sourceId)) : found;
+        if (kept.length >= candidates || found.length < n) return kept.slice(0, candidates);
+      }
+    };
+    const lexical = allowedTop((n) => this.store.lexicalSearch(query, { ...base, k: n }));
     let dense: ScoredChunk[] = [];
     try {
       const [qvec] = await this.embedder.embed([query], { signal: opts.signal });
@@ -250,7 +268,7 @@ export class Retriever {
       // the writer's lock is released when `index()` returns, and the next
       // model may begin replacing rows while this search is still running.
       if (qvec && qvec.length) {
-        dense = this.store.denseSearch(qvec, { ...base, embedModel: this.embedder.model });
+        dense = allowedTop((n) => this.store.denseSearch(qvec, { ...base, k: n, embedModel: this.embedder.model }));
       }
     } catch {
       // Embedding the query failed (provider hiccup) — degrade to lexical-only.

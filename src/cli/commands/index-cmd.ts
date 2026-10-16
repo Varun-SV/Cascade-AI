@@ -12,6 +12,9 @@ import fs from 'node:fs';
 import Database from 'better-sqlite3';
 import { ConfigManager } from '../../config/index.js';
 import { CascadeIgnore } from '../../config/ignore.js';
+import { PrivacyPaths } from '../../core/privacy/paths.js';
+import { statePath, STATE } from '../../config/project-state.js';
+import { WorkspaceGate } from '../../tools/workspace-gate.js';
 import { WorkspaceIndex } from '../../retrieval/workspace-index.js';
 import { embedderFromProviders } from '../../retrieval/embedder.js';
 import { LLMReranker, chatCompleterFromProviders } from '../../retrieval/rerank.js';
@@ -30,7 +33,8 @@ export async function indexCommand(dirPath?: string): Promise<void> {
     return;
   }
 
-  const dbPath = config.codeIndex?.dbPath || path.join(workspace, '.cascade', 'code-index.db');
+  // Resolved against the workspace, as a run resolves it: both must open one file.
+  const dbPath = config.codeIndex?.dbPath ? path.resolve(workspace, config.codeIndex.dbPath) : statePath(workspace, STATE.codeIndex);
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
@@ -40,13 +44,17 @@ export async function indexCommand(dirPath?: string): Promise<void> {
 
   const ignore = new CascadeIgnore();
   await ignore.load(workspace);
+  const privacy = new PrivacyPaths(config.privacy?.paths ?? [], { workspaceRoot: workspace });
 
   const index = new WorkspaceIndex({
     root: workspace,
     db,
     embedder,
     reranker,
-    isIgnored: (abs) => ignore.isIgnored(abs, workspace),
+    // Local-only files stay out: indexing would send them to the embedder.
+    isIgnored: (abs) => ignore.isIgnored(abs, workspace) || privacy.coversFile(abs, workspace),
+    // …and so does what a local-only command in a run is writing meanwhile.
+    whileReading: whileReadingIn(workspace),
   });
 
   console.log(chalk.magenta(`\n  ◈ Indexing ${workspace}\n`));
@@ -66,4 +74,16 @@ export async function indexCommand(dirPath?: string): Promise<void> {
   }
   console.log('');
   db.close();
+}
+
+/**
+ * Each file read with the workspace's tool calls, in this process and every
+ * other: never while a command — which could swap a file the index checked
+ * for a symlink to `.env` — or a local-only one's writes are under way.
+ */
+export function whileReadingIn(workspace: string): <T>(read: () => Promise<T>) => Promise<T> {
+  return async (read) => {
+    const leave = await WorkspaceGate.for(workspace).enter('tools', true);
+    try { return await read(); } finally { leave(); }
+  };
 }

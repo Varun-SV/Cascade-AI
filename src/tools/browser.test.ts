@@ -69,16 +69,13 @@ describe('BrowserTool — screenshot', () => {
     expect(out).not.toContain('data:image');
     expect(out).toContain('image_analyze');
 
-    // ABSOLUTE, because image_analyze reads with a bare fs.readFile and never
-    // consults its own workspace root — a relative path would resolve against
-    // process.cwd() and ENOENT wherever the workspace isn't the cwd, which is
-    // every hosted run, every SDK embedder, and the desktop app.
-    const named = /\S*screenshot-[\w-]+\.png/.exec(out)?.[0];
+    // A path the image and file tools resolve — `@screenshots/…`, in the
+    // project's state folder — not an absolute one outside the workspace,
+    // which they refuse.
+    const named = /@screenshots\/screenshot-[\w-]+\.png/.exec(out)?.[0];
     expect(named, `no filename in: ${out}`).toBeTruthy();
-    expect(path.isAbsolute(named!), `expected an absolute path, got: ${named}`).toBe(true);
-    expect(named!.startsWith(await fs.realpath(workspace))).toBe(true);
-
-    const written = await fs.readFile(named!);
+    const { resolveInWorkspace } = await import('./utils/workspace-path.js');
+    const written = await fs.readFile(resolveInWorkspace(workspace, named!));
     expect(written.equals(png)).toBe(true);
   });
 
@@ -113,16 +110,17 @@ describe('BrowserTool — screenshot', () => {
 
     // And every one of them is still on disk — a collision would have left
     // fewer files than calls even if the names had differed.
-    const written = (await fs.readdir(path.join(workspace, '.cascade', 'screenshots')))
+    const { statePath } = await import('../config/project-state.js');
+    const written = (await fs.readdir(statePath(workspace, 'screenshots')))
       .filter((f) => f.endsWith('.png'));
     expect(written.length).toBe(names.length);
   });
 
-  it('writes into .cascade/, leaving the workspace root clean', async () => {
+  it('writes into the project\'s state folder, leaving the project untouched', async () => {
     // A workspace is usually a git checkout. Dropping PNGs in its root leaves
     // the worktree dirty after ordinary browser use and they are never cleaned
-    // up, so they accumulate. `.gitignore` already covers `.cascade/`, and the
-    // interpreter's scratch dir sets the precedent.
+    // up, so they accumulate. They go where the rest of Cascade's state does,
+    // outside the project (config/project-state.ts).
     stubPlaywright(fakePage(Buffer.from('89504e470d0a1a0a', 'hex')));
     const { BrowserTool: Tool } = await import('./browser.js');
     const tool = new Tool();
@@ -130,10 +128,10 @@ describe('BrowserTool — screenshot', () => {
 
     const out = await tool.execute({ action: 'screenshot' }, {} as never);
 
-    expect(out).toContain(path.join('.cascade', 'screenshots'));
+    expect(out).toContain('@screenshots/');
     const rootEntries = await fs.readdir(workspace);
     expect(rootEntries.filter((f) => f.endsWith('.png'))).toEqual([]);
-    expect(rootEntries).toContain('.cascade');
+    expect(rootEntries).not.toContain('.cascade');
   });
 
   it('keeps the result small enough to be worth putting in a context window', async () => {

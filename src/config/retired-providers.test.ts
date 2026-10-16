@@ -18,6 +18,7 @@ import {
   stripRetiredProviders,
 } from './retired-providers.js';
 import { validateConfig } from './validate.js';
+import { statePath, STATE } from './project-state.js';
 import { ConfigManager } from './index.js';
 import { applySyncBundle, type SyncBundle } from '../cloud/keysync.js';
 import type { ProviderConfig } from '../types.js';
@@ -118,8 +119,8 @@ describe('ConfigManager — upgrading from a real 0.70.0 install', () => {
   });
 
   function writeWorkspaceConfig(cfg: unknown) {
-    fs.mkdirSync(path.join(dir, '.cascade'), { recursive: true });
-    fs.writeFileSync(path.join(dir, '.cascade', 'config.json'), JSON.stringify(cfg, null, 2));
+    fs.mkdirSync(path.dirname(statePath(dir, STATE.config)), { recursive: true });
+    fs.writeFileSync(statePath(dir, STATE.config), JSON.stringify(cfg, null, 2));
   }
 
   it('loads instead of throwing, and persists the cleaned config', async () => {
@@ -131,7 +132,7 @@ describe('ConfigManager — upgrading from a real 0.70.0 install', () => {
 
     // Persisted, not just fixed in memory — otherwise every future load
     // repeats the migration and the warning never stops.
-    const onDisk = JSON.parse(fs.readFileSync(path.join(dir, '.cascade', 'config.json'), 'utf-8'));
+    const onDisk = JSON.parse(fs.readFileSync(statePath(dir, STATE.config), 'utf-8'));
     expect(onDisk.providers.some((p: { type: string }) => p.type === 'github-models')).toBe(false);
     expect(onDisk.models?.t1).toBeUndefined();
 
@@ -276,10 +277,10 @@ describe('migration hardening (review round 3)', () => {
   });
 
   const write = (cfg: unknown) => {
-    fs.mkdirSync(path.join(dir, '.cascade'), { recursive: true });
-    fs.writeFileSync(path.join(dir, '.cascade', 'config.json'), JSON.stringify(cfg, null, 2));
+    fs.mkdirSync(path.dirname(statePath(dir, STATE.config)), { recursive: true });
+    fs.writeFileSync(statePath(dir, STATE.config), JSON.stringify(cfg, null, 2));
   };
-  const onDisk = () => JSON.parse(fs.readFileSync(path.join(dir, '.cascade', 'config.json'), 'utf-8'));
+  const onDisk = () => JSON.parse(fs.readFileSync(statePath(dir, STATE.config), 'utf-8'));
 
   it('never writes env or global credentials into the workspace file', async () => {
     // The migration used to persist via save() at the END of load(), by which
@@ -293,14 +294,20 @@ describe('migration hardening (review round 3)', () => {
       JSON.stringify({ providers: [{ type: 'gemini', apiKey: 'sk-gemini-global' }] }),
     );
 
-    await new ConfigManager(dir, globalDir).load();
+    const mgr = new ConfigManager(dir, globalDir);
+    await mgr.load();
 
     const serialized = JSON.stringify(onDisk());
     expect(serialized).not.toContain('sk-openai-from-env');
     expect(serialized).not.toContain('sk-gemini-global');
-    // The workspace's OWN key is untouched, and the retired entry is gone.
-    expect(serialized).toContain('sk-ws');
+    // The retired entry is gone, and the project's own key is not kept in
+    // its config either: it is the project's own in the credential store,
+    // and still the one it uses.
     expect(serialized).not.toContain('github-models');
+    expect(serialized).not.toContain('sk-ws');
+    expect(mgr.getConfig().providers.find((p) => p.type === 'anthropic')?.apiKey).toBe('sk-ws');
+    const store = JSON.parse(fs.readFileSync(path.join(globalDir, 'credentials.json'), 'utf-8'));
+    expect(JSON.stringify(store.projects)).toContain('sk-ws');
   });
 
   // Root ignores permission bits, so the chmod below denies nothing and the
@@ -315,7 +322,7 @@ describe('migration hardening (review round 3)', () => {
     // that load() opens inside it, which fails for reasons that have nothing
     // to do with this migration — the assertion would then be testing a
     // constraint the hardening never claimed to remove.
-    const cfgFile = path.join(dir, '.cascade', 'config.json');
+    const cfgFile = statePath(dir, STATE.config);
     fs.chmodSync(cfgFile, 0o400);
     try {
       const mgr = new ConfigManager(dir, globalDir);
@@ -378,8 +385,8 @@ describe('migration must not strand a usable install (review round 4)', () => {
   });
 
   const write = (cfg: unknown) => {
-    fs.mkdirSync(path.join(dir, '.cascade'), { recursive: true });
-    fs.writeFileSync(path.join(dir, '.cascade', 'config.json'), JSON.stringify(cfg, null, 2));
+    fs.mkdirSync(path.dirname(statePath(dir, STATE.config)), { recursive: true });
+    fs.writeFileSync(statePath(dir, STATE.config), JSON.stringify(cfg, null, 2));
   };
 
   it('still adopts an environment key when retirement emptied the list', async () => {
@@ -452,8 +459,8 @@ describe('retirement ordering (review round 5)', () => {
     // called it a first run, and appended a keyless Ollama entry — which
     // hasUsableProvider() accepts without checking the daemon, so the setup
     // wizard never runs and the router starts with nothing usable.
-    fs.mkdirSync(path.join(dir, '.cascade'), { recursive: true });
-    fs.writeFileSync(path.join(dir, '.cascade', 'config.json'), JSON.stringify({ providers: [] }));
+    fs.mkdirSync(path.dirname(statePath(dir, STATE.config)), { recursive: true });
+    fs.writeFileSync(statePath(dir, STATE.config), JSON.stringify({ providers: [] }));
     fs.writeFileSync(
       path.join(globalDir, 'credentials.json'),
       JSON.stringify({ providers: [{ type: 'github-models', apiKey: 'dead' }] }),
@@ -487,9 +494,9 @@ describe('cache purge is not gated on a migration (review round 7)', () => {
     // are still in cascade.db, and the REPL reads any non-empty, non-stale
     // cache as authoritative. Gating the purge on the migration left exactly
     // this user with zero models for the providers they DO have.
-    fs.mkdirSync(path.join(dir, '.cascade'), { recursive: true });
+    fs.mkdirSync(path.dirname(statePath(dir, STATE.config)), { recursive: true });
     fs.writeFileSync(
-      path.join(dir, '.cascade', 'config.json'),
+      statePath(dir, STATE.config),
       JSON.stringify({ providers: [{ type: 'openai', apiKey: 'k' }] }),
     );
 
@@ -528,8 +535,8 @@ describe('retiredCleanup is per-load state (review round 11)', () => {
   });
 
   const write = (cfg: unknown) => {
-    fs.mkdirSync(path.join(dir, '.cascade'), { recursive: true });
-    fs.writeFileSync(path.join(dir, '.cascade', 'config.json'), JSON.stringify(cfg));
+    fs.mkdirSync(path.dirname(statePath(dir, STATE.config)), { recursive: true });
+    fs.writeFileSync(statePath(dir, STATE.config), JSON.stringify(cfg));
   };
 
   const migrationWarnings = () =>

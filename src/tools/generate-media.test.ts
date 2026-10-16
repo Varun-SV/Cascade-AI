@@ -345,3 +345,31 @@ describe('generate_image falls back across providers before declaring the capabi
     expect(generateImageMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('transcribe_audio and privacy.paths', () => {
+  // The recording goes to the transcription service itself, not to the
+  // model, so a local-only file is refused outright rather than moving the
+  // subtask onto a private model.
+  it('does not send a local-only file to the transcription service', async () => {
+    const reads: string[] = [];
+    const tools = buildMediaTools(
+      {
+        registry: new MultimodalRegistry(['openai']),
+        sink: noopSink,
+        lookupProvider: (p) => (p === 'openai' ? OPENAI_CFG : undefined),
+      },
+      async (p) => { reads.push(p); return Buffer.from('audio'); },
+    );
+    const tool = tools.find((t) => t.name === 'transcribe_audio')!;
+    tool.setWorkspaceRoot('/w');
+    const asked: Array<[string, string]> = [];
+    const out = await tool.execute({ path: 'secret/call.mp3' }, {
+      mayRead: (abs: string, to: 'model' | 'service') => { asked.push([abs, to]); return false; },
+    } as unknown as ToolExecuteOptions);
+
+    expect(asked).toEqual([['/w/secret/call.mp3', 'service']]);
+    expect(out).toContain('local-only');
+    expect(reads).toEqual([]);
+  });
+});
+

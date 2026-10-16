@@ -4,7 +4,8 @@
 
 import chalk from 'chalk';
 import path from 'node:path';
-import { CASCADE_CONFIG_FILE, LM_STUDIO_BASE_URL, OLLAMA_BASE_URL } from '../../constants.js';
+import { LM_STUDIO_BASE_URL, OLLAMA_BASE_URL } from '../../constants.js';
+import { statePath, STATE } from '../../config/project-state.js';
 import { ConfigManager } from '../../config/index.js';
 import { discoverCredentials, type DiscoveredCredential } from '../../config/credential-discovery.js';
 import { willAdoptFromConfig } from './link.js';
@@ -65,7 +66,7 @@ export async function doctorCommand(): Promise<void> {
   checks.push({
     label: 'Cascade config',
     ok: true,
-    detail: `Loaded ${path.join(process.cwd(), CASCADE_CONFIG_FILE)}`,
+    detail: `Loaded ${statePath(process.cwd(), STATE.config)}`,
   });
 
   // API keys from config/env/keystore

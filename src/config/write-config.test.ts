@@ -45,3 +45,25 @@ describe('writeConfigFile — the save is only saved when it lands', () => {
     expect(result.ok).toBe(false);
   });
 });
+
+// Keys live only in the global store now, so storing them is part of the save:
+// a failure there is the save failing, and the project's config never holds them.
+describe('writeProjectConfig — a project\'s config and its keys', () => {
+  it('writes the config without the keys, and the keys where every project finds them', async () => {
+    const { writeProjectConfig } = await import('./write-config.js');
+    const { globalDir, statePath, STATE } = await import('./project-state.js');
+    const ws = tmp();
+    expect(writeProjectConfig(ws, { providers: [{ type: 'openai', apiKey: 'sk-here' }] })).toEqual({ ok: true });
+    expect(fs.readFileSync(statePath(ws, STATE.config), 'utf-8')).not.toContain('sk-here');
+    expect(fs.readFileSync(path.join(globalDir(), 'credentials.json'), 'utf-8')).toContain('sk-here');
+  });
+
+  it('fails the save when the keys cannot be stored', async () => {
+    const { writeProjectConfig } = await import('./write-config.js');
+    const ws = tmp();
+    const blocked = path.join(tmp(), 'file-not-a-folder');
+    fs.writeFileSync(blocked, '');
+    const result = writeProjectConfig(ws, { providers: [{ type: 'openai', apiKey: 'sk-here' }] }, blocked);
+    expect(result.ok).toBe(false);
+  });
+});
