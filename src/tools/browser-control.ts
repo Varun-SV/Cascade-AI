@@ -359,11 +359,14 @@ export class BrowserControlTool extends BaseTool {
         // unless the key lands on a named control and nothing listed on the
         // page is one to ask about.
         || (submits && (!named || Object.values(seen?.labels ?? {}).some((l) => irreversible(l) || (cut(l) && l.startsWith('button ')))))
+        // A key sent to whatever has focus has no verified target. Even Tab,
+        // Delete, arrows and shortcuts may trigger page actions or navigation,
+        // so the earlier "always allow" cannot cover an unaimed press.
+        || unaimed
         // Where pages are described, an action with no name from the view
-        // has nothing to be judged by: a selector, a ref the view did not
-        // list, or an unnamed control. Keys other than Enter and Space sent
-        // to whatever has focus only type.
-        || (this.pageView && !named && !unaimed)
+        // has nothing to be judged by: a selector, an unlisted ref or an
+        // unnamed control.
+        || (this.pageView && !named)
         // Nor does one whose label the view cut short.
         || (target !== undefined && cut(target))
         || chosenCut;
