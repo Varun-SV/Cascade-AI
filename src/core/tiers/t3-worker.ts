@@ -1165,9 +1165,20 @@ export class T3Worker extends BaseTier {
         }
       }
 
+      // All calls in this batch were composed against the page view before
+      // any of them ran. Browser actions refresh that view and may navigate,
+      // so a ref in a later call cannot safely be reinterpreted using the new
+      // page's labels or approval. Ask the model to inspect the page again.
+      let browserAlreadyActed = false;
       for (const tc of effectiveResult.toolCalls) {
         allToolCalls.push(tc);
-        const toolResult = await this.executeTool(tc);
+        const staleRef = tc.name === 'browser_control'
+          && typeof tc.input['ref'] === 'string'
+          && browserAlreadyActed;
+        const toolResult = staleRef
+          ? 'Tool error: A previous browser_control call in this response may have changed the page. This ref was not executed. Observe the current page and issue a new call using its refs.'
+          : await this.executeTool(tc);
+        if (tc.name === 'browser_control') browserAlreadyActed = true;
         appendToolRecord(this.toolRecord, recordToolCall(tc.name, toolResult, tc.input, this.ranAs.get(tc)));
         // Bound what enters the context: the WHOLE history is re-sent on every
         // remaining iteration, so an unbounded tool result (big file read,
