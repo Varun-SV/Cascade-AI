@@ -184,12 +184,14 @@ async function evaluate() {
   });
   // They register as a Cascade is built, so building one is enough: nothing
   // is initialised, and a model that cannot be reached is each run's to report.
+  const inheritedDisabled = (base.tools?.disabledTools ?? []).filter((name) => name !== 'browser_control');
   const probeSpace = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-bve-'));
-  const probe = new sdk.Cascade(isolated(models[0], arms[0], base.tools?.disabledTools ?? []), probeSpace);
+  const probe = new sdk.Cascade(isolated(models[0], arms[0], inheritedDisabled), probeSpace);
   const disabled = [
-    ...(base.tools?.disabledTools ?? []),
+    ...inheritedDisabled,
     ...probe.getToolRegistry().getToolDefinitions().map((d) => d.name).filter((n) => n !== 'browser_control'),
   ];
+  await probe.close();
   fs.rmSync(probeSpace, { recursive: true, force: true });
 
   const rows = [];
@@ -203,6 +205,7 @@ async function evaluate() {
           // wrote, but it is still a model reading web pages, and your own
           // config would otherwise hand it your shell, files and MCP servers.
           const cascade = new sdk.Cascade(isolated(model, arm, disabled), workspace);
+          try {
           const prompt = `Use the browser. Open ${site.url}/${task.page}?run=${run} and do this: ${task.prompt}`;
           const started = Date.now();
           let output = '';
@@ -216,8 +219,8 @@ async function evaluate() {
             await cascade.init();
             cascade.setRemoteBrowserController(counted, (a) => controller.actorEnded(a), controller.features);
             const offered = cascade.getToolRegistry().getToolDefinitions().map((d) => d.name);
-            if (offered.some((n) => n !== 'browser_control')) {
-              throw new IsolationError(`This run would offer ${offered.filter((n) => n !== 'browser_control').join(', ')} besides the browser.`);
+            if (offered.length !== 1 || offered[0] !== 'browser_control') {
+              throw new IsolationError(`Expected only browser_control, but this run would offer: ${offered.join(', ') || '(none)'}.`);
             }
             const result = await cascade.run({
               prompt,
@@ -227,10 +230,7 @@ async function evaluate() {
             usage = result.usage ?? {};
           } catch (err) {
             // Not a result: the comparison would not be of the browser alone.
-            if (err instanceof IsolationError) {
-              fs.rmSync(workspace, { recursive: true, force: true });
-              throw err;
-            }
+            if (err instanceof IsolationError) throw err;
             error = err instanceof Error ? err.message : String(err);
           }
           const opened = [...steps.keys()].filter((k) => !known.has(k));
@@ -249,7 +249,15 @@ async function evaluate() {
           });
           console.log(`${ok ? 'PASS' : 'FAIL'}  ${model}  ${arm.padEnd(6)}  ${task.id.padEnd(11)}  $${(usage.estimatedCostUsd ?? 0).toFixed(4)}${error ? `  ${error}` : ''}`);
           for (const id of opened) await controller.endRun(id).catch(() => {});
-          fs.rmSync(workspace, { recursive: true, force: true });
+          } finally {
+            // Each run owns its telemetry and connections. Clean up even when
+            // isolation fails, before deleting the workspace.
+            await cascade.close().catch(() => {});
+            for (const id of [...steps.keys()].filter((k) => !known.has(k))) {
+              await controller.endRun(id).catch(() => {});
+            }
+            fs.rmSync(workspace, { recursive: true, force: true });
+          }
         }
       }
     }
@@ -359,11 +367,19 @@ async function launchChromium(executable) {
   const ws = await new Promise((resolve, reject) => {
     let err = '';
     const timer = setTimeout(() => { abandon(); reject(new Error(`Chromium did not start: ${err.slice(-400)}`)); }, 15_000);
-    child.stderr.on('data', (d) => {
-      err += d;
+    const onStartupStderr = (d) => {
+      // Only startup diagnostics matter. Do not accumulate or repeatedly scan
+      // potentially unbounded browser logs during the benchmark itself.
+      err = (err + String(d)).slice(-4096);
       const m = /DevTools listening on (ws:\/\/\S+)/.exec(err);
-      if (m) { clearTimeout(timer); started = true; resolve(m[1]); }
-    });
+      if (m) {
+        child.stderr.off('data', onStartupStderr);
+        clearTimeout(timer);
+        started = true;
+        resolve(m[1]);
+      }
+    };
+    child.stderr.on('data', onStartupStderr);
     child.on('exit', (code) => { clearTimeout(timer); abandon(); reject(new Error(`Chromium exited (${code}): ${err.slice(-400)}`)); });
     // No such binary: say so, with the way to name another.
     child.on('error', (e) => { clearTimeout(timer); abandon(); reject(new Error(`Chromium could not start (${e.message}). Name one with --chromium <path>.`)); });
