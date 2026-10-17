@@ -334,7 +334,8 @@ export const PRIVATE_FIELDS = [
   'input[type="password" i]',
   ...PRIVATE_AUTOCOMPLETE.map((token) => `[autocomplete~="${token}" i]`),
   // Shown in clear, with no autocomplete to say so, by name or id.
-  ...['password', 'passwd', 'cvc', 'cvv', 'cardnumber', 'card_number', 'card-number']
+  ...['password', 'passwd', 'cvc', 'cvv', 'cardnumber', 'card_number', 'card-number',
+    'cardholder', 'card_holder', 'card-holder', 'nameoncard', 'name_on_card', 'name-on-card']
     .flatMap((word) => [`input[name*="${word}" i]`, `input[id*="${word}" i]`]),
   // Custom checkout fields often omit the cc-exp autocomplete token.
   ...['expiry', 'expiration', 'expires', 'cc-exp', 'cc_exp', 'ccexp', 'card-exp', 'card_exp', 'cardexp',
@@ -358,7 +359,7 @@ export const PRIVATE_FIELDS = [
  * Fields known only by their label — a `<label>`, `aria-label` or
  * `aria-labelledby` — and no name or id that says what they hold.
  */
-export const PRIVATE_LABEL = /password|passcode|one[\s-]?time|verification code|verify code|security code|auth(?:entication|orization)? code|access code|sign[\s-]?in code|login code|\botp\b|\b2fa\b|two[\s-]?(?:factor|step)|\bmfa\b|\bpin\b|card number|\bcvc\b|\bcvv\b|\bexpir(?:y|ation|es?)\b|\bexp\.?\s*(?:date|month|year)\b|\bmm\s*[/\-]\s*y{2}(?:y{2})?\b/i;
+export const PRIVATE_LABEL = /password|passcode|one[\s-]?time|verification code|verify code|security code|auth(?:entication|orization)? code|access code|sign[\s-]?in code|login code|\botp\b|\b2fa\b|two[\s-]?(?:factor|step)|\bmfa\b|\bpin\b|card number|(?:name\s+on\s+(?:the\s+)?card|card[\s_-]*holder(?:[\s_-]*name)?|cardholder[\s_-]*name)|\bcvc\b|\bcvv\b|\bexpir(?:y|ation|es?)\b|\bexp\.?\s*(?:date|month|year)\b|\bmm\s*[/\-]\s*y{2}(?:y{2})?\b/i;
 /**
  * Placeholders that say the same, and the digits a card field shows before
  * one is typed: "Card number", "1234 1234 1234 1234", "•••• ••••".
@@ -382,7 +383,7 @@ const PRIVATE_SELECTOR = [PRIVATE_FIELDS, ...PAYMENT_HOSTS.map((host) => `iframe
 /** Matches in one frame the check measures; past this it cannot say. */
 const PRIVACY_MATCH_LIMIT = 20;
 /** The page's scroll state, read without reaching into page globals twice. */
-const VIEWPORT_EXPRESSION = '({ width: innerWidth, height: innerHeight, scrollY: scrollY, scrollHeight: document.documentElement.scrollHeight })';
+const VIEWPORT_EXPRESSION = '({ width: innerWidth, height: innerHeight, scrollX: scrollX, scrollY: scrollY, scrollHeight: document.documentElement.scrollHeight })';
 /**
  * How long the agent waits for a restored picture before refusing to act.
  *
@@ -3150,7 +3151,7 @@ export class RemoteBrowserController {
       const scrolled = typeof page.evaluate === 'function'
         ? readViewport(await stoppable(within(page.evaluate(VIEWPORT_EXPRESSION))).catch(() => undefined))
         : undefined;
-      if (!scrolled || scrolled.scrollY !== seen.viewport.scrollY
+      if (!scrolled || scrolled.scrollX !== seen.viewport.scrollX || scrolled.scrollY !== seen.viewport.scrollY
         || scrolled.width !== seen.viewport.width || scrolled.height !== seen.viewport.height) {
         return { withheld: 'No screenshot: the page moved while it was being looked at.' };
       }
@@ -3941,10 +3942,11 @@ function readViewport(v: unknown): Viewport | undefined {
   const n = (k: string) => (typeof o[k] === 'number' && Number.isFinite(o[k]) ? o[k] as number : undefined);
   const width = n('width');
   const height = n('height');
+  const scrollX = n('scrollX');
   const scrollY = n('scrollY');
   const scrollHeight = n('scrollHeight');
-  if (width === undefined || height === undefined || scrollY === undefined || scrollHeight === undefined) return undefined;
-  return { width, height, scrollY, scrollHeight };
+  if (width === undefined || height === undefined || scrollX === undefined || scrollY === undefined || scrollHeight === undefined) return undefined;
+  return { width, height, scrollX, scrollY, scrollHeight };
 }
 
 /**
