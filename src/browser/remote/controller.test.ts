@@ -4658,7 +4658,7 @@ describe('page views and refs', () => {
     });
     extra['evaluate'] = async (expression: string) => {
       if (expression.startsWith('window.scrollBy')) { page.calls.push(`eval:${expression}`); return undefined; }
-      return { width: 1280, height: 800, scrollY: 0, scrollHeight: 1600 };
+      return { width: 1280, height: 800, scrollX: 0, scrollY: 0, scrollHeight: 1600 };
     };
     extra['frames'] = () => [
       scanned(privateOnScreen, 0),
@@ -5369,7 +5369,7 @@ describe('page views and refs', () => {
       // included — would read as off screen and go unread.
       const evaluate = extra['evaluate'] as (e: string) => Promise<unknown>;
       extra['evaluate'] = async (expression: string) => (
-        expression.includes('one-time-code') || expression === 'scrollY' ? evaluate(expression) : { width: 1280, height: 0, scrollY: 0, scrollHeight: 0 });
+        expression.includes('one-time-code') || expression === 'scrollY' ? evaluate(expression) : { width: 1280, height: 0, scrollX: 0, scrollY: 0, scrollHeight: 0 });
       subFrames = [{ found: true, y: 100 }];
       const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
       expect(out.image).toBeUndefined();
@@ -5427,7 +5427,7 @@ describe('page views and refs', () => {
       // getBoundingClientRect say nothing is on screen. Playwright's queries
       // run in a world the page cannot reach.
       extra['evaluate'] = async (expression: string) => (
-        /password|one-time-code|getBoundingClientRect/.test(expression) ? false : { width: 1280, height: 800, scrollY: 0, scrollHeight: 1600 });
+        /password|one-time-code|getBoundingClientRect/.test(expression) ? false : { width: 1280, height: 800, scrollX: 0, scrollY: 0, scrollHeight: 1600 });
       privateOnScreen = true;
       const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
       expect(out.image).toBeUndefined();
@@ -5533,6 +5533,29 @@ describe('page views and refs', () => {
       const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
       expect(out.image).toBeUndefined();
       expect(out.view!.text).toContain('a password, card or one-time-code field is on screen');
+    });
+
+    it('withholds a screenshot after a horizontal scroll during capture', async () => {
+      let scrollX = 0;
+      extra['evaluate'] = async () => ({ width: 1280, height: 800, scrollX, scrollY: 0, scrollHeight: 1600 });
+      const shoot = extra['screenshot'] as (opts: unknown) => Promise<Uint8Array>;
+      extra['screenshot'] = async (opts: unknown) => { scrollX = 200; return shoot(opts); };
+      const out = await controller().controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: the page moved');
+    });
+
+    it('treats cardholder names as private without autocomplete', async () => {
+      const { PRIVATE_FIELDS, PRIVATE_LABEL, PRIVATE_PLACEHOLDER } = await import('./controller.js');
+      for (const field of ['cardholder', 'card_holder', 'card-holder', 'nameoncard', 'name_on_card', 'name-on-card']) {
+        expect(PRIVATE_FIELDS).toContain(`input[name*="${field}" i]`);
+        expect(PRIVATE_FIELDS).toContain(`input[id*="${field}" i]`);
+      }
+      for (const text of ['Name on card', 'Name on the card', 'Cardholder name', 'Card Holder Name']) {
+        expect(text).toMatch(PRIVATE_LABEL);
+        expect(text).toMatch(PRIVATE_PLACEHOLDER);
+      }
+      expect('Your name').not.toMatch(PRIVATE_LABEL);
     });
 
     it('withholds a picture of a page that scrolled between its view and the picture', async () => {
@@ -5820,7 +5843,7 @@ describe('page views and refs', () => {
     it('gives the picture\'s own size, whatever the page says of itself', async () => {
       // A page can redefine innerWidth; the router prices the image by this size.
       extra['evaluate'] = async (expression: string) => (
-        expression.includes('one-time-code') ? false : { width: 320, height: 200, scrollY: 0, scrollHeight: 200 });
+        expression.includes('one-time-code') ? false : { width: 320, height: 200, scrollX: 0, scrollY: 0, scrollHeight: 200 });
       SHOT = jpeg(1920, 1080);
       const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
       expect(out.image).toMatchObject({ width: 1920, height: 1080 });
@@ -5842,7 +5865,7 @@ describe('page views and refs', () => {
   });
 
   it('leaves out a scroll position the page did not report as numbers', async () => {
-    extra['evaluate'] = async () => ({ width: '1280', height: 800, scrollY: 0, scrollHeight: 1600 });
+    extra['evaluate'] = async () => ({ width: '1280', height: 800, scrollX: 0, scrollY: 0, scrollHeight: 1600 });
     const out = await controller().controller({ kind: 'observe' }, ctx('run', 'w1'));
     expect(out.view!.text).not.toContain('Viewport');
   });
