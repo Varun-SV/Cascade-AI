@@ -20,17 +20,13 @@
 //             sockets: the namespace leaves loopback only, and the filter
 //             keeps it from reaching a host daemon (Docker, say) through a
 //             socket file.
-//    macOS  — sandbox-exec, with a generated profile that denies the same
-//             paths. A local-only caller runs no commands there: with no
-//             mount boundary a command can hard-link a file from outside the
-//             workspace in and write what it read into it, and with no
-//             process namespace a child it leaves behind can write after it
-//             ends — either way, somewhere Cascade cannot mark local-only.
+//    macOS  — refused: sandbox-exec cannot isolate surviving descendants or
+//             prevent inspection of the parent process environment.
 //
 //  Every launch, jailed or not, gets an environment with the provider keys
 //  taken out. Where there is no jailer (Windows, or a Linux without a
-//  working bubblewrap), `auto` runs commands with that environment alone —
-//  and refuses them to a local-only caller, whose network it cannot cut.
+//  working bubblewrap), `auto` refuses arbitrary commands and gives only
+//  the git tool its independently checked hermetic fallback.
 //  Naming a jailer outright refuses commands when that jailer is missing;
 //  `off` is today's behaviour, and nothing is scrubbed.
 //
@@ -123,6 +119,8 @@ export interface JailPolicy {
    * POSIX) as local-only: they may carry what it read.
    */
   taint?: (rels: string[]) => void;
+  /** A durable whole-workspace barrier until a local-only command is fully scanned. */
+  beginPrivateCommand?: () => { finish: () => void; isLocalOnly: (rel: string) => boolean };
   /** Write marks `taint` could hold only in memory — its save failed — to the record; throws if it still cannot. */
   saveMarks?: () => void;
   /**
@@ -212,7 +210,7 @@ function noJailReason(): string {
   const why = process.platform === 'win32'
     ? 'Windows has no supported process jail'
     : process.platform === 'darwin'
-      ? 'sandbox-exec is not working on this Mac'
+      ? 'macOS has no supported process jail that isolates descendants and the parent process'
       : 'bubblewrap is missing here or cannot create user namespaces';
   const fix = process.platform === 'linux'
     ? 'Install bubblewrap, or set tools.processJail to "off" to run commands without a jail.'
@@ -275,7 +273,9 @@ export class ProcessJail {
   private saveGitTrust(trust: Map<string, string>): void {
     try {
       fs.writeFileSync(this.gitTrustRecord(), JSON.stringify(Object.fromEntries(trust)), { mode: 0o600 });
-    } catch { /* kept in this process */ }
+    } catch (err) {
+      throw new Error(`Could not persist git trust (${(err as Error).message}), so the command was not run.`);
+    }
   }
 
   /**
@@ -361,14 +361,20 @@ export class ProcessJail {
     // keeps every command and git call from running until it is.
     const unrestored = this.retryUnrestored();
     if (unrestored) return { ok: false, reason: `Commands are not run: ${unrestored}` };
-    const env = scrubEnv(process.env, this.policy.secretValues());
+    const env = scrubEnv(process.env, this.policy.secretValues(), opts.keepGit === true);
     // The git tool's git, and what it starts — ssh, gpg, a credential
     // helper — run with the credentials it keeps in view, so they come only
     // from folders no command can write to: one could otherwise leave its
     // own `git` or `ssh` in ~/.local/bin for the next push to run.
     if (opts.keepGit) env['PATH'] = trustedDirs(this.policy.workspaceRoot).join(path.delimiter);
     const available = await (this.policy.detect ?? detectJail)();
-    const kind = mode === 'auto' ? available : (available === mode ? mode : null);
+    // sandbox-exec has neither a descendant lifecycle boundary nor parent
+    // process isolation. Git alone can use its independently checked fallback.
+    if (available === 'sandbox-exec' && (mode !== 'auto' || !opts.confinesItself || opts.offline)) {
+      return { ok: false, reason: 'Commands cannot run on macOS with sandbox-exec: it cannot isolate surviving descendants or the parent process environment. Set tools.processJail to "off" only to explicitly run without confinement.' };
+    }
+    const usable = available === 'sandbox-exec' ? null : available;
+    const kind = mode === 'auto' ? usable : (usable === mode ? mode : null);
 
     if (!kind) {
       if (mode !== 'auto') {
@@ -383,7 +389,7 @@ export class ProcessJail {
       if (!opts.confinesItself) return { ok: false, reason: noJailReason() };
       if (!this.warned) {
         this.warned = true;
-        this.policy.log('[jail] No process jail is available (bubblewrap on Linux, sandbox-exec on macOS): the git tool runs with provider keys removed from its environment and no configuration that can start a program, and shell and code commands are refused until tools.processJail is "off".');
+        this.policy.log('[jail] No process jail is available (bubblewrap on Linux): the git tool runs with provider keys removed from its environment and no configuration that can start a program, and shell and code commands are refused until tools.processJail is "off".');
       }
       // No mount keeps git from changing .cascadeignore — a checkout of
       // another commit would — so it is put back as it was when git ends.
@@ -397,26 +403,18 @@ export class ProcessJail {
     if (!jailer) {
       return { ok: false, reason: `${kind} was found only in folders a command could change (or not at all), so the command was not run.` };
     }
-    // As root a command could rewrite any program on the machine — the
-    // ones Cascade starts outside the jail too, its jailer and git among
-    // them. bubblewrap shows it the system read-only (`rootLayout`);
-    // sandbox-exec has no such view, so nothing is run.
-    if (asRoot() && kind === 'sandbox-exec') {
-      return { ok: false, reason: 'Cascade is running as root, and on macOS a command run as root could change the programs Cascade itself runs, so the command was not run. Run Cascade as an ordinary user.' };
-    }
-    if (opts.offline && kind === 'sandbox-exec') {
-      return { ok: false, reason: 'A local-only subtask (privacy.paths) cannot run commands on macOS: sandbox-exec cannot stop a command from hard-linking a file outside the workspace in and writing to it, nor end a child it leaves running, so what it writes could not all be marked local-only.' };
-    }
     // Repositories nested in the workspace — independent ones, submodules —
     // are found on the way: each store is checked as the workspace's own is.
     const nested: string[] = [];
-    const hidden = await collectHidden(this.policy, opts.offline, nested);
+    const credentials = opts.keepGit ? [] : secretsToHide([
+      ...(this.policy.hiddenSecrets?.() ?? []), ...credentialFiles(process.env, opts.cwd),
+    ]);
+    const hidden = await collectHidden(this.policy, opts.offline, nested, undefined, credentials);
     await this.trustGitConfigs(nested);
     if (!opts.keepGit) {
       for (const repo of [this.policy.workspaceRoot, ...nested]) {
         for (const dir of await this.gitDirsToHide(opts.offline, repo)) hidden.push({ path: dir, dir: true });
       }
-      hidden.push(...secretsToHide(this.policy.hiddenSecrets?.() ?? []));
     }
     // A container daemon's socket reaches a process outside the jail that
     // will mount the host for whoever asks — every masked path included.
@@ -457,12 +455,6 @@ export class ProcessJail {
       const done = async (): Promise<string | void> => {
         try { return restorePolicy(); } finally { scrubbed.cleanup(); }
       };
-      if (kind === 'sandbox-exec') {
-        // No mount to put a copy in its place: a file that holds one is not
-        // readable at all.
-        const unreadable = [...scrubbed.copies.keys()].map((f) => ({ path: f, dir: false }));
-        return { ok: true, launch: { file: jailer, args: ['-p', seatbeltProfile([...hidden, ...unreadable], frozen), file, ...args], env, cwd: opts.cwd, jail: kind, done } };
-      }
       const layout = asRoot() ? rootLayout(this.policy.workspaceRoot) : undefined;
       return { ok: true, launch: { file: jailer, args: bwrapArgs(hidden, false, opts.cwd, file, args, layout, frozen, scrubbed.copies), env, cwd: opts.cwd, jail: kind, done } };
     }
@@ -494,10 +486,21 @@ export class ProcessJail {
       scratch: ['/tmp', path.join(os.homedir(), '.cache')].filter((d) => !inside(d) && fs.existsSync(d)),
     };
     const own = this.policy.stateDirs?.().private;
+    let scanBarrier: ReturnType<NonNullable<JailPolicy['beginPrivateCommand']>> | undefined;
     const done = async (): Promise<string | void> => {
       const policyNote = restorePolicy();
+      // Restore known folder permissions before inspecting what changed.
+      // A command may have made a public folder unreadable after writing it.
+      restoreFolders(root, folders);
       const dirsAfter = new Set<string>();
-      const after = await stampFiles(root, gitDirs, dirsAfter);
+      const unknown = new Set<string>();
+      const after = await stampFiles(root, gitDirs, dirsAfter, undefined, unknown);
+      if (unknown.has('.')) {
+        // No subtree can be proved public when even the root could not be
+        // scanned. Persist a whole-workspace mark before releasing the gate.
+        await recordMarks(this.policy, ['.'], [], root, own);
+        return 'The workspace could not be fully inspected after a local-only command; the whole workspace remains local-only.';
+      }
       // A policy file it changed has just been put back as it was.
       const policyRels = new Set(policyFiles.map((f) => path.relative(root, f).split(path.sep).join('/')));
       const changed = changedFiles(before, after, startedAt).filter((rel) => !policyRels.has(rel));
@@ -518,7 +521,8 @@ export class ProcessJail {
         const parts = rel.split('/');
         try {
           for (let i = isDir ? parts.length : parts.length - 1; i > 0; i--) {
-            if (this.policy.isLocalOnly?.(`${parts.slice(0, i).join('/')}/${PROBE}`)) return true;
+            const probe = `${parts.slice(0, i).join('/')}/${PROBE}`;
+            if (scanBarrier ? scanBarrier.isLocalOnly(probe) : this.policy.isLocalOnly?.(probe)) return true;
           }
         } catch { /* see above */ }
         return false;
@@ -531,7 +535,7 @@ export class ProcessJail {
       const goneDirs = madeDirs(dirsAfter, dirsBefore);
       const inGone = (rel: string) => goneDirs.some((dir) => rel.startsWith(`${dir}/`));
       const deleted = [...goneDirs, ...[...before.keys()].filter((rel) => !after.has(rel) && !inGone(rel))];
-      const marked = [...changed.filter((rel) => before.has(rel) || !inMade(rel)), ...made, ...deleted].filter((rel) => !moved.includes(rel));
+      const marked = [...changed.filter((rel) => before.has(rel) || !inMade(rel)), ...made, ...deleted, ...unknown].filter((rel) => !moved.includes(rel));
       // A folder it did not make carries nothing of its own choosing out:
       // its mode and times are put back as they were (extended attributes
       // it could not set at all).
@@ -549,6 +553,7 @@ export class ProcessJail {
         if (setAside) notes.push(setAside);
       }
       if (policyNote) notes.push(policyNote);
+      scanBarrier?.finish();
       if (notes.length) return notes.join('\n');
     };
 
@@ -559,6 +564,7 @@ export class ProcessJail {
       return { ok: false, reason: `A local-only subtask (privacy.paths) cannot run commands on ${process.arch}: the filter that keeps them off host sockets is built for x64 and arm64 only.` };
     }
     const jailArgs = bwrapArgs(hidden, true, opts.cwd, file, args, layout, frozen);
+    scanBarrier = this.policy.beginPrivateCommand?.();
     return {
       ok: true,
       launch: {
@@ -774,11 +780,28 @@ export class ProcessJail {
 }
 
 /** `env` without provider keys: the known names, and any variable holding a configured secret. */
-export function scrubEnv(env: NodeJS.ProcessEnv, secretValues: string[]): NodeJS.ProcessEnv {
+const CREDENTIAL_FILE_ENV = new Set([
+  'GOOGLE_APPLICATION_CREDENTIALS', 'AWS_SHARED_CREDENTIALS_FILE', 'AWS_CONFIG_FILE',
+  'AWS_WEB_IDENTITY_TOKEN_FILE', 'AZURE_FEDERATED_TOKEN_FILE',
+  'KUBECONFIG', 'AZURE_AUTH_LOCATION', 'REGISTRY_AUTH_FILE', 'BOTO_CONFIG',
+  'DOCKER_CONFIG', 'NPM_CONFIG_USERCONFIG', 'NETRC',
+]);
+
+/** Credential files (or credential directories) explicitly advertised by the host. */
+export function credentialFiles(env: NodeJS.ProcessEnv, cwd: string): string[] {
+  return [...new Set(Object.entries(env).flatMap(([name, value]) => {
+    if (!value || !CREDENTIAL_FILE_ENV.has(name.toUpperCase())) return [];
+    const values = name.toUpperCase() === 'KUBECONFIG' ? value.split(path.delimiter) : [value];
+    return values.filter(Boolean).flatMap((file) => [path.resolve(cwd, file), path.resolve(process.cwd(), file)]);
+  }))];
+}
+
+export function scrubEnv(env: NodeJS.ProcessEnv, secretValues: string[], keepCredentialPaths = false): NodeJS.ProcessEnv {
   const secrets = [...new Set(secretValues.filter((v) => v && v.length >= 8))];
   const out: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(env)) {
     if (SECRET_ENV_NAMES.includes(name.toUpperCase())) continue;
+    if (!keepCredentialPaths && CREDENTIAL_FILE_ENV.has(name.toUpperCase())) continue;
     // Anywhere in the value: `Bearer <key>`, a URL holding it.
     if (value !== undefined && secrets.some((secret) => value.includes(secret))) continue;
     out[name] = value;
@@ -794,8 +817,8 @@ export function scrubEnv(env: NodeJS.ProcessEnv, secretValues: string[]): NodeJS
  * and not walked. The walk awaits each directory, so the event loop keeps
  * running in a large workspace.
  */
-export async function collectHidden(policy: JailPolicy, offline: boolean, nestedRepos?: string[], linkedLimit = LINKED_WALK_LIMIT): Promise<Hidden[]> {
-  const out: Hidden[] = [];
+export async function collectHidden(policy: JailPolicy, offline: boolean, nestedRepos?: string[], linkedLimit = LINKED_WALK_LIMIT, extraHidden: Hidden[] = []): Promise<Hidden[]> {
+  const out: Hidden[] = [...extraHidden];
   let root: string;
   try { root = fs.realpathSync(policy.workspaceRoot); } catch { root = path.resolve(policy.workspaceRoot); }
   const hide = (rel: string): boolean => policy.isProtected(rel) || (!offline && !!policy.isLocalOnly?.(rel));
@@ -1313,9 +1336,8 @@ let detected: Promise<JailKind | null> | undefined;
 /**
  * The jailer this machine can actually run, found once. Each is tried the way
  * it will be used — bubblewrap can be installed and still unusable, where
- * unprivileged user namespaces are switched off — and sandbox-exec is given
- * a profile of the shape a launch uses, so a profile it rejects is found now
- * rather than on every command.
+ * unprivileged user namespaces are switched off. macOS has no supported
+ * lifecycle and process-isolation boundary, so it reports no usable jail.
  */
 export function detectJail(): Promise<JailKind | null> {
   detected ??= (async () => {
@@ -1323,15 +1345,6 @@ export function detectJail(): Promise<JailKind | null> {
       const bwrap = onTrustedPath(['bwrap']);
       const ok = bwrap !== undefined && await runs(bwrap, bwrapArgs([], true, '/', 'true', []));
       return ok ? 'bwrap' : null;
-    }
-    if (process.platform === 'darwin') {
-      const probe = seatbeltProfile([
-        { path: '/nonexistent/cascade-probe', dir: false },
-        { path: '/nonexistent/cascade-dir', dir: true, keep: ['/nonexistent/cascade-dir/tmp'] },
-      ], ['/nonexistent/cascade-read-only']);
-      const sandboxExec = onTrustedPath(['sandbox-exec']);
-      const ok = sandboxExec !== undefined && await runs(sandboxExec, ['-p', probe, '/usr/bin/true']);
-      return ok ? 'sandbox-exec' : null;
     }
     return null;
   })();
@@ -1374,7 +1387,7 @@ interface Stamp { ctime: number; mtime: number; size: number; ino: number; nlink
 /** A folder's mode and times, as they were before a command ran. */
 interface FolderStamp { mode: number; atime: number; mtime: number }
 
-async function stampFiles(root: string, skip: string[], dirs?: Set<string>, folders?: Map<string, FolderStamp>): Promise<Map<string, Stamp>> {
+async function stampFiles(root: string, skip: string[], dirs?: Set<string>, folders?: Map<string, FolderStamp>, unknown?: Set<string>): Promise<Map<string, Stamp>> {
   const out = new Map<string, Stamp>();
   const skipped = new Set(skip);
   const folder = async (abs: string, rel: string): Promise<void> => {
@@ -1382,12 +1395,18 @@ async function stampFiles(root: string, skip: string[], dirs?: Set<string>, fold
     try {
       const st = await fs.promises.lstat(abs);
       folders.set(rel, { mode: st.mode & 0o7777, atime: st.atimeMs, mtime: st.mtimeMs });
-    } catch { /* gone meanwhile */ }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
   };
   await folder(root, '');
   const walk = async (dir: string, relDir: string): Promise<void> => {
     let entries: fs.Dirent[];
-    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
+    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+      if (unknown) { unknown.add(relDir || '.'); return; }
+      throw new Error(`Could not inspect ${dir} before a local-only command (${(err as Error).message}), so it was not run.`);
+    }
     for (const entry of entries) {
       const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
       const abs = path.join(dir, entry.name);
@@ -1405,7 +1424,11 @@ async function stampFiles(root: string, skip: string[], dirs?: Set<string>, fold
       try {
         const st = await fs.promises.lstat(abs);
         out.set(rel, { ctime: st.ctimeMs, mtime: st.mtimeMs, size: st.size, ino: st.ino, nlink: st.nlink });
-      } catch { /* gone meanwhile */ }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        if (unknown) unknown.add(rel);
+        else throw err;
+      }
     }
   };
   await walk(root, '');

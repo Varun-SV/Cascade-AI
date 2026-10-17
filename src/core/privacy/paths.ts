@@ -48,7 +48,7 @@ export class PrivacyPaths {
   private derived = new Set<string>();
   /** The same paths as a tree of their segments, to find one a path is or lies in with one walk. */
   private derivedTree: SegmentNode = treeOf([]);
-  private readonly derivedFile?: string;
+  private derivedFile?: string;
   /** Recorded here but not yet on disk: a save that could not take the lock. */
   private unsaved = new Set<string>();
   /** The record's file as last read or written here, to tell when another run changed it. */
@@ -78,13 +78,28 @@ export class PrivacyPaths {
     }
   }
 
+  /** Attach a process-only policy to its durable record before a command runs. */
+  requireDurableRecord(workspaceRoot: string): void {
+    const file = statePath(workspaceRoot, STATE.privacyDerived);
+    if (this.derivedFile) {
+      if (this.derivedFile !== file) throw new Error('A privacy policy cannot share its record across workspaces.');
+      this.saveUnsaved();
+      return;
+    }
+    for (const rel of this.derived) this.unsaved.add(rel);
+    this.derivedFile = file;
+    this.synced = false;
+    this.sync();
+    this.saveUnsaved();
+  }
+
   /**
    * The local-only patterns, gitignore-style: the configured ones, and one
    * for each file a local-only subtask wrote.
    */
   localOnlyPatterns(): string[] {
     this.sync();
-    return [...this.patterns, ...[...this.derived].map(literalPattern)];
+    return [...this.patterns, ...[...this.derived].map((rel) => rel === '.' ? '**' : literalPattern(rel))];
   }
 
   /** True when any privacy rules are configured, or a local-only subtask has written anything. */
@@ -101,6 +116,7 @@ export class PrivacyPaths {
     if (!relativePath) return false;
     const rel = relativePath.replace(/^\.?\//, '');
     this.sync();
+    if (this.derived.has('.')) return true;
     if (this.derived.size) {
       let node = this.derivedTree;
       for (const segment of stripTrailingSlashes(rel).split('/')) {

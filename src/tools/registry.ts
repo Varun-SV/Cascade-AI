@@ -202,6 +202,19 @@ export class ToolRegistry extends EventEmitter {
       readOnlyFiles: () => READ_ONLY_POLICY.map((rel) => path.join(workspaceRoot, rel)),
       secretValues: () => this.secretValues(),
       taint: (rels) => this.markLocalOnly(rels),
+      beginPrivateCommand: () => {
+        const privacy = this.privacyPaths;
+        if (!privacy) throw new Error('A local-only command requires a durable privacy record.');
+        privacy.requireDurableRecord(workspaceRoot);
+        // Snapshot the actual policy: the temporary barrier must not make
+        // newly created outputs appear already covered and leave them public.
+        const before = ignore().add(privacy.localOnlyPatterns());
+        const added = privacy.addDerived(['.']).includes('.');
+        return {
+          isLocalOnly: (rel) => before.ignores(rel),
+          finish: () => { if (added) privacy.removeDerived(['.']); },
+        };
+      },
       saveMarks: () => this.privacyPaths?.saveUnsaved(),
       holdPending: (rels) => {
         const release = this.gate.holdPending(rels);

@@ -16,7 +16,7 @@ deadline (`src/tools/sandbox/`). The bare
 worker fallback, which confined nothing, is gone; a config naming it gets the
 WebAssembly sandbox.
 
-**OS-level jail for real-process execution — ✅ shipped for Linux and macOS.**
+**OS-level jail for real-process execution — ✅ shipped for Linux; macOS and Windows fail closed.**
 `shell`, `run_code` and `git` launch through `ProcessJail`
 (`src/tools/jail/process-jail.ts`, `tools.processJail: 'auto' | 'bwrap' |
 'sandbox-exec' | 'off'`), on top of approvals:
@@ -44,12 +44,10 @@ WebAssembly sandbox.
   workspace: one gate per workspace in a process, and marker files in the
   project's state folder between processes.
   `.cascadeignore` is mounted over itself read-only for every caller.
-- **macOS — sandbox-exec**, a generated profile denying the same paths.
-  A local-only caller runs no commands there: with no mount boundary a
-  command could hard-link a file from outside the workspace in and write
-  through it, and with no process namespace a child it left running could
-  write after it ended — either way where Cascade cannot mark it. Checked at
-  startup with a profile of the same shape; not exercised in CI.
+- **macOS:** arbitrary commands are refused. `sandbox-exec` cannot contain
+  surviving descendants or isolate the parent process environment. Auto-mode
+  Git uses the independently checked hermetic fallback; explicit
+  `sandbox-exec` refuses commands.
 - **Everywhere** — provider keys are taken out of every command's
   environment, `git`'s on Windows included; the usual credential locations
   in the home folder (`~/.ssh`, `~/.aws`, …) are hidden from every command
@@ -61,9 +59,7 @@ WebAssembly sandbox.
 
 **Still open:** Windows (Job Objects/AppContainer, or WSL2 + bubblewrap), and
 a Docker/Podman fallback where no jailer works — which would also give
-macOS local-only commands. On macOS a command can still
-read another same-user process's startup environment; Linux's PID namespace
-closes that there. A mask hides what a path holds, not that it is there: a
+macOS commands. Linux's PID namespace isolates the parent process environment. A mask hides what a path holds, not that it is there: a
 cloud worker's command can list the name of a file a local-only pattern
 matches — one you named, since what a local-only worker makes is kept out of
 the project.

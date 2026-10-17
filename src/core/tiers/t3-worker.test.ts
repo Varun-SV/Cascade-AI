@@ -16,6 +16,7 @@ import { PermissionEscalator } from '../permissions/escalator.js';
 import { T3Worker, buildWorkerRules, canProduceFiles, canProduceNonDiskDeliverables, hasFileWritingTool, missingVisualEvidence, shouldRequireArtifact, tscErrors } from './t3-worker.js';
 import { ACTING_INTEGRITY_RULE } from './integrity.js';
 import os from 'node:os';
+import fs from 'node:fs';
 import path from 'node:path';
 import { statePath, STATE } from '../../config/project-state.js';
 
@@ -642,8 +643,11 @@ describe('artifact verification resolves against the run workspace', () => {
     // dynamic tool generation from T2 Manager") — a failed node for a file
     // that had in fact been written.
     const { ToolRegistry } = await import('../../tools/registry.js');
-    const registry = new ToolRegistry({ enabledTools: [] }, '/srv/data/tenants/u1');
-    expect(registry.getWorkspaceRoot()).toBe('/srv/data/tenants/u1');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-tenant-root-'));
+    try {
+      const registry = new ToolRegistry({ enabledTools: [] }, root);
+      expect(registry.getWorkspaceRoot()).toBe(root);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
   it('defaults to the process directory when no root was given', async () => {
@@ -1563,7 +1567,8 @@ describe('privacy.paths, enforced when a file is read', () => {
 // refused a place in it, as though it were a public file.
 describe('T3Worker — copying into its private folder', () => {
   it('lets a local-only file into a document in the private folder, and not into a public one', () => {
-    const ws = path.join(os.tmpdir(), 'cascade-copy-private');
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-copy-private-'));
+    try {
     const privacy = { hasPolicies: () => true, anyLocalOnly: () => true, coversFile: (abs: string) => abs.includes(`${path.sep}secret${path.sep}`) };
     const router = { getPrivacyPaths: () => privacy, hasPrivateModel: () => true } as unknown as CascadeRouter;
     const registry = makeToolRegistry({ getToolDefinitions: () => [], getWorkspaceRoot: () => ws } as unknown as Partial<ToolRegistry>);
@@ -1573,6 +1578,7 @@ describe('T3Worker — copying into its private folder', () => {
     expect(mayRead(image, { file: statePath(ws, STATE.private, 'deck.pptx') })).toBe(true);
     expect(mayRead(image, { file: path.join(ws, 'deck.pptx') })).toBe(false);
     expect(mayRead(image, { file: `${statePath(ws, STATE.private)}-elsewhere${path.sep}deck.pptx` })).toBe(false);
+    } finally { fs.rmSync(ws, { recursive: true, force: true }); }
   });
 });
 

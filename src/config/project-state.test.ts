@@ -85,15 +85,91 @@ describe('a project\'s state folder', () => {
       if (String(file).endsWith('project.json')) throw Object.assign(new Error('EROFS'), { code: 'EROFS' });
       return real(file, ...(rest as [never]));
     });
-    let dir: string;
     try {
-      dir = projectStateDir(ws);
-      expect(fs.existsSync(identity(dir))).toBe(false);
+      expect(() => projectStateDir(ws)).toThrow(/identity/);
     } finally {
       spy.mockRestore();
     }
-    expect(projectStateDir(ws)).toBe(dir);
+    const dir = projectStateDir(ws);
     expect(fs.existsSync(identity(dir))).toBe(true);
+  });
+
+  it.each(['missing', 'malformed', 'unreadable'])('refuses existing history with %s project identity instead of adopting it', (kind) => {
+    const ws = tempDir('cascade-state-unknown-');
+    const dir = projectStateDir(ws);
+    const record = path.join(dir, 'project.json');
+    const original = fs.readFileSync(record, 'utf8');
+    const history = path.join(dir, 'sessions.json');
+    fs.writeFileSync(history, 'old-project-history');
+    let spy: ReturnType<typeof vi.spyOn> | undefined;
+    if (kind === 'missing') fs.rmSync(record);
+    else if (kind === 'malformed') fs.writeFileSync(record, '{broken');
+    else {
+      const real = fs.readFileSync;
+      spy = vi.spyOn(fs, 'readFileSync').mockImplementation(((file: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+        if (String(file) === record) throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+        return (real as (...args: unknown[]) => unknown)(file, ...rest);
+      }) as typeof fs.readFileSync);
+    }
+    try {
+      expect(() => migrateProjectState(ws)).toThrow(/identity/);
+      expect(fs.readFileSync(history, 'utf8')).toBe('old-project-history');
+    } finally {
+      spy?.mockRestore();
+      fs.writeFileSync(record, original);
+    }
+    expect(() => migrateProjectState(ws)).not.toThrow();
+  });
+
+  it('refuses direct state access when setting earlier history aside fails', async () => {
+    const ws = tempDir('cascade-state-aside-failed-');
+    const dir = projectStateDir(ws);
+    const record = path.join(dir, 'project.json');
+    const identity = JSON.parse(fs.readFileSync(record, 'utf8'));
+    fs.writeFileSync(record, JSON.stringify({ ...identity, ino: 'another-folder' }));
+    const history = path.join(dir, 'sessions.json');
+    fs.writeFileSync(history, 'old-private-history');
+    vi.resetModules();
+    const fresh = await import('./project-state.js');
+    const real = fs.renameSync;
+    const spy = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (String(from) === history) throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+      return real(from, to);
+    });
+    try {
+      expect(() => fresh.projectStateDir(ws)).toThrow(/EPERM/);
+      expect(() => fresh.statePath(ws, STATE.sessions)).toThrow(/EPERM/);
+    } finally { spy.mockRestore(); }
+    expect(() => fresh.projectStateDir(ws)).not.toThrow();
+    expect(fs.existsSync(history)).toBe(false);
+  });
+
+  it('retries link cleanup after an entry moved, even when its legacy source is gone', () => {
+    const ws = tempDir('cascade-moved-links-');
+    const other = tempDir('cascade-foreign-checkpoint-');
+    fs.writeFileSync(path.join(other, 'checkpoint.json'), 'foreign-prompt');
+    fs.mkdirSync(path.join(ws, '.cascade', 'resume'), { recursive: true });
+    fs.symlinkSync(other, path.join(ws, '.cascade', 'resume', 'foreign'), 'junction');
+    const real = fs.rmSync;
+    let failedPath = '';
+    const spy = vi.spyOn(fs, 'rmSync').mockImplementation((file, options) => {
+      if (String(file).endsWith(`${path.sep}resume${path.sep}foreign`) && !String(file).includes(`${path.sep}.cascade${path.sep}`)) {
+        failedPath = String(file);
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      }
+      return real(file, options);
+    });
+    try {
+      expect(() => projectStateDir(ws)).toThrow(/Could not/);
+      expect(fs.existsSync(path.join(ws, '.cascade', 'resume'))).toBe(false);
+      expect(failedPath).not.toBe('');
+      expect(() => projectStateDir(ws)).toThrow(/Could not/);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(() => projectStateDir(ws)).not.toThrow();
+    expect(fs.existsSync(failedPath)).toBe(false);
+    expect(fs.readFileSync(path.join(other, 'checkpoint.json'), 'utf8')).toBe('foreign-prompt');
   });
 
   // Judged by its lexical path while not made yet, a host's state folder
