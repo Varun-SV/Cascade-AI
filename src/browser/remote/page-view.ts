@@ -409,7 +409,14 @@ export function describePage(input: {
     identities: new Map([...shownView, ...shownBelow].map((e) => [e.ref, e.identity])),
     options: new Map([...shownView, ...shownBelow].flatMap((e) => (e.options ? [[e.ref, e.options] as const] : []))),
     framed: new Set([...shownView, ...shownBelow].filter((e) => e.framed).map((e) => e.ref)),
-    marks: shownView.flatMap((e) => (e.box && !e.heading ? [{ ref: e.ref, x: e.box.x, y: e.box.y, w: e.box.w, h: e.box.h }] : [])),
+    marks: shownView.flatMap((e) => {
+      if (!e.box || e.heading) return [];
+      // A control can extend outside a scrolled iframe. Mark only the part
+      // visible through all enclosing frames and the screenshot viewport.
+      let box = e.node.clip ? intersect(e.box, e.node.clip) : e.box;
+      if (input.viewport) box = intersect(box, { x: 0, y: 0, w: input.viewport.width, h: input.viewport.height });
+      return box.w > 0 && box.h > 0 ? [{ ref: e.ref, ...box }] : [];
+    }),
   };
 }
 

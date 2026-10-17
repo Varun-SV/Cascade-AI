@@ -317,6 +317,19 @@ describe('describePage', () => {
     expect(v.marks.map((m) => m.ref)).not.toContain('f1e3');
   });
 
+  it('clips partially visible marks to nested frame bounds and the viewport', () => {
+    const snapshot = [
+      '- iframe [ref=e1] [box=100,100,100,100]:',
+      '  - iframe [ref=f1e1] [box=50,50,100,100]:',
+      '    - button "Partly visible" [ref=f2e2] [box=-20,-20,120,120]',
+      '- button "Page edge" [ref=e2] [box=-10,-10,50,50]',
+    ].join('\n');
+    const v = view(snapshot, { width: 180, height: 180, scrollX: 0, scrollY: 0, scrollHeight: 200 })!;
+    expect(v.marks).toContainEqual({ ref: 'f2e2', x: 150, y: 150, w: 30, h: 30 });
+    expect(v.marks).toContainEqual({ ref: 'e2', x: 0, y: 0, w: 40, h: 40 });
+    expect(view(snapshot, undefined)!.marks).toContainEqual({ ref: 'f2e2', x: 150, y: 150, w: 50, h: 50 });
+  });
+
   it('does not take a nameless field\'s value for its label', () => {
     // With no accessible name, the label falls back to text — never to what
     // was typed.
