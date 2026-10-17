@@ -553,7 +553,12 @@ export class ProcessJail {
         if (setAside) notes.push(setAside);
       }
       if (policyNote) notes.push(policyNote);
-      scanBarrier?.finish();
+      try { scanBarrier?.finish(); } catch {
+        // Marks were recorded or their pending gate is held. A failed
+        // barrier removal stays conservative, without discarding the
+        // private-output result or turning cleanup into an unhandled error.
+        notes.push('The privacy record could not be finalized; the workspace remains local-only until its record can be repaired.');
+      }
       if (notes.length) return notes.join('\n');
     };
 

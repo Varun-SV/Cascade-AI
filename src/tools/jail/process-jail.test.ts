@@ -114,6 +114,26 @@ describe('late containment review regressions', () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
+  it('keeps the privacy barrier without rejecting cleanup when its record becomes unreadable', async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-scan-record-failed-')));
+    try {
+      const privacy = new PrivacyPaths([], { workspaceRoot: root });
+      const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false } as never, root);
+      reg.setPrivacyPaths(privacy);
+      const jail = (reg as unknown as { processJail: ProcessJail & { policy: JailPolicy } }).processJail;
+      jail.policy.detect = async () => 'bwrap';
+      jail.policy.program = (name) => name;
+      const prepared = await jail.prepare('true', [], { cwd: root, offline: true, keepGit: true });
+      if (!prepared.ok) throw new Error(prepared.reason);
+      const record = statePath(root, 'privacy-derived.json');
+      const kept = await fs.readFile(record);
+      await fs.rm(record); await fs.mkdir(record);
+      await expect(prepared.launch.done?.()).resolves.toMatch(/privacy record|local-only/);
+      await fs.rm(record, { recursive: true }); await fs.writeFile(record, kept);
+      expect(new PrivacyPaths([], { workspaceRoot: root }).isLocalOnly('unscanned.txt')).toBe(true);
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+
   it.each(['public', '.'])('marks an indeterminate post-command subtree %s before releasing it', async (unreadable) => {
     const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-unreadable-after-')));
     await fs.mkdir(path.join(root, 'public'));
