@@ -56,6 +56,10 @@ function policy(over: Partial<JailPolicy> = {}): JailPolicy {
 }
 
 describe('scrubEnv', () => {
+  it('removes credential-file hints from command environments', () => {
+    const env = scrubEnv({ GOOGLE_APPLICATION_CREDENTIALS: '/creds/gcp.json', AWS_SHARED_CREDENTIALS_FILE: '/creds/aws', KUBECONFIG: '/creds/kube', PATH: '/usr/bin' }, []);
+    expect(env).toEqual({ PATH: '/usr/bin' });
+  });
   it('takes out provider keys by name and any variable holding a configured secret — nothing else', () => {
     const env = scrubEnv({
       PATH: '/usr/bin', ANTHROPIC_API_KEY: 'a', openai_api_key: 'b', CASCADE_DASHBOARD_SECRET: 'c',
@@ -63,6 +67,229 @@ describe('scrubEnv', () => {
       GITHUB_TOKEN: 'ghp_for_git_push', SHORT: 'x',
     }, [SECRET, 'x']);
     expect(env).toEqual({ PATH: '/usr/bin', GITHUB_TOKEN: 'ghp_for_git_push', SHORT: 'x' });
+  });
+});
+
+describe('late containment review regressions', () => {
+  const makePolicy = (root: string, extra: Partial<JailPolicy> = {}) => policy({
+    workspaceRoot: root, detect: async () => 'bwrap', isProtected: () => false,
+    isLocalOnly: () => false, hiddenPatterns: () => [], hiddenSecrets: () => [], ...extra,
+  });
+
+  it.each([true, false])('keeps a durable privacy barrier if a process ends before its command is scanned (bound: %s)', async (bound) => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-pending-scan-')));
+    try {
+      const privacy = new PrivacyPaths([], bound ? { workspaceRoot: root } : {});
+      const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false } as never, root);
+      reg.setPrivacyPaths(privacy);
+      const jail = (reg as unknown as { processJail: ProcessJail & { policy: JailPolicy } }).processJail;
+      jail.policy.detect = async () => 'bwrap';
+      jail.policy.program = (name) => name;
+      const prepared = await jail.prepare('true', [], { cwd: root, offline: true, keepGit: true });
+      if (!prepared.ok) throw new Error(prepared.reason);
+      // A later process must remain safe even if this one never calls done.
+      expect(new PrivacyPaths([], { workspaceRoot: root }).isLocalOnly('new-secret.txt')).toBe(true);
+      await prepared.launch.done?.();
+      // A completed scan releases only the barrier this command added.
+      expect(new PrivacyPaths([], { workspaceRoot: root }).isLocalOnly('ordinary.txt')).toBe(false);
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+
+  it('rolls back its privacy barrier if command setup cannot persist it', async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-barrier-setup-failed-')));
+    try {
+      const privacy = new PrivacyPaths([], { workspaceRoot: root });
+      privacy.addDerived(['earlier-private.txt']);
+      const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false } as never, root);
+      reg.setPrivacyPaths(privacy);
+      const jail = (reg as unknown as { processJail: ProcessJail & { policy: JailPolicy } }).processJail;
+      jail.policy.detect = async () => 'bwrap';
+      jail.policy.program = (name) => name;
+      const record = statePath(root, 'privacy-derived.json');
+      const real = fsSync.renameSync;
+      const spy = vi.spyOn(fsSync, 'renameSync').mockImplementation((from, to) => {
+        if (String(to) === record) throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+        return real(from, to);
+      });
+      try {
+        await expect(jail.prepare('true', [], { cwd: root, offline: true, keepGit: true }).then((r) => r.ok)).rejects.toThrow(/ENOSPC/);
+      } finally { spy.mockRestore(); }
+      expect(privacy.isLocalOnly('public.txt')).toBe(false);
+      privacy.saveUnsaved();
+      const next = new PrivacyPaths([], { workspaceRoot: root });
+      expect(next.isLocalOnly('public.txt')).toBe(false);
+      expect(next.isLocalOnly('earlier-private.txt')).toBe(true);
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+
+  it('retries a failed barrier removal without making it public in memory', async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-barrier-remove-failed-')));
+    try {
+      const privacy = new PrivacyPaths([], { workspaceRoot: root });
+      const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false } as never, root);
+      reg.setPrivacyPaths(privacy);
+      const jail = (reg as unknown as { processJail: ProcessJail & { policy: JailPolicy } }).processJail;
+      jail.policy.detect = async () => 'bwrap'; jail.policy.program = (name) => name;
+      const prepared = await jail.prepare('true', [], { cwd: root, offline: true, keepGit: true });
+      if (!prepared.ok) throw new Error(prepared.reason);
+      const record = statePath(root, 'privacy-derived.json');
+      const real = fsSync.renameSync;
+      const spy = vi.spyOn(fsSync, 'renameSync').mockImplementation((from, to) => {
+        if (String(to) === record) throw new Error('REMOVE_BARRIER_FAILED');
+        return real(from, to);
+      });
+      try { await prepared.launch.done?.(); } finally { spy.mockRestore(); }
+      expect(privacy.isLocalOnly('public.txt')).toBe(true);
+      privacy.saveUnsaved();
+      expect(new PrivacyPaths([], { workspaceRoot: root }).isLocalOnly('public.txt')).toBe(false);
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+
+  it('does not require read access to unrelated ancestors to flush git trust', async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-trust-ancestor-')));
+    const state = projectStateDir(root);
+    const real = fsSync.openSync;
+    const spy = vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, ...rest) => {
+      if (String(file) === path.dirname(state) && flags === 'r') throw new Error('ANCESTOR_NOT_READABLE');
+      return real(file, flags, ...rest);
+    });
+    try {
+      const run = await new ProcessJail(makePolicy(root)).prepare('true', [], { cwd: root, offline: false, keepGit: true });
+      expect(run.ok).toBe(true);
+      if (run.ok) await run.launch.done?.();
+    } finally { spy.mockRestore(); await fs.rm(root, { recursive: true, force: true }); }
+  });
+
+  it('does not launch until the scan barrier temporary file can be flushed', async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-barrier-flush-')));
+    try {
+      const privacy = new PrivacyPaths([], { workspaceRoot: root });
+      const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false } as never, root);
+      reg.setPrivacyPaths(privacy);
+      const jail = (reg as unknown as { processJail: ProcessJail & { policy: JailPolicy } }).processJail;
+      jail.policy.detect = async () => 'bwrap'; jail.policy.program = (name) => name;
+      const record = statePath(root, 'privacy-derived.json');
+      const real = fsSync.openSync;
+      const spy = vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, ...rest) => {
+        if (String(file).startsWith(`${record}.`) && flags === 'r+') throw new Error('BARRIER_FLUSH_FAILED');
+        return real(file, flags, ...rest);
+      });
+      try {
+        await expect(jail.prepare('true', [], { cwd: root, offline: true, keepGit: true }).then((r) => r.ok)).rejects.toThrow(/BARRIER_FLUSH_FAILED/);
+      } finally { spy.mockRestore(); }
+      privacy.saveUnsaved();
+      expect(new PrivacyPaths([], { workspaceRoot: root }).isLocalOnly('public.txt')).toBe(false);
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+
+  it('refuses a command until the initial git trust baseline is durable', async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-trust-durable-')));
+    const record = statePath(root, 'git-config-trust.json');
+    const real = fsSync.writeFileSync;
+    const spy = vi.spyOn(fsSync, 'writeFileSync').mockImplementation((file, ...rest) => {
+      if (String(file) === record) throw Object.assign(new Error('EROFS'), { code: 'EROFS' });
+      return real(file, ...(rest as [never]));
+    });
+    try {
+      await expect(new ProcessJail(makePolicy(root)).prepare('true', [], { cwd: root, offline: false, keepGit: true }).then((r) => r.ok))
+        .rejects.toThrow(/trust|EROFS/);
+    } finally { spy.mockRestore(); }
+    const retry = await new ProcessJail(makePolicy(root)).prepare('true', [], { cwd: root, offline: false, keepGit: true });
+    expect(retry.ok).toBe(true);
+    if (retry.ok) await retry.launch.done?.();
+    expect(fsSync.existsSync(record)).toBe(true);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('refuses commands until an existing git trust record can be flushed too', async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-trust-flush-')));
+    const record = statePath(root, 'git-config-trust.json');
+    const spy = vi.spyOn(fsSync, 'fsyncSync').mockImplementation(() => { throw new Error('FSYNC_FAILED'); });
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await expect(new ProcessJail(makePolicy(root)).prepare('true', [], { cwd: root, offline: false, keepGit: true }).then((r) => r.ok)).rejects.toThrow(/FSYNC_FAILED/);
+      }
+    } finally { spy.mockRestore(); }
+    expect(fsSync.existsSync(record)).toBe(true);
+    const run = await new ProcessJail(makePolicy(root)).prepare('true', [], { cwd: root, offline: false, keepGit: true });
+    if (!run.ok) throw new Error(run.reason);
+    await run.launch.done?.();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('keeps the privacy barrier without rejecting cleanup when its record becomes unreadable', async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-scan-record-failed-')));
+    try {
+      const privacy = new PrivacyPaths([], { workspaceRoot: root });
+      const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false } as never, root);
+      reg.setPrivacyPaths(privacy);
+      const jail = (reg as unknown as { processJail: ProcessJail & { policy: JailPolicy } }).processJail;
+      jail.policy.detect = async () => 'bwrap';
+      jail.policy.program = (name) => name;
+      const prepared = await jail.prepare('true', [], { cwd: root, offline: true, keepGit: true });
+      if (!prepared.ok) throw new Error(prepared.reason);
+      const record = statePath(root, 'privacy-derived.json');
+      const kept = await fs.readFile(record);
+      await fs.rm(record); await fs.mkdir(record);
+      await expect(prepared.launch.done?.()).resolves.toMatch(/privacy record|local-only/);
+      await fs.rm(record, { recursive: true }); await fs.writeFile(record, kept);
+      expect(new PrivacyPaths([], { workspaceRoot: root }).isLocalOnly('unscanned.txt')).toBe(true);
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+
+  it.each(['public', '.'])('marks an indeterminate post-command subtree %s before releasing it', async (unreadable) => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-unreadable-after-')));
+    await fs.mkdir(path.join(root, 'public'));
+    const privacy = new PrivacyPaths([], { workspaceRoot: root });
+    const jail = new ProcessJail(makePolicy(root, { taint: (rels) => privacy.addDerived(rels), saveMarks: () => privacy.saveUnsaved() }));
+    const prepared = await jail.prepare('true', [], { cwd: root, offline: true, keepGit: true });
+    if (!prepared.ok) throw new Error(prepared.reason);
+    await fs.writeFile(path.join(root, 'public', 'secret.txt'), LOCAL);
+    const blocked = unreadable === '.' ? root : path.join(root, unreadable);
+    const real = fs.readdir;
+    const spy = vi.spyOn(fs, 'readdir').mockImplementation(((dir: fsSync.PathLike, ...args: unknown[]) => {
+      if (String(dir) === blocked) return Promise.reject(Object.assign(new Error('EACCES'), { code: 'EACCES' }));
+      return (real as (...args: unknown[]) => unknown)(dir, ...args);
+    }) as typeof fs.readdir);
+    try { await prepared.launch.done?.(); } finally { spy.mockRestore(); }
+    const next = new PrivacyPaths([], { workspaceRoot: root });
+    expect(next.isLocalOnly('public/secret.txt')).toBe(true);
+    if (unreadable === '.') expect(next.isLocalOnly('elsewhere.txt')).toBe(true);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('masks credential-file paths and their hard-link aliases, while git retains its credentials', async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-env-credentials-')));
+    const outside = `${root}-creds`;
+    await fs.mkdir(outside);
+    try {
+      const key = path.join(outside, 'service-account.json');
+      const kube = path.join(outside, 'cluster');
+      await fs.writeFile(key, SECRET); await fs.writeFile(kube, SECRET);
+      await fs.link(key, path.join(root, 'public.json'));
+      vi.stubEnv('GOOGLE_APPLICATION_CREDENTIALS', key);
+      vi.stubEnv('AWS_WEB_IDENTITY_TOKEN_FILE', kube);
+      vi.stubEnv('AZURE_FEDERATED_TOKEN_FILE', kube);
+      vi.stubEnv('CLOUDSDK_CONFIG', outside);
+      vi.stubEnv('AZURE_CONFIG_DIR', outside);
+      vi.stubEnv('KUBECONFIG', [path.relative(root, kube), key].join(path.delimiter));
+      const jail = new ProcessJail(makePolicy(root));
+      const run = await jail.prepare('true', [], { cwd: root, offline: false });
+      expect(run.ok && run.launch.args).toEqual(expect.arrayContaining([key, kube, path.join(root, 'public.json')]));
+      expect(run.ok && run.launch.env).not.toHaveProperty('AWS_WEB_IDENTITY_TOKEN_FILE');
+      expect(run.ok && run.launch.env).not.toHaveProperty('AZURE_FEDERATED_TOKEN_FILE');
+      expect(run.ok && run.launch.env).not.toHaveProperty('CLOUDSDK_CONFIG');
+      expect(run.ok && run.launch.env).not.toHaveProperty('AZURE_CONFIG_DIR');
+      expect(run.ok && run.launch.args).toContain(outside);
+      if (run.ok) await run.launch.done?.();
+      const git = await jail.prepare('git', [], { cwd: root, offline: false, keepGit: true, confinesItself: true });
+      expect(git.ok && git.launch.args).not.toContain(key);
+      if (git.ok) await git.launch.done?.();
+    } finally {
+      vi.unstubAllEnvs();
+      await fs.rm(root, { recursive: true, force: true });
+      await fs.rm(outside, { recursive: true, force: true });
+    }
   });
 });
 
@@ -492,19 +719,18 @@ describe('ProcessJail.prepare — which way a command runs', () => {
   // sandbox-exec has no mount boundary to stop a hard link from outside the
   // workspace, nor a process namespace to end a child left running: what a
   // local-only command writes could land where it cannot be marked.
-  it('sandbox-exec: refuses a local-only caller, and wraps a cloud one', async () => {
-    // As an ordinary user: as root it runs none (see 'commands run as root').
-    const getuid = vi.spyOn(process, 'getuid').mockReturnValue(501);
-    try {
-      const jail = new ProcessJail(policy({ detect: async () => 'sandbox-exec' }));
-      const offline = await jail.prepare('/bin/sh', ['-c', 'true'], { cwd: ws, offline: true });
-      expect(offline.ok).toBe(false);
-      expect(!offline.ok && offline.reason).toMatch(/cannot run commands on macOS/);
-      const online = await jail.prepare('/bin/sh', ['-c', 'true'], { cwd: ws, offline: false });
-      expect(online.ok && online.launch.file).toBe('sandbox-exec');
-    } finally {
-      getuid.mockRestore();
+  it('sandbox-exec: refuses arbitrary commands and gives auto git only its hermetic fallback', async () => {
+    const jail = new ProcessJail(policy({ detect: async () => 'sandbox-exec' }));
+    for (const offline of [true, false]) {
+      const result = await jail.prepare('/bin/sh', ['-c', 'true'], { cwd: ws, offline });
+      expect(result.ok).toBe(false);
     }
+    const git = await jail.prepare('git', ['status'], { cwd: ws, offline: false, keepGit: true, confinesItself: true });
+    expect(git.ok && git.launch.unconfined).toBe(true);
+    if (git.ok) await git.launch.done?.();
+    const explicit = await new ProcessJail(policy({ mode: 'sandbox-exec', detect: async () => 'sandbox-exec' }))
+      .prepare('git', [], { cwd: ws, offline: false, keepGit: true, confinesItself: true });
+    expect(explicit.ok).toBe(false);
   });
 
   it('loads the socket filter for a local-only caller, through a shell that opens it', async () => {
@@ -2242,15 +2468,7 @@ describe('commands run as root', () => {
     expect(r.launch.args.join(' ').includes('--bind / /')).toBe(!root);
   });
 
-  it('are not run on macOS, which has no read-only view to give them', async () => {
-    const getuid = vi.spyOn(process, 'getuid').mockReturnValue(0);
-    try {
-      const r = await new ProcessJail(policy({ detect: async () => 'sandbox-exec' })).prepare('/bin/sh', [], { cwd: ws, offline: false });
-      expect(!r.ok && r.reason).toMatch(/running as root/);
-    } finally {
-      getuid.mockRestore();
-    }
-  });
+
 });
 
 // The jail freezes a repository's configuration while a command runs, so

@@ -2,6 +2,73 @@ import { describe, expect, it, vi } from 'vitest';
 import { PrivacyPaths } from './paths.js';
 
 describe('PrivacyPaths', () => {
+  it('cancels a failed removal when a later private write re-adds the same path', async () => {
+    const { default: fs } = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { statePath } = await import('../../config/project-state.js');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-privacy-readd-'));
+    try {
+      const privacy = new PrivacyPaths([], { workspaceRoot: root });
+      privacy.addDerived(['private.txt']);
+      const record = statePath(root, 'privacy-derived.json');
+      const real = fs.renameSync;
+      const spy = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+        if (String(to) === record) throw new Error('RENAME_FAILED');
+        return real(from, to);
+      });
+      try { expect(() => privacy.removeDerived(['private.txt'])).toThrow(/RENAME_FAILED/); }
+      finally { spy.mockRestore(); }
+      privacy.addDerived(['private.txt']);
+      privacy.saveUnsaved();
+      expect(new PrivacyPaths([], { workspaceRoot: root }).isLocalOnly('private.txt')).toBe(true);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('does not replay a failed file-mark removal over a later private write by another run', async () => {
+    const { default: fs } = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { statePath } = await import('../../config/project-state.js');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-privacy-other-readd-'));
+    try {
+      const first = new PrivacyPaths([], { workspaceRoot: root });
+      first.addDerived(['private.txt']);
+      const record = statePath(root, 'privacy-derived.json');
+      const real = fs.renameSync;
+      const spy = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+        if (String(to) === record) throw new Error('RENAME_FAILED');
+        return real(from, to);
+      });
+      try { expect(() => first.removeDerived(['private.txt'])).toThrow(/RENAME_FAILED/); }
+      finally { spy.mockRestore(); }
+      new PrivacyPaths([], { workspaceRoot: root }).addDerived(['private.txt']);
+      first.saveUnsaved();
+      expect(new PrivacyPaths([], { workspaceRoot: root }).isLocalOnly('private.txt')).toBe(true);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('clears an earlier read error after pending marks are durably saved', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { statePath } = await import('../../config/project-state.js');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-privacy-recover-'));
+    try {
+      const privacy = new PrivacyPaths([], { workspaceRoot: root });
+      privacy.addDerived(['earlier.txt']);
+      await Promise.resolve();
+      const record = statePath(root, 'privacy-derived.json');
+      const kept = fs.readFileSync(record);
+      fs.rmSync(record); fs.mkdirSync(record);
+      expect(() => privacy.addDerived(['later.txt'])).toThrow(/cannot read/);
+      fs.rmSync(record, { recursive: true }); fs.writeFileSync(record, kept);
+      privacy.saveUnsaved();
+      expect(privacy.isLocalOnly('public.txt')).toBe(false);
+      expect(privacy.isLocalOnly('later.txt')).toBe(true);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   const policy = new PrivacyPaths([
     { pattern: 'src/core/crypto/**', policy: 'local-only' },
     { pattern: 'secrets.json', policy: 'local-only' },

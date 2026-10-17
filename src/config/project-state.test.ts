@@ -82,18 +82,200 @@ describe('a project\'s state folder', () => {
     const identity = (dir: string) => path.join(dir, 'project.json');
     const real = fs.writeFileSync;
     const spy = vi.spyOn(fs, 'writeFileSync').mockImplementation((file, ...rest) => {
-      if (String(file).endsWith('project.json')) throw Object.assign(new Error('EROFS'), { code: 'EROFS' });
+      if (String(file).includes('project.json')) throw Object.assign(new Error('EROFS'), { code: 'EROFS' });
       return real(file, ...(rest as [never]));
     });
-    let dir: string;
     try {
-      dir = projectStateDir(ws);
-      expect(fs.existsSync(identity(dir))).toBe(false);
+      expect(() => projectStateDir(ws)).toThrow(/identity/);
     } finally {
       spy.mockRestore();
     }
-    expect(projectStateDir(ws)).toBe(dir);
+    const dir = projectStateDir(ws);
     expect(fs.existsSync(identity(dir))).toBe(true);
+  });
+
+  it.each(['missing', 'malformed', 'unreadable'])('refuses existing history with %s project identity instead of adopting it', (kind) => {
+    const ws = tempDir('cascade-state-unknown-');
+    const dir = projectStateDir(ws);
+    const record = path.join(dir, 'project.json');
+    const original = fs.readFileSync(record, 'utf8');
+    const history = path.join(dir, 'sessions.json');
+    fs.writeFileSync(history, 'old-project-history');
+    let spy: ReturnType<typeof vi.spyOn> | undefined;
+    if (kind === 'missing') fs.rmSync(record);
+    else if (kind === 'malformed') fs.writeFileSync(record, '{broken');
+    else {
+      const real = fs.readFileSync;
+      spy = vi.spyOn(fs, 'readFileSync').mockImplementation(((file: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+        if (String(file) === record) throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+        return (real as (...args: unknown[]) => unknown)(file, ...rest);
+      }) as typeof fs.readFileSync);
+    }
+    try {
+      expect(() => migrateProjectState(ws)).toThrow(/identity/);
+      expect(fs.readFileSync(history, 'utf8')).toBe('old-project-history');
+    } finally {
+      spy?.mockRestore();
+      fs.writeFileSync(record, original);
+    }
+    expect(() => migrateProjectState(ws)).not.toThrow();
+  });
+
+  it('refuses direct state access when setting earlier history aside fails', async () => {
+    const ws = tempDir('cascade-state-aside-failed-');
+    const dir = projectStateDir(ws);
+    const record = path.join(dir, 'project.json');
+    const identity = JSON.parse(fs.readFileSync(record, 'utf8'));
+    fs.writeFileSync(record, JSON.stringify({ ...identity, ino: 'another-folder' }));
+    const history = path.join(dir, 'sessions.json');
+    fs.writeFileSync(history, 'old-private-history');
+    vi.resetModules();
+    const fresh = await import('./project-state.js');
+    const real = fs.renameSync;
+    const spy = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (String(from) === history) throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+      return real(from, to);
+    });
+    try {
+      expect(() => fresh.projectStateDir(ws)).toThrow(/EPERM/);
+      expect(() => fresh.statePath(ws, STATE.sessions)).toThrow(/EPERM/);
+    } finally { spy.mockRestore(); }
+    expect(() => fresh.projectStateDir(ws)).not.toThrow();
+    expect(fs.existsSync(history)).toBe(false);
+  });
+
+  it('repairs state directory access before inspecting its identity', async () => {
+    const ws = tempDir('cascade-state-repair-order-');
+    const dir = projectStateDir(ws);
+    vi.resetModules();
+    const fresh = await import('./project-state.js');
+    let repaired = false;
+    const mkdir = fs.mkdirSync, read = fs.readFileSync, list = fs.readdirSync;
+    const repair = vi.spyOn(fs, 'mkdirSync').mockImplementation(((at: fs.PathLike, ...args: unknown[]) => {
+      if (String(at) === dir) repaired = true;
+      return (mkdir as (...args: unknown[]) => unknown)(at, ...args);
+    }) as typeof fs.mkdirSync);
+    const denied = Object.assign(new Error('EACCES'), { code: 'EACCES' });
+    const reading = vi.spyOn(fs, 'readFileSync').mockImplementation(((at: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+      if (!repaired && String(at) === path.join(dir, 'project.json')) throw denied;
+      return (read as (...args: unknown[]) => unknown)(at, ...args);
+    }) as typeof fs.readFileSync);
+    const listing = vi.spyOn(fs, 'readdirSync').mockImplementation(((at: fs.PathLike, ...args: unknown[]) => {
+      if (!repaired && String(at) === dir) throw denied;
+      return (list as (...args: unknown[]) => unknown)(at, ...args);
+    }) as typeof fs.readdirSync);
+    try { expect(fresh.projectStateDir(ws)).toBe(dir); }
+    finally { repair.mockRestore(); reading.mockRestore(); listing.mockRestore(); }
+  });
+
+  it('opens an old partial migration while preserving unverified target history separately', () => {
+    const ws = tempDir('cascade-pre-identity-migration-');
+    const dir = projectStateDir(ws);
+    fs.rmSync(path.join(dir, 'project.json'));
+    fs.writeFileSync(path.join(dir, 'sessions.json'), 'unverified-history');
+    fs.mkdirSync(path.join(ws, '.cascade', 'resume'), { recursive: true });
+    fs.writeFileSync(path.join(ws, '.cascade', 'resume', 'remaining.json'), 'legacy-remainder');
+    expect(() => migrateProjectState(ws)).not.toThrow();
+    expect(fs.existsSync(path.join(dir, 'sessions.json'))).toBe(false);
+    expect(fs.readFileSync(path.join(dir, 'resume', 'remaining.json'), 'utf8')).toBe('legacy-remainder');
+    const aside = fs.readdirSync(path.dirname(dir)).find((name) => name.startsWith(`${path.basename(dir)}.before-unverified-`));
+    expect(aside).toBeDefined();
+    expect(fs.readFileSync(path.join(path.dirname(dir), aside!, 'sessions.json'), 'utf8')).toBe('unverified-history');
+    expect(stateNotices(ws).join(' ')).toMatch(/unverified|identity/);
+  });
+
+  it('recovers an orphaned initial identity temporary file when no history exists', async () => {
+    const ws = tempDir('cascade-identity-orphan-');
+    const dir = projectStateDir(ws);
+    const record = path.join(dir, 'project.json');
+    const orphan = `${record}.${process.pid}.00000000-0000-4000-8000-000000000000.tmp`;
+    fs.renameSync(record, orphan);
+    vi.resetModules();
+    const fresh = await import('./project-state.js');
+    expect(fresh.projectStateDir(ws)).toBe(dir);
+    expect(fs.existsSync(record)).toBe(true);
+    expect(fs.existsSync(orphan)).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')('refuses to move legacy state until its journal directory update is durable', () => {
+    const ws = tempDir('cascade-migration-durable-');
+    const dir = projectStateDir(ws);
+    const source = path.join(ws, '.cascade', 'resume');
+    fs.mkdirSync(source, { recursive: true });
+    fs.writeFileSync(path.join(source, 'run.json'), 'history');
+    const real = fs.openSync;
+    const spy = vi.spyOn(fs, 'openSync').mockImplementation((file, flags, ...rest) => {
+      if (String(file) === dir && flags === 'r') throw new Error('DIR_SYNC_FAILED');
+      return real(file, flags, ...rest);
+    });
+    try { expect(() => migrateProjectState(ws)).toThrow(/DIR_SYNC_FAILED/); }
+    finally { spy.mockRestore(); }
+    expect(fs.existsSync(source)).toBe(true);
+    expect(() => migrateProjectState(ws)).not.toThrow();
+    expect(fs.readFileSync(path.join(dir, 'resume', 'run.json'), 'utf8')).toBe('history');
+  });
+
+  it('preserves live private symlink outputs when no migration is pending', async () => {
+    const ws = tempDir('cascade-live-private-links-');
+    const dir = projectStateDir(ws);
+    const privateDir = path.join(dir, STATE.private);
+    fs.mkdirSync(path.join(privateDir, 'real'), { recursive: true });
+    fs.writeFileSync(path.join(privateDir, 'real', 'output.txt'), 'private-output');
+    const alias = path.join(privateDir, 'alias');
+    fs.symlinkSync(path.join(privateDir, 'real'), alias, 'junction');
+    vi.resetModules();
+    const fresh = await import('./project-state.js');
+    expect(fresh.projectStateDir(ws)).toBe(dir);
+    expect(fs.lstatSync(alias).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(path.join(alias, 'output.txt'), 'utf8')).toBe('private-output');
+  });
+
+  it('retains the prior identity when an update is interrupted after a partial write', () => {
+    const ws = tempDir('cascade-identity-atomic-');
+    const dir = projectStateDir(ws);
+    const record = path.join(dir, 'project.json');
+    const prior = JSON.stringify({ ...JSON.parse(fs.readFileSync(record, 'utf8')), path: `${ws}-before` });
+    fs.writeFileSync(record, prior);
+    const real = fs.writeFileSync;
+    const spy = vi.spyOn(fs, 'writeFileSync').mockImplementation((file, ...rest) => {
+      if (String(file).includes('project.json')) {
+        real(file, '{partial');
+        throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+      }
+      return real(file, ...(rest as [never]));
+    });
+    try { expect(() => migrateProjectState(ws)).toThrow(/ENOSPC/); }
+    finally { spy.mockRestore(); }
+    expect(fs.readFileSync(record, 'utf8')).toBe(prior);
+    expect(() => migrateProjectState(ws)).not.toThrow();
+  });
+
+  it('retries link cleanup after an entry moved, even when its legacy source is gone', () => {
+    const ws = tempDir('cascade-moved-links-');
+    const other = tempDir('cascade-foreign-checkpoint-');
+    fs.writeFileSync(path.join(other, 'checkpoint.json'), 'foreign-prompt');
+    fs.mkdirSync(path.join(ws, '.cascade', 'resume'), { recursive: true });
+    fs.symlinkSync(other, path.join(ws, '.cascade', 'resume', 'foreign'), 'junction');
+    const real = fs.rmSync;
+    let failedPath = '';
+    const spy = vi.spyOn(fs, 'rmSync').mockImplementation((file, options) => {
+      if (String(file).endsWith(`${path.sep}resume${path.sep}foreign`) && !String(file).includes(`${path.sep}.cascade${path.sep}`)) {
+        failedPath = String(file);
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      }
+      return real(file, options);
+    });
+    try {
+      expect(() => projectStateDir(ws)).toThrow(/Could not/);
+      expect(fs.existsSync(path.join(ws, '.cascade', 'resume'))).toBe(false);
+      expect(failedPath).not.toBe('');
+      expect(() => projectStateDir(ws)).toThrow(/Could not/);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(() => projectStateDir(ws)).not.toThrow();
+    expect(fs.existsSync(failedPath)).toBe(false);
+    expect(fs.readFileSync(path.join(other, 'checkpoint.json'), 'utf8')).toBe('foreign-prompt');
   });
 
   // Judged by its lexical path while not made yet, a host's state folder
