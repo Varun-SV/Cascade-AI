@@ -336,6 +336,10 @@ export const PRIVATE_FIELDS = [
   // Shown in clear, with no autocomplete to say so, by name or id.
   ...['password', 'passwd', 'cvc', 'cvv', 'cardnumber', 'card_number', 'card-number']
     .flatMap((word) => [`input[name*="${word}" i]`, `input[id*="${word}" i]`]),
+  // Custom checkout fields often omit the cc-exp autocomplete token.
+  ...['expiry', 'expiration', 'expires', 'cc-exp', 'cc_exp', 'ccexp', 'card-exp', 'card_exp', 'cardexp',
+    'exp-month', 'exp_month', 'expmonth', 'exp-year', 'exp_year', 'expyear', 'exp-date', 'exp_date', 'expdate']
+    .flatMap((word) => [`input[name*="${word}" i]`, `input[id*="${word}" i]`]),
   'input[aria-label*="password" i]',
   // A one-time code by its name: sites often leave out the autocomplete
   // token. Generous on purpose — a picture withheld for a field named
@@ -354,12 +358,14 @@ export const PRIVATE_FIELDS = [
  * Fields known only by their label — a `<label>`, `aria-label` or
  * `aria-labelledby` — and no name or id that says what they hold.
  */
-export const PRIVATE_LABEL = /password|passcode|one[\s-]?time|verification code|verify code|security code|auth(?:entication|orization)? code|access code|sign[\s-]?in code|login code|\botp\b|\b2fa\b|two[\s-]?(?:factor|step)|\bmfa\b|\bpin\b|card number|\bcvc\b|\bcvv\b/i;
+export const PRIVATE_LABEL = /password|passcode|one[\s-]?time|verification code|verify code|security code|auth(?:entication|orization)? code|access code|sign[\s-]?in code|login code|\botp\b|\b2fa\b|two[\s-]?(?:factor|step)|\bmfa\b|\bpin\b|card number|\bcvc\b|\bcvv\b|\bexpir(?:y|ation|es?)\b|\bexp\.?\s*(?:date|month|year)\b|\bmm\s*[/\-]\s*y{2}(?:y{2})?\b/i;
 /**
  * Placeholders that say the same, and the digits a card field shows before
  * one is typed: "Card number", "1234 1234 1234 1234", "•••• ••••".
+ * Split expiry placeholders are conservative: ordinary date fields using
+ * MM, YY or YYYY also withhold the picture.
  */
-export const PRIVATE_PLACEHOLDER = new RegExp(`${PRIVATE_LABEL.source}|\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}|[•*x]{4}[\\s-]?[•*x]{4}`, 'i');
+export const PRIVATE_PLACEHOLDER = new RegExp(`${PRIVATE_LABEL.source}|^\\s*(?:mm|yy|yyyy)\\s*$|\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}|[•*x]{4}[\\s-]?[•*x]{4}`, 'i');
 /** Payment providers whose iframe holds a card form, by the address it loads. */
 const PAYMENT_HOSTS = [
   'stripe', 'braintree', 'adyen', 'paypal', 'checkout.com', 'squareup', 'razorpay', 'klarna', 'recurly', 'chargebee', 'authorize.net',

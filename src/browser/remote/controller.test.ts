@@ -4582,6 +4582,7 @@ describe('page views and refs', () => {
   let labelledOnly = false;
   /** One found only by its placeholder. */
   let placeholderOnly = false;
+  let placeholderText = 'Card number';
   /** Refs the fake page can still resolve, whatever the last view listed. */
   let liveRefs = new Set<string>();
   const extra = page as unknown as Record<string, unknown>;
@@ -4617,6 +4618,7 @@ describe('page views and refs', () => {
     shotFails = false;
     labelledOnly = false;
     placeholderOnly = false;
+    placeholderText = 'Card number';
     SHOT = jpeg(1280, 800);
     liveRefs = new Set(['e5', 'e9', 'e11', 'e14']);
     extra['ariaSnapshot'] = async (opts: unknown) => {
@@ -4640,7 +4642,7 @@ describe('page views and refs', () => {
       getByPlaceholder: (text: RegExp) => ({
         count: async () => {
           if (!text.test('Card number')) throw new Error(`unexpected placeholder ${text}`);
-          return found === true && placeholderOnly ? 1 : 0;
+          return found === true && placeholderOnly && text.test(placeholderText) ? 1 : 0;
         },
         nth: () => ({ boundingBox: async () => ({ x: 10, y: y + 5, width: 100, height: 20 }) }),
       }),
@@ -5512,6 +5514,27 @@ describe('page views and refs', () => {
       }
     });
 
+    it('recognizes card expiry by name, id and label without autocomplete', async () => {
+      const { PRIVATE_FIELDS, PRIVATE_LABEL } = await import('./controller.js');
+      for (const word of ['expiry', 'expiration', 'exp_month', 'exp_year', 'cc-exp', 'card_exp']) {
+        expect(PRIVATE_FIELDS).toContain(`input[name*="${word}" i]`);
+        expect(PRIVATE_FIELDS).toContain(`input[id*="${word}" i]`);
+      }
+      for (const label of ['Expiry', 'Expiration date', 'Card expiry', 'Expiry month', 'Expiry year', 'Expires', 'Exp. date', 'Exp month', 'Exp. year', 'MM/YY', 'Exp. (MM/YYYY)']) {
+        expect(label).toMatch(PRIVATE_LABEL);
+      }
+      for (const label of ['Experience', 'Expected date', 'Expense report', 'Search']) expect(label).not.toMatch(PRIVATE_LABEL);
+    });
+
+    it.each(['MM/YY', 'MM / YY', 'MM/YYYY', 'MM / YYYY', 'MM-YY', 'MM', 'YY', 'YYYY'])('withholds screenshots for the expiry placeholder %s', async (text) => {
+      privateOnScreen = true;
+      placeholderOnly = true;
+      placeholderText = text;
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('a password, card or one-time-code field is on screen');
+    });
+
     it('withholds a picture of a page that scrolled between its view and the picture', async () => {
       // The view's boxes, and the marks drawn from them, are of where it was.
       let scrollY = 0;
@@ -5648,7 +5671,7 @@ describe('page views and refs', () => {
       for (const text of ['Card number', '1234 1234 1234 1234', '•••• •••• •••• ••••', 'CVC', 'Password', 'Enter code (OTP)']) {
         expect(text).toMatch(PRIVATE_PLACEHOLDER);
       }
-      for (const text of ['Search', 'Your email', 'Promo code', 'MM / YY', 'Postal code']) expect(text).not.toMatch(PRIVATE_PLACEHOLDER);
+      for (const text of ['Search', 'Your email', 'Promo code', 'Postal code']) expect(text).not.toMatch(PRIVATE_PLACEHOLDER);
       privateOnScreen = true;
       placeholderOnly = true;
       const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
