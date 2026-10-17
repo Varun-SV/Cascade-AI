@@ -235,7 +235,7 @@ describe('BrowserControlTool — page views', () => {
     await tool.execute({ action: 'observe' }, {} as never);
     calls.length = 0;
     await tool.execute({ action: 'click', ref: 'e14' }, {} as never);
-    expect(calls[0]).toEqual({ kind: 'click', ref: 'e14', pageView: true });
+    expect(calls[0]).toEqual({ kind: 'click', ref: 'e14', pageView: true, expectSite: 'shop.example', expectDocument: 'verified-page' });
   });
 
   it('asks for a view after the actions that usually change the page, and only those', async () => {
