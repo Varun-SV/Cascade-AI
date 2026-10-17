@@ -161,6 +161,21 @@ export class PrivacyPaths {
     return added;
   }
 
+  /** No command has run yet: an unsaved setup barrier must not survive failure. */
+  addCommandBarrier(): boolean {
+    this.sync();
+    const had = this.derived.has('.');
+    try { return this.addDerived(['.']).includes('.'); }
+    catch (err) {
+      if (!had) {
+        this.unsaved.delete('.');
+        this.derived.delete('.');
+        this.setDerived(this.derived);
+      }
+      throw err;
+    }
+  }
+
   /**
    * Write the marks this run holds but the record does not — a save that
    * failed — to the record. Throws if it still cannot.
@@ -201,6 +216,7 @@ export class PrivacyPaths {
         fs.renameSync(tmp, file);
         saves++;
         this.unsaved.clear();
+        this.unreadable = undefined;
         this.setDerived(next);
         this.seen = stampOf(file);
       });

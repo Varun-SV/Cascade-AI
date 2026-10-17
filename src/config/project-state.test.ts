@@ -82,7 +82,7 @@ describe('a project\'s state folder', () => {
     const identity = (dir: string) => path.join(dir, 'project.json');
     const real = fs.writeFileSync;
     const spy = vi.spyOn(fs, 'writeFileSync').mockImplementation((file, ...rest) => {
-      if (String(file).endsWith('project.json')) throw Object.assign(new Error('EROFS'), { code: 'EROFS' });
+      if (String(file).includes('project.json')) throw Object.assign(new Error('EROFS'), { code: 'EROFS' });
       return real(file, ...(rest as [never]));
     });
     try {
@@ -142,6 +142,41 @@ describe('a project\'s state folder', () => {
     } finally { spy.mockRestore(); }
     expect(() => fresh.projectStateDir(ws)).not.toThrow();
     expect(fs.existsSync(history)).toBe(false);
+  });
+
+  it('preserves live private symlink outputs when no migration is pending', async () => {
+    const ws = tempDir('cascade-live-private-links-');
+    const dir = projectStateDir(ws);
+    const privateDir = path.join(dir, STATE.private);
+    fs.mkdirSync(path.join(privateDir, 'real'), { recursive: true });
+    fs.writeFileSync(path.join(privateDir, 'real', 'output.txt'), 'private-output');
+    const alias = path.join(privateDir, 'alias');
+    fs.symlinkSync(path.join(privateDir, 'real'), alias, 'junction');
+    vi.resetModules();
+    const fresh = await import('./project-state.js');
+    expect(fresh.projectStateDir(ws)).toBe(dir);
+    expect(fs.lstatSync(alias).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(path.join(alias, 'output.txt'), 'utf8')).toBe('private-output');
+  });
+
+  it('retains the prior identity when an update is interrupted after a partial write', () => {
+    const ws = tempDir('cascade-identity-atomic-');
+    const dir = projectStateDir(ws);
+    const record = path.join(dir, 'project.json');
+    const prior = JSON.stringify({ ...JSON.parse(fs.readFileSync(record, 'utf8')), path: `${ws}-before` });
+    fs.writeFileSync(record, prior);
+    const real = fs.writeFileSync;
+    const spy = vi.spyOn(fs, 'writeFileSync').mockImplementation((file, ...rest) => {
+      if (String(file).includes('project.json')) {
+        real(file, '{partial');
+        throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+      }
+      return real(file, ...(rest as [never]));
+    });
+    try { expect(() => migrateProjectState(ws)).toThrow(/ENOSPC/); }
+    finally { spy.mockRestore(); }
+    expect(fs.readFileSync(record, 'utf8')).toBe(prior);
+    expect(() => migrateProjectState(ws)).not.toThrow();
   });
 
   it('retries link cleanup after an entry moved, even when its legacy source is gone', () => {

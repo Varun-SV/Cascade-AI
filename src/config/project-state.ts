@@ -27,6 +27,7 @@ import path from 'node:path';
 import { GLOBAL_CONFIG_DIR } from '../constants.js';
 import { renameProjectCredentials } from './global-credentials.js';
 import { isWithin, realPathOf } from '../utils/real-path.js';
+import { withLock } from '../utils/file-lock.js';
 
 /** The folder a project kept its state in before; moved out on first use (`projectStateDir`). */
 export const LEGACY_STATE_DIR = '.cascade';
@@ -183,9 +184,20 @@ function recordIdentity(root: string, dir: string, keysFrom?: string): void {
   const pending = keysFrom ?? was?.keysFrom;
   if (was && was.path === root && sameFolder(was, now) && was.keysFrom === pending) return;
   try {
-    fs.writeFileSync(path.join(dir, IDENTITY_FILE), JSON.stringify({ path: root, ...now, ...(pending ? { keysFrom: pending } : {}) }, null, 2), { mode: 0o600 });
+    writeJsonAtomic(path.join(dir, IDENTITY_FILE), { path: root, ...now, ...(pending ? { keysFrom: pending } : {}) });
   } catch (err) {
     throw new StateIdentityError(`Could not save the project identity in ${dir} (${(err as Error).message}), so its state was not opened.`);
+  }
+}
+
+/** A failed or interrupted update leaves the previous complete record in place. */
+function writeJsonAtomic(file: string, value: unknown): void {
+  const tmp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(value, null, 2), { mode: 0o600, flag: 'wx', flush: true });
+    fs.renameSync(tmp, file);
+  } finally {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* preserve the write error */ }
   }
 }
 
@@ -250,7 +262,7 @@ function moveOwnKeys(dir: string): void {
     return;
   }
   const { keysFrom: _done, ...rest } = record;
-  fs.writeFileSync(path.join(dir, IDENTITY_FILE), JSON.stringify(rest, null, 2), { mode: 0o600 });
+  writeJsonAtomic(path.join(dir, IDENTITY_FILE), rest);
 }
 
 /**
@@ -459,10 +471,38 @@ export function legacyStateIsLink(workspacePath: string): boolean {
 }
 
 function moveLegacyState(workspacePath: string, target: string): string[] {
-  // A prior rename can have succeeded before its link cleanup failed.
-  // Revisit the destination even when no legacy source remains.
-  try { dropLinks(target); } catch (err) {
-    throw new LegacyStateNotMovedError(`Could not clean migrated state in ${target} (${(err as Error).message}), so Cascade did not start. Make it writable and start again.`);
+  return withLock(path.join(target, '.legacy-migration.lock'), 'finish legacy state migration', () => moveLegacyStateLocked(workspacePath, target));
+}
+
+function moveLegacyStateLocked(workspacePath: string, target: string): string[] {
+  const journal = path.join(target, '.legacy-migration.json');
+  let pending: Set<string>;
+  try {
+    const names: unknown = JSON.parse(fs.readFileSync(journal, 'utf8'));
+    if (!Array.isArray(names) || names.some((name) => typeof name !== 'string' || !name || name === '.' || name === '..' || /[/\\]/.test(name))) {
+      throw new Error('invalid migration entry names');
+    }
+    pending = new Set(names as string[]);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new LegacyStateNotMovedError(`Could not read migration journal ${journal} (${(err as Error).message}), so Cascade did not open this state.`);
+    }
+    pending = new Set();
+  }
+  const savePending = () => {
+    if (pending.size) writeJsonAtomic(journal, [...pending]);
+    else fs.rmSync(journal, { force: true });
+  };
+  // Intent is persisted before a move. Retry only unfinished imports,
+  // even when their source vanished; live private outputs are left alone.
+  for (const name of pending) {
+    try {
+      dropLinks(path.join(target, name));
+      pending.delete(name);
+      savePending();
+    } catch (err) {
+      throw new LegacyStateNotMovedError(`Could not clean migrated state ${name} in ${target} (${(err as Error).message}), so Cascade did not start. Make it writable and start again.`);
+    }
   }
   const legacy = path.join(workspacePath, LEGACY_STATE_DIR);
   let entries: string[];
@@ -480,6 +520,7 @@ function moveLegacyState(workspacePath: string, target: string): string[] {
   const moved: string[] = [];
   const stuck: string[] = [];
   for (const name of entries) {
+    if (name === '.legacy-migration.json' || name === '.legacy-migration.lock') continue;
     const from = path.join(legacy, name);
     const to = path.join(target, name);
     if (fs.existsSync(to)) continue;
@@ -489,8 +530,12 @@ function moveLegacyState(workspacePath: string, target: string): string[] {
     // then write over. It stays where it is.
     if (fs.lstatSync(from, { throwIfNoEntry: false })?.isSymbolicLink()) continue;
     try {
+      pending.add(name);
+      savePending();
       moveEntry(from, to);
       dropLinks(to);
+      pending.delete(name);
+      savePending();
       moved.push(name);
     } catch (err) {
       stuck.push(`${name} (${(err as Error).message})`);

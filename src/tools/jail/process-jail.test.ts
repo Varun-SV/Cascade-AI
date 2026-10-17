@@ -95,6 +95,33 @@ describe('late containment review regressions', () => {
     } finally { await fs.rm(root, { recursive: true, force: true }); }
   });
 
+  it('rolls back its privacy barrier if command setup cannot persist it', async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-barrier-setup-failed-')));
+    try {
+      const privacy = new PrivacyPaths([], { workspaceRoot: root });
+      privacy.addDerived(['earlier-private.txt']);
+      const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false } as never, root);
+      reg.setPrivacyPaths(privacy);
+      const jail = (reg as unknown as { processJail: ProcessJail & { policy: JailPolicy } }).processJail;
+      jail.policy.detect = async () => 'bwrap';
+      jail.policy.program = (name) => name;
+      const record = statePath(root, 'privacy-derived.json');
+      const real = fsSync.renameSync;
+      const spy = vi.spyOn(fsSync, 'renameSync').mockImplementation((from, to) => {
+        if (String(to) === record) throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+        return real(from, to);
+      });
+      try {
+        await expect(jail.prepare('true', [], { cwd: root, offline: true, keepGit: true }).then((r) => r.ok)).rejects.toThrow(/ENOSPC/);
+      } finally { spy.mockRestore(); }
+      expect(privacy.isLocalOnly('public.txt')).toBe(false);
+      privacy.saveUnsaved();
+      const next = new PrivacyPaths([], { workspaceRoot: root });
+      expect(next.isLocalOnly('public.txt')).toBe(false);
+      expect(next.isLocalOnly('earlier-private.txt')).toBe(true);
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+
   it('refuses a command until the initial git trust baseline is durable', async () => {
     const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-trust-durable-')));
     const record = statePath(root, 'git-config-trust.json');

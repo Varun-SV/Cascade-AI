@@ -209,7 +209,7 @@ export class ToolRegistry extends EventEmitter {
         // Snapshot the actual policy: the temporary barrier must not make
         // newly created outputs appear already covered and leave them public.
         const before = ignore().add(privacy.localOnlyPatterns());
-        const added = privacy.addDerived(['.']).includes('.');
+        const added = privacy.addCommandBarrier();
         return {
           isLocalOnly: (rel) => before.ignores(rel),
           finish: () => { if (added) privacy.removeDerived(['.']); },

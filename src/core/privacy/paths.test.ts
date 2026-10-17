@@ -2,6 +2,27 @@ import { describe, expect, it, vi } from 'vitest';
 import { PrivacyPaths } from './paths.js';
 
 describe('PrivacyPaths', () => {
+  it('clears an earlier read error after pending marks are durably saved', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { statePath } = await import('../../config/project-state.js');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-privacy-recover-'));
+    try {
+      const privacy = new PrivacyPaths([], { workspaceRoot: root });
+      privacy.addDerived(['earlier.txt']);
+      await Promise.resolve();
+      const record = statePath(root, 'privacy-derived.json');
+      const kept = fs.readFileSync(record);
+      fs.rmSync(record); fs.mkdirSync(record);
+      expect(() => privacy.addDerived(['later.txt'])).toThrow(/cannot read/);
+      fs.rmSync(record, { recursive: true }); fs.writeFileSync(record, kept);
+      privacy.saveUnsaved();
+      expect(privacy.isLocalOnly('public.txt')).toBe(false);
+      expect(privacy.isLocalOnly('later.txt')).toBe(true);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   const policy = new PrivacyPaths([
     { pattern: 'src/core/crypto/**', policy: 'local-only' },
     { pattern: 'secrets.json', policy: 'local-only' },
