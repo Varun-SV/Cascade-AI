@@ -620,7 +620,7 @@ describe('BrowserControlTool — what a person approving sees', () => {
     expect(tool.forApproval({ action: 'click', selector: '.primary-action' }, 'run-1').alwaysAsk).toBe(false);
     expect(tool.forApproval({ action: 'press', key: 'Enter' }, 'run-1').alwaysAsk).toBe(true);
     expect(tool.forApproval({ action: 'press', selector: '#q', key: 'Enter' }, 'run-1').alwaysAsk).toBe(true);
-    expect(tool.forApproval({ action: 'press', key: 'Tab' }, 'run-1').alwaysAsk).toBe(false);
+    expect(tool.forApproval({ action: 'press', key: 'Tab' }, 'run-1').alwaysAsk).toBe(true);
   });
 
   it('keeps each run\'s view to itself', async () => {
