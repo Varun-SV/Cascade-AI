@@ -195,7 +195,7 @@ describe('BrowserControlTool — registration gate', () => {
 describe('BrowserControlTool — page views', () => {
   const VIEW = '[Page view 2]\nPage: Shop — https://shop.example/\n\nOn screen:\n[e14] button "Pay"';
   const viewTool = (outcome: Partial<Awaited<ReturnType<BrowserController>>> = {}) => {
-    const rec = recorder(outcome);
+    const rec = recorder({ document: 'verified-page', ...outcome });
     return { ...rec, tool: new BrowserControlTool(rec.controller, undefined, { pageView: true }) };
   };
   const schemaOf = (tool: BrowserControlTool) =>
@@ -232,6 +232,8 @@ describe('BrowserControlTool — page views', () => {
 
   it('acts by ref', async () => {
     const { calls, tool } = viewTool();
+    await tool.execute({ action: 'observe' }, {} as never);
+    calls.length = 0;
     await tool.execute({ action: 'click', ref: 'e14' }, {} as never);
     expect(calls[0]).toEqual({ kind: 'click', ref: 'e14', pageView: true });
   });
@@ -259,12 +261,14 @@ describe('BrowserControlTool — page views', () => {
 
   it('puts the page view after the outcome, in place of the bare address', async () => {
     const { tool } = viewTool({ detail: 'Clicked button "Next" (e3)', url: 'https://shop.example/', title: 'Shop', view: { text: VIEW, labels: { e14: 'button "Pay"' } } });
+    await tool.execute({ action: 'observe' }, {} as never);
     const out = await tool.execute({ action: 'click', ref: 'e3' }, {} as never);
     expect(out).toBe(`Clicked button "Next" (e3)\n\n${VIEW}`);
   });
 
-  it('still gives the address when the host could not describe the page', async () => {
+  it('still gives the address when the host could not describe the page after a prior verified view', async () => {
     const { tool } = viewTool({ detail: 'Clicked #go', url: 'https://shop.example/', title: 'Shop' });
+    await tool.execute({ action: 'observe' }, {} as never);
     expect(await tool.execute({ action: 'click', selector: '#go' }, {} as never)).toBe('Clicked #go\nPage: Shop — https://shop.example/');
   });
 
@@ -295,6 +299,8 @@ describe('BrowserControlTool — page views', () => {
 
     it('takes a ref from inside a frame', async () => {
       const { calls, tool } = viewTool();
+      await tool.execute({ action: 'observe' }, {} as never);
+      calls.length = 0;
       await tool.execute({ action: 'click', ref: 'f1e2' }, {} as never);
       expect(calls[0]).toMatchObject({ ref: 'f1e2' });
     });
@@ -313,7 +319,7 @@ describe('BrowserControlTool — page views', () => {
 describe('BrowserControlTool — screenshots', () => {
   const IMAGE = { data: 'AQID', mimeType: 'image/jpeg' as const, width: 1280, height: 800 };
   const shotTool = (features = { pageView: true, screenshots: true }) => {
-    const rec = recorder({ detail: 'Looked at the page.', view: { text: '[Page view 1]\nPage: A — https://a.example/', labels: {} }, image: IMAGE });
+    const rec = recorder({ detail: 'Looked at the page.', document: 'shot-page', view: { text: '[Page view 1]\nPage: A — https://a.example/', labels: {} }, image: IMAGE });
     return { ...rec, tool: new BrowserControlTool(rec.controller, undefined, features) };
   };
 
@@ -328,6 +334,8 @@ describe('BrowserControlTool — screenshots', () => {
 
   it('never asks for one on an action that brings back no view', async () => {
     const { calls, tool } = shotTool();
+    await tool.execute({ action: 'observe' }, {} as never);
+    calls.length = 0;
     await tool.execute({ action: 'fill', ref: 'e1', value: 'x' }, { attachImage: vi.fn() } as never);
     expect(calls[0]).not.toHaveProperty('screenshot');
   });
@@ -566,7 +574,7 @@ describe('BrowserControlTool — what a person approving sees', () => {
   });
 
   it('runs an approved action only on the site it was approved on', async () => {
-    const rec = recorder({ detail: 'ok', url: 'https://shop.example/cart', view: { text: '[Page view 1]', labels: { e14: 'button "Pay"' } } });
+    const rec = recorder({ detail: 'ok', url: 'https://shop.example/cart', document: 'shop-cart', view: { text: '[Page view 1]', labels: { e14: 'button "Pay"' } } });
     const tool = new BrowserControlTool(rec.controller, undefined, { pageView: true });
     await tool.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
     const input = { action: 'click', ref: 'e14' };
