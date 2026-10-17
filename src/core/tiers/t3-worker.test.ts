@@ -1110,6 +1110,30 @@ describe('a browser screenshot reaches the next request, once', () => {
   });
 });
 
+describe('batched browser ref safety', () => {
+  it('does not reauthorize a second ref against a page changed by the first call', async () => {
+    let rounds = 0;
+    const router = makeRouter(vi.fn(async () => {
+      rounds++;
+      return rounds === 1
+        ? makeResult('', [
+            { id: 'c1', name: 'browser_control', input: { action: 'click', ref: 'e1' } },
+            { id: 'c2', name: 'browser_control', input: { action: 'click', ref: 'e2' } },
+          ], 'tool_use')
+        : makeResult('Finished.');
+    }) as unknown as CascadeRouter['generate']);
+    const execute = vi.fn().mockResolvedValue('Clicked, new page view');
+    const registry = makeToolRegistry({
+      getToolDefinitions: () => [{ name: 'browser_control', description: 'Browse', inputSchema: {} }],
+      execute,
+    } as unknown as Partial<ToolRegistry>);
+    const worker = new T3Worker(router, registry, 't2-parent');
+    await worker.execute(makeAssignment({ subtaskTitle: 'Browse safely' }), 'task-batched-refs');
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0]![1]).toMatchObject({ ref: 'e1' });
+  });
+});
+
 describe('a person approving a browser action sees what it acts on', () => {
   async function approve(shown: { input: Record<string, unknown>; alwaysAsk: boolean }) {
     let call = 0;
