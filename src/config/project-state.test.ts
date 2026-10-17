@@ -168,6 +168,37 @@ describe('a project\'s state folder', () => {
     finally { repair.mockRestore(); reading.mockRestore(); listing.mockRestore(); }
   });
 
+  it('recovers an orphaned initial identity temporary file when no history exists', async () => {
+    const ws = tempDir('cascade-identity-orphan-');
+    const dir = projectStateDir(ws);
+    const record = path.join(dir, 'project.json');
+    const orphan = `${record}.${process.pid}.00000000-0000-4000-8000-000000000000.tmp`;
+    fs.renameSync(record, orphan);
+    vi.resetModules();
+    const fresh = await import('./project-state.js');
+    expect(fresh.projectStateDir(ws)).toBe(dir);
+    expect(fs.existsSync(record)).toBe(true);
+    expect(fs.existsSync(orphan)).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')('refuses to move legacy state until its journal directory update is durable', () => {
+    const ws = tempDir('cascade-migration-durable-');
+    const dir = projectStateDir(ws);
+    const source = path.join(ws, '.cascade', 'resume');
+    fs.mkdirSync(source, { recursive: true });
+    fs.writeFileSync(path.join(source, 'run.json'), 'history');
+    const real = fs.openSync;
+    const spy = vi.spyOn(fs, 'openSync').mockImplementation((file, flags, ...rest) => {
+      if (String(file) === dir && flags === 'r') throw new Error('DIR_SYNC_FAILED');
+      return real(file, flags, ...rest);
+    });
+    try { expect(() => migrateProjectState(ws)).toThrow(/DIR_SYNC_FAILED/); }
+    finally { spy.mockRestore(); }
+    expect(fs.existsSync(source)).toBe(true);
+    expect(() => migrateProjectState(ws)).not.toThrow();
+    expect(fs.readFileSync(path.join(dir, 'resume', 'run.json'), 'utf8')).toBe('history');
+  });
+
   it('preserves live private symlink outputs when no migration is pending', async () => {
     const ws = tempDir('cascade-live-private-links-');
     const dir = projectStateDir(ws);

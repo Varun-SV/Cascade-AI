@@ -51,6 +51,8 @@ export class PrivacyPaths {
   private derivedFile?: string;
   /** Recorded here but not yet on disk: a save that could not take the lock. */
   private unsaved = new Set<string>();
+  /** Removals whose save failed; retried with pending additions. */
+  private unremoved = new Set<string>();
   /** The record's file as last read or written here, to tell when another run changed it. */
   private seen = '';
   /** Whether the record was looked at in the current job, and how many saves this process had made then (see `sync`). */
@@ -165,10 +167,12 @@ export class PrivacyPaths {
   addCommandBarrier(): boolean {
     this.sync();
     const had = this.derived.has('.');
+    if (had || this.unremoved.has('.')) throw new Error('A previous local-only command has an unfinished privacy barrier; repair its record before running another command.');
     try { return this.addDerived(['.']).includes('.'); }
     catch (err) {
       if (!had) {
         this.unsaved.delete('.');
+        this.unremoved.add('.');
         this.derived.delete('.');
         this.setDerived(this.derived);
       }
@@ -181,11 +185,13 @@ export class PrivacyPaths {
    * failed — to the record. Throws if it still cannot.
    */
   saveUnsaved(): void {
-    if (this.unsaved.size > 0) this.saveDerived([], []);
+    if (this.unsaved.size > 0 || this.unremoved.size > 0) this.saveDerived([], []);
   }
 
   /** Forget records made for a write that did not happen. */
   removeDerived(relativePaths: string[]): void {
+    // A read can fail before saveDerived gets to queue this removal.
+    for (const rel of relativePaths) if (this.derived.has(rel)) this.unremoved.add(rel);
     this.sync();
     const removed = relativePaths.filter((rel) => this.derived.has(rel));
     if (removed.length) this.saveDerived([], removed);
@@ -199,6 +205,8 @@ export class PrivacyPaths {
    * write tool asking fails then, and the write with it.
    */
   private saveDerived(added: string[], removed: string[]): void {
+    for (const rel of added) this.unremoved.delete(rel);
+    for (const rel of removed) this.unremoved.add(rel);
     for (const rel of added) this.derived.add(rel);
     for (const rel of removed) this.derived.delete(rel);
     for (const rel of removed) this.unsaved.delete(rel);
@@ -210,18 +218,21 @@ export class PrivacyPaths {
       withLock(`${file}.lock`, 'record a local-only file', () => {
         const next = new Set(readDerived(file));
         for (const rel of [...this.unsaved, ...added]) next.add(rel);
-        for (const rel of removed) next.delete(rel);
+        for (const rel of this.unremoved) next.delete(rel);
         const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
         fs.writeFileSync(tmp, JSON.stringify({ version: 1, paths: [...next].sort() }, null, 2));
         fs.renameSync(tmp, file);
         saves++;
         this.unsaved.clear();
+        this.unremoved.clear();
         this.unreadable = undefined;
         this.setDerived(next);
         this.seen = stampOf(file);
       });
     } catch (err) {
       for (const rel of added) this.unsaved.add(rel);
+      for (const rel of removed) this.derived.add(rel);
+      this.setDerived(this.derived);
       throw err;
     }
   }

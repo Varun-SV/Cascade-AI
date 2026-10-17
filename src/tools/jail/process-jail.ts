@@ -291,13 +291,10 @@ export class ProcessJail {
     };
     flush(record, 'r+');
     // Windows cannot fsync directory handles through Node and refuses
-    // arbitrary commands in auto mode. POSIX jail launches require both
-    // the record and its containing directory chain to survive a restart.
+    // arbitrary commands in auto mode. State preparation flushes newly
+    // created directories; this write changes only the immediate parent.
     if (process.platform !== 'win32') {
-      for (let dir = path.dirname(record); ; dir = path.dirname(dir)) {
-        flush(dir, 'r');
-        if (path.dirname(dir) === dir) break;
-      }
+      flush(path.dirname(record), 'r');
     }
   }
 
@@ -577,6 +574,7 @@ export class ProcessJail {
       }
       if (policyNote) notes.push(policyNote);
       try { scanBarrier?.finish(); } catch {
+        this.policy.holdPending?.(['.']);
         // Marks were recorded or their pending gate is held. A failed
         // barrier removal stays conservative, without discarding the
         // private-output result or turning cleanup into an unhandled error.

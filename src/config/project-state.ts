@@ -28,6 +28,7 @@ import { GLOBAL_CONFIG_DIR } from '../constants.js';
 import { renameProjectCredentials } from './global-credentials.js';
 import { isWithin, realPathOf } from '../utils/real-path.js';
 import { withLock } from '../utils/file-lock.js';
+import { syncDirectory } from '../utils/sync-directory.js';
 
 /** The folder a project kept its state in before; moved out on first use (`projectStateDir`). */
 export const LEGACY_STATE_DIR = '.cascade';
@@ -186,7 +187,10 @@ function recordIdentity(root: string, dir: string, keysFrom?: string): void {
   if (!now) throw new StateIdentityError(`Could not establish the project identity of ${root}, so its state was not opened.`);
   const was = readIdentity(dir);
   const pending = keysFrom ?? was?.keysFrom;
-  if (was && was.path === root && sameFolder(was, now) && was.keysFrom === pending) return;
+  if (was && was.path === root && sameFolder(was, now) && was.keysFrom === pending) {
+    syncDirectory(dir);
+    return;
+  }
   try {
     writeJsonAtomic(path.join(dir, IDENTITY_FILE), { path: root, ...now, ...(pending ? { keysFrom: pending } : {}) });
   } catch (err) {
@@ -200,6 +204,7 @@ function writeJsonAtomic(file: string, value: unknown): void {
   try {
     fs.writeFileSync(tmp, JSON.stringify(value, null, 2), { mode: 0o600, flag: 'wx', flush: true });
     fs.renameSync(tmp, file);
+    syncDirectory(path.dirname(file));
   } finally {
     try { fs.rmSync(tmp, { force: true }); } catch { /* preserve the write error */ }
   }
@@ -233,9 +238,15 @@ function setAsideForNewFolder(root: string, dir: string): void {
     }
     // An empty initial directory (or settings alone) holds no earlier
     // project's history. Existing invalid metadata is never overwritten.
-    if (entries.includes(IDENTITY_FILE) || entries.some((name) => !keptForANewFolder().has(name))) {
+    const temps = entries.filter((name) => /^project\.json\.\d+\.[0-9a-f-]{36}\.tmp$/.test(name)
+      && fs.lstatSync(path.join(dir, name)).isFile());
+    if (entries.includes(IDENTITY_FILE) || entries.some((name) => !keptForANewFolder().has(name) && !temps.includes(name))) {
       throw new StateIdentityError(`The project identity in ${dir} is missing, invalid or unreadable. Restore its project.json, or move this state folder aside before opening the project; its earlier history was not adopted.`);
     }
+    // Only settings and initial identity temps: no earlier history can be
+    // adopted. Discard the interrupted write and establish identity afresh.
+    for (const name of temps) fs.rmSync(path.join(dir, name));
+    if (temps.length) syncDirectory(dir);
     return;
   }
   if (!now) throw new StateIdentityError(`Could not verify the project identity of ${root}, so its state was not opened.`);
@@ -343,7 +354,15 @@ export function stateNotices(workspacePath: string): string[] {
  */
 function makePrivate(dirs: string[]): void {
   for (const dir of dirs) {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const created = fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (created) {
+      // Flush only entries this preparation created, including their
+      // immediate parent, rather than unrelated traverse-only ancestors.
+      for (let at = dir; ; at = path.dirname(at)) {
+        syncDirectory(at);
+        if (at === created || path.dirname(at) === at) { syncDirectory(path.dirname(at)); break; }
+      }
+    }
     if (process.platform === 'win32') continue;
     const st = fs.statSync(dir);
     // Another account's folder is not changed, but refused, however closed
@@ -495,7 +514,7 @@ function moveLegacyStateLocked(workspacePath: string, target: string): string[] 
   }
   const savePending = () => {
     if (pending.size) writeJsonAtomic(journal, [...pending]);
-    else fs.rmSync(journal, { force: true });
+    else { fs.rmSync(journal, { force: true }); syncDirectory(target); }
   };
   // Intent is persisted before a move. Retry only unfinished imports,
   // even when their source vanished; live private outputs are left alone.
@@ -557,12 +576,14 @@ function moveLegacyStateLocked(workspacePath: string, target: string): string[] 
 /** Remove the symlinks under a folder moved out of `.cascade/`, which would lead somewhere else from here. */
 function dropLinks(dir: string): void {
   if (!fs.lstatSync(dir, { throwIfNoEntry: false })?.isDirectory()) return;
+  let removed = false;
   for (const name of fs.readdirSync(dir)) {
     const p = path.join(dir, name);
     const st = fs.lstatSync(p);
-    if (st.isSymbolicLink()) fs.rmSync(p, { force: true });
+    if (st.isSymbolicLink()) { fs.rmSync(p, { force: true }); removed = true; }
     else if (st.isDirectory()) dropLinks(p);
   }
+  if (removed) syncDirectory(dir);
 }
 
 function moveEntry(from: string, to: string): void {
