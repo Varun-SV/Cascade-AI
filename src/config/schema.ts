@@ -163,13 +163,13 @@ export const ToolsConfigSchema = z.object({
    * jail hides Cascade's own files, the built-in secrets and — from a caller
    * that is not local-only — local-only paths; gives each command its own
    * process namespace; and cuts the network for a local-only caller.
-   * - 'auto' (default): bubblewrap on Linux, sandbox-exec on macOS, where it
-   *   works. Elsewhere (Windows, or a Linux without working bubblewrap)
+   * - 'auto' (default): bubblewrap on Linux where it works. Elsewhere
+   *   (Windows, macOS, or a Linux without working bubblewrap)
    *   `shell` and `run_code` are refused, since nothing would keep them from
    *   reading protected files; `git`, whose operations it checks itself, runs
    *   with provider keys removed from its environment and no configuration
    *   that can start a program (tools/git-hermetic.ts).
-   * - 'bwrap' / 'sandbox-exec': that jailer, or no commands.
+   * - 'bwrap': require bubblewrap. 'sandbox-exec' is retained but refuses commands.
    * - 'off': no jail and no scrubbing.
    */
   processJail: z.enum(['auto', 'bwrap', 'sandbox-exec', 'off']).default('auto'),

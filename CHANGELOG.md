@@ -307,6 +307,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each choice does to that work — on the web and in the desktop app.
 
 ### Security
+- State migration retries symlink cleanup even after the source has moved;
+  existing state with missing, invalid or unreadable identity is refused, and
+  new identity is saved before importing legacy history. Git trust must be
+  saved before a command runs. Local-only commands establish a durable privacy
+  barrier before launch; incomplete final scans keep the affected subtree
+  local-only, or the whole workspace when its root cannot be inspected.
+- macOS shell/code commands now fail closed because `sandbox-exec` cannot
+  contain descendants or isolate the parent environment. Auto Git uses its
+  hermetic fallback; `off` remains an explicit opt-out. Credential files named
+  by standard environment variables are hidden along with their hard-link
+  aliases, and command environments omit those path hints.
 - Hard-link aliases of protected or local-only dependency files stay protected,
   including explicit rules through symlinked dependency folders, mixed-case
   rules and `**/` prefixes. Commands refuse cyclic symlinks reached by such

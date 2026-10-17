@@ -27,6 +27,8 @@ import path from 'node:path';
 import { GLOBAL_CONFIG_DIR } from '../constants.js';
 import { renameProjectCredentials } from './global-credentials.js';
 import { isWithin, realPathOf } from '../utils/real-path.js';
+import { withLock } from '../utils/file-lock.js';
+import { syncDirectory } from '../utils/sync-directory.js';
 
 /** The folder a project kept its state in before; moved out on first use (`projectStateDir`). */
 export const LEGACY_STATE_DIR = '.cascade';
@@ -121,20 +123,24 @@ export function projectStateDir(workspacePath: string): string {
   if (!prepared.has(dir)) {
     prepared.add(dir);
     try {
-      if (!chosen && !fs.existsSync(dir)) followMove(root, dir);
-      else if (!chosen) setAsideForNewFolder(root, dir);
-      makePrivate(chosen ? [dir] : [globalDir(), path.join(globalDir(), 'projects'), dir]);
+      if (!chosen) {
+        makePrivate([globalDir(), path.join(globalDir(), 'projects')]);
+        if (!fs.existsSync(dir)) followMove(root, dir);
+      }
+      // Repair owner-owned unusable modes before any identity reads.
+      makePrivate([dir]);
+      if (!chosen) setAsideForNewFolder(root, dir);
+      // Establish provenance before a partial migration can populate state.
+      if (!chosen) recordIdentity(root, dir);
       movedIn.set(dir, moveLegacyState(workspacePath, dir));
       if (!chosen) {
-        recordIdentity(root, dir);
         moveOwnKeys(dir);
       }
     } catch (err) {
-      // Left to whatever opens it to report — and tried again on the next
-      // ask, rather than taken as done for the rest of the process. A
-      // folder others can read is not left for later: nothing is kept there.
+      // Preparation establishes provenance and privacy. Any incomplete
+      // step must prevent direct state readers from opening old history.
       prepared.delete(dir);
-      if (err instanceof StateNotPrivateError || err instanceof LegacyStateNotMovedError || err instanceof MovedStateNotFollowedError) throw err;
+      throw err;
     }
   }
   return dir;
@@ -178,11 +184,30 @@ function sameFolder(a: Omit<ProjectIdentity, 'path'>, b: Omit<ProjectIdentity, '
 
 function recordIdentity(root: string, dir: string, keysFrom?: string): void {
   const now = identityOf(root);
-  if (!now) return;
+  if (!now) throw new StateIdentityError(`Could not establish the project identity of ${root}, so its state was not opened.`);
   const was = readIdentity(dir);
   const pending = keysFrom ?? was?.keysFrom;
-  if (was && was.path === root && sameFolder(was, now) && was.keysFrom === pending) return;
-  fs.writeFileSync(path.join(dir, IDENTITY_FILE), JSON.stringify({ path: root, ...now, ...(pending ? { keysFrom: pending } : {}) }, null, 2), { mode: 0o600 });
+  if (was && was.path === root && sameFolder(was, now) && was.keysFrom === pending) {
+    syncDirectory(dir);
+    return;
+  }
+  try {
+    writeJsonAtomic(path.join(dir, IDENTITY_FILE), { path: root, ...now, ...(pending ? { keysFrom: pending } : {}) });
+  } catch (err) {
+    throw new StateIdentityError(`Could not save the project identity in ${dir} (${(err as Error).message}), so its state was not opened.`);
+  }
+}
+
+/** A failed or interrupted update leaves the previous complete record in place. */
+function writeJsonAtomic(file: string, value: unknown): void {
+  const tmp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(value, null, 2), { mode: 0o600, flag: 'wx', flush: true });
+    fs.renameSync(tmp, file);
+    syncDirectory(path.dirname(file));
+  } finally {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* preserve the write error */ }
+  }
 }
 
 /**
@@ -206,7 +231,41 @@ function keptForANewFolder(): Set<string> {
 function setAsideForNewFolder(root: string, dir: string): void {
   const was = readIdentity(dir);
   const now = identityOf(root);
-  if (!was || !now || was.path !== root) return;
+  if (!was) {
+    let entries: string[];
+    try { entries = fs.readdirSync(dir); } catch (err) {
+      throw new StateIdentityError(`Could not verify the project identity in ${dir} (${(err as Error).message}). Restore its project.json before opening this state.`);
+    }
+    // An empty initial directory (or settings alone) holds no earlier
+    // project's history. Existing invalid metadata is never overwritten.
+    const temps = entries.filter((name) => /^project\.json\.\d+\.[0-9a-f-]{36}\.tmp$/.test(name)
+      && fs.lstatSync(path.join(dir, name)).isFile());
+    if (entries.includes(IDENTITY_FILE) || entries.some((name) => !keptForANewFolder().has(name) && !temps.includes(name))) {
+      // Older versions imported entries before recording identity. Their
+      // unfinished source can be resumed, but cannot prove the destination
+      // belongs to this folder: preserve its unverified history separately.
+      const legacy = path.join(root, LEGACY_STATE_DIR);
+      const legacyDir = fs.lstatSync(legacy, { throwIfNoEntry: false });
+      if (!entries.includes(IDENTITY_FILE) && legacyDir?.isDirectory() && fs.readdirSync(legacy).length) {
+        const aside = `${dir}.before-unverified-${crypto.randomUUID()}`;
+        makePrivate([aside]);
+        for (const name of entries.filter((entry) => !keptForANewFolder().has(entry))) {
+          moveEntry(path.join(dir, name), path.join(aside, name));
+        }
+        syncDirectory(aside); syncDirectory(dir);
+        notices.set(dir, [...(notices.get(dir) ?? []), `Earlier history had no project identity and was preserved unverified in ${aside}. Cascade resumes the remaining legacy migration without adopting that history; recover it from there only after confirming it belongs to this project.`]);
+        return;
+      }
+      throw new StateIdentityError(`The project identity in ${dir} is missing, invalid or unreadable. Restore its project.json, or move this state folder aside before opening the project; its earlier history was not adopted.`);
+    }
+    // Only settings and initial identity temps: no earlier history can be
+    // adopted. Discard the interrupted write and establish identity afresh.
+    for (const name of temps) fs.rmSync(path.join(dir, name));
+    if (temps.length) syncDirectory(dir);
+    return;
+  }
+  if (!now) throw new StateIdentityError(`Could not verify the project identity of ${root}, so its state was not opened.`);
+  if (was.path !== root) return;
   // By inode and when it was made, not the device: a remount can change that.
   if (was.ino === now.ino && (was.born === '0' || now.born === '0' || was.born === now.born)) return;
   const kept = keptForANewFolder();
@@ -233,7 +292,7 @@ function moveOwnKeys(dir: string): void {
     return;
   }
   const { keysFrom: _done, ...rest } = record;
-  fs.writeFileSync(path.join(dir, IDENTITY_FILE), JSON.stringify(rest, null, 2), { mode: 0o600 });
+  writeJsonAtomic(path.join(dir, IDENTITY_FILE), rest);
 }
 
 /**
@@ -310,7 +369,15 @@ export function stateNotices(workspacePath: string): string[] {
  */
 function makePrivate(dirs: string[]): void {
   for (const dir of dirs) {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const created = fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (created) {
+      // Flush only entries this preparation created, including their
+      // immediate parent, rather than unrelated traverse-only ancestors.
+      for (let at = dir; ; at = path.dirname(at)) {
+        syncDirectory(at);
+        if (at === created || path.dirname(at) === at) { syncDirectory(path.dirname(at)); break; }
+      }
+    }
     if (process.platform === 'win32') continue;
     const st = fs.statSync(dir);
     // Another account's folder is not changed, but refused, however closed
@@ -337,6 +404,11 @@ export class StateNotPrivateError extends Error {
     super(message);
     this.name = 'StateNotPrivateError';
   }
+}
+
+/** Existing state whose ownership by this project cannot be established. */
+export class StateIdentityError extends Error {
+  constructor(message: string) { super(message); this.name = 'StateIdentityError'; }
 }
 
 /**
@@ -419,8 +491,6 @@ export function statePathFor(workspacePath: string, input: string): string | nul
  */
 export function migrateProjectState(workspacePath: string): string[] {
   const dir = projectStateDir(workspacePath);
-  const moved = [...(movedIn.get(dir) ?? []), ...moveLegacyState(workspacePath, dir)];
-  movedIn.delete(dir);
   const root = realRoot(workspacePath);
   if (!named.has(root)) {
     // As on first use — a folder replaced, or keys still to file, since.
@@ -428,6 +498,8 @@ export function migrateProjectState(workspacePath: string): string[] {
     recordIdentity(root, dir);
     moveOwnKeys(dir);
   }
+  const moved = [...(movedIn.get(dir) ?? []), ...moveLegacyState(workspacePath, dir)];
+  movedIn.delete(dir);
   return moved;
 }
 
@@ -437,6 +509,39 @@ export function legacyStateIsLink(workspacePath: string): boolean {
 }
 
 function moveLegacyState(workspacePath: string, target: string): string[] {
+  return withLock(path.join(target, '.legacy-migration.lock'), 'finish legacy state migration', () => moveLegacyStateLocked(workspacePath, target));
+}
+
+function moveLegacyStateLocked(workspacePath: string, target: string): string[] {
+  const journal = path.join(target, '.legacy-migration.json');
+  let pending: Set<string>;
+  try {
+    const names: unknown = JSON.parse(fs.readFileSync(journal, 'utf8'));
+    if (!Array.isArray(names) || names.some((name) => typeof name !== 'string' || !name || name === '.' || name === '..' || /[/\\]/.test(name))) {
+      throw new Error('invalid migration entry names');
+    }
+    pending = new Set(names as string[]);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new LegacyStateNotMovedError(`Could not read migration journal ${journal} (${(err as Error).message}), so Cascade did not open this state.`);
+    }
+    pending = new Set();
+  }
+  const savePending = () => {
+    if (pending.size) writeJsonAtomic(journal, [...pending]);
+    else { fs.rmSync(journal, { force: true }); syncDirectory(target); }
+  };
+  // Intent is persisted before a move. Retry only unfinished imports,
+  // even when their source vanished; live private outputs are left alone.
+  for (const name of pending) {
+    try {
+      dropLinks(path.join(target, name));
+      pending.delete(name);
+      savePending();
+    } catch (err) {
+      throw new LegacyStateNotMovedError(`Could not clean migrated state ${name} in ${target} (${(err as Error).message}), so Cascade did not start. Make it writable and start again.`);
+    }
+  }
   const legacy = path.join(workspacePath, LEGACY_STATE_DIR);
   let entries: string[];
   try {
@@ -453,6 +558,7 @@ function moveLegacyState(workspacePath: string, target: string): string[] {
   const moved: string[] = [];
   const stuck: string[] = [];
   for (const name of entries) {
+    if (name === '.legacy-migration.json' || name === '.legacy-migration.lock') continue;
     const from = path.join(legacy, name);
     const to = path.join(target, name);
     if (fs.existsSync(to)) continue;
@@ -462,8 +568,12 @@ function moveLegacyState(workspacePath: string, target: string): string[] {
     // then write over. It stays where it is.
     if (fs.lstatSync(from, { throwIfNoEntry: false })?.isSymbolicLink()) continue;
     try {
+      pending.add(name);
+      savePending();
       moveEntry(from, to);
       dropLinks(to);
+      pending.delete(name);
+      savePending();
       moved.push(name);
     } catch (err) {
       stuck.push(`${name} (${(err as Error).message})`);
@@ -481,12 +591,14 @@ function moveLegacyState(workspacePath: string, target: string): string[] {
 /** Remove the symlinks under a folder moved out of `.cascade/`, which would lead somewhere else from here. */
 function dropLinks(dir: string): void {
   if (!fs.lstatSync(dir, { throwIfNoEntry: false })?.isDirectory()) return;
+  let removed = false;
   for (const name of fs.readdirSync(dir)) {
     const p = path.join(dir, name);
     const st = fs.lstatSync(p);
-    if (st.isSymbolicLink()) fs.rmSync(p, { force: true });
+    if (st.isSymbolicLink()) { fs.rmSync(p, { force: true }); removed = true; }
     else if (st.isDirectory()) dropLinks(p);
   }
+  if (removed) syncDirectory(dir);
 }
 
 function moveEntry(from: string, to: string): void {

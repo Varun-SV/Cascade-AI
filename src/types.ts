@@ -927,9 +927,9 @@ export interface ToolsConfig {
   dynamicToolSandbox?: 'isolate' | 'wasm' | 'auto' | 'worker';
   /**
    * Confinement for `shell`, `run_code` and `git`, on top of approvals: 'auto'
-   * (default) = bubblewrap on Linux or sandbox-exec on macOS where it works,
-   * else commands run with provider keys removed from their environment;
-   * 'bwrap' / 'sandbox-exec' = that jailer or no command at all; 'off' = none.
+   * (default) = bubblewrap on Linux; elsewhere shell/code are refused and Git
+   * uses its hermetic fallback. 'bwrap' requires bubblewrap; 'sandbox-exec'
+   * is retained but refuses commands. 'off' explicitly disables confinement.
    */
   processJail?: 'auto' | 'bwrap' | 'sandbox-exec' | 'off';
   /**
