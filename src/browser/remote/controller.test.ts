@@ -4886,7 +4886,7 @@ describe('page views and refs', () => {
     snapshot = BOOKING.replace('    - option "2 people" [selected] [box=0,0,0,0]', [
       '    - option "Continue" [selected] [box=0,0,0,0]',
       '    - option "Continue" [box=0,0,0,0]',
-    ].join('\\n'));
+    ].join('\n'));
     const c = controller();
     await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
     page.calls = [];
