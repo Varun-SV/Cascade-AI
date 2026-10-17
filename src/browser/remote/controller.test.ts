@@ -5561,7 +5561,7 @@ describe('page views and refs', () => {
     it('withholds a picture of a page that scrolled between its view and the picture', async () => {
       // The view's boxes, and the marks drawn from them, are of where it was.
       let scrollY = 0;
-      extra['evaluate'] = async () => ({ width: 1280, height: 800, scrollY, scrollHeight: 1600 });
+      extra['evaluate'] = async () => ({ width: 1280, height: 800, scrollX: 0, scrollY, scrollHeight: 1600 });
       const shoot = extra['screenshot'] as (opts: unknown) => Promise<Uint8Array>;
       extra['screenshot'] = async (opts: unknown) => { scrollY = 400; return shoot(opts); };
       const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
