@@ -2277,3 +2277,40 @@ describe('CascadeRouter — routing evidence reaches the model that ran', () => 
     vi.restoreAllMocks();
   });
 });
+
+describe('CascadeRouter — a gateway named only by the SDK\'s own variable', () => {
+  const env = { openai: process.env['OPENAI_BASE_URL'], anthropic: process.env['ANTHROPIC_BASE_URL'] };
+  afterEach(() => {
+    for (const [name, value] of [['OPENAI_BASE_URL', env.openai], ['ANTHROPIC_BASE_URL', env.anthropic]] as const) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  });
+  const routerWith = (providers: CascadeConfig['providers']) => {
+    const router = new CascadeRouter();
+    (router as unknown as { config: CascadeConfig }).config = makeConfig({ providers });
+    return router;
+  };
+  const gpt = { provider: 'openai', id: 'gpt-4o' } as never;
+  const claude = { provider: 'anthropic', id: 'claude-sonnet-4-5' } as never;
+
+  it('counts an address the SDK reads from the environment, when the config names none', () => {
+    // The OpenAI and Anthropic SDKs go to OPENAI_BASE_URL / ANTHROPIC_BASE_URL
+    // when given no baseURL: a screenshot would go there too.
+    delete process.env['OPENAI_BASE_URL'];
+    delete process.env['ANTHROPIC_BASE_URL'];
+    const router = routerWith([{ type: 'openai', apiKey: 'k' }, { type: 'anthropic', apiKey: 'k' }]);
+    expect(router.throughGateway(gpt)).toBe(false);
+    process.env['OPENAI_BASE_URL'] = 'https://gateway.example/v1';
+    process.env['ANTHROPIC_BASE_URL'] = 'https://gateway.example';
+    expect(router.throughGateway(gpt)).toBe(true);
+    expect(router.throughGateway(claude)).toBe(true);
+    // The provider's own address, set explicitly, is no gateway.
+    process.env['OPENAI_BASE_URL'] = 'https://api.openai.com/v1';
+    expect(router.throughGateway(gpt)).toBe(false);
+  });
+
+  it('goes by the config when it names an address', () => {
+    process.env['OPENAI_BASE_URL'] = 'https://gateway.example/v1';
+    expect(routerWith([{ type: 'openai', apiKey: 'k', baseUrl: 'https://api.openai.com/v1' }]).throughGateway(gpt)).toBe(false);
+  });
+});

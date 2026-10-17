@@ -372,7 +372,11 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
   // agentBrowserControl, the desktop flag for driving a signed-in session,
   // which defaults to false and is never set on a server. Calling it here
   // registered nothing at all.
-  opts.cascade.setRemoteBrowserController(controller.controller, (actorId) => controller.actorEnded(actorId));
+  opts.cascade.setRemoteBrowserController(
+    controller.controller,
+    (actorId) => controller.actorEnded(actorId),
+    controller.features,
+  );
 
   return {
     get taskId() { return taskId; },

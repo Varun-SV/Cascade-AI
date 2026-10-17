@@ -1,0 +1,7 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Ember &amp; Oak</title><link rel="stylesheet" href="style.css"></head><body>
+<main><h1>Ember &amp; Oak</h1>
+<div role="tablist"><button role="tab" aria-selected="true" onclick="show('about',this)">About</button><button role="tab" aria-selected="false" onclick="show('reviews',this)">Reviews</button></div>
+<section id="about"><p>Wood-fired cooking since 2016.</p></section>
+<section id="reviews" hidden><p><strong>Rahul</strong> — 3 stars. Slow service.</p><p><strong>Priya</strong> — 5 stars. Best lamb in town.</p></section>
+<script>function show(id,b){for(const s of document.querySelectorAll('section'))s.hidden=s.id!==id;for(const t of document.querySelectorAll('[role=tab]'))t.setAttribute('aria-selected',String(t===b));}</script>
+</main></body></html>

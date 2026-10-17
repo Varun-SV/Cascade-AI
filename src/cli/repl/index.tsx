@@ -1483,6 +1483,7 @@ const DECISION_KIND_LABEL: Record<DecisionLogEntry['kind'], string> = {
   context: 'Context',
   'provider-exhausted': 'Provider out',
   budget: 'Budget',
+  browser: 'Browser',
 };
 
 function formatPlanPreview(plan: { complexity: string; sections: Array<{ sectionTitle: string; t3Subtasks?: unknown[] }>; reasoning?: string }): string {

@@ -193,6 +193,8 @@ export interface GenerateResult {
    * performance history learns something untrue about both.
    */
   servedBy?: { provider: ProviderType; id: string };
+  /** Browser screenshots included in the successful provider request, after router filtering. */
+  screenshotsSent?: number;
 }
 
 export interface ConversationMessage {
@@ -212,6 +214,14 @@ export interface ImageAttachment {
   type: 'base64' | 'url';
   data: string;         // base64 string or URL
   mimeType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+  /**
+   * Set on a browser screenshot, with its size in pixels: a picture the
+   * request still makes sense without. The router leaves it out for a model
+   * that cannot see it or would be overcharged for it, and says so in its
+   * place — see `core/router/screenshots.ts`. Never set on an image a person
+   * attached; those are not the router's to drop.
+   */
+  screenshot?: { width: number; height: number };
 }
 
 // ── Tools ─────────────────────────────────────
@@ -381,6 +391,24 @@ export interface ToolExecuteOptions {
     content: string | Record<string, unknown>,
   ) => void;
   getPeerMessages?: () => Array<{ fromId: string; content: unknown; timestamp: string }>;
+  /**
+   * Hand the worker a picture to show the model with its NEXT request — a
+   * browser screenshot. Present only when that model can see images, so a
+   * tool that has a picture to give checks for it before going to the
+   * trouble. The picture never enters the result, the history, events or the
+   * audit log; the worker sends it once and lets it go.
+   */
+  attachImage?: (image: ImageAttachment) => void;
+  /** Invalidate the transient screenshot before any browser action except extract_text, including nested calls. */
+  clearImage?: () => void;
+  /** Shared by calls authored in one model response, including generated tools and fallback calls. */
+  browserBatch?: { acted: boolean };
+  /**
+   * The page looks exactly as in the last picture a tool handed over, so no
+   * new one was taken: that one still stands for the page, if it has not
+   * gone to the model yet. Present with `attachImage`.
+   */
+  keepImage?: () => void;
 }
 
 // ── Tier System ───────────────────────────────
@@ -882,6 +910,11 @@ export interface ToolsConfig {
     cdpHostHeader?: string;
     maxSessions?: number;
   };
+  /**
+   * What `browser_control` shows the model of a page. See
+   * `src/config/schema.ts`. Absent means `list`.
+   */
+  browserVision?: 'off' | 'list' | 'image' | 'marked';
   mcpServers?: McpServerConfig[];
   /**
    * Names of MCP servers (matching McpServerConfig.name) that the user has

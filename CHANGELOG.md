@@ -43,6 +43,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a deployment driving its own browser over CDP opens none, so it has no
   daily limit.
 
+- **The browser agent reads a page as a list of its controls, and can see
+  it.** On the web (CDP or Steel), `browser_control` now describes each page
+  as a page view: the controls on screen and further down, each under a ref
+  like `e14`, from Playwright's own accessibility snapshot. The model clicks,
+  types, chooses and hovers by ref instead of guessing CSS selectors, which
+  still work. New actions: `observe`, `scroll`, `select_option` and `hover`.
+  A select is listed with its options, and on a ref `select_option` takes
+  one by its text, never by a value the page hides in it; text the view
+  shortened or rewrote still picks the option it came from.
+  A page view never shows what is typed into a field. Only the two newest
+  views are sent whole; older ones fold to a line. Page views need
+  Playwright 1.60 or later, which Cascade installs; a host that brings an
+  older one gets the original actions only.
+  `tools.browserVision` (`off`, `list` by default, `image`, `marked`) adds a
+  screenshot for models that can see images:
+  - It's taken clean, at 1280×800 on Steel, and sent with one step only, so
+    it isn't kept in the history. A step that leaves the page looking exactly
+    as it did in the last screenshot sends none and says so. A page with
+    nothing to act on, like a chart drawn on a canvas, still gets one.
+  - None is taken while a password, PIN, card or one-time-code field is on screen,
+    in any frame, or when the page can't be checked for one, or right after
+    you took control of the browser or hid it. The page is checked again once
+    the picture is taken. A picture taken as such a field came up, or as the
+    page went to another or scrolled, is dropped.
+  - A model that can't see images, or would be charged far more than usual
+    for one, gets the page view alone.
+  - `marked` draws each ref on a copy of the screenshot, as an experiment.
+  - /why counts the screenshots a run sent.
+  - Hosted deployments set it with `REMOTE_BROWSER_VISION`.
+  Approval prompts now name the element and the site. A click, entry or
+  choice on something labelled pay, buy, purchase, order, check out, delete,
+  remove, send, transfer, publish, confirm, approve, authorize, allow,
+  withdraw, subscribe or donate (in any of the forms buttons use, and read
+  past accents, invisible characters and lookalike letters) asks every time,
+  even after "always allow". So does Enter or Space where it may submit a
+  form, alone or in a key combination, and, where pages are described, a
+  click, fill or key press on something the page view did not name — a
+  selector, an icon-only control — or named only in part, because the name
+  was too long to show or had typed text taken out of it. Text typed into a
+  text box is kept out of the names of other controls too, a button named
+  after the field included. An approved action runs only on
+  the page it was approved on: not after the page moved to another site, or
+  to another page of the same one. One by selector also stops if an app has
+  changed its route. A ref whose control the page has renamed since the view
+  is refused too, even where only the part of its name the view cut off
+  changed, and so is a ref inside an iframe once a frame on the page has
+  loaded another document. A page view taken while an app changed its route
+  is taken again. `scripts/browser-vision-eval/` has ten test
+  tasks and a runner to compare the settings.
+
 ### Changed
 - **Cascade keeps a project's state outside the project.** Its settings,
   sessions, audit trail, world state, code index, run checkpoints and the
@@ -147,6 +197,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/design/calm-direction.md`.
 
 ### Fixed
+- **A misspelled tool name no longer runs a tool that needs approval.** When
+  a call failed, the worker retried it with a tool whose name shared a word
+  with it, without asking — so `browser_click`, which needs no approval
+  because it does not exist, ran as `browser_control`, and a failed file call
+  could land on `file_delete`. A replacement that needs approval now goes
+  through the same approval checks as a direct call, including its browser
+  target and site; without an approver it is not chosen. A known read never
+  falls back to a write.
+- **A failed browser action no longer quotes the page back.** Playwright's
+  errors print the elements they found, attributes and all — in the log it
+  adds, and in the list of matches when a selector matched more than one — so
+  a failed choice on a password field printed the password to the model. Only
+  the first line, the reason, is kept.
 - **`pdf_create` wrote relative to the process, not the workspace.** In the
   desktop app and the server those differ, so a PDF landed outside the
   workspace, where no file check looked. It resolves its path in the

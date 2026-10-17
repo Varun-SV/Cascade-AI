@@ -318,12 +318,19 @@ class DynamicTool extends BaseTool {
     // waiting for an answer is withdrawn, and a tool still running is told to
     // stop, as a cancelled run tells it.
     const budget = hostCallBudget();
+    const browserBatch = options.browserBatch ?? { acted: false };
     const tooMany = `Not run: dynamic tool "${this.name}" made more than ${DYNAMIC_HOST_CALLS} calls to tools and fetch.`;
     const callTool = (toolName: string, toolInput: Record<string, unknown>, ended?: AbortSignal): Promise<string> =>
       budget(tooMany, () => callToolNow(toolName, toolInput, ended));
     const callToolNow = async (toolName: string, toolInput: Record<string, unknown>, ended?: AbortSignal): Promise<string> => {
       if (ended?.aborted) return `Not run: dynamic tool "${this.name}" had already ended.`;
       if (!registry.hasTool(toolName)) return `Tool not found: ${toolName}`;
+      // Refuse before approval can relabel the stale ref using a newer view.
+      // The registry also checks and advances this shared state atomically
+      // before execution, covering concurrent nested calls.
+      if (toolName === 'browser_control' && typeof toolInput['ref'] === 'string' && browserBatch.acted) {
+        return 'Tool error: A previous browser_control call may have changed the page. This ref was not executed. Observe the current page and issue a new call using its refs.';
+      }
 
       // The registry's whole approval policy — the built-in list, the user's
       // tools.requireApprovalFor, and isDangerous() — as a worker's own call
@@ -342,6 +349,13 @@ class DynamicTool extends BaseTool {
         if (!escalator) {
           return `Permission denied for "${toolName}": dynamic tool "${this.name}" has no approver available (default-deny).`;
         }
+        // What the person sees, and whether an earlier "always" may answer for
+        // them — as the worker asks it. A tool that offers neither is shown
+        // as called. Without this, a generated tool reached `browser_control`
+        // with no element named and no forced prompt before a payment.
+        const shown = (registry.getTool(toolName) as {
+          forApproval?: (input: Record<string, unknown>, sessionId: string) => { input: Record<string, unknown>; alwaysAsk: boolean };
+        } | undefined)?.forApproval?.(toolInput, options.sessionId);
         const req: PermissionRequest = {
           // Unique to the call: two from one run in the same millisecond
           // would otherwise share it, and the answer to one end both.
@@ -349,11 +363,11 @@ class DynamicTool extends BaseTool {
           requestedBy: `dynamic_tool:${this.name}`,
           parentT2Id: options.tierId,
           toolName,
-          input: toolInput,
+          input: shown?.input ?? toolInput,
           isDangerous: registry.isDangerous(toolName),
           subtaskContext: `Dynamic tool "${this.name}" (${this.trusted ? 'trusted' : 'UNTRUSTED'}) requesting access to "${toolName}"`,
           sectionContext: `Dynamic tool "${this.name}"`,
-          forceReprompt: !this.trusted,
+          forceReprompt: !this.trusted || shown?.alwaysAsk === true,
           localOnly: options.isOffline?.() === true,
         };
         const decision = await escalator.requestPermission(req, ended);
@@ -365,7 +379,7 @@ class DynamicTool extends BaseTool {
 
       try {
         const signal = ended && options.signal ? AbortSignal.any([ended, options.signal]) : (ended ?? options.signal);
-        const result = await registry.execute(toolName, toolInput, { ...options, dynamicTool: this.name, ...(signal ? { signal } : {}) });
+        const result = await registry.execute(toolName, toolInput, { ...options, browserBatch, dynamicTool: this.name, ...(signal ? { signal } : {}) });
         return typeof result === 'string' ? result : JSON.stringify(result);
       } catch (err) {
         return `Error calling ${toolName}: ${err instanceof Error ? err.message : String(err)}`;

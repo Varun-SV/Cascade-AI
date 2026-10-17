@@ -7,6 +7,7 @@ import path from 'node:path';
 import type {
   ConversationMessage,
   GenerateOptions,
+  ImageAttachment,
   ModelInfo,
   PermissionRequest,
   ReadDestination,
@@ -15,6 +16,7 @@ import type {
   TaskType,
   ToolCall,
   ToolDefinition,
+  ToolExecuteOptions,
 } from '../../types.js';
 import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
@@ -40,7 +42,9 @@ import {
 } from '../verification/acceptance.js';
 import { ACTING_INTEGRITY_RULE, appendToolRecord, describeHandedWork, describeToolRecord, recordToolCall, type HandedWork, type ToolRecordEntry } from './integrity.js';
 import { RedactionLayer } from '../audit/redaction.js';
-import { BROWSER_TOOL, BROWSER_WORKER_RULE } from './browser-planning.js';
+import { BROWSER_TOOL, BROWSER_WORKER_RULE, foldOldPageViews, withScreenshot } from './browser-planning.js';
+import { IMAGE_TOKENS_EACH } from '../router/index.js';
+import { mayTakeScreenshots } from '../router/screenshots.js';
 import { statePath, STATE } from '../../config/project-state.js';
 import { onTrustedPath, ownTsc } from '../../utils/trusted-exec.js';
 
@@ -381,6 +385,26 @@ export class T3Worker extends BaseTier {
   /** True when this subtask matched a privacy.paths local-only pattern. */
   private localOnlyMatch = false;
   private peerSyncBuffer: Array<{ fromId: string; content: unknown; timestamp: string }> = [];
+  /**
+   * Whether the model this worker runs on can be shown a browser screenshot.
+   * Set when the loop picks its model; tools are offered `attachImage` only
+   * while it holds.
+   */
+  private seesScreenshots = false;
+  /**
+   * The newest screenshot a tool handed over, waiting for the next request.
+   * Sent once and dropped — never stored in the history — so the cost is one
+   * picture per step rather than every picture on every step.
+   */
+  private pendingScreenshot: ImageAttachment | undefined;
+  /**
+   * The newest picture a tool handed over, until a request has carried it.
+   * A later browser step clears the pending one — it may have changed the
+   * page — so a step that then reports the page looking exactly as in that
+   * picture (`keepImage`) puts this one back: it is still the page, and the
+   * model has not yet been shown it.
+   */
+  private undeliveredScreenshot: ImageAttachment | undefined;
   private store?: MemoryStore;
   private audit?: AuditLogger;
   private tools: ToolDefinition[] = [];
@@ -834,6 +858,22 @@ export class T3Worker extends BaseTier {
   }
 
   /**
+   * Whether a page screenshot could reach `model` — by the model and by the
+   * route to it: one reached through a gateway never gets one, so none is
+   * taken for it.
+   */
+  private mayBeShown(model: ModelInfo | undefined): boolean {
+    if (!model) return false;
+    let gateway = false;
+    try {
+      gateway = this.router.throughGateway?.(model) === true;
+    } catch {
+      // Asked only to save a picture's cost; the router still decides.
+    }
+    return mayTakeScreenshots(model, IMAGE_TOKENS_EACH, { gateway });
+  }
+
+  /**
    * End this worker's hold on the shared browser.
    *
    * Duck-typed rather than imported: `browser_control` is registered only by a
@@ -842,6 +882,9 @@ export class T3Worker extends BaseTier {
    * it would couple the worker to a tool that usually is not there.
    */
   private releaseBrowserControl(): void {
+    // A finished worker sends nothing more, so its last picture goes too.
+    this.pendingScreenshot = undefined;
+    this.undeliveredScreenshot = undefined;
     // Best-effort, and swallowing is deliberate. This runs in `execute`'s
     // finally, so anything thrown here REPLACES the worker's real result — a
     // registry without `getTool` turned every completed subtask into a
@@ -928,6 +971,12 @@ export class T3Worker extends BaseTier {
     let stalledArtifactIterations = 0;
     const MAX_ITERATIONS = 15;
     const requiresArtifact = this.requiresArtifact();
+    // A picture belongs to the step after the action that took it. One left
+    // over from a loop that ended — the final step's, say — would otherwise
+    // ride on the first request of the next loop (a correction round), after
+    // a prompt it has nothing to do with.
+    this.pendingScreenshot = undefined;
+    this.undeliveredScreenshot = undefined;
     // `tools` is reassigned when a dynamic tool is created — must be a let
     tools = [...tools];
 
@@ -953,6 +1002,7 @@ export class T3Worker extends BaseTier {
     // Detect tool-use mode against the EFFECTIVE model (per-subtask override if
     // any, else the tier default).
     let effectiveModel = subtaskModel ?? this.router.getModelForTier('T3');
+    this.seesScreenshots = this.mayBeShown(effectiveModel);
     // Tag this node with the model actually serving it — including a Cascade
     // Auto per-subtask override — so the desktop can show model-per-task.
     if (effectiveModel) this.setServingModel(`${effectiveModel.provider}:${effectiveModel.id}`);
@@ -972,6 +1022,7 @@ export class T3Worker extends BaseTier {
       subtaskModel = privateModel;
       subtaskTaskType = undefined;
       effectiveModel = privateModel;
+      this.seesScreenshots = this.mayBeShown(privateModel);
       this.setServingModel(`${privateModel.provider}:${privateModel.id}`);
       const textTools = privateModel.supportsToolUse === false && tools.length > 0;
       if (textTools !== useTextTools) {
@@ -1019,8 +1070,13 @@ export class T3Worker extends BaseTier {
         }
       }
 
+      // The screenshot rides on this request only, after the tool results it
+      // belongs to. The router still drops it if the model it resolves to
+      // cannot see it.
+      const screenshot = this.pendingScreenshot;
+      this.pendingScreenshot = undefined;
       const options: GenerateOptions = {
-        messages: this.context.getMessages(),
+        messages: withScreenshot(foldOldPageViews(this.context.getMessages()), screenshot),
         systemPrompt: this.systemPromptOverride + systemPrompt
           + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : '')
           + textToolSuffix,
@@ -1046,6 +1102,19 @@ export class T3Worker extends BaseTier {
           if (!this.localOnlyMatch) this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: this.isPresenter });
         },
       );
+      // The router can reject the actual dimensions or resolve to a model
+      // that cannot see this image. Retain it until delivery is confirmed;
+      // only a later browser step proving the page unchanged may restore it.
+      if (screenshot && (result.screenshotsSent ?? 0) > 0) this.undeliveredScreenshot = undefined;
+      // Pictures are taken for the model that is answering. After a failover
+      // that is another model, one that may see them where the first could
+      // not, or the other way round. The router still decides, per request,
+      // whether one is sent.
+      if (result.servedBy) {
+        const served = this.router.getAvailableModels?.()
+          .find((m) => m.provider === result.servedBy!.provider && m.id === result.servedBy!.id);
+        if (served) this.seesScreenshots = this.mayBeShown(served);
+      }
 
       // For text-tool mode: parse <tool_call> blocks and inject as native tool calls
       let effectiveToolCalls = result.toolCalls ?? [];
@@ -1100,9 +1169,20 @@ export class T3Worker extends BaseTier {
         }
       }
 
+      // All calls in this batch were composed against the page view before
+      // any of them ran. Browser actions refresh that view and may navigate,
+      // so a ref in a later call cannot safely be reinterpreted using the new
+      // page's labels or approval. Ask the model to inspect the page again.
+      const browserBatch = { acted: false };
       for (const tc of effectiveResult.toolCalls) {
         allToolCalls.push(tc);
-        const toolResult = await this.executeTool(tc);
+        const staleRef = tc.name === 'browser_control'
+          && typeof tc.input['ref'] === 'string'
+          && browserBatch.acted;
+        const toolResult = staleRef
+          ? 'Tool error: A previous browser_control call in this response may have changed the page. This ref was not executed. Observe the current page and issue a new call using its refs.'
+          : await this.executeTool(tc, browserBatch);
+        if (tc.name === 'browser_control') browserBatch.acted = true;
         appendToolRecord(this.toolRecord, recordToolCall(tc.name, toolResult, tc.input, this.ranAs.get(tc)));
         // Bound what enters the context: the WHOLE history is re-sent on every
         // remaining iteration, so an unbounded tool result (big file read,
@@ -1174,6 +1254,10 @@ export class T3Worker extends BaseTier {
       return `Tool ${tc.name} was not run: ${named} is local-only (privacy.paths), and no private model can take this subtask on.`;
     }
 
+    const shown = (this.toolRegistry.getTool?.(tc.name) as {
+      forApproval?: (input: Record<string, unknown>, sessionId: string) => { input: Record<string, unknown>; alwaysAsk: boolean };
+    } | undefined)?.forApproval?.(tc.input, this.taskId);
+
     // ── Hierarchical permission escalation: T3 → T2 → T1 → User ──
     if (this.permissionEscalator) {
       const req: PermissionRequest = {
@@ -1181,11 +1265,12 @@ export class T3Worker extends BaseTier {
         requestedBy: this.id,
         parentT2Id: this.parentId ?? 'root',
         toolName: tc.name,
-        input: tc.input,
+        input: shown?.input ?? tc.input,
         isDangerous: this.toolRegistry.isDangerous(tc.name),
         subtaskContext: this.assignment?.subtaskTitle ?? 'Unknown subtask',
         sectionContext: this.assignment?.subtaskTitle ?? 'Unknown section',
         localOnly: this.localOnlyMatch,
+        ...(shown?.alwaysAsk ? { forceReprompt: true } : {}),
       };
       // The run's signal: a cancelled run withdraws the question rather
       // than leaving it with an evaluator or on screen.
@@ -1194,7 +1279,7 @@ export class T3Worker extends BaseTier {
     }
 
     // ── Fallback: legacy direct approval event (used when escalator not wired) ──
-    if (this.sessionApprovals.has(tc.name)) {
+    if (!shown?.alwaysAsk && this.sessionApprovals.has(tc.name)) {
       return this.sessionApprovals.get(tc.name) ? null : `Tool ${tc.name} was denied by user.`;
     }
     // Time-box this fallback too (default 10 min → deny) so a missing or
@@ -1211,7 +1296,7 @@ export class T3Worker extends BaseTier {
         id: `${this.id}-${tc.id}`,
         tierId: this.id,
         toolName: tc.name,
-        input: tc.input,
+        input: shown?.input ?? tc.input,
         description: `T3 (${this.assignment?.subtaskTitle}) wants to run "${tc.name}"`,
         isDangerous: this.toolRegistry.isDangerous(tc.name),
       });
@@ -1220,11 +1305,11 @@ export class T3Worker extends BaseTier {
         resolve(d);
       });
     });
-    if (legacyDecision.always) this.sessionApprovals.set(tc.name, legacyDecision.approved);
+    if (legacyDecision.always && !shown?.alwaysAsk) this.sessionApprovals.set(tc.name, legacyDecision.approved);
     return legacyDecision.approved ? null : `Tool ${tc.name} was denied by user.`;
   }
 
-  private async executeTool(tc: ToolCall): Promise<string> {
+  private async executeTool(tc: ToolCall, browserBatch?: ToolExecuteOptions['browserBatch']): Promise<string> {
     // T3→T2 reinforcement: handle locally (record the request for the manager) —
     // it is a signal, not a real side-effecting tool, so it skips registry
     // validation and approval.
@@ -1268,6 +1353,13 @@ export class T3Worker extends BaseTier {
 
     this.emit('tool:call', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), input: this.localOnlyMatch ? {} : tc.input });
     const toolStartMs = Date.now();
+    // A picture is of the page after the last browser action. One that ran
+    // since and sent none — a fill, or a page whose picture was withheld —
+    // leaves the older picture showing a page that is no longer there, under
+    // a caption that says otherwise. Reading the page changes nothing, and a
+    // step that leaves the pixels as they were says so (`keepImage`): the
+    // last picture not yet shown is then still the page.
+    if (tc.name === 'browser_control' && tc.input['action'] !== 'extract_text') this.pendingScreenshot = undefined;
 
     try {
       this.noteRan(tc.name);
@@ -1275,6 +1367,7 @@ export class T3Worker extends BaseTier {
         tierId: this.id,
         sessionId: this.taskId,
         requireApproval: false,
+        ...(browserBatch ? { browserBatch } : {}),
         // Media generation can run for a minute; without this a cancelled run
         // still pays for an image nobody will see.
         ...(this.signal ? { signal: this.signal } : {}),
@@ -1296,6 +1389,12 @@ export class T3Worker extends BaseTier {
           this.peerSyncBuffer = [];
           return msgs;
         },
+        // The newest wins: one picture per step, of the page as it is now.
+        ...(this.seesScreenshots ? {
+          attachImage: (image: ImageAttachment) => { this.pendingScreenshot = image; this.undeliveredScreenshot = image; },
+          clearImage: () => { this.pendingScreenshot = undefined; },
+          keepImage: () => { this.pendingScreenshot ??= this.undeliveredScreenshot; },
+        } : {}),
       });
       if (this.audit) {
         this.audit.toolCall(this.id, tc.name, tc.input);
@@ -1358,7 +1457,7 @@ export class T3Worker extends BaseTier {
       }
       // Try to recover via a sibling tool or a synthesized one before giving up;
       // returns the original error string if no fallback succeeds.
-      return await this.adaptiveFallback(tc, `Tool error: ${errMsg}`);
+      return await this.adaptiveFallback(tc, `Tool error: ${errMsg}`, browserBatch);
     }
   }
 
@@ -1377,7 +1476,7 @@ export class T3Worker extends BaseTier {
    * theirs, or a synthesized replacement's — is separately billed. See the
    * fast-fail branch in executeTool().
    */
-  private async adaptiveFallback(tc: ToolCall, originalError: string): Promise<string> {
+  private async adaptiveFallback(tc: ToolCall, originalError: string, browserBatch?: ToolExecuteOptions['browserBatch']): Promise<string> {
     // Strategy 1: alternative tool with overlapping purpose
     const altTool = this.findAlternativeTool(tc.name);
     // The tool run in its place is checked as the one called would be: its
@@ -1396,6 +1495,8 @@ export class T3Worker extends BaseTier {
           tierId: this.id,
           sessionId: this.taskId,
           requireApproval: false,
+          ...(browserBatch ? { browserBatch } : {}),
+          clearImage: () => { this.pendingScreenshot = undefined; },
           ...(this.signal ? { signal: this.signal } : {}),
           mayRead: this.mayRead,
           noteRead: this.noteRead,
@@ -1427,6 +1528,8 @@ export class T3Worker extends BaseTier {
             tierId: this.id,
             sessionId: this.taskId,
             requireApproval: false,
+            ...(browserBatch ? { browserBatch } : {}),
+            clearImage: () => { this.pendingScreenshot = undefined; },
             ...(this.signal ? { signal: this.signal } : {}),
             mayRead: this.mayRead,
             noteRead: this.noteRead,
@@ -1456,6 +1559,11 @@ export class T3Worker extends BaseTier {
 
     for (const tool of allTools) {
       if (tool.name === failedToolName) continue;
+      // Approval-requiring replacements need the same explicit escalator as
+      // normal calls. Without one, leave the model the error so it can call
+      // the real tool itself. With one, adaptiveFallback validates and asks
+      // about the replacement, including its browser target and site.
+      if (!this.permissionEscalator && (this.toolRegistry.requiresApproval(tool.name) || this.toolRegistry.isDangerous(tool.name))) continue;
       const toolWords = tool.name.toLowerCase().split(/[_\-\s]+/);
       const score = failedKeywords.filter(k => toolWords.includes(k)).length;
       if (score > bestScore && score >= 1) {

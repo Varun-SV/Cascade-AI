@@ -36,7 +36,7 @@ The CLI, desktop app and Cascade Cloud share one account. Settings can follow yo
 ## ✨ Highlights
 
 - 🧠 **Live benchmark Auto-routing** — set a tier to `Auto` and Cascade fuses *live* public benchmark scores with *live* pricing to pick the best-**value** model for each task, then learns from how each model actually did.
-- 🌐 **Browser control** (desktop app and web) — the agent drives a real browser: the desktop's own, or on the web your Chrome over CDP or a hosted Steel session. You watch it live and can take the wheel and hand it back.
+- 🌐 **Browser control** (desktop app and web) — the agent drives a real browser: the desktop's own, or on the web your Chrome over CDP or a hosted Steel session. You watch it live and can take the wheel and hand it back. On the web the agent reads each page as a list of its controls, each with a ref like `e14`, and acts on them by ref; a model that can see images can also get a screenshot (`tools.browserVision`).
 - 🙋 **Asks instead of guessing** (Cascade Cloud and self-hosted web) — when a request is genuinely ambiguous, Cascade asks one structured question rather than inventing an answer.
 - 🤖 **Autonomous mode** (`/auto`) — hands-off runs: safe tools run silently, dangerous ones still ask, budget caps stay the hard stop.
 - 📋 **Boardroom plan review** — pause to review, **edit**, or steer T1's plan (with an AI reviewer's critique) before any worker spawns.
@@ -343,6 +343,7 @@ Cascade keeps what it knows about a project outside the project, in a folder of 
     "shellBlocklist":     ["sudo rm", "rm -rf", "mkfs"],
     "requireApprovalFor": ["shell", "file_write", "file_delete"],
     "browserEnabled":     false,
+    "browserVision":      "list",
     "mcpServers": [
       { "name": "filesystem", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] }
     ],
@@ -509,7 +510,7 @@ T3 workers have access to the following tools. All destructive operations requir
 | `web_search` | Search the web (SearXNG, Brave or Tavily) | |
 | `web_fetch` | Fetch a page, SSRF-guarded | |
 | `browser` | Headless Playwright automation (off unless `tools.browserEnabled`) | ✓ |
-| `browser_control` | Drive a real browser — desktop app and web (CDP or Steel) | ✓ |
+| `browser_control` | Drive a real browser — desktop app and web (CDP or Steel). On the web: page views with refs, and screenshots for vision models (`tools.browserVision`) | ✓ |
 | `read_current_page` | Read the page you have open — desktop app | |
 | `image_analyze` | Describe an image (vision-capable models) | |
 | `generate_image` · `generate_speech` · `generate_video` | Generate media, with a provider key that supports it | |
@@ -519,6 +520,39 @@ T3 workers have access to the following tools. All destructive operations requir
 | `knowledge_graph_search` | Query the project's knowledge graph of facts — appears once the project has learned some | |
 | `peer_message` | Message a sibling worker | |
 | `ask_user` | Ask you one structured question instead of guessing — Cascade Cloud and self-hosted web | |
+
+#### What the browser agent sees
+
+On the web (a CDP browser or Steel), `browser_control` describes each page as a **page view**: the controls on screen and further down, each under a ref.
+
+```
+[Page view 2]
+Page: Dine — https://dine.example/search
+Viewport 1280×800, scrolled 0 of 1,013
+
+On screen:
+[e5] button "Account"
+[e8] combobox "Party size": "2 people" (options "1 person", "2 people", "4 people")
+[e14] button "Reserve 7:30 pm"
+```
+
+The model acts by ref (`{"action":"click","ref":"e14"}`), and CSS selectors still work. On a ref, `select_option` chooses an option by its text as the view lists it, never by the value hidden in the page; text the view shortened still picks the option it came from. A page view never shows what is typed into a field. A ref is refused, never re-matched, once the page has loaded something else or the control it named has gone or been renamed, even past the part of its name the view shows. A ref inside an iframe is refused once a frame on the page has loaded another document.
+
+`tools.browserVision` sets how much it sees. It applies to a remote browser — Cascade Cloud and self-hosted deployments set it with `REMOTE_BROWSER_VISION`, and an SDK host that attaches one reads it from its config. The desktop's built-in browser keeps CSS selectors. Page views need Playwright 1.60 or later, the version Cascade installs; with an older one the agent is offered the original actions only, and reads page text and uses CSS selectors.
+
+| Setting | What the model gets |
+|---|---|
+| `off` | Page text and CSS selectors only |
+| `list` (default) | Page views with refs, for every model |
+| `image` | Page views, plus a screenshot for models that can see images |
+| `marked` | Page views, plus a screenshot with each ref drawn on it (experimental) |
+
+When screenshots are on:
+- No screenshot is taken while a password, card or one-time-code field is on screen in any frame, when the page can't be checked for one, or right after you took control of the browser or hid it. The page is checked again once the picture is taken, and a picture taken as such a field came up, or as the page went to another, is dropped.
+- A screenshot is sent with one step and not kept: about 1.4k tokens a step on Claude at 1280×800 (Steel's size). A larger screen costs more. A step that leaves the page looking exactly as it did in the last one sends none.
+- A model that can't see images, one reached through a gateway, or one that would be charged more for a picture than a run allows for an image gets the page view alone.
+
+Approval prompts name the element and the site. A click on something labelled pay, buy, order, delete, remove, send, transfer, publish, confirm, approve, authorize, allow, withdraw, subscribe or donate asks every time, even after "always allow" — read past accents, invisible characters and lookalike letters. So does Enter or Space where it may submit a form, alone or in a key combination, and a click, fill or key press on something the page view did not name, such as a CSS selector or an icon-only button, or named only in part because its name was too long to show or had typed text hidden in it. An approved action runs only on the page it was approved on, not after the page has moved to another, even on the same site; one by CSS selector also stops when an app changes its route. Hosted deployments set `REMOTE_BROWSER_VISION`. `scripts/browser-vision-eval/` holds the side-by-side test that decides the default.
 
 MCP servers' tools, plugins and dynamic tools join this list at runtime.
 

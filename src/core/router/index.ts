@@ -27,6 +27,8 @@ import { OpenAIProvider } from '../../providers/openai.js';
 import { ProviderUnreachableError } from '../../providers/base.js';
 import type { BaseProvider } from '../../providers/base.js';
 import { ModelSelector } from './selector.js';
+import { countScreenshots, fitScreenshots } from './screenshots.js';
+import { hasDefaultEndpoint, sameCredentialEndpoint } from '../../config/endpoint-identity.js';
 import { FailoverManager, failureScopeOf } from './failover.js';
 import { normalizeEndpoint } from '../../utils/net.js';
 import { classifyProviderError, describeProviderError, enrichProviderError } from './provider-errors.js';
@@ -150,7 +152,7 @@ const IMAGE_TOKENS_MAX = 2_000;
  * rate per image, at the top of the range they bill in, so no real image falls
  * below what was reserved for it.
  */
-const IMAGE_TOKENS_EACH = IMAGE_TOKENS_MAX;
+export const IMAGE_TOKENS_EACH = IMAGE_TOKENS_MAX;
 
 function safeJson(value: unknown): string {
   try { return JSON.stringify(value) ?? ''; } catch { return ''; }
@@ -441,6 +443,12 @@ export function applyTierLimits(options: GenerateOptions, tier: TierRole, limits
 function explorationKey(tier: string, modelId: string, taskType?: string): string {
   return `${tier}\u0000${modelId}\u0000${taskType ?? ''}`;
 }
+
+/** The variable each provider's SDK takes its address from when given none. */
+const BASE_URL_ENV: Partial<Record<ProviderType, string>> = {
+  openai: 'OPENAI_BASE_URL',
+  anthropic: 'ANTHROPIC_BASE_URL',
+};
 
 export class CascadeRouter extends EventEmitter {
   private selector!: ModelSelector;
@@ -1096,6 +1104,19 @@ export class CascadeRouter extends EventEmitter {
     const provider = this.getProvider(model);
     if (!provider) throw new Error(`No provider for model ${model.id}`);
 
+    // A browser screenshot goes only to a model that can see it, at no more
+    // than the flat amount the check below reserves for an image. Decided
+    // here, against the model this call actually resolved to: failover, a
+    // backoff and the local-only swap above can all have changed it since the
+    // worker built the request.
+    // The request as the worker built it is kept for a retry on another
+    // model: one that can see the screenshot must get it back, not the line
+    // that stood in for it here.
+    const offeredShots = countScreenshots(options);
+    const asOffered = options;
+    options = fitScreenshots(options, model, IMAGE_TOKENS_EACH, { gateway: this.throughGateway(model) });
+    const sentShots = countScreenshots(options);
+
     // Refuse a call whose INPUT alone cannot fit the remaining budget, before
     // spending it. Placed ahead of the TPM wait: there is no point queueing for
     // provider capacity on a call we are about to decline.
@@ -1258,7 +1279,7 @@ export class CascadeRouter extends EventEmitter {
           // transient rebinding here would never be undone — one throttled
           // worker would move the tier's traffic, and its billing, to the
           // fallback indefinitely after the limit had cleared.
-          return this.generate(tier, { ...options, model: alt }, onChunk, requireVision);
+          return this.generate(tier, { ...asOffered, model: alt }, onChunk, requireVision);
         }
         // Nothing else can serve it: proceed rather than fail the run over a
         // condition that clears on its own.
@@ -1298,6 +1319,16 @@ export class CascadeRouter extends EventEmitter {
         // while /why already claimed the run tried an alternative.
         this.flushExplorationNote(tier, model.id, selectionTaskType);
       }
+
+      // Counted as each request goes out, for /why: a request that fails, or a
+      // stream retried as a plain call, has still sent its screenshot to the
+      // provider, and may still be billed for it.
+      const noteShots = (): void => {
+        if (!offeredShots || runGeneration !== this.runGeneration) return;
+        this.runScreenshots.sent += sentShots;
+        this.runScreenshots.leftOut += offeredShots - sentShots;
+      };
+      noteShots();
 
       if (model.isLocal) {
         // Apply a hard timeout to local inference calls so a slow/overloaded
@@ -1345,6 +1376,7 @@ export class CascadeRouter extends EventEmitter {
           // non-streaming call rather than letting a hung stream freeze the run.
           // The stalled attempt has been aborted by now, so this is the only
           // request in flight and the reservation taken above still covers it.
+          noteShots();
           result = await withTimeoutAbort(
             (signal) => provider.generate({ ...options, signal }),
             cloudTimeoutMs,
@@ -1382,6 +1414,9 @@ export class CascadeRouter extends EventEmitter {
         // Which model ACTUALLY answered. A failover recursion returns its own
         // result from the inner call, so this is always the one that ran.
         servedBy: { provider: model.provider, id: model.id },
+        // A filtered offer is not delivery. Failover returns its own count,
+        // so callers can retain an unseen screenshot for a later safe step.
+        ...(offeredShots ? { screenshotsSent: sentShots } : {}),
       };
 
       if (!result || typeof result.content !== 'string' || !result.usage) {
@@ -1533,9 +1568,9 @@ export class CascadeRouter extends EventEmitter {
           // resolves right back to the pin, ignoring the fallback just bound
           // above and re-hitting the same rate-limited provider. Same fix
           // already applied to the model-not-found branch below.
-          const retryOpts = options.model && options.model.id === model.id
-            ? { ...options, model: undefined }
-            : options;
+          const retryOpts = asOffered.model && asOffered.model.id === model.id
+            ? { ...asOffered, model: undefined }
+            : asOffered;
           return this.generate(tier, retryOpts, onChunk, requireVision);
         }
       }
@@ -1597,9 +1632,9 @@ export class CascadeRouter extends EventEmitter {
           // Clear a per-subtask override that pointed at the dead model so the
           // recursive call resolves the tier's next-best model, and carry the
           // depth so the chain is bounded.
-          const base = options.model && options.model.id === model.id
-            ? { ...options, model: undefined }
-            : options;
+          const base = asOffered.model && asOffered.model.id === model.id
+            ? { ...asOffered, model: undefined }
+            : asOffered;
           const retryOpts = { ...base, _notFoundDepth: depth } as GenerateOptions;
           return this.generate(tier, retryOpts, onChunk, requireVision);
         }
@@ -2196,6 +2231,23 @@ export class CascadeRouter extends EventEmitter {
     return `${resourceScope}#k${group}`;
   }
 
+  /**
+   * Whether this model is reached through an endpoint other than its
+   * provider's own — a gateway, whose list of models and whose idea of which
+   * of them can see are its own. Azure and the local types have no public
+   * endpoint to differ from. Public so a worker can tell, before it has a
+   * picture taken, that this route would drop it.
+   */
+  throughGateway(model: ModelInfo): boolean {
+    if (!hasDefaultEndpoint(model.provider)) return false;
+    const configured = (this.config?.providers ?? []).find((c) => c.type === model.provider)?.baseUrl;
+    // With none configured, the provider's SDK reads its own variable — and
+    // goes wherever that points.
+    const fromEnv = BASE_URL_ENV[model.provider];
+    const baseUrl = configured?.trim() ? configured : fromEnv ? process.env[fromEnv] : undefined;
+    return Boolean(baseUrl?.trim()) && !sameCredentialEndpoint(model.provider, baseUrl, undefined);
+  }
+
   private scopeFor(model: ModelInfo): string {
     if (model.provider !== 'azure') return failureScopeOf(model);
     const cfg = (this.config?.providers ?? []).find(
@@ -2385,6 +2437,14 @@ export class CascadeRouter extends EventEmitter {
     this.emit('routing:exploring', { tier, note });
   }
 
+  /** Browser screenshots this run sent to a model, and left out for one that could not take them. */
+  private runScreenshots = { sent: 0, leftOut: 0 };
+
+  /** See `runScreenshots`. Read by /why. */
+  getRunScreenshots(): { sent: number; leftOut: number } {
+    return { ...this.runScreenshots };
+  }
+
   beginRun(): void {
     // Per-run, like everything else here: a stale mapping would credit this
     // run's calls to the task type a previous run happened to select under.
@@ -2406,6 +2466,7 @@ export class CascadeRouter extends EventEmitter {
     this.runWrappingUp = false;
     this.runWrapUpReason = undefined;
     this.runWorkNotStarted = 0;
+    this.runScreenshots = { sent: 0, leftOut: 0 };
     this.reservedWorkUsd = 0;
     this.reservedWorkTokens = 0;
     // Quota/auth verdicts are RUN-scoped by design — a user who tops up their
