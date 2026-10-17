@@ -162,6 +162,53 @@ describe('ToolCreator — runtime tool generation', () => {
     expect(asked).toBe(true);
     expect(out).toMatch(/Permission denied/);
   });
+
+  it('does not relabel a second nested ref against a newly observed page', async () => {
+    const reg = makeRegistry();
+    const actions: string[] = [];
+    const browser = new BrowserControlTool(async (action) => {
+      actions.push(action.kind);
+      return { ok: true, detail: 'ok', url: 'https://shop.example/', document: `doc-${actions.length}`,
+        view: { text: '[Page view 1]', labels: { e1: 'button "Next"', e2: 'button "Continue"' } } };
+    }, undefined, { pageView: true });
+    reg.register(browser);
+    await browser.execute({ action: 'observe' }, { ...opts, sessionId: 'nested' });
+    actions.length = 0;
+    const spec: GeneratedToolSpec = { name: 'dynamic_nested_refs', description: 'browse', inputSchema: {}, isDangerous: true,
+      executeCode: "await callTool('browser_control', { action: 'click', ref: 'e1' }); return await callTool('browser_control', { action: 'click', ref: 'e2' });" };
+    const creator = new ToolCreator(mockRouter(spec), reg, ws, true, 'wasm');
+    creator.setPermissionEscalator({ requestPermission: async () => ({ approved: true, decidedBy: 'USER' }) } as any);
+    creator.registerSpec(spec, true);
+    const out = await reg.execute(spec.name, {}, { ...opts, sessionId: 'nested' });
+    expect(actions).toEqual(['click']);
+    expect(out).toContain('previous browser_control call');
+    actions.length = 0;
+    const prior = await reg.execute(spec.name, {}, { ...opts, sessionId: 'nested', browserBatch: { acted: true } });
+    expect(actions).toEqual([]);
+    expect(prior).toContain('previous browser_control call');
+    creator.registerSpec({ ...spec, name: 'dynamic_parallel_refs',
+      executeCode: "return JSON.stringify(await Promise.all([callTool('browser_control', { action: 'click', ref: 'e1' }), callTool('browser_control', { action: 'click', ref: 'e2' })]));" }, true);
+    await reg.execute('dynamic_parallel_refs', {}, { ...opts, sessionId: 'nested' });
+    expect(actions).toEqual(['click']);
+  });
+
+  it('clears screenshots between nested browser actions while preserving read-only text', async () => {
+    const reg = makeRegistry();
+    let pending: unknown;
+    const browser = new BrowserControlTool(async (action) => ({ ok: true, detail: 'ok', url: 'https://shop.example/', document: 'doc',
+      ...(action.kind === 'observe' ? { image: { data: 'AAAA', mimeType: 'image/jpeg' as const, width: 1280, height: 800 } } : {}) }),
+    undefined, { pageView: true, screenshots: true });
+    reg.register(browser);
+    const creator = new ToolCreator(mockRouter({}), reg, ws, true, 'wasm');
+    creator.setPermissionEscalator({ requestPermission: async () => ({ approved: true, decidedBy: 'USER' }) } as any);
+    for (const action of ['extract_text', 'fill']) {
+      const spec: GeneratedToolSpec = { name: `dynamic_nested_${action}`, description: 'browse', inputSchema: {}, isDangerous: true,
+        executeCode: `await callTool('browser_control', { action: 'observe' }); return await callTool('browser_control', { action: '${action}', selector: '#name', value: 'Ada' });` };
+      creator.registerSpec(spec, true);
+      await reg.execute(spec.name, {}, { ...opts, sessionId: 'nested-shot', attachImage: (image: unknown) => { pending = image; }, clearImage: () => { pending = undefined; } } as any);
+      expect(Boolean(pending), action).toBe(action === 'extract_text');
+    }
+  });
 });
 
 describe('ToolCreator — the WebAssembly sandbox', () => {

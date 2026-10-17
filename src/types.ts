@@ -399,6 +399,10 @@ export interface ToolExecuteOptions {
    * audit log; the worker sends it once and lets it go.
    */
   attachImage?: (image: ImageAttachment) => void;
+  /** Invalidate the transient screenshot before any browser action except extract_text, including nested calls. */
+  clearImage?: () => void;
+  /** Shared by calls authored in one model response, including generated tools and fallback calls. */
+  browserBatch?: { acted: boolean };
   /**
    * The page looks exactly as in the last picture a tool handed over, so no
    * new one was taken: that one still stands for the page, if it has not

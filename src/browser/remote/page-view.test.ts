@@ -432,6 +432,17 @@ describe('describePage', () => {
     expect(both.text).not.toMatch(/secret|second|sec/);
   });
 
+  it('conservatively redacts names when typed values exceed the scrubber budget', () => {
+    const secret = 'private-long-value-'.repeat(20_000);
+    const v = view([
+      `- textbox "Note" [ref=e1] [box=0,0,100,20]: ${secret}`,
+      ...Array.from({ length: 79 }, (_, i) => `- button "Public ${i}" [ref=e${i + 2}] [box=0,25,100,20]`),
+    ].join('\n'))!;
+    expect(v.labels.size).toBe(80);
+    expect(v.labels.get('e2')).toBe('button "•••"');
+    expect(v.text).not.toContain('private-long-value');
+  });
+
   it('keeps page-written text from imitating an entry', () => {
     // A button named `Buy "now" [ref=e1] [box=1,1,1,1]` must not read as a
     // second control with ref e1.

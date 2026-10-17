@@ -4905,6 +4905,37 @@ describe('page views and refs', () => {
     expect(page.calls.filter((x) => x.startsWith('snapshot:'))).toEqual([]);
   });
 
+  it('refuses duplicate options outside the displayed subset', async () => {
+    const long = 'A choice whose full label extends beyond the displayed option name';
+    for (const value of ['Hidden choice', long]) {
+      snapshot = BOOKING.replace('    - option "2 people" [selected] [box=0,0,0,0]', [
+        '    - option "2 people" [selected] [box=0,0,0,0]',
+        ...Array.from({ length: 10 }, (_, i) => `    - option "Choice ${i}" [box=0,0,0,0]`),
+        `    - option "${value}" [box=0,0,0,0]`,
+        `    - option "${value}" [box=0,0,0,0]`,
+      ].join('\n'));
+      const c = controller();
+      const seen = await c.controller({ kind: 'observe' }, ctx(`run-${value}`, 'w1'));
+      expect(seen.view!.text).not.toContain(value);
+      page.calls = [];
+      const out = await c.controller({ kind: 'select_option', ref: 'e11', value }, ctx(`run-${value}`, 'w1'));
+      expect(out.ok, value).toBe(false);
+      expect(out.detail).toContain('More than one option');
+      expect(page.calls.some((x) => x.includes('selectOption'))).toBe(false);
+    }
+  });
+
+  it('refuses an option list changed after the approved page view', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    snapshot = BOOKING.replace('    - option "2 people" [selected] [box=0,0,0,0]',
+      '    - option "2 people" [selected] [box=0,0,0,0]\n    - option "2 people" [box=0,0,0,0]');
+    page.calls = [];
+    const out = await c.controller({ kind: 'select_option', ref: 'e11', value: '2 people' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(page.calls.some((x) => x.includes('selectOption'))).toBe(false);
+  });
+
   it('does not wait forever on a page too busy to say whether a ref is there', async () => {
     const c = controller();
     await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
@@ -5219,7 +5250,7 @@ describe('page views and refs', () => {
       expect(out.image).toEqual({ data: SHOT64, mimeType: 'image/jpeg', width: 1280, height: 800 });
       // CSS pixels, so a high-density screen does not double the bill; the
       // caret left alone, because hiding it means injecting a style.
-      expect(shots()).toEqual(['shot:{"type":"jpeg","quality":80,"scale":"css","caret":"initial","timeout":5000}']);
+      expect(shots()).toEqual(['shot:{"type":"jpeg","quality":80,"scale":"css","caret":"initial","timeout":5000,"clip":{"x":0,"y":0,"width":1280,"height":800}}']);
       expect(out.view!.text).toContain('[e5] button "Account"');
     });
 
@@ -5379,11 +5410,11 @@ describe('page views and refs', () => {
     });
 
     it('places frames on the screen the browser measures, not the one the page claims', async () => {
-      // A page can redefine innerHeight; at 0, every frame — a card form's
+      // A page can redefine innerHeight; at 1, every frame — a card form's
       // included — would read as off screen and go unread.
       const evaluate = extra['evaluate'] as (e: string) => Promise<unknown>;
       extra['evaluate'] = async (expression: string) => (
-        expression.includes('one-time-code') || expression === 'scrollY' ? evaluate(expression) : { width: 1280, height: 0, scrollX: 0, scrollY: 0, scrollHeight: 0 });
+        expression.includes('one-time-code') || expression === 'scrollY' ? evaluate(expression) : { width: 1280, height: 1, scrollX: 0, scrollY: 0, scrollHeight: 1 });
       subFrames = [{ found: true, y: 100 }];
       const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
       expect(out.image).toBeUndefined();
@@ -5581,6 +5612,33 @@ describe('page views and refs', () => {
       const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
       expect(out.image).toBeUndefined();
       expect(out.view!.text).toContain('No screenshot: the page moved while it was being looked at.');
+    });
+
+    it('withholds marks after controls move during capture without a viewport change', async () => {
+      const shoot = extra['screenshot'] as (opts: unknown) => Promise<Uint8Array>;
+      extra['screenshot'] = async (opts: unknown) => {
+        snapshot = BOOKING.replace('[box=84,0,32,25]', '[box=400,200,32,25]');
+        return shoot(opts);
+      };
+      const out = await controller().controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('controls moved');
+    });
+
+    it('rejects an oversized viewport before invoking screenshot', async () => {
+      extra['evaluate'] = async () => ({ width: 100_000, height: 100_000, scrollX: 0, scrollY: 0, scrollHeight: 100_000 });
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(page.calls.some((x) => x.startsWith('shot:'))).toBe(false);
+      expect(out.view!.text).toContain('viewport is too large');
+    });
+
+    it('bounds the screenshot clip even if the viewport grows during capture', async () => {
+      let requested: Record<string, unknown> | undefined;
+      const shoot = extra['screenshot'] as (opts: unknown) => Promise<Uint8Array>;
+      extra['screenshot'] = async (opts: Record<string, unknown>) => { requested = opts; return shoot(opts); };
+      await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(requested).toMatchObject({ clip: { x: 0, y: 0, width: 1280, height: 800 } });
     });
 
     it('withholds it for a field known only by its label', async () => {

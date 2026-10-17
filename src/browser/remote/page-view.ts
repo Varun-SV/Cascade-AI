@@ -73,10 +73,11 @@ export interface PageView {
    */
   identities: Map<string, string>;
   /**
-   * Each listed select's options as the view shows them, and as the page
+   * Each listed select's complete options, with their display form and page
    * labels them: select_option is given the first, Playwright needs the
    * second — a name cut short, or with its brackets made parentheses, is no
-   * option's label.
+   * option's label. Metadata beyond the displayed ten stays private so
+   * selection can reject ambiguous labels in the unlisted subset too.
    */
   options: Map<string, Array<{ shown: string; label: string }>>;
   /**
@@ -338,6 +339,8 @@ export function describePage(input: {
   const entries: Entry[] = [];
   const hidden = valuesAround(roots);
   const typedAnywhere = textboxValues(roots);
+  const typedSet = new Set(typedAnywhere);
+  const scrubTyped = scrubber(typedAnywhere);
   let sawRef = false;
   let sawControl = false;
 
@@ -376,8 +379,11 @@ export function describePage(input: {
       // into a text box — a button can be named after one ("Send to …"), a
       // radio after the field its label holds — though not into a search, whose
       // words are what the results are about. Headings are the page's own.
-      const values = [...(hidden.get(e.node) ?? []), ...(e.heading ? [] : typedAnywhere)];
-      const shown = { ...e, ...describe(e.node, e.ref, scrubber(values)) };
+      const local = hidden.get(e.node) ?? [];
+      const scrub = !e.heading && local.every((value) => typedSet.has(value))
+        ? scrubTyped
+        : scrubber([...local, ...(e.heading ? [] : typedAnywhere)]);
+      const shown = { ...e, ...describe(e.node, e.ref, scrub) };
       if (shown.line.length + 1 > room) break;
       room -= shown.line.length + 1;
       out.push(shown);
@@ -460,9 +466,11 @@ function describe(
       // And what else it offers, by the text select_option takes: a closed
       // select's options take no space, so they are not listed on their own.
       const options = optionsOf(node);
-      listedOptions = options.slice(0, OPTIONS_SHOWN)
+      // Keep complete private metadata for ambiguity checks, including options
+      // after the displayed subset. Only the first ten enter the model's view.
+      listedOptions = options
         .map((o) => ({ shown: clean(scrub(o.name ?? ''), OPTION_NAME_LIMIT), label: o.name ?? '' }));
-      const listed = listedOptions.map((o) => `"${o.shown}"`);
+      const listed = listedOptions.slice(0, OPTIONS_SHOWN).map((o) => `"${o.shown}"`);
       if (options.length > OPTIONS_SHOWN) listed.push(`and ${options.length - OPTIONS_SHOWN} more`);
       notes.push(`options ${listed.join(', ')}`);
     } else {
@@ -635,6 +643,10 @@ function scrubber(values: string[] | undefined): (text: string) => string {
   const unique = [...new Set(values ?? [])].filter((v) => v.length > 0);
   if (!unique.length) return (text) => text.slice(0, SCRUB_TEXT_MAX);
   if (unique.length > SCRUB_VALUES_MAX) return () => '•••';
+  // A bounded snapshot can still hold one enormous field value. Never compile
+  // that into a pattern; conservatively hide the names instead of dropping a
+  // secret from the redaction set. Escaping at most doubles this character cap.
+  if (unique.reduce((total, value) => total + value.length, 0) > 16_384) return () => '•••';
   // One pass for all of them, the longest first where two start together.
   const escape = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const long = unique.filter((v) => v.length >= SHORT_VALUE).sort((a, b) => b.length - a.length).map(escape);

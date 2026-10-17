@@ -16,6 +16,7 @@ import type {
   TaskType,
   ToolCall,
   ToolDefinition,
+  ToolExecuteOptions,
 } from '../../types.js';
 import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
@@ -1172,16 +1173,16 @@ export class T3Worker extends BaseTier {
       // any of them ran. Browser actions refresh that view and may navigate,
       // so a ref in a later call cannot safely be reinterpreted using the new
       // page's labels or approval. Ask the model to inspect the page again.
-      let browserAlreadyActed = false;
+      const browserBatch = { acted: false };
       for (const tc of effectiveResult.toolCalls) {
         allToolCalls.push(tc);
         const staleRef = tc.name === 'browser_control'
           && typeof tc.input['ref'] === 'string'
-          && browserAlreadyActed;
+          && browserBatch.acted;
         const toolResult = staleRef
           ? 'Tool error: A previous browser_control call in this response may have changed the page. This ref was not executed. Observe the current page and issue a new call using its refs.'
-          : await this.executeTool(tc);
-        if (tc.name === 'browser_control') browserAlreadyActed = true;
+          : await this.executeTool(tc, browserBatch);
+        if (tc.name === 'browser_control') browserBatch.acted = true;
         appendToolRecord(this.toolRecord, recordToolCall(tc.name, toolResult, tc.input, this.ranAs.get(tc)));
         // Bound what enters the context: the WHOLE history is re-sent on every
         // remaining iteration, so an unbounded tool result (big file read,
@@ -1308,7 +1309,7 @@ export class T3Worker extends BaseTier {
     return legacyDecision.approved ? null : `Tool ${tc.name} was denied by user.`;
   }
 
-  private async executeTool(tc: ToolCall): Promise<string> {
+  private async executeTool(tc: ToolCall, browserBatch?: ToolExecuteOptions['browserBatch']): Promise<string> {
     // T3→T2 reinforcement: handle locally (record the request for the manager) —
     // it is a signal, not a real side-effecting tool, so it skips registry
     // validation and approval.
@@ -1366,6 +1367,7 @@ export class T3Worker extends BaseTier {
         tierId: this.id,
         sessionId: this.taskId,
         requireApproval: false,
+        ...(browserBatch ? { browserBatch } : {}),
         // Media generation can run for a minute; without this a cancelled run
         // still pays for an image nobody will see.
         ...(this.signal ? { signal: this.signal } : {}),
@@ -1390,6 +1392,7 @@ export class T3Worker extends BaseTier {
         // The newest wins: one picture per step, of the page as it is now.
         ...(this.seesScreenshots ? {
           attachImage: (image: ImageAttachment) => { this.pendingScreenshot = image; this.undeliveredScreenshot = image; },
+          clearImage: () => { this.pendingScreenshot = undefined; },
           keepImage: () => { this.pendingScreenshot ??= this.undeliveredScreenshot; },
         } : {}),
       });
@@ -1454,7 +1457,7 @@ export class T3Worker extends BaseTier {
       }
       // Try to recover via a sibling tool or a synthesized one before giving up;
       // returns the original error string if no fallback succeeds.
-      return await this.adaptiveFallback(tc, `Tool error: ${errMsg}`);
+      return await this.adaptiveFallback(tc, `Tool error: ${errMsg}`, browserBatch);
     }
   }
 
@@ -1473,7 +1476,7 @@ export class T3Worker extends BaseTier {
    * theirs, or a synthesized replacement's — is separately billed. See the
    * fast-fail branch in executeTool().
    */
-  private async adaptiveFallback(tc: ToolCall, originalError: string): Promise<string> {
+  private async adaptiveFallback(tc: ToolCall, originalError: string, browserBatch?: ToolExecuteOptions['browserBatch']): Promise<string> {
     // Strategy 1: alternative tool with overlapping purpose
     const altTool = this.findAlternativeTool(tc.name);
     // The tool run in its place is checked as the one called would be: its
@@ -1492,6 +1495,8 @@ export class T3Worker extends BaseTier {
           tierId: this.id,
           sessionId: this.taskId,
           requireApproval: false,
+          ...(browserBatch ? { browserBatch } : {}),
+          clearImage: () => { this.pendingScreenshot = undefined; },
           ...(this.signal ? { signal: this.signal } : {}),
           mayRead: this.mayRead,
           noteRead: this.noteRead,
@@ -1523,6 +1528,8 @@ export class T3Worker extends BaseTier {
             tierId: this.id,
             sessionId: this.taskId,
             requireApproval: false,
+            ...(browserBatch ? { browserBatch } : {}),
+            clearImage: () => { this.pendingScreenshot = undefined; },
             ...(this.signal ? { signal: this.signal } : {}),
             mayRead: this.mayRead,
             noteRead: this.noteRead,

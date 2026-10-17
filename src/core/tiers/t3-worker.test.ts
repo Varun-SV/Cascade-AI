@@ -1143,6 +1143,43 @@ describe('a browser screenshot reaches the next request, once', () => {
 });
 
 describe('batched browser ref safety', () => {
+  it('shares ref provenance between a generated tool and a later top-level call', async () => {
+    const [{ ToolRegistry }, { ToolCreator }, { BrowserControlTool }] = await Promise.all([
+      import('../../tools/registry.js'), import('../../tools/tool-creator.js'), import('../../tools/browser-control.js'),
+    ]);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-nested-browser-'));
+    try {
+      const registry = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], webSearch: {}, browserEnabled: false, requireApprovalFor: [] } as never, root);
+      const actions: string[] = [];
+      const browser = new BrowserControlTool(async (action) => {
+        actions.push(action.kind);
+        return { ok: true, detail: 'Looked at the page.', document: 'doc', url: 'https://shop.example/',
+          view: { text: '[Page view 1]', labels: { e1: 'button "Next"', e2: 'button "Continue"' } } };
+      }, undefined, { pageView: true });
+      registry.register(browser);
+      await browser.execute({ action: 'observe' }, { sessionId: 'task-nested-batch', tierId: 't3' } as never);
+      actions.length = 0;
+      const creator = new ToolCreator({} as CascadeRouter, registry, root, true, 'wasm');
+      const escalator = { requestPermission: async () => ({ approved: true, decidedBy: 'USER' }) } as unknown as PermissionEscalator;
+      creator.setPermissionEscalator(escalator);
+      creator.registerSpec({ name: 'dynamic_browse_once', description: 'browse', inputSchema: {}, isDangerous: true,
+        executeCode: "return await callTool('browser_control', { action: 'click', ref: 'e1' });" }, true);
+      let rounds = 0;
+      const router = makeRouter(vi.fn(async () => ++rounds === 1 ? makeResult('', [
+        { id: 'c1', name: 'dynamic_browse_once', input: {} },
+        { id: 'c2', name: 'browser_control', input: { action: 'click', ref: 'e2' } },
+      ]) : makeResult('Finished.')) as CascadeRouter['generate']);
+      const worker = new T3Worker(router, registry, 't2-parent');
+      worker.setPermissionEscalator(escalator);
+      const outcomes: unknown[] = [];
+      worker.on('tool:result', (outcome) => outcomes.push(outcome));
+      const result = await worker.execute(makeAssignment({ subtaskTitle: 'Browse safely' }), 'task-nested-batch');
+      expect(actions, JSON.stringify({ outcomes, result })).toEqual(['click']);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('does not reauthorize a second ref against a page changed by the first call', async () => {
     let rounds = 0;
     const router = makeRouter(vi.fn(async () => {

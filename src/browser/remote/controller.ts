@@ -62,6 +62,7 @@ type Page = {
   /** A picture of what is on screen. See `screenshot`. */
   screenshot?(opts: {
     type: 'jpeg'; quality: number; scale: 'css'; caret: 'initial'; timeout?: number;
+    clip?: { x: number; y: number; width: number; height: number };
   }): Promise<Uint8Array>;
   /** Every frame, the page's own first. Where the privacy check looks. */
   frames?(): Frame[];
@@ -305,6 +306,9 @@ const SCREENSHOT_TIMEOUT_MS = 5_000;
 const PAGE_CHECK_TIMEOUT_MS = 2_000;
 /** A screenshot this large (base64) is not sent: something is wrong with it. */
 const SCREENSHOT_MAX_CHARS = 2_000_000;
+/** Bound rendering work before Chrome allocates a capture surface. */
+const SCREENSHOT_MAX_EDGE = 4096;
+const SCREENSHOT_MAX_PIXELS = 4_194_304;
 /** The longest error reason passed on: Playwright repeats the selector in it. */
 const ERROR_MAX_CHARS = 500;
 /** How long drawing the refs on a copy may take before the clean picture goes. */
@@ -3124,6 +3128,10 @@ export class RemoteBrowserController {
     if (typeof page.screenshot !== 'function' || !seen.viewport) {
       return { withheld: 'No screenshot: this browser cannot take one.' };
     }
+    const { width, height } = seen.viewport;
+    if (width <= 0 || height <= 0 || width > SCREENSHOT_MAX_EDGE || height > SCREENSHOT_MAX_EDGE || width * height > SCREENSHOT_MAX_PIXELS) {
+      return { withheld: 'No screenshot: the viewport is too large to capture safely.' };
+    }
     if (held.hiddenByHolder === true) return { withheld: HIDDEN_SHOT };
     if (held.skipShot) {
       const why = held.skipShot;
@@ -3135,6 +3143,8 @@ export class RemoteBrowserController {
     try {
       const bytes = await stoppable(page.screenshot({
         type: 'jpeg', quality: SCREENSHOT_QUALITY, scale: 'css', caret: 'initial', timeout: SCREENSHOT_TIMEOUT_MS,
+        // A resize after the check above must not grow the capture surface.
+        clip: { x: 0, y: 0, width, height },
       }));
       // The check above was of the page before the picture; the picture is of
       // it a moment later. A page that loaded another document, or put a
@@ -3157,6 +3167,13 @@ export class RemoteBrowserController {
       }
       const after = await this.privateOnScreen(page, stoppable);
       if (after) return { withheld: after };
+      if (marked) {
+        const current = await this.pageView(held, stoppable, false);
+        if (!current || !sameDocument(seen.document, held) || !sameRoute(seen.document, page.url())
+          || JSON.stringify(current.view.marks) !== JSON.stringify(seen.view.marks)) {
+          return { withheld: 'No screenshot: the controls moved while it was being looked at.' };
+        }
+      }
       const picture = Buffer.from(bytes);
       // The size is read from the picture, not from the page: the router
       // prices the image by it, and a page can say anything about its own
@@ -3463,7 +3480,11 @@ export class RemoteBrowserController {
           };
         }
         const current = now?.view.labels.get(action.ref);
-        if (current !== shown || now?.view.identities.get(action.ref) !== held.view!.identities.get(action.ref)) {
+        // A select can acquire duplicate labels while keeping its own name.
+        // Its complete option metadata must still be the one approved.
+        const optionsChanged = action.kind === 'select_option'
+          && JSON.stringify(now?.view.options.get(action.ref)) !== JSON.stringify(held.view!.options.get(action.ref));
+        if (current !== shown || now?.view.identities.get(action.ref) !== held.view!.identities.get(action.ref) || optionsChanged) {
           now?.keep();
           return {
             ok: false,
@@ -3599,7 +3620,7 @@ export class RemoteBrowserController {
         // "Delete account", and the approval would be asked about `1`. The
         // text the view showed is turned back into the label it came from;
         // one it did not show is taken as a label as it is.
-        const shown = (held.view!.options.get(action.ref) ?? []).filter((o) => o.shown === action.value);
+        const shown = (held.view!.options.get(action.ref) ?? []).filter((o) => o.shown === action.value || o.label === action.value);
         // Every matching option is a separate possible action, even when
         // their full labels are also identical. Deduplicating labels here
         // would silently select the first option by DOM order.

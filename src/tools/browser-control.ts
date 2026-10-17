@@ -470,6 +470,7 @@ export class BrowserControlTool extends BaseTool {
     };
 
     let outcome: BrowserActionOutcome;
+    if (kind !== 'extract_text') options?.clearImage?.();
     try {
       outcome = await this.controller(action, {
         // `sessionId` is the run. The host scopes both revocation and its
