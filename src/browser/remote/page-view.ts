@@ -51,6 +51,7 @@ export interface SnapshotNode {
 export interface Viewport {
   width: number;
   height: number;
+  scrollX: number;
   scrollY: number;
   scrollHeight: number;
 }
