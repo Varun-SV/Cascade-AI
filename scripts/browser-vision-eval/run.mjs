@@ -205,50 +205,50 @@ async function evaluate() {
           // wrote, but it is still a model reading web pages, and your own
           // config would otherwise hand it your shell, files and MCP servers.
           const cascade = new sdk.Cascade(isolated(model, arm, disabled), workspace);
-          try {
-          const prompt = `Use the browser. Open ${site.url}/${task.page}?run=${run} and do this: ${task.prompt}`;
-          const started = Date.now();
-          let output = '';
-          let error = '';
-          let usage = {};
-          // The runs this one opened in the browser, whether or not it returns:
-          // a run that throws must still give its session back, or every run
-          // after it finds the one CDP session taken.
+          // Track session ownership across every exit path, including errors.
           const known = new Set(steps.keys());
           try {
-            await cascade.init();
-            cascade.setRemoteBrowserController(counted, (a) => controller.actorEnded(a), controller.features);
-            const offered = cascade.getToolRegistry().getToolDefinitions().map((d) => d.name);
-            if (offered.length !== 1 || offered[0] !== 'browser_control') {
-              throw new IsolationError(`Expected only browser_control, but this run would offer: ${offered.join(', ') || '(none)'}.`);
+            const prompt = `Use the browser. Open ${site.url}/${task.page}?run=${run} and do this: ${task.prompt}`;
+            const started = Date.now();
+            let output = '';
+            let error = '';
+            let usage = {};
+            // The runs this one opened in the browser, whether or not it returns:
+            // a run that throws must still give its session back, or every run
+            // after it finds the one CDP session taken.
+            try {
+              await cascade.init();
+              cascade.setRemoteBrowserController(counted, (a) => controller.actorEnded(a), controller.features);
+              const offered = cascade.getToolRegistry().getToolDefinitions().map((d) => d.name);
+              if (offered.length !== 1 || offered[0] !== 'browser_control') {
+                throw new IsolationError(`Expected only browser_control, but this run would offer: ${offered.join(', ') || '(none)'}.`);
+              }
+              const result = await cascade.run({
+                prompt,
+                approvalCallback: async (request) => ({ approved: request.toolName === 'browser_control', always: false }),
+              });
+              output = result.output;
+              usage = result.usage ?? {};
+            } catch (err) {
+              // Not a result: the comparison would not be of the browser alone.
+              if (err instanceof IsolationError) throw err;
+              error = err instanceof Error ? err.message : String(err);
             }
-            const result = await cascade.run({
-              prompt,
-              approvalCallback: async (request) => ({ approved: request.toolName === 'browser_control', always: false }),
+            const opened = [...steps.keys()].filter((k) => !known.has(k));
+            const shots = cascade.getDecisionLog().find((d) => d.kind === 'browser')?.detail ?? '';
+            // The page reports a finished task with a request of its own, which
+            // can land after the model's last word: wait for it a moment.
+            if (task.check.done) await reported(`${run}:${task.check.done}`);
+            const ok = task.check.done ? site.done.has(`${run}:${task.check.done}`) : task.check.answer.test(output);
+            rows.push({
+              model, arm, task: task.id, ok,
+              steps: opened.reduce((n, k) => n + (steps.get(k) ?? 0), 0),
+              costUsd: usage.estimatedCostUsd ?? 0,
+              tokens: usage.totalTokens ?? 0,
+              seconds: Math.round((Date.now() - started) / 1000),
+              shots, error,
             });
-            output = result.output;
-            usage = result.usage ?? {};
-          } catch (err) {
-            // Not a result: the comparison would not be of the browser alone.
-            if (err instanceof IsolationError) throw err;
-            error = err instanceof Error ? err.message : String(err);
-          }
-          const opened = [...steps.keys()].filter((k) => !known.has(k));
-          const shots = cascade.getDecisionLog().find((d) => d.kind === 'browser')?.detail ?? '';
-          // The page reports a finished task with a request of its own, which
-          // can land after the model's last word: wait for it a moment.
-          if (task.check.done) await reported(`${run}:${task.check.done}`);
-          const ok = task.check.done ? site.done.has(`${run}:${task.check.done}`) : task.check.answer.test(output);
-          rows.push({
-            model, arm, task: task.id, ok,
-            steps: opened.reduce((n, k) => n + (steps.get(k) ?? 0), 0),
-            costUsd: usage.estimatedCostUsd ?? 0,
-            tokens: usage.totalTokens ?? 0,
-            seconds: Math.round((Date.now() - started) / 1000),
-            shots, error,
-          });
-          console.log(`${ok ? 'PASS' : 'FAIL'}  ${model}  ${arm.padEnd(6)}  ${task.id.padEnd(11)}  $${(usage.estimatedCostUsd ?? 0).toFixed(4)}${error ? `  ${error}` : ''}`);
-          for (const id of opened) await controller.endRun(id).catch(() => {});
+            console.log(`${ok ? 'PASS' : 'FAIL'}  ${model}  ${arm.padEnd(6)}  ${task.id.padEnd(11)}  $${(usage.estimatedCostUsd ?? 0).toFixed(4)}${error ? `  ${error}` : ''}`);
           } finally {
             // Each run owns its telemetry and connections. Clean up even when
             // isolation fails, before deleting the workspace.
@@ -374,6 +374,7 @@ async function launchChromium(executable) {
       const m = /DevTools listening on (ws:\/\/\S+)/.exec(err);
       if (m) {
         child.stderr.off('data', onStartupStderr);
+        child.stderr.resume(); // keep draining the pipe, but discard later logs
         clearTimeout(timer);
         started = true;
         resolve(m[1]);
