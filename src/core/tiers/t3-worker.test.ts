@@ -961,8 +961,9 @@ describe('a browser screenshot reaches the next request, once', () => {
   });
 
   it('does not let an older picture stand for a page a later step changed', async () => {
-    // One turn, two steps: a look that takes a picture, then a fill that
-    // takes none. The picture shows the page before the fill.
+    // One turn, two steps: a look that takes a picture, then a selector-based
+    // fill that takes none. Ref actions would be refused after a prior browser
+    // call in the same turn, so this keeps testing screenshot invalidation.
     const sent: ConversationMessage[][] = [];
     let call = 0;
     const generate = vi.fn(async (_tier: string, options: { messages: ConversationMessage[] }) => {
@@ -971,7 +972,7 @@ describe('a browser screenshot reaches the next request, once', () => {
       if (call === 1) {
         return makeResult('', [
           { id: 'c1', name: 'browser_control', input: { action: 'observe' } },
-          { id: 'c2', name: 'browser_control', input: { action: 'fill', ref: 'e9', value: 'Ada' } },
+          { id: 'c2', name: 'browser_control', input: { action: 'fill', selector: '#name', value: 'Ada' } },
         ]);
       }
       if (call === 2) {
@@ -998,7 +999,7 @@ describe('a browser screenshot reaches the next request, once', () => {
   });
 
   it('keeps an earlier picture when a later step in the turn leaves the page looking the same', async () => {
-    // observe, then hover: the hover sends no picture because the page looks
+    // observe, then selector-based hover: it sends no picture because the page looks
     // as in the one the observe took — which must still reach the model.
     const sent: ConversationMessage[][] = [];
     let call = 0;
@@ -1008,7 +1009,7 @@ describe('a browser screenshot reaches the next request, once', () => {
       if (call === 1) {
         return makeResult('', [
           { id: 'c1', name: 'browser_control', input: { action: 'observe' } },
-          { id: 'c2', name: 'browser_control', input: { action: 'hover', ref: 'e5' } },
+          { id: 'c2', name: 'browser_control', input: { action: 'hover', selector: '#menu' } },
         ]);
       }
       return makeResult('The menu shows three items.');
@@ -1028,7 +1029,7 @@ describe('a browser screenshot reaches the next request, once', () => {
   });
 
   it('puts back a picture a refused step cleared when a later step finds the page unchanged', async () => {
-    // observe takes P1; a click refused before it acted clears it, so the
+    // observe takes P1; a selector click refused before it acted clears it, so the
     // next request goes without. A hover then finds the page exactly as in
     // P1, which the model has not been shown: P1 goes with the request after.
     const sent: ConversationMessage[][] = [];
@@ -1039,7 +1040,7 @@ describe('a browser screenshot reaches the next request, once', () => {
       if (call === 1) {
         return makeResult('', [
           { id: 'c1', name: 'browser_control', input: { action: 'observe' } },
-          { id: 'c2', name: 'browser_control', input: { action: 'click', ref: 'e99' } },
+          { id: 'c2', name: 'browser_control', input: { action: 'click', selector: '#missing' } },
         ]);
       }
       if (call === 2) return makeResult('', [{ id: 'c3', name: 'browser_control', input: { action: 'hover', ref: 'e14' } }]);
@@ -1052,7 +1053,7 @@ describe('a browser screenshot reaches the next request, once', () => {
       execute: vi.fn(async (_name: string, input: { action: string }, options: { attachImage?: (i: ImageAttachment) => void; keepImage?: () => void }) => {
         if (input.action === 'observe') options.attachImage?.(IMAGE);
         else if (input.action === 'hover') options.keepImage?.();
-        return input.action === 'click' ? 'Failed: e99 is not in the latest page view.' : 'ok';
+        return input.action === 'click' ? 'Failed: selector is not on the page.' : 'ok';
       }),
     } as unknown as Partial<ToolRegistry>);
     const worker = new T3Worker(router, registry, 't2-parent');
