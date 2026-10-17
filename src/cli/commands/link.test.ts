@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { linkCommand } from './link.js';
 import { ConfigManager } from '../../config/index.js';
-import { CASCADE_CONFIG_FILE } from '../../constants.js';
+import { statePath, STATE } from '../../config/project-state.js';
 
 const ENV_KEYS = [
   'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY',
@@ -55,9 +55,9 @@ describe('cascade link — adoption', () => {
   }
 
   async function seedConfig(providers: unknown[]): Promise<void> {
-    await fs.mkdir(path.join(dir, '.cascade'), { recursive: true });
+    await fs.mkdir(path.dirname(statePath(dir, STATE.config)), { recursive: true });
     await fs.writeFile(
-      path.join(dir, CASCADE_CONFIG_FILE),
+      statePath(dir, STATE.config),
       JSON.stringify({ providers, models: {}, tools: {} }),
       'utf-8',
     );

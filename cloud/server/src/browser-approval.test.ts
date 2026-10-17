@@ -102,6 +102,25 @@ describe('a run with someone watching', () => {
     expect((await decision).always).toBe(true);
   });
 
+  // The request went to the browser as it was, input and all: a local-only
+  // subtask's input may carry what it read, and the browser is off the machine.
+  it('names a local-only subtask\'s tool but withholds its input', async () => {
+    const emit = vi.fn();
+    const { callback, onDecision } = makeApprovalCallback({ interactive: true, conversationId: 'c1', emit });
+    const cb = callback as unknown as (r: Record<string, unknown>) => Promise<{ approved: boolean }>;
+    const plain = cb({ id: 'req-1', toolName: 'shell', input: { command: 'ls' } });
+    const local = cb({ id: 'req-2', toolName: 'shell', input: { command: 'echo TOP-SECRET-PLAN' }, localOnly: true });
+    await new Promise((r) => setTimeout(r, 10));
+    const sent = emit.mock.calls.filter((c) => c[0] === 'permission:user-required').map((c) => c[1] as Record<string, unknown>);
+    expect(sent.find((p) => p['id'] === 'req-1')?.['input']).toEqual({ command: 'ls' });
+    const withheld = sent.find((p) => p['id'] === 'req-2')!;
+    expect(withheld['toolName']).toBe('shell');
+    expect(JSON.stringify(withheld)).not.toContain('TOP-SECRET-PLAN');
+    onDecision({ conversationId: 'c1', requestId: 'req-1', approved: false });
+    onDecision({ conversationId: 'c1', requestId: 'req-2', approved: false });
+    await Promise.all([plain, local]);
+  });
+
   it('treats a denial as a denial', async () => {
     const { callback, onDecision } = makeApprovalCallback({ interactive: true, conversationId: 'c1', emit: vi.fn() });
     const decision = callback({ id: 'req-1' });

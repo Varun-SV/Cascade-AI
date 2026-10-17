@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import os from 'node:os';
+import path from 'node:path';
 import { GraphSearchTool } from './graph-search.js';
 import type { GraphFactSource } from '../retrieval/graph.js';
 import type { WorldFact } from '../core/knowledge/world-state.js';
@@ -32,5 +34,35 @@ describe('GraphSearchTool', () => {
     const tool = new GraphSearchTool(source([fact('Payments', 'uses', 'Stripe')]));
     const out = await tool.execute({ query: 'how does Payments work' }, opts);
     expect(out).toContain('- Payments uses Stripe');
+  });
+});
+
+describe('GraphSearchTool — facts that may not leave', () => {
+  const rules = { hasPolicies: () => true, isLocalOnly: (p: string) => p.startsWith('secret/'), coversFile: () => false };
+  const facts = [
+    { ...fact('Payments', 'uses', 'Stripe'), sources: ['src/pay.ts'] },
+    { ...fact('Payments', 'settles', 'weekly'), sources: null },
+    { ...fact('Payments', 'owner', 'ops team'), sources: ['secret/org.md'] },
+  ];
+
+  it('shows a caller on any model only facts that may leave', async () => {
+    const out = await new GraphSearchTool(source(facts), () => rules).execute({ query: 'Payments' }, opts);
+    expect(out).toContain('Payments uses Stripe');
+    expect(out).not.toContain('weekly');
+    expect(out).not.toContain('ops team');
+  });
+
+  it('shows a local-only caller everything: it stays on this machine', async () => {
+    const out = await new GraphSearchTool(source(facts), () => rules).execute({ query: 'Payments' }, { isOffline: () => true } as never);
+    expect(out).toContain('weekly');
+    expect(out).toContain('ops team');
+  });
+
+  it('judges a source by every name it has in the workspace', async () => {
+    const linked = { ...rules, coversFile: (abs: string, root: string) => abs === path.join(root, 'src', 'pay.ts') };
+    const tool = new GraphSearchTool(source(facts), () => linked);
+    tool.setWorkspaceRoot(path.join(os.tmpdir(), 'ws'));
+    const out = await tool.execute({ query: 'Payments' }, opts);
+    expect(out).not.toContain('Stripe');
   });
 });

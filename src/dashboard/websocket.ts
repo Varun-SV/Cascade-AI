@@ -114,8 +114,9 @@ export class DashboardSocket {
     this.io.to(`session:${event.sessionId}`).emit('peer:message', event);
   }
 
-  emitApprovalRequest(request: PermissionRequest): void {
-    this.io.emit('permission:user-required', request);
+  /** To the session's own viewers: its input is the run's, and may be a local-only subtask's. */
+  emitApprovalRequest(request: PermissionRequest, sessionId: string): void {
+    this.io.to(`session:${sessionId}`).emit('permission:user-required', { sessionId, ...request });
   }
 
   onApprovalResponse(callback: (data: PermissionDecisionPayload) => void): void {

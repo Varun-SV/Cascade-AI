@@ -93,4 +93,25 @@ export default defineConfig([
       js: '// Cascade AI — embedded desktop backend (self-contained bundle)',
     },
   },
+
+  // ── The WebAssembly sandbox's worker ─────────────────────────────────────────
+  // Agent-written tools run in QuickJS inside a worker thread, which loads this
+  // file by path (src/tools/sandbox/wasm-sandbox.ts) — so it is a bundle of its own,
+  // QuickJS and its inlined WebAssembly included, that runs with no
+  // node_modules. It lands beside index/desktop-core, and the desktop app ships
+  // every .cjs in dist beside its core, so every install has it.
+  {
+    entry: { 'wasm-sandbox-worker': 'src/tools/sandbox/wasm-sandbox-worker.ts' },
+    format: ['cjs'],
+    dts: false,
+    clean: false,
+    sourcemap: false,
+    splitting: false,
+    treeshake: true,
+    target: 'node20',
+    noExternal: [/.*/],
+    banner: {
+      js: '// Cascade AI — the WebAssembly sandbox for agent-written tools (worker)',
+    },
+  },
 ]);

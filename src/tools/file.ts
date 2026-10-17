@@ -7,6 +7,15 @@ import path from 'node:path';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
 import { resolveInWorkspace } from './utils/workspace-path.js';
+import { statePathFor } from '../config/project-state.js';
+
+/** A read refused under privacy.paths: the file is local-only, and nothing private can take it. */
+export class WithheldError extends Error {
+  constructor(filePath: string) {
+    super(`Access denied: ${filePath} is local-only (privacy.paths), and nothing private is available to read it with.`);
+    this.name = 'WithheldError';
+  }
+}
 
 // ── File Read ─────────────────────────────────
 
@@ -23,9 +32,10 @@ export class FileReadTool extends BaseTool {
     required: ['path'],
   };
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const filePath = input['path'] as string;
     const absPath = resolveInWorkspace(this.workspaceRoot, filePath);
+    if (!this.readGate(options)(absPath)) throw new WithheldError(filePath);
     const offset = (input['offset'] as number | undefined) ?? 1;
     const limit = input['limit'] as number | undefined;
 
@@ -100,6 +110,9 @@ export class FileEditTool extends BaseTool {
     const oldString = input['old_string'] as string;
     const newString = input['new_string'] as string;
     const replaceAll = (input['replace_all'] as boolean | undefined) ?? false;
+    // An edit reads before it writes, and its answer says whether old_string
+    // was there and how often — enough to probe a file a read may not see.
+    if (!this.readGate(options)(absPath)) throw new WithheldError(filePath);
 
     const rawContent = await fs.readFile(absPath, 'utf-8');
 
@@ -173,11 +186,17 @@ export class FileListTool extends BaseTool {
     required: ['path'],
   };
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const inputPath = (input['path'] as string) || '.';
     const absPath = resolveInWorkspace(this.workspaceRoot, inputPath);
+    const shown = this.listGate(options);
 
-    const entries = await fs.readdir(absPath, { withFileTypes: true });
+    // A folder in the project's state folder (`@private/…`): the registry has
+    // already decided this caller may list it, and all of it lies outside the
+    // workspace, which the path guard would otherwise refuse entry by entry.
+    const inState = statePathFor(this.workspaceRoot, inputPath) !== null;
+    const entries = (await fs.readdir(absPath, { withFileTypes: true }))
+      .filter((e) => inState || (!this.isProtectedPath(path.join(absPath, e.name)) && shown(path.join(absPath, e.name), e.isDirectory())));
     return entries.map(e => `${e.isDirectory() ? '[DIR] ' : '      '}${e.name}`).join('\n') || '(empty directory)';
   }
 }

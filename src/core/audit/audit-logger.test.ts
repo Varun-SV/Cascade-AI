@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { AuditLogger } from './audit-logger.js';
+import { projectStateDir } from '../../config/project-state.js';
 
 let dir: string;
 
@@ -40,7 +41,7 @@ describe('AuditLogger hash chain', () => {
     logger.close();
 
     // Tamper directly: swap the second row's event_type without re-hashing.
-    const db = new Database(path.join(dir, '.cascade', 'audit_log.db'));
+    const db = new Database(path.join(projectStateDir(dir), 'audit_log.db'));
     db.prepare("UPDATE audit_logs SET event_type = 'tool_call' WHERE rowid = 2").run();
     db.close();
 
@@ -58,7 +59,7 @@ describe('AuditLogger hash chain', () => {
     logger.logEvent('c', 't', { n: 3 });
     logger.close();
 
-    const db = new Database(path.join(dir, '.cascade', 'audit_log.db'));
+    const db = new Database(path.join(projectStateDir(dir), 'audit_log.db'));
     db.prepare('DELETE FROM audit_logs WHERE rowid = 2').run();
     db.close();
 

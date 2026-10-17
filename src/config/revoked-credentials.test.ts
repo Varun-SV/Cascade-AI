@@ -11,7 +11,7 @@ import {
   clearAnthropicPins, hasUsableAnthropic, isSubscriptionToken,
 } from './revoked-credentials.js';
 import { ConfigManager, hasUsableProvider } from './index.js';
-import { CASCADE_CONFIG_FILE } from '../constants.js';
+import { statePath, STATE } from './project-state.js';
 
 describe('isRevokedSubscriptionCredential', () => {
   it('recognises a token by its Anthropic subscription prefix', () => {
@@ -106,9 +106,9 @@ describe('ConfigManager — removing a dead subscription token on load', () => {
   afterEach(async () => { await fs.rm(dir, { recursive: true, force: true }); });
 
   async function seed(providers: unknown[]): Promise<void> {
-    await fs.mkdir(path.join(dir, '.cascade'), { recursive: true });
+    await fs.mkdir(path.dirname(statePath(dir, STATE.config)), { recursive: true });
     await fs.writeFile(
-      path.join(dir, CASCADE_CONFIG_FILE),
+      statePath(dir, STATE.config),
       JSON.stringify({ providers, models: {}, tools: {} }),
       'utf-8',
     );
@@ -181,9 +181,9 @@ describe('a subscription token exported as ANTHROPIC_AUTH_TOKEN', () => {
     // load, and then the same dead token — exported as a variable — was put
     // back into the config it had just been removed from, on every load.
     // Anthropic refuses it whatever header carries it.
-    await fs.mkdir(path.join(dir, '.cascade'), { recursive: true });
+    await fs.mkdir(path.dirname(statePath(dir, STATE.config)), { recursive: true });
     await fs.writeFile(
-      path.join(dir, CASCADE_CONFIG_FILE),
+      statePath(dir, STATE.config),
       JSON.stringify({ providers: [], models: {}, tools: {} }),
       'utf-8',
     );
@@ -221,9 +221,9 @@ describe('an environment key can replace what the migration removed', () => {
     // non-empty list — so the "may an env key seed an entry" gate said no, the
     // merged config had no Anthropic at all, and the pin was cleared. All while
     // a working key sat in the environment.
-    await fs.mkdir(path.join(dir, '.cascade'), { recursive: true });
+    await fs.mkdir(path.dirname(statePath(dir, STATE.config)), { recursive: true });
     await fs.writeFile(
-      path.join(dir, CASCADE_CONFIG_FILE),
+      statePath(dir, STATE.config),
       JSON.stringify({
         providers: [
           { type: 'openai', apiKey: 'sk-openai' },
@@ -340,9 +340,9 @@ describe('ConfigManager — a pin survives if any source still supplies Anthropi
   afterEach(async () => { await fs.rm(dir, { recursive: true, force: true }); });
 
   async function seedWorkspace(providers: unknown[], models: unknown): Promise<void> {
-    await fs.mkdir(path.join(dir, '.cascade'), { recursive: true });
+    await fs.mkdir(path.dirname(statePath(dir, STATE.config)), { recursive: true });
     await fs.writeFile(
-      path.join(dir, CASCADE_CONFIG_FILE),
+      statePath(dir, STATE.config),
       JSON.stringify({ providers, models, tools: {} }),
       'utf-8',
     );
@@ -379,7 +379,7 @@ describe('ConfigManager — a pin survives if any source still supplies Anthropi
     expect(cm.getConfig().models.t1).toBeUndefined();
 
     // Persisted, so the next launch does not repeat the migration or re-warn.
-    const onDisk = JSON.parse(await fs.readFile(path.join(dir, CASCADE_CONFIG_FILE), 'utf-8')) as
+    const onDisk = JSON.parse(await fs.readFile(statePath(dir, STATE.config), 'utf-8')) as
       { models?: Record<string, unknown> };
     expect(onDisk.models?.['t1']).toBeUndefined();
   });
@@ -410,9 +410,9 @@ describe('the notice survives alongside a retirement notice', () => {
   });
 
   it('names the pin it cleared, so the tier change is not a surprise', async () => {
-    await fs.mkdir(path.join(dir, '.cascade'), { recursive: true });
+    await fs.mkdir(path.dirname(statePath(dir, STATE.config)), { recursive: true });
     await fs.writeFile(
-      path.join(dir, CASCADE_CONFIG_FILE),
+      statePath(dir, STATE.config),
       JSON.stringify({
         providers: [{ type: 'anthropic', authToken: 'sk-ant-oat01-x' }],
         models: { t1: 'anthropic:claude-opus-4' },

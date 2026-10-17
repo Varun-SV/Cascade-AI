@@ -6,3 +6,10 @@ import type { CloudEnv } from './env.js';
 export function tenantScratchDir(env: CloudEnv, userId: string): string {
   return path.join(path.resolve(env.DATA_DIR), 'tenants', userId);
 }
+
+// What Cascade keeps about a tenant's runs — settings, the audit trail, what
+// local-only subtasks made — beside the scratch folder, not in it: the
+// scratch folder is the runs' workspace, which their tools can read.
+export function tenantStateDir(env: CloudEnv, userId: string): string {
+  return path.join(path.resolve(env.DATA_DIR), 'tenant-state', userId);
+}

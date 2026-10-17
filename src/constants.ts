@@ -10,14 +10,11 @@ import { resolvePricing } from './core/router/pricing.js';
 // The fallback applies only when running the un-bundled source directly (tests, tsx),
 // and is kept in step with package.json.
 export const CASCADE_VERSION = process.env.CASCADE_BUILD_VERSION ?? '0.12.18';
-export const CASCADE_CONFIG_DIR = '.cascade';
+// What Cascade keeps about a project lives outside it, in the project's
+// state folder (config/project-state.ts: `STATE` names the files there). The
+// project itself holds only these two, which are meant to be shared.
 export const CASCADE_MD_FILE = 'CASCADE.md';
 export const CASCADE_IGNORE_FILE = '.cascadeignore';
-export const CASCADE_CONFIG_FILE = '.cascade/config.json';
-export const CASCADE_KEYSTORE_FILE = '.cascade/keystore.enc';
-export const CASCADE_AUDIT_FILE = '.cascade/audit.log';
-export const CASCADE_DB_FILE = '.cascade/memory.db';
-export const CASCADE_DASHBOARD_SECRET_FILE = '.cascade/dashboard-secret';
 
 export const GLOBAL_CONFIG_DIR = '.cascade-ai';
 export const GLOBAL_DB_FILE = 'memory.db';
