@@ -428,9 +428,10 @@ describe('BrowserControlTool — what a person approving sees', () => {
     for (const key of ['Enter', 'NumpadEnter', 'Space', ' ', 'Control+Enter', 'Meta+Enter']) {
       expect(tool.forApproval({ action: 'press', key }, 'run-1').alwaysAsk, key).toBe(true);
     }
-    // Other keys sent to whatever has focus only move or type.
-    for (const key of ['Tab', 'Escape', 'ArrowDown', 'a']) {
-      expect(tool.forApproval({ action: 'press', key }, 'run-1').alwaysAsk, key).toBe(false);
+    // Keys aimed at page focus may trigger changes, shortcuts, or navigation,
+    // even when they are not Enter or Space.
+    for (const key of ['Tab', 'Escape', 'ArrowDown', 'Delete', 'Control+W', 'Alt+Left', 'a']) {
+      expect(tool.forApproval({ action: 'press', key }, 'run-1').alwaysAsk, key).toBe(true);
     }
   });
 
