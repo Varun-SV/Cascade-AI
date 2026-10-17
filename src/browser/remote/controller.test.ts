@@ -4882,6 +4882,20 @@ describe('page views and refs', () => {
     expect(page.calls.filter((x) => x.includes('selectOption'))).toEqual([]);
   });
 
+  it('refuses two distinct options with the exact same original label', async () => {
+    snapshot = BOOKING.replace('    - option "2 people" [selected] [box=0,0,0,0]', [
+      '    - option "Continue" [selected] [box=0,0,0,0]',
+      '    - option "Continue" [box=0,0,0,0]',
+    ].join('\\n'));
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.calls = [];
+    const out = await c.controller({ kind: 'select_option', ref: 'e11', value: 'Continue' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('More than one option in combobox "Party size" (e11) reads "Continue"');
+    expect(page.calls.filter((x) => x.includes('selectOption'))).toEqual([]);
+  });
+
   it('checks the name only before an action that can set something off', async () => {
     const c = controller();
     await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
