@@ -97,7 +97,7 @@ const TRICKY = [
   "  - img \"Logo\" [ref=f2e19] [cursor=pointer] [box=8,273,50,18]",
 ].join('\n');
 
-const SCREEN: Viewport = { width: 1280, height: 800, scrollY: 0, scrollHeight: 1229 };
+const SCREEN: Viewport = { width: 1280, height: 800, scrollX: 0, scrollY: 0, scrollHeight: 1229 };
 
 function view(snapshot: string, viewport: Viewport | undefined = SCREEN) {
   return describePage({ snapshot, url: 'https://dine.example/search', title: 'Dine', viewport, number: 3 });
@@ -484,7 +484,7 @@ describe('describePage', () => {
       '  - button "Top" [ref=e2] [box=0,-880,50,20]',
       '  - button "Here" [ref=e3] [box=0,300,50,20]',
     ].join('\n');
-    const v = view(snapshot, { width: 1280, height: 800, scrollY: 900, scrollHeight: 2000 })!;
+    const v = view(snapshot, { width: 1280, height: 800, scrollX: 0, scrollY: 900, scrollHeight: 2000 })!;
     expect(v.text).toContain('scrolled 900 of 2,000');
     expect(v.text).toContain('[e3] button "Here"');
     expect(v.text).toContain('Not listed: 1 above.');
