@@ -122,9 +122,13 @@ export function projectStateDir(workspacePath: string): string {
   if (!prepared.has(dir)) {
     prepared.add(dir);
     try {
-      if (!chosen && !fs.existsSync(dir)) followMove(root, dir);
-      else if (!chosen) setAsideForNewFolder(root, dir);
-      makePrivate(chosen ? [dir] : [globalDir(), path.join(globalDir(), 'projects'), dir]);
+      if (!chosen) {
+        makePrivate([globalDir(), path.join(globalDir(), 'projects')]);
+        if (!fs.existsSync(dir)) followMove(root, dir);
+      }
+      // Repair owner-owned unusable modes before any identity reads.
+      makePrivate([dir]);
+      if (!chosen) setAsideForNewFolder(root, dir);
       // Establish provenance before a partial migration can populate state.
       if (!chosen) recordIdentity(root, dir);
       movedIn.set(dir, moveLegacyState(workspacePath, dir));

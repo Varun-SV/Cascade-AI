@@ -141,6 +141,22 @@ describe('late containment review regressions', () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
+  it('refuses commands until an existing git trust record can be flushed too', async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-trust-flush-')));
+    const record = statePath(root, 'git-config-trust.json');
+    const spy = vi.spyOn(fsSync, 'fsyncSync').mockImplementation(() => { throw new Error('FSYNC_FAILED'); });
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await expect(new ProcessJail(makePolicy(root)).prepare('true', [], { cwd: root, offline: false, keepGit: true }).then((r) => r.ok)).rejects.toThrow(/FSYNC_FAILED/);
+      }
+    } finally { spy.mockRestore(); }
+    expect(fsSync.existsSync(record)).toBe(true);
+    const run = await new ProcessJail(makePolicy(root)).prepare('true', [], { cwd: root, offline: false, keepGit: true });
+    if (!run.ok) throw new Error(run.reason);
+    await run.launch.done?.();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
   it('keeps the privacy barrier without rejecting cleanup when its record becomes unreadable', async () => {
     const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-scan-record-failed-')));
     try {
@@ -194,12 +210,17 @@ describe('late containment review regressions', () => {
       vi.stubEnv('GOOGLE_APPLICATION_CREDENTIALS', key);
       vi.stubEnv('AWS_WEB_IDENTITY_TOKEN_FILE', kube);
       vi.stubEnv('AZURE_FEDERATED_TOKEN_FILE', kube);
+      vi.stubEnv('CLOUDSDK_CONFIG', outside);
+      vi.stubEnv('AZURE_CONFIG_DIR', outside);
       vi.stubEnv('KUBECONFIG', [path.relative(root, kube), key].join(path.delimiter));
       const jail = new ProcessJail(makePolicy(root));
       const run = await jail.prepare('true', [], { cwd: root, offline: false });
       expect(run.ok && run.launch.args).toEqual(expect.arrayContaining([key, kube, path.join(root, 'public.json')]));
       expect(run.ok && run.launch.env).not.toHaveProperty('AWS_WEB_IDENTITY_TOKEN_FILE');
       expect(run.ok && run.launch.env).not.toHaveProperty('AZURE_FEDERATED_TOKEN_FILE');
+      expect(run.ok && run.launch.env).not.toHaveProperty('CLOUDSDK_CONFIG');
+      expect(run.ok && run.launch.env).not.toHaveProperty('AZURE_CONFIG_DIR');
+      expect(run.ok && run.launch.args).toContain(outside);
       if (run.ok) await run.launch.done?.();
       const git = await jail.prepare('git', [], { cwd: root, offline: false, keepGit: true, confinesItself: true });
       expect(git.ok && git.launch.args).not.toContain(key);

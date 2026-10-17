@@ -144,6 +144,30 @@ describe('a project\'s state folder', () => {
     expect(fs.existsSync(history)).toBe(false);
   });
 
+  it('repairs state directory access before inspecting its identity', async () => {
+    const ws = tempDir('cascade-state-repair-order-');
+    const dir = projectStateDir(ws);
+    vi.resetModules();
+    const fresh = await import('./project-state.js');
+    let repaired = false;
+    const mkdir = fs.mkdirSync, read = fs.readFileSync, list = fs.readdirSync;
+    const repair = vi.spyOn(fs, 'mkdirSync').mockImplementation(((at: fs.PathLike, ...args: unknown[]) => {
+      if (String(at) === dir) repaired = true;
+      return (mkdir as (...args: unknown[]) => unknown)(at, ...args);
+    }) as typeof fs.mkdirSync);
+    const denied = Object.assign(new Error('EACCES'), { code: 'EACCES' });
+    const reading = vi.spyOn(fs, 'readFileSync').mockImplementation(((at: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+      if (!repaired && String(at) === path.join(dir, 'project.json')) throw denied;
+      return (read as (...args: unknown[]) => unknown)(at, ...args);
+    }) as typeof fs.readFileSync);
+    const listing = vi.spyOn(fs, 'readdirSync').mockImplementation(((at: fs.PathLike, ...args: unknown[]) => {
+      if (!repaired && String(at) === dir) throw denied;
+      return (list as (...args: unknown[]) => unknown)(at, ...args);
+    }) as typeof fs.readdirSync);
+    try { expect(fresh.projectStateDir(ws)).toBe(dir); }
+    finally { repair.mockRestore(); reading.mockRestore(); listing.mockRestore(); }
+  });
+
   it('preserves live private symlink outputs when no migration is pending', async () => {
     const ws = tempDir('cascade-live-private-links-');
     const dir = projectStateDir(ws);

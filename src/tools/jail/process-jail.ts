@@ -249,6 +249,7 @@ export class ProcessJail {
     if (this.gitTrust) return this.gitTrust;
     const record = this.gitTrustRecord();
     let trust: Map<string, string>;
+    let loaded = true;
     try {
       trust = new Map(Object.entries(JSON.parse(fs.readFileSync(record, 'utf8')) as Record<string, string>));
     } catch (err) {
@@ -258,6 +259,7 @@ export class ProcessJail {
         return this.gitTrust;
       }
       trust = new Map();
+      loaded = false;
       for (const repo of [this.policy.workspaceRoot, ...nested]) {
         for (const file of repoConfigFiles(await repoGitDirs(repo) ?? [])) {
           const id = fingerprintOf(file);
@@ -266,6 +268,8 @@ export class ProcessJail {
       }
       this.saveGitTrust(trust);
     }
+    // A prior attempt may have written the file but failed its flush.
+    if (loaded) this.flushGitTrust();
     this.gitTrust = trust;
     return trust;
   }
@@ -273,8 +277,27 @@ export class ProcessJail {
   private saveGitTrust(trust: Map<string, string>): void {
     try {
       fs.writeFileSync(this.gitTrustRecord(), JSON.stringify(Object.fromEntries(trust)), { mode: 0o600 });
+      this.flushGitTrust();
     } catch (err) {
       throw new Error(`Could not persist git trust (${(err as Error).message}), so the command was not run.`);
+    }
+  }
+
+  private flushGitTrust(): void {
+    const record = this.gitTrustRecord();
+    const flush = (file: string, flags: 'r' | 'r+') => {
+      const fd = fs.openSync(file, flags);
+      try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    };
+    flush(record, 'r+');
+    // Windows cannot fsync directory handles through Node and refuses
+    // arbitrary commands in auto mode. POSIX jail launches require both
+    // the record and its containing directory chain to survive a restart.
+    if (process.platform !== 'win32') {
+      for (let dir = path.dirname(record); ; dir = path.dirname(dir)) {
+        flush(dir, 'r');
+        if (path.dirname(dir) === dir) break;
+      }
     }
   }
 
@@ -788,6 +811,7 @@ export class ProcessJail {
 const CREDENTIAL_FILE_ENV = new Set([
   'GOOGLE_APPLICATION_CREDENTIALS', 'AWS_SHARED_CREDENTIALS_FILE', 'AWS_CONFIG_FILE',
   'AWS_WEB_IDENTITY_TOKEN_FILE', 'AZURE_FEDERATED_TOKEN_FILE',
+  'CLOUDSDK_CONFIG', 'AZURE_CONFIG_DIR',
   'KUBECONFIG', 'AZURE_AUTH_LOCATION', 'REGISTRY_AUTH_FILE', 'BOTO_CONFIG',
   'DOCKER_CONFIG', 'NPM_CONFIG_USERCONFIG', 'NETRC',
 ]);
