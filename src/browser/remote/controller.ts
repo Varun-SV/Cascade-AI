@@ -3600,15 +3600,17 @@ export class RemoteBrowserController {
         // text the view showed is turned back into the label it came from;
         // one it did not show is taken as a label as it is.
         const shown = (held.view!.options.get(action.ref) ?? []).filter((o) => o.shown === action.value);
-        const labels = [...new Set(shown.map((o) => o.label))];
-        if (labels.length > 1) {
+        // Every matching option is a separate possible action, even when
+        // their full labels are also identical. Deduplicating labels here
+        // would silently select the first option by DOM order.
+        if (shown.length > 1) {
           return {
             ok: false,
             detail: `More than one option in ${named} reads "${action.value}" in the page view, so none was chosen. Use extract_text to read them in full.`,
             ...(await where()),
           };
         }
-        await stoppable(target!.selectOption({ label: labels[0] ?? action.value ?? '' }, { timeout }));
+        await stoppable(target!.selectOption({ label: shown[0]?.label ?? action.value ?? '' }, { timeout }));
         return { ok: true, detail: `Chose "${action.value}" in ${named}`, ...(await where()) };
       }
       case 'hover':
