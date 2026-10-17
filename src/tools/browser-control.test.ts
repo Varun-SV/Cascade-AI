@@ -195,7 +195,7 @@ describe('BrowserControlTool — registration gate', () => {
 describe('BrowserControlTool — page views', () => {
   const VIEW = '[Page view 2]\nPage: Shop — https://shop.example/\n\nOn screen:\n[e14] button "Pay"';
   const viewTool = (outcome: Partial<Awaited<ReturnType<BrowserController>>> = {}) => {
-    const rec = recorder({ document: 'verified-page', ...outcome });
+    const rec = recorder({ url: 'https://shop.example/', document: 'verified-page', ...outcome });
     return { ...rec, tool: new BrowserControlTool(rec.controller, undefined, { pageView: true }) };
   };
   const schemaOf = (tool: BrowserControlTool) =>
