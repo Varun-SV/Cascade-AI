@@ -241,6 +241,21 @@ function setAsideForNewFolder(root: string, dir: string): void {
     const temps = entries.filter((name) => /^project\.json\.\d+\.[0-9a-f-]{36}\.tmp$/.test(name)
       && fs.lstatSync(path.join(dir, name)).isFile());
     if (entries.includes(IDENTITY_FILE) || entries.some((name) => !keptForANewFolder().has(name) && !temps.includes(name))) {
+      // Older versions imported entries before recording identity. Their
+      // unfinished source can be resumed, but cannot prove the destination
+      // belongs to this folder: preserve its unverified history separately.
+      const legacy = path.join(root, LEGACY_STATE_DIR);
+      const legacyDir = fs.lstatSync(legacy, { throwIfNoEntry: false });
+      if (!entries.includes(IDENTITY_FILE) && legacyDir?.isDirectory() && fs.readdirSync(legacy).length) {
+        const aside = `${dir}.before-unverified-${crypto.randomUUID()}`;
+        makePrivate([aside]);
+        for (const name of entries.filter((entry) => !keptForANewFolder().has(entry))) {
+          moveEntry(path.join(dir, name), path.join(aside, name));
+        }
+        syncDirectory(aside); syncDirectory(dir);
+        notices.set(dir, [...(notices.get(dir) ?? []), `Earlier history had no project identity and was preserved unverified in ${aside}. Cascade resumes the remaining legacy migration without adopting that history; recover it from there only after confirming it belongs to this project.`]);
+        return;
+      }
       throw new StateIdentityError(`The project identity in ${dir} is missing, invalid or unreadable. Restore its project.json, or move this state folder aside before opening the project; its earlier history was not adopted.`);
     }
     // Only settings and initial identity temps: no earlier history can be

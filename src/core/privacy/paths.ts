@@ -27,6 +27,7 @@ import { LinkAliases } from '../../utils/link-aliases.js';
 import { statePath, STATE } from '../../config/project-state.js';
 import { stripTrailingSlashes } from '../../utils/net.js';
 import { withLock } from '../../utils/file-lock.js';
+import { syncDirectory, syncFile } from '../../utils/sync-directory.js';
 // Same gitignore-style matcher used by .cascadeignore (src/config/ignore.ts),
 // so privacy patterns behave exactly like ignore patterns users already know.
 const ignore = (_ignoreModule as unknown as { default: () => Ignore }).default ?? (_ignoreModule as unknown as () => Ignore);
@@ -51,8 +52,9 @@ export class PrivacyPaths {
   private derivedFile?: string;
   /** Recorded here but not yet on disk: a save that could not take the lock. */
   private unsaved = new Set<string>();
-  /** Removals whose save failed; retried with pending additions. */
+  /** A scan barrier whose removal failed, retried with pending additions. */
   private unremoved = new Set<string>();
+  private removalRetry?: ReturnType<typeof setInterval>;
   /** The record's file as last read or written here, to tell when another run changed it. */
   private seen = '';
   /** Whether the record was looked at in the current job, and how many saves this process had made then (see `sync`). */
@@ -148,6 +150,9 @@ export class PrivacyPaths {
     const wanted = relativePaths
       .map((raw) => stripTrailingSlashes(raw.split(path.sep).join('/').replace(/^\.?\//, '')))
       .filter((rel) => rel && rel !== '..' && !rel.startsWith('../'));
+    // A new private write supersedes any earlier canceled write, including
+    // when the path remained in memory after its removal failed.
+    const readded = wanted.filter((rel) => this.unremoved.delete(rel));
     try {
       this.sync();
     } catch (err) {
@@ -159,7 +164,7 @@ export class PrivacyPaths {
       throw err;
     }
     const added = [...new Set(wanted)].filter((rel) => !this.derived.has(rel));
-    if (added.length) this.saveDerived(added, []);
+    if (added.length || readded.length) this.saveDerived([...new Set([...added, ...readded])], []);
     return added;
   }
 
@@ -175,6 +180,7 @@ export class PrivacyPaths {
         this.unremoved.add('.');
         this.derived.delete('.');
         this.setDerived(this.derived);
+        this.retryRemovals();
       }
       throw err;
     }
@@ -191,10 +197,18 @@ export class PrivacyPaths {
   /** Forget records made for a write that did not happen. */
   removeDerived(relativePaths: string[]): void {
     // A read can fail before saveDerived gets to queue this removal.
-    for (const rel of relativePaths) if (this.derived.has(rel)) this.unremoved.add(rel);
-    this.sync();
+    for (const rel of relativePaths) if (rel === '.' && this.derived.has(rel)) this.unremoved.add(rel);
+    try { this.sync(); } catch (err) { this.retryRemovals(); throw err; }
     const removed = relativePaths.filter((rel) => this.derived.has(rel));
     if (removed.length) this.saveDerived([], removed);
+  }
+
+  private retryRemovals(): void {
+    if (this.removalRetry || !this.derivedFile || !this.unremoved.size) return;
+    this.removalRetry = setInterval(() => {
+      try { this.saveUnsaved(); } catch { /* retry while storage is unavailable */ }
+    }, 5_000);
+    this.removalRetry.unref?.();
   }
 
   /**
@@ -212,7 +226,7 @@ export class PrivacyPaths {
     for (const rel of removed) this.unsaved.delete(rel);
     this.setDerived(this.derived);
     const file = this.derivedFile;
-    if (!file) return;
+    if (!file) { this.unremoved.clear(); return; }
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
       withLock(`${file}.lock`, 'record a local-only file', () => {
@@ -221,18 +235,28 @@ export class PrivacyPaths {
         for (const rel of this.unremoved) next.delete(rel);
         const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
         fs.writeFileSync(tmp, JSON.stringify({ version: 1, paths: [...next].sort() }, null, 2));
+        syncFile(tmp);
         fs.renameSync(tmp, file);
+        syncDirectory(path.dirname(file));
         saves++;
         this.unsaved.clear();
         this.unremoved.clear();
+        if (this.removalRetry) { clearInterval(this.removalRetry); this.removalRetry = undefined; }
         this.unreadable = undefined;
         this.setDerived(next);
         this.seen = stampOf(file);
       });
     } catch (err) {
       for (const rel of added) this.unsaved.add(rel);
-      for (const rel of removed) this.derived.add(rel);
+      for (const rel of removed) {
+        this.derived.add(rel);
+        // Another run may subsequently write this file privately. Replaying
+        // an ordinary canceled-write removal would erase that newer mark.
+        // Retain it conservatively; only the exclusive scan barrier retries.
+        if (rel !== '.') this.unremoved.delete(rel);
+      }
       this.setDerived(this.derived);
+      this.retryRemovals();
       throw err;
     }
   }

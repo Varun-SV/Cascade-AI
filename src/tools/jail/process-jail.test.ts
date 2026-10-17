@@ -160,6 +160,28 @@ describe('late containment review regressions', () => {
     } finally { spy.mockRestore(); await fs.rm(root, { recursive: true, force: true }); }
   });
 
+  it('does not launch until the scan barrier temporary file can be flushed', async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-barrier-flush-')));
+    try {
+      const privacy = new PrivacyPaths([], { workspaceRoot: root });
+      const reg = new ToolRegistry({ shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false } as never, root);
+      reg.setPrivacyPaths(privacy);
+      const jail = (reg as unknown as { processJail: ProcessJail & { policy: JailPolicy } }).processJail;
+      jail.policy.detect = async () => 'bwrap'; jail.policy.program = (name) => name;
+      const record = statePath(root, 'privacy-derived.json');
+      const real = fsSync.openSync;
+      const spy = vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, ...rest) => {
+        if (String(file).startsWith(`${record}.`) && flags === 'r+') throw new Error('BARRIER_FLUSH_FAILED');
+        return real(file, flags, ...rest);
+      });
+      try {
+        await expect(jail.prepare('true', [], { cwd: root, offline: true, keepGit: true }).then((r) => r.ok)).rejects.toThrow(/BARRIER_FLUSH_FAILED/);
+      } finally { spy.mockRestore(); }
+      privacy.saveUnsaved();
+      expect(new PrivacyPaths([], { workspaceRoot: root }).isLocalOnly('public.txt')).toBe(false);
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+
   it('refuses a command until the initial git trust baseline is durable', async () => {
     const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-trust-durable-')));
     const record = statePath(root, 'git-config-trust.json');

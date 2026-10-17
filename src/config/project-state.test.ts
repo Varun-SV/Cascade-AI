@@ -168,6 +168,22 @@ describe('a project\'s state folder', () => {
     finally { repair.mockRestore(); reading.mockRestore(); listing.mockRestore(); }
   });
 
+  it('opens an old partial migration while preserving unverified target history separately', () => {
+    const ws = tempDir('cascade-pre-identity-migration-');
+    const dir = projectStateDir(ws);
+    fs.rmSync(path.join(dir, 'project.json'));
+    fs.writeFileSync(path.join(dir, 'sessions.json'), 'unverified-history');
+    fs.mkdirSync(path.join(ws, '.cascade', 'resume'), { recursive: true });
+    fs.writeFileSync(path.join(ws, '.cascade', 'resume', 'remaining.json'), 'legacy-remainder');
+    expect(() => migrateProjectState(ws)).not.toThrow();
+    expect(fs.existsSync(path.join(dir, 'sessions.json'))).toBe(false);
+    expect(fs.readFileSync(path.join(dir, 'resume', 'remaining.json'), 'utf8')).toBe('legacy-remainder');
+    const aside = fs.readdirSync(path.dirname(dir)).find((name) => name.startsWith(`${path.basename(dir)}.before-unverified-`));
+    expect(aside).toBeDefined();
+    expect(fs.readFileSync(path.join(path.dirname(dir), aside!, 'sessions.json'), 'utf8')).toBe('unverified-history');
+    expect(stateNotices(ws).join(' ')).toMatch(/unverified|identity/);
+  });
+
   it('recovers an orphaned initial identity temporary file when no history exists', async () => {
     const ws = tempDir('cascade-identity-orphan-');
     const dir = projectStateDir(ws);
