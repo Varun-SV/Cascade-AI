@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: "If you use Cascade AI in your work, please cite this software."
+title: "Cascade AI"
+type: software
+authors:
+  - given-names: "Varun"
+    family-names: "SV"
+doi: "10.5281/zenodo.23427428"
+repository-code: "https://github.com/Varun-SV/Cascade-AI"
+url: "https://cascadeai.in"
+license: MIT
+abstract: >-
+  Cascade AI is a multi-tier AI orchestration system in which hierarchical
+  T1/T2/T3 agents plan, delegate, and execute tasks in parallel while
+  routing work across AI model providers.
