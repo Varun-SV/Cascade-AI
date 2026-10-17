@@ -4,6 +4,7 @@
 > Auto-routed to the cheapest model that's best at each step. **Up to 90% cheaper** than running everything on one frontier model.
 
 [![npm](https://img.shields.io/npm/v/cascade-ai?color=aaff00&label=npm)](https://www.npmjs.com/package/cascade-ai)
+[![DOI](https://zenodo.org/badge/1199633168.svg)](https://doi.org/10.5281/zenodo.23427428)
 [![license](https://img.shields.io/badge/license-MIT-aaff00.svg)](LICENSE)
 [![node](https://img.shields.io/badge/node-%E2%89%A522-5AB4E8.svg)](#installation)
 [![providers](https://img.shields.io/badge/providers-6-a78bff.svg)](#ai-providers)
