@@ -148,8 +148,19 @@ describe('the router decides against the model it resolved', () => {
 
   it('sends the screenshot to a model that can see it', async () => {
     const { router, seen } = await routerServing(CLAUDE);
-    await router.generate('T3', withShot);
+    const result = await router.generate('T3', withShot);
     expect(JSON.stringify(seen[0])).toContain('"type":"image"');
+    expect(result.screenshotsSent).toBe(1);
+  });
+
+  it('does not acknowledge delivery when the actual dimensions exceed the budget', async () => {
+    const { router, seen } = await routerServing(CLAUDE);
+    const large = { ...SHOT, screenshot: { width: 1920, height: 1080 } };
+    const result = await router.generate('T3', {
+      messages: [{ role: 'user', content: [{ type: 'image', image: large }] }],
+    });
+    expect(JSON.stringify(seen[0])).not.toContain('"type":"image"');
+    expect(result.screenshotsSent).toBe(0);
   });
 
   it('leaves it out for a model that cannot, and says so', async () => {
@@ -180,8 +191,9 @@ describe('the router decides against the model it resolved', () => {
     internals.selector.removeModel = () => {};
     internals.deadModels.record = () => false;
 
-    await router.generate('T3', withShot);
+    const result = await router.generate('T3', withShot);
     expect(seen).toHaveLength(1);
+    expect(result.screenshotsSent).toBe(1);
     expect(JSON.stringify(seen[0])).toContain('"type":"image"');
     expect(JSON.stringify(seen[0])).not.toContain('Screenshot left out');
     // Each attempt counts: left out for the blind model, then sent.

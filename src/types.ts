@@ -193,6 +193,8 @@ export interface GenerateResult {
    * performance history learns something untrue about both.
    */
   servedBy?: { provider: ProviderType; id: string };
+  /** Browser screenshots included in the successful provider request, after router filtering. */
+  screenshotsSent?: number;
 }
 
 export interface ConversationMessage {

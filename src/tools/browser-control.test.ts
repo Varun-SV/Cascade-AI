@@ -4,6 +4,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { toolReportedFailure } from '../core/tiers/integrity.js';
+import { describePage, VIEW_LIMIT } from '../browser/remote/page-view.js';
 import { BrowserControlTool, type BrowserAction, type BrowserActionOutcome, type BrowserController } from './browser-control.js';
 
 /** A controller that records what it was asked to do. */
@@ -452,7 +453,26 @@ describe('BrowserControlTool — what a person approving sees', () => {
     const rec = recorder({ detail: 'ok', url: 'https://search.example/', view: { text: '[Page view 1]', labels: { e2: 'searchbox "Search"', e3: 'button "Go"' } } });
     const calm = new BrowserControlTool(rec.controller, undefined, { pageView: true });
     await calm.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
-    expect(calm.forApproval({ action: 'press', ref: 'e2', key: 'Enter' }, 'run-1').alwaysAsk).toBe(false);
+    expect(calm.forApproval({ action: 'press', ref: 'e2', key: 'Enter' }, 'run-1').alwaysAsk).toBe(true);
+  });
+
+  it('asks before implicit submission when the capped view omits the submit button', async () => {
+    const snapshot = [
+      '- textbox "Email" [ref=e1] [box=0,0,100,20]',
+      ...Array.from({ length: VIEW_LIMIT - 1 }, (_, i) => `- button "Help ${i}" [ref=e${i + 2}] [box=0,25,100,20]`),
+      '- button "Pay" [ref=e999] [box=0,50,100,20]',
+    ].join('\n');
+    const view = describePage({ snapshot, url: 'https://shop.example/', title: 'Checkout',
+      viewport: { width: 1280, height: 800, scrollX: 0, scrollY: 0 }, number: 1 })!;
+    expect(view.labels.get('e1')).toBe('textbox "Email"');
+    expect(view.labels.has('e999')).toBe(false);
+    const { controller } = recorder({ url: 'https://shop.example/', view: { text: view.text, labels: Object.fromEntries(view.labels) } });
+    const tool = new BrowserControlTool(controller, undefined, { pageView: true });
+    await tool.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
+    for (const key of ['Enter', 'NumpadEnter', 'Return', 'Control+Enter', 'Space']) {
+      expect(tool.forApproval({ action: 'press', ref: 'e1', key }, 'run-1').alwaysAsk, key).toBe(true);
+    }
+    expect(tool.forApproval({ action: 'press', ref: 'e1', key: 'Tab' }, 'run-1').alwaysAsk).toBe(false);
   });
 
   it('knows Enter by every name a host takes for it', async () => {
@@ -492,8 +512,8 @@ describe('BrowserControlTool — what a person approving sees', () => {
     const links = recorder({ detail: 'ok', url: 'https://news.example/', view: { text: '[Page view 1]', labels: { e2: 'link "A very long headline about the economy that goes on and on and on past the limit of…"', e5: 'searchbox "Search"' } } });
     const reader = new BrowserControlTool(links.controller, undefined, { pageView: true });
     await reader.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
-    // A cut link is not what Enter in a search box submits.
-    expect(reader.forApproval({ action: 'press', ref: 'e5', key: 'Enter' }, 'run-1').alwaysAsk).toBe(false);
+    // A field's label cannot establish what Enter submits.
+    expect(reader.forApproval({ action: 'press', ref: 'e5', key: 'Enter' }, 'run-1').alwaysAsk).toBe(true);
   });
 
   it('asks about Enter or Space anywhere in a key combination', async () => {

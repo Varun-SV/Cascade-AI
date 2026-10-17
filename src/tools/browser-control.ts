@@ -354,11 +354,9 @@ export class BrowserControlTool extends BaseTool {
       // ones that matter.
       const chosenCut = chosen.endsWith('…') || chosen.includes('•••');
       alwaysAsk = irreversible(`${target ?? selector ?? ''}${chosen}`)
-        // Enter or Space can submit a form, or press whatever has focus. What
-        // that does is not in a field's own label, so it counts as unknown
-        // unless the key lands on a named control and nothing listed on the
-        // page is one to ask about.
-        || (submits && (!named || Object.values(seen?.labels ?? {}).some((l) => irreversible(l) || (cut(l) && l.startsWith('button ')))))
+        // A named field does not establish what Enter or Space will submit.
+        // The capped view may omit the form's destructive submit button.
+        || submits
         // A key sent to whatever has focus has no verified target. Even Tab,
         // Delete, arrows and shortcuts may trigger page actions or navigation,
         // so the earlier "always allow" cannot cover an unaimed press.

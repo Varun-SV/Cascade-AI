@@ -1414,6 +1414,9 @@ export class CascadeRouter extends EventEmitter {
         // Which model ACTUALLY answered. A failover recursion returns its own
         // result from the inner call, so this is always the one that ran.
         servedBy: { provider: model.provider, id: model.id },
+        // A filtered offer is not delivery. Failover returns its own count,
+        // so callers can retain an unseen screenshot for a later safe step.
+        ...(offeredShots ? { screenshotsSent: sentShots } : {}),
       };
 
       if (!result || typeof result.content !== 'string' || !result.usage) {

@@ -12,6 +12,7 @@ import type {
   ToolDefinition,
 } from '../../types.js';
 import type { CascadeRouter } from '../router/index.js';
+import { fitScreenshots, countScreenshots } from '../router/screenshots.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import { PeerBus } from '../peer/bus.js';
 import { PermissionEscalator } from '../permissions/escalator.js';
@@ -1044,7 +1045,7 @@ describe('a browser screenshot reaches the next request, once', () => {
         ]);
       }
       if (call === 2) return makeResult('', [{ id: 'c3', name: 'browser_control', input: { action: 'hover', ref: 'e14' } }]);
-      if (call === 3) return makeResult('', [{ id: 'c4', name: 'browser_control', input: { action: 'hover', ref: 'e14' } }]);
+      if (call === 3) return { ...makeResult('', [{ id: 'c4', name: 'browser_control', input: { action: 'hover', ref: 'e14' } }]), screenshotsSent: 1 };
       return makeResult('Done.');
     });
     const router = { generate, getModelForTier: () => SEEING } as unknown as CascadeRouter;
@@ -1062,6 +1063,36 @@ describe('a browser screenshot reaches the next request, once', () => {
     expect(hasImage(sent[2]!)).toBe(true);
     // Shown once: a picture the model has had is not sent again.
     expect(hasImage(sent[3]!)).toBe(false);
+  });
+
+  it('reoffers an unchanged picture after router refusal, then stops after confirmed delivery', async () => {
+    const large = { ...IMAGE, screenshot: { width: 1920, height: 1080 } };
+    const accepting = { ...SEEING, provider: 'openai', id: 'gpt-4o' } as ModelInfo;
+    const sent: ConversationMessage[][] = [];
+    let call = 0;
+    const generate = vi.fn(async (_tier: string, options: { messages: ConversationMessage[] }) => {
+      call++;
+      const fitted = fitScreenshots(options, call <= 2 ? SEEING : accepting, 2000);
+      sent.push(fitted.messages);
+      const result = call < 4
+        ? makeResult('', [{ id: `c${call}`, name: 'browser_control', input: { action: call === 1 ? 'observe' : 'hover', ref: 'e14' } }])
+        : makeResult('Done.');
+      return { ...result, screenshotsSent: countScreenshots(fitted) };
+    });
+    const router = { generate, getModelForTier: () => SEEING } as unknown as CascadeRouter;
+    const registry = makeToolRegistry({
+      getToolDefinitions: () => [{ name: 'browser_control', description: 'Browse', inputSchema: {} }],
+      execute: vi.fn(async (_name: string, input: { action: string }, options: { attachImage?: (i: ImageAttachment) => void; keepImage?: () => void }) => {
+        if (input.action === 'observe') options.attachImage?.(large);
+        else options.keepImage?.();
+        return 'ok';
+      }),
+    } as unknown as Partial<ToolRegistry>);
+    const worker = new T3Worker(router, registry, 't2-parent');
+    await worker.execute(makeAssignment({ subtaskTitle: 'Open the menu' }), 'task-deferred-shot');
+    expect(sent.slice(0, 4).map(hasImage)).toEqual([false, false, true, false]);
+    expect(sent.slice(3).some(hasImage)).toBe(false);
+    expect(hasImage((worker as unknown as { context: { getMessages(): ConversationMessage[] } }).context.getMessages())).toBe(false);
   });
 
   it('takes pictures for the model that answers after a failover', async () => {

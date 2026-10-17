@@ -1074,7 +1074,6 @@ export class T3Worker extends BaseTier {
       // cannot see it.
       const screenshot = this.pendingScreenshot;
       this.pendingScreenshot = undefined;
-      if (screenshot) this.undeliveredScreenshot = undefined;
       const options: GenerateOptions = {
         messages: withScreenshot(foldOldPageViews(this.context.getMessages()), screenshot),
         systemPrompt: this.systemPromptOverride + systemPrompt
@@ -1102,6 +1101,10 @@ export class T3Worker extends BaseTier {
           if (!this.localOnlyMatch) this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: this.isPresenter });
         },
       );
+      // The router can reject the actual dimensions or resolve to a model
+      // that cannot see this image. Retain it until delivery is confirmed;
+      // only a later browser step proving the page unchanged may restore it.
+      if (screenshot && (result.screenshotsSent ?? 0) > 0) this.undeliveredScreenshot = undefined;
       // Pictures are taken for the model that is answering. After a failover
       // that is another model, one that may see them where the first could
       // not, or the other way round. The router still decides, per request,
