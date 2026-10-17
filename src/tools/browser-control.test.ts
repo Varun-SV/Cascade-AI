@@ -578,6 +578,59 @@ describe('BrowserControlTool — what a person approving sees', () => {
     expect(rec.calls.at(-1)).not.toHaveProperty('expectSite');
   });
 
+  it('refuses selector control until an approved page has a trusted document token', async () => {
+    // extract_text tells us the URL but cannot bind a document. While the
+    // approval prompt is pending, an SPA can move from cart to account on
+    // the SAME host, where an identical selector can do something else.
+    let route = 'cart';
+    const calls: BrowserAction[] = [];
+    const controller: BrowserController = async (action) => {
+      calls.push(action);
+      if (action.expectDocument && action.expectDocument !== route) {
+        return { ok: false, detail: 'page changed' };
+      }
+      return {
+        ok: true, detail: 'ok', url: `https://shop.example/${route}`,
+        ...(action.kind === 'observe' ? { document: route, view: { text: '[Page view 1]', labels: {} } } : {}),
+      };
+    };
+    const tool = new BrowserControlTool(controller, undefined, { pageView: true });
+    await tool.execute({ action: 'extract_text' }, { sessionId: 'run-1' } as never);
+    const oldCall = { action: 'click', selector: '.primary-action' };
+    tool.forApproval(oldCall, 'run-1');
+    route = 'account'; // site is unchanged while the person reads the prompt
+    const refused = await tool.execute(oldCall, { sessionId: 'run-1' } as never);
+    expect(refused).toContain('Call observe');
+    expect(calls.map((c) => c.kind)).toEqual(['extract_text']);
+
+    // A later observation must NOT retroactively bind an earlier approval.
+    await tool.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
+    expect(await tool.execute(oldCall, { sessionId: 'run-1' } as never)).toContain('Call observe');
+    expect(calls.map((c) => c.kind)).toEqual(['extract_text', 'observe']);
+
+    // An approval made after the observation binds the new page.
+    const currentCall = { action: 'click', selector: '.primary-action' };
+    tool.forApproval(currentCall, 'run-1');
+    expect(await tool.execute(currentCall, { sessionId: 'run-1' } as never)).not.toContain('Call observe');
+    expect(calls.at(-1)).toMatchObject({ kind: 'click', expectSite: 'shop.example', expectDocument: 'account' });
+  });
+
+  it('rejects unbound selector fills and key presses as well as clicks', async () => {
+    const rec = recorder({ url: 'https://shop.example/cart' });
+    const tool = new BrowserControlTool(rec.controller, undefined, { pageView: true });
+    for (const input of [
+      { action: 'click', selector: '#go' },
+      { action: 'fill', selector: '#name', value: 'Ada' },
+      { action: 'press', selector: '#submit', key: 'Enter' },
+      { action: 'press', key: 'Enter' },
+      { action: 'select_option', selector: '#choices', value: 'delete' },
+    ]) {
+      tool.forApproval(input, 'run-1');
+      expect(await tool.execute(input, { sessionId: 'run-1' } as never)).toContain('Call observe');
+    }
+    expect(rec.calls).toEqual([]);
+  });
+
   it('runs an approved action only on the page it was approved on, not just the site', async () => {
     // /cart to /account on the same site, while the person decides: the
     // selector would find what the new page has there.
