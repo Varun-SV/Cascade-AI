@@ -450,6 +450,7 @@ function describe(
   // what was typed into it.
   const options = node.role === 'combobox' || node.role === 'listbox' ? optionsOf(node) : [];
   const choices = options.filter((option) => option.attrs['selected'] === true || option.attrs['selected'] === 'true');
+  const typedChars = TYPED.has(node.role) ? [...fieldValue(node)].length : 0;
   const raw = TYPED.has(node.role) || options.length > 0 ? node.name ?? '' : node.name || node.inline || textWithin(node, IDENTITY_TEXT_MAX);
   const scrubbed = scrub(raw);
   const label = clean(scrubbed, NAME_LIMIT);
@@ -468,6 +469,9 @@ function describe(
     })))
     .update(JSON.stringify(choices.map((option) => option.name ?? '')))
     .update(node.role === 'slider' ? `\0${node.inline ?? ''}` : '')
+    // Match the privacy-safe fill state shown in the view, without retaining
+    // the text itself in the identity input.
+    .update(TYPED.has(node.role) ? `\0filled:${typedChars}` : '')
     .digest('base64');
   const named = `${role}${label ? ` "${label}"` : ''}`;
   let line = `[${ref}] ${named}`;
@@ -490,8 +494,7 @@ function describe(
       if (options.length > OPTIONS_SHOWN) listed.push(`and ${options.length - OPTIONS_SHOWN} more`);
       notes.push(`options ${listed.join(', ')}`);
     } else {
-      const typed = [...fieldValue(node)].length;
-      notes.push(typed ? `filled, ${typed} char${typed === 1 ? '' : 's'}` : 'empty');
+      notes.push(typedChars ? `filled, ${typedChars} char${typedChars === 1 ? '' : 's'}` : 'empty');
     }
   } else if (node.role === 'slider' && node.inline) {
     notes.push(`at ${clean(node.inline, 20)}`);

@@ -360,7 +360,7 @@ export const PRIVATE_FIELDS = [
     .flatMap((word) => [`input[name*="${word}" i]`, `input[id*="${word}" i]`]),
   // A PIN by its name, as a word of it — `pin`, `card_pin`, `atmPin`,
   // `pin-input`, `user[pin]` — not the "pin" inside "shipping" or "spinner".
-  ...['$="pin"', '*="pin_"', '*="pin-"', '*="pin]"', '*="pinnumber"']
+  ...['$="pin"', '*="pin_"', '*="pin-"', '*="pin]"', '*="pinnumber"', '*="pincode"']
     .flatMap((match) => [`input[name${match} i]`, `input[id${match} i]`]),
   'input[placeholder*="verification code" i]', 'input[placeholder*="one-time" i]',
   // One box per digit.
@@ -3390,7 +3390,9 @@ export class RemoteBrowserController {
         held.abort.signal.removeEventListener('abort', onAbort);
       }
     };
-    const timeout = Math.min(action.timeoutMs ?? 10_000, ACTION_TIMEOUT_MS);
+    // Playwright treats zero as unlimited. Invalid/nonpositive values use the
+    // ordinary finite default, and positive values cannot exceed our ceiling.
+    const timeout = Math.min(action.timeoutMs && action.timeoutMs > 0 ? action.timeoutMs : 10_000, ACTION_TIMEOUT_MS);
     /**
      * The document and address this action ran on, once the checks below
      * have let it. A refusal says where the page is but not which document it
@@ -3490,10 +3492,9 @@ export class RemoteBrowserController {
           };
         }
         const current = now?.view.labels.get(action.ref);
-        // A select can acquire duplicate labels while keeping its own name.
-        // Its complete option metadata must still be the one approved.
-        const optionsChanged = action.kind === 'select_option'
-          && JSON.stringify(now?.view.options.get(action.ref)) !== JSON.stringify(held.view!.options.get(action.ref));
+        // The options and their order affect aimed keys as well as explicit
+        // choices. Every triggering action requires the approved metadata.
+        const optionsChanged = JSON.stringify(now?.view.options.get(action.ref)) !== JSON.stringify(held.view!.options.get(action.ref));
         if (current !== shown || now?.view.identities.get(action.ref) !== held.view!.identities.get(action.ref) || optionsChanged) {
           now?.keep();
           return {

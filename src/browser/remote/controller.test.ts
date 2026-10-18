@@ -5014,6 +5014,57 @@ describe('page views and refs', () => {
     expect(page.calls.some((x) => x.includes('selectOption'))).toBe(false);
   });
 
+  it('refuses aimed keys after select choices change without changing the selected label', async () => {
+    for (const options of [
+      '    - option "1 person" [box=0,0,0,0]\n    - option "Delete account" [box=0,0,0,0]',
+      '    - option "Delete account" [box=0,0,0,0]\n    - option "1 person" [box=0,0,0,0]',
+    ]) {
+      snapshot = BOOKING.replace('    - option "2 people" [selected] [box=0,0,0,0]',
+        '    - option "1 person" [box=0,0,0,0]\n    - option "2 people" [selected] [box=0,0,0,0]');
+      const c = controller();
+      await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+      snapshot = snapshot.replace('    - option "1 person" [box=0,0,0,0]', options);
+      page.calls = [];
+      expect((await c.controller({ kind: 'press', ref: 'e11', key: 'ArrowDown' }, ctx('run', 'w1'))).ok).toBe(false);
+      expect(page.calls.some((call) => call.includes('press ArrowDown'))).toBe(false);
+    }
+  });
+
+  it('refuses overwriting or submitting fields whose visible fill state changed', async () => {
+    for (const role of ['textbox', 'spinbutton', 'combobox', 'searchbox']) {
+      for (const before of ['', ': "x"']) {
+        snapshot = `- ${role} "Account" [ref=e5] [box=0,0,100,20]${before}`;
+        const c = controller();
+        await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+        snapshot = `- ${role} "Account" [ref=e5] [box=0,0,100,20]: "秘密🔑"`;
+        page.calls = [];
+        const refused = await c.controller({ kind: before ? 'press' : 'fill', ref: 'e5', key: 'Enter', value: 'replacement' }, ctx('run', 'w1'));
+        expect(refused.ok, `${role} ${before}`).toBe(false);
+        expect(page.calls.some((call) => call.includes(' fill ') || call.includes(' press '))).toBe(false);
+        expect(refused.view!.text).toContain('filled, 3 chars');
+      }
+    }
+  });
+
+  it('never passes Playwright a zero or unbounded ref-action timeout', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    const timeouts: number[] = [];
+    extra['locator'] = (selector: string) => ({ ...locate(selector),
+      async elementHandle(opts: { timeout: number }) {
+        timeouts.push(opts.timeout);
+        return (locate(selector).elementHandle as (opts: unknown) => Promise<unknown>).call(this, opts);
+      },
+      async click(opts: { timeout: number }) { timeouts.push(opts.timeout); },
+    });
+    for (const timeoutMs of [0, -1, Infinity, 30_000]) {
+      expect((await c.controller({ kind: 'click', ref: 'e5', timeoutMs }, ctx('run', 'w1'))).ok).toBe(true);
+    }
+    expect(timeouts).toHaveLength(8);
+    expect(timeouts.every((value) => Number.isFinite(value) && value > 0 && value <= 30_000)).toBe(true);
+  });
+
   it('does not wait forever on a page too busy to say whether a ref is there', async () => {
     const c = controller();
     await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
