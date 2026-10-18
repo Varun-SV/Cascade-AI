@@ -483,6 +483,20 @@ describe('describePage', () => {
     expect(v.text).not.toContain('987654321');
   });
 
+  it('scrubs short standalone values from distant names but preserves larger words and numbers', () => {
+    for (const [role, value, larger] of [['spinbutton', '42', '142'], ['textbox', 'AB', 'LABS'], ['combobox', '7', '17']]) {
+      const v = view([
+        '- group:',
+        `  - ${role} "Field" [ref=e2] [box=0,0,100,20]: "${value}"`,
+        '- group:',
+        `  - button "Submit ${value}" [ref=e3] [box=0,30,100,20]`,
+        `  - button "Keep ${larger}" [ref=e4] [box=0,60,100,20]`,
+      ].join('\n'))!;
+      expect(v.labels.get('e3')).toBe('button "Submit •••"');
+      expect(v.labels.get('e4')).toBe(`button "Keep ${larger}"`);
+    }
+  });
+
   it('scrubs editable combobox values globally without hiding native option choices', () => {
     for (const options of ['', '\n    - listbox:\n      - option "alice@example.com" [selected]']) {
       const v = view([

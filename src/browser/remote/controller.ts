@@ -99,6 +99,7 @@ type FoundFields = {
 };
 /** One control on the page, as Playwright resolves it at the moment of acting. */
 type ActionElement = {
+  evaluate?(expression: (node: { nodeName: string }) => boolean): Promise<boolean>;
   click(opts?: { timeout?: number }): Promise<void>;
   fill(value: string, opts?: { timeout?: number }): Promise<void>;
   press(key: string, opts?: { timeout?: number }): Promise<void>;
@@ -3548,6 +3549,11 @@ export class RemoteBrowserController {
     const element = bind ? await stoppable(target!.elementHandle!({ timeout })) : null;
     try {
       if (bind && !element) return { ok: false, detail: 'The observed element is no longer on the page.', ...(await where()) };
+      const actual = element ?? target;
+      if (action.kind === 'select_option') {
+        const native = actual?.evaluate && await stoppable(within(actual.evaluate((node) => node.nodeName === 'SELECT'))).catch(() => false);
+        if (!native) return { ok: false, detail: 'This control is a custom dropdown rather than a native select. Use click or press to operate its visible options.', ...(await where()) };
+      }
       if (action.kind !== 'navigate' && (held.page !== page || !sameDocument(actedOn!, held)
         || (action.ref && frameMoved(held, action.ref))
         || (action.ref && !sameRoute(actedOn!, page.url()))
@@ -3558,7 +3564,6 @@ export class RemoteBrowserController {
           || !(action.ref ? sameRoute(action.expectDocument, page.url()) : samePlace(action.expectDocument, held, page.url())))))) {
         return { ok: false, detail: 'The page changed while this action was being checked, so it was not run. Call observe for a fresh page view.', ...(await where()) };
       }
-      const actual = element ?? target;
       switch (action.kind) {
         case 'navigate': {
           const target = action.url ?? '';

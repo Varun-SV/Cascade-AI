@@ -354,8 +354,8 @@ class DynamicTool extends BaseTool {
         // as called. Without this, a generated tool reached `browser_control`
         // with no element named and no forced prompt before a payment.
         const shown = (registry.getTool(toolName) as {
-          forApproval?: (input: Record<string, unknown>, sessionId: string) => { input: Record<string, unknown>; alwaysAsk: boolean };
-        } | undefined)?.forApproval?.(toolInput, options.sessionId);
+          forApproval?: (input: Record<string, unknown>, sessionId: string, actorId?: string) => { input: Record<string, unknown>; alwaysAsk: boolean };
+        } | undefined)?.forApproval?.(toolInput, options.sessionId, options.tierId);
         const req: PermissionRequest = {
           // Unique to the call: two from one run in the same millisecond
           // would otherwise share it, and the answer to one end both.

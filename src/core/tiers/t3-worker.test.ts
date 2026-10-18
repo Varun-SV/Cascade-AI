@@ -1157,8 +1157,6 @@ describe('batched browser ref safety', () => {
           view: { text: '[Page view 1]', labels: { e1: 'button "Next"', e2: 'button "Continue"' } } };
       }, undefined, { pageView: true });
       registry.register(browser);
-      await browser.execute({ action: 'observe' }, { sessionId: 'task-nested-batch', tierId: 't3' } as never);
-      actions.length = 0;
       const creator = new ToolCreator({} as CascadeRouter, registry, root, true, 'wasm');
       const escalator = { requestPermission: async () => ({ approved: true, decidedBy: 'USER' }) } as unknown as PermissionEscalator;
       creator.setPermissionEscalator(escalator);
@@ -1171,6 +1169,8 @@ describe('batched browser ref safety', () => {
       ]) : makeResult('Finished.')) as CascadeRouter['generate']);
       const worker = new T3Worker(router, registry, 't2-parent');
       worker.setPermissionEscalator(escalator);
+      await browser.execute({ action: 'observe' }, { sessionId: 'task-nested-batch', tierId: worker.id } as never);
+      actions.length = 0;
       const outcomes: unknown[] = [];
       worker.on('tool:result', (outcome) => outcomes.push(outcome));
       const result = await worker.execute(makeAssignment({ subtaskTitle: 'Browse safely' }), 'task-nested-batch');
@@ -1235,7 +1235,7 @@ describe('a person approving a browser action sees what it acts on', () => {
       input: { action: 'click', ref: 'e14', target: 'button "Reserve 7:30 pm"', site: 'dine.example' },
       alwaysAsk: false,
     });
-    expect(forApproval).toHaveBeenCalledWith({ action: 'click', ref: 'e14' }, 'task-approve');
+    expect(forApproval).toHaveBeenCalledWith({ action: 'click', ref: 'e14' }, 'task-approve', request.requestedBy);
     expect(request.input).toEqual({ action: 'click', ref: 'e14', target: 'button "Reserve 7:30 pm"', site: 'dine.example' });
     expect(request.forceReprompt).toBeUndefined();
     expect(execute.mock.calls[0]![1]).toEqual({ action: 'click', ref: 'e14' });

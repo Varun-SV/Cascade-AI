@@ -479,6 +479,7 @@ function describe(
     })))
     .update(JSON.stringify(choices.map((option) => option.name ?? '')))
     .update(node.role === 'slider' ? `\0${node.inline ?? ''}` : '')
+    .update(JSON.stringify(node.children.filter((child) => child.role === '/url').map((child) => child.inline ?? '')))
     // A private digest detects even same-length substitutions. Only the
     // final identity stays in controller memory; viewOutcome exposes neither
     // this digest nor the field value to the model or its history.
@@ -745,7 +746,7 @@ function textboxValues(roots: SnapshotNode[]): string[] {
     if (n.role === 'textbox' || n.role === 'spinbutton' || n.role === 'combobox') {
       for (const v of [fieldValue(n), ...typedParts(n)]) {
         const value = v.replace(/\s+/g, ' ').trim();
-        if (value.length >= SHORT_VALUE) found.add(value);
+        if (value.length > 0) found.add(value);
       }
       return;
     }

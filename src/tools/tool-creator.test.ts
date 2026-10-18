@@ -126,7 +126,7 @@ describe('ToolCreator — runtime tool generation', () => {
       { pageView: true },
     );
     reg.register(browser);
-    await browser.execute({ action: 'observe' }, { sessionId: 'run-1', tierId: 't3' } as any);
+    await browser.execute({ action: 'observe' }, { sessionId: 'run-1', tierId: opts.tierId } as any);
     const asked: any[] = [];
     const escalator: any = { requestPermission: async (req: any) => { asked.push(req); return { approved: false, decidedBy: 'test' }; } };
     const spec: GeneratedToolSpec = {

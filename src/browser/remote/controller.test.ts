@@ -4693,6 +4693,7 @@ describe('page views and refs', () => {
         fill: record('fill'),
         press: record('press'),
         hover: record('hover'),
+        evaluate: async (fn: (node: { nodeName: string }) => boolean) => fn({ nodeName: 'SELECT' }),
         selectOption: async (option: unknown) => {
           page.calls.push(`${selector} selectOption=${typeof option === 'string' ? option : `label:${(option as { label: string }).label}`}`);
         },
@@ -4702,7 +4703,7 @@ describe('page views and refs', () => {
         async elementHandle() {
           const locator = this;
           const element: Record<string, unknown> = { dispose: async () => {}, waitForElementState: async (_state: string, opts: unknown) => locator.waitFor(opts) };
-          for (const method of ['click', 'fill', 'press', 'hover', 'selectOption', 'scrollIntoViewIfNeeded', 'innerText'] as const) {
+          for (const method of ['click', 'fill', 'press', 'hover', 'selectOption', 'scrollIntoViewIfNeeded', 'innerText', 'evaluate'] as const) {
             element[method] = (...args: unknown[]) => (locator[method] as (...a: unknown[]) => Promise<unknown>)(...args);
           }
           return element;
@@ -4772,6 +4773,16 @@ describe('page views and refs', () => {
     expect(out.detail).toContain('e14 is now button "Cancel reservation", not button "Reserve 7:30 pm"');
     expect(out.view!.text).toContain('[e14] button "Cancel reservation"');
     expect(page.calls).not.toContain('aria-ref=e14 click');
+  });
+
+  it('refuses a named link whose destination changed while retaining its label', async () => {
+    snapshot = '- link "Continue" [ref=e5] [box=0,0,100,20]:\n  - /url: /next-step';
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    snapshot = snapshot.replace('/next-step', 'https://elsewhere.test/other-account');
+    page.calls = [];
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(false);
+    expect(page.calls).not.toContain('aria-ref=e5 click');
   });
 
   it('refuses navigation or reload landing during ref revalidation', async () => {
@@ -4981,6 +4992,21 @@ describe('page views and refs', () => {
       expect(out.ok, role).toBe(false);
       expect(page.calls.some((call) => call.includes('selectOption'))).toBe(false);
     }
+  });
+
+  it('guides custom ARIA dropdowns without invoking the native selection API', async () => {
+    snapshot = '- listbox "Choices" [ref=e11] [box=0,0,200,100]:\n  - option "First" [selected]\n  - option "Second"';
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    let nativeCalls = 0;
+    extra['locator'] = (selector: string) => ({ ...locate(selector), evaluate: async () => false,
+      selectOption: async () => { nativeCalls++; throw new Error('Element is not a <select> element'); },
+    });
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const out = await c.controller({ kind: 'select_option', ref: 'e11', value: 'Second' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('Use click or press');
+    expect(nativeCalls).toBe(0);
   });
 
   it('refuses duplicate options outside the displayed subset', async () => {

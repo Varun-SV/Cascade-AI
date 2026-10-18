@@ -1255,8 +1255,8 @@ export class T3Worker extends BaseTier {
     }
 
     const shown = (this.toolRegistry.getTool?.(tc.name) as {
-      forApproval?: (input: Record<string, unknown>, sessionId: string) => { input: Record<string, unknown>; alwaysAsk: boolean };
-    } | undefined)?.forApproval?.(tc.input, this.taskId);
+      forApproval?: (input: Record<string, unknown>, sessionId: string, actorId?: string) => { input: Record<string, unknown>; alwaysAsk: boolean };
+    } | undefined)?.forApproval?.(tc.input, this.taskId, this.id);
 
     // ── Hierarchical permission escalation: T3 → T2 → T1 → User ──
     if (this.permissionEscalator) {

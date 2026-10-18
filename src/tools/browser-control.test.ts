@@ -194,9 +194,9 @@ describe('BrowserControlTool — registration gate', () => {
 });
 
 describe('BrowserControlTool — page views', () => {
-  const VIEW = '[Page view 2]\nPage: Shop — https://shop.example/\n\nOn screen:\n[e14] button "Pay"';
+  const VIEW = '[Page view 2]\nPage: Shop — https://shop.example/\n\nOn screen:\n[e14] button "Pay"\n[e1] button "Example"';
   const viewTool = (outcome: Partial<Awaited<ReturnType<BrowserController>>> = {}) => {
-    const rec = recorder({ url: 'https://shop.example/', document: 'verified-page', ...outcome });
+    const rec = recorder({ url: 'https://shop.example/', document: 'verified-page', view: { text: VIEW, labels: { e14: 'button "Pay"', e1: 'button "Example"' } }, ...outcome });
     return { ...rec, tool: new BrowserControlTool(rec.controller, undefined, { pageView: true }) };
   };
   const schemaOf = (tool: BrowserControlTool) =>
@@ -261,14 +261,15 @@ describe('BrowserControlTool — page views', () => {
   });
 
   it('puts the page view after the outcome, in place of the bare address', async () => {
-    const { tool } = viewTool({ detail: 'Clicked button "Next" (e3)', url: 'https://shop.example/', title: 'Shop', view: { text: VIEW, labels: { e14: 'button "Pay"' } } });
+    const nextView = VIEW.replace('[e14] button "Pay"', '[e3] button "Next"');
+    const { tool } = viewTool({ detail: 'Clicked button "Next" (e3)', url: 'https://shop.example/', title: 'Shop', view: { text: nextView, labels: { e3: 'button "Next"' } } });
     await tool.execute({ action: 'observe' }, {} as never);
     const out = await tool.execute({ action: 'click', ref: 'e3' }, {} as never);
-    expect(out).toBe(`Clicked button "Next" (e3)\n\n${VIEW}`);
+    expect(out).toBe(`Clicked button "Next" (e3)\n\n${nextView}`);
   });
 
   it('still gives the address when the host could not describe the page after a prior verified view', async () => {
-    const { tool } = viewTool({ detail: 'Clicked #go', url: 'https://shop.example/', title: 'Shop' });
+    const { tool } = viewTool({ detail: 'Clicked #go', url: 'https://shop.example/', title: 'Shop', view: undefined });
     await tool.execute({ action: 'observe' }, {} as never);
     expect(await tool.execute({ action: 'click', selector: '#go' }, {} as never)).toBe('Clicked #go\nPage: Shop — https://shop.example/');
   });
@@ -299,7 +300,7 @@ describe('BrowserControlTool — page views', () => {
     }
 
     it('takes a ref from inside a frame', async () => {
-      const { calls, tool } = viewTool();
+      const { calls, tool } = viewTool({ view: { text: '[f1e2] button "Frame"', labels: { f1e2: 'button "Frame"' } } });
       await tool.execute({ action: 'observe' }, {} as never);
       calls.length = 0;
       await tool.execute({ action: 'click', ref: 'f1e2' }, {} as never);
@@ -309,9 +310,9 @@ describe('BrowserControlTool — page views', () => {
     it('scrolls down by default, and to a ref when given one', async () => {
       const { calls, tool } = viewTool();
       await tool.execute({ action: 'scroll', direction: 'up' }, {} as never);
-      await tool.execute({ action: 'scroll', ref: 'e9' }, {} as never);
+      await tool.execute({ action: 'scroll', ref: 'e14' }, {} as never);
       expect(calls[0]).toMatchObject({ kind: 'scroll', direction: 'up' });
-      expect(calls[1]).toMatchObject({ kind: 'scroll', ref: 'e9' });
+      expect(calls[1]).toMatchObject({ kind: 'scroll', ref: 'e14' });
       expect(calls[1]).not.toHaveProperty('direction');
     });
   });
@@ -320,7 +321,7 @@ describe('BrowserControlTool — page views', () => {
 describe('BrowserControlTool — screenshots', () => {
   const IMAGE = { data: 'AQID', mimeType: 'image/jpeg' as const, width: 1280, height: 800 };
   const shotTool = (features = { pageView: true, screenshots: true }) => {
-    const rec = recorder({ detail: 'Looked at the page.', document: 'shot-page', view: { text: '[Page view 1]\nPage: A — https://a.example/', labels: {} }, image: IMAGE });
+    const rec = recorder({ detail: 'Looked at the page.', document: 'shot-page', view: { text: '[Page view 1]\nPage: A — https://a.example/\n[e1] textbox "Email"', labels: { e1: 'textbox "Email"' } }, image: IMAGE });
     return { ...rec, tool: new BrowserControlTool(rec.controller, undefined, features) };
   };
 
@@ -384,6 +385,47 @@ describe('BrowserControlTool — what a person approving sees', () => {
     await tool.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
     return tool;
   }
+
+  it('keeps sibling observations and approval bindings separate within one run', async () => {
+    const outcome = { ok: true, detail: 'ok', url: 'https://shop.example/', document: 'same-document',
+      view: { text: '[Page view 1]', labels: { e5: 'button "First worker choice"' } } };
+    const controller = vi.fn(async () => outcome);
+    const tool = new BrowserControlTool(controller, undefined, { pageView: true });
+    const a = { sessionId: 'shared', tierId: 'worker-a' };
+    const b = { sessionId: 'shared', tierId: 'worker-b' };
+    await tool.execute({ action: 'observe' }, a as never);
+    const call = { action: 'click', ref: 'e5' };
+    const approval = (input: Record<string, unknown>, actor: string) =>
+      (tool.forApproval as (input: Record<string, unknown>, session: string, actor: string) => ReturnType<typeof tool.forApproval>)(input, 'shared', actor);
+    expect(approval(call, 'worker-b').input).not.toHaveProperty('target');
+    expect(await tool.execute(call, b as never)).toContain('Call observe');
+    expect(controller).toHaveBeenCalledTimes(1);
+    approval(call, 'worker-a');
+    outcome.view.labels.e5 = 'button "Second worker choice"';
+    await tool.execute({ action: 'observe' }, b as never);
+    expect(approval({ action: 'click', ref: 'e5' }, 'worker-a').input['target']).toBe('button "First worker choice"');
+    expect(await tool.execute(call, b as never)).toContain('Call observe');
+    tool.releaseActor('worker-a');
+    expect(approval({ action: 'click', ref: 'e5' }, 'worker-a').input).not.toHaveProperty('target');
+  });
+
+  it('does not reuse an approval after that worker received a new page view', async () => {
+    const controller = vi.fn(async () => ({ ok: true, detail: 'ok', document: 'doc', url: 'https://shop.example/',
+      view: { text: '[Page view]', labels: { e5: 'button "Next"' } } }));
+    const tool = new BrowserControlTool(controller, undefined, { pageView: true });
+    const context = { sessionId: 'run', tierId: 'worker' } as never;
+    await tool.execute({ action: 'observe' }, context);
+    const call = { action: 'click', ref: 'e5' };
+    tool.forApproval(call, 'run', 'worker');
+    await tool.execute({ action: 'observe' }, context);
+    expect(await tool.execute(call, context)).toContain('Call observe');
+    expect(controller).toHaveBeenCalledTimes(2);
+    tool.forApproval(call, 'run', 'worker');
+    expect(await tool.execute(call, context)).not.toContain('Error:');
+    tool.releaseActor('worker');
+    expect(await tool.execute(call, context)).toContain('Call observe');
+    expect(controller).toHaveBeenCalledTimes(3);
+  });
 
   it('names the element and the site, not a ref', async () => {
     const tool = await seenTool();
@@ -584,10 +626,11 @@ describe('BrowserControlTool — what a person approving sees', () => {
   });
 
   it('says the last picture still stands when the page looks the same', async () => {
-    const rec = recorder({ detail: 'ok', imageUnchanged: true, view: { text: '[Page view 2]', labels: {} } });
+    const rec = recorder({ detail: 'ok', imageUnchanged: true, view: { text: '[Page view 2]\n[e5] button "Next"', labels: { e5: 'button "Next"' } } });
     const tool = new BrowserControlTool(rec.controller, undefined, { pageView: true, screenshots: true });
     const keepImage = vi.fn();
     const attachImage = vi.fn();
+    await tool.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
     await tool.execute({ action: 'hover', ref: 'e5' }, { sessionId: 'run-1', attachImage, keepImage } as never);
     expect(keepImage).toHaveBeenCalledTimes(1);
     expect(attachImage).not.toHaveBeenCalled();
