@@ -412,6 +412,21 @@ describe('describePage', () => {
     expect(at('keep the subscription').identities).toEqual(keep.identities);
   });
 
+  it('binds action state and selected choices while ignoring focus and explicit false', () => {
+    const at = (state: string) => view(`- checkbox "Remember" [ref=e1]${state ? ` ${state}` : ''} [box=0,0,20,20]`)!.identities.get('e1');
+    expect(at('[checked]')).not.toBe(at(''));
+    expect(at('[checked=mixed]')).not.toBe(at('[checked]'));
+    expect(at('[checked=false]')).toBe(at(''));
+    expect(at('[active]')).toBe(at(''));
+    const selected = (choice: number) => view([
+      '- listbox "Plan" [ref=e1] [box=0,0,100,100]:',
+      `  - option "Alpha"${choice === 0 ? ' [selected]' : ''} [box=0,0,0,0]`,
+      `  - option "Beta"${choice === 1 ? ' [selected]' : ''} [box=0,0,0,0]`,
+    ].join('\n'))!;
+    expect(selected(0).identities.get('e1')).not.toBe(selected(1).identities.get('e1'));
+    expect(selected(0).text).toContain('options "Alpha", "Beta"');
+  });
+
   it('keeps a control the same when only what is typed into the page has changed', () => {
     const at = (typed: string) => view([
       '- main [ref=e1] [box=0,0,1280,800]:',

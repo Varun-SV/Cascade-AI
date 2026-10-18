@@ -3168,10 +3168,11 @@ export class RemoteBrowserController {
       const after = await this.privateOnScreen(page, stoppable);
       if (after) return { withheld: after };
       if (marked) {
-        const current = await this.pageView(held, stoppable, false);
+        const current = await this.pageView(held, stoppable, false, false);
         if (!current || !sameDocument(seen.document, held) || !sameRoute(seen.document, page.url())
-          || JSON.stringify(current.view.marks) !== JSON.stringify(seen.view.marks)) {
-          return { withheld: 'No screenshot: the controls moved while it was being looked at.' };
+          || JSON.stringify(current.view.marks) !== JSON.stringify(seen.view.marks)
+          || JSON.stringify([...current.view.identities]) !== JSON.stringify([...seen.view.identities])) {
+          return { withheld: 'No screenshot: the controls changed while it was being looked at.' };
         }
       }
       const picture = Buffer.from(bytes);
@@ -3769,15 +3770,16 @@ type DomNode = {
 /** Inputs that take no typed text: nothing for a picture to give away. */
 const NOT_TYPED = new Set(['hidden', 'checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'range', 'color', 'file']);
 
-/** A field someone types into: an input of a typed kind, a text area, an editable element. */
+/** Closed-root fields whose displayed contents Playwright cannot check for privacy. */
 function typedField(node: DomNode): boolean {
   if (node.nodeType !== undefined && node.nodeType !== 1) return false;
   const attrs = new Map<string, string>();
   for (let i = 0; i + 1 < (node.attributes?.length ?? 0); i += 2) attrs.set(node.attributes![i]!.toLowerCase(), node.attributes![i + 1]!);
   const editable = attrs.get('contenteditable');
   if (editable !== undefined && editable.toLowerCase() !== 'false') return true;
+  if ((attrs.get('role') ?? '').toLowerCase().split(/\s+/).some((role) => ['textbox', 'searchbox', 'combobox', 'listbox', 'spinbutton'].includes(role))) return true;
   const name = node.nodeName?.toUpperCase();
-  return name === 'TEXTAREA' || (name === 'INPUT' && !NOT_TYPED.has((attrs.get('type') ?? 'text').toLowerCase()));
+  return name === 'TEXTAREA' || name === 'SELECT' || (name === 'INPUT' && !NOT_TYPED.has((attrs.get('type') ?? 'text').toLowerCase()));
 }
 
 /**

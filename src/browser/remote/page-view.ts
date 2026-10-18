@@ -68,8 +68,9 @@ export interface PageView {
   labels: Map<string, string>;
   /**
    * What each listed ref is, in full — a digest of its role and all of its
-   * name, not the cut one `labels` shows. A control renamed only past the cut
-   * keeps its label; this is how it is told apart. Never shown.
+   * name, not the cut one `labels` shows, plus its action state and selected
+   * choices. Focus is excluded. A control renamed only past the cut keeps
+   * its label; this is how it is told apart. Never shown.
    */
   identities: Map<string, string>;
   /**
@@ -447,7 +448,9 @@ function describe(
     : node.role === 'generic' ? 'clickable' : `clickable ${node.role}`;
   // A field is named by its name alone: its inline text and its children are
   // what was typed into it.
-  const raw = TYPED.has(node.role) ? node.name ?? '' : node.name || node.inline || textWithin(node, IDENTITY_TEXT_MAX);
+  const options = node.role === 'combobox' || node.role === 'listbox' ? optionsOf(node) : [];
+  const choices = options.filter((option) => option.attrs['selected'] === true || option.attrs['selected'] === 'true');
+  const raw = TYPED.has(node.role) || options.length > 0 ? node.name ?? '' : node.name || node.inline || textWithin(node, IDENTITY_TEXT_MAX);
   const scrubbed = scrub(raw);
   const label = clean(scrubbed, NAME_LIMIT);
   // All of the name, where the label is cut: a control that keeps the label's
@@ -457,6 +460,13 @@ function describe(
   const identity = createHash('sha256')
     .update(`${node.role}\0${scrubbed}\0`)
     .update(raw.length > SCRUB_TEXT_MAX ? raw.slice(SCRUB_TEXT_MAX, IDENTITY_TEXT_MAX) : '')
+    // Focus may move as ordinary fields are filled. Action state must not:
+    // clicking a toggle whose state changed can perform the opposite action.
+    .update(JSON.stringify(STATES.filter(([attr]) => attr !== 'active').map(([attr]) => {
+      const value = node.attrs[attr];
+      return [attr, value === true || value === 'true' ? true : value === undefined || value === 'false' ? false : value];
+    })))
+    .update(JSON.stringify(choices.map((option) => option.name ?? '')))
     .digest('base64');
   const named = `${role}${label ? ` "${label}"` : ''}`;
   let line = `[${ref}] ${named}`;
@@ -464,15 +474,13 @@ function describe(
   const notes: string[] = [];
   let listedOptions: Shown['options'];
   if (node.role === 'heading' && typeof node.attrs['level'] === 'string') notes.push(`level ${node.attrs['level']}`);
-  if (TYPED.has(node.role)) {
-    const chosen = chosenOption(node);
-    if (chosen) {
+  if (TYPED.has(node.role) || options.length > 0) {
+    if (options.length > 0) {
       // A native select's choice is one of the page's own option labels, not
       // something a person typed.
-      line += `: "${clean(scrub(chosen.name ?? ''), NAME_LIMIT)}"`;
+      if (choices.length) line += `: ${choices.slice(0, OPTIONS_SHOWN).map((option) => `"${clean(scrub(option.name ?? ''), NAME_LIMIT)}"`).join(', ')}${choices.length > OPTIONS_SHOWN ? `, and ${choices.length - OPTIONS_SHOWN} more chosen` : ''}`;
       // And what else it offers, by the text select_option takes: a closed
       // select's options take no space, so they are not listed on their own.
-      const options = optionsOf(node);
       // Keep complete private metadata for ambiguity checks, including options
       // after the displayed subset. Only the first ten enter the model's view.
       listedOptions = options
@@ -536,7 +544,8 @@ function textWithin(node: SnapshotNode, limit: number): string {
 
 /** The option a native select shows as chosen. */
 function chosenOption(node: SnapshotNode): SnapshotNode | undefined {
-  return node.role === 'combobox' ? optionsOf(node).find((o) => o.attrs['selected']) : undefined;
+  return node.role === 'combobox' || node.role === 'listbox'
+    ? optionsOf(node).find((o) => o.attrs['selected'] === true || o.attrs['selected'] === 'true') : undefined;
 }
 
 /** A list's options, wherever its groups put them. */

@@ -4905,6 +4905,33 @@ describe('page views and refs', () => {
     expect(page.calls.filter((x) => x.startsWith('snapshot:'))).toEqual([]);
   });
 
+  it('refuses a toggle whose state changed after the shown view', async () => {
+    for (const [role, state] of [['checkbox', 'checked'], ['switch', 'checked'], ['button', 'pressed'], ['tab', 'selected'], ['button', 'expanded']]) {
+      snapshot = `- ${role} "Toggle" [ref=e5] [box=84,0,32,25]`;
+      const c = controller();
+      await c.controller({ kind: 'observe' }, ctx(`state-${role}-${state}`, 'w1'));
+      snapshot = `${snapshot} [${state}]`;
+      page.calls = [];
+      const out = await c.controller({ kind: 'click', ref: 'e5' }, ctx(`state-${role}-${state}`, 'w1'));
+      expect(out.ok, `${role} ${state}`).toBe(false);
+      expect(page.calls).not.toContain('aria-ref=e5 click');
+    }
+  });
+
+  it('rejects ambiguous listbox and unselected combobox options', async () => {
+    for (const role of ['listbox', 'combobox']) {
+      snapshot = `- ${role} "Plans" [ref=e11] [box=10,10,200,200]:\n`
+        + Array.from({ length: 11 }, (_, i) => `  - option "Plan ${i}" [box=0,0,0,0]`).join('\n')
+        + '\n  - option "Same plan" [box=0,0,0,0]\n  - option "Same plan" [box=0,0,0,0]';
+      const c = controller();
+      await c.controller({ kind: 'observe' }, ctx(`options-${role}`, 'w1'));
+      page.calls = [];
+      const out = await c.controller({ kind: 'select_option', ref: 'e11', value: 'Same plan' }, ctx(`options-${role}`, 'w1'));
+      expect(out.ok, role).toBe(false);
+      expect(page.calls.some((call) => call.includes('selectOption'))).toBe(false);
+    }
+  });
+
   it('refuses duplicate options outside the displayed subset', async () => {
     const long = 'A choice whose full label extends beyond the displayed option name';
     for (const value of ['Hidden choice', long]) {
@@ -5622,7 +5649,30 @@ describe('page views and refs', () => {
       };
       const out = await controller().controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
       expect(out.image).toBeUndefined();
-      expect(out.view!.text).toContain('controls moved');
+      expect(out.view!.text).toContain('controls changed');
+    });
+
+    it('does not retain an unseen renamed control from marked screenshot validation', async () => {
+      const shoot = extra['screenshot'] as (opts: unknown) => Promise<Uint8Array>;
+      extra['screenshot'] = async (opts: unknown) => {
+        snapshot = BOOKING.replace('button "Account"', 'button "Delete account"');
+        return shoot(opts);
+      };
+      const c = controller();
+      const seen = await c.controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
+      expect(seen.view!.labels.e5).toBe('button "Account"');
+      page.calls = [];
+      const clicked = await c.controller({ kind: 'click', ref: 'e5', expectDocument: seen.document }, ctx('run', 'w1'));
+      expect(clicked.ok).toBe(false);
+      expect(page.calls).not.toContain('aria-ref=e5 click');
+      expect(seen.image).toBeUndefined();
+    });
+
+    it('does not advance the shown view number for a private marked validation', async () => {
+      const c = controller();
+      await c.controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
+      const next = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+      expect(next.view!.text).toMatch(/^\[Page view 2\]/);
     });
 
     it('rejects an oversized viewport before invoking screenshot', async () => {
@@ -5670,6 +5720,21 @@ describe('page views and refs', () => {
         expect(cdp.calls).toContainEqual({ method: 'DOM.getDocument', params: { depth: -1, pierce: true } });
       });
 
+      it('withholds native and semantic selection fields inside closed roots', async () => {
+        for (const inside of [
+          { nodeName: 'SELECT', attributes: ['autocomplete', 'cc-exp-month'] },
+          { nodeName: 'SELECT', attributes: ['autocomplete', 'cc-exp-year'] },
+          { nodeName: 'SELECT', attributes: ['name', 'expiry'] },
+          { nodeName: 'DIV', attributes: ['role', 'combobox'] },
+          { nodeName: 'DIV', attributes: ['role', 'listbox'] },
+        ]) {
+          cdp.dom = shadowed(inside);
+          cdp.boxes.set(4, ON_SCREEN);
+          const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+          expect(out.image, JSON.stringify(inside)).toBeUndefined();
+        }
+      });
+
       it('looks inside an iframe of the same process, and at editable text', async () => {
         cdp.dom = { nodeId: 1, nodeType: 9, nodeName: '#document', children: [
           { nodeId: 5, nodeType: 1, nodeName: 'IFRAME', contentDocument: shadowed({ nodeName: 'DIV', attributes: ['contenteditable', ''] }) },
@@ -5685,6 +5750,8 @@ describe('page views and refs', () => {
           [{ nodeName: 'INPUT' }, undefined],
           [{ nodeName: 'INPUT', attributes: ['type', 'checkbox'] }, ON_SCREEN],
           [{ nodeName: 'INPUT', attributes: ['type', 'hidden'] }, ON_SCREEN],
+          [{ nodeName: 'SELECT' }, [10, 2000, 200, 2000, 200, 2020, 10, 2020]],
+          [{ nodeName: 'SELECT' }, ON_SCREEN, 'open'],
           // An open root is Playwright's to read, and it found nothing there.
           [{ nodeName: 'INPUT' }, ON_SCREEN, 'open'],
         ];
