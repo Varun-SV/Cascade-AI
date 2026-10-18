@@ -670,6 +670,7 @@ interface RunBrowser {
    */
   view?: {
     page: Page;
+    document: string;
     documents: number;
     frames: number;
     labels: Map<string, string>;
@@ -681,7 +682,7 @@ interface RunBrowser {
    * Main documents loaded into the current page: bumped by a load, not by a
    * history change. A view's refs belong to the document it was taken of —
    * Playwright gives each new one its own — while `pushState`, `replaceState`
-   * and hash changes keep the document, and the refs, as they were.
+   * and hash changes keep the document. Refs still require the observed route.
    */
   documents?: number;
   /**
@@ -3103,7 +3104,7 @@ export class RemoteBrowserController {
         kept = true;
         held.views = (held.views ?? 0) + 1;
         held.view = {
-          page, documents, frames, labels: view.labels, identities: view.identities, options: view.options, framed: view.framed,
+          page, document, documents, frames, labels: view.labels, identities: view.identities, options: view.options, framed: view.framed,
         };
       };
       if (show) keep();
@@ -3424,15 +3425,13 @@ export class RemoteBrowserController {
     // another page under a selector while the person decides — /cart to
     // /account — and the selector would find whatever that page has there.
     // An app can do the same without loading anything, by changing its route,
-    // so an action not aimed at a ref must also still be at the address it
-    // was planned at. A ref needs only its document: its label is checked
-    // below, and it stays good while a map or a feed rewrites the address.
+    // so selectors need the exact address. Refs need the observed route too:
+    // a retained control can have a new handler on another route, without any
+    // change to its label. Feed queries and in-page anchors can still move.
     if (action.expectDocument) {
       const moved = !sameDocument(action.expectDocument, held)
         ? 'The page has loaded something else since it was last looked at, so this was not done. Call observe to see it now.'
-        : !action.ref && !samePlace(action.expectDocument, held, page.url())
-          // A page that rewrites its address as it goes — a map, a feed —
-          // does so again before the next try; a ref is not held to it.
+        : !(action.ref ? sameRoute(action.expectDocument, page.url()) : samePlace(action.expectDocument, held, page.url()))
           ? 'The page has moved to another address since it was last looked at, so this was not done. Call observe and act on a ref from it.'
           : undefined;
       if (moved) return { ok: false, detail: moved, ...(await where()) };
@@ -3547,11 +3546,12 @@ export class RemoteBrowserController {
       if (bind && !element) return { ok: false, detail: 'The observed element is no longer on the page.', ...(await where()) };
       if (action.kind !== 'navigate' && (held.page !== page || !sameDocument(actedOn!, held)
         || (action.ref && frameMoved(held, action.ref))
+        || (action.ref && !sameRoute(actedOn!, page.url()))
         || hostOf(page.url()) !== hostOf(readPlace(actedOn!)?.[1])
         || (!action.ref && held.generation !== planned)
         || (action.expectSite && hostOf(page.url()) !== action.expectSite)
         || (action.expectDocument && (!sameDocument(action.expectDocument, held)
-          || (!action.ref && !samePlace(action.expectDocument, held, page.url())))))) {
+          || !(action.ref ? sameRoute(action.expectDocument, page.url()) : samePlace(action.expectDocument, held, page.url())))))) {
         return { ok: false, detail: 'The page changed while this action was being checked, so it was not run. Call observe for a fresh page view.', ...(await where()) };
       }
       const actual = element ?? target;
@@ -3974,6 +3974,9 @@ function refRefusal(held: RunBrowser, ref: string): string | null {
   if (!held.view) return `There is no page view to take ${ref} from. Call observe first.`;
   if (held.view.page !== held.page || held.view.documents !== (held.documents ?? 0)) {
     return `${ref} is from an earlier page. Call observe for a fresh page view.`;
+  }
+  if (!sameRoute(held.view.document, held.page.url())) {
+    return `${ref} is from another route. Call observe for a fresh page view.`;
   }
   if (frameMoved(held, ref)) return FRAME_MOVED(ref);
   if (!held.view.labels.has(ref)) return `${ref} is not in the latest page view. Use a ref from it, or call observe again.`;

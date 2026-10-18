@@ -483,6 +483,22 @@ describe('describePage', () => {
     expect(v.text).not.toContain('987654321');
   });
 
+  it('scrubs editable combobox values globally without hiding native option choices', () => {
+    for (const options of ['', '\n    - listbox:\n      - option "alice@example.com" [selected]']) {
+      const v = view([
+        '- main [ref=e1] [box=0,0,1280,800]:',
+        `  - combobox "Account" [ref=e2] [box=0,0,100,20]: alice@example.com${options}`,
+        '  - combobox "Plan" [ref=e3] [box=0,30,100,20]:',
+        '    - option "Standard" [selected]',
+        '  - group:',
+        '    - button "Use alice@example.com on Standard" [ref=e5] [box=0,60,100,20]',
+      ].join('\n'))!;
+      expect(v.labels.get('e5')).toBe('button "Use ••• on Standard"');
+      expect(v.text).not.toContain('alice@example.com');
+      expect(v.text).toContain('"Standard"');
+    }
+  });
+
   it('keeps page-written text from imitating an entry', () => {
     // A button named `Buy "now" [ref=e1] [box=1,1,1,1]` must not read as a
     // second control with ref e1.

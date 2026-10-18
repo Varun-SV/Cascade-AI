@@ -5121,7 +5121,7 @@ describe('page views and refs', () => {
     expect(out.ok).toBe(true);
   });
 
-  it('does not act by selector after an app moved to another route, but does by ref', async () => {
+  it('does not act by selector or ref after an app moved to another route', async () => {
     // pushState from /cart to /account: no load, the same document, and a
     // selector that finds what the new route put there.
     const c = controller();
@@ -5135,10 +5135,40 @@ describe('page views and refs', () => {
     const unaimed = await c.controller({ kind: 'press', key: 'Enter', expectDocument: seen.document }, ctx('run', 'w1'));
     expect(unaimed.ok).toBe(false);
     expect(page.calls.filter((x) => !x.startsWith('snapshot:'))).toEqual([]);
-    // A ref is checked by its label instead, which a route change that left
-    // the control as it was does not touch.
+    // Keeping the same DOM control and label does not prove its handler still
+    // has the semantics approved on the previous route.
     const byRef = await c.controller({ kind: 'click', ref: 'e5', expectDocument: seen.document }, ctx('run', 'w1'));
-    expect(byRef.ok).toBe(true);
+    expect(byRef.ok).toBe(false);
+    expect(page.calls).not.toContain('aria-ref=e5 click');
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(false);
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(true);
+  });
+
+  it('refuses SPA route changes during ref checks, including after element binding', async () => {
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    const snap = extra['ariaSnapshot'] as (opts: unknown) => Promise<string>;
+    for (const phase of ['count', 'snapshot', 'binding']) {
+      for (const route of ['https://start.test/account', 'https://start.test/#/account']) {
+        page.currentUrl = 'https://start.test/';
+        const c = controller();
+        const session = `route-${phase}-${route}`;
+        const seen = await c.controller({ kind: 'observe' }, ctx(session, 'w1'));
+        const move = () => page.replaceState(route);
+        if (phase === 'snapshot') extra['ariaSnapshot'] = async (opts: unknown) => { move(); return snap(opts); };
+        else extra['locator'] = (selector: string) => ({ ...locate(selector),
+          ...(phase === 'count' ? { count: async () => { move(); return 1; } } : {
+            async elementHandle() { move(); return (locate(selector).elementHandle as () => Promise<unknown>).call(this); },
+          }),
+        });
+        page.calls = [];
+        expect((await c.controller({ kind: 'click', ref: 'e5', expectDocument: seen.document }, ctx(session, 'w1'))).ok).toBe(false);
+        expect(page.calls).not.toContain('aria-ref=e5 click');
+        extra['locator'] = locate;
+        extra['ariaSnapshot'] = snap;
+        await c.endRun(session);
+      }
+    }
   });
 
   it('keeps the refs the model was shown when a check looked at the page again', async () => {

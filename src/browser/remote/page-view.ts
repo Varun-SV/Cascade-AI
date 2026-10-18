@@ -720,14 +720,14 @@ function overlap(text: string, value: string): number {
 }
 
 /**
- * What is typed into the page's text boxes, long enough to hide by itself.
- * Not searches or comboboxes: a query, or a choice from a list, is what the
- * page goes on to show, and hiding it everywhere would hide the answer.
+ * What is typed into the page's ordinary fields, long enough to hide by
+ * itself. Search queries remain visible in results. A combobox's typed text
+ * is private too; typedParts skips native option choices and listbox options.
  */
 function textboxValues(roots: SnapshotNode[]): string[] {
   const found = new Set<string>();
   const walk = (n: SnapshotNode): void => {
-    if (n.role === 'textbox' || n.role === 'spinbutton') {
+    if (n.role === 'textbox' || n.role === 'spinbutton' || n.role === 'combobox') {
       for (const v of [fieldValue(n), ...typedParts(n)]) {
         const value = v.replace(/\s+/g, ' ').trim();
         if (value.length >= SHORT_VALUE) found.add(value);
