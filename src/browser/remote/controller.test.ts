@@ -5046,6 +5046,33 @@ describe('page views and refs', () => {
     }
   });
 
+  it('refuses same-length substituted field values without exposing them', async () => {
+    for (const role of ['textbox', 'spinbutton', 'combobox', 'searchbox']) {
+      for (const kind of ['fill', 'press'] as const) {
+        snapshot = `- ${role} "Account" [ref=e5] [box=0,0,100,20]: "alpha9"`;
+        const c = controller();
+        const observed = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+        snapshot = snapshot.replace('alpha9', 'bravo9');
+        page.calls = [];
+        const refused = await c.controller({ kind, ref: 'e5', key: 'Enter', value: 'replacement' }, ctx('run', 'w1'));
+        expect(refused.ok, `${role} ${kind}`).toBe(false);
+        expect(page.calls.some((call) => call.includes(' fill ') || call.includes(' press '))).toBe(false);
+        for (const secret of ['alpha9', 'bravo9']) expect(JSON.stringify([observed, refused])).not.toContain(secret);
+      }
+    }
+  });
+
+  it('can scroll to a ref wholly outside the viewport horizontally', async () => {
+    snapshot = `${BOOKING}\n  - button "Carousel item" [ref=e30] [box=1500,20,100,20]`;
+    liveRefs.add('e30');
+    const c = controller();
+    const observed = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(observed.view!.labels['e30']).toBe('button "Carousel item"');
+    page.calls = [];
+    expect((await c.controller({ kind: 'scroll', ref: 'e30' }, ctx('run', 'w1'))).ok).toBe(true);
+    expect(page.calls).toContain('aria-ref=e30 scrollIntoView');
+  });
+
   it('never passes Playwright a zero or unbounded ref-action timeout', async () => {
     const c = controller();
     await c.controller({ kind: 'observe' }, ctx('run', 'w1'));

@@ -545,6 +545,30 @@ describe('describePage', () => {
     expect(v.labels.has('e999')).toBe(false);
   });
 
+  it('retains left and right off-screen refs without drawing marks over them', () => {
+    const v = view([
+      '- button "Left" [ref=e1] [box=-110,20,100,20]',
+      '- button "Right" [ref=e2] [box=1281,20,100,20]',
+      '- button "Visible" [ref=e3] [box=10,20,100,20]',
+    ].join('\n'))!;
+    expect(v.labels.get('e1')).toBe('button "Left"');
+    expect(v.labels.get('e2')).toBe('button "Right"');
+    expect(v.text).toContain('To the left or right');
+    expect(v.marks.map((mark) => mark.ref)).toEqual(['e3']);
+  });
+
+  it('shares the off-screen cap and counts horizontal overflow', () => {
+    const snapshot = [
+      ...Array.from({ length: BELOW_LIMIT + 3 }, (_, i) => `- button "Right ${i}" [ref=e${i}] [box=1500,20,100,20]`),
+      '- button "Below" [ref=e999] [box=0,1000,100,20]',
+    ].join('\n');
+    const v = view(snapshot)!;
+    expect(v.labels.size).toBe(BELOW_LIMIT);
+    expect(v.text).toContain('3 to the left or right');
+    expect(v.text).toContain('1 further down');
+    expect(v.marks).toEqual([]);
+  });
+
   it('scrolled down, what is above is counted and what is now on screen is listed', () => {
     const snapshot = [
       '- main [ref=e1] [box=0,-900,1280,2000]:',

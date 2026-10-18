@@ -303,7 +303,7 @@ interface Entry {
   framed: boolean;
   box?: SnapshotNode['box'];
   heading: boolean;
-  where: 'view' | 'below' | 'above';
+  where: 'view' | 'below' | 'above' | 'side';
 }
 
 /** An entry as the view shows it. */
@@ -369,10 +369,11 @@ export function describePage(input: {
   const view = entries.filter((e) => e.where === 'view');
   const below = entries.filter((e) => e.where === 'below');
   const above = entries.filter((e) => e.where === 'above');
+  const side = entries.filter((e) => e.where === 'side');
 
   const lines = viewHeader(input);
   // Room for the headings and the "Not listed" line, which are short.
-  let room = VIEW_MAX_CHARS - lines.join('\n').length - 200;
+  let room = VIEW_MAX_CHARS - lines.join('\n').length - 300;
   const fit = (list: Entry[], limit: number): Shown[] => {
     const out: Shown[] = [];
     for (const e of list.slice(0, limit)) {
@@ -392,24 +393,30 @@ export function describePage(input: {
     return out;
   };
   const shownView = fit(view, VIEW_LIMIT);
-  const shownBelow = fit(below, BELOW_LIMIT);
+  // Sideways controls need refs to scroll to: the generic scroll action is
+  // vertical. Share the existing off-screen cap rather than enlarging views.
+  const shownSide = fit(side, BELOW_LIMIT);
+  const shownBelow = fit(below, BELOW_LIMIT - shownSide.length);
+  const shownEntries = [...shownView, ...shownBelow, ...shownSide];
   lines.push('', 'On screen:');
   if (shownView.length) lines.push(...shownView.map((e) => e.line));
   else lines.push('(no controls on screen)');
   if (shownBelow.length) lines.push('', 'Further down:', ...shownBelow.map((e) => e.line));
+  if (shownSide.length) lines.push('', 'To the left or right (scroll to a ref):', ...shownSide.map((e) => e.line));
 
   const unlisted: string[] = [];
   if (view.length > shownView.length) unlisted.push(`${view.length - shownView.length} more on screen`);
   if (below.length > shownBelow.length) unlisted.push(`${below.length - shownBelow.length} further down`);
+  if (side.length > shownSide.length) unlisted.push(`${side.length - shownSide.length} to the left or right`);
   if (above.length) unlisted.push(`${above.length} above`);
   if (unlisted.length) lines.push('', `Not listed: ${unlisted.join(', ')}. Scroll to see them.`);
 
   return {
     text: lines.join('\n'),
-    labels: new Map([...shownView, ...shownBelow].map((e) => [e.ref, e.label])),
-    identities: new Map([...shownView, ...shownBelow].map((e) => [e.ref, e.identity])),
-    options: new Map([...shownView, ...shownBelow].flatMap((e) => (e.options ? [[e.ref, e.options] as const] : []))),
-    framed: new Set([...shownView, ...shownBelow].filter((e) => e.framed).map((e) => e.ref)),
+    labels: new Map(shownEntries.map((e) => [e.ref, e.label])),
+    identities: new Map(shownEntries.map((e) => [e.ref, e.identity])),
+    options: new Map(shownEntries.flatMap((e) => (e.options ? [[e.ref, e.options] as const] : []))),
+    framed: new Set(shownEntries.filter((e) => e.framed).map((e) => e.ref)),
     marks: shownView.flatMap((e) => {
       if (!e.box || e.heading) return [];
       // A control can extend outside a scrolled iframe. Mark only the part
@@ -430,11 +437,13 @@ function placement(node: SnapshotNode, viewport: Viewport | undefined): Entry['w
   if (box.w <= 0 || box.h <= 0) return null;
   // Scrolled out of sight inside its frame: reached by scrolling, as one
   // further down the page is — not drawn over whatever the page shows there.
-  if (clip && intersect(clip, box).w * intersect(clip, box).h === 0) return 'below';
+  if (clip && intersect(clip, box).w * intersect(clip, box).h === 0) {
+    return box.x >= clip.x + clip.w || box.x + box.w <= clip.x ? 'side' : 'below';
+  }
   if (!viewport) return 'view';
   if (box.y >= viewport.height) return 'below';
   if (box.y + box.h <= 0) return 'above';
-  if (box.x >= viewport.width || box.x + box.w <= 0) return null;
+  if (box.x >= viewport.width || box.x + box.w <= 0) return 'side';
   return 'view';
 }
 
@@ -450,7 +459,8 @@ function describe(
   // what was typed into it.
   const options = node.role === 'combobox' || node.role === 'listbox' ? optionsOf(node) : [];
   const choices = options.filter((option) => option.attrs['selected'] === true || option.attrs['selected'] === 'true');
-  const typedChars = TYPED.has(node.role) ? [...fieldValue(node)].length : 0;
+  const typedValue = TYPED.has(node.role) ? fieldValue(node) : undefined;
+  const typedChars = typedValue === undefined ? 0 : [...typedValue].length;
   const raw = TYPED.has(node.role) || options.length > 0 ? node.name ?? '' : node.name || node.inline || textWithin(node, IDENTITY_TEXT_MAX);
   const scrubbed = scrub(raw);
   const label = clean(scrubbed, NAME_LIMIT);
@@ -469,9 +479,10 @@ function describe(
     })))
     .update(JSON.stringify(choices.map((option) => option.name ?? '')))
     .update(node.role === 'slider' ? `\0${node.inline ?? ''}` : '')
-    // Match the privacy-safe fill state shown in the view, without retaining
-    // the text itself in the identity input.
-    .update(TYPED.has(node.role) ? `\0filled:${typedChars}` : '')
+    // A private digest detects even same-length substitutions. Only the
+    // final identity stays in controller memory; viewOutcome exposes neither
+    // this digest nor the field value to the model or its history.
+    .update(typedValue === undefined ? '' : createHash('sha256').update(typedValue).digest())
     .digest('base64');
   const named = `${role}${label ? ` "${label}"` : ''}`;
   let line = `[${ref}] ${named}`;
