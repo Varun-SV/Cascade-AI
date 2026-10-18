@@ -4797,7 +4797,7 @@ describe('page views and refs', () => {
     }
   });
 
-  it('refuses a frame navigation during element binding but permits a same-document history change', async () => {
+  it('refuses frame and history navigation during element binding', async () => {
     const locate = extra['locator'] as (s: string) => Record<string, unknown>;
     snapshot = `${BOOKING}\n  - iframe [ref=e20] [box=0,300,400,100]:\n    - button "Next" [ref=f1e2] [box=8,8,40,20]`;
     liveRefs.add('f1e2');
@@ -4811,10 +4811,10 @@ describe('page views and refs', () => {
     expect((await c.controller({ kind: 'click', ref: 'f1e2' }, ctx('run', 'w1'))).ok).toBe(false);
     expect(page.calls).not.toContain('aria-ref=f1e2 click');
     extra['locator'] = (selector: string) => ({ ...locate(selector), async elementHandle() {
-      page.replaceState('https://start.test/?at=2');
+      page.replaceState('https://start.test/#details');
       return (locate(selector).elementHandle as () => Promise<unknown>).call(this);
     } });
-    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(true);
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(false);
   });
 
   it('refuses a ref renamed only past what its label shows', async () => {
@@ -5025,14 +5025,13 @@ describe('page views and refs', () => {
     expect(Date.now() - started).toBeLessThan(5_000);
   }, 10_000);
 
-  it('keeps refs through a history change, which keeps the document', async () => {
-    // Map pages and scroll-spy docs call replaceState every few hundred ms.
+  it('requires fresh refs after hash state changes', async () => {
     const c = controller();
     await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
-    page.replaceState('https://start.test/?at=2');
-    page.replaceState('https://start.test/?at=3');
+    page.replaceState('https://start.test/#details');
+    page.replaceState('https://start.test/#summary');
     const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
-    expect(out.ok).toBe(true);
+    expect(out.ok).toBe(false);
   });
 
   it('reads a ref Playwright refuses as naming a gone frame as no longer on the page', async () => {
@@ -5149,7 +5148,7 @@ describe('page views and refs', () => {
     const locate = extra['locator'] as (s: string) => Record<string, unknown>;
     const snap = extra['ariaSnapshot'] as (opts: unknown) => Promise<string>;
     for (const phase of ['count', 'snapshot', 'binding']) {
-      for (const route of ['https://start.test/account', 'https://start.test/#/account']) {
+      for (const route of ['https://start.test/account', 'https://start.test/#/account', 'https://start.test/?order=456', 'https://start.test/#order456']) {
         page.currentUrl = 'https://start.test/';
         const c = controller();
         const session = `route-${phase}-${route}`;
@@ -5169,6 +5168,30 @@ describe('page views and refs', () => {
         await c.endRun(session);
       }
     }
+  });
+
+  it('refuses a retained ref when query state changes after approval', async () => {
+    const c = controller();
+    page.currentUrl = 'https://start.test/checkout?order=123';
+    const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.replaceState('https://start.test/checkout?order=456');
+    page.calls = [];
+    expect((await c.controller({ kind: 'click', ref: 'e5', expectDocument: seen.document }, ctx('run', 'w1'))).ok).toBe(false);
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(false);
+    expect(page.calls).not.toContain('aria-ref=e5 click');
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(true);
+  });
+
+  it('refuses slider input after its displayed value changed', async () => {
+    snapshot = `${BOOKING}\n  - slider "Volume" [ref=e30] [box=0,300,120,20]: "40"`;
+    liveRefs.add('e30');
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    snapshot = snapshot.replace(': "40"', ': "90"');
+    page.calls = [];
+    expect((await c.controller({ kind: 'press', ref: 'e30', key: 'ArrowRight' }, ctx('run', 'w1'))).ok).toBe(false);
+    expect(page.calls).not.toContain('aria-ref=e30 press ArrowRight');
   });
 
   it('keeps the refs the model was shown when a check looked at the page again', async () => {
@@ -5439,7 +5462,7 @@ describe('page views and refs', () => {
 
     it('drops a picture taken as an app moved to another route', async () => {
       // /cart's controls with /account's pixels: a page the list does not describe.
-      for (const route of ['https://start.test/account', 'https://start.test/#/account']) {
+      for (const route of ['https://start.test/account', 'https://start.test/#/account', 'https://start.test/?order=456', 'https://start.test/#order456']) {
         page.currentUrl = 'https://start.test/';
         extra['screenshot'] = async () => { page.replaceState(route); return SHOT; };
         const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
@@ -5448,11 +5471,8 @@ describe('page views and refs', () => {
       }
     });
 
-    it('keeps a picture taken while the page changed only its query or place, or a frame in it loaded', async () => {
-      // A feed's ?at=, a scroll-spy's #section: the same page, as described.
+    it('keeps a clean picture when only a frame loaded', async () => {
       for (const meanwhile of [
-        () => page.replaceState('https://start.test/?slide=2'),
-        () => page.replaceState('https://start.test/#pricing'),
         () => page.requestNavigation(SUB_FRAME),
       ]) {
         extra['screenshot'] = async () => { meanwhile(); return SHOT; };
@@ -6010,6 +6030,29 @@ describe('page views and refs', () => {
       // The fake CDP answers none of the drawing calls.
       const out = await controller().controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
       expect(out.image?.data).toBe(SHOT64);
+    });
+
+    it('retries transient failed marks on unchanged pixels before caching the marked image', async () => {
+      const send = cdp.send;
+      let attempts = 0;
+      cdp.send = async (method: string, params?: Record<string, unknown>) => {
+        if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'MAIN' } } };
+        if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 };
+        if (method === 'Runtime.evaluate') {
+          attempts++;
+          return attempts === 1 ? {} : { result: { value: 'TUFSS0VE' } };
+        }
+        return send(method, params);
+      };
+      try {
+        const c = controller();
+        const step = () => c.controller({ kind: 'click', selector: '#next', pageView: true, screenshot: true, marked: true }, ctx('run', 'w1'));
+        expect((await step()).image?.data).toBe(SHOT64);
+        expect((await step()).image?.data).toBe('TUFSS0VE');
+        expect(attempts).toBe(2);
+        expect((await step()).imageUnchanged).toBe(true);
+        expect(attempts).toBe(2);
+      } finally { cdp.send = send; }
     });
 
     it('sends the clean picture when drawing the marks never finishes', async () => {

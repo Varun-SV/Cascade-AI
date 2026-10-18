@@ -3196,10 +3196,12 @@ export class RemoteBrowserController {
       // ones — is another picture.
       const print = createHash('sha256').update(picture).update(marked ? JSON.stringify(seen.view.marks) : '').digest('base64');
       if (!always && held.shotOf === print) return { unchanged: true };
-      held.shotOf = print;
       // The marks go on a copy; if they cannot be drawn, the clean picture is
-      // still worth sending.
-      const data = marked ? (await this.marked(page, clean, size, seen.view)) ?? clean : clean;
+      // still worth sending. A failed drawing must be retried next time:
+      // caching the intended marks would claim an image nobody received.
+      const drawn = marked ? await this.marked(page, clean, size, seen.view) : null;
+      const data = drawn ?? clean;
+      held.shotOf = marked && !drawn ? undefined : print;
       return { image: { data, mimeType: 'image/jpeg', ...size } };
     } catch {
       return { withheld: 'No screenshot: the picture could not be taken.' };
@@ -3425,9 +3427,10 @@ export class RemoteBrowserController {
     // another page under a selector while the person decides — /cart to
     // /account — and the selector would find whatever that page has there.
     // An app can do the same without loading anything, by changing its route,
-    // so selectors need the exact address. Refs need the observed route too:
+    // so every action needs the observed address:
     // a retained control can have a new handler on another route, without any
-    // change to its label. Feed queries and in-page anchors can still move.
+    // change to its label. Query and hash state can identify another order
+    // or account just as a different path can.
     if (action.expectDocument) {
       const moved = !sameDocument(action.expectDocument, held)
         ? 'The page has loaded something else since it was last looked at, so this was not done. Call observe to see it now.'
@@ -3943,10 +3946,8 @@ function sameDocument(token: string, held: RunBrowser): boolean {
 }
 
 /**
- * And on the same route: the same path, and the same hash where it names one
- * (`#/account`). Not the query, nor a hash that marks a place in the page —
- * a feed or a scroll-spy rewrites those as it goes, and a picture taken then
- * still shows the page the view describes.
+ * And at the same address, including query and hash state: either can select
+ * another order or account without replacing the document or named control.
  */
 function sameRoute(token: string, url: string): boolean {
   const place = readPlace(token);
@@ -3955,8 +3956,7 @@ function sameRoute(token: string, url: string): boolean {
 
 function routeOf(url: string): string {
   try {
-    const at = new URL(url);
-    return `${at.origin}${at.pathname}${/^#!?\//.test(at.hash) ? at.hash : ''}`;
+    return new URL(url).href;
   } catch {
     return url;
   }

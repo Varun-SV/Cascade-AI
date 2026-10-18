@@ -31,15 +31,21 @@ import type { GenerateOptions, ImageAttachment, MessageContent, ModelInfo } from
 const PRICED_VISION = new Set(['anthropic', 'openai', 'azure', 'gemini']);
 
 /**
- * OpenAI models priced by 32px patch, and the multiplier they bill patches at.
- * The rest of the family is priced by 512px tile.
+ * Auto-detail patch rules: model, multiplier, patch budget and longest edge.
+ * https://developers.openai.com/api/docs/guides/images-vision (2026-10-18).
+ * Unlisted model variants are not assumed to inherit a different model's rate.
  */
-const PATCH_PRICED: Array<[RegExp, number]> = [
-  [/gpt-4\.1-mini/, 1.62],
-  [/gpt-4\.1-nano/, 2.46],
-  [/o4-mini/, 1.72],
-  [/gpt-5(?:\.\d+)?-mini/, 1.62],
-  [/gpt-5(?:\.\d+)?-nano/, 2.46],
+const PATCH_PRICED: Array<[RegExp, number, number, number]> = [
+  [/^gpt-6-astra(?:-\d{4}-\d{2}-\d{2})?$/, 1.2, Infinity, 65_535],
+  [/^gpt-5\.6-(?:sol|terra|luna)(?:-\d{4}-\d{2}-\d{2})?$/, 1.2, Infinity, 65_535],
+  [/^gpt-5\.5(?:-\d{4}-\d{2}-\d{2})?$/, 1.2, 10_000, 6000],
+  [/^gpt-5\.4(?:-(?:mini|nano))?(?:-\d{4}-\d{2}-\d{2})?$/, 1.2, 2500, 2048],
+  [/^gpt-5\.2(?:-\d{4}-\d{2}-\d{2})?$/, 1.2, 6144, 2048],
+  [/^gpt-4\.1-mini(?:-\d{4}-\d{2}-\d{2})?$/, 1.62, 6144, 2048],
+  [/^gpt-4\.1-nano(?:-\d{4}-\d{2}-\d{2})?$/, 2.46, 1536, Infinity],
+  [/^o4-mini(?:-\d{4}-\d{2}-\d{2})?$/, 1.72, 1536, Infinity],
+  [/^gpt-5-mini(?:-\d{4}-\d{2}-\d{2})?$/, 1.2, 1536, Infinity],
+  [/^gpt-5-nano(?:-\d{4}-\d{2}-\d{2})?$/, 1.5, 1536, Infinity],
 ];
 
 /**
@@ -50,7 +56,7 @@ const PATCH_PRICED: Array<[RegExp, number]> = [
  */
 export function screenshotTokens(model: ModelInfo, width: number, height: number): number | null {
   if (!(Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0)) return null;
-  const id = (model.baseModelId ?? model.id).toLowerCase();
+  const id = (model.baseModelId ?? model.id).toLowerCase().replace(/^openai\//, '');
   switch (model.provider) {
     case 'anthropic': {
       // ~750 px a token, after downscaling. Priced at the high-resolution
@@ -70,15 +76,20 @@ export function screenshotTokens(model: ModelInfo, width: number, height: number
     case 'azure': {
       const patch = PATCH_PRICED.find(([re]) => re.test(id));
       if (patch) {
-        // 32px patches, scaled down to at most 1,536 of them.
-        const raw = Math.ceil(width / 32) * Math.ceil(height / 32);
-        const patches = Math.min(raw, 1536);
+        const scale = Math.min(1, patch[3] / Math.max(width, height));
+        const raw = Math.ceil(Math.max(1, Math.ceil(width * scale)) / 32)
+          * Math.ceil(Math.max(1, Math.ceil(height * scale)) / 32);
+        // Budget is a conservative upper bound after proportional resizing;
+        // integer patch alignment can reduce the actual bill below this cap.
+        const patches = Math.min(raw, patch[2]);
+        if (!Number.isFinite(patches) || patches > 30_000) return null;
         return Math.ceil(patches * patch[1]);
       }
-      if (/mini|nano/.test(id) && !/gpt-4o-mini/.test(id)) {
-        // An unlisted small model: priced at the steepest patch rate known.
-        return Math.ceil(Math.min(Math.ceil(width / 32) * Math.ceil(height / 32), 1536) * 2.46);
-      }
+      const tile = /^(?:gpt-4o-mini)(?:-\d{4}-\d{2}-\d{2})?$/.test(id) ? [2833, 5667]
+        : /^(?:gpt-4o|gpt-4\.1)(?:-\d{4}-\d{2}-\d{2})?$/.test(id) ? [85, 170]
+          : /^gpt-5(?:\.1)?(?:-\d{4}-\d{2}-\d{2})?$/.test(id) ? [70, 140]
+            : /^(?:o1|o1-pro|o3)(?:-\d{4}-\d{2}-\d{2})?$/.test(id) ? [75, 150] : null;
+      if (!tile) return null;
       // High detail: fit in 2048², shortest side to 768, then 512px tiles.
       let w = width;
       let h = height;
@@ -88,7 +99,7 @@ export function screenshotTokens(model: ModelInfo, width: number, height: number
       if (short > 768) { w *= 768 / short; h *= 768 / short; }
       const tiles = Math.ceil(w / 512) * Math.ceil(h / 512);
       // gpt-4o-mini bills images at ~33× the tokens, to keep the same price.
-      return /gpt-4o-mini/.test(id) ? 2833 + 5667 * tiles : 85 + 170 * tiles;
+      return tile[0]! + tile[1]! * tiles;
     }
     default:
       return null;

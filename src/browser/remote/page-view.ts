@@ -467,6 +467,7 @@ function describe(
       return [attr, value === true || value === 'true' ? true : value === undefined || value === 'false' ? false : value];
     })))
     .update(JSON.stringify(choices.map((option) => option.name ?? '')))
+    .update(node.role === 'slider' ? `\0${node.inline ?? ''}` : '')
     .digest('base64');
   const named = `${role}${label ? ` "${label}"` : ''}`;
   let line = `[${ref}] ${named}`;

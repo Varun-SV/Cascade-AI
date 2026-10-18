@@ -33,6 +33,27 @@ describe('screenshotTokens', () => {
     expect(screenshotTokens(model('openai', 'gpt-4o-mini'), 1280, 800)).toBe(2833 + 5667 * 6);
   });
 
+  it('prices current GPT patch families with their own multipliers and budgets', () => {
+    for (const id of ['gpt-5.2', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+      expect(screenshotTokens(model('openai', id), 1280, 800)).toBe(1200);
+      expect(screenshotTokens(model('openai', id), 1920, 1080)).toBe(2448);
+      expect(screenshotRefusal(model('openai', id), { ...SHOT, screenshot: { width: 1920, height: 1080 } }, IMAGE_TOKENS_EACH)).toMatch(/cost more/);
+    }
+    expect(screenshotTokens(model('azure', 'deployment', { baseModelId: 'gpt-5.4-nano' }), 1280, 800)).toBe(1200);
+    expect(screenshotTokens(model('openai', 'gpt-5-mini'), 1280, 800)).toBe(1200);
+    expect(screenshotTokens(model('openai', 'gpt-5-nano'), 1280, 800)).toBe(1500);
+    expect(screenshotTokens(model('openai', 'gpt-5.4'), 2048, 2048)).toBe(3000);
+    expect(screenshotTokens(model('openai', 'gpt-5.2'), 2048, 2048)).toBe(4916);
+    expect(screenshotTokens(model('openai', 'gpt-5.6-sol'), 4096, 1024)).toBe(4916);
+    expect(screenshotTokens(model('openai', 'gpt-5.4'), 8192, 1024)).toBe(615);
+    expect(screenshotTokens(model('openai', 'gpt-4.1-mini'), 2048, 2048)).toBe(6636);
+    expect(screenshotTokens(model('openai', 'gpt-6-astra'), 1280, 800)).toBe(1200);
+    expect(screenshotTokens(model('openai', 'gpt-5.4-2026-03-05'), 1280, 800)).toBe(1200);
+    expect(screenshotTokens(model('openai', 'gpt-6-astra'), 65_535, 65_535)).toBeNull();
+    expect(screenshotTokens(model('openai', 'future-vision-mini'), 1280, 800)).toBeNull();
+    expect(screenshotTokens(model('openai', 'gpt-5.4-unknown-variant'), 1280, 800)).toBeNull();
+  });
+
   it('prices Claude at the high-resolution limits, so a large page is never underpriced', () => {
     // Opus 4.7+ and Sonnet 5+ read a 1920×1080 page whole: ~2.8k tokens.
     expect(screenshotTokens(CLAUDE, 1920, 1080)).toBe(2765);
