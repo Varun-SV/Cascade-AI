@@ -4699,6 +4699,14 @@ describe('page views and refs', () => {
         scrollIntoViewIfNeeded: record('scrollIntoView'),
         waitFor: record('waitFor'),
         innerText: record('innerText'),
+        async elementHandle() {
+          const locator = this;
+          const element: Record<string, unknown> = { dispose: async () => {}, waitForElementState: async (_state: string, opts: unknown) => locator.waitFor(opts) };
+          for (const method of ['click', 'fill', 'press', 'hover', 'selectOption', 'scrollIntoViewIfNeeded', 'innerText'] as const) {
+            element[method] = (...args: unknown[]) => (locator[method] as (...a: unknown[]) => Promise<unknown>)(...args);
+          }
+          return element;
+        },
       };
     };
   });
@@ -4764,6 +4772,49 @@ describe('page views and refs', () => {
     expect(out.detail).toContain('e14 is now button "Cancel reservation", not button "Reserve 7:30 pm"');
     expect(out.view!.text).toContain('[e14] button "Cancel reservation"');
     expect(page.calls).not.toContain('aria-ref=e14 click');
+  });
+
+  it('refuses navigation or reload landing during ref revalidation', async () => {
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    const snap = extra['ariaSnapshot'] as (opts: unknown) => Promise<string>;
+    for (const phase of ['count', 'snapshot', 'binding']) {
+      for (const url of ['https://elsewhere.test/', 'https://start.test/']) {
+        const c = controller();
+        const session = `racing-${phase}-${url}`;
+        const seen = await c.controller({ kind: 'observe' }, ctx(session, 'w1'));
+        let moved = false;
+        const move = async () => { if (!moved) { moved = true; await page.goto(url); } };
+        if (phase === 'count') extra['locator'] = (selector: string) => ({ ...locate(selector), count: async () => { await move(); return 1; } });
+        else if (phase === 'snapshot') extra['ariaSnapshot'] = async (opts: unknown) => { await move(); return snap(opts); };
+        else extra['locator'] = (selector: string) => ({ ...locate(selector), async elementHandle() { await move(); return (locate(selector).elementHandle as () => Promise<unknown>).call(this); } });
+        page.calls = [];
+        const out = await c.controller({ kind: 'click', ref: 'e5', expectDocument: seen.document }, ctx(session, 'w1'));
+        expect(out.ok, `${phase} ${url}`).toBe(false);
+        expect(page.calls).not.toContain('aria-ref=e5 click');
+        extra['locator'] = locate;
+        extra['ariaSnapshot'] = snap;
+      }
+    }
+  });
+
+  it('refuses a frame navigation during element binding but permits a same-document history change', async () => {
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    snapshot = `${BOOKING}\n  - iframe [ref=e20] [box=0,300,400,100]:\n    - button "Next" [ref=f1e2] [box=8,8,40,20]`;
+    liveRefs.add('f1e2');
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    extra['locator'] = (selector: string) => ({ ...locate(selector), async elementHandle() {
+      page.navigateSubframe();
+      return (locate(selector).elementHandle as () => Promise<unknown>).call(this);
+    } });
+    page.calls = [];
+    expect((await c.controller({ kind: 'click', ref: 'f1e2' }, ctx('run', 'w1'))).ok).toBe(false);
+    expect(page.calls).not.toContain('aria-ref=f1e2 click');
+    extra['locator'] = (selector: string) => ({ ...locate(selector), async elementHandle() {
+      page.replaceState('https://start.test/?at=2');
+      return (locate(selector).elementHandle as () => Promise<unknown>).call(this);
+    } });
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(true);
   });
 
   it('refuses a ref renamed only past what its label shows', async () => {
@@ -6011,6 +6062,15 @@ describe('page views and refs', () => {
 });
 
 describe('a failed action is told without Playwright\'s call log', () => {
+  it('drops attributes from tags whose closing bracket is past the error bound', async () => {
+    const { actionError } = await import('./controller.js');
+    for (const value of ['hunter2secret', 'hunter2<tail>secret']) {
+      const said = actionError(new Error(`Error: <input value="${value}" data-note="${'x'.repeat(1000)}"> is not a select`));
+      expect(said).not.toContain('hunter2');
+      expect(said).not.toContain('value=');
+      expect(said.length).toBeLessThanOrEqual(500);
+    }
+  });
   it('keeps the reason and drops the log, which quotes the element\'s attributes', async () => {
     // Captured from Playwright 1.62: the log printed a password field whole.
     const { actionError } = await import('./controller.js');

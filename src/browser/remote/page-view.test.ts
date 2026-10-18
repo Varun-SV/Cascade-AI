@@ -471,6 +471,18 @@ describe('describePage', () => {
     expect(v.text).not.toContain('private-long-value');
   });
 
+  it('scrubs numeric spinbutton values from distant controls', () => {
+    const v = view([
+      '- main [ref=e1] [box=0,0,1280,800]:',
+      '  - group [ref=e2]:',
+      '    - spinbutton "Account number" [ref=e3] [box=0,0,100,20]: 987654321',
+      '  - group [ref=e4]:',
+      '    - button "Submit account 987654321" [ref=e5] [box=0,50,100,20]',
+    ].join('\n'))!;
+    expect(v.labels.get('e5')).toBe('button "Submit account •••"');
+    expect(v.text).not.toContain('987654321');
+  });
+
   it('keeps page-written text from imitating an entry', () => {
     // A button named `Buy "now" [ref=e1] [box=1,1,1,1]` must not read as a
     // second control with ref e1.

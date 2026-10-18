@@ -98,16 +98,23 @@ type FoundFields = {
   nth(index: number): { boundingBox(opts?: { timeout?: number }): Promise<Box | null> };
 };
 /** One control on the page, as Playwright resolves it at the moment of acting. */
-type Locator = {
-  count(): Promise<number>;
+type ActionElement = {
   click(opts?: { timeout?: number }): Promise<void>;
   fill(value: string, opts?: { timeout?: number }): Promise<void>;
   press(key: string, opts?: { timeout?: number }): Promise<void>;
   hover(opts?: { timeout?: number }): Promise<void>;
   selectOption(value: string | { label: string }, opts?: { timeout?: number }): Promise<unknown>;
   scrollIntoViewIfNeeded(opts?: { timeout?: number }): Promise<void>;
-  waitFor(opts?: { state?: 'visible'; timeout?: number }): Promise<void>;
   innerText(opts?: { timeout?: number }): Promise<string>;
+};
+type BoundElement = ActionElement & {
+  waitForElementState(state: 'visible', opts?: { timeout?: number }): Promise<void>;
+  dispose(): Promise<void>;
+};
+type Locator = ActionElement & {
+  count(): Promise<number>;
+  waitFor(opts?: { state?: 'visible'; timeout?: number }): Promise<void>;
+  elementHandle?(opts?: { timeout?: number }): Promise<BoundElement | null>;
 };
 /**
  * A raw Chrome DevTools Protocol session on one page.
@@ -3529,117 +3536,140 @@ export class RemoteBrowserController {
       };
     };
 
-    switch (action.kind) {
-      case 'navigate': {
-        const target = action.url ?? '';
-        if (!/^https?:\/\//i.test(target)) {
-          return { ok: false, detail: 'Only http and https addresses can be opened.' };
+    // A lazy locator can resolve a recycled ref after navigation while its
+    // action auto-waits. Pin ref actions (and explicitly bound selectors) to
+    // one DOM element, then recheck the document after the awaited lookup.
+    const bind = !!action.ref || !!(action.expectDocument && action.selector && CHANGES_THE_PAGE.has(action.kind));
+    if (bind && !target && action.selector) target = page.locator?.(action.selector);
+    if (bind && !target?.elementHandle) return { ok: false, detail: 'This browser cannot bind this action to the observed element.', ...(await where()) };
+    const element = bind ? await stoppable(target!.elementHandle!({ timeout })) : null;
+    try {
+      if (bind && !element) return { ok: false, detail: 'The observed element is no longer on the page.', ...(await where()) };
+      if (action.kind !== 'navigate' && (held.page !== page || !sameDocument(actedOn!, held)
+        || (action.ref && frameMoved(held, action.ref))
+        || hostOf(page.url()) !== hostOf(readPlace(actedOn!)?.[1])
+        || (!action.ref && held.generation !== planned)
+        || (action.expectSite && hostOf(page.url()) !== action.expectSite)
+        || (action.expectDocument && (!sameDocument(action.expectDocument, held)
+          || (!action.ref && !samePlace(action.expectDocument, held, page.url())))))) {
+        return { ok: false, detail: 'The page changed while this action was being checked, so it was not run. Call observe for a fresh page view.', ...(await where()) };
+      }
+      const actual = element ?? target;
+      switch (action.kind) {
+        case 'navigate': {
+          const target = action.url ?? '';
+          if (!/^https?:\/\//i.test(target)) {
+            return { ok: false, detail: 'Only http and https addresses can be opened.' };
+          }
+          await stoppable(page.goto(target, { timeout: ACTION_TIMEOUT_MS, waitUntil: 'domcontentloaded' }));
+          return finish({ ok: true, detail: `Opened ${target}`, ...(await where()) }, true);
         }
-        await stoppable(page.goto(target, { timeout: ACTION_TIMEOUT_MS, waitUntil: 'domcontentloaded' }));
-        return finish({ ok: true, detail: `Opened ${target}`, ...(await where()) }, true);
-      }
-      case 'click': {
-        const pagesBefore = new Set(page.context().pages());
-        if (target) await stoppable(target.click({ timeout }));
-        else await stoppable(page.click(action.selector!, { timeout }));
-        await this.followOpenedPage(runId, held, pagesBefore);
-        return finish({ ok: true, detail: `Clicked ${named}`, ...(await where()) }, true);
-      }
-      case 'fill':
-        if (target) await stoppable(target.fill(action.value ?? '', { timeout }));
-        else await stoppable(page.fill(action.selector!, action.value ?? '', { timeout }));
-        return { ok: true, detail: `Filled ${named}`, ...(await where()) };
-      case 'press': {
-        // A selector focuses first; without one the key goes to whatever has
-        // focus, which is what "press Escape" usually means.
-        const pagesBefore = new Set(page.context().pages());
-        if (target) await stoppable(target.press(action.key!, { timeout }));
-        else if (action.selector) await stoppable(page.press(action.selector, action.key!, { timeout }));
-        else await stoppable(page.keyboard.press(action.key!));
-        await this.followOpenedPage(runId, held, pagesBefore);
-        return finish({ ok: true, detail: `Pressed ${action.key}`, ...(await where()) }, true);
-      }
-      case 'wait_for':
-        if (target) await stoppable(target.waitFor({ state: 'visible', timeout }));
-        else await stoppable(page.waitForSelector(action.selector!, { timeout }));
-        return { ok: true, detail: `${named} appeared`, ...(await where()) };
-      case 'extract_text': {
-        const text = target
-          ? await stoppable(target.innerText({ timeout }))
-          : await stoppable(page.innerText(action.selector ?? 'body', { timeout }));
-        return { ok: true, detail: wellFormed(text.slice(0, 200_000)), ...(await where()) };
-      }
-      case 'observe': {
-        const seen = await this.pageView(held, stoppable, false);
-        if (!seen) {
+        case 'click': {
+          const pagesBefore = new Set(page.context().pages());
+          if (actual) await stoppable(actual.click({ timeout }));
+          else await stoppable(page.click(action.selector!, { timeout }));
+          await this.followOpenedPage(runId, held, pagesBefore);
+          return finish({ ok: true, detail: `Clicked ${named}`, ...(await where()) }, true);
+        }
+        case 'fill':
+          if (actual) await stoppable(actual.fill(action.value ?? '', { timeout }));
+          else await stoppable(page.fill(action.selector!, action.value ?? '', { timeout }));
+          return { ok: true, detail: `Filled ${named}`, ...(await where()) };
+        case 'press': {
+          // A selector focuses first; without one the key goes to whatever has
+          // focus, which is what "press Escape" usually means.
+          const pagesBefore = new Set(page.context().pages());
+          if (actual) await stoppable(actual.press(action.key!, { timeout }));
+          else if (action.selector) await stoppable(page.press(action.selector, action.key!, { timeout }));
+          else await stoppable(page.keyboard.press(action.key!));
+          await this.followOpenedPage(runId, held, pagesBefore);
+          return finish({ ok: true, detail: `Pressed ${action.key}`, ...(await where()) }, true);
+        }
+        case 'wait_for':
+          if (element) await stoppable(element.waitForElementState('visible', { timeout }));
+          else if (target) await stoppable(target.waitFor({ state: 'visible', timeout }));
+          else await stoppable(page.waitForSelector(action.selector!, { timeout }));
+          return { ok: true, detail: `${named} appeared`, ...(await where()) };
+        case 'extract_text': {
+          const text = actual
+            ? await stoppable(actual.innerText({ timeout }))
+            : await stoppable(page.innerText(action.selector ?? 'body', { timeout }));
+          return { ok: true, detail: wellFormed(text.slice(0, 200_000)), ...(await where()) };
+        }
+        case 'observe': {
+          const seen = await this.pageView(held, stoppable, false);
+          if (!seen) {
+            return {
+              ok: false,
+              // No AI snapshot in this Playwright, one that failed, or an app
+              // whose route would not hold still for one.
+              detail: 'The page\'s controls could not be listed. Use extract_text to read the page and CSS selectors to act on it.',
+              ...(await where()),
+            };
+          }
           return {
-            ok: false,
-            // No AI snapshot in this Playwright, one that failed, or an app
-            // whose route would not hold still for one.
-            detail: 'The page\'s controls could not be listed. Use extract_text to read the page and CSS selectors to act on it.',
+            ok: true,
+            detail: 'Looked at the page.',
             ...(await where()),
+            document: seen.document,
+            ...(await this.pictured(held, stoppable, seen, action)),
           };
         }
-        return {
-          ok: true,
-          detail: 'Looked at the page.',
-          ...(await where()),
-          document: seen.document,
-          ...(await this.pictured(held, stoppable, seen, action)),
-        };
-      }
-      case 'scroll': {
-        if (target) {
-          await stoppable(target.scrollIntoViewIfNeeded({ timeout }));
-        } else {
-          if (typeof page.evaluate !== 'function') return { ok: false, detail: 'This browser cannot scroll.' };
-          // Fixed text: the direction picks the sign and nothing the model
-          // wrote reaches the expression. Instant, so a page that scrolls
-          // smoothly has arrived by the time the view is taken.
-          const sign = action.direction === 'up' ? -1 : 1;
-          const before = await stoppable(within(page.evaluate('scrollY'))).catch(() => undefined);
-          await stoppable(within(page.evaluate(`window.scrollBy({ top: ${sign} * Math.round(innerHeight * 0.8), behavior: 'instant' })`)));
-          const after = await stoppable(within(page.evaluate('scrollY'))).catch(() => undefined);
-          if (typeof before === 'number' && before === after) {
-            return finish({
-              ok: true,
-              detail: `Nothing moved: the page is already at the ${sign < 0 ? 'top' : 'bottom'}, or it scrolls inside a panel. To bring a control on screen, scroll to its ref.`,
-              ...(await where()),
-            }, false);
+        case 'scroll': {
+          if (actual) {
+            await stoppable(actual.scrollIntoViewIfNeeded({ timeout }));
+          } else {
+            if (typeof page.evaluate !== 'function') return { ok: false, detail: 'This browser cannot scroll.' };
+            // Fixed text: the direction picks the sign and nothing the model
+            // wrote reaches the expression. Instant, so a page that scrolls
+            // smoothly has arrived by the time the view is taken.
+            const sign = action.direction === 'up' ? -1 : 1;
+            const before = await stoppable(within(page.evaluate('scrollY'))).catch(() => undefined);
+            await stoppable(within(page.evaluate(`window.scrollBy({ top: ${sign} * Math.round(innerHeight * 0.8), behavior: 'instant' })`)));
+            const after = await stoppable(within(page.evaluate('scrollY'))).catch(() => undefined);
+            if (typeof before === 'number' && before === after) {
+              return finish({
+                ok: true,
+                detail: `Nothing moved: the page is already at the ${sign < 0 ? 'top' : 'bottom'}, or it scrolls inside a panel. To bring a control on screen, scroll to its ref.`,
+                ...(await where()),
+              }, false);
+            }
           }
+          const how = actual ? `Scrolled to ${named}` : `Scrolled ${action.direction === 'up' ? 'up' : 'down'}`;
+          return finish({ ok: true, detail: how, ...(await where()) }, false);
         }
-        const how = target ? `Scrolled to ${named}` : `Scrolled ${action.direction === 'up' ? 'up' : 'down'}`;
-        return finish({ ok: true, detail: how, ...(await where()) }, false);
-      }
-      case 'select_option': {
-        if (!action.ref) {
-          await stoppable(target!.selectOption(action.value ?? '', { timeout }));
+        case 'select_option': {
+          if (!action.ref) {
+            await stoppable(actual!.selectOption(action.value ?? '', { timeout }));
+            return { ok: true, detail: `Chose "${action.value}" in ${named}`, ...(await where()) };
+          }
+          // On a ref, by the option's text alone. Playwright otherwise takes an
+          // option's value too, which nobody is shown: `1` can be the value of
+          // "Delete account", and the approval would be asked about `1`. The
+          // text the view showed is turned back into the label it came from;
+          // one it did not show is taken as a label as it is.
+          const shown = (held.view!.options.get(action.ref) ?? []).filter((o) => o.shown === action.value || o.label === action.value);
+          // Every matching option is a separate possible action, even when
+          // their full labels are also identical. Deduplicating labels here
+          // would silently select the first option by DOM order.
+          if (shown.length > 1) {
+            return {
+              ok: false,
+              detail: `More than one option in ${named} reads "${action.value}" in the page view, so none was chosen. Use extract_text to read them in full.`,
+              ...(await where()),
+            };
+          }
+          await stoppable(actual!.selectOption({ label: shown[0]?.label ?? action.value ?? '' }, { timeout }));
           return { ok: true, detail: `Chose "${action.value}" in ${named}`, ...(await where()) };
         }
-        // On a ref, by the option's text alone. Playwright otherwise takes an
-        // option's value too, which nobody is shown: `1` can be the value of
-        // "Delete account", and the approval would be asked about `1`. The
-        // text the view showed is turned back into the label it came from;
-        // one it did not show is taken as a label as it is.
-        const shown = (held.view!.options.get(action.ref) ?? []).filter((o) => o.shown === action.value || o.label === action.value);
-        // Every matching option is a separate possible action, even when
-        // their full labels are also identical. Deduplicating labels here
-        // would silently select the first option by DOM order.
-        if (shown.length > 1) {
-          return {
-            ok: false,
-            detail: `More than one option in ${named} reads "${action.value}" in the page view, so none was chosen. Use extract_text to read them in full.`,
-            ...(await where()),
-          };
-        }
-        await stoppable(target!.selectOption({ label: shown[0]?.label ?? action.value ?? '' }, { timeout }));
-        return { ok: true, detail: `Chose "${action.value}" in ${named}`, ...(await where()) };
+        case 'hover':
+          await stoppable(actual!.hover({ timeout }));
+          return finish({ ok: true, detail: `Hovered over ${named}`, ...(await where()) }, false);
+        default:
+          return { ok: false, detail: `Unsupported action: ${String(action.kind)}` };
       }
-      case 'hover':
-        await stoppable(target!.hover({ timeout }));
-        return finish({ ok: true, detail: `Hovered over ${named}`, ...(await where()) }, false);
-      default:
-        return { ok: false, detail: `Unsupported action: ${String(action.kind)}` };
+    } finally {
+      if (element) await within(element.dispose()).catch(() => {});
     }
   }
 }
@@ -3671,9 +3701,24 @@ export function actionError(err: unknown): string {
   // eslint-disable-next-line no-control-regex
   const plain = message.replace(/\u001b\[[0-9;]*m/g, '');
   const reason = plain.split('\n').map((line) => line.trim()).find((line) => line.length > 0) ?? '';
-  // Bounded, and no "<" inside a tag: a selector of thousands of unclosed
-  // "<a" is quick to write and slow to scan.
-  return reason.slice(0, ERROR_MAX_CHARS).replace(/<([a-z][\w-]*)\b[^<>]*>/gi, '<$1>');
+  // Bounded and linear. A tag cut by this bound is still stripped through
+  // the end; quotes can contain angle brackets without exposing attributes.
+  const source = reason.slice(0, ERROR_MAX_CHARS);
+  let out = '';
+  for (let i = 0; i < source.length;) {
+    if (source[i] !== '<' || !/[a-z]/i.test(source[i + 1] ?? '')) { out += source[i++]; continue; }
+    let end = i + 1;
+    while (end < source.length && /[\w-]/.test(source[end]!)) end++;
+    out += `<${source.slice(i + 1, end)}>`;
+    let quote = '';
+    for (i = end; i < source.length; i++) {
+      const char = source[i]!;
+      if (quote) { if (char === quote) quote = ''; }
+      else if (char === '"' || char === "'") quote = char;
+      else if (char === '>') { i++; break; }
+    }
+  }
+  return out.slice(0, ERROR_MAX_CHARS);
 }
 
 /**

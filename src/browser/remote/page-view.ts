@@ -727,7 +727,7 @@ function overlap(text: string, value: string): number {
 function textboxValues(roots: SnapshotNode[]): string[] {
   const found = new Set<string>();
   const walk = (n: SnapshotNode): void => {
-    if (n.role === 'textbox') {
+    if (n.role === 'textbox' || n.role === 'spinbutton') {
       for (const v of [fieldValue(n), ...typedParts(n)]) {
         const value = v.replace(/\s+/g, ' ').trim();
         if (value.length >= SHORT_VALUE) found.add(value);

@@ -31,6 +31,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { TASKS } from './tasks.mjs';
+import { assessRun, modelBindingsMatch, scheduleRuns, summarise } from './results.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const args = parseArgs(process.argv.slice(2));
@@ -195,77 +196,77 @@ async function evaluate() {
   fs.rmSync(probeSpace, { recursive: true, force: true });
 
   const rows = [];
-  for (const model of models) {
-    for (const arm of arms) {
-      for (const task of tasks) {
-        for (let r = 0; r < repeats; r++) {
-          const run = `${model}-${arm}-${task.id}-${r}-${Date.now()}`.replace(/[^a-z0-9-]/gi, '');
-          const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-bve-'));
-          // The browser and nothing else. The model reads pages this test
-          // wrote, but it is still a model reading web pages, and your own
-          // config would otherwise hand it your shell, files and MCP servers.
-          const cascade = new sdk.Cascade(isolated(model, arm, disabled), workspace);
-          // Track session ownership across every exit path, including errors.
-          const known = new Set(steps.keys());
-          try {
-            const prompt = `Use the browser. Open ${site.url}/${task.page}?run=${run} and do this: ${task.prompt}`;
-            const started = Date.now();
-            let output = '';
-            let error = '';
-            let usage = {};
-            // The runs this one opened in the browser, whether or not it returns:
-            // a run that throws must still give its session back, or every run
-            // after it finds the one CDP session taken.
-            try {
-              await cascade.init();
-              cascade.setRemoteBrowserController(counted, (a) => controller.actorEnded(a), controller.features);
-              const offered = cascade.getToolRegistry().getToolDefinitions().map((d) => d.name);
-              if (offered.length !== 1 || offered[0] !== 'browser_control') {
-                throw new IsolationError(`Expected only browser_control, but this run would offer: ${offered.join(', ') || '(none)'}.`);
-              }
-              const result = await cascade.run({
-                prompt,
-                approvalCallback: async (request) => ({ approved: request.toolName === 'browser_control', always: false }),
-              });
-              output = result.output;
-              usage = result.usage ?? {};
-            } catch (err) {
-              // Not a result: the comparison would not be of the browser alone.
-              if (err instanceof IsolationError) throw err;
-              error = err instanceof Error ? err.message : String(err);
-            }
-            const opened = [...steps.keys()].filter((k) => !known.has(k));
-            const shots = cascade.getDecisionLog().find((d) => d.kind === 'browser')?.detail ?? '';
-            // The page reports a finished task with a request of its own, which
-            // can land after the model's last word: wait for it a moment.
-            if (task.check.done) await reported(`${run}:${task.check.done}`);
-            const ok = task.check.done ? site.done.has(`${run}:${task.check.done}`) : task.check.answer.test(output);
-            rows.push({
-              model, arm, task: task.id, ok,
-              steps: opened.reduce((n, k) => n + (steps.get(k) ?? 0), 0),
-              costUsd: usage.estimatedCostUsd ?? 0,
-              tokens: usage.totalTokens ?? 0,
-              seconds: Math.round((Date.now() - started) / 1000),
-              shots, error,
-            });
-            console.log(`${ok ? 'PASS' : 'FAIL'}  ${model}  ${arm.padEnd(6)}  ${task.id.padEnd(11)}  $${(usage.estimatedCostUsd ?? 0).toFixed(4)}${error ? `  ${error}` : ''}`);
-          } finally {
-            // Each run owns its telemetry and connections. Clean up even when
-            // isolation fails, before deleting the workspace.
-            await cascade.close().catch(() => {});
-            for (const id of [...steps.keys()].filter((k) => !known.has(k))) {
-              await controller.endRun(id).catch(() => {});
-            }
-            fs.rmSync(workspace, { recursive: true, force: true });
-          }
+  for (const { model, arm, task, repeat: r } of scheduleRuns(models, arms, tasks, repeats)) {
+    const run = `${model}-${arm}-${task.id}-${r}-${Date.now()}`.replace(/[^a-z0-9-]/gi, '');
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-bve-'));
+    // The browser and nothing else. The model reads pages this test
+    // wrote, but it is still a model reading web pages, and your own
+    // config would otherwise hand it your shell, files and MCP servers.
+    const cascade = new sdk.Cascade(isolated(model, arm, disabled), workspace);
+    // Track session ownership across every exit path, including errors.
+    const known = new Set(steps.keys());
+    try {
+      const prompt = `Use the browser. Open ${site.url}/${task.page}?run=${run} and do this: ${task.prompt}`;
+      const started = Date.now();
+      let output = '';
+      let error = '';
+      let usage = {};
+      let modelInvalid = '';
+      // The runs this one opened in the browser, whether or not it returns:
+      // a run that throws must still give its session back, or every run
+      // after it finds the one CDP session taken.
+      try {
+        await cascade.init();
+        const bindings = ['T1', 'T2', 'T3'].map((tier) => cascade.getRouter().getModelForTier(tier));
+        if (!modelBindingsMatch(model, bindings)) {
+          modelInvalid = 'The requested model was not bound to every tier; this run is excluded from the comparison.';
+          throw new Error(modelInvalid);
         }
+        cascade.setRemoteBrowserController(counted, (a) => controller.actorEnded(a), controller.features);
+        const offered = cascade.getToolRegistry().getToolDefinitions().map((d) => d.name);
+        if (offered.length !== 1 || offered[0] !== 'browser_control') {
+          throw new IsolationError(`Expected only browser_control, but this run would offer: ${offered.join(', ') || '(none)'}.`);
+        }
+        const result = await cascade.run({
+          prompt,
+          approvalCallback: async (request) => ({ approved: request.toolName === 'browser_control', always: false }),
+        });
+        output = result.output;
+        usage = result.usage ?? {};
+      } catch (err) {
+        // Not a result: the comparison would not be of the browser alone.
+        if (err instanceof IsolationError) throw err;
+        error = err instanceof Error ? err.message : String(err);
       }
+      const opened = [...steps.keys()].filter((k) => !known.has(k));
+      const decisions = cascade.getDecisionLog();
+      const shots = decisions.find((d) => d.kind === 'browser')?.detail ?? '';
+      // The page reports a finished task with a request of its own, which
+      // can land after the model's last word: wait for it a moment.
+      if (task.check.done) await reported(`${run}:${task.check.done}`);
+      const ok = task.check.done ? site.done.has(`${run}:${task.check.done}`) : task.check.answer.test(output);
+      const assessment = assessRun({ ok, usage, stats: cascade.getRouter().getStats(), decisions, error, modelInvalid });
+      rows.push({
+        model, arm, task: task.id, ...assessment,
+        steps: opened.reduce((n, k) => n + (steps.get(k) ?? 0), 0),
+        seconds: Math.round((Date.now() - started) / 1000),
+        shots,
+      });
+      console.log(`${assessment.valid ? assessment.ok ? 'PASS' : 'FAIL' : 'EXCLUDED'}  ${model}  ${arm.padEnd(6)}  ${task.id.padEnd(11)}  ${assessment.costUsd === null ? 'cost unavailable' : `$${assessment.costUsd.toFixed(4)}`}${assessment.error ? `  ${assessment.error}` : ''}`);
+    } finally {
+      // Each run owns its telemetry and connections. Clean up even when
+      // isolation fails, before deleting the workspace.
+      await cascade.close().catch(() => {});
+      for (const id of [...steps.keys()].filter((k) => !known.has(k))) {
+        await controller.endRun(id).catch(() => {});
+      }
+      fs.rmSync(workspace, { recursive: true, force: true });
     }
   }
   await controller.dispose().catch(() => {});
 
   const out = args.out ?? 'browser-vision-eval-results.md';
-  fs.writeFileSync(out, summarise(rows));
+  fs.writeFileSync(out, summarise(rows, tasks));
   // Beside the summary, never over it: `--out results` has no .md to replace.
   const json = /\.md$/i.test(out) ? out.replace(/\.md$/i, '.json') : `${out}.json`;
   fs.writeFileSync(json, JSON.stringify(rows, null, 2));
@@ -277,29 +278,6 @@ async function reported(key) {
   for (let waited = 0; waited < 2_000 && !site.done.has(key); waited += 100) {
     await new Promise((r) => setTimeout(r, 100));
   }
-}
-
-function summarise(rows) {
-  const lines = ['# Browser vision test', '', '| Model | Setting | Done | Steps (mean) | Cost (mean) | Tokens (mean) |', '|---|---|---|---|---|---|'];
-  const groups = new Map();
-  for (const r of rows) {
-    const key = `${r.model}|${r.arm}`;
-    groups.set(key, [...(groups.get(key) ?? []), r]);
-  }
-  for (const [key, rs] of groups) {
-    const [model, arm] = key.split('|');
-    const mean = (f) => rs.reduce((n, r) => n + f(r), 0) / rs.length;
-    lines.push(`| ${model} | ${arm} | ${rs.filter((r) => r.ok).length}/${rs.length} | ${mean((r) => r.steps).toFixed(1)} | $${mean((r) => r.costUsd).toFixed(4)} | ${Math.round(mean((r) => r.tokens))} |`);
-  }
-  lines.push('', '## By task', '', '| Task | Model | Setting | Done |', '|---|---|---|---|');
-  for (const t of tasks) {
-    for (const [key, rs] of groups) {
-      const [model, arm] = key.split('|');
-      const mine = rs.filter((r) => r.task === t.id);
-      lines.push(`| ${t.id} | ${model} | ${arm} | ${mine.filter((r) => r.ok).length}/${mine.length} |`);
-    }
-  }
-  return `${lines.join('\n')}\n`;
 }
 
 // ── The site, and a browser to drive it ──────
