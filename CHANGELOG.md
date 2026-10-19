@@ -52,7 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A select is listed with its options, and on a ref `select_option` takes
   one by its text, never by a value the page hides in it; text the view
   shortened or rewrote still picks the option it came from.
-  A page view never shows what is typed into a field. Only the two newest
+  A page view never shows what is typed into a field, nor that text where
+  the page copies it into its title or address. A page too large to list
+  shows only its site. Only the two newest
   views are sent whole; older ones fold to a line. Page views need
   Playwright 1.60 or later, which Cascade installs; a host that brings an
   older one gets the original actions only.

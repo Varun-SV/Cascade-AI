@@ -1,7 +1,7 @@
 // The process jail for shell, run_code and git. The unit tests run
 // everywhere; the ones that launch real commands in bubblewrap run where it
 // works (Linux with unprivileged user namespaces, or as root).
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import net from 'node:net';
@@ -1143,7 +1143,7 @@ describe('what git push may send', () => {
 
   // The destination was asked by a raw git outside the jail, with Cascade's
   // whole environment: a remote whose URL runs a program ran it there.
-  it('asks the destination as the push would, inside the jail', async () => {
+  it.skipIf(!bwrapWorks)('asks the destination as the push would, inside the jail', async () => {
     const seen = path.join(repo, 'helper-env.txt');
     const before = process.env['ANTHROPIC_API_KEY'];
     process.env['ANTHROPIC_API_KEY'] = 'sk-ant-helper-probe-0123456789';
@@ -1965,7 +1965,7 @@ describe('the git tool where its store holds what commands may not see', () => {
     await fs.rm(globalConfig, { force: true });
   });
 
-  it('runs no hook and nothing the global configuration names, and keeps the name and email', async () => {
+  it.skipIf(!bwrapWorks)('runs no hook and nothing the global configuration names, and keeps the name and email', async () => {
     await fs.writeFile(path.join(repo, 'notes.md'), 'public, revised\n');
     await withGlobal(async () => {
       await tool('add', ['notes.md', '.gitattributes']);
@@ -1980,6 +1980,19 @@ describe('the git tool where its store holds what commands may not see', () => {
   // workspace — for the next commit here to run with the credentials this
   // tool keeps in view. It runs none, wherever the store stands.
   it('runs no hook where nothing in the store is hidden either, and keeps the repository\'s own settings', async () => {
+    // A home with no git configuration: the developer's own may sign
+    // commits, which a git without a jail refuses to do.
+    const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-hermetic-home-')));
+    const saved = { HOME: process.env['HOME'], XDG_CONFIG_HOME: process.env['XDG_CONFIG_HOME'], GIT_CONFIG_GLOBAL: process.env['GIT_CONFIG_GLOBAL'] };
+    process.env['HOME'] = home;
+    delete process.env['XDG_CONFIG_HOME'];
+    delete process.env['GIT_CONFIG_GLOBAL'];
+    onTestFinished(async () => {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name]; else process.env[name] = value;
+      }
+      await fs.rm(home, { recursive: true, force: true });
+    });
     const clean = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-hermetic-clean-')));
     const c = (...args: string[]) => execFileSync('git', ['-C', clean, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { encoding: 'utf8' });
     c('init', '-q');
@@ -2003,7 +2016,9 @@ describe('the git tool where its store holds what commands may not see', () => {
     const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-late-home-')));
     const savedHome = process.env['HOME'];
     const savedXdg = process.env['XDG_CONFIG_HOME'];
+    const savedGlobal = process.env['GIT_CONFIG_GLOBAL'];
     try {
+      delete process.env['GIT_CONFIG_GLOBAL'];
       execFileSync('git', ['-C', clean, 'init', '-q']);
       execFileSync('git', ['-C', clean, 'config', 'user.email', 'local@example.com']);
       await fs.writeFile(path.join(clean, 'a.md'), 'a\n');
@@ -2018,6 +2033,7 @@ describe('the git tool where its store holds what commands may not see', () => {
     } finally {
       process.env['HOME'] = savedHome;
       if (savedXdg === undefined) delete process.env['XDG_CONFIG_HOME']; else process.env['XDG_CONFIG_HOME'] = savedXdg;
+      if (savedGlobal === undefined) delete process.env['GIT_CONFIG_GLOBAL']; else process.env['GIT_CONFIG_GLOBAL'] = savedGlobal;
       await fs.rm(clean, { recursive: true, force: true });
       await fs.rm(home, { recursive: true, force: true });
     }

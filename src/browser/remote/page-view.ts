@@ -371,7 +371,7 @@ export function describePage(input: {
   const above = entries.filter((e) => e.where === 'above');
   const side = entries.filter((e) => e.where === 'side');
 
-  const lines = viewHeader(input);
+  const lines = viewHeader(input, typedAnywhere);
   // Room for the headings and the "Not listed" line, which are short.
   let room = VIEW_MAX_CHARS - lines.join('\n').length - 300;
   const fit = (list: Entry[], limit: number): Shown[] => {
@@ -520,10 +520,16 @@ function describe(
 
 type ViewPlace = { url: string; title: string; viewport: Viewport | undefined; number: number };
 
-/** A view's first lines: which view it is, the page, and where it is scrolled to. */
-function viewHeader(input: ViewPlace): string[] {
-  const title = clean(input.title, 120);
-  const lines = [`${PAGE_VIEW_MARK} ${input.number}]`, `Page: ${title ? `${title} — ` : ''}${clean(input.url, 300)}`];
+/**
+ * A view's first lines: which view it is, the page, and where it is scrolled
+ * to. A page can copy what is typed into its title or address (`Editing
+ * alice@example.com`, `?to=alice%40example.com`), so both go through the same
+ * redaction as control names, the address in its percent-encoded forms too.
+ */
+function viewHeader(input: ViewPlace, typed: string[]): string[] {
+  const title = clean(scrubber(typed)(input.title), 120);
+  const url = clean(scrubber(typed.flatMap(addressForms))(input.url), 300);
+  const lines = [`${PAGE_VIEW_MARK} ${input.number}]`, `Page: ${title ? `${title} — ` : ''}${url}`];
   if (input.viewport) {
     const v = input.viewport;
     lines.push(`Viewport ${v.width}×${v.height}, scrolled ${Math.round(v.scrollY).toLocaleString('en-US')} of ${Math.round(v.scrollHeight).toLocaleString('en-US')}`);
@@ -531,9 +537,22 @@ function viewHeader(input: ViewPlace): string[] {
   return lines;
 }
 
-/** The view of a page too big to list: where it is, and what to do instead. */
+/** How a typed value can appear in an address: as typed, and percent-encoded. */
+function addressForms(value: string): string[] {
+  const encoded = encodeURIComponent(wellFormed(value));
+  return [value, encoded, encoded.replace(/%20/g, '+')];
+}
+
+/**
+ * The view of a page too big to list: where it is, and what to do instead.
+ * Its fields are not read, so nothing typed can be told apart from the
+ * page's own words: the title is left out, and of the address only its origin
+ * is shown.
+ */
 function tooBig(input: ViewPlace): PageView {
-  const lines = viewHeader(input);
+  let origin = 'null';
+  try { origin = new URL(input.url).origin; } catch { /* shown as unknown below */ }
+  const lines = viewHeader({ ...input, title: '', url: origin === 'null' ? '(address not shown)' : `${origin} (rest of the address not shown)` }, []);
   lines.push('', 'This page is too large to list its controls. Use extract_text to read it, and CSS selectors to act on it.');
   return { text: lines.join('\n'), labels: new Map(), identities: new Map(), options: new Map(), framed: new Set(), marks: [] };
 }

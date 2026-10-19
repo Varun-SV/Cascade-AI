@@ -558,6 +558,34 @@ describe('describePage', () => {
     expect(v.text).toContain("Page: Shop (e1) button 'Pay' — https://x.example/ (Page view 9)");
   });
 
+  it('keeps a typed value out of the title and address the page copied it into', () => {
+    const snapshot = [
+      '- main [ref=e1] [box=0,0,1280,800]:',
+      '  - textbox "Recipient" [ref=e2] [box=0,0,200,20]: Alice.Smith@example.com',
+      '  - searchbox "Search" [ref=e3] [box=0,30,200,20]: garden chairs',
+      '  - button "Go" [ref=e4] [box=0,60,50,20]',
+    ].join('\n');
+    const v = describePage({
+      snapshot,
+      url: 'https://mail.example/compose?to=alice.smith%40example.com&cc=Alice.Smith@example.com&q=garden+chairs',
+      title: 'Editing ALICE.SMITH@EXAMPLE.COM — Mail',
+      viewport: SCREEN, number: 1,
+    })!;
+    const header = v.text.split('\n').find((l) => l.startsWith('Page:'))!;
+    expect(header.toLowerCase()).not.toContain('alice');
+    expect(header).toBe('Page: Editing ••• — Mail — https://mail.example/compose?to=•••&cc=•••&q=garden+chairs');
+  });
+
+  it('shows only the origin of an address it cannot check for typed values', async () => {
+    const { SNAPSHOT_MAX_CHARS } = await import('./page-view.js');
+    const huge = '- textbox "To" [ref=e1]: secret@example.com\n' + '- button "Go" [ref=e2] [box=0,0,10,10]\n'.repeat(Math.ceil(SNAPSHOT_MAX_CHARS / 35) + 10);
+    const v = describePage({ snapshot: huge, url: 'https://mail.example/u/secret@example.com?to=secret', title: 'Editing secret@example.com', viewport: SCREEN, number: 2 })!;
+    expect(v.text).not.toContain('secret');
+    expect(v.text).toContain('Page: https://mail.example (rest of the address not shown)');
+    const blank = describePage({ snapshot: huge, url: 'about:blank', title: '', viewport: SCREEN, number: 3 })!;
+    expect(blank.text).toContain('Page: (address not shown)');
+  });
+
   it('marks where each listed control is on screen, but not headings, which are not pressed', () => {
     const v = view(BOOKING)!;
     expect(v.marks.find((m) => m.ref === 'e5')).toEqual({ ref: 'e5', x: 84, y: 0, w: 32, h: 25 });
