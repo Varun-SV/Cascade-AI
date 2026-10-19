@@ -672,12 +672,15 @@ const SCRUB_VALUES_MAX = 256;
  * page's own words.
  */
 function scrubber(values: string[] | undefined): (text: string) => string {
-  const unique = [...new Set(values ?? [])].filter((v) => v.length > 0);
-  if (!unique.length) return (text) => text.slice(0, SCRUB_TEXT_MAX);
-  if (unique.length > SCRUB_VALUES_MAX) return () => '•••';
+  const rawValues = [...new Set(values ?? [])].filter((v) => v.length > 0);
+  if (!rawValues.length) return (text) => text.slice(0, SCRUB_TEXT_MAX);
+  if (rawValues.length > SCRUB_VALUES_MAX) return () => '•••';
   // A bounded snapshot can still hold one enormous field value. Never compile
   // that into a pattern; conservatively hide the names instead of dropping a
   // secret from the redaction set. Escaping at most doubles this character cap.
+  if (rawValues.reduce((total, value) => total + value.length, 0) > 16_384) return () => '•••';
+  const unique = [...new Set(rawValues.map((value) => foldText(scrubNormal(value).trim())))].filter(Boolean);
+  if (!unique.length) return (text) => text.slice(0, SCRUB_TEXT_MAX);
   if (unique.reduce((total, value) => total + value.length, 0) > 16_384) return () => '•••';
   // One pass for all of them, the longest first where two start together.
   const escape = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -688,21 +691,49 @@ function scrubber(values: string[] | undefined): (text: string) => string {
     ...(short.length ? [`(?<![\\p{L}\\p{N}])(?:${short.join('|')})(?![\\p{L}\\p{N}])`] : []),
   ].join('|'), 'gu');
   return (text) => {
-    const read = text.slice(0, SCRUB_TEXT_MAX).replace(/\s+/g, ' ');
+    const normalized = scrubNormal(text);
+    const read = normalized.slice(0, SCRUB_TEXT_MAX);
+    // Case folding can expand a character (ß -> ss). Keep offsets into the
+    // display text so redaction preserves the case of unrelated words and
+    // never slices through an expanded character.
+    let folded = '';
+    let cursor = 0;
+    const starts: number[] = [];
+    const ends: number[] = [];
+    for (const char of read) {
+      const part = foldText(char);
+      for (let i = 0; i < part.length; i++) { starts.push(cursor); ends.push(cursor + char.length); }
+      folded += part;
+      cursor += char.length;
+    }
     // Where the text is cut, a value can start before the cut and go on past
     // it, so it is never there whole to be matched. Whatever at the end could
     // be the start of one goes, and everything after it.
-    const until = text.length > SCRUB_TEXT_MAX ? runsOffAt(read, unique) : read.length;
+    const foldedUntil = normalized.length > SCRUB_TEXT_MAX ? runsOffAt(folded, unique) : folded.length;
+    const until = starts[foldedUntil] ?? read.length;
     let out = '';
     let from = 0;
-    for (const m of read.matchAll(pattern)) {
-      if (m.index >= until) break;
-      out += `${read.slice(from, m.index)}•••`;
-      from = m.index + m[0].length;
+    for (const m of folded.matchAll(pattern)) {
+      const start = starts[m.index]!;
+      if (start >= until) break;
+      out += `${read.slice(from, start)}•••`;
+      from = ends[m.index + m[0].length - 1]!;
     }
     if (until === read.length) return out + read.slice(from);
     return from < read.length ? `${out}${read.slice(from, Math.max(from, until))}•••` : out;
   };
+}
+
+/** Decompose compatibility forms before folding; clean recomposes the display. */
+function scrubNormal(text: string): string {
+  return wellFormed(text).normalize('NFKD').replace(/\p{Cf}+/gu, '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ');
+}
+
+/** Per-code-point folding also unifies final sigma and expanding cases. */
+function foldText(text: string): string {
+  return [...text].map((char) => char.toLowerCase().toUpperCase().toLowerCase()).join('');
 }
 
 /**

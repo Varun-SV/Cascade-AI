@@ -473,6 +473,32 @@ describe('describePage', () => {
     expect(v.text).not.toContain('private-long-value');
   });
 
+  it.each([
+    ['Alice@Example.com', 'ALICE@EXAMPLE.COM'],
+    ['Ａｌｉｃｅ＠Ｅｘａｍｐｌｅ．ｃｏｍ', 'alice@example.com'],
+    ['alice@example.com', 'ＡＬＩＣＥ＠ＥＸＡＭＰＬＥ．ＣＯＭ'],
+    ['Straße', 'STRASSE'],
+    ['Straße', 'STRAẞE'],
+    ['café', 'CAFE\u0301'],
+    ['alice@example.com', 'a\u200blice@example.com'],
+    ['ΟΣ', 'ος'],
+    ['ΐ', 'Ϊ\u0301'],
+  ])('redacts normalized reflection of %s', (value, reflected) => {
+    const v = view([
+      '- group:',
+      `  - textbox "Recipient" [ref=e2] [box=0,0,200,20]: ${value}`,
+      '- group:',
+      `  - button "Send to ${reflected}" [ref=e3] [box=0,30,200,20]`,
+    ].join('\n'))!;
+    expect(v.labels.get('e3')).toBe('button "Send to •••"');
+  });
+
+  it('redacts a case-expanded value whose reflection runs past the scrubber bound', () => {
+    const value = 'Straße-'.repeat(400);
+    const v = view(`- textbox "Recipient" [ref=e2]: ${value}\n- button "Send ${value.toUpperCase()}" [ref=e3]`)!;
+    expect(v.labels.get('e3')).toBe('button "Send •••"');
+  });
+
   it('scrubs numeric spinbutton values from distant controls', () => {
     const v = view([
       '- main [ref=e1] [box=0,0,1280,800]:',
