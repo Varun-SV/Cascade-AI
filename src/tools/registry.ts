@@ -428,7 +428,8 @@ export class ToolRegistry extends EventEmitter {
       if (typeof input['ref'] === 'string' && options.browserBatch.acted) {
         return 'Tool error: A previous browser_control call in this response may have changed the page. This ref was not executed. Observe the current page and issue a new call using its refs.';
       }
-      options.browserBatch.acted = true;
+      // Extraction preserves refs; it also must not clear an earlier action.
+      if (input['action'] !== 'extract_text') options.browserBatch.acted = true;
     }
 
     if (options.isOffline?.() && !this.keepsToMachine(toolName, tool)) {

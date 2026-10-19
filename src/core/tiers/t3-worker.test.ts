@@ -1143,7 +1143,7 @@ describe('a browser screenshot reaches the next request, once', () => {
 });
 
 describe('batched browser ref safety', () => {
-  it('shares ref provenance between a generated tool and a later top-level call', async () => {
+  it.each(['click', 'extract_text'])('shares %s provenance between a generated tool and a later top-level call', async (firstAction) => {
     const [{ ToolRegistry }, { ToolCreator }, { BrowserControlTool }] = await Promise.all([
       import('../../tools/registry.js'), import('../../tools/tool-creator.js'), import('../../tools/browser-control.js'),
     ]);
@@ -1161,7 +1161,7 @@ describe('batched browser ref safety', () => {
       const escalator = { requestPermission: async () => ({ approved: true, decidedBy: 'USER' }) } as unknown as PermissionEscalator;
       creator.setPermissionEscalator(escalator);
       creator.registerSpec({ name: 'dynamic_browse_once', description: 'browse', inputSchema: {}, isDangerous: true,
-        executeCode: "return await callTool('browser_control', { action: 'click', ref: 'e1' });" }, true);
+        executeCode: `return await callTool('browser_control', { action: '${firstAction}', ref: 'e1' });` }, true);
       let rounds = 0;
       const router = makeRouter(vi.fn(async () => ++rounds === 1 ? makeResult('', [
         { id: 'c1', name: 'dynamic_browse_once', input: {} },
@@ -1174,10 +1174,24 @@ describe('batched browser ref safety', () => {
       const outcomes: unknown[] = [];
       worker.on('tool:result', (outcome) => outcomes.push(outcome));
       const result = await worker.execute(makeAssignment({ subtaskTitle: 'Browse safely' }), 'task-nested-batch');
-      expect(actions, JSON.stringify({ outcomes, result })).toEqual(['click']);
+      expect(actions, JSON.stringify({ outcomes, result })).toEqual(firstAction === 'click' ? ['click'] : ['extract_text', 'click']);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it('allows an extract-only call followed by an existing ref in one response', async () => {
+    let rounds = 0;
+    const router = makeRouter(vi.fn(async () => ++rounds === 1 ? makeResult('', [
+      { id: 'c1', name: 'browser_control', input: { action: 'extract_text' } },
+      { id: 'c2', name: 'browser_control', input: { action: 'click', ref: 'e1' } },
+    ], 'tool_use') : makeResult('Finished.')) as CascadeRouter['generate']);
+    const execute = vi.fn().mockResolvedValue('Read the page');
+    const registry = makeToolRegistry({
+      getToolDefinitions: () => [{ name: 'browser_control', description: 'Browse', inputSchema: {} }], execute,
+    } as unknown as Partial<ToolRegistry>);
+    await new T3Worker(router, registry, 't2-parent').execute(makeAssignment({ subtaskTitle: 'Browse safely' }), 'task-extract-then-ref');
+    expect(execute).toHaveBeenCalledTimes(2);
   });
 
   it('does not reauthorize a second ref against a page changed by the first call', async () => {

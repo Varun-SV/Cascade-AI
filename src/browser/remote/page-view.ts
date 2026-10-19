@@ -465,12 +465,12 @@ function describe(
   const scrubbed = scrub(raw);
   const label = clean(scrubbed, NAME_LIMIT);
   // All of the name, where the label is cut: a control that keeps the label's
-  // first eighty characters can still have become another. What scrubbing
-  // reads is compared as scrubbed — a value typed since is not a new name —
-  // and the rest as the page wrote it.
+  // first eighty characters can still have become another. Bind the original
+  // text privately too: two different recipients may have the same scrubbed
+  // label, but must not authorize the same action.
   const identity = createHash('sha256')
     .update(`${node.role}\0${scrubbed}\0`)
-    .update(raw.length > SCRUB_TEXT_MAX ? raw.slice(SCRUB_TEXT_MAX, IDENTITY_TEXT_MAX) : '')
+    .update(raw.slice(0, IDENTITY_TEXT_MAX))
     // Focus may move as ordinary fields are filled. Action state must not:
     // clicking a toggle whose state changed can perform the opposite action.
     .update(JSON.stringify(STATES.filter(([attr]) => attr !== 'active').map(([attr]) => {

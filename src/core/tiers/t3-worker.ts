@@ -1182,7 +1182,7 @@ export class T3Worker extends BaseTier {
         const toolResult = staleRef
           ? 'Tool error: A previous browser_control call in this response may have changed the page. This ref was not executed. Observe the current page and issue a new call using its refs.'
           : await this.executeTool(tc, browserBatch);
-        if (tc.name === 'browser_control') browserBatch.acted = true;
+        if (tc.name === 'browser_control' && tc.input['action'] !== 'extract_text') browserBatch.acted = true;
         appendToolRecord(this.toolRecord, recordToolCall(tc.name, toolResult, tc.input, this.ranAs.get(tc)));
         // Bound what enters the context: the WHOLE history is re-sent on every
         // remaining iteration, so an unbounded tool result (big file read,

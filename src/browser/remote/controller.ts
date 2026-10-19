@@ -341,7 +341,7 @@ const PRIVATE_AUTOCOMPLETE = [
   'cc-name', 'cc-given-name', 'cc-additional-name', 'cc-family-name',
   'cc-number', 'cc-exp', 'cc-exp-month', 'cc-exp-year', 'cc-csc', 'cc-type',
 ];
-/** Fields that hold something private, by type, autocomplete token or name. */
+/** Private-field hints cover native inputs and custom text widgets alike. */
 export const PRIVATE_FIELDS = [
   'input[type="password" i]',
   ...PRIVATE_AUTOCOMPLETE.map((token) => `[autocomplete~="${token}" i]`),
@@ -366,7 +366,9 @@ export const PRIVATE_FIELDS = [
   'input[placeholder*="verification code" i]', 'input[placeholder*="one-time" i]',
   // One box per digit.
   'input[maxlength="1"][inputmode="numeric" i]',
-].join(', ');
+].flatMap((selector) => selector.startsWith('input[')
+  ? [selector, `:is(textarea,select,[contenteditable]:not([contenteditable="false" i]),[role="textbox" i],[role="searchbox" i],[role="combobox" i],[role="spinbutton" i])${selector.slice('input'.length)}`]
+  : [selector]).join(', ');
 /**
  * Fields known only by their label — a `<label>`, `aria-label` or
  * `aria-labelledby` — and no name or id that says what they hold.

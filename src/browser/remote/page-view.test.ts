@@ -427,14 +427,16 @@ describe('describePage', () => {
     expect(selected(0).text).toContain('options "Alpha", "Beta"');
   });
 
-  it('keeps a control the same when only what is typed into the page has changed', () => {
+  it('privately binds a scrubbed control name to its original text', () => {
     const at = (typed: string) => view([
       '- main [ref=e1] [box=0,0,1280,800]:',
       `  - 'radio "Other: ${typed}" [ref=e2] [box=0,0,13,13]'`,
       `  - textbox "Other reason" [ref=e3] [box=20,0,185,21]: ${typed}`,
     ].join('\n'))!;
     expect(at('Bobby').labels.get('e2')).toBe('radio "Other: •••"');
-    expect(at('Bobby').identities.get('e2')).toBe(at('Alice').identities.get('e2'));
+    expect(at('Bobby').labels.get('e2')).toBe(at('Alice').labels.get('e2'));
+    expect(at('Bobby').identities.get('e2')).not.toBe(at('Alice').identities.get('e2'));
+    expect(at('Bobby').identities.get('e2')).toBe(at('Bobby').identities.get('e2'));
   });
 
   it('hides a typed value that runs on past the end of the text it scrubs', () => {

@@ -5054,6 +5054,21 @@ describe('page views and refs', () => {
     expect(out.detail).not.toContain('undefined');
   });
 
+  it('refuses a changed hidden recipient even when the scrubbed button label stays the same', async () => {
+    const at = (recipient: string) => `- textbox "Recipient" [ref=e9] [box=0,0,200,25]: ${recipient}\n`
+      + `- button "Send to ${recipient}" [ref=e5] [box=0,30,200,25]`;
+    snapshot = at('alice@example.com');
+    const c = controller();
+    const observed = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    snapshot = at('bobby@example.com');
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.view?.labels['e5']).toBe(observed.view?.labels['e5']);
+    expect(page.calls).not.toContain('aria-ref=e5 click');
+    expect(JSON.stringify(out)).not.toMatch(/alice@example|bobby@example/);
+  });
+
   it('rejects ambiguous listbox and unselected combobox options', async () => {
     for (const role of ['listbox', 'combobox']) {
       snapshot = `- ${role} "Plans" [ref=e11] [box=10,10,200,200]:\n`
