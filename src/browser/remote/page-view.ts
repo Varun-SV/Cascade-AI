@@ -528,7 +528,11 @@ type ViewPlace = { url: string; title: string; viewport: Viewport | undefined; n
  */
 function viewHeader(input: ViewPlace, typed: string[]): string[] {
   const title = clean(scrubber(typed)(input.title), 120);
-  const url = clean(scrubber(typed.flatMap(addressForms))(input.url), 300);
+  const scrubbed = scrubber(typed.flatMap(addressForms))(input.url);
+  // A page can encode a value some other way. Decoded, it would still read
+  // as typed: then show no more of the address than its site.
+  const decoded = percentDecoded(scrubbed);
+  const url = clean(scrubber(typed)(decoded) === scrubber([])(decoded) ? scrubbed : originOnly(input.url), 300);
   const lines = [`${PAGE_VIEW_MARK} ${input.number}]`, `Page: ${title ? `${title} — ` : ''}${url}`];
   if (input.viewport) {
     const v = input.viewport;
@@ -537,10 +541,28 @@ function viewHeader(input: ViewPlace, typed: string[]): string[] {
   return lines;
 }
 
-/** How a typed value can appear in an address: as typed, and percent-encoded. */
+/**
+ * How a typed value can appear in an address: as typed, percent-encoded, and
+ * form-encoded as URLSearchParams writes it, which also encodes ~ ! ' ( ).
+ */
 function addressForms(value: string): string[] {
   const encoded = encodeURIComponent(wellFormed(value));
-  return [value, encoded, encoded.replace(/%20/g, '+')];
+  const form = new URLSearchParams({ v: wellFormed(value) }).toString().slice(2);
+  return [value, encoded, encoded.replace(/%20/g, '+'), form];
+}
+
+/** An address with its percent-escapes and form spaces read as text. */
+function percentDecoded(url: string): string {
+  return url.replace(/\+/g, ' ').replace(/(?:%[0-9a-f]{2})+/gi, (run) => {
+    try { return decodeURIComponent(run); } catch { return run; }
+  });
+}
+
+/** Of an address, only its site. */
+function originOnly(url: string): string {
+  let origin = 'null';
+  try { origin = new URL(url).origin; } catch { /* shown as unknown below */ }
+  return origin === 'null' ? '(address not shown)' : `${origin} (rest of the address not shown)`;
 }
 
 /**
@@ -550,9 +572,7 @@ function addressForms(value: string): string[] {
  * is shown.
  */
 function tooBig(input: ViewPlace): PageView {
-  let origin = 'null';
-  try { origin = new URL(input.url).origin; } catch { /* shown as unknown below */ }
-  const lines = viewHeader({ ...input, title: '', url: origin === 'null' ? '(address not shown)' : `${origin} (rest of the address not shown)` }, []);
+  const lines = viewHeader({ ...input, title: '', url: originOnly(input.url) }, []);
   lines.push('', 'This page is too large to list its controls. Use extract_text to read it, and CSS selectors to act on it.');
   return { text: lines.join('\n'), labels: new Map(), identities: new Map(), options: new Map(), framed: new Set(), marks: [] };
 }

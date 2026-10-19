@@ -576,6 +576,30 @@ describe('describePage', () => {
     expect(header).toBe('Page: Editing ••• — Mail — https://mail.example/compose?to=•••&cc=•••&q=garden+chairs');
   });
 
+  it('keeps a form-encoded typed value out of the address', () => {
+    const typed = "alice~smith!(x)'@example.com";
+    const address = new URL('https://mail.example/compose');
+    address.searchParams.set('to', typed);
+    const v = describePage({
+      snapshot: `- textbox "To" [ref=e1] [box=0,0,200,20]: ${typed}`,
+      url: address.href, title: 'Mail', viewport: SCREEN, number: 1,
+    })!;
+    const header = v.text.split('\n').find((l) => l.startsWith('Page:'))!;
+    expect(header).not.toMatch(/alice|smith/i);
+    expect(header).toBe('Page: Mail — https://mail.example/compose?to=•••');
+  });
+
+  it('shows only the site of an address holding a typed value in an encoding it does not know', () => {
+    const typed = 'alice@example.com';
+    const every = [...typed].map((c) => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`).join('');
+    const v = describePage({
+      snapshot: `- textbox "To" [ref=e1] [box=0,0,200,20]: ${typed}`,
+      url: `https://mail.example/compose?to=${every}`, title: 'Mail', viewport: SCREEN, number: 1,
+    })!;
+    const header = v.text.split('\n').find((l) => l.startsWith('Page:'))!;
+    expect(header).toBe('Page: Mail — https://mail.example (rest of the address not shown)');
+  });
+
   it('shows only the origin of an address it cannot check for typed values', async () => {
     const { SNAPSHOT_MAX_CHARS } = await import('./page-view.js');
     const huge = '- textbox "To" [ref=e1]: secret@example.com\n' + '- button "Go" [ref=e2] [box=0,0,10,10]\n'.repeat(Math.ceil(SNAPSHOT_MAX_CHARS / 35) + 10);
