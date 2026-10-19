@@ -409,6 +409,25 @@ describe('BrowserControlTool — what a person approving sees', () => {
     expect(approval({ action: 'click', ref: 'e5' }, 'worker-a').input).not.toHaveProperty('target');
   });
 
+  it('lets an approved selector act after an observe whose controls could not be listed', async () => {
+    // The host told the model to fall back to extract_text and CSS
+    // selectors; it still names the page it looked at, and the action is
+    // bound to that page rather than refused as unverified.
+    const calls: unknown[] = [];
+    const controller = vi.fn(async (action: unknown) => {
+      calls.push(action);
+      return { ok: (action as { kind: string }).kind !== 'observe', url: 'https://shop.example/cart', document: 'listed-nothing',
+        detail: 'The page\'s controls could not be listed. Use extract_text to read the page and CSS selectors to act on it.' };
+    });
+    const tool = new BrowserControlTool(controller, undefined, { pageView: true });
+    const context = { sessionId: 'run', tierId: 'worker' } as never;
+    await tool.execute({ action: 'observe' }, context);
+    const call = { action: 'click', selector: '#checkout' };
+    expect(tool.forApproval(call, 'run', 'worker').alwaysAsk).toBe(true);
+    expect(await tool.execute(call, context)).not.toContain('has not been verified');
+    expect(calls[1]).toMatchObject({ kind: 'click', selector: '#checkout', expectSite: 'shop.example', expectDocument: 'listed-nothing' });
+  });
+
   it('does not reuse an approval after that worker received a new page view', async () => {
     const controller = vi.fn(async () => ({ ok: true, detail: 'ok', document: 'doc', url: 'https://shop.example/',
       view: { text: '[Page view]', labels: { e5: 'button "Next"' } } }));

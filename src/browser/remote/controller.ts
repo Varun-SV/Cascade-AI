@@ -3230,7 +3230,12 @@ export class RemoteBrowserController {
     // must not hold the step. Past it the clean picture goes instead.
     try {
       const drawn = await this.withPageCdp(page, (cdp) => within(drawMarks(cdp, { data, ...size }, view.marks), MARKS_TIMEOUT_MS));
-      return drawn && drawn.length <= SCREENSHOT_MAX_CHARS ? drawn : null;
+      if (!drawn || drawn.length > SCREENSHOT_MAX_CHARS) return null;
+      // Sent under the clean picture's size, which the router prices it by:
+      // what came back must be a JPEG of that size, like the picture it was
+      // drawn on.
+      const drawnSize = jpegSize(Buffer.from(drawn, 'base64'));
+      return drawnSize && drawnSize.width === size.width && drawnSize.height === size.height ? drawn : null;
     } catch {
       return null;
     }

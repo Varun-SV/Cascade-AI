@@ -4608,6 +4608,8 @@ describe('page views and refs', () => {
   ]);
   let SHOT = jpeg(1280, 800);
   const SHOT64 = Buffer.from(jpeg(1280, 800)).toString('base64');
+  /** What the marks come back as: the same size, other pixels. */
+  const MARKED64 = Buffer.from(jpeg(1280, 800, 9)).toString('base64');
 
   const BOOKING = [
     '- main [ref=e1] [box=0,0,1280,1600]:',
@@ -5310,6 +5312,22 @@ describe('page views and refs', () => {
     expect(looked.document).not.toBe(seen.document);
     expect((await c.controller(
       { kind: 'click', selector: '.primary-action', expectDocument: looked.document }, ctx('run', 'w1'))).ok).toBe(true);
+  });
+
+  it('binds selector actions to the page when its controls could not be listed', async () => {
+    // A snapshot that fails: the model is told to fall back to extract_text
+    // and CSS selectors, and those must still be able to run on this page.
+    const c = controller();
+    extra['ariaSnapshot'] = async () => { throw new Error('snapshot timed out'); };
+    const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(seen.ok).toBe(false);
+    expect(seen.detail).toContain('Use extract_text to read the page and CSS selectors to act on it.');
+    expect(seen.document).toEqual(expect.any(String));
+    expect((await c.controller(
+      { kind: 'click', selector: '#go', expectDocument: seen.document }, ctx('run', 'w1'))).ok).toBe(true);
+    await page.goto('https://start.test/account');
+    expect((await c.controller(
+      { kind: 'click', selector: '#go', expectDocument: seen.document }, ctx('run', 'w1'))).ok).toBe(false);
   });
 
   it('names the document an action ran on, not one it set off', async () => {
@@ -6245,14 +6263,39 @@ describe('page views and refs', () => {
           // What is drawn: the controls on screen, never a heading.
           const expression = String(params?.['expression']);
           page.calls.push(`marks:${['e5', 'e9', 'e11'].filter((r) => expression.includes(`"ref":"${r}"`)).join(',')}`);
-          return { result: { value: 'TUFSS0VE' } };
+          return { result: { value: MARKED64 } };
         }
         return send(method, params);
       };
       try {
         const out = await controller().controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
-        expect(out.image).toMatchObject({ data: 'TUFSS0VE', width: 1280, height: 800 });
+        expect(out.image).toMatchObject({ data: MARKED64, width: 1280, height: 800 });
         expect(page.calls).toContain('marks:e5,e9,e11');
+      } finally {
+        cdp.send = send;
+      }
+    });
+
+    it('sends the clean picture when the drawn marks are not a JPEG of the same size', async () => {
+      // Sent under the clean picture's size: anything else drawn is not sent.
+      const send = cdp.send;
+      let drawn = '';
+      cdp.send = async (method: string, params?: Record<string, unknown>) => {
+        if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'MAIN' } } };
+        if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 };
+        if (method === 'Runtime.evaluate') return { result: { value: drawn } };
+        return send(method, params);
+      };
+      try {
+        for (const value of [
+          Buffer.from('MARKED').toString('base64'),
+          Buffer.from(jpeg(640, 400)).toString('base64'),
+          `${MARKED64}${'A'.repeat(2_000_001)}`,
+        ]) {
+          drawn = value;
+          const out = await controller().controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
+          expect(out.image).toMatchObject({ data: SHOT64, width: 1280, height: 800 });
+        }
       } finally {
         cdp.send = send;
       }
@@ -6272,7 +6315,7 @@ describe('page views and refs', () => {
         if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 };
         if (method === 'Runtime.evaluate') {
           attempts++;
-          return attempts === 1 ? {} : { result: { value: 'TUFSS0VE' } };
+          return attempts === 1 ? {} : { result: { value: MARKED64 } };
         }
         return send(method, params);
       };
@@ -6280,7 +6323,7 @@ describe('page views and refs', () => {
         const c = controller();
         const step = () => c.controller({ kind: 'click', selector: '#next', pageView: true, screenshot: true, marked: true }, ctx('run', 'w1'));
         expect((await step()).image?.data).toBe(SHOT64);
-        expect((await step()).image?.data).toBe('TUFSS0VE');
+        expect((await step()).image?.data).toBe(MARKED64);
         expect(attempts).toBe(2);
         expect((await step()).imageUnchanged).toBe(true);
         expect(attempts).toBe(2);
@@ -6312,7 +6355,7 @@ describe('page views and refs', () => {
       cdp.send = async (method: string, params?: Record<string, unknown>) => {
         if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'MAIN' } } };
         if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 };
-        if (method === 'Runtime.evaluate') return { result: { value: Buffer.from(String(params?.['expression']).slice(-40)).toString('base64') } };
+        if (method === 'Runtime.evaluate') return { result: { value: MARKED64 } };
         return send(method, params);
       };
       try {
