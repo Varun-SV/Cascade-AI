@@ -100,7 +100,7 @@ type FoundFields = {
 /** One control on the page, as Playwright resolves it at the moment of acting. */
 type ActionElement = {
   evaluate?(expression: (node: { nodeName: string }) => boolean): Promise<boolean>;
-  click(opts?: { timeout?: number }): Promise<void>;
+  click(opts?: { timeout?: number; trial?: boolean }): Promise<void>;
   fill(value: string, opts?: { timeout?: number }): Promise<void>;
   press(key: string, opts?: { timeout?: number }): Promise<void>;
   hover(opts?: { timeout?: number }): Promise<void>;
@@ -3450,6 +3450,7 @@ export class RemoteBrowserController {
     // wrong thing.
     let target: Locator | undefined;
     let named = action.selector ?? '';
+    const expectedView = held.view;
     if (action.ref) {
       const refused = refRefusal(held, action.ref);
       if (refused) return { ok: false, detail: refused, ...(await where()) };
@@ -3466,51 +3467,7 @@ export class RemoteBrowserController {
           ...(await where()),
         };
       }
-      const shown = held.view!.labels.get(action.ref)!;
-      // Playwright resolves a ref to the element it was given for, whatever
-      // that element now says. A page that renames a control — "Keep
-      // subscription" to "Cancel subscription" — would have the click land on
-      // what the model, and the person approving, never saw. So before an
-      // action that can set something off, the page is described again and
-      // the ref must still be called what the view called it: all of its
-      // name, not only the part a label shows.
-      if (CHANGES_THE_PAGE.has(action.kind)) {
-        // Not kept unless it is sent: a fill that goes ahead says nothing of
-        // the page, so its refs must stay the ones the model, and the person
-        // approving its next step, were shown.
-        const now = await this.pageView(held, stoppable, false, false);
-        // A frame that loaded another document before this look would have
-        // its new controls under the old refs, with the old names perhaps.
-        if (frameMoved(held, action.ref)) {
-          if (!now) return { ok: false, detail: FRAME_MOVED(action.ref), ...(await where()) };
-          now.keep();
-          return {
-            ok: false,
-            detail: `A frame on the page has loaded something else since the page view, so ${action.ref} was not used. The page as it is now:`,
-            ...(await where()),
-            view: viewOutcome(now.view),
-            document: now.document,
-          };
-        }
-        const current = now?.view.labels.get(action.ref);
-        // The options and their order affect aimed keys as well as explicit
-        // choices. Every triggering action requires the approved metadata.
-        const optionsChanged = JSON.stringify(now?.view.options.get(action.ref)) !== JSON.stringify(held.view!.options.get(action.ref));
-        if (current !== shown || now?.view.identities.get(action.ref) !== held.view!.identities.get(action.ref) || optionsChanged) {
-          now?.keep();
-          return {
-            ok: false,
-            detail: !now
-              ? `Could not check that ${action.ref} is still ${shown}, so it was not used. Call observe for a fresh page view.`
-              : current && current !== shown
-                ? `${action.ref} is now ${current}, not ${shown} as the page view said, so it was not used. The page as it is now:`
-                : `${action.ref} (${shown}) has changed or gone since the page view, so it was not used. The page as it is now:`,
-            ...(await where()),
-            ...(now ? { view: viewOutcome(now.view), document: now.document } : {}),
-          };
-        }
-      }
-      named = `${shown} (${action.ref})`;
+      named = `${expectedView!.labels.get(action.ref)!} (${action.ref})`;
     } else if (action.selector && needsLocator(action.kind)) {
       if (typeof page.locator !== 'function') {
         return { ok: false, detail: `This browser cannot ${action.kind.replace('_', ' ')}.` };
@@ -3553,6 +3510,60 @@ export class RemoteBrowserController {
       if (action.kind === 'select_option') {
         const native = actual?.evaluate && await stoppable(within(actual.evaluate((node) => node.nodeName === 'SELECT'))).catch(() => false);
         if (!native) return { ok: false, detail: 'This control is a custom dropdown rather than a native select. Use click or press to operate its visible options.', ...(await where()) };
+      }
+      // A click's actionability wait can outlive the state the action was
+      // approved against (for example, a disabled checkbox can become checked
+      // while enabling). Wait on the pinned element without dispatching input,
+      // then validate the ref's identity and document before the real click.
+      if (action.ref && action.kind === 'click') {
+        if (refRefusal(held, action.ref)) {
+          return { ok: false, detail: 'The page changed while this action was being checked, so it was not run. Call observe for a fresh page view.', ...(await where()) };
+        }
+        await stoppable(actual!.click({ timeout, trial: true }));
+      }
+      if (action.ref && CHANGES_THE_PAGE.has(action.kind)) {
+        const shown = expectedView!.labels.get(action.ref)!;
+        // Playwright resolves a ref to the element it was given for, whatever
+        // that element now says. A page that renames a control — "Keep
+        // subscription" to "Cancel subscription" — would have the click land on
+        // what the model, and the person approving, never saw. So before an
+        // action that can set something off, the page is described again and
+        // the ref must still be called what the view called it: all of its
+        // name, not only the part a label shows.
+        // Not kept unless it is sent: a fill that goes ahead says nothing of
+        // the page, so its refs must stay the ones the model, and the person
+        // approving its next step, were shown.
+        const now = await this.pageView(held, stoppable, false, false);
+        // A frame that loaded another document before this look would have
+        // its new controls under the old refs, with the old names perhaps.
+        if (frameMoved(held, action.ref)) {
+          if (!now) return { ok: false, detail: FRAME_MOVED(action.ref), ...(await where()) };
+          now.keep();
+          return {
+            ok: false,
+            detail: `A frame on the page has loaded something else since the page view, so ${action.ref} was not used. The page as it is now:`,
+            ...(await where()),
+            view: viewOutcome(now.view),
+            document: now.document,
+          };
+        }
+        const current = now?.view.labels.get(action.ref);
+        // The options and their order affect aimed keys as well as explicit
+        // choices. Every triggering action requires the approved metadata.
+        const optionsChanged = JSON.stringify(now?.view.options.get(action.ref)) !== JSON.stringify(expectedView!.options.get(action.ref));
+        if (current !== shown || now?.view.identities.get(action.ref) !== expectedView!.identities.get(action.ref) || optionsChanged) {
+          now?.keep();
+          return {
+            ok: false,
+            detail: !now
+              ? `Could not check that ${action.ref} is still ${shown}, so it was not used. Call observe for a fresh page view.`
+              : current && current !== shown
+                ? `${action.ref} is now ${current}, not ${shown} as the page view said, so it was not used. The page as it is now:`
+                : `${action.ref} (${shown}) has changed or gone since the page view, so it was not used. The page as it is now:`,
+            ...(await where()),
+            ...(now ? { view: viewOutcome(now.view), document: now.document } : {}),
+          };
+        }
       }
       if (action.kind !== 'navigate' && (held.page !== page || !sameDocument(actedOn!, held)
         || (action.ref && frameMoved(held, action.ref))

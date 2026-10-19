@@ -4689,7 +4689,7 @@ describe('page views and refs', () => {
           const ref = /^aria-ref=(.+)$/.exec(selector)?.[1];
           return ref === undefined || liveRefs.has(ref) ? 1 : 0;
         },
-        click: record('click'),
+        click: async (opts?: { trial?: boolean }) => { if (!opts?.trial) await record('click')(); },
         fill: record('fill'),
         press: record('press'),
         hover: record('hover'),
@@ -4980,6 +4980,52 @@ describe('page views and refs', () => {
     }
   });
 
+  it('rechecks approved state after waiting for a ref click to become actionable', async () => {
+    snapshot = '- checkbox "Remember" [disabled] [ref=e5] [box=84,0,32,25]';
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    let clicked = false;
+    extra['locator'] = (selector: string) => ({ ...locate(selector),
+      async click(opts: { trial?: boolean }) {
+        // The browser waits for enablement. In that interval the page also
+        // checks the box, changing what a real click would do.
+        await Promise.resolve();
+        snapshot = '- checkbox "Remember" [checked] [ref=e5] [box=84,0,32,25]';
+        if (!opts.trial) clicked = true;
+      },
+    });
+    const out = await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(clicked).toBe(false);
+    expect(out.view?.text).toContain('checked');
+  });
+
+  it('refuses navigation during a trial click and disposes the pinned element', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    let clicked = false;
+    let disposed = false;
+    extra['locator'] = (selector: string) => ({ ...locate(selector),
+      async elementHandle() {
+        const bound = await (locate(selector).elementHandle as () => Promise<Record<string, unknown>>)();
+        return { ...bound,
+          async click(opts: { trial?: boolean }) {
+            if (opts.trial) await page.goto('https://start.test/another-document');
+            else clicked = true;
+          },
+          async dispose() { disposed = true; },
+        };
+      },
+    });
+    const out = await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(clicked).toBe(false);
+    expect(disposed).toBe(true);
+    expect(out.detail).not.toContain('undefined');
+  });
+
   it('rejects ambiguous listbox and unselected combobox options', async () => {
     for (const role of ['listbox', 'combobox']) {
       snapshot = `- ${role} "Plans" [ref=e11] [box=10,10,200,200]:\n`
@@ -5114,7 +5160,7 @@ describe('page views and refs', () => {
     for (const timeoutMs of [0, -1, Infinity, 30_000]) {
       expect((await c.controller({ kind: 'click', ref: 'e5', timeoutMs }, ctx('run', 'w1'))).ok).toBe(true);
     }
-    expect(timeouts).toHaveLength(8);
+    expect(timeouts).toHaveLength(12);
     expect(timeouts.every((value) => Number.isFinite(value) && value > 0 && value <= 30_000)).toBe(true);
   });
 
