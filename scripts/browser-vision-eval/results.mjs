@@ -16,6 +16,26 @@ export function modelBindingsMatch(requested, bindings) {
   return bindings.length === 3 && bindings.every((model) => model && (model.id === requested || `${model.provider}:${model.id}` === requested));
 }
 
+/**
+ * A model's final reply, read as the short answer the task asked for: case,
+ * surrounding quotes or emphasis, a closing full stop and spacing aside, it
+ * must be one of the accepted answers, so a guess or an explanation that
+ * merely mentions the answer does not pass.
+ */
+export function answeredExactly(accepted, reply) {
+  const normal = (text) => String(text).normalize('NFKC')
+    .trim().replace(/^[\s*_`"'“”‘’]+|[\s*_`"'“”‘’.!]+$/gu, '')
+    .replace(/\s+/g, ' ').toLowerCase();
+  const answer = normal(reply);
+  return accepted.some((form) => normal(form) === answer);
+}
+
+/** Whether a page's text shows an answer at all: the scripted check's test. */
+export function pageShows(accepted, text) {
+  const escape = (v) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escape(accepted[0])}(?![\\p{L}\\p{N}])`, 'iu').test(text);
+}
+
 const known = (value) => Number.isFinite(value) && value >= 0 ? value : null;
 
 /** Preserve observed usage, and never attribute a fallback model to the requested one. */

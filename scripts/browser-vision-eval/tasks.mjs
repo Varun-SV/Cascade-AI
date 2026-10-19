@@ -4,8 +4,8 @@
 //
 //  Ten small tasks on a local site, each aimed at something the old
 //  text-and-selector view handled badly. A task is done when its page reports
-//  it (`check.done`, sent by the page itself) or when the run's answer matches
-//  (`check.answer`).
+//  it (`check.done`, sent by the page itself) or when the model's final reply
+//  is one of the accepted short answers (`check.answer`), exactly.
 //
 //  `solve` is a scripted solution, used by `run.mjs --check` to prove each
 //  task can be done through browser_control at all — so a model that fails a
@@ -40,7 +40,7 @@ export const TASKS = [
     page: 'plans.html',
     tests: 'a layout whose order on screen differs from the order in the page',
     prompt: 'Which plan appears in the middle of the three, as the page is shown on screen? Answer with the plan name only.',
-    check: { answer: /\bteam\b/i },
+    check: { answer: ['Team'] },
     solve: [{ action: 'extract_text' }],
   },
   {
@@ -89,7 +89,7 @@ export const TASKS = [
     page: 'reviews.html',
     tests: 'tabs, with the answer hidden until one is opened',
     prompt: 'How many stars did Priya give in her review? Answer with the number only.',
-    check: { answer: /\b5\b/ },
+    check: { answer: ['5', '5 stars'] },
     solve: [{ action: 'click', label: 'tab "Reviews"' }, { action: 'extract_text' }],
   },
   {
@@ -108,7 +108,7 @@ export const TASKS = [
     page: 'home.html',
     tests: 'an answer on another page of the site',
     prompt: 'How much is the mushroom risotto? Answer with the price only.',
-    check: { answer: /640/ },
+    check: { answer: ['640', '₹640', '₹ 640', 'Rs 640', 'Rs. 640', 'INR 640'] },
     solve: [{ action: 'click', label: 'link "Menu"' }, { action: 'extract_text' }],
   },
 ];

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { assessRun, modelBindingsMatch, scheduleRuns, summarise } from './results.mjs';
+import { answeredExactly, assessRun, modelBindingsMatch, pageShows, scheduleRuns, summarise } from './results.mjs';
+import { TASKS } from './tasks.mjs';
 
 describe('browser comparison validity', () => {
   const taskList = [{ id: 'a' }, { id: 'b' }];
@@ -46,5 +47,30 @@ describe('browser comparison validity', () => {
     const unknown = summarise([{ ...base, ...assessRun({ error: 'missing' }) }], taskList);
     expect(unknown).toContain('n/a');
     expect(unknown).not.toContain('$0.0000');
+  });
+
+  it('passes an answer-scored run only on the short answer itself', () => {
+    const answers = Object.fromEntries(TASKS.filter((t) => t.check.answer).map((t) => [t.id, t.check.answer]));
+    expect(answeredExactly(answers.plans, 'Team')).toBe(true);
+    expect(answeredExactly(answers.plans, '**Team**.')).toBe(true);
+    expect(answeredExactly(answers.plans, ' "team" ')).toBe(true);
+    expect(answeredExactly(answers.reviews, '5')).toBe(true);
+    expect(answeredExactly(answers.reviews, '5 stars')).toBe(true);
+    expect(answeredExactly(answers.menu, '₹640')).toBe(true);
+    expect(answeredExactly(answers.menu, 'Rs. 640')).toBe(true);
+    // Mentioning the answer, guessing between answers, or explaining a failure.
+    expect(answeredExactly(answers.plans, 'I could not verify whether Team is the middle plan')).toBe(false);
+    expect(answeredExactly(answers.plans, 'Team or Pro')).toBe(false);
+    expect(answeredExactly(answers.reviews, 'Probably 5, but I could not open the tab')).toBe(false);
+    expect(answeredExactly(answers.reviews, '15')).toBe(false);
+    expect(answeredExactly(answers.menu, '6400')).toBe(false);
+    expect(answeredExactly(answers.menu, 'I could not find 640 on the menu')).toBe(false);
+    expect(answeredExactly(answers.menu, undefined)).toBe(false);
+  });
+
+  it('lets the scripted check find the answer on the page, as a whole word', () => {
+    expect(pageShows(['Team'], 'Pro ₹999 a month Basic ₹199 a month Team ₹2,499 a month')).toBe(true);
+    expect(pageShows(['640'], 'Mushroom risotto — ₹640')).toBe(true);
+    expect(pageShows(['5'], 'Priya — 15 stars')).toBe(false);
   });
 });

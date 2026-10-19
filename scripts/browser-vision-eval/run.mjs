@@ -31,7 +31,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { TASKS } from './tasks.mjs';
-import { assessRun, modelBindingsMatch, scheduleRuns, summarise } from './results.mjs';
+import { answeredExactly, assessRun, modelBindingsMatch, pageShows, scheduleRuns, summarise } from './results.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const args = parseArgs(process.argv.slice(2));
@@ -113,7 +113,7 @@ async function check() {
     } catch (err) {
       problem = String(err);
     }
-    const ok = !problem && (task.check.done ? site.done.has(`${run}:${task.check.done}`) : task.check.answer.test(outputs.join('\n')));
+    const ok = !problem && (task.check.done ? site.done.has(`${run}:${task.check.done}`) : pageShows(task.check.answer, outputs.join('\n')));
     if (!ok) failed++;
     console.log(`${ok ? 'PASS' : 'FAIL'}  ${task.id.padEnd(11)} ${task.tests}${problem ? `\n      ${problem}` : ''}`);
     await controller.endRun(run).catch(() => {});
@@ -244,7 +244,7 @@ async function evaluate() {
       // The page reports a finished task with a request of its own, which
       // can land after the model's last word: wait for it a moment.
       if (task.check.done) await reported(`${run}:${task.check.done}`);
-      const ok = task.check.done ? site.done.has(`${run}:${task.check.done}`) : task.check.answer.test(output);
+      const ok = task.check.done ? site.done.has(`${run}:${task.check.done}`) : answeredExactly(task.check.answer, output);
       const assessment = assessRun({ ok, usage, stats: cascade.getRouter().getStats(), decisions, error, modelInvalid });
       rows.push({
         model, arm, task: task.id, ...assessment,
