@@ -530,9 +530,11 @@ function viewHeader(input: ViewPlace, typed: string[]): string[] {
   const title = clean(scrubber(typed)(input.title), 120);
   const scrubbed = scrubber(typed.flatMap(addressForms))(input.url);
   // A page can encode a value some other way. Decoded, it would still read
-  // as typed: then show no more of the address than its site.
+  // as typed: then show no more of the address than its site. So too when
+  // the address is encoded more deeply than it is decoded here.
   const decoded = percentDecoded(scrubbed);
-  const url = clean(scrubber(typed)(decoded) === scrubber([])(decoded) ? scrubbed : originOnly(input.url), 300);
+  const unsure = decoded.exhausted || redactor(typed)(decoded.text).hidden;
+  const url = clean(unsure ? originOnly(input.url) : scrubbed, 300);
   const lines = [`${PAGE_VIEW_MARK} ${input.number}]`, `Page: ${title ? `${title} — ` : ''}${url}`];
   if (input.viewport) {
     const v = input.viewport;
@@ -554,20 +556,24 @@ function addressForms(value: string): string[] {
 /** Not fatal: a byte that is not UTF-8 reads as U+FFFD, and the rest still reads. */
 const UTF8 = new TextDecoder('utf-8');
 
+/** How many times over an address is decoded before it is taken as unreadable. */
+const DECODE_ROUNDS = 8;
+
 /**
  * An address with its percent-escapes and form spaces read as text. A run
  * with one invalid byte (`%FF%61…`) is still read around it, and an escape
- * that decodes to another escape (`%2561`) is read again, a few times over.
+ * that decodes to another escape (`%2561`) is read again, until none is left.
+ * Escapes still there after DECODE_ROUNDS make it `exhausted`: what they
+ * hide was never read.
  */
-function percentDecoded(url: string): string {
+function percentDecoded(url: string): { text: string; exhausted: boolean } {
+  const ESCAPES = /(?:%[0-9a-f]{2})+/gi;
   let text = url.replace(/\+/g, ' ');
-  for (let round = 0; round < 3; round++) {
-    const next = text.replace(/(?:%[0-9a-f]{2})+/gi, (run) =>
+  for (let round = 0; round < DECODE_ROUNDS && /%[0-9a-f]{2}/i.test(text); round++) {
+    text = text.replace(ESCAPES, (run) =>
       UTF8.decode(Uint8Array.from(run.slice(1).split('%'), (hex) => parseInt(hex, 16))));
-    if (next === text) break;
-    text = next;
   }
-  return text;
+  return { text, exhausted: /%[0-9a-f]{2}/i.test(text) };
 }
 
 /** Of an address, only its site. */
@@ -723,16 +729,27 @@ const SCRUB_VALUES_MAX = 256;
  * page's own words.
  */
 function scrubber(values: string[] | undefined): (text: string) => string {
+  const redact = redactor(values);
+  return (text) => redact(text).text;
+}
+
+/** What scrubber returns, and whether it took anything out to return it. */
+type Redacted = { text: string; hidden: boolean };
+
+/** See scrubber. */
+function redactor(values: string[] | undefined): (text: string) => Redacted {
+  const kept = (text: string): Redacted => ({ text: text.slice(0, SCRUB_TEXT_MAX), hidden: false });
+  const all = (): Redacted => ({ text: '•••', hidden: true });
   const rawValues = [...new Set(values ?? [])].filter((v) => v.length > 0);
-  if (!rawValues.length) return (text) => text.slice(0, SCRUB_TEXT_MAX);
-  if (rawValues.length > SCRUB_VALUES_MAX) return () => '•••';
+  if (!rawValues.length) return kept;
+  if (rawValues.length > SCRUB_VALUES_MAX) return all;
   // A bounded snapshot can still hold one enormous field value. Never compile
   // that into a pattern; conservatively hide the names instead of dropping a
   // secret from the redaction set. Escaping at most doubles this character cap.
-  if (rawValues.reduce((total, value) => total + value.length, 0) > 16_384) return () => '•••';
+  if (rawValues.reduce((total, value) => total + value.length, 0) > 16_384) return all;
   const unique = [...new Set(rawValues.map((value) => foldText(scrubNormal(value).trim())))].filter(Boolean);
-  if (!unique.length) return (text) => text.slice(0, SCRUB_TEXT_MAX);
-  if (unique.reduce((total, value) => total + value.length, 0) > 16_384) return () => '•••';
+  if (!unique.length) return kept;
+  if (unique.reduce((total, value) => total + value.length, 0) > 16_384) return all;
   // One pass for all of them, the longest first where two start together.
   const escape = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const long = unique.filter((v) => v.length >= SHORT_VALUE).sort((a, b) => b.length - a.length).map(escape);
@@ -764,14 +781,16 @@ function scrubber(values: string[] | undefined): (text: string) => string {
     const until = starts[foldedUntil] ?? read.length;
     let out = '';
     let from = 0;
+    let hidden = false;
     for (const m of folded.matchAll(pattern)) {
       const start = starts[m.index]!;
       if (start >= until) break;
       out += `${read.slice(from, start)}•••`;
       from = ends[m.index + m[0].length - 1]!;
+      hidden = true;
     }
-    if (until === read.length) return out + read.slice(from);
-    return from < read.length ? `${out}${read.slice(from, Math.max(from, until))}•••` : out;
+    if (until === read.length) return { text: out + read.slice(from), hidden };
+    return { text: from < read.length ? `${out}${read.slice(from, Math.max(from, until))}•••` : out, hidden: true };
   };
 }
 

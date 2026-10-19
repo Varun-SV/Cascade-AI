@@ -615,6 +615,29 @@ describe('describePage', () => {
     }
   });
 
+  it('shows only the site of an address encoded more deeply than it can read, and reads four layers', () => {
+    const typed = 'alice@example.com';
+    const once = [...typed].map((c) => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`).join('');
+    const layered = (extra: number) => once.replace(/%/g, `%${'25'.repeat(extra)}`);
+    for (const extra of [3, 12]) {
+      const url = `https://mail.example/compose?to=${layered(extra)}`;
+      const v = describePage({
+        snapshot: `- textbox "To" [ref=e1] [box=0,0,200,20]: ${typed}`,
+        url, title: 'Mail', viewport: SCREEN, number: 1,
+      })!;
+      const header = v.text.split('\n').find((l) => l.startsWith('Page:'))!;
+      expect(header, `${extra} extra layers`).toBe('Page: Mail — https://mail.example (rest of the address not shown)');
+    }
+  });
+
+  it('keeps an address whose Unicode path holds nothing typed', () => {
+    const v = describePage({
+      snapshot: '- textbox "To" [ref=e1] [box=0,0,200,20]: alice@example.com',
+      url: 'https://mail.example/caf%C3%A9', title: 'Mail', viewport: SCREEN, number: 1,
+    })!;
+    expect(v.text.split('\n').find((l) => l.startsWith('Page:'))).toBe('Page: Mail — https://mail.example/caf%C3%A9');
+  });
+
   it('shows only the origin of an address it cannot check for typed values', async () => {
     const { SNAPSHOT_MAX_CHARS } = await import('./page-view.js');
     const huge = '- textbox "To" [ref=e1]: secret@example.com\n' + '- button "Go" [ref=e2] [box=0,0,10,10]\n'.repeat(Math.ceil(SNAPSHOT_MAX_CHARS / 35) + 10);
