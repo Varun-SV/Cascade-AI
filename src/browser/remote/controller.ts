@@ -109,7 +109,7 @@ type ActionElement = {
   innerText(opts?: { timeout?: number }): Promise<string>;
 };
 type BoundElement = ActionElement & {
-  waitForElementState(state: 'visible', opts?: { timeout?: number }): Promise<void>;
+  waitForElementState(state: 'visible' | 'enabled' | 'editable', opts?: { timeout?: number }): Promise<void>;
   dispose(): Promise<void>;
 };
 type Locator = ActionElement & {
@@ -3511,15 +3511,18 @@ export class RemoteBrowserController {
         const native = actual?.evaluate && await stoppable(within(actual.evaluate((node) => node.nodeName === 'SELECT'))).catch(() => false);
         if (!native) return { ok: false, detail: 'This control is a custom dropdown rather than a native select. Use click or press to operate its visible options.', ...(await where()) };
       }
-      // A click's actionability wait can outlive the state the action was
-      // approved against (for example, a disabled checkbox can become checked
-      // while enabling). Wait on the pinned element without dispatching input,
-      // then validate the ref's identity and document before the real click.
-      if (action.ref && action.kind === 'click') {
+      // Readiness waits can outlive the approved state: a checkbox can become
+      // checked or a field can acquire a user's draft while enabling. Wait on
+      // the pinned element without dispatching input, then revalidate the ref.
+      if (action.ref && CHANGES_THE_PAGE.has(action.kind)) {
         if (refRefusal(held, action.ref)) {
           return { ok: false, detail: 'The page changed while this action was being checked, so it was not run. Call observe for a fresh page view.', ...(await where()) };
         }
-        await stoppable(actual!.click({ timeout, trial: true }));
+        if (action.kind === 'click') await stoppable(element!.click({ timeout, trial: true }));
+        if (action.kind === 'fill' || action.kind === 'select_option') {
+          await stoppable(element!.waitForElementState('visible', { timeout }));
+          await stoppable(element!.waitForElementState(action.kind === 'fill' ? 'editable' : 'enabled', { timeout }));
+        }
       }
       if (action.ref && CHANGES_THE_PAGE.has(action.kind)) {
         const shown = expectedView!.labels.get(action.ref)!;

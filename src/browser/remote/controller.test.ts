@@ -5001,6 +5001,34 @@ describe('page views and refs', () => {
     expect(out.view?.text).toContain('checked');
   });
 
+  it.each(['fill', 'select_option'] as const)('rechecks approved state after %s readiness waits', async (kind) => {
+    snapshot = kind === 'fill'
+      ? '- textbox "Description" [disabled] [ref=e5] [box=84,0,200,25]'
+      : '- combobox "Plan" [disabled] [ref=e5] [box=84,0,200,25]:\n  - option "First" [selected]\n  - option "Second"';
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    const ready = () => {
+      snapshot = kind === 'fill'
+        ? '- textbox "Description" [ref=e5] [box=84,0,200,25]: user draft'
+        : '- combobox "Plan" [ref=e5] [box=84,0,200,25]:\n  - option "First"\n  - option "Second" [selected]';
+    };
+    let dispatched = false;
+    extra['locator'] = (selector: string) => ({ ...locate(selector),
+      async elementHandle() {
+        const bound = await (locate(selector).elementHandle as () => Promise<Record<string, unknown>>)();
+        return { ...bound,
+          async waitForElementState() { ready(); },
+          async fill() { ready(); dispatched = true; },
+          async selectOption() { ready(); dispatched = true; },
+        };
+      },
+    });
+    const out = await c.controller({ kind, ref: 'e5', value: kind === 'fill' ? 'replacement' : 'First' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(dispatched).toBe(false);
+  });
+
   it('refuses navigation during a trial click and disposes the pinned element', async () => {
     const c = controller();
     await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
@@ -5391,7 +5419,9 @@ describe('page views and refs', () => {
     const text = await c.controller({ kind: 'extract_text', ref: 'e14' }, ctx('run', 'w1'));
     expect(page.calls.filter((x) => !x.startsWith('snapshot:'))).toEqual([
       // An option on a ref by its text alone: its value is not shown to anyone.
-      'aria-ref=e9 fill=secret', 'aria-ref=e9 press=Enter', 'aria-ref=e14 waitFor', 'aria-ref=e11 selectOption=label:4 people',
+      'aria-ref=e9 waitFor', 'aria-ref=e9 waitFor',
+      'aria-ref=e9 fill=secret', 'aria-ref=e9 press=Enter', 'aria-ref=e14 waitFor',
+      'aria-ref=e11 waitFor', 'aria-ref=e11 waitFor', 'aria-ref=e11 selectOption=label:4 people',
       'aria-ref=e5 hover', 'aria-ref=e14 scrollIntoView', 'aria-ref=e14 innerText',
     ]);
     expect(text.detail).toBe('located text');
