@@ -141,7 +141,7 @@ const VIEWED_AFTER = new Set<BrowserAction['kind']>(['navigate', 'click', 'press
  * answered. "Sender settings" is not "send".
  */
 const IRREVERSIBLE =
-  /\b(?:pa(?:y|ys|ying|id|yment|yments)|buy(?:s|ing)?|purchas(?:e|es|ing)|order(?:s|ing)?|check[\s-]?out|delet(?:e|es|ing)|remov(?:e|es|ing)|send(?:s|ing)?|transfer(?:s|ring)?|publish(?:es|ing)?|confirm(?:s|ing)?|approv(?:e|es|ing)|authori[sz](?:e|es|ing)|allow(?:s|ing)?|withdraw(?:s|al|ing)?|subscrib(?:e|es|ing)|unsubscrib(?:e|es|ed|ing)|cancel(?:s|l?ed|l?ing|lations?)?|donat(?:e|es|ing))\b/i;
+  /\b(?:pa(?:y|ys|ying|id|yment|yments)|buy(?:s|ing)?|purchas(?:e|es|ing)|order(?:s|ing)?|check[\s-]?out|delet(?:e|es|ing)|remov(?:e|es|ing)|send(?:s|ing)?|submit(?:s|ted|ting)?|transfer(?:s|ring)?|publish(?:es|ing)?|confirm(?:s|ing)?|approv(?:e|es|ing)|authori[sz](?:e|es|ing)|allow(?:s|ing)?|withdraw(?:s|al|ing)?|subscrib(?:e|es|ing)|unsubscrib(?:e|es|ed|ing)|cancel(?:s|l?ed|l?ing|lations?)?|donat(?:e|es|ing))\b/i;
 /**
  * Letters from other scripts drawn like Latin ones — "Рay" with a Cyrillic Р
  * reads as "Pay" — folded to the Latin letter they pass for.

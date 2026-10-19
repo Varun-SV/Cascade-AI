@@ -765,6 +765,16 @@ describe('BrowserControlTool — what a person approving sees', () => {
     expect(tool.forApproval({ action: 'click', ref: 'e7' }, 'run-1').alwaysAsk).toBe(false);
   });
 
+  it('reprompts for plain submit buttons and their usual inflections', async () => {
+    const labels = ['Submit', 'Submits', 'Submitting', 'Submitted'];
+    const { controller } = recorder({ document: 'doc', url: 'https://shop.example/',
+      view: { text: '[Page view 1]', labels: Object.fromEntries([...labels, 'Submitter settings'].map((label, i) => [`e${i + 1}`, `button "${label}"`])) } });
+    const tool = new BrowserControlTool(controller, undefined, { pageView: true });
+    await tool.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
+    labels.forEach((label, i) => expect(tool.forApproval({ action: 'click', ref: `e${i + 1}` }, 'run-1').alwaysAsk, label).toBe(true));
+    expect(tool.forApproval({ action: 'click', ref: 'e5' }, 'run-1').alwaysAsk).toBe(false);
+  });
+
   it('remembers a bounded number of runs', async () => {
     const rec = recorder({ detail: 'ok', url: 'https://a.example/', view: VIEW });
     const tool = new BrowserControlTool(rec.controller, undefined, { pageView: true });

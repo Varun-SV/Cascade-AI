@@ -4566,6 +4566,13 @@ describe('round 34 view-boundary regressions', () => {
 });
 
 describe('page views and refs', () => {
+  it('recognizes compound sensitive labels without matching ordinary shipping labels', async () => {
+    const { PRIVATE_LABEL } = await import('./controller.js');
+    for (const label of ['pinCode', 'userPinCode', 'cardNumber', 'cvvCode', 'cardCvvCode', 'cvcCode', 'securityCode', 'verificationCode', 'authCode', 'otpCode', 'signInCode']) {
+      expect(PRIVATE_LABEL.test(label), label).toBe(true);
+    }
+    for (const label of ['Shipping info', 'Spinner size']) expect(PRIVATE_LABEL.test(label), label).toBe(false);
+  });
   /** What the fake page's AI snapshot says the page holds. */
   let snapshot = '';
   let snapshotFails = false;
@@ -4585,6 +4592,7 @@ describe('page views and refs', () => {
   let placeholderText = 'Card number';
   /** Refs the fake page can still resolve, whatever the last view listed. */
   let liveRefs = new Set<string>();
+  let nativeOptionValues: string[] = [];
   const extra = page as unknown as Record<string, unknown>;
 
   /**
@@ -4612,6 +4620,7 @@ describe('page views and refs', () => {
 
   beforeEach(() => {
     snapshot = BOOKING;
+    nativeOptionValues = [];
     snapshotFails = false;
     privateOnScreen = false;
     subFrames = [];
@@ -4685,6 +4694,10 @@ describe('page views and refs', () => {
         return what === 'innerText' ? 'located text' : undefined;
       };
       return {
+        locator: () => ({
+          count: async () => nativeOptionValues.length,
+          nth: (index: number) => ({ getAttribute: async () => nativeOptionValues[index] ?? null, textContent: async () => `Choice ${index}` }),
+        }),
         count: async () => {
           const ref = /^aria-ref=(.+)$/.exec(selector)?.[1];
           return ref === undefined || liveRefs.has(ref) ? 1 : 0;
@@ -5067,6 +5080,30 @@ describe('page views and refs', () => {
     expect(out.view?.labels['e5']).toBe(observed.view?.labels['e5']);
     expect(page.calls).not.toContain('aria-ref=e5 click');
     expect(JSON.stringify(out)).not.toMatch(/alice@example|bobby@example/);
+  });
+
+  it('refuses changed native option values without exposing them', async () => {
+    nativeOptionValues = ['basic-operation', 'other-operation'];
+    const c = controller();
+    const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(JSON.stringify(seen)).not.toContain('basic-operation');
+    nativeOptionValues[0] = 'delete-operation';
+    page.calls = [];
+    const out = await c.controller({ kind: 'select_option', ref: 'e11', value: '4 people' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(page.calls.some((call) => call.includes('selectOption'))).toBe(false);
+    expect(JSON.stringify(out)).not.toMatch(/basic-operation|delete-operation/);
+  });
+
+  it.each(['too many', 'unreadable'])('withholds refs when native values are %s', async (failure) => {
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    extra['locator'] = (selector: string) => ({ ...locate(selector), locator: () => ({
+      count: async () => failure === 'too many' ? 2_001 : 1,
+      nth: () => ({ getAttribute: async () => { throw new Error('Cannot read option value'); }, textContent: async () => 'Basic' }),
+    }) });
+    const out = await controller().controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.view).toBeUndefined();
   });
 
   it('rejects ambiguous listbox and unselected combobox options', async () => {

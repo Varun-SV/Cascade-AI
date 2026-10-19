@@ -114,6 +114,13 @@ type BoundElement = ActionElement & {
 };
 type Locator = ActionElement & {
   count(): Promise<number>;
+  locator?(selector: string): {
+    count(): Promise<number>;
+    nth(index: number): {
+      getAttribute(name: string): Promise<string | null>;
+      textContent(): Promise<string | null>;
+    };
+  };
   waitFor(opts?: { state?: 'visible'; timeout?: number }): Promise<void>;
   elementHandle?(opts?: { timeout?: number }): Promise<BoundElement | null>;
 };
@@ -373,7 +380,7 @@ export const PRIVATE_FIELDS = [
  * Fields known only by their label — a `<label>`, `aria-label` or
  * `aria-labelledby` — and no name or id that says what they hold.
  */
-export const PRIVATE_LABEL = /password|passcode|one[\s-]?time|verification code|verify code|security code|auth(?:entication|orization)? code|access code|sign[\s-]?in code|login code|\botp\b|\b2fa\b|two[\s-]?(?:factor|step)|\bmfa\b|\bpin\b|card number|(?:name\s+on\s+(?:the\s+)?card|card[\s_-]*holder(?:[\s_-]*name)?|cardholder[\s_-]*name)|\bcvc\b|\bcvv\b|\bexpir(?:y|ation|es?)\b|\bexp\.?\s*(?:date|month|year)\b|\bmm\s*[/\-]\s*y{2}(?:y{2})?\b/i;
+export const PRIVATE_LABEL = /(?:pin|cv[cv]|otp)[\s_-]*(?:code|number)|password|passcode|one[\s-]?time|verification[\s_-]*code|verify[\s_-]*code|security[\s_-]*code|auth(?:entication|orization)?[\s_-]*code|access[\s_-]*code|sign[\s_-]*in[\s_-]*code|login[\s_-]*code|\botp(?:[\s_-]*code)?\b|\b2fa\b|two[\s-]?(?:factor|step)|\bmfa\b|\bpin(?:[\s_-]*(?:code|number))?\b|card[\s_-]*number|(?:name\s+on\s+(?:the\s+)?card|card[\s_-]*holder(?:[\s_-]*name)?|cardholder[\s_-]*name)|\bcvc(?:[\s_-]*(?:code|number))?\b|\bcvv(?:[\s_-]*(?:code|number))?\b|\bexpir(?:y|ation|es?)\b|\bexp\.?\s*(?:date|month|year)\b|\bmm\s*[/\-]\s*y{2}(?:y{2})?\b/i;
 /**
  * Placeholders that say the same, and the digits a card field shows before
  * one is typed: "Card number", "1234 1234 1234 1234", "•••• ••••".
@@ -3101,6 +3108,7 @@ export class RemoteBrowserController {
         number: (held.views ?? 0) + 1,
       });
       if (!view) return null;
+      await stoppable(within(bindOptionValues(page, view)));
       let kept = false;
       const keep = (): void => {
         if (kept) return;
@@ -4020,6 +4028,38 @@ const FRAME_MOVED = (ref: string): string =>
 
 /** Actions on a ref that can set off what its control does. See `perform`. */
 const CHANGES_THE_PAGE = new Set<BrowserAction['kind']>(['click', 'fill', 'press', 'select_option']);
+
+/** Hidden native option values affect what choosing a displayed label does. */
+async function bindOptionValues(page: Page, view: PageView): Promise<void> {
+  const deadline = Date.now() + PAGE_CHECK_TIMEOUT_MS;
+  let countRead = 0;
+  let charsRead = 0;
+  for (const ref of view.options.keys()) {
+    if (Date.now() >= deadline) throw new Error('Native option values took too long to check.');
+    // These Playwright reads use its isolated DOM access, rather than running
+    // page-written getters or a page-world evaluate callback.
+    const options = page.locator?.(`aria-ref=${ref}`).locator?.('option');
+    if (!options) throw new Error('Native option values could not be checked.');
+    const count = await options.count();
+    countRead += count;
+    if (!Number.isSafeInteger(count) || count < 0 || countRead > 2_000) throw new Error('Too many native options to check.');
+    const digest = createHash('sha256').update(view.identities.get(ref) ?? '');
+    for (let start = 0; start < count; start += 16) {
+      if (Date.now() >= deadline) throw new Error('Native option values took too long to check.');
+      const values = await Promise.all(Array.from({ length: Math.min(16, count - start) }, async (_, offset) => {
+        const option = options.nth(start + offset);
+        // Text determines the native value when the value attribute is absent.
+        return Promise.all([option.getAttribute('value'), option.textContent()]);
+      }));
+      const raw = JSON.stringify(values);
+      charsRead += raw.length;
+      if (charsRead > 1_000_000) throw new Error('Native option values are too large to check.');
+      digest.update(raw);
+    }
+    if (await options.count() !== count) throw new Error('Native options changed during the check.');
+    view.identities.set(ref, digest.digest('base64'));
+  }
+}
 
 /** Actions that resolve their selector through a locator rather than a page method. */
 function needsLocator(kind: BrowserAction['kind']): boolean {
