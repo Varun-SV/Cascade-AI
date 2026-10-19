@@ -600,6 +600,21 @@ describe('describePage', () => {
     expect(header).toBe('Page: Mail — https://mail.example (rest of the address not shown)');
   });
 
+  it('reads past an invalid escape and a doubled one when looking for a typed value in the address', () => {
+    const typed = 'alice@example.com';
+    const every = [...typed].map((c) => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`).join('');
+    for (const query of [`%FF${every}`, `${every}%FF`, every.replace(/%/g, '%25')]) {
+      const url = `https://mail.example/compose?to=${query}`;
+      expect(new URL(url).href).toBe(url);
+      const v = describePage({
+        snapshot: `- textbox "To" [ref=e1] [box=0,0,200,20]: ${typed}`,
+        url, title: 'Mail', viewport: SCREEN, number: 1,
+      })!;
+      const header = v.text.split('\n').find((l) => l.startsWith('Page:'))!;
+      expect(header, query).toBe('Page: Mail — https://mail.example (rest of the address not shown)');
+    }
+  });
+
   it('shows only the origin of an address it cannot check for typed values', async () => {
     const { SNAPSHOT_MAX_CHARS } = await import('./page-view.js');
     const huge = '- textbox "To" [ref=e1]: secret@example.com\n' + '- button "Go" [ref=e2] [box=0,0,10,10]\n'.repeat(Math.ceil(SNAPSHOT_MAX_CHARS / 35) + 10);

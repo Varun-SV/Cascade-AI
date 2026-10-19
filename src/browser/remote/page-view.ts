@@ -551,11 +551,23 @@ function addressForms(value: string): string[] {
   return [value, encoded, encoded.replace(/%20/g, '+'), form];
 }
 
-/** An address with its percent-escapes and form spaces read as text. */
+/** Not fatal: a byte that is not UTF-8 reads as U+FFFD, and the rest still reads. */
+const UTF8 = new TextDecoder('utf-8');
+
+/**
+ * An address with its percent-escapes and form spaces read as text. A run
+ * with one invalid byte (`%FF%61…`) is still read around it, and an escape
+ * that decodes to another escape (`%2561`) is read again, a few times over.
+ */
 function percentDecoded(url: string): string {
-  return url.replace(/\+/g, ' ').replace(/(?:%[0-9a-f]{2})+/gi, (run) => {
-    try { return decodeURIComponent(run); } catch { return run; }
-  });
+  let text = url.replace(/\+/g, ' ');
+  for (let round = 0; round < 3; round++) {
+    const next = text.replace(/(?:%[0-9a-f]{2})+/gi, (run) =>
+      UTF8.decode(Uint8Array.from(run.slice(1).split('%'), (hex) => parseInt(hex, 16))));
+    if (next === text) break;
+    text = next;
+  }
+  return text;
 }
 
 /** Of an address, only its site. */
