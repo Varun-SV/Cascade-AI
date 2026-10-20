@@ -245,13 +245,14 @@ async function evaluate() {
       // can land after the model's last word: wait for it a moment.
       if (task.check.done) await reported(`${run}:${task.check.done}`);
       const ok = task.check.done ? site.done.has(`${run}:${task.check.done}`) : answeredExactly(task.check.answer, output);
+      const stepCount = opened.reduce((n, k) => n + (steps.get(k) ?? 0), 0);
       const assessment = assessRun({
         ok, usage, stats: cascade.getRouter().getStats(), decisions, error, modelInvalid,
-        arm, shots: cascade.getRouter().getRunScreenshots?.() ?? { sent: 0, leftOut: 0 },
+        arm, shots: cascade.getRouter().getRunScreenshots?.() ?? { sent: 0, leftOut: 0 }, steps: stepCount,
       });
       rows.push({
         model, arm, task: task.id, ...assessment,
-        steps: opened.reduce((n, k) => n + (steps.get(k) ?? 0), 0),
+        steps: stepCount,
         seconds: Math.round((Date.now() - started) / 1000),
         shots,
       });

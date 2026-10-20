@@ -78,6 +78,15 @@ describe('browser comparison validity', () => {
     expect(assessRun({ ok: true, arm: 'image', shots: { sent: 0, leftOut: 3 } })).toMatchObject({ valid: false, ok: false });
     expect(assessRun({ ok: true, arm: 'marked', shots: { sent: 2, leftOut: 1 } }).error).toMatch(/not a fair marked run/);
     expect(assessRun({ ok: true, arm: 'image', shots: { sent: 4, leftOut: 0 } })).toMatchObject({ valid: true, ok: true });
+    // Withheld by the browser (a password on screen) never reaches the router
+    // at all: no picture was seen, whatever the router counted.
+    for (const arm of ['image', 'marked']) {
+      expect(assessRun({ ok: true, arm, steps: 4, shots: { sent: 0, leftOut: 0 } })).toMatchObject({ valid: false, ok: false });
+    }
+    expect(assessRun({ ok: true, arm: 'image', steps: 4, shots: { sent: 0, leftOut: 0 } }).error).toMatch(/No screenshot reached the model/);
+    // No browser step: no setting could have shown a picture, so it stays a
+    // fair failure rather than being dropped from the picture settings alone.
+    expect(assessRun({ ok: false, arm: 'image', steps: 0, shots: { sent: 0, leftOut: 0 } })).toMatchObject({ valid: true, ok: false });
     // The list settings send no pictures to begin with.
     expect(assessRun({ ok: true, arm: 'list', shots: { sent: 0, leftOut: 2 } })).toMatchObject({ valid: true, ok: true });
     expect(assessRun({ ok: true })).toMatchObject({ valid: true });

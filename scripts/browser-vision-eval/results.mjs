@@ -43,15 +43,21 @@ const PICTURED = new Set(['image', 'marked']);
 
 /**
  * Preserve observed usage, and never attribute a fallback model to the
- * requested one. Nor a picture setting to a run whose model was sent none: the
- * router puts text in place of every screenshot a model cannot take (one that
- * cannot see images, one through a gateway, one priced past the per-image
- * ceiling), and that run measured the list alone.
+ * requested one. Nor a picture setting to a run whose model saw no picture:
+ * the router puts text in place of every screenshot a model cannot take (one
+ * that cannot see images, one through a gateway, one priced past the
+ * per-image ceiling), and the browser withholds one whenever a password or
+ * code field is on screen. Either way that run measured the list alone. A run
+ * that took no browser step at all could have had no picture in any setting,
+ * and stays a fair failure.
  */
-export function assessRun({ ok = false, usage = {}, stats = {}, decisions = [], error = '', modelInvalid = '', arm = '', shots = { sent: 0, leftOut: 0 } } = {}) {
-  const unpictured = PICTURED.has(arm) && shots.leftOut > 0
-    ? `${shots.leftOut} screenshot${shots.leftOut === 1 ? ' was' : 's were'} left out for this model, so this is not a fair ${arm} run; it is excluded from the comparison.`
-    : '';
+export function assessRun({ ok = false, usage = {}, stats = {}, decisions = [], error = '', modelInvalid = '', arm = '', shots = { sent: 0, leftOut: 0 }, steps = 0 } = {}) {
+  const unpictured = !PICTURED.has(arm) ? ''
+    : shots.leftOut > 0
+      ? `${shots.leftOut} screenshot${shots.leftOut === 1 ? ' was' : 's were'} left out for this model, so this is not a fair ${arm} run; it is excluded from the comparison.`
+      : steps > 0 && shots.sent === 0
+        ? `No screenshot reached the model in this run, so it is not a fair ${arm} run; it is excluded from the comparison.`
+        : '';
   const substitution = modelInvalid || (decisions.some((entry) => entry.kind === 'failover') ? 'Model failover occurred; this run is excluded from the comparison.' : '') || unpictured;
   const valid = !substitution;
   return {
@@ -65,7 +71,7 @@ export function assessRun({ ok = false, usage = {}, stats = {}, decisions = [], 
 
 export function summarise(rows, tasks) {
   const lines = ['# Browser vision test', '',
-    'Runs with model substitution are excluded, as are image and marked runs whose model was sent text in place of screenshots. Usage means include available recorded usage from failed runs; unavailable values are excluded, and a failed request may have unreported usage.', '',
+    'Runs with model substitution are excluded, as are image and marked runs in which no picture, or not every picture, reached the model. Usage means include available recorded usage from failed runs; unavailable values are excluded, and a failed request may have unreported usage.', '',
     '| Model | Setting | Valid runs | Done | Steps (mean) | Cost (mean; samples) | Tokens (mean; samples) |',
     '|---|---|---|---|---|---|---|'];
   const groups = new Map();
