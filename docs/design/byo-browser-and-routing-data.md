@@ -400,8 +400,8 @@ commands and detaches the debugger, all on the device:
   redirect, and iframe. The test asserts the destination server saw 0
   requests. No request reaches a private-network address unless consented.
   The agent cannot disable the policy's interception. Run on each adapter.
-  Today `poc-egress-and-lease.mjs` (12 of its 20 checks) covers the CLI
-  path.
+  Today `poc-egress-and-lease.mjs` covers the CLI-style path (a
+  privileged CDP session); desktop and extension need their own runs.
 - **P3.** Under Strict, no cloud run can attach (test). Under Controlled
   abstraction, screenshots are off (test).
 
