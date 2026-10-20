@@ -214,6 +214,14 @@ describe('Message — receipt', () => {
     expect(screen.getByText(/gpt-mid/)).toBeInTheDocument();
   });
 
+  it('leads from a reply\'s /why to the report for every chat', () => {
+    const onOpenSpend = vi.fn();
+    render(<Message message={base({ role: 'assistant', content: 'done', why })} onOpenSpend={onOpenSpend} />);
+    fireEvent.click(screen.getByRole('button', { name: /\/why/ }));
+    fireEvent.click(screen.getByRole('button', { name: /All spending and savings/ }));
+    expect(onOpenSpend).toHaveBeenCalledTimes(1);
+  });
+
   it('still shows "stopped" and /why for a run stopped before its first token', () => {
     render(<Message message={base({ role: 'assistant', content: '', cancelled: true, why })} onDelete={() => {}} />);
     expect(screen.getByText('stopped')).toBeInTheDocument();

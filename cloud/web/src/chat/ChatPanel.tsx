@@ -59,6 +59,8 @@ interface Props {
   onManageConnectors?: () => void;
   /** Open /why on one reply (the top bar's saved figure asks for the latest). */
   whyRequest?: { messageId: string; seq: number } | null;
+  /** Opens the spend & savings report (from a reply's /why). */
+  onOpenSpend?: () => void;
   approval: PlanApproval | null;
   compactionNotice: string | null;
   providerNotice: string | null;
@@ -106,7 +108,7 @@ export default function ChatPanel({
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
   clarifications, onAnswerClarification,
   browserMode, onBrowserModeChange, browserAvailable, runDetail, userName, contextTokens = 0, contextWindow = 0,
-  onAddKey, onManageSkills, onManageConnectors, whyRequest, approval,
+  onAddKey, onManageSkills, onManageConnectors, whyRequest, onOpenSpend, approval,
   compactionNotice, providerNotice, knowledgeNotice, browserRefusedNotice, browserAllowance, activity, browserLiveView, browserActive,
   browserFrame, browserTaskId, browserStreaming, browserHuman, browserCapturing, browserConfirmed, browserNotice,
   onStopBrowser, onTakeOverBrowser, onHandBackBrowser, onBrowserInput, onBrowserCapture,
@@ -216,6 +218,7 @@ export default function ChatPanel({
                       onEdit={m.role === 'user' ? (text) => onEditMessage(m.id, text) : undefined}
                       onDelete={!m.streaming ? () => onDeleteMessage(m.id) : undefined}
                       onSelectSibling={onSelectSibling}
+                      onOpenSpend={onOpenSpend}
                     />
                   </motion.div>
                 ))}

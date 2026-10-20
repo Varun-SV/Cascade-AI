@@ -23,7 +23,8 @@ export interface DelegationSavings {
 const NO_SAVINGS: DelegationSavings = { savedUsd: 0, savedPct: 0, counterfactualUsd: 0 };
 
 export function computeDelegationSavings(
-  stats: Pick<RouterStats, 'totalCostUsd' | 'inputTokensByTier' | 'outputTokensByTier'>,
+  stats: Pick<RouterStats, 'totalCostUsd' | 'inputTokensByTier' | 'outputTokensByTier'>
+    & Partial<Pick<RouterStats, 'untrackedCostCalls'>>,
   t1Model: ModelInfo | undefined | null,
 ): DelegationSavings {
   if (!t1Model) return NO_SAVINGS;
@@ -43,7 +44,10 @@ export function computeDelegationSavings(
 
   const savedUsd = counterfactualUsd - stats.totalCostUsd;
   // A free/local T1 (counterfactual 0) or an all-T1 run never shows savings.
-  if (!(savedUsd > 0) || counterfactualUsd <= 0) {
+  // Nor does a run with calls on a model that has no published price: its
+  // total leaves out what those calls cost, so "all on T1 minus the total"
+  // would claim as saved money that may well have been spent.
+  if (!(savedUsd > 0) || counterfactualUsd <= 0 || (stats.untrackedCostCalls ?? 0) > 0) {
     return { ...NO_SAVINGS, counterfactualUsd: Math.max(0, counterfactualUsd) };
   }
 

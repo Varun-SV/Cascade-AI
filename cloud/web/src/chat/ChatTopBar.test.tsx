@@ -13,6 +13,7 @@ function renderBar(over: Partial<React.ComponentProps<typeof ChatTopBar>> = {}) 
     onOpenSidebar: vi.fn(),
     savedUsd: 0,
     onShowWhy: vi.fn(),
+    onOpenSpend: vi.fn(),
     onRename: vi.fn().mockResolvedValue(undefined),
     onContinueElsewhere: vi.fn(),
     onOpenFiles: vi.fn(),
@@ -33,6 +34,14 @@ describe('ChatTopBar', () => {
     expect(menu).toHaveTextContent('Across 3 replies that delegated below T1.');
     fireEvent.click(screen.getByRole('menuitem', { name: 'Explain the latest reply' }));
     expect(onShowWhy).toHaveBeenCalled();
+  });
+
+  it('opens the report for every chat from the saved figure', () => {
+    const { onOpenSpend, onShowWhy } = renderBar({ savedUsd: 0.3, spentUsd: 0.1, savedReplies: 3 });
+    fireEvent.click(screen.getByRole('button', { name: /saved \$0\.30/ }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'All spending and savings' }));
+    expect(onOpenSpend).toHaveBeenCalledTimes(1);
+    expect(onShowWhy).not.toHaveBeenCalled();
   });
 
   it('shows nothing saved when nothing was', () => {

@@ -216,7 +216,12 @@ export function ChatPanel({ socket, compact }: Props) {
     // Streaming tokens are appended by the global handler in App.tsx (so they
     // also update when you're on another view). Here we only react to
     // completion to stop the cursor and offer rating.
-    const onComplete = (data?: { sessionId?: string; result?: { output?: string; costByFeature?: Record<string, number> } }) => {
+    const onComplete = (data?: {
+      sessionId?: string;
+      result?: { output?: string; costByFeature?: Record<string, number> };
+      /** What the run cost, as the cloud takes it with the copied chat. */
+      cloud?: { costUsd: number; why: string };
+    }) => {
       // Ignore completions for a session other than the one this panel is
       // currently showing — otherwise a background session finishing marked
       // THIS panel's unrelated transcript done and swapped in its cost data.
@@ -232,6 +237,7 @@ export function ChatPanel({ socket, compact }: Props) {
       // breaks the run; a no-op when signed out or opted out.
       const sid = data?.sessionId ?? currentSessionIdRef.current;
       const output = data?.result?.output;
+      const accounting = data?.cloud;
       const prompt = lastPromptRef.current;
       if (sid && output && prompt && localStorage.getItem('cascade.noCloudSync') !== '1') {
         void (async () => {
@@ -245,7 +251,8 @@ export function ChatPanel({ socket, compact }: Props) {
               convId = created.conversation.id;
               cloudConvRef.current.set(sid, convId);
             }
-            await api.appendTurn(convId, { userContent: prompt, assistant: { content: output } });
+            // With its cost and /why, so the run counts in the spend report.
+            await api.appendTurn(convId, { userContent: prompt, assistant: { content: output, ...accounting } });
           } catch { /* best-effort mirror — offline, revoked token, etc. */ }
         })();
       }

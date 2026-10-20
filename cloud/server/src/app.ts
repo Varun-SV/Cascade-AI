@@ -25,6 +25,7 @@ import { remoteBrowserControls } from './runs.js';
 import { NativeAuthStore, isLoopbackRedirect, hashRefreshToken } from './native-auth.js';
 import { githubAuthUrl, exchangeGithubCode, googleAuthUrl, exchangeGoogleCode, type OAuthProfile } from './auth/oauth.js';
 import { limitsForPlan, ORPHAN_UPLOAD_TTL_MS, todayKey, checkStorageQuota } from './entitlements.js';
+import { buildSpendReport, parsePeriod, parseTzOffset } from './spend.js';
 import { skillCatalog } from './skills.js';
 import { renderDocsPage } from './docs.js';
 import { tenantScratchDir } from './paths.js';
@@ -1339,6 +1340,16 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
         }
         : {}),
     });
+  });
+
+  // The spend & savings report: what runs cost and what delegation saved over
+  // a period, by tier and model, and which chats cost the most. `tz` is the
+  // viewer's offset in minutes east of UTC, so days end at their midnight.
+  app.get('/api/usage/report', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const period = parsePeriod(req.query['period'] ?? '30d');
+    const tz = parseTzOffset(req.query['tz']);
+    if (!period || tz === null) { res.status(400).json({ error: 'Invalid period or tz' }); return; }
+    res.json(buildSpendReport(store.spend, req.session!.userId, period, tz, Date.now()));
   });
 
   // ── Billing (Razorpay recurring subscriptions) ──
