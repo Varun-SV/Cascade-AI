@@ -1,7 +1,7 @@
 # Bring-your-own browser, and routing data for users
 
 Status: **design for review**, revision 2 (council: discussion #315, review
-on PR #316 as inline comments). Q1–Q4 decided by the maintainer; Q5 open.
+on PR #316 as inline comments). Q1–Q5 decided by the maintainer.
 No feature code lands until the design is agreed.
 
 Revision 2 answers ChatGPT's review on #316:
@@ -170,7 +170,20 @@ provider the user chose:
 | Console messages and errors | while attached | relay, server |
 | Downloads | never: download redirection is not applied (§3.3) | — |
 
-Settings and the consent prompt show this list in plain words. The privacy
+**Where the user sees it (decided, Q5):**
+- **Consent prompt:** shows this full list in plain words the first time a
+  run uses a site. It shows it again whenever a run turns on screenshots, or
+  the privacy profile moves to a looser one. Otherwise it links to the list.
+- **Always-visible indicator:** whenever data from the user's browser is
+  being sent off the device, an "Online" indicator stays visible. It's on
+  the cascadeai.in chat, the desktop app's browser bar and the extension
+  icon. Hovering (or focusing it, for keyboard and screen-reader users)
+  lists **which** of the categories above this run is sending right now,
+  e.g. "URLs, page text, screenshots". Not the full list, and never the data
+  itself. The indicator turns off as soon as the relay detaches.
+- **Settings:** shows the full list per source.
+
+The privacy
 profile (Strict / Controlled abstraction / Explicit approval) applies at each
 egress point:
 
@@ -342,6 +355,14 @@ commands and detaches the debugger, all on the device:
   - detaches the debugger
   - leaves the user's tab open (test per trigger)
 
+**Visibility**
+- **V1.** The "Online" indicator is visible on every surface while any
+  category above is being sent. Its hover/focus text names exactly the
+  categories in use. It clears within 1 s of detach (test per surface).
+- **V2.** The consent prompt shows the full list on first use per site, on
+  enabling screenshots, and on a move to a looser privacy profile, and not
+  otherwise (test).
+
 **Desktop**
 - **E1.** A manual Electron 41 smoke test: app start, the built-in browser,
   terminal (`node-pty`), local history (`better-sqlite3`), and
@@ -384,8 +405,8 @@ Decided by the maintainer (21 Oct 2026):
 - **Q4.** Extension: **Chrome first**, behind a browser-agnostic interface.
   Other Chromium browsers are claimed only after their debugger permission,
   service-worker lifecycle and attach/detach behaviour are tested.
+- **Q5.** The full list is shown in the consent prompt on first use per site
+  and on screenshots or a looser profile. Plus an always-visible "Online"
+  indicator whose hover lists which data is leaving the device (§4.1).
 
-Still open:
-
-- **Q5.** Should the egress list in §4.1 be shown in the consent prompt
-  every time, or only on first use per site?
+No open questions remain. The next gate is agreement on stage 1 (§10).
