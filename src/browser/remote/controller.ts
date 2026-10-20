@@ -100,7 +100,7 @@ type FoundFields = {
 /** One control on the page, as Playwright resolves it at the moment of acting. */
 type ActionElement = {
   evaluate?(expression: (node: { nodeName: string }) => boolean): Promise<boolean>;
-  click(opts?: { timeout?: number; trial?: boolean }): Promise<void>;
+  click(opts?: { timeout?: number; trial?: boolean; noWaitAfter?: boolean }): Promise<void>;
   fill(value: string, opts?: { timeout?: number }): Promise<void>;
   press(key: string, opts?: { timeout?: number }): Promise<void>;
   hover(opts?: { timeout?: number; trial?: boolean }): Promise<void>;
@@ -3599,19 +3599,34 @@ export class RemoteBrowserController {
       // The ref was waited for and then checked. Sending the input waits for
       // readiness again, and a long second wait would act on whatever the
       // control became after the check: a checkbox disabled and re-enabled
-      // already ticked. So it may wait only a moment, and one not ready by then
-      // is not used. Playwright's own hit-target checks still apply.
+      // already ticked. So it is checked once more, for a moment and without
+      // sending anything — a control not ready by then is not used — and the
+      // input then goes at once. A timeout while it is being sent is another
+      // matter: a click may have landed, and its page may be loading. That is
+      // reported as unknown, never as not done, so a payment is not repeated.
+      // Playwright's own hit-target checks still apply.
       const checked = !!action.ref && REVALIDATED.has(action.kind);
-      const sendTimeout = checked ? Math.min(timeout, DISPATCH_WAIT_MS) : timeout;
-      const send = async (input: () => Promise<unknown>): Promise<BrowserActionOutcome | null> => {
+      const sendTimeout = Math.min(timeout, DISPATCH_WAIT_MS);
+      const timedOut = (err: unknown) => err instanceof Error && err.name === 'TimeoutError';
+      const send = async (ready: () => Promise<unknown>, input: () => Promise<unknown>): Promise<BrowserActionOutcome | null> => {
+        try {
+          await stoppable(ready());
+        } catch (err) {
+          if (!timedOut(err)) throw err;
+          return {
+            ok: false,
+            detail: `${named} stopped being ready to use after it was checked, so it was not used. Call observe for a fresh page view.`,
+            ...(await where()),
+          };
+        }
         try {
           await stoppable(input());
           return null;
         } catch (err) {
-          if (!checked || !(err instanceof Error) || err.name !== 'TimeoutError') throw err;
+          if (!timedOut(err)) throw err;
           return {
             ok: false,
-            detail: `${named} stopped being ready to use after it was checked, so it was not used. Call observe for a fresh page view.`,
+            detail: `${named} may or may not have been used: the browser did not confirm it in time. Do not repeat it — call observe to see what happened first.`,
             ...(await where()),
           };
         }
@@ -3627,19 +3642,32 @@ export class RemoteBrowserController {
         }
         case 'click': {
           const pagesBefore = new Set(page.context().pages());
-          if (actual) {
-            const refused = await send(() => actual.click({ timeout: sendTimeout }));
-            if (refused) return refused;
-          }
+          if (checked) {
+            // Sent without waiting for a page it starts loading: that is
+            // looked at afterwards, and is no reason to say it was not sent.
+            const refused = await send(
+              () => element!.click({ timeout: sendTimeout, trial: true }),
+              () => element!.click({ timeout: sendTimeout, noWaitAfter: true }));
+            if (refused) {
+              // One that may have landed may also have opened a page.
+              await this.followOpenedPage(runId, held, pagesBefore);
+              return refused;
+            }
+          } else if (actual) await stoppable(actual.click({ timeout }));
           else await stoppable(page.click(action.selector!, { timeout }));
           await this.followOpenedPage(runId, held, pagesBefore);
           return finish({ ok: true, detail: `Clicked ${named}`, ...(await where()) }, true);
         }
         case 'fill':
-          if (actual) {
-            const refused = await send(() => actual.fill(action.value ?? '', { timeout: sendTimeout }));
+          if (checked) {
+            const refused = await send(
+              async () => {
+                await element!.waitForElementState('visible', { timeout: sendTimeout });
+                await element!.waitForElementState('editable', { timeout: sendTimeout });
+              },
+              () => element!.fill(action.value ?? '', { timeout: sendTimeout }));
             if (refused) return refused;
-          }
+          } else if (actual) await stoppable(actual.fill(action.value ?? '', { timeout }));
           else await stoppable(page.fill(action.selector!, action.value ?? '', { timeout }));
           return { ok: true, detail: `Filled ${named}`, ...(await where()) };
         case 'press': {
@@ -3726,13 +3754,22 @@ export class RemoteBrowserController {
               ...(await where()),
             };
           }
-          const refused = await send(() => actual!.selectOption({ label: shown[0]?.label ?? action.value ?? '' }, { timeout: sendTimeout }));
+          const refused = await send(
+            async () => {
+              await element!.waitForElementState('visible', { timeout: sendTimeout });
+              await element!.waitForElementState('enabled', { timeout: sendTimeout });
+            },
+            () => element!.selectOption({ label: shown[0]?.label ?? action.value ?? '' }, { timeout: sendTimeout }));
           if (refused) return refused;
           return { ok: true, detail: `Chose "${action.value}" in ${named}`, ...(await where()) };
         }
         case 'hover': {
-          const refused = await send(() => actual!.hover({ timeout: sendTimeout }));
-          if (refused) return refused;
+          if (checked) {
+            const refused = await send(
+              () => element!.hover({ timeout: sendTimeout, trial: true }),
+              () => element!.hover({ timeout: sendTimeout }));
+            if (refused) return refused;
+          } else await stoppable(actual!.hover({ timeout }));
           return finish({ ok: true, detail: `Hovered over ${named}`, ...(await where()) }, false);
         }
         default:

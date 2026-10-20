@@ -5019,27 +5019,68 @@ describe('page views and refs', () => {
   });
 
   it('does not wait again at length to send a ref click that was checked', async () => {
-    // Ready for the trial, then checked: by the time the click is sent the
-    // control has gone unready, and waiting it out would click whatever it
-    // became. Only a moment's wait is allowed, then it is not used.
+    // Ready for the first trial, then checked: by the time it is to be sent
+    // the control has gone unready, and waiting it out would click whatever
+    // it became. It is checked again only for a moment, then not used.
     snapshot = '- checkbox "Remember" [ref=e5] [box=84,0,32,25]';
     const c = controller();
     await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
     const locate = extra['locator'] as (s: string) => Record<string, unknown>;
     let waited = 0;
+    let clicked = false;
     extra['locator'] = (selector: string) => ({ ...locate(selector),
       async click(opts: { trial?: boolean; timeout?: number }) {
-        if (opts.trial) return;
+        if (opts.trial && (opts.timeout ?? Infinity) > 500) return;
+        if (!opts.trial) { clicked = true; return; }
         waited = opts.timeout ?? Infinity;
-        const err = new Error(`locator.click: Timeout ${waited}ms exceeded.`);
+        const err = new Error(`elementHandle.click: Timeout ${waited}ms exceeded.`);
         err.name = 'TimeoutError';
         throw err;
       },
     });
     const out = await c.controller({ kind: 'click', ref: 'e5', timeoutMs: 30_000 }, ctx('run', 'w1'));
     expect(out.ok).toBe(false);
-    expect(out.detail).toContain('stopped being ready to use after it was checked');
+    expect(out.detail).toContain('stopped being ready to use after it was checked, so it was not used');
     expect(waited).toBeLessThanOrEqual(500);
+    expect(clicked).toBe(false);
+  });
+
+  it('sends a checked ref click without waiting for the page it loads', async () => {
+    // A Pay button whose handler runs and starts a slow navigation: the
+    // click went, and must be reported as done, not as not used.
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    const sent: Array<Record<string, unknown>> = [];
+    extra['locator'] = (selector: string) => ({ ...locate(selector),
+      async click(opts: { trial?: boolean; noWaitAfter?: boolean }) {
+        if (!opts.trial) sent.push({ ...opts });
+      },
+    });
+    const out = await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'));
+    expect(sent).toEqual([expect.objectContaining({ noWaitAfter: true })]);
+    expect(out.ok).toBe(true);
+    expect(out.detail).toContain('Clicked');
+  });
+
+  it('reports a ref click that timed out while being sent as unknown, never as not used', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    extra['locator'] = (selector: string) => ({ ...locate(selector),
+      async click(opts: { trial?: boolean }) {
+        if (opts.trial) return;
+        // The handler ran; the browser did not confirm in time.
+        const err = new Error('elementHandle.click: Timeout 500ms exceeded.');
+        err.name = 'TimeoutError';
+        throw err;
+      },
+    });
+    const out = await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).not.toContain('was not used');
+    expect(out.detail).toContain('may or may not have been used');
+    expect(out.detail).toContain('Do not repeat it');
   });
 
   it('rechecks a ref before hovering over it', async () => {
@@ -5295,7 +5336,8 @@ describe('page views and refs', () => {
     for (const timeoutMs of [0, -1, Infinity, 30_000]) {
       expect((await c.controller({ kind: 'click', ref: 'e5', timeoutMs }, ctx('run', 'w1'))).ok).toBe(true);
     }
-    expect(timeouts).toHaveLength(12);
+    // The handle, the trial, the moment's recheck before sending, the click.
+    expect(timeouts).toHaveLength(16);
     expect(timeouts.every((value) => Number.isFinite(value) && value > 0 && value <= 30_000)).toBe(true);
   });
 
@@ -5542,9 +5584,11 @@ describe('page views and refs', () => {
     const text = await c.controller({ kind: 'extract_text', ref: 'e14' }, ctx('run', 'w1'));
     expect(page.calls.filter((x) => !x.startsWith('snapshot:'))).toEqual([
       // An option on a ref by its text alone: its value is not shown to anyone.
-      'aria-ref=e9 waitFor', 'aria-ref=e9 waitFor',
+      // Ready, checked, ready again for a moment, then sent.
+      'aria-ref=e9 waitFor', 'aria-ref=e9 waitFor', 'aria-ref=e9 waitFor', 'aria-ref=e9 waitFor',
       'aria-ref=e9 fill=secret', 'aria-ref=e9 press=Enter', 'aria-ref=e14 waitFor',
-      'aria-ref=e11 waitFor', 'aria-ref=e11 waitFor', 'aria-ref=e11 selectOption=label:4 people',
+      'aria-ref=e11 waitFor', 'aria-ref=e11 waitFor', 'aria-ref=e11 waitFor', 'aria-ref=e11 waitFor',
+      'aria-ref=e11 selectOption=label:4 people',
       'aria-ref=e5 hover', 'aria-ref=e14 scrollIntoView', 'aria-ref=e14 innerText',
     ]);
     expect(text.detail).toBe('located text');
