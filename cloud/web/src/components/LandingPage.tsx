@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { AnimatePresence, useReducedMotion } from 'framer-motion';
 import {
-  Github, Download, Copy, Check, Terminal, Monitor, Globe, Ban, RotateCcw, HelpCircle, Sparkles,
+  GitBranch, Download, Copy, Check, Terminal, Monitor, Globe, Ban, RotateCcw, HelpCircle, Sparkles,
 } from 'lucide-react';
 import type { CloudConfig } from '../lib/api.js';
 import { devLogin } from '../lib/api.js';
@@ -298,7 +298,7 @@ export default function LandingPage({ config, onDevLogin }: Props) {
             <div className="flex flex-col gap-2.5 px-5 pb-5 pt-1.5">
               <p className="m-0 mb-1 text-[14px] text-ink-300">Free to start. You bring your own API keys.</p>
               {config.githubEnabled && (
-                <a href="/auth/github" className="cz-btn h-11"><Github size={17} /> Continue with GitHub</a>
+                <a href="/auth/github" className="cz-btn h-11"><GitBranch size={17} /> Continue with GitHub</a>
               )}
               {config.googleEnabled && (
                 <a href="/auth/google" className="cz-btn cz-btn-ghost h-11">Continue with Google</a>

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { BrowserAllowanceView } from './browserAllowance.js';
 import { AnimatePresence, motion } from 'framer-motion';
-import { AlertTriangle, KeyRound, Layers, ChevronDown, Search, BookOpen, Calendar, Globe, Github } from 'lucide-react';
+import { AlertTriangle, KeyRound, Layers, ChevronDown, Search, BookOpen, Calendar, Globe, GitBranch } from 'lucide-react';
 import CascadeMark from '../components/CascadeMark.js';
 import Message from './Message.js';
 import Composer from './Composer.js';
@@ -150,7 +150,7 @@ export default function ChatPanel({
     { label: 'Research a topic', prompt: 'Build a competitor report on AI coding CLIs and export it as a Word doc', icon: <BookOpen size={14} /> },
     { label: 'Plan something', prompt: 'Plan a team offsite', icon: <Calendar size={14} /> },
     ...(browserAvailable ? [{ label: 'Check a live page', prompt: 'Open example.com/pricing and tell me the Team plan price with annual billing', icon: <Globe size={14} />, browser: true }] : []),
-    { label: 'Summarise repos', prompt: 'Summarise every repository in our GitHub org', icon: <Github size={14} /> },
+    { label: 'Summarise repos', prompt: 'Summarise every repository in our GitHub org', icon: <GitBranch size={14} /> },
   ];
 
   const browserView = (
