@@ -1,7 +1,7 @@
 # Bring-your-own browser, and routing data for users
 
-Status: **design for review** (council: discussion #315). No feature code lands
-until the open questions below are settled.
+Status: **design for review** (council: discussion #315). Q1–Q3 decided by
+the maintainer; Q4 open. No feature code lands until the design is agreed.
 
 ## 1. Decisions already made by the maintainer
 
@@ -96,10 +96,9 @@ The new pieces are the **relay** and the **per-user browser setting**.
 - cascadeai.in stops attaching an operator-provided browser. The Steel
   service and `REMOTE_BROWSER_*` variables on the hosted deployment can then
   be removed.
-- **Open question Q1:** self-hosters of Cascade Cloud configure
-  `REMOTE_BROWSER_*` for their own deployment. Is that the operator being
-  the user (keep the env path for self-host), or should the env path go
-  entirely in favour of per-user settings?
+- **Decided (Q1):** the `REMOTE_BROWSER_*` operator path is removed
+  entirely, self-host included. Every deployment uses per-user browser
+  settings (sources A–D).
 - The daily browser-session allowance exists to ration billed hosted
   sessions. With BYO there is nothing to bill, so it goes.
 
@@ -123,8 +122,8 @@ The new pieces are the **relay** and the **per-user browser setting**.
     upload.
   - Runs a user syncs to their account already arrive through
     `cloudRunReport` (#305).
-  - **Open question Q2:** should unsynced desktop/CLI runs contribute
-    aggregates to Everyone? If so, opt-in or opt-out?
+  - **Decided (Q2):** unsynced desktop/CLI runs contribute aggregates to
+    Everyone only if the user opts in. Off by default.
 - Each ledger row gains `surface: cloud | desktop | cli` so the tabs can
   split.
 
@@ -142,9 +141,14 @@ The new pieces are the **relay** and the **per-user browser setting**.
 
 ## 9. Open questions
 
-- **Q1.** Keep `REMOTE_BROWSER_*` for self-hosters, or remove it? (§6)
-- **Q2.** Desktop/CLI aggregates to Everyone: off, opt-in, or opt-out? (§7)
-- **Q3.** Desktop source: drive the built-in `WebContentsView` (visible in
-  the app, needs the tab adapter) or launch system Chrome like the CLI?
+Decided by the maintainer (21 Oct 2026):
+
+- **Q1.** Remove `REMOTE_BROWSER_*` entirely, self-host included.
+- **Q2.** Desktop/CLI aggregates to Everyone: opt-in.
+- **Q3.** Desktop source: the built-in `WebContentsView`, through the
+  shared tab-level CDP adapter.
+
+Still open:
+
 - **Q4.** Extension scope: Chrome only first, or Chromium-based browsers in
   general from the start?
