@@ -59,10 +59,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function countingServer(name, routes) {
   const hits = [];
+  const table = new Map(Object.entries(routes));
   const server = http.createServer((req, res) => {
     hits.push(`${req.method} ${req.url}`);
-    const route = routes[req.url.split('?')[0]];
-    if (!route) { res.statusCode = 404; return res.end(); }
+    const route = table.get(req.url.split('?')[0]);
+    if (typeof route !== 'function') { res.statusCode = 404; return res.end(); }
     route(req, res);
   });
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ name, server, hits, port: server.address().port })));
