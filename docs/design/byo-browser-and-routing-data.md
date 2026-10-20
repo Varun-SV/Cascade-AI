@@ -213,17 +213,67 @@ depth.
   - `Page.setDownloadBehavior` (`Browser.setDownloadBehavior` is answered
     `{}` and never applied)
   - `SystemInfo.*`
-  - `Fetch.*` and `Network.setRequestInterception`. They're unused, and
-    they're the way to read or rewrite authenticated traffic.
-- **Origin scope:**
-  - `Page.navigate` and link navigation are allowed only to origins in the
-    run's consented site list.
-  - On a redirect off the list, the device detaches before running the next
-    command.
-- **Honest limit:** page script reachable through `Runtime.evaluate` can read
-  what the page can (§3.3, finding 2). The contract limits **which pages** a
-  run can be on. It cannot limit what is readable on a page it is allowed
-  to be on.
+  - `Fetch.*` and `Network.setRequestInterception`. They're the way to
+    read or rewrite authenticated traffic, and the policy itself uses
+    `Fetch` (below), so the agent must not be able to turn it off.
+
+### 4.3 Request-level egress enforcement (enforced on the user's device)
+
+Blocking the agent's next command is too late: a click, a form, page script
+or a redirect has already sent the request. So the policy stops **requests**,
+before they leave the browser, through its own privileged channel. The agent
+can neither see nor disable that channel:
+
+| Source | Mechanism |
+|---|---|
+| CLI | The policy's own CDP session on the tab: `Fetch.enable` for every URL at the **Request** stage |
+| Desktop | `session.webRequest.onBeforeRequest` on the built-in browser's partition, in Electron's main process |
+| Extension | `declarativeNetRequest` session rules scoped to the leased tab; `Fetch` through `chrome.debugger` as a fallback |
+
+**Rules, applied to every request before it is sent:**
+
+| Request | Rule |
+|---|---|
+| Document (top-level navigation or iframe), any initiator: agent command, click, form, page script or redirect hop | Allowed only to a **consented origin**. Otherwise failed before sending |
+| Any request to a **private-network destination** (loopback, RFC 1918, link-local, CGNAT, unique-local IPv6, `localhost`, `*.local`) | Failed unless that exact origin was consented |
+| Subresources (script, style, image, font, fetch/XHR, WebSocket) to **public** origins | **Allowed** |
+
+**Hostnames:** the policy resolves the name on the device and checks the
+resulting address. It pins that address for the request (CLI and desktop),
+which defends against DNS rebinding. The extension cannot resolve names
+itself; it relies on Chrome's Private Network Access checks for that part,
+and the doc says so.
+
+**What is guaranteed, and what is not.** This is not network egress
+isolation:
+- **Guaranteed:** a leased tab cannot navigate, frame or be redirected to a
+  site the user did not consent to. It cannot reach the user's private
+  network unless the user consented that origin.
+- **Not guaranteed:** a consented page, or the agent through `evaluate` on
+  it, can still send data to public third-party hosts as subresource
+  requests. Cascade cannot tell page script from agent script, and blocking
+  public subresources breaks most sites.
+- **The real limits on that:** the consent list (which pages the run may
+  be on), the egress list (§4.1), and the "Online" indicator.
+
+`poc-egress-and-lease.mjs` checks this with servers that count the requests
+they receive. An off-list server saw **0 requests** for each of the
+following:
+- agent navigation
+- a link click
+- `location.href`
+- a form POST
+- a 302 redirect from a consented site
+- an iframe
+
+A `fetch` to a 127.0.0.1 address was failed by the policy, not merely by
+the browser. A public script from a non-consented origin loaded, which is
+the stated limit. `Fetch.disable` from the agent was refused.
+
+- **Honest limit (page data):** page script reachable through
+  `Runtime.evaluate` can read what the page can (§3.3, finding 2). The
+  contract limits which pages a run can be on, not what is readable on a
+  page it is allowed to be on.
 
 ## 5. Ownership, lease and stop
 
@@ -236,9 +286,19 @@ depth.
   user, device, run id and expiry (≤ the run's budget time, max 30 min,
   renewable while the run is active).
 
-**Replay protection:**
-- Capabilities carry a nonce.
-- The server keeps a used-nonce set until expiry.
+**Single use, and no resume (model (a)):**
+- A capability opens **one** connection and **one** lease. It is consumed
+  when claimed, and burned when that connection ends for any reason.
+- A dropped connection is **never resumed**. The run sees a disconnect.
+- Getting control back needs a **new capability**, which the device mints
+  only after the user approves the run again, with the same consent prompt.
+  A bounded resume protocol (reconnect credentials, generation tokens) is
+  deferred until there's evidence drops are common enough to need it.
+- A connection refused only because the tab is leased does **not** consume
+  its capability.
+- Each lease has a generation number. Frames from an older generation are
+  never served (fencing).
+- Capabilities carry a nonce. The used set is kept until expiry.
 - Relay frames carry a monotonically increasing sequence number per
   connection.
 
@@ -265,8 +325,8 @@ commands and detaches the debugger, all on the device:
 - The server maps a run capability to exactly one device connection.
 - There is no lookup by user alone, so user A's run cannot be routed to user
   B's device.
-- Reconnects re-present the capability. A revoked or expired capability is
-  never re-admitted.
+- There are no reconnects with an old capability (see Single use). A
+  burned, revoked or expired capability is never admitted.
 
 ## 6. Settings
 
@@ -335,8 +395,13 @@ commands and detaches the debugger, all on the device:
 **Policy and egress**
 - **P1.** Every always-denied method returns an error and never reaches the
   browser (test per method).
-- **P2.** Navigation to an origin outside the consented list is refused. A
-  redirect off-list detaches before the next command (test).
+- **P2.** No request reaches a non-consented origin for each of: agent
+  navigation, link click, script navigation, form submission, server
+  redirect, and iframe. The test asserts the destination server saw 0
+  requests. No request reaches a private-network address unless consented.
+  The agent cannot disable the policy's interception. Run on each adapter.
+  Today `poc-egress-and-lease.mjs` (12 of its 20 checks) covers the CLI
+  path.
 - **P3.** Under Strict, no cloud run can attach (test). Under Controlled
   abstraction, screenshots are off (test).
 
@@ -345,8 +410,14 @@ commands and detaches the debugger, all on the device:
   with two users, two devices).
 - **O2.** A second run is refused while a lease is held. Human takeover
   suspends the lease (test).
-- **O3.** Replayed or expired capabilities are refused, including across
-  reconnects (test).
+- **O3.** A capability is refused when:
+  - replayed on a second socket while its lease is live
+  - presented again after its connection dropped
+  - presented after a new lease was issued from a fresh capability
+  - expired
+
+  A capability refused only because the tab was leased stays usable (test;
+  covered for the relay in `poc-egress-and-lease.mjs`).
 
 **Stop**
 - **S1.** Each of Stop, logout, token rotation, network drop, tab close, run

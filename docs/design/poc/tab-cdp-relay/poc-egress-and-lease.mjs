@@ -1,0 +1,403 @@
+// ─────────────────────────────────────────────────────────────────────────────
+//  PoC 2: request-level origin enforcement, and the fail-closed lease model
+// ─────────────────────────────────────────────────────────────────────────────
+//
+//  Follows ChatGPT's stage-1 review on PR #316 (design §4.2 and §5):
+//
+//  1. Origin enforcement must stop the REQUEST, not detach after it. Here
+//     the device-side policy holds its own privileged CDP session on the tab
+//     (the agent never sees it) and pauses every request at the Request
+//     stage with Fetch, before anything is sent:
+//       - a document request (top-level navigation or iframe) must go to a
+//         consented origin, or it is failed;
+//       - any request to a private-network destination (loopback, RFC 1918,
+//         link-local, unique-local IPv6, *.local, localhost) is failed unless
+//         that origin was consented;
+//       - other subresources (scripts, images, fetch/XHR) to public origins
+//         are allowed. Pages need their CDNs, and Cascade cannot tell page
+//         script from agent script. This is the stated limit of §4.2.
+//     The agent's own Fetch.* stays denied, so it can neither see nor turn
+//     off the policy's interception.
+//
+//  2. Capabilities are single-use, and a dropped connection is never
+//     resumed (model (a)). A capability opens exactly one connection and one
+//     lease; it is burned on first use and again on disconnect. Getting
+//     control back needs a NEW capability, which the device mints only after
+//     the user approves again (simulated here by approveRun()).
+//
+//  Hosts: Chromium maps allowed.test and offlist.test to two local servers
+//  (--host-resolver-rules), so "public, not consented" is testable offline.
+//  A third server on a 127.0.0.1 IP literal is the private-network target.
+//  Each server counts the requests it receives, so "blocked" means the
+//  server saw nothing, not just that the agent got an error.
+//
+//  Run from the repo root:  node docs/design/poc/tab-cdp-relay/poc-egress-and-lease.mjs
+//  Chromium: CHROMIUM=/path/to/chrome, else Playwright's bundled browser.
+
+import { spawn } from 'node:child_process';
+import http from 'node:http';
+import net from 'node:net';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const { chromium } = require('playwright-core');
+const { WebSocket, WebSocketServer } = require('ws');
+
+const TAB_SESSION = 'cascade-tab-1';
+const results = [];
+const check = (name, ok, detail = '') => {
+  results.push({ name, ok, detail });
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
+};
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ── Test servers that count what reaches them ───────────────────────────────
+
+function countingServer(name, routes) {
+  const hits = [];
+  const server = http.createServer((req, res) => {
+    hits.push(`${req.method} ${req.url}`);
+    const route = routes[req.url.split('?')[0]];
+    if (!route) { res.statusCode = 404; return res.end(); }
+    route(req, res);
+  });
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ name, server, hits, port: server.address().port })));
+}
+
+const html = (body) => (req, res) => { res.setHeader('content-type', 'text/html'); res.end(`<!doctype html>${body}`); };
+
+// ── Chromium with host mapping and one tab ──────────────────────────────────
+
+async function launchChromium(mapRules) {
+  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cdp-poc2-'));
+  const proc = spawn(process.env.CHROMIUM || chromium.executablePath(), [
+    '--headless=new', '--no-sandbox', '--remote-debugging-port=0',
+    `--user-data-dir=${userDataDir}`, `--host-resolver-rules=${mapRules}`, 'about:blank',
+  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const port = await new Promise((resolve, reject) => {
+    let buf = '';
+    proc.stderr.on('data', (d) => { buf += d; const m = buf.match(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//); if (m) resolve(Number(m[1])); });
+    proc.on('exit', (code) => reject(new Error(`chromium exited ${code}: ${buf.slice(-400)}`)));
+  });
+  const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+  return { proc, tab: list.find((t) => t.type === 'page') };
+}
+
+// A tiny CDP client for the policy's own session.
+function cdpClient(url) {
+  const ws = new WebSocket(url, { perMessageDeflate: false });
+  let id = 1;
+  const pending = new Map();
+  const handlers = new Map();
+  ws.on('message', (raw) => {
+    const msg = JSON.parse(raw);
+    if (msg.id && pending.has(msg.id)) { const p = pending.get(msg.id); pending.delete(msg.id); msg.error ? p.reject(new Error(msg.error.message)) : p.resolve(msg.result); }
+    else if (msg.method && handlers.has(msg.method)) handlers.get(msg.method)(msg.params);
+  });
+  return {
+    ready: new Promise((r) => ws.on('open', r)),
+    send: (method, params = {}) => new Promise((resolve, reject) => { const i = id++; pending.set(i, { resolve, reject }); ws.send(JSON.stringify({ id: i, method, params })); }),
+    on: (method, fn) => handlers.set(method, fn),
+    close: () => ws.close(),
+  };
+}
+
+// ── 1. Device-side egress policy (privileged; the agent cannot reach it) ────
+
+function isPrivateHost(host) {
+  const h = host.replace(/^\[|\]$/g, '').toLowerCase();
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local')) return true;
+  if (net.isIPv4(h)) {
+    const [a, b] = h.split('.').map(Number);
+    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+  }
+  if (net.isIPv6(h)) return h === '::1' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80');
+  // Hostnames: production resolves and checks the address on the device
+  // (and pins it for the request, against DNS rebinding). Not done here.
+  return false;
+}
+
+async function startEgressPolicy(tabWsUrl, consentedOrigins) {
+  const client = cdpClient(tabWsUrl);
+  await client.ready;
+  const decisions = [];
+  client.on('Fetch.requestPaused', async ({ requestId, request, resourceType }) => {
+    const url = new URL(request.url);
+    const origin = url.origin;
+    let verdict = 'allow';
+    let reason = '';
+    if (url.protocol === 'http:' || url.protocol === 'https:') {
+      const consented = consentedOrigins.has(origin);
+      if (resourceType === 'Document' && !consented) { verdict = 'block'; reason = 'navigation to an origin without consent'; }
+      else if (isPrivateHost(url.hostname) && !consented) { verdict = 'block'; reason = 'private-network destination'; }
+    }
+    decisions.push({ verdict, resourceType, url: request.url, reason });
+    try {
+      if (verdict === 'block') await client.send('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' });
+      else await client.send('Fetch.continueRequest', { requestId });
+    } catch { /* request already gone */ }
+  });
+  // Every request, every resource type, paused BEFORE it is sent.
+  await client.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] });
+  return { decisions, close: () => client.close() };
+}
+
+// ── 2. Relay with single-use capabilities and an exclusive lease ────────────
+
+const DENY_PREFIXES = ['Fetch.', 'Storage.', 'SystemInfo.'];
+const DENY = new Set([
+  'Network.getAllCookies', 'Network.getCookies', 'Network.setCookie', 'Network.setCookies', 'Network.deleteCookies',
+  'Network.clearBrowserCookies', 'Network.setRequestInterception', 'Page.setDownloadBehavior',
+  'Target.createTarget', 'Target.closeTarget', 'Target.attachToTarget', 'Target.createBrowserContext',
+]);
+const denied = (m) => DENY.has(m) || DENY_PREFIXES.some((p) => m.startsWith(p));
+
+function createCapabilityStore() {
+  const caps = new Map(); // token -> { runId, state: 'fresh'|'used'|'burned', expiresAt }
+  let generation = 0;
+  return {
+    // The device mints a capability only after the user approves the run.
+    approveRun(runId, ttlMs = 30 * 60_000) {
+      const token = crypto.randomBytes(24).toString('base64url');
+      caps.set(token, { runId, state: 'fresh', expiresAt: Date.now() + ttlMs });
+      return token;
+    },
+    // Single use: the first successful claim consumes it.
+    claim(token) {
+      const c = caps.get(token);
+      if (!c) return { ok: false, why: 'unknown capability' };
+      if (c.state !== 'fresh') return { ok: false, why: `capability already ${c.state}` };
+      if (Date.now() > c.expiresAt) return { ok: false, why: 'capability expired' };
+      c.state = 'used';
+      return { ok: true, runId: c.runId, generation: ++generation };
+    },
+    burn(token) { const c = caps.get(token); if (c) c.state = 'burned'; },
+  };
+}
+
+function startRelay(tabWsUrl, caps) {
+  const server = http.createServer((_, res) => { res.statusCode = 404; res.end(); });
+  const wss = new WebSocketServer({ noServer: true });
+  const state = { lease: null, refusals: [] };
+
+  server.on('upgrade', (req, socket, head) => {
+    const token = (req.url.match(/^\/devtools\/browser\/([\w-]+)$/) || [])[1];
+    const refuse = (why) => { state.refusals.push(why); socket.write(`HTTP/1.1 403 Forbidden\r\n\r\n${why}`); socket.destroy(); };
+    if (!token) return refuse('no capability');
+    // One exclusive lease per tab: a second connection is refused outright,
+    // and its token is NOT consumed.
+    if (state.lease) return refuse('tab already leased');
+    const claim = caps.claim(token);
+    if (!claim.ok) return refuse(claim.why);
+    wss.handleUpgrade(req, socket, head, (client) => attach(client, token, claim.generation));
+  });
+
+  function attach(client, token, generation) {
+    const tab = new WebSocket(tabWsUrl, { perMessageDeflate: false });
+    state.lease = { token, generation, client, tab };
+    let nextId = 1;
+    const pending = new Map();
+    const queue = [];
+    const sendTab = (m) => (tab.readyState === WebSocket.OPEN ? tab.send(JSON.stringify(m)) : queue.push(m));
+    tab.on('open', () => { while (queue.length) tab.send(JSON.stringify(queue.shift())); });
+    const reply = (id, sessionId, body) => client.send(JSON.stringify({ id, ...(sessionId ? { sessionId } : {}), ...body }));
+    const emit = (method, params, sessionId) => client.send(JSON.stringify({ method, params, ...(sessionId ? { sessionId } : {}) }));
+    let targetInfo = null;
+
+    // Fail closed: any disconnect ends the lease and burns the capability.
+    const end = () => {
+      if (state.lease?.generation !== generation) return;
+      caps.burn(token);
+      state.lease = null;
+      try { client.close(1011, 'lease ended'); } catch {}
+      try { tab.close(); } catch {}
+    };
+    tab.on('close', end);
+    client.on('close', end);
+
+    tab.on('message', (raw) => {
+      const msg = JSON.parse(raw);
+      if (msg.id !== undefined) {
+        const p = pending.get(msg.id);
+        if (!p) return;
+        pending.delete(msg.id);
+        if (p.internal) return p.internal(msg);
+        reply(p.clientId, p.sessionId, msg.error ? { error: msg.error } : { result: msg.result });
+      } else emit(msg.method, msg.params, msg.sessionId ?? TAB_SESSION);
+    });
+
+    client.on('message', (raw) => {
+      // Fencing: a socket from an older lease generation is never served.
+      if (state.lease?.generation !== generation) return;
+      const { id, method, params = {}, sessionId } = JSON.parse(raw);
+      if (denied(method)) return reply(id, sessionId, { error: { code: -32000, message: `Denied by Cascade relay policy: ${method}` } });
+      if (!sessionId) {
+        switch (method) {
+          case 'Browser.getVersion': return reply(id, null, { result: { protocolVersion: '1.3', product: 'Chrome/Cascade-Relay', revision: '', userAgent: 'Cascade-Relay', jsVersion: '' } });
+          case 'Browser.setDownloadBehavior': return reply(id, null, { result: {} });
+          case 'Target.getTargetInfo': return reply(id, null, { result: { targetInfo: targetInfo ?? { targetId: 'browser', type: 'browser', title: '', url: '', attached: true } } });
+          case 'Target.setAutoAttach': {
+            reply(id, null, { result: {} });
+            const rid = nextId++;
+            pending.set(rid, { internal: (m) => {
+              targetInfo = { ...m.result.targetInfo, attached: true, browserContextId: 'cascade-default' };
+              emit('Target.attachedToTarget', { sessionId: TAB_SESSION, targetInfo, waitingForDebugger: false });
+            } });
+            return sendTab({ id: rid, method: 'Target.getTargetInfo' });
+          }
+          default: return reply(id, null, { error: { code: -32601, message: `Relay: browser-level ${method} not supported` } });
+        }
+      }
+      const rid = nextId++;
+      pending.set(rid, { clientId: id, sessionId });
+      sendTab(sessionId === TAB_SESSION ? { id: rid, method, params } : { id: rid, method, params, sessionId });
+    });
+  }
+
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({
+    server, state, endpoint: (token) => `ws://127.0.0.1:${server.address().port}/devtools/browser/${token}`,
+  })));
+}
+
+// Try a raw WebSocket connection; resolves 'open' or the refusal.
+const tryConnect = (url) => new Promise((resolve) => {
+  const ws = new WebSocket(url);
+  ws.on('open', () => { ws.close(); resolve('open'); });
+  ws.on('unexpected-response', (_, res) => resolve(`refused ${res.statusCode}`));
+  ws.on('error', (e) => resolve(`error ${e.message}`));
+});
+
+// ── Run ─────────────────────────────────────────────────────────────────────
+
+const offlist = await countingServer('offlist.test', {
+  '/': html('<title>offlist</title>off'),
+  '/collect': (req, res) => res.end('ok'),
+  '/lib.js': (req, res) => { res.setHeader('content-type', 'text/javascript'); res.end('window.__lib = 1;'); },
+});
+const priv = await countingServer('127.0.0.1 (private)', { '/admin': (req, res) => res.end('router admin') });
+const allowed = await countingServer('allowed.test', {
+  '/': html(`<title>allowed</title>
+    <a id="off" href="http://offlist.test/">off-list link</a>
+    <a id="redir" href="/redirect">redirect</a>
+    <form id="f" method="post" action="http://offlist.test/collect"><input name="q" value="secret"><button>go</button></form>
+    <script src="http://offlist.test/lib.js"></script>`),
+  '/two': html('<title>allowed two</title>two'),
+  '/redirect': (req, res) => { res.statusCode = 302; res.setHeader('location', 'http://offlist.test/'); res.end(); },
+  '/framer': html('<title>framer</title><iframe src="http://offlist.test/"></iframe>'),
+});
+
+const rules = `MAP allowed.test 127.0.0.1:${allowed.port}, MAP offlist.test 127.0.0.1:${offlist.port}`;
+const { proc, tab } = await launchChromium(rules);
+const ALLOWED = 'http://allowed.test';
+const policy = await startEgressPolicy(tab.webSocketDebuggerUrl, new Set([ALLOWED]));
+const caps = createCapabilityStore();
+const relay = await startRelay(tab.webSocketDebuggerUrl, caps);
+console.log(`Playwright ${require('playwright-core/package.json').version}\n`);
+
+const offHits = () => offlist.hits.filter((h) => !h.startsWith('GET /lib.js')).length;
+const navBlocked = async (label, action) => {
+  const before = offHits();
+  await action().catch(() => {});
+  await sleep(400);
+  const blocked = policy.decisions.some((d) => d.verdict === 'block' && d.url.startsWith('http://offlist.test') && d.resourceType === 'Document');
+  check(`P2: ${label} is blocked before any request`, offHits() === before && blocked, `off-list server saw ${offHits() - before} request(s)`);
+};
+
+let browser;
+try {
+  // ── Lease and capabilities (O2, O3)
+  const cap1 = caps.approveRun('run-1');
+  browser = await chromium.connectOverCDP(relay.endpoint(cap1));
+  const context = browser.contexts()[0];
+  const page = context.pages()[0] ?? await context.waitForEvent('page', { timeout: 5000 });
+  check('connect with a fresh capability', !!page);
+
+  check('O3: same capability replayed on a second socket is refused', (await tryConnect(relay.endpoint(cap1))).startsWith('refused'), relay.state.refusals.at(-1));
+  const capOther = caps.approveRun('run-2');
+  check('O2: a second run is refused while the tab is leased', (await tryConnect(relay.endpoint(capOther))).startsWith('refused'), relay.state.refusals.at(-1));
+
+  // ── Origin enforcement (P2)
+  await page.goto(`${ALLOWED}/`);
+  check('consented origin loads', (await page.title()) === 'allowed');
+  const libHits = offlist.hits.filter((h) => h.startsWith('GET /lib.js')).length;
+  check('LIMIT: public subresource from a non-consented origin is allowed', libHits === 1, 'page scripts and CDNs keep working; see §4.2');
+
+  await navBlocked('agent navigation (page.goto) to an off-list origin', () => page.goto('http://offlist.test/', { timeout: 3000 }));
+  await page.goto(`${ALLOWED}/`);
+  await navBlocked('clicking an off-list link', () => page.click('#off', { timeout: 3000 }));
+  await page.goto(`${ALLOWED}/`);
+  await navBlocked('script navigation (location.href)', () => page.evaluate(() => { location.href = 'http://offlist.test/'; }));
+  await page.goto(`${ALLOWED}/`);
+  await navBlocked('form POST to an off-list origin', () => page.click('#f button', { timeout: 3000 }));
+  await page.goto(`${ALLOWED}/`);
+  {
+    const before = offHits();
+    const allowedRedirects = allowed.hits.filter((h) => h === 'GET /redirect').length;
+    await page.click('#redir', { timeout: 3000 }).catch(() => {});
+    await sleep(400);
+    check('P2: server redirect to an off-list origin is blocked before the redirected request',
+      allowed.hits.filter((h) => h === 'GET /redirect').length === allowedRedirects + 1 && offHits() === before,
+      `consented server saw the redirect; off-list server saw ${offHits() - before}`);
+  }
+  await navBlocked('an off-list iframe', () => page.goto(`${ALLOWED}/framer`));
+
+  {
+    const before = priv.hits.length;
+    const result = await page.evaluate((u) => fetch(u).then(() => 'reached', (e) => `failed: ${e.message}`), `http://127.0.0.1:${priv.port}/admin`);
+    await sleep(200);
+    const policyBlocked = policy.decisions.some((d) => d.verdict === 'block' && d.reason === 'private-network destination');
+    check('P2: fetch to a private-network address is blocked by the policy', priv.hits.length === before && policyBlocked, result);
+  }
+
+  await page.goto(`${ALLOWED}/two`);
+  check('navigation within the consented origin still works', (await page.title()) === 'allowed two');
+
+  // ── Fail closed, no resume (model (a))
+  relay.state.lease.tab.close();
+  await sleep(300);
+  check('S1: a dropped connection ends the lease', relay.state.lease === null && !browser.isConnected());
+  check('O3: the same capability cannot reconnect after a drop', (await tryConnect(relay.endpoint(cap1))).startsWith('refused'), relay.state.refusals.at(-1));
+  check('O3: a capability refused only because the tab was leased is still usable later', (await tryConnect(relay.endpoint(capOther))) === 'open');
+  await sleep(200);
+
+  const cap2 = caps.approveRun('run-1');
+  const browser2 = await chromium.connectOverCDP(relay.endpoint(cap2));
+  check('a NEW capability after re-approval opens a new lease', browser2.isConnected());
+  check('O3: the old capability is still refused after the new lease', (await tryConnect(relay.endpoint(cap1))).startsWith('refused'));
+  await browser2.close();
+  await sleep(200);
+
+  // The agent cannot see or switch off the policy's interception.
+  {
+    const raw = new WebSocket(relay.endpoint(caps.approveRun('run-4')));
+    const reply = await new Promise((resolve) => {
+      raw.on('open', () => raw.send(JSON.stringify({ id: 1, method: 'Fetch.disable', params: {}, sessionId: TAB_SESSION })));
+      raw.on('message', (m) => { const msg = JSON.parse(m); if (msg.id === 1) resolve(msg.error?.message ?? 'allowed'); });
+      setTimeout(() => resolve('timeout'), 3000);
+    });
+    raw.close();
+    check('the agent cannot turn the policy off (Fetch.disable denied)', reply.includes('Denied'), reply);
+    await sleep(200);
+  }
+
+  const expired = caps.approveRun('run-3', -1);
+  check('O3: an expired capability is refused', (await tryConnect(relay.endpoint(expired))).startsWith('refused'), relay.state.refusals.at(-1));
+} catch (e) {
+  check('unexpected error', false, e.stack?.split('\n').slice(0, 3).join(' / '));
+} finally {
+  await browser?.close().catch(() => {});
+  policy.close();
+  relay.server.close();
+  for (const s of [allowed, offlist, priv]) s.server.close();
+  proc.kill();
+}
+
+console.log('\nPolicy decisions (blocked):');
+for (const d of policy.decisions.filter((x) => x.verdict === 'block')) console.log(`  ${d.resourceType.padEnd(9)} ${d.url} — ${d.reason}`);
+const failed = results.filter((r) => !r.ok).length;
+console.log(`\n${results.length - failed}/${results.length} checks passed`);
+process.exit(failed ? 1 : 0);
