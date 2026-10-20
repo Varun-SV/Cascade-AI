@@ -1,8 +1,8 @@
 # Bring-your-own browser, and routing data for users
 
 Status: **design for review**, revision 2 (council: discussion #315, review
-on PR #316). Q1–Q3 decided by the maintainer; Q4 open. No feature code
-lands until the design is agreed.
+on PR #316 as inline comments). Q1–Q4 decided by the maintainer; Q5 open.
+No feature code lands until the design is agreed.
 
 Revision 2 answers ChatGPT's review on #316:
 - **A:** the tab-level adapter has been prototyped against Playwright (§3.3).
@@ -381,12 +381,11 @@ Decided by the maintainer (21 Oct 2026):
 - **Q2.** Desktop/CLI aggregates to Everyone: opt-in.
 - **Q3.** Desktop source: the built-in `WebContentsView`, through the
   shared tab-level adapter.
+- **Q4.** Extension: **Chrome first**, behind a browser-agnostic interface.
+  Other Chromium browsers are claimed only after their debugger permission,
+  service-worker lifecycle and attach/detach behaviour are tested.
 
 Still open:
 
-- **Q4.** Extension scope. Both reviewers recommend **Chrome first** behind
-  a browser-agnostic interface, claiming other Chromium browsers only after
-  their debugger permission, service-worker lifecycle and attach/detach
-  behaviour are tested. Maintainer to confirm.
 - **Q5.** Should the egress list in §4.1 be shown in the consent prompt
   every time, or only on first use per site?
