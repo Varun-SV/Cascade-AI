@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { answeredExactly, assessRun, modelBindingsMatch, pageShows, scheduleRuns, summarise } from './results.mjs';
+import { answeredExactly, assessRun, modelBindingsMatch, pageShows, pictureMissed, scheduleRuns, summarise } from './results.mjs';
 import { TASKS } from './tasks.mjs';
 
 describe('browser comparison validity', () => {
@@ -92,11 +92,31 @@ describe('browser comparison validity', () => {
     for (const arm of ['image', 'marked']) {
       const row = assessRun({ ok: true, arm, steps: 2, shots: { sent: 1, leftOut: 0 }, withheld: 1 });
       expect(row).toMatchObject({ valid: false, ok: false });
-      expect(row.error).toMatch(/withheld by the browser/);
+      expect(row.error).toMatch(/without the screenshot asked for/);
     }
     expect(assessRun({ ok: true, arm: 'list', steps: 2, withheld: 1 })).toMatchObject({ valid: true });
     // The list settings send no pictures to begin with.
     expect(assessRun({ ok: true, arm: 'list', shots: { sent: 0, leftOut: 2 } })).toMatchObject({ valid: true, ok: true });
     expect(assessRun({ ok: true })).toMatchObject({ valid: true });
+  });
+
+  it('counts every step that showed the page without the picture it asked for', () => {
+    const asked = { kind: 'navigate', screenshot: true };
+    // A pictured first step, then one whose page view could not be built:
+    // no picture, nothing withheld by name, and the step still succeeded.
+    expect(pictureMissed(asked, { ok: true, detail: 'Opened', image: { data: 'x' } })).toBe(false);
+    expect(pictureMissed(asked, { ok: true, detail: 'Opened', url: 'https://x' })).toBe(true);
+    // A failed observe told to fall back to text, a refusal showing the page
+    // as it is now, and a picture withheld for a password on screen.
+    expect(pictureMissed({ kind: 'observe', screenshot: true }, { ok: false, detail: 'could not be listed' })).toBe(true);
+    expect(pictureMissed({ kind: 'click', screenshot: true }, { ok: false, detail: 'changed', view: { text: 'v' } })).toBe(true);
+    expect(pictureMissed(asked, { ok: true, detail: 'x', view: { text: 'v' }, imageWithheld: true })).toBe(true);
+    // The picture the model already has, a step that showed nothing, and a
+    // step that asked for none.
+    expect(pictureMissed(asked, { ok: true, detail: 'x', imageUnchanged: true })).toBe(false);
+    expect(pictureMissed({ kind: 'click', screenshot: true }, { ok: false, detail: 'Nothing matches #x' })).toBe(false);
+    expect(pictureMissed({ kind: 'navigate' }, { ok: true, detail: 'Opened' })).toBe(false);
+    // Counted, such a run is no fair picture run.
+    expect(assessRun({ ok: true, arm: 'image', steps: 2, shots: { sent: 1, leftOut: 0 }, withheld: 1 }).valid).toBe(false);
   });
 });

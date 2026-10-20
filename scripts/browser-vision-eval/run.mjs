@@ -31,7 +31,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { TASKS } from './tasks.mjs';
-import { answeredExactly, assessRun, modelBindingsMatch, pageShows, scheduleRuns, summarise } from './results.mjs';
+import { answeredExactly, assessRun, modelBindingsMatch, pageShows, pictureMissed, scheduleRuns, summarise } from './results.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const args = parseArgs(process.argv.slice(2));
@@ -156,13 +156,14 @@ async function evaluate() {
   const base = cm.getConfig();
   const controller = new sdk.RemoteBrowserController({ provider: new sdk.GenericCdpProvider(chrome.ws) });
   const steps = new Map();
-  // Screenshots the browser itself held back (a password on screen): they
-  // never reach the router, so its counts cannot show them.
+  // Steps that showed the page without the picture asked for: withheld by the
+  // browser, or never taken because no page view could be built. Neither
+  // reaches the router, so its counts cannot show them.
   const withheld = new Map();
   const counted = async (action, context) => {
     steps.set(context.sessionId, (steps.get(context.sessionId) ?? 0) + 1);
     const outcome = await controller.controller(action, context);
-    if (outcome?.imageWithheld) withheld.set(context.sessionId, (withheld.get(context.sessionId) ?? 0) + 1);
+    if (pictureMissed(action, outcome)) withheld.set(context.sessionId, (withheld.get(context.sessionId) ?? 0) + 1);
     return outcome;
   };
 

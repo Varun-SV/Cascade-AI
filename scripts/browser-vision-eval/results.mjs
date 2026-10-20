@@ -38,6 +38,18 @@ export function pageShows(accepted, text) {
 
 const known = (value) => Number.isFinite(value) && value >= 0 ? value : null;
 
+/**
+ * Whether a step that asked for a screenshot showed the page without one. That
+ * is the case whether the browser withheld it (a password on screen) or never
+ * got as far as one (no page view could be built, so none was taken), and
+ * whether the step succeeded or came back with the page as it is now. A step
+ * that failed without showing the page at all showed nothing in any setting.
+ */
+export function pictureMissed(action, outcome) {
+  if (!action?.screenshot || !outcome || outcome.image || outcome.imageUnchanged) return false;
+  return Boolean(outcome.imageWithheld || outcome.ok || outcome.view || action.kind === 'observe');
+}
+
 /** The settings that are meant to show the model a picture. */
 const PICTURED = new Set(['image', 'marked']);
 
@@ -54,7 +66,7 @@ const PICTURED = new Set(['image', 'marked']);
 export function assessRun({ ok = false, usage = {}, stats = {}, decisions = [], error = '', modelInvalid = '', arm = '', shots = { sent: 0, leftOut: 0 }, steps = 0, withheld = 0 } = {}) {
   const unpictured = !PICTURED.has(arm) ? ''
     : withheld > 0
-      ? `${withheld} screenshot${withheld === 1 ? ' was' : 's were'} withheld by the browser (a password or code field on screen), so this is not a fair ${arm} run; it is excluded from the comparison.`
+      ? `${withheld} step${withheld === 1 ? '' : 's'} showed the page without the screenshot asked for (withheld by the browser, or no page view to take it with), so this is not a fair ${arm} run; it is excluded from the comparison.`
     : shots.leftOut > 0
       ? `${shots.leftOut} screenshot${shots.leftOut === 1 ? ' was' : 's were'} left out for this model, so this is not a fair ${arm} run; it is excluded from the comparison.`
       : steps > 0 && shots.sent === 0
