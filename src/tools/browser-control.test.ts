@@ -428,6 +428,34 @@ describe('BrowserControlTool — what a person approving sees', () => {
     expect(calls[1]).toMatchObject({ kind: 'click', selector: '#checkout', expectSite: 'shop.example', expectDocument: 'listed-nothing' });
   });
 
+  it('forgets every worker\'s view of the run after an action whose outcome is unknown', async () => {
+    const view = { text: '[Page view 1]', labels: { e5: 'button "Pay"' } };
+    let unknown = true;
+    const controller = vi.fn(async (action: unknown) => {
+      const kind = (action as { kind: string }).kind;
+      if (kind === 'click' && unknown) {
+        return { ok: false, indeterminate: true as const, url: 'https://shop.example/pay', document: 'same',
+          detail: 'button "Pay" (e5) may or may not have been used: the browser did not confirm it in time. Do not repeat it — call observe to see what happened first.' };
+      }
+      return { ok: true, detail: 'ok', url: 'https://shop.example/pay', document: 'same', view };
+    });
+    const tool = new BrowserControlTool(controller, undefined, { pageView: true });
+    const a = { sessionId: 'run', tierId: 'worker-a' } as never;
+    const b = { sessionId: 'run', tierId: 'worker-b' } as never;
+    await tool.execute({ action: 'observe' }, a);
+    await tool.execute({ action: 'observe' }, b);
+    expect(await tool.execute({ action: 'click', ref: 'e5' }, a)).toContain('may or may not have been used');
+    controller.mockClear();
+    // Neither the same worker nor a sibling may act on what the view showed.
+    expect(await tool.execute({ action: 'click', ref: 'e5' }, a)).toContain('Call observe');
+    expect(await tool.execute({ action: 'click', ref: 'e5' }, b)).toContain('Call observe');
+    expect(await tool.execute({ action: 'click', selector: '#pay' }, a)).toContain('has not been verified');
+    expect(controller).not.toHaveBeenCalled();
+    unknown = false;
+    await tool.execute({ action: 'observe' }, a);
+    expect(await tool.execute({ action: 'click', ref: 'e5' }, a)).not.toContain('Call observe');
+  });
+
   it('does not reuse an approval after that worker received a new page view', async () => {
     const controller = vi.fn(async () => ({ ok: true, detail: 'ok', document: 'doc', url: 'https://shop.example/',
       view: { text: '[Page view]', labels: { e5: 'button "Next"' } } }));

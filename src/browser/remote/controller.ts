@@ -3358,13 +3358,13 @@ export class RemoteBrowserController {
     stoppable: <T>(work: Promise<T>) => Promise<T>,
     seen: { view: PageView; viewport: Viewport | undefined; document: string },
     action: BrowserAction,
-  ): Promise<Pick<BrowserActionOutcome, 'view' | 'image' | 'imageUnchanged'>> {
+  ): Promise<Pick<BrowserActionOutcome, 'view' | 'image' | 'imageUnchanged' | 'imageWithheld'>> {
     const view = viewOutcome(seen.view);
     if (!action.screenshot) return { view };
     // Asked for by name, a picture is sent even of an unchanged page.
     const shot = await this.screenshot(held, stoppable, seen, action.kind === 'observe', action.marked === true);
     if ('unchanged' in shot) return { view: { ...view, text: `${view.text}\n\n${UNCHANGED_SHOT}` }, imageUnchanged: true };
-    if ('withheld' in shot) return { view: { ...view, text: `${view.text}\n\n${shot.withheld}` } };
+    if ('withheld' in shot) return { view: { ...view, text: `${view.text}\n\n${shot.withheld}` }, imageWithheld: true };
     return { view, image: shot.image };
   }
 
@@ -3624,9 +3624,13 @@ export class RemoteBrowserController {
           return null;
         } catch (err) {
           if (!timedOut(err)) throw err;
+          // Advice alone does not stop a second click: the view it came from
+          // is dropped, so no ref from it can be used again before observe.
+          held.view = undefined;
           return {
             ok: false,
             detail: `${named} may or may not have been used: the browser did not confirm it in time. Do not repeat it — call observe to see what happened first.`,
+            indeterminate: true,
             ...(await where()),
           };
         }

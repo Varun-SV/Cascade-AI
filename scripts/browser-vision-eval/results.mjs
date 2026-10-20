@@ -51,8 +51,10 @@ const PICTURED = new Set(['image', 'marked']);
  * that took no browser step at all could have had no picture in any setting,
  * and stays a fair failure.
  */
-export function assessRun({ ok = false, usage = {}, stats = {}, decisions = [], error = '', modelInvalid = '', arm = '', shots = { sent: 0, leftOut: 0 }, steps = 0 } = {}) {
+export function assessRun({ ok = false, usage = {}, stats = {}, decisions = [], error = '', modelInvalid = '', arm = '', shots = { sent: 0, leftOut: 0 }, steps = 0, withheld = 0 } = {}) {
   const unpictured = !PICTURED.has(arm) ? ''
+    : withheld > 0
+      ? `${withheld} screenshot${withheld === 1 ? ' was' : 's were'} withheld by the browser (a password or code field on screen), so this is not a fair ${arm} run; it is excluded from the comparison.`
     : shots.leftOut > 0
       ? `${shots.leftOut} screenshot${shots.leftOut === 1 ? ' was' : 's were'} left out for this model, so this is not a fair ${arm} run; it is excluded from the comparison.`
       : steps > 0 && shots.sent === 0

@@ -87,6 +87,14 @@ describe('browser comparison validity', () => {
     // No browser step: no setting could have shown a picture, so it stays a
     // fair failure rather than being dropped from the picture settings alone.
     expect(assessRun({ ok: false, arm: 'image', steps: 0, shots: { sent: 0, leftOut: 0 } })).toMatchObject({ valid: true, ok: false });
+    // One picture sent, the next withheld by the browser before the router
+    // ever saw it: that step was list-only, so the run is not a picture run.
+    for (const arm of ['image', 'marked']) {
+      const row = assessRun({ ok: true, arm, steps: 2, shots: { sent: 1, leftOut: 0 }, withheld: 1 });
+      expect(row).toMatchObject({ valid: false, ok: false });
+      expect(row.error).toMatch(/withheld by the browser/);
+    }
+    expect(assessRun({ ok: true, arm: 'list', steps: 2, withheld: 1 })).toMatchObject({ valid: true });
     // The list settings send no pictures to begin with.
     expect(assessRun({ ok: true, arm: 'list', shots: { sent: 0, leftOut: 2 } })).toMatchObject({ valid: true, ok: true });
     expect(assessRun({ ok: true })).toMatchObject({ valid: true });

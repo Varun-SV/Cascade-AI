@@ -114,6 +114,17 @@ export interface BrowserActionOutcome {
    * one the host sent. That one still shows it.
    */
   imageUnchanged?: true;
+  /**
+   * A screenshot was asked for and none was taken, because something private
+   * was on screen or the page could not be checked. `view` says why.
+   */
+  imageWithheld?: true;
+  /**
+   * The action may or may not have run: the browser did not confirm it in
+   * time. Nothing from the earlier page view may be acted on until the page
+   * has been observed again, or a payment could go through twice.
+   */
+  indeterminate?: true;
 }
 
 /** What a host's controller can do beyond the original six actions. */
@@ -393,6 +404,13 @@ export class BrowserControlTool extends BaseTool {
 
   /** Keep what this run's latest page view said, for `forApproval`. */
   private remember(sessionId: string, actorId: string, outcome: BrowserActionOutcome): void {
+    // An action that may have run leaves no worker in the run anything to act
+    // on: not its refs, not the page binding a selector needs, not approvals
+    // tied to that view. Each must observe again first.
+    if (outcome.indeterminate) {
+      for (const key of [...this.seen.keys()]) if ((JSON.parse(key) as string[])[0] === sessionId) this.seen.delete(key);
+      return;
+    }
     if (!outcome.view && !outcome.url) return;
     const scope = JSON.stringify([sessionId, actorId]);
     const prior = this.seen.get(scope);

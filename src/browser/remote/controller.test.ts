@@ -5083,6 +5083,36 @@ describe('page views and refs', () => {
     expect(out.detail).toContain('Do not repeat it');
   });
 
+  it('does not let a ref click whose outcome is unknown be sent again before observing', async () => {
+    // A same-page Pay handler: the click may have gone, the page has not moved.
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    let sent = 0;
+    let stall = true;
+    extra['locator'] = (selector: string) => ({ ...locate(selector),
+      async click(opts: { trial?: boolean }) {
+        if (opts.trial) return;
+        sent++;
+        if (!stall) return;
+        const err = new Error('elementHandle.click: Timeout 500ms exceeded.');
+        err.name = 'TimeoutError';
+        throw err;
+      },
+    });
+    const first = await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'));
+    expect(first.indeterminate).toBe(true);
+    expect(sent).toBe(1);
+    const again = await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'));
+    expect(again.ok).toBe(false);
+    expect(again.detail).toContain('Call observe first');
+    expect(sent).toBe(1);
+    stall = false;
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(true);
+    expect(sent).toBe(2);
+  });
+
   it('rechecks a ref before hovering over it', async () => {
     const c = controller();
     await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
@@ -6129,6 +6159,8 @@ describe('page views and refs', () => {
       expect(out.image).toBeUndefined();
       expect(page.calls.some((x) => x.startsWith('shot:'))).toBe(false);
       expect(out.view!.text).toContain('viewport is too large');
+      // Said in a field too, so a caller counting pictures can tell.
+      expect(out.imageWithheld).toBe(true);
     });
 
     it('bounds the screenshot clip even if the viewport grows during capture', async () => {

@@ -156,9 +156,14 @@ async function evaluate() {
   const base = cm.getConfig();
   const controller = new sdk.RemoteBrowserController({ provider: new sdk.GenericCdpProvider(chrome.ws) });
   const steps = new Map();
-  const counted = (action, context) => {
+  // Screenshots the browser itself held back (a password on screen): they
+  // never reach the router, so its counts cannot show them.
+  const withheld = new Map();
+  const counted = async (action, context) => {
     steps.set(context.sessionId, (steps.get(context.sessionId) ?? 0) + 1);
-    return controller.controller(action, context);
+    const outcome = await controller.controller(action, context);
+    if (outcome?.imageWithheld) withheld.set(context.sessionId, (withheld.get(context.sessionId) ?? 0) + 1);
+    return outcome;
   };
 
   // The browser and nothing else. `enabledTools: []` keeps out the built-in
@@ -246,9 +251,10 @@ async function evaluate() {
       if (task.check.done) await reported(`${run}:${task.check.done}`);
       const ok = task.check.done ? site.done.has(`${run}:${task.check.done}`) : answeredExactly(task.check.answer, output);
       const stepCount = opened.reduce((n, k) => n + (steps.get(k) ?? 0), 0);
+      const withheldCount = opened.reduce((n, k) => n + (withheld.get(k) ?? 0), 0);
       const assessment = assessRun({
         ok, usage, stats: cascade.getRouter().getStats(), decisions, error, modelInvalid,
-        arm, shots: cascade.getRouter().getRunScreenshots?.() ?? { sent: 0, leftOut: 0 }, steps: stepCount,
+        arm, shots: cascade.getRouter().getRunScreenshots?.() ?? { sent: 0, leftOut: 0 }, steps: stepCount, withheld: withheldCount,
       });
       rows.push({
         model, arm, task: task.id, ...assessment,
