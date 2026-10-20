@@ -163,7 +163,8 @@ const page = {
   /** An ad slot or embedded widget re-navigating itself. Not the page. */
   navigateSubframe() { this.navHandlers.forEach((h) => h(SUB_FRAME)); },
   mainFrame() { return MAIN_FRAME; },
-  async click(s: string) { this.calls.push(`click:${s}`); },
+  // A trial click waits for the control and sends nothing, as in Playwright.
+  async click(s: string, opts?: { trial?: boolean }) { if (!opts?.trial) this.calls.push(`click:${s}`); },
   async fill(s: string, v: string) { this.calls.push(`fill:${s}=${v}`); },
   async press(s: string, k: string) { this.calls.push(`press:${s}:${k}`); },
   keyboard: { press: async (k: string) => { page.calls.push(`key:${k}`); } },
@@ -294,7 +295,8 @@ describe('the six actions reach the page', () => {
     await c.controller({ kind: 'extract_text' }, ctx('run', 'w1'));
 
     expect(page.calls).toEqual([
-      'goto:https://a.test/', 'click:#go', 'fill:#q=hello', 'press:#q:Enter', 'wait:#done', 'text:body',
+      // A press waits for its field first: a timeout there sent no key.
+      'goto:https://a.test/', 'click:#go', 'fill:#q=hello', 'wait:#q', 'press:#q:Enter', 'wait:#done', 'text:body',
     ]);
   });
 
@@ -2183,7 +2185,8 @@ describe('handing the browser to the person watching', () => {
     await watched(c);
 
     let finishClick = () => {};
-    page.click = async (selector: string) => {
+    page.click = async (selector: string, opts?: { trial?: boolean }) => {
+      if (opts?.trial) return;
       page.calls.push(`click:${selector}`);
       await new Promise<void>((r) => { finishClick = r; });
     };
@@ -5081,6 +5084,70 @@ describe('page views and refs', () => {
     expect(out.detail).not.toContain('was not used');
     expect(out.detail).toContain('may or may not have been used');
     expect(out.detail).toContain('Do not repeat it');
+  });
+
+  it('does not let a key press whose outcome is unknown be sent again before observing', async () => {
+    // Enter on a field whose handler pays, then keeps the page busy: the
+    // browser cannot confirm the press in time, though the payment went.
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    let paid = 0;
+    extra['locator'] = (selector: string) => ({ ...locate(selector),
+      async press(_key: string, opts: { noWaitAfter?: boolean }) {
+        expect(opts.noWaitAfter).toBe(true);
+        paid++;
+        const err = new Error('elementHandle.press: Timeout 500ms exceeded.');
+        err.name = 'TimeoutError';
+        throw err;
+      },
+    });
+    const first = await c.controller({ kind: 'press', ref: 'e9', key: 'Enter' }, ctx('run', 'w1'));
+    expect(first.ok).toBe(false);
+    expect(first.indeterminate).toBe(true);
+    expect(first.detail).toContain('Enter on');
+    expect(first.detail).toContain('may or may not have been used');
+    expect(first.detail).not.toContain('was not used');
+    const again = await c.controller({ kind: 'press', ref: 'e9', key: 'Enter' }, ctx('run', 'w1'));
+    expect(again.ok).toBe(false);
+    expect(again.detail).toContain('Call observe first');
+    expect(paid).toBe(1);
+  });
+
+  it('tells a selector action that never found its control from one that may have gone', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const timeout = (what: string) => Object.assign(new Error(`${what}: Timeout 10000ms exceeded.`), { name: 'TimeoutError' });
+    const { press, waitForSelector } = page;
+    let stage: 'ready' | 'send' = 'ready';
+    let sentClicks = 0;
+    page.click = async (_selector: string, opts?: { trial?: boolean; noWaitAfter?: boolean }) => {
+      if (opts?.trial) { if (stage === 'ready') throw timeout('page.click'); return; }
+      expect(opts?.noWaitAfter).toBe(true);
+      sentClicks++;
+      throw timeout('page.click');
+    };
+    page.waitForSelector = async () => { throw timeout('page.waitForSelector'); };
+    try {
+      // Not found in time: nothing was sent, an ordinary failure.
+      const missing = await c.controller({ kind: 'click', selector: '#pay' }, ctx('run', 'w1'));
+      expect(missing.ok).toBe(false);
+      expect(missing.indeterminate).toBeUndefined();
+      expect(sentClicks).toBe(0);
+      const noField = await c.controller({ kind: 'press', selector: '#card', key: 'Enter' }, ctx('run', 'w1'));
+      expect(noField.ok).toBe(false);
+      expect(noField.indeterminate).toBeUndefined();
+      // Found and clicked, then unconfirmed: unknown, and the view is dropped.
+      stage = 'send';
+      const sent = await c.controller({ kind: 'click', selector: '#pay' }, ctx('run', 'w1'));
+      expect(sent.indeterminate).toBe(true);
+      expect(sent.detail).toContain('may or may not have been used');
+      expect(sentClicks).toBe(1);
+      expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).detail).toContain('Call observe first');
+    } finally {
+      page.press = press;
+      page.waitForSelector = waitForSelector;
+    }
   });
 
   it('does not let a ref click whose outcome is unknown be sent again before observing', async () => {

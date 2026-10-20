@@ -44,9 +44,9 @@ type Page = {
   url(): string;
   title(): Promise<string>;
   goto(url: string, opts?: { timeout?: number; waitUntil?: 'load' | 'domcontentloaded' }): Promise<unknown>;
-  click(selector: string, opts?: { timeout?: number }): Promise<void>;
+  click(selector: string, opts?: { timeout?: number; trial?: boolean; noWaitAfter?: boolean }): Promise<void>;
   fill(selector: string, value: string, opts?: { timeout?: number }): Promise<void>;
-  press(selector: string, key: string, opts?: { timeout?: number }): Promise<void>;
+  press(selector: string, key: string, opts?: { timeout?: number; noWaitAfter?: boolean }): Promise<void>;
   keyboard: { press(key: string): Promise<void> };
   waitForSelector(selector: string, opts?: { timeout?: number }): Promise<unknown>;
   innerText(selector: string, opts?: { timeout?: number }): Promise<string>;
@@ -102,7 +102,7 @@ type ActionElement = {
   evaluate?(expression: (node: { nodeName: string }) => boolean): Promise<boolean>;
   click(opts?: { timeout?: number; trial?: boolean; noWaitAfter?: boolean }): Promise<void>;
   fill(value: string, opts?: { timeout?: number }): Promise<void>;
-  press(key: string, opts?: { timeout?: number }): Promise<void>;
+  press(key: string, opts?: { timeout?: number; noWaitAfter?: boolean }): Promise<void>;
   hover(opts?: { timeout?: number; trial?: boolean }): Promise<void>;
   selectOption(value: string | { label: string }, opts?: { timeout?: number }): Promise<unknown>;
   scrollIntoViewIfNeeded(opts?: { timeout?: number }): Promise<void>;
@@ -121,7 +121,7 @@ type Locator = ActionElement & {
       textContent(): Promise<string | null>;
     };
   };
-  waitFor(opts?: { state?: 'visible'; timeout?: number }): Promise<void>;
+  waitFor(opts?: { state?: 'visible' | 'attached'; timeout?: number }): Promise<void>;
   elementHandle?(opts?: { timeout?: number }): Promise<BoundElement | null>;
 };
 /**
@@ -3608,11 +3608,17 @@ export class RemoteBrowserController {
       const checked = !!action.ref && REVALIDATED.has(action.kind);
       const sendTimeout = Math.min(timeout, DISPATCH_WAIT_MS);
       const timedOut = (err: unknown) => err instanceof Error && err.name === 'TimeoutError';
-      const send = async (ready: () => Promise<unknown>, input: () => Promise<unknown>): Promise<BrowserActionOutcome | null> => {
+      const send = async (
+        ready: () => Promise<unknown>,
+        input: () => Promise<unknown>,
+        subject = named,
+      ): Promise<BrowserActionOutcome | null> => {
         try {
           await stoppable(ready());
         } catch (err) {
-          if (!timedOut(err)) throw err;
+          // Nothing was sent. Unchecked, it is an ordinary failure: the
+          // selector matched nothing ready in time.
+          if (!checked || !timedOut(err)) throw err;
           return {
             ok: false,
             detail: `${named} stopped being ready to use after it was checked, so it was not used. Call observe for a fresh page view.`,
@@ -3629,7 +3635,7 @@ export class RemoteBrowserController {
           held.view = undefined;
           return {
             ok: false,
-            detail: `${named} may or may not have been used: the browser did not confirm it in time. Do not repeat it — call observe to see what happened first.`,
+            detail: `${subject} may or may not have been used: the browser did not confirm it in time. Do not repeat it — call observe to see what happened first.`,
             indeterminate: true,
             ...(await where()),
           };
@@ -3657,8 +3663,20 @@ export class RemoteBrowserController {
               await this.followOpenedPage(runId, held, pagesBefore);
               return refused;
             }
-          } else if (actual) await stoppable(actual.click({ timeout }));
-          else await stoppable(page.click(action.selector!, { timeout }));
+          } else {
+            // By selector the wait for the control is the ordinary one, and a
+            // timeout there sent nothing. Once it is ready the click goes, and
+            // a timeout after that is unknown, as on a ref.
+            const refused = await send(
+              () => actual ? actual.click({ timeout, trial: true }) : page.click(action.selector!, { timeout, trial: true }),
+              () => actual
+                ? actual.click({ timeout, noWaitAfter: true })
+                : page.click(action.selector!, { timeout, noWaitAfter: true }));
+            if (refused) {
+              await this.followOpenedPage(runId, held, pagesBefore);
+              return refused;
+            }
+          }
           await this.followOpenedPage(runId, held, pagesBefore);
           return finish({ ok: true, detail: `Clicked ${named}`, ...(await where()) }, true);
         }
@@ -3678,9 +3696,27 @@ export class RemoteBrowserController {
           // A selector focuses first; without one the key goes to whatever has
           // focus, which is what "press Escape" usually means.
           const pagesBefore = new Set(page.context().pages());
-          if (actual) await stoppable(actual.press(action.key!, { timeout }));
-          else if (action.selector) await stoppable(page.press(action.selector, action.key!, { timeout }));
-          else await stoppable(page.keyboard.press(action.key!));
+          // A key handler can submit before the browser confirms the press.
+          // The control is waited for first, where a timeout sent nothing;
+          // a timeout while pressing is unknown, and nothing may be repeated
+          // before the page has been observed again. Nor is the page it
+          // loads waited for: it is looked at afterwards.
+          if (actual || action.selector) {
+            const refused = await send(
+              async () => {
+                if (element) return;
+                if (actual) await (target as Locator).waitFor({ state: 'attached', timeout });
+                else await page.waitForSelector(action.selector!, { timeout });
+              },
+              () => actual
+                ? actual.press(action.key!, { timeout: checked ? sendTimeout : timeout, noWaitAfter: true })
+                : page.press(action.selector!, action.key!, { timeout, noWaitAfter: true }),
+              `${action.key} on ${named}`);
+            if (refused) {
+              await this.followOpenedPage(runId, held, pagesBefore);
+              return refused;
+            }
+          } else await stoppable(page.keyboard.press(action.key!));
           await this.followOpenedPage(runId, held, pagesBefore);
           return finish({ ok: true, detail: `Pressed ${action.key}`, ...(await where()) }, true);
         }
