@@ -88,16 +88,23 @@ async function launchChromium(mapRules) {
   return { proc, tab: list.find((t) => t.type === 'page'), browserWs: version.webSocketDebuggerUrl };
 }
 
+function originOf(u) { try { return new URL(u).origin; } catch { return ''; } }
+
 // A tiny CDP client for the policy's own session.
 function cdpClient(url) {
   const ws = new WebSocket(url, { perMessageDeflate: false });
   let id = 1;
   const pending = new Map();
   const handlers = new Map();
+  // Only events this prototype subscribes to are dispatched.
+  const EVENTS = new Set(['Fetch.requestPaused']);
   ws.on('message', (raw) => {
     const msg = JSON.parse(raw);
     if (msg.id && pending.has(msg.id)) { const p = pending.get(msg.id); pending.delete(msg.id); msg.error ? p.reject(new Error(msg.error.message)) : p.resolve(msg.result); }
-    else if (msg.method && handlers.has(msg.method)) handlers.get(msg.method)(msg.params);
+    else if (typeof msg.method === 'string' && EVENTS.has(msg.method)) {
+      const fn = handlers.get(msg.method);
+      if (typeof fn === 'function') fn(msg.params);
+    }
   });
   return {
     ready: new Promise((r) => ws.on('open', r)),
@@ -346,7 +353,7 @@ const navBlocked = async (label, action) => {
   const before = offHits();
   await action().catch(() => {});
   await sleep(400);
-  const blocked = policy.decisions.some((d) => d.verdict === 'block' && d.url.startsWith('http://offlist.test') && d.resourceType === 'Document');
+  const blocked = policy.decisions.some((d) => d.verdict === 'block' && originOf(d.url) === 'http://offlist.test' && d.resourceType === 'Document');
   check(`P2: ${label} is blocked before any request`, offHits() === before && blocked, `off-list server saw ${offHits() - before} request(s)`);
 };
 
