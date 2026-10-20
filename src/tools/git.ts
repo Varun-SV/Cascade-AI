@@ -333,7 +333,9 @@ export class GitTool extends BaseTool {
    * configuration names one.
    */
   private async unjailedGit(cwd: string, launch: Launch, operation?: string): Promise<{ git: SimpleGit; done: () => Promise<string | void>; unconfined: true }> {
-    const listed = await listGitConfig(cwd, launch.env);
+    // No global or system file made after Cascade started (configAtStart),
+    // unless the environment names one itself.
+    const listed = await listGitConfig(cwd, { ...this.configAtStart, ...launch.env });
     if (listed === null) {
       throw new Error('No process jail is available, and git could not list its configuration here to run without the settings that start programs (this needs git 2.26 or newer). Set tools.processJail to "off" to run git as it is.');
     }

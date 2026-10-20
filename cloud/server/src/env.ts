@@ -141,6 +141,14 @@ const EnvSchema = z.object({
   // endpoint is capped at 1 whatever this says — that endpoint IS one browser,
   // so a second "session" would be the same page.
   REMOTE_BROWSER_MAX_SESSIONS: z.coerce.number().int().min(1).max(16).default(1),
+  // What the browser shows the model of a page — the SDK's tools.browserVision.
+  //   off    — page text and CSS selectors only.
+  //   list   — (unset means this) a list of the page's controls, each with a ref.
+  //   image  — the list, plus a screenshot for models that can see images.
+  //   marked — the list, plus a screenshot with each ref drawn on it.
+  // `image` and `marked` cost tokens on every browsing step for a vision
+  // model; they are opt-in until a side-by-side test shows they pay.
+  REMOTE_BROWSER_VISION: z.enum(['off', 'list', 'image', 'marked']).optional(),
 });
 
 export type CloudEnv = z.infer<typeof EnvSchema>;

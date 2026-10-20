@@ -2,7 +2,7 @@
 //  Cascade AI — driving a remote browser
 // ─────────────────────────────────────────────
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { RemoteBrowserProvider } from './provider.js';
 import type { BrowserFrame } from './controller.js';
 
@@ -35,9 +35,19 @@ function fakeCdp() {
     layout: { clientWidth: 1280, clientHeight: 800 },
     /** Answer with the deprecated device-pixel field only. See below. */
     legacyOnly: false,
+    /** What `DOM.getDocument` answers: the page's DOM, shadow roots included. */
+    dom: { nodeId: 1, nodeType: 9, nodeName: '#document', children: [] } as unknown,
+    /** `DOM.getBoxModel`'s border quad for each node; absent means not laid out. */
+    boxes: new Map<number, number[]>(),
     async send(method: string, params?: Record<string, unknown>) {
       session.sent.push(method);
       session.calls.push({ method, ...(params ? { params } : {}) });
+      if (method === 'DOM.getDocument') return { root: session.dom };
+      if (method === 'DOM.getBoxModel') {
+        const border = session.boxes.get(params?.['nodeId'] as number);
+        if (!border) throw new Error('Protocol error (DOM.getBoxModel): Could not compute box model.');
+        return { model: { border } };
+      }
       // A STARTED SCREENCAST DRAWS AT ONCE. Chrome emits its first frame as
       // soon as capture begins, whatever the page is doing, and this PR relies
       // on that in three places — the unwatch/watch pair that recovers an idle
@@ -96,6 +106,8 @@ let cdpCreated = 0;
 let cdpGate: Promise<void> | null = null;
 /** Make CDP session creation itself fail, before Page.startScreencast. */
 let cdpFailure: Error | null = null;
+/** A sub-frame's own CDP session, for one Chrome runs out of process. */
+let frameCdp: ((frame: unknown) => Promise<unknown>) | null = null;
 /**
  * Give each attach its OWN session, and keep them.
  *
@@ -126,25 +138,43 @@ const page = {
   closed: false,
   currentUrl: 'https://start.test/',
   navHandlers: [] as Array<(frame: unknown) => void>,
+  /** A new document's load, which `pushState` and its kin do not fire. */
+  loadHandlers: [] as Array<() => void>,
+  /** Requests the page makes; a navigation's is the first sign of a new document. */
+  requestHandlers: [] as Array<(request: unknown) => void>,
   calls: [] as string[],
   url() { return this.currentUrl; },
   async title() { return 'Title'; },
   async goto(u: string) {
-    this.calls.push(`goto:${u}`); this.currentUrl = u;
+    this.calls.push(`goto:${u}`);
+    this.requestNavigation();
+    this.currentUrl = u;
     // Playwright reports the frame that moved. A real top-level navigation
     // reports the main frame; see `navigateSubframe` for the other kind.
     this.navHandlers.forEach((h) => h(MAIN_FRAME));
+    this.loadHandlers.forEach((h) => h());
   },
+  /** A navigation asked for and not yet answered: the old document is still up. */
+  requestNavigation(frame: unknown = MAIN_FRAME) {
+    this.requestHandlers.forEach((h) => h({ isNavigationRequest: () => true, frame: () => frame }));
+  },
+  /** A history change: the main frame "navigates", the document stays. */
+  replaceState(u: string) { this.currentUrl = u; this.navHandlers.forEach((h) => h(MAIN_FRAME)); },
   /** An ad slot or embedded widget re-navigating itself. Not the page. */
   navigateSubframe() { this.navHandlers.forEach((h) => h(SUB_FRAME)); },
   mainFrame() { return MAIN_FRAME; },
-  async click(s: string) { this.calls.push(`click:${s}`); },
+  // A trial click waits for the control and sends nothing, as in Playwright.
+  async click(s: string, opts?: { trial?: boolean }) { if (!opts?.trial) this.calls.push(`click:${s}`); },
   async fill(s: string, v: string) { this.calls.push(`fill:${s}=${v}`); },
   async press(s: string, k: string) { this.calls.push(`press:${s}:${k}`); },
   keyboard: { press: async (k: string) => { page.calls.push(`key:${k}`); } },
   async waitForSelector(s: string) { this.calls.push(`wait:${s}`); },
   async innerText(s: string) { this.calls.push(`text:${s}`); return 'page text'; },
-  on(event: string, handler: (frame: unknown) => void) { if (event === 'framenavigated') this.navHandlers.push(handler); },
+  on(event: string, handler: (frame: unknown) => void) {
+    if (event === 'framenavigated') this.navHandlers.push(handler);
+    if (event === 'domcontentloaded') this.loadHandlers.push(handler as () => void);
+    if (event === 'request') this.requestHandlers.push(handler);
+  },
   async close() { this.closed = true; this.closeCount += 1; },
   isClosed() { return this.closed; },
   context() { return pageContext; },
@@ -164,7 +194,13 @@ function fakeContext(pageForThisContext: typeof page) {
     pageList: [pageForThisContext] as Array<typeof page>,
     pages: () => c.pageList,
     newPage: async () => pageForThisContext,
-    newCDPSession: async () => {
+    newCDPSession: async (target?: { goto?: unknown }) => {
+      // A frame — no `goto` — has a session of its own only when Chrome runs
+      // it in a process of its own. Playwright refuses the rest.
+      if (target && typeof target.goto !== 'function') {
+        if (frameCdp) return frameCdp(target);
+        throw new Error('This frame does not have a separate CDP session, it is a part of the parent frame\'s session');
+      }
       cdpCreated += 1;
       if (cdpGate) await cdpGate;
       if (cdpFailure) throw cdpFailure;
@@ -228,12 +264,15 @@ beforeEach(() => {
   page.currentUrl = 'https://start.test/';
   page.calls = [];
   page.navHandlers = [];
+  page.loadHandlers = [];
+  page.requestHandlers = [];
   browser.closed = false;
   browser.contexts = () => [defaultContext];
   defaultContext.closed = false;
   defaultContext.pageList = [page];
   createdContexts.length = 0;
   cdp = fakeCdp();
+  frameCdp = null;
   cdpCreated = 0;
   cdpPerAttach = false;
   silentNewCdp = false;
@@ -256,7 +295,8 @@ describe('the six actions reach the page', () => {
     await c.controller({ kind: 'extract_text' }, ctx('run', 'w1'));
 
     expect(page.calls).toEqual([
-      'goto:https://a.test/', 'click:#go', 'fill:#q=hello', 'press:#q:Enter', 'wait:#done', 'text:body',
+      // A press waits for its field first: a timeout there sent no key.
+      'goto:https://a.test/', 'click:#go', 'fill:#q=hello', 'wait:#q', 'press:#q:Enter', 'wait:#done', 'text:body',
     ]);
   });
 
@@ -2145,7 +2185,8 @@ describe('handing the browser to the person watching', () => {
     await watched(c);
 
     let finishClick = () => {};
-    page.click = async (selector: string) => {
+    page.click = async (selector: string, opts?: { trial?: boolean }) => {
+      if (opts?.trial) return;
       page.calls.push(`click:${selector}`);
       await new Promise<void>((r) => { finishClick = r; });
     };
@@ -2264,6 +2305,7 @@ describe('handing the browser to the person watching', () => {
       closed: false,
       currentUrl: 'https://login.test/popup',
       navHandlers: [] as Array<(frame: unknown) => void>,
+      loadHandlers: [] as Array<() => void>,
       calls: [] as string[],
       closeCount: 0,
       keyboard: { press: async (k: string) => { popup.calls.push(`key:${k}`); } },
@@ -4278,6 +4320,7 @@ describe('round 33 review regressions', () => {
       closed: false,
       currentUrl: url,
       navHandlers: [] as Array<(frame: unknown) => void>,
+      loadHandlers: [] as Array<() => void>,
       calls: [] as string[],
       closeCount: 0,
       keyboard: { press: async (k: string) => { popup.calls.push(`key:${k}`); } },
@@ -4522,5 +4565,2104 @@ describe('round 34 view-boundary regressions', () => {
     expect(states.at(-1)?.confirmed).toBe(true);
     expect(await c.setCapture('run-A', false)).toBe(false);
     expect((await c.input('run-A', { kind: 'text', text: '123456' })).ok).toBe(true);
+  });
+});
+
+describe('page views and refs', () => {
+  it('recognizes compound sensitive labels without matching ordinary shipping labels', async () => {
+    const { PRIVATE_LABEL } = await import('./controller.js');
+    for (const label of ['pinCode', 'userPinCode', 'cardNumber', 'cvvCode', 'cardCvvCode', 'cvcCode', 'securityCode', 'verificationCode', 'authCode', 'otpCode', 'signInCode']) {
+      expect(PRIVATE_LABEL.test(label), label).toBe(true);
+    }
+    for (const label of ['Shipping info', 'Spinner size']) expect(PRIVATE_LABEL.test(label), label).toBe(false);
+  });
+  /** What the fake page's AI snapshot says the page holds. */
+  let snapshot = '';
+  let snapshotFails = false;
+  /** What the privacy check finds in the page itself: a field on screen, an error, or no answer. */
+  let privateOnScreen: boolean | null | 'throws' = false;
+  /**
+   * What each sub-frame's privacy check finds, and where its iframe sits (on
+   * screen unless given). `gone` throws from a frame that has left the page;
+   * `throws` from one still on it.
+   */
+  let subFrames: Array<boolean | null | 'throws' | 'gone' | { found: boolean; y: number }> = [];
+  let shotFails = false;
+  /** A private field found only by its label, not by any attribute. */
+  let labelledOnly = false;
+  /** One found only by its placeholder. */
+  let placeholderOnly = false;
+  let placeholderText = 'Card number';
+  /** Refs the fake page can still resolve, whatever the last view listed. */
+  let liveRefs = new Set<string>();
+  let nativeOptionValues: string[] = [];
+  const extra = page as unknown as Record<string, unknown>;
+
+  /**
+   * A JPEG's headers: enough for its size to be read, as a real one's is.
+   * `shade` stands for what is in the picture: two of the same size and shade
+   * are the same picture.
+   */
+  const jpeg = (width: number, height: number, shade = 0) => new Uint8Array([
+    0xff, 0xd8,
+    0xff, 0xe0, 0x00, 0x04, 0x00, shade,
+    0xff, 0xc0, 0x00, 0x0b, 0x08, height >> 8, height & 0xff, width >> 8, width & 0xff, 0x01, 0x01, 0x11, 0x00,
+    0xff, 0xd9,
+  ]);
+  let SHOT = jpeg(1280, 800);
+  const SHOT64 = Buffer.from(jpeg(1280, 800)).toString('base64');
+  /** What the marks come back as: the same size, other pixels. */
+  const MARKED64 = Buffer.from(jpeg(1280, 800, 9)).toString('base64');
+
+  const BOOKING = [
+    '- main [ref=e1] [box=0,0,1280,1600]:',
+    '  - button "Account" [ref=e5] [box=84,0,32,25]',
+    '  - textbox "Password" [ref=e9] [box=189,96,185,21]: hunter2',
+    '  - combobox "Party size" [ref=e11] [box=567,97,74,19]:',
+    '    - option "2 people" [selected] [box=0,0,0,0]',
+    '  - button "Reserve 7:30 pm" [ref=e14] [box=0,1200,118,21]',
+  ].join('\n');
+
+  beforeEach(() => {
+    snapshot = BOOKING;
+    nativeOptionValues = [];
+    snapshotFails = false;
+    privateOnScreen = false;
+    subFrames = [];
+    shotFails = false;
+    labelledOnly = false;
+    placeholderOnly = false;
+    placeholderText = 'Card number';
+    SHOT = jpeg(1280, 800);
+    liveRefs = new Set(['e5', 'e9', 'e11', 'e14']);
+    extra['ariaSnapshot'] = async (opts: unknown) => {
+      page.calls.push(`snapshot:${JSON.stringify(opts)}`);
+      if (snapshotFails) throw new Error('snapshot timed out');
+      return snapshot;
+    };
+    /**
+     * A frame as the privacy check reads it: through Playwright's queries,
+     * never the page's own JavaScript. What it finds is boxed at `y`.
+     */
+    const scanned = (found: boolean | null | 'throws' | 'gone', y: number) => ({
+      evaluate: async () => { throw new Error('the privacy check must not run in the page\'s own world'); },
+      getByLabel: (label: RegExp) => ({
+        count: async () => {
+          if (!label.test('Verification code')) throw new Error(`unexpected label ${label}`);
+          return found === true && labelledOnly ? 1 : 0;
+        },
+        nth: () => ({ boundingBox: async () => ({ x: 10, y: y + 5, width: 100, height: 20 }) }),
+      }),
+      getByPlaceholder: (text: RegExp) => ({
+        count: async () => {
+          if (!text.test('Card number')) throw new Error(`unexpected placeholder ${text}`);
+          return found === true && placeholderOnly && text.test(placeholderText) ? 1 : 0;
+        },
+        nth: () => ({ boundingBox: async () => ({ x: 10, y: y + 5, width: 100, height: 20 }) }),
+      }),
+      locator: (selector: string) => ({
+        count: async () => {
+          page.calls.push('privacy');
+          if (!selector.includes('one-time-code') || !selector.includes('iframe[src*="stripe" i]')) throw new Error(`unexpected query ${selector}`);
+          if (found === 'throws' || found === 'gone' || found === null) throw new Error('Execution context was destroyed');
+          return found && !labelledOnly && !placeholderOnly ? 1 : 0;
+        },
+        nth: () => ({ boundingBox: async () => ({ x: 10, y: y + 5, width: 100, height: 20 }) }),
+      }),
+    });
+    extra['evaluate'] = async (expression: string) => {
+      if (expression.startsWith('window.scrollBy')) { page.calls.push(`eval:${expression}`); return undefined; }
+      return { width: 1280, height: 800, scrollX: 0, scrollY: 0, scrollHeight: 1600 };
+    };
+    extra['frames'] = () => [
+      scanned(privateOnScreen, 0),
+      ...subFrames.map((frame) => {
+        const placed = frame !== null && typeof frame === 'object';
+        const found = placed ? frame.found : frame;
+        const y = placed ? frame.y : 100;
+        return {
+          ...scanned(found, y),
+          frameElement: async () => ({ boundingBox: async () => ({ x: 0, y, width: 200, height: 40 }) }),
+          isDetached: () => found === 'gone',
+        };
+      }),
+    ];
+    extra['screenshot'] = async (opts: unknown) => {
+      page.calls.push(`shot:${JSON.stringify(opts)}`);
+      if (shotFails) throw new Error('Target closed');
+      return SHOT;
+    };
+    extra['waitForLoadState'] = async (state: string) => { page.calls.push(`settle:${state}`); };
+    extra['locator'] = (selector: string) => {
+      const record = (what: string) => async (...args: unknown[]) => {
+        page.calls.push(`${selector} ${what}${args.length && typeof args[0] === 'string' ? `=${args[0]}` : ''}`);
+        return what === 'innerText' ? 'located text' : undefined;
+      };
+      return {
+        locator: () => ({
+          count: async () => nativeOptionValues.length,
+          nth: (index: number) => ({ getAttribute: async () => nativeOptionValues[index] ?? null, textContent: async () => `Choice ${index}` }),
+        }),
+        count: async () => {
+          const ref = /^aria-ref=(.+)$/.exec(selector)?.[1];
+          return ref === undefined || liveRefs.has(ref) ? 1 : 0;
+        },
+        click: async (opts?: { trial?: boolean }) => { if (!opts?.trial) await record('click')(); },
+        fill: record('fill'),
+        press: record('press'),
+        hover: async (opts?: { trial?: boolean }) => { if (!opts?.trial) await record('hover')(); },
+        evaluate: async (fn: (node: { nodeName: string }) => boolean) => fn({ nodeName: 'SELECT' }),
+        selectOption: async (option: unknown) => {
+          page.calls.push(`${selector} selectOption=${typeof option === 'string' ? option : `label:${(option as { label: string }).label}`}`);
+        },
+        scrollIntoViewIfNeeded: record('scrollIntoView'),
+        waitFor: record('waitFor'),
+        innerText: record('innerText'),
+        async elementHandle() {
+          const locator = this;
+          const element: Record<string, unknown> = { dispose: async () => {}, waitForElementState: async (_state: string, opts: unknown) => locator.waitFor(opts) };
+          for (const method of ['click', 'fill', 'press', 'hover', 'selectOption', 'scrollIntoViewIfNeeded', 'innerText', 'evaluate'] as const) {
+            element[method] = (...args: unknown[]) => (locator[method] as (...a: unknown[]) => Promise<unknown>)(...args);
+          }
+          return element;
+        },
+      };
+    };
+  });
+
+  afterEach(() => {
+    for (const k of ['ariaSnapshot', 'evaluate', 'waitForLoadState', 'locator', 'screenshot', 'frames']) delete extra[k];
+  });
+
+  const controller = () => new RemoteBrowserController({ provider: fakeProvider().provider, settleQuietMs: 0 });
+
+  it('offers page views only with a Playwright that can write them', async () => {
+    const { pageViewsIn } = await import('./controller.js');
+    for (const version of ['1.60.0', '1.62.1', '1.60.0-beta-1', '2.0.0']) expect(pageViewsIn(version), version).toBe(true);
+    for (const version of ['1.59.3', '1.40.0', '0.99.0', 'next', '', undefined]) expect(pageViewsIn(version), String(version)).toBe(false);
+  });
+
+  it('says what it offers, so the tool can offer refs and screenshots', () => {
+    expect(controller().features).toEqual({ pageView: true, screenshots: true, marked: true });
+  });
+
+  it('describes the page from Playwright\'s AI snapshot, with boxes', async () => {
+    const c = controller();
+    const out = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(true);
+    expect(page.calls).toContain('snapshot:{"mode":"ai","boxes":true,"timeout":5000}');
+    expect(out.view!.text).toContain('[Page view 1]');
+    expect(out.view!.text).toContain('[e5] button "Account"');
+    expect(out.view!.text).toContain('[e11] combobox "Party size": "2 people"');
+    expect(out.view!.text).toContain('Further down:\n[e14] button "Reserve 7:30 pm"');
+    expect(out.view!.labels).toEqual({
+      e5: 'button "Account"', e9: 'textbox "Password"', e11: 'combobox "Party size"', e14: 'button "Reserve 7:30 pm"',
+    });
+    // Never the value — the snapshot carries a password field's contents.
+    expect(JSON.stringify(out)).not.toContain('hunter2');
+  });
+
+  it('numbers its views', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const second = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(second.view!.text.startsWith('[Page view 2]')).toBe(true);
+  });
+
+  it('acts on a ref through Playwright\'s own aria-ref locator, and names it', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(true);
+    // Described again first, to check e14 is still what the view called it.
+    expect(page.calls).toEqual([expect.stringMatching(/^snapshot:/), 'aria-ref=e14 click']);
+    expect(out.detail).toBe('Clicked button "Reserve 7:30 pm" (e14)');
+  });
+
+  it('refuses a ref whose control the page has renamed since the view, and shows the page as it is', async () => {
+    // Playwright resolves a ref to its element whatever the element now says.
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    snapshot = BOOKING.replace('Reserve 7:30 pm', 'Cancel reservation');
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('e14 is now button "Cancel reservation", not button "Reserve 7:30 pm"');
+    expect(out.view!.text).toContain('[e14] button "Cancel reservation"');
+    expect(page.calls).not.toContain('aria-ref=e14 click');
+  });
+
+  it('refuses a named link whose destination changed while retaining its label', async () => {
+    snapshot = '- link "Continue" [ref=e5] [box=0,0,100,20]:\n  - /url: /next-step';
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    snapshot = snapshot.replace('/next-step', 'https://elsewhere.test/other-account');
+    page.calls = [];
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(false);
+    expect(page.calls).not.toContain('aria-ref=e5 click');
+  });
+
+  it('refuses navigation or reload landing during ref revalidation', async () => {
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    const snap = extra['ariaSnapshot'] as (opts: unknown) => Promise<string>;
+    for (const phase of ['count', 'snapshot', 'binding']) {
+      for (const url of ['https://elsewhere.test/', 'https://start.test/']) {
+        const c = controller();
+        const session = `racing-${phase}-${url}`;
+        const seen = await c.controller({ kind: 'observe' }, ctx(session, 'w1'));
+        let moved = false;
+        const move = async () => { if (!moved) { moved = true; await page.goto(url); } };
+        if (phase === 'count') extra['locator'] = (selector: string) => ({ ...locate(selector), count: async () => { await move(); return 1; } });
+        else if (phase === 'snapshot') extra['ariaSnapshot'] = async (opts: unknown) => { await move(); return snap(opts); };
+        else extra['locator'] = (selector: string) => ({ ...locate(selector), async elementHandle() { await move(); return (locate(selector).elementHandle as () => Promise<unknown>).call(this); } });
+        page.calls = [];
+        const out = await c.controller({ kind: 'click', ref: 'e5', expectDocument: seen.document }, ctx(session, 'w1'));
+        expect(out.ok, `${phase} ${url}`).toBe(false);
+        expect(page.calls).not.toContain('aria-ref=e5 click');
+        extra['locator'] = locate;
+        extra['ariaSnapshot'] = snap;
+      }
+    }
+  });
+
+  it('refuses frame and history navigation during element binding', async () => {
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    snapshot = `${BOOKING}\n  - iframe [ref=e20] [box=0,300,400,100]:\n    - button "Next" [ref=f1e2] [box=8,8,40,20]`;
+    liveRefs.add('f1e2');
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    extra['locator'] = (selector: string) => ({ ...locate(selector), async elementHandle() {
+      page.navigateSubframe();
+      return (locate(selector).elementHandle as () => Promise<unknown>).call(this);
+    } });
+    page.calls = [];
+    expect((await c.controller({ kind: 'click', ref: 'f1e2' }, ctx('run', 'w1'))).ok).toBe(false);
+    expect(page.calls).not.toContain('aria-ref=f1e2 click');
+    extra['locator'] = (selector: string) => ({ ...locate(selector), async elementHandle() {
+      page.replaceState('https://start.test/#details');
+      return (locate(selector).elementHandle as () => Promise<unknown>).call(this);
+    } });
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(false);
+  });
+
+  it('refuses a ref renamed only past what its label shows', async () => {
+    // Both names cut to the same label; the words that differ come after it.
+    const start = 'Review the plan, the billing details and the terms of service before you choose to ';
+    snapshot = BOOKING.replace('Reserve 7:30 pm', `${start}keep the subscription`);
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    snapshot = BOOKING.replace('Reserve 7:30 pm', `${start}cancel the subscription`);
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/^e14 \(button "Review the plan.*…"\) has changed or gone since the page view, so it was not used/);
+    expect(page.calls).not.toContain('aria-ref=e14 click');
+  });
+
+  it('refuses a ref inside a frame once a frame has loaded something else', async () => {
+    // Playwright numbers a frame's refs within its document: the next
+    // snapshot gives the new document's controls the old refs.
+    // After its first document, the page's own refs carry a prefix too:
+    // which are in a frame is told by the snapshot, not the ref.
+    snapshot = `${BOOKING}\n  - button "Book" [ref=f4e30] [box=0,200,60,20]\n  - iframe [ref=e20] [box=0,300,400,100]:\n    - button "Pay" [ref=f1e2] [box=8,308,40,20]`;
+    liveRefs.add('f1e2');
+    liveRefs.add('f4e30');
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.navigateSubframe();
+    page.calls = [];
+    for (const kind of ['hover', 'click'] as const) {
+      const out = await c.controller({ kind, ref: 'f1e2' }, ctx('run', 'w1'));
+      expect(out.ok, kind).toBe(false);
+      expect(out.detail, kind).toContain('A frame on the page has loaded something else since the page view, so f1e2 may not be what it was');
+    }
+    expect(page.calls.filter((x) => x.startsWith('aria-ref=f1e2'))).toEqual([]);
+    // The page's own controls are in no frame.
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(true);
+    expect((await c.controller({ kind: 'click', ref: 'f4e30' }, ctx('run', 'w1'))).ok).toBe(true);
+  });
+
+  it('refuses a ref inside a frame that loads something else while it is checked', async () => {
+    snapshot = `${BOOKING}\n  - iframe [ref=e20] [box=0,300,400,100]:\n    - button "Pay" [ref=f1e2] [box=8,308,40,20]`;
+    liveRefs.add('f1e2');
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const look = extra['ariaSnapshot'] as (opts: unknown) => Promise<string>;
+    extra['ariaSnapshot'] = async (opts: unknown) => { page.navigateSubframe(); return look(opts); };
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', ref: 'f1e2' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('A frame on the page has loaded something else since the page view');
+    expect(page.calls).not.toContain('aria-ref=f1e2 click');
+  });
+
+  it('looks again when an app changes its route while the page is described', async () => {
+    const c = controller();
+    const look = extra['ariaSnapshot'] as (opts: unknown) => Promise<string>;
+    let moves = 1;
+    extra['ariaSnapshot'] = async (opts: unknown) => {
+      const said = await look(opts);
+      // The cart was described; the app is at the account by the time it is done.
+      if (moves-- > 0) {
+        page.replaceState('https://start.test/account');
+        snapshot = BOOKING.replace('Reserve 7:30 pm', 'Delete account');
+      }
+      return said;
+    };
+    const out = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(page.calls.filter((x) => x.startsWith('snapshot:'))).toHaveLength(2);
+    expect(out.view!.text).toContain('https://start.test/account');
+    expect(out.view!.text).toContain('[e14] button "Delete account"');
+    // One that will not hold still is not described at all.
+    extra['ariaSnapshot'] = async (opts: unknown) => {
+      const said = await look(opts);
+      page.replaceState(`https://start.test/step/${Math.random()}`);
+      return said;
+    };
+    const moving = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(moving.ok).toBe(false);
+    expect(moving.view).toBeUndefined();
+  });
+
+  it('chooses an option by the text the view showed, as the page labels it', async () => {
+    const long = 'Join the waiting list and we will text you when a table is free';
+    snapshot = BOOKING.replace('    - option "2 people" [selected] [box=0,0,0,0]', [
+      '    - option "2 people" [selected] [box=0,0,0,0]',
+      '    - option "Continue [recommended]" [box=0,0,0,0]',
+      `    - option "${long}" [box=0,0,0,0]`,
+    ].join('\n'));
+    const c = controller();
+    const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const shown = /\[e11\][^\n]*\(options "2 people", "Continue \(recommended\)", "([^"]+)"\)/.exec(seen.view!.text);
+    expect(shown?.[1]).toMatch(/^Join the waiting list.*…$/);
+    page.calls = [];
+    for (const value of ['Continue (recommended)', shown![1]!, '6 people']) {
+      expect((await c.controller({ kind: 'select_option', ref: 'e11', value }, ctx('run', 'w1'))).ok, value).toBe(true);
+    }
+    // One the view did not show goes as it is: it can only be an option's text.
+    expect(page.calls.filter((x) => x.includes('selectOption'))).toEqual([
+      'aria-ref=e11 selectOption=label:Continue [recommended]',
+      `aria-ref=e11 selectOption=label:${long}`,
+      'aria-ref=e11 selectOption=label:6 people',
+    ]);
+  });
+
+  it('chooses no option where two read the same in the view', async () => {
+    snapshot = BOOKING.replace('    - option "2 people" [selected] [box=0,0,0,0]', [
+      '    - option "Keep [all]" [selected] [box=0,0,0,0]',
+      '    - option "Keep (all)" [box=0,0,0,0]',
+    ].join('\n'));
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.calls = [];
+    const out = await c.controller({ kind: 'select_option', ref: 'e11', value: 'Keep (all)' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('More than one option in combobox "Party size" (e11) reads "Keep (all)"');
+    expect(page.calls.filter((x) => x.includes('selectOption'))).toEqual([]);
+  });
+
+  it('refuses two distinct options with the exact same original label', async () => {
+    snapshot = BOOKING.replace('    - option "2 people" [selected] [box=0,0,0,0]', [
+      '    - option "Continue" [selected] [box=0,0,0,0]',
+      '    - option "Continue" [box=0,0,0,0]',
+    ].join('\n'));
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.calls = [];
+    const out = await c.controller({ kind: 'select_option', ref: 'e11', value: 'Continue' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('More than one option in combobox "Party size" (e11) reads "Continue"');
+    expect(page.calls.filter((x) => x.includes('selectOption'))).toEqual([]);
+  });
+
+  it('checks the name only before an action that can set something off', async () => {
+    // A hover is one: its mouse events can open a menu or load a page.
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.calls = [];
+    await c.controller({ kind: 'extract_text', ref: 'e14' }, ctx('run', 'w1'));
+    expect(page.calls.filter((x) => x.startsWith('snapshot:'))).toEqual([]);
+    await c.controller({ kind: 'hover', ref: 'e5' }, ctx('run', 'w1'));
+    expect(page.calls.filter((x) => x.startsWith('snapshot:'))).not.toEqual([]);
+  });
+
+  it('refuses a toggle whose state changed after the shown view', async () => {
+    for (const [role, state] of [['checkbox', 'checked'], ['switch', 'checked'], ['button', 'pressed'], ['tab', 'selected'], ['button', 'expanded']]) {
+      snapshot = `- ${role} "Toggle" [ref=e5] [box=84,0,32,25]`;
+      const c = controller();
+      await c.controller({ kind: 'observe' }, ctx(`state-${role}-${state}`, 'w1'));
+      snapshot = `${snapshot} [${state}]`;
+      page.calls = [];
+      const out = await c.controller({ kind: 'click', ref: 'e5' }, ctx(`state-${role}-${state}`, 'w1'));
+      expect(out.ok, `${role} ${state}`).toBe(false);
+      expect(page.calls).not.toContain('aria-ref=e5 click');
+    }
+  });
+
+  it('rechecks approved state after waiting for a ref click to become actionable', async () => {
+    snapshot = '- checkbox "Remember" [disabled] [ref=e5] [box=84,0,32,25]';
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    let clicked = false;
+    extra['locator'] = (selector: string) => ({ ...locate(selector),
+      async click(opts: { trial?: boolean }) {
+        // The browser waits for enablement. In that interval the page also
+        // checks the box, changing what a real click would do.
+        await Promise.resolve();
+        snapshot = '- checkbox "Remember" [checked] [ref=e5] [box=84,0,32,25]';
+        if (!opts.trial) clicked = true;
+      },
+    });
+    const out = await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(clicked).toBe(false);
+    expect(out.view?.text).toContain('checked');
+  });
+
+  it('does not wait again at length to send a ref click that was checked', async () => {
+    // Ready for the first trial, then checked: by the time it is to be sent
+    // the control has gone unready, and waiting it out would click whatever
+    // it became. It is checked again only for a moment, then not used.
+    snapshot = '- checkbox "Remember" [ref=e5] [box=84,0,32,25]';
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    let waited = 0;
+    let clicked = false;
+    extra['locator'] = (selector: string) => ({ ...locate(selector),
+      async click(opts: { trial?: boolean; timeout?: number }) {
+        if (opts.trial && (opts.timeout ?? Infinity) > 500) return;
+        if (!opts.trial) { clicked = true; return; }
+        waited = opts.timeout ?? Infinity;
+        const err = new Error(`elementHandle.click: Timeout ${waited}ms exceeded.`);
+        err.name = 'TimeoutError';
+        throw err;
+      },
+    });
+    const out = await c.controller({ kind: 'click', ref: 'e5', timeoutMs: 30_000 }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('stopped being ready to use after it was checked, so it was not used');
+    expect(waited).toBeLessThanOrEqual(500);
+    expect(clicked).toBe(false);
+  });
+
+  it('sends a checked ref click without waiting for the page it loads', async () => {
+    // A Pay button whose handler runs and starts a slow navigation: the
+    // click went, and must be reported as done, not as not used.
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    const sent: Array<Record<string, unknown>> = [];
+    extra['locator'] = (selector: string) => ({ ...locate(selector),
+      async click(opts: { trial?: boolean; noWaitAfter?: boolean }) {
+        if (!opts.trial) sent.push({ ...opts });
+      },
+    });
+    const out = await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'));
+    expect(sent).toEqual([expect.objectContaining({ noWaitAfter: true })]);
+    expect(out.ok).toBe(true);
+    expect(out.detail).toContain('Clicked');
+  });
+
+  it('reports a ref click that timed out while being sent as unknown, never as not used', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    extra['locator'] = (selector: string) => ({ ...locate(selector),
+      async click(opts: { trial?: boolean }) {
+        if (opts.trial) return;
+        // The handler ran; the browser did not confirm in time.
+        const err = new Error('elementHandle.click: Timeout 500ms exceeded.');
+        err.name = 'TimeoutError';
+        throw err;
+      },
+    });
+    const out = await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).not.toContain('was not used');
+    expect(out.detail).toContain('may or may not have been used');
+    expect(out.detail).toContain('Do not repeat it');
+  });
+
+  it('does not let a key press whose outcome is unknown be sent again before observing', async () => {
+    // Enter on a field whose handler pays, then keeps the page busy: the
+    // browser cannot confirm the press in time, though the payment went.
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    let paid = 0;
+    extra['locator'] = (selector: string) => ({ ...locate(selector),
+      async press(_key: string, opts: { noWaitAfter?: boolean }) {
+        expect(opts.noWaitAfter).toBe(true);
+        paid++;
+        const err = new Error('elementHandle.press: Timeout 500ms exceeded.');
+        err.name = 'TimeoutError';
+        throw err;
+      },
+    });
+    const first = await c.controller({ kind: 'press', ref: 'e9', key: 'Enter' }, ctx('run', 'w1'));
+    expect(first.ok).toBe(false);
+    expect(first.indeterminate).toBe(true);
+    expect(first.detail).toContain('Enter on');
+    expect(first.detail).toContain('may or may not have been used');
+    expect(first.detail).not.toContain('was not used');
+    const again = await c.controller({ kind: 'press', ref: 'e9', key: 'Enter' }, ctx('run', 'w1'));
+    expect(again.ok).toBe(false);
+    expect(again.detail).toContain('Call observe first');
+    expect(paid).toBe(1);
+  });
+
+  it('tells a selector action that never found its control from one that may have gone', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const timeout = (what: string) => Object.assign(new Error(`${what}: Timeout 10000ms exceeded.`), { name: 'TimeoutError' });
+    const { press, waitForSelector } = page;
+    let stage: 'ready' | 'send' = 'ready';
+    let sentClicks = 0;
+    page.click = async (_selector: string, opts?: { trial?: boolean; noWaitAfter?: boolean }) => {
+      if (opts?.trial) { if (stage === 'ready') throw timeout('page.click'); return; }
+      expect(opts?.noWaitAfter).toBe(true);
+      sentClicks++;
+      throw timeout('page.click');
+    };
+    page.waitForSelector = async () => { throw timeout('page.waitForSelector'); };
+    try {
+      // Not found in time: nothing was sent, an ordinary failure.
+      const missing = await c.controller({ kind: 'click', selector: '#pay' }, ctx('run', 'w1'));
+      expect(missing.ok).toBe(false);
+      expect(missing.indeterminate).toBeUndefined();
+      expect(sentClicks).toBe(0);
+      const noField = await c.controller({ kind: 'press', selector: '#card', key: 'Enter' }, ctx('run', 'w1'));
+      expect(noField.ok).toBe(false);
+      expect(noField.indeterminate).toBeUndefined();
+      // Found and clicked, then unconfirmed: unknown, and the view is dropped.
+      stage = 'send';
+      const sent = await c.controller({ kind: 'click', selector: '#pay' }, ctx('run', 'w1'));
+      expect(sent.indeterminate).toBe(true);
+      expect(sent.detail).toContain('may or may not have been used');
+      expect(sentClicks).toBe(1);
+      expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).detail).toContain('Call observe first');
+    } finally {
+      page.press = press;
+      page.waitForSelector = waitForSelector;
+    }
+  });
+
+  it('does not let a ref click whose outcome is unknown be sent again before observing', async () => {
+    // A same-page Pay handler: the click may have gone, the page has not moved.
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    let sent = 0;
+    let stall = true;
+    extra['locator'] = (selector: string) => ({ ...locate(selector),
+      async click(opts: { trial?: boolean }) {
+        if (opts.trial) return;
+        sent++;
+        if (!stall) return;
+        const err = new Error('elementHandle.click: Timeout 500ms exceeded.');
+        err.name = 'TimeoutError';
+        throw err;
+      },
+    });
+    const first = await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'));
+    expect(first.indeterminate).toBe(true);
+    expect(sent).toBe(1);
+    const again = await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'));
+    expect(again.ok).toBe(false);
+    expect(again.detail).toContain('Call observe first');
+    expect(sent).toBe(1);
+    stall = false;
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(true);
+    expect(sent).toBe(2);
+  });
+
+  it('rechecks a ref before hovering over it', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.calls = [];
+    expect((await c.controller({ kind: 'hover', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(true);
+    expect(page.calls).toContain('aria-ref=e5 hover');
+    // Renamed since the view: its mouse events may open something else.
+    snapshot = snapshot.replace(/"([^"]*)" \[ref=e5\]/, '"Delete account" [ref=e5]');
+    page.calls = [];
+    const out = await c.controller({ kind: 'hover', ref: 'e5' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(page.calls).not.toContain('aria-ref=e5 hover');
+  });
+
+  it('reports the page\'s address without the name and password in it', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.currentUrl = 'https://alice:secret@start.test/account';
+    const out = await c.controller({ kind: 'extract_text', selector: 'body' }, ctx('run', 'w1'));
+    expect(out.url).toBe('https://start.test/account');
+    const opened = await c.controller({ kind: 'navigate', url: 'https://alice:secret@start.test/inbox' }, ctx('run', 'w1'));
+    expect(opened.detail).toBe('Opened https://start.test/inbox');
+    // What the model is shown. The document token stays opaque to it and
+    // keeps the page's own address, which the checks compare against.
+    expect(JSON.stringify([out.detail, out.url, out.title, out.view])).not.toMatch(/alice|secret/);
+  });
+
+  it.each(['fill', 'select_option'] as const)('rechecks approved state after %s readiness waits', async (kind) => {
+    snapshot = kind === 'fill'
+      ? '- textbox "Description" [disabled] [ref=e5] [box=84,0,200,25]'
+      : '- combobox "Plan" [disabled] [ref=e5] [box=84,0,200,25]:\n  - option "First" [selected]\n  - option "Second"';
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    const ready = () => {
+      snapshot = kind === 'fill'
+        ? '- textbox "Description" [ref=e5] [box=84,0,200,25]: user draft'
+        : '- combobox "Plan" [ref=e5] [box=84,0,200,25]:\n  - option "First"\n  - option "Second" [selected]';
+    };
+    let dispatched = false;
+    extra['locator'] = (selector: string) => ({ ...locate(selector),
+      async elementHandle() {
+        const bound = await (locate(selector).elementHandle as () => Promise<Record<string, unknown>>)();
+        return { ...bound,
+          async waitForElementState() { ready(); },
+          async fill() { ready(); dispatched = true; },
+          async selectOption() { ready(); dispatched = true; },
+        };
+      },
+    });
+    const out = await c.controller({ kind, ref: 'e5', value: kind === 'fill' ? 'replacement' : 'First' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(dispatched).toBe(false);
+  });
+
+  it('refuses navigation during a trial click and disposes the pinned element', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    let clicked = false;
+    let disposed = false;
+    extra['locator'] = (selector: string) => ({ ...locate(selector),
+      async elementHandle() {
+        const bound = await (locate(selector).elementHandle as () => Promise<Record<string, unknown>>)();
+        return { ...bound,
+          async click(opts: { trial?: boolean }) {
+            if (opts.trial) await page.goto('https://start.test/another-document');
+            else clicked = true;
+          },
+          async dispose() { disposed = true; },
+        };
+      },
+    });
+    const out = await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(clicked).toBe(false);
+    expect(disposed).toBe(true);
+    expect(out.detail).not.toContain('undefined');
+  });
+
+  it('refuses a changed hidden recipient even when the scrubbed button label stays the same', async () => {
+    const at = (recipient: string) => `- textbox "Recipient" [ref=e9] [box=0,0,200,25]: ${recipient}\n`
+      + `- button "Send to ${recipient}" [ref=e5] [box=0,30,200,25]`;
+    snapshot = at('alice@example.com');
+    const c = controller();
+    const observed = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    snapshot = at('bobby@example.com');
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.view?.labels['e5']).toBe(observed.view?.labels['e5']);
+    expect(page.calls).not.toContain('aria-ref=e5 click');
+    expect(JSON.stringify(out)).not.toMatch(/alice@example|bobby@example/);
+  });
+
+  it('refuses changed native option values without exposing them', async () => {
+    nativeOptionValues = ['basic-operation', 'other-operation'];
+    const c = controller();
+    const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(JSON.stringify(seen)).not.toContain('basic-operation');
+    nativeOptionValues[0] = 'delete-operation';
+    page.calls = [];
+    const out = await c.controller({ kind: 'select_option', ref: 'e11', value: '4 people' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(page.calls.some((call) => call.includes('selectOption'))).toBe(false);
+    expect(JSON.stringify(out)).not.toMatch(/basic-operation|delete-operation/);
+  });
+
+  it.each(['too many', 'unreadable'])('withholds refs when native values are %s', async (failure) => {
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    extra['locator'] = (selector: string) => ({ ...locate(selector), locator: () => ({
+      count: async () => failure === 'too many' ? 2_001 : 1,
+      nth: () => ({ getAttribute: async () => { throw new Error('Cannot read option value'); }, textContent: async () => 'Basic' }),
+    }) });
+    const out = await controller().controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.view).toBeUndefined();
+  });
+
+  it('rejects ambiguous listbox and unselected combobox options', async () => {
+    for (const role of ['listbox', 'combobox']) {
+      snapshot = `- ${role} "Plans" [ref=e11] [box=10,10,200,200]:\n`
+        + Array.from({ length: 11 }, (_, i) => `  - option "Plan ${i}" [box=0,0,0,0]`).join('\n')
+        + '\n  - option "Same plan" [box=0,0,0,0]\n  - option "Same plan" [box=0,0,0,0]';
+      const c = controller();
+      await c.controller({ kind: 'observe' }, ctx(`options-${role}`, 'w1'));
+      page.calls = [];
+      const out = await c.controller({ kind: 'select_option', ref: 'e11', value: 'Same plan' }, ctx(`options-${role}`, 'w1'));
+      expect(out.ok, role).toBe(false);
+      expect(page.calls.some((call) => call.includes('selectOption'))).toBe(false);
+    }
+  });
+
+  it('guides custom ARIA dropdowns without invoking the native selection API', async () => {
+    snapshot = '- listbox "Choices" [ref=e11] [box=0,0,200,100]:\n  - option "First" [selected]\n  - option "Second"';
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    let nativeCalls = 0;
+    extra['locator'] = (selector: string) => ({ ...locate(selector), evaluate: async () => false,
+      selectOption: async () => { nativeCalls++; throw new Error('Element is not a <select> element'); },
+    });
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const out = await c.controller({ kind: 'select_option', ref: 'e11', value: 'Second' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('Use click or press');
+    expect(nativeCalls).toBe(0);
+  });
+
+  it('refuses duplicate options outside the displayed subset', async () => {
+    const long = 'A choice whose full label extends beyond the displayed option name';
+    for (const value of ['Hidden choice', long]) {
+      snapshot = BOOKING.replace('    - option "2 people" [selected] [box=0,0,0,0]', [
+        '    - option "2 people" [selected] [box=0,0,0,0]',
+        ...Array.from({ length: 10 }, (_, i) => `    - option "Choice ${i}" [box=0,0,0,0]`),
+        `    - option "${value}" [box=0,0,0,0]`,
+        `    - option "${value}" [box=0,0,0,0]`,
+      ].join('\n'));
+      const c = controller();
+      const seen = await c.controller({ kind: 'observe' }, ctx(`run-${value}`, 'w1'));
+      expect(seen.view!.text).not.toContain(value);
+      page.calls = [];
+      const out = await c.controller({ kind: 'select_option', ref: 'e11', value }, ctx(`run-${value}`, 'w1'));
+      expect(out.ok, value).toBe(false);
+      expect(out.detail).toContain('More than one option');
+      expect(page.calls.some((x) => x.includes('selectOption'))).toBe(false);
+    }
+  });
+
+  it('refuses an option list changed after the approved page view', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    snapshot = BOOKING.replace('    - option "2 people" [selected] [box=0,0,0,0]',
+      '    - option "2 people" [selected] [box=0,0,0,0]\n    - option "2 people" [box=0,0,0,0]');
+    page.calls = [];
+    const out = await c.controller({ kind: 'select_option', ref: 'e11', value: '2 people' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(page.calls.some((x) => x.includes('selectOption'))).toBe(false);
+  });
+
+  it('refuses aimed keys after select choices change without changing the selected label', async () => {
+    for (const options of [
+      '    - option "1 person" [box=0,0,0,0]\n    - option "Delete account" [box=0,0,0,0]',
+      '    - option "Delete account" [box=0,0,0,0]\n    - option "1 person" [box=0,0,0,0]',
+    ]) {
+      snapshot = BOOKING.replace('    - option "2 people" [selected] [box=0,0,0,0]',
+        '    - option "1 person" [box=0,0,0,0]\n    - option "2 people" [selected] [box=0,0,0,0]');
+      const c = controller();
+      await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+      snapshot = snapshot.replace('    - option "1 person" [box=0,0,0,0]', options);
+      page.calls = [];
+      expect((await c.controller({ kind: 'press', ref: 'e11', key: 'ArrowDown' }, ctx('run', 'w1'))).ok).toBe(false);
+      expect(page.calls.some((call) => call.includes('press ArrowDown'))).toBe(false);
+    }
+  });
+
+  it('refuses overwriting or submitting fields whose visible fill state changed', async () => {
+    for (const role of ['textbox', 'spinbutton', 'combobox', 'searchbox']) {
+      for (const before of ['', ': "x"']) {
+        snapshot = `- ${role} "Account" [ref=e5] [box=0,0,100,20]${before}`;
+        const c = controller();
+        await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+        snapshot = `- ${role} "Account" [ref=e5] [box=0,0,100,20]: "秘密🔑"`;
+        page.calls = [];
+        const refused = await c.controller({ kind: before ? 'press' : 'fill', ref: 'e5', key: 'Enter', value: 'replacement' }, ctx('run', 'w1'));
+        expect(refused.ok, `${role} ${before}`).toBe(false);
+        expect(page.calls.some((call) => call.includes(' fill ') || call.includes(' press '))).toBe(false);
+        expect(refused.view!.text).toContain('filled, 3 chars');
+      }
+    }
+  });
+
+  it('refuses same-length substituted field values without exposing them', async () => {
+    for (const role of ['textbox', 'spinbutton', 'combobox', 'searchbox']) {
+      for (const kind of ['fill', 'press'] as const) {
+        snapshot = `- ${role} "Account" [ref=e5] [box=0,0,100,20]: "alpha9"`;
+        const c = controller();
+        const observed = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+        snapshot = snapshot.replace('alpha9', 'bravo9');
+        page.calls = [];
+        const refused = await c.controller({ kind, ref: 'e5', key: 'Enter', value: 'replacement' }, ctx('run', 'w1'));
+        expect(refused.ok, `${role} ${kind}`).toBe(false);
+        expect(page.calls.some((call) => call.includes(' fill ') || call.includes(' press '))).toBe(false);
+        for (const secret of ['alpha9', 'bravo9']) expect(JSON.stringify([observed, refused])).not.toContain(secret);
+      }
+    }
+  });
+
+  it('can scroll to a ref wholly outside the viewport horizontally', async () => {
+    snapshot = `${BOOKING}\n  - button "Carousel item" [ref=e30] [box=1500,20,100,20]`;
+    liveRefs.add('e30');
+    const c = controller();
+    const observed = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(observed.view!.labels['e30']).toBe('button "Carousel item"');
+    page.calls = [];
+    expect((await c.controller({ kind: 'scroll', ref: 'e30' }, ctx('run', 'w1'))).ok).toBe(true);
+    expect(page.calls).toContain('aria-ref=e30 scrollIntoView');
+  });
+
+  it('never passes Playwright a zero or unbounded ref-action timeout', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    const timeouts: number[] = [];
+    extra['locator'] = (selector: string) => ({ ...locate(selector),
+      async elementHandle(opts: { timeout: number }) {
+        timeouts.push(opts.timeout);
+        return (locate(selector).elementHandle as (opts: unknown) => Promise<unknown>).call(this, opts);
+      },
+      async click(opts: { timeout: number }) { timeouts.push(opts.timeout); },
+    });
+    for (const timeoutMs of [0, -1, Infinity, 30_000]) {
+      expect((await c.controller({ kind: 'click', ref: 'e5', timeoutMs }, ctx('run', 'w1'))).ok).toBe(true);
+    }
+    // The handle, the trial, the moment's recheck before sending, the click.
+    expect(timeouts).toHaveLength(16);
+    expect(timeouts.every((value) => Number.isFinite(value) && value > 0 && value <= 30_000)).toBe(true);
+  });
+
+  it('does not wait forever on a page too busy to say whether a ref is there', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    extra['locator'] = (selector: string) => ({ ...locate(selector), count: () => new Promise(() => {}) });
+    const started = Date.now();
+    const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 10_000);
+
+  it('requires fresh refs after hash state changes', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.replaceState('https://start.test/#details');
+    page.replaceState('https://start.test/#summary');
+    const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+  });
+
+  it('reads a ref Playwright refuses as naming a gone frame as no longer on the page', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    extra['locator'] = (selector: string) => ({
+      ...locate(selector),
+      count: async () => { throw new Error(`Invalid frame in aria-ref selector "${selector}"`); },
+    });
+    const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out).toMatchObject({ ok: false, detail: expect.stringContaining('no longer on the page') });
+  });
+
+  it('does not act once the page has left the site it was approved on', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.currentUrl = 'https://elsewhere.test/pay';
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', selector: '#go', expectSite: 'start.test' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('no longer on start.test');
+    expect(page.calls).toEqual([]);
+    page.currentUrl = 'https://start.test/';
+    expect((await c.controller({ kind: 'click', selector: '#go', expectSite: 'start.test' }, ctx('run', 'w1'))).ok).toBe(true);
+  });
+
+  it('does not act on a page of the same site that loaded since it was planned and approved', async () => {
+    // Approved on /cart; while the person decided, the site moved to /account,
+    // where the same selector finds something else.
+    const c = controller();
+    const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(seen.document).toEqual(expect.any(String));
+    await page.goto('https://start.test/account');
+    page.calls = [];
+    const out = await c.controller(
+      { kind: 'click', selector: '.primary-action', expectSite: 'start.test', expectDocument: seen.document }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('The page has loaded something else since it was last looked at');
+    expect(page.calls).toEqual([]);
+    // Told where the page is, but not which document is up: the next try is
+    // planned against it only once the page has been looked at.
+    expect(out.url).toBe('https://start.test/account');
+    expect(out).not.toHaveProperty('document');
+    const looked = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(looked.document).not.toBe(seen.document);
+    expect((await c.controller(
+      { kind: 'click', selector: '.primary-action', expectDocument: looked.document }, ctx('run', 'w1'))).ok).toBe(true);
+  });
+
+  it('binds selector actions to the page when its controls could not be listed', async () => {
+    // A snapshot that fails: the model is told to fall back to extract_text
+    // and CSS selectors, and those must still be able to run on this page.
+    const c = controller();
+    extra['ariaSnapshot'] = async () => { throw new Error('snapshot timed out'); };
+    const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(seen.ok).toBe(false);
+    expect(seen.detail).toContain('Use extract_text to read the page and CSS selectors to act on it.');
+    expect(seen.document).toEqual(expect.any(String));
+    expect((await c.controller(
+      { kind: 'click', selector: '#go', expectDocument: seen.document }, ctx('run', 'w1'))).ok).toBe(true);
+    await page.goto('https://start.test/account');
+    expect((await c.controller(
+      { kind: 'click', selector: '#go', expectDocument: seen.document }, ctx('run', 'w1'))).ok).toBe(false);
+  });
+
+  it('names the document an action ran on, not one it set off', async () => {
+    // A region picker that loads another page as soon as it is changed: the
+    // model has not seen that page, so what it plans next is not run there.
+    const c = controller();
+    const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    extra['locator'] = (selector: string) => ({
+      ...locate(selector),
+      selectOption: async () => { page.loadHandlers.forEach((h) => h()); },
+    });
+    const chose = await c.controller(
+      { kind: 'select_option', selector: '#region', value: 'EU', expectDocument: seen.document }, ctx('run', 'w1'));
+    expect(chose.ok).toBe(true);
+    expect(chose.document).toBe(seen.document);
+    const next = await c.controller({ kind: 'click', selector: '#go', expectDocument: chose.document }, ctx('run', 'w1'));
+    expect(next.ok).toBe(false);
+  });
+
+  it('does not act while the page is on its way to another document', async () => {
+    // Asked for, not yet loaded: the next page can be up, half built, any moment.
+    const c = controller();
+    const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.requestNavigation();
+    page.calls = [];
+    const out = await c.controller({ kind: 'fill', selector: '#q', value: 'x', expectDocument: seen.document }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(page.calls).toEqual([]);
+  });
+
+  it('acts when only a frame in the page loaded', async () => {
+    const c = controller();
+    const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.navigateSubframe();
+    page.requestNavigation(SUB_FRAME);
+    const out = await c.controller({ kind: 'click', selector: '#go', expectDocument: seen.document }, ctx('run', 'w1'));
+    expect(out.ok).toBe(true);
+  });
+
+  it('does not act by selector or ref after an app moved to another route', async () => {
+    // pushState from /cart to /account: no load, the same document, and a
+    // selector that finds what the new route put there.
+    const c = controller();
+    const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.replaceState('https://start.test/account');
+    page.calls = [];
+    const bySelector = await c.controller(
+      { kind: 'click', selector: '.primary-action', expectDocument: seen.document }, ctx('run', 'w1'));
+    expect(bySelector.ok).toBe(false);
+    expect(bySelector.detail).toContain('The page has moved to another address since it was last looked at, so this was not done. Call observe and act on a ref from it.');
+    const unaimed = await c.controller({ kind: 'press', key: 'Enter', expectDocument: seen.document }, ctx('run', 'w1'));
+    expect(unaimed.ok).toBe(false);
+    expect(page.calls.filter((x) => !x.startsWith('snapshot:'))).toEqual([]);
+    // Keeping the same DOM control and label does not prove its handler still
+    // has the semantics approved on the previous route.
+    const byRef = await c.controller({ kind: 'click', ref: 'e5', expectDocument: seen.document }, ctx('run', 'w1'));
+    expect(byRef.ok).toBe(false);
+    expect(page.calls).not.toContain('aria-ref=e5 click');
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(false);
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(true);
+  });
+
+  it('refuses SPA route changes during ref checks, including after element binding', async () => {
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    const snap = extra['ariaSnapshot'] as (opts: unknown) => Promise<string>;
+    for (const phase of ['count', 'snapshot', 'binding']) {
+      for (const route of ['https://start.test/account', 'https://start.test/#/account', 'https://start.test/?order=456', 'https://start.test/#order456']) {
+        page.currentUrl = 'https://start.test/';
+        const c = controller();
+        const session = `route-${phase}-${route}`;
+        const seen = await c.controller({ kind: 'observe' }, ctx(session, 'w1'));
+        const move = () => page.replaceState(route);
+        if (phase === 'snapshot') extra['ariaSnapshot'] = async (opts: unknown) => { move(); return snap(opts); };
+        else extra['locator'] = (selector: string) => ({ ...locate(selector),
+          ...(phase === 'count' ? { count: async () => { move(); return 1; } } : {
+            async elementHandle() { move(); return (locate(selector).elementHandle as () => Promise<unknown>).call(this); },
+          }),
+        });
+        page.calls = [];
+        expect((await c.controller({ kind: 'click', ref: 'e5', expectDocument: seen.document }, ctx(session, 'w1'))).ok).toBe(false);
+        expect(page.calls).not.toContain('aria-ref=e5 click');
+        extra['locator'] = locate;
+        extra['ariaSnapshot'] = snap;
+        await c.endRun(session);
+      }
+    }
+  });
+
+  it('refuses a retained ref when query state changes after approval', async () => {
+    const c = controller();
+    page.currentUrl = 'https://start.test/checkout?order=123';
+    const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.replaceState('https://start.test/checkout?order=456');
+    page.calls = [];
+    expect((await c.controller({ kind: 'click', ref: 'e5', expectDocument: seen.document }, ctx('run', 'w1'))).ok).toBe(false);
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(false);
+    expect(page.calls).not.toContain('aria-ref=e5 click');
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(true);
+  });
+
+  it('refuses slider input after its displayed value changed', async () => {
+    snapshot = `${BOOKING}\n  - slider "Volume" [ref=e30] [box=0,300,120,20]: "40"`;
+    liveRefs.add('e30');
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    snapshot = snapshot.replace(': "40"', ': "90"');
+    page.calls = [];
+    expect((await c.controller({ kind: 'press', ref: 'e30', key: 'ArrowRight' }, ctx('run', 'w1'))).ok).toBe(false);
+    expect(page.calls).not.toContain('aria-ref=e30 press ArrowRight');
+  });
+
+  it('keeps the refs the model was shown when a check looked at the page again', async () => {
+    // A fill by ref looks at the page first. Meanwhile e5 became "Pay". The
+    // fill goes ahead and says nothing of the page, so the next step must
+    // still be judged against "Account" — and refused for not being it.
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    snapshot = BOOKING.replace('button "Account"', 'button "Pay $42.00"');
+    const filled = await c.controller({ kind: 'fill', ref: 'e9', value: 'x' }, ctx('run', 'w1'));
+    expect(filled.ok).toBe(true);
+    expect(filled.view).toBeUndefined();
+    const clicked = await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'));
+    expect(clicked.ok).toBe(false);
+    expect(clicked.detail).toContain('e5 is now button "Pay $42.00", not button "Account"');
+    // Shown now, so it is what the next step is judged by.
+    expect(clicked.view!.text).toContain('[e5] button "Pay $42.00"');
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(true);
+  });
+
+  it('says which document a view was of, not one that loaded after it', async () => {
+    // The model plans against the view; a load landing after the snapshot
+    // must not lend the view the new document's name.
+    const c = controller();
+    const snap = extra['ariaSnapshot'] as (o: unknown) => Promise<string>;
+    extra['ariaSnapshot'] = async (o: unknown) => {
+      const text = await snap(o);
+      page.loadHandlers.forEach((h) => h());
+      return text;
+    };
+    const seen = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    extra['ariaSnapshot'] = snap;
+    const out = await c.controller({ kind: 'click', selector: '#go', expectDocument: seen.document }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+  });
+
+  it('routes every ref action through the locator', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.calls = [];
+    await c.controller({ kind: 'fill', ref: 'e9', value: 'secret' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'press', ref: 'e9', key: 'Enter' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'wait_for', ref: 'e14' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'select_option', ref: 'e11', value: '4 people' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'hover', ref: 'e5' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'scroll', ref: 'e14' }, ctx('run', 'w1'));
+    const text = await c.controller({ kind: 'extract_text', ref: 'e14' }, ctx('run', 'w1'));
+    expect(page.calls.filter((x) => !x.startsWith('snapshot:'))).toEqual([
+      // An option on a ref by its text alone: its value is not shown to anyone.
+      // Ready, checked, ready again for a moment, then sent.
+      'aria-ref=e9 waitFor', 'aria-ref=e9 waitFor', 'aria-ref=e9 waitFor', 'aria-ref=e9 waitFor',
+      'aria-ref=e9 fill=secret', 'aria-ref=e9 press=Enter', 'aria-ref=e14 waitFor',
+      'aria-ref=e11 waitFor', 'aria-ref=e11 waitFor', 'aria-ref=e11 waitFor', 'aria-ref=e11 waitFor',
+      'aria-ref=e11 selectOption=label:4 people',
+      'aria-ref=e5 hover', 'aria-ref=e14 scrollIntoView', 'aria-ref=e14 innerText',
+    ]);
+    expect(text.detail).toBe('located text');
+  });
+
+  it('refuses a ref before any view has been shown', async () => {
+    const out = await controller().controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('Call observe first');
+    expect(page.calls).toEqual([]);
+  });
+
+  it('refuses a ref the latest view did not list', async () => {
+    // e1 is a real ref — the container — but it was never offered.
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', ref: 'e1' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('not in the latest page view');
+    expect(page.calls).toEqual([]);
+  });
+
+  it('refuses a ref from before the page navigated, rather than re-matching it', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'navigate', url: 'https://elsewhere.test/' }, ctx('run', 'w1'));
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('from an earlier page');
+    expect(page.calls).toEqual([]);
+  });
+
+  it('refuses a listed ref whose control has since gone from the page', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    liveRefs.delete('e14');
+    page.calls = [];
+    const out = await c.controller({ kind: 'click', ref: 'e14' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('no longer on the page');
+    expect(page.calls).toEqual([]);
+  });
+
+  it('describes the page after an action that asked for it, once the page has settled', async () => {
+    const c = controller();
+    const out = await c.controller({ kind: 'navigate', url: 'https://a.test/', pageView: true }, ctx('run', 'w1'));
+    expect(page.calls.slice(0, 3)).toEqual(['goto:https://a.test/', 'settle:load', expect.stringMatching(/^snapshot:/)]);
+    expect(out.view!.text).toContain('[e5] button "Account"');
+    // The view's refs belong to the page as it is AFTER the navigation.
+    page.calls = [];
+    expect((await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(true);
+  });
+
+  it('does not describe the page unless asked', async () => {
+    const out = await controller().controller({ kind: 'click', selector: '#go' }, ctx('run', 'w1'));
+    expect(out.view).toBeUndefined();
+    expect(page.calls).toEqual(['click:#go']);
+  });
+
+  it('does not turn a done action into a failed one when the page cannot then be described', async () => {
+    // The click happened. Saying it failed invites a second click.
+    snapshotFails = true;
+    const out = await controller().controller({ kind: 'click', selector: '#go', pageView: true }, ctx('run', 'w1'));
+    expect(out.ok).toBe(true);
+    expect(out.detail).toBe('Clicked #go');
+    expect(out.view).toBeUndefined();
+  });
+
+  it('falls back to text and selectors where Playwright has no AI snapshot', async () => {
+    delete extra['ariaSnapshot'];
+    const c = controller();
+    const observed = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(observed.ok).toBe(false);
+    expect(observed.detail).toContain('Use extract_text');
+    const clicked = await c.controller({ kind: 'click', selector: '#go', pageView: true }, ctx('run', 'w1'));
+    expect(clicked.ok).toBe(true);
+    expect(clicked.view).toBeUndefined();
+  });
+
+  it('treats a snapshot that names controls without refs as no view at all', async () => {
+    // An older Playwright ignores `mode: 'ai'` and writes the plain snapshot.
+    snapshot = '- main:\n  - button "Go"';
+    const out = await controller().controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+  });
+
+  it('describes, and pictures, a page with nothing to act on', async () => {
+    // A chart drawn on a canvas, an image, a page still blank: what a picture
+    // is most for.
+    const c = controller();
+    for (const nothing of ['', '- img "Sales by month" [ref=e1] [box=0,0,1280,800]']) {
+      snapshot = nothing;
+      const observed = await c.controller({ kind: 'observe', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      expect(observed.ok).toBe(true);
+      expect(observed.view!.text).toContain('(no controls on screen)');
+      expect(observed.image).toBeDefined();
+    }
+    SHOT = jpeg(1280, 800, 1);
+    const opened = await c.controller(
+      { kind: 'navigate', url: 'https://charts.test/', pageView: true, screenshot: true }, ctx('run', 'w1'));
+    expect(opened.view!.text).toContain('(no controls on screen)');
+    expect(opened.image).toBeDefined();
+  });
+
+  it('scrolls by a fixed expression the model cannot write into', async () => {
+    const c = controller();
+    await c.controller({ kind: 'scroll', direction: 'up', pageView: true }, ctx('run', 'w1'));
+    await c.controller({ kind: 'scroll' }, ctx('run', 'w1'));
+    expect(page.calls.filter((x) => x.startsWith('eval:'))).toEqual([
+      'eval:window.scrollBy({ top: -1 * Math.round(innerHeight * 0.8), behavior: \'instant\' })',
+      'eval:window.scrollBy({ top: 1 * Math.round(innerHeight * 0.8), behavior: \'instant\' })',
+    ]);
+  });
+
+  it('says so when a scroll moved nothing, rather than that it scrolled', async () => {
+    // At the bottom already, or an app whose window never scrolls.
+    const evaluate = extra['evaluate'] as (e: string) => Promise<unknown>;
+    extra['evaluate'] = async (expression: string) => (expression === 'scrollY' ? 400 : evaluate(expression));
+    const out = await controller().controller({ kind: 'scroll' }, ctx('run', 'w1'));
+    expect(out.detail).toContain('Nothing moved');
+  });
+
+  it('chooses and hovers by selector through a locator too', async () => {
+    const c = controller();
+    await c.controller({ kind: 'select_option', selector: '#size', value: 'Two' }, ctx('run', 'w1'));
+    await c.controller({ kind: 'hover', selector: '#menu' }, ctx('run', 'w1'));
+    expect(page.calls).toEqual(['#size selectOption=Two', '#menu hover']);
+  });
+
+  describe('screenshots', () => {
+    const shots = () => page.calls.filter((x) => x.startsWith('shot:'));
+
+    it('takes a clean JPEG of the screen, with the view, when asked', async () => {
+      const out = await controller().controller({ kind: 'observe', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toEqual({ data: SHOT64, mimeType: 'image/jpeg', width: 1280, height: 800 });
+      // CSS pixels, so a high-density screen does not double the bill; the
+      // caret left alone, because hiding it means injecting a style.
+      expect(shots()).toEqual(['shot:{"type":"jpeg","quality":80,"scale":"css","caret":"initial","timeout":5000,"clip":{"x":0,"y":0,"width":1280,"height":800}}']);
+      expect(out.view!.text).toContain('[e5] button "Account"');
+    });
+
+    it('checks for private fields before taking one', async () => {
+      await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(page.calls.indexOf('privacy')).toBeLessThan(page.calls.findIndex((x) => x.startsWith('shot:')));
+    });
+
+    it('takes none unless asked', async () => {
+      const out = await controller().controller({ kind: 'click', ref: 'e5', pageView: true }, ctx('run', 'w1')).catch(() => null);
+      const observed = await controller().controller({ kind: 'observe' }, ctx('run', 'w1'));
+      expect(out?.image).toBeUndefined();
+      expect(observed.image).toBeUndefined();
+      expect(shots()).toEqual([]);
+    });
+
+    it('sends no second picture of a page that looks the same — unless asked by name', async () => {
+      const c = controller();
+      await c.controller({ kind: 'click', selector: '#a', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      const again = await c.controller({ kind: 'click', selector: '#b', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      expect(again.image).toBeUndefined();
+      // Said in a way the tool can act on: the last picture still stands.
+      expect(again.imageUnchanged).toBe(true);
+      // Told, so the model does not wait for a picture or think it lost one.
+      expect(again.view!.text).toContain('No new screenshot: the page looks as it did in the last one. Call observe for a fresh one.');
+      const asked = await c.controller({ kind: 'observe', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      expect(asked.image).toBeDefined();
+      snapshot = BOOKING.replace('Account', 'Signed in');
+      SHOT = jpeg(1280, 800, 1);
+      const changed = await c.controller({ kind: 'click', selector: '#c', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      expect(changed.image).toBeDefined();
+      expect(shots()).toHaveLength(4);
+    });
+
+    it('sends a new picture when only the pixels changed — a chart, a map, a carousel', async () => {
+      // Not a word of the page view changes: the same list, the same page.
+      const c = controller();
+      const first = await c.controller({ kind: 'click', selector: '#next', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      SHOT = jpeg(1280, 800, 7);
+      const next = await c.controller({ kind: 'click', selector: '#next', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      const list = (text: string) => text.slice(text.indexOf('\n') + 1);
+      expect(list(next.view!.text)).toBe(list(first.view!.text));
+      expect(next.image).toBeDefined();
+      expect(next.image!.data).not.toBe(first.image!.data);
+    });
+
+    it('drops a picture taken as a password field came on screen', async () => {
+      // Checked clean, then the page put up a code form before the capture
+      // finished: the picture is of the form.
+      extra['screenshot'] = async () => { page.calls.push('shot:'); privateOnScreen = true; return SHOT; };
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: a password, card or one-time-code field is on screen.');
+    });
+
+    it('drops a picture taken as the page loaded another document, or set off to', async () => {
+      for (const meanwhile of [() => page.loadHandlers.forEach((h) => h()), () => page.requestNavigation()]) {
+        extra['screenshot'] = async () => { meanwhile(); return SHOT; };
+        const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+        expect(out.image).toBeUndefined();
+        expect(out.view!.text).toContain('No screenshot: the page changed while it was being looked at.');
+      }
+    });
+
+    it('drops a picture of a document that loaded after the view was taken', async () => {
+      // The picture goes with the view; of another document, it would show
+      // a page the list does not describe.
+      const snap = extra['ariaSnapshot'] as (o: unknown) => Promise<string>;
+      extra['ariaSnapshot'] = async (o: unknown) => {
+        const text = await snap(o);
+        page.loadHandlers.forEach((h) => h());
+        return text;
+      };
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: the page changed while it was being looked at.');
+    });
+
+    it('drops a picture taken as an app moved to another route', async () => {
+      // /cart's controls with /account's pixels: a page the list does not describe.
+      for (const route of ['https://start.test/account', 'https://start.test/#/account', 'https://start.test/?order=456', 'https://start.test/#order456']) {
+        page.currentUrl = 'https://start.test/';
+        extra['screenshot'] = async () => { page.replaceState(route); return SHOT; };
+        const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+        expect(out.image, route).toBeUndefined();
+        expect(out.view!.text).toContain('No screenshot: the page changed while it was being looked at.');
+      }
+    });
+
+    it('keeps a clean picture when only a frame loaded', async () => {
+      for (const meanwhile of [
+        () => page.requestNavigation(SUB_FRAME),
+      ]) {
+        extra['screenshot'] = async () => { meanwhile(); return SHOT; };
+        const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+        expect(out.image).toBeDefined();
+      }
+    });
+
+    it('withholds it while a password, card or one-time-code field is on screen', async () => {
+      privateOnScreen = true;
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: a password, card or one-time-code field is on screen.');
+      expect(shots()).toEqual([]);
+    });
+
+    it('looks in every frame, where a payment form usually lives', async () => {
+      subFrames = [false, true];
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot');
+    });
+
+    it('does not count a frame whose iframe is off the screen, however its own check reads', async () => {
+      // Inside its own 40px viewport, a login iframe 1,000px down "shows" its
+      // password field. Found on a real page, where it withheld every picture.
+      subFrames = [{ found: true, y: 1000 }];
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeDefined();
+      // The page itself, before the picture and again after it.
+      expect(page.calls.filter((x) => x === 'privacy')).toHaveLength(2);
+    });
+
+    it('does not let a sub-frame that went away end every screenshot', async () => {
+      subFrames = ['gone'];
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeDefined();
+    });
+
+    it('takes none when a frame on screen cannot answer, and says why', async () => {
+      subFrames = ['throws'];
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: the page could not be checked for password, card or one-time-code fields.');
+      expect(shots()).toEqual([]);
+    });
+
+    it('reads every frame, not just the first few', async () => {
+      // Twenty-five frames, the private one last: a cut-off used to leave it unread.
+      subFrames = [...Array.from({ length: 24 }, () => false), true];
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: a password, card or one-time-code field is on screen.');
+      expect(page.calls.filter((x) => x === 'privacy')).toHaveLength(26);
+    });
+
+    it('takes none of a page with more frames than it reads', async () => {
+      subFrames = Array.from({ length: 51 }, () => false);
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('could not be checked');
+      expect(shots()).toEqual([]);
+    });
+
+    it('places frames on the screen the browser measures, not the one the page claims', async () => {
+      // A page can redefine innerHeight; at 1, every frame — a card form's
+      // included — would read as off screen and go unread.
+      const evaluate = extra['evaluate'] as (e: string) => Promise<unknown>;
+      extra['evaluate'] = async (expression: string) => (
+        expression.includes('one-time-code') || expression === 'scrollY' ? evaluate(expression) : { width: 1280, height: 1, scrollX: 0, scrollY: 0, scrollHeight: 1 });
+      subFrames = [{ found: true, y: 100 }];
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(cdp.sent).toContain('Page.getLayoutMetrics');
+    });
+
+    it('takes none when the browser cannot say how big the screen is', async () => {
+      const send = cdp.send;
+      cdp.send = async (method: string, params?: Record<string, unknown>) => {
+        if (method === 'Page.getLayoutMetrics') throw new Error('target closed');
+        return send(method, params);
+      };
+      try {
+        const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+        expect(out.image).toBeUndefined();
+        expect(out.view!.text).toContain('could not be checked');
+      } finally {
+        cdp.send = send;
+      }
+    });
+
+    it('lets go of each frame it measured', async () => {
+      const disposed: number[] = [];
+      subFrames = [false, false];
+      const frames = extra['frames'] as () => Array<Record<string, unknown>>;
+      extra['frames'] = () => frames().map((frame, i) => (i === 0 ? frame : {
+        ...frame,
+        frameElement: async () => ({
+          boundingBox: async () => ({ x: 0, y: 100, width: 200, height: 40 }),
+          dispose: async () => { disposed.push(i); },
+        }),
+      }));
+      await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      // Measured before the picture and after it, and let go each time.
+      expect(disposed.sort()).toEqual([1, 1, 2, 2]);
+    });
+
+    it('does not wait on a frame that never answers: no screenshot, and the step goes on', async () => {
+      subFrames = [false];
+      const frames = extra['frames'] as () => Array<Record<string, unknown>>;
+      extra['frames'] = () => frames().map((frame, i) => (i === 0 ? frame : {
+        ...frame,
+        locator: () => ({ count: () => new Promise<number>(() => {}), nth: () => ({ boundingBox: async () => null }) }),
+      }));
+      const started = Date.now();
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(Date.now() - started).toBeLessThan(4_000);
+      expect(out.ok).toBe(true);
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('could not be checked');
+    });
+
+    it('does not ask the page\'s own JavaScript, which the page can redefine', async () => {
+      // A page can make its own querySelectorAll find nothing and its own
+      // getBoundingClientRect say nothing is on screen. Playwright's queries
+      // run in a world the page cannot reach.
+      extra['evaluate'] = async (expression: string) => (
+        /password|one-time-code|getBoundingClientRect/.test(expression) ? false : { width: 1280, height: 800, scrollX: 0, scrollY: 0, scrollHeight: 1600 });
+      privateOnScreen = true;
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('a password, card or one-time-code field is on screen');
+    });
+
+    it('does not count a field scrolled out of sight inside a frame that is on screen', async () => {
+      // The frame's box is 100–140 on the page; its field is drawn further
+      // down, where the frame does not show it.
+      subFrames = [{ found: true, y: 100 }];
+      const frames = extra['frames'] as () => Array<Record<string, unknown>>;
+      extra['frames'] = () => frames().map((frame, i) => (i === 0 ? frame : {
+        ...frame,
+        locator: (selector: string) => ({
+          ...(frame['locator'] as (s: string) => Record<string, unknown>)(selector),
+          nth: () => ({ boundingBox: async () => ({ x: 10, y: 600, width: 100, height: 20 }) }),
+        }),
+      }));
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeDefined();
+    });
+
+    it('takes none when a field cannot be measured', async () => {
+      privateOnScreen = true;
+      const frames = extra['frames'] as () => Array<Record<string, unknown>>;
+      extra['frames'] = () => frames().map((frame, i) => (i !== 0 ? frame : {
+        ...frame,
+        locator: (selector: string) => ({
+          ...(frame['locator'] as (s: string) => Record<string, unknown>)(selector),
+          nth: () => ({ boundingBox: async () => { throw new Error('Timeout 1000ms exceeded.'); } }),
+        }),
+      }));
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('could not be checked');
+    });
+
+    it('takes none when a frame gives no answer', async () => {
+      // The check says neither yes nor no when it could not read everything.
+      privateOnScreen = null;
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      subFrames = [null];
+      privateOnScreen = false;
+      const framed = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run2', 'w1'));
+      expect(framed.image).toBeUndefined();
+    });
+
+    it('knows a private field by its autocomplete token anywhere in the attribute, and a password shown in clear', async () => {
+      const { PRIVATE_FIELDS } = await import('./controller.js');
+      // Token matches (~=), not prefix or whole-value: `section-pay billing cc-number`.
+      for (const token of ['cc-number', 'cc-csc', 'cc-exp', 'one-time-code', 'current-password', 'new-password']) {
+        expect(PRIVATE_FIELDS).toContain(`[autocomplete~="${token}" i]`);
+      }
+      expect(PRIVATE_FIELDS).not.toMatch(/autocomplete\^=|autocomplete="/);
+      expect(PRIVATE_FIELDS).toContain('input[name*="password" i]');
+    });
+
+    it('knows a one-time code without its autocomplete token, by name, id or label', async () => {
+      const { PRIVATE_FIELDS, PRIVATE_LABEL } = await import('./controller.js');
+      for (const field of ['input[name*="otp" i]', 'input[id*="verification" i]', 'input[name*="2fa" i]', 'input[maxlength="1"][inputmode="numeric" i]']) {
+        expect(PRIVATE_FIELDS).toContain(field);
+      }
+      for (const label of ['Verification code', 'One-time password', 'Enter your OTP', '2FA code', 'Security code', 'PIN', 'Two-step code']) {
+        expect(label).toMatch(PRIVATE_LABEL);
+      }
+      for (const label of ['Promo code', 'Postal code', 'Search', 'Your name', 'Spinach']) expect(label).not.toMatch(PRIVATE_LABEL);
+    });
+
+    it('knows a PIN by its name or id as a word of it, not inside another word', async () => {
+      const { PRIVATE_FIELDS } = await import('./controller.js');
+      for (const field of ['input[name$="pin" i]', 'input[id$="pin" i]', 'input[name*="pin_" i]', 'input[id*="pin-" i]', 'input[name*="pin]" i]']) {
+        expect(PRIVATE_FIELDS).toContain(field);
+      }
+      // "shipping", "spinner": the bare word is never matched anywhere in a name.
+      expect(PRIVATE_FIELDS).not.toContain('*="pin" i]');
+    });
+
+    it('knows a card number or code by its id as well as its name', async () => {
+      const { PRIVATE_FIELDS } = await import('./controller.js');
+      for (const word of ['card-number', 'card_number', 'cardnumber', 'cvc', 'cvv', 'passwd']) {
+        expect(PRIVATE_FIELDS).toContain(`input[id*="${word}" i]`);
+        expect(PRIVATE_FIELDS).toContain(`input[name*="${word}" i]`);
+      }
+    });
+
+    it('recognizes card expiry by name, id and label without autocomplete', async () => {
+      const { PRIVATE_FIELDS, PRIVATE_LABEL } = await import('./controller.js');
+      for (const word of ['expiry', 'expiration', 'exp_month', 'exp_year', 'cc-exp', 'card_exp']) {
+        expect(PRIVATE_FIELDS).toContain(`input[name*="${word}" i]`);
+        expect(PRIVATE_FIELDS).toContain(`input[id*="${word}" i]`);
+      }
+      for (const label of ['Expiry', 'Expiration date', 'Card expiry', 'Expiry month', 'Expiry year', 'Expires', 'Exp. date', 'Exp month', 'Exp. year', 'MM/YY', 'Exp. (MM/YYYY)']) {
+        expect(label).toMatch(PRIVATE_LABEL);
+      }
+      for (const label of ['Experience', 'Expected date', 'Expense report', 'Search']) expect(label).not.toMatch(PRIVATE_LABEL);
+    });
+
+    it.each(['MM/YY', 'MM / YY', 'MM/YYYY', 'MM / YYYY', 'MM-YY', 'MM', 'YY', 'YYYY'])('withholds screenshots for the expiry placeholder %s', async (text) => {
+      privateOnScreen = true;
+      placeholderOnly = true;
+      placeholderText = text;
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('a password, card or one-time-code field is on screen');
+    });
+
+    it('withholds a screenshot after a horizontal scroll during capture', async () => {
+      let scrollX = 0;
+      extra['evaluate'] = async () => ({ width: 1280, height: 800, scrollX, scrollY: 0, scrollHeight: 1600 });
+      const shoot = extra['screenshot'] as (opts: unknown) => Promise<Uint8Array>;
+      extra['screenshot'] = async (opts: unknown) => { scrollX = 200; return shoot(opts); };
+      const out = await controller().controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: the page moved');
+    });
+
+    it('treats cardholder names as private without autocomplete', async () => {
+      const { PRIVATE_FIELDS, PRIVATE_LABEL, PRIVATE_PLACEHOLDER } = await import('./controller.js');
+      for (const field of ['cardholder', 'card_holder', 'card-holder', 'nameoncard', 'name_on_card', 'name-on-card']) {
+        expect(PRIVATE_FIELDS).toContain(`input[name*="${field}" i]`);
+        expect(PRIVATE_FIELDS).toContain(`input[id*="${field}" i]`);
+      }
+      for (const text of ['Name on card', 'Name on the card', 'Cardholder name', 'Card Holder Name']) {
+        expect(text).toMatch(PRIVATE_LABEL);
+        expect(text).toMatch(PRIVATE_PLACEHOLDER);
+      }
+      expect('Your name').not.toMatch(PRIVATE_LABEL);
+    });
+
+    it('withholds a picture of a page that scrolled between its view and the picture', async () => {
+      // The view's boxes, and the marks drawn from them, are of where it was.
+      let scrollY = 0;
+      extra['evaluate'] = async () => ({ width: 1280, height: 800, scrollX: 0, scrollY, scrollHeight: 1600 });
+      const shoot = extra['screenshot'] as (opts: unknown) => Promise<Uint8Array>;
+      extra['screenshot'] = async (opts: unknown) => { scrollY = 400; return shoot(opts); };
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: the page moved while it was being looked at.');
+    });
+
+    it('withholds marks after controls move during capture without a viewport change', async () => {
+      const shoot = extra['screenshot'] as (opts: unknown) => Promise<Uint8Array>;
+      extra['screenshot'] = async (opts: unknown) => {
+        snapshot = BOOKING.replace('[box=84,0,32,25]', '[box=400,200,32,25]');
+        return shoot(opts);
+      };
+      const out = await controller().controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('controls changed');
+    });
+
+    it('does not retain an unseen renamed control from marked screenshot validation', async () => {
+      const shoot = extra['screenshot'] as (opts: unknown) => Promise<Uint8Array>;
+      extra['screenshot'] = async (opts: unknown) => {
+        snapshot = BOOKING.replace('button "Account"', 'button "Delete account"');
+        return shoot(opts);
+      };
+      const c = controller();
+      const seen = await c.controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
+      expect(seen.view!.labels.e5).toBe('button "Account"');
+      page.calls = [];
+      const clicked = await c.controller({ kind: 'click', ref: 'e5', expectDocument: seen.document }, ctx('run', 'w1'));
+      expect(clicked.ok).toBe(false);
+      expect(page.calls).not.toContain('aria-ref=e5 click');
+      expect(seen.image).toBeUndefined();
+    });
+
+    it('does not advance the shown view number for a private marked validation', async () => {
+      const c = controller();
+      await c.controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
+      const next = await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+      expect(next.view!.text).toMatch(/^\[Page view 2\]/);
+    });
+
+    it('rejects an oversized viewport before invoking screenshot', async () => {
+      extra['evaluate'] = async () => ({ width: 100_000, height: 100_000, scrollX: 0, scrollY: 0, scrollHeight: 100_000 });
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(page.calls.some((x) => x.startsWith('shot:'))).toBe(false);
+      expect(out.view!.text).toContain('viewport is too large');
+      // Said in a field too, so a caller counting pictures can tell.
+      expect(out.imageWithheld).toBe(true);
+    });
+
+    it('bounds the screenshot clip even if the viewport grows during capture', async () => {
+      let requested: Record<string, unknown> | undefined;
+      const shoot = extra['screenshot'] as (opts: unknown) => Promise<Uint8Array>;
+      extra['screenshot'] = async (opts: Record<string, unknown>) => { requested = opts; return shoot(opts); };
+      await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(requested).toMatchObject({ clip: { x: 0, y: 0, width: 1280, height: 800 } });
+    });
+
+    it('withholds it for a field known only by its label', async () => {
+      privateOnScreen = true;
+      labelledOnly = true;
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: a password, card or one-time-code field is on screen.');
+    });
+
+    describe('in a closed shadow root, which Playwright cannot reach', () => {
+      /** A document whose one element holds `inside` behind a shadow root of `mode`. */
+      const shadowed = (inside: Record<string, unknown>, mode = 'closed') => ({
+        nodeId: 1, nodeType: 9, nodeName: '#document', children: [
+          { nodeId: 2, nodeType: 1, nodeName: 'DIV', shadowRoots: [
+            { nodeId: 3, nodeType: 11, nodeName: '#document-fragment', shadowRootType: mode, children: [{ nodeId: 4, nodeType: 1, ...inside }] },
+          ] },
+        ],
+      });
+      const ON_SCREEN = [10, 300, 200, 300, 200, 320, 10, 320];
+
+      it('takes none while a text field there is on screen', async () => {
+        // Playwright's queries found nothing; the browser's own DOM shows the field.
+        cdp.dom = shadowed({ nodeName: 'INPUT', attributes: ['value', '493021'] });
+        cdp.boxes.set(4, ON_SCREEN);
+        const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+        expect(out.image).toBeUndefined();
+        expect(out.view!.text).toContain('No screenshot: the page could not be checked for password, card or one-time-code fields.');
+        expect(cdp.calls).toContainEqual({ method: 'DOM.getDocument', params: { depth: -1, pierce: true } });
+      });
+
+      it('withholds native and semantic selection fields inside closed roots', async () => {
+        for (const inside of [
+          { nodeName: 'SELECT', attributes: ['autocomplete', 'cc-exp-month'] },
+          { nodeName: 'SELECT', attributes: ['autocomplete', 'cc-exp-year'] },
+          { nodeName: 'SELECT', attributes: ['name', 'expiry'] },
+          { nodeName: 'DIV', attributes: ['role', 'combobox'] },
+          { nodeName: 'DIV', attributes: ['role', 'listbox'] },
+        ]) {
+          cdp.dom = shadowed(inside);
+          cdp.boxes.set(4, ON_SCREEN);
+          const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+          expect(out.image, JSON.stringify(inside)).toBeUndefined();
+        }
+      });
+
+      it('looks inside an iframe of the same process, and at editable text', async () => {
+        cdp.dom = { nodeId: 1, nodeType: 9, nodeName: '#document', children: [
+          { nodeId: 5, nodeType: 1, nodeName: 'IFRAME', contentDocument: shadowed({ nodeName: 'DIV', attributes: ['contenteditable', ''] }) },
+        ] };
+        cdp.boxes.set(4, ON_SCREEN);
+        const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+        expect(out.image).toBeUndefined();
+      });
+
+      it('still pictures a page whose field there is off screen, not laid out, not typed into, or in an open root', async () => {
+        const cases: Array<[Record<string, unknown>, number[] | undefined, string?]> = [
+          [{ nodeName: 'INPUT' }, [10, 2000, 200, 2000, 200, 2020, 10, 2020]],
+          [{ nodeName: 'INPUT' }, undefined],
+          [{ nodeName: 'INPUT', attributes: ['type', 'checkbox'] }, ON_SCREEN],
+          [{ nodeName: 'INPUT', attributes: ['type', 'hidden'] }, ON_SCREEN],
+          [{ nodeName: 'SELECT' }, [10, 2000, 200, 2000, 200, 2020, 10, 2020]],
+          [{ nodeName: 'SELECT' }, ON_SCREEN, 'open'],
+          // An open root is Playwright's to read, and it found nothing there.
+          [{ nodeName: 'INPUT' }, ON_SCREEN, 'open'],
+        ];
+        for (const [inside, box, mode] of cases) {
+          cdp.dom = shadowed(inside, mode);
+          cdp.boxes = new Map(box ? [[4, box]] : []);
+          const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+          expect(out.image, JSON.stringify([inside, box, mode])).toBeDefined();
+        }
+      });
+
+      it('does not read a DOM larger than it can safely take in one message', async () => {
+        // The browser's own count, read first: past the bound the page is
+        // not read, and counts as unchecked.
+        const send = cdp.send;
+        cdp.send = async (method: string, params?: Record<string, unknown>) => {
+          if (method === 'Performance.getMetrics') return { metrics: [{ name: 'Nodes', value: 400_000 }] };
+          return send(method, params);
+        };
+        try {
+          const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+          expect(out.image).toBeUndefined();
+          expect(out.view!.text).toContain('could not be checked');
+          expect(cdp.sent).not.toContain('DOM.getDocument');
+        } finally {
+          cdp.send = send;
+        }
+        // An ordinary count is read through.
+        cdp.send = async (method: string, params?: Record<string, unknown>) => {
+          if (method === 'Performance.getMetrics') return { metrics: [{ name: 'Nodes', value: 4_000 }] };
+          return send(method, params);
+        };
+        try {
+          const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run2', 'w1'));
+          expect(out.image).toBeDefined();
+        } finally {
+          cdp.send = send;
+        }
+      });
+
+      it('takes none when the browser cannot describe the page', async () => {
+        const send = cdp.send;
+        cdp.send = async (method: string, params?: Record<string, unknown>) => {
+          if (method === 'DOM.getDocument') throw new Error('target closed');
+          return send(method, params);
+        };
+        try {
+          const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+          expect(out.image).toBeUndefined();
+          expect(out.view!.text).toContain('could not be checked');
+        } finally {
+          cdp.send = send;
+        }
+      });
+
+      it('looks in a cross-site frame through a session of its own', async () => {
+        subFrames = [false];
+        const own = fakeCdp();
+        own.dom = shadowed({ nodeName: 'TEXTAREA' });
+        // Its own coordinates: anywhere at all counts, the frame being on screen.
+        own.boxes.set(4, [0, 900, 50, 900, 50, 920, 0, 920]);
+        frameCdp = async () => own;
+        const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+        expect(out.image).toBeUndefined();
+        expect(own.detached).toBe(true);
+        // One that cannot be opened for another reason is not let through.
+        frameCdp = async () => { throw new Error('Target closed'); };
+        const failed = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run2', 'w1'));
+        expect(failed.image).toBeUndefined();
+        // And an empty one is.
+        frameCdp = async () => fakeCdp();
+        const empty = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run3', 'w1'));
+        expect(empty.image).toBeDefined();
+      });
+    });
+
+    it('withholds it for a card field known only by its placeholder', async () => {
+      const { PRIVATE_PLACEHOLDER } = await import('./controller.js');
+      for (const text of ['Card number', '1234 1234 1234 1234', '•••• •••• •••• ••••', 'CVC', 'Password', 'Enter code (OTP)']) {
+        expect(text).toMatch(PRIVATE_PLACEHOLDER);
+      }
+      for (const text of ['Search', 'Your email', 'Promo code', 'Postal code']) expect(text).not.toMatch(PRIVATE_PLACEHOLDER);
+      privateOnScreen = true;
+      placeholderOnly = true;
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: a password, card or one-time-code field is on screen.');
+      // And none in a frame it cannot ask by placeholder.
+      privateOnScreen = false;
+      placeholderOnly = false;
+      const frames = extra['frames'] as () => Array<Record<string, unknown>>;
+      extra['frames'] = () => frames().map(({ getByPlaceholder: _unused, ...frame }) => frame);
+      const blind = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run2', 'w1'));
+      expect(blind.image).toBeUndefined();
+      expect(blind.view!.text).toContain('could not be checked');
+    });
+
+    it('takes none in a frame it cannot ask by label', async () => {
+      const frames = extra['frames'] as () => Array<Record<string, unknown>>;
+      extra['frames'] = () => frames().map(({ getByLabel: _unused, ...frame }) => frame);
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('could not be checked');
+    });
+
+    it('takes none when the page itself cannot be checked', async () => {
+      privateOnScreen = 'throws';
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(shots()).toEqual([]);
+    });
+
+    it('takes none while the person watching has hidden the page', async () => {
+      const c = controller();
+      await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+      (c as unknown as { runs: Map<string, { hiddenByHolder?: boolean }> }).runs.get('run')!.hiddenByHolder = true;
+      const out = await c.controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot this time: the person watching had hidden the page.');
+      expect(shots()).toEqual([]);
+    });
+
+    it('skips the first one after a person had control, then carries on', async () => {
+      // They may have just typed a password; the field can be gone from
+      // the screen while what they typed is still on it.
+      const c = controller();
+      await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+      let gen: number | undefined;
+      await c.startWatching('run', (f) => { gen = f.generation; });
+      cdp.pushFrame(1);
+      if (gen !== undefined) c.frameSeen('run', gen);
+      c.actorEnded('w1');
+      expect(await c.takeOver('run')).toEqual({ ok: true });
+      expect(c.handBack('run')).toBe(true);
+
+      const first = await c.controller({ kind: 'observe', screenshot: true }, ctx('run', 'w2'));
+      expect(first.ok).toBe(true);
+      expect(first.image).toBeUndefined();
+      expect(first.view!.text).toContain('No screenshot this time: a person was just using this page.');
+      const second = await c.controller({ kind: 'observe', screenshot: true }, ctx('run', 'w2'));
+      expect(second.image).toBeDefined();
+    });
+
+    it('says so when the picture could not be taken, and the action still counts', async () => {
+      shotFails = true;
+      const out = await controller().controller({ kind: 'click', selector: '#go', pageView: true, screenshot: true }, ctx('run', 'w1'));
+      expect(out.ok).toBe(true);
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: the picture could not be taken.');
+    });
+
+    it('draws the refs on a copy when marks are asked for', async () => {
+      const send = cdp.send;
+      cdp.send = async (method: string, params?: Record<string, unknown>) => {
+        if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'MAIN' } } };
+        if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 };
+        if (method === 'Runtime.evaluate') {
+          // What is drawn: the controls on screen, never a heading.
+          const expression = String(params?.['expression']);
+          page.calls.push(`marks:${['e5', 'e9', 'e11'].filter((r) => expression.includes(`"ref":"${r}"`)).join(',')}`);
+          return { result: { value: MARKED64 } };
+        }
+        return send(method, params);
+      };
+      try {
+        const out = await controller().controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
+        expect(out.image).toMatchObject({ data: MARKED64, width: 1280, height: 800 });
+        expect(page.calls).toContain('marks:e5,e9,e11');
+      } finally {
+        cdp.send = send;
+      }
+    });
+
+    it('sends the clean picture when the drawn marks are not a JPEG of the same size', async () => {
+      // Sent under the clean picture's size: anything else drawn is not sent.
+      const send = cdp.send;
+      let drawn = '';
+      cdp.send = async (method: string, params?: Record<string, unknown>) => {
+        if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'MAIN' } } };
+        if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 };
+        if (method === 'Runtime.evaluate') return { result: { value: drawn } };
+        return send(method, params);
+      };
+      try {
+        for (const value of [
+          Buffer.from('MARKED').toString('base64'),
+          Buffer.from(jpeg(640, 400)).toString('base64'),
+          `${MARKED64}${'A'.repeat(2_000_001)}`,
+        ]) {
+          drawn = value;
+          const out = await controller().controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
+          expect(out.image).toMatchObject({ data: SHOT64, width: 1280, height: 800 });
+        }
+      } finally {
+        cdp.send = send;
+      }
+    });
+
+    it('sends the clean picture when the marks cannot be drawn', async () => {
+      // The fake CDP answers none of the drawing calls.
+      const out = await controller().controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
+      expect(out.image?.data).toBe(SHOT64);
+    });
+
+    it('retries transient failed marks on unchanged pixels before caching the marked image', async () => {
+      const send = cdp.send;
+      let attempts = 0;
+      cdp.send = async (method: string, params?: Record<string, unknown>) => {
+        if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'MAIN' } } };
+        if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 };
+        if (method === 'Runtime.evaluate') {
+          attempts++;
+          return attempts === 1 ? {} : { result: { value: MARKED64 } };
+        }
+        return send(method, params);
+      };
+      try {
+        const c = controller();
+        const step = () => c.controller({ kind: 'click', selector: '#next', pageView: true, screenshot: true, marked: true }, ctx('run', 'w1'));
+        expect((await step()).image?.data).toBe(SHOT64);
+        expect((await step()).image?.data).toBe(MARKED64);
+        expect(attempts).toBe(2);
+        expect((await step()).imageUnchanged).toBe(true);
+        expect(attempts).toBe(2);
+      } finally { cdp.send = send; }
+    });
+
+    it('sends the clean picture when drawing the marks never finishes', async () => {
+      // A renderer that is stuck: the drawing call never answers.
+      const send = cdp.send;
+      cdp.send = async (method: string, params?: Record<string, unknown>) => {
+        if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'MAIN' } } };
+        if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 };
+        if (method === 'Runtime.evaluate') return new Promise(() => {});
+        return send(method, params);
+      };
+      try {
+        const started = Date.now();
+        const out = await controller().controller({ kind: 'observe', screenshot: true, marked: true }, ctx('run', 'w1'));
+        expect(out.image?.data).toBe(SHOT64);
+        expect(Date.now() - started).toBeLessThan(6_000);
+      } finally {
+        cdp.send = send;
+      }
+    }, 10_000);
+
+    it('sends a new marked picture when the refs on the same pixels changed', async () => {
+      // An app swapped its controls for identical ones: the same picture, new refs.
+      const send = cdp.send;
+      cdp.send = async (method: string, params?: Record<string, unknown>) => {
+        if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'MAIN' } } };
+        if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 };
+        if (method === 'Runtime.evaluate') return { result: { value: MARKED64 } };
+        return send(method, params);
+      };
+      try {
+        const c = controller();
+        await c.controller({ kind: 'click', selector: '#a', pageView: true, screenshot: true, marked: true }, ctx('run', 'w1'));
+        const same = await c.controller({ kind: 'click', selector: '#b', pageView: true, screenshot: true, marked: true }, ctx('run', 'w1'));
+        expect(same.imageUnchanged).toBe(true);
+        snapshot = BOOKING.replace('[ref=e5]', '[ref=e50]');
+        liveRefs.add('e50');
+        const swapped = await c.controller({ kind: 'click', selector: '#c', pageView: true, screenshot: true, marked: true }, ctx('run', 'w1'));
+        expect(swapped.image).toBeDefined();
+        expect(swapped.imageUnchanged).toBeUndefined();
+      } finally {
+        cdp.send = send;
+      }
+    });
+
+    it('draws nothing unless marks are asked for', async () => {
+      await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(cdp.sent).not.toContain('Page.createIsolatedWorld');
+    });
+
+    it('gives the picture\'s own size, whatever the page says of itself', async () => {
+      // A page can redefine innerWidth; the router prices the image by this size.
+      extra['evaluate'] = async (expression: string) => (
+        expression.includes('one-time-code') ? false : { width: 320, height: 200, scrollX: 0, scrollY: 0, scrollHeight: 200 });
+      SHOT = jpeg(1920, 1080);
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toMatchObject({ width: 1920, height: 1080 });
+    });
+
+    it('takes none when the picture does not say its size', async () => {
+      SHOT = new Uint8Array([1, 2, 3]);
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.view!.text).toContain('No screenshot: the picture could not be taken.');
+    });
+
+    it('cannot price a picture whose size it does not know, so takes none', async () => {
+      extra['evaluate'] = async (expression: string) => (expression.includes('one-time-code') ? false : { width: 'wide' });
+      const out = await controller().controller({ kind: 'observe', screenshot: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(shots()).toEqual([]);
+    });
+  });
+
+  it('leaves out a scroll position the page did not report as numbers', async () => {
+    extra['evaluate'] = async () => ({ width: '1280', height: 800, scrollX: 0, scrollY: 0, scrollHeight: 1600 });
+    const out = await controller().controller({ kind: 'observe' }, ctx('run', 'w1'));
+    expect(out.view!.text).not.toContain('Viewport');
+  });
+});
+
+describe('a failed action is told without Playwright\'s call log', () => {
+  it('drops attributes from tags whose closing bracket is past the error bound', async () => {
+    const { actionError } = await import('./controller.js');
+    for (const value of ['hunter2secret', 'hunter2<tail>secret']) {
+      const said = actionError(new Error(`Error: <input value="${value}" data-note="${'x'.repeat(1000)}"> is not a select`));
+      expect(said).not.toContain('hunter2');
+      expect(said).not.toContain('value=');
+      expect(said.length).toBeLessThanOrEqual(500);
+    }
+  });
+  it('keeps the reason and drops the log, which quotes the element\'s attributes', async () => {
+    // Captured from Playwright 1.62: the log printed a password field whole.
+    const { actionError } = await import('./controller.js');
+    const err = new Error([
+      'locator.selectOption: Error: Element is not a <select> element',
+      'Call log:',
+      '\u001b[2m  - waiting for locator(\'aria-ref=e7\')\u001b[22m',
+      '\u001b[2m    - locator resolved to <input type="password" aria-label="Password" value="hunter2secret"/>\u001b[22m',
+    ].join('\n'));
+    expect(actionError(err)).toBe('locator.selectOption: Error: Element is not a <select> element');
+    expect(actionError('plain')).toBe('plain');
+  });
+
+  it('stays quick and short on a reason built to be slow to clean', async () => {
+    // Playwright repeats the selector in its first line: thousands of
+    // unclosed "<a" used to take seconds to scan.
+    const { actionError } = await import('./controller.js');
+    const started = Date.now();
+    const said = actionError(new Error(`locator.waitFor: Timeout waiting for ${'<a'.repeat(100_000)}`));
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(said.length).toBeLessThanOrEqual(500);
+  });
+
+  it('drops the elements a strict-mode error lists, which come before any log', async () => {
+    // Captured from Playwright 1.62: a selector matching two fields quotes
+    // both, and a page that mirrors a field's value into its attribute shows
+    // what was typed.
+    const { actionError } = await import('./controller.js');
+    const err = new Error([
+      'locator.selectOption: Error: strict mode violation: locator(\'input\') resolved to 2 elements:',
+      '    1) <input name="user" value="alice"/> aka locator(\'input[name="user"]\')',
+      '    2) <input type="password" value="hunter2-secret"/> aka locator(\'input[type="password"]\')',
+      '',
+      'Call log:',
+      '  - waiting for locator(\'input\')',
+    ].join('\n'));
+    const said = actionError(err);
+    expect(said).toBe('locator.selectOption: Error: strict mode violation: locator(\'input\') resolved to 2 elements:');
+    expect(said).not.toContain('hunter2');
+    // An element in the reason itself keeps its tag and nothing else.
+    expect(actionError(new Error('Error: <input type="password" value="hunter2"> is not a <select> element')))
+      .toBe('Error: <input> is not a <select> element');
+  });
+
+  it('applies to what the model is told', async () => {
+    const c = new RemoteBrowserController({ provider: fakeProvider().provider });
+    page.click = async () => { throw new Error('page.click: Timeout 30000ms exceeded.\nCall log:\n  - waiting for <input value="secret">'); };
+    const out = await c.controller({ kind: 'click', selector: '#x' }, ctx('run', 'w1'));
+    expect(out).toMatchObject({ ok: false, detail: 'page.click: Timeout 30000ms exceeded.' });
   });
 });

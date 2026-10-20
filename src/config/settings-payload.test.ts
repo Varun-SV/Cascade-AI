@@ -115,6 +115,16 @@ describe('applySettingsPayload — the whole Settings save, not part of it', () 
     expect((config as unknown as Record<string, unknown>)['somethingElse']).toBeUndefined();
   });
 
+  it('applies what the browser shows the model, and only the four known values', () => {
+    const config = base();
+    applySettingsPayload(config, { advanced: { browserVision: 'image' } });
+    expect(config.tools.browserVision).toBe('image');
+    applySettingsPayload(config, { advanced: { browserVision: 'everything' } });
+    expect(config.tools.browserVision).toBe('image');
+    expect(settingsSnapshot(config).advanced['browserVision']).toBe('image');
+    expect(CascadeConfigSchema.parse({}).tools.browserVision).toBe('list');
+  });
+
   // 'worker' ran agent-written tools in a bare thread that confined nothing.
   // A config that still names it gets the WebAssembly sandbox, on every path
   // the setting is read by, and Settings can no longer write it.

@@ -1,0 +1,114 @@
+/** Keep settings adjacent and rotate their starting position across blocks. */
+export function* scheduleRuns(models, arms, tasks, repeats) {
+  if (!Number.isSafeInteger(repeats) || repeats < 1) throw new Error('Repeats must be a positive integer.');
+  for (let repeat = 0; repeat < repeats; repeat++) {
+    for (let t = 0; t < tasks.length; t++) {
+      for (let m = 0; m < models.length; m++) {
+        for (let offset = 0; offset < arms.length; offset++) {
+          yield { model: models[m], arm: arms[(repeat + t + m + offset) % arms.length], task: tasks[t], repeat };
+        }
+      }
+    }
+  }
+}
+
+export function modelBindingsMatch(requested, bindings) {
+  return bindings.length === 3 && bindings.every((model) => model && (model.id === requested || `${model.provider}:${model.id}` === requested));
+}
+
+/**
+ * A model's final reply, read as the short answer the task asked for: case,
+ * surrounding quotes or emphasis, a closing full stop and spacing aside, it
+ * must be one of the accepted answers, so a guess or an explanation that
+ * merely mentions the answer does not pass.
+ */
+export function answeredExactly(accepted, reply) {
+  const normal = (text) => String(text).normalize('NFKC')
+    .trim().replace(/^[\s*_`"'“”‘’]+|[\s*_`"'“”‘’.!]+$/gu, '')
+    .replace(/\s+/g, ' ').toLowerCase();
+  const answer = normal(reply);
+  return accepted.some((form) => normal(form) === answer);
+}
+
+/** Whether a page's text shows an answer at all: the scripted check's test. */
+export function pageShows(accepted, text) {
+  const escape = (v) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escape(accepted[0])}(?![\\p{L}\\p{N}])`, 'iu').test(text);
+}
+
+const known = (value) => Number.isFinite(value) && value >= 0 ? value : null;
+
+/**
+ * Whether a step that asked for a screenshot showed the page without one. That
+ * is the case whether the browser withheld it (a password on screen) or never
+ * got as far as one (no page view could be built, so none was taken), and
+ * whether the step succeeded or came back with the page as it is now. A step
+ * that failed without showing the page at all showed nothing in any setting.
+ */
+export function pictureMissed(action, outcome) {
+  if (!action?.screenshot || !outcome || outcome.image || outcome.imageUnchanged) return false;
+  return Boolean(outcome.imageWithheld || outcome.ok || outcome.view || action.kind === 'observe');
+}
+
+/** The settings that are meant to show the model a picture. */
+const PICTURED = new Set(['image', 'marked']);
+
+/**
+ * Preserve observed usage, and never attribute a fallback model to the
+ * requested one. Nor a picture setting to a run whose model saw no picture:
+ * the router puts text in place of every screenshot a model cannot take (one
+ * that cannot see images, one through a gateway, one priced past the
+ * per-image ceiling), and the browser withholds one whenever a password or
+ * code field is on screen. Either way that run measured the list alone. A run
+ * that took no browser step at all could have had no picture in any setting,
+ * and stays a fair failure.
+ */
+export function assessRun({ ok = false, usage = {}, stats = {}, decisions = [], error = '', modelInvalid = '', arm = '', shots = { sent: 0, leftOut: 0 }, steps = 0, withheld = 0 } = {}) {
+  const unpictured = !PICTURED.has(arm) ? ''
+    : withheld > 0
+      ? `${withheld} step${withheld === 1 ? '' : 's'} showed the page without the screenshot asked for (withheld by the browser, or no page view to take it with), so this is not a fair ${arm} run; it is excluded from the comparison.`
+    : shots.leftOut > 0
+      ? `${shots.leftOut} screenshot${shots.leftOut === 1 ? ' was' : 's were'} left out for this model, so this is not a fair ${arm} run; it is excluded from the comparison.`
+      : steps > 0 && shots.sent === 0
+        ? `No screenshot reached the model in this run, so it is not a fair ${arm} run; it is excluded from the comparison.`
+        : '';
+  const substitution = modelInvalid || (decisions.some((entry) => entry.kind === 'failover') ? 'Model failover occurred; this run is excluded from the comparison.' : '') || unpictured;
+  const valid = !substitution;
+  return {
+    valid, ok: valid && ok,
+    tokens: known(usage.totalTokens) ?? known(stats.totalTokens),
+    costUsd: usage.costUnknown || stats.untrackedCostCalls > 0 ? null : known(usage.estimatedCostUsd) ?? known(stats.totalCostUsd),
+    usagePartial: Boolean(error),
+    error: [error, substitution].filter(Boolean).join(' '),
+  };
+}
+
+export function summarise(rows, tasks) {
+  const lines = ['# Browser vision test', '',
+    'Runs with model substitution are excluded, as are image and marked runs in which no picture, or not every picture, reached the model. Usage means include available recorded usage from failed runs; unavailable values are excluded, and a failed request may have unreported usage.', '',
+    '| Model | Setting | Valid runs | Done | Steps (mean) | Cost (mean; samples) | Tokens (mean; samples) |',
+    '|---|---|---|---|---|---|---|'];
+  const groups = new Map();
+  for (const row of rows) {
+    const key = `${row.model}|${row.arm}`;
+    groups.set(key, [...(groups.get(key) ?? []), row]);
+  }
+  const mean = (samples) => samples.reduce((sum, value) => sum + value, 0) / samples.length;
+  for (const [key, all] of groups) {
+    const [model, arm] = key.split('|');
+    const valid = all.filter((row) => row.valid);
+    const costs = valid.map((row) => row.costUsd).filter((value) => known(value) !== null);
+    const tokens = valid.map((row) => row.tokens).filter((value) => known(value) !== null);
+    lines.push(`| ${model} | ${arm} | ${valid.length}/${all.length} | ${valid.filter((row) => row.ok).length}/${valid.length} | ${valid.length ? mean(valid.map((row) => row.steps)).toFixed(1) : 'n/a'} | ${costs.length ? `$${mean(costs).toFixed(4)} (${costs.length}/${valid.length})` : 'n/a'} | ${tokens.length ? `${Math.round(mean(tokens))} (${tokens.length}/${valid.length})` : 'n/a'} |`);
+  }
+  lines.push('', '## By task', '', '| Task | Model | Setting | Valid runs | Done |', '|---|---|---|---|---|');
+  for (const task of tasks) {
+    for (const [key, all] of groups) {
+      const [model, arm] = key.split('|');
+      const mine = all.filter((row) => row.task === task.id);
+      const valid = mine.filter((row) => row.valid);
+      lines.push(`| ${task.id} | ${model} | ${arm} | ${valid.length}/${mine.length} | ${valid.filter((row) => row.ok).length}/${valid.length} |`);
+    }
+  }
+  return `${lines.join('\n')}\n`;
+}

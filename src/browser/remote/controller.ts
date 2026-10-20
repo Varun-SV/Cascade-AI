@@ -25,25 +25,47 @@
 //  stop it. That is why a provider with no live view is a weaker configuration,
 //  and why the caller is told rather than left to assume.
 
-import type {
-  BrowserAction,
-  BrowserActionContext,
-  BrowserActionOutcome,
+import {
+  hostOf,
+  type BrowserAction,
+  type BrowserActionContext,
+  type BrowserActionOutcome,
 } from '../../tools/browser-control.js';
 import type { RemoteBrowserProvider, RemoteBrowserSession } from './provider.js';
+import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { BrowserLease } from '../lease.js';
+import { describePage, wellFormed, withoutCredentials, type PageView, type Viewport } from './page-view.js';
+import { drawMarks } from './marks.js';
 
 /** Playwright's shapes, named locally so the optional dep stays optional. */
 type Page = {
   url(): string;
   title(): Promise<string>;
   goto(url: string, opts?: { timeout?: number; waitUntil?: 'load' | 'domcontentloaded' }): Promise<unknown>;
-  click(selector: string, opts?: { timeout?: number }): Promise<void>;
+  click(selector: string, opts?: { timeout?: number; trial?: boolean; noWaitAfter?: boolean }): Promise<void>;
   fill(selector: string, value: string, opts?: { timeout?: number }): Promise<void>;
-  press(selector: string, key: string, opts?: { timeout?: number }): Promise<void>;
+  press(selector: string, key: string, opts?: { timeout?: number; noWaitAfter?: boolean }): Promise<void>;
   keyboard: { press(key: string): Promise<void> };
   waitForSelector(selector: string, opts?: { timeout?: number }): Promise<unknown>;
   innerText(selector: string, opts?: { timeout?: number }): Promise<string>;
+  /**
+   * The page view's source — see `page-view.ts`. Optional because Playwright
+   * is: an install without the AI snapshot falls back to text and selectors.
+   */
+  ariaSnapshot?(opts: { mode: 'ai'; boxes: boolean; timeout?: number }): Promise<string>;
+  /** Where refs (`aria-ref=e14`) and the newer actions resolve. */
+  locator?(selector: string): Locator;
+  evaluate?(expression: string): Promise<unknown>;
+  waitForLoadState?(state: 'load', opts?: { timeout?: number }): Promise<void>;
+  /** A picture of what is on screen. See `screenshot`. */
+  screenshot?(opts: {
+    type: 'jpeg'; quality: number; scale: 'css'; caret: 'initial'; timeout?: number;
+    clip?: { x: number; y: number; width: number; height: number };
+  }): Promise<Uint8Array>;
+  /** Every frame, the page's own first. Where the privacy check looks. */
+  frames?(): Frame[];
   on(event: string, handler: (...args: never[]) => void): void;
   /** The page's own top-level frame; sub-frames are not it. See `generation`. */
   mainFrame(): unknown;
@@ -51,6 +73,56 @@ type Page = {
   context(): BrowserContext;
   isClosed(): boolean;
   close(): Promise<void>;
+};
+/** A frame of the page, and where its iframe sits on the page's screen. */
+type Frame = {
+  evaluate(expression: string): Promise<unknown>;
+  /** Playwright's queries in this frame. See `PRIVATE_SELECTOR`. */
+  locator?(selector: string): FoundFields;
+  /** And by label. See `PRIVATE_LABEL`. */
+  getByLabel?(text: RegExp): FoundFields;
+  /** And by placeholder. See `PRIVATE_PLACEHOLDER`. */
+  getByPlaceholder?(text: RegExp): FoundFields;
+  /** True once the frame has left the page. See `privateOnScreen`. */
+  isDetached?(): boolean;
+  frameElement?(): Promise<{
+    boundingBox(): Promise<{ x: number; y: number; width: number; height: number } | null>;
+    dispose?(): Promise<void>;
+  }>;
+};
+/** A box on the page, in CSS pixels from its top left. */
+type Box = { x: number; y: number; width: number; height: number };
+/** What one of the privacy check's queries found in a frame. */
+type FoundFields = {
+  count(): Promise<number>;
+  nth(index: number): { boundingBox(opts?: { timeout?: number }): Promise<Box | null> };
+};
+/** One control on the page, as Playwright resolves it at the moment of acting. */
+type ActionElement = {
+  evaluate?(expression: (node: { nodeName: string }) => boolean): Promise<boolean>;
+  click(opts?: { timeout?: number; trial?: boolean; noWaitAfter?: boolean }): Promise<void>;
+  fill(value: string, opts?: { timeout?: number }): Promise<void>;
+  press(key: string, opts?: { timeout?: number; noWaitAfter?: boolean }): Promise<void>;
+  hover(opts?: { timeout?: number; trial?: boolean }): Promise<void>;
+  selectOption(value: string | { label: string }, opts?: { timeout?: number }): Promise<unknown>;
+  scrollIntoViewIfNeeded(opts?: { timeout?: number }): Promise<void>;
+  innerText(opts?: { timeout?: number }): Promise<string>;
+};
+type BoundElement = ActionElement & {
+  waitForElementState(state: 'visible' | 'enabled' | 'editable', opts?: { timeout?: number }): Promise<void>;
+  dispose(): Promise<void>;
+};
+type Locator = ActionElement & {
+  count(): Promise<number>;
+  locator?(selector: string): {
+    count(): Promise<number>;
+    nth(index: number): {
+      getAttribute(name: string): Promise<string | null>;
+      textContent(): Promise<string | null>;
+    };
+  };
+  waitFor(opts?: { state?: 'visible' | 'attached'; timeout?: number }): Promise<void>;
+  elementHandle?(opts?: { timeout?: number }): Promise<BoundElement | null>;
 };
 /**
  * A raw Chrome DevTools Protocol session on one page.
@@ -224,6 +296,116 @@ const SCREENCAST = { format: 'jpeg', quality: 60, maxWidth: 1280, maxHeight: 800
 /** Default ceiling for a single action, matching the tool's own clamp. */
 const ACTION_TIMEOUT_MS = 30_000;
 /**
+ * How long a page view waits for the page to finish loading after an action
+ * that may have changed it. Bounded: a page that never stops loading still
+ * gets described, only less settled.
+ */
+const SETTLE_LOAD_MS = 2_000;
+/** And a beat after that, for script-rendered content to land. */
+const SETTLE_QUIET_MS = 300;
+/** The snapshot's own ceiling. A huge page fails over to text, not a hang. */
+const SNAPSHOT_TIMEOUT_MS = 5_000;
+/** Why no new screenshot goes with a step: it would show what the last one did. */
+const UNCHANGED_SHOT = 'No new screenshot: the page looks as it did in the last one. Call observe for a fresh one.';
+/** Why a screenshot was skipped after the person watching hid the page. */
+const HIDDEN_SHOT = 'No screenshot this time: the person watching had hidden the page.';
+/** A screenshot's encoding. JPEG at 80 reads text cleanly at a fifth of PNG's size. */
+const SCREENSHOT_QUALITY = 80;
+/** Longest a screenshot may take before the step goes on without one. */
+const SCREENSHOT_TIMEOUT_MS = 5_000;
+/**
+ * Longest one look into the page may take — its size, its title, whether a
+ * frame holds a private field. A frame busy with a long task would otherwise
+ * hold the action, and the person waiting to take control, indefinitely.
+ */
+const PAGE_CHECK_TIMEOUT_MS = 2_000;
+/** A screenshot this large (base64) is not sent: something is wrong with it. */
+const SCREENSHOT_MAX_CHARS = 2_000_000;
+/** Bound rendering work before Chrome allocates a capture surface. */
+const SCREENSHOT_MAX_EDGE = 4096;
+const SCREENSHOT_MAX_PIXELS = 4_194_304;
+/** The longest error reason passed on: Playwright repeats the selector in it. */
+const ERROR_MAX_CHARS = 500;
+/** How long drawing the refs on a copy may take before the clean picture goes. */
+const MARKS_TIMEOUT_MS = 3_000;
+/**
+ * Sub-frames the privacy check will read. A page with more is not pictured:
+ * every frame is read or none is, so a password field cannot sit in the one
+ * frame past a cut-off.
+ */
+const PRIVACY_FRAME_LIMIT = 50;
+/** Why a screenshot was skipped when something private is, or may be, on screen. */
+const PRIVATE_SHOT = 'No screenshot: a password, card or one-time-code field is on screen.';
+const UNCHECKED_SHOT = 'No screenshot: the page could not be checked for password, card or one-time-code fields.';
+/**
+ * `autocomplete` tokens that mark a private field. Matched as tokens, not as
+ * the whole attribute: `section-pay billing cc-number` is a card number too.
+ * A password field shown in clear by its "show" button is still marked
+ * `current-password` or `new-password`.
+ */
+const PRIVATE_AUTOCOMPLETE = [
+  'current-password', 'new-password', 'one-time-code',
+  'cc-name', 'cc-given-name', 'cc-additional-name', 'cc-family-name',
+  'cc-number', 'cc-exp', 'cc-exp-month', 'cc-exp-year', 'cc-csc', 'cc-type',
+];
+/** Private-field hints cover native inputs and custom text widgets alike. */
+export const PRIVATE_FIELDS = [
+  'input[type="password" i]',
+  ...PRIVATE_AUTOCOMPLETE.map((token) => `[autocomplete~="${token}" i]`),
+  // Shown in clear, with no autocomplete to say so, by name or id.
+  ...['password', 'passwd', 'cvc', 'cvv', 'cardnumber', 'card_number', 'card-number',
+    'cardholder', 'card_holder', 'card-holder', 'nameoncard', 'name_on_card', 'name-on-card']
+    .flatMap((word) => [`input[name*="${word}" i]`, `input[id*="${word}" i]`]),
+  // Custom checkout fields often omit the cc-exp autocomplete token.
+  ...['expiry', 'expiration', 'expires', 'cc-exp', 'cc_exp', 'ccexp', 'card-exp', 'card_exp', 'cardexp',
+    'exp-month', 'exp_month', 'expmonth', 'exp-year', 'exp_year', 'expyear', 'exp-date', 'exp_date', 'expdate']
+    .flatMap((word) => [`input[name*="${word}" i]`, `input[id*="${word}" i]`]),
+  'input[aria-label*="password" i]',
+  // A one-time code by its name: sites often leave out the autocomplete
+  // token. Generous on purpose — a picture withheld for a field named
+  // "footprint" costs a step; a code sent to the model costs an account.
+  ...['otp', 'one-time', 'onetime', 'one_time', 'verification', 'passcode', '2fa', 'mfa', 'totp', 'securitycode', 'security_code', 'security-code', 'authcode', 'auth_code', 'auth-code']
+    .flatMap((word) => [`input[name*="${word}" i]`, `input[id*="${word}" i]`]),
+  // A PIN by its name, as a word of it — `pin`, `card_pin`, `atmPin`,
+  // `pin-input`, `user[pin]` — not the "pin" inside "shipping" or "spinner".
+  ...['$="pin"', '*="pin_"', '*="pin-"', '*="pin]"', '*="pinnumber"', '*="pincode"']
+    .flatMap((match) => [`input[name${match} i]`, `input[id${match} i]`]),
+  'input[placeholder*="verification code" i]', 'input[placeholder*="one-time" i]',
+  // One box per digit.
+  'input[maxlength="1"][inputmode="numeric" i]',
+].flatMap((selector) => selector.startsWith('input[')
+  ? [selector, `:is(textarea,select,[contenteditable]:not([contenteditable="false" i]),[role="textbox" i],[role="searchbox" i],[role="combobox" i],[role="spinbutton" i])${selector.slice('input'.length)}`]
+  : [selector]).join(', ');
+/**
+ * Fields known only by their label — a `<label>`, `aria-label` or
+ * `aria-labelledby` — and no name or id that says what they hold.
+ */
+export const PRIVATE_LABEL = /(?:pin|cv[cv]|otp)[\s_-]*(?:code|number)|password|passcode|one[\s-]?time|verification[\s_-]*code|verify[\s_-]*code|security[\s_-]*code|auth(?:entication|orization)?[\s_-]*code|access[\s_-]*code|sign[\s_-]*in[\s_-]*code|login[\s_-]*code|\botp(?:[\s_-]*code)?\b|\b2fa\b|two[\s-]?(?:factor|step)|\bmfa\b|\bpin(?:[\s_-]*(?:code|number))?\b|card[\s_-]*number|(?:name\s+on\s+(?:the\s+)?card|card[\s_-]*holder(?:[\s_-]*name)?|cardholder[\s_-]*name)|\bcvc(?:[\s_-]*(?:code|number))?\b|\bcvv(?:[\s_-]*(?:code|number))?\b|\bexpir(?:y|ation|es?)\b|\bexp\.?\s*(?:date|month|year)\b|\bmm\s*[/\-]\s*y{2}(?:y{2})?\b/i;
+/**
+ * Placeholders that say the same, and the digits a card field shows before
+ * one is typed: "Card number", "1234 1234 1234 1234", "•••• ••••".
+ * Split expiry placeholders are conservative: ordinary date fields using
+ * MM, YY or YYYY also withhold the picture.
+ */
+export const PRIVATE_PLACEHOLDER = new RegExp(`${PRIVATE_LABEL.source}|^\\s*(?:mm|yy|yyyy)\\s*$|\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}|[•*x]{4}[\\s-]?[•*x]{4}`, 'i');
+/** Payment providers whose iframe holds a card form, by the address it loads. */
+const PAYMENT_HOSTS = [
+  'stripe', 'braintree', 'adyen', 'paypal', 'checkout.com', 'squareup', 'razorpay', 'klarna', 'recurly', 'chargebee', 'authorize.net',
+];
+/**
+ * Everything the privacy check looks for in a frame: a private field, or a
+ * payment provider's iframe. Asked through Playwright's own queries, which
+ * run in a world of their own and reach into open shadow roots — never
+ * through the page's JavaScript, whose `querySelectorAll`,
+ * `getBoundingClientRect` and `innerHeight` the page itself can redefine to
+ * hide a field from the check.
+ */
+const PRIVATE_SELECTOR = [PRIVATE_FIELDS, ...PAYMENT_HOSTS.map((host) => `iframe[src*="${host}" i]`)].join(', ');
+/** Matches in one frame the check measures; past this it cannot say. */
+const PRIVACY_MATCH_LIMIT = 20;
+/** The page's scroll state, read without reaching into page globals twice. */
+const VIEWPORT_EXPRESSION = '({ width: innerWidth, height: innerHeight, scrollX: scrollX, scrollY: scrollY, scrollHeight: document.documentElement.scrollHeight })';
+/**
  * How long the agent waits for a restored picture before refusing to act.
  *
  * A started screencast emits its first frame immediately, so this is generous
@@ -299,6 +481,11 @@ export interface RemoteBrowserControllerOptions {
    * its own trouble.
    */
   ready?: Promise<unknown>;
+  /**
+   * The pause after an action before its page view is taken, in ms. Tests set
+   * it to 0; everything else should leave it alone.
+   */
+  settleQuietMs?: number;
 }
 
 /** One run's browser, and the page it is working on. */
@@ -486,6 +673,57 @@ interface RunBrowser {
   ownedContext?: BrowserContext;
   /** Bumped on every main-frame navigation. See the desktop's equivalent. */
   generation: number;
+  /**
+   * The latest page view the model was shown: which refs it may act on, what
+   * each one is called, and the page and document they belong to. A ref is
+   * good only while all of these still hold — see `refRefusal`.
+   */
+  view?: {
+    page: Page;
+    document: string;
+    documents: number;
+    frames: number;
+    labels: Map<string, string>;
+    identities: Map<string, string>;
+    options: PageView['options'];
+    framed: PageView['framed'];
+  };
+  /**
+   * Main documents loaded into the current page: bumped by a load, not by a
+   * history change. A view's refs belong to the document it was taken of —
+   * Playwright gives each new one its own — while `pushState`, `replaceState`
+   * and hash changes keep the document. Refs still require the observed route.
+   */
+  documents?: number;
+  /**
+   * Main-frame navigation requests: a new document on its way, before it has
+   * loaded enough to count in `documents`. See `documentOf`.
+   */
+  loads?: number;
+  /**
+   * Navigations in the page's frames, the main one aside. Playwright keeps a
+   * frame's refs across the documents it loads: once the frame has loaded
+   * another, the next snapshot gives its controls the same refs (`f1e2`) as
+   * the old one's. See `refRefusal`.
+   */
+  frames?: number;
+  /** Views shown so far, so each one can say which it is. */
+  views?: number;
+  /**
+   * A digest of the last screenshot sent. An action that leaves the page
+   * looking the same — the same pixels, not just the same controls: a chart,
+   * a map or a carousel changes without a word of its page view changing —
+   * sends no second picture of it.
+   */
+  shotOf?: string;
+  /** Pages this run has moved to, a popup included. See `documentOf`. */
+  pageSerial?: number;
+  /**
+   * Why the next screenshot is skipped, when something since the last one
+   * says a picture could catch what a person wanted kept private: they took
+   * control (and may have typed a password), or they hid the page.
+   */
+  skipShot?: string;
   /**
    * Fires when this run's browser must stop, now.
    *
@@ -685,7 +923,26 @@ export class RemoteBrowserController {
     this.onLiveViewAll = options.onLiveView;
     this.onReleaseFailed = options.onReleaseFailed;
     this.ready = options.ready;
+    this.settleQuietMs = options.settleQuietMs ?? SETTLE_QUIET_MS;
   }
+
+  /** See `RemoteBrowserControllerOptions.settleQuietMs`. */
+  private settleQuietMs: number;
+
+  /**
+   * What this controller can do beyond the six original actions. The tool
+   * reads it to decide which actions and parameters to offer the model.
+   *
+   * Page views need Playwright 1.60's AI snapshot, with refs and boxes — the
+   * version this package installs. A host that brings an older one (the peer
+   * range allows it, so as not to break an install) gets none of it: the
+   * model is offered the six actions and CSS selectors, rather than refs and
+   * an `observe` that could only fail.
+   */
+  readonly features: { pageView: boolean; screenshots: boolean; marked: boolean } = (() => {
+    const views = pageViewsIn(installedPlaywright());
+    return { pageView: views, screenshots: views, marked: views };
+  })();
 
   /**
    * The predecessor's teardown, until it has been waited for once.
@@ -1615,6 +1872,7 @@ export class RemoteBrowserController {
         return { ok: false, detail: 'The browser view changed while you were waiting. Take control again from the current view.' };
       }
       lease.takeOver(runId);
+      held.skipShot = 'No screenshot this time: a person was just using this page.';
     } finally {
       lease.endAction(token);
     }
@@ -2212,6 +2470,11 @@ export class RemoteBrowserController {
         return { ok: false, detail: 'The run was cancelled.' };
       }
 
+      // An action on a hidden page shows it again first (below), so by the
+      // time a screenshot could be taken the page no longer reads as hidden.
+      // The person hid it for a reason; the next picture is skipped.
+      if (held.hiddenByHolder === true) held.skipShot = HIDDEN_SHOT;
+
       // A deliberate Hide survives handback, and an unwatch deliberately
       // detaches the CDP session. Those two facts can coexist: hiddenByHolder
       // can still be true here with no screencast to restore. Skipping the gate
@@ -2317,7 +2580,7 @@ export class RemoteBrowserController {
 
       return await this.perform(runId, held, action, recoveringClosedPage ? held.generation : planned);
     } catch (err) {
-      return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+      return { ok: false, detail: actionError(err) };
     } finally {
       if (temporaryCapture) {
         const { held, cdp, watchGen } = temporaryCapture;
@@ -2683,8 +2946,27 @@ export class RemoteBrowserController {
 
   /** Count main-frame navigation only while this page is the run's active page. */
   private trackPageNavigation(runId: string, held: RunBrowser, page: Page): void {
+    // The page's own event: the main frame only, and only for a new document.
+    page.on('domcontentloaded', (() => {
+      if (held.page === page) held.documents = (held.documents ?? 0) + 1;
+    }) as (...args: never[]) => void);
+    // Earlier than that: the request for one. Between it and the load above,
+    // the page can show the next document half-built under the old one's
+    // selectors. A history change makes no request, so it is not counted.
+    page.on('request', ((request: { isNavigationRequest?(): boolean; frame?(): unknown }) => {
+      if (held.page !== page) return;
+      try {
+        if (request.isNavigationRequest?.() && request.frame?.() === page.mainFrame()) held.loads = (held.loads ?? 0) + 1;
+      } catch {
+        // A service worker's request has no frame, and is no navigation.
+      }
+    }) as (...args: never[]) => void);
     page.on('framenavigated', ((frame: unknown) => {
-      if (held.page !== page || frame !== page.mainFrame()) return;
+      if (held.page !== page) return;
+      if (frame !== page.mainFrame()) {
+        held.frames = (held.frames ?? 0) + 1;
+        return;
+      }
       held.generation += 1;
 
       // A different main document is also a different claim of SIGHT. The CDP
@@ -2730,6 +3012,7 @@ export class RemoteBrowserController {
 
     held.page = next;
     held.generation += 1;
+    held.pageSerial = (held.pageSerial ?? 0) + 1;
     held.viewport = undefined;
     held.metricsStale = true;
     this.trackPageNavigation(runId, held, next);
@@ -2763,6 +3046,326 @@ export class RemoteBrowserController {
     held.visibilityUnconfirmed = false;
     held.capturing = held.hiddenByHolder !== true;
     this.announceControl(runId);
+  }
+
+  /**
+   * Describe the run's page as it is now, and remember what was shown.
+   *
+   * Null when the page cannot be described — no AI snapshot in this
+   * Playwright, a snapshot that failed, or one that names controls without
+   * refs. A page with nothing to act on is described, as such. The caller
+   * then says so rather than presenting an empty list as the page.
+   */
+  private async pageView(
+    held: RunBrowser,
+    stoppable: <T>(work: Promise<T>) => Promise<T>,
+    settle: boolean,
+    /**
+     * False for a look the model is not shown: the refs stay those of the
+     * view it was, until `keep` is called when the view is handed to it after
+     * all. Acting on labels the model and the person approving never saw is
+     * what the refs' check exists to prevent.
+     */
+    show = true,
+  ): Promise<{ view: PageView; viewport: Viewport | undefined; document: string; keep: () => void } | null> {
+    // The CURRENT page: a click may have moved the run to a popup.
+    const page = held.page;
+    if (typeof page.ariaSnapshot !== 'function') return null;
+    try {
+      if (settle) {
+        if (typeof page.waitForLoadState === 'function') {
+          await stoppable(page.waitForLoadState('load', { timeout: SETTLE_LOAD_MS })).catch(() => {});
+        }
+        if (this.settleQuietMs > 0) await new Promise((r) => setTimeout(r, this.settleQuietMs));
+      }
+      // Read before the snapshot, so a load landing in between makes the view
+      // stale rather than credits it to the new page.
+      let documents = held.documents ?? 0;
+      let frames = held.frames ?? 0;
+      let url = page.url();
+      let document = placeOf(held, url);
+      let snapshot = await stoppable(page.ariaSnapshot({ mode: 'ai', boxes: true, timeout: SNAPSHOT_TIMEOUT_MS }));
+      // A route change has no load to make it stale: an app that went from
+      // /cart to /account during the snapshot would have the account's
+      // controls listed as the cart's. It is taken again; an app still moving
+      // after that is not described.
+      if (routeOf(page.url()) !== routeOf(url)) {
+        documents = held.documents ?? 0;
+        frames = held.frames ?? 0;
+        url = page.url();
+        document = placeOf(held, url);
+        snapshot = await stoppable(page.ariaSnapshot({ mode: 'ai', boxes: true, timeout: SNAPSHOT_TIMEOUT_MS }));
+        if (routeOf(page.url()) !== routeOf(url)) return null;
+      }
+      const viewport = typeof page.evaluate === 'function'
+        ? readViewport(await stoppable(within(page.evaluate(VIEWPORT_EXPRESSION))).catch(() => undefined))
+        : undefined;
+      const view = describePage({
+        snapshot,
+        url,
+        title: await within(page.title()).catch(() => ''),
+        viewport,
+        number: (held.views ?? 0) + 1,
+      });
+      if (!view) return null;
+      await stoppable(within(bindOptionValues(page, view)));
+      let kept = false;
+      const keep = (): void => {
+        if (kept) return;
+        kept = true;
+        held.views = (held.views ?? 0) + 1;
+        held.view = {
+          page, document, documents, frames, labels: view.labels, identities: view.identities, options: view.options, framed: view.framed,
+        };
+      };
+      if (show) keep();
+      return { view, viewport, document, keep };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * A picture of the run's page to go with a page view, the reason there is
+   * none, or word that the page looks exactly as it did in the last picture
+   * sent (`unchanged`).
+   *
+   * Taken clean: nothing is drawn on or injected into the page, and Chrome
+   * captures what is on screen. Withheld, and the model told why, while the
+   * person watching has hidden the page, on the first view after they took
+   * control, and whenever a password, card or one-time-code field or a payment
+   * frame is on screen. The page view still goes: it never holds a value.
+   */
+  private async screenshot(
+    held: RunBrowser,
+    stoppable: <T>(work: Promise<T>) => Promise<T>,
+    seen: { view: PageView; viewport: Viewport | undefined; document: string },
+    always: boolean,
+    marked: boolean,
+  ): Promise<{ image: NonNullable<BrowserActionOutcome['image']> } | { withheld: string } | { unchanged: true }> {
+    const page = held.page;
+    if (typeof page.screenshot !== 'function' || !seen.viewport) {
+      return { withheld: 'No screenshot: this browser cannot take one.' };
+    }
+    const { width, height } = seen.viewport;
+    if (width <= 0 || height <= 0 || width > SCREENSHOT_MAX_EDGE || height > SCREENSHOT_MAX_EDGE || width * height > SCREENSHOT_MAX_PIXELS) {
+      return { withheld: 'No screenshot: the viewport is too large to capture safely.' };
+    }
+    if (held.hiddenByHolder === true) return { withheld: HIDDEN_SHOT };
+    if (held.skipShot) {
+      const why = held.skipShot;
+      held.skipShot = undefined;
+      return { withheld: why };
+    }
+    const unsafe = await this.privateOnScreen(page, stoppable);
+    if (unsafe) return { withheld: unsafe };
+    try {
+      const bytes = await stoppable(page.screenshot({
+        type: 'jpeg', quality: SCREENSHOT_QUALITY, scale: 'css', caret: 'initial', timeout: SCREENSHOT_TIMEOUT_MS,
+        // A resize after the check above must not grow the capture surface.
+        clip: { x: 0, y: 0, width, height },
+      }));
+      // The check above was of the page before the picture; the picture is of
+      // it a moment later. A page that loaded another document, or put a
+      // password or code field on screen, in between is not sent: it is
+      // checked again now, and a picture either check doubts is dropped. The
+      // document is the one the view describes, so the two go together — and
+      // so is the route: an app that moved from /cart to /account in between
+      // would send the account's pixels with the cart's controls.
+      if (held.page !== page || !sameDocument(seen.document, held) || !sameRoute(seen.document, page.url())) {
+        return { withheld: 'No screenshot: the page changed while it was being looked at.' };
+      }
+      // Nor one scrolled in between: the view's boxes, and the marks drawn
+      // from them, are of where it was.
+      const scrolled = typeof page.evaluate === 'function'
+        ? readViewport(await stoppable(within(page.evaluate(VIEWPORT_EXPRESSION))).catch(() => undefined))
+        : undefined;
+      if (!scrolled || scrolled.scrollX !== seen.viewport.scrollX || scrolled.scrollY !== seen.viewport.scrollY
+        || scrolled.width !== seen.viewport.width || scrolled.height !== seen.viewport.height) {
+        return { withheld: 'No screenshot: the page moved while it was being looked at.' };
+      }
+      const after = await this.privateOnScreen(page, stoppable);
+      if (after) return { withheld: after };
+      if (marked) {
+        const current = await this.pageView(held, stoppable, false, false);
+        if (!current || !sameDocument(seen.document, held) || !sameRoute(seen.document, page.url())
+          || JSON.stringify(current.view.marks) !== JSON.stringify(seen.view.marks)
+          || JSON.stringify([...current.view.identities]) !== JSON.stringify([...seen.view.identities])) {
+          return { withheld: 'No screenshot: the controls changed while it was being looked at.' };
+        }
+      }
+      const picture = Buffer.from(bytes);
+      // The size is read from the picture, not from the page: the router
+      // prices the image by it, and a page can say anything about its own
+      // innerWidth.
+      const size = jpegSize(picture);
+      const clean = picture.toString('base64');
+      if (!size || !clean || clean.length > SCREENSHOT_MAX_CHARS) return { withheld: 'No screenshot: the picture could not be taken.' };
+      // Asked for by name, a picture is sent even of an unchanged page.
+      // With marks, the picture sent is the marked one: the same pixels with
+      // other refs on them — an app that swapped its controls for identical
+      // ones — is another picture.
+      const print = createHash('sha256').update(picture).update(marked ? JSON.stringify(seen.view.marks) : '').digest('base64');
+      if (!always && held.shotOf === print) return { unchanged: true };
+      // The marks go on a copy; if they cannot be drawn, the clean picture is
+      // still worth sending. A failed drawing must be retried next time:
+      // caching the intended marks would claim an image nobody received.
+      const drawn = marked ? await this.marked(page, clean, size, seen.view) : null;
+      const data = drawn ?? clean;
+      held.shotOf = marked && !drawn ? undefined : print;
+      return { image: { data, mimeType: 'image/jpeg', ...size } };
+    } catch {
+      return { withheld: 'No screenshot: the picture could not be taken.' };
+    }
+  }
+
+  /** The screenshot with the view's refs drawn on it, or null. See `marks.ts`. */
+  private async marked(
+    page: Page,
+    data: string,
+    size: { width: number; height: number },
+    view: PageView,
+  ): Promise<string | null> {
+    // Bounded like the picture it draws on: a page whose renderer is stuck
+    // must not hold the step. Past it the clean picture goes instead.
+    try {
+      const drawn = await this.withPageCdp(page, (cdp) => within(drawMarks(cdp, { data, ...size }, view.marks), MARKS_TIMEOUT_MS));
+      if (!drawn || drawn.length > SCREENSHOT_MAX_CHARS) return null;
+      // Sent under the clean picture's size, which the router prices it by:
+      // what came back must be a JPEG of that size, like the picture it was
+      // drawn on.
+      const drawnSize = jpegSize(Buffer.from(drawn, 'base64'));
+      return drawnSize && drawnSize.width === size.width && drawnSize.height === size.height ? drawn : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Why no screenshot may be taken — something private is, or may be, on
+   * screen in some frame — or null when one may. Fails closed: a page that
+   * cannot be checked, a frame on screen that cannot answer, or more frames
+   * than the check reads. Open only for a sub-frame that went away
+   * mid-check, which would otherwise end every screenshot on a page with an
+   * ad slot.
+   */
+  private async privateOnScreen(
+    page: Page,
+    stoppable: <T>(work: Promise<T>) => Promise<T>,
+  ): Promise<string | null> {
+    if (typeof page.frames !== 'function') return UNCHECKED_SHOT;
+    // The screen's size from the browser, not from the page: a page can say
+    // anything about its own innerHeight, and a height of 0 would put every
+    // frame — a card form's included — off screen and unread.
+    const screen = await this.screenSize(page);
+    if (!screen) return UNCHECKED_SHOT;
+    const frames = page.frames();
+    if (frames.length - 1 > PRIVACY_FRAME_LIMIT) return UNCHECKED_SHOT;
+    // Read side by side: each one is a round trip to a browser that may be in
+    // another data centre.
+    const verdicts = await Promise.all(frames.map(async (frame, i): Promise<string | null> => {
+      const main = i === 0;
+      // A frame is seen only through its iframe, so only what lies inside
+      // that iframe's box on the page's screen counts — a login iframe far
+      // below the fold is not on screen, however its own page is scrolled.
+      const area = main ? { x: 0, y: 0, ...screen } : await frameArea(frame, screen);
+      if (!area) return null;
+      try {
+        return await stoppable(within(privateIn(frame, area)))
+          // A frame in a process of its own is out of the page's DOM below.
+          ?? (main ? null : await stoppable(this.closedInOwnFrame(page, frame)));
+      } catch {
+        // A frame that went away mid-check has nothing to show; one still on
+        // the page that could not be read might.
+        return !main && frame.isDetached?.() === true ? null : UNCHECKED_SHOT;
+      }
+    }));
+    const found = verdicts.find((v) => v === PRIVATE_SHOT) ?? verdicts.find((v) => v !== null);
+    if (found) return found;
+    // Playwright's queries do not reach into a closed shadow root, so a field
+    // there passes them unseen. The browser's own DOM does show it: any text
+    // field in one, on screen, is a field this check cannot vouch for.
+    try {
+      return await stoppable(this.withPageCdp(page, (cdp) => closedFieldOn(cdp, { x: 0, y: 0, ...screen }))) ? UNCHECKED_SHOT : null;
+    } catch {
+      return UNCHECKED_SHOT;
+    }
+  }
+
+  /**
+   * For a frame Chrome runs in a process of its own — a cross-site iframe —
+   * the same closed-shadow-root check, in its own DOM. Its fields' boxes are
+   * in its own coordinates, so any shown at all counts: the frame itself is
+   * on screen. Null for a frame in the page's process, which the page's
+   * check covers.
+   */
+  private async closedInOwnFrame(page: Page, frame: Frame): Promise<string | null> {
+    let cdp: CDPSession | undefined;
+    const opening = page.context().newCDPSession(frame as unknown as Page);
+    try {
+      cdp = await within(opening).catch((err: unknown) => {
+        opening.then((late) => late.detach()).catch(() => {});
+        throw err;
+      });
+    } catch (err) {
+      if (err instanceof Error && /does not have a separate CDP session/.test(err.message)) return null;
+      return UNCHECKED_SHOT;
+    }
+    try {
+      return await closedFieldOn(cdp, null) ? UNCHECKED_SHOT : null;
+    } catch {
+      return UNCHECKED_SHOT;
+    } finally {
+      await within(cdp.detach()).catch(() => {});
+    }
+  }
+
+  /** Run `work` on a CDP session of the page's own, detached after. */
+  private async withPageCdp<T>(page: Page, work: (cdp: CDPSession) => Promise<T>): Promise<T> {
+    let cdp: CDPSession | undefined;
+    const opening = page.context().newCDPSession(page);
+    try {
+      cdp = await within(opening).catch((err) => {
+        // Given up on, it may still open: closed when it does.
+        opening.then((late) => late.detach()).catch(() => {});
+        throw err;
+      });
+      return await work(cdp);
+    } finally {
+      if (cdp) await within(cdp.detach()).catch(() => {});
+    }
+  }
+
+  /** The page's screen in CSS pixels, as the browser measures it, or null. */
+  private async screenSize(page: Page): Promise<{ width: number; height: number } | null> {
+    try {
+      return await this.withPageCdp(page, async (cdp) => {
+        const metrics = await within(cdp.send('Page.getLayoutMetrics')) as {
+          cssVisualViewport?: { clientWidth?: number; clientHeight?: number };
+        };
+        const width = metrics?.cssVisualViewport?.clientWidth;
+        const height = metrics?.cssVisualViewport?.clientHeight;
+        return typeof width === 'number' && typeof height === 'number' && width > 0 && height > 0 ? { width, height } : null;
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  /** A view for the outcome, with its screenshot or the reason for none when one was asked for. */
+  private async pictured(
+    held: RunBrowser,
+    stoppable: <T>(work: Promise<T>) => Promise<T>,
+    seen: { view: PageView; viewport: Viewport | undefined; document: string },
+    action: BrowserAction,
+  ): Promise<Pick<BrowserActionOutcome, 'view' | 'image' | 'imageUnchanged' | 'imageWithheld'>> {
+    const view = viewOutcome(seen.view);
+    if (!action.screenshot) return { view };
+    // Asked for by name, a picture is sent even of an unchanged page.
+    const shot = await this.screenshot(held, stoppable, seen, action.kind === 'observe', action.marked === true);
+    if ('unchanged' in shot) return { view: { ...view, text: `${view.text}\n\n${UNCHANGED_SHOT}` }, imageUnchanged: true };
+    if ('withheld' in shot) return { view: { ...view, text: `${view.text}\n\n${shot.withheld}` }, imageWithheld: true };
+    return { view, image: shot.image };
   }
 
   private async perform(runId: string, held: RunBrowser, action: BrowserAction, planned: number): Promise<BrowserActionOutcome> {
@@ -2803,10 +3406,21 @@ export class RemoteBrowserController {
         held.abort.signal.removeEventListener('abort', onAbort);
       }
     };
-    const timeout = Math.min(action.timeoutMs ?? 10_000, ACTION_TIMEOUT_MS);
-    const where = async (): Promise<{ url: string; title: string }> => {
+    // Playwright treats zero as unlimited. Invalid/nonpositive values use the
+    // ordinary finite default, and positive values cannot exceed our ceiling.
+    const timeout = Math.min(action.timeoutMs && action.timeoutMs > 0 ? action.timeoutMs : 10_000, ACTION_TIMEOUT_MS);
+    /**
+     * The document and address this action ran on, once the checks below
+     * have let it. A refusal says where the page is but not which document it
+     * holds: the model has not seen that one, and an action bound to it would
+     * be planned against a page it never looked at. See `expectDocument`.
+     */
+    let actedOn: string | undefined;
+    const where = async (): Promise<{ url: string; title: string; document?: string }> => {
       const current = held.page;
-      return { url: current.url(), title: await current.title().catch(() => '') };
+      // The address as reported, never with a name and password in it; the
+      // checks above compare the page's own.
+      return { url: withoutCredentials(current.url()), title: await current.title().catch(() => ''), ...(actedOn ? { document: actedOn } : {}) };
     };
 
     // Same rule as the desktop: an action planned against one page must not run
@@ -2819,42 +3433,390 @@ export class RemoteBrowserController {
       };
     }
 
-    switch (action.kind) {
-      case 'navigate': {
-        const target = action.url ?? '';
-        if (!/^https?:\/\//i.test(target)) {
-          return { ok: false, detail: 'Only http and https addresses can be opened.' };
+    // Approved on one site, run on that site. A page that moved to another
+    // while the person was deciding is not acted on: what they approved was
+    // shown with the site's name.
+    if (action.expectSite && hostOf(page.url()) !== action.expectSite) {
+      return {
+        ok: false,
+        detail: `The page is no longer on ${action.expectSite}, where this was approved, so it was not done. Call observe to see where it is now.`,
+        ...(await where()),
+      };
+    }
+    // And on the page it was planned and approved on: the same site can load
+    // another page under a selector while the person decides — /cart to
+    // /account — and the selector would find whatever that page has there.
+    // An app can do the same without loading anything, by changing its route,
+    // so every action needs the observed address:
+    // a retained control can have a new handler on another route, without any
+    // change to its label. Query and hash state can identify another order
+    // or account just as a different path can.
+    if (action.expectDocument) {
+      const moved = !sameDocument(action.expectDocument, held)
+        ? 'The page has loaded something else since it was last looked at, so this was not done. Call observe to see it now.'
+        : !(action.ref ? sameRoute(action.expectDocument, page.url()) : samePlace(action.expectDocument, held, page.url()))
+          ? 'The page has moved to another address since it was last looked at, so this was not done. Call observe and act on a ref from it.'
+          : undefined;
+      if (moved) return { ok: false, detail: moved, ...(await where()) };
+    }
+    actedOn = placeOf(held, page.url());
+
+    // A ref names a control from the latest page view, and only from it. It is
+    // refused rather than re-matched when that view no longer describes the
+    // page: guessing which new button "e14" meant is how a click lands on the
+    // wrong thing.
+    let target: Locator | undefined;
+    let named = action.selector ?? '';
+    const expectedView = held.view;
+    if (action.ref) {
+      const refused = refRefusal(held, action.ref);
+      if (refused) return { ok: false, detail: refused, ...(await where()) };
+      target = page.locator!(`aria-ref=${action.ref}`);
+      // A ref from a document the page has left either matches nothing or is
+      // refused by Playwright as naming a frame that is gone. Both say the
+      // same thing.
+      // Bounded: Playwright's count waits on a page that may never answer.
+      const present = await stoppable(within(target.count())).catch(() => 0);
+      if (present === 0) {
+        return {
+          ok: false,
+          detail: `${action.ref} is no longer on the page. Call observe for a fresh page view.`,
+          ...(await where()),
+        };
+      }
+      named = `${expectedView!.labels.get(action.ref)!} (${action.ref})`;
+    } else if (action.selector && needsLocator(action.kind)) {
+      if (typeof page.locator !== 'function') {
+        return { ok: false, detail: `This browser cannot ${action.kind.replace('_', ' ')}.` };
+      }
+      target = page.locator(action.selector);
+    }
+
+    /**
+     * Finish an action, with a fresh page view when the tool asked for one.
+     *
+     * The view never turns a done action into a failed one: the click happened
+     * whether or not the page could then be described, and saying otherwise
+     * invites the model to click again.
+     */
+    const finish = async (outcome: BrowserActionOutcome, settle: boolean): Promise<BrowserActionOutcome> => {
+      if (!action.pageView) return outcome;
+      const seen = await this.pageView(held, stoppable, settle);
+      if (!seen) return outcome;
+      // Where the page is now that it has settled: a click that loads another
+      // page has usually not committed by the time it returns. The document is
+      // the one the view describes, which is what the model plans against.
+      return {
+        ...outcome,
+        ...(await where()),
+        document: seen.document,
+        ...(await this.pictured(held, stoppable, seen, action)),
+      };
+    };
+
+    // A lazy locator can resolve a recycled ref after navigation while its
+    // action auto-waits. Pin ref actions (and explicitly bound selectors) to
+    // one DOM element, then recheck the document after the awaited lookup.
+    const bind = !!action.ref || !!(action.expectDocument && action.selector && CHANGES_THE_PAGE.has(action.kind));
+    if (bind && !target && action.selector) target = page.locator?.(action.selector);
+    if (bind && !target?.elementHandle) return { ok: false, detail: 'This browser cannot bind this action to the observed element.', ...(await where()) };
+    const element = bind ? await stoppable(target!.elementHandle!({ timeout })) : null;
+    try {
+      if (bind && !element) return { ok: false, detail: 'The observed element is no longer on the page.', ...(await where()) };
+      const actual = element ?? target;
+      if (action.kind === 'select_option') {
+        const native = actual?.evaluate && await stoppable(within(actual.evaluate((node) => node.nodeName === 'SELECT'))).catch(() => false);
+        if (!native) return { ok: false, detail: 'This control is a custom dropdown rather than a native select. Use click or press to operate its visible options.', ...(await where()) };
+      }
+      // Readiness waits can outlive the approved state: a checkbox can become
+      // checked or a field can acquire a user's draft while enabling. Wait on
+      // the pinned element without dispatching input, then revalidate the ref.
+      if (action.ref && REVALIDATED.has(action.kind)) {
+        if (refRefusal(held, action.ref)) {
+          return { ok: false, detail: 'The page changed while this action was being checked, so it was not run. Call observe for a fresh page view.', ...(await where()) };
         }
-        await stoppable(page.goto(target, { timeout: ACTION_TIMEOUT_MS, waitUntil: 'domcontentloaded' }));
-        return { ok: true, detail: `Opened ${target}`, ...(await where()) };
+        if (action.kind === 'click') await stoppable(element!.click({ timeout, trial: true }));
+        if (action.kind === 'hover') await stoppable(element!.hover({ timeout, trial: true }));
+        if (action.kind === 'fill' || action.kind === 'select_option') {
+          await stoppable(element!.waitForElementState('visible', { timeout }));
+          await stoppable(element!.waitForElementState(action.kind === 'fill' ? 'editable' : 'enabled', { timeout }));
+        }
       }
-      case 'click': {
-        const pagesBefore = new Set(page.context().pages());
-        await stoppable(page.click(action.selector!, { timeout }));
-        await this.followOpenedPage(runId, held, pagesBefore);
-        return { ok: true, detail: `Clicked ${action.selector}`, ...(await where()) };
+      if (action.ref && REVALIDATED.has(action.kind)) {
+        const shown = expectedView!.labels.get(action.ref)!;
+        // Playwright resolves a ref to the element it was given for, whatever
+        // that element now says. A page that renames a control — "Keep
+        // subscription" to "Cancel subscription" — would have the click land on
+        // what the model, and the person approving, never saw. So before an
+        // action that can set something off, the page is described again and
+        // the ref must still be called what the view called it: all of its
+        // name, not only the part a label shows.
+        // Not kept unless it is sent: a fill that goes ahead says nothing of
+        // the page, so its refs must stay the ones the model, and the person
+        // approving its next step, were shown.
+        const now = await this.pageView(held, stoppable, false, false);
+        // A frame that loaded another document before this look would have
+        // its new controls under the old refs, with the old names perhaps.
+        if (frameMoved(held, action.ref)) {
+          if (!now) return { ok: false, detail: FRAME_MOVED(action.ref), ...(await where()) };
+          now.keep();
+          return {
+            ok: false,
+            detail: `A frame on the page has loaded something else since the page view, so ${action.ref} was not used. The page as it is now:`,
+            ...(await where()),
+            view: viewOutcome(now.view),
+            document: now.document,
+          };
+        }
+        const current = now?.view.labels.get(action.ref);
+        // The options and their order affect aimed keys as well as explicit
+        // choices. Every triggering action requires the approved metadata.
+        const optionsChanged = JSON.stringify(now?.view.options.get(action.ref)) !== JSON.stringify(expectedView!.options.get(action.ref));
+        if (current !== shown || now?.view.identities.get(action.ref) !== expectedView!.identities.get(action.ref) || optionsChanged) {
+          now?.keep();
+          return {
+            ok: false,
+            detail: !now
+              ? `Could not check that ${action.ref} is still ${shown}, so it was not used. Call observe for a fresh page view.`
+              : current && current !== shown
+                ? `${action.ref} is now ${current}, not ${shown} as the page view said, so it was not used. The page as it is now:`
+                : `${action.ref} (${shown}) has changed or gone since the page view, so it was not used. The page as it is now:`,
+            ...(await where()),
+            ...(now ? { view: viewOutcome(now.view), document: now.document } : {}),
+          };
+        }
       }
-      case 'fill':
-        await stoppable(page.fill(action.selector!, action.value ?? '', { timeout }));
-        return { ok: true, detail: `Filled ${action.selector}`, ...(await where()) };
-      case 'press': {
-        // A selector focuses first; without one the key goes to whatever has
-        // focus, which is what "press Escape" usually means.
-        const pagesBefore = new Set(page.context().pages());
-        if (action.selector) await stoppable(page.press(action.selector, action.key!, { timeout }));
-        else await stoppable(page.keyboard.press(action.key!));
-        await this.followOpenedPage(runId, held, pagesBefore);
-        return { ok: true, detail: `Pressed ${action.key}`, ...(await where()) };
+      if (action.kind !== 'navigate' && (held.page !== page || !sameDocument(actedOn!, held)
+        || (action.ref && frameMoved(held, action.ref))
+        || (action.ref && !sameRoute(actedOn!, page.url()))
+        || hostOf(page.url()) !== hostOf(readPlace(actedOn!)?.[1])
+        || (!action.ref && held.generation !== planned)
+        || (action.expectSite && hostOf(page.url()) !== action.expectSite)
+        || (action.expectDocument && (!sameDocument(action.expectDocument, held)
+          || !(action.ref ? sameRoute(action.expectDocument, page.url()) : samePlace(action.expectDocument, held, page.url())))))) {
+        return { ok: false, detail: 'The page changed while this action was being checked, so it was not run. Call observe for a fresh page view.', ...(await where()) };
       }
-      case 'wait_for':
-        await stoppable(page.waitForSelector(action.selector!, { timeout }));
-        return { ok: true, detail: `${action.selector} appeared`, ...(await where()) };
-      case 'extract_text': {
-        const text = await stoppable(page.innerText(action.selector ?? 'body', { timeout }));
-        return { ok: true, detail: text.slice(0, 200_000), ...(await where()) };
+      // The ref was waited for and then checked. Sending the input waits for
+      // readiness again, and a long second wait would act on whatever the
+      // control became after the check: a checkbox disabled and re-enabled
+      // already ticked. So it is checked once more, for a moment and without
+      // sending anything — a control not ready by then is not used — and the
+      // input then goes at once. A timeout while it is being sent is another
+      // matter: a click may have landed, and its page may be loading. That is
+      // reported as unknown, never as not done, so a payment is not repeated.
+      // Playwright's own hit-target checks still apply.
+      const checked = !!action.ref && REVALIDATED.has(action.kind);
+      const sendTimeout = Math.min(timeout, DISPATCH_WAIT_MS);
+      const timedOut = (err: unknown) => err instanceof Error && err.name === 'TimeoutError';
+      const send = async (
+        ready: () => Promise<unknown>,
+        input: () => Promise<unknown>,
+        subject = named,
+      ): Promise<BrowserActionOutcome | null> => {
+        try {
+          await stoppable(ready());
+        } catch (err) {
+          // Nothing was sent. Unchecked, it is an ordinary failure: the
+          // selector matched nothing ready in time.
+          if (!checked || !timedOut(err)) throw err;
+          return {
+            ok: false,
+            detail: `${named} stopped being ready to use after it was checked, so it was not used. Call observe for a fresh page view.`,
+            ...(await where()),
+          };
+        }
+        try {
+          await stoppable(input());
+          return null;
+        } catch (err) {
+          if (!timedOut(err)) throw err;
+          // Advice alone does not stop a second click: the view it came from
+          // is dropped, so no ref from it can be used again before observe.
+          held.view = undefined;
+          return {
+            ok: false,
+            detail: `${subject} may or may not have been used: the browser did not confirm it in time. Do not repeat it — call observe to see what happened first.`,
+            indeterminate: true,
+            ...(await where()),
+          };
+        }
+      };
+      switch (action.kind) {
+        case 'navigate': {
+          const target = action.url ?? '';
+          if (!/^https?:\/\//i.test(target)) {
+            return { ok: false, detail: 'Only http and https addresses can be opened.' };
+          }
+          await stoppable(page.goto(target, { timeout: ACTION_TIMEOUT_MS, waitUntil: 'domcontentloaded' }));
+          return finish({ ok: true, detail: `Opened ${withoutCredentials(target)}`, ...(await where()) }, true);
+        }
+        case 'click': {
+          const pagesBefore = new Set(page.context().pages());
+          if (checked) {
+            // Sent without waiting for a page it starts loading: that is
+            // looked at afterwards, and is no reason to say it was not sent.
+            const refused = await send(
+              () => element!.click({ timeout: sendTimeout, trial: true }),
+              () => element!.click({ timeout: sendTimeout, noWaitAfter: true }));
+            if (refused) {
+              // One that may have landed may also have opened a page.
+              await this.followOpenedPage(runId, held, pagesBefore);
+              return refused;
+            }
+          } else {
+            // By selector the wait for the control is the ordinary one, and a
+            // timeout there sent nothing. Once it is ready the click goes, and
+            // a timeout after that is unknown, as on a ref.
+            const refused = await send(
+              () => actual ? actual.click({ timeout, trial: true }) : page.click(action.selector!, { timeout, trial: true }),
+              () => actual
+                ? actual.click({ timeout, noWaitAfter: true })
+                : page.click(action.selector!, { timeout, noWaitAfter: true }));
+            if (refused) {
+              await this.followOpenedPage(runId, held, pagesBefore);
+              return refused;
+            }
+          }
+          await this.followOpenedPage(runId, held, pagesBefore);
+          return finish({ ok: true, detail: `Clicked ${named}`, ...(await where()) }, true);
+        }
+        case 'fill':
+          if (checked) {
+            const refused = await send(
+              async () => {
+                await element!.waitForElementState('visible', { timeout: sendTimeout });
+                await element!.waitForElementState('editable', { timeout: sendTimeout });
+              },
+              () => element!.fill(action.value ?? '', { timeout: sendTimeout }));
+            if (refused) return refused;
+          } else if (actual) await stoppable(actual.fill(action.value ?? '', { timeout }));
+          else await stoppable(page.fill(action.selector!, action.value ?? '', { timeout }));
+          return { ok: true, detail: `Filled ${named}`, ...(await where()) };
+        case 'press': {
+          // A selector focuses first; without one the key goes to whatever has
+          // focus, which is what "press Escape" usually means.
+          const pagesBefore = new Set(page.context().pages());
+          // A key handler can submit before the browser confirms the press.
+          // The control is waited for first, where a timeout sent nothing;
+          // a timeout while pressing is unknown, and nothing may be repeated
+          // before the page has been observed again. Nor is the page it
+          // loads waited for: it is looked at afterwards.
+          if (actual || action.selector) {
+            const refused = await send(
+              async () => {
+                if (element) return;
+                if (actual) await (target as Locator).waitFor({ state: 'attached', timeout });
+                else await page.waitForSelector(action.selector!, { timeout });
+              },
+              () => actual
+                ? actual.press(action.key!, { timeout: checked ? sendTimeout : timeout, noWaitAfter: true })
+                : page.press(action.selector!, action.key!, { timeout, noWaitAfter: true }),
+              `${action.key} on ${named}`);
+            if (refused) {
+              await this.followOpenedPage(runId, held, pagesBefore);
+              return refused;
+            }
+          } else await stoppable(page.keyboard.press(action.key!));
+          await this.followOpenedPage(runId, held, pagesBefore);
+          return finish({ ok: true, detail: `Pressed ${action.key}`, ...(await where()) }, true);
+        }
+        case 'wait_for':
+          if (element) await stoppable(element.waitForElementState('visible', { timeout }));
+          else if (target) await stoppable(target.waitFor({ state: 'visible', timeout }));
+          else await stoppable(page.waitForSelector(action.selector!, { timeout }));
+          return { ok: true, detail: `${named} appeared`, ...(await where()) };
+        case 'extract_text': {
+          const text = actual
+            ? await stoppable(actual.innerText({ timeout }))
+            : await stoppable(page.innerText(action.selector ?? 'body', { timeout }));
+          return { ok: true, detail: wellFormed(text.slice(0, 200_000)), ...(await where()) };
+        }
+        case 'observe': {
+          const seen = await this.pageView(held, stoppable, false);
+          if (!seen) {
+            return {
+              ok: false,
+              // No AI snapshot in this Playwright, one that failed, or an app
+              // whose route would not hold still for one.
+              detail: 'The page\'s controls could not be listed. Use extract_text to read the page and CSS selectors to act on it.',
+              ...(await where()),
+            };
+          }
+          return {
+            ok: true,
+            detail: 'Looked at the page.',
+            ...(await where()),
+            document: seen.document,
+            ...(await this.pictured(held, stoppable, seen, action)),
+          };
+        }
+        case 'scroll': {
+          if (actual) {
+            await stoppable(actual.scrollIntoViewIfNeeded({ timeout }));
+          } else {
+            if (typeof page.evaluate !== 'function') return { ok: false, detail: 'This browser cannot scroll.' };
+            // Fixed text: the direction picks the sign and nothing the model
+            // wrote reaches the expression. Instant, so a page that scrolls
+            // smoothly has arrived by the time the view is taken.
+            const sign = action.direction === 'up' ? -1 : 1;
+            const before = await stoppable(within(page.evaluate('scrollY'))).catch(() => undefined);
+            await stoppable(within(page.evaluate(`window.scrollBy({ top: ${sign} * Math.round(innerHeight * 0.8), behavior: 'instant' })`)));
+            const after = await stoppable(within(page.evaluate('scrollY'))).catch(() => undefined);
+            if (typeof before === 'number' && before === after) {
+              return finish({
+                ok: true,
+                detail: `Nothing moved: the page is already at the ${sign < 0 ? 'top' : 'bottom'}, or it scrolls inside a panel. To bring a control on screen, scroll to its ref.`,
+                ...(await where()),
+              }, false);
+            }
+          }
+          const how = actual ? `Scrolled to ${named}` : `Scrolled ${action.direction === 'up' ? 'up' : 'down'}`;
+          return finish({ ok: true, detail: how, ...(await where()) }, false);
+        }
+        case 'select_option': {
+          if (!action.ref) {
+            await stoppable(actual!.selectOption(action.value ?? '', { timeout }));
+            return { ok: true, detail: `Chose "${action.value}" in ${named}`, ...(await where()) };
+          }
+          // On a ref, by the option's text alone. Playwright otherwise takes an
+          // option's value too, which nobody is shown: `1` can be the value of
+          // "Delete account", and the approval would be asked about `1`. The
+          // text the view showed is turned back into the label it came from;
+          // one it did not show is taken as a label as it is.
+          const shown = (held.view!.options.get(action.ref) ?? []).filter((o) => o.shown === action.value || o.label === action.value);
+          // Every matching option is a separate possible action, even when
+          // their full labels are also identical. Deduplicating labels here
+          // would silently select the first option by DOM order.
+          if (shown.length > 1) {
+            return {
+              ok: false,
+              detail: `More than one option in ${named} reads "${action.value}" in the page view, so none was chosen. Use extract_text to read them in full.`,
+              ...(await where()),
+            };
+          }
+          const refused = await send(
+            async () => {
+              await element!.waitForElementState('visible', { timeout: sendTimeout });
+              await element!.waitForElementState('enabled', { timeout: sendTimeout });
+            },
+            () => element!.selectOption({ label: shown[0]?.label ?? action.value ?? '' }, { timeout: sendTimeout }));
+          if (refused) return refused;
+          return { ok: true, detail: `Chose "${action.value}" in ${named}`, ...(await where()) };
+        }
+        case 'hover': {
+          if (checked) {
+            const refused = await send(
+              () => element!.hover({ timeout: sendTimeout, trial: true }),
+              () => element!.hover({ timeout: sendTimeout }));
+            if (refused) return refused;
+          } else await stoppable(actual!.hover({ timeout }));
+          return finish({ ok: true, detail: `Hovered over ${named}`, ...(await where()) }, false);
+        }
+        default:
+          return { ok: false, detail: `Unsupported action: ${String(action.kind)}` };
       }
-      default:
-        return { ok: false, detail: `Unsupported action: ${String(action.kind)}` };
+    } finally {
+      if (element) await within(element.dispose()).catch(() => {});
     }
   }
 }
@@ -2869,6 +3831,384 @@ function refusal(result: 'busy' | 'cancelled' | 'off' | 'human'): string {
   if (result === 'off') return 'Browser control was turned off while this action waited for the browser.';
   if (result === 'cancelled') return 'The run was cancelled while waiting for the browser.';
   return 'The browser is in use by another part of this run and did not come free in time. Try again, or do something else first.';
+}
+
+/**
+ * A failed action, said in the words the model is shown.
+ *
+ * Playwright quotes the elements it found in its errors — attributes and all,
+ * so `<input type="password" value="…">` arrives with the password in it. The
+ * call log it appends does, and so does a strict-mode error, which lists every
+ * element a locator matched before any log. Only the first line, the reason,
+ * is kept, with any element in it cut to its tag and without the terminal
+ * colours it is written in.
+ */
+export function actionError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  // eslint-disable-next-line no-control-regex
+  const plain = message.replace(/\u001b\[[0-9;]*m/g, '');
+  const reason = plain.split('\n').map((line) => line.trim()).find((line) => line.length > 0) ?? '';
+  // Bounded and linear. A tag cut by this bound is still stripped through
+  // the end; quotes can contain angle brackets without exposing attributes.
+  const source = reason.slice(0, ERROR_MAX_CHARS);
+  let out = '';
+  for (let i = 0; i < source.length;) {
+    if (source[i] !== '<' || !/[a-z]/i.test(source[i + 1] ?? '')) { out += source[i++]; continue; }
+    let end = i + 1;
+    while (end < source.length && /[\w-]/.test(source[end]!)) end++;
+    out += `<${source.slice(i + 1, end)}>`;
+    let quote = '';
+    for (i = end; i < source.length; i++) {
+      const char = source[i]!;
+      if (quote) { if (char === quote) quote = ''; }
+      else if (char === '"' || char === "'") quote = char;
+      else if (char === '>') { i++; break; }
+    }
+  }
+  return out.slice(0, ERROR_MAX_CHARS);
+}
+
+/**
+ * A JPEG's size in pixels, from its frame header, or null when the bytes are
+ * not a JPEG that says.
+ */
+function jpegSize(bytes: Uint8Array): { width: number; height: number } | null {
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
+  let at = 2;
+  while (at + 4 <= bytes.length) {
+    if (bytes[at] !== 0xff) return null;
+    const marker = bytes[at + 1]!;
+    // Fill bytes, and markers that carry no length.
+    if (marker === 0xff) { at += 1; continue; }
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { at += 2; continue; }
+    if (marker === 0xd9 || marker === 0xda) return null;
+    const length = (bytes[at + 2]! << 8) | bytes[at + 3]!;
+    if (length < 2) return null;
+    // Start-of-frame: every SOFn but the DHT (C4), JPG (C8) and DAC (CC) markers.
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      if (at + 9 > bytes.length) return null;
+      const height = (bytes[at + 5]! << 8) | bytes[at + 6]!;
+      const width = (bytes[at + 7]! << 8) | bytes[at + 8]!;
+      return width > 0 && height > 0 ? { width, height } : null;
+    }
+    at += 2 + length;
+  }
+  return null;
+}
+
+/**
+ * The part of the screen a frame's iframe covers, or null when it covers none
+ * of it. The whole screen when that cannot be told: the check it decides is a
+ * privacy check, and a frame it skips is a frame it does not read.
+ */
+async function frameArea(frame: Frame, screen: { width: number; height: number }): Promise<Box | null> {
+  const whole = { x: 0, y: 0, ...screen };
+  if (typeof frame.frameElement !== 'function') return whole;
+  let element: Awaited<ReturnType<NonNullable<Frame['frameElement']>>> | undefined;
+  try {
+    element = await within(frame.frameElement());
+    const box = await within(element.boundingBox());
+    if (!box) return null;
+    const area = overlap(box, whole);
+    return area.width > 0 && area.height > 0 ? area : null;
+  } catch {
+    return whole;
+  } finally {
+    // A handle keeps its element alive in the page until its document goes;
+    // a single-page app keeps its document for the whole run.
+    if (element?.dispose) await within(element.dispose()).catch(() => {});
+  }
+}
+
+/**
+ * Whether a private field or a payment iframe of this frame lies within
+ * `area`, by Playwright's own queries and measurements. Boxes are on the
+ * page's screen, frames included.
+ */
+async function privateIn(frame: Frame, area: Box): Promise<string | null> {
+  if (typeof frame.locator !== 'function' || typeof frame.getByLabel !== 'function' || typeof frame.getByPlaceholder !== 'function') {
+    return UNCHECKED_SHOT;
+  }
+  for (const found of [frame.locator(PRIVATE_SELECTOR), frame.getByLabel(PRIVATE_LABEL), frame.getByPlaceholder(PRIVATE_PLACEHOLDER)]) {
+    const count = await found.count();
+    if (count > PRIVACY_MATCH_LIMIT) return UNCHECKED_SHOT;
+    // A box that cannot be measured — a frame too busy to answer, say — is a
+    // field that may be on screen, not one that is not.
+    const boxes = await Promise.all(Array.from({ length: count }, (_, i) => found.nth(i).boundingBox({ timeout: 1_000 })));
+    if (boxes.some((box) => box && box.width > 0 && box.height > 0 && overlap(box, area).width > 0 && overlap(box, area).height > 0)) {
+      return PRIVATE_SHOT;
+    }
+  }
+  return null;
+}
+
+/**
+ * The most DOM nodes, text included, the closed-shadow-root check reads in
+ * one message. A large real page has tens of thousands.
+ */
+const DOM_READ_MAX_NODES = 300_000;
+class DomTooLarge extends Error {}
+
+/** A node of the DOM as CDP's `DOM.getDocument` gives it. */
+type DomNode = {
+  nodeId: number;
+  nodeType?: number;
+  nodeName?: string;
+  attributes?: string[];
+  children?: DomNode[];
+  shadowRoots?: Array<DomNode & { shadowRootType?: string }>;
+  contentDocument?: DomNode;
+};
+/** Inputs that take no typed text: nothing for a picture to give away. */
+const NOT_TYPED = new Set(['hidden', 'checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'range', 'color', 'file']);
+
+/** Closed-root fields whose displayed contents Playwright cannot check for privacy. */
+function typedField(node: DomNode): boolean {
+  if (node.nodeType !== undefined && node.nodeType !== 1) return false;
+  const attrs = new Map<string, string>();
+  for (let i = 0; i + 1 < (node.attributes?.length ?? 0); i += 2) attrs.set(node.attributes![i]!.toLowerCase(), node.attributes![i + 1]!);
+  const editable = attrs.get('contenteditable');
+  if (editable !== undefined && editable.toLowerCase() !== 'false') return true;
+  if ((attrs.get('role') ?? '').toLowerCase().split(/\s+/).some((role) => ['textbox', 'searchbox', 'combobox', 'listbox', 'spinbutton'].includes(role))) return true;
+  const name = node.nodeName?.toUpperCase();
+  return name === 'TEXTAREA' || name === 'SELECT' || (name === 'INPUT' && !NOT_TYPED.has((attrs.get('type') ?? 'text').toLowerCase()));
+}
+
+/**
+ * Whether a text field inside a closed shadow root is shown within `area`
+ * (anywhere at all when null), by the browser's own DOM. Reaches every
+ * shadow root, closed ones included, and the documents of iframes in the
+ * same process. Throws when it cannot tell.
+ */
+async function closedFieldOn(cdp: CDPSession, area: Box | null): Promise<boolean> {
+  // The whole DOM comes back in one message, and the page decides its size:
+  // past a bound it is not read, and the page counts as unchecked.
+  try {
+    await within(cdp.send('Performance.enable'));
+    const { metrics } = await within(cdp.send('Performance.getMetrics')) as { metrics?: Array<{ name?: string; value?: number }> };
+    const nodes = metrics?.find((m) => m.name === 'Nodes')?.value;
+    if (typeof nodes === 'number' && nodes > DOM_READ_MAX_NODES) throw new DomTooLarge();
+  } catch (err) {
+    if (err instanceof DomTooLarge) throw err;
+    // A browser that cannot say leaves the read to its own timeout.
+  } finally {
+    await within(cdp.send('Performance.disable')).catch(() => {});
+  }
+  const { root } = await within(cdp.send('DOM.getDocument', { depth: -1, pierce: true })) as { root?: DomNode };
+  if (!root || typeof root.nodeId !== 'number') throw new Error('The browser did not describe the page.');
+  const fields: number[] = [];
+  // A stack, not recursion: a page decides how deep its DOM goes.
+  const stack: Array<[DomNode, boolean]> = [[root, false]];
+  while (stack.length) {
+    const [node, closed] = stack.pop()!;
+    if (closed && typedField(node)) fields.push(node.nodeId);
+    for (const child of node.children ?? []) stack.push([child, closed]);
+    for (const shadow of node.shadowRoots ?? []) stack.push([shadow, closed || shadow.shadowRootType === 'closed']);
+    if (node.contentDocument) stack.push([node.contentDocument, closed]);
+  }
+  if (fields.length > PRIVACY_MATCH_LIMIT) throw new Error('Too many fields to measure.');
+  for (const nodeId of fields) {
+    let quad: number[] | undefined;
+    try {
+      const box = await within(cdp.send('DOM.getBoxModel', { nodeId })) as { model?: { border?: number[] } };
+      quad = box.model?.border;
+    } catch (err) {
+      // Not laid out — display: none — is not on screen. Anything else is
+      // not known to be off it.
+      if (err instanceof Error && /Could not compute box model/.test(err.message)) continue;
+      throw err;
+    }
+    if (!quad || quad.length < 8) throw new Error('A field could not be measured.');
+    const xs = [quad[0]!, quad[2]!, quad[4]!, quad[6]!];
+    const ys = [quad[1]!, quad[3]!, quad[5]!, quad[7]!];
+    const box = { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
+    if (box.width <= 0 || box.height <= 0) continue;
+    if (!area) return true;
+    const shared = overlap(box, area);
+    if (shared.width > 0 && shared.height > 0) return true;
+  }
+  return false;
+}
+
+/** The part two boxes share; zero-sized when they do not meet. */
+function overlap(a: Box, b: Box): Box {
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  return {
+    x, y,
+    width: Math.max(0, Math.min(a.x + a.width, b.x + b.width) - x),
+    height: Math.max(0, Math.min(a.y + a.height, b.y + b.height) - y),
+  };
+}
+
+/**
+ * A look into the page, abandoned after `PAGE_CHECK_TIMEOUT_MS`. What it was
+ * for then counts as unknown — for the privacy check, as unsafe.
+ */
+function within<T>(work: Promise<T>, ms = PAGE_CHECK_TIMEOUT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // The abandoned call still settles later; its rejection is nobody's.
+  work.catch(() => {});
+  return Promise.race([
+    work,
+    new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('The page did not answer in time.')), ms); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Which page, and which document in it, the run is on: the page's place in the
+ * run's popups, and the documents it has loaded or asked for. A history change
+ * keeps it; a new document, one on its way, or a popup does not. Opaque to
+ * everything but a comparison.
+ */
+function documentOf(held: RunBrowser): string {
+  return `${held.pageSerial ?? 0}:${held.documents ?? 0}:${held.loads ?? 0}`;
+}
+
+/**
+ * What an outcome reports as `document`: the document, and the address it was
+ * at. Opaque to the tool, which only hands it back as `expectDocument`.
+ */
+function placeOf(held: RunBrowser, url: string): string {
+  return JSON.stringify([documentOf(held), url]);
+}
+
+function readPlace(token: string): [string, string] | null {
+  try {
+    const place: unknown = JSON.parse(token);
+    return Array.isArray(place) && place.length === 2 && place.every((p) => typeof p === 'string')
+      ? place as [string, string]
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The run is still on the document `token` was taken of. Unreadable is no. */
+function sameDocument(token: string, held: RunBrowser): boolean {
+  return readPlace(token)?.[0] === documentOf(held);
+}
+
+/**
+ * And at the same address, including query and hash state: either can select
+ * another order or account without replacing the document or named control.
+ */
+function sameRoute(token: string, url: string): boolean {
+  const place = readPlace(token);
+  return place !== null && routeOf(place[1]) === routeOf(url);
+}
+
+function routeOf(url: string): string {
+  try {
+    return new URL(url).href;
+  } catch {
+    return url;
+  }
+}
+
+/** And at the same address, a route change by `pushState` included. */
+function samePlace(token: string, held: RunBrowser, url: string): boolean {
+  const place = readPlace(token);
+  return place !== null && place[0] === documentOf(held) && place[1] === url;
+}
+
+
+/** Why a ref cannot be used now, or null when it can. */
+function refRefusal(held: RunBrowser, ref: string): string | null {
+  if (!held.view) return `There is no page view to take ${ref} from. Call observe first.`;
+  if (held.view.page !== held.page || held.view.documents !== (held.documents ?? 0)) {
+    return `${ref} is from an earlier page. Call observe for a fresh page view.`;
+  }
+  if (!sameRoute(held.view.document, held.page.url())) {
+    return `${ref} is from another route. Call observe for a fresh page view.`;
+  }
+  if (frameMoved(held, ref)) return FRAME_MOVED(ref);
+  if (!held.view.labels.has(ref)) return `${ref} is not in the latest page view. Use a ref from it, or call observe again.`;
+  if (typeof held.page.locator !== 'function') return 'This browser cannot act on refs. Use a CSS selector.';
+  return null;
+}
+
+/**
+ * Whether a frame on the page has loaded another document since the view, for
+ * a ref inside one. Which frame is not known — the view says only that the
+ * ref is in one — so any frame's load counts.
+ */
+function frameMoved(held: RunBrowser, ref: string): boolean {
+  return held.view?.framed.has(ref) === true && held.view.frames !== (held.frames ?? 0);
+}
+
+const FRAME_MOVED = (ref: string): string =>
+  `A frame on the page has loaded something else since the page view, so ${ref} may not be what it was. Call observe for a fresh page view.`;
+
+/** Actions on a ref that can set off what its control does. See `perform`. */
+const CHANGES_THE_PAGE = new Set<BrowserAction['kind']>(['click', 'fill', 'press', 'select_option']);
+
+/**
+ * Actions on a ref that are rechecked against the view before they go: those,
+ * and a hover, whose mouse events can open a menu or load another page.
+ */
+const REVALIDATED = new Set<BrowserAction['kind']>([...CHANGES_THE_PAGE, 'hover']);
+
+/**
+ * How long a revalidated ref action may wait to be ready when it is finally
+ * sent. Its readiness was already waited for, then checked; a control that is
+ * not ready again at once has changed since, and is not used.
+ */
+const DISPATCH_WAIT_MS = 500;
+
+/** Hidden native option values affect what choosing a displayed label does. */
+async function bindOptionValues(page: Page, view: PageView): Promise<void> {
+  const deadline = Date.now() + PAGE_CHECK_TIMEOUT_MS;
+  let countRead = 0;
+  let charsRead = 0;
+  for (const ref of view.options.keys()) {
+    if (Date.now() >= deadline) throw new Error('Native option values took too long to check.');
+    // These Playwright reads use its isolated DOM access, rather than running
+    // page-written getters or a page-world evaluate callback.
+    const options = page.locator?.(`aria-ref=${ref}`).locator?.('option');
+    if (!options) throw new Error('Native option values could not be checked.');
+    const count = await options.count();
+    countRead += count;
+    if (!Number.isSafeInteger(count) || count < 0 || countRead > 2_000) throw new Error('Too many native options to check.');
+    const digest = createHash('sha256').update(view.identities.get(ref) ?? '');
+    for (let start = 0; start < count; start += 16) {
+      if (Date.now() >= deadline) throw new Error('Native option values took too long to check.');
+      const values = await Promise.all(Array.from({ length: Math.min(16, count - start) }, async (_, offset) => {
+        const option = options.nth(start + offset);
+        // Text determines the native value when the value attribute is absent.
+        return Promise.all([option.getAttribute('value'), option.textContent()]);
+      }));
+      const raw = JSON.stringify(values);
+      charsRead += raw.length;
+      if (charsRead > 1_000_000) throw new Error('Native option values are too large to check.');
+      digest.update(raw);
+    }
+    if (await options.count() !== count) throw new Error('Native options changed during the check.');
+    view.identities.set(ref, digest.digest('base64'));
+  }
+}
+
+/** Actions that resolve their selector through a locator rather than a page method. */
+function needsLocator(kind: BrowserAction['kind']): boolean {
+  return kind === 'scroll' || kind === 'select_option' || kind === 'hover';
+}
+
+function viewOutcome(view: PageView): NonNullable<BrowserActionOutcome['view']> {
+  return { text: view.text, labels: Object.fromEntries(view.labels) };
+}
+
+/** The page's own report of its size and scroll, kept only when it is numbers. */
+function readViewport(v: unknown): Viewport | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const o = v as Record<string, unknown>;
+  const n = (k: string) => (typeof o[k] === 'number' && Number.isFinite(o[k]) ? o[k] as number : undefined);
+  const width = n('width');
+  const height = n('height');
+  const scrollX = n('scrollX');
+  const scrollY = n('scrollY');
+  const scrollHeight = n('scrollHeight');
+  if (width === undefined || height === undefined || scrollX === undefined || scrollY === undefined || scrollHeight === undefined) return undefined;
+  return { width, height, scrollX, scrollY, scrollHeight };
 }
 
 /**
@@ -2906,6 +4246,31 @@ function scrollDelta(n: unknown): number {
  * kind of wrong advice that costs an afternoon.
  */
 type CdpConnectOptions = { headers?: Record<string, string> };
+
+/**
+ * The version of the Playwright this package would load, or undefined when
+ * there is none it can find. Read from its package.json, resolved from here
+ * the way `import('playwright')` resolves it, in the CommonJS builds as well
+ * as the ES module ones.
+ */
+function installedPlaywright(): string | undefined {
+  try {
+    const from = typeof __filename === 'string' ? __filename : fileURLToPath(import.meta.url);
+    const version = (createRequire(from)('playwright/package.json') as { version?: unknown }).version;
+    return typeof version === 'string' ? version : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Whether a Playwright of `version` writes the AI snapshot page views read: 1.60 or later. */
+export function pageViewsIn(version: string | undefined): boolean {
+  const m = /^(\d+)\.(\d+)\./.exec(version ?? '');
+  if (!m) return false;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  return major > 1 || (major === 1 && minor >= 60);
+}
 
 async function loadPlaywright(): Promise<{ chromium: { connectOverCDP(url: string, opts?: CdpConnectOptions): Promise<unknown> } }> {
   try {

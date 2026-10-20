@@ -421,6 +421,16 @@ export class ToolRegistry extends EventEmitter {
     const tool = this.tools.get(toolName);
     if (!tool) throw new Error(`Tool not found: ${toolName}`);
     this.checkRoot();
+    // The same authored batch can reach this boundary through a generated
+    // tool, concurrent nested calls, or a fallback. Never rebind an old ref
+    // to labels produced by an earlier browser call in that batch.
+    if (toolName === 'browser_control' && options.browserBatch) {
+      if (typeof input['ref'] === 'string' && options.browserBatch.acted) {
+        return 'Tool error: A previous browser_control call in this response may have changed the page. This ref was not executed. Observe the current page and issue a new call using its refs.';
+      }
+      // Extraction preserves refs; it also must not clear an earlier action.
+      if (input['action'] !== 'extract_text') options.browserBatch.acted = true;
+    }
 
     if (options.isOffline?.() && !this.keepsToMachine(toolName, tool)) {
       throw new Error(`${toolName} is unavailable to a local-only subtask (privacy.paths): it would send what the subtask knows off this machine.`);

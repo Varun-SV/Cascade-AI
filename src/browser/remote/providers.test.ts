@@ -76,6 +76,12 @@ describe('Steel', () => {
     expect(session).toEqual({ id: 'sess-1', cdpUrl: 'wss://s/cdp', liveViewUrl: 'https://s/debug' });
   });
 
+  it('asks for a 1280×800 page, the size screenshots are priced at', async () => {
+    const calls = stubFetch([{ body: { id: 'sess-1', websocketUrl: 'wss://s/cdp' } }]);
+    await new SteelProvider({ url: 'https://steel.test' }).createSession();
+    expect(JSON.parse(String(calls[0]?.init.body))).toEqual({ dimensions: { width: 1280, height: 800 } });
+  });
+
   it('carries a configured CDP Host override without adding it to Steel API requests', async () => {
     const calls = stubFetch([{ body: { id: 'sess-1', websocketUrl: 'ws://steel.internal:3000/' } }]);
     const session = await new SteelProvider({
