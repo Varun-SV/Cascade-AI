@@ -46,7 +46,7 @@
     "README.md"
   ],
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.125.0",
+    "@anthropic-ai/sdk": "^0.135.0",
     "@google/genai": "^1.50.1",
     "@jitl/quickjs-singlefile-cjs-release-sync": "^0.32.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
