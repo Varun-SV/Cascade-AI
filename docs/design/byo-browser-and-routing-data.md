@@ -1,14 +1,26 @@
 # Bring-your-own browser, and routing data for users
 
-Status: **design for review** (council: discussion #315). Q1–Q3 decided by
-the maintainer; Q4 open. No feature code lands until the design is agreed.
+Status: **design for review**, revision 2 (council: discussion #315, review
+on PR #316). Q1–Q3 decided by the maintainer; Q4 open. No feature code
+lands until the design is agreed.
+
+Revision 2 answers ChatGPT's review on #316:
+- **A:** the tab-level adapter has been prototyped against Playwright (§3.3).
+- **B:** the privacy promise is replaced by an explicit egress list and
+  command contract (§4).
+- **C:** ownership, the browser lease and fail-closed rules are now
+  acceptance criteria (§5, §9).
+- **D:** aggregation protections are added (§8).
+- **E:** staged delivery behind flags (§10).
 
 ## 1. Decisions already made by the maintainer
 
 - Browser control stays available to **every** user, free or paid.
 - The platform **does not host browsers** for cascadeai.in users. Each user
-  brings their own. Misuse then originates from the user's own browser, and
-  page data stays on the user's machine or infrastructure.
+  brings their own. Misuse then originates from the user's own browser. This
+  removes Cascade's hosted-browser infrastructure. It does **not** remove
+  Cascade's responsibility for what its runs do with the user's browser
+  (§4).
 - Four ways to bring a browser, all chosen and configured in **Settings**:
 
   | | Source | Order |
@@ -22,87 +34,246 @@ the maintainer; Q4 open. No feature code lands until the design is agreed.
   cost, time and outcome. Tabs: **All / Cloud / Desktop / CLI**, each with
   **You / Everyone**.
 
-## 2. One attach path on the server
+## 2. One attach boundary on the server
 
 The cloud server already attaches browsers through `GenericCdpProvider`
 (`src/browser/remote/provider.ts`, `cloud/server/src/remote-browser.ts`).
-Every source ends at that seam, so the browser tool, page views, approvals
-and run cleanup stay as they are.
+Every source ends at that **boundary**: the browser tool, page views,
+approvals and run cleanup see one CDP endpoint, whatever is behind it.
+
+What sits behind the boundary is new code. It is not an unchanged reuse.
 
 ```
                 cascadeai.in (Railway)
-  run ──► RemoteBrowserController ──► GenericCdpProvider ──► CDP endpoint
+  run ──► RemoteBrowserController ──► GenericCdpProvider ──► per-run endpoint
                                                                │
+                                     policy + lease (§4, §5) ──┤
           ┌────────────────────────────────────────────────────┤
-          │ A/B: per-user relay (outbound WSS from the user)   │ C: user URL
+          │ A/B: relay (outbound WSS from the user's device)   │ C: user URL
           ▼                                                    ▼
   desktop app / CLI / extension                     user's Steel / Chrome
 ```
 
-The new pieces are the **relay** and the **per-user browser setting**.
-
 ## 3. The relay (A and B)
+
+### 3.1 Transport
 
 - **Direction:** the user's side always dials out to
   `wss://cascadeai.in/api/browser-relay`. Nothing on the user's machine
   listens on a public port.
-- **Auth:** desktop and CLI reuse the existing native sign-in (refresh
-  tokens in `native_refresh_tokens`). The extension uses a short-lived token
-  minted from the signed-in web session. Every connection is bound to one
-  user. A run can only attach that user's relay.
-- **Per run:** the server gives the run a one-time local endpoint that pipes
-  CDP frames to the relay. It is closed when the run ends (task id, as
+- **Auth:** see §5.
+- **Per run:** the server gives the run a one-time endpoint that pipes CDP
+  frames to the relay. It closes when the run ends (keyed by task id, as
   `remote-browser.ts` already does).
-- **CDP shape.** Playwright's `connectOverCDP` expects a browser-level
-  endpoint (the `Target` domain). Two of the sources only expose tab-level
-  CDP:
-  - **CLI:** launches Chrome or Chromium with a dedicated profile and
-    `--remote-debugging-port` bound to 127.0.0.1, then relays the browser
-    endpoint as is. Simplest.
-  - **Desktop:** the built-in browser is a `WebContentsView`.
-    `webContents.debugger` speaks tab-level CDP, so the relay needs a small
-    adapter that answers the browser-level `Target.*` calls for one tab.
-  - **Extension:** `chrome.debugger` is also tab-level, so it needs the same
-    adapter. Build it once, share it between desktop and extension.
 
-## 4. Safety rules (all sources)
+### 3.2 CDP shape per source
 
-- **Consent per run**, naming the sites the run wants. "Always allow for
-  this site" is opt-in.
-- **Site allowlist** in Settings; empty means ask.
-- **Visible indicator** while a run controls the browser, with a **stop**
-  button that cuts the relay at once.
-- **Separate profile by default** (CLI, desktop). The extension acts in the
-  user's real profile, so it shows the strongest warning and defaults to
-  asking every time.
-- **Nothing sensitive leaves the browser:** no cookies, storage or saved
-  passwords are relayed as data. Existing page-view redaction of typed
-  values stays on.
-- **Page content is untrusted:** instructions found on pages are data,
-  never commands. This is unchanged from today, but restated because the
-  browser is now the user's own.
-- **Relay limits:** frame size, rate and an idle timeout per connection.
+Playwright's `connectOverCDP` expects a browser-level endpoint (the `Target`
+domain).
+- **CLI:** launches Chrome or Chromium with a dedicated profile and
+  `--remote-debugging-port` bound to 127.0.0.1. It relays the real browser
+  endpoint, so no adapter is needed.
+- **Desktop:** `webContents.debugger` is tab-scoped, so it needs the adapter
+  in §3.3.
+- **Extension:** `chrome.debugger` is tab-scoped, so it needs the same
+  adapter.
 
-## 5. Settings
+The adapter is shared as a **protocol contract** (the browser-level methods
+and session rules below), not as one transport-specific implementation.
+
+### 3.3 Prototype result: tab-scoped CDP behind Playwright
+
+`docs/design/poc/tab-cdp-relay/poc.mjs` connects to **one page target's**
+WebSocket, which stands in for a tab-scoped debugger. It presents that tab
+to Playwright 1.64.1 as a browser through a relay and drives it. It applies
+the command contract from §4.2. **18 of 18 checks pass.**
+
+**Browser-level methods Playwright sent, and how the relay answers:**
+
+| Method | Relay answer |
+|---|---|
+| `Browser.getVersion` | fixed version object |
+| `Target.setAutoAttach` (no session) | `{}`, then emits `Target.attachedToTarget` for the one tab under a synthetic session id |
+| `Browser.setDownloadBehavior` | `{}`, **not applied**: the agent never redirects the user's downloads |
+| `Target.getTargetInfo` | the tab's target info |
+
+Everything else carries a session id:
+- **The synthetic tab session:** stripped and forwarded to the tab.
+- **Nested sessions** (iframes, workers): passed through unchanged.
+
+This is four methods. Extension relays built on Playwright MCP handle
+the same four.
+
+**Worked through the relay:**
+- navigate
+- fill, select, click
+- console events
+- `evaluate`
+- same-origin iframe content
+- accessibility snapshot (page views)
+- screenshot
+- link navigation with `waitForURL`
+- history back
+
+Playwright used 25 tab-level methods across Page, Runtime, DOM, Input,
+Emulation, Network, Log, Inspector and `Target.setAutoAttach` (for child
+frames). This is the allowlist baseline in §4.2.
+
+**Refused, by design:**
+- `context.newPage()`: `Target.createTarget` is denied, which enforces the
+  single-tab lease.
+- `context.cookies()`: `Storage.getCookies` is denied.
+
+**Stop:**
+- Closing the tab connection rejected an in-flight command in **8 ms**.
+- Playwright reported disconnected.
+- The user's tab survived.
+
+**Two findings that change the design:**
+1. **History back/forward hangs with `waitUntil: 'load'`.** In a browser
+   Playwright did not launch, the back-forward cache restores the page
+   without a load event. This is **not** caused by the relay: a direct
+   `connectOverCDP` without the relay hangs the same way. Cascade's browser
+   tool must navigate history with `waitUntil: 'commit'` and then wait for
+   content.
+2. **Method filtering cannot stop page script.** With cookie APIs denied,
+   `Runtime.evaluate('document.cookie')` still returned the non-HttpOnly
+   cookie. Playwright cannot work without `Runtime.evaluate` and
+   `Runtime.callFunctionOn`. So §4 does not claim that filtering protects
+   page data. The real controls are origin scope, consent and a separate
+   profile.
+
+**Not yet proven:**
+- `chrome.debugger` refuses some pages (`chrome://`, the Web Store) and may
+  refuse some methods.
+- An MV3 service worker can be suspended, which drops the WebSocket.
+- `webContents.debugger` has its own attach/detach lifecycle.
+
+Each needs its own smoke test with the same 18 checks before its source
+ships (stage 2 and 3 gates, §10).
+
+## 4. What leaves the user's device, and the command contract
+
+### 4.1 Egress: what actually leaves the device
+
+While a run controls the user's browser, the following can leave the
+device. It goes to the relay, then the Cascade server, then the model
+provider the user chose:
+
+| Data | When | Goes to |
+|---|---|---|
+| Page URLs and titles | every navigation | relay, server, model |
+| Page text and the accessibility tree (page views) | each observation | relay, server, model |
+| Form field values | only as the run's own typed input; page views redact values typed into fields | relay, server |
+| Screenshots | when `browserVision` is `image` or `marked` | relay, server, model |
+| Results of script the run evaluates (`evaluate`) | each call; can include anything page script can read, e.g. non-HttpOnly cookies, `localStorage` | relay, server, model |
+| Console messages and errors | while attached | relay, server |
+| Downloads | never: download redirection is not applied (§3.3) | — |
+
+Settings and the consent prompt show this list in plain words. The privacy
+profile (Strict / Controlled abstraction / Explicit approval) applies at each
+egress point:
+
+| Profile | Rule |
+|---|---|
+| Strict | No cloud runs on the user's browser. Only D (run on desktop) is offered. |
+| Controlled abstraction | Screenshots off. `evaluate` results are size-capped and redacted for token-like strings. |
+| Explicit approval | Each screenshot and each `evaluate` returning more than a size cap asks the user. |
+
+### 4.2 Command contract (enforced on the user's device)
+
+The policy runs **on the device**, in the desktop app, CLI or extension,
+before a command reaches the browser. A compromised or buggy server
+therefore cannot widen it. The server runs the same check as defence in
+depth.
+
+- **Allowlist by domain and method**, starting from the 25 methods
+  Playwright used in §3.3 plus those the page-view and vision code need.
+  Anything not on the list is refused and logged.
+- **Always denied:**
+  - cookie and storage reads and writes (`Network.getCookies`,
+    `getAllCookies`, `setCookie(s)`, `deleteCookies`,
+    `clearBrowserCookies`; `Storage.getCookies`, `setCookies`,
+    `clearCookies`, `clearDataForOrigin`)
+  - `Target.createTarget`, `closeTarget`, `attachToTarget`,
+    `createBrowserContext`
+  - `Page.setDownloadBehavior` (`Browser.setDownloadBehavior` is answered
+    `{}` and never applied)
+  - `SystemInfo.*`
+  - `Fetch.*` and `Network.setRequestInterception`. They're unused, and
+    they're the way to read or rewrite authenticated traffic.
+- **Origin scope:**
+  - `Page.navigate` and link navigation are allowed only to origins in the
+    run's consented site list.
+  - On a redirect off the list, the device detaches before running the next
+    command.
+- **Honest limit:** page script reachable through `Runtime.evaluate` can read
+  what the page can (§3.3, finding 2). The contract limits **which pages** a
+  run can be on. It cannot limit what is readable on a page it is allowed
+  to be on.
+
+## 5. Ownership, lease and stop
+
+**Capabilities:**
+- Per user, per device, per run.
+- A device registers with the user's account. It is the existing native
+  sign-in for desktop and CLI, and a short-lived token minted from the web
+  session for the extension.
+- A run receives a **run capability**: a signed, single-use token naming
+  user, device, run id and expiry (≤ the run's budget time, max 30 min,
+  renewable while the run is active).
+
+**Replay protection:**
+- Capabilities carry a nonce.
+- The server keeps a used-nonce set until expiry.
+- Relay frames carry a monotonically increasing sequence number per
+  connection.
+
+**Lease:**
+- A device grants **one exclusive lease** per browser tab.
+- A second run, or a second connection for the same run, is refused while a
+  lease is held.
+- **Human takeover:** when the user interacts with the tab or presses Take
+  over, the device suspends the lease. Commands are refused until the user
+  hands back control.
+
+**Fail closed.** Each of the following revokes the lease, rejects in-flight
+commands and detaches the debugger, all on the device:
+- Stop
+- logout
+- token rotation
+- device unregistered
+- network drop
+- tab closed
+- run ended
+- capability expired
+
+**Routing:**
+- The server maps a run capability to exactly one device connection.
+- There is no lookup by user alone, so user A's run cannot be routed to user
+  B's device.
+- Reconnects re-present the capability. A revoked or expired capability is
+  never re-admitted.
+
+## 6. Settings
 
 `Settings → Browser`:
 
-- Source: `None` (default) · `Desktop app` · `CLI` · `Extension` · `My CDP endpoint` · `Run on my desktop`
-- Per source: connection status, last seen, and the allowlist.
-- `My CDP endpoint`: URL and token, stored encrypted. Never logged.
+- **Source:** `None` (default) · `Desktop app` · `CLI` · `Extension` · `My CDP endpoint` · `Run on my desktop`
+- **Per source:** connection status, last seen, the site allowlist, and the
+  egress list from §4.1 in plain words.
+- **`My CDP endpoint`:** URL and token, stored encrypted, never logged.
 
-## 6. The hosted browser
+## 7. The hosted browser
 
-- cascadeai.in stops attaching an operator-provided browser. The Steel
-  service and `REMOTE_BROWSER_*` variables on the hosted deployment can then
-  be removed.
+- cascadeai.in stops attaching an operator-provided browser.
 - **Decided (Q1):** the `REMOTE_BROWSER_*` operator path is removed
   entirely, self-host included. Every deployment uses per-user browser
   settings (sources A–D).
-- The daily browser-session allowance exists to ration billed hosted
+- The daily browser-session allowance existed to ration billed hosted
   sessions. With BYO there is nothing to bill, so it goes.
 
-## 7. Routing and spend data for users
+## 8. Routing and spend data for users
 
 - **Source of truth:** the per-run spend ledger from #305 (`spend_ledger`,
   `spend_ledger_models`) plus each reply's stored /why report.
@@ -111,44 +282,111 @@ The new pieces are the **relay** and the **per-user browser setting**.
   - cost, tokens and time
   - each agent's final status
   - failovers
-- **Hold back until outcomes are truthful:** learned success rates and
-  task-type labels. The router currently records one label per run and
-  credits it to every model (council proposal: truthful outcomes).
+- **Hold back until truthful outcomes exist:**
+  - learned success rates
+  - task-type labels
+  - any success-rate comparison between models
+
+  Spend accounting does not depend on that work. Performance claims do.
 - **You:** computed from the user's own rows.
-- **Everyone:** aggregated across users, shown only for cells with at least
-  20 outcomes from at least 5 users.
+- **Everyone:** aggregated across users, with these protections:
+  - **Minimum cell:** at least 20 outcomes from at least 5 users.
+  - **Complementary suppression:** if hiding one cell lets a total minus the
+    visible cells reveal it, a second cell is hidden too.
+  - **Fixed cuts only:** no free-form filters or arbitrary time windows. The
+    windows are 7, 30 and 90 days, ending at the last full UTC day. That
+    stops differencing across overlapping windows.
+  - **Provenance kept separate:** synced runs, opt-in desktop/CLI aggregates
+    and cloud runs are stored and counted separately. Opt-in uploads are
+    rate-limited per device and checked against plausible ranges. A device
+    whose uploads fail the checks is excluded and flagged for review.
 - **Desktop / CLI:**
-  - Their personal tabs are computed locally from local data, with no
-    upload.
-  - Runs a user syncs to their account already arrive through
-    `cloudRunReport` (#305).
+  - Their personal tabs are computed locally, with no upload.
+  - Runs a user syncs to their account arrive through `cloudRunReport`
+    (#305).
   - **Decided (Q2):** unsynced desktop/CLI runs contribute aggregates to
     Everyone only if the user opts in. Off by default.
-- Each ledger row gains `surface: cloud | desktop | cli` so the tabs can
-  split.
+- Each ledger row gains `surface: cloud | desktop | cli`.
 
-## 8. Acceptance criteria
+## 9. Acceptance criteria
 
-- A1. A cloud run uses the user's desktop browser over the relay: navigate,
-  read, click, type, page views. The stop button ends control within 1 s.
-- A2. The same through the CLI relay with a dedicated profile.
-- B1. The extension attaches only after the user approves the run. It shows
-  the indicator, and detaches on stop or when the run ends.
-- All: a run cannot reach another user's relay (test). No relay port listens
-  on a non-loopback interface (test). Settings default is `None`.
-- R1. The All / Cloud / Desktop / CLI tabs match ledger totals exactly.
-  "Everyone" cells under the threshold are hidden (test).
+**Relay and adapter**
+- **R-A1.** The 18 checks in `poc.mjs` pass against:
+  - the desktop app's `webContents.debugger` adapter
+  - the Chrome MV3 extension's `chrome.debugger` adapter, including a
+    service-worker suspend and restart mid-run
+  - the CLI's browser endpoint
+- **R-A2.** History navigation uses `waitUntil: 'commit'`. A back/forward
+  test passes with the back-forward cache enabled.
 
-## 9. Open questions
+**Policy and egress**
+- **P1.** Every always-denied method returns an error and never reaches the
+  browser (test per method).
+- **P2.** Navigation to an origin outside the consented list is refused. A
+  redirect off-list detaches before the next command (test).
+- **P3.** Under Strict, no cloud run can attach (test). Under Controlled
+  abstraction, screenshots are off (test).
+
+**Ownership**
+- **O1.** A run capability for user A can never reach user B's device (test
+  with two users, two devices).
+- **O2.** A second run is refused while a lease is held. Human takeover
+  suspends the lease (test).
+- **O3.** Replayed or expired capabilities are refused, including across
+  reconnects (test).
+
+**Stop**
+- **S1.** Each of Stop, logout, token rotation, network drop, tab close, run
+  end and expiry:
+  - rejects in-flight commands within 1 s
+  - detaches the debugger
+  - leaves the user's tab open (test per trigger)
+
+**Desktop**
+- **E1.** A manual Electron 41 smoke test: app start, the built-in browser,
+  terminal (`node-pty`), local history (`better-sqlite3`), and
+  sign-in/sync.
+
+**Routing data**
+- **D1.** The All / Cloud / Desktop / CLI tabs match ledger totals exactly.
+- **D2.** Everyone cells under threshold are hidden, and so are their
+  complements (test).
+- **D3.** No arbitrary windows (test).
+
+## 10. Delivery: stages and flags
+
+Each stage is separate commits with its own tests, behind a flag that is
+off by default:
+
+| Stage | Contents | Flag | Gate |
+|---|---|---|---|
+| 0 | Dependency updates, #305 (done) | — | CI green; E1 manual smoke test |
+| 1 | Threat model, command contract and lease library, with tests; history `commit` fix | — | P1, O1–O3 at library level |
+| 2 | A: CLI relay, then desktop adapter | `browser.relay.cli`, `browser.relay.desktop` | R-A1 (CLI, desktop), S1, P2, P3 |
+| 3 | B: Chrome extension | `browser.relay.extension` | R-A1 (extension), S1 incl. service-worker restart |
+| 4 | Remove hosted browser and `REMOTE_BROWSER_*`; drop the allowance | — | no remaining references; self-host docs updated |
+| 5 | `surface` on ledger rows; You tabs; opt-in Everyone with protections | `insights.everyone` | D1–D3 |
+| 6 | C and D | per source | R-A1 against each |
+
+Independent review happens per stage, from the diff and tests rather than
+the implementer's summary. If the combined PR grows too large to review
+well, stages 2+ can be split into stacked PRs. That's the maintainer's
+call.
+
+## 11. Open questions
 
 Decided by the maintainer (21 Oct 2026):
 
 - **Q1.** Remove `REMOTE_BROWSER_*` entirely, self-host included.
 - **Q2.** Desktop/CLI aggregates to Everyone: opt-in.
 - **Q3.** Desktop source: the built-in `WebContentsView`, through the
-  shared tab-level CDP adapter.
+  shared tab-level adapter.
 
 Still open:
 
-- **Q4.** Extension scope: Chrome only first, or Chromium-based browsers in
-  general from the start?
+- **Q4.** Extension scope. Both reviewers recommend **Chrome first** behind
+  a browser-agnostic interface, claiming other Chromium browsers only after
+  their debugger permission, service-worker lifecycle and attach/detach
+  behaviour are tested. Maintainer to confirm.
+- **Q5.** Should the egress list in §4.1 be shown in the consent prompt
+  every time, or only on first use per site?
