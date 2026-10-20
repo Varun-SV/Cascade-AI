@@ -85,8 +85,11 @@ and session rules below), not as one transport-specific implementation.
 
 `docs/design/poc/tab-cdp-relay/poc.mjs` connects to **one page target's**
 WebSocket, which stands in for a tab-scoped debugger. It presents that tab
-to Playwright 1.64.1 as a browser through a relay and drives it. It applies
-the command contract from §4.2. **18 of 18 checks pass.**
+to Playwright 1.64.1 as a browser through a relay and drives it. **18 of 18
+checks pass.** It is a protocol prototype. Its policy is only a deny set, so
+it is **not** evidence for the security contract. That is
+`poc-egress-and-lease.mjs` (§4.2, §4.3), which uses a default-deny
+allowlist.
 
 **Browser-level methods Playwright sent, and how the relay answers:**
 
@@ -94,7 +97,7 @@ the command contract from §4.2. **18 of 18 checks pass.**
 |---|---|
 | `Browser.getVersion` | fixed version object |
 | `Target.setAutoAttach` (no session) | `{}`, then emits `Target.attachedToTarget` for the one tab under a synthetic session id |
-| `Browser.setDownloadBehavior` | `{}`, **not applied**: the agent never redirects the user's downloads |
+| `Browser.setDownloadBehavior` | `{}`, **not applied**: the agent cannot configure downloads. Preventing downloads is the policy's job (§4.1) |
 | `Target.getTargetInfo` | the tab's target info |
 
 Everything else carries a session id:
@@ -168,7 +171,24 @@ provider the user chose:
 | Screenshots | when `browserVision` is `image` or `marked` | relay, server, model |
 | Results of script the run evaluates (`evaluate`) | each call; can include anything page script can read, e.g. non-HttpOnly cookies, `localStorage` | relay, server, model |
 | Console messages and errors | while attached | relay, server |
-| Downloads | never: download redirection is not applied (§3.3) | — |
+| Downloads | **prevented** while a run holds the lease: no file is written to the user's disk, and no bytes go to the cloud (see below) | — |
+
+**Downloads during a lease are prevented, not just unrelayed.** Covered:
+link, attachment, `blob:`/`download` attribute and script-triggered
+downloads, enforced on the device:
+
+| Source | Mechanism |
+|---|---|
+| CLI | the policy's own browser-level session sets `Browser.setDownloadBehavior: deny` for the lease and restores it after |
+| Desktop | the built-in browser's session cancels every `will-download` while leased |
+| Extension | `chrome.downloads.onCreated` cancels and erases downloads that start while a lease is held, with a notice |
+
+The extension cannot always tie a download to a tab, so while a lease is
+held it may also cancel a download the user starts in another tab. The
+notice says so. `poc-egress-and-lease.mjs` checks the CLI path: with
+downloads allowed, an attachment writes a file (the control). During the
+lease, an attachment, a `blob:` link and a script-made `download` link
+write **0 files**.
 
 **Where the user sees it (decided, Q5):**
 - **Consent prompt:** shows this full list in plain words the first time a
@@ -200,9 +220,28 @@ before a command reaches the browser. A compromised or buggy server
 therefore cannot widen it. The server runs the same check as defence in
 depth.
 
-- **Allowlist by domain and method**, starting from the 25 methods
-  Playwright used in §3.3 plus those the page-view and vision code need.
-  Anything not on the list is refused and logged.
+- **Default-deny allowlist of exact methods** (never wildcards such as
+  `Emulation.*`):
+  - It's an explicit set reviewed with the code. It starts from the methods
+    Playwright used in §3.3 plus those the page-view and vision code need.
+  - A command is forwarded only if its method is on the list **and** its
+    session id is the tab's or a nested session the tab announced
+    (frames, workers).
+  - Anything else is refused and logged, at the root or in a nested
+    session.
+  - Parameters are validated where they carry side effects:
+    `Page.navigate` URLs go through §4.3, and `Input.*` must target the
+    leased tab.
+  - Changing the list is a reviewed policy change with a version number.
+  - Method names alone don't express side effects. `Runtime.evaluate`
+    stays privileged page script by design (§4.3, honest limit).
+  - `poc-egress-and-lease.mjs` checks all of this (27/27):
+    - an allowlisted method works on a nested cross-site iframe session
+    - `Emulation.setGeolocationOverride` through that nested session is
+      refused
+    - `Emulation.setUserAgentOverride` is refused
+    - a fabricated session id is refused
+    - normal Playwright use hit no allowlist refusals
 - **Always denied:**
   - cookie and storage reads and writes (`Network.getCookies`,
     `getAllCookies`, `setCookie(s)`, `deleteCookies`,
@@ -366,9 +405,24 @@ commands and detaches the debugger, all on the device:
   - **Minimum cell:** at least 20 outcomes from at least 5 users.
   - **Complementary suppression:** if hiding one cell lets a total minus the
     visible cells reveal it, a second cell is hidden too.
-  - **Fixed cuts only:** no free-form filters or arbitrary time windows. The
-    windows are 7, 30 and 90 days, ending at the last full UTC day. That
-    stops differencing across overlapping windows.
+  - **Immutable, non-overlapping releases.** Rolling windows don't stop
+    differencing: windows released on successive days overlap, and their
+    difference can reveal one boundary day. So Everyone is published only
+    as closed calendar buckets (ISO weeks; months built only from published
+    weeks):
+    - each bucket is released once, after it closes, and **never revised**
+    - late data for a closed bucket is dropped from Everyone, not
+      back-filled
+    - there are no rolling windows and no free-form filters
+  - **Suppression across every released cut.** A cell is suppressed when it
+    is under the minimum, or when it could be derived by subtraction from
+    any combination of released cells: across dimensions and across
+    buckets. That includes totals and any longer-range figure, which are
+    built only from released, unsuppressed cells.
+  - **Later option:** a formal privacy budget with calibrated noise, if
+    Everyone ever needs finer cuts. Not in v1.
+  - **Gate:** this is a blocker for publishing Everyone, not for the private
+    You tabs.
   - **Provenance kept separate:** synced runs, opt-in desktop/CLI aggregates
     and cloud runs are stored and counted separately. Opt-in uploads are
     rate-limited per device and checked against plausible ranges. A device
@@ -384,17 +438,38 @@ commands and detaches the debugger, all on the device:
 ## 9. Acceptance criteria
 
 **Relay and adapter**
-- **R-A1.** The 18 checks in `poc.mjs` pass against:
+- **R-A1.** The 18 checks in `poc.mjs` pass on an **uninterrupted** session
+  against:
   - the desktop app's `webContents.debugger` adapter
-  - the Chrome MV3 extension's `chrome.debugger` adapter, including a
-    service-worker suspend and restart mid-run
+  - the Chrome MV3 extension's `chrome.debugger` adapter
   - the CLI's browser endpoint
+- **R-A3 (extension lifecycle, fail closed).** Covers service-worker
+  suspension or a `chrome.debugger` detach mid-run:
+  - the device detaches
+  - in-flight operations reject
+  - later same-run operations reject
+  - the lease and capability are invalidated
+  - there is **no automatic reattach**
+  - control returns only after a new user approval
+
+  Cascade receives a clear, recoverable error. This is a separate test from
+  R-A1.
+- **R-A4.** Attaching to protected Chrome pages (`chrome://`, the Web Store)
+  is refused cleanly, with a message to the user and no partial lease.
 - **R-A2.** History navigation uses `waitUntil: 'commit'`. A back/forward
   test passes with the back-forward cache enabled.
 
 **Policy and egress**
-- **P1.** Every always-denied method returns an error and never reaches the
-  browser (test per method).
+- **P1.** Default deny:
+  - every always-denied method, and every method **not** on the allowlist,
+    is refused and never reaches the browser
+  - this holds at the root and through nested sessions
+  - commands on unknown session ids are refused
+  - `Emulation.setGeolocationOverride` and `setUserAgentOverride` are
+    refused by name (tests)
+- **P4.** No download writes a file while a lease is held: link,
+  attachment, `blob:` and script-triggered. There's a control test proving a
+  download is detectable when allowed. Run on each source.
 - **P2.** No request reaches a non-consented origin for each of: agent
   navigation, link click, script navigation, form submission, server
   redirect, and iframe. The test asserts the destination server saw 0
@@ -443,7 +518,10 @@ commands and detaches the debugger, all on the device:
 - **D1.** The All / Cloud / Desktop / CLI tabs match ledger totals exactly.
 - **D2.** Everyone cells under threshold are hidden, and so are their
   complements (test).
-- **D3.** No arbitrary windows (test).
+- **D3.** Releases are immutable, non-overlapping buckets (test).
+- **D4.** A differencing attack fails. The test queries the same metrics as
+  published on successive days and across every released cut, and cannot
+  recover a suppressed small cohort.
 
 ## 10. Delivery: stages and flags
 

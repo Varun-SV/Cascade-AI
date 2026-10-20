@@ -84,7 +84,8 @@ async function launchChromium(mapRules) {
     proc.on('exit', (code) => reject(new Error(`chromium exited ${code}: ${buf.slice(-400)}`)));
   });
   const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-  return { proc, tab: list.find((t) => t.type === 'page') };
+  const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+  return { proc, tab: list.find((t) => t.type === 'page'), browserWs: version.webSocketDebuggerUrl };
 }
 
 // A tiny CDP client for the policy's own session.
@@ -148,13 +149,36 @@ async function startEgressPolicy(tabWsUrl, consentedOrigins) {
 
 // ── 2. Relay with single-use capabilities and an exclusive lease ────────────
 
-const DENY_PREFIXES = ['Fetch.', 'Storage.', 'SystemInfo.'];
-const DENY = new Set([
+// Default deny. A session-level command is forwarded only if its exact
+// method is on this list AND its session id is one the relay has seen
+// attached (the tab, or a nested frame/worker session the tab announced).
+// Seeded from the 25 methods Playwright 1.64.1 used in poc.mjs, plus the
+// ones these flows need. Changing it is a reviewable policy change.
+const ALLOW = new Set([
+  'DOM.getContentQuads', 'DOM.scrollIntoViewIfNeeded', 'DOM.describeNode', 'DOM.resolveNode',
+  'Emulation.setEmulatedMedia', 'Emulation.setFocusEmulationEnabled',
+  'Input.dispatchMouseEvent', 'Input.dispatchKeyEvent', 'Input.insertText',
+  'Inspector.enable', 'Log.enable', 'Network.enable',
+  'Page.addScriptToEvaluateOnNewDocument', 'Page.captureScreenshot', 'Page.createIsolatedWorld', 'Page.enable',
+  'Page.getFrameTree', 'Page.getLayoutMetrics', 'Page.getNavigationHistory', 'Page.navigate',
+  'Page.navigateToHistoryEntry', 'Page.setLifecycleEventsEnabled',
+  'Runtime.callFunctionOn', 'Runtime.enable', 'Runtime.evaluate', 'Runtime.releaseObject',
+  'Runtime.runIfWaitingForDebugger', 'Runtime.getProperties', 'Target.setAutoAttach',
+]);
+// Denied whatever the allowlist says (belt and braces against a bad edit).
+const ALWAYS_DENY_PREFIXES = ['Fetch.', 'Storage.', 'SystemInfo.', 'Browser.'];
+const ALWAYS_DENY = new Set([
   'Network.getAllCookies', 'Network.getCookies', 'Network.setCookie', 'Network.setCookies', 'Network.deleteCookies',
   'Network.clearBrowserCookies', 'Network.setRequestInterception', 'Page.setDownloadBehavior',
   'Target.createTarget', 'Target.closeTarget', 'Target.attachToTarget', 'Target.createBrowserContext',
 ]);
-const denied = (m) => DENY.has(m) || DENY_PREFIXES.some((p) => m.startsWith(p));
+const policyRefusal = (method, sessionId, knownSessions) => {
+  if (ALWAYS_DENY.has(method) || ALWAYS_DENY_PREFIXES.some((p) => method.startsWith(p))) return `Denied by Cascade relay policy: ${method}`;
+  if (!knownSessions.has(sessionId)) return `Denied by Cascade relay policy: unknown session ${sessionId}`;
+  if (!ALLOW.has(method)) return `Denied by Cascade relay policy: ${method} is not on the allowlist`;
+  return null;
+};
+const allowlistMisses = new Set();
 
 function createCapabilityStore() {
   const caps = new Map(); // token -> { runId, state: 'fresh'|'used'|'burned', expiresAt }
@@ -207,6 +231,7 @@ function startRelay(tabWsUrl, caps) {
     const reply = (id, sessionId, body) => client.send(JSON.stringify({ id, ...(sessionId ? { sessionId } : {}), ...body }));
     const emit = (method, params, sessionId) => client.send(JSON.stringify({ method, params, ...(sessionId ? { sessionId } : {}) }));
     let targetInfo = null;
+    const knownSessions = new Set([TAB_SESSION]);
 
     // Fail closed: any disconnect ends the lease and burns the capability.
     const end = () => {
@@ -218,6 +243,8 @@ function startRelay(tabWsUrl, caps) {
     };
     tab.on('close', end);
     client.on('close', end);
+    tab.on('error', end);
+    client.on('error', end);
 
     tab.on('message', (raw) => {
       const msg = JSON.parse(raw);
@@ -227,14 +254,24 @@ function startRelay(tabWsUrl, caps) {
         pending.delete(msg.id);
         if (p.internal) return p.internal(msg);
         reply(p.clientId, p.sessionId, msg.error ? { error: msg.error } : { result: msg.result });
-      } else emit(msg.method, msg.params, msg.sessionId ?? TAB_SESSION);
+      } else {
+        if (msg.method === 'Target.attachedToTarget') knownSessions.add(msg.params.sessionId);
+        if (msg.method === 'Target.detachedFromTarget') knownSessions.delete(msg.params.sessionId);
+        emit(msg.method, msg.params, msg.sessionId ?? TAB_SESSION);
+      }
     });
 
     client.on('message', (raw) => {
       // Fencing: a socket from an older lease generation is never served.
       if (state.lease?.generation !== generation) return;
       const { id, method, params = {}, sessionId } = JSON.parse(raw);
-      if (denied(method)) return reply(id, sessionId, { error: { code: -32000, message: `Denied by Cascade relay policy: ${method}` } });
+      if (sessionId) {
+        const refusal = policyRefusal(method, sessionId, knownSessions);
+        if (refusal) {
+          if (refusal.includes('not on the allowlist')) allowlistMisses.add(method);
+          return reply(id, sessionId, { error: { code: -32000, message: refusal } });
+        }
+      }
       if (!sessionId) {
         switch (method) {
           case 'Browser.getVersion': return reply(id, null, { result: { protocolVersion: '1.3', product: 'Chrome/Cascade-Relay', revision: '', userAgent: 'Cascade-Relay', jsVersion: '' } });
@@ -288,12 +325,18 @@ const allowed = await countingServer('allowed.test', {
   '/two': html('<title>allowed two</title>two'),
   '/redirect': (req, res) => { res.statusCode = 302; res.setHeader('location', 'http://offlist.test/'); res.end(); },
   '/framer': html('<title>framer</title><iframe src="http://offlist.test/"></iframe>'),
+  '/xframe': html('<title>xframe</title><iframe src="http://allowed2.test/two"></iframe>'),
+  '/file': (req, res) => { res.setHeader('content-type', 'application/octet-stream'); res.setHeader('content-disposition', 'attachment; filename="report.bin"'); res.end('secret bytes'); },
+  '/dl': html(`<title>downloads</title>
+    <a id="attach" href="/file">attachment</a>
+    <a id="blob" download="note.txt" href="#">blob</a>
+    <script>document.querySelector('#blob').href = URL.createObjectURL(new Blob(['local note']));</script>`),
 });
 
-const rules = `MAP allowed.test 127.0.0.1:${allowed.port}, MAP offlist.test 127.0.0.1:${offlist.port}`;
-const { proc, tab } = await launchChromium(rules);
+const rules = `MAP allowed.test 127.0.0.1:${allowed.port}, MAP allowed2.test 127.0.0.1:${allowed.port}, MAP offlist.test 127.0.0.1:${offlist.port}`;
+const { proc, tab, browserWs } = await launchChromium(rules);
 const ALLOWED = 'http://allowed.test';
-const policy = await startEgressPolicy(tab.webSocketDebuggerUrl, new Set([ALLOWED]));
+const policy = await startEgressPolicy(tab.webSocketDebuggerUrl, new Set([ALLOWED, 'http://allowed2.test']));
 const caps = createCapabilityStore();
 const relay = await startRelay(tab.webSocketDebuggerUrl, caps);
 console.log(`Playwright ${require('playwright-core/package.json').version}\n`);
@@ -356,6 +399,29 @@ try {
   await page.goto(`${ALLOWED}/two`);
   check('navigation within the consented origin still works', (await page.title()) === 'allowed two');
 
+  // ── Downloads (CLI path: the policy's own BROWSER-level session)
+  {
+    const dlDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cdp-poc2-dl-'));
+    const files = () => fs.readdirSync(dlDir).filter((f) => !f.endsWith('.crdownload'));
+    const browserPolicy = cdpClient(browserWs);
+    await browserPolicy.ready;
+    // Control: with downloads allowed, the test can see a file appear.
+    await browserPolicy.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: dlDir });
+    await page.goto(`${ALLOWED}/dl`);
+    await page.click('#attach');
+    for (let i = 0; i < 30 && files().length === 0; i++) await sleep(100);
+    check('control: an attachment download writes a file when allowed', files().length === 1, files().join(', '));
+    // Policy during a lease: deny.
+    await browserPolicy.send('Browser.setDownloadBehavior', { behavior: 'deny' });
+    const before = files().length;
+    await page.click('#attach');
+    await page.click('#blob');
+    await page.evaluate(() => { const a = document.createElement('a'); a.href = '/file'; a.download = 'x.bin'; document.body.append(a); a.click(); });
+    await sleep(1500);
+    check('downloads during a lease write no file (link, blob, script)', files().length === before, `${files().length - before} new file(s)`);
+    browserPolicy.close();
+  }
+
   // ── Fail closed, no resume (model (a))
   relay.state.lease.tab.close();
   await sleep(300);
@@ -371,16 +437,44 @@ try {
   await browser2.close();
   await sleep(200);
 
-  // The agent cannot see or switch off the policy's interception.
+  // Raw protocol client: nested sessions, unseen methods, and the policy's
+  // own interception.
   {
     const raw = new WebSocket(relay.endpoint(caps.approveRun('run-4')));
-    const reply = await new Promise((resolve) => {
-      raw.on('open', () => raw.send(JSON.stringify({ id: 1, method: 'Fetch.disable', params: {}, sessionId: TAB_SESSION })));
-      raw.on('message', (m) => { const msg = JSON.parse(m); if (msg.id === 1) resolve(msg.error?.message ?? 'allowed'); });
-      setTimeout(() => resolve('timeout'), 3000);
+    let nextId = 1;
+    const waiters = new Map();
+    let nested = null;
+    raw.on('message', (m) => {
+      const msg = JSON.parse(m);
+      if (msg.id && waiters.has(msg.id)) { waiters.get(msg.id)(msg); waiters.delete(msg.id); }
+      if (msg.method === 'Target.attachedToTarget' && msg.sessionId === TAB_SESSION && msg.params.targetInfo.type === 'iframe') nested = msg.params.sessionId;
     });
+    await new Promise((r) => raw.on('open', r));
+    const call = (method, params = {}, sessionId) => new Promise((resolve) => {
+      const id = nextId++;
+      waiters.set(id, (msg) => resolve(msg.error ? `error: ${msg.error.message}` : msg.result));
+      raw.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+      setTimeout(() => resolve('timeout'), 5000);
+    });
+    await call('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
+    await sleep(200);
+    await call('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, TAB_SESSION);
+    await call('Page.enable', {}, TAB_SESSION);
+    await call('Page.navigate', { url: `${ALLOWED}/xframe` }, TAB_SESSION);
+    for (let i = 0; i < 40 && !nested; i++) await sleep(100);
+    check('a cross-site consented iframe arrives as a nested session', !!nested, nested ?? 'none');
+
+    const ok = await call('Runtime.evaluate', { expression: '6*7', returnByValue: true }, nested);
+    check('allowlisted method works on the nested session', ok?.result?.value === 42, JSON.stringify(ok).slice(0, 80));
+    const geo = await call('Emulation.setGeolocationOverride', { latitude: 1, longitude: 1, accuracy: 1 }, nested);
+    check('P1: unseen method through a NESTED session is refused', String(geo).includes('not on the allowlist'), String(geo));
+    const ua = await call('Emulation.setUserAgentOverride', { userAgent: 'spoof' }, TAB_SESSION);
+    check('P1: Emulation.setUserAgentOverride is refused', String(ua).includes('not on the allowlist'), String(ua));
+    const madeUp = await call('Runtime.evaluate', { expression: '1' }, 'fabricated-session');
+    check('P1: a command on an unknown session id is refused', String(madeUp).includes('unknown session'), String(madeUp));
+    const fd = await call('Fetch.disable', {}, TAB_SESSION);
+    check('the agent cannot turn the policy off (Fetch.disable denied)', String(fd).includes('Denied'), String(fd));
     raw.close();
-    check('the agent cannot turn the policy off (Fetch.disable denied)', reply.includes('Denied'), reply);
     await sleep(200);
   }
 
@@ -398,6 +492,7 @@ try {
 
 console.log('\nPolicy decisions (blocked):');
 for (const d of policy.decisions.filter((x) => x.verdict === 'block')) console.log(`  ${d.resourceType.padEnd(9)} ${d.url} — ${d.reason}`);
+console.log(`Methods refused as not allowlisted (expected: only the two Emulation probes): ${[...allowlistMisses].join(', ') || 'none'}`);
 const failed = results.filter((r) => !r.ok).length;
 console.log(`\n${results.length - failed}/${results.length} checks passed`);
 process.exit(failed ? 1 : 0);
