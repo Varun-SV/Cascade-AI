@@ -371,7 +371,9 @@ export function describePage(input: {
   const above = entries.filter((e) => e.where === 'above');
   const side = entries.filter((e) => e.where === 'side');
 
-  const lines = viewHeader(input, typedAnywhere);
+  // A search's words are the page's results and stay in them, but the title
+  // and address need not repeat a query that may name a person or a project.
+  const lines = viewHeader(input, [...typedAnywhere, ...textboxValues(roots, SEARCH_FIELDS)]);
   // Room for the headings and the "Not listed" line, which are short.
   let room = VIEW_MAX_CHARS - lines.join('\n').length - 300;
   const fit = (list: Entry[], limit: number): Shown[] => {
@@ -853,15 +855,21 @@ function overlap(text: string, value: string): number {
   return k;
 }
 
+/** The fields whose typed text is hidden wherever a control repeats it. */
+const ORDINARY_FIELDS = new Set(['textbox', 'spinbutton', 'combobox']);
+/** A search box: its words stay in the results, but not in the title or address. */
+const SEARCH_FIELDS = new Set(['searchbox']);
+
 /**
- * What is typed into the page's ordinary fields, long enough to hide by
- * itself. Search queries remain visible in results. A combobox's typed text
- * is private too; typedParts skips native option choices and listbox options.
+ * What is typed into the page's ordinary fields (or, given `roles`, its
+ * search boxes), long enough to hide by itself. Search queries remain visible
+ * in results. A combobox's typed text is private too; typedParts skips native
+ * option choices and listbox options.
  */
-function textboxValues(roots: SnapshotNode[]): string[] {
+function textboxValues(roots: SnapshotNode[], roles: ReadonlySet<string> = ORDINARY_FIELDS): string[] {
   const found = new Set<string>();
   const walk = (n: SnapshotNode): void => {
-    if (n.role === 'textbox' || n.role === 'spinbutton' || n.role === 'combobox') {
+    if (roles.has(n.role)) {
       for (const v of [fieldValue(n), ...typedParts(n)]) {
         const value = v.replace(/\s+/g, ' ').trim();
         if (value.length > 0) found.add(value);

@@ -573,7 +573,8 @@ describe('describePage', () => {
     })!;
     const header = v.text.split('\n').find((l) => l.startsWith('Page:'))!;
     expect(header.toLowerCase()).not.toContain('alice');
-    expect(header).toBe('Page: Editing ••• — Mail — https://mail.example/compose?to=•••&cc=•••&q=garden+chairs');
+    // The search box's query goes from the address too; see below.
+    expect(header).toBe('Page: Editing ••• — Mail — https://mail.example/compose?to=•••&cc=•••&q=•••');
   });
 
   it('shows the address without the name and password a browser keeps in it', () => {
@@ -581,6 +582,33 @@ describe('describePage', () => {
     const v = describePage({ snapshot, url: 'https://alice:secret@mail.example/inbox?x=1', title: 'Inbox', viewport: SCREEN, number: 1 })!;
     expect(v.text).toContain('Page: Inbox — https://mail.example/inbox?x=1');
     expect(v.text).not.toMatch(/alice|secret/);
+  });
+
+  it('keeps a search query out of the title and address, but not out of the results', () => {
+    // A query can name a person or an internal project. The results the page
+    // lists for it are its own text, and the model needs them to go on.
+    const snapshot = [
+      '- main [ref=e1] [box=0,0,1280,800]:',
+      '  - searchbox "Search" [ref=e2] [box=0,0,200,20]: Project Falcon budget',
+      '  - heading "Results for Project Falcon budget" [level=1] [ref=e3] [box=0,30,400,30]',
+      '  - link "Project Falcon budget 2026" [ref=e4] [box=0,70,200,20]',
+    ].join('\n');
+    const query = 'Project Falcon budget';
+    const form = new URLSearchParams({ q: query }).toString();
+    for (const url of [
+      `https://intranet.example/search?q=${encodeURIComponent(query)}&page=2`,
+      `https://intranet.example/search?${form}&page=2`,
+      `https://intranet.example/search?q=${query}&page=2`,
+    ]) {
+      const v = describePage({ snapshot, url, title: `${query} - Intranet search`, viewport: SCREEN, number: 1 })!;
+      const header = v.text.split('\n').find((l) => l.startsWith('Page:'))!;
+      expect(header).not.toMatch(/falcon|budget/i);
+      expect(header).toContain('••• - Intranet search');
+      expect(header).toContain('https://intranet.example/search?q=•••&page=2');
+      expect(v.text).toContain('[e3] heading "Results for Project Falcon budget"');
+      expect(v.text).toContain('[e4] link "Project Falcon budget 2026"');
+      expect(v.text).toContain('[e2] searchbox "Search" (filled, 21 chars)');
+    }
   });
 
   it('keeps a form-encoded typed value out of the address', () => {

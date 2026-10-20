@@ -53,7 +53,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one by its text, never by a value the page hides in it; text the view
   shortened or rewrote still picks the option it came from.
   A page view never shows what is typed into a field, nor that text where
-  the page copies it into its title or address. A page too large to list
+  the page copies it into its title or address — a search box's query
+  included, though the results the page lists for it stay as the page
+  wrote them. A page too large to list
   shows only its site. Only the two newest
   views are sent whole; older ones fold to a line. Page views need
   Playwright 1.60 or later, which Cascade installs; a host that brings an
