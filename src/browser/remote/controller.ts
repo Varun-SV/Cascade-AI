@@ -36,7 +36,7 @@ import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { BrowserLease } from '../lease.js';
-import { describePage, wellFormed, type PageView, type Viewport } from './page-view.js';
+import { describePage, wellFormed, withoutCredentials, type PageView, type Viewport } from './page-view.js';
 import { drawMarks } from './marks.js';
 
 /** Playwright's shapes, named locally so the optional dep stays optional. */
@@ -103,7 +103,7 @@ type ActionElement = {
   click(opts?: { timeout?: number; trial?: boolean }): Promise<void>;
   fill(value: string, opts?: { timeout?: number }): Promise<void>;
   press(key: string, opts?: { timeout?: number }): Promise<void>;
-  hover(opts?: { timeout?: number }): Promise<void>;
+  hover(opts?: { timeout?: number; trial?: boolean }): Promise<void>;
   selectOption(value: string | { label: string }, opts?: { timeout?: number }): Promise<unknown>;
   scrollIntoViewIfNeeded(opts?: { timeout?: number }): Promise<void>;
   innerText(opts?: { timeout?: number }): Promise<string>;
@@ -3418,7 +3418,9 @@ export class RemoteBrowserController {
     let actedOn: string | undefined;
     const where = async (): Promise<{ url: string; title: string; document?: string }> => {
       const current = held.page;
-      return { url: current.url(), title: await current.title().catch(() => ''), ...(actedOn ? { document: actedOn } : {}) };
+      // The address as reported, never with a name and password in it; the
+      // checks above compare the page's own.
+      return { url: withoutCredentials(current.url()), title: await current.title().catch(() => ''), ...(actedOn ? { document: actedOn } : {}) };
     };
 
     // Same rule as the desktop: an action planned against one page must not run
@@ -3529,17 +3531,18 @@ export class RemoteBrowserController {
       // Readiness waits can outlive the approved state: a checkbox can become
       // checked or a field can acquire a user's draft while enabling. Wait on
       // the pinned element without dispatching input, then revalidate the ref.
-      if (action.ref && CHANGES_THE_PAGE.has(action.kind)) {
+      if (action.ref && REVALIDATED.has(action.kind)) {
         if (refRefusal(held, action.ref)) {
           return { ok: false, detail: 'The page changed while this action was being checked, so it was not run. Call observe for a fresh page view.', ...(await where()) };
         }
         if (action.kind === 'click') await stoppable(element!.click({ timeout, trial: true }));
+        if (action.kind === 'hover') await stoppable(element!.hover({ timeout, trial: true }));
         if (action.kind === 'fill' || action.kind === 'select_option') {
           await stoppable(element!.waitForElementState('visible', { timeout }));
           await stoppable(element!.waitForElementState(action.kind === 'fill' ? 'editable' : 'enabled', { timeout }));
         }
       }
-      if (action.ref && CHANGES_THE_PAGE.has(action.kind)) {
+      if (action.ref && REVALIDATED.has(action.kind)) {
         const shown = expectedView!.labels.get(action.ref)!;
         // Playwright resolves a ref to the element it was given for, whatever
         // that element now says. A page that renames a control — "Keep
@@ -3593,6 +3596,26 @@ export class RemoteBrowserController {
           || !(action.ref ? sameRoute(action.expectDocument, page.url()) : samePlace(action.expectDocument, held, page.url())))))) {
         return { ok: false, detail: 'The page changed while this action was being checked, so it was not run. Call observe for a fresh page view.', ...(await where()) };
       }
+      // The ref was waited for and then checked. Sending the input waits for
+      // readiness again, and a long second wait would act on whatever the
+      // control became after the check: a checkbox disabled and re-enabled
+      // already ticked. So it may wait only a moment, and one not ready by then
+      // is not used. Playwright's own hit-target checks still apply.
+      const checked = !!action.ref && REVALIDATED.has(action.kind);
+      const sendTimeout = checked ? Math.min(timeout, DISPATCH_WAIT_MS) : timeout;
+      const send = async (input: () => Promise<unknown>): Promise<BrowserActionOutcome | null> => {
+        try {
+          await stoppable(input());
+          return null;
+        } catch (err) {
+          if (!checked || !(err instanceof Error) || err.name !== 'TimeoutError') throw err;
+          return {
+            ok: false,
+            detail: `${named} stopped being ready to use after it was checked, so it was not used. Call observe for a fresh page view.`,
+            ...(await where()),
+          };
+        }
+      };
       switch (action.kind) {
         case 'navigate': {
           const target = action.url ?? '';
@@ -3600,17 +3623,23 @@ export class RemoteBrowserController {
             return { ok: false, detail: 'Only http and https addresses can be opened.' };
           }
           await stoppable(page.goto(target, { timeout: ACTION_TIMEOUT_MS, waitUntil: 'domcontentloaded' }));
-          return finish({ ok: true, detail: `Opened ${target}`, ...(await where()) }, true);
+          return finish({ ok: true, detail: `Opened ${withoutCredentials(target)}`, ...(await where()) }, true);
         }
         case 'click': {
           const pagesBefore = new Set(page.context().pages());
-          if (actual) await stoppable(actual.click({ timeout }));
+          if (actual) {
+            const refused = await send(() => actual.click({ timeout: sendTimeout }));
+            if (refused) return refused;
+          }
           else await stoppable(page.click(action.selector!, { timeout }));
           await this.followOpenedPage(runId, held, pagesBefore);
           return finish({ ok: true, detail: `Clicked ${named}`, ...(await where()) }, true);
         }
         case 'fill':
-          if (actual) await stoppable(actual.fill(action.value ?? '', { timeout }));
+          if (actual) {
+            const refused = await send(() => actual.fill(action.value ?? '', { timeout: sendTimeout }));
+            if (refused) return refused;
+          }
           else await stoppable(page.fill(action.selector!, action.value ?? '', { timeout }));
           return { ok: true, detail: `Filled ${named}`, ...(await where()) };
         case 'press': {
@@ -3697,12 +3726,15 @@ export class RemoteBrowserController {
               ...(await where()),
             };
           }
-          await stoppable(actual!.selectOption({ label: shown[0]?.label ?? action.value ?? '' }, { timeout }));
+          const refused = await send(() => actual!.selectOption({ label: shown[0]?.label ?? action.value ?? '' }, { timeout: sendTimeout }));
+          if (refused) return refused;
           return { ok: true, detail: `Chose "${action.value}" in ${named}`, ...(await where()) };
         }
-        case 'hover':
-          await stoppable(actual!.hover({ timeout }));
+        case 'hover': {
+          const refused = await send(() => actual!.hover({ timeout: sendTimeout }));
+          if (refused) return refused;
           return finish({ ok: true, detail: `Hovered over ${named}`, ...(await where()) }, false);
+        }
         default:
           return { ok: false, detail: `Unsupported action: ${String(action.kind)}` };
       }
@@ -4033,6 +4065,19 @@ const FRAME_MOVED = (ref: string): string =>
 
 /** Actions on a ref that can set off what its control does. See `perform`. */
 const CHANGES_THE_PAGE = new Set<BrowserAction['kind']>(['click', 'fill', 'press', 'select_option']);
+
+/**
+ * Actions on a ref that are rechecked against the view before they go: those,
+ * and a hover, whose mouse events can open a menu or load another page.
+ */
+const REVALIDATED = new Set<BrowserAction['kind']>([...CHANGES_THE_PAGE, 'hover']);
+
+/**
+ * How long a revalidated ref action may wait to be ready when it is finally
+ * sent. Its readiness was already waited for, then checked; a control that is
+ * not ready again at once has changed since, and is not used.
+ */
+const DISPATCH_WAIT_MS = 500;
 
 /** Hidden native option values affect what choosing a displayed label does. */
 async function bindOptionValues(page: Page, view: PageView): Promise<void> {

@@ -38,9 +38,21 @@ export function pageShows(accepted, text) {
 
 const known = (value) => Number.isFinite(value) && value >= 0 ? value : null;
 
-/** Preserve observed usage, and never attribute a fallback model to the requested one. */
-export function assessRun({ ok = false, usage = {}, stats = {}, decisions = [], error = '', modelInvalid = '' } = {}) {
-  const substitution = modelInvalid || (decisions.some((entry) => entry.kind === 'failover') ? 'Model failover occurred; this run is excluded from the comparison.' : '');
+/** The settings that are meant to show the model a picture. */
+const PICTURED = new Set(['image', 'marked']);
+
+/**
+ * Preserve observed usage, and never attribute a fallback model to the
+ * requested one. Nor a picture setting to a run whose model was sent none: the
+ * router puts text in place of every screenshot a model cannot take (one that
+ * cannot see images, one through a gateway, one priced past the per-image
+ * ceiling), and that run measured the list alone.
+ */
+export function assessRun({ ok = false, usage = {}, stats = {}, decisions = [], error = '', modelInvalid = '', arm = '', shots = { sent: 0, leftOut: 0 } } = {}) {
+  const unpictured = PICTURED.has(arm) && shots.leftOut > 0
+    ? `${shots.leftOut} screenshot${shots.leftOut === 1 ? ' was' : 's were'} left out for this model, so this is not a fair ${arm} run; it is excluded from the comparison.`
+    : '';
+  const substitution = modelInvalid || (decisions.some((entry) => entry.kind === 'failover') ? 'Model failover occurred; this run is excluded from the comparison.' : '') || unpictured;
   const valid = !substitution;
   return {
     valid, ok: valid && ok,
@@ -53,7 +65,7 @@ export function assessRun({ ok = false, usage = {}, stats = {}, decisions = [], 
 
 export function summarise(rows, tasks) {
   const lines = ['# Browser vision test', '',
-    'Runs with model substitution are excluded. Usage means include available recorded usage from failed runs; unavailable values are excluded, and a failed request may have unreported usage.', '',
+    'Runs with model substitution are excluded, as are image and marked runs whose model was sent text in place of screenshots. Usage means include available recorded usage from failed runs; unavailable values are excluded, and a failed request may have unreported usage.', '',
     '| Model | Setting | Valid runs | Done | Steps (mean) | Cost (mean; samples) | Tokens (mean; samples) |',
     '|---|---|---|---|---|---|---|'];
   const groups = new Map();

@@ -73,4 +73,13 @@ describe('browser comparison validity', () => {
     expect(pageShows(['640'], 'Mushroom risotto — ₹640')).toBe(true);
     expect(pageShows(['5'], 'Priya — 15 stars')).toBe(false);
   });
+
+  it('excludes a picture setting whose model was sent text in place of screenshots', () => {
+    expect(assessRun({ ok: true, arm: 'image', shots: { sent: 0, leftOut: 3 } })).toMatchObject({ valid: false, ok: false });
+    expect(assessRun({ ok: true, arm: 'marked', shots: { sent: 2, leftOut: 1 } }).error).toMatch(/not a fair marked run/);
+    expect(assessRun({ ok: true, arm: 'image', shots: { sent: 4, leftOut: 0 } })).toMatchObject({ valid: true, ok: true });
+    // The list settings send no pictures to begin with.
+    expect(assessRun({ ok: true, arm: 'list', shots: { sent: 0, leftOut: 2 } })).toMatchObject({ valid: true, ok: true });
+    expect(assessRun({ ok: true })).toMatchObject({ valid: true });
+  });
 });

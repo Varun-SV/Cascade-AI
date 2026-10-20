@@ -528,7 +528,7 @@ type ViewPlace = { url: string; title: string; viewport: Viewport | undefined; n
  */
 function viewHeader(input: ViewPlace, typed: string[]): string[] {
   const title = clean(scrubber(typed)(input.title), 120);
-  const scrubbed = scrubber(typed.flatMap(addressForms))(input.url);
+  const scrubbed = scrubber(typed.flatMap(addressForms))(withoutCredentials(input.url));
   // A page can encode a value some other way. Decoded, it would still read
   // as typed: then show no more of the address than its site. So too when
   // the address is encoded more deeply than it is decoded here.
@@ -574,6 +574,23 @@ function percentDecoded(url: string): { text: string; exhausted: boolean } {
       UTF8.decode(Uint8Array.from(run.slice(1).split('%'), (hex) => parseInt(hex, 16))));
   }
   return { text, exhausted: /%[0-9a-f]{2}/i.test(text) };
+}
+
+/**
+ * An address without the name and password a browser keeps in it: Chromium
+ * reports `https://alice:secret@example.com/` as the page's URL after opening
+ * it. Anything that does not parse is returned as it was.
+ */
+export function withoutCredentials(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (!parsed.username && !parsed.password) return url;
+    parsed.username = '';
+    parsed.password = '';
+    return parsed.href;
+  } catch {
+    return url;
+  }
 }
 
 /** Of an address, only its site. */

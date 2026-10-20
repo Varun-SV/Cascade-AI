@@ -4707,7 +4707,7 @@ describe('page views and refs', () => {
         click: async (opts?: { trial?: boolean }) => { if (!opts?.trial) await record('click')(); },
         fill: record('fill'),
         press: record('press'),
-        hover: record('hover'),
+        hover: async (opts?: { trial?: boolean }) => { if (!opts?.trial) await record('hover')(); },
         evaluate: async (fn: (node: { nodeName: string }) => boolean) => fn({ nodeName: 'SELECT' }),
         selectOption: async (option: unknown) => {
           page.calls.push(`${selector} selectOption=${typeof option === 'string' ? option : `label:${(option as { label: string }).label}`}`);
@@ -4974,12 +4974,14 @@ describe('page views and refs', () => {
   });
 
   it('checks the name only before an action that can set something off', async () => {
+    // A hover is one: its mouse events can open a menu or load a page.
     const c = controller();
     await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
     page.calls = [];
-    await c.controller({ kind: 'hover', ref: 'e5' }, ctx('run', 'w1'));
     await c.controller({ kind: 'extract_text', ref: 'e14' }, ctx('run', 'w1'));
     expect(page.calls.filter((x) => x.startsWith('snapshot:'))).toEqual([]);
+    await c.controller({ kind: 'hover', ref: 'e5' }, ctx('run', 'w1'));
+    expect(page.calls.filter((x) => x.startsWith('snapshot:'))).not.toEqual([]);
   });
 
   it('refuses a toggle whose state changed after the shown view', async () => {
@@ -5014,6 +5016,57 @@ describe('page views and refs', () => {
     expect(out.ok).toBe(false);
     expect(clicked).toBe(false);
     expect(out.view?.text).toContain('checked');
+  });
+
+  it('does not wait again at length to send a ref click that was checked', async () => {
+    // Ready for the trial, then checked: by the time the click is sent the
+    // control has gone unready, and waiting it out would click whatever it
+    // became. Only a moment's wait is allowed, then it is not used.
+    snapshot = '- checkbox "Remember" [ref=e5] [box=84,0,32,25]';
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    let waited = 0;
+    extra['locator'] = (selector: string) => ({ ...locate(selector),
+      async click(opts: { trial?: boolean; timeout?: number }) {
+        if (opts.trial) return;
+        waited = opts.timeout ?? Infinity;
+        const err = new Error(`locator.click: Timeout ${waited}ms exceeded.`);
+        err.name = 'TimeoutError';
+        throw err;
+      },
+    });
+    const out = await c.controller({ kind: 'click', ref: 'e5', timeoutMs: 30_000 }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toContain('stopped being ready to use after it was checked');
+    expect(waited).toBeLessThanOrEqual(500);
+  });
+
+  it('rechecks a ref before hovering over it', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.calls = [];
+    expect((await c.controller({ kind: 'hover', ref: 'e5' }, ctx('run', 'w1'))).ok).toBe(true);
+    expect(page.calls).toContain('aria-ref=e5 hover');
+    // Renamed since the view: its mouse events may open something else.
+    snapshot = snapshot.replace(/"([^"]*)" \[ref=e5\]/, '"Delete account" [ref=e5]');
+    page.calls = [];
+    const out = await c.controller({ kind: 'hover', ref: 'e5' }, ctx('run', 'w1'));
+    expect(out.ok).toBe(false);
+    expect(page.calls).not.toContain('aria-ref=e5 hover');
+  });
+
+  it('reports the page\'s address without the name and password in it', async () => {
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    page.currentUrl = 'https://alice:secret@start.test/account';
+    const out = await c.controller({ kind: 'extract_text', selector: 'body' }, ctx('run', 'w1'));
+    expect(out.url).toBe('https://start.test/account');
+    const opened = await c.controller({ kind: 'navigate', url: 'https://alice:secret@start.test/inbox' }, ctx('run', 'w1'));
+    expect(opened.detail).toBe('Opened https://start.test/inbox');
+    // What the model is shown. The document token stays opaque to it and
+    // keeps the page's own address, which the checks compare against.
+    expect(JSON.stringify([out.detail, out.url, out.title, out.view])).not.toMatch(/alice|secret/);
   });
 
   it.each(['fill', 'select_option'] as const)('rechecks approved state after %s readiness waits', async (kind) => {

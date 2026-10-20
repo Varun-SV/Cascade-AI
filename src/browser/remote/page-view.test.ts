@@ -576,6 +576,13 @@ describe('describePage', () => {
     expect(header).toBe('Page: Editing ••• — Mail — https://mail.example/compose?to=•••&cc=•••&q=garden+chairs');
   });
 
+  it('shows the address without the name and password a browser keeps in it', () => {
+    const snapshot = '- main [ref=e1] [box=0,0,1280,800]:\n  - button "Go" [ref=e2] [box=0,0,50,20]';
+    const v = describePage({ snapshot, url: 'https://alice:secret@mail.example/inbox?x=1', title: 'Inbox', viewport: SCREEN, number: 1 })!;
+    expect(v.text).toContain('Page: Inbox — https://mail.example/inbox?x=1');
+    expect(v.text).not.toMatch(/alice|secret/);
+  });
+
   it('keeps a form-encoded typed value out of the address', () => {
     const typed = "alice~smith!(x)'@example.com";
     const address = new URL('https://mail.example/compose');
