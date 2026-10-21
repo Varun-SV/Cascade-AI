@@ -94,6 +94,16 @@ describe('SpendReport', () => {
     expect(screen.queryByText(/no published price/)).toBeNull();
   });
 
+  it('marks a model whose history mixes priced runs with older unrecorded $0 runs', async () => {
+    mocked.mockResolvedValue(report({
+      tiers: [{ tier: 'T3', spentUsd: 0.2, tokens: 90, runs: 2, models: [{ model: 'x:y', spentUsd: 0.2, tokens: 90, runs: 2, unpricedRuns: 0, priceUnknownRuns: 1 }] }],
+    }));
+    render(<SpendReport onClose={() => {}} onOpenChat={() => {}} />);
+    const t3 = await screen.findByRole('button', { name: /T3 · Worker/ });
+    expect(t3).toHaveTextContent('$0.20*');
+    expect(screen.getByText(/Older runs did not record/)).toBeInTheDocument();
+  });
+
   it('says an older $0 run did not record whether it was priced', async () => {
     mocked.mockResolvedValue(report({
       tiers: [{ tier: 'T3', spentUsd: 0, tokens: 40, runs: 1, models: [{ model: 'x:y', spentUsd: 0, tokens: 40, runs: 1, unpricedRuns: 0, priceUnknownRuns: 1 }] }],

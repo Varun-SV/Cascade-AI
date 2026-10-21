@@ -260,10 +260,17 @@ depth.
   - Parameters are validated where they carry side effects:
     `Page.navigate` URLs must be http(s) or `about:blank` and then go
     through §4.3, and `Input.*` must target the leased tab.
+  - **Events are filtered too.** An allowlisted `Network.enable` makes
+    Chromium report request and response headers, and its ExtraInfo events
+    carry raw `Cookie`/`Set-Cookie` values, HttpOnly ones included. The
+    device drops ExtraInfo, early-hints and WebSocket handshake events,
+    clears the flags that promise them, and removes `Cookie`, `Set-Cookie`,
+    `Authorization` and `Proxy-Authorization` headers (and raw header text)
+    from the request and response events it forwards.
   - Changing the list is a reviewed policy change with a version number.
   - Method names alone don't express side effects. `Runtime.evaluate`
     stays privileged page script by design (§4.3, honest limit).
-  - `poc-egress-and-lease.mjs` checks all of this (31/31):
+  - `poc-egress-and-lease.mjs` checks all of this (34/34):
     - an allowlisted method works on a nested cross-site iframe session
     - `Emulation.setGeolocationOverride` through that nested session is
       refused
@@ -271,6 +278,9 @@ depth.
     - a fabricated session id is refused
     - normal Playwright use hit no allowlist refusals
     - `page.goto('file:///etc/hostname')` is refused by the relay
+    - after signing in to a consented page that sets an HttpOnly cookie,
+      Chromium emitted the cookie in 2 Network event frames (the control)
+      and 0 reached the agent; with the filter off, the same test fails
 - **Always denied:**
   - cookie and storage reads and writes (`Network.getCookies`,
     `getAllCookies`, `setCookie(s)`, `deleteCookies`,

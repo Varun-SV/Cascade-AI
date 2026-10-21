@@ -1066,7 +1066,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         stats: runStats() ?? cascade.getRouter().getRunStats(Number.NaN), t1Model: cascade.getRouter().getTierModel('T1'),
         decisions: cascade.getDecisionLog(), durationMs: result.durationMs,
       });
-      void mirrorTurnToCloud(trimmed, { content: result.output, ...cloudTurnAccounting(report) });
+      // Stopped before any answer: the run resolves with no text, but what it
+      // spent is still recorded, with no empty reply.
+      if (result.output) void mirrorTurnToCloud(trimmed, { content: result.output, ...cloudTurnAccounting(report) });
+      else void recordUnansweredRunInCloud('stopped', report);
       // One-line run receipt — the delegation economics in scrollback.
       const receipt = formatRunReceipt(result, stats.totalCostUsd, savings);
       if (receipt) {

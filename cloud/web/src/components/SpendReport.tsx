@@ -48,10 +48,12 @@ function TierRows({ tiers, total }: { tiers: Report['tiers']; total: number }) {
   const cols = 'grid grid-cols-[minmax(0,1fr)_3.5rem_4.5rem] items-center gap-x-3 sm:grid-cols-[minmax(0,1fr)_3.5rem_4.5rem_4.5rem]';
   type Priced = { spentUsd: number; tokens: number; unpricedRuns: number; priceUnknownRuns: number };
   // Whether a model had a price is recorded per run, not read off a $0: a
-  // local model is free and shows $0.00. "+" marks a cost missing some calls.
+  // local model is free and shows $0.00. "+" marks a cost missing some calls;
+  // "*" one that includes older $0 runs which did not record whether they
+  // were priced, so it may be missing some.
   const cost = (p: Priced) => {
     if (p.unpricedRuns > 0) return p.spentUsd > 0 ? `${fmtUsd(p.spentUsd)}+` : 'no price';
-    if (p.spentUsd === 0 && p.tokens > 0 && p.priceUnknownRuns > 0) return 'not recorded';
+    if (p.priceUnknownRuns > 0) return p.spentUsd > 0 ? `${fmtUsd(p.spentUsd)}*` : 'not recorded';
     return fmtUsd(p.spentUsd);
   };
   const tierPriced = (t: Report['tiers'][number]): Priced => ({
@@ -147,7 +149,7 @@ function Body({ report, onOpenChat }: { report: Report; onOpenChat: (id: string)
   // One slot is not a chart; its numbers are the whole story.
   const chartable = report.series.length > 1;
   const unpriced = report.tiers.some((t) => t.models.some((m) => m.unpricedRuns > 0));
-  const priceUnknown = report.tiers.some((t) => t.models.some((m) => m.priceUnknownRuns > 0 && m.spentUsd === 0 && m.tokens > 0));
+  const priceUnknown = report.tiers.some((t) => t.models.some((m) => m.priceUnknownRuns > 0));
 
   if (totals.runs === 0) {
     return <p className="m-0 py-10 text-center text-[14px] text-ink-400">No runs in this period.</p>;
@@ -233,7 +235,7 @@ function Body({ report, onOpenChat }: { report: Report; onOpenChat: (id: string)
         <p className="m-0">
           Costs use each provider&apos;s published prices.
           {unpriced ? ' A model with no published price shows its tokens, and "no price" or a "+" where its cost is missing.' : ''}
-          {priceUnknown ? ' Older runs did not record whether a $0 model was priced, so they show "not recorded".' : ''}{' '}
+          {priceUnknown ? ' Older runs did not record whether a $0 model was priced: those show "not recorded", or a "*" where they are mixed with priced runs.' : ''}{' '}
           Deleted chats stay counted, and days end at your local midnight.
         </p>
       </div>

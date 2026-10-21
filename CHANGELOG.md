@@ -35,7 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   /why with the chat it copies to your account (`cloudRunReport`), so the
   report splits them by tier and model like a hosted run, and the web shows
   their /why. A run there that fails or is stopped after spending is sent
-  too, with no reply. The CLI used to send the whole session's cost with
+  too, with no reply, even if it finishes while another chat is open; one
+  that never got a first reply counts under "Runs with no chat" rather than
+  leaving an empty chat behind. The CLI used to send the whole session's cost with
   every reply; it now sends that run's alone, and a call from the previous
   run that settles late stays with that run. A reply from an older CLI,
   stored or still arriving, is counted at what its running total grew by.

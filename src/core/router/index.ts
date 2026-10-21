@@ -106,6 +106,7 @@ interface RunUsage {
   tokensByTier: Record<string, number>;
   inputTokensByTier: Record<string, number>;
   outputTokensByTier: Record<string, number>;
+  costByFeature: Map<string, number>;
   untrackedCostCalls: number;
   untrackedCostModels: string[];
   servedBy: ServedBy;
@@ -113,7 +114,7 @@ interface RunUsage {
 
 const emptyRunUsage = (): RunUsage => ({
   totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, inputTokensByTier: {},
-  outputTokensByTier: {}, untrackedCostCalls: 0, untrackedCostModels: [], servedBy: new Map(),
+  outputTokensByTier: {}, costByFeature: new Map(), untrackedCostCalls: 0, untrackedCostModels: [], servedBy: new Map(),
 });
 
 /** Runs whose usage is still kept: enough for stragglers to land in their own run. */
@@ -1984,7 +1985,7 @@ export class CascadeRouter extends EventEmitter {
       tokensByTier: { ...u.tokensByTier },
       inputTokensByTier: { ...u.inputTokensByTier },
       outputTokensByTier: { ...u.outputTokensByTier },
-      costByFeature: {},
+      costByFeature: Object.fromEntries(u.costByFeature),
       costByTierModel: servedByRecord(u.servedBy, 'costUsd'),
       tokensByTierModel: servedByRecord(u.servedBy, 'tokens'),
       untrackedByTierModel: servedByRecord(u.servedBy, 'untrackedCalls'),
@@ -2473,6 +2474,7 @@ export class CascadeRouter extends EventEmitter {
     run.tokensByTier[tier] = (run.tokensByTier[tier] ?? 0) + usage.totalTokens;
     run.inputTokensByTier[tier] = (run.inputTokensByTier[tier] ?? 0) + usage.inputTokens;
     run.outputTokensByTier[tier] = (run.outputTokensByTier[tier] ?? 0) + usage.outputTokens;
+    if (featureTag) run.costByFeature.set(featureTag, (run.costByFeature.get(featureTag) ?? 0) + usage.estimatedCostUsd);
     if (usage.costUnknown) {
       run.untrackedCostCalls += 1;
       if (!run.untrackedCostModels.includes(model.id)) run.untrackedCostModels.push(model.id);

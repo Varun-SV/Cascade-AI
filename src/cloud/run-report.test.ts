@@ -133,6 +133,18 @@ describe('a device run\'s /why for the cloud', () => {
     expect(router.getStats().totalCostUsd).toBeCloseTo(0.031, 8);
   });
 
+  it('keeps each run\'s cost by feature', () => {
+    const rec = (router as unknown as {
+      recordStats: (tier: string, model: { id: string; provider: string }, usage: Record<string, unknown>, featureTag?: string) => void;
+    }).recordStats.bind(router);
+    router.beginRun();
+    rec('T2', { id: 'mini', provider: 'openai' }, { inputTokens: 10, outputTokens: 0, totalTokens: 10, estimatedCostUsd: 0.002 }, 'Research');
+    router.beginRun();
+    rec('T2', { id: 'mini', provider: 'openai' }, { inputTokens: 10, outputTokens: 0, totalTokens: 10, estimatedCostUsd: 0.001 }, 'Write-up');
+    expect(router.getRunStats().costByFeature).toEqual({ 'Write-up': 0.001 });
+    expect(router.getStats().costByFeature).toEqual({ Research: 0.002, 'Write-up': 0.001 });
+  });
+
   it('forgets per-run usage when the stats are reset between independent tasks', () => {
     router.beginRun();
     call('T3', 'openai', 'mini', 1000, 0, 0.001);
