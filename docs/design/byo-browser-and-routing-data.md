@@ -172,9 +172,9 @@ provider the user chose:
 | Screenshots | when `browserVision` is `image` or `marked` | relay, server, model |
 | Results of script the run evaluates (`evaluate`) | each call; can include anything page script can read, e.g. non-HttpOnly cookies, `localStorage` | relay, server, model |
 | Console messages and errors | while attached | relay, server |
-| Downloads | **prevented** while a run holds the lease: no file is written to the user's disk, and no bytes go to the cloud (see below) | — |
+| Downloads | **prevented** for the leased tab: no file is written to the user's disk, and no bytes go to the cloud (see below) | — |
 
-**Downloads during a lease are prevented, not just unrelayed.** Covered:
+**Downloads the leased tab starts are prevented, not just unrelayed.** Covered:
 link, attachment, `blob:`/`download` attribute and script-triggered
 downloads, enforced on the device:
 
@@ -182,14 +182,41 @@ downloads, enforced on the device:
 |---|---|
 | CLI | the policy's own browser-level session sets `Browser.setDownloadBehavior: deny` for the lease and restores it after |
 | Desktop | the built-in browser's session cancels every `will-download` while leased |
-| Extension | `chrome.downloads.onCreated` cancels and erases downloads that start while a lease is held, with a notice |
+| Extension | **Tab-scoped, by attribution** (below). No profile-wide cancellation |
 
-The extension cannot always tie a download to a tab, so while a lease is
-held it may also cancel a download the user starts in another tab. The
-notice says so. `poc-egress-and-lease.mjs` checks the CLI path: with
-downloads allowed, an attachment writes a file (the control). During the
-lease, an attachment, a `blob:` link and a script-made `download` link
-write **0 files**.
+**Extension: only downloads the leased tab started.** The CLI and desktop
+sources control a browser session Cascade owns. The extension runs in the
+user's own Chrome profile, where other tabs are the user's, so it never
+cancels a download it cannot tie to the leased tab:
+- The leased tab's own `chrome.debugger` session reports
+  `Page.downloadWillBegin` with the download's URL.
+- `chrome.downloads.onDeterminingFilename` holds each new download until
+  the extension decides. One whose URL the leased tab announced is
+  cancelled, and only that one is erased from history. Every other download
+  is released untouched.
+- **Known limit, measured:** if the user downloads the *exact same* http(s)
+  URL in another tab during the lease, that download is cancelled too, since
+  the URL is the only key `chrome.downloads` shares with the tab. `blob:`
+  URLs are unique per object, so they never collide.
+- **Not usable:** `Page.setDownloadBehavior` on the tab's session looks
+  tab-scoped but applies to the whole profile. Denying it on the leased tab
+  also blocked a download in another tab.
+- The extension's P4 run must prove the hold, which the CDP stand-in cannot
+  model; until it passes, the extension claims only what that run shows.
+
+**Evidence:**
+- `poc-egress-and-lease.mjs` checks the CLI path. With downloads allowed,
+  an attachment writes a file (the control). During the lease, an
+  attachment, a `blob:` link and a script-made `download` link write
+  **0 files**.
+- `poc-tab-downloads.mjs` checks attribution with CDP stand-ins for
+  `chrome.debugger` and `chrome.downloads` (6/6, stable over 3 runs):
+  - all 3 of the leased tab's downloads (attachment, `blob:`, script) are
+    tied to it, and neither of the user tab's is
+  - the user tab's downloads complete during the lease
+  - the leased tab's attachment is cancelled before completing
+  - the known limit above
+  - the `Page.setDownloadBehavior` finding above
 
 **Where the user sees it (decided, Q5):**
 - **Consent prompt:** shows this full list in plain words the first time a
@@ -477,9 +504,12 @@ commands and detaches the debugger, all on the device:
   - commands on unknown session ids are refused
   - `Emulation.setGeolocationOverride` and `setUserAgentOverride` are
     refused by name (tests)
-- **P4.** No download writes a file while a lease is held: link,
+- **P4.** No download started by the leased tab writes a file: link,
   attachment, `blob:` and script-triggered. There's a control test proving a
-  download is detectable when allowed. Run on each source.
+  download is detectable when allowed. Run on each source; the CLI proof is
+  not evidence for the others. For the extension, P4 also proves that a
+  download the user starts in another tab during the lease completes
+  (except the same-URL limit in §4.1).
 - **P2.** No request reaches a non-consented origin for each of: agent
   navigation, link click, script navigation, form submission, server
   redirect, and iframe. The test asserts the destination server saw 0
