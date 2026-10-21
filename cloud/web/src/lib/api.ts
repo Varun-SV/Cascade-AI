@@ -521,16 +521,28 @@ export interface SpendReport {
     tokens: number;
     runs: number;
     /** `provider:id`, or '' when a run did not say which model served the tier. */
-    models: Array<{ model: string; spentUsd: number; tokens: number; runs: number }>;
+    models: Array<{
+      model: string; spentUsd: number; tokens: number; runs: number;
+      /** Runs where some of its calls had no price: the cost shown is an undercount. */
+      unpricedRuns: number;
+      /** Runs at $0 with tokens, from before reports said whether that was priced. */
+      priceUnknownRuns: number;
+    }>;
   }>;
   /** Costliest chats first. A null id is every deleted chat, counted together. */
   chats: Array<{ conversationId: string | null; title: string | null; spentUsd: number; savedUsd: number; runs: number }>;
 }
 
-/** Days in the report end at this browser's local midnight. */
+/**
+ * Days in the report end at this browser's local midnight. The time zone is
+ * sent by name, so a day on the other side of a daylight-saving change ends
+ * at its own midnight; today's offset is the fallback where it has no name.
+ */
 export function fetchSpendReport(period: SpendPeriod): Promise<SpendReport> {
-  const tz = -new Date().getTimezoneOffset();
-  return json(fetch(`/api/usage/report?period=${period}&tz=${tz}`, { credentials: 'include' }));
+  let tz = '';
+  try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone ?? ''; } catch { /* no Intl zone: use the offset */ }
+  if (!tz) tz = String(-new Date().getTimezoneOffset());
+  return json(fetch(`/api/usage/report?period=${period}&tz=${encodeURIComponent(tz)}`, { credentials: 'include' }));
 }
 
 // ── Conversation handoff (open-and-continue, web ↔ desktop) ──

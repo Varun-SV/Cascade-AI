@@ -30,7 +30,7 @@ import { writeProjectConfig } from '../../config/write-config.js';
 import { Cascade, type DecisionLogEntry } from '../../core/cascade.js';
 import { MemoryStore } from '../../memory/store.js';
 import { CloudClient } from '../../cloud/client.js';
-import { cloudRunReport, cloudTurnAccounting } from '../../cloud/run-report.js';
+import { cloudRunReport, cloudTurnAccounting, type CloudRunReport } from '../../cloud/run-report.js';
 import { ModelSelector } from '../../core/router/selector.js';
 import { OpenAIProvider } from '../../providers/openai.js';
 import { GeminiProvider } from '../../providers/gemini.js';
@@ -360,28 +360,44 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   // turn, and the whole thing is best-effort: it never blocks or breaks a run,
   // and `CASCADE_NO_CLOUD_SYNC=1` opts out.
   const cloudMirrorRef = useRef<{ client: CloudClient; convId: string | null } | null>(null);
+  const ensureCloudConversation = useCallback(async (mirror: { client: CloudClient; convId: string | null }, title: string): Promise<string> => {
+    if (mirror.convId) return mirror.convId;
+    const convo = await mirror.client.createConversation(title.slice(0, 72));
+    mirror.convId = convo.id;
+    dispatch({
+      type: 'ADD_MESSAGE',
+      message: {
+        id: randomUUID(), role: 'system',
+        content: `☁ Synced to your Cascade account — this chat is on web + desktop too (id ${convo.id.slice(0, 8)}).`,
+        timestamp: new Date().toISOString(),
+      },
+    });
+    return convo.id;
+  }, []);
   const mirrorTurnToCloud = useCallback(async (userContent: string, assistant: { content: string; costUsd: number; why: string }) => {
     const mirror = cloudMirrorRef.current;
     if (!mirror || process.env['CASCADE_NO_CLOUD_SYNC']) return;
     try {
-      if (!mirror.convId) {
-        const convo = await mirror.client.createConversation(userContent.slice(0, 72));
-        mirror.convId = convo.id;
-        dispatch({
-          type: 'ADD_MESSAGE',
-          message: {
-            id: randomUUID(), role: 'system',
-            content: `☁ Synced to your Cascade account — this chat is on web + desktop too (id ${convo.id.slice(0, 8)}).`,
-            timestamp: new Date().toISOString(),
-          },
-        });
-      }
-      await mirror.client.appendTurn(mirror.convId, {
+      const convId = await ensureCloudConversation(mirror, userContent);
+      await mirror.client.appendTurn(convId, {
         userContent,
         assistant: { content: assistant.content, costUsd: assistant.costUsd, why: assistant.why },
       });
     } catch { /* best-effort mirror — offline, revoked token, etc. Local run is unaffected. */ }
-  }, []);
+  }, [ensureCloudConversation]);
+  /**
+   * A run that ended without a reply still spent money: add it to the
+   * account's spend report, as a hosted run that fails is. Best-effort.
+   */
+  const recordUnansweredRunInCloud = useCallback(async (prompt: string, outcome: 'failed' | 'stopped', report: CloudRunReport) => {
+    const mirror = cloudMirrorRef.current;
+    if (!mirror || process.env['CASCADE_NO_CLOUD_SYNC']) return;
+    if (report.totalCostUsd <= 0 && report.totalTokens <= 0) return;
+    try {
+      const conversationId = await ensureCloudConversation(mirror, prompt);
+      await mirror.client.recordUnansweredRun({ conversationId, outcome, ...cloudTurnAccounting(report) });
+    } catch { /* best-effort — the local run's error is what the user sees */ }
+  }, [ensureCloudConversation]);
 
   /**
    * Apply a selection from the interactive model picker:
@@ -1011,10 +1027,16 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       });
       approvalResolverRef.current = ({ approved }) => cascade.resolveMcpApproval(server.name, approved);
     });
+    // The router serves the whole session. Its generation moves on when the
+    // run begins, and that run's own stats are kept under it: a call from the
+    // previous run that settles late stays with that run.
+    const generationBefore = cascade.getRouter().getRunGeneration();
+    const runStats = () => {
+      const generation = cascade.getRouter().getRunGeneration();
+      return generation === generationBefore ? null : cascade.getRouter().getRunStats(generation);
+    };
     try {
       runAbortRef.current = new AbortController();
-      // The router serves the whole session: this run is what it adds from here.
-      const statsBefore = cascade.getRouter().getStats();
       const result = await cascade.run({
         prompt: trimmed,
         workspacePath,
@@ -1039,7 +1061,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       // Mirror the finished turn into the shared cloud session (best-effort),
       // with what this run cost: the cloud's /why and spend report read it.
       const report = cloudRunReport({
-        stats, before: statsBefore, t1Model: cascade.getRouter().getTierModel('T1'),
+        // A run that answered has begun; an unknown generation reads as empty.
+        stats: runStats() ?? cascade.getRouter().getRunStats(Number.NaN), t1Model: cascade.getRouter().getTierModel('T1'),
         decisions: cascade.getDecisionLog(), durationMs: result.durationMs,
       });
       void mirrorTurnToCloud(trimmed, { content: result.output, ...cloudTurnAccounting(report) });
@@ -1061,6 +1084,16 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     } catch (err: unknown) { 
       const message = err instanceof Error ? err.message : String(err);
       dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'error', content: message, timestamp: new Date().toISOString() } }); 
+      // Its calls were billed all the same. A run that never began (setup
+      // failed before it) has no stats of its own, and nothing is sent.
+      const spent = runStats();
+      if (spent) {
+        const report = cloudRunReport({
+          stats: spent, t1Model: cascade.getRouter().getTierModel('T1'),
+          decisions: cascade.getDecisionLog(), durationMs: 0,
+        });
+        void recordUnansweredRunInCloud(trimmed, runAbortRef.current?.signal.aborted ? 'stopped' : 'failed', report);
+      }
     }
     finally {
       if (streamThrottleTimeout) { clearTimeout(streamThrottleTimeout); streamThrottleTimeout = null; }

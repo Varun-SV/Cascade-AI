@@ -89,11 +89,44 @@ export function azureModelForTier<T>(tier: 'T1' | 'T2' | 'T3', ranked: T[]): T |
 }
 
 /** Per tier, per model (`provider:id`): what it cost and how many tokens it used. */
-type ServedBy = Map<string, Map<string, { costUsd: number; tokens: number }>>;
+type ServedBy = Map<string, Map<string, { costUsd: number; tokens: number; untrackedCalls: number }>>;
 
-function servedByRecord(m: ServedBy, pick: 'costUsd' | 'tokens'): Record<string, Record<string, number>> {
+function servedByRecord(m: ServedBy, pick: 'costUsd' | 'tokens' | 'untrackedCalls'): Record<string, Record<string, number>> {
   return Object.fromEntries([...m].map(([tier, models]) =>
     [tier, Object.fromEntries([...models].map(([model, sums]) => [model, sums[pick]]))]));
+}
+
+/** The usage one run's calls added, kept apart from every other run's. */
+interface RunUsage {
+  totalTokens: number;
+  totalCostUsd: number;
+  callsByProvider: Record<string, number>;
+  callsByTier: Record<string, number>;
+  costByTier: Record<string, number>;
+  tokensByTier: Record<string, number>;
+  inputTokensByTier: Record<string, number>;
+  outputTokensByTier: Record<string, number>;
+  untrackedCostCalls: number;
+  untrackedCostModels: string[];
+  servedBy: ServedBy;
+}
+
+const emptyRunUsage = (): RunUsage => ({
+  totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, inputTokensByTier: {},
+  outputTokensByTier: {}, untrackedCostCalls: 0, untrackedCostModels: [], servedBy: new Map(),
+});
+
+/** Runs whose usage is still kept: enough for stragglers to land in their own run. */
+const RUN_USAGE_KEPT = 8;
+
+function addServed(m: ServedBy, tier: string, served: string, usage: TokenUsage): void {
+  const models = m.get(tier) ?? new Map<string, { costUsd: number; tokens: number; untrackedCalls: number }>();
+  m.set(tier, models);
+  const sums = models.get(served) ?? { costUsd: 0, tokens: 0, untrackedCalls: 0 };
+  sums.costUsd += usage.estimatedCostUsd;
+  sums.tokens += usage.totalTokens;
+  if (usage.costUnknown) sums.untrackedCalls += 1;
+  models.set(served, sums);
 }
 
 export interface RouterStats {
@@ -117,6 +150,12 @@ export interface RouterStats {
    */
   costByTierModel: Record<string, Record<string, number>>;
   tokensByTierModel: Record<string, Record<string, number>>;
+  /**
+   * Calls with no known price, per tier, then per `provider:id`. A model that
+   * served tokens at $0 and has no entry here was priced, and free (a local
+   * model); one with an entry has spend that could not be counted.
+   */
+  untrackedByTierModel: Record<string, Record<string, number>>;
   /**
    * Calls made against models Cascade has no price for. Their spend is NOT in
    * `totalCostUsd` — it can't be — so a non-zero count here means the totals
@@ -472,7 +511,9 @@ export class CascadeRouter extends EventEmitter {
   // Kept in Maps, not in `stats`: a tier or model name is used as a key, and a
   // plain object keyed by input could be written through to its prototype.
   private servedBy: ServedBy = new Map();
-  private stats: Omit<RouterStats, 'costByTierModel' | 'tokensByTierModel'> = {
+  /** Usage by run generation (see `runGeneration`), newest last. */
+  private runUsage = new Map<number, RunUsage>();
+  private stats: Omit<RouterStats, 'costByTierModel' | 'tokensByTierModel' | 'untrackedByTierModel'> = {
     totalTokens: 0,
     totalCostUsd: 0,
     callsByProvider: {},
@@ -1911,9 +1952,59 @@ export class CascadeRouter extends EventEmitter {
       costByFeature: { ...this.stats.costByFeature },
       costByTierModel: servedByRecord(this.servedBy, 'costUsd'),
       tokensByTierModel: servedByRecord(this.servedBy, 'tokens'),
+      untrackedByTierModel: servedByRecord(this.servedBy, 'untrackedCalls'),
       untrackedCostCalls: this.stats.untrackedCostCalls,
       untrackedCostModels: [...this.stats.untrackedCostModels],
     };
+  }
+
+  /**
+   * The current run's generation: bumped by every `beginRun()`. Read it after
+   * a run to ask `getRunStats()` for that run alone.
+   */
+  getRunGeneration(): number {
+    return this.runGeneration;
+  }
+
+  /**
+   * What one run's calls added, and nothing else. `getStats()` is the whole
+   * session's, so subtracting two of its snapshots credits a call from the
+   * previous run that settled late to whichever run is current when it lands.
+   * Here a call counts toward the run it was admitted in, whenever it settles.
+   * Only the last few runs are kept; an older or unknown generation is empty.
+   */
+  getRunStats(generation: number = this.runGeneration): RouterStats {
+    const u = this.runUsage.get(generation) ?? emptyRunUsage();
+    return {
+      totalTokens: u.totalTokens,
+      totalCostUsd: u.totalCostUsd,
+      callsByProvider: { ...u.callsByProvider },
+      callsByTier: { ...u.callsByTier },
+      costByTier: { ...u.costByTier },
+      tokensByTier: { ...u.tokensByTier },
+      inputTokensByTier: { ...u.inputTokensByTier },
+      outputTokensByTier: { ...u.outputTokensByTier },
+      costByFeature: {},
+      costByTierModel: servedByRecord(u.servedBy, 'costUsd'),
+      tokensByTierModel: servedByRecord(u.servedBy, 'tokens'),
+      untrackedByTierModel: servedByRecord(u.servedBy, 'untrackedCalls'),
+      untrackedCostCalls: u.untrackedCostCalls,
+      untrackedCostModels: [...u.untrackedCostModels],
+    };
+  }
+
+  /** The usage record for `generation`, dropping the oldest beyond the kept few. */
+  private runUsageFor(generation: number): RunUsage {
+    let u = this.runUsage.get(generation);
+    if (!u) {
+      u = emptyRunUsage();
+      this.runUsage.set(generation, u);
+      while (this.runUsage.size > RUN_USAGE_KEPT) {
+        const oldest = Math.min(...this.runUsage.keys());
+        this.runUsage.delete(oldest);
+      }
+    }
+    return u;
   }
 
   /**
@@ -2365,12 +2456,25 @@ export class CascadeRouter extends EventEmitter {
     this.stats.outputTokensByTier[tier] = (this.stats.outputTokensByTier[tier] ?? 0) + usage.outputTokens;
     // Keyed as `provider:id`, the way a tier reports the model serving it.
     const served = `${model.provider}:${model.id}`;
-    const models = this.servedBy.get(tier) ?? new Map<string, { costUsd: number; tokens: number }>();
-    this.servedBy.set(tier, models);
-    const sums = models.get(served) ?? { costUsd: 0, tokens: 0 };
-    sums.costUsd += usage.estimatedCostUsd;
-    sums.tokens += usage.totalTokens;
-    models.set(served, sums);
+    addServed(this.servedBy, tier, served, usage);
+
+    // ── The run this call belongs to ─────────────
+    // The run it was ADMITTED in, not whichever is current when it settles:
+    // a straggler from the previous run must not be billed to this one.
+    const run = this.runUsageFor(runGeneration ?? this.runGeneration);
+    run.totalTokens += usage.totalTokens;
+    run.totalCostUsd += usage.estimatedCostUsd;
+    run.callsByProvider[model.provider] = (run.callsByProvider[model.provider] ?? 0) + 1;
+    run.callsByTier[tier] = (run.callsByTier[tier] ?? 0) + 1;
+    run.costByTier[tier] = (run.costByTier[tier] ?? 0) + usage.estimatedCostUsd;
+    run.tokensByTier[tier] = (run.tokensByTier[tier] ?? 0) + usage.totalTokens;
+    run.inputTokensByTier[tier] = (run.inputTokensByTier[tier] ?? 0) + usage.inputTokens;
+    run.outputTokensByTier[tier] = (run.outputTokensByTier[tier] ?? 0) + usage.outputTokens;
+    if (usage.costUnknown) {
+      run.untrackedCostCalls += 1;
+      if (!run.untrackedCostModels.includes(model.id)) run.untrackedCostModels.push(model.id);
+    }
+    addServed(run.servedBy, tier, served, usage);
 
     if (featureTag) {
       this.stats.costByFeature[featureTag] = (this.stats.costByFeature[featureTag] ?? 0) + usage.estimatedCostUsd;

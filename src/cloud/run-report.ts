@@ -28,6 +28,12 @@ export interface CloudRunReport {
   /** tier → `provider:id` → cost / tokens. */
   costByModel: Record<string, Record<string, number>>;
   tokensByModel: Record<string, Record<string, number>>;
+  /**
+   * tier → `provider:id` → calls with no known price. A model served at $0
+   * with no entry here was priced and free (a local model); one with an entry
+   * spent money that could not be counted.
+   */
+  unpricedByModel: Record<string, Record<string, number>>;
   /** tier → the model that did most of its work. */
   models: Record<string, string>;
 }
@@ -58,10 +64,13 @@ function top(m: Flat): string | undefined {
 }
 
 /**
- * The /why of the run that just ended. Where one router serves several runs
- * (the CLI's session), `before` is its stats as the run began and the run is
- * what was added since; where a router serves one run (the desktop app's),
- * leave it out.
+ * The /why of the run that just ended, from that run's own stats: the
+ * router's `getRunStats()` where one router serves several runs (the CLI's
+ * session), or `getStats()` where it serves one (the desktop app's).
+ *
+ * `before` subtracts a snapshot instead. Avoid it where runs share a router:
+ * a call from the previous run that settles late lands in the session totals
+ * between the two snapshots and is billed to this run.
  */
 export function cloudRunReport(input: {
   stats: RouterStats;
@@ -83,6 +92,7 @@ export function cloudRunReport(input: {
   const tokensByTier = minus(stats.tokensByTier, before?.tokensByTier);
   const costByModel = minusNested(stats.costByTierModel, before?.costByTierModel);
   const tokensByModel = minusNested(stats.tokensByTierModel, before?.tokensByTierModel);
+  const unpricedByModel = minusNested(stats.untrackedByTierModel ?? {}, before?.untrackedByTierModel);
   const totalCostUsd = Math.max(0, stats.totalCostUsd - (before?.totalCostUsd ?? 0));
   const totalTokens = Math.max(0, stats.totalTokens - (before?.totalTokens ?? 0));
   const savings = computeDelegationSavings({
@@ -112,6 +122,7 @@ export function cloudRunReport(input: {
     tokensByTier,
     costByModel,
     tokensByModel,
+    unpricedByModel,
     models,
   };
 }

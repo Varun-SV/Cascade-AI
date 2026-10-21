@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { bucketKey, legacyCliRunCost, parsePeriod, parseTzOffset, periodRange, spendEntryFromRun } from './spend.js';
+import { bucketKey, buildSpendReport, legacyCliRunCost, parsePeriod, parseTimeZone, parseTzOffset, periodRange, spendEntryFromRun, type SpendSource } from './spend.js';
 
 const base = { id: 'r1', userId: 'u1', conversationId: 'c1', at: 1_000 };
 
@@ -18,9 +18,9 @@ describe('spendEntryFromRun', () => {
     });
     expect(e).toMatchObject({ costUsd: 0.03, savedUsd: 0.2, tokens: 900, outcome: 'answered' });
     expect(e.lines).toEqual([
-      { tier: 'T1', model: 'anthropic:big', costUsd: 0.01, tokens: 100 },
-      { tier: 'T3', model: 'openai:mini', costUsd: 0.015, tokens: 600 },
-      { tier: 'T3', model: 'openai:nano', costUsd: 0.005, tokens: 200 },
+      { tier: 'T1', model: 'anthropic:big', costUsd: 0.01, tokens: 100, unpriced: null },
+      { tier: 'T3', model: 'openai:mini', costUsd: 0.015, tokens: 600, unpriced: null },
+      { tier: 'T3', model: 'openai:nano', costUsd: 0.005, tokens: 200, unpriced: null },
     ]);
   });
 
@@ -36,9 +36,10 @@ describe('spendEntryFromRun', () => {
     // With no cost on the reply, the report's own total stands in.
     expect(e.costUsd).toBe(0.012);
     expect(e.lines).toEqual([
-      { tier: 'T2', model: 'openai:mid', costUsd: 0.012, tokens: 300 },
-      // Tokens with no price (an unpriced model) are still kept, under no model name.
-      { tier: 'T3', model: '', costUsd: 0, tokens: 100 },
+      { tier: 'T2', model: 'openai:mid', costUsd: 0.012, tokens: 300, unpriced: null },
+      // Tokens at $0 are still kept, under no model name; whether they were
+      // priced is unknown for a report this old.
+      { tier: 'T3', model: '', costUsd: 0, tokens: 100, unpriced: null },
     ]);
   });
 
@@ -51,6 +52,25 @@ describe('spendEntryFromRun', () => {
   it('survives a report it cannot read', () => {
     const e = spendEntryFromRun({ ...base, costUsd: 0.01, why: '{not json', outcome: 'failed' });
     expect(e).toMatchObject({ costUsd: 0.01, savedUsd: 0, tokens: 0, outcome: 'failed', lines: [] });
+  });
+
+  it('tells a free local model from one with no price, when the report says', () => {
+    const e = spendEntryFromRun({
+      ...base,
+      why: {
+        costByModel: { T3: { 'ollama:llama': 0, 'compat:mystery': 0, 'openai:mini': 0.002 } },
+        tokensByModel: { T3: { 'ollama:llama': 1000, 'compat:mystery': 500, 'openai:mini': 300 } },
+        unpricedByModel: { T3: { 'compat:mystery': 2 } },
+      },
+    });
+    expect(e.lines).toEqual([
+      { tier: 'T3', model: 'ollama:llama', costUsd: 0, tokens: 1000, unpriced: false },
+      { tier: 'T3', model: 'compat:mystery', costUsd: 0, tokens: 500, unpriced: true },
+      { tier: 'T3', model: 'openai:mini', costUsd: 0.002, tokens: 300, unpriced: false },
+    ]);
+    // An empty map still says every model was priced.
+    const allPriced = spendEntryFromRun({ ...base, why: { costByModel: { T3: { 'ollama:llama': 0 } }, tokensByModel: { T3: { 'ollama:llama': 10 } }, unpricedByModel: {} } });
+    expect(allPriced.lines[0]!.unpriced).toBe(false);
   });
 
   it('drops tiers that spent nothing at all', () => {
@@ -108,6 +128,67 @@ describe('report periods', () => {
     expect(r.keys[r.keys.length - 1]).toBe('2026-09');
     expect(r.keys).toHaveLength(11);
     expect(periodRange('all', 0, now, null).keys).toEqual([]);
+  });
+
+  describe('in a time zone with daylight saving', () => {
+    // London: BST (UTC+1) until 02:00 on 25 Oct 2026, GMT (UTC+0) after.
+    const LONDON = 'Europe/London';
+    const afterChange = Date.UTC(2026, 9, 26, 12, 0); // Mon 26 Oct, GMT
+
+    it('reads each instant under the offset in force then, not today\'s', () => {
+      // 23:30 UTC on 24 Oct is 00:30 on the 25th in BST: a fixed GMT offset
+      // (today's) would put it on the 24th.
+      const lateOnThe24th = Date.UTC(2026, 9, 24, 23, 30);
+      expect(bucketKey(lateOnThe24th, LONDON, 'day')).toBe('2026-10-25');
+      expect(bucketKey(lateOnThe24th, 0, 'day')).toBe('2026-10-24');
+      expect(bucketKey(afterChange, LONDON, 'hour')).toBe('2026-10-26 12');
+    });
+
+    it('starts each day at its own local midnight', () => {
+      const week = periodRange('7d', LONDON, afterChange, null);
+      expect(week.keys).toEqual(['2026-10-20', '2026-10-21', '2026-10-22', '2026-10-23', '2026-10-24', '2026-10-25', '2026-10-26']);
+      // 00:00 BST on the 20th is 23:00 UTC on the 19th: not 24 × 7 hours back.
+      expect(week.fromMs).toBe(Date.UTC(2026, 9, 19, 23, 0));
+    });
+
+    it('gives the change day its 25 hours, with the repeated hour as one slot', () => {
+      const changeDay = Date.UTC(2026, 9, 25, 12, 0);
+      const r = periodRange('today', LONDON, changeDay, null);
+      expect(r.fromMs).toBe(Date.UTC(2026, 9, 24, 23, 0)); // 00:00 BST
+      expect(r.keys).toHaveLength(24);
+      expect(r.keys.filter((k) => k === '2026-10-25 01')).toHaveLength(1);
+      expect(r.keys[23]).toBe('2026-10-25 23');
+    });
+
+    it('puts runs into the right local day in the report', () => {
+      const source: SpendSource = {
+        firstSpendAt: () => null,
+        spendTotals: () => ({ spentUsd: 0, savedUsd: 0, runs: 0, tokens: 0, failedRuns: 0, failedUsd: 0 }),
+        spendRuns: () => [
+          { at: Date.UTC(2026, 9, 24, 23, 30), spentUsd: 1, savedUsd: 0 }, // 00:30 BST on the 25th
+          { at: Date.UTC(2026, 9, 25, 23, 30), spentUsd: 2, savedUsd: 0 }, // 23:30 GMT on the 25th
+          { at: Date.UTC(2026, 9, 26, 0, 30), spentUsd: 4, savedUsd: 0 },  // 00:30 GMT on the 26th
+        ],
+        spendByTierModel: () => [],
+        spendTopChats: () => [],
+      };
+      const report = buildSpendReport(source, 'u1', '7d', LONDON, afterChange);
+      const byDay = Object.fromEntries(report.series.map((s) => [s.key, s.spentUsd]));
+      expect(byDay['2026-10-24']).toBe(0);
+      expect(byDay['2026-10-25']).toBe(3);
+      expect(byDay['2026-10-26']).toBe(4);
+    });
+
+    it('accepts a real zone name and refuses anything else', () => {
+      expect(parseTimeZone('Europe/London')).toBe('Europe/London');
+      expect(parseTimeZone('America/Argentina/Buenos_Aires')).toBe('America/Argentina/Buenos_Aires');
+      expect(parseTimeZone('UTC')).toBe('UTC');
+      expect(parseTimeZone('330')).toBe(330);
+      expect(parseTimeZone(undefined)).toBe(0);
+      expect(parseTimeZone('Mars/Olympus_Mons')).toBeNull();
+      expect(parseTimeZone('../etc/passwd')).toBeNull();
+      expect(parseTimeZone(['Europe/London'])).toBeNull();
+    });
   });
 
   it('accepts only the four periods and real UTC offsets', () => {

@@ -68,6 +68,7 @@ interface CloudClientLike {
   getMessages(id: string): Promise<CloudMsg[]>;
   createConversation(title?: string): Promise<{ id: string; title: string | null }>;
   appendTurn(id: string, turn: CloudTurn): Promise<CloudMsg[]>;
+  recordUnansweredRun(run: { conversationId: string | null; outcome: 'failed' | 'stopped'; costUsd: number; why: string }): Promise<{ recorded: boolean }>;
   selectBranch(id: string, messageId: string): Promise<CloudMsg[]>;
   deleteMessage(id: string, messageId: string): Promise<CloudMsg[]>;
   renameConversation(id: string, title: string): Promise<void>;
@@ -245,6 +246,19 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
   ipcMain.handle('cloud:appendTurn', async (_e, id: unknown, turn: unknown) => {
     try { return { ok: true, messages: await client().appendTurn(String(id), turn as CloudTurn) }; }
     catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not save that turn.', messages: [] }; }
+  });
+
+  // A local run that ended without a reply: its spend goes to the account's
+  // report all the same. The renderer's input is checked, not trusted.
+  ipcMain.handle('cloud:recordUnansweredRun', async (_e, run: unknown) => {
+    const r = (run && typeof run === 'object' ? run : {}) as Record<string, unknown>;
+    const outcome = r['outcome'] === 'failed' || r['outcome'] === 'stopped' ? r['outcome'] : null;
+    const costUsd = typeof r['costUsd'] === 'number' && Number.isFinite(r['costUsd']) && r['costUsd'] >= 0 ? r['costUsd'] : null;
+    const why = typeof r['why'] === 'string' ? r['why'] : null;
+    const conversationId = typeof r['conversationId'] === 'string' ? r['conversationId'] : null;
+    if (!outcome || costUsd === null || why === null) return { ok: false, error: 'Invalid run.' };
+    try { return { ok: true, ...(await client().recordUnansweredRun({ conversationId, outcome, costUsd, why })) }; }
+    catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not record that run.' }; }
   });
 
   ipcMain.handle('cloud:selectBranch', async (_e, id: unknown, messageId: unknown) => {

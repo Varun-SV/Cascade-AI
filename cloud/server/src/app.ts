@@ -25,7 +25,7 @@ import { remoteBrowserControls } from './runs.js';
 import { NativeAuthStore, isLoopbackRedirect, hashRefreshToken } from './native-auth.js';
 import { githubAuthUrl, exchangeGithubCode, googleAuthUrl, exchangeGoogleCode, type OAuthProfile } from './auth/oauth.js';
 import { limitsForPlan, ORPHAN_UPLOAD_TTL_MS, todayKey, checkStorageQuota } from './entitlements.js';
-import { buildSpendReport, parsePeriod, parseTzOffset } from './spend.js';
+import { buildSpendReport, parsePeriod, parseTimeZone, spendEntryFromRun } from './spend.js';
 import { skillCatalog } from './skills.js';
 import { renderDocsPage } from './docs.js';
 import { tenantScratchDir } from './paths.js';
@@ -65,6 +65,8 @@ export function parseSearchCursor(raw: unknown): { updatedAt: number; id: string
 
 /** Upper bound on a persisted message (well above any real turn; a light DoS rail). */
 const MAX_MESSAGE_LEN = 500_000;
+/** A run's /why report as a device sends it: numbers and model ids, never content. */
+const MAX_RUN_WHY_LEN = 64_000;
 const MAX_SKILL_NAME_LEN = 60;
 const MAX_SKILL_DESC_LEN = 200;
 const MAX_SKILL_PROMPT_LEN = 8000;
@@ -563,6 +565,33 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     });
     if (!path) { res.status(404).json({ error: 'Not found' }); return; }
     res.json({ messages: serializeActivePath(id) });
+  });
+
+  // A run on the user's own device that ended without a reply: it failed, or
+  // was stopped, after its calls were billed. A hosted run in that state is
+  // added to the ledger with no reply (runs.ts); this is the same for the CLI
+  // and the desktop app, which otherwise only report a run through /turns.
+  app.post('/api/usage/runs', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const body = req.body as { conversationId?: unknown; outcome?: unknown; costUsd?: unknown; why?: unknown };
+    const outcome = body?.outcome === 'failed' || body?.outcome === 'stopped' ? body.outcome : null;
+    const costUsd = typeof body?.costUsd === 'number' && Number.isFinite(body.costUsd) && body.costUsd >= 0 ? body.costUsd : null;
+    const why = typeof body?.why === 'string' && body.why.length <= MAX_RUN_WHY_LEN ? body.why : null;
+    if (!outcome || costUsd === null || why === null) {
+      res.status(400).json({ error: 'outcome (failed|stopped), costUsd and why are required' }); return;
+    }
+    const userId = req.session!.userId;
+    let conversationId: string | null = null;
+    if (body.conversationId != null) {
+      if (typeof body.conversationId !== 'string' || !store.getConversation(body.conversationId, userId)) {
+        res.status(404).json({ error: 'Not found' }); return;
+      }
+      conversationId = body.conversationId;
+    }
+    const entry = spendEntryFromRun({ id: randomUUID(), userId, conversationId, at: Date.now(), costUsd, why, outcome });
+    // Nothing billed, nothing to keep.
+    if (entry.costUsd === 0 && entry.tokens === 0) { res.json({ recorded: false }); return; }
+    store.recordSpend(entry);
+    res.json({ recorded: true });
   });
 
   // Rename a conversation — used by the opt-in in-browser titler and manual edits.
@@ -1344,10 +1373,12 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
 
   // The spend & savings report: what runs cost and what delegation saved over
   // a period, by tier and model, and which chats cost the most. `tz` is the
-  // viewer's offset in minutes east of UTC, so days end at their midnight.
+  // viewer's IANA time zone (e.g. Europe/London), so each day ends at their
+  // midnight under the rules in force that day; a bare offset in minutes east
+  // of UTC is still accepted, as a fixed offset.
   app.get('/api/usage/report', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
     const period = parsePeriod(req.query['period'] ?? '30d');
-    const tz = parseTzOffset(req.query['tz']);
+    const tz = parseTimeZone(req.query['tz']);
     if (!period || tz === null) { res.status(400).json({ error: 'Invalid period or tz' }); return; }
     res.json(buildSpendReport(store.spend, req.session!.userId, period, tz, Date.now()));
   });

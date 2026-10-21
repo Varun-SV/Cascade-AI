@@ -795,6 +795,8 @@ export interface WhyReport {
    *  models that served it, which the spend report keeps per model. */
   costByModel?: Record<string, Record<string, number>>;
   tokensByModel?: Record<string, Record<string, number>>;
+  /** tier → `provider:id` → calls with no known price (see the SDK's run report). */
+  unpricedByModel?: Record<string, Record<string, number>>;
   /** tier → model that served it (from tier:status). */
   models: Record<string, string>;
   /** The agents that worked the run, each as it last reported — the tree the
@@ -2306,6 +2308,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
       tokensByTier,
       costByModel: stats.costByTierModel,
       tokensByModel: stats.tokensByTierModel,
+      unpricedByModel: stats.untrackedByTierModel,
       models: tierModels,
       ...(trace.size > 0 ? { trace: [...trace.values()] } : {}),
     };
@@ -2375,7 +2378,8 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
       recordRunSpend(store, spendEntryFromRun({
         id: randomUUID(), userId, conversationId: conversation.id, at: Date.now(), costUsd: spent.totalCostUsd,
         why: {
-          costByModel: spent.costByTierModel, tokensByModel: spent.tokensByTierModel, totalTokens: spent.totalTokens,
+          costByModel: spent.costByTierModel, tokensByModel: spent.tokensByTierModel,
+          unpricedByModel: spent.untrackedByTierModel, totalTokens: spent.totalTokens,
           savedUsd: cascade.getRouter().getDelegationSavings().savedUsd,
         },
         outcome: 'failed',

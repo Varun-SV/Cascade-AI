@@ -19,11 +19,13 @@ function report(over: Partial<Report> = {}): Report {
       { key: '2026-09-29', spentUsd: 0.24, savedUsd: 0.72, runs: 2 },
     ],
     tiers: [
-      { tier: 'T1', spentUsd: 0.16, tokens: 2000, runs: 3, models: [{ model: 'anthropic:big', spentUsd: 0.16, tokens: 2000, runs: 3 }] },
+      { tier: 'T1', spentUsd: 0.16, tokens: 2000, runs: 3, models: [{ model: 'anthropic:big', spentUsd: 0.16, tokens: 2000, runs: 3, unpricedRuns: 0, priceUnknownRuns: 0 }] },
       {
         tier: 'T3', spentUsd: 0.48, tokens: 10_300, runs: 3, models: [
-          { model: 'openai:mini', spentUsd: 0.48, tokens: 9_000, runs: 3 },
-          { model: 'ollama:llama', spentUsd: 0, tokens: 1_300, runs: 1 },
+          { model: 'openai:mini', spentUsd: 0.48, tokens: 9_000, runs: 3, unpricedRuns: 0, priceUnknownRuns: 0 },
+          // A local model: priced, and free.
+          { model: 'ollama:llama', spentUsd: 0, tokens: 1_300, runs: 1, unpricedRuns: 0, priceUnknownRuns: 0 },
+          { model: 'compat:mystery', spentUsd: 0, tokens: 700, runs: 1, unpricedRuns: 1, priceUnknownRuns: 0 },
         ],
       },
     ],
@@ -64,7 +66,7 @@ describe('SpendReport', () => {
     await screen.findByText('$0.25');
   });
 
-  it('opens a tier onto the models that served it, and says when a model has no price', async () => {
+  it('opens a tier onto the models that served it, and tells a free model from one with no price', async () => {
     mocked.mockResolvedValue(report());
     render(<SpendReport onClose={() => {}} onOpenChat={() => {}} />);
     const t3 = await screen.findByRole('button', { name: /T3 · Worker/ });
@@ -74,8 +76,32 @@ describe('SpendReport', () => {
     expect(t3).toHaveAttribute('aria-expanded', 'true');
     const mini = screen.getByText('openai:mini').closest('li')!;
     expect(mini).toHaveTextContent('$0.48');
-    expect(screen.getByText('ollama:llama').closest('li')!).toHaveTextContent('no price');
-    expect(screen.getByText(/A model with no published price shows its tokens but no cost/)).toBeInTheDocument();
+    expect(screen.getByText('ollama:llama').closest('li')!).toHaveTextContent('$0.00');
+    expect(screen.getByText('ollama:llama').closest('li')!).not.toHaveTextContent('no price');
+    expect(screen.getByText('compat:mystery').closest('li')!).toHaveTextContent('no price');
+    // The tier's cost is missing the unpriced model's share.
+    expect(t3).toHaveTextContent('$0.48+');
+    expect(screen.getByText(/A model with no published price shows its tokens/)).toBeInTheDocument();
+  });
+
+  it('shows a free local model as $0.00, with no unpriced warning', async () => {
+    mocked.mockResolvedValue(report({
+      tiers: [{ tier: 'T3', spentUsd: 0, tokens: 1_300, runs: 1, models: [{ model: 'ollama:llama', spentUsd: 0, tokens: 1_300, runs: 1, unpricedRuns: 0, priceUnknownRuns: 0 }] }],
+    }));
+    render(<SpendReport onClose={() => {}} onOpenChat={() => {}} />);
+    const t3 = await screen.findByRole('button', { name: /T3 · Worker/ });
+    expect(t3).toHaveTextContent('$0.00');
+    expect(screen.queryByText(/no published price/)).toBeNull();
+  });
+
+  it('says an older $0 run did not record whether it was priced', async () => {
+    mocked.mockResolvedValue(report({
+      tiers: [{ tier: 'T3', spentUsd: 0, tokens: 40, runs: 1, models: [{ model: 'x:y', spentUsd: 0, tokens: 40, runs: 1, unpricedRuns: 0, priceUnknownRuns: 1 }] }],
+    }));
+    render(<SpendReport onClose={() => {}} onOpenChat={() => {}} />);
+    const t3 = await screen.findByRole('button', { name: /T3 · Worker/ });
+    expect(t3).toHaveTextContent('not recorded');
+    expect(screen.getByText(/Older runs did not record/)).toBeInTheDocument();
   });
 
   it('opens a chat from the list; deleted ones are counted together and not a link', async () => {
@@ -116,7 +142,7 @@ describe('SpendReport', () => {
   it('gives no share of the spend when nothing had a price', async () => {
     mocked.mockResolvedValue(report({
       totals: { ...report().totals, spentUsd: 0 },
-      tiers: [{ tier: 'T2', spentUsd: 0, tokens: 52, runs: 1, models: [{ model: 'openai-compatible:stub', spentUsd: 0, tokens: 52, runs: 1 }] }],
+      tiers: [{ tier: 'T2', spentUsd: 0, tokens: 52, runs: 1, models: [{ model: 'openai-compatible:stub', spentUsd: 0, tokens: 52, runs: 1, unpricedRuns: 1, priceUnknownRuns: 0 }] }],
     }));
     render(<SpendReport onClose={() => {}} onOpenChat={() => {}} />);
     const t2 = await screen.findByRole('button', { name: /T2 · Manager/ });

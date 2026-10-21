@@ -424,7 +424,10 @@ describe('cloud/server app', () => {
     const byDefault = await (await fetch(`${baseUrl}/api/usage/report`, { headers: { Cookie: cookie } })).json() as { period: string };
     expect(byDefault.period).toBe('30d');
 
-    for (const bad of ['period=year', 'tz=900', 'tz=abc', 'period=7d&period=30d']) {
+    // A zone name, so days follow its daylight-saving changes.
+    expect((await fetch(`${baseUrl}/api/usage/report?period=7d&tz=Europe%2FLondon`, { headers: { Cookie: cookie } })).status).toBe(200);
+
+    for (const bad of ['period=year', 'tz=900', 'tz=abc', 'tz=Mars%2FBase', 'period=7d&period=30d']) {
       expect((await fetch(`${baseUrl}/api/usage/report?${bad}`, { headers: { Cookie: cookie } })).status).toBe(400);
     }
   });
@@ -469,6 +472,48 @@ describe('cloud/server app', () => {
     const messages = (await (await fetch(`${baseUrl}/api/conversations/${cid}/messages`, { headers: { Cookie: cookie } })).json()) as { messages: Array<{ role: string; why: string | null }> };
     const why = JSON.parse(messages.messages.find((m) => m.role === 'assistant')!.why!) as { tier: string; model: string };
     expect(why).toMatchObject({ tier: 'T3', model: 'openai:nano' });
+  });
+
+  it('counts a device run that ended without a reply, as the CLI sends it', async () => {
+    const cookie = await login('Failed run user');
+    const other = await login('Not the owner');
+    const j = { 'Content-Type': 'application/json', Cookie: cookie };
+    const cid = ((await (await fetch(`${baseUrl}/api/conversations`, {
+      method: 'POST', headers: j, body: JSON.stringify({ title: 'Broke halfway' }),
+    })).json()) as { conversation: { id: string } }).conversation.id;
+    const post = (body: Record<string, unknown>, headers: Record<string, string> = j) =>
+      fetch(`${baseUrl}/api/usage/runs`, { method: 'POST', headers, body: JSON.stringify(body) });
+
+    const why = JSON.stringify({
+      totalCostUsd: 0.004, totalTokens: 1500,
+      costByModel: { T3: { 'openai:mini': 0.004, 'ollama:llama': 0 } },
+      tokensByModel: { T3: { 'openai:mini': 1000, 'ollama:llama': 500 } },
+      unpricedByModel: {},
+    });
+    expect((await fetch(`${baseUrl}/api/usage/runs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status).toBe(401);
+    const ok = await post({ conversationId: cid, outcome: 'failed', costUsd: 0.004, why });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ recorded: true });
+
+    // Nothing billed: nothing kept. Bad input and someone else's chat: refused.
+    expect(await (await post({ outcome: 'stopped', costUsd: 0, why: '{}' })).json()).toEqual({ recorded: false });
+    for (const bad of [{ outcome: 'answered', costUsd: 1, why }, { outcome: 'failed', costUsd: -1, why }, { outcome: 'failed', costUsd: 1 }]) {
+      expect((await post(bad)).status).toBe(400);
+    }
+    const otherHeaders = { 'Content-Type': 'application/json', Cookie: other };
+    expect((await post({ conversationId: cid, outcome: 'failed', costUsd: 1, why }, otherHeaders)).status).toBe(404);
+
+    const body = await (await fetch(`${baseUrl}/api/usage/report?period=today`, { headers: { Cookie: cookie } })).json() as {
+      totals: { spentUsd: number; runs: number; failedRuns: number; failedUsd: number };
+      tiers: Array<{ tier: string; models: Array<{ model: string; unpricedRuns: number; priceUnknownRuns: number }> }>;
+      chats: Array<{ title: string }>;
+    };
+    expect(body.totals).toMatchObject({ runs: 1, failedRuns: 1 });
+    expect(body.totals.failedUsd).toBeCloseTo(0.004, 8);
+    expect(body.chats.map((c) => c.title)).toEqual(['Broke halfway']);
+    // The local model was priced, at $0: free, not missing a price.
+    const llama = body.tiers[0]!.models.find((m) => m.model === 'ollama:llama')!;
+    expect(llama).toMatchObject({ unpricedRuns: 0, priceUnknownRuns: 0 });
   });
 
   it('GET /api/usage reports no browser allowance where nothing rations one', async () => {

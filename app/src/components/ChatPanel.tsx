@@ -257,8 +257,32 @@ export function ChatPanel({ socket, compact }: Props) {
         })();
       }
     };
+    // A run that failed or was stopped has no reply to sync, but its calls were
+    // billed: send its spend to the account's report, as a hosted run's is.
+    const onError = (data: { sessionId?: string; cloud?: { costUsd: number; why: string }; stopped?: boolean }) => {
+      const sid = data?.sessionId;
+      const accounting = data?.cloud;
+      const prompt = lastPromptRef.current;
+      if (!sid || sid !== currentSessionIdRef.current || !accounting || !prompt) return;
+      if (localStorage.getItem('cascade.noCloudSync') === '1') return;
+      void (async () => {
+        const api = window.cascade?.cloud;
+        if (!api?.recordUnansweredRun || !api.createConversation) return;
+        try {
+          let convId = cloudConvRef.current.get(sid);
+          if (!convId) {
+            const created = await api.createConversation(prompt.slice(0, 72));
+            if (!created.ok || !created.conversation) return; // signed out / error → skip
+            convId = created.conversation.id;
+            cloudConvRef.current.set(sid, convId);
+          }
+          await api.recordUnansweredRun({ conversationId: convId, outcome: data.stopped ? 'stopped' : 'failed', ...accounting });
+        } catch { /* best-effort — the run's error is what the user sees */ }
+      })();
+    };
     socket.on('session:complete', onComplete);
-    return () => { socket.off('session:complete', onComplete); };
+    socket.on('session:error', onError);
+    return () => { socket.off('session:complete', onComplete); socket.off('session:error', onError); };
   }, [socket, dispatch]);
 
   const send = () => {

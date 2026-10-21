@@ -46,7 +46,19 @@ function TierRows({ tiers, total }: { tiers: Report['tiers']; total: number }) {
     return next;
   });
   const cols = 'grid grid-cols-[minmax(0,1fr)_3.5rem_4.5rem] items-center gap-x-3 sm:grid-cols-[minmax(0,1fr)_3.5rem_4.5rem_4.5rem]';
-  const cost = (spent: number, tokens: number) => (spent === 0 && tokens > 0 ? 'no price' : fmtUsd(spent));
+  type Priced = { spentUsd: number; tokens: number; unpricedRuns: number; priceUnknownRuns: number };
+  // Whether a model had a price is recorded per run, not read off a $0: a
+  // local model is free and shows $0.00. "+" marks a cost missing some calls.
+  const cost = (p: Priced) => {
+    if (p.unpricedRuns > 0) return p.spentUsd > 0 ? `${fmtUsd(p.spentUsd)}+` : 'no price';
+    if (p.spentUsd === 0 && p.tokens > 0 && p.priceUnknownRuns > 0) return 'not recorded';
+    return fmtUsd(p.spentUsd);
+  };
+  const tierPriced = (t: Report['tiers'][number]): Priced => ({
+    spentUsd: t.spentUsd, tokens: t.tokens,
+    unpricedRuns: t.models.reduce((n, m) => n + m.unpricedRuns, 0),
+    priceUnknownRuns: t.models.reduce((n, m) => n + m.priceUnknownRuns, 0),
+  });
   return (
     <div className="flex flex-col text-[13px]">
       <div className={`${cols} px-2 pb-1.5 text-[11.5px] text-ink-500`}>
@@ -75,7 +87,7 @@ function TierRows({ tiers, total }: { tiers: Report['tiers']; total: number }) {
               </span>
               <span className="text-right tabular-nums text-ink-300">{t.runs.toLocaleString('en-US')}</span>
               <span className="hidden text-right tabular-nums text-ink-300 sm:block">{fmtTokens(t.tokens)}</span>
-              <span className="text-right font-medium tabular-nums text-ink-50">{cost(t.spentUsd, t.tokens)}</span>
+              <span className="text-right font-medium tabular-nums text-ink-50">{cost(tierPriced(t))}</span>
             </button>
             {expanded && (
               <ul className="m-0 mb-1.5 flex list-none flex-col p-0">
@@ -86,7 +98,7 @@ function TierRows({ tiers, total }: { tiers: Report['tiers']; total: number }) {
                     </span>
                     <span className="text-right tabular-nums text-ink-400">{m.runs.toLocaleString('en-US')}</span>
                     <span className="hidden text-right tabular-nums text-ink-400 sm:block">{fmtTokens(m.tokens)}</span>
-                    <span className="text-right tabular-nums text-ink-300">{cost(m.spentUsd, m.tokens)}</span>
+                    <span className="text-right tabular-nums text-ink-300">{cost(m)}</span>
                   </li>
                 ))}
               </ul>
@@ -134,7 +146,8 @@ function Body({ report, onOpenChat }: { report: Report; onOpenChat: (id: string)
   const savedPct = allT1 > 0 ? Math.round((totals.savedUsd / allT1) * 100) : 0;
   // One slot is not a chart; its numbers are the whole story.
   const chartable = report.series.length > 1;
-  const unpriced = report.tiers.some((t) => t.models.some((m) => m.spentUsd === 0 && m.tokens > 0));
+  const unpriced = report.tiers.some((t) => t.models.some((m) => m.unpricedRuns > 0));
+  const priceUnknown = report.tiers.some((t) => t.models.some((m) => m.priceUnknownRuns > 0 && m.spentUsd === 0 && m.tokens > 0));
 
   if (totals.runs === 0) {
     return <p className="m-0 py-10 text-center text-[14px] text-ink-400">No runs in this period.</p>;
@@ -218,7 +231,9 @@ function Body({ report, onOpenChat }: { report: Report; onOpenChat: (id: string)
           </p>
         )}
         <p className="m-0">
-          Costs use each provider&apos;s published prices.{unpriced ? ' A model with no published price shows its tokens but no cost.' : ''}{' '}
+          Costs use each provider&apos;s published prices.
+          {unpriced ? ' A model with no published price shows its tokens, and "no price" or a "+" where its cost is missing.' : ''}
+          {priceUnknown ? ' Older runs did not record whether a $0 model was priced, so they show "not recorded".' : ''}{' '}
           Deleted chats stay counted, and days end at your local midnight.
         </p>
       </div>

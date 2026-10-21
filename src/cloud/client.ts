@@ -326,6 +326,19 @@ export class CloudClient {
     return b.messages ?? [];
   }
 
+  /**
+   * Add a run that ended without a reply (failed, or stopped) to the account's
+   * spend ledger: its calls were billed even though there is no turn to sync.
+   * `why` is the run's report (`cloudRunReport`), as JSON.
+   */
+  async recordUnansweredRun(run: {
+    conversationId: string | null; outcome: 'failed' | 'stopped'; costUsd: number; why: string;
+  }): Promise<{ recorded: boolean }> {
+    return this.authed<{ recorded: boolean }>('/api/usage/runs', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(run),
+    });
+  }
+
   /** Branching: switch the active path to a sibling; returns the new path. */
   async selectBranch(conversationId: string, messageId: string): Promise<CloudMessage[]> {
     const b = await this.authed<{ messages: CloudMessage[] }>(

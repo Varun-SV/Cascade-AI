@@ -15,7 +15,7 @@ import { randomUUID } from 'node:crypto';
 import {
   legacyCliRunCost,
   spendEntryFromRun,
-  type SpendBucket, type SpendChatRow, type SpendEntry, type SpendSlot, type SpendSource, type SpendTotals,
+  type SpendChatRow, type SpendEntry, type SpendSource, type SpendTotals,
 } from './spend.js';
 
 export type OAuthProvider = 'github' | 'google' | 'dev';
@@ -586,7 +586,12 @@ export class CloudStore {
     const exists = this.db
       .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'spend_ledger'")
       .get();
-    if (exists) return;
+    if (exists) {
+      // Whether a line's calls had a price: 1 unpriced, 0 priced, NULL unknown.
+      const cols = this.db.prepare('PRAGMA table_info(spend_ledger_models)').all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === 'unpriced')) this.db.exec('ALTER TABLE spend_ledger_models ADD COLUMN unpriced INTEGER');
+      return;
+    }
     const create = this.db.transaction(() => {
       this.db.exec(`
         CREATE TABLE spend_ledger (
@@ -606,6 +611,7 @@ export class CloudStore {
           model TEXT NOT NULL DEFAULT '',
           cost_usd REAL NOT NULL DEFAULT 0,
           tokens INTEGER NOT NULL DEFAULT 0,
+          unpriced INTEGER,
           PRIMARY KEY (run_id, tier, model)
         );
       `);
@@ -1094,10 +1100,13 @@ export class CloudStore {
         .run(e.id, e.userId, e.conversationId, e.at, e.costUsd, e.savedUsd, e.tokens, e.outcome);
       if (added.changes === 0) return;
       const line = this.db.prepare(
-        `INSERT INTO spend_ledger_models (run_id, tier, model, cost_usd, tokens) VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(run_id, tier, model) DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd, tokens = tokens + excluded.tokens`,
+        `INSERT INTO spend_ledger_models (run_id, tier, model, cost_usd, tokens, unpriced) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(run_id, tier, model) DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd, tokens = tokens + excluded.tokens,
+           unpriced = CASE WHEN unpriced IS NULL THEN excluded.unpriced
+                           WHEN excluded.unpriced IS NULL THEN unpriced
+                           ELSE MAX(unpriced, excluded.unpriced) END`,
       );
-      for (const l of e.lines) line.run(e.id, l.tier, l.model, l.costUsd, l.tokens);
+      for (const l of e.lines) line.run(e.id, l.tier, l.model, l.costUsd, l.tokens, l.unpriced === null ? null : l.unpriced ? 1 : 0);
     });
     tx();
   }
@@ -1120,22 +1129,21 @@ export class CloudStore {
         ).get(userId, fromMs, fromMs) as SpendTotals;
         return row;
       },
-      spendSeries: (userId, fromMs, tzOffsetMin, bucket: SpendBucket): SpendSlot[] => {
-        const fmt = bucket === 'hour' ? '%Y-%m-%d %H' : bucket === 'month' ? '%Y-%m' : '%Y-%m-%d';
-        return this.db.prepare(
-          `SELECT strftime(?, (l.at + ?) / 1000, 'unixepoch') AS key,
-                  SUM(l.cost_usd) AS spentUsd, SUM(l.saved_usd) AS savedUsd, COUNT(*) AS runs
-             FROM spend_ledger l WHERE ${since}
-            GROUP BY key`,
-        ).all(fmt, tzOffsetMin * 60_000, userId, fromMs, fromMs) as SpendSlot[];
-      },
+      spendRuns: (userId, fromMs) =>
+        this.db.prepare(
+          `SELECT l.at, l.cost_usd AS spentUsd, l.saved_usd AS savedUsd FROM spend_ledger l WHERE ${since}`,
+        ).all(userId, fromMs, fromMs) as Array<{ at: number; spentUsd: number; savedUsd: number }>,
       spendByTierModel: (userId, fromMs) => {
         const rows = this.db.prepare(
-          `SELECT m.tier, m.model, SUM(m.cost_usd) AS spentUsd, SUM(m.tokens) AS tokens, COUNT(DISTINCT m.run_id) AS runs
+          `SELECT m.tier, m.model, SUM(m.cost_usd) AS spentUsd, SUM(m.tokens) AS tokens, COUNT(DISTINCT m.run_id) AS runs,
+                  COALESCE(SUM(m.unpriced = 1), 0) AS unpricedRuns,
+                  COALESCE(SUM(m.unpriced IS NULL AND m.cost_usd = 0 AND m.tokens > 0), 0) AS priceUnknownRuns
              FROM spend_ledger_models m JOIN spend_ledger l ON l.id = m.run_id
             WHERE ${since}
             GROUP BY m.tier, m.model`,
-        ).all(userId, fromMs, fromMs) as Array<{ tier: string; model: string; spentUsd: number; tokens: number; runs: number }>;
+        ).all(userId, fromMs, fromMs) as Array<{
+          tier: string; model: string; spentUsd: number; tokens: number; runs: number; unpricedRuns: number; priceUnknownRuns: number;
+        }>;
         // A run that used two models on one tier is still one run of that tier.
         const tierRuns = new Map((this.db.prepare(
           `SELECT m.tier, COUNT(DISTINCT m.run_id) AS runs

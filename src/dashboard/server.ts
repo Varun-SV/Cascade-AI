@@ -344,10 +344,14 @@ export class DashboardServer {
         this.throttledBroadcast('workspace');
       } catch (err) {
         this.persistRunEnd(sessionId, title, prompt, undefined, 'FAILED');
-        this.captureWhy(sessionId, cascade);
+        // No reply, but the calls it made were billed: the desktop sends this
+        // to the account's spend report, as a hosted run that fails is.
+        const cloud = this.captureWhy(sessionId, cascade);
         this.emitToSessionClients(socketId, sessionId, 'session:error', {
           sessionId,
           error: err instanceof Error ? err.message : String(err),
+          cloud,
+          stopped: abortController.signal.aborted,
         });
       } finally {
         this.activeSessions.delete(sessionId);
@@ -813,10 +817,11 @@ export class DashboardServer {
       this.throttledBroadcast('workspace');
     } catch (err) {
       this.persistRunEnd(sessionId, title, prompt, undefined, 'FAILED');
-      this.captureWhy(sessionId, cascade);
+      const cloud = this.captureWhy(sessionId, cascade);
       this.socket.broadcast('session:error', {
         sessionId,
         error: err instanceof Error ? err.message : String(err),
+        cloud,
       });
       throw err;
     } finally {
@@ -1585,10 +1590,11 @@ export class DashboardServer {
           this.throttledBroadcast('workspace');
         } catch (err) {
           this.persistRunEnd(sessionId, title, prompt, undefined, 'FAILED');
-          this.captureWhy(sessionId, cascade);
+          const cloud = this.captureWhy(sessionId, cascade);
           this.socket.broadcastToRoom(`session:${sessionId}`, 'session:error', {
             sessionId,
             error: err instanceof Error ? err.message : String(err),
+            cloud,
           });
         } finally {
           this.activeSessions.delete(sessionId);

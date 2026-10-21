@@ -12,6 +12,13 @@ export interface SpendModelLine {
   model: string;
   costUsd: number;
   tokens: number;
+  /**
+   * Whether some of this model's calls had no known price, so its cost is an
+   * undercount. False means priced: $0 with tokens is a free (local) model.
+   * Null for runs whose report did not say, which is every report from before
+   * the distinction was kept.
+   */
+  unpriced: boolean | null;
 }
 
 export interface SpendEntry {
@@ -57,12 +64,19 @@ export function spendEntryFromRun(input: {
   const lines: SpendModelLine[] = [];
   const byModel = record(why['costByModel']);
   const tokensByModel = record(why['tokensByModel']);
+  // Present (even empty) on reports that keep priced and unpriced apart.
+  const unpricedKnown = why['unpricedByModel'] !== undefined;
+  const unpricedByModel = record(why['unpricedByModel']);
   if (Object.keys(byModel).length > 0 || Object.keys(tokensByModel).length > 0) {
     for (const tier of new Set([...Object.keys(byModel), ...Object.keys(tokensByModel)])) {
       const costs = record(byModel[tier]);
       const tokens = record(tokensByModel[tier]);
+      const unpriced = record(unpricedByModel[tier]);
       for (const model of new Set([...Object.keys(costs), ...Object.keys(tokens)])) {
-        lines.push({ tier, model, costUsd: num(costs[model]), tokens: Math.round(num(tokens[model])) });
+        lines.push({
+          tier, model, costUsd: num(costs[model]), tokens: Math.round(num(tokens[model])),
+          unpriced: unpricedKnown ? num(unpriced[model]) > 0 : null,
+        });
       }
     }
   } else {
@@ -71,7 +85,7 @@ export function spendEntryFromRun(input: {
     const models = record(why['models']);
     for (const tier of new Set([...Object.keys(costByTier), ...Object.keys(tokensByTier)])) {
       const model = typeof models[tier] === 'string' ? (models[tier] as string) : '';
-      lines.push({ tier, model, costUsd: num(costByTier[tier]), tokens: Math.round(num(tokensByTier[tier])) });
+      lines.push({ tier, model, costUsd: num(costByTier[tier]), tokens: Math.round(num(tokensByTier[tier])), unpriced: null });
     }
   }
   const kept = lines.filter((l) => l.costUsd > 0 || l.tokens > 0);
@@ -119,6 +133,7 @@ export type SpendPeriod = 'today' | '7d' | '30d' | 'all';
 export type SpendBucket = 'hour' | 'day' | 'month';
 export const SPEND_PERIODS: readonly SpendPeriod[] = ['today', '7d', '30d', 'all'];
 
+const pad = (n: number) => String(n).padStart(2, '0');
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 /** The longest history "all time" still shows day by day. */
@@ -138,6 +153,87 @@ export function parseTzOffset(v: unknown): number | null {
   return Math.abs(n) <= MAX_TZ_OFFSET_MIN ? n : null;
 }
 
+/**
+ * Where the viewer's days begin and end: an IANA time zone name
+ * (`Europe/London`), whose offset is looked up for each instant so a
+ * daylight-saving change moves midnight with it, or a fixed offset in minutes
+ * east of UTC.
+ */
+export type TimeZone = string | number;
+
+const zoneFormats = new Map<string, Intl.DateTimeFormat>();
+function zoneFormat(zone: string): Intl.DateTimeFormat {
+  let f = zoneFormats.get(zone);
+  if (!f) {
+    f = new Intl.DateTimeFormat('en-US', {
+      timeZone: zone, hourCycle: 'h23',
+      year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric',
+    });
+    zoneFormats.set(zone, f);
+  }
+  return f;
+}
+
+/** A time zone name, or a fixed offset (see `parseTzOffset`); null when neither. */
+export function parseTimeZone(v: unknown): TimeZone | null {
+  if (typeof v === 'string' && /^[A-Za-z][A-Za-z0-9_+\-]*(\/[A-Za-z0-9_+\-]+){0,2}$/.test(v) && v.length <= 64) {
+    try {
+      zoneFormat(v);
+      return v;
+    } catch {
+      return null;
+    }
+  }
+  return parseTzOffset(v);
+}
+
+interface LocalTime { y: number; mo: number; d: number; h: number; mi: number; s: number }
+
+/** The wall-clock time at an instant in a zone. */
+function localTime(atMs: number, zone: TimeZone): LocalTime {
+  if (typeof zone === 'number') {
+    const t = new Date(atMs + zone * 60_000);
+    return { y: t.getUTCFullYear(), mo: t.getUTCMonth() + 1, d: t.getUTCDate(), h: t.getUTCHours(), mi: t.getUTCMinutes(), s: t.getUTCSeconds() };
+  }
+  const p: Record<string, number> = {};
+  for (const part of zoneFormat(zone).formatToParts(new Date(atMs))) {
+    if (part.type !== 'literal') p[part.type] = Number(part.value);
+  }
+  return { y: p['year']!, mo: p['month']!, d: p['day']!, h: p['hour']! % 24, mi: p['minute']!, s: p['second']! };
+}
+
+/** Minutes east of UTC in force at an instant. */
+function offsetAt(atMs: number, zone: TimeZone): number {
+  if (typeof zone === 'number') return zone;
+  const l = localTime(atMs, zone);
+  return Math.round((Date.UTC(l.y, l.mo - 1, l.d, l.h, l.mi, l.s) - Math.floor(atMs / 1000) * 1000) / 60_000);
+}
+
+/** A calendar date `n` days after (y, mo, d). */
+function addDays(y: number, mo: number, d: number, n: number): { y: number; mo: number; d: number } {
+  const t = new Date(Date.UTC(y, mo - 1, d + n));
+  return { y: t.getUTCFullYear(), mo: t.getUTCMonth() + 1, d: t.getUTCDate() };
+}
+
+const dateKey = (y: number, mo: number, d: number) => `${y}-${pad(mo)}-${pad(d)}`;
+
+/** The first instant of a local calendar date. */
+function startOfDate(y: number, mo: number, d: number, zone: TimeZone): number {
+  const wall = Date.UTC(y, mo - 1, d);
+  // The offset at the guess, then at the instant it gives: right on either
+  // side of a daylight-saving change near midnight.
+  let t = wall - offsetAt(wall, zone) * 60_000;
+  t = wall - offsetAt(t, zone) * 60_000;
+  // A zone whose clocks skip midnight starts that day at the first instant
+  // that reads as it.
+  for (let i = 0; i < 4; i++) {
+    const l = localTime(t, zone);
+    if (dateKey(l.y, l.mo, l.d) >= dateKey(y, mo, d)) break;
+    t += 15 * 60_000;
+  }
+  return t;
+}
+
 export interface PeriodRange {
   /** Epoch ms of the first instant counted, or null for all time. */
   fromMs: number | null;
@@ -146,48 +242,54 @@ export interface PeriodRange {
   keys: string[];
 }
 
-const pad = (n: number) => String(n).padStart(2, '0');
 /** The ledger's bucket key for a UTC instant, read in the viewer's local time. */
-export function bucketKey(atMs: number, tzOffsetMin: number, bucket: SpendBucket): string {
-  const d = new Date(atMs + tzOffsetMin * 60_000);
-  const day = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+export function bucketKey(atMs: number, zone: TimeZone, bucket: SpendBucket): string {
+  const l = localTime(atMs, zone);
+  const day = dateKey(l.y, l.mo, l.d);
   if (bucket === 'month') return day.slice(0, 7);
-  if (bucket === 'hour') return `${day} ${pad(d.getUTCHours())}`;
+  if (bucket === 'hour') return `${day} ${pad(l.h)}`;
   return day;
 }
 
 /**
- * Where a period starts and which chart slots it has, with days ending at the
- * viewer's local midnight. The offset is today's, so across a daylight-saving
- * change a run near midnight can land on the neighbouring day.
+ * Where a period starts and which chart slots it has, with days running from
+ * the viewer's local midnight to the next, under the offset in force on each
+ * day: a day with a daylight-saving change has 23 or 25 hours, not 24.
  */
-export function periodRange(period: SpendPeriod, tzOffsetMin: number, nowMs: number, firstAtMs: number | null): PeriodRange {
-  const offset = tzOffsetMin * 60_000;
-  const todayStart = Math.floor((nowMs + offset) / DAY) * DAY - offset;
+export function periodRange(period: SpendPeriod, zone: TimeZone, nowMs: number, firstAtMs: number | null): PeriodRange {
+  const today = localTime(nowMs, zone);
+  const todayStart = startOfDate(today.y, today.mo, today.d, zone);
   if (period === 'today') {
-    const keys = Array.from({ length: 24 }, (_, h) => bucketKey(todayStart + h * HOUR, tzOffsetMin, 'hour'));
+    const next = addDays(today.y, today.mo, today.d, 1);
+    const end = startOfDate(next.y, next.mo, next.d, zone);
+    const keys: string[] = [];
+    // Hour by hour to the next midnight; an hour the clocks repeat is one slot.
+    for (let t = todayStart; t < end; t += HOUR) {
+      const key = bucketKey(t, zone, 'hour');
+      if (keys[keys.length - 1] !== key) keys.push(key);
+    }
     return { fromMs: todayStart, bucket: 'hour', keys };
   }
+  const datesFrom = (from: { y: number; mo: number; d: number }, days: number) =>
+    Array.from({ length: days }, (_, i) => { const x = addDays(from.y, from.mo, from.d, i); return dateKey(x.y, x.mo, x.d); });
   if (period === '7d' || period === '30d') {
     const days = period === '7d' ? 7 : 30;
-    const fromMs = todayStart - (days - 1) * DAY;
-    const keys = Array.from({ length: days }, (_, i) => bucketKey(fromMs + i * DAY, tzOffsetMin, 'day'));
-    return { fromMs, bucket: 'day', keys };
+    const first = addDays(today.y, today.mo, today.d, -(days - 1));
+    return { fromMs: startOfDate(first.y, first.mo, first.d, zone), bucket: 'day', keys: datesFrom(first, days) };
   }
   // All time: day by day while the history is short, so a new account sees
   // its days rather than one or two monthly bars; month by month after that.
   if (firstAtMs != null) {
-    const firstDay = Math.floor((firstAtMs + offset) / DAY) * DAY - offset;
-    const days = Math.round((todayStart - firstDay) / DAY) + 1;
+    const first = localTime(firstAtMs, zone);
+    const days = Math.round((Date.UTC(today.y, today.mo - 1, today.d) - Date.UTC(first.y, first.mo - 1, first.d)) / DAY) + 1;
     if (days <= ALL_TIME_DAILY_UP_TO) {
-      const keys = Array.from({ length: days }, (_, i) => bucketKey(firstDay + i * DAY, tzOffsetMin, 'day'));
-      return { fromMs: null, bucket: 'day', keys };
+      return { fromMs: null, bucket: 'day', keys: datesFrom(first, days) };
     }
   }
   const keys: string[] = [];
   if (firstAtMs != null) {
-    const last = bucketKey(nowMs, tzOffsetMin, 'month');
-    let [y, m] = bucketKey(firstAtMs, tzOffsetMin, 'month').split('-').map(Number) as [number, number];
+    const last = bucketKey(nowMs, zone, 'month');
+    let [y, m] = bucketKey(firstAtMs, zone, 'month').split('-').map(Number) as [number, number];
     for (let guard = 0; guard < 1200; guard++) {
       const key = `${y}-${pad(m)}`;
       keys.push(key);
@@ -213,7 +315,16 @@ export interface SpendTotals {
 
 export interface SpendSlot { key: string; spentUsd: number; savedUsd: number; runs: number }
 
-export interface SpendModelRow { model: string; spentUsd: number; tokens: number; runs: number }
+export interface SpendModelRow {
+  model: string;
+  spentUsd: number;
+  tokens: number;
+  runs: number;
+  /** Runs where some of this model's calls had no price: its cost is an undercount. */
+  unpricedRuns: number;
+  /** Runs at $0 with tokens whose report did not say whether they were priced. */
+  priceUnknownRuns: number;
+}
 export interface SpendTierRow { tier: string; spentUsd: number; tokens: number; runs: number; models: SpendModelRow[] }
 
 export interface SpendChatRow {
@@ -238,8 +349,15 @@ export interface SpendReport {
 export interface SpendSource {
   firstSpendAt(userId: string): number | null;
   spendTotals(userId: string, fromMs: number | null): SpendTotals;
-  spendSeries(userId: string, fromMs: number | null, tzOffsetMin: number, bucket: SpendBucket): SpendSlot[];
-  spendByTierModel(userId: string, fromMs: number | null): Array<{ tier: string; model: string; spentUsd: number; tokens: number; runs: number; tierRuns: number }>;
+  /**
+   * Each run's time, spend and saving. The report puts them into the viewer's
+   * local days here rather than in SQL, which has no time zone rules.
+   */
+  spendRuns(userId: string, fromMs: number | null): Array<{ at: number; spentUsd: number; savedUsd: number }>;
+  spendByTierModel(userId: string, fromMs: number | null): Array<{
+    tier: string; model: string; spentUsd: number; tokens: number; runs: number; tierRuns: number;
+    unpricedRuns: number; priceUnknownRuns: number;
+  }>;
   spendTopChats(userId: string, fromMs: number | null, limit: number): SpendChatRow[];
 }
 
@@ -247,10 +365,18 @@ export const TOP_CHATS = 5;
 const TIER_ORDER = ['T1', 'T2', 'T3'];
 
 export function buildSpendReport(
-  source: SpendSource, userId: string, period: SpendPeriod, tzOffsetMin: number, nowMs: number,
+  source: SpendSource, userId: string, period: SpendPeriod, zone: TimeZone, nowMs: number,
 ): SpendReport {
-  const range = periodRange(period, tzOffsetMin, nowMs, period === 'all' ? source.firstSpendAt(userId) : null);
-  const found = new Map(source.spendSeries(userId, range.fromMs, tzOffsetMin, range.bucket).map((s) => [s.key, s]));
+  const range = periodRange(period, zone, nowMs, period === 'all' ? source.firstSpendAt(userId) : null);
+  const found = new Map<string, SpendSlot>();
+  for (const run of source.spendRuns(userId, range.fromMs)) {
+    const key = bucketKey(run.at, zone, range.bucket);
+    const slot = found.get(key) ?? { key, spentUsd: 0, savedUsd: 0, runs: 0 };
+    slot.spentUsd += run.spentUsd;
+    slot.savedUsd += run.savedUsd;
+    slot.runs += 1;
+    found.set(key, slot);
+  }
   const series = range.keys.map((key) => found.get(key) ?? { key, spentUsd: 0, savedUsd: 0, runs: 0 });
 
   const tiers = new Map<string, SpendTierRow>();
@@ -258,7 +384,10 @@ export function buildSpendReport(
     const t = tiers.get(r.tier) ?? { tier: r.tier, spentUsd: 0, tokens: 0, runs: r.tierRuns, models: [] };
     t.spentUsd += r.spentUsd;
     t.tokens += r.tokens;
-    t.models.push({ model: r.model, spentUsd: r.spentUsd, tokens: r.tokens, runs: r.runs });
+    t.models.push({
+      model: r.model, spentUsd: r.spentUsd, tokens: r.tokens, runs: r.runs,
+      unpricedRuns: r.unpricedRuns, priceUnknownRuns: r.priceUnknownRuns,
+    });
     tiers.set(r.tier, t);
   }
   const rank = (tier: string) => { const i = TIER_ORDER.indexOf(tier); return i < 0 ? TIER_ORDER.length : i; };
