@@ -2063,6 +2063,9 @@ export class CascadeRouter extends EventEmitter {
       untrackedCostModels: [],
     };
     this.servedBy = new Map();
+    // Per-run usage too: a reset between independent tasks must not leave the
+    // previous task's calls in what getRunStats() reports for the next.
+    this.runUsage = new Map();
     this.sessionCostUsd = 0;
     this.budgetState = 'ok';
     this.budgetExceededReason = undefined;

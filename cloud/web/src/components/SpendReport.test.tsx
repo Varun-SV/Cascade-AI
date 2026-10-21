@@ -114,6 +114,14 @@ describe('SpendReport', () => {
     expect(deleted.closest('button')).toBeNull();
   });
 
+  it('counts runs that never had a chat apart from deleted chats', async () => {
+    mocked.mockResolvedValue(report({ chats: [...report().chats, { conversationId: null, noChat: true, title: null, spentUsd: 0.01, savedUsd: 0, runs: 1 }] }));
+    render(<SpendReport onClose={() => {}} onOpenChat={() => {}} />);
+    expect(await screen.findByText('Runs with no chat')).toBeInTheDocument();
+    expect(screen.getByText('Deleted chats')).toBeInTheDocument();
+    expect(screen.getByText('Runs with no chat').closest('button')).toBeNull();
+  });
+
   it('shows the same figures as a table', async () => {
     mocked.mockResolvedValue(report({ series: [...report().series, { key: '2026-09-30', spentUsd: 0, savedUsd: 0, runs: 0 }] }));
     render(<SpendReport onClose={() => {}} onOpenChat={() => {}} />);

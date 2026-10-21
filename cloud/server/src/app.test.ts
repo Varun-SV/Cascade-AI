@@ -495,6 +495,10 @@ describe('cloud/server app', () => {
     expect(ok.status).toBe(200);
     expect(await ok.json()).toEqual({ recorded: true });
 
+    // A run that failed before its first reply has no chat: it is counted
+    // apart from deleted chats, and no empty chat is made for it.
+    expect(await (await post({ conversationId: null, outcome: 'failed', costUsd: 0.001, why })).json()).toEqual({ recorded: true });
+
     // Nothing billed: nothing kept. Bad input and someone else's chat: refused.
     expect(await (await post({ outcome: 'stopped', costUsd: 0, why: '{}' })).json()).toEqual({ recorded: false });
     for (const bad of [{ outcome: 'answered', costUsd: 1, why }, { outcome: 'failed', costUsd: -1, why }, { outcome: 'failed', costUsd: 1 }]) {
@@ -506,11 +510,13 @@ describe('cloud/server app', () => {
     const body = await (await fetch(`${baseUrl}/api/usage/report?period=today`, { headers: { Cookie: cookie } })).json() as {
       totals: { spentUsd: number; runs: number; failedRuns: number; failedUsd: number };
       tiers: Array<{ tier: string; models: Array<{ model: string; unpricedRuns: number; priceUnknownRuns: number }> }>;
-      chats: Array<{ title: string }>;
+      chats: Array<{ title: string | null; noChat: boolean }>;
     };
-    expect(body.totals).toMatchObject({ runs: 1, failedRuns: 1 });
-    expect(body.totals.failedUsd).toBeCloseTo(0.004, 8);
-    expect(body.chats.map((c) => c.title)).toEqual(['Broke halfway']);
+    expect(body.totals).toMatchObject({ runs: 2, failedRuns: 2 });
+    expect(body.totals.failedUsd).toBeCloseTo(0.005, 8);
+    expect(body.chats.map((c) => [c.title, c.noChat])).toEqual([['Broke halfway', false], [null, true]]);
+    const convos = (await (await fetch(`${baseUrl}/api/conversations`, { headers: { Cookie: cookie } })).json()) as { conversations: Array<{ id: string }> };
+    expect(convos.conversations.map((c) => c.id)).toEqual([cid]);
     // The local model was priced, at $0: free, not missing a price.
     const llama = body.tiers[0]!.models.find((m) => m.model === 'ollama:llama')!;
     expect(llama).toMatchObject({ unpricedRuns: 0, priceUnknownRuns: 0 });

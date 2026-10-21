@@ -328,8 +328,10 @@ export interface SpendModelRow {
 export interface SpendTierRow { tier: string; spentUsd: number; tokens: number; runs: number; models: SpendModelRow[] }
 
 export interface SpendChatRow {
-  /** Null for the chats that have since been deleted, counted together. */
+  /** Null for the chats that have since been deleted, counted together, and for runs with no chat. */
   conversationId: string | null;
+  /** Runs that never had a chat: a device run that failed before its first reply. */
+  noChat: boolean;
   title: string | null;
   spentUsd: number;
   savedUsd: number;

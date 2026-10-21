@@ -388,16 +388,17 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   /**
    * A run that ended without a reply still spent money: add it to the
    * account's spend report, as a hosted run that fails is. Best-effort.
+   * It joins the chat already synced, if any; it never creates one, since a
+   * chat with no messages would be left behind for it.
    */
-  const recordUnansweredRunInCloud = useCallback(async (prompt: string, outcome: 'failed' | 'stopped', report: CloudRunReport) => {
+  const recordUnansweredRunInCloud = useCallback(async (outcome: 'failed' | 'stopped', report: CloudRunReport) => {
     const mirror = cloudMirrorRef.current;
     if (!mirror || process.env['CASCADE_NO_CLOUD_SYNC']) return;
     if (report.totalCostUsd <= 0 && report.totalTokens <= 0) return;
     try {
-      const conversationId = await ensureCloudConversation(mirror, prompt);
-      await mirror.client.recordUnansweredRun({ conversationId, outcome, ...cloudTurnAccounting(report) });
+      await mirror.client.recordUnansweredRun({ conversationId: mirror.convId, outcome, ...cloudTurnAccounting(report) });
     } catch { /* best-effort — the local run's error is what the user sees */ }
-  }, [ensureCloudConversation]);
+  }, []);
 
   /**
    * Apply a selection from the interactive model picker:
@@ -1092,7 +1093,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           stats: spent, t1Model: cascade.getRouter().getTierModel('T1'),
           decisions: cascade.getDecisionLog(), durationMs: 0,
         });
-        void recordUnansweredRunInCloud(trimmed, runAbortRef.current?.signal.aborted ? 'stopped' : 'failed', report);
+        void recordUnansweredRunInCloud(runAbortRef.current?.signal.aborted ? 'stopped' : 'failed', report);
       }
     }
     finally {

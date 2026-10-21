@@ -1157,15 +1157,19 @@ export class CloudStore {
         // Deleted chats are counted together under one row with no id or title.
         this.db.prepare(
           `SELECT CASE WHEN c.id IS NULL THEN NULL ELSE l.conversation_id END AS conversationId,
+                  (l.conversation_id IS NULL) AS noChat,
                   MAX(c.title) AS title,
                   SUM(l.cost_usd) AS spentUsd, SUM(l.saved_usd) AS savedUsd, COUNT(*) AS runs
              FROM spend_ledger l
              LEFT JOIN conversations c ON c.id = l.conversation_id AND c.user_id = l.user_id
             WHERE ${since}
-            GROUP BY conversationId
+            GROUP BY conversationId, noChat
             ORDER BY spentUsd DESC, runs DESC
             LIMIT ?`,
-        ).all(userId, fromMs, fromMs, limit) as SpendChatRow[],
+        ).all(userId, fromMs, fromMs, limit).map((r) => {
+          const row = r as Omit<SpendChatRow, 'noChat'> & { noChat: number };
+          return { ...row, noChat: row.noChat === 1 };
+        }),
     };
   }
 

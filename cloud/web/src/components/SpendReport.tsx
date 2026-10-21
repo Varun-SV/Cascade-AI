@@ -197,14 +197,14 @@ function Body({ report, onOpenChat }: { report: Report; onOpenChat: (id: string)
               const body = (
                 <>
                   <span className={`min-w-0 flex-1 truncate ${c.conversationId ? 'text-ink-50' : 'italic text-ink-400'}`}>
-                    {c.conversationId ? (c.title || 'Untitled chat') : 'Deleted chats'}
+                    {c.conversationId ? (c.title || 'Untitled chat') : c.noChat ? 'Runs with no chat' : 'Deleted chats'}
                   </span>
                   <span className="hidden shrink-0 text-[12px] text-ink-500 sm:inline">{detail}</span>
                   <span className="w-[4.5rem] shrink-0 text-right font-medium tabular-nums text-ink-50">{fmtUsd(c.spentUsd)}</span>
                 </>
               );
               return (
-                <li key={c.conversationId ?? 'deleted'} className="border-t border-elev/10">
+                <li key={c.conversationId ?? (c.noChat ? 'no-chat' : 'deleted')} className="border-t border-elev/10">
                   {c.conversationId ? (
                     <button
                       type="button"

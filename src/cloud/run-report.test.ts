@@ -133,6 +133,16 @@ describe('a device run\'s /why for the cloud', () => {
     expect(router.getStats().totalCostUsd).toBeCloseTo(0.031, 8);
   });
 
+  it('forgets per-run usage when the stats are reset between independent tasks', () => {
+    router.beginRun();
+    call('T3', 'openai', 'mini', 1000, 0, 0.001);
+    router.resetStats();
+    expect(router.getRunStats().totalTokens).toBe(0);
+    call('T3', 'openai', 'mini', 100, 0, 0.0001);
+    expect(router.getRunStats().totalTokens).toBe(100);
+    expect(router.getRunStats().totalCostUsd).toBeCloseTo(0.0001, 8);
+  });
+
   it('keeps only recent runs, and reports an unknown run as empty', () => {
     for (let i = 0; i < 12; i++) {
       router.beginRun();

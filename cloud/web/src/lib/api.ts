@@ -529,8 +529,9 @@ export interface SpendReport {
       priceUnknownRuns: number;
     }>;
   }>;
-  /** Costliest chats first. A null id is every deleted chat, counted together. */
-  chats: Array<{ conversationId: string | null; title: string | null; spentUsd: number; savedUsd: number; runs: number }>;
+  /** Costliest chats first. A null id is every deleted chat, counted together,
+   *  or (with `noChat`) the runs that never had a chat. */
+  chats: Array<{ conversationId: string | null; noChat?: boolean; title: string | null; spentUsd: number; savedUsd: number; runs: number }>;
 }
 
 /**
