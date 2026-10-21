@@ -1,8 +1,9 @@
 # Bring-your-own browser, and routing data for users
 
-Status: **design for review**, revision 2 (council: discussion #315, review
-on PR #316 as inline comments). Q1–Q5 decided by the maintainer.
-No feature code lands until the design is agreed.
+Status: **stage 1 agreed to start** (ChatGPT, 21 Oct 2026, on PR #316),
+revision 2 (council: discussion #315, review on PR #316 as inline comments).
+Q1–Q5 decided by the maintainer. That agreement is to start stage 1, not
+approval of its code: each stage is reviewed from its own diff and tests.
 
 Revision 2 answers ChatGPT's review on #316:
 - **A:** the tab-level adapter has been prototyped against Playwright (§3.3).
@@ -280,8 +281,10 @@ can neither see nor disable that channel:
 **Hostnames:** the policy resolves the name on the device and checks the
 resulting address. It pins that address for the request (CLI and desktop),
 which defends against DNS rebinding. The extension cannot resolve names
-itself; it relies on Chrome's Private Network Access checks for that part,
-and the doc says so.
+itself. Chrome's Private Network Access checks are **not** a demonstrated
+request firewall, so the extension makes **no** private-network claim until
+its own P2 run (§9) passes; until then the UI and docs say private-network
+blocking is not enforced for that source.
 
 **What is guaranteed, and what is not.** This is not network egress
 isolation:
@@ -474,7 +477,12 @@ commands and detaches the debugger, all on the device:
   navigation, link click, script navigation, form submission, server
   redirect, and iframe. The test asserts the destination server saw 0
   requests. No request reaches a private-network address unless consented.
-  The agent cannot disable the policy's interception. Run on each adapter.
+  The agent cannot disable the policy's interception. Every case is
+  asserted **at the destination server**, including each redirect hop and
+  loopback, RFC 1918 and `localhost` destinations.
+  P2 is a **separate shipping gate for each adapter**: a source ships only
+  with the claims its own run proves, and any claim it cannot enforce is
+  stated as such in its UI and docs.
   Today `poc-egress-and-lease.mjs` covers the CLI-style path (a
   privileged CDP session); desktop and extension need their own runs.
 - **P3.** Under Strict, no cloud run can attach (test). Under Controlled
@@ -490,6 +498,11 @@ commands and detaches the debugger, all on the device:
   - presented again after its connection dropped
   - presented after a new lease was issued from a fresh capability
   - expired
+
+  After a disconnect, control comes back only through a **fresh approval**
+  that mints a new capability. Tests assert that a burned capability, a
+  stale lease generation, and a command in flight on the old connection
+  each fail to regain control.
 
   A capability refused only because the tab was leased stays usable (test;
   covered for the relay in `poc-egress-and-lease.mjs`).
@@ -531,7 +544,7 @@ off by default:
 | Stage | Contents | Flag | Gate |
 |---|---|---|---|
 | 0 | Dependency updates, #305 (done) | — | CI green; E1 manual smoke test |
-| 1 | Threat model, command contract and lease library, with tests; history `commit` fix | — | P1, O1–O3 at library level |
+| 1 | Threat model, command contract and lease library, with tests; request-origin policy; history `commit` fix | — | P1, P2 (CLI-style path), O1–O3 at library level |
 | 2 | A: CLI relay, then desktop adapter | `browser.relay.cli`, `browser.relay.desktop` | R-A1 (CLI, desktop), S1, P2, P3 |
 | 3 | B: Chrome extension | `browser.relay.extension` | R-A1 (extension), S1 incl. service-worker restart |
 | 4 | Remove hosted browser and `REMOTE_BROWSER_*`; drop the allowance | — | no remaining references; self-host docs updated |
@@ -539,9 +552,9 @@ off by default:
 | 6 | C and D | per source | R-A1 against each |
 
 Independent review happens per stage, from the diff and tests rather than
-the implementer's summary. If the combined PR grows too large to review
-well, stages 2+ can be split into stacked PRs. That's the maintainer's
-call.
+the implementer's summary. The maintainer decided (21 Oct 2026) that PR #316
+carries this design, the prototypes and stage 0, and **each later stage gets
+its own PR**.
 
 ## 11. Open questions
 
@@ -558,4 +571,5 @@ Decided by the maintainer (21 Oct 2026):
   and on screenshots or a looser profile. Plus an always-visible "Online"
   indicator whose hover lists which data is leaving the device (§4.1).
 
-No open questions remain. The next gate is agreement on stage 1 (§10).
+No open questions remain. Stage 1 is agreed to start (§10); its code is
+reviewed in its own PR.
