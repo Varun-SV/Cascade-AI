@@ -403,7 +403,8 @@ commands and detaches the debugger, all on the device:
   - any success-rate comparison between models
 
   Spend accounting does not depend on that work. Performance claims do.
-- **You:** computed from the user's own rows.
+- **You:** computed from the user's own rows. Exact calendar months,
+  days and date ranges are fine here: no public aggregation is involved.
 - **Everyone:** aggregated across users, with these protections:
   - **Minimum cell:** at least 20 outcomes from at least 5 users.
   - **Complementary suppression:** if hiding one cell lets a total minus the
@@ -411,12 +412,18 @@ commands and detaches the debugger, all on the device:
   - **Immutable, non-overlapping releases.** Rolling windows don't stop
     differencing: windows released on successive days overlap, and their
     difference can reveal one boundary day. So Everyone is published only
-    as closed calendar buckets (ISO weeks; months built only from published
-    weeks):
+    as closed **ISO weeks**:
     - each bucket is released once, after it closes, and **never revised**
     - late data for a closed bucket is dropped from Everyone, not
       back-filled
     - there are no rolling windows and no free-form filters
+    - **no calendar months.** ISO weeks straddle month boundaries, so whole
+      weeks cannot add up to an exact calendar month, and publishing true
+      months as a second cut would bring back overlapping slices. Longer
+      views combine published weeks into periods labelled as **N weeks**
+      (e.g. "weeks 40–43"), never as a month. They disclose no new cells.
+      Public calendar months need their own privacy-safe joint release
+      scheme, specified and tested first.
   - **Suppression across every released cut.** A cell is suppressed when it
     is under the minimum, or when it could be derived by subtraction from
     any combination of released cells: across dimensions and across
@@ -528,13 +535,20 @@ commands and detaches the debugger, all on the device:
   sign-in/sync.
 
 **Routing data**
-- **D1.** The All / Cloud / Desktop / CLI tabs match ledger totals exactly.
+- **D1.** The All / Cloud / Desktop / CLI tabs match ledger totals exactly,
+  including exact calendar months and date ranges in You.
 - **D2.** Everyone cells under threshold are hidden, and so are their
   complements (test).
-- **D3.** Releases are immutable, non-overlapping buckets (test).
-- **D4.** A differencing attack fails. The test queries the same metrics as
-  published on successive days and across every released cut, and cannot
-  recover a suppressed small cohort.
+- **D3.** Everyone releases are immutable, non-overlapping ISO weeks, and
+  longer periods are labelled as N weeks, never months (test).
+- **D4.** A differencing attack fails. The test reads everything published
+  (every week, every N-week period, and every tier/model/surface/provenance
+  and total cut) and tries:
+  - cross-dimensional subtraction (a total minus its visible parts)
+  - cumulative subtraction (an N-week period minus its published weeks, and
+    successive periods minus each other)
+
+  None of them recovers a suppressed small cohort.
 
 ## 10. Delivery: stages and flags
 
