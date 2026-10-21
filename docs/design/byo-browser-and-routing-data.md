@@ -258,18 +258,19 @@ depth.
   - Anything else is refused and logged, at the root or in a nested
     session.
   - Parameters are validated where they carry side effects:
-    `Page.navigate` URLs go through §4.3, and `Input.*` must target the
-    leased tab.
+    `Page.navigate` URLs must be http(s) or `about:blank` and then go
+    through §4.3, and `Input.*` must target the leased tab.
   - Changing the list is a reviewed policy change with a version number.
   - Method names alone don't express side effects. `Runtime.evaluate`
     stays privileged page script by design (§4.3, honest limit).
-  - `poc-egress-and-lease.mjs` checks all of this (27/27):
+  - `poc-egress-and-lease.mjs` checks all of this (31/31):
     - an allowlisted method works on a nested cross-site iframe session
     - `Emulation.setGeolocationOverride` through that nested session is
       refused
     - `Emulation.setUserAgentOverride` is refused
     - a fabricated session id is refused
     - normal Playwright use hit no allowlist refusals
+    - `page.goto('file:///etc/hostname')` is refused by the relay
 - **Always denied:**
   - cookie and storage reads and writes (`Network.getCookies`,
     `getAllCookies`, `setCookie(s)`, `deleteCookies`,
@@ -301,8 +302,9 @@ can neither see nor disable that channel:
 
 | Request | Rule |
 |---|---|
-| Document (top-level navigation or iframe), any initiator: agent command, click, form, page script or redirect hop | Allowed only to a **consented origin**. Otherwise failed before sending |
-| Any request to a **private-network destination** (loopback, RFC 1918, link-local, CGNAT, unique-local IPv6, `localhost`, `*.local`) | Failed unless that exact origin was consented |
+| Document (top-level navigation or iframe), any initiator: agent command, click, form, page script or redirect hop | Allowed only over http(s) to a **consented origin**. Any other scheme (`file:`, `chrome:`, `data:`…) and any other origin are failed before sending |
+| Any `file:` request, of any type | Failed |
+| Any request to a **private-network destination** (loopback, RFC 1918, link-local, CGNAT, unspecified, multicast, unique-local IPv6, `localhost`, `*.local`), including IPv6 forms that reach an IPv4 address (IPv4-mapped, IPv4-compatible, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`), checked as that IPv4 address | Failed unless that exact origin was consented |
 | Subresources (script, style, image, font, fetch/XHR, WebSocket) to **public** origins | **Allowed** |
 
 **Hostnames:** the policy resolves the name on the device and checks the

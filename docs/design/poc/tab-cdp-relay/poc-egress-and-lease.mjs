@@ -8,11 +8,13 @@
 //     the device-side policy holds its own privileged CDP session on the tab
 //     (the agent never sees it) and pauses every request at the Request
 //     stage with Fetch, before anything is sent:
-//       - a document request (top-level navigation or iframe) must go to a
-//         consented origin, or it is failed;
+//       - a document request (top-level navigation or iframe) must be
+//         http(s) to a consented origin, or it is failed; a file: request of
+//         any type is failed;
 //       - any request to a private-network destination (loopback, RFC 1918,
-//         link-local, unique-local IPv6, *.local, localhost) is failed unless
-//         that origin was consented;
+//         link-local, unique-local IPv6, *.local, localhost, and IPv6 forms
+//         that reach an IPv4 address) is failed unless that origin was
+//         consented;
 //       - other subresources (scripts, images, fetch/XHR) to public origins
 //         are allowed. Pages need their CDNs, and Cascade cannot tell page
 //         script from agent script. This is the stated limit of §4.2.
@@ -117,17 +119,71 @@ function cdpClient(url) {
 
 // ── 1. Device-side egress policy (privileged; the agent cannot reach it) ────
 
-function isPrivateHost(host) {
-  const h = host.replace(/^\[|\]$/g, '').toLowerCase();
-  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local')) return true;
-  if (net.isIPv4(h)) {
-    const [a, b] = h.split('.').map(Number);
-    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+function isPrivateV4(h) {
+  const [a, b] = h.split('.').map(Number);
+  return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || (a === 198 && (b === 18 || b === 19))
+    || a >= 224; // multicast, reserved and broadcast
+}
+
+/** An IPv6 literal as eight 16-bit groups, with a trailing dotted IPv4 expanded. */
+function ipv6Groups(h) {
+  let s = h;
+  const v4 = /(\d+\.\d+\.\d+\.\d+)$/.exec(s);
+  if (v4) {
+    const [a, b, c, d] = v4[1].split('.').map(Number);
+    s = s.slice(0, -v4[1].length) + `${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
   }
-  if (net.isIPv6(h)) return h === '::1' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80');
+  const [head, tail] = s.includes('::') ? s.split('::') : [s, null];
+  const left = head ? head.split(':') : [];
+  const right = tail ? tail.split(':') : [];
+  const fill = tail === null ? [] : Array(8 - left.length - right.length).fill('0');
+  return [...left, ...fill, ...right].map((g) => parseInt(g || '0', 16));
+}
+
+const v4From = (hi, lo) => `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+
+function isPrivateHost(host) {
+  const h = host.replace(/^\[|\]$/g, '').toLowerCase().split('%')[0];
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local')) return true;
+  if (net.isIPv4(h)) return isPrivateV4(h);
+  if (net.isIPv6(h)) {
+    const g = ipv6Groups(h);
+    const zeros = (n) => g.slice(0, n).every((x) => x === 0);
+    // IPv4 inside IPv6 is checked as the IPv4 it reaches: mapped (::ffff:a.b.c.d),
+    // compatible (::a.b.c.d), NAT64 (64:ff9b::a.b.c.d) and 6to4 (2002:aabb:ccdd::).
+    if (zeros(5) && g[5] === 0xffff) return isPrivateV4(v4From(g[6], g[7]));
+    if (zeros(6)) return g[6] === 0 && g[7] <= 1 ? true : isPrivateV4(v4From(g[6], g[7])); // :: and ::1
+    if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) return isPrivateV4(v4From(g[6], g[7]));
+    if (g[0] === 0x2002) return isPrivateV4(v4From(g[1], g[2]));
+    return (g[0] & 0xfe00) === 0xfc00 // unique local fc00::/7
+      || (g[0] & 0xffc0) === 0xfe80 // link-local fe80::/10
+      || (g[0] & 0xff00) === 0xff00; // multicast
+  }
   // Hostnames: production resolves and checks the address on the device
   // (and pins it for the request, against DNS rebinding). Not done here.
   return false;
+}
+
+/**
+ * The policy's verdict on one request, before it is sent. A document (a
+ * top-level page or a frame) may only be http(s) on a consented origin: any
+ * other scheme (`file:`, `chrome:`, `data:`…) is blocked, as a `file:` request
+ * of any type is.
+ */
+function egressVerdict(rawUrl, resourceType, consentedOrigins) {
+  let url;
+  try { url = new URL(rawUrl); } catch { return { verdict: 'block', reason: 'unparseable URL' }; }
+  const web = url.protocol === 'http:' || url.protocol === 'https:';
+  if (!web) {
+    if (resourceType === 'Document') return { verdict: 'block', reason: `${url.protocol} document` };
+    if (url.protocol === 'file:') return { verdict: 'block', reason: 'file: request' };
+    return { verdict: 'allow', reason: '' };
+  }
+  const consented = consentedOrigins.has(url.origin);
+  if (resourceType === 'Document' && !consented) return { verdict: 'block', reason: 'navigation to an origin without consent' };
+  if (isPrivateHost(url.hostname) && !consented) return { verdict: 'block', reason: 'private-network destination' };
+  return { verdict: 'allow', reason: '' };
 }
 
 async function startEgressPolicy(tabWsUrl, consentedOrigins) {
@@ -135,15 +191,7 @@ async function startEgressPolicy(tabWsUrl, consentedOrigins) {
   await client.ready;
   const decisions = [];
   client.on('Fetch.requestPaused', async ({ requestId, request, resourceType }) => {
-    const url = new URL(request.url);
-    const origin = url.origin;
-    let verdict = 'allow';
-    let reason = '';
-    if (url.protocol === 'http:' || url.protocol === 'https:') {
-      const consented = consentedOrigins.has(origin);
-      if (resourceType === 'Document' && !consented) { verdict = 'block'; reason = 'navigation to an origin without consent'; }
-      else if (isPrivateHost(url.hostname) && !consented) { verdict = 'block'; reason = 'private-network destination'; }
-    }
+    const { verdict, reason } = egressVerdict(request.url, resourceType, consentedOrigins);
     decisions.push({ verdict, resourceType, url: request.url, reason });
     try {
       if (verdict === 'block') await client.send('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' });
@@ -274,6 +322,11 @@ function startRelay(tabWsUrl, caps) {
       if (state.lease?.generation !== generation) return;
       const { id, method, params = {}, sessionId } = JSON.parse(raw);
       if (sessionId) {
+        // The command contract also checks the one argument that names a
+        // destination: an agent navigation is http(s) or about:blank only.
+        if (method === 'Page.navigate' && !/^(https?:|about:blank$)/i.test(String(params.url ?? ''))) {
+          return reply(id, sessionId, { error: { code: -32000, message: `Denied by Cascade relay policy: Page.navigate to ${String(params.url).split(':')[0]}:` } });
+        }
         const refusal = policyRefusal(method, sessionId, knownSessions);
         if (refusal) {
           if (refusal.includes('not on the allowlist')) allowlistMisses.add(method);
@@ -402,6 +455,32 @@ try {
     await sleep(200);
     const policyBlocked = policy.decisions.some((d) => d.verdict === 'block' && d.reason === 'private-network destination');
     check('P2: fetch to a private-network address is blocked by the policy', priv.hits.length === before && policyBlocked, result);
+  }
+  {
+    // The same private server, reached through an IPv4-mapped IPv6 literal.
+    const before = priv.hits.length;
+    const result = await page.evaluate((u) => fetch(u).then(() => 'reached', (e) => `failed: ${e.message}`), `http://[::ffff:127.0.0.1]:${priv.port}/admin`);
+    await sleep(200);
+    const blocked = policy.decisions.some((d) => d.verdict === 'block' && d.reason === 'private-network destination' && d.url.includes('[::ffff:'));
+    check('P2: fetch to a private address written as IPv4-mapped IPv6 is blocked', priv.hits.length === before && blocked, result);
+  }
+  {
+    const cases = {
+      private: ['::ffff:127.0.0.1', '[::ffff:7f00:1]', '::ffff:10.0.0.1', '64:ff9b::7f00:1', '::', '::1', '::127.0.0.1', '0.0.0.0',
+        'fe90::1', 'febf::1', 'fd00::1', '2002:7f00:1::', '2002:c0a8:101::', '224.0.0.1', '[fe80::1%25eth0]'],
+      public: ['8.8.8.8', '2606:4700:4700::1111', '::ffff:8.8.8.8', '64:ff9b::808:808', '2002:808:808::', 'fec0::1'],
+    };
+    const wrong = [...cases.private.filter((h) => !isPrivateHost(h)), ...cases.public.filter((h) => isPrivateHost(h))];
+    check('P2: private-address check covers IPv6 forms that reach IPv4 (mapped, compatible, NAT64, 6to4) and all of fe80::/10', wrong.length === 0, wrong.join(', ') || `${cases.private.length} private, ${cases.public.length} public`);
+  }
+  {
+    const opened = await page.goto('file:///etc/hostname').then(() => 'navigated', (e) => `refused: ${e.message.split('\n')[0]}`);
+    check('P2: the agent cannot navigate the tab to a file: URL', opened.startsWith('refused') && !page.url().startsWith('file:'), opened);
+    const verdicts = [
+      ['file:///etc/hostname', 'Document'], ['chrome://settings/', 'Document'], ['data:text/html,hi', 'Document'],
+      ['file:///etc/passwd', 'Image'],
+    ].map(([u, t]) => egressVerdict(u, t, new Set([ALLOWED])).verdict);
+    check('P2: non-http(s) documents and any file: request are blocked by the request policy', verdicts.every((v) => v === 'block'), verdicts.join(', '));
   }
 
   await page.goto(`${ALLOWED}/two`);
