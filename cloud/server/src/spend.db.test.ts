@@ -191,12 +191,17 @@ describe('spend ledger', () => {
     const u = user('stopped-turn');
     const c = store.createConversation(u.id, 'Chat');
     store.appendTurn(c.id, u.id, { userContent: 'q', runId: 'run-0004-dddd', outcome: 'stopped', assistant: { content: 'half', costUsd: 0.01, why: JSON.stringify({ totalTokens: 10 }) } });
-    // The partial reply is kept, and the run is a stop in the report.
+    // The partial reply is kept, marked as stopped on every reload, and the
+    // run is a stop in the report.
     expect(store.getMessages(c.id).map((m) => m.content)).toEqual(['q', 'half']);
+    expect(store.getActivePath(c.id).map((m) => m.cancelled)).toEqual([undefined, true]);
     const raw = new Database(dbPath, { readonly: true });
     try {
       expect(raw.prepare('SELECT outcome FROM spend_ledger WHERE user_id = ?').all(u.id)).toEqual([{ outcome: 'stopped' }]);
     } finally { raw.close(); }
+    // A reply from a run that was not stopped is not marked.
+    store.appendTurn(c.id, u.id, { userContent: 'q2', runId: 'run-0005-eeee', assistant: { content: 'whole', costUsd: 0.01, why: '{}' } });
+    expect(store.getActivePath(c.id).at(-1)!.cancelled).toBeUndefined();
   });
 
   it('counts a run once when its turn also lands in a second chat', () => {

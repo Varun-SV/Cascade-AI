@@ -51,6 +51,13 @@ describe('the desktop\'s run accounting for the cloud', () => {
       { prompt: 'q', output: 'a', outcome: 'answered', durationMs: 900, copyTurn: true });
     expect(sent.map((s) => s.event)).toEqual(['run:accounting']);
     expect(sent[0]!.payload).toMatchObject({ outcome: 'answered', copyTurn: true, prompt: 'q' });
+    // Kept, under an id, until a window confirms it: a run can end with no window open.
+    const id = (sent[0]!.payload as { id?: string }).id;
+    expect(id).toMatch(/^[0-9a-f-]{36}$/);
+    const pending = (server as unknown as { pendingAccounting: { unconfirmed(): Array<{ id: string }>; confirm(id: string): void } }).pendingAccounting;
+    expect(pending.unconfirmed().map((r) => r.id)).toEqual([id]);
+    pending.confirm(id!);
+    expect(pending.unconfirmed()).toEqual([]);
     const cloud = sent[0]!.payload.cloud;
 
     expect(cloud?.costUsd).toBeCloseTo(0.001, 8);

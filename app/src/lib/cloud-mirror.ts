@@ -12,6 +12,8 @@ export interface RunAccounting { costUsd: number; why: string }
 
 /** One finished run, as the backend sends it in `run:accounting`. */
 export interface AccountedRun {
+  /** The backend's id for this report; also the run's id in the cloud. */
+  id?: string;
   sessionId?: string;
   prompt?: string;
   output?: string;
@@ -108,8 +110,9 @@ export class CloudMirror {
     const key = `${who?.serverUrl ?? ''}|${who?.user?.id ?? ''}|${sid}`;
     const outcome = run.outcome ?? 'answered';
     // One id for this run, however it is sent and however often: the cloud
-    // adds its turn to a chat once, and counts the run once, per id.
-    const runId = newRunId();
+    // adds its turn to a chat once, and counts the run once, per id. The
+    // backend's id when it gave one, so a replayed report is the same run.
+    const runId = typeof run.id === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(run.id) ? run.id : newRunId();
     // A turn from the desktop's own views is copied, with its cost: an answer,
     // or what a run the user stopped had written so far (counted as stopped).
     if ((outcome === 'answered' || outcome === 'stopped') && run.output && run.prompt && run.copyTurn !== false

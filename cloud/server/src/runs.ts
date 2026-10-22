@@ -2349,6 +2349,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
       ...(trace.size > 0 ? { trace: [...trace.values()] } : {}),
     };
 
+    const cancelled = signal?.aborted ?? false;
     const assistantMessage = store.addMessage({
       conversationId: conversation.id,
       role: 'assistant',
@@ -2361,9 +2362,10 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
       tier,
       why: JSON.stringify(why),
       costUsd: result.usage.estimatedCostUsd,
+      // A stopped run's partial reply keeps saying so after a reload.
+      cancelled,
     });
     store.incrementUsage(userId, todayKey());
-    const cancelled = signal?.aborted ?? false;
 
     // Opt-in session → memory: distill the conversation into durable memories the
     // user's future runs will see (they're injected via buildRunPrompt). Best-

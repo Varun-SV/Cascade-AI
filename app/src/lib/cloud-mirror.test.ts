@@ -48,6 +48,14 @@ describe('CloudMirror', () => {
     expect(api.recordRunSpend).not.toHaveBeenCalled();
   });
 
+  it('sends a report replayed by the backend under the backend\'s id, so it is counted once', async () => {
+    const { api, mirror } = setup();
+    const id = '6a1c2f3e-0000-4000-8000-123456789abc';
+    await mirror.accounted({ id, sessionId: 'sched', outcome: 'answered', copyTurn: false, prompt: 'q', output: 'a', cloud: accounting });
+    await mirror.accounted({ id, sessionId: 'sched', outcome: 'answered', copyTurn: false, prompt: 'q', output: 'a', cloud: accounting });
+    expect(api.recordRunSpend.mock.calls.map((c) => (c[0] as { runId: string }).runId)).toEqual([id, id]);
+  });
+
   it('counts a scheduled run\'s spend without copying it as a chat', async () => {
     const { api, mirror } = setup();
     await mirror.accounted(answered('sched', { copyTurn: false }));

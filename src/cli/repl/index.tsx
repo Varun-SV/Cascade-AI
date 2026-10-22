@@ -1063,7 +1063,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
      * its cloud send may wait behind earlier ones, by which time later runs
      * have begun, and could have dropped this run's usage.
      */
-    const runReportLater = (durationMs: number): (() => Promise<CloudRunReport | null>) => {
+    const runReportLater = (durationMs: number, after?: Promise<unknown>): (() => Promise<CloudRunReport | null>) => {
       const generation = runGeneration();
       if (generation === null) return async () => null;
       const router = cascade.getRouter();
@@ -1071,7 +1071,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       // a later model pick must not change what this run saved.
       const report = settledRunReport(router, generation, {
         t1Model: router.getTierModel('T1'), decisions: cascade.getDecisionLog(), durationMs,
-      });
+      }, after);
       return () => report;
     };
     try {
@@ -1104,7 +1104,20 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       // with no empty reply.
       const output = result.output;
       const stopped = runAbortRef.current?.signal.aborted === true;
-      const reportFor = runReportLater(result.durationMs);
+      // Name the session on its first exchange (async). Started before the
+      // run's report, which waits for it: the title's model call is part of
+      // what this run spent.
+      let titled: Promise<unknown> | undefined;
+      if (!sessionTitleGeneratedRef.current && storeRef.current) {
+        sessionTitleGeneratedRef.current = true;
+        titled = generateSessionName(trimmed, cascadeRef.current).then(name => {
+          if (name && storeRef.current) {
+            storeRef.current.updateSession(sessionIdRef.current, { title: name, updatedAt: new Date().toISOString() });
+            persistRuntimeSession('ACTIVE');
+          }
+        }).catch(() => { /* non-critical */ });
+      }
+      const reportFor = runReportLater(result.durationMs, titled);
       queueCloud(async () => {
         const report = await reportFor();
         if (!report) return;
@@ -1116,16 +1129,6 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       const receipt = formatRunReceipt(result, stats.totalCostUsd, savings);
       if (receipt) {
         dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'system', content: receipt, timestamp: new Date().toISOString() } });
-      }
-      // Generate AI session name on first exchange (async, fire-and-forget)
-      if (!sessionTitleGeneratedRef.current && storeRef.current) {
-        sessionTitleGeneratedRef.current = true;
-        generateSessionName(trimmed, cascadeRef.current).then(name => {
-          if (name && storeRef.current) {
-            storeRef.current.updateSession(sessionIdRef.current, { title: name, updatedAt: new Date().toISOString() });
-            persistRuntimeSession('ACTIVE');
-          }
-        }).catch(() => { /* non-critical */ });
       }
     } catch (err: unknown) { 
       const message = err instanceof Error ? err.message : String(err);

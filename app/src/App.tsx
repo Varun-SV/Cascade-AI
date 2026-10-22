@@ -395,7 +395,11 @@ export function App() {
     // transcript's streaming flag when a run finishes while another view is open.
     // Each finished run's cost, sent once its calls have settled: copied to the
     // cloud account whichever session or view is on screen.
-    socket.on('run:accounting', (data: AccountedRun) => { void cloudMirror.accounted(data); });
+    // Confirmed once handled (sent or skipped), so the backend stops
+    // replaying it; one that never is gets replayed on the next connect.
+    socket.on('run:accounting', (data: AccountedRun) => {
+      void cloudMirror.accounted(data).then(() => { if (data?.id) socket.emit('run:accounting:ack', { id: data.id }); });
+    });
     socket.on('session:error', (data: { sessionId?: string; error?: string }) => {
       dispatch(setBackendError(data?.error ? `Run failed: ${data.error}` : 'Run failed — check your model/key and try again.'));
       dispatch(clearApprovals());

@@ -63,6 +63,8 @@ export interface CloudMessage {
   why: string | null;
   costUsd: number | null;
   createdAt: number;
+  /** A reply from a run the user stopped: what it had written by then. */
+  cancelled?: true;
 }
 
 export interface CloudMemory {
@@ -264,6 +266,8 @@ interface DbMessageRow {
   why_json: string | null;
   cost_usd: number | null;
   created_at: number;
+  /** 1 for a reply from a run the user stopped. */
+  cancelled?: number | null;
 }
 
 export class CloudStore {
@@ -595,6 +599,8 @@ export class CloudStore {
     }
     this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_run
       ON messages(conversation_id, client_run_id) WHERE client_run_id IS NOT NULL`);
+    // A reply from a run the user stopped keeps saying so after a reload.
+    if (!this.hasColumn('messages', 'cancelled')) this.db.exec('ALTER TABLE messages ADD COLUMN cancelled INTEGER');
     // The last running total an old CLI sent for this chat (see appendTurn),
     // kept apart from its messages so deleting a reply cannot lower it.
     if (!this.hasColumn('conversations', 'legacy_cli_total')) {
@@ -863,6 +869,8 @@ export class CloudStore {
     tier?: string | null;
     why?: string | null;
     costUsd?: number | null;
+    /** A reply from a run the user stopped. */
+    cancelled?: boolean;
   }): CloudMessage {
     const row: DbMessageRow = {
       id: randomUUID(),
@@ -875,13 +883,14 @@ export class CloudStore {
       why_json: input.why ?? null,
       cost_usd: input.costUsd ?? null,
       created_at: Date.now(),
+      cancelled: input.cancelled ? 1 : null,
     };
     this.db
       .prepare(
-        `INSERT INTO messages (id, conversation_id, parent_id, role, content, model, tier, why_json, cost_usd, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages (id, conversation_id, parent_id, role, content, model, tier, why_json, cost_usd, created_at, cancelled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(row.id, row.conversation_id, row.parent_id, row.role, row.content, row.model, row.tier, row.why_json, row.cost_usd, row.created_at);
+      .run(row.id, row.conversation_id, row.parent_id, row.role, row.content, row.model, row.tier, row.why_json, row.cost_usd, row.created_at, row.cancelled);
     // The newly appended message becomes the tip of the active path.
     this.db.prepare('UPDATE conversations SET active_leaf_id = ? WHERE id = ?').run(row.id, input.conversationId);
     this.touchConversation(input.conversationId);
@@ -1033,6 +1042,7 @@ export class CloudStore {
         conversationId, role: 'assistant', content: input.assistant.content, parentId: userMsg.id,
         model: input.assistant.model ?? null, tier: input.assistant.tier ?? null,
         why: input.assistant.why ?? null, costUsd: input.assistant.costUsd ?? null,
+        cancelled: input.outcome === 'stopped',
       });
       if (runId) this.db.prepare('UPDATE messages SET client_run_id = ? WHERE id = ?').run(runId, reply.id);
       // A run on the user's own device, synced here: it spent their money all
@@ -1979,6 +1989,7 @@ export class CloudStore {
       why: row.why_json ?? null,
       costUsd: row.cost_usd,
       createdAt: row.created_at,
+      ...(row.cancelled ? { cancelled: true as const } : {}),
     };
   }
 

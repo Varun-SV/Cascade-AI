@@ -505,11 +505,19 @@ function startRelay(tabWsUrl, caps, consentedOrigins) {
     };
     let targetInfo = null;
     const knownSessions = new Set([TAB_SESSION]);
+    // Scripts the agent registered to run on every new document. Chromium
+    // drops them when this connection's session ends, which teardown does;
+    // they are also removed by name first, so the user's later pages never
+    // run them even if the connection outlived the lease.
+    const injected = [];
 
     // Fail closed: any disconnect ends the lease and burns the capability.
     const end = () => {
       if (state.lease?.generation !== generation) return;
       clearTimeout(expiry);
+      for (const { identifier, sessionId } of injected.splice(0)) {
+        sendTab({ id: nextId++, method: 'Page.removeScriptToEvaluateOnNewDocument', params: { identifier }, ...(sessionId ? { sessionId } : {}) });
+      }
       caps.burn(token);
       state.lease = null;
       try { client.close(1011, 'lease ended'); } catch {}
@@ -633,7 +641,13 @@ function startRelay(tabWsUrl, caps, consentedOrigins) {
         return sendTab(toTab({ id: hid, method: 'Page.getNavigationHistory' }));
       }
       const rid = nextId++;
-      pending.set(rid, { clientId: id, sessionId, transform: method === 'Page.getNavigationHistory' ? redactHistory : undefined });
+      const transform = method === 'Page.getNavigationHistory' ? redactHistory
+        : method === 'Page.addScriptToEvaluateOnNewDocument' ? (r) => {
+          if (r?.identifier) injected.push({ identifier: r.identifier, sessionId: sessionId === TAB_SESSION ? undefined : sessionId });
+          return r;
+        }
+        : undefined;
+      pending.set(rid, { clientId: id, sessionId, transform });
       sendTab(toTab({ id: rid, method, params }));
     }
   }
@@ -686,6 +700,8 @@ const allowed = await countingServer('allowed.test', {
   // Workers and a cross-site frame that fetch whatever URL they are handed.
   '/workers': html('<title>workers</title>workers'),
   '/ping': (req, res) => res.end('pong'),
+  // Counts the pages an injected new-document script has run on.
+  '/injected': (req, res) => res.end('seen'),
   '/dedicated.js': js(`onmessage = (m) => (${TRY_FETCH})(m.data).then((r) => postMessage(r));`),
   '/shared.js': js(`onconnect = (e) => { const port = e.ports[0]; port.onmessage = (m) => (${TRY_FETCH})(m.data).then((r) => port.postMessage(r)); };`),
   '/sw.js': js(`self.addEventListener('install', () => self.skipWaiting());
@@ -1008,6 +1024,44 @@ try {
     check('its capability cannot reconnect', (await tryConnect(relay.endpoint(cap))).startsWith('refused'));
     check('the relay still serves a fresh capability', (await tryConnect(relay.endpoint(caps.approveRun('run-6')))) === 'open');
     await sleep(200);
+  }
+
+  {
+    // A script the agent registers to run on every new document must not
+    // outlive the lease: the user goes on using the tab afterwards.
+    const injectedHits = () => allowed.hits.filter((h) => h.startsWith('GET /injected')).length;
+    const cap = caps.approveRun('run-8');
+    const raw = new WebSocket(relay.endpoint(cap));
+    let nextId = 1;
+    const waiters = new Map();
+    raw.on('message', (m) => { const msg = JSON.parse(m); if (msg.id && waiters.has(msg.id)) { waiters.get(msg.id)(msg); waiters.delete(msg.id); } });
+    await new Promise((r) => raw.on('open', r));
+    const call = (method, params = {}, sessionId = TAB_SESSION) => new Promise((resolve) => {
+      const id = nextId++;
+      waiters.set(id, (msg) => resolve(msg.error ? `error: ${msg.error.message}` : msg.result));
+      raw.send(JSON.stringify({ id, method, params, sessionId }));
+      setTimeout(() => resolve('timeout'), 5000);
+    });
+    await call('Page.enable');
+    const added = await call('Page.addScriptToEvaluateOnNewDocument', { source: `fetch('${ALLOWED}/injected?' + location.pathname)` });
+    const before = injectedHits();
+    await call('Page.navigate', { url: `${ALLOWED}/two` });
+    await sleep(600);
+    const duringLease = injectedHits() - before;
+    check('control: a script the agent injected runs on new documents during the lease', duringLease > 0, `identifier ${added?.identifier}; ran ${duringLease} time(s)`);
+    raw.close();
+    await sleep(400);
+    // The user's own later use of the tab, not through the relay.
+    const direct = cdpClient(tab.webSocketDebuggerUrl);
+    await direct.ready;
+    const afterLeaseBefore = injectedHits();
+    await direct.send('Page.navigate', { url: `${ALLOWED}/` });
+    await sleep(800);
+    await direct.send('Page.navigate', { url: `${ALLOWED}/two` });
+    await sleep(800);
+    direct.close();
+    check('P1: an injected new-document script does not run after the lease ends', injectedHits() === afterLeaseBefore,
+      `ran ${injectedHits() - afterLeaseBefore} time(s) after the lease`);
   }
 
   {

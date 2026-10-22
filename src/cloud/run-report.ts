@@ -146,17 +146,36 @@ export interface RunStatsSource {
  * Run stats only grow, so the figures read once settled are kept unless they
  * shrank, which means the usage was dropped; then the ones read at the start
  * are used.
+ *
+ * `after` is follow-up work the run started on the same router once it
+ * answered (the CLI's session title): it is waited for first, up to
+ * `FOLLOW_UP_WAIT_MS`, so its calls count even when they begin after the
+ * run's own calls settled.
  */
 export function settledRunReport(
   router: RunStatsSource,
   generation: number,
   input: Omit<Parameters<typeof cloudRunReport>[0], 'stats' | 'before'>,
+  after?: Promise<unknown>,
 ): Promise<CloudRunReport> {
   const atEnd = router.getRunStats(generation);
-  return router.whenRunSettled(generation).then(() => {
+  const followUp = after ? boundedWait(after, FOLLOW_UP_WAIT_MS) : Promise.resolve();
+  return followUp.then(() => router.whenRunSettled(generation)).then(() => {
     const settled = router.getRunStats(generation);
     const kept = settled.totalTokens >= atEnd.totalTokens && settled.totalCostUsd >= atEnd.totalCostUsd
       && settled.untrackedCostCalls >= atEnd.untrackedCostCalls;
     return cloudRunReport({ ...input, stats: kept ? settled : atEnd });
   });
+}
+
+/** How long a run's report waits for its follow-up work (`after`). */
+export const FOLLOW_UP_WAIT_MS = 60_000;
+
+/** Resolves when `work` settles or `ms` pass, whichever is first; never rejects. */
+function boundedWait(work: Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    work.then(() => undefined, () => undefined),
+    new Promise<void>((resolve) => { timer = setTimeout(resolve, ms); (timer as { unref?: () => void }).unref?.(); }),
+  ]).finally(() => clearTimeout(timer));
 }

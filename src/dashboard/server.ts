@@ -19,6 +19,7 @@ import { writeProjectConfig } from '../config/write-config.js';
 import type { RuntimeNode, RuntimeNodeLog, RuntimeSession } from '../types.js';
 import { GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE } from '../constants.js';
 import { statePath, STATE } from '../config/project-state.js';
+import { PendingAccounting } from './pending-accounting.js';
 import { DashboardSocket } from './websocket.js';
 import { authMiddleware, createToken } from './auth.js';
 import { DEFAULT_DASHBOARD_PORT } from '../constants.js';
@@ -147,6 +148,8 @@ export class DashboardServer {
   private globalStore: MemoryStore | null = null;
   private broadcastTimer: NodeJS.Timeout | null = null;
   private activeSessions = new Map<string, import('../core/cascade.js').Cascade>();
+  /** Run accounting no window has confirmed yet (see PendingAccounting). */
+  private readonly pendingAccounting = new PendingAccounting<Record<string, unknown>>();
   /**
    * Supplied by the desktop shell so a run can read the page the user has
    * open in the built-in browser. Absent in the CLI, where there is no
@@ -220,6 +223,12 @@ export class DashboardServer {
     this.scheduler = new TaskScheduler(store, (task) => this.runScheduledTask(task));
     this.setupMiddleware();
     this.setupRoutes();
+    // Run accounting reaches the cloud from a window: replay what none has
+    // confirmed to each window that connects, and forget what one confirms.
+    this.socket.onConnect((socketId) => {
+      for (const report of this.pendingAccounting.unconfirmed()) this.socket.emitToSocket(socketId, 'run:accounting', report);
+    });
+    this.socket.onAccountingConfirmed((id) => this.pendingAccounting.confirm(id));
     this.socket.onSessionRate((sessionId, rating) => {
       this.activeSessions.get(sessionId)?.rateLastRun(rating);
     });
@@ -757,7 +766,8 @@ export class DashboardServer {
       const report = cloudRunReport({ stats: router.getStats(), t1Model: router.getTierModel('T1'), decisions, durationMs: run.durationMs });
       // A call with no price and no usage reported still happened, and may have cost money.
       if (report.totalCostUsd <= 0 && report.totalTokens <= 0 && Object.keys(report.unpricedByModel).length === 0 && !run.output) return;
-      emit('run:accounting', { sessionId, ...run, cloud: cloudTurnAccounting(report) });
+      // Kept until a window confirms it: a run can end with no window open.
+      emit('run:accounting', this.pendingAccounting.add({ sessionId, ...run, cloud: cloudTurnAccounting(report) }));
     } catch (err) {
       console.warn('[dashboard] failed to report run accounting:', err);
     }

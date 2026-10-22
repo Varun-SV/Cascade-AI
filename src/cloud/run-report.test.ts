@@ -206,6 +206,27 @@ describe('a device run\'s /why for the cloud', () => {
     expect((await report).totalTokens).toBe(400);
   });
 
+  it('includes a follow-up call the run starts after its own calls settled', async () => {
+    const r = router as unknown as {
+      generateCall: (...a: unknown[]) => Promise<unknown>;
+      recordStats: (tier: string, model: { id: string; provider: string }, usage: Record<string, unknown>, featureTag?: string, generation?: number) => void;
+    };
+    router.beginRun();
+    const run = router.getRunGeneration();
+    r.recordStats('T3', { id: 'mini', provider: 'openai' }, { inputTokens: 600, outputTokens: 0, totalTokens: 600, estimatedCostUsd: 0.0006 }, undefined, run);
+    r.generateCall = () => new Promise((resolve) => setTimeout(() => {
+      r.recordStats('T3', { id: 'mini', provider: 'openai' }, { inputTokens: 20, outputTokens: 0, totalTokens: 20, estimatedCostUsd: 0.00002 }, undefined, run);
+      resolve({});
+    }, 10));
+    // The session title: its model call starts a moment after the run has
+    // settled, as an async helper's does.
+    const title = (async () => { await new Promise((t) => setTimeout(t, 0)); return router.generate('T3', { messages: [] } as never); })();
+    const withoutWaiting = settledRunReport(router, run, { t1Model: t1, decisions: [], durationMs: 0 });
+    const waitingForIt = settledRunReport(router, run, { t1Model: t1, decisions: [], durationMs: 0 }, title);
+    expect((await withoutWaiting).totalTokens).toBe(600);
+    expect((await waitingForIt).totalTokens).toBe(620);
+  });
+
   it('stops waiting for a run whose call never settles', async () => {
     const r = router as unknown as { generateCall: (...a: unknown[]) => Promise<unknown> };
     router.beginRun();

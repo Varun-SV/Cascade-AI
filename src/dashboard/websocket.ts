@@ -290,6 +290,18 @@ export class DashboardSocket {
     });
   }
 
+  /** A client connected: `socketId` is its new connection. */
+  onConnect(callback: (socketId: string) => void): void {
+    this.io.on('connection', (socket) => callback(socket.id));
+  }
+
+  /** A window confirmed it has handled a `run:accounting` report. */
+  onAccountingConfirmed(callback: (id: unknown) => void): void {
+    this.io.on('connection', (socket) => {
+      socket.on('run:accounting:ack', (payload: { id?: unknown }) => callback(payload?.id));
+    });
+  }
+
   emitToSocket(socketId: string, event: string, data: unknown): void {
     this.io.sockets.sockets.get(socketId)?.emit(event, data);
   }

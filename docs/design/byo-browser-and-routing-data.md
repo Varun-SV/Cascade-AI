@@ -297,6 +297,14 @@ depth.
     consented site, and refuses the lease if not. A frame or worker on a
     site without consent (one already in the tab, typically) is never
     given to the agent as a session, and its events are dropped.
+  - **Nothing the agent set up outlives the lease.** A script it registers
+    to run on every new document (`Page.addScriptToEvaluateOnNewDocument`)
+    is tied to the debugger session that registered it, and Chromium drops
+    it when that session ends, which teardown does. The relay also records
+    each one and removes it by name first, so the user's later pages never
+    run it, even if a future design keeps one session across leases.
+    Measured: with teardown leaving the session open, the script ran on
+    both of the user's later pages; with either layer in place, on none.
   - **No second page.** A page the leased tab opens (`target=_blank`,
     `window.open`, with or without `noopener`) is a new target outside the
     tab's request policy and outside the lease. The device's browser-level
@@ -316,7 +324,7 @@ depth.
   - Changing the list is a reviewed policy change with a version number.
   - Method names alone don't express side effects. `Runtime.evaluate`
     stays privileged page script by design (§4.3, honest limit).
-  - `poc-egress-and-lease.mjs` checks all of this (56/56):
+  - `poc-egress-and-lease.mjs` checks all of this (58/58):
     - an allowlisted method works on a nested cross-site iframe session
     - `Emulation.setGeolocationOverride` through that nested session is
       refused
