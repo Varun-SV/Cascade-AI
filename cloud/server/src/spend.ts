@@ -92,6 +92,10 @@ export function spendEntryFromRun(input: {
 
   const costUsd = input.costUsd != null ? num(input.costUsd) : num(why['totalCostUsd']);
   const tokens = num(why['totalTokens']) || kept.reduce((s, l) => s + l.tokens, 0);
+  // A report from before price status was kept, with tokens at $0: that model
+  // may have had no price, its calls left out of the total, so any saving the
+  // report claimed against T1 cannot be checked. None is counted.
+  const savingUnverifiable = kept.some((l) => l.unpriced === null && l.costUsd === 0 && l.tokens > 0);
   return {
     id: input.id,
     userId: input.userId,
@@ -99,7 +103,7 @@ export function spendEntryFromRun(input: {
     at: input.at,
     costUsd,
     // Same rule as the chat's saved chip: a run that saved nothing adds nothing.
-    savedUsd: num(why['savedUsd']),
+    savedUsd: savingUnverifiable ? 0 : num(why['savedUsd']),
     tokens: Math.round(tokens),
     outcome: input.outcome ?? 'answered',
     lines: kept,

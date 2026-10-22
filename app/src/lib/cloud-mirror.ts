@@ -33,16 +33,21 @@ export class CloudMirror {
     this.prompts.set(sessionId, prompt);
   }
 
-  /** A run ended with `session:complete`. */
-  async completed(data: { sessionId?: string; result?: { output?: string }; cloud?: RunAccounting } | undefined): Promise<void> {
+  /**
+   * A run ended with `session:complete`. The backend sends the run's prompt
+   * with it; one remembered at launch is the fallback for an older backend.
+   */
+  async completed(data: { sessionId?: string; result?: { output?: string }; cloud?: RunAccounting; prompt?: string } | undefined): Promise<void> {
     const sid = data?.sessionId;
     if (!sid || this.optedOut()) return;
-    const prompt = this.prompts.get(sid);
+    const prompt = data?.prompt || this.prompts.get(sid);
     const output = data?.result?.output;
     const api = this.api();
     try {
-      if (output && prompt) {
-        if (!api?.appendTurn || !api.createConversation) return;
+      if (output) {
+        // An answered run with no known prompt cannot be copied as a turn,
+        // and is not a stopped run either: it is left alone.
+        if (!prompt || !api?.appendTurn || !api.createConversation) return;
         const chat = await this.chatFor(sid, prompt, api);
         if (!chat) return;
         // With its cost and /why, so the run counts in the spend report.

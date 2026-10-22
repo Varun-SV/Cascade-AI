@@ -1032,9 +1032,23 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     // run begins, and that run's own stats are kept under it: a call from the
     // previous run that settles late stays with that run.
     const generationBefore = cascade.getRouter().getRunGeneration();
-    const runStats = () => {
+    const runGeneration = () => {
       const generation = cascade.getRouter().getRunGeneration();
-      return generation === generationBefore ? null : cascade.getRouter().getRunStats(generation);
+      return generation === generationBefore ? null : generation;
+    };
+    /**
+     * This run's report, once every call it made has settled (or 30 s have
+     * passed): a call that lands after the run returned still belongs to it.
+     * Null for a run that never began, which has no stats of its own.
+     */
+    const settledRunReport = async (durationMs: number) => {
+      const generation = runGeneration();
+      if (generation === null) return null;
+      const router = cascade.getRouter();
+      // Read now, while the decision log is this run's.
+      const decisions = cascade.getDecisionLog();
+      await router.whenRunSettled(generation);
+      return cloudRunReport({ stats: router.getRunStats(generation), t1Model: router.getTierModel('T1'), decisions, durationMs });
     };
     try {
       runAbortRef.current = new AbortController();
@@ -1061,15 +1075,14 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       persistMessage('assistant', result.output, new Date().toISOString());
       // Mirror the finished turn into the shared cloud session (best-effort),
       // with what this run cost: the cloud's /why and spend report read it.
-      const report = cloudRunReport({
-        // A run that answered has begun; an unknown generation reads as empty.
-        stats: runStats() ?? cascade.getRouter().getRunStats(Number.NaN), t1Model: cascade.getRouter().getTierModel('T1'),
-        decisions: cascade.getDecisionLog(), durationMs: result.durationMs,
-      });
       // Stopped before any answer: the run resolves with no text, but what it
       // spent is still recorded, with no empty reply.
-      if (result.output) void mirrorTurnToCloud(trimmed, { content: result.output, ...cloudTurnAccounting(report) });
-      else void recordUnansweredRunInCloud('stopped', report);
+      const output = result.output;
+      void settledRunReport(result.durationMs).then((report) => {
+        if (!report) return;
+        if (output) return mirrorTurnToCloud(trimmed, { content: output, ...cloudTurnAccounting(report) });
+        return recordUnansweredRunInCloud('stopped', report);
+      }).catch(() => { /* best-effort mirror */ });
       // One-line run receipt — the delegation economics in scrollback.
       const receipt = formatRunReceipt(result, stats.totalCostUsd, savings);
       if (receipt) {
@@ -1090,14 +1103,9 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'error', content: message, timestamp: new Date().toISOString() } }); 
       // Its calls were billed all the same. A run that never began (setup
       // failed before it) has no stats of its own, and nothing is sent.
-      const spent = runStats();
-      if (spent) {
-        const report = cloudRunReport({
-          stats: spent, t1Model: cascade.getRouter().getTierModel('T1'),
-          decisions: cascade.getDecisionLog(), durationMs: 0,
-        });
-        void recordUnansweredRunInCloud(runAbortRef.current?.signal.aborted ? 'stopped' : 'failed', report);
-      }
+      const outcome = runAbortRef.current?.signal.aborted ? 'stopped' : 'failed';
+      void settledRunReport(0).then((report) => report && recordUnansweredRunInCloud(outcome, report))
+        .catch(() => { /* best-effort */ });
     }
     finally {
       if (streamThrottleTimeout) { clearTimeout(streamThrottleTimeout); streamThrottleTimeout = null; }

@@ -39,7 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that never got a first reply counts under "Runs with no chat" rather than
   leaving an empty chat behind. The CLI used to send the whole session's cost with
   every reply; it now sends that run's alone, and a call from the previous
-  run that settles late stays with that run. A reply from an older CLI,
+  run that settles late stays with that run: the CLI waits up to 30 seconds
+  for a run's last calls before sending its report. An older run whose $0
+  model may have had no price counts no saving, since its saving cannot be
+  checked. A reply from an older CLI,
   stored or still arriving, is counted at what its running total grew by.
   `GET /api/usage/report` (`tz` takes a time zone name), and
   `POST /api/usage/runs` for a device run with no reply. The router's stats

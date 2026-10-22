@@ -23,6 +23,21 @@ describe('CloudMirror', () => {
     expect(api.appendTurn).toHaveBeenCalledWith('c1', { userContent: 'first', assistant: { content: 'answer', ...accounting } });
   });
 
+  it('copies an answered run from any view, by the prompt the backend sends', async () => {
+    const { api, mirror } = setup();
+    // The cockpit, or an older launch path, never told the mirror its prompt.
+    await mirror.completed({ sessionId: 's9', result: { output: 'answer' }, cloud: accounting, prompt: 'from the cockpit' });
+    expect(api.appendTurn).toHaveBeenCalledWith('c1', { userContent: 'from the cockpit', assistant: { content: 'answer', ...accounting } });
+    expect(api.recordUnansweredRun).not.toHaveBeenCalled();
+  });
+
+  it('never records an answered run as stopped, even with no prompt known', async () => {
+    const { api, mirror } = setup();
+    await mirror.completed({ sessionId: 's9', result: { output: 'answer' }, cloud: accounting });
+    expect(api.recordUnansweredRun).not.toHaveBeenCalled();
+    expect(api.appendTurn).not.toHaveBeenCalled();
+  });
+
   it('records a run stopped before any answer as stopped, with no chat made for it', async () => {
     const { api, mirror } = setup();
     mirror.rememberPrompt('s1', 'q');

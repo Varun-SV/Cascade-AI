@@ -144,7 +144,8 @@ function ipv6Groups(h) {
 const v4From = (hi, lo) => `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
 
 function isPrivateHost(host) {
-  const h = host.replace(/^\[|\]$/g, '').toLowerCase().split('%')[0];
+  // A fully qualified name's root dot (`localhost.`) resolves as without it.
+  const h = host.replace(/^\[|\]$/g, '').toLowerCase().split('%')[0].replace(/\.+$/, '');
   if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local')) return true;
   if (net.isIPv4(h)) return isPrivateV4(h);
   if (net.isIPv6(h)) {
@@ -518,11 +519,12 @@ try {
   {
     const cases = {
       private: ['::ffff:127.0.0.1', '[::ffff:7f00:1]', '::ffff:10.0.0.1', '64:ff9b::7f00:1', '::', '::1', '::127.0.0.1', '0.0.0.0',
-        'fe90::1', 'febf::1', 'fd00::1', '2002:7f00:1::', '2002:c0a8:101::', '224.0.0.1', '[fe80::1%25eth0]'],
+        'fe90::1', 'febf::1', 'fd00::1', '2002:7f00:1::', '2002:c0a8:101::', '224.0.0.1', '[fe80::1%25eth0]',
+        'localhost.', 'printer.local.', 'app.localhost.', '127.0.0.1.'],
       public: ['8.8.8.8', '2606:4700:4700::1111', '::ffff:8.8.8.8', '64:ff9b::808:808', '2002:808:808::', 'fec0::1'],
     };
     const wrong = [...cases.private.filter((h) => !isPrivateHost(h)), ...cases.public.filter((h) => isPrivateHost(h))];
-    check('P2: private-address check covers IPv6 forms that reach IPv4 (mapped, compatible, NAT64, 6to4) and all of fe80::/10', wrong.length === 0, wrong.join(', ') || `${cases.private.length} private, ${cases.public.length} public`);
+    check('P2: private-address check covers IPv6 forms that reach IPv4 (mapped, compatible, NAT64, 6to4), all of fe80::/10, and root-dot names', wrong.length === 0, wrong.join(', ') || `${cases.private.length} private, ${cases.public.length} public`);
   }
   {
     const opened = await page.goto('file:///etc/hostname').then(() => 'navigated', (e) => `refused: ${e.message.split('\n')[0]}`);

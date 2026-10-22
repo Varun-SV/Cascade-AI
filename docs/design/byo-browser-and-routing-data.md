@@ -327,7 +327,7 @@ can neither see nor disable that channel:
 |---|---|
 | Document (top-level navigation or iframe), any initiator: agent command, click, form, page script or redirect hop | Allowed only over http(s) to a **consented origin**. Any other scheme (`file:`, `chrome:`, `data:`…) and any other origin are failed before sending |
 | Any `file:` request, of any type | Failed |
-| Any request to a **private-network destination** (loopback, RFC 1918, link-local, CGNAT, unspecified, multicast, unique-local IPv6, `localhost`, `*.local`), including IPv6 forms that reach an IPv4 address (IPv4-mapped, IPv4-compatible, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`), checked as that IPv4 address | Failed unless that exact origin was consented |
+| Any request to a **private-network destination** (loopback, RFC 1918, link-local, CGNAT, unspecified, multicast, unique-local IPv6, `localhost`, `*.localhost`, `*.local`, each with or without the root dot as in `localhost.`), including IPv6 forms that reach an IPv4 address (IPv4-mapped, IPv4-compatible, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`), checked as that IPv4 address | Failed unless that exact origin was consented |
 | Subresources (script, style, image, font, fetch/XHR, WebSocket) to **public** origins | **Allowed** |
 
 **Hostnames:** the policy resolves the name on the device and checks the

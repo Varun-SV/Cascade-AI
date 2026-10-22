@@ -73,6 +73,23 @@ describe('spendEntryFromRun', () => {
     expect(allPriced.lines[0]!.unpriced).toBe(false);
   });
 
+  it('counts no saving for an older run whose $0 model may have had no price', () => {
+    const legacy = spendEntryFromRun({
+      ...base,
+      why: { savedUsd: 0.3, costByModel: { T3: { 'compat:mystery': 0 } }, tokensByModel: { T3: { 'compat:mystery': 900 } } },
+    });
+    expect(legacy.savedUsd).toBe(0);
+    // A newer report says it was priced (a free local model): its saving stands.
+    const priced = spendEntryFromRun({
+      ...base,
+      why: { savedUsd: 0.3, costByModel: { T3: { 'ollama:llama': 0 } }, tokensByModel: { T3: { 'ollama:llama': 900 } }, unpricedByModel: {} },
+    });
+    expect(priced.savedUsd).toBe(0.3);
+    // An older report with every model priced above $0 keeps its saving too.
+    const paid = spendEntryFromRun({ ...base, why: { savedUsd: 0.3, costByTier: { T3: 0.01 }, tokensByTier: { T3: 900 } } });
+    expect(paid.savedUsd).toBe(0.3);
+  });
+
   it('drops tiers that spent nothing at all', () => {
     const e = spendEntryFromRun({ ...base, why: { costByTier: { T1: 0, T2: 0.001 }, tokensByTier: { T1: 0, T2: 10 } } });
     expect(e.lines.map((l) => l.tier)).toEqual(['T2']);

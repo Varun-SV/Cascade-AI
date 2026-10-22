@@ -332,7 +332,9 @@ export class DashboardServer {
         });
         this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED', result);
         const cloud = this.captureWhy(sessionId, cascade, result);
-        this.emitToSessionClients(socketId, sessionId, 'session:complete', { sessionId, result, cloud });
+        // The prompt goes with it, so the desktop can copy the turn to the
+        // cloud whichever view started the run.
+        this.emitToSessionClients(socketId, sessionId, 'session:complete', { sessionId, result, cloud, prompt });
         this.socket.broadcast('cost:update', {
           sessionId,
           totalTokens: result.usage.totalTokens,
@@ -351,6 +353,7 @@ export class DashboardServer {
           sessionId,
           error: err instanceof Error ? err.message : String(err),
           cloud,
+          prompt,
           stopped: abortController.signal.aborted,
         });
       } finally {

@@ -1008,7 +1008,61 @@ export class CascadeRouter extends EventEmitter {
     }
   }
 
+  /**
+   * Calls still in flight, by the run generation they were admitted in, and
+   * who is waiting for each generation to settle (see `whenRunSettled`).
+   */
+  private inFlightByRun = new Map<number, number>();
+  private settleWaiters = new Map<number, Array<() => void>>();
+
   async generate(
+    tier: TierRole,
+    options: GenerateOptions,
+    onChunk?: (chunk: StreamChunk) => void,
+    requireVision = false,
+  ): Promise<GenerateResult> {
+    // Read synchronously, as generateCall() reads it before its first await:
+    // both name the same run.
+    const generation = this.runGeneration;
+    this.inFlightByRun.set(generation, (this.inFlightByRun.get(generation) ?? 0) + 1);
+    try {
+      return await this.generateCall(tier, options, onChunk, requireVision);
+    } finally {
+      const left = (this.inFlightByRun.get(generation) ?? 1) - 1;
+      if (left > 0) {
+        this.inFlightByRun.set(generation, left);
+      } else {
+        this.inFlightByRun.delete(generation);
+        const waiters = this.settleWaiters.get(generation) ?? [];
+        this.settleWaiters.delete(generation);
+        for (const w of waiters) w();
+      }
+    }
+  }
+
+  /**
+   * Resolves once no call admitted in `generation` is still in flight, so a
+   * run's report can include a call that settles after the run returned. True
+   * when it settled; false when `timeoutMs` passed first, and the report then
+   * leaves out what is still outstanding.
+   */
+  whenRunSettled(generation: number = this.runGeneration, timeoutMs = 30_000): Promise<boolean> {
+    if (!this.inFlightByRun.get(generation)) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        const list = this.settleWaiters.get(generation);
+        if (list) this.settleWaiters.set(generation, list.filter((w) => w !== done));
+        resolve(false);
+      }, timeoutMs);
+      timer.unref?.();
+      const done = () => { clearTimeout(timer); resolve(true); };
+      const list = this.settleWaiters.get(generation) ?? [];
+      list.push(done);
+      this.settleWaiters.set(generation, list);
+    });
+  }
+
+  private async generateCall(
     tier: TierRole,
     options: GenerateOptions,
     onChunk?: (chunk: StreamChunk) => void,

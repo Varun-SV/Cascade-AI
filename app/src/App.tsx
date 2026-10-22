@@ -403,7 +403,7 @@ export function App() {
       if (!data?.sessionId || data.sessionId === runSessionIdRef.current) dispatch(runEnded());
       if (!data?.sessionId || data.sessionId === sessionIdRef.current) dispatch(finalizeLastMessage({}));
     });
-    socket.on('session:complete', (data: { sessionId?: string; result?: { output?: string }; cloud?: RunAccounting } | undefined) => {
+    socket.on('session:complete', (data: { sessionId?: string; result?: { output?: string }; cloud?: RunAccounting; prompt?: string } | undefined) => {
       // Copied to the cloud account whichever session or view is on screen.
       void cloudMirror.completed(data);
       dispatch(setBackendError(null));

@@ -133,6 +133,46 @@ describe('a device run\'s /why for the cloud', () => {
     expect(router.getStats().totalCostUsd).toBeCloseTo(0.031, 8);
   });
 
+  it('waits for a run\'s late call, so its report includes it', async () => {
+    const r = router as unknown as {
+      generateCall: (...a: unknown[]) => Promise<unknown>;
+      recordStats: (tier: string, model: { id: string; provider: string }, usage: Record<string, unknown>, featureTag?: string, generation?: number) => void;
+    };
+    router.beginRun();
+    const first = router.getRunGeneration();
+    // A call admitted in the first run that settles only after the next begins.
+    let settle!: () => void;
+    r.generateCall = () => new Promise((resolve) => { settle = () => {
+      r.recordStats('T3', { id: 'mini', provider: 'openai' }, { inputTokens: 500, outputTokens: 0, totalTokens: 500, estimatedCostUsd: 0.0005 }, undefined, first);
+      resolve({});
+    }; });
+    const call = router.generate('T3', { messages: [] } as never);
+    router.beginRun();
+
+    let settled: boolean | undefined;
+    const waiting = router.whenRunSettled(first, 5_000).then((v) => { settled = v; });
+    await Promise.resolve();
+    expect(settled).toBeUndefined();
+    expect(router.getRunStats(first).totalTokens).toBe(0);
+    settle();
+    await call;
+    await waiting;
+    expect(settled).toBe(true);
+    expect(router.getRunStats(first).totalTokens).toBe(500);
+    expect(router.getRunStats().totalTokens).toBe(0);
+  });
+
+  it('stops waiting for a run whose call never settles', async () => {
+    const r = router as unknown as { generateCall: (...a: unknown[]) => Promise<unknown> };
+    router.beginRun();
+    r.generateCall = () => new Promise(() => {});
+    void router.generate('T3', { messages: [] } as never);
+    expect(await router.whenRunSettled(router.getRunGeneration(), 20)).toBe(false);
+    // A run with nothing in flight has settled already.
+    router.beginRun();
+    expect(await router.whenRunSettled(router.getRunGeneration(), 20)).toBe(true);
+  });
+
   it('keeps each run\'s cost by feature', () => {
     const rec = (router as unknown as {
       recordStats: (tier: string, model: { id: string; provider: string }, usage: Record<string, unknown>, featureTag?: string) => void;
