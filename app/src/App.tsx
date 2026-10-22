@@ -52,6 +52,8 @@ export interface CloudTurn {
   regenerateFromUserMessageId?: string;
   /** The device's id for the run: the same turn sent again is added once. */
   runId?: string;
+  /** 'stopped' for a run the user stopped, sent with its partial reply. */
+  outcome?: 'answered' | 'stopped';
 }
 
 /** Live state of the built-in browser, pushed on every navigation. */

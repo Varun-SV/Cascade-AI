@@ -489,6 +489,10 @@ describe('cloud/server app', () => {
     expect(again.status).toBe(200);
     expect(((await again.json()) as { messages: unknown[] }).messages).toHaveLength(2);
     for (const bad of ['short', 'has spaces in it', 42, 'x'.repeat(65)]) expect((await send(bad)).status).toBe(400);
+    const withOutcome = (outcome: unknown) => fetch(`${baseUrl}/api/conversations/${cid}/turns`, {
+      method: 'POST', headers: j, body: JSON.stringify({ userContent: 'q', outcome, assistant: { content: 'a' } }),
+    });
+    for (const bad of ['failed', 'done', 1]) expect((await withOutcome(bad)).status).toBe(400);
     const report = await (await fetch(`${baseUrl}/api/usage/report?period=today`, { headers: { Cookie: cookie } })).json() as { totals: { runs: number } };
     expect(report.totals.runs).toBe(1);
   });

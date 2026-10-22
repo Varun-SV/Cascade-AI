@@ -41,6 +41,13 @@ describe('CloudMirror', () => {
     expect(api.recordRunSpend).toHaveBeenNthCalledWith(2, { conversationId: null, outcome: 'answered', runId: expect.any(String), ...accounting });
   });
 
+  it('copies what a stopped run had written, marked as stopped', async () => {
+    const { api, mirror } = setup();
+    await mirror.accounted(answered('s1', { output: 'half an ans', outcome: 'stopped' }));
+    expect(api.appendTurn).toHaveBeenCalledWith('c1', { userContent: 'q', runId: expect.any(String), outcome: 'stopped', assistant: { content: 'half an ans', ...accounting } });
+    expect(api.recordRunSpend).not.toHaveBeenCalled();
+  });
+
   it('counts a scheduled run\'s spend without copying it as a chat', async () => {
     const { api, mirror } = setup();
     await mirror.accounted(answered('sched', { copyTurn: false }));
@@ -111,6 +118,37 @@ describe('CloudMirror', () => {
     api.appendTurn.mockResolvedValue({ ok: true });
     await mirror.accounted(answered('s1', { output: 'next' }));
     expect(api.appendTurn).toHaveBeenLastCalledWith('chat', expect.anything());
+  });
+
+  it('does not send a queued run to an account that signed in after it ended', async () => {
+    const { api, mirror } = setup();
+    let release!: () => void;
+    api.appendTurn.mockImplementationOnce(() => new Promise((r) => { release = () => r({ ok: true }); }));
+    const first = mirror.accounted(answered('s1', { output: 'first' }));
+    const second = mirror.accounted(answered('s2', { output: 'second, by u1' }));
+    await new Promise((r) => setTimeout(r, 0));
+    // While the first send is stalled, u1 signs out and u2 signs in.
+    api.status.mockResolvedValue(as('u2'));
+    release();
+    await first; await second;
+    expect(api.appendTurn.mock.calls.map((c) => (c[1] as { assistant: { content: string } }).assistant.content)).toEqual(['first']);
+    expect(api.recordRunSpend).not.toHaveBeenCalled();
+  });
+
+  it('does not send a queued run once syncing was turned off before it ended', async () => {
+    let off = false;
+    const api = {
+      status: vi.fn().mockResolvedValue(as('u1')),
+      createConversation: vi.fn().mockResolvedValue({ ok: true, conversation: { id: 'c1' } }),
+      appendTurn: vi.fn().mockResolvedValue({ ok: true }),
+      recordRunSpend: vi.fn().mockResolvedValue({ ok: true }),
+    };
+    const mirror = new CloudMirror(() => api, () => off, links());
+    off = true;
+    const queued = mirror.accounted(answered('s1'));
+    off = false;
+    await queued;
+    expect(api.appendTurn).not.toHaveBeenCalled();
   });
 
   it('sends nothing while signed out', async () => {

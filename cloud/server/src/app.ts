@@ -547,6 +547,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       editOfMessageId?: unknown;
       regenerateFromUserMessageId?: unknown;
       runId?: unknown;
+      outcome?: unknown;
     };
     if (typeof id !== 'string' || typeof body?.userContent !== 'string' || typeof body?.assistant?.content !== 'string') {
       res.status(400).json({ error: 'userContent and assistant.content are required' }); return;
@@ -554,6 +555,10 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     // The device's id for the run: the same turn sent again is added once.
     if (body.runId !== undefined && !(typeof body.runId === 'string' && DEVICE_RUN_ID.test(body.runId))) {
       res.status(400).json({ error: 'runId must be 8-64 letters, digits or dashes' }); return;
+    }
+    // A run the user stopped, with its partial reply: counted as stopped.
+    if (body.outcome !== undefined && body.outcome !== 'answered' && body.outcome !== 'stopped') {
+      res.status(400).json({ error: 'outcome must be answered or stopped' }); return;
     }
     const str = (v: unknown) => (typeof v === 'string' && v ? v : null);
     const path = store.appendTurn(id, req.session!.userId, {
@@ -568,6 +573,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       editOfMessageId: str(body.editOfMessageId),
       regenerateFromUserMessageId: str(body.regenerateFromUserMessageId),
       runId: str(body.runId),
+      ...(body.outcome === 'stopped' ? { outcome: 'stopped' as const } : {}),
     });
     if (!path) { res.status(404).json({ error: 'Not found' }); return; }
     res.json({ messages: serializeActivePath(id) });

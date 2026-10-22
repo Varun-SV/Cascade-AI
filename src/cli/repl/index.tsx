@@ -374,13 +374,21 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     });
     return convo.id;
   }, []);
-  const mirrorTurnToCloud = useCallback(async (userContent: string, assistant: { content: string; costUsd: number; why: string }) => {
+  const mirrorTurnToCloud = useCallback(async (
+    userContent: string,
+    assistant: { content: string; costUsd: number; why: string },
+    /** 'stopped' when the user stopped the run: its partial reply is kept. */
+    outcome: 'answered' | 'stopped' = 'answered',
+  ) => {
     const mirror = cloudMirrorRef.current;
     if (!mirror || process.env['CASCADE_NO_CLOUD_SYNC']) return;
     // One id for this run: the cloud adds its turn once and counts it once,
     // so a turn whose answer was lost can be sent again.
     const runId = randomUUID();
-    const turn = { userContent, runId, assistant: { content: assistant.content, costUsd: assistant.costUsd, why: assistant.why } };
+    const turn = {
+      userContent, runId, ...(outcome === 'stopped' ? { outcome } : {}),
+      assistant: { content: assistant.content, costUsd: assistant.costUsd, why: assistant.why },
+    };
     try {
       const convId = await ensureCloudConversation(mirror, userContent);
       for (let attempt = 0; ; attempt++) {
@@ -393,7 +401,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       // Best-effort mirror: offline, revoked token, etc. The local run is
       // unaffected. What it spent still counts, under the same run id, so a
       // turn that got through after all is not counted twice.
-      await mirror.client.recordRunSpend({ conversationId: null, outcome: 'answered', runId, costUsd: assistant.costUsd, why: assistant.why })
+      await mirror.client.recordRunSpend({ conversationId: null, outcome, runId, costUsd: assistant.costUsd, why: assistant.why })
         .catch(() => { /* best-effort */ });
     }
   }, [ensureCloudConversation]);
@@ -1111,7 +1119,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       queueCloud(async () => {
         const report = await reportFor();
         if (!report) return;
-        if (output) return mirrorTurnToCloud(trimmed, { content: output, ...cloudTurnAccounting(report) });
+        // A stopped run returns what it had written so far: kept, as a stop.
+        if (output) return mirrorTurnToCloud(trimmed, { content: output, ...cloudTurnAccounting(report) }, stopped ? 'stopped' : 'answered');
         return recordRunSpendInCloud(stopped ? 'stopped' : 'answered', report);
       });
       // One-line run receipt — the delegation economics in scrollback.

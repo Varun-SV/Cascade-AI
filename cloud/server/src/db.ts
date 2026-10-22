@@ -988,6 +988,8 @@ export class CloudStore {
        * counted once in the ledger, under the same id `/api/usage/runs` uses.
        */
       runId?: string | null;
+      /** A run the user stopped, whose partial reply is kept: counted as stopped. */
+      outcome?: 'answered' | 'stopped';
     },
   ): CloudMessage[] | null {
     const convo = this.getConversation(conversationId, userId);
@@ -1041,6 +1043,7 @@ export class CloudStore {
         this.recordSpend(spendEntryFromRun({
           id: runId ? deviceRunSpendId(userId, runId) : reply.id,
           userId, conversationId, at: reply.createdAt, costUsd: spent, why: input.assistant.why,
+          outcome: input.outcome ?? 'answered',
         }));
       }
     });

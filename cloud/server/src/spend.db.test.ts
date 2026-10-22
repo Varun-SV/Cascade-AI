@@ -187,6 +187,18 @@ describe('spend ledger', () => {
     expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals).toMatchObject({ runs: 1, spentUsd: 0.02 });
   });
 
+  it('counts a synced turn from a run the user stopped as stopped', () => {
+    const u = user('stopped-turn');
+    const c = store.createConversation(u.id, 'Chat');
+    store.appendTurn(c.id, u.id, { userContent: 'q', runId: 'run-0004-dddd', outcome: 'stopped', assistant: { content: 'half', costUsd: 0.01, why: JSON.stringify({ totalTokens: 10 }) } });
+    // The partial reply is kept, and the run is a stop in the report.
+    expect(store.getMessages(c.id).map((m) => m.content)).toEqual(['q', 'half']);
+    const raw = new Database(dbPath, { readonly: true });
+    try {
+      expect(raw.prepare('SELECT outcome FROM spend_ledger WHERE user_id = ?').all(u.id)).toEqual([{ outcome: 'stopped' }]);
+    } finally { raw.close(); }
+  });
+
   it('counts a run once when its turn also lands in a second chat', () => {
     const u = user('rechat');
     const turn = {

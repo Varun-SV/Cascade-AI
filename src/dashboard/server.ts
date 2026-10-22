@@ -333,8 +333,9 @@ export class DashboardServer {
         this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED', result);
         this.captureWhy(sessionId, cascade, result);
         this.emitToSessionClients(socketId, sessionId, 'session:complete', { sessionId, result });
-        // An empty answer is a stop only when the user stopped it.
-        const outcome = result.output ? 'answered' : abortController.signal.aborted ? 'stopped' : 'answered';
+        // A stopped run returns what it had written so far: it is still a
+        // stop, as a hosted run is, with its partial reply kept.
+        const outcome = abortController.signal.aborted ? 'stopped' : 'answered';
         void this.emitRunAccounting((e, p) => this.emitToSessionClients(socketId, sessionId, e, p), sessionId, cascade,
           { prompt, output: result.output ?? '', outcome, durationMs: result.durationMs, copyTurn: true });
         this.socket.broadcast('cost:update', {

@@ -291,6 +291,12 @@ depth.
     failed) with no URL or title, and `Page.navigateToHistoryEntry` is
     refused for them: a page restored from the back-forward cache sends no
     request for the request policy to stop.
+  - **What the tab already held stays out of reach.** A page or frame the
+    tab loaded before the lease never went through the request policy.
+    The relay serves no command until it has checked the tab is on a
+    consented site, and refuses the lease if not. A frame or worker on a
+    site without consent (one already in the tab, typically) is never
+    given to the agent as a session, and its events are dropped.
   - **No second page.** A page the leased tab opens (`target=_blank`,
     `window.open`, with or without `noopener`) is a new target outside the
     tab's request policy and outside the lease. The device's browser-level
@@ -310,7 +316,7 @@ depth.
   - Changing the list is a reviewed policy change with a version number.
   - Method names alone don't express side effects. `Runtime.evaluate`
     stays privileged page script by design (§4.3, honest limit).
-  - `poc-egress-and-lease.mjs` checks all of this (51/51):
+  - `poc-egress-and-lease.mjs` checks all of this (56/56):
     - an allowlisted method works on a nested cross-site iframe session
     - `Emulation.setGeolocationOverride` through that nested session is
       refused
@@ -329,6 +335,12 @@ depth.
       `target=_blank` link: the off-list server saw 0 requests and the tab
       stayed the only page (without the guard: 3 requests, 4 pages); ten
       pop-ups in a row: 0 requests
+    - in a second browser whose tab loaded an off-list frame before any
+      policy existed (the control shows the frame), the agent was never
+      given that frame; with the tab itself on an off-list site, no
+      command was answered and the lease was refused
+    - a lease whose capability expires ends on time with its socket still
+      open, and the capability cannot reconnect
     - after a blocked navigation, the agent's history has no off-list URL
       and going back to that entry is refused; going back to a consented
       entry works
@@ -456,7 +468,9 @@ commands and detaches the debugger, all on the device:
 - network drop
 - tab closed
 - run ended
-- capability expired
+- capability expired (a timer from the capability's expiry, not only a
+  check when it is claimed: a lease claimed just before expiry would
+  otherwise keep control)
 
 **Routing:**
 - The server maps a run capability to exactly one device connection.

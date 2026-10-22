@@ -25,7 +25,7 @@ export interface CloudMirrorApi {
   /** Who is signed in, and to which server: the links below belong to them. */
   status(): Promise<{ signedIn: boolean; user: { id: string } | null; serverUrl: string }>;
   createConversation(title?: string): Promise<{ ok: boolean; conversation?: { id: string } }>;
-  appendTurn(id: string, turn: { userContent: string; runId?: string; assistant: { content: string; costUsd?: number; why?: string } }): Promise<{ ok: boolean; error?: string }>;
+  appendTurn(id: string, turn: { userContent: string; runId?: string; outcome?: 'answered' | 'stopped'; assistant: { content: string; costUsd?: number; why?: string } }): Promise<{ ok: boolean; error?: string }>;
   recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string }): Promise<{ ok: boolean }>;
 }
 
@@ -75,29 +75,49 @@ export class CloudMirror {
     private readonly chats: ChatLinks,
   ) {}
 
-  /** A run's `run:accounting`. Resolves once it has been sent, or skipped. */
+  /**
+   * A run's `run:accounting`. Resolves once it has been sent, or skipped.
+   * Who is signed in, and whether syncing is on, are taken now, as the run
+   * ends: a send can wait behind a slow one, and if the account changes in
+   * the meantime the run is not sent to the new one.
+   */
   accounted(run: AccountedRun | undefined): Promise<void> {
-    this.queue = this.queue.then(() => this.send(run)).catch(() => { /* best-effort mirror */ });
+    const optedOut = this.optedOut();
+    const atEnd = optedOut ? Promise.resolve(null) : this.api()?.status?.().catch(() => null);
+    this.queue = this.queue.then(() => this.send(run, optedOut, atEnd)).catch(() => { /* best-effort mirror */ });
     return this.queue;
   }
 
-  private async send(run: AccountedRun | undefined): Promise<void> {
+  private async send(
+    run: AccountedRun | undefined,
+    optedOut: boolean,
+    atEnd: Promise<Awaited<ReturnType<CloudMirrorApi['status']>> | null> | undefined,
+  ): Promise<void> {
     const sid = run?.sessionId;
-    if (!sid || !run?.cloud || this.optedOut()) return;
+    if (!sid || !run?.cloud || optedOut || this.optedOut()) return;
     const api = this.api();
     if (!api) return;
     // Links belong to the account they were made under; signed out, nothing goes.
-    const who = await api.status?.().catch(() => null);
-    if (api.status && (!who?.signedIn || !who.user)) return;
+    const who = await atEnd;
+    if (api.status) {
+      if (!who?.signedIn || !who.user) return;
+      // Still the account the run ended under, on the same server.
+      const now = await api.status().catch(() => null);
+      if (!now?.signedIn || now.user?.id !== who.user.id || now.serverUrl !== who.serverUrl) return;
+    }
     const key = `${who?.serverUrl ?? ''}|${who?.user?.id ?? ''}|${sid}`;
     const outcome = run.outcome ?? 'answered';
     // One id for this run, however it is sent and however often: the cloud
     // adds its turn to a chat once, and counts the run once, per id.
     const runId = newRunId();
-    // An answered turn from the desktop's own views is copied, with its cost.
-    if (outcome === 'answered' && run.output && run.prompt && run.copyTurn !== false
+    // A turn from the desktop's own views is copied, with its cost: an answer,
+    // or what a run the user stopped had written so far (counted as stopped).
+    if ((outcome === 'answered' || outcome === 'stopped') && run.output && run.prompt && run.copyTurn !== false
       && api.appendTurn && api.createConversation) {
-      const turn = { userContent: run.prompt, runId, assistant: { content: run.output, ...run.cloud } };
+      const turn = {
+        userContent: run.prompt, runId, ...(outcome === 'stopped' ? { outcome } : {}),
+        assistant: { content: run.output, ...run.cloud },
+      };
       const known = this.chats.get(key);
       const sent = known ? await this.appendTurn(api, known, turn) : 'gone';
       if (sent === 'ok') return;

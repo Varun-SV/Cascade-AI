@@ -28,7 +28,11 @@
 //     for a pop-up that sends its first request before it is paused.
 //
 //  2. Capabilities are single-use, and a dropped connection is never
-//     resumed (model (a)). A capability opens exactly one connection and one
+//     resumed (model (a)). A lease ends when its capability expires.
+//     Nothing is served until the tab is known to be on a consented site,
+//     and a frame or worker on a site without consent (one the tab held
+//     before the lease, which no request policy saw load) is never handed
+//     to the agent. A capability opens exactly one connection and one
 //     lease; it is burned on first use and again on disconnect. Getting
 //     control back needs a NEW capability, which the device mints only after
 //     the user approves again (simulated here by approveRun()).
@@ -322,7 +326,8 @@ function createCapabilityStore() {
       if (c.state !== 'fresh') return { ok: false, why: `capability already ${c.state}` };
       if (Date.now() > c.expiresAt) return { ok: false, why: 'capability expired' };
       c.state = 'used';
-      return { ok: true, runId: c.runId, generation: ++generation };
+      // The lease it opens ends when it expires.
+      return { ok: true, runId: c.runId, generation: ++generation, expiresAt: c.expiresAt };
     },
     burn(token) { const c = caps.get(token); if (c) c.state = 'burned'; },
   };
@@ -461,7 +466,14 @@ function startRelay(tabWsUrl, caps, consentedOrigins) {
   const server = http.createServer((_, res) => { res.statusCode = 404; res.end(); });
   const wss = new WebSocketServer({ noServer: true });
   // `watch`: a test can name a secret and count where it was seen.
-  const state = { lease: null, refusals: [], watch: null, seenFromTab: 0, sentToAgent: 0 };
+  const state = { lease: null, refusals: [], hidden: [], watch: null, seenFromTab: 0, sentToAgent: 0 };
+  // A frame or worker the agent may reach: on a consented origin (a blob:
+  // URL counts as its creator's), or not navigated yet. An unnavigated one
+  // can only load through the request policy, which needs consent.
+  const childConsented = (u) => {
+    if (!u || u === 'about:blank') return true;
+    try { return consentedOrigins.has(new URL(u).origin); } catch { return false; }
+  };
 
   server.on('upgrade', (req, socket, head) => {
     const token = (req.url.match(/^\/devtools\/browser\/([\w-]+)$/) || [])[1];
@@ -472,10 +484,10 @@ function startRelay(tabWsUrl, caps, consentedOrigins) {
     if (state.lease) return refuse('tab already leased');
     const claim = caps.claim(token);
     if (!claim.ok) return refuse(claim.why);
-    wss.handleUpgrade(req, socket, head, (client) => attach(client, token, claim.generation));
+    wss.handleUpgrade(req, socket, head, (client) => attach(client, token, claim.generation, claim.expiresAt));
   });
 
-  function attach(client, token, generation) {
+  function attach(client, token, generation, expiresAt) {
     const tab = new WebSocket(tabWsUrl, { perMessageDeflate: false });
     state.lease = { token, generation, client, tab };
     let nextId = 1;
@@ -497,6 +509,7 @@ function startRelay(tabWsUrl, caps, consentedOrigins) {
     // Fail closed: any disconnect ends the lease and burns the capability.
     const end = () => {
       if (state.lease?.generation !== generation) return;
+      clearTimeout(expiry);
       caps.burn(token);
       state.lease = null;
       try { client.close(1011, 'lease ended'); } catch {}
@@ -506,6 +519,23 @@ function startRelay(tabWsUrl, caps, consentedOrigins) {
     client.on('close', end);
     tab.on('error', end);
     client.on('error', end);
+    // A lease lasts no longer than the capability that opened it.
+    const expiry = setTimeout(() => { state.refusals.push('lease ended: capability expired'); end(); }, Math.max(0, expiresAt - Date.now()));
+    expiry.unref?.();
+
+    // Nothing is served until the tab is known to be on a consented site: a
+    // page it was already showing loaded before any request policy, so the
+    // policy never had the chance to refuse it.
+    let ready = false;
+    const backlog = [];
+    const checkId = nextId++;
+    pending.set(checkId, { internal: (m) => {
+      const url = m.result?.targetInfo?.url ?? '';
+      if (!consented(url)) { state.refusals.push(`the tab is on a site without consent: ${originOf(url) || url}`); return end(); }
+      ready = true;
+      while (backlog.length) serve(backlog.shift());
+    } });
+    sendTab({ id: checkId, method: 'Target.getTargetInfo' });
 
     tab.on('message', (raw) => {
       if (state.watch && String(raw).includes(state.watch)) state.seenFromTab++;
@@ -517,7 +547,20 @@ function startRelay(tabWsUrl, caps, consentedOrigins) {
         if (p.internal) return p.internal(msg);
         reply(p.clientId, p.sessionId, msg.error ? { error: msg.error } : { result: p.transform ? p.transform(msg.result) : msg.result });
       } else {
-        if (msg.method === 'Target.attachedToTarget') knownSessions.add(msg.params.sessionId);
+        // Events from a session the agent was never given are not its own.
+        if (msg.sessionId && !knownSessions.has(msg.sessionId)) return;
+        if (msg.method === 'Target.attachedToTarget') {
+          const { sessionId: child, targetInfo: info, waitingForDebugger } = msg.params;
+          // A frame or worker on a site without consent, typically one the tab
+          // already held before the lease (it sent no request for the policy
+          // to stop), is never handed to the agent.
+          if (!childConsented(info?.url)) {
+            state.hidden.push(info?.url ?? '');
+            if (waitingForDebugger) sendTab({ id: nextId++, method: 'Runtime.runIfWaitingForDebugger', sessionId: child });
+            return;
+          }
+          knownSessions.add(child);
+        }
         if (msg.method === 'Target.detachedFromTarget') knownSessions.delete(msg.params.sessionId);
         emit(msg.method, msg.params, msg.sessionId ?? TAB_SESSION);
       }
@@ -525,6 +568,12 @@ function startRelay(tabWsUrl, caps, consentedOrigins) {
 
     client.on('message', (raw) => {
       // Fencing: a socket from an older lease generation is never served.
+      if (state.lease?.generation !== generation) return;
+      if (!ready) return void backlog.push(raw);
+      serve(raw);
+    });
+
+    function serve(raw) {
       if (state.lease?.generation !== generation) return;
       // A frame that is not a well-formed command ends the lease, fail closed,
       // rather than throwing out of the relay.
@@ -586,7 +635,7 @@ function startRelay(tabWsUrl, caps, consentedOrigins) {
       const rid = nextId++;
       pending.set(rid, { clientId: id, sessionId, transform: method === 'Page.getNavigationHistory' ? redactHistory : undefined });
       sendTab(toTab({ id: rid, method, params }));
-    });
+    }
   }
 
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({
@@ -959,6 +1008,82 @@ try {
     check('its capability cannot reconnect', (await tryConnect(relay.endpoint(cap))).startsWith('refused'));
     check('the relay still serves a fresh capability', (await tryConnect(relay.endpoint(caps.approveRun('run-6')))) === 'open');
     await sleep(200);
+  }
+
+  {
+    // A lease ends when its capability expires, even with the socket open.
+    const cap = caps.approveRun('run-7', 1500);
+    const raw = new WebSocket(relay.endpoint(cap));
+    await new Promise((r) => raw.on('open', r));
+    let closedAt = 0;
+    const closed = new Promise((r) => raw.on('close', () => { closedAt = Date.now(); r(); }));
+    const openedAt = Date.now();
+    await Promise.race([closed, sleep(5000)]);
+    check('O3: a lease ends when its capability expires, with the socket still open',
+      closedAt > 0 && relay.state.lease === null && relay.state.refusals.at(-1) === 'lease ended: capability expired',
+      `closed after ${closedAt ? closedAt - openedAt : 'never'} ms; ${relay.state.refusals.at(-1)}`);
+    check('its capability cannot reconnect after expiry', (await tryConnect(relay.endpoint(cap))).startsWith('refused'));
+  }
+
+  {
+    // What the tab already held before the lease loaded before any request
+    // policy, so the policy never had a request to refuse. A second browser,
+    // so its tab can load an off-list frame first.
+    const second = await launchChromium(rules);
+    try {
+      const direct = cdpClient(second.tab.webSocketDebuggerUrl);
+      await direct.ready;
+      await direct.send('Page.navigate', { url: `${ALLOWED}/framer` });
+      await sleep(1200);
+      const targets = await (await fetch(`http://127.0.0.1:${second.port}/json/list`)).json();
+      check('control: before the lease, the tab holds an off-list frame in its own process',
+        targets.some((t) => t.type === 'iframe' && t.url.startsWith('http://offlist.test')), targets.map((t) => `${t.type} ${t.url}`).join(' | '));
+      const caps2 = createCapabilityStore();
+      const relay2 = await startRelay(second.tab.webSocketDebuggerUrl, caps2, new Set([ALLOWED, 'http://allowed2.test']));
+      const raw = new WebSocket(relay2.endpoint(caps2.approveRun('pre-1')));
+      const attached = [];
+      let nextId = 1;
+      const waiters = new Map();
+      raw.on('message', (m) => {
+        const msg = JSON.parse(m);
+        if (msg.id && waiters.has(msg.id)) { waiters.get(msg.id)(msg); waiters.delete(msg.id); }
+        if (msg.method === 'Target.attachedToTarget') attached.push(msg.params.targetInfo.url);
+      });
+      await new Promise((r) => raw.on('open', r));
+      const call = (method, params = {}, sessionId) => new Promise((resolve) => {
+        const id = nextId++;
+        waiters.set(id, (msg) => resolve(msg.error ? `error: ${msg.error.message}` : msg.result));
+        raw.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+        setTimeout(() => resolve('timeout'), 5000);
+      });
+      await call('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
+      await call('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, TAB_SESSION);
+      await sleep(800);
+      check('P2: a frame on an off-list site that the tab held before the lease is never given to the agent',
+        !attached.some((u) => u.includes('offlist')) && relay2.state.hidden.some((u) => u.includes('offlist')),
+        `agent saw: ${attached.join(', ')}; hidden: ${relay2.state.hidden.join(', ')}`);
+      raw.close();
+      await sleep(300);
+
+      // The tab itself on an off-list site when the lease starts.
+      await direct.send('Page.navigate', { url: 'http://offlist.test/' });
+      await sleep(800);
+      const raw2 = new WebSocket(relay2.endpoint(caps2.approveRun('pre-2')));
+      let answered = false;
+      const closed2 = new Promise((r) => raw2.on('close', r));
+      raw2.on('message', (m) => { if (JSON.parse(m).result) answered = true; });
+      await new Promise((r) => raw2.on('open', r));
+      // Sent at once, before the relay has looked at the tab.
+      raw2.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: { expression: 'document.title' }, sessionId: TAB_SESSION }));
+      await Promise.race([closed2, sleep(3000)]);
+      check('P2: no lease is served on a tab that is on a site without consent',
+        !answered && relay2.state.lease === null && String(relay2.state.refusals.at(-1)).startsWith('the tab is on a site without consent'),
+        relay2.state.refusals.at(-1));
+      direct.close();
+      relay2.server.close();
+    } finally {
+      second.proc.kill();
+    }
   }
 
   const expired = caps.approveRun('run-3', -1);
