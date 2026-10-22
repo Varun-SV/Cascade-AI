@@ -1037,7 +1037,7 @@ try {
       await sleep(1200);
       const targets = await (await fetch(`http://127.0.0.1:${second.port}/json/list`)).json();
       check('control: before the lease, the tab holds an off-list frame in its own process',
-        targets.some((t) => t.type === 'iframe' && t.url.startsWith('http://offlist.test')), targets.map((t) => `${t.type} ${t.url}`).join(' | '));
+        targets.some((t) => t.type === 'iframe' && originOf(t.url) === 'http://offlist.test'), targets.map((t) => `${t.type} ${t.url}`).join(' | '));
       const caps2 = createCapabilityStore();
       const relay2 = await startRelay(second.tab.webSocketDebuggerUrl, caps2, new Set([ALLOWED, 'http://allowed2.test']));
       const raw = new WebSocket(relay2.endpoint(caps2.approveRun('pre-1')));
@@ -1060,7 +1060,7 @@ try {
       await call('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, TAB_SESSION);
       await sleep(800);
       check('P2: a frame on an off-list site that the tab held before the lease is never given to the agent',
-        !attached.some((u) => u.includes('offlist')) && relay2.state.hidden.some((u) => u.includes('offlist')),
+        !attached.some((u) => originOf(u) === 'http://offlist.test') && relay2.state.hidden.some((u) => originOf(u) === 'http://offlist.test'),
         `agent saw: ${attached.join(', ')}; hidden: ${relay2.state.hidden.join(', ')}`);
       raw.close();
       await sleep(300);
