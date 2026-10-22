@@ -286,10 +286,24 @@ depth.
   - **Malformed frames fail closed.** A frame from the server that is not a
     well-formed command ends the lease and burns its capability; the relay
     keeps serving others.
+  - **History stays on consented sites.** `Page.getNavigationHistory` lists
+    entries from other sites (the tab's past, or a navigation the policy
+    failed) with no URL or title, and `Page.navigateToHistoryEntry` is
+    refused for them: a page restored from the back-forward cache sends no
+    request for the request policy to stop.
+  - **No second page.** A page the leased tab opens (`target=_blank`,
+    `window.open`, with or without `noopener`) is a new target outside the
+    tab's request policy and outside the lease. The device's browser-level
+    session holds every new target paused before it sends anything; a new
+    page gets a deny-everything request interception, is resumed and is
+    closed. (CLI: a dedicated profile, so every new page during a lease is
+    the run's. Desktop: `setWindowOpenHandler` denies. Extension: its P2
+    run must show the same for `chrome.tabs.onCreated` with an
+    `openerTabId` of the leased tab.)
   - Changing the list is a reviewed policy change with a version number.
   - Method names alone don't express side effects. `Runtime.evaluate`
     stays privileged page script by design (§4.3, honest limit).
-  - `poc-egress-and-lease.mjs` checks all of this (40/40):
+  - `poc-egress-and-lease.mjs` checks all of this (46/46):
     - an allowlisted method works on a nested cross-site iframe session
     - `Emulation.setGeolocationOverride` through that nested session is
       refused
@@ -304,6 +318,12 @@ depth.
       agent; fails with body stripping off)
     - a non-JSON frame ends the lease, its capability cannot reconnect, and
       a fresh one still connects
+    - pages opened by `window.open` (with and without `noopener`) and by a
+      `target=_blank` link: the off-list server saw 0 requests and the tab
+      stayed the only page (without the guard: 3 requests, 4 pages)
+    - after a blocked navigation, the agent's history has no off-list URL
+      and going back to that entry is refused; going back to a consented
+      entry works
 - **Always denied:**
   - cookie and storage reads and writes (`Network.getCookies`,
     `getAllCookies`, `setCookie(s)`, `deleteCookies`,

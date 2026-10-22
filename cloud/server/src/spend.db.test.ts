@@ -260,6 +260,24 @@ describe('spend ledger', () => {
     expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals.runs).toBe(1);
   });
 
+  it('measures an old CLI\'s next sync from the total it last sent before the upgrade', () => {
+    const u = user('upgraded-cli');
+    const c = store.createConversation(u.id, 'From before');
+    for (const total of [0.01, 0.03]) store.addMessage({ conversationId: c.id, role: 'assistant', content: 'a', costUsd: total });
+    store.close();
+    // Roll back to before the ledger and the kept total existed.
+    const raw = new Database(dbPath);
+    raw.exec('DROP TABLE spend_ledger_models; DROP TABLE spend_ledger; ALTER TABLE conversations DROP COLUMN legacy_cli_total;');
+    raw.close();
+    store = new CloudStore(dbPath);
+    // The newest reply is deleted after the upgrade, then the old CLI syncs again.
+    const newest = store.getMessages(c.id).filter((m) => m.role === 'assistant').at(-1)!;
+    store.deleteMessageSubtree(c.id, u.id, newest.id);
+    store.appendTurn(c.id, u.id, { userContent: 'q', assistant: { content: 'a', costUsd: 0.06 } });
+    // 0.01 + 0.02 (back-filled) + 0.03: not 0.05 measured from the older 0.01.
+    expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals.spentUsd).toBeCloseTo(0.06, 9);
+  });
+
   it('back-fills an old CLI\'s replies by what each run added, chat by chat', () => {
     const u = user('old-cli');
     const first = store.createConversation(u.id, 'Session one');

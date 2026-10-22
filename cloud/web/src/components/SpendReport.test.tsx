@@ -50,6 +50,8 @@ describe('SpendReport', () => {
     expect(screen.getByText('$1.92')).toBeInTheDocument();
     expect(screen.getByText('on runs that cost less than T1')).toBeInTheDocument();
     expect(screen.queryByText(/% less than all on T1/)).toBeNull();
+    expect(screen.getByText('Saved on runs cheaper than T1')).toBeInTheDocument();
+    expect(screen.queryByText(/vs all on T1/)).toBeNull();
     expect(screen.getByText('12.3K tokens')).toBeInTheDocument();
     expect(screen.getAllByTestId('spend-slot')).toHaveLength(2);
   });

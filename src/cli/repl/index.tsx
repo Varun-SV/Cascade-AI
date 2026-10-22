@@ -1061,9 +1061,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       if (generation === null) return async () => null;
       const router = cascade.getRouter();
       const decisions = cascade.getDecisionLog();
+      // The T1 model savings are measured against, as it was for this run:
+      // a later model pick must not change what this run saved.
+      const t1Model = router.getTierModel('T1');
       return async () => {
         await router.whenRunSettled(generation);
-        return cloudRunReport({ stats: router.getRunStats(generation), t1Model: router.getTierModel('T1'), decisions, durationMs });
+        return cloudRunReport({ stats: router.getRunStats(generation), t1Model, decisions, durationMs });
       };
     };
     try {

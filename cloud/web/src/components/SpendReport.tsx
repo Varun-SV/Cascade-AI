@@ -172,7 +172,7 @@ function Body({ report, onOpenChat }: { report: Report; onOpenChat: (id: string)
           <h3 id="spend-series-h" className="m-0 text-[13.5px] font-medium text-ink-50">Spent and saved by {report.bucket}</h3>
           <span className="flex items-center gap-3 text-[12px] text-ink-400">
             <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-[3px]" style={{ background: 'var(--chart-spent)' }} />Spent</span>
-            <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-[3px]" style={{ background: 'var(--chart-saved)' }} />Saved vs all on T1</span>
+            <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-[3px]" style={{ background: 'var(--chart-saved)' }} />Saved on runs cheaper than T1</span>
           </span>
           <span className="flex-1" />
           {chartable && (

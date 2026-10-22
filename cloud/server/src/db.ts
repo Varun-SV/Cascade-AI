@@ -493,9 +493,6 @@ export class CloudStore {
     const hasCol = (table: string, col: string) =>
       (this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === col);
     if (!hasCol('conversations', 'skill_id')) this.db.exec('ALTER TABLE conversations ADD COLUMN skill_id TEXT');
-    // The last running total an old CLI sent for this chat (see appendTurn),
-    // kept apart from its messages so deleting a reply cannot lower it.
-    if (!hasCol('conversations', 'legacy_cli_total')) this.db.exec('ALTER TABLE conversations ADD COLUMN legacy_cli_total REAL');
     // Browser sessions opened per day, beside the runs counted on the same row.
     if (!hasCol('usage', 'browser_sessions')) {
       this.db.exec('ALTER TABLE usage ADD COLUMN browser_sessions INTEGER NOT NULL DEFAULT 0');
@@ -585,7 +582,26 @@ export class CloudStore {
    * next boot simply tries again. Runs whose chat was deleted before the ledger
    * existed cannot be recovered: nothing of them is left to read.
    */
+  private hasColumn(table: string, col: string): boolean {
+    return (this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === col);
+  }
+
   private migrateSpendLedger(): void {
+    // The last running total an old CLI sent for this chat (see appendTurn),
+    // kept apart from its messages so deleting a reply cannot lower it.
+    if (!this.hasColumn('conversations', 'legacy_cli_total')) {
+      this.db.exec('ALTER TABLE conversations ADD COLUMN legacy_cli_total REAL');
+      // Seeded from each chat's newest such reply as it stands now, so a reply
+      // deleted after the upgrade cannot lower the total the next sync is
+      // measured against.
+      if (this.hasColumn('messages', 'cost_usd')) {
+        this.db.exec(`UPDATE conversations SET legacy_cli_total = (
+          SELECT m.cost_usd FROM messages m
+           WHERE m.conversation_id = conversations.id AND m.role = 'assistant'
+             AND m.why_json IS NULL AND m.cost_usd IS NOT NULL
+           ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1)`);
+      }
+    }
     const exists = this.db
       .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'spend_ledger'")
       .get();

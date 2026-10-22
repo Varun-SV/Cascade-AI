@@ -88,7 +88,7 @@ async function launchChromium(mapRules) {
   });
   const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
   const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
-  return { proc, tab: list.find((t) => t.type === 'page'), browserWs: version.webSocketDebuggerUrl };
+  return { proc, port, tab: list.find((t) => t.type === 'page'), browserWs: version.webSocketDebuggerUrl };
 }
 
 function originOf(u) { try { return new URL(u).origin; } catch { return ''; } }
@@ -99,20 +99,31 @@ function cdpClient(url) {
   let id = 1;
   const pending = new Map();
   const handlers = new Map();
+  const listeners = [];
   // Only events this prototype subscribes to are dispatched.
   const EVENTS = new Set(['Fetch.requestPaused']);
   ws.on('message', (raw) => {
     const msg = JSON.parse(raw);
     if (msg.id && pending.has(msg.id)) { const p = pending.get(msg.id); pending.delete(msg.id); msg.error ? p.reject(new Error(msg.error.message)) : p.resolve(msg.result); }
-    else if (typeof msg.method === 'string' && EVENTS.has(msg.method)) {
-      const fn = handlers.get(msg.method);
-      if (typeof fn === 'function') fn(msg.params);
+    else if (typeof msg.method === 'string') {
+      for (const fn of listeners) fn(msg);
+      if (EVENTS.has(msg.method)) {
+        const fn = handlers.get(msg.method);
+        if (typeof fn === 'function') fn(msg.params);
+      }
     }
+  });
+  const sendRaw = (method, params = {}, sessionId) => new Promise((resolve, reject) => {
+    const i = id++;
+    pending.set(i, { resolve, reject });
+    ws.send(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) }));
   });
   return {
     ready: new Promise((r) => ws.on('open', r)),
-    send: (method, params = {}) => new Promise((resolve, reject) => { const i = id++; pending.set(i, { resolve, reject }); ws.send(JSON.stringify({ id: i, method, params })); }),
+    send: (method, params = {}) => sendRaw(method, params),
+    sendRaw,
     on: (method, fn) => handlers.set(method, fn),
+    onAny: (fn) => listeners.push(fn),
     close: () => ws.close(),
   };
 }
@@ -311,7 +322,61 @@ function redactEvent(method, params) {
   return params;
 }
 
-function startRelay(tabWsUrl, caps) {
+/**
+ * The privileged browser-level guard against new pages. A page the leased
+ * tab opens (a `target=_blank` link, `window.open`) is a new target that the
+ * tab's request policy does not cover, and a second tab the lease does not
+ * cover either. New targets start paused (waitForDebuggerOnStart), before
+ * they send any request. A new page gets a deny-everything request
+ * interception first, then is resumed (closing it while paused would leave
+ * the opener's window.open waiting) and closed; anything else resumes.
+ * The CLI drives a dedicated browser profile, so during a lease every new
+ * page is one the run opened.
+ */
+async function startPopupGuard(browserWs, leasedTargetId) {
+  const client = cdpClient(browserWs);
+  await client.ready;
+  const closed = [];
+  const send = (method, params = {}, sessionId) => client.sendRaw(method, params, sessionId).catch(() => {});
+  const blockedRequests = [];
+  client.onAny(async (msg) => {
+    if (msg.method === 'Fetch.requestPaused') {
+      blockedRequests.push(msg.params.request.url);
+      await send('Fetch.failRequest', { requestId: msg.params.requestId, errorReason: 'BlockedByClient' }, msg.sessionId);
+      return;
+    }
+    if (msg.method !== 'Target.attachedToTarget') return;
+    const { sessionId, targetInfo } = msg.params;
+    if (targetInfo.type === 'page' && targetInfo.targetId !== leasedTargetId) {
+      closed.push(targetInfo.url || '(not yet navigated)');
+      await send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }, sessionId);
+      await send('Runtime.runIfWaitingForDebugger', {}, sessionId);
+      await send('Target.closeTarget', { targetId: targetInfo.targetId });
+      return;
+    }
+    await send('Runtime.runIfWaitingForDebugger', {}, sessionId);
+    await send('Target.detachFromTarget', { sessionId });
+  });
+  await client.sendRaw('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
+  return { closed, blockedRequests, close: () => client.close() };
+}
+
+/** Whether a URL is on a site the run may show: consented http(s), or about:blank. */
+const onConsentedSite = (consentedOrigins) => (u) => {
+  if (u === 'about:blank') return true;
+  try {
+    const x = new URL(u);
+    return (x.protocol === 'http:' || x.protocol === 'https:') && consentedOrigins.has(x.origin);
+  } catch { return false; }
+};
+
+function startRelay(tabWsUrl, caps, consentedOrigins) {
+  const consented = onConsentedSite(consentedOrigins);
+  // History entries from sites without consent (the tab's past, or a
+  // navigation the policy failed) are listed with no URL or title.
+  const redactHistory = (r) => (r && Array.isArray(r.entries)
+    ? { ...r, entries: r.entries.map((e) => (consented(e.url) ? e : { ...e, url: 'about:blank#not-consented', userTypedURL: 'about:blank#not-consented', title: '' })) }
+    : r);
   const server = http.createServer((_, res) => { res.statusCode = 404; res.end(); });
   const wss = new WebSocketServer({ noServer: true });
   // `watch`: a test can name a secret and count where it was seen.
@@ -369,7 +434,7 @@ function startRelay(tabWsUrl, caps) {
         if (!p) return;
         pending.delete(msg.id);
         if (p.internal) return p.internal(msg);
-        reply(p.clientId, p.sessionId, msg.error ? { error: msg.error } : { result: msg.result });
+        reply(p.clientId, p.sessionId, msg.error ? { error: msg.error } : { result: p.transform ? p.transform(msg.result) : msg.result });
       } else {
         if (msg.method === 'Target.attachedToTarget') knownSessions.add(msg.params.sessionId);
         if (msg.method === 'Target.detachedFromTarget') knownSessions.delete(msg.params.sessionId);
@@ -420,9 +485,26 @@ function startRelay(tabWsUrl, caps) {
           default: return reply(id, null, { error: { code: -32601, message: `Relay: browser-level ${method} not supported` } });
         }
       }
+      const toTab = (m) => (sessionId === TAB_SESSION ? m : { ...m, sessionId });
+      // Going back or forward: only to an entry on a consented site. A page
+      // restored from the back-forward cache sends no request, so the request
+      // policy alone would never see it.
+      if (method === 'Page.navigateToHistoryEntry') {
+        const hid = nextId++;
+        pending.set(hid, { internal: (m) => {
+          const entry = m.result?.entries?.find((e) => e.id === params.entryId);
+          if (!entry || !consented(entry.url)) {
+            return reply(id, sessionId, { error: { code: -32000, message: 'Denied by Cascade relay policy: that history entry is not on a consented site' } });
+          }
+          const rid = nextId++;
+          pending.set(rid, { clientId: id, sessionId });
+          sendTab(toTab({ id: rid, method, params }));
+        } });
+        return sendTab(toTab({ id: hid, method: 'Page.getNavigationHistory' }));
+      }
       const rid = nextId++;
-      pending.set(rid, { clientId: id, sessionId });
-      sendTab(sessionId === TAB_SESSION ? { id: rid, method, params } : { id: rid, method, params, sessionId });
+      pending.set(rid, { clientId: id, sessionId, transform: method === 'Page.getNavigationHistory' ? redactHistory : undefined });
+      sendTab(toTab({ id: rid, method, params }));
     });
   }
 
@@ -456,6 +538,7 @@ const allowed = await countingServer('allowed.test', {
     <form id="f" method="post" action="http://offlist.test/collect"><input name="q" value="secret"><button>go</button></form>
     <script src="http://offlist.test/lib.js"></script>`),
   '/two': html('<title>allowed two</title>two'),
+  '/opener': html(`<title>opener</title><a id="nb" href="http://offlist.test/popup-link" target="_blank">new tab</a>`),
   // A form that sends a body the agent never typed (a stored token, say).
   '/form': html(`<title>form</title><form id="pf" method="post" action="/save">
     <input type="hidden" name="token" value="${BODY_SECRET}"><button id="go">save</button></form>`),
@@ -477,11 +560,12 @@ const allowed = await countingServer('allowed.test', {
 });
 
 const rules = `MAP allowed.test 127.0.0.1:${allowed.port}, MAP allowed2.test 127.0.0.1:${allowed.port}, MAP offlist.test 127.0.0.1:${offlist.port}`;
-const { proc, tab, browserWs } = await launchChromium(rules);
+const { proc, port: cdpPort, tab, browserWs } = await launchChromium(rules);
 const ALLOWED = 'http://allowed.test';
 const policy = await startEgressPolicy(tab.webSocketDebuggerUrl, new Set([ALLOWED, 'http://allowed2.test']));
 const caps = createCapabilityStore();
-const relay = await startRelay(tab.webSocketDebuggerUrl, caps);
+const relay = await startRelay(tab.webSocketDebuggerUrl, caps, new Set([ALLOWED, 'http://allowed2.test']));
+const popups = await startPopupGuard(browserWs, tab.id);
 console.log(`Playwright ${require('playwright-core/package.json').version}\n`);
 
 const offHits = () => offlist.hits.filter((h) => !h.startsWith('GET /lib.js')).length;
@@ -564,6 +648,20 @@ try {
       ['file:///etc/passwd', 'Image'],
     ].map(([u, t]) => egressVerdict(u, t, new Set([ALLOWED])).verdict);
     check('P2: non-http(s) documents and any file: request are blocked by the request policy', verdicts.every((v) => v === 'block'), verdicts.join(', '));
+  }
+  {
+    // New pages the leased tab opens are outside its request policy and its
+    // lease: closed before they send anything.
+    const before = offHits();
+    await page.goto(`${ALLOWED}/opener`, { timeout: 8000 });
+    await page.evaluate(() => { window.open('http://offlist.test/popup-script'); });
+    // One pop-up per user gesture: each in its own call.
+    await page.evaluate(() => { window.open('http://offlist.test/popup-noopener', '_blank', 'noopener'); });
+    await page.click('#nb', { timeout: 5000, noWaitAfter: true }).catch(() => {});
+    await sleep(800);
+    const pages = (await (await fetch(`http://127.0.0.1:${cdpPort}/json/list`)).json()).filter((t) => t.type === 'page');
+    check('P2: pages opened by window.open or a target=_blank link send no request', offHits() === before, `off-list server saw ${offHits() - before}`);
+    check('the lease stays one tab: every new page is closed', pages.length === 1 && popups.closed.length >= 3, `${pages.length} page(s); closed ${popups.closed.length}; their requests failed: ${popups.blockedRequests.length}`);
   }
 
   await page.goto(`${ALLOWED}/two`);
@@ -673,6 +771,29 @@ try {
     check('P1: a command on an unknown session id is refused', String(madeUp).includes('unknown session'), String(madeUp));
     const fd = await call('Fetch.disable', {}, TAB_SESSION);
     check('the agent cannot turn the policy off (Fetch.disable denied)', String(fd).includes('Denied'), String(fd));
+
+    // History: a blocked navigation leaves an entry for the off-list site.
+    await call('Page.navigate', { url: `${ALLOWED}/two` }, TAB_SESSION);
+    await sleep(300);
+    await call('Page.navigate', { url: 'http://offlist.test/history-probe' }, TAB_SESSION);
+    await sleep(300);
+    await call('Page.navigate', { url: `${ALLOWED}/two` }, TAB_SESSION);
+    await sleep(300);
+    const direct = cdpClient(tab.webSocketDebuggerUrl);
+    await direct.ready;
+    const truth = await direct.send('Page.getNavigationHistory');
+    direct.close();
+    const seenByAgent = await call('Page.getNavigationHistory', {}, TAB_SESSION);
+    const offEntry = truth.entries.find((e) => e.url.includes('offlist.test'));
+    check('control: the tab\'s real history has an entry for the off-list site', !!offEntry, truth.entries.map((e) => e.url).join(' | '));
+    check('P2: the agent\'s view of history has no off-list URL or title', !JSON.stringify(seenByAgent).includes('offlist'), JSON.stringify(seenByAgent.entries?.map((e) => e.url)));
+    const beforeBack = offHits();
+    const back = await call('Page.navigateToHistoryEntry', { entryId: offEntry?.id ?? -1 }, TAB_SESSION);
+    await sleep(300);
+    check('P2: going back to an off-list entry is refused', String(back).includes('not on a consented site') && offHits() === beforeBack, String(back));
+    const consentedEntry = truth.entries.find((e) => e.url === `${ALLOWED}/two`);
+    const fine = await call('Page.navigateToHistoryEntry', { entryId: consentedEntry.id }, TAB_SESSION);
+    check('going back to a consented entry still works', !String(fine).startsWith('error'), JSON.stringify(fine));
     raw.close();
     await sleep(200);
   }
@@ -699,6 +820,7 @@ try {
 } finally {
   await browser?.close().catch(() => {});
   policy.close();
+  popups.close();
   relay.server.close();
   for (const s of [allowed, offlist, priv]) s.server.close();
   proc.kill();
