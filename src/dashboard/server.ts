@@ -202,7 +202,19 @@ export class DashboardServer {
   private host: string;
   private workspacePath: string;
 
-  constructor(config: CascadeConfig, store: MemoryStore, workspacePath = process.cwd()) {
+  constructor(
+    config: CascadeConfig,
+    store: MemoryStore,
+    workspacePath = process.cwd(),
+    options: {
+      /**
+       * Where run accounting waiting for a window is kept. The desktop app
+       * passes a file in its own data folder, stable across restarts (its
+       * port is new each time). Default: per port, in the global folder.
+       */
+      pendingAccountingFile?: string;
+    } = {},
+  ) {
     this.config = config;
     this.store = store;
     this.workspacePath = workspacePath;
@@ -210,8 +222,9 @@ export class DashboardServer {
     this.host = config.dashboard.host ?? '127.0.0.1';
     this.dashboardSecret = this.resolveDashboardSecret();
     // On disk, so nothing waiting for a window is lost, even across restarts.
-    // One file per port: another dashboard on this machine keeps its own.
-    this.pendingAccounting = new PendingAccounting(path.join(globalDir(), `pending-accounting-${this.port}.jsonl`));
+    // One file per host: another dashboard on this machine keeps its own.
+    this.pendingAccounting = new PendingAccounting(options.pendingAccountingFile
+      ?? path.join(globalDir(), `pending-accounting-${this.port}.jsonl`));
     this.app = express();
     this.httpServer = createServer(this.app);
     this.socket = new DashboardSocket(this.httpServer, {
@@ -762,6 +775,9 @@ export class DashboardServer {
     cascade: Cascade,
     run: { prompt: string; output: string; outcome: 'answered' | 'failed' | 'stopped'; durationMs: number; copyTurn: boolean },
   ): Promise<void> {
+    // When the run finished, before waiting for its late calls: the cloud
+    // counts it on that day, however long it waits to be sent.
+    const endedAt = Date.now();
     try {
       const router = cascade.getRouter();
       const decisions = cascade.getDecisionLog();
@@ -770,7 +786,7 @@ export class DashboardServer {
       // A call with no price and no usage reported still happened, and may have cost money.
       if (report.totalCostUsd <= 0 && report.totalTokens <= 0 && Object.keys(report.unpricedByModel).length === 0 && !run.output) return;
       // Kept until a window confirms it: a run can end with no window open.
-      emit('run:accounting', this.pendingAccounting.add({ sessionId, ...run, cloud: cloudTurnAccounting(report) }));
+      emit('run:accounting', this.pendingAccounting.add({ sessionId, ...run, endedAt, cloud: cloudTurnAccounting(report) }));
     } catch (err) {
       console.warn('[dashboard] failed to report run accounting:', err);
     }

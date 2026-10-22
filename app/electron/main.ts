@@ -146,7 +146,11 @@ async function startBackend(): Promise<void> {
       host: '127.0.0.1',
       auth: false,
     };
-    const server = new DashboardServer(cascadeConfig, configManager.getStore(), workspace);
+    // Run accounting no window has handled yet survives a restart here: the
+    // port is new on every start, so it is kept in this app's own data folder.
+    const server = new DashboardServer(cascadeConfig, configManager.getStore(), workspace, {
+      pendingAccountingFile: join(app.getPath('userData'), 'pending-accounting.jsonl'),
+    });
     // The other half of the built-in browser: a run can read the page the user
     // is actually on. Wired only here — the backend runs in this process, so it
     // can reach the live view directly. In the CLI there is no browser and the

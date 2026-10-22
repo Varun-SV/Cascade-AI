@@ -493,6 +493,19 @@ describe('cloud/server app', () => {
       method: 'POST', headers: j, body: JSON.stringify({ userContent: 'q', outcome, assistant: { content: 'a' } }),
     });
     for (const bad of ['failed', 'done', 1]) expect((await withOutcome(bad)).status).toBe(400);
+    // A run that ended two days ago and arrives now counts two days ago.
+    const twoDaysAgo = Date.now() - 2 * 86_400_000;
+    const late = await fetch(`${baseUrl}/api/usage/runs`, { method: 'POST', headers: j, body: JSON.stringify({
+      conversationId: null, outcome: 'failed', costUsd: 0.02, why: JSON.stringify({ totalTokens: 5 }), runId: 'late-run-0001', endedAt: twoDaysAgo,
+    }) });
+    expect(late.status).toBe(200);
+    const today = await (await fetch(`${baseUrl}/api/usage/report?period=today`, { headers: { Cookie: cookie } })).json() as { totals: { runs: number } };
+    const week = await (await fetch(`${baseUrl}/api/usage/report?period=7d`, { headers: { Cookie: cookie } })).json() as { totals: { runs: number } };
+    expect(week.totals.runs - today.totals.runs).toBe(1);
+    const badTime = await fetch(`${baseUrl}/api/usage/runs`, { method: 'POST', headers: j, body: JSON.stringify({
+      conversationId: null, outcome: 'failed', costUsd: 0.02, why: '{}', runId: 'late-run-0002', endedAt: 'yesterday',
+    }) });
+    expect(badTime.status).toBe(400);
     const report = await (await fetch(`${baseUrl}/api/usage/report?period=today`, { headers: { Cookie: cookie } })).json() as { totals: { runs: number } };
     expect(report.totals.runs).toBe(1);
   });

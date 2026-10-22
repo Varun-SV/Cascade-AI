@@ -380,6 +380,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     assistant: { content: string; costUsd: number; why: string },
     /** 'stopped' when the user stopped the run: its partial reply is kept. */
     outcome: 'answered' | 'stopped' = 'answered',
+    /** When the run finished: it counts on that day, however late it is sent. */
+    endedAt?: number,
   ) => {
     const mirror = cloudMirrorRef.current;
     if (!mirror || process.env['CASCADE_NO_CLOUD_SYNC']) return;
@@ -387,7 +389,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     // so a turn whose answer was lost can be sent again.
     const runId = randomUUID();
     const turn = {
-      userContent, runId, ...(outcome === 'stopped' ? { outcome } : {}),
+      userContent, runId, ...(outcome === 'stopped' ? { outcome } : {}), ...(endedAt !== undefined ? { endedAt } : {}),
       assistant: { content: assistant.content, costUsd: assistant.costUsd, why: assistant.why },
     };
     // Best-effort mirror: offline, revoked token, etc. The local run is
@@ -400,13 +402,13 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
    * chat already synced, if any; it never creates one, since a chat with no
    * messages would be left behind for it.
    */
-  const recordRunSpendInCloud = useCallback(async (outcome: 'answered' | 'failed' | 'stopped', report: CloudRunReport) => {
+  const recordRunSpendInCloud = useCallback(async (outcome: 'answered' | 'failed' | 'stopped', report: CloudRunReport, endedAt?: number) => {
     const mirror = cloudMirrorRef.current;
     if (!mirror || process.env['CASCADE_NO_CLOUD_SYNC']) return;
     // A call with no price and no usage reported still happened, and may have cost money.
     if (report.totalCostUsd <= 0 && report.totalTokens <= 0 && Object.keys(report.unpricedByModel).length === 0) return;
     // Best-effort — the local run's error is what the user sees.
-    await syncRunSpend(mirror, { conversationId: mirror.convId, outcome, runId: randomUUID(), ...cloudTurnAccounting(report) })
+    await syncRunSpend(mirror, { conversationId: mirror.convId, outcome, runId: randomUUID(), ...(endedAt !== undefined ? { endedAt } : {}), ...cloudTurnAccounting(report) })
       .catch(() => { /* best-effort */ });
   }, []);
   /**
@@ -1118,12 +1120,14 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         }).catch(() => { /* non-critical */ });
       }
       const reportFor = runReportLater(result.durationMs, titled);
+      // When it finished: a send queued behind a slow one still counts on this day.
+      const endedAt = Date.now();
       queueCloud(async () => {
         const report = await reportFor();
         if (!report) return;
         // A stopped run returns what it had written so far: kept, as a stop.
-        if (output) return mirrorTurnToCloud(trimmed, { content: output, ...cloudTurnAccounting(report) }, stopped ? 'stopped' : 'answered');
-        return recordRunSpendInCloud(stopped ? 'stopped' : 'answered', report);
+        if (output) return mirrorTurnToCloud(trimmed, { content: output, ...cloudTurnAccounting(report) }, stopped ? 'stopped' : 'answered', endedAt);
+        return recordRunSpendInCloud(stopped ? 'stopped' : 'answered', report, endedAt);
       });
       // One-line run receipt — the delegation economics in scrollback.
       const receipt = formatRunReceipt(result, stats.totalCostUsd, savings);
@@ -1137,9 +1141,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       // failed before it) has no stats of its own, and nothing is sent.
       const outcome = runAbortRef.current?.signal.aborted ? 'stopped' : 'failed';
       const reportFor = runReportLater(0);
+      const endedAt = Date.now();
       queueCloud(async () => {
         const report = await reportFor();
-        if (report) await recordRunSpendInCloud(outcome, report);
+        if (report) await recordRunSpendInCloud(outcome, report, endedAt);
       });
     }
     finally {

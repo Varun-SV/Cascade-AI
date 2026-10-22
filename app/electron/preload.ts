@@ -202,7 +202,7 @@ contextBridge.exposeInMainWorld('cascade', {
     appendTurn: (id: string, turn: CloudTurn) => ipcRenderer.invoke('cloud:appendTurn', id, turn) as Promise<{
       ok: boolean; error?: string; messages: CloudMsg[];
     }>,
-    recordRunSpend: (run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string }) =>
+    recordRunSpend: (run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string; endedAt?: number }) =>
       ipcRenderer.invoke('cloud:recordRunSpend', run) as Promise<{ ok: boolean; error?: string; recorded?: boolean }>,
     selectBranch: (id: string, messageId: string) => ipcRenderer.invoke('cloud:selectBranch', id, messageId) as Promise<{
       ok: boolean; error?: string; messages: CloudMsg[];

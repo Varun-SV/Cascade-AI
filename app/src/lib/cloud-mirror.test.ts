@@ -56,6 +56,15 @@ describe('CloudMirror', () => {
     expect(api.recordRunSpend.mock.calls.map((c) => (c[0] as { runId: string }).runId)).toEqual([id, id]);
   });
 
+  it('sends the time the run ended with its turn and its spend', async () => {
+    const { api, mirror } = setup();
+    const endedAt = Date.UTC(2026, 9, 21, 23, 58);
+    await mirror.accounted(answered('s1', { endedAt }));
+    await mirror.accounted({ sessionId: 's2', outcome: 'failed', endedAt, cloud: accounting });
+    expect((api.appendTurn.mock.calls[0]![1] as { endedAt?: number }).endedAt).toBe(endedAt);
+    expect((api.recordRunSpend.mock.calls[0]![0] as { endedAt?: number }).endedAt).toBe(endedAt);
+  });
+
   it('counts a scheduled run\'s spend without copying it as a chat', async () => {
     const { api, mirror } = setup();
     await mirror.accounted(answered('sched', { copyTurn: false }));

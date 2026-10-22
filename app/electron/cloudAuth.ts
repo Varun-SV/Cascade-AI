@@ -68,7 +68,7 @@ interface CloudClientLike {
   getMessages(id: string): Promise<CloudMsg[]>;
   createConversation(title?: string): Promise<{ id: string; title: string | null }>;
   appendTurn(id: string, turn: CloudTurn): Promise<CloudMsg[]>;
-  recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string }): Promise<{ recorded: boolean }>;
+  recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string; endedAt?: number }): Promise<{ recorded: boolean }>;
   selectBranch(id: string, messageId: string): Promise<CloudMsg[]>;
   deleteMessage(id: string, messageId: string): Promise<CloudMsg[]>;
   renameConversation(id: string, title: string): Promise<void>;
@@ -257,8 +257,9 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
     const why = typeof r['why'] === 'string' ? r['why'] : null;
     const conversationId = typeof r['conversationId'] === 'string' ? r['conversationId'] : null;
     const runId = typeof r['runId'] === 'string' ? r['runId'] : undefined;
+    const endedAt = typeof r['endedAt'] === 'number' && Number.isFinite(r['endedAt']) ? r['endedAt'] : undefined;
     if (!outcome || costUsd === null || why === null) return { ok: false, error: 'Invalid run.' };
-    try { return { ok: true, ...(await client().recordRunSpend({ conversationId, outcome, costUsd, why, ...(runId ? { runId } : {}) })) }; }
+    try { return { ok: true, ...(await client().recordRunSpend({ conversationId, outcome, costUsd, why, ...(runId ? { runId } : {}), ...(endedAt !== undefined ? { endedAt } : {}) })) }; }
     catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not record that run.' }; }
   });
 

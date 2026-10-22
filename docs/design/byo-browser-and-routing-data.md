@@ -294,7 +294,10 @@ depth.
   - **What the tab already held stays out of reach.** A page or frame the
     tab loaded before the lease never went through the request policy.
     The relay serves no command until it has checked the tab is on a
-    consented site, and refuses the lease if not. A frame or worker on a
+    consented site, and every frame in its frame tree too, and refuses the
+    lease if not. The frame tree matters: a cross-origin frame on the same
+    site can share the tab's process, so it never arrives as a target of
+    its own. A frame or worker on a
     site without consent (one already in the tab, typically) is never
     given to the agent as a session, and its events are dropped.
   - **Nothing the agent set up outlives the lease.** A script it registers
@@ -324,7 +327,7 @@ depth.
   - Changing the list is a reviewed policy change with a version number.
   - Method names alone don't express side effects. `Runtime.evaluate`
     stays privileged page script by design (§4.3, honest limit).
-  - `poc-egress-and-lease.mjs` checks all of this (58/58):
+  - `poc-egress-and-lease.mjs` checks all of this (60/60):
     - an allowlisted method works on a nested cross-site iframe session
     - `Emulation.setGeolocationOverride` through that nested session is
       refused
@@ -345,8 +348,10 @@ depth.
       pop-ups in a row: 0 requests
     - in a second browser whose tab loaded an off-list frame before any
       policy existed (the control shows the frame), the agent was never
-      given that frame; with the tab itself on an off-list site, no
-      command was answered and the lease was refused
+      given that frame; with a same-site frame from an origin without
+      consent in the tab's own process (no target of its own), or with the
+      tab itself on an off-list site, no command was answered and the
+      lease was refused
     - a lease whose capability expires ends on time with its socket still
       open, and the capability cannot reconnect
     - after a blocked navigation, the agent's history has no off-list URL

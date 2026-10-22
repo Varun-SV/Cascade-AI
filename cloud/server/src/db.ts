@@ -999,6 +999,8 @@ export class CloudStore {
       runId?: string | null;
       /** A run the user stopped, whose partial reply is kept: counted as stopped. */
       outcome?: 'answered' | 'stopped';
+      /** When the run finished, which the ledger counts it at (the reply's time otherwise). */
+      endedAt?: number;
     },
   ): CloudMessage[] | null {
     const convo = this.getConversation(conversationId, userId);
@@ -1052,7 +1054,7 @@ export class CloudStore {
       if (input.assistant.why != null || input.assistant.costUsd != null) {
         this.recordSpend(spendEntryFromRun({
           id: runId ? deviceRunSpendId(userId, runId) : reply.id,
-          userId, conversationId, at: reply.createdAt, costUsd: spent, why: input.assistant.why,
+          userId, conversationId, at: input.endedAt ?? reply.createdAt, costUsd: spent, why: input.assistant.why,
           outcome: input.outcome ?? 'answered',
         }));
       }

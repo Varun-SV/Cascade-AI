@@ -536,12 +536,27 @@ function startRelay(tabWsUrl, caps, consentedOrigins) {
     // policy never had the chance to refuse it.
     let ready = false;
     const backlog = [];
+    // Every frame too: a cross-origin frame on the same site can share the
+    // tab's process, so it never arrives as a target of its own to check.
+    const frameConsented = (u) => u === 'about:srcdoc' || childConsented(u);
     const checkId = nextId++;
     pending.set(checkId, { internal: (m) => {
       const url = m.result?.targetInfo?.url ?? '';
       if (!consented(url)) { state.refusals.push(`the tab is on a site without consent: ${originOf(url) || url}`); return end(); }
-      ready = true;
-      while (backlog.length) serve(backlog.shift());
+      const treeId = nextId++;
+      pending.set(treeId, { internal: (t) => {
+        const urls = [];
+        const walk = (node) => { if (!node) return; urls.push(node.frame?.url ?? ''); for (const c of node.childFrames ?? []) walk(c); };
+        walk(t.result?.frameTree);
+        const outside = urls.find((u) => !frameConsented(u));
+        if (t.error || outside !== undefined) {
+          state.refusals.push(`a frame on a site without consent: ${outside !== undefined ? (originOf(outside) || outside) : 'frame tree unavailable'}`);
+          return end();
+        }
+        ready = true;
+        while (backlog.length) serve(backlog.shift());
+      } });
+      sendTab({ id: treeId, method: 'Page.getFrameTree' });
     } });
     sendTab({ id: checkId, method: 'Target.getTargetInfo' });
 
@@ -695,6 +710,8 @@ const allowed = await countingServer('allowed.test', {
   },
   '/redirect': (req, res) => { res.statusCode = 302; res.setHeader('location', 'http://offlist.test/'); res.end(); },
   '/framer': html('<title>framer</title><iframe src="http://offlist.test/"></iframe>'),
+  // A frame on the same site but another origin: it shares the tab's process.
+  '/framer-same-site': html('<title>framer same site</title><iframe src="http://sub.allowed.test/two"></iframe>'),
   '/xframe': html('<title>xframe</title><iframe src="http://allowed2.test/two"></iframe>'),
   '/file': (req, res) => { res.setHeader('content-type', 'application/octet-stream'); res.setHeader('content-disposition', 'attachment; filename="report.bin"'); res.end('secret bytes'); },
   // Workers and a cross-site frame that fetch whatever URL they are handed.
@@ -714,7 +731,7 @@ const allowed = await countingServer('allowed.test', {
     <script>document.querySelector('#blob').href = URL.createObjectURL(new Blob(['local note']));</script>`),
 });
 
-const rules = `MAP allowed.test 127.0.0.1:${allowed.port}, MAP allowed2.test 127.0.0.1:${allowed.port}, MAP offlist.test 127.0.0.1:${offlist.port}`;
+const rules = `MAP allowed.test 127.0.0.1:${allowed.port}, MAP allowed2.test 127.0.0.1:${allowed.port}, MAP sub.allowed.test 127.0.0.1:${allowed.port}, MAP offlist.test 127.0.0.1:${offlist.port}`;
 const { proc, port: cdpPort, tab, browserWs } = await launchChromium(rules);
 const ALLOWED = 'http://allowed.test';
 const policy = await startEgressPolicy(tab.webSocketDebuggerUrl, new Set([ALLOWED, 'http://allowed2.test']));
@@ -1118,6 +1135,27 @@ try {
         `agent saw: ${attached.join(', ')}; hidden: ${relay2.state.hidden.join(', ')}`);
       raw.close();
       await sleep(300);
+
+      // A same-site frame from an origin without consent, in the tab's own
+      // process: no target of its own, so only the frame tree shows it.
+      await direct.send('Page.navigate', { url: `${ALLOWED}/framer-same-site` });
+      await sleep(1000);
+      const sameSiteTargets = await (await fetch(`http://127.0.0.1:${second.port}/json/list`)).json();
+      const tree = await direct.send('Page.getFrameTree');
+      check('control: the same-site frame is in the tab\'s process (no target of its own) but in its frame tree',
+        !sameSiteTargets.some((t) => originOf(t.url) === 'http://sub.allowed.test')
+          && (tree.frameTree.childFrames ?? []).some((c) => originOf(c.frame.url) === 'http://sub.allowed.test'),
+        sameSiteTargets.map((t) => `${t.type} ${t.url}`).join(' | '));
+      const rawSame = new WebSocket(relay2.endpoint(caps2.approveRun('pre-3')));
+      let sameAnswered = false;
+      const sameClosed = new Promise((r) => rawSame.on('close', r));
+      rawSame.on('message', (m) => { if (JSON.parse(m).result) sameAnswered = true; });
+      await new Promise((r) => rawSame.on('open', r));
+      rawSame.send(JSON.stringify({ id: 1, method: 'Page.getFrameTree', params: {}, sessionId: TAB_SESSION }));
+      await Promise.race([sameClosed, sleep(3000)]);
+      check('P2: no lease is served while an in-process frame is on a site without consent',
+        !sameAnswered && relay2.state.lease === null && String(relay2.state.refusals.at(-1)).startsWith('a frame on a site without consent'),
+        relay2.state.refusals.at(-1));
 
       // The tab itself on an off-list site when the lease starts.
       await direct.send('Page.navigate', { url: 'http://offlist.test/' });

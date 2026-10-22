@@ -20,6 +20,8 @@ export interface AccountedRun {
   outcome?: 'answered' | 'failed' | 'stopped';
   /** False for runs not started from the desktop's own views (scheduled, API). */
   copyTurn?: boolean;
+  /** When the run finished (epoch ms), so it counts on that day in the cloud. */
+  endedAt?: number;
   cloud?: RunAccounting;
 }
 
@@ -27,8 +29,8 @@ export interface CloudMirrorApi {
   /** Who is signed in, and to which server: the links below belong to them. */
   status(): Promise<{ signedIn: boolean; user: { id: string } | null; serverUrl: string }>;
   createConversation(title?: string): Promise<{ ok: boolean; conversation?: { id: string } }>;
-  appendTurn(id: string, turn: { userContent: string; runId?: string; outcome?: 'answered' | 'stopped'; assistant: { content: string; costUsd?: number; why?: string } }): Promise<{ ok: boolean; error?: string }>;
-  recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string }): Promise<{ ok: boolean; error?: string }>;
+  appendTurn(id: string, turn: { userContent: string; runId?: string; outcome?: 'answered' | 'stopped'; endedAt?: number; assistant: { content: string; costUsd?: number; why?: string } }): Promise<{ ok: boolean; error?: string }>;
+  recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string; endedAt?: number }): Promise<{ ok: boolean; error?: string }>;
 }
 
 /**
@@ -116,12 +118,13 @@ export class CloudMirror {
     // adds its turn to a chat once, and counts the run once, per id. The
     // backend's id when it gave one, so a replayed report is the same run.
     const runId = typeof run.id === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(run.id) ? run.id : newRunId();
+    const ended = typeof run.endedAt === 'number' ? { endedAt: run.endedAt } : {};
     // A turn from the desktop's own views is copied, with its cost: an answer,
     // or what a run the user stopped had written so far (counted as stopped).
     if ((outcome === 'answered' || outcome === 'stopped') && run.output && run.prompt && run.copyTurn !== false
       && api.appendTurn && api.createConversation) {
       const turn = {
-        userContent: run.prompt, runId, ...(outcome === 'stopped' ? { outcome } : {}),
+        userContent: run.prompt, runId, ...(outcome === 'stopped' ? { outcome } : {}), ...ended,
         assistant: { content: run.output, ...run.cloud },
       };
       const known = this.chats.get(key);
@@ -141,7 +144,7 @@ export class CloudMirror {
     if (!api.recordRunSpend) return;
     const conversationId = this.chats.get(key) ?? null;
     const cost = run.cloud;
-    const send = (chat: string | null) => api.recordRunSpend!({ conversationId: chat, outcome, runId, ...cost })
+    const send = (chat: string | null) => api.recordRunSpend!({ conversationId: chat, outcome, runId, ...ended, ...cost })
       .catch(() => ({ ok: false, error: undefined }));
     let recorded = await send(conversationId);
     // No answer: once more, to the same chat (the run id keeps it to one).

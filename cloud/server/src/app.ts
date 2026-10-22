@@ -25,7 +25,7 @@ import { remoteBrowserControls } from './runs.js';
 import { NativeAuthStore, isLoopbackRedirect, hashRefreshToken } from './native-auth.js';
 import { githubAuthUrl, exchangeGithubCode, googleAuthUrl, exchangeGoogleCode, type OAuthProfile } from './auth/oauth.js';
 import { limitsForPlan, ORPHAN_UPLOAD_TTL_MS, todayKey, checkStorageQuota } from './entitlements.js';
-import { buildSpendReport, DEVICE_RUN_ID, deviceRunSpendId, parsePeriod, parseTimeZone, spendEntryFromRun } from './spend.js';
+import { buildSpendReport, DEVICE_RUN_ID, deviceEndedAt, deviceRunSpendId, parsePeriod, parseTimeZone, spendEntryFromRun } from './spend.js';
 import { skillCatalog } from './skills.js';
 import { renderDocsPage } from './docs.js';
 import { tenantScratchDir } from './paths.js';
@@ -548,6 +548,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       regenerateFromUserMessageId?: unknown;
       runId?: unknown;
       outcome?: unknown;
+      endedAt?: unknown;
     };
     if (typeof id !== 'string' || typeof body?.userContent !== 'string' || typeof body?.assistant?.content !== 'string') {
       res.status(400).json({ error: 'userContent and assistant.content are required' }); return;
@@ -560,6 +561,8 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     if (body.outcome !== undefined && body.outcome !== 'answered' && body.outcome !== 'stopped') {
       res.status(400).json({ error: 'outcome must be answered or stopped' }); return;
     }
+    const endedAt = deviceEndedAt(body.endedAt, Date.now());
+    if (endedAt === undefined) { res.status(400).json({ error: 'endedAt must be a time in milliseconds' }); return; }
     const str = (v: unknown) => (typeof v === 'string' && v ? v : null);
     const path = store.appendTurn(id, req.session!.userId, {
       userContent: body.userContent.slice(0, MAX_MESSAGE_LEN),
@@ -574,6 +577,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       regenerateFromUserMessageId: str(body.regenerateFromUserMessageId),
       runId: str(body.runId),
       ...(body.outcome === 'stopped' ? { outcome: 'stopped' as const } : {}),
+      endedAt,
     });
     if (!path) { res.status(404).json({ error: 'Not found' }); return; }
     res.json({ messages: serializeActivePath(id) });
@@ -585,7 +589,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   // no reply is added to the ledger the same way (runs.ts); the CLI and the
   // desktop app otherwise report a run only through /turns.
   app.post('/api/usage/runs', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
-    const body = req.body as { conversationId?: unknown; outcome?: unknown; costUsd?: unknown; why?: unknown; runId?: unknown };
+    const body = req.body as { conversationId?: unknown; outcome?: unknown; costUsd?: unknown; why?: unknown; runId?: unknown; endedAt?: unknown };
     const outcome = body?.outcome === 'answered' || body?.outcome === 'failed' || body?.outcome === 'stopped' ? body.outcome : null;
     const costUsd = typeof body?.costUsd === 'number' && Number.isFinite(body.costUsd) && body.costUsd >= 0 ? body.costUsd : null;
     const why = typeof body?.why === 'string' && body.why.length <= MAX_RUN_WHY_LEN ? body.why : null;
@@ -596,6 +600,9 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     if (!outcome || costUsd === null || why === null || runId === null) {
       res.status(400).json({ error: 'outcome (answered|failed|stopped), costUsd and why are required' }); return;
     }
+    // When the run finished: it can arrive long after, and counts on that day.
+    const endedAt = deviceEndedAt(body?.endedAt, Date.now());
+    if (endedAt === undefined) { res.status(400).json({ error: 'endedAt must be a time in milliseconds' }); return; }
     const userId = req.session!.userId;
     let conversationId: string | null = null;
     if (body.conversationId != null) {
@@ -604,7 +611,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       }
       conversationId = body.conversationId;
     }
-    const entry = spendEntryFromRun({ id: deviceRunSpendId(userId, runId), userId, conversationId, at: Date.now(), costUsd, why, outcome });
+    const entry = spendEntryFromRun({ id: deviceRunSpendId(userId, runId), userId, conversationId, at: endedAt, costUsd, why, outcome });
     // Nothing billed, nothing to keep.
     if (entry.costUsd === 0 && entry.tokens === 0 && entry.lines.length === 0) { res.json({ recorded: false }); return; }
     store.recordSpend(entry);

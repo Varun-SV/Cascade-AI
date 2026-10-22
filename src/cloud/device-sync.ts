@@ -13,7 +13,7 @@ import type { CloudTurnInput } from './client.js';
 export interface DeviceSyncClient {
   appendTurn(conversationId: string, turn: CloudTurnInput): Promise<unknown>;
   recordRunSpend(run: {
-    conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string;
+    conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string; endedAt?: number;
   }): Promise<unknown>;
 }
 
@@ -58,6 +58,7 @@ export async function syncTurn(
     await syncRunSpend(target, {
       conversationId: null, outcome: turn.outcome ?? 'answered', runId: turn.runId,
       costUsd: turn.assistant.costUsd ?? 0, why: turn.assistant.why ?? '{}',
+      ...(turn.endedAt !== undefined ? { endedAt: turn.endedAt } : {}),
     });
   }
 }
@@ -69,7 +70,7 @@ export async function syncTurn(
  */
 export async function syncRunSpend(
   target: DeviceSyncTarget,
-  run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId: string },
+  run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId: string; endedAt?: number },
 ): Promise<void> {
   try {
     await target.client.recordRunSpend(run);

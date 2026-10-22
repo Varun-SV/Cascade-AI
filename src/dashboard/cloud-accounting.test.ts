@@ -8,6 +8,9 @@
 //  sends once the run's calls have settled.
 
 import { describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { DashboardServer } from './server.js';
 import { CascadeRouter } from '../core/router/index.js';
 import type { CascadeConfig, ModelInfo } from '../types.js';
@@ -51,6 +54,8 @@ describe('the desktop\'s run accounting for the cloud', () => {
       { prompt: 'q', output: 'a', outcome: 'answered', durationMs: 900, copyTurn: true });
     expect(sent.map((s) => s.event)).toEqual(['run:accounting']);
     expect(sent[0]!.payload).toMatchObject({ outcome: 'answered', copyTurn: true, prompt: 'q' });
+    // When the run ended, so the cloud counts it on that day.
+    expect((sent[0]!.payload as { endedAt?: number }).endedAt).toBeLessThanOrEqual(Date.now());
     // Kept, under an id, until a window confirms it: a run can end with no window open.
     const id = (sent[0]!.payload as { id?: string }).id;
     expect(id).toMatch(/^[0-9a-f-]{36}$/);
@@ -68,5 +73,31 @@ describe('the desktop\'s run accounting for the cloud', () => {
     expect(why['models']).toEqual({ T3: 'openai:mini' });
     expect(why['decisions']).toEqual([{ at: 'now', kind: 'model', detail: 'T3 → mini' }]);
     expect(why['durationMs']).toBe(900);
+  });
+
+  it('keeps an unconfirmed report for the next backend, on whatever port it starts', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-acct-'));
+    try {
+      const file = path.join(dir, 'pending-accounting.jsonl');
+      const router = new CascadeRouter();
+      (router as unknown as Record<string, unknown>)['detectAvailableProviders'] = vi.fn().mockResolvedValue(new Set());
+      (router as unknown as Record<string, unknown>)['discoverOllamaModels'] = vi.fn().mockResolvedValue(undefined);
+      await router.init({ providers: [], models: {}, tools: { allowedTools: [] } } as unknown as CascadeConfig);
+      (router as unknown as { recordStats: (t: string, m: { id: string; provider: string }, u: Record<string, number>) => void })
+        .recordStats('T3', { id: 'mini', provider: 'openai' }, { inputTokens: 100, outputTokens: 0, totalTokens: 100, estimatedCostUsd: 0.0001 });
+      const cascade = { getRouter: () => router, getDecisionLog: () => [] };
+      const first = new DashboardServer({ ...config, dashboard: { ...config.dashboard, port: 51001 } } as CascadeConfig, store, '/tmp', { pendingAccountingFile: file });
+      let sentId = '';
+      await (first as unknown as {
+        emitRunAccounting: (emit: (e: string, p: unknown) => void, sessionId: string, cascade: unknown, run: Record<string, unknown>) => Promise<void>;
+      }).emitRunAccounting((_e, p) => { sentId = (p as { id: string }).id; }, 'sched', cascade,
+        { prompt: 'q', output: 'a', outcome: 'answered', durationMs: 1, copyTurn: false });
+      // No window confirmed it. The app restarts and its backend gets a new port.
+      const next = new DashboardServer({ ...config, dashboard: { ...config.dashboard, port: 51002 } } as CascadeConfig, store, '/tmp', { pendingAccountingFile: file });
+      const pending = (next as unknown as { pendingAccounting: { unconfirmed(): Array<{ id: string }> } }).pendingAccounting;
+      expect(pending.unconfirmed().map((r) => r.id)).toEqual([sentId]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

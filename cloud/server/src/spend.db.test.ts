@@ -204,6 +204,17 @@ describe('spend ledger', () => {
     expect(store.getActivePath(c.id).at(-1)!.cancelled).toBeUndefined();
   });
 
+  it('counts a synced turn at the time its run ended', () => {
+    const u = user('late-turn');
+    const c = store.createConversation(u.id, 'Chat');
+    const ended = Date.now() - 3 * DAY;
+    store.appendTurn(c.id, u.id, { userContent: 'q', runId: 'run-0006-ffff', endedAt: ended, assistant: { content: 'a', costUsd: 0.01, why: '{}' } });
+    const raw = new Database(dbPath, { readonly: true });
+    try {
+      expect(raw.prepare('SELECT at FROM spend_ledger WHERE user_id = ?').all(u.id)).toEqual([{ at: ended }]);
+    } finally { raw.close(); }
+  });
+
   it('counts a run once when its turn also lands in a second chat', () => {
     const u = user('rechat');
     const turn = {

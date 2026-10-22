@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { bucketKey, buildSpendReport, legacyCliRunCost, parsePeriod, parseTimeZone, parseTzOffset, periodRange, spendEntryFromRun, type SpendSource } from './spend.js';
+import { bucketKey, buildSpendReport, legacyCliRunCost, parsePeriod, parseTimeZone, parseTzOffset, periodRange, spendEntryFromRun, type SpendSource, deviceEndedAt } from './spend.js';
 
 const base = { id: 'r1', userId: 'u1', conversationId: 'c1', at: 1_000 };
 
@@ -258,5 +258,22 @@ describe('legacyCliRunCost', () => {
   it('never goes negative or counts nonsense', () => {
     expect(legacyCliRunCost(-1, null)).toBe(0);
     expect(legacyCliRunCost(Number.NaN, 0.01)).toBe(0);
+  });
+});
+
+describe('a device run\'s end time', () => {
+  const now = Date.UTC(2026, 9, 22, 12, 0);
+  it('counts a run when it ended, not when it arrived', () => {
+    const lastNight = Date.UTC(2026, 9, 21, 23, 50);
+    expect(deviceEndedAt(lastNight, now)).toBe(lastNight);
+    expect(deviceEndedAt(undefined, now)).toBe(now);
+  });
+  it('does not trust a clock far ahead or a time long past', () => {
+    expect(deviceEndedAt(now + 10 * 60_000, now)).toBe(now);
+    expect(deviceEndedAt(now - 31 * 86_400_000, now)).toBe(now);
+  });
+  it('refuses something that is not a time', () => {
+    expect(deviceEndedAt('yesterday', now)).toBeUndefined();
+    expect(deviceEndedAt(Number.NaN, now)).toBeUndefined();
   });
 });
