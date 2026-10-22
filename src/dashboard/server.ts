@@ -18,7 +18,7 @@ import { commitSettings, settingsSnapshot } from '../config/settings-payload.js'
 import { writeProjectConfig } from '../config/write-config.js';
 import type { RuntimeNode, RuntimeNodeLog, RuntimeSession } from '../types.js';
 import { GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE } from '../constants.js';
-import { statePath, STATE } from '../config/project-state.js';
+import { globalDir, statePath, STATE } from '../config/project-state.js';
 import { PendingAccounting } from './pending-accounting.js';
 import { DashboardSocket } from './websocket.js';
 import { authMiddleware, createToken } from './auth.js';
@@ -149,7 +149,7 @@ export class DashboardServer {
   private broadcastTimer: NodeJS.Timeout | null = null;
   private activeSessions = new Map<string, import('../core/cascade.js').Cascade>();
   /** Run accounting no window has confirmed yet (see PendingAccounting). */
-  private readonly pendingAccounting = new PendingAccounting<Record<string, unknown>>();
+  private readonly pendingAccounting: PendingAccounting<Record<string, unknown>>;
   /**
    * Supplied by the desktop shell so a run can read the page the user has
    * open in the built-in browser. Absent in the CLI, where there is no
@@ -209,6 +209,9 @@ export class DashboardServer {
     this.port = config.dashboard.port ?? DEFAULT_DASHBOARD_PORT;
     this.host = config.dashboard.host ?? '127.0.0.1';
     this.dashboardSecret = this.resolveDashboardSecret();
+    // On disk, so nothing waiting for a window is lost, even across restarts.
+    // One file per port: another dashboard on this machine keeps its own.
+    this.pendingAccounting = new PendingAccounting(path.join(globalDir(), `pending-accounting-${this.port}.jsonl`));
     this.app = express();
     this.httpServer = createServer(this.app);
     this.socket = new DashboardSocket(this.httpServer, {

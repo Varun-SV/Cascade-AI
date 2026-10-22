@@ -93,7 +93,7 @@ describe('CloudMirror', () => {
     expect(api.appendTurn.mock.calls.map((c) => c[0])).toEqual(['deleted-chat', 'c1']);
 
     const other = setup(false, links([['https://cloud|u1|s2', 'deleted-chat']]));
-    other.api.recordRunSpend.mockResolvedValueOnce({ ok: false }).mockResolvedValue({ ok: true });
+    other.api.recordRunSpend.mockResolvedValueOnce({ ok: false, error: 'Request failed (404).' }).mockResolvedValue({ ok: true });
     await other.mirror.accounted({ sessionId: 's2', outcome: 'failed', cloud: accounting });
     const calls = other.api.recordRunSpend.mock.calls.map((c) => c[0] as { conversationId: string | null; runId: string });
     expect(calls.map((c) => c.conversationId)).toEqual(['deleted-chat', null]);
@@ -157,6 +157,20 @@ describe('CloudMirror', () => {
     off = false;
     await queued;
     expect(api.appendTurn).not.toHaveBeenCalled();
+  });
+
+  it('keeps the chat link when spend alone fails without a 404, and resends to it once', async () => {
+    const chats = links([['https://cloud|u1|s1', 'live-chat']]);
+    const { api, mirror } = setup(false, chats);
+    api.recordRunSpend.mockResolvedValueOnce({ ok: false, error: 'socket hang up' }).mockResolvedValue({ ok: true });
+    await mirror.accounted({ sessionId: 's1', outcome: 'failed', cloud: accounting });
+    const calls = api.recordRunSpend.mock.calls.map((c) => c[0] as { conversationId: string | null; runId: string });
+    expect(calls.map((c) => c.conversationId)).toEqual(['live-chat', 'live-chat']);
+    expect(calls[1]!.runId).toBe(calls[0]!.runId);
+    // The session's next answered turn still goes to the same chat.
+    await mirror.accounted(answered('s1'));
+    expect(api.createConversation).not.toHaveBeenCalled();
+    expect(api.appendTurn).toHaveBeenCalledWith('live-chat', expect.anything());
   });
 
   it('sends nothing while signed out', async () => {

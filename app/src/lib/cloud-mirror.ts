@@ -28,7 +28,7 @@ export interface CloudMirrorApi {
   status(): Promise<{ signedIn: boolean; user: { id: string } | null; serverUrl: string }>;
   createConversation(title?: string): Promise<{ ok: boolean; conversation?: { id: string } }>;
   appendTurn(id: string, turn: { userContent: string; runId?: string; outcome?: 'answered' | 'stopped'; assistant: { content: string; costUsd?: number; why?: string } }): Promise<{ ok: boolean; error?: string }>;
-  recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string }): Promise<{ ok: boolean }>;
+  recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string }): Promise<{ ok: boolean; error?: string }>;
 }
 
 /**
@@ -63,6 +63,9 @@ export function storedChatLinks(key = 'cascade.cloudChats', max = 500): ChatLink
     delete: (k) => { if (memory.delete(k)) save(); },
   };
 }
+
+/** The cloud answers 404 for a chat that was deleted, or is not this account's. */
+const isNotFound = (error: string | undefined): boolean => /\(404\)/.test(error ?? '');
 
 const newRunId = (): string =>
   (globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`);
@@ -137,11 +140,18 @@ export class CloudMirror {
     // a second time.
     if (!api.recordRunSpend) return;
     const conversationId = this.chats.get(key) ?? null;
-    const recorded = await api.recordRunSpend({ conversationId, outcome, runId, ...run.cloud });
-    // A chat the account can no longer reach: count the run on its own.
-    if (!recorded.ok && conversationId) {
+    const cost = run.cloud;
+    const send = (chat: string | null) => api.recordRunSpend!({ conversationId: chat, outcome, runId, ...cost })
+      .catch(() => ({ ok: false, error: undefined }));
+    let recorded = await send(conversationId);
+    // No answer: once more, to the same chat (the run id keeps it to one).
+    if (!recorded.ok && !isNotFound(recorded.error)) recorded = await send(conversationId);
+    // Only a chat the cloud says is gone loses its link (and the run is
+    // counted on its own): a lost answer or a passing error leaves the
+    // session's later turns in the chat they belong to.
+    if (!recorded.ok && conversationId && isNotFound(recorded.error)) {
       this.chats.delete(key);
-      await api.recordRunSpend({ conversationId: null, outcome, runId, ...run.cloud });
+      await send(null);
     }
   }
 
@@ -157,7 +167,7 @@ export class CloudMirror {
     for (let attempt = 0; attempt < 2; attempt++) {
       const result = await api.appendTurn!(chat, turn).catch(() => ({ ok: false, error: undefined }));
       if (result.ok) return 'ok';
-      if (/\(404\)/.test(result.error ?? '')) return 'gone';
+      if (isNotFound(result.error)) return 'gone';
     }
     return 'failed';
   }
