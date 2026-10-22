@@ -590,7 +590,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     }
     const entry = spendEntryFromRun({ id: randomUUID(), userId, conversationId, at: Date.now(), costUsd, why, outcome });
     // Nothing billed, nothing to keep.
-    if (entry.costUsd === 0 && entry.tokens === 0) { res.json({ recorded: false }); return; }
+    if (entry.costUsd === 0 && entry.tokens === 0 && entry.lines.length === 0) { res.json({ recorded: false }); return; }
     store.recordSpend(entry);
     res.json({ recorded: true });
   });

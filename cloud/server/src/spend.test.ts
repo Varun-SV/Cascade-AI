@@ -90,6 +90,15 @@ describe('spendEntryFromRun', () => {
     expect(paid.savedUsd).toBe(0.3);
   });
 
+  it('keeps an unpriced call that reported no usage', () => {
+    const e = spendEntryFromRun({
+      ...base,
+      why: { costByModel: {}, tokensByModel: {}, unpricedByModel: { T3: { 'compat:mystery': 1 } } },
+    });
+    // Its cost is unknown, which the report says, rather than an exact $0.
+    expect(e.lines).toEqual([{ tier: 'T3', model: 'compat:mystery', costUsd: 0, tokens: 0, unpriced: true }]);
+  });
+
   it('drops tiers that spent nothing at all', () => {
     const e = spendEntryFromRun({ ...base, why: { costByTier: { T1: 0, T2: 0.001 }, tokensByTier: { T1: 0, T2: 10 } } });
     expect(e.lines.map((l) => l.tier)).toEqual(['T2']);

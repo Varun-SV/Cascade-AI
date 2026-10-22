@@ -210,6 +210,30 @@ describe('a device run\'s /why for the cloud', () => {
     expect(router.getRunStats().totalCostUsd).toBeCloseTo(0.0001, 8);
   });
 
+  it('keeps a run that is still settling, however many runs come after it', async () => {
+    const r = router as unknown as {
+      generateCall: (...a: unknown[]) => Promise<unknown>;
+      recordStats: (tier: string, model: { id: string; provider: string }, usage: Record<string, unknown>, featureTag?: string, generation?: number) => void;
+    };
+    router.beginRun();
+    const slow = router.getRunGeneration();
+    r.recordStats('T3', { id: 'mini', provider: 'openai' }, { inputTokens: 100, outputTokens: 0, totalTokens: 100, estimatedCostUsd: 0.0001 }, undefined, slow);
+    let settle!: () => void;
+    r.generateCall = () => new Promise((resolve) => { settle = () => {
+      r.recordStats('T3', { id: 'mini', provider: 'openai' }, { inputTokens: 400, outputTokens: 0, totalTokens: 400, estimatedCostUsd: 0.0004 }, undefined, slow);
+      resolve({});
+    }; });
+    const pending = router.generate('T3', { messages: [] } as never);
+    for (let i = 0; i < 12; i++) {
+      router.beginRun();
+      call('T3', 'openai', 'mini', 10, 0, 0.00001);
+    }
+    settle();
+    await pending;
+    expect(await router.whenRunSettled(slow, 100)).toBe(true);
+    expect(router.getRunStats(slow).totalTokens).toBe(500);
+  });
+
   it('keeps only recent runs, and reports an unknown run as empty', () => {
     for (let i = 0; i < 12; i++) {
       router.beginRun();

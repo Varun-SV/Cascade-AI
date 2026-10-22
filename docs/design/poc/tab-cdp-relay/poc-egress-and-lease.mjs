@@ -227,6 +227,8 @@ const ALWAYS_DENY_PREFIXES = ['Fetch.', 'Storage.', 'SystemInfo.', 'Browser.'];
 const ALWAYS_DENY = new Set([
   'Network.getAllCookies', 'Network.getCookies', 'Network.setCookie', 'Network.setCookies', 'Network.deleteCookies',
   'Network.clearBrowserCookies', 'Network.setRequestInterception', 'Page.setDownloadBehavior',
+  'Network.getRequestPostData', 'Network.getResponseBody', 'Network.getResponseBodyForInterception',
+  'Network.takeResponseBodyForInterceptionAsStream', 'Network.streamResourceContent', 'Network.searchInResponseBody',
   'Target.createTarget', 'Target.closeTarget', 'Target.attachToTarget', 'Target.createBrowserContext',
 ]);
 const policyRefusal = (method, sessionId, knownSessions) => {
@@ -266,11 +268,24 @@ function createCapabilityStore() {
 // leave the device. ExtraInfo events are dropped, the flags that promise them
 // are cleared (so Playwright does not wait for them), and credential headers
 // are removed from what remains.
+// Payload-bearing events go too: request bodies, WebSocket frames and
+// EventSource messages carry the application's own data.
 const DROPPED_EVENTS = new Set([
   'Network.requestWillBeSentExtraInfo', 'Network.responseReceivedExtraInfo',
   'Network.responseReceivedEarlyHints', 'Network.webSocketHandshakeResponseReceived',
-  'Network.webSocketWillSendHandshakeRequest',
+  'Network.webSocketWillSendHandshakeRequest', 'Network.webSocketFrameSent',
+  'Network.webSocketFrameReceived', 'Network.webSocketFrameError', 'Network.eventSourceMessageReceived',
+  'Network.requestIntercepted', 'Network.trustTokenOperationDone',
+  'Network.reportingApiReportAdded', 'Network.reportingApiReportUpdated',
+  'Network.subresourceWebBundleInnerResponseParsed',
 ]);
+/** A request as the agent may see it: no credential headers, no body. */
+function redactRequest(r) {
+  if (!r || typeof r !== 'object') return r;
+  const { postData, postDataEntries, ...rest } = r;
+  void postData; void postDataEntries;
+  return { ...rest, headers: withoutCredentials(r.headers) };
+}
 const CREDENTIAL_HEADERS = /^(cookie|set-cookie2?|authorization|proxy-authorization)$/i;
 const withoutCredentials = (headers) => (headers && typeof headers === 'object'
   ? Object.fromEntries(Object.entries(headers).filter(([k]) => !CREDENTIAL_HEADERS.test(k)))
@@ -287,7 +302,7 @@ function redactEvent(method, params) {
   if (method === 'Network.requestWillBeSent') {
     return {
       ...params,
-      request: { ...params.request, headers: withoutCredentials(params.request?.headers) },
+      request: redactRequest(params.request),
       ...(params.redirectResponse ? { redirectResponse: redactResponse(params.redirectResponse) } : {}),
       redirectHasExtraInfo: false,
     };
@@ -365,7 +380,17 @@ function startRelay(tabWsUrl, caps) {
     client.on('message', (raw) => {
       // Fencing: a socket from an older lease generation is never served.
       if (state.lease?.generation !== generation) return;
-      const { id, method, params = {}, sessionId } = JSON.parse(raw);
+      // A frame that is not a well-formed command ends the lease, fail closed,
+      // rather than throwing out of the relay.
+      let frame;
+      try { frame = JSON.parse(raw); } catch { frame = null; }
+      if (!frame || typeof frame !== 'object' || typeof frame.method !== 'string' || !Number.isInteger(frame.id)
+        || (frame.sessionId !== undefined && typeof frame.sessionId !== 'string')
+        || (frame.params !== undefined && (typeof frame.params !== 'object' || frame.params === null))) {
+        state.refusals.push('malformed frame');
+        return end();
+      }
+      const { id, method, params = {}, sessionId } = frame;
       if (sessionId) {
         // The command contract also checks the one argument that names a
         // destination: an agent navigation is http(s) or about:blank only.
@@ -422,6 +447,7 @@ const offlist = await countingServer('offlist.test', {
   '/lib.js': (req, res) => { res.setHeader('content-type', 'text/javascript'); res.end('window.__lib = 1;'); },
 });
 const SESSION_SECRET = `S3SS10N-${crypto.randomBytes(8).toString('hex')}`;
+const BODY_SECRET = `B0DY-${crypto.randomBytes(8).toString('hex')}`;
 const priv = await countingServer('127.0.0.1 (private)', { '/admin': (req, res) => res.end('router admin') });
 const allowed = await countingServer('allowed.test', {
   '/': html(`<title>allowed</title>
@@ -430,6 +456,10 @@ const allowed = await countingServer('allowed.test', {
     <form id="f" method="post" action="http://offlist.test/collect"><input name="q" value="secret"><button>go</button></form>
     <script src="http://offlist.test/lib.js"></script>`),
   '/two': html('<title>allowed two</title>two'),
+  // A form that sends a body the agent never typed (a stored token, say).
+  '/form': html(`<title>form</title><form id="pf" method="post" action="/save">
+    <input type="hidden" name="token" value="${BODY_SECRET}"><button id="go">save</button></form>`),
+  '/save': (req, res) => { req.resume(); req.on('end', () => { res.setHeader('content-type', 'text/html'); res.end('<!doctype html><title>saved</title>ok'); }); },
   // Signs in: an HttpOnly session cookie, which page script cannot read.
   '/login': (req, res) => {
     res.setHeader('set-cookie', `sid=${SESSION_SECRET}; HttpOnly; Path=/`);
@@ -551,7 +581,21 @@ try {
     relay.state.watch = null;
     check('control: Chromium did emit the HttpOnly cookie in Network events', seenFromTab > 0, `${seenFromTab} frame(s)`);
     check('P1: no cookie or credential header reaches the agent through Network events', sentToAgent === 0, `${sentToAgent} frame(s)`);
-    check('navigation still works with ExtraInfo events dropped', (await page.title()) === 'allowed two');
+  }
+  {
+    // The same for a request body: a form posts a value the agent never saw.
+    relay.state.watch = BODY_SECRET; relay.state.seenFromTab = 0; relay.state.sentToAgent = 0;
+    await page.goto(`${ALLOWED}/form`);
+    await Promise.all([page.waitForURL(`${ALLOWED}/save`, { waitUntil: 'commit' }), page.click('#go')]);
+    await sleep(300);
+    const { seenFromTab, sentToAgent } = relay.state;
+    relay.state.watch = null;
+    check('control: Chromium did emit the posted body in Network events', seenFromTab > 0, `${seenFromTab} frame(s)`);
+    check('P1: no request body reaches the agent through Network events', sentToAgent === 0, `${sentToAgent} frame(s)`);
+    const ws = redactEvent('Network.webSocketFrameReceived', { response: { payloadData: 'x' } });
+    const es = redactEvent('Network.eventSourceMessageReceived', { data: 'x' });
+    check('WebSocket frames and EventSource messages are dropped', ws === null && es === null);
+    check('navigation still works with ExtraInfo events dropped and bodies stripped', (await page.title()) === 'saved');
   }
 
   // ── Downloads (CLI path: the policy's own BROWSER-level session)
@@ -630,6 +674,21 @@ try {
     const fd = await call('Fetch.disable', {}, TAB_SESSION);
     check('the agent cannot turn the policy off (Fetch.disable denied)', String(fd).includes('Denied'), String(fd));
     raw.close();
+    await sleep(200);
+  }
+
+  {
+    // A buggy or hostile server sends a frame that is not JSON: the lease
+    // ends and its capability burns, and the relay keeps serving.
+    const cap = caps.approveRun('run-5');
+    const raw = new WebSocket(relay.endpoint(cap));
+    await new Promise((r) => raw.on('open', r));
+    const closed = new Promise((r) => raw.on('close', r));
+    raw.send('{not json');
+    await Promise.race([closed, sleep(2000)]);
+    check('a malformed frame ends the lease without stopping the relay', relay.state.lease === null && relay.state.refusals.at(-1) === 'malformed frame', relay.state.refusals.at(-1));
+    check('its capability cannot reconnect', (await tryConnect(relay.endpoint(cap))).startsWith('refused'));
+    check('the relay still serves a fresh capability', (await tryConnect(relay.endpoint(caps.approveRun('run-6')))) === 'open');
     await sleep(200);
   }
 

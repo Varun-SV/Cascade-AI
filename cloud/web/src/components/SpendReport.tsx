@@ -144,8 +144,6 @@ function SeriesTable({ report }: { report: Report }) {
 function Body({ report, onOpenChat }: { report: Report; onOpenChat: (id: string) => void }) {
   const [table, setTable] = useState(false);
   const { totals } = report;
-  const allT1 = totals.spentUsd + totals.savedUsd;
-  const savedPct = allT1 > 0 ? Math.round((totals.savedUsd / allT1) * 100) : 0;
   // One slot is not a chart; its numbers are the whole story.
   const chartable = report.series.length > 1;
   const unpriced = report.tiers.some((t) => t.models.some((m) => m.unpricedRuns > 0));
@@ -161,7 +159,10 @@ function Body({ report, onOpenChat }: { report: Report; onOpenChat: (id: string)
         <Tile
           label="Saved"
           value={fmtUsd(totals.savedUsd)}
-          note={allT1 > 0 ? `${savedPct}% less than all on T1` : undefined}
+          // A sum of each run's saving: a run that cost more than T1 would
+          // have counts as saving nothing, not as a loss, so no percentage of
+          // an all-T1 total is claimed for the period.
+          note={totals.savedUsd > 0 ? 'on runs that cost less than T1' : undefined}
         />
         <Tile label="Runs" value={totals.runs.toLocaleString('en-US')} note={`${fmtTokens(totals.tokens)} tokens`} />
       </div>

@@ -5,11 +5,14 @@ const accounting = { costUsd: 0.01, why: '{"totalCostUsd":0.01}' };
 
 function links(initial: Array<[string, string]> = []): ChatLinks {
   const m = new Map(initial);
-  return { get: (s) => m.get(s), set: (s, c) => { m.set(s, c); } };
+  return { get: (s) => m.get(s), set: (s, c) => { m.set(s, c); }, delete: (s) => { m.delete(s); } };
 }
+
+const as = (id: string) => ({ signedIn: true, user: { id }, serverUrl: 'https://cloud' });
 
 function setup(optedOut = false, chats = links()) {
   const api = {
+    status: vi.fn().mockResolvedValue(as('u1')),
     createConversation: vi.fn().mockResolvedValue({ ok: true, conversation: { id: 'c1' } }),
     appendTurn: vi.fn().mockResolvedValue({ ok: true }),
     recordRunSpend: vi.fn().mockResolvedValue({ ok: true }),
@@ -53,10 +56,39 @@ describe('CloudMirror', () => {
   });
 
   it('continues the same cloud chat after a restart', async () => {
-    const { api, mirror } = setup(false, links([['s1', 'kept-chat']]));
+    const { api, mirror } = setup(false, links([['https://cloud|u1|s1', 'kept-chat']]));
     await mirror.accounted(answered('s1'));
     expect(api.createConversation).not.toHaveBeenCalled();
     expect(api.appendTurn).toHaveBeenCalledWith('kept-chat', expect.anything());
+  });
+
+  it('starts a new chat for a session when another account signs in', async () => {
+    const { api, mirror } = setup(false, links([['https://cloud|u1|s1', 'chat-of-u1']]));
+    api.status.mockResolvedValue(as('u2'));
+    api.createConversation.mockResolvedValue({ ok: true, conversation: { id: 'chat-of-u2' } });
+    await mirror.accounted(answered('s1'));
+    expect(api.appendTurn).toHaveBeenCalledTimes(1);
+    expect(api.appendTurn).toHaveBeenCalledWith('chat-of-u2', expect.anything());
+  });
+
+  it('replaces a chat that can no longer be reached, and still counts a run with no turn', async () => {
+    const { api, mirror } = setup(false, links([['https://cloud|u1|s1', 'deleted-chat']]));
+    api.appendTurn.mockResolvedValueOnce({ ok: false }).mockResolvedValue({ ok: true });
+    await mirror.accounted(answered('s1'));
+    expect(api.appendTurn.mock.calls.map((c) => c[0])).toEqual(['deleted-chat', 'c1']);
+
+    const other = setup(false, links([['https://cloud|u1|s2', 'deleted-chat']]));
+    other.api.recordRunSpend.mockResolvedValueOnce({ ok: false }).mockResolvedValue({ ok: true });
+    await other.mirror.accounted({ sessionId: 's2', outcome: 'failed', cloud: accounting });
+    expect(other.api.recordRunSpend.mock.calls.map((c) => (c[0] as { conversationId: string | null }).conversationId)).toEqual(['deleted-chat', null]);
+  });
+
+  it('sends nothing while signed out', async () => {
+    const { api, mirror } = setup();
+    api.status.mockResolvedValue({ signedIn: false, user: null, serverUrl: 'https://cloud' });
+    await mirror.accounted(answered('s1'));
+    expect(api.appendTurn).not.toHaveBeenCalled();
+    expect(api.recordRunSpend).not.toHaveBeenCalled();
   });
 
   it('sends runs one at a time, in the order they ended', async () => {

@@ -2054,10 +2054,12 @@ export class CascadeRouter extends EventEmitter {
     if (!u) {
       u = emptyRunUsage();
       this.runUsage.set(generation, u);
-      while (this.runUsage.size > RUN_USAGE_KEPT) {
-        const oldest = Math.min(...this.runUsage.keys());
-        this.runUsage.delete(oldest);
-      }
+      // Drop the oldest runs past the kept few, but never one that is still
+      // settling (a call in flight, or someone waiting to report it) or the
+      // current run: its report would come out empty or partial.
+      const busy = (g: number) => g === this.runGeneration || !!this.inFlightByRun.get(g) || this.settleWaiters.has(g);
+      const idle = [...this.runUsage.keys()].filter((g) => !busy(g)).sort((a, b) => a - b);
+      while (this.runUsage.size > RUN_USAGE_KEPT && idle.length > 0) this.runUsage.delete(idle.shift()!);
     }
     return u;
   }

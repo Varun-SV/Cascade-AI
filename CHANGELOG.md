@@ -30,7 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   once, when the ledger is first made. Days end at your local midnight under
   your time zone's own rules, so a day with a daylight-saving change has 23
   or 25 hours and a run near midnight lands on the right day. A free local
-  model shows $0.00; only a model with no published price shows "no price".
+  model shows $0.00; only a model with no published price shows "no price",
+  even when it reported no usage. The saved figure is the sum of each run's
+  saving, so no percentage of an all-T1 total is claimed for a period.
   Runs on the CLI or the desktop app count too: each sends its own cost and
   /why with the chat it copies to your account (`cloudRunReport`), so the
   report splits them by tier and model like a hosted run, and the web shows

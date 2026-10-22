@@ -48,7 +48,8 @@ describe('SpendReport', () => {
     await screen.findByText('Spent and saved by day');
     expect(screen.getByText('$0.64')).toBeInTheDocument();
     expect(screen.getByText('$1.92')).toBeInTheDocument();
-    expect(screen.getByText('75% less than all on T1')).toBeInTheDocument();
+    expect(screen.getByText('on runs that cost less than T1')).toBeInTheDocument();
+    expect(screen.queryByText(/% less than all on T1/)).toBeNull();
     expect(screen.getByText('12.3K tokens')).toBeInTheDocument();
     expect(screen.getAllByTestId('spend-slot')).toHaveLength(2);
   });

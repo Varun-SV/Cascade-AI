@@ -394,7 +394,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const recordRunSpendInCloud = useCallback(async (outcome: 'answered' | 'failed' | 'stopped', report: CloudRunReport) => {
     const mirror = cloudMirrorRef.current;
     if (!mirror || process.env['CASCADE_NO_CLOUD_SYNC']) return;
-    if (report.totalCostUsd <= 0 && report.totalTokens <= 0) return;
+    // A call with no price and no usage reported still happened, and may have cost money.
+    if (report.totalCostUsd <= 0 && report.totalTokens <= 0 && Object.keys(report.unpricedByModel).length === 0) return;
     try {
       await mirror.client.recordRunSpend({ conversationId: mirror.convId, outcome, ...cloudTurnAccounting(report) });
     } catch { /* best-effort — the local run's error is what the user sees */ }
@@ -1050,14 +1051,20 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
      * passed): a call that lands after the run returned still belongs to it.
      * Null for a run that never began, which has no stats of its own.
      */
-    const settledRunReport = async (durationMs: number) => {
+    /**
+     * Fix which run this is, and its decisions, now, as the run ends: the
+     * report itself may only be built after earlier sends in the queue, by
+     * which time another run can have begun.
+     */
+    const runReportLater = (durationMs: number) => {
       const generation = runGeneration();
-      if (generation === null) return null;
+      if (generation === null) return async () => null;
       const router = cascade.getRouter();
-      // Read now, while the decision log is this run's.
       const decisions = cascade.getDecisionLog();
-      await router.whenRunSettled(generation);
-      return cloudRunReport({ stats: router.getRunStats(generation), t1Model: router.getTierModel('T1'), decisions, durationMs });
+      return async () => {
+        await router.whenRunSettled(generation);
+        return cloudRunReport({ stats: router.getRunStats(generation), t1Model: router.getTierModel('T1'), decisions, durationMs });
+      };
     };
     try {
       runAbortRef.current = new AbortController();
@@ -1089,8 +1096,9 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       // with no empty reply.
       const output = result.output;
       const stopped = runAbortRef.current?.signal.aborted === true;
+      const reportFor = runReportLater(result.durationMs);
       queueCloud(async () => {
-        const report = await settledRunReport(result.durationMs);
+        const report = await reportFor();
         if (!report) return;
         if (output) return mirrorTurnToCloud(trimmed, { content: output, ...cloudTurnAccounting(report) });
         return recordRunSpendInCloud(stopped ? 'stopped' : 'answered', report);
@@ -1116,8 +1124,9 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       // Its calls were billed all the same. A run that never began (setup
       // failed before it) has no stats of its own, and nothing is sent.
       const outcome = runAbortRef.current?.signal.aborted ? 'stopped' : 'failed';
+      const reportFor = runReportLater(0);
       queueCloud(async () => {
-        const report = await settledRunReport(0);
+        const report = await reportFor();
         if (report) await recordRunSpendInCloud(outcome, report);
       });
     }

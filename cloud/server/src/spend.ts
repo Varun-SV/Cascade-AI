@@ -67,12 +67,13 @@ export function spendEntryFromRun(input: {
   // Present (even empty) on reports that keep priced and unpriced apart.
   const unpricedKnown = why['unpricedByModel'] !== undefined;
   const unpricedByModel = record(why['unpricedByModel']);
-  if (Object.keys(byModel).length > 0 || Object.keys(tokensByModel).length > 0) {
-    for (const tier of new Set([...Object.keys(byModel), ...Object.keys(tokensByModel)])) {
+  if (Object.keys(byModel).length > 0 || Object.keys(tokensByModel).length > 0 || Object.keys(unpricedByModel).length > 0) {
+    // An unpriced call that reported no usage appears only in unpricedByModel.
+    for (const tier of new Set([...Object.keys(byModel), ...Object.keys(tokensByModel), ...Object.keys(unpricedByModel)])) {
       const costs = record(byModel[tier]);
       const tokens = record(tokensByModel[tier]);
       const unpriced = record(unpricedByModel[tier]);
-      for (const model of new Set([...Object.keys(costs), ...Object.keys(tokens)])) {
+      for (const model of new Set([...Object.keys(costs), ...Object.keys(tokens), ...Object.keys(unpriced)])) {
         lines.push({
           tier, model, costUsd: num(costs[model]), tokens: Math.round(num(tokens[model])),
           unpriced: unpricedKnown ? num(unpriced[model]) > 0 : null,
@@ -88,7 +89,9 @@ export function spendEntryFromRun(input: {
       lines.push({ tier, model, costUsd: num(costByTier[tier]), tokens: Math.round(num(tokensByTier[tier])), unpriced: null });
     }
   }
-  const kept = lines.filter((l) => l.costUsd > 0 || l.tokens > 0);
+  // An unpriced call is kept even with no usage reported: it happened, and its
+  // cost is unknown, which the report says rather than showing an exact $0.
+  const kept = lines.filter((l) => l.costUsd > 0 || l.tokens > 0 || l.unpriced === true);
 
   const costUsd = input.costUsd != null ? num(input.costUsd) : num(why['totalCostUsd']);
   const tokens = num(why['totalTokens']) || kept.reduce((s, l) => s + l.tokens, 0);

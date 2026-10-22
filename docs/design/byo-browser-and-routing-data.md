@@ -279,11 +279,17 @@ depth.
     device drops ExtraInfo, early-hints and WebSocket handshake events,
     clears the flags that promise them, and removes `Cookie`, `Set-Cookie`,
     `Authorization` and `Proxy-Authorization` headers (and raw header text)
-    from the request and response events it forwards.
+    from the request and response events it forwards. Payloads go too:
+    request bodies (`postData`, `postDataEntries`) are removed, WebSocket
+    frame and EventSource message events are dropped, and the body-reading
+    `Network.*` commands are always denied.
+  - **Malformed frames fail closed.** A frame from the server that is not a
+    well-formed command ends the lease and burns its capability; the relay
+    keeps serving others.
   - Changing the list is a reviewed policy change with a version number.
   - Method names alone don't express side effects. `Runtime.evaluate`
     stays privileged page script by design (§4.3, honest limit).
-  - `poc-egress-and-lease.mjs` checks all of this (34/34):
+  - `poc-egress-and-lease.mjs` checks all of this (40/40):
     - an allowlisted method works on a nested cross-site iframe session
     - `Emulation.setGeolocationOverride` through that nested session is
       refused
@@ -294,6 +300,10 @@ depth.
     - after signing in to a consented page that sets an HttpOnly cookie,
       Chromium emitted the cookie in 2 Network event frames (the control)
       and 0 reached the agent; with the filter off, the same test fails
+    - the same for a form's request body (1 frame from the tab, 0 to the
+      agent; fails with body stripping off)
+    - a non-JSON frame ends the lease, its capability cannot reconnect, and
+      a fresh one still connects
 - **Always denied:**
   - cookie and storage reads and writes (`Network.getCookies`,
     `getAllCookies`, `setCookie(s)`, `deleteCookies`,

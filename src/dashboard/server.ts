@@ -754,7 +754,8 @@ export class DashboardServer {
       const decisions = cascade.getDecisionLog();
       await router.whenRunSettled();
       const report = cloudRunReport({ stats: router.getStats(), t1Model: router.getTierModel('T1'), decisions, durationMs: run.durationMs });
-      if (report.totalCostUsd <= 0 && report.totalTokens <= 0 && !run.output) return;
+      // A call with no price and no usage reported still happened, and may have cost money.
+      if (report.totalCostUsd <= 0 && report.totalTokens <= 0 && Object.keys(report.unpricedByModel).length === 0 && !run.output) return;
       emit('run:accounting', { sessionId, ...run, cloud: cloudTurnAccounting(report) });
     } catch (err) {
       console.warn('[dashboard] failed to report run accounting:', err);
