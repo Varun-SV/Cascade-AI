@@ -567,17 +567,18 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     res.json({ messages: serializeActivePath(id) });
   });
 
-  // A run on the user's own device that ended without a reply: it failed, or
-  // was stopped, after its calls were billed. A hosted run in that state is
-  // added to the ledger with no reply (runs.ts); this is the same for the CLI
-  // and the desktop app, which otherwise only report a run through /turns.
+  // A run on the user's own device with no turn to sync: it failed, was
+  // stopped, or answered with no text or from somewhere that is not copied as
+  // a chat (a scheduled task), after its calls were billed. A hosted run with
+  // no reply is added to the ledger the same way (runs.ts); the CLI and the
+  // desktop app otherwise report a run only through /turns.
   app.post('/api/usage/runs', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
     const body = req.body as { conversationId?: unknown; outcome?: unknown; costUsd?: unknown; why?: unknown };
-    const outcome = body?.outcome === 'failed' || body?.outcome === 'stopped' ? body.outcome : null;
+    const outcome = body?.outcome === 'answered' || body?.outcome === 'failed' || body?.outcome === 'stopped' ? body.outcome : null;
     const costUsd = typeof body?.costUsd === 'number' && Number.isFinite(body.costUsd) && body.costUsd >= 0 ? body.costUsd : null;
     const why = typeof body?.why === 'string' && body.why.length <= MAX_RUN_WHY_LEN ? body.why : null;
     if (!outcome || costUsd === null || why === null) {
-      res.status(400).json({ error: 'outcome (failed|stopped), costUsd and why are required' }); return;
+      res.status(400).json({ error: 'outcome (answered|failed|stopped), costUsd and why are required' }); return;
     }
     const userId = req.session!.userId;
     let conversationId: string | null = null;

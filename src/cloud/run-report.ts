@@ -41,22 +41,22 @@ export interface CloudRunReport {
 type Flat = Record<string, number>;
 type Nested = Record<string, Record<string, number>>;
 
+// Keys are model ids, which can be any string a user configures — including
+// `__proto__`, which a plain assignment would treat as the prototype rather
+// than a key. Built with Object.fromEntries and read with hasOwn instead.
+const own = (m: Flat | undefined, key: string): number =>
+  (m && Object.prototype.hasOwnProperty.call(m, key) ? m[key] : 0) ?? 0;
+
 function minus(after: Flat, before: Flat = {}): Flat {
-  const out: Flat = {};
-  for (const [key, value] of Object.entries(after)) {
-    const left = value - (before[key] ?? 0);
-    if (left > 0) out[key] = left;
-  }
-  return out;
+  return Object.fromEntries(Object.entries(after)
+    .map(([key, value]) => [key, value - own(before, key)] as const)
+    .filter(([, left]) => left > 0));
 }
 
 function minusNested(after: Nested, before: Nested = {}): Nested {
-  const out: Nested = {};
-  for (const [key, inner] of Object.entries(after)) {
-    const left = minus(inner, before[key]);
-    if (Object.keys(left).length > 0) out[key] = left;
-  }
-  return out;
+  return Object.fromEntries(Object.entries(after)
+    .map(([key, inner]) => [key, minus(inner, Object.prototype.hasOwnProperty.call(before, key) ? before[key] : undefined)] as const)
+    .filter(([, left]) => Object.keys(left).length > 0));
 }
 
 function top(m: Flat): string | undefined {

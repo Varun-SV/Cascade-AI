@@ -1,79 +1,92 @@
-// Copies the desktop's runs to the signed-in Cascade account: each finished
-// turn into the shared cloud chat (so it also shows on web and CLI), and each
+// Copies the desktop's runs to the signed-in Cascade account: each answered
+// turn into the shared cloud chat (so it also shows on web and CLI), and every
 // run's cost into the account's spend report.
 //
-// Driven by App's socket handlers, which never unmount, rather than by the
-// chat panel: a run can finish while the user is looking at another session
-// or another view, and its spend counts all the same. Everything here is
-// best-effort: it never blocks or breaks a run, and does nothing when signed
-// out or opted out (`cascade.noCloudSync`).
+// Driven by the backend's `run:accounting` event, which App listens for and
+// which comes once per run after its calls have settled, whichever session or
+// view is on screen. Everything here is best-effort: it never blocks or breaks
+// a run, and does nothing when signed out or opted out (`cascade.noCloudSync`).
 
 /** What a run reports for the cloud: its cost and its /why, as JSON. */
 export interface RunAccounting { costUsd: number; why: string }
 
+/** One finished run, as the backend sends it in `run:accounting`. */
+export interface AccountedRun {
+  sessionId?: string;
+  prompt?: string;
+  output?: string;
+  outcome?: 'answered' | 'failed' | 'stopped';
+  /** False for runs not started from the desktop's own views (scheduled, API). */
+  copyTurn?: boolean;
+  cloud?: RunAccounting;
+}
+
 export interface CloudMirrorApi {
   createConversation(title?: string): Promise<{ ok: boolean; conversation?: { id: string } }>;
   appendTurn(id: string, turn: { userContent: string; assistant: { content: string; costUsd?: number; why?: string } }): Promise<{ ok: boolean }>;
-  recordUnansweredRun(run: { conversationId: string | null; outcome: 'failed' | 'stopped'; costUsd: number; why: string }): Promise<{ ok: boolean }>;
+  recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string }): Promise<{ ok: boolean }>;
+}
+
+/** Where the local-session → cloud-chat links are kept between launches. */
+export interface ChatLinks {
+  get(sessionId: string): string | undefined;
+  set(sessionId: string, chatId: string): void;
+}
+
+/** Links kept in localStorage, newest last, at most `max` of them. */
+export function storedChatLinks(key = 'cascade.cloudChats', max = 500): ChatLinks {
+  const read = (): Array<[string, string]> => {
+    try {
+      const raw = JSON.parse(localStorage.getItem(key) ?? '[]') as unknown;
+      return Array.isArray(raw) ? raw.filter((e): e is [string, string] => Array.isArray(e) && typeof e[0] === 'string' && typeof e[1] === 'string') : [];
+    } catch { return []; }
+  };
+  const memory = new Map<string, string>(read());
+  return {
+    get: (sid) => memory.get(sid),
+    set: (sid, chat) => {
+      memory.delete(sid);
+      memory.set(sid, chat);
+      while (memory.size > max) memory.delete(memory.keys().next().value!);
+      try { localStorage.setItem(key, JSON.stringify([...memory])); } catch { /* kept for this launch only */ }
+    },
+  };
 }
 
 export class CloudMirror {
-  /** The prompt each session's current run was started with. */
-  private prompts = new Map<string, string>();
-  /** The cloud chat each local session is copied to. */
-  private chats = new Map<string, string>();
+  /** Runs are sent one at a time, in the order they ended. */
+  private queue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly api: () => Partial<CloudMirrorApi> | undefined,
     private readonly optedOut: () => boolean,
+    private readonly chats: ChatLinks,
   ) {}
 
-  /** Called when a run starts, so its turn can be copied when it ends. */
-  rememberPrompt(sessionId: string, prompt: string): void {
-    this.prompts.set(sessionId, prompt);
+  /** A run's `run:accounting`. Resolves once it has been sent, or skipped. */
+  accounted(run: AccountedRun | undefined): Promise<void> {
+    this.queue = this.queue.then(() => this.send(run)).catch(() => { /* best-effort mirror */ });
+    return this.queue;
   }
 
-  /**
-   * A run ended with `session:complete`. The backend sends the run's prompt
-   * with it; one remembered at launch is the fallback for an older backend.
-   */
-  async completed(data: { sessionId?: string; result?: { output?: string }; cloud?: RunAccounting; prompt?: string } | undefined): Promise<void> {
-    const sid = data?.sessionId;
-    if (!sid || this.optedOut()) return;
-    const prompt = data?.prompt || this.prompts.get(sid);
-    const output = data?.result?.output;
+  private async send(run: AccountedRun | undefined): Promise<void> {
+    const sid = run?.sessionId;
+    if (!sid || !run?.cloud || this.optedOut()) return;
     const api = this.api();
-    try {
-      if (output) {
-        // An answered run with no known prompt cannot be copied as a turn,
-        // and is not a stopped run either: it is left alone.
-        if (!prompt || !api?.appendTurn || !api.createConversation) return;
-        const chat = await this.chatFor(sid, prompt, api);
-        if (!chat) return;
-        // With its cost and /why, so the run counts in the spend report.
-        await api.appendTurn(chat, { userContent: prompt, assistant: { content: output, ...data?.cloud } });
-      } else if (data?.cloud) {
-        // Stopped before any answer: the run resolves with no text, but the
-        // calls it made were billed.
-        await this.unanswered(sid, 'stopped', data.cloud);
+    const outcome = run.outcome ?? 'answered';
+    // An answered turn from the desktop's own views is copied, with its cost.
+    if (outcome === 'answered' && run.output && run.prompt && run.copyTurn !== false
+      && api?.appendTurn && api.createConversation) {
+      const chat = await this.chatFor(sid, run.prompt, api);
+      if (chat) {
+        await api.appendTurn(chat, { userContent: run.prompt, assistant: { content: run.output, ...run.cloud } });
+        return;
       }
-    } catch { /* best-effort mirror — offline, revoked token, etc. */ }
-  }
-
-  /** A run ended with `session:error`: no reply, but its calls were billed. */
-  async failed(data: { sessionId?: string; cloud?: RunAccounting; stopped?: boolean } | undefined): Promise<void> {
-    const sid = data?.sessionId;
-    if (!sid || !data?.cloud || this.optedOut()) return;
-    try {
-      await this.unanswered(sid, data.stopped ? 'stopped' : 'failed', data.cloud);
-    } catch { /* best-effort — the run's error is what the user sees */ }
-  }
-
-  /** Joins the chat already copied, if any; never creates an empty one. */
-  private async unanswered(sid: string, outcome: 'failed' | 'stopped', accounting: RunAccounting): Promise<void> {
-    const api = this.api();
-    if (!api?.recordUnansweredRun) return;
-    await api.recordUnansweredRun({ conversationId: this.chats.get(sid) ?? null, outcome, ...accounting });
+    }
+    // Anything else still spent money: its cost alone, under the chat already
+    // copied for this session if there is one. It never creates an empty chat.
+    if (!api?.recordRunSpend) return;
+    await api.recordRunSpend({ conversationId: this.chats.get(sid) ?? null, outcome, ...run.cloud });
   }
 
   private async chatFor(sid: string, prompt: string, api: Partial<CloudMirrorApi>): Promise<string | null> {
@@ -90,4 +103,5 @@ export class CloudMirror {
 export const cloudMirror = new CloudMirror(
   () => (typeof window === 'undefined' ? undefined : (window as unknown as { cascade?: { cloud?: Partial<CloudMirrorApi> } }).cascade?.cloud),
   () => { try { return localStorage.getItem('cascade.noCloudSync') === '1'; } catch { return false; } },
+  storedChatLinks(),
 );

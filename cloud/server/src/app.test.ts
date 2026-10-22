@@ -501,7 +501,7 @@ describe('cloud/server app', () => {
 
     // Nothing billed: nothing kept. Bad input and someone else's chat: refused.
     expect(await (await post({ outcome: 'stopped', costUsd: 0, why: '{}' })).json()).toEqual({ recorded: false });
-    for (const bad of [{ outcome: 'answered', costUsd: 1, why }, { outcome: 'failed', costUsd: -1, why }, { outcome: 'failed', costUsd: 1 }]) {
+    for (const bad of [{ outcome: 'done', costUsd: 1, why }, { outcome: 'failed', costUsd: -1, why }, { outcome: 'failed', costUsd: 1 }]) {
       expect((await post(bad)).status).toBe(400);
     }
     const otherHeaders = { 'Content-Type': 'application/json', Cookie: other };

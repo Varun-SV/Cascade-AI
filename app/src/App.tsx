@@ -30,7 +30,7 @@ import { CommandPalette } from './components/CommandPalette.js';
 import { ChangesModal } from './components/ChangesModal.js';
 import { ContinueModal } from './components/ContinueModal.js';
 import { useThemeSync } from './theme/useTheme.js';
-import { cloudMirror, type RunAccounting } from './lib/cloud-mirror.js';
+import { cloudMirror, type AccountedRun } from './lib/cloud-mirror.js';
 
 /** A message on a cloud conversation's active path (with branching data). */
 export interface CloudMsg {
@@ -134,7 +134,7 @@ declare global {
         messages(id: string): Promise<{ ok: boolean; error?: string; messages: CloudMsg[] }>;
         createConversation(title?: string): Promise<{ ok: boolean; error?: string; conversation?: { id: string; title: string | null } }>;
         appendTurn(id: string, turn: CloudTurn): Promise<{ ok: boolean; error?: string; messages: CloudMsg[] }>;
-        recordUnansweredRun(run: { conversationId: string | null; outcome: 'failed' | 'stopped'; costUsd: number; why: string }): Promise<{ ok: boolean; error?: string; recorded?: boolean }>;
+        recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string }): Promise<{ ok: boolean; error?: string; recorded?: boolean }>;
         selectBranch(id: string, messageId: string): Promise<{ ok: boolean; error?: string; messages: CloudMsg[] }>;
         deleteMessage(id: string, messageId: string): Promise<{ ok: boolean; error?: string; messages: CloudMsg[] }>;
         renameConversation(id: string, title: string): Promise<{ ok: boolean; error?: string }>;
@@ -389,9 +389,10 @@ export function App() {
     // unmounts), so they also own ending the run lifecycle: runEnded keeps the
     // persistent Stop control honest, and finalizeLastMessage un-sticks the
     // transcript's streaming flag when a run finishes while another view is open.
-    socket.on('session:error', (data: { sessionId?: string; error?: string; cloud?: RunAccounting; stopped?: boolean }) => {
-      // Its spend goes to the cloud account whichever session is on screen.
-      void cloudMirror.failed(data);
+    // Each finished run's cost, sent once its calls have settled: copied to the
+    // cloud account whichever session or view is on screen.
+    socket.on('run:accounting', (data: AccountedRun) => { void cloudMirror.accounted(data); });
+    socket.on('session:error', (data: { sessionId?: string; error?: string }) => {
       dispatch(setBackendError(data?.error ? `Run failed: ${data.error}` : 'Run failed — check your model/key and try again.'));
       dispatch(clearApprovals());
       dispatch(setPendingPlan(null));
@@ -403,9 +404,7 @@ export function App() {
       if (!data?.sessionId || data.sessionId === runSessionIdRef.current) dispatch(runEnded());
       if (!data?.sessionId || data.sessionId === sessionIdRef.current) dispatch(finalizeLastMessage({}));
     });
-    socket.on('session:complete', (data: { sessionId?: string; result?: { output?: string }; cloud?: RunAccounting; prompt?: string } | undefined) => {
-      // Copied to the cloud account whichever session or view is on screen.
-      void cloudMirror.completed(data);
+    socket.on('session:complete', (data: { sessionId?: string; result?: { output?: string } } | undefined) => {
       dispatch(setBackendError(null));
       dispatch(clearApprovals());
       dispatch(setPendingPlan(null));

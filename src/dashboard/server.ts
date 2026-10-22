@@ -331,10 +331,12 @@ export class DashboardServer {
           approvalCallback: this.makeApprovalCallback(sessionId),
         });
         this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED', result);
-        const cloud = this.captureWhy(sessionId, cascade, result);
-        // The prompt goes with it, so the desktop can copy the turn to the
-        // cloud whichever view started the run.
-        this.emitToSessionClients(socketId, sessionId, 'session:complete', { sessionId, result, cloud, prompt });
+        this.captureWhy(sessionId, cascade, result);
+        this.emitToSessionClients(socketId, sessionId, 'session:complete', { sessionId, result });
+        // An empty answer is a stop only when the user stopped it.
+        const outcome = result.output ? 'answered' : abortController.signal.aborted ? 'stopped' : 'answered';
+        void this.emitRunAccounting((e, p) => this.emitToSessionClients(socketId, sessionId, e, p), sessionId, cascade,
+          { prompt, output: result.output ?? '', outcome, durationMs: result.durationMs, copyTurn: true });
         this.socket.broadcast('cost:update', {
           sessionId,
           totalTokens: result.usage.totalTokens,
@@ -346,16 +348,15 @@ export class DashboardServer {
         this.throttledBroadcast('workspace');
       } catch (err) {
         this.persistRunEnd(sessionId, title, prompt, undefined, 'FAILED');
-        // No reply, but the calls it made were billed: the desktop sends this
-        // to the account's spend report, as a hosted run that fails is.
-        const cloud = this.captureWhy(sessionId, cascade);
+        this.captureWhy(sessionId, cascade);
         this.emitToSessionClients(socketId, sessionId, 'session:error', {
           sessionId,
           error: err instanceof Error ? err.message : String(err),
-          cloud,
-          prompt,
-          stopped: abortController.signal.aborted,
         });
+        // No reply, but the calls it made were billed: the desktop sends this
+        // to the account's spend report, as a hosted run that fails is.
+        void this.emitRunAccounting((e, p) => this.emitToSessionClients(socketId, sessionId, e, p), sessionId, cascade,
+          { prompt, output: '', outcome: abortController.signal.aborted ? 'stopped' : 'failed', durationMs: 0, copyTurn: true });
       } finally {
         this.activeSessions.delete(sessionId);
         this.activeControllers.delete(sessionId);
@@ -702,11 +703,10 @@ export class DashboardServer {
    * it so the desktop's Why panel updates live; kept per-session for the
    * GET /api/sessions/:id/why fallback (panel opened after the run).
    *
-   * Returns the run's accounting as the cloud takes it, for the desktop to
-   * send with the chat it copies there: each run has its own Cascade, so the
-   * router's stats are this run's alone.
+   * The run's accounting for the cloud goes separately, once its calls have
+   * settled (`emitRunAccounting`).
    */
-  private captureWhy(sessionId: string, cascade: Cascade, result?: CascadeRunResult): { costUsd: number; why: string } | undefined {
+  private captureWhy(sessionId: string, cascade: Cascade, result?: CascadeRunResult): void {
     try {
       const stats = cascade.getRouter().getStats();
       const savings = cascade.getRouter().getDelegationSavings();
@@ -728,12 +728,36 @@ export class DashboardServer {
         if (oldest) this.whyBySession.delete(oldest);
       }
       this.socket.broadcast('run:why', report);
-      return cloudTurnAccounting(cloudRunReport({
-        stats, t1Model: cascade.getRouter().getTierModel('T1'), decisions: report.decisions, durationMs: result?.durationMs ?? 0,
-      }));
     } catch (err) {
       console.warn('[dashboard] failed to capture decision trail:', err);
-      return undefined;
+    }
+  }
+
+  /**
+   * What a finished run cost, as the cloud takes it, for the desktop to send
+   * to the signed-in account: with the turn it copies, or on its own for a
+   * run that has no turn to copy (it failed, was stopped, gave no text, or
+   * was not started from the desktop's own views — `copyTurn` false).
+   *
+   * Sent once every call the run made has settled, up to 30 s, so a call that
+   * lands after the run returned still counts. Each run has its own Cascade,
+   * so the router's stats are this run's alone.
+   */
+  private async emitRunAccounting(
+    emit: (event: string, payload: unknown) => void,
+    sessionId: string,
+    cascade: Cascade,
+    run: { prompt: string; output: string; outcome: 'answered' | 'failed' | 'stopped'; durationMs: number; copyTurn: boolean },
+  ): Promise<void> {
+    try {
+      const router = cascade.getRouter();
+      const decisions = cascade.getDecisionLog();
+      await router.whenRunSettled();
+      const report = cloudRunReport({ stats: router.getStats(), t1Model: router.getTierModel('T1'), decisions, durationMs: run.durationMs });
+      if (report.totalCostUsd <= 0 && report.totalTokens <= 0 && !run.output) return;
+      emit('run:accounting', { sessionId, ...run, cloud: cloudTurnAccounting(report) });
+    } catch (err) {
+      console.warn('[dashboard] failed to report run accounting:', err);
     }
   }
 
@@ -809,8 +833,12 @@ export class DashboardServer {
         approvalCallback: async () => ({ approved: true, always: false }),
       });
       this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED', result);
-      const cloud = this.captureWhy(sessionId, cascade, result);
-      this.socket.broadcast('session:complete', { sessionId, result, cloud });
+      this.captureWhy(sessionId, cascade, result);
+      this.socket.broadcast('session:complete', { sessionId, result });
+      // A scheduled run is not copied to the cloud as a chat (as before), but
+      // what it spent counts in the account's report.
+      void this.emitRunAccounting((e, p) => this.socket.broadcast(e, p), sessionId, cascade,
+        { prompt, output: result.output ?? '', outcome: 'answered', durationMs: result.durationMs, copyTurn: false });
       this.socket.broadcast('cost:update', {
         sessionId,
         totalTokens: result.usage.totalTokens,
@@ -820,12 +848,13 @@ export class DashboardServer {
       this.throttledBroadcast('workspace');
     } catch (err) {
       this.persistRunEnd(sessionId, title, prompt, undefined, 'FAILED');
-      const cloud = this.captureWhy(sessionId, cascade);
+      this.captureWhy(sessionId, cascade);
       this.socket.broadcast('session:error', {
         sessionId,
         error: err instanceof Error ? err.message : String(err),
-        cloud,
       });
+      void this.emitRunAccounting((e, p) => this.socket.broadcast(e, p), sessionId, cascade,
+        { prompt, output: '', outcome: 'failed', durationMs: 0, copyTurn: false });
       throw err;
     } finally {
       this.activeSessions.delete(sessionId);
@@ -1582,23 +1611,28 @@ export class DashboardServer {
             approvalCallback: this.makeApprovalCallback(sessionId),
           });
           this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED', result);
-          const cloud = this.captureWhy(sessionId, cascade, result);
+          this.captureWhy(sessionId, cascade, result);
           this.socket.broadcast('cost:update', {
             sessionId,
             totalTokens: result.usage.totalTokens,
             totalCostUsd: result.usage.estimatedCostUsd,
             costUnknown: result.usage.costUnknown === true,
           });
-          this.socket.broadcastToRoom(`session:${sessionId}`, 'session:complete', { sessionId, result, cloud });
+          this.socket.broadcastToRoom(`session:${sessionId}`, 'session:complete', { sessionId, result });
+          // Started over the API, not from the desktop's views: its spend
+          // counts, but it is not copied to the cloud as a chat (as before).
+          void this.emitRunAccounting((e, p) => this.socket.broadcast(e, p), sessionId, cascade,
+            { prompt, output: result.output ?? '', outcome: 'answered', durationMs: result.durationMs, copyTurn: false });
           this.throttledBroadcast('workspace');
         } catch (err) {
           this.persistRunEnd(sessionId, title, prompt, undefined, 'FAILED');
-          const cloud = this.captureWhy(sessionId, cascade);
+          this.captureWhy(sessionId, cascade);
           this.socket.broadcastToRoom(`session:${sessionId}`, 'session:error', {
             sessionId,
             error: err instanceof Error ? err.message : String(err),
-            cloud,
           });
+          void this.emitRunAccounting((e, p) => this.socket.broadcast(e, p), sessionId, cascade,
+            { prompt, output: '', outcome: 'failed', durationMs: 0, copyTurn: false });
         } finally {
           this.activeSessions.delete(sessionId);
           this.denyPendingApprovals(sessionId);

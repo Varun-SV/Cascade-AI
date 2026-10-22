@@ -327,12 +327,13 @@ export class CloudClient {
   }
 
   /**
-   * Add a run that ended without a reply (failed, or stopped) to the account's
-   * spend ledger: its calls were billed even though there is no turn to sync.
-   * `why` is the run's report (`cloudRunReport`), as JSON.
+   * Add a run with no turn to sync to the account's spend ledger: one that
+   * failed, was stopped, or answered with no text or from somewhere that is
+   * not copied as a chat. Its calls were billed all the same. `why` is the
+   * run's report (`cloudRunReport`), as JSON.
    */
-  async recordUnansweredRun(run: {
-    conversationId: string | null; outcome: 'failed' | 'stopped'; costUsd: number; why: string;
+  async recordRunSpend(run: {
+    conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string;
   }): Promise<{ recorded: boolean }> {
     return this.authed<{ recorded: boolean }>('/api/usage/runs', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(run),

@@ -386,18 +386,27 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     } catch { /* best-effort mirror — offline, revoked token, etc. Local run is unaffected. */ }
   }, [ensureCloudConversation]);
   /**
-   * A run that ended without a reply still spent money: add it to the
-   * account's spend report, as a hosted run that fails is. Best-effort.
-   * It joins the chat already synced, if any; it never creates one, since a
-   * chat with no messages would be left behind for it.
+   * A run with no turn to sync still spent money: add it to the account's
+   * spend report, as a hosted run that fails is. Best-effort. It joins the
+   * chat already synced, if any; it never creates one, since a chat with no
+   * messages would be left behind for it.
    */
-  const recordUnansweredRunInCloud = useCallback(async (outcome: 'failed' | 'stopped', report: CloudRunReport) => {
+  const recordRunSpendInCloud = useCallback(async (outcome: 'answered' | 'failed' | 'stopped', report: CloudRunReport) => {
     const mirror = cloudMirrorRef.current;
     if (!mirror || process.env['CASCADE_NO_CLOUD_SYNC']) return;
     if (report.totalCostUsd <= 0 && report.totalTokens <= 0) return;
     try {
-      await mirror.client.recordUnansweredRun({ conversationId: mirror.convId, outcome, ...cloudTurnAccounting(report) });
+      await mirror.client.recordRunSpend({ conversationId: mirror.convId, outcome, ...cloudTurnAccounting(report) });
     } catch { /* best-effort — the local run's error is what the user sees */ }
+  }, []);
+  /**
+   * Runs are sent to the cloud one at a time, in the order they ended: a run
+   * still waiting for a late call holds back the next, so the cloud chat keeps
+   * the turns in the order they happened.
+   */
+  const cloudQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const queueCloud = useCallback((send: () => Promise<unknown>) => {
+    cloudQueueRef.current = cloudQueueRef.current.then(send).catch(() => { /* best-effort mirror */ });
   }, []);
 
   /**
@@ -1075,14 +1084,17 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       persistMessage('assistant', result.output, new Date().toISOString());
       // Mirror the finished turn into the shared cloud session (best-effort),
       // with what this run cost: the cloud's /why and spend report read it.
-      // Stopped before any answer: the run resolves with no text, but what it
-      // spent is still recorded, with no empty reply.
+      // A run with no text resolves normally: stopped by the user, or a model
+      // that answered with nothing. What it spent is recorded either way,
+      // with no empty reply.
       const output = result.output;
-      void settledRunReport(result.durationMs).then((report) => {
+      const stopped = runAbortRef.current?.signal.aborted === true;
+      queueCloud(async () => {
+        const report = await settledRunReport(result.durationMs);
         if (!report) return;
         if (output) return mirrorTurnToCloud(trimmed, { content: output, ...cloudTurnAccounting(report) });
-        return recordUnansweredRunInCloud('stopped', report);
-      }).catch(() => { /* best-effort mirror */ });
+        return recordRunSpendInCloud(stopped ? 'stopped' : 'answered', report);
+      });
       // One-line run receipt — the delegation economics in scrollback.
       const receipt = formatRunReceipt(result, stats.totalCostUsd, savings);
       if (receipt) {
@@ -1104,8 +1116,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       // Its calls were billed all the same. A run that never began (setup
       // failed before it) has no stats of its own, and nothing is sent.
       const outcome = runAbortRef.current?.signal.aborted ? 'stopped' : 'failed';
-      void settledRunReport(0).then((report) => report && recordUnansweredRunInCloud(outcome, report))
-        .catch(() => { /* best-effort */ });
+      queueCloud(async () => {
+        const report = await settledRunReport(0);
+        if (report) await recordRunSpendInCloud(outcome, report);
+      });
     }
     finally {
       if (streamThrottleTimeout) { clearTimeout(streamThrottleTimeout); streamThrottleTimeout = null; }

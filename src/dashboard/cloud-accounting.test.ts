@@ -4,8 +4,8 @@
 //
 //  The desktop copies a finished run into the user's cloud chat. What the run
 //  cost has to go with it, or the cloud's spend report never counts the run:
-//  the app sends whatever `session:complete` carries as `cloud`, which is what
-//  captureWhy returns.
+//  the app sends what `run:accounting` carries as `cloud`, which the backend
+//  sends once the run's calls have settled.
 
 import { describe, expect, it, vi } from 'vitest';
 import { DashboardServer } from './server.js';
@@ -44,9 +44,14 @@ describe('the desktop\'s run accounting for the cloud', () => {
     const cascade = { getRouter: () => router, getDecisionLog: () => [{ at: 'now', kind: 'model', detail: 'T3 → mini' }] };
 
     const server = new DashboardServer(config, store, '/tmp');
-    const cloud = (server as unknown as {
-      captureWhy: (sessionId: string, cascade: unknown, result?: { durationMs: number }) => { costUsd: number; why: string } | undefined;
-    }).captureWhy('s1', cascade, { durationMs: 900 });
+    const sent: Array<{ event: string; payload: { cloud?: { costUsd: number; why: string }; outcome?: string; copyTurn?: boolean; prompt?: string } }> = [];
+    await (server as unknown as {
+      emitRunAccounting: (emit: (e: string, p: unknown) => void, sessionId: string, cascade: unknown, run: Record<string, unknown>) => Promise<void>;
+    }).emitRunAccounting((event, payload) => sent.push({ event, payload: payload as never }), 's1', cascade,
+      { prompt: 'q', output: 'a', outcome: 'answered', durationMs: 900, copyTurn: true });
+    expect(sent.map((s) => s.event)).toEqual(['run:accounting']);
+    expect(sent[0]!.payload).toMatchObject({ outcome: 'answered', copyTurn: true, prompt: 'q' });
+    const cloud = sent[0]!.payload.cloud;
 
     expect(cloud?.costUsd).toBeCloseTo(0.001, 8);
     const why = JSON.parse(cloud!.why) as Record<string, unknown>;

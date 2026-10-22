@@ -493,6 +493,9 @@ export class CloudStore {
     const hasCol = (table: string, col: string) =>
       (this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === col);
     if (!hasCol('conversations', 'skill_id')) this.db.exec('ALTER TABLE conversations ADD COLUMN skill_id TEXT');
+    // The last running total an old CLI sent for this chat (see appendTurn),
+    // kept apart from its messages so deleting a reply cannot lower it.
+    if (!hasCol('conversations', 'legacy_cli_total')) this.db.exec('ALTER TABLE conversations ADD COLUMN legacy_cli_total REAL');
     // Browser sessions opened per day, beside the runs counted on the same row.
     if (!hasCol('usage', 'browser_sessions')) {
       this.db.exec('ALTER TABLE usage ADD COLUMN browser_sessions INTEGER NOT NULL DEFAULT 0');
@@ -972,14 +975,20 @@ export class CloudStore {
     const tx = this.db.transaction(() => {
       // An old CLI sends its session's running total, not the run's cost. Read
       // the chat's previous total before this reply joins it.
+      // Kept on the chat, not read back from its replies: a deleted reply's
+      // total would otherwise be counted again by the next one.
       let spent = input.assistant.costUsd ?? null;
       if (input.assistant.why == null && spent != null) {
-        const previous = this.db.prepare(
+        const kept = this.db.prepare('SELECT legacy_cli_total FROM conversations WHERE id = ?')
+          .get(conversationId) as { legacy_cli_total: number | null } | undefined;
+        // A chat from before the total was kept: its newest such reply.
+        const previous = kept?.legacy_cli_total ?? (this.db.prepare(
           `SELECT cost_usd FROM messages
             WHERE conversation_id = ? AND role = 'assistant' AND why_json IS NULL AND cost_usd IS NOT NULL
             ORDER BY created_at DESC, rowid DESC LIMIT 1`,
-        ).get(conversationId) as { cost_usd: number } | undefined;
-        spent = legacyCliRunCost(spent, previous?.cost_usd ?? null);
+        ).get(conversationId) as { cost_usd: number } | undefined)?.cost_usd ?? null;
+        this.db.prepare('UPDATE conversations SET legacy_cli_total = ? WHERE id = ?').run(spent, conversationId);
+        spent = legacyCliRunCost(spent, previous);
       }
       const userMsg = regen ?? this.addMessage({
         conversationId, role: 'user', content: input.userContent, parentId: branchParentId,

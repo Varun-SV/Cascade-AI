@@ -185,6 +185,19 @@ describe('spend ledger', () => {
     expect(store.getMessages(c.id).filter((m) => m.role === 'assistant').map((m) => m.costUsd)).toEqual([0.01, 0.03, 0.06]);
   });
 
+  it('does not count a deleted reply\'s run again when an old CLI syncs the next', () => {
+    const u = user('cli-del');
+    const c = store.createConversation(u.id, 'Pruned');
+    store.appendTurn(c.id, u.id, { userContent: 'q', assistant: { content: 'a', costUsd: 0.01 } });
+    store.appendTurn(c.id, u.id, { userContent: 'q', assistant: { content: 'a', costUsd: 0.03 } });
+    // The user deletes the newest reply; its run stays in the ledger.
+    const newest = store.getMessages(c.id).filter((m) => m.role === 'assistant').at(-1)!;
+    store.deleteMessageSubtree(c.id, u.id, newest.id);
+    store.appendTurn(c.id, u.id, { userContent: 'q', assistant: { content: 'a', costUsd: 0.06 } });
+    // 0.01 + 0.02 + 0.03: the third run is what grew since 0.03, not since 0.01.
+    expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals.spentUsd).toBeCloseTo(0.06, 9);
+  });
+
   it('does not take a reply with its own /why as a running total', () => {
     const u = user('mix');
     const c = store.createConversation(u.id, 'Mixed');

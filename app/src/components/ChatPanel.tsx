@@ -10,7 +10,6 @@ import { CHAT_REHYPE_PLUGINS, CHAT_REMARK_PLUGINS, createAnswerPreparer, usePace
 import { SessionRating } from './SessionRating.js';
 import { useAppDispatch, useAppSelector, appendMessage, finalizeLastMessage, setSessionId, loadTranscript, runStarted } from '../store/index.js';
 import { fetchSessionTranscript } from '../utils/sessionLoad.js';
-import { cloudMirror } from '../lib/cloud-mirror.js';
 
 // Reasoning-tuned models (Anthropic thinking_delta, OpenAI reasoning_content,
 // and local GGUF models that emit it natively) all surface their "thinking"
@@ -245,7 +244,6 @@ export function ChatPanel({ socket, compact }: Props) {
     // the list immediately; subsequent sends continue the same session.
     let sid = sessionId;
     if (!sid) { sid = crypto.randomUUID(); dispatch(setSessionId(sid)); }
-    cloudMirror.rememberPrompt(sid, input.trim()); // pair with the completed output for the cloud mirror
     const userMsg = { id: crypto.randomUUID(), role: 'user' as const, content: input.trim(), timestamp: Date.now() };
     const assistantMsg = { id: crypto.randomUUID(), role: 'assistant' as const, content: '', timestamp: Date.now(), streaming: true };
     dispatch(appendMessage(userMsg));

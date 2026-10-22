@@ -173,6 +173,21 @@ describe('a device run\'s /why for the cloud', () => {
     expect(await router.whenRunSettled(router.getRunGeneration(), 20)).toBe(true);
   });
 
+  it('keeps a model whose id is __proto__', () => {
+    const rec = (router as unknown as {
+      recordStats: (tier: string, model: { id: string; provider: string }, usage: Record<string, unknown>) => void;
+    }).recordStats.bind(router);
+    rec('T3', { id: '__proto__', provider: '' }, { inputTokens: 10, outputTokens: 0, totalTokens: 10, estimatedCostUsd: 0.001, costUnknown: true });
+    const report = cloudRunReport({ stats: router.getStats(), t1Model: t1, decisions: [], durationMs: 0, before: { ...router.getStats(), totalTokens: 0, totalCostUsd: 0, costByTierModel: {}, tokensByTierModel: {}, untrackedByTierModel: {} } });
+    const parsed = JSON.parse(JSON.stringify(report)) as { costByModel: Record<string, Record<string, number>>; tokensByModel: Record<string, Record<string, number>>; unpricedByModel: Record<string, Record<string, number>> };
+    expect(Object.keys(parsed.tokensByModel['T3']!)).toEqual([':__proto__']);
+    // The id with an empty provider is ':__proto__'; one with none at all is still an own key.
+    const bare = Object.fromEntries([['__proto__', 5]]) as Record<string, number>;
+    const kept = cloudRunReport({ stats: { ...router.getStats(), tokensByTierModel: { T3: bare }, costByTierModel: { T3: bare }, untrackedByTierModel: { T3: bare } }, before: { ...router.getStats(), totalTokens: 0, totalCostUsd: 0, tokensByTierModel: {}, costByTierModel: {}, untrackedByTierModel: {} }, t1Model: t1, decisions: [], durationMs: 0 });
+    expect(Object.prototype.hasOwnProperty.call(kept.tokensByModel['T3'], '__proto__')).toBe(true);
+    expect(JSON.parse(JSON.stringify(kept)).unpricedByModel.T3).toEqual(JSON.parse('{"__proto__":5}'));
+  });
+
   it('keeps each run\'s cost by feature', () => {
     const rec = (router as unknown as {
       recordStats: (tier: string, model: { id: string; provider: string }, usage: Record<string, unknown>, featureTag?: string) => void;
