@@ -1,6 +1,12 @@
 // Tab-scoped download prevention: can a download be tied to the leased tab,
 // and cancelled, without touching a download the user starts in another tab?
 //
+// Outcome (design §4.1): no. URL matching also cancelled a user download of
+// the same URL in another tab, and a real DownloadItem has no tab id, so the
+// extension does NOT cancel downloads. It ends the lease when the leased
+// tab's own session reports Page.downloadWillBegin (which this run shows is
+// tab-specific). Kept as the evidence for that decision.
+//
 // Stand-ins (this is CDP, not the real extension):
 // - The leased tab's own debugger session (what chrome.debugger gives the
 //   extension) enables Page events and reports `Page.downloadWillBegin`.

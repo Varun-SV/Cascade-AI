@@ -172,51 +172,64 @@ provider the user chose:
 | Screenshots | when `browserVision` is `image` or `marked` | relay, server, model |
 | Results of script the run evaluates (`evaluate`) | each call; can include anything page script can read, e.g. non-HttpOnly cookies, `localStorage` | relay, server, model |
 | Console messages and errors | while attached | relay, server |
-| Downloads | **prevented** for the leased tab: no file is written to the user's disk, and no bytes go to the cloud (see below) | — |
+| Downloads | **CLI and desktop:** prevented for the leased tab, no file is written. **Extension:** *not* prevented; a download stops the run (see below). No source sends download bytes to the cloud | — |
 
-**Downloads the leased tab starts are prevented, not just unrelayed.** Covered:
-link, attachment, `blob:`/`download` attribute and script-triggered
-downloads, enforced on the device:
+**Downloads: the guarantee depends on the source.** Covered: link,
+attachment, `blob:`/`download` attribute and script-triggered downloads,
+enforced on the device:
 
-| Source | Mechanism |
-|---|---|
-| CLI | the policy's own browser-level session sets `Browser.setDownloadBehavior: deny` for the lease and restores it after |
-| Desktop | the built-in browser's session cancels every `will-download` while leased |
-| Extension | **Tab-scoped, by attribution** (below). No profile-wide cancellation |
+| Source | Mechanism | Guarantee |
+|---|---|---|
+| CLI | the policy's own browser-level session sets `Browser.setDownloadBehavior: deny` for the lease and restores it after | No file written (P4) |
+| Desktop | the built-in browser's session cancels every `will-download` while leased | No file written (P4) |
+| Extension | detect and stop, never cancel (below) | **None for the file.** The run stops; the download is left to the user |
 
-**Extension: only downloads the leased tab started.** The CLI and desktop
-sources control a browser session Cascade owns. The extension runs in the
-user's own Chrome profile, where other tabs are the user's, so it never
-cancels a download it cannot tie to the leased tab:
-- The leased tab's own `chrome.debugger` session reports
-  `Page.downloadWillBegin` with the download's URL.
-- `chrome.downloads.onDeterminingFilename` holds each new download until
-  the extension decides. One whose URL the leased tab announced is
-  cancelled, and only that one is erased from history. Every other download
-  is released untouched.
-- **Known limit, measured:** if the user downloads the *exact same* http(s)
-  URL in another tab during the lease, that download is cancelled too, since
-  the URL is the only key `chrome.downloads` shares with the tab. `blob:`
-  URLs are unique per object, so they never collide.
-- **Not usable:** `Page.setDownloadBehavior` on the tab's session looks
-  tab-scoped but applies to the whole profile. Denying it on the leased tab
-  also blocked a download in another tab.
-- The extension's P4 run must prove the hold, which the CDP stand-in cannot
-  model; until it passes, the extension claims only what that run shows.
+**Extension: detect and stop, never cancel.** The CLI and desktop sources
+drive a browser session Cascade owns. The extension runs in the user's own
+Chrome profile, where every other tab is the user's, and Chrome gives it no
+reliable way to tie a download to the tab that started it: a
+`chrome.downloads` `DownloadItem` has no tab or frame id, and its URL is
+not unique (measured below). So the extension:
+- **never cancels or erases a download.** An ambiguous match could be the
+  user's own download in another tab, and a warning does not make
+  interrupting it acceptable;
+- **ends the lease when the leased tab starts a download.** The leased
+  tab's own `chrome.debugger` session reports `Page.downloadWillBegin`,
+  which is specific to that tab. The device then detaches and tells the
+  user the run stopped because a page started a download, which stays in
+  their Downloads to keep or delete. Stopping affects only Cascade's run,
+  never the user's tabs;
+- **avoids agent-initiated downloads where it can:** the command contract
+  has no download commands, and the agent cannot set download behaviour.
+  This is mitigation, not proof: page script on a consented page can still
+  start one;
+- **says so in the consent prompt** for the extension source: "A page this
+  run visits can save a file to your Downloads. Cascade stops the run when
+  that happens but does not delete the file." Users who need a strong
+  no-download guarantee use the desktop app, the CLI, or option C with a
+  dedicated browser profile.
+
+Revisiting P4 for the extension needs a real, reliable, unique link between
+a download and the leased tab, and a real-MV3 test showing no file written
+for attachment, `blob:` and script downloads with no effect on other tabs.
 
 **Evidence:**
 - `poc-egress-and-lease.mjs` checks the CLI path. With downloads allowed,
   an attachment writes a file (the control). During the lease, an
   attachment, a `blob:` link and a script-made `download` link write
   **0 files**.
-- `poc-tab-downloads.mjs` checks attribution with CDP stand-ins for
-  `chrome.debugger` and `chrome.downloads` (6/6, stable over 3 runs):
-  - all 3 of the leased tab's downloads (attachment, `blob:`, script) are
-    tied to it, and neither of the user tab's is
-  - the user tab's downloads complete during the lease
-  - the leased tab's attachment is cancelled before completing
-  - the known limit above
-  - the `Page.setDownloadBehavior` finding above
+- `poc-tab-downloads.mjs` tested the rejected alternative (cancel by
+  matching URL) with CDP stand-ins for `chrome.debugger` and
+  `chrome.downloads` (6/6, stable over 3 runs). It is kept as the evidence
+  for this decision:
+  - the leased tab's own session did report all 3 of its downloads, and
+    none of the user tab's: the basis for detect-and-stop
+  - a user download of the **same URL** in another tab was cancelled too:
+    URL matching cannot establish ownership
+  - `Page.setDownloadBehavior` on the leased tab's session is not
+    tab-scoped: denying it also blocked a download in another tab
+  - the stand-in cannot hold a download, so it says nothing about
+    zero-bytes-written on a real MV3 extension
 
 **Where the user sees it (decided, Q5):**
 - **Consent prompt:** shows this full list in plain words the first time a
@@ -516,12 +529,18 @@ commands and detaches the debugger, all on the device:
   - commands on unknown session ids are refused
   - `Emulation.setGeolocationOverride` and `setUserAgentOverride` are
     refused by name (tests)
-- **P4.** No download started by the leased tab writes a file: link,
-  attachment, `blob:` and script-triggered. There's a control test proving a
-  download is detectable when allowed. Run on each source; the CLI proof is
-  not evidence for the others. For the extension, P4 also proves that a
-  download the user starts in another tab during the lease completes
-  (except the same-URL limit in §4.1).
+- **P4.** Per source; one source's proof is not evidence for another.
+  Each run includes a control test proving a download is detectable when
+  allowed, and covers link, attachment, `blob:` and script-triggered
+  downloads.
+  - **CLI and desktop:** no download started by the leased tab writes a
+    file.
+  - **Extension** (real MV3, not a stand-in): a download started by the
+    leased tab ends the lease within 1 s and the user is told; no download
+    is cancelled or erased, in the leased tab or any other; a download the
+    user starts in an unrelated tab during the lease completes untouched;
+    no download bytes reach the relay or the cloud. The extension makes no
+    no-file-written claim.
 - **P2.** No request reaches a non-consented origin for each of: agent
   navigation, link click, script navigation, form submission, server
   redirect, and iframe. The test asserts the destination server saw 0
@@ -582,7 +601,10 @@ commands and detaches the debugger, all on the device:
 - **D2.** Everyone cells under threshold are hidden, and so are their
   complements (test).
 - **D3.** Everyone releases are immutable, non-overlapping ISO weeks, and
-  longer periods are labelled as N weeks, never months (test).
+  longer periods are labelled as N weeks, never months (test). A run that
+  arrives after its week was published changes no published figure (test).
+- D1–D4 are stage-5 gates on the real publication queries, not on this
+  document: a written suppression rule does not prove composition safety.
 - **D4.** A differencing attack fails. The test reads everything published
   (every week, every N-week period, and every tier/model/surface/provenance
   and total cut) and tries:
