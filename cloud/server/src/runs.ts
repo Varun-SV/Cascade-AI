@@ -891,13 +891,30 @@ function recordRunSpend(store: CloudStore, entry: SpendEntry): void {
  * 30 s), from the router's stats as they are then: a parallel call that lands
  * after `cascade.run()` returned is still this run's spend. The reply itself
  * is not held back for it. Each hosted run has its own router.
+ *
+ * `after` is follow-up work the run started on the same router once it
+ * answered (the opt-in memory distillation): it is waited for first, so its
+ * calls are counted even when they start after the run's own calls settled.
  */
+/** How long a run's spend record waits for its follow-up work (`after`). */
+export const FOLLOW_UP_WAIT_MS = 60_000;
+
 export function recordSettledRunSpend(
   store: CloudStore,
   router: { whenRunSettled(): Promise<boolean>; getStats(): RouterStats; getDelegationSavings(): { savedUsd: number } },
   build: (stats: RouterStats, savedUsd: number) => SpendEntry | null,
+  after?: Promise<unknown>,
 ): Promise<void> {
   return (async () => {
+    if (after) {
+      // Bounded, so a hung follow-up call cannot keep the run out of the ledger.
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        after.catch(() => { /* its calls are counted either way */ }),
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, FOLLOW_UP_WAIT_MS); timer.unref?.(); }),
+      ]);
+      clearTimeout(timer);
+    }
     try { await router.whenRunSettled(); } catch { /* record what there is */ }
     const entry = build(router.getStats(), router.getDelegationSavings().savedUsd);
     if (entry) recordRunSpend(store, entry);
@@ -2347,28 +2364,14 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
     });
     store.incrementUsage(userId, todayKey());
     const cancelled = signal?.aborted ?? false;
-    // The ledger takes the run's final figures, late calls included; the
-    // reply keeps the /why it was answered with.
-    void recordSettledRunSpend(store, cascade.getRouter(), (settled, savedUsd) => spendEntryFromRun({
-      id: assistantMessage.id, userId, conversationId: conversation.id, at: assistantMessage.createdAt,
-      costUsd: Math.max(result.usage.estimatedCostUsd, settled.totalCostUsd),
-      why: {
-        ...why, savedUsd,
-        totalCostUsd: settled.totalCostUsd, totalTokens: settled.totalTokens,
-        costByModel: settled.costByTierModel, tokensByModel: settled.tokensByTierModel,
-        unpricedByModel: settled.untrackedByTierModel,
-      },
-      outcome: cancelled ? 'stopped' : 'answered',
-    }));
-    socket.emit('run:why', { conversationId: conversation.id, messageId: assistantMessage.id, ...why });
-    socket.emit('session:complete', { conversationId: conversation.id, result, cancelled });
 
     // Opt-in session → memory: distill the conversation into durable memories the
     // user's future runs will see (they're injected via buildRunPrompt). Best-
     // effort and non-blocking; skips trivial exchanges. The user manages/prunes
-    // these from the Memory panel exactly like hand-added ones.
-    if (payload.rememberSession && !cancelled && sessionWorthRemembering(conversationHistory, payload.prompt, result.output)) {
-      void (async () => {
+    // these from the Memory panel exactly like hand-added ones. Started before
+    // the spend is recorded, which waits for it: its T3 call is billed too.
+    const remembered = payload.rememberSession && !cancelled && sessionWorthRemembering(conversationHistory, payload.prompt, result.output)
+      ? (async () => {
         try {
           const transcript = buildSessionTranscript(conversationHistory, payload.prompt, result.output);
           const facts = await distillSessionFacts(transcript, async (p) => {
@@ -2381,8 +2384,24 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
             if (!existing.has(content)) { store.addMemory(userId, content, 'session'); existing.add(content); }
           }
         } catch { /* best-effort — never affects the run */ }
-      })();
-    }
+      })()
+      : undefined;
+    // The ledger takes the run's final figures, late calls included; the
+    // reply keeps the /why it was answered with.
+    void recordSettledRunSpend(store, cascade.getRouter(), (settled, savedUsd) => spendEntryFromRun({
+      id: assistantMessage.id, userId, conversationId: conversation.id, at: assistantMessage.createdAt,
+      costUsd: Math.max(result.usage.estimatedCostUsd, settled.totalCostUsd),
+      why: {
+        ...why, savedUsd,
+        totalCostUsd: settled.totalCostUsd, totalTokens: settled.totalTokens,
+        costByModel: settled.costByTierModel, tokensByModel: settled.tokensByTierModel,
+        unpricedByModel: settled.untrackedByTierModel,
+      },
+      outcome: cancelled ? 'stopped' : 'answered',
+    }), remembered);
+    socket.emit('run:why', { conversationId: conversation.id, messageId: assistantMessage.id, ...why });
+    socket.emit('session:complete', { conversationId: conversation.id, result, cancelled });
+
     return {
       conversationId: conversation.id,
       output: result.output,

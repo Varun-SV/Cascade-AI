@@ -25,7 +25,7 @@ import { remoteBrowserControls } from './runs.js';
 import { NativeAuthStore, isLoopbackRedirect, hashRefreshToken } from './native-auth.js';
 import { githubAuthUrl, exchangeGithubCode, googleAuthUrl, exchangeGoogleCode, type OAuthProfile } from './auth/oauth.js';
 import { limitsForPlan, ORPHAN_UPLOAD_TTL_MS, todayKey, checkStorageQuota } from './entitlements.js';
-import { buildSpendReport, parsePeriod, parseTimeZone, spendEntryFromRun } from './spend.js';
+import { buildSpendReport, DEVICE_RUN_ID, deviceRunSpendId, parsePeriod, parseTimeZone, spendEntryFromRun } from './spend.js';
 import { skillCatalog } from './skills.js';
 import { renderDocsPage } from './docs.js';
 import { tenantScratchDir } from './paths.js';
@@ -546,9 +546,14 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       assistant?: { content?: unknown; model?: unknown; tier?: unknown; why?: unknown; costUsd?: unknown };
       editOfMessageId?: unknown;
       regenerateFromUserMessageId?: unknown;
+      runId?: unknown;
     };
     if (typeof id !== 'string' || typeof body?.userContent !== 'string' || typeof body?.assistant?.content !== 'string') {
       res.status(400).json({ error: 'userContent and assistant.content are required' }); return;
+    }
+    // The device's id for the run: the same turn sent again is added once.
+    if (body.runId !== undefined && !(typeof body.runId === 'string' && DEVICE_RUN_ID.test(body.runId))) {
+      res.status(400).json({ error: 'runId must be 8-64 letters, digits or dashes' }); return;
     }
     const str = (v: unknown) => (typeof v === 'string' && v ? v : null);
     const path = store.appendTurn(id, req.session!.userId, {
@@ -562,6 +567,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       },
       editOfMessageId: str(body.editOfMessageId),
       regenerateFromUserMessageId: str(body.regenerateFromUserMessageId),
+      runId: str(body.runId),
     });
     if (!path) { res.status(404).json({ error: 'Not found' }); return; }
     res.json({ messages: serializeActivePath(id) });
@@ -580,7 +586,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     // The device's own id for the run: sending it again (a retry, or the same
     // run with no chat after its chat was gone) records it once, not twice.
     const runId = body?.runId === undefined ? randomUUID()
-      : typeof body.runId === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(body.runId) ? body.runId : null;
+      : typeof body.runId === 'string' && DEVICE_RUN_ID.test(body.runId) ? body.runId : null;
     if (!outcome || costUsd === null || why === null || runId === null) {
       res.status(400).json({ error: 'outcome (answered|failed|stopped), costUsd and why are required' }); return;
     }
@@ -592,8 +598,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       }
       conversationId = body.conversationId;
     }
-    // Scoped to the account, so one user's id can never name another's row.
-    const entry = spendEntryFromRun({ id: `device:${userId}:${runId}`, userId, conversationId, at: Date.now(), costUsd, why, outcome });
+    const entry = spendEntryFromRun({ id: deviceRunSpendId(userId, runId), userId, conversationId, at: Date.now(), costUsd, why, outcome });
     // Nothing billed, nothing to keep.
     if (entry.costUsd === 0 && entry.tokens === 0 && entry.lines.length === 0) { res.json({ recorded: false }); return; }
     store.recordSpend(entry);

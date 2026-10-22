@@ -50,6 +50,8 @@ export interface CloudTurn {
   assistant: { content: string; tier?: string | null; model?: string | null; costUsd?: number | null; why?: string | null };
   editOfMessageId?: string;
   regenerateFromUserMessageId?: string;
+  /** The device's id for the run: the same turn sent again is added once. */
+  runId?: string;
 }
 
 /** Live state of the built-in browser, pushed on every navigation. */

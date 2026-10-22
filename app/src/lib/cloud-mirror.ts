@@ -25,7 +25,7 @@ export interface CloudMirrorApi {
   /** Who is signed in, and to which server: the links below belong to them. */
   status(): Promise<{ signedIn: boolean; user: { id: string } | null; serverUrl: string }>;
   createConversation(title?: string): Promise<{ ok: boolean; conversation?: { id: string } }>;
-  appendTurn(id: string, turn: { userContent: string; assistant: { content: string; costUsd?: number; why?: string } }): Promise<{ ok: boolean }>;
+  appendTurn(id: string, turn: { userContent: string; runId?: string; assistant: { content: string; costUsd?: number; why?: string } }): Promise<{ ok: boolean; error?: string }>;
   recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string }): Promise<{ ok: boolean }>;
 }
 
@@ -91,32 +91,52 @@ export class CloudMirror {
     if (api.status && (!who?.signedIn || !who.user)) return;
     const key = `${who?.serverUrl ?? ''}|${who?.user?.id ?? ''}|${sid}`;
     const outcome = run.outcome ?? 'answered';
+    // One id for this run, however it is sent and however often: the cloud
+    // adds its turn to a chat once, and counts the run once, per id.
+    const runId = newRunId();
     // An answered turn from the desktop's own views is copied, with its cost.
     if (outcome === 'answered' && run.output && run.prompt && run.copyTurn !== false
       && api.appendTurn && api.createConversation) {
-      const turn = { userContent: run.prompt, assistant: { content: run.output, ...run.cloud } };
+      const turn = { userContent: run.prompt, runId, assistant: { content: run.output, ...run.cloud } };
       const known = this.chats.get(key);
-      if (known) {
-        if ((await api.appendTurn(known, turn)).ok) return;
-        // The chat is gone, or not this account's: start a new one.
-        this.chats.delete(key);
+      const sent = known ? await this.appendTurn(api, known, turn) : 'gone';
+      if (sent === 'ok') return;
+      if (sent === 'gone') {
+        // No chat yet, or the one linked is gone or not this account's.
+        if (known) this.chats.delete(key);
+        const chat = await this.newChat(key, run.prompt, api);
+        if (chat && (await this.appendTurn(api, chat, turn)) === 'ok') return;
       }
-      const chat = await this.newChat(key, run.prompt, api);
-      if (chat && (await api.appendTurn(chat, turn)).ok) return;
     }
     // Anything else still spent money: its cost alone, under the chat already
     // copied for this session if there is one. It never creates an empty chat.
+    // Under the same run id, so a turn that was added after all is not counted
+    // a second time.
     if (!api.recordRunSpend) return;
     const conversationId = this.chats.get(key) ?? null;
-    // One id for this run, so a resend is recorded once even if the first
-    // request was recorded and only its answer was lost.
-    const runId = newRunId();
-    const sent = await api.recordRunSpend({ conversationId, outcome, runId, ...run.cloud });
+    const recorded = await api.recordRunSpend({ conversationId, outcome, runId, ...run.cloud });
     // A chat the account can no longer reach: count the run on its own.
-    if (!sent.ok && conversationId) {
+    if (!recorded.ok && conversationId) {
       this.chats.delete(key);
       await api.recordRunSpend({ conversationId: null, outcome, runId, ...run.cloud });
     }
+  }
+
+  /**
+   * Sends a turn to a chat, and once more if no answer came back: the cloud
+   * then answers from what the first request added, so a lost response does
+   * not copy the turn twice or start another chat. 'gone' when the chat no
+   * longer exists or is not this account's (the cloud answers 404).
+   */
+  private async appendTurn(
+    api: Partial<CloudMirrorApi>, chat: string, turn: Parameters<CloudMirrorApi['appendTurn']>[1],
+  ): Promise<'ok' | 'gone' | 'failed'> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await api.appendTurn!(chat, turn).catch(() => ({ ok: false, error: undefined }));
+      if (result.ok) return 'ok';
+      if (/\(404\)/.test(result.error ?? '')) return 'gone';
+    }
+    return 'failed';
   }
 
   private async newChat(key: string, prompt: string, api: Partial<CloudMirrorApi>): Promise<string | null> {

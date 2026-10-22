@@ -28,7 +28,7 @@ describe('CloudMirror', () => {
     const { api, mirror } = setup();
     await mirror.accounted(answered('s1', { prompt: 'from the cockpit' }));
     expect(api.createConversation).toHaveBeenCalledWith('from the cockpit');
-    expect(api.appendTurn).toHaveBeenCalledWith('c1', { userContent: 'from the cockpit', assistant: { content: 'answer', ...accounting } });
+    expect(api.appendTurn).toHaveBeenCalledWith('c1', { userContent: 'from the cockpit', runId: expect.any(String), assistant: { content: 'answer', ...accounting } });
     expect(api.recordRunSpend).not.toHaveBeenCalled();
   });
 
@@ -73,7 +73,7 @@ describe('CloudMirror', () => {
 
   it('replaces a chat that can no longer be reached, and still counts a run with no turn', async () => {
     const { api, mirror } = setup(false, links([['https://cloud|u1|s1', 'deleted-chat']]));
-    api.appendTurn.mockResolvedValueOnce({ ok: false }).mockResolvedValue({ ok: true });
+    api.appendTurn.mockResolvedValueOnce({ ok: false, error: 'Request failed (404).' }).mockResolvedValue({ ok: true });
     await mirror.accounted(answered('s1'));
     expect(api.appendTurn.mock.calls.map((c) => c[0])).toEqual(['deleted-chat', 'c1']);
 
@@ -85,6 +85,32 @@ describe('CloudMirror', () => {
     // The same run id both times: if the first was recorded after all, the second is not.
     expect(calls[0]!.runId).toBeTruthy();
     expect(calls[1]!.runId).toBe(calls[0]!.runId);
+  });
+
+  it('resends a turn whose answer was lost to the same chat, under the same run id', async () => {
+    const { api, mirror } = setup(false, links([['https://cloud|u1|s1', 'chat']]));
+    // The first request was added, but its response never came back.
+    api.appendTurn.mockResolvedValueOnce({ ok: false, error: 'socket hang up' }).mockResolvedValue({ ok: true });
+    await mirror.accounted(answered('s1'));
+    const calls = api.appendTurn.mock.calls as Array<[string, { runId: string }]>;
+    expect(calls.map((c) => c[0])).toEqual(['chat', 'chat']);
+    expect(calls[1]![1].runId).toBe(calls[0]![1].runId);
+    expect(api.createConversation).not.toHaveBeenCalled();
+    expect(api.recordRunSpend).not.toHaveBeenCalled();
+  });
+
+  it('keeps the chat when the cloud cannot be reached, and counts the run under the turn\'s id', async () => {
+    const { api, mirror } = setup(false, links([['https://cloud|u1|s1', 'chat']]));
+    api.appendTurn.mockResolvedValue({ ok: false, error: 'Request failed (502).' });
+    await mirror.accounted(answered('s1'));
+    expect(api.createConversation).not.toHaveBeenCalled();
+    const turnId = (api.appendTurn.mock.calls[0]![1] as { runId: string }).runId;
+    // If a turn got through after all, the cloud counts the run once.
+    expect(api.recordRunSpend).toHaveBeenCalledWith({ conversationId: 'chat', outcome: 'answered', runId: turnId, ...accounting });
+    // The link is kept for the next run.
+    api.appendTurn.mockResolvedValue({ ok: true });
+    await mirror.accounted(answered('s1', { output: 'next' }));
+    expect(api.appendTurn).toHaveBeenLastCalledWith('chat', expect.anything());
   });
 
   it('sends nothing while signed out', async () => {
@@ -116,10 +142,10 @@ describe('CloudMirror', () => {
     const on = setup();
     await on.mirror.accounted({ sessionId: 's1', outcome: 'failed' });
     expect(on.api.recordRunSpend).not.toHaveBeenCalled();
-    on.api.appendTurn.mockRejectedValueOnce(new Error('offline'));
+    on.api.appendTurn.mockRejectedValueOnce(new Error('offline')).mockRejectedValueOnce(new Error('offline'));
     await expect(on.mirror.accounted(answered('s1'))).resolves.toBeUndefined();
     // A failure does not stop the next run from being sent.
     await on.mirror.accounted(answered('s1', { output: 'next' }));
-    expect(on.api.appendTurn).toHaveBeenCalledTimes(2);
+    expect(on.api.appendTurn).toHaveBeenLastCalledWith('c1', expect.objectContaining({ assistant: expect.objectContaining({ content: 'next' }) }));
   });
 });

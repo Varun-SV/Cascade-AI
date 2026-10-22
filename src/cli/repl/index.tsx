@@ -30,7 +30,7 @@ import { writeProjectConfig } from '../../config/write-config.js';
 import { Cascade, type DecisionLogEntry } from '../../core/cascade.js';
 import { MemoryStore } from '../../memory/store.js';
 import { CloudClient } from '../../cloud/client.js';
-import { cloudRunReport, cloudTurnAccounting, type CloudRunReport } from '../../cloud/run-report.js';
+import { cloudTurnAccounting, settledRunReport, type CloudRunReport } from '../../cloud/run-report.js';
 import { ModelSelector } from '../../core/router/selector.js';
 import { OpenAIProvider } from '../../providers/openai.js';
 import { GeminiProvider } from '../../providers/gemini.js';
@@ -377,13 +377,25 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const mirrorTurnToCloud = useCallback(async (userContent: string, assistant: { content: string; costUsd: number; why: string }) => {
     const mirror = cloudMirrorRef.current;
     if (!mirror || process.env['CASCADE_NO_CLOUD_SYNC']) return;
+    // One id for this run: the cloud adds its turn once and counts it once,
+    // so a turn whose answer was lost can be sent again.
+    const runId = randomUUID();
+    const turn = { userContent, runId, assistant: { content: assistant.content, costUsd: assistant.costUsd, why: assistant.why } };
     try {
       const convId = await ensureCloudConversation(mirror, userContent);
-      await mirror.client.appendTurn(convId, {
-        userContent,
-        assistant: { content: assistant.content, costUsd: assistant.costUsd, why: assistant.why },
-      });
-    } catch { /* best-effort mirror — offline, revoked token, etc. Local run is unaffected. */ }
+      for (let attempt = 0; ; attempt++) {
+        try { await mirror.client.appendTurn(convId, turn); return; } catch (err) {
+          // A chat that is gone is not tried again.
+          if (attempt >= 1 || /\(404\)/.test(err instanceof Error ? err.message : '')) throw err;
+        }
+      }
+    } catch {
+      // Best-effort mirror: offline, revoked token, etc. The local run is
+      // unaffected. What it spent still counts, under the same run id, so a
+      // turn that got through after all is not counted twice.
+      await mirror.client.recordRunSpend({ conversationId: null, outcome: 'answered', runId, costUsd: assistant.costUsd, why: assistant.why })
+        .catch(() => { /* best-effort */ });
+    }
   }, [ensureCloudConversation]);
   /**
    * A run with no turn to sync still spent money: add it to the account's
@@ -1050,24 +1062,20 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
      * This run's report, once every call it made has settled (or 30 s have
      * passed): a call that lands after the run returned still belongs to it.
      * Null for a run that never began, which has no stats of its own.
+     * Started now, as the run ends, with this run's decisions and T1 model:
+     * its cloud send may wait behind earlier ones, by which time later runs
+     * have begun, and could have dropped this run's usage.
      */
-    /**
-     * Fix which run this is, and its decisions, now, as the run ends: the
-     * report itself may only be built after earlier sends in the queue, by
-     * which time another run can have begun.
-     */
-    const runReportLater = (durationMs: number) => {
+    const runReportLater = (durationMs: number): (() => Promise<CloudRunReport | null>) => {
       const generation = runGeneration();
       if (generation === null) return async () => null;
       const router = cascade.getRouter();
-      const decisions = cascade.getDecisionLog();
       // The T1 model savings are measured against, as it was for this run:
       // a later model pick must not change what this run saved.
-      const t1Model = router.getTierModel('T1');
-      return async () => {
-        await router.whenRunSettled(generation);
-        return cloudRunReport({ stats: router.getRunStats(generation), t1Model, decisions, durationMs });
-      };
+      const report = settledRunReport(router, generation, {
+        t1Model: router.getTierModel('T1'), decisions: cascade.getDecisionLog(), durationMs,
+      });
+      return () => report;
     };
     try {
       runAbortRef.current = new AbortController();

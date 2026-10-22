@@ -64,6 +64,8 @@ export interface CloudTurnInput {
   editOfMessageId?: string;
   /** Re-answer this user turn (reply saved as a sibling; no new user message). */
   regenerateFromUserMessageId?: string;
+  /** The device's id for the run: the same turn sent again is added once. */
+  runId?: string;
 }
 
 interface TokenResponse {

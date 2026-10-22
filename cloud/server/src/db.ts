@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import { SqliteVectorStore, mcpServerPrefix } from '#cascade-ai';
 import { randomUUID } from 'node:crypto';
 import {
+  deviceRunSpendId,
   legacyCliRunCost,
   spendEntryFromRun,
   type SpendChatRow, type SpendEntry, type SpendSource, type SpendTotals,
@@ -587,6 +588,13 @@ export class CloudStore {
   }
 
   private migrateSpendLedger(): void {
+    // The device's id for the run a synced reply came from, so the same turn
+    // sent twice (a retry after a lost response) is added once.
+    if (!this.hasColumn('messages', 'client_run_id')) {
+      this.db.exec('ALTER TABLE messages ADD COLUMN client_run_id TEXT');
+    }
+    this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_run
+      ON messages(conversation_id, client_run_id) WHERE client_run_id IS NOT NULL`);
     // The last running total an old CLI sent for this chat (see appendTurn),
     // kept apart from its messages so deleting a reply cannot lower it.
     if (!this.hasColumn('conversations', 'legacy_cli_total')) {
@@ -974,10 +982,20 @@ export class CloudStore {
       assistant: { content: string; model?: string | null; tier?: string | null; why?: string | null; costUsd?: number | null };
       editOfMessageId?: string | null;
       regenerateFromUserMessageId?: string | null;
+      /**
+       * The device's id for the run. The same turn sent again to this chat
+       * (its first response was lost) is not added twice, and the run is
+       * counted once in the ledger, under the same id `/api/usage/runs` uses.
+       */
+      runId?: string | null;
     },
   ): CloudMessage[] | null {
     const convo = this.getConversation(conversationId, userId);
     if (!convo) return null;
+    const runId = input.runId ?? null;
+    if (runId && this.db.prepare('SELECT 1 FROM messages WHERE conversation_id = ? AND client_run_id = ?').get(conversationId, runId)) {
+      return this.getActivePath(conversationId);
+    }
 
     const ownedUserTurn = (id?: string | null) => {
       if (!id) return null;
@@ -1014,11 +1032,15 @@ export class CloudStore {
         model: input.assistant.model ?? null, tier: input.assistant.tier ?? null,
         why: input.assistant.why ?? null, costUsd: input.assistant.costUsd ?? null,
       });
+      if (runId) this.db.prepare('UPDATE messages SET client_run_id = ? WHERE id = ?').run(runId, reply.id);
       // A run on the user's own device, synced here: it spent their money all
       // the same, so it counts in their report as the chat's saved chip does.
+      // With the device's run id, a run already counted (its turn went to
+      // another chat, or its spend alone was sent) is not counted again.
       if (input.assistant.why != null || input.assistant.costUsd != null) {
         this.recordSpend(spendEntryFromRun({
-          id: reply.id, userId, conversationId, at: reply.createdAt, costUsd: spent, why: input.assistant.why,
+          id: runId ? deviceRunSpendId(userId, runId) : reply.id,
+          userId, conversationId, at: reply.createdAt, costUsd: spent, why: input.assistant.why,
         }));
       }
     });

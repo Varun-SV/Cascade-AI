@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CascadeRouter } from '../core/router/index.js';
 import type { CascadeConfig, ModelInfo } from '../types.js';
-import { cloudRunReport, cloudTurnAccounting } from './run-report.js';
+import { cloudRunReport, cloudTurnAccounting, settledRunReport } from './run-report.js';
 
 async function makeRouter(): Promise<CascadeRouter> {
   const router = new CascadeRouter();
@@ -160,6 +160,50 @@ describe('a device run\'s /why for the cloud', () => {
     expect(settled).toBe(true);
     expect(router.getRunStats(first).totalTokens).toBe(500);
     expect(router.getRunStats().totalTokens).toBe(0);
+  });
+
+  it('keeps a finished run\'s report when its send waits behind later runs', async () => {
+    const rec = (router as unknown as {
+      recordStats: (tier: string, model: { id: string; provider: string }, usage: Record<string, unknown>, featureTag?: string, generation?: number) => void;
+    }).recordStats.bind(router);
+    const usage = (tokens: number) => ({ inputTokens: tokens, outputTokens: 0, totalTokens: tokens, estimatedCostUsd: tokens / 1e6 });
+    router.beginRun();
+    const first = router.getRunGeneration();
+    rec('T3', { id: 'mini', provider: 'openai' }, usage(700), undefined, first);
+    // Started as the run ends; its cloud send is still queued.
+    const report = settledRunReport(router, first, { t1Model: t1, decisions: [], durationMs: 0 });
+    // More runs than the router keeps finish before the queue reaches it.
+    for (let i = 0; i < 12; i++) {
+      router.beginRun();
+      rec('T3', { id: 'mini', provider: 'openai' }, usage(1), undefined, router.getRunGeneration());
+    }
+    // Read only when the send's turn comes, the run's usage is gone.
+    expect(router.getRunStats(first).totalTokens).toBe(0);
+    expect((await report).totalTokens).toBe(700);
+  });
+
+  it('pins a run that is still settling until its late call lands, then reports it', async () => {
+    const r = router as unknown as {
+      generateCall: (...a: unknown[]) => Promise<unknown>;
+      recordStats: (tier: string, model: { id: string; provider: string }, usage: Record<string, unknown>, featureTag?: string, generation?: number) => void;
+    };
+    router.beginRun();
+    const first = router.getRunGeneration();
+    let settle!: () => void;
+    r.generateCall = () => new Promise((resolve) => { settle = () => {
+      r.recordStats('T3', { id: 'mini', provider: 'openai' }, { inputTokens: 400, outputTokens: 0, totalTokens: 400, estimatedCostUsd: 0.0004 }, undefined, first);
+      resolve({});
+    }; });
+    const call = router.generate('T3', { messages: [] } as never);
+    const report = settledRunReport(router, first, { t1Model: t1, decisions: [], durationMs: 0 });
+    r.generateCall = async () => ({});
+    for (let i = 0; i < 12; i++) {
+      router.beginRun();
+      r.recordStats('T3', { id: 'mini', provider: 'openai' }, { inputTokens: 1, outputTokens: 0, totalTokens: 1, estimatedCostUsd: 0 }, undefined, router.getRunGeneration());
+    }
+    settle();
+    await call;
+    expect((await report).totalTokens).toBe(400);
   });
 
   it('stops waiting for a run whose call never settles', async () => {

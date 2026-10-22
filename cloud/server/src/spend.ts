@@ -39,6 +39,19 @@ const record = (v: unknown): Record<string, unknown> =>
   v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 
 /**
+ * The ledger id for a run on the user's device, from the device's own run id:
+ * a synced turn and a spend-only record for the same run share it, so the run
+ * is counted once. Scoped to the account, so one user's id can never name
+ * another's row.
+ */
+export function deviceRunSpendId(userId: string, runId: string): string {
+  return `device:${userId}:${runId}`;
+}
+
+/** A device's run id as `/turns` and `/usage/runs` accept it. */
+export const DEVICE_RUN_ID = /^[A-Za-z0-9-]{8,64}$/;
+
+/**
  * A run's ledger row from its /why report, whether the object a run just built
  * or the JSON a stored reply carries. Old reports have cost per tier and one
  * model per tier; newer ones also split each tier by the models that served it,

@@ -131,3 +131,32 @@ export function cloudRunReport(input: {
 export function cloudTurnAccounting(report: CloudRunReport): { costUsd: number; why: string } {
   return { costUsd: report.totalCostUsd, why: JSON.stringify(report) };
 }
+
+/** The router calls a run's report is built from. */
+export interface RunStatsSource {
+  getRunStats(generation: number): RouterStats;
+  whenRunSettled(generation: number): Promise<boolean>;
+}
+
+/**
+ * Starts a finished run's report now: it waits for the run's calls to settle
+ * and is built the moment they do. Start it as the run ends, not when a send
+ * queue reaches it: a run's usage is only kept while it is still settling or
+ * someone is waiting on it, so later runs could otherwise drop it first.
+ * Run stats only grow, so the figures read once settled are kept unless they
+ * shrank, which means the usage was dropped; then the ones read at the start
+ * are used.
+ */
+export function settledRunReport(
+  router: RunStatsSource,
+  generation: number,
+  input: Omit<Parameters<typeof cloudRunReport>[0], 'stats' | 'before'>,
+): Promise<CloudRunReport> {
+  const atEnd = router.getRunStats(generation);
+  return router.whenRunSettled(generation).then(() => {
+    const settled = router.getRunStats(generation);
+    const kept = settled.totalTokens >= atEnd.totalTokens && settled.totalCostUsd >= atEnd.totalCostUsd
+      && settled.untrackedCostCalls >= atEnd.untrackedCostCalls;
+    return cloudRunReport({ ...input, stats: kept ? settled : atEnd });
+  });
+}

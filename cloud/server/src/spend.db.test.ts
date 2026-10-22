@@ -1,11 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import Database from 'better-sqlite3';
 import { CloudStore } from './db.js';
-import { buildSpendReport, spendEntryFromRun, type SpendOutcome } from './spend.js';
-import { recordSettledRunSpend } from './runs.js';
+import { buildSpendReport, deviceRunSpendId, spendEntryFromRun, type SpendOutcome } from './spend.js';
+import { recordSettledRunSpend, FOLLOW_UP_WAIT_MS } from './runs.js';
 
 const DAY = 86_400_000;
 const NOW = Date.UTC(2026, 8, 29, 12, 0);
@@ -172,6 +172,46 @@ describe('spend ledger', () => {
     expect(r.tiers[0]!.models[0]!.model).toBe('openai:mini');
   });
 
+  it('adds a synced turn sent twice with the same run id once', () => {
+    const u = user('retry');
+    const c = store.createConversation(u.id, 'Desktop chat');
+    const turn = {
+      userContent: 'hi', runId: 'run-0001-aaaa',
+      assistant: { content: 'hello', costUsd: 0.02, why: JSON.stringify({ totalTokens: 100, costByTier: { T3: 0.02 } }) },
+    };
+    store.appendTurn(c.id, u.id, turn);
+    // The first response was lost; the device sends the same turn again.
+    const path = store.appendTurn(c.id, u.id, turn);
+    expect(store.getMessages(c.id).map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(path!.map((m) => m.content)).toEqual(['hi', 'hello']);
+    expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals).toMatchObject({ runs: 1, spentUsd: 0.02 });
+  });
+
+  it('counts a run once when its turn also lands in a second chat', () => {
+    const u = user('rechat');
+    const turn = {
+      userContent: 'hi', runId: 'run-0002-bbbb',
+      assistant: { content: 'hello', costUsd: 0.02, why: JSON.stringify({ totalTokens: 100 }) },
+    };
+    const first = store.createConversation(u.id, 'First');
+    const second = store.createConversation(u.id, 'Second');
+    store.appendTurn(first.id, u.id, turn);
+    store.appendTurn(second.id, u.id, turn);
+    // The second chat gets the transcript; the run is still one run.
+    expect(store.getMessages(second.id)).toHaveLength(2);
+    expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals.runs).toBe(1);
+  });
+
+  it('counts a run once when its spend alone was sent as well as its turn', () => {
+    const u = user('both');
+    const c = store.createConversation(u.id, 'Chat');
+    const why = JSON.stringify({ totalTokens: 100 });
+    // What /api/usage/runs records for the device's run id.
+    store.recordSpend(spendEntryFromRun({ id: deviceRunSpendId(u.id, 'run-0003-cccc'), userId: u.id, conversationId: null, at: Date.now(), costUsd: 0.02, why, outcome: 'answered' }));
+    store.appendTurn(c.id, u.id, { userContent: 'hi', runId: 'run-0003-cccc', assistant: { content: 'hello', costUsd: 0.02, why } });
+    expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals).toMatchObject({ runs: 1, spentUsd: 0.02 });
+  });
+
   it('records a hosted run once its late calls have settled', async () => {
     const u = user('late');
     // The router as a run leaves it: one call still in flight.
@@ -190,6 +230,48 @@ describe('spend ledger', () => {
     settle();
     await done;
     expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals).toMatchObject({ runs: 1, tokens: 1500 });
+  });
+
+  it('counts a follow-up call the run starts after its own calls settled', async () => {
+    const u = user('distill');
+    // The run's calls have settled; then memory distillation makes one more.
+    let tokens = 1000; let finish!: () => void;
+    const router = {
+      whenRunSettled: async () => true,
+      getStats: () => ({ totalCostUsd: tokens / 1e6, totalTokens: tokens, costByTierModel: { T3: { 'openai:mini': tokens / 1e6 } }, tokensByTierModel: { T3: { 'openai:mini': tokens } }, untrackedByTierModel: {} }) as never,
+      getDelegationSavings: () => ({ savedUsd: 0 }),
+    };
+    const distillation = new Promise<void>((r) => { finish = () => { tokens = 1300; r(); }; });
+    const done = recordSettledRunSpend(store, router, (st) => spendEntryFromRun({
+      id: 'hosted-distill', userId: u.id, conversationId: null, at: Date.now(), costUsd: st.totalCostUsd,
+      why: { costByModel: st.costByTierModel, tokensByModel: st.tokensByTierModel, unpricedByModel: {}, totalTokens: st.totalTokens },
+    }), distillation);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals.runs).toBe(0);
+    finish();
+    await done;
+    expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals).toMatchObject({ runs: 1, tokens: 1300 });
+  });
+
+  it('records the run anyway when its follow-up work never finishes', async () => {
+    vi.useFakeTimers();
+    try {
+      const u = user('hung');
+      const router = {
+        whenRunSettled: async () => true,
+        getStats: () => ({ totalCostUsd: 0.001, totalTokens: 1000, costByTierModel: {}, tokensByTierModel: {}, untrackedByTierModel: {} }) as never,
+        getDelegationSavings: () => ({ savedUsd: 0 }),
+      };
+      const done = recordSettledRunSpend(store, router, (st) => spendEntryFromRun({
+        id: 'hosted-hung', userId: u.id, conversationId: null, at: Date.now(), costUsd: st.totalCostUsd,
+        why: { totalTokens: st.totalTokens },
+      }), new Promise(() => { /* never settles */ }));
+      await vi.advanceTimersByTimeAsync(FOLLOW_UP_WAIT_MS);
+      await done;
+      expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals.runs).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('counts an old CLI\'s sync by what each run added, not the running total it sent', () => {

@@ -20,6 +20,12 @@
 //         script from agent script. This is the stated limit of §4.2.
 //     The agent's own Fetch.* stays denied, so it can neither see nor turn
 //     off the policy's interception.
+//     Out-of-process frames and workers are their own targets, which the
+//     tab's interception does not see. The policy auto-attaches every child
+//     target paused and intercepts it before it runs; a browser-level guard
+//     does the same for new top-level targets (service and shared workers),
+//     closes new pages, and keeps a browser-wide interception as a backstop
+//     for a pop-up that sends its first request before it is paused.
 //
 //  2. Capabilities are single-use, and a dropped connection is never
 //     resumed (model (a)). A capability opens exactly one connection and one
@@ -72,6 +78,9 @@ function countingServer(name, routes) {
 }
 
 const html = (body) => (req, res) => { res.setHeader('content-type', 'text/html'); res.end(`<!doctype html>${body}`); };
+const js = (body) => (req, res) => { res.setHeader('content-type', 'text/javascript'); res.end(body); };
+// What a worker or frame reports back after fetching a URL it was given.
+const TRY_FETCH = "(u) => fetch(u).then(() => 'reached', (e) => 'failed: ' + e.message)";
 
 // ── Chromium with host mapping and one tab ──────────────────────────────────
 
@@ -79,7 +88,9 @@ async function launchChromium(mapRules) {
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cdp-poc2-'));
   const proc = spawn(process.env.CHROMIUM || chromium.executablePath(), [
     '--headless=new', '--no-sandbox', '--remote-debugging-port=0',
-    `--user-data-dir=${userDataDir}`, `--host-resolver-rules=${mapRules}`, 'about:blank',
+    `--user-data-dir=${userDataDir}`, `--host-resolver-rules=${mapRules}`,
+    // Service workers need a secure context; the mapped test origins are http.
+    '--unsafely-treat-insecure-origin-as-secure=http://allowed.test,http://allowed2.test', 'about:blank',
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
   const port = await new Promise((resolve, reject) => {
     let buf = '';
@@ -198,21 +209,65 @@ function egressVerdict(rawUrl, resourceType, consentedOrigins) {
   return { verdict: 'allow', reason: '' };
 }
 
+// Pauses every request a target sends, every resource type, BEFORE it is sent.
+const INTERCEPT_ALL = { patterns: [{ urlPattern: '*', requestStage: 'Request' }] };
+// New child targets (frames, workers) start paused, so a policy can be put on
+// them before they send anything.
+const AUTO_ATTACH_PAUSED = { autoAttach: true, waitForDebuggerOnStart: true, flatten: true };
+
+/**
+ * Puts the egress policy on one attached target and only then lets it run.
+ * Its own children are attached paused too, so the policy follows the whole
+ * tree. A dedicated worker has no request interception of its own: Chromium
+ * sends its requests through its parent frame, which is already policed
+ * (attached targets only come from policed sessions), so it runs. Any other
+ * target whose interception cannot be enabled stays paused and returns false:
+ * a target the policy cannot see never runs.
+ */
+async function policeTarget(send, sessionId, type) {
+  let policed = 'own interception';
+  try { await send('Fetch.enable', INTERCEPT_ALL, sessionId); } catch {
+    if (type !== 'worker') return false;
+    policed = "parent frame's interception";
+  }
+  await send('Target.setAutoAttach', AUTO_ATTACH_PAUSED, sessionId).catch(() => { /* a target with no children */ });
+  await send('Runtime.runIfWaitingForDebugger', {}, sessionId).catch(() => {});
+  return policed;
+}
+
+/** Decides one paused request by the egress policy and fails or continues it. */
+async function decideRequest(send, msg, consentedOrigins, decisions, where) {
+  const { requestId, request, resourceType } = msg.params;
+  const { verdict, reason } = egressVerdict(request.url, resourceType, consentedOrigins);
+  decisions.push({ verdict, resourceType, url: request.url, reason, where });
+  try {
+    if (verdict === 'block') await send('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' }, msg.sessionId);
+    else await send('Fetch.continueRequest', { requestId }, msg.sessionId);
+  } catch { /* request already gone */ }
+}
+
+/**
+ * The policy on the tab: its own requests, and those of every target inside
+ * it. Out-of-process frames (a cross-site frame under site isolation) and
+ * workers are their own targets, which the tab's interception does not see.
+ */
 async function startEgressPolicy(tabWsUrl, consentedOrigins) {
   const client = cdpClient(tabWsUrl);
   await client.ready;
   const decisions = [];
-  client.on('Fetch.requestPaused', async ({ requestId, request, resourceType }) => {
-    const { verdict, reason } = egressVerdict(request.url, resourceType, consentedOrigins);
-    decisions.push({ verdict, resourceType, url: request.url, reason });
-    try {
-      if (verdict === 'block') await client.send('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' });
-      else await client.send('Fetch.continueRequest', { requestId });
-    } catch { /* request already gone */ }
+  const children = [];
+  const send = (method, params = {}, sessionId) => client.sendRaw(method, params, sessionId);
+  client.onAny(async (msg) => {
+    if (msg.method === 'Fetch.requestPaused') {
+      await decideRequest(send, msg, consentedOrigins, decisions, msg.sessionId ? 'child' : 'tab');
+    } else if (msg.method === 'Target.attachedToTarget') {
+      const { sessionId, targetInfo } = msg.params;
+      children.push({ type: targetInfo.type, policed: await policeTarget(send, sessionId, targetInfo.type) });
+    }
   });
-  // Every request, every resource type, paused BEFORE it is sent.
-  await client.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] });
-  return { decisions, close: () => client.close() };
+  await send('Fetch.enable', INTERCEPT_ALL);
+  await send('Target.setAutoAttach', AUTO_ATTACH_PAUSED);
+  return { decisions, children, close: () => client.close() };
 }
 
 // ── 2. Relay with single-use capabilities and an exclusive lease ────────────
@@ -323,42 +378,68 @@ function redactEvent(method, params) {
 }
 
 /**
- * The privileged browser-level guard against new pages. A page the leased
- * tab opens (a `target=_blank` link, `window.open`) is a new target that the
- * tab's request policy does not cover, and a second tab the lease does not
- * cover either. New targets start paused (waitForDebuggerOnStart), before
- * they send any request. A new page gets a deny-everything request
- * interception first, then is resumed (closing it while paused would leave
- * the opener's window.open waiting) and closed; anything else resumes.
+ * The privileged browser-level guard for new top-level targets, which the
+ * tab's policy does not cover. New targets start paused (waitForDebuggerOnStart),
+ * before they send any request.
+ * - A new page (a `target=_blank` link, `window.open`) would also be a second
+ *   tab the lease does not cover. It gets a deny-everything interception
+ *   first, then is resumed (closing it while paused would leave the opener's
+ *   window.open waiting) and closed.
+ * - Anything else, such as a service worker or shared worker the page starts,
+ *   gets the egress policy before it runs. One whose interception cannot be
+ *   enabled is closed.
  * The CLI drives a dedicated browser profile, so during a lease every new
- * page is one the run opened.
+ * target is one the run started.
  */
-async function startPopupGuard(browserWs, leasedTargetId) {
+async function startPopupGuard(browserWs, leasedTargetId, consentedOrigins) {
   const client = cdpClient(browserWs);
   await client.ready;
   const closed = [];
-  const send = (method, params = {}, sessionId) => client.sendRaw(method, params, sessionId).catch(() => {});
+  const workers = [];
+  const decisions = [];
+  const denyAll = new Set();
+  const send = (method, params = {}, sessionId) => client.sendRaw(method, params, sessionId);
+  const quiet = (method, params, sessionId) => send(method, params, sessionId).catch(() => {});
   const blockedRequests = [];
   client.onAny(async (msg) => {
     if (msg.method === 'Fetch.requestPaused') {
-      blockedRequests.push(msg.params.request.url);
-      await send('Fetch.failRequest', { requestId: msg.params.requestId, errorReason: 'BlockedByClient' }, msg.sessionId);
+      if (!msg.sessionId) {
+        await decideRequest(send, msg, consentedOrigins, decisions, 'browser');
+      } else if (denyAll.has(msg.sessionId)) {
+        blockedRequests.push(msg.params.request.url);
+        await quiet('Fetch.failRequest', { requestId: msg.params.requestId, errorReason: 'BlockedByClient' }, msg.sessionId);
+      } else {
+        await decideRequest(send, msg, consentedOrigins, decisions, 'worker');
+      }
       return;
     }
     if (msg.method !== 'Target.attachedToTarget') return;
     const { sessionId, targetInfo } = msg.params;
     if (targetInfo.type === 'page' && targetInfo.targetId !== leasedTargetId) {
       closed.push(targetInfo.url || '(not yet navigated)');
-      await send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }, sessionId);
-      await send('Runtime.runIfWaitingForDebugger', {}, sessionId);
-      await send('Target.closeTarget', { targetId: targetInfo.targetId });
+      denyAll.add(sessionId);
+      await quiet('Fetch.enable', INTERCEPT_ALL, sessionId);
+      await quiet('Runtime.runIfWaitingForDebugger', {}, sessionId);
+      await quiet('Target.closeTarget', { targetId: targetInfo.targetId });
       return;
     }
-    await send('Runtime.runIfWaitingForDebugger', {}, sessionId);
-    await send('Target.detachFromTarget', { sessionId });
+    if (targetInfo.targetId === leasedTargetId) {
+      // The leased tab has its own policy session.
+      await quiet('Runtime.runIfWaitingForDebugger', {}, sessionId);
+      await quiet('Target.detachFromTarget', { sessionId });
+      return;
+    }
+    const policed = await policeTarget(send, sessionId, targetInfo.type);
+    workers.push({ type: targetInfo.type, policed });
+    if (!policed) await quiet('Target.closeTarget', { targetId: targetInfo.targetId });
   });
-  await client.sendRaw('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
-  return { closed, blockedRequests, close: () => client.close() };
+  // Browser-wide interception, a measured backstop: without it, a burst of
+  // pop-ups sends some first requests before their own targets are paused
+  // (see the ten-pop-up check). Requests the target-level policies let
+  // through reach it too, under the same rules.
+  await send('Fetch.enable', INTERCEPT_ALL);
+  await send('Target.setAutoAttach', AUTO_ATTACH_PAUSED);
+  return { closed, workers, decisions, blockedRequests, close: () => client.close() };
 }
 
 /** Whether a URL is on a site the run may show: consented http(s), or about:blank. */
@@ -553,6 +634,15 @@ const allowed = await countingServer('allowed.test', {
   '/framer': html('<title>framer</title><iframe src="http://offlist.test/"></iframe>'),
   '/xframe': html('<title>xframe</title><iframe src="http://allowed2.test/two"></iframe>'),
   '/file': (req, res) => { res.setHeader('content-type', 'application/octet-stream'); res.setHeader('content-disposition', 'attachment; filename="report.bin"'); res.end('secret bytes'); },
+  // Workers and a cross-site frame that fetch whatever URL they are handed.
+  '/workers': html('<title>workers</title>workers'),
+  '/ping': (req, res) => res.end('pong'),
+  '/dedicated.js': js(`onmessage = (m) => (${TRY_FETCH})(m.data).then((r) => postMessage(r));`),
+  '/shared.js': js(`onconnect = (e) => { const port = e.ports[0]; port.onmessage = (m) => (${TRY_FETCH})(m.data).then((r) => port.postMessage(r)); };`),
+  '/sw.js': js(`self.addEventListener('install', () => self.skipWaiting());
+    self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+    self.addEventListener('message', (e) => e.waitUntil((${TRY_FETCH})(e.data).then((r) => e.source.postMessage(r))));`),
+  '/frame-fetch': html(`<script>(${TRY_FETCH})(new URLSearchParams(location.search).get('u')).then((r) => parent.postMessage(r, '*'));</script>`),
   '/dl': html(`<title>downloads</title>
     <a id="attach" href="/file">attachment</a>
     <a id="blob" download="note.txt" href="#">blob</a>
@@ -565,7 +655,7 @@ const ALLOWED = 'http://allowed.test';
 const policy = await startEgressPolicy(tab.webSocketDebuggerUrl, new Set([ALLOWED, 'http://allowed2.test']));
 const caps = createCapabilityStore();
 const relay = await startRelay(tab.webSocketDebuggerUrl, caps, new Set([ALLOWED, 'http://allowed2.test']));
-const popups = await startPopupGuard(browserWs, tab.id);
+const popups = await startPopupGuard(browserWs, tab.id, new Set([ALLOWED, 'http://allowed2.test']));
 console.log(`Playwright ${require('playwright-core/package.json').version}\n`);
 
 const offHits = () => offlist.hits.filter((h) => !h.startsWith('GET /lib.js')).length;
@@ -660,8 +750,66 @@ try {
     await page.click('#nb', { timeout: 5000, noWaitAfter: true }).catch(() => {});
     await sleep(800);
     const pages = (await (await fetch(`http://127.0.0.1:${cdpPort}/json/list`)).json()).filter((t) => t.type === 'page');
-    check('P2: pages opened by window.open or a target=_blank link send no request', offHits() === before, `off-list server saw ${offHits() - before}`);
+    check('P2: pages opened by window.open or a target=_blank link send no request', offHits() === before, `off-list server saw ${offHits() - before}: ${offlist.hits.slice(-3).join(' | ')}; policy children: ${JSON.stringify(policy.children.filter((c) => c.type === 'page'))}`);
     check('the lease stays one tab: every new page is closed', pages.length === 1 && popups.closed.length >= 3, `${pages.length} page(s); closed ${popups.closed.length}; their requests failed: ${popups.blockedRequests.length}`);
+  }
+
+  {
+    // Workers and out-of-process frames are their own targets, so the tab's
+    // own request interception does not see their requests. A consented page
+    // (or the agent through Runtime.evaluate) starts one and hands it a
+    // private-network URL; it must be blocked like the page's own fetch,
+    // while the same worker still reaches the consented origin.
+    await page.goto(`${ALLOWED}/workers`);
+    const PRIVATE = `http://127.0.0.1:${priv.port}/admin`;
+    const viaWorker = (kind, url) => page.evaluate(async ({ kind, url }) => {
+      const ask = (post, listen) => new Promise((resolve) => { listen(resolve); post(url); setTimeout(() => resolve('timeout'), 4000); });
+      if (kind === 'dedicated worker') { const w = new Worker('/dedicated.js'); return ask((u) => w.postMessage(u), (f) => { w.onmessage = (e) => f(e.data); }); }
+      if (kind === 'shared worker') { const w = new SharedWorker('/shared.js'); w.port.start(); return ask((u) => w.port.postMessage(u), (f) => { w.port.onmessage = (e) => f(e.data); }); }
+      const reg = await navigator.serviceWorker.register('/sw.js');
+      await navigator.serviceWorker.ready;
+      const sw = reg.active ?? reg.waiting ?? reg.installing;
+      return ask((u) => sw.postMessage(u), (f) => { navigator.serviceWorker.onmessage = (e) => f(e.data); });
+    }, { kind, url });
+    // Counted from the policy's own decisions, so a block is the policy's and
+    // not Chromium's private-network protection failing the fetch afterwards.
+    const policyBlocks = (url) => [...policy.decisions, ...popups.decisions].filter((d) => d.verdict === 'block' && d.url === url).length;
+    for (const kind of ['dedicated worker', 'shared worker', 'service worker']) {
+      const before = priv.hits.length;
+      const blocksBefore = policyBlocks(PRIVATE);
+      const blocked = await viaWorker(kind, PRIVATE);
+      await sleep(200);
+      const reached = await viaWorker(kind, `${ALLOWED}/ping`);
+      check(`P2: a ${kind} the page starts cannot reach a private-network address`,
+        priv.hits.length === before && policyBlocks(PRIVATE) > blocksBefore && blocked !== 'reached' && reached === 'reached',
+        `private server saw ${priv.hits.length - before}; policy blocks ${policyBlocks(PRIVATE) - blocksBefore}; private: ${blocked}; consented: ${reached}`);
+    }
+    await page.evaluate(async () => { for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister(); });
+  }
+  {
+    // A consented cross-site frame runs in its own process (site isolation).
+    const before = priv.hits.length;
+    await page.goto(`${ALLOWED}/workers`);
+    const result = await page.evaluate((src) => new Promise((resolve) => {
+      addEventListener('message', (e) => resolve(e.data));
+      const f = document.createElement('iframe'); f.src = src; document.body.append(f);
+      setTimeout(() => resolve('timeout'), 4000);
+    }), `http://allowed2.test/frame-fetch?u=${encodeURIComponent(`http://127.0.0.1:${priv.port}/admin`)}`);
+    await sleep(200);
+    const frameBlocked = policy.decisions.some((d) => d.verdict === 'block' && d.where === 'child' && d.url === `http://127.0.0.1:${priv.port}/admin`);
+    check('P2: a consented cross-site frame cannot reach a private-network address', priv.hits.length === before && frameBlocked && result !== 'reached',
+      `private server saw ${priv.hits.length - before}; blocked in the frame's own target: ${frameBlocked}; frame: ${result}`);
+  }
+
+  {
+    // The same, ten times in a row. Pausing new targets alone let 1 to 3 of
+    // ten send their first request; the browser-wide interception closes it.
+    const before = offHits();
+    await page.goto(`${ALLOWED}/opener`, { timeout: 8000 });
+    for (let i = 0; i < 10; i++) await page.evaluate((n) => { window.open(`http://offlist.test/popup-burst-${n}`); }, i);
+    await sleep(1000);
+    check('P2: ten pop-ups in a row send no request', offHits() === before,
+      `off-list server saw ${offHits() - before}`);
   }
 
   await page.goto(`${ALLOWED}/two`);

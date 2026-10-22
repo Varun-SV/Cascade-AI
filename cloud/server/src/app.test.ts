@@ -474,6 +474,25 @@ describe('cloud/server app', () => {
     expect(why).toMatchObject({ tier: 'T3', model: 'openai:nano' });
   });
 
+  it('adds a turn resent with the same run id once, and refuses a malformed run id', async () => {
+    const cookie = await login('Retrying device');
+    const j = { 'Content-Type': 'application/json', Cookie: cookie };
+    const cid = ((await (await fetch(`${baseUrl}/api/conversations`, {
+      method: 'POST', headers: j, body: JSON.stringify({ title: 'Flaky network' }),
+    })).json()) as { conversation: { id: string } }).conversation.id;
+    const send = (runId: unknown) => fetch(`${baseUrl}/api/conversations/${cid}/turns`, {
+      method: 'POST', headers: j,
+      body: JSON.stringify({ userContent: 'q', runId, assistant: { content: 'a', costUsd: 0.01, why: JSON.stringify({ totalTokens: 10 }) } }),
+    });
+    expect((await send('5f0c2a3e-1111-4222-8333-944445555666')).status).toBe(200);
+    const again = await send('5f0c2a3e-1111-4222-8333-944445555666');
+    expect(again.status).toBe(200);
+    expect(((await again.json()) as { messages: unknown[] }).messages).toHaveLength(2);
+    for (const bad of ['short', 'has spaces in it', 42, 'x'.repeat(65)]) expect((await send(bad)).status).toBe(400);
+    const report = await (await fetch(`${baseUrl}/api/usage/report?period=today`, { headers: { Cookie: cookie } })).json() as { totals: { runs: number } };
+    expect(report.totals.runs).toBe(1);
+  });
+
   it('counts a device run that ended without a reply, as the CLI sends it', async () => {
     const cookie = await login('Failed run user');
     const other = await login('Not the owner');

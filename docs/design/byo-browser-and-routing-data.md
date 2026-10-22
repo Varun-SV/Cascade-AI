@@ -294,16 +294,23 @@ depth.
   - **No second page.** A page the leased tab opens (`target=_blank`,
     `window.open`, with or without `noopener`) is a new target outside the
     tab's request policy and outside the lease. The device's browser-level
-    session holds every new target paused before it sends anything; a new
-    page gets a deny-everything request interception, is resumed and is
-    closed. (CLI: a dedicated profile, so every new page during a lease is
+    session holds every new target paused; a new page gets a
+    deny-everything request interception, is resumed and is closed, and
+    any other new target (a service or shared worker) gets the request
+    policy before it runs. Pausing alone is not enough: in a burst of ten
+    `window.open` calls, 1 to 3 pop-ups sent their first request before
+    their target was paused. With the browser-wide interception also on,
+    40 pop-ups and 12 full runs sent none. It never recorded the block
+    itself, so it seems to work by changing how Chromium orders the
+    pop-up's navigation; the mechanism isn't pinned down, and the
+    extension's P2 run must show the same with its own tools. (CLI: a dedicated profile, so every new page during a lease is
     the run's. Desktop: `setWindowOpenHandler` denies. Extension: its P2
     run must show the same for `chrome.tabs.onCreated` with an
     `openerTabId` of the leased tab.)
   - Changing the list is a reviewed policy change with a version number.
   - Method names alone don't express side effects. `Runtime.evaluate`
     stays privileged page script by design (§4.3, honest limit).
-  - `poc-egress-and-lease.mjs` checks all of this (46/46):
+  - `poc-egress-and-lease.mjs` checks all of this (51/51):
     - an allowlisted method works on a nested cross-site iframe session
     - `Emulation.setGeolocationOverride` through that nested session is
       refused
@@ -320,7 +327,8 @@ depth.
       a fresh one still connects
     - pages opened by `window.open` (with and without `noopener`) and by a
       `target=_blank` link: the off-list server saw 0 requests and the tab
-      stayed the only page (without the guard: 3 requests, 4 pages)
+      stayed the only page (without the guard: 3 requests, 4 pages); ten
+      pop-ups in a row: 0 requests
     - after a blocked navigation, the agent's history has no off-list URL
       and going back to that entry is refused; going back to a consented
       entry works
@@ -347,9 +355,9 @@ can neither see nor disable that channel:
 
 | Source | Mechanism |
 |---|---|
-| CLI | The policy's own CDP session on the tab: `Fetch.enable` for every URL at the **Request** stage |
+| CLI | The policy's own CDP session on the tab: `Fetch.enable` for every URL at the **Request** stage. Out-of-process frames and workers are their own targets, which the tab's interception does not see, so the policy also auto-attaches every child target **paused**, puts the same interception on it, and only then resumes it; a child it cannot intercept stays paused (a dedicated worker, whose requests go through its parent frame, runs). A browser-level session does the same for new top-level targets (service and shared workers) and keeps a browser-wide interception as a backstop |
 | Desktop | `session.webRequest.onBeforeRequest` on the built-in browser's partition, in Electron's main process |
-| Extension | `declarativeNetRequest` session rules scoped to the leased tab; `Fetch` through `chrome.debugger` as a fallback |
+| Extension | `declarativeNetRequest` session rules scoped to the leased tab; `Fetch` through `chrome.debugger` as a fallback. Requests from service and shared workers carry no tab id (`-1`), so tab-scoped rules miss them; the extension's P2 run must show workers the page starts are covered too |
 
 **Rules, applied to every request before it is sent:**
 
@@ -391,7 +399,12 @@ following:
 - an iframe
 
 A `fetch` to a 127.0.0.1 address was failed by the policy, not merely by
-the browser. A public script from a non-consented origin loaded, which is
+the browser. So was the same `fetch` from a dedicated worker, a shared
+worker and a service worker the page started, and from a consented
+cross-site frame (its own process): the private server saw 0 requests and
+the block is in the policy's own log. Before child targets were policed,
+the shared worker, the service worker and the frame each reached it. The
+same workers still reach the consented origin. A public script from a non-consented origin loaded, which is
 the stated limit. `Fetch.disable` from the agent was refused.
 
 - **Honest limit (page data):** page script reachable through
