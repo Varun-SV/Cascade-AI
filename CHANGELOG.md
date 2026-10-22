@@ -113,8 +113,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.135, pdfkit 0.20, KaTeX 0.19, lucide-react 1.x (whose brand icons are
   gone, so GitHub and Slack show generic ones), DOMPurify 3.4.17 and the
   minor and patch group. Native modules are rebuilt for Electron 41.
+- **Building the desktop app on Windows works with Visual Studio 2026.** The
+  native-module rebuild tool (`@electron/rebuild`) moves from 3.x to 4.2.1,
+  whose `node-gyp` recognises Visual Studio 2026 as well as 2019 and 2022.
 
 ### Fixed
+- **You can start a new chat from the session sidebar.** Before, only the Code
+  view's chat picker and the command palette could. The sidebar (and its
+  collapsed rail) now has a New chat button: Mission Control and Chat start the
+  fresh session in place, and other views open Chat.
 - **A misspelled tool name no longer runs a tool that needs approval.** When
   a call failed, the worker retried it with a tool whose name shared a word
   with it, without asking — so `browser_click`, which needs no approval
