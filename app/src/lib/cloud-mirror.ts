@@ -26,7 +26,7 @@ export interface CloudMirrorApi {
   status(): Promise<{ signedIn: boolean; user: { id: string } | null; serverUrl: string }>;
   createConversation(title?: string): Promise<{ ok: boolean; conversation?: { id: string } }>;
   appendTurn(id: string, turn: { userContent: string; assistant: { content: string; costUsd?: number; why?: string } }): Promise<{ ok: boolean }>;
-  recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string }): Promise<{ ok: boolean }>;
+  recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string }): Promise<{ ok: boolean }>;
 }
 
 /**
@@ -61,6 +61,9 @@ export function storedChatLinks(key = 'cascade.cloudChats', max = 500): ChatLink
     delete: (k) => { if (memory.delete(k)) save(); },
   };
 }
+
+const newRunId = (): string =>
+  (globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`);
 
 export class CloudMirror {
   /** Runs are sent one at a time, in the order they ended. */
@@ -105,11 +108,14 @@ export class CloudMirror {
     // copied for this session if there is one. It never creates an empty chat.
     if (!api.recordRunSpend) return;
     const conversationId = this.chats.get(key) ?? null;
-    const sent = await api.recordRunSpend({ conversationId, outcome, ...run.cloud });
+    // One id for this run, so a resend is recorded once even if the first
+    // request was recorded and only its answer was lost.
+    const runId = newRunId();
+    const sent = await api.recordRunSpend({ conversationId, outcome, runId, ...run.cloud });
     // A chat the account can no longer reach: count the run on its own.
     if (!sent.ok && conversationId) {
       this.chats.delete(key);
-      await api.recordRunSpend({ conversationId: null, outcome, ...run.cloud });
+      await api.recordRunSpend({ conversationId: null, outcome, runId, ...run.cloud });
     }
   }
 

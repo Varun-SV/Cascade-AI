@@ -37,22 +37,22 @@ describe('CloudMirror', () => {
     await mirror.accounted({ sessionId: 's1', prompt: 'q', output: '', outcome: 'stopped', copyTurn: true, cloud: accounting });
     await mirror.accounted({ sessionId: 's2', prompt: 'q', output: '', outcome: 'answered', copyTurn: true, cloud: accounting });
     expect(api.createConversation).not.toHaveBeenCalled();
-    expect(api.recordRunSpend).toHaveBeenNthCalledWith(1, { conversationId: null, outcome: 'stopped', ...accounting });
-    expect(api.recordRunSpend).toHaveBeenNthCalledWith(2, { conversationId: null, outcome: 'answered', ...accounting });
+    expect(api.recordRunSpend).toHaveBeenNthCalledWith(1, { conversationId: null, outcome: 'stopped', runId: expect.any(String), ...accounting });
+    expect(api.recordRunSpend).toHaveBeenNthCalledWith(2, { conversationId: null, outcome: 'answered', runId: expect.any(String), ...accounting });
   });
 
   it('counts a scheduled run\'s spend without copying it as a chat', async () => {
     const { api, mirror } = setup();
     await mirror.accounted(answered('sched', { copyTurn: false }));
     expect(api.appendTurn).not.toHaveBeenCalled();
-    expect(api.recordRunSpend).toHaveBeenCalledWith({ conversationId: null, outcome: 'answered', ...accounting });
+    expect(api.recordRunSpend).toHaveBeenCalledWith({ conversationId: null, outcome: 'answered', runId: expect.any(String), ...accounting });
   });
 
   it('records a failed run against the chat already copied', async () => {
     const { api, mirror } = setup();
     await mirror.accounted(answered('s1'));
     await mirror.accounted({ sessionId: 's1', outcome: 'failed', cloud: accounting });
-    expect(api.recordRunSpend).toHaveBeenCalledWith({ conversationId: 'c1', outcome: 'failed', ...accounting });
+    expect(api.recordRunSpend).toHaveBeenCalledWith({ conversationId: 'c1', outcome: 'failed', runId: expect.any(String), ...accounting });
   });
 
   it('continues the same cloud chat after a restart', async () => {
@@ -80,7 +80,11 @@ describe('CloudMirror', () => {
     const other = setup(false, links([['https://cloud|u1|s2', 'deleted-chat']]));
     other.api.recordRunSpend.mockResolvedValueOnce({ ok: false }).mockResolvedValue({ ok: true });
     await other.mirror.accounted({ sessionId: 's2', outcome: 'failed', cloud: accounting });
-    expect(other.api.recordRunSpend.mock.calls.map((c) => (c[0] as { conversationId: string | null }).conversationId)).toEqual(['deleted-chat', null]);
+    const calls = other.api.recordRunSpend.mock.calls.map((c) => c[0] as { conversationId: string | null; runId: string });
+    expect(calls.map((c) => c.conversationId)).toEqual(['deleted-chat', null]);
+    // The same run id both times: if the first was recorded after all, the second is not.
+    expect(calls[0]!.runId).toBeTruthy();
+    expect(calls[1]!.runId).toBe(calls[0]!.runId);
   });
 
   it('sends nothing while signed out', async () => {

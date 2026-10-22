@@ -5,6 +5,7 @@ import os from 'node:os';
 import Database from 'better-sqlite3';
 import { CloudStore } from './db.js';
 import { buildSpendReport, spendEntryFromRun, type SpendOutcome } from './spend.js';
+import { recordSettledRunSpend } from './runs.js';
 
 const DAY = 86_400_000;
 const NOW = Date.UTC(2026, 8, 29, 12, 0);
@@ -169,6 +170,26 @@ describe('spend ledger', () => {
     expect(r.totals.runs).toBe(1);
     expect(r.totals.spentUsd).toBeCloseTo(0.03, 9);
     expect(r.tiers[0]!.models[0]!.model).toBe('openai:mini');
+  });
+
+  it('records a hosted run once its late calls have settled', async () => {
+    const u = user('late');
+    // The router as a run leaves it: one call still in flight.
+    let tokens = 1000; let settle!: () => void;
+    const router = {
+      whenRunSettled: () => new Promise<boolean>((r) => { settle = () => { tokens = 1500; r(true); }; }),
+      getStats: () => ({ totalCostUsd: tokens / 1e6, totalTokens: tokens, costByTierModel: { T3: { 'openai:mini': tokens / 1e6 } }, tokensByTierModel: { T3: { 'openai:mini': tokens } }, untrackedByTierModel: {} }) as never,
+      getDelegationSavings: () => ({ savedUsd: 0 }),
+    };
+    const done = recordSettledRunSpend(store, router, (st) => spendEntryFromRun({
+      id: 'hosted-1', userId: u.id, conversationId: null, at: Date.now(), costUsd: st.totalCostUsd,
+      why: { costByModel: st.costByTierModel, tokensByModel: st.tokensByTierModel, unpricedByModel: {}, totalTokens: st.totalTokens },
+    }));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals.runs).toBe(0);
+    settle();
+    await done;
+    expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals).toMatchObject({ runs: 1, tokens: 1500 });
   });
 
   it('counts an old CLI\'s sync by what each run added, not the running total it sent', () => {

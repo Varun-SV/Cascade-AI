@@ -499,6 +499,12 @@ describe('cloud/server app', () => {
     // apart from deleted chats, and no empty chat is made for it.
     expect(await (await post({ conversationId: null, outcome: 'failed', costUsd: 0.001, why })).json()).toEqual({ recorded: true });
 
+    // The same device run id twice is one run: a resend after a lost answer.
+    const once = { outcome: 'failed', costUsd: 0.002, why, runId: 'run-0001-aaaa' };
+    expect((await post(once)).status).toBe(200);
+    expect((await post(once)).status).toBe(200);
+    expect((await post({ ...once, runId: 'bad id!' })).status).toBe(400);
+
     // Nothing billed: nothing kept. Bad input and someone else's chat: refused.
     expect(await (await post({ outcome: 'stopped', costUsd: 0, why: '{}' })).json()).toEqual({ recorded: false });
     for (const bad of [{ outcome: 'done', costUsd: 1, why }, { outcome: 'failed', costUsd: -1, why }, { outcome: 'failed', costUsd: 1 }]) {
@@ -512,8 +518,8 @@ describe('cloud/server app', () => {
       tiers: Array<{ tier: string; models: Array<{ model: string; unpricedRuns: number; priceUnknownRuns: number }> }>;
       chats: Array<{ title: string | null; noChat: boolean }>;
     };
-    expect(body.totals).toMatchObject({ runs: 2, failedRuns: 2 });
-    expect(body.totals.failedUsd).toBeCloseTo(0.005, 8);
+    expect(body.totals).toMatchObject({ runs: 3, failedRuns: 3 });
+    expect(body.totals.failedUsd).toBeCloseTo(0.007, 8);
     expect(body.chats.map((c) => [c.title, c.noChat])).toEqual([['Broke halfway', false], [null, true]]);
     const convos = (await (await fetch(`${baseUrl}/api/conversations`, { headers: { Cookie: cookie } })).json()) as { conversations: Array<{ id: string }> };
     expect(convos.conversations.map((c) => c.id)).toEqual([cid]);

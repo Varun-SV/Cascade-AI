@@ -134,7 +134,7 @@ declare global {
         messages(id: string): Promise<{ ok: boolean; error?: string; messages: CloudMsg[] }>;
         createConversation(title?: string): Promise<{ ok: boolean; error?: string; conversation?: { id: string; title: string | null } }>;
         appendTurn(id: string, turn: CloudTurn): Promise<{ ok: boolean; error?: string; messages: CloudMsg[] }>;
-        recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string }): Promise<{ ok: boolean; error?: string; recorded?: boolean }>;
+        recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string }): Promise<{ ok: boolean; error?: string; recorded?: boolean }>;
         selectBranch(id: string, messageId: string): Promise<{ ok: boolean; error?: string; messages: CloudMsg[] }>;
         deleteMessage(id: string, messageId: string): Promise<{ ok: boolean; error?: string; messages: CloudMsg[] }>;
         renameConversation(id: string, title: string): Promise<{ ok: boolean; error?: string }>;

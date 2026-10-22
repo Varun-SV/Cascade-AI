@@ -334,6 +334,8 @@ export class CloudClient {
    */
   async recordRunSpend(run: {
     conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string;
+    /** The device's id for this run: the same id sent twice is recorded once. */
+    runId?: string;
   }): Promise<{ recorded: boolean }> {
     return this.authed<{ recorded: boolean }>('/api/usage/runs', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(run),

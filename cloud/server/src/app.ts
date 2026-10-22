@@ -573,11 +573,15 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   // no reply is added to the ledger the same way (runs.ts); the CLI and the
   // desktop app otherwise report a run only through /turns.
   app.post('/api/usage/runs', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
-    const body = req.body as { conversationId?: unknown; outcome?: unknown; costUsd?: unknown; why?: unknown };
+    const body = req.body as { conversationId?: unknown; outcome?: unknown; costUsd?: unknown; why?: unknown; runId?: unknown };
     const outcome = body?.outcome === 'answered' || body?.outcome === 'failed' || body?.outcome === 'stopped' ? body.outcome : null;
     const costUsd = typeof body?.costUsd === 'number' && Number.isFinite(body.costUsd) && body.costUsd >= 0 ? body.costUsd : null;
     const why = typeof body?.why === 'string' && body.why.length <= MAX_RUN_WHY_LEN ? body.why : null;
-    if (!outcome || costUsd === null || why === null) {
+    // The device's own id for the run: sending it again (a retry, or the same
+    // run with no chat after its chat was gone) records it once, not twice.
+    const runId = body?.runId === undefined ? randomUUID()
+      : typeof body.runId === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(body.runId) ? body.runId : null;
+    if (!outcome || costUsd === null || why === null || runId === null) {
       res.status(400).json({ error: 'outcome (answered|failed|stopped), costUsd and why are required' }); return;
     }
     const userId = req.session!.userId;
@@ -588,7 +592,8 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       }
       conversationId = body.conversationId;
     }
-    const entry = spendEntryFromRun({ id: randomUUID(), userId, conversationId, at: Date.now(), costUsd, why, outcome });
+    // Scoped to the account, so one user's id can never name another's row.
+    const entry = spendEntryFromRun({ id: `device:${userId}:${runId}`, userId, conversationId, at: Date.now(), costUsd, why, outcome });
     // Nothing billed, nothing to keep.
     if (entry.costUsd === 0 && entry.tokens === 0 && entry.lines.length === 0) { res.json({ recorded: false }); return; }
     store.recordSpend(entry);

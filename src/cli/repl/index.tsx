@@ -397,7 +397,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     // A call with no price and no usage reported still happened, and may have cost money.
     if (report.totalCostUsd <= 0 && report.totalTokens <= 0 && Object.keys(report.unpricedByModel).length === 0) return;
     try {
-      await mirror.client.recordRunSpend({ conversationId: mirror.convId, outcome, ...cloudTurnAccounting(report) });
+      await mirror.client.recordRunSpend({ conversationId: mirror.convId, outcome, runId: randomUUID(), ...cloudTurnAccounting(report) });
     } catch { /* best-effort — the local run's error is what the user sees */ }
   }, []);
   /**

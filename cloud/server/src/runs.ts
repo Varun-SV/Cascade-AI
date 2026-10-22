@@ -17,6 +17,7 @@ import {
 import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ApprovalRequest, ProviderConfig, BrowserAllowance, BrowserInput } from '#cascade-ai';
 import { attachRemoteBrowser, providerRationsSessions } from './remote-browser.js';
 import type { ClarificationAnswer } from '#cascade-ai';
+type RouterStats = ReturnType<ReturnType<Cascade['getRouter']>['getStats']>;
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { z, type ZodError } from 'zod';
@@ -883,6 +884,24 @@ function recordRunSpend(store: CloudStore, entry: SpendEntry): void {
   } catch (err) {
     console.error(`[spend] could not record run ${entry.id}:`, err);
   }
+}
+
+/**
+ * Add a run to the spend ledger once every call it made has settled (up to
+ * 30 s), from the router's stats as they are then: a parallel call that lands
+ * after `cascade.run()` returned is still this run's spend. The reply itself
+ * is not held back for it. Each hosted run has its own router.
+ */
+export function recordSettledRunSpend(
+  store: CloudStore,
+  router: { whenRunSettled(): Promise<boolean>; getStats(): RouterStats; getDelegationSavings(): { savedUsd: number } },
+  build: (stats: RouterStats, savedUsd: number) => SpendEntry | null,
+): Promise<void> {
+  return (async () => {
+    try { await router.whenRunSettled(); } catch { /* record what there is */ }
+    const entry = build(router.getStats(), router.getDelegationSavings().savedUsd);
+    if (entry) recordRunSpend(store, entry);
+  })();
 }
 
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
@@ -2328,9 +2347,18 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
     });
     store.incrementUsage(userId, todayKey());
     const cancelled = signal?.aborted ?? false;
-    recordRunSpend(store, spendEntryFromRun({
+    // The ledger takes the run's final figures, late calls included; the
+    // reply keeps the /why it was answered with.
+    void recordSettledRunSpend(store, cascade.getRouter(), (settled, savedUsd) => spendEntryFromRun({
       id: assistantMessage.id, userId, conversationId: conversation.id, at: assistantMessage.createdAt,
-      costUsd: result.usage.estimatedCostUsd, why, outcome: cancelled ? 'stopped' : 'answered',
+      costUsd: Math.max(result.usage.estimatedCostUsd, settled.totalCostUsd),
+      why: {
+        ...why, savedUsd,
+        totalCostUsd: settled.totalCostUsd, totalTokens: settled.totalTokens,
+        costByModel: settled.costByTierModel, tokensByModel: settled.tokensByTierModel,
+        unpricedByModel: settled.untrackedByTierModel,
+      },
+      outcome: cancelled ? 'stopped' : 'answered',
     }));
     socket.emit('run:why', { conversationId: conversation.id, messageId: assistantMessage.id, ...why });
     socket.emit('session:complete', { conversationId: conversation.id, result, cancelled });
@@ -2373,18 +2401,20 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
     console.error(`[run ${conversation.id}] failed:`, err);
     // A run that failed part-way leaves no reply, but its calls were billed —
     // and what its cheaper tiers saved is as real as on an answered run.
-    const spent = cascade.getRouter().getStats();
-    if (spent.totalCostUsd > 0 || spent.totalTokens > 0) {
-      recordRunSpend(store, spendEntryFromRun({
-        id: randomUUID(), userId, conversationId: conversation.id, at: Date.now(), costUsd: spent.totalCostUsd,
-        why: {
-          costByModel: spent.costByTierModel, tokensByModel: spent.tokensByTierModel,
-          unpricedByModel: spent.untrackedByTierModel, totalTokens: spent.totalTokens,
-          savedUsd: cascade.getRouter().getDelegationSavings().savedUsd,
-        },
-        outcome: 'failed',
-      }));
-    }
+    // A call with no price and no usage reported still happened, and may
+    // have cost money, so it counts as spending too.
+    const failedAt = Date.now();
+    void recordSettledRunSpend(store, cascade.getRouter(), (spent, savedUsd) =>
+      spent.totalCostUsd > 0 || spent.totalTokens > 0 || spent.untrackedCostCalls > 0
+        ? spendEntryFromRun({
+          id: randomUUID(), userId, conversationId: conversation.id, at: failedAt, costUsd: spent.totalCostUsd,
+          why: {
+            costByModel: spent.costByTierModel, tokensByModel: spent.tokensByTierModel,
+            unpricedByModel: spent.untrackedByTierModel, totalTokens: spent.totalTokens, savedUsd,
+          },
+          outcome: 'failed',
+        })
+        : null);
     socket.emit('session:error', { conversationId: conversation.id, error: message });
     throw err;
   } finally {
