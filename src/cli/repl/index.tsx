@@ -31,6 +31,7 @@ import { Cascade, type DecisionLogEntry } from '../../core/cascade.js';
 import { MemoryStore } from '../../memory/store.js';
 import { CloudClient } from '../../cloud/client.js';
 import { cloudTurnAccounting, settledRunReport, type CloudRunReport } from '../../cloud/run-report.js';
+import { syncRunSpend, syncTurn } from '../../cloud/device-sync.js';
 import { ModelSelector } from '../../core/router/selector.js';
 import { OpenAIProvider } from '../../providers/openai.js';
 import { GeminiProvider } from '../../providers/gemini.js';
@@ -389,21 +390,9 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       userContent, runId, ...(outcome === 'stopped' ? { outcome } : {}),
       assistant: { content: assistant.content, costUsd: assistant.costUsd, why: assistant.why },
     };
-    try {
-      const convId = await ensureCloudConversation(mirror, userContent);
-      for (let attempt = 0; ; attempt++) {
-        try { await mirror.client.appendTurn(convId, turn); return; } catch (err) {
-          // A chat that is gone is not tried again.
-          if (attempt >= 1 || /\(404\)/.test(err instanceof Error ? err.message : '')) throw err;
-        }
-      }
-    } catch {
-      // Best-effort mirror: offline, revoked token, etc. The local run is
-      // unaffected. What it spent still counts, under the same run id, so a
-      // turn that got through after all is not counted twice.
-      await mirror.client.recordRunSpend({ conversationId: null, outcome, runId, costUsd: assistant.costUsd, why: assistant.why })
-        .catch(() => { /* best-effort */ });
-    }
+    // Best-effort mirror: offline, revoked token, etc. The local run is
+    // unaffected, and what it spent still counts.
+    await syncTurn(mirror, turn, () => ensureCloudConversation(mirror, userContent)).catch(() => { /* best-effort */ });
   }, [ensureCloudConversation]);
   /**
    * A run with no turn to sync still spent money: add it to the account's
@@ -416,9 +405,9 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     if (!mirror || process.env['CASCADE_NO_CLOUD_SYNC']) return;
     // A call with no price and no usage reported still happened, and may have cost money.
     if (report.totalCostUsd <= 0 && report.totalTokens <= 0 && Object.keys(report.unpricedByModel).length === 0) return;
-    try {
-      await mirror.client.recordRunSpend({ conversationId: mirror.convId, outcome, runId: randomUUID(), ...cloudTurnAccounting(report) });
-    } catch { /* best-effort — the local run's error is what the user sees */ }
+    // Best-effort — the local run's error is what the user sees.
+    await syncRunSpend(mirror, { conversationId: mirror.convId, outcome, runId: randomUUID(), ...cloudTurnAccounting(report) })
+      .catch(() => { /* best-effort */ });
   }, []);
   /**
    * Runs are sent to the cloud one at a time, in the order they ended: a run

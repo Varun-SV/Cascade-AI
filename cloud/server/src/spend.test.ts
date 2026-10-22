@@ -205,6 +205,20 @@ describe('report periods', () => {
       expect(byDay['2026-10-26']).toBe(4);
     });
 
+    it('starts a day whose midnight happens twice at the first one', () => {
+      // Casey went from UTC+11 to UTC+8 at 03:00 on 17 Mar 2019: midnight
+      // came at 13:00 UTC on the 16th, and again at 16:00 UTC.
+      const r = periodRange('today', 'Antarctica/Casey', Date.UTC(2019, 2, 17, 2, 0), null);
+      expect(r.fromMs).toBe(Date.UTC(2019, 2, 16, 13, 0));
+      expect(bucketKey(Date.UTC(2019, 2, 16, 13, 30), 'Antarctica/Casey', 'day')).toBe('2019-03-17');
+    });
+
+    it('starts a day with no midnight at its first instant', () => {
+      // Santiago skipped from 00:00 to 01:00 on 12 Aug 2018 (UTC-4 to UTC-3).
+      const r = periodRange('today', 'America/Santiago', Date.UTC(2018, 7, 12, 15, 0), null);
+      expect(r.fromMs).toBe(Date.UTC(2018, 7, 12, 4, 0));
+    });
+
     it('accepts a real zone name and refuses anything else', () => {
       expect(parseTimeZone('Europe/London')).toBe('Europe/London');
       expect(parseTimeZone('America/Argentina/Buenos_Aires')).toBe('America/Argentina/Buenos_Aires');

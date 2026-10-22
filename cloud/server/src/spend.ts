@@ -240,15 +240,24 @@ const dateKey = (y: number, mo: number, d: number) => `${y}-${pad(mo)}-${pad(d)}
 /** The first instant of a local calendar date. */
 function startOfDate(y: number, mo: number, d: number, zone: TimeZone): number {
   const wall = Date.UTC(y, mo - 1, d);
-  // The offset at the guess, then at the instant it gives: right on either
-  // side of a daylight-saving change near midnight.
-  let t = wall - offsetAt(wall, zone) * 60_000;
-  t = wall - offsetAt(t, zone) * 60_000;
+  const day = dateKey(y, mo, d);
+  const readsAsMidnight = (t: number) => {
+    const l = localTime(t, zone);
+    return dateKey(l.y, l.mo, l.d) === day && l.h === 0 && l.mi === 0 && l.s === 0;
+  };
+  // Midnight under each offset in force within a day of it. When clocks go
+  // back across midnight it happens twice, and the day starts at the first.
+  const DAY = 86_400_000;
+  const offsets = new Set([-DAY, 0, DAY].map((k) => offsetAt(wall + k, zone)));
+  const midnights = [...offsets].map((o) => wall - o * 60_000).filter(readsAsMidnight);
+  if (midnights.length > 0) return Math.min(...midnights);
   // A zone whose clocks skip midnight starts that day at the first instant
   // that reads as it.
-  for (let i = 0; i < 4; i++) {
+  let t = wall - offsetAt(wall, zone) * 60_000;
+  t = wall - offsetAt(t, zone) * 60_000;
+  for (let i = 0; i < 8; i++) {
     const l = localTime(t, zone);
-    if (dateKey(l.y, l.mo, l.d) >= dateKey(y, mo, d)) break;
+    if (dateKey(l.y, l.mo, l.d) >= day) break;
     t += 15 * 60_000;
   }
   return t;
