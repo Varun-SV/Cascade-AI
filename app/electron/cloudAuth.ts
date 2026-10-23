@@ -54,7 +54,7 @@ interface CloudMsg {
 /** A locally-executed turn to persist into the shared cloud conversation. */
 interface CloudTurn {
   userContent: string;
-  assistant: { content: string; tier?: string | null; model?: string | null; costUsd?: number | null };
+  assistant: { content: string; tier?: string | null; model?: string | null; costUsd?: number | null; why?: string | null };
   editOfMessageId?: string;
   regenerateFromUserMessageId?: string;
 }
@@ -68,6 +68,7 @@ interface CloudClientLike {
   getMessages(id: string): Promise<CloudMsg[]>;
   createConversation(title?: string): Promise<{ id: string; title: string | null }>;
   appendTurn(id: string, turn: CloudTurn): Promise<CloudMsg[]>;
+  recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string; endedAt?: number }): Promise<{ recorded: boolean }>;
   selectBranch(id: string, messageId: string): Promise<CloudMsg[]>;
   deleteMessage(id: string, messageId: string): Promise<CloudMsg[]>;
   renameConversation(id: string, title: string): Promise<void>;
@@ -245,6 +246,21 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
   ipcMain.handle('cloud:appendTurn', async (_e, id: unknown, turn: unknown) => {
     try { return { ok: true, messages: await client().appendTurn(String(id), turn as CloudTurn) }; }
     catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not save that turn.', messages: [] }; }
+  });
+
+  // A local run with no turn to copy: its spend goes to the account's report
+  // all the same. The renderer's input is checked, not trusted.
+  ipcMain.handle('cloud:recordRunSpend', async (_e, run: unknown) => {
+    const r = (run && typeof run === 'object' ? run : {}) as Record<string, unknown>;
+    const outcome = r['outcome'] === 'answered' || r['outcome'] === 'failed' || r['outcome'] === 'stopped' ? r['outcome'] : null;
+    const costUsd = typeof r['costUsd'] === 'number' && Number.isFinite(r['costUsd']) && r['costUsd'] >= 0 ? r['costUsd'] : null;
+    const why = typeof r['why'] === 'string' ? r['why'] : null;
+    const conversationId = typeof r['conversationId'] === 'string' ? r['conversationId'] : null;
+    const runId = typeof r['runId'] === 'string' ? r['runId'] : undefined;
+    const endedAt = typeof r['endedAt'] === 'number' && Number.isFinite(r['endedAt']) ? r['endedAt'] : undefined;
+    if (!outcome || costUsd === null || why === null) return { ok: false, error: 'Invalid run.' };
+    try { return { ok: true, ...(await client().recordRunSpend({ conversationId, outcome, costUsd, why, ...(runId ? { runId } : {}), ...(endedAt !== undefined ? { endedAt } : {}) })) }; }
+    catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not record that run.' }; }
   });
 
   ipcMain.handle('cloud:selectBranch', async (_e, id: unknown, messageId: unknown) => {

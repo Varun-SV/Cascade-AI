@@ -5,7 +5,7 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.83.0 - 2026-10-13
+## 0.84.0 - 2026-10-22
 
 <!-- One `### Added` / `### Changed` / `### Fixed` per release, not per PR.
      The release workflow copies this whole block verbatim into the GitHub
@@ -19,30 +19,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
 ### Added
-- **The MIT License text, in `LICENSE`.** Cascade AI was already declared
-  MIT in its package metadata and README, but the licence itself was not in
-  the repository, so the README's licence link went nowhere. It now ships at
-  the root and in the npm package.
-- **A daily allowance of browser sessions: 5 a day on Free, 50 on Pro.** A
-  session is claimed the moment one is about to be opened, which is what the
-  provider bills for, and returned if none was, so a Browser-chip run that
-  never needs the browser costs nothing and concurrent runs cannot share the
-  last one. Each claim is returned on its own, so two opens at once never
-  leave a session that did not open counted. Once the day's sessions are gone the Browser chip switches
-  off and says when they reset (midnight UTC), and it stays off until
-  today's count has been read for this sign-in, so it cannot be turned on
-  for a run that will be refused. A run sent with it anyway is refused before anything is
-  spent, and a run that runs out partway through
-  is refused the next session with the same message shown in the chat. If
-  the allowance cannot be checked, the chat says so too, and a later refusal
-  for a different reason is shown as well. The
-  chip's tooltip shows how many are left today, and it follows a plan change
-  in either direction without a reload. A deployment without a browser
-  never asks for it. After a reconnect, the newest browser refusal is the
-  one shown. Only billed sessions are rationed:
-  a deployment driving its own browser over CDP opens none, so it has no
-  daily limit.
-
+- **A spend & savings report in the cloud app.** What your runs cost and
+  what delegating below T1 saved, over today, 7 or 30 days, or all time:
+  totals, a chart by hour, day or month, each tier's spend split by the
+  models that served it, and the chats that cost the most. It opens from the
+  account menu, the saved figure at the top of a chat, and a reply's /why.
+  Every run is kept in a ledger apart from the chat it came from, so
+  deleting a chat does not take its cost off the report, and runs that
+  failed or were stopped are counted too; replies already stored are counted
+  once, when the ledger is first made. Days end at your local midnight under
+  your time zone's own rules, so a day with a daylight-saving change has 23
+  or 25 hours and a run near midnight lands on the right day. A free local
+  model shows $0.00; only a model with no published price shows "no price",
+  even when it reported no usage. The saved figure is the sum of each run's
+  saving, so no percentage of an all-T1 total is claimed for a period.
+  Runs on the CLI or the desktop app count too: each sends its own cost and
+  /why with the chat it copies to your account (`cloudRunReport`), so the
+  report splits them by tier and model like a hosted run, and the web shows
+  their /why. A run there that fails, is stopped, or answers with no text
+  is sent too, with no reply, even if it finishes while another chat is
+  open, as is the spend of a desktop scheduled task (which is not copied as
+  a chat). One with no chat yet counts under "Runs with no chat" rather than
+  leaving an empty chat behind, the desktop keeps adding to the same cloud
+  chat after a restart, and runs reach the cloud in the order they ended. The CLI used to send the whole session's cost with
+  every reply; it now sends that run's alone, and a call from the previous
+  run that settles late stays with that run: the CLI waits up to 30 seconds
+  for a run's last calls before sending its report. An older run whose $0
+  model may have had no price counts no saving, since its saving cannot be
+  checked. A reply from an older CLI,
+  stored or still arriving, is counted at what its running total grew by.
+  `GET /api/usage/report` (`tz` takes a time zone name), and
+  `POST /api/usage/runs` for a device run with no reply. The router's stats
+  now split each tier's cost by model (`costByTierModel`,
+  `tokensByTierModel`) and count unpriced calls per model
+  (`untrackedByTierModel`); `getRunStats()` gives one run's usage alone.
 - **The browser agent reads a page as a list of its controls, and can see
   it.** On the web (CDP or Steel), `browser_control` now describes each page
   as a page view: the controls on screen and further down, each under a ref
@@ -96,6 +106,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loaded another document. A page view taken while an app changed its route
   is taken again. `scripts/browser-vision-eval/` has ten test
   tasks and a runner to compare the settings.
+
+### Changed
+- **The desktop app runs on Electron 41** (from 33), and the SDK, desktop
+  and web apps take the pending dependency updates: `@anthropic-ai/sdk`
+  0.135, pdfkit 0.20, KaTeX 0.19, lucide-react 1.x (whose brand icons are
+  gone, so GitHub and Slack show generic ones), DOMPurify 3.4.17 and the
+  minor and patch group. Native modules are rebuilt for Electron 41.
+- **Building the desktop app on Windows works with Visual Studio 2026.** The
+  native-module rebuild tool (`@electron/rebuild`) moves from 3.x to 4.2.1,
+  whose `node-gyp` recognises Visual Studio 2026 as well as 2019 and 2022.
+
+### Fixed
+- **You can start a new chat from the session sidebar.** Before, only the Code
+  view's chat picker and the command palette could. The sidebar (and its
+  collapsed rail) now has a New chat button: Mission Control and Chat start the
+  fresh session in place, and other views open Chat.
+- **A misspelled tool name no longer runs a tool that needs approval.** When
+  a call failed, the worker retried it with a tool whose name shared a word
+  with it, without asking — so `browser_click`, which needs no approval
+  because it does not exist, ran as `browser_control`, and a failed file call
+  could land on `file_delete`. A replacement that needs approval now goes
+  through the same approval checks as a direct call, including its browser
+  target and site; without an approver it is not chosen. A known read never
+  falls back to a write.
+- **A failed browser action no longer quotes the page back.** Playwright's
+  errors print the elements they found, attributes and all — in the log it
+  adds, and in the list of matches when a selector matched more than one — so
+  a failed choice on a password field printed the password to the model. Only
+  the first line, the reason, is kept.
+- **A run that used a model with no published price no longer claims a
+  saving.** Its total leaves out what those calls cost, so "all on T1 minus
+  the total" counted money that may well have been spent as saved. The
+  saved figure, /why and the spend report now show no saving for it.
+
+### Security
+- State migration retries symlink cleanup even after the source has moved;
+  existing state with missing, invalid or unreadable identity is refused, and
+  new identity is saved before importing legacy history. Git trust must be
+  saved before a command runs. Local-only commands establish a durable privacy
+  barrier before launch; incomplete final scans keep the affected subtree
+  local-only, or the whole workspace when its root cannot be inspected.
+- macOS shell/code commands now fail closed because `sandbox-exec` cannot
+  contain descendants or isolate the parent environment. Auto Git uses its
+  hermetic fallback; `off` remains an explicit opt-out. Credential files named
+  by standard environment variables are hidden along with their hard-link
+  aliases, and command environments omit those path hints.
+
+## 0.83.0 - 2026-10-13
+
+### Added
+- **The MIT License text, in `LICENSE`.** Cascade AI was already declared
+  MIT in its package metadata and README, but the licence itself was not in
+  the repository, so the README's licence link went nowhere. It now ships at
+  the root and in the npm package.
+- **A daily allowance of browser sessions: 5 a day on Free, 50 on Pro.** A
+  session is claimed the moment one is about to be opened, which is what the
+  provider bills for, and returned if none was, so a Browser-chip run that
+  never needs the browser costs nothing and concurrent runs cannot share the
+  last one. Each claim is returned on its own, so two opens at once never
+  leave a session that did not open counted. Once the day's sessions are gone the Browser chip switches
+  off and says when they reset (midnight UTC), and it stays off until
+  today's count has been read for this sign-in, so it cannot be turned on
+  for a run that will be refused. A run sent with it anyway is refused before anything is
+  spent, and a run that runs out partway through
+  is refused the next session with the same message shown in the chat. If
+  the allowance cannot be checked, the chat says so too, and a later refusal
+  for a different reason is shown as well. The
+  chip's tooltip shows how many are left today, and it follows a plan change
+  in either direction without a reload. A deployment without a browser
+  never asks for it. After a reconnect, the newest browser refusal is the
+  one shown. Only billed sessions are rationed:
+  a deployment driving its own browser over CDP opens none, so it has no
+  daily limit.
 
 ### Changed
 - **Cascade keeps a project's state outside the project.** Its settings,
@@ -201,19 +284,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/design/calm-direction.md`.
 
 ### Fixed
-- **A misspelled tool name no longer runs a tool that needs approval.** When
-  a call failed, the worker retried it with a tool whose name shared a word
-  with it, without asking — so `browser_click`, which needs no approval
-  because it does not exist, ran as `browser_control`, and a failed file call
-  could land on `file_delete`. A replacement that needs approval now goes
-  through the same approval checks as a direct call, including its browser
-  target and site; without an approver it is not chosen. A known read never
-  falls back to a write.
-- **A failed browser action no longer quotes the page back.** Playwright's
-  errors print the elements they found, attributes and all — in the log it
-  adds, and in the list of matches when a selector matched more than one — so
-  a failed choice on a password field printed the password to the model. Only
-  the first line, the reason, is kept.
 - **`pdf_create` wrote relative to the process, not the workspace.** In the
   desktop app and the server those differ, so a PDF landed outside the
   workspace, where no file check looked. It resolves its path in the
@@ -311,17 +381,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each choice does to that work — on the web and in the desktop app.
 
 ### Security
-- State migration retries symlink cleanup even after the source has moved;
-  existing state with missing, invalid or unreadable identity is refused, and
-  new identity is saved before importing legacy history. Git trust must be
-  saved before a command runs. Local-only commands establish a durable privacy
-  barrier before launch; incomplete final scans keep the affected subtree
-  local-only, or the whole workspace when its root cannot be inspected.
-- macOS shell/code commands now fail closed because `sandbox-exec` cannot
-  contain descendants or isolate the parent environment. Auto Git uses its
-  hermetic fallback; `off` remains an explicit opt-out. Credential files named
-  by standard environment variables are hidden along with their hard-link
-  aliases, and command environments omit those path hints.
 - Hard-link aliases of protected or local-only dependency files stay protected,
   including explicit rules through symlinked dependency folders, mixed-case
   rules and `**/` prefixes. Commands refuse cyclic symlinks reached by such

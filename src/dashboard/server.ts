@@ -18,7 +18,8 @@ import { commitSettings, settingsSnapshot } from '../config/settings-payload.js'
 import { writeProjectConfig } from '../config/write-config.js';
 import type { RuntimeNode, RuntimeNodeLog, RuntimeSession } from '../types.js';
 import { GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE } from '../constants.js';
-import { statePath, STATE } from '../config/project-state.js';
+import { globalDir, statePath, STATE } from '../config/project-state.js';
+import { PendingAccounting } from './pending-accounting.js';
 import { DashboardSocket } from './websocket.js';
 import { authMiddleware, createToken } from './auth.js';
 import { DEFAULT_DASHBOARD_PORT } from '../constants.js';
@@ -28,6 +29,7 @@ import { Cascade } from '../core/cascade.js';
 import { WorldStateDB } from '../core/knowledge/world-state.js';
 import { TaskScheduler } from '../scheduler/index.js';
 import type { ScheduledTask, CascadeRunResult } from '../types.js';
+import { cloudRunReport, cloudTurnAccounting } from '../cloud/run-report.js';
 import { aggregateCostStats } from './cost-stats.js';
 import type { WhyReport } from './cost-stats.js';
 import { saveGlobalCredentials } from '../config/global-credentials.js';
@@ -147,6 +149,20 @@ export class DashboardServer {
   private broadcastTimer: NodeJS.Timeout | null = null;
   private activeSessions = new Map<string, import('../core/cascade.js').Cascade>();
   /**
+   * Run accounting no desktop window has confirmed yet (see PendingAccounting).
+   * Kept only when the host is the desktop app, the one client that sends it
+   * on to the cloud; another host has nothing to replay it to.
+   */
+  private readonly pendingAccounting: PendingAccounting<Record<string, unknown>> | null;
+  /** The desktop's token for its own windows; unset for any other host. */
+  private readonly desktopToken: string | undefined;
+  /**
+   * Reports journaled by this process for runs still waiting on late calls:
+   * not replayed until final. One left from a previous process (the app quit
+   * during the wait) is replayed as it was written.
+   */
+  private readonly settlingAccounting = new Set<string>();
+  /**
    * Supplied by the desktop shell so a run can read the page the user has
    * open in the built-in browser. Absent in the CLI, where there is no
    * browser — so the tool is simply not registered rather than present and
@@ -198,13 +214,38 @@ export class DashboardServer {
   private host: string;
   private workspacePath: string;
 
-  constructor(config: CascadeConfig, store: MemoryStore, workspacePath = process.cwd()) {
+  constructor(
+    config: CascadeConfig,
+    store: MemoryStore,
+    workspacePath = process.cwd(),
+    options: {
+      /**
+       * Where run accounting waiting for a window is kept. The desktop app
+       * passes a file in its own data folder, stable across restarts (its
+       * port is new each time). Default: per port, in the global folder.
+       */
+      pendingAccountingFile?: string;
+      /**
+       * The token the desktop app gives its own windows, which they present
+       * when they connect. Run accounting (prompts and replies included) goes
+       * only to a connection that presents it, and only such a connection can
+       * confirm it, even with dashboard auth off. Without it, nothing is kept.
+       */
+      desktopToken?: string;
+    } = {},
+  ) {
     this.config = config;
     this.store = store;
     this.workspacePath = workspacePath;
     this.port = config.dashboard.port ?? DEFAULT_DASHBOARD_PORT;
     this.host = config.dashboard.host ?? '127.0.0.1';
     this.dashboardSecret = this.resolveDashboardSecret();
+    // On disk, so nothing waiting for a window is lost, even across restarts.
+    // One file per host: another dashboard on this machine keeps its own.
+    this.desktopToken = options.desktopToken || undefined;
+    this.pendingAccounting = this.desktopToken
+      ? new PendingAccounting(options.pendingAccountingFile ?? path.join(globalDir(), `pending-accounting-${this.port}.jsonl`))
+      : null;
     this.app = express();
     this.httpServer = createServer(this.app);
     this.socket = new DashboardSocket(this.httpServer, {
@@ -219,6 +260,11 @@ export class DashboardServer {
     this.scheduler = new TaskScheduler(store, (task) => this.runScheduledTask(task));
     this.setupMiddleware();
     this.setupRoutes();
+    // Run accounting reaches the cloud from a desktop window: replay what none
+    // has confirmed to each of the desktop's windows that connects, and forget
+    // what one of them confirms. Any other connection gets neither.
+    this.socket.onConnect((socketId) => this.replayAccountingTo(socketId));
+    this.socket.onAccountingConfirmed((id, socketId) => this.confirmAccounting(id, socketId));
     this.socket.onSessionRate((sessionId, rating) => {
       this.activeSessions.get(sessionId)?.rateLastRun(rating);
     });
@@ -332,6 +378,11 @@ export class DashboardServer {
         this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED', result);
         this.captureWhy(sessionId, cascade, result);
         this.emitToSessionClients(socketId, sessionId, 'session:complete', { sessionId, result });
+        // A stopped run returns what it had written so far: it is still a
+        // stop, as a hosted run is, with its partial reply kept.
+        const outcome = abortController.signal.aborted ? 'stopped' : 'answered';
+        void this.emitRunAccounting((e, p) => this.emitToSessionClients(socketId, sessionId, e, p), sessionId, cascade,
+          { prompt, output: result.output ?? '', outcome, durationMs: result.durationMs, copyTurn: true });
         this.socket.broadcast('cost:update', {
           sessionId,
           totalTokens: result.usage.totalTokens,
@@ -348,6 +399,10 @@ export class DashboardServer {
           sessionId,
           error: err instanceof Error ? err.message : String(err),
         });
+        // No reply, but the calls it made were billed: the desktop sends this
+        // to the account's spend report, as a hosted run that fails is.
+        void this.emitRunAccounting((e, p) => this.emitToSessionClients(socketId, sessionId, e, p), sessionId, cascade,
+          { prompt, output: '', outcome: abortController.signal.aborted ? 'stopped' : 'failed', durationMs: 0, copyTurn: true });
       } finally {
         this.activeSessions.delete(sessionId);
         this.activeControllers.delete(sessionId);
@@ -693,6 +748,9 @@ export class DashboardServer {
    * Capture the run's decision trail + router economics ("why") and broadcast
    * it so the desktop's Why panel updates live; kept per-session for the
    * GET /api/sessions/:id/why fallback (panel opened after the run).
+   *
+   * The run's accounting for the cloud goes separately, once its calls have
+   * settled (`emitRunAccounting`).
    */
   private captureWhy(sessionId: string, cascade: Cascade, result?: CascadeRunResult): void {
     try {
@@ -719,6 +777,83 @@ export class DashboardServer {
     } catch (err) {
       console.warn('[dashboard] failed to capture decision trail:', err);
     }
+  }
+
+  /**
+   * What a finished run cost, as the cloud takes it, for the desktop to send
+   * to the signed-in account: with the turn it copies, or on its own for a
+   * run that has no turn to copy (it failed, was stopped, gave no text, or
+   * was not started from the desktop's own views — `copyTurn` false).
+   *
+   * Sent once every call the run made has settled, up to 30 s, so a call that
+   * lands after the run returned still counts. Each run has its own Cascade,
+   * so the router's stats are this run's alone.
+   */
+  private async emitRunAccounting(
+    emit: (event: string, payload: unknown) => void,
+    sessionId: string,
+    cascade: Cascade,
+    run: { prompt: string; output: string; outcome: 'answered' | 'failed' | 'stopped'; durationMs: number; copyTurn: boolean },
+  ): Promise<void> {
+    // When the run finished, before waiting for its late calls: the cloud
+    // counts it on that day, however long it waits to be sent.
+    const endedAt = Date.now();
+    let journaled: string | undefined;
+    try {
+      const router = cascade.getRouter();
+      const decisions = cascade.getDecisionLog();
+      const t1Model = router.getTierModel('T1');
+      const reportNow = () => cloudRunReport({ stats: router.getStats(), t1Model, decisions, durationMs: run.durationMs });
+      // Written down before the wait, from what the run spent so far: if the
+      // app quits while it waits, this is replayed when it next starts. Not
+      // sent while this process is still waiting.
+      if (this.pendingAccounting) {
+        journaled = this.pendingAccounting.add({ sessionId, ...run, endedAt, cloud: cloudTurnAccounting(reportNow()) }).id;
+        this.settlingAccounting.add(journaled);
+      }
+      await router.whenRunSettled();
+      const report = reportNow();
+      // A call with no price and no usage reported still happened, and may have cost money.
+      if (journaled) this.settlingAccounting.delete(journaled);
+      if (report.totalCostUsd <= 0 && report.totalTokens <= 0 && Object.keys(report.unpricedByModel).length === 0 && !run.output) {
+        if (journaled) this.pendingAccounting?.confirm(journaled);
+        return;
+      }
+      const payload = { sessionId, ...run, endedAt, cloud: cloudTurnAccounting(report) };
+      if (!this.pendingAccounting || !journaled) { emit('run:accounting', payload); return; }
+      // Kept until a desktop window confirms it (a run can end with none
+      // open), and sent only to the desktop's own windows.
+      const kept = this.pendingAccounting.replace(journaled, payload);
+      for (const socketId of this.socket.socketIds()) {
+        if (this.isDesktopWindow(socketId)) this.socket.emitToSocket(socketId, 'run:accounting', kept);
+      }
+    } catch (err) {
+      // What was journaled stays, and is replayed as written.
+      if (journaled) this.settlingAccounting.delete(journaled);
+      console.warn('[dashboard] failed to report run accounting:', err);
+    }
+  }
+
+  /** Every report no desktop window has confirmed, to one that just connected. */
+  private replayAccountingTo(socketId: string): void {
+    if (!this.pendingAccounting || !this.isDesktopWindow(socketId)) return;
+    for (const report of this.pendingAccounting.unconfirmed()) {
+      if (!this.settlingAccounting.has(report.id)) this.socket.emitToSocket(socketId, 'run:accounting', report);
+    }
+  }
+
+  /** A desktop window handled a report; a confirmation from anyone else is ignored. */
+  private confirmAccounting(id: unknown, socketId: string): void {
+    if (this.isDesktopWindow(socketId)) this.pendingAccounting?.confirm(id);
+  }
+
+  /** A connection from one of the desktop app's own windows. */
+  private isDesktopWindow(socketId: string): boolean {
+    const presented = this.socket.handshakeToken(socketId);
+    if (!this.desktopToken || !presented) return false;
+    const a = Buffer.from(presented);
+    const b = Buffer.from(this.desktopToken);
+    return a.length === b.length && timingSafeEqual(a, b);
   }
 
   /**
@@ -795,6 +930,10 @@ export class DashboardServer {
       this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED', result);
       this.captureWhy(sessionId, cascade, result);
       this.socket.broadcast('session:complete', { sessionId, result });
+      // A scheduled run is not copied to the cloud as a chat (as before), but
+      // what it spent counts in the account's report.
+      void this.emitRunAccounting((e, p) => this.socket.broadcast(e, p), sessionId, cascade,
+        { prompt, output: result.output ?? '', outcome: 'answered', durationMs: result.durationMs, copyTurn: false });
       this.socket.broadcast('cost:update', {
         sessionId,
         totalTokens: result.usage.totalTokens,
@@ -809,6 +948,8 @@ export class DashboardServer {
         sessionId,
         error: err instanceof Error ? err.message : String(err),
       });
+      void this.emitRunAccounting((e, p) => this.socket.broadcast(e, p), sessionId, cascade,
+        { prompt, output: '', outcome: 'failed', durationMs: 0, copyTurn: false });
       throw err;
     } finally {
       this.activeSessions.delete(sessionId);
@@ -1573,6 +1714,10 @@ export class DashboardServer {
             costUnknown: result.usage.costUnknown === true,
           });
           this.socket.broadcastToRoom(`session:${sessionId}`, 'session:complete', { sessionId, result });
+          // Started over the API, not from the desktop's views: its spend
+          // counts, but it is not copied to the cloud as a chat (as before).
+          void this.emitRunAccounting((e, p) => this.socket.broadcast(e, p), sessionId, cascade,
+            { prompt, output: result.output ?? '', outcome: 'answered', durationMs: result.durationMs, copyTurn: false });
           this.throttledBroadcast('workspace');
         } catch (err) {
           this.persistRunEnd(sessionId, title, prompt, undefined, 'FAILED');
@@ -1581,6 +1726,8 @@ export class DashboardServer {
             sessionId,
             error: err instanceof Error ? err.message : String(err),
           });
+          void this.emitRunAccounting((e, p) => this.socket.broadcast(e, p), sessionId, cascade,
+            { prompt, output: '', outcome: 'failed', durationMs: 0, copyTurn: false });
         } finally {
           this.activeSessions.delete(sessionId);
           this.denyPendingApprovals(sessionId);

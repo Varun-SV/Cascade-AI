@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { BrowserAllowanceView } from './browserAllowance.js';
 import { AnimatePresence, motion } from 'framer-motion';
-import { AlertTriangle, KeyRound, Layers, ChevronDown, Search, BookOpen, Calendar, Globe, Github } from 'lucide-react';
+import { AlertTriangle, KeyRound, Layers, ChevronDown, Search, BookOpen, Calendar, Globe, GitBranch } from 'lucide-react';
 import CascadeMark from '../components/CascadeMark.js';
 import Message from './Message.js';
 import Composer from './Composer.js';
@@ -59,6 +59,8 @@ interface Props {
   onManageConnectors?: () => void;
   /** Open /why on one reply (the top bar's saved figure asks for the latest). */
   whyRequest?: { messageId: string; seq: number } | null;
+  /** Opens the spend & savings report (from a reply's /why). */
+  onOpenSpend?: () => void;
   approval: PlanApproval | null;
   compactionNotice: string | null;
   providerNotice: string | null;
@@ -106,7 +108,7 @@ export default function ChatPanel({
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
   clarifications, onAnswerClarification,
   browserMode, onBrowserModeChange, browserAvailable, runDetail, userName, contextTokens = 0, contextWindow = 0,
-  onAddKey, onManageSkills, onManageConnectors, whyRequest, approval,
+  onAddKey, onManageSkills, onManageConnectors, whyRequest, onOpenSpend, approval,
   compactionNotice, providerNotice, knowledgeNotice, browserRefusedNotice, browserAllowance, activity, browserLiveView, browserActive,
   browserFrame, browserTaskId, browserStreaming, browserHuman, browserCapturing, browserConfirmed, browserNotice,
   onStopBrowser, onTakeOverBrowser, onHandBackBrowser, onBrowserInput, onBrowserCapture,
@@ -150,7 +152,7 @@ export default function ChatPanel({
     { label: 'Research a topic', prompt: 'Build a competitor report on AI coding CLIs and export it as a Word doc', icon: <BookOpen size={14} /> },
     { label: 'Plan something', prompt: 'Plan a team offsite', icon: <Calendar size={14} /> },
     ...(browserAvailable ? [{ label: 'Check a live page', prompt: 'Open example.com/pricing and tell me the Team plan price with annual billing', icon: <Globe size={14} />, browser: true }] : []),
-    { label: 'Summarise repos', prompt: 'Summarise every repository in our GitHub org', icon: <Github size={14} /> },
+    { label: 'Summarise repos', prompt: 'Summarise every repository in our GitHub org', icon: <GitBranch size={14} /> },
   ];
 
   const browserView = (
@@ -216,6 +218,7 @@ export default function ChatPanel({
                       onEdit={m.role === 'user' ? (text) => onEditMessage(m.id, text) : undefined}
                       onDelete={!m.streaming ? () => onDeleteMessage(m.id) : undefined}
                       onSelectSibling={onSelectSibling}
+                      onOpenSpend={onOpenSpend}
                     />
                   </motion.div>
                 ))}

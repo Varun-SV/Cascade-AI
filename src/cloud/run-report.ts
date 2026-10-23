@@ -1,0 +1,181 @@
+// ─────────────────────────────────────────────
+//  Cascade AI — A device run's /why for the cloud
+// ─────────────────────────────────────────────
+//
+//  A run on the user's own device (the CLI, the desktop app) is copied into
+//  their cloud chat. What it cost goes with it, in the shape a hosted run
+//  keeps on its reply: the web's /why panel reads it, and so does the spend
+//  report, which counts the run by tier and by the models that served it.
+
+import type { ModelInfo } from '../types.js';
+import type { RouterStats } from '../core/router/index.js';
+import { computeDelegationSavings } from '../core/router/savings.js';
+
+/** One run's /why as the cloud keeps it on the reply. */
+export interface CloudRunReport {
+  /** The tier that did the most work. */
+  tier: string | null;
+  /** The model that served that tier (`provider:id`). */
+  model: string | null;
+  decisions: Array<{ at: string; kind: string; detail: string }>;
+  savedUsd: number;
+  savedPct: number;
+  totalCostUsd: number;
+  totalTokens: number;
+  durationMs: number;
+  costByTier: Record<string, number>;
+  tokensByTier: Record<string, number>;
+  /** tier → `provider:id` → cost / tokens. */
+  costByModel: Record<string, Record<string, number>>;
+  tokensByModel: Record<string, Record<string, number>>;
+  /**
+   * tier → `provider:id` → calls with no known price. A model served at $0
+   * with no entry here was priced and free (a local model); one with an entry
+   * spent money that could not be counted.
+   */
+  unpricedByModel: Record<string, Record<string, number>>;
+  /** tier → the model that did most of its work. */
+  models: Record<string, string>;
+}
+
+type Flat = Record<string, number>;
+type Nested = Record<string, Record<string, number>>;
+
+// Keys are model ids, which can be any string a user configures — including
+// `__proto__`, which a plain assignment would treat as the prototype rather
+// than a key. Built with Object.fromEntries and read with hasOwn instead.
+const own = (m: Flat | undefined, key: string): number =>
+  (m && Object.prototype.hasOwnProperty.call(m, key) ? m[key] : 0) ?? 0;
+
+function minus(after: Flat, before: Flat = {}): Flat {
+  return Object.fromEntries(Object.entries(after)
+    .map(([key, value]) => [key, value - own(before, key)] as const)
+    .filter(([, left]) => left > 0));
+}
+
+function minusNested(after: Nested, before: Nested = {}): Nested {
+  return Object.fromEntries(Object.entries(after)
+    .map(([key, inner]) => [key, minus(inner, Object.prototype.hasOwnProperty.call(before, key) ? before[key] : undefined)] as const)
+    .filter(([, left]) => Object.keys(left).length > 0));
+}
+
+function top(m: Flat): string | undefined {
+  return Object.entries(m).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1])[0]?.[0];
+}
+
+/**
+ * The /why of the run that just ended, from that run's own stats: the
+ * router's `getRunStats()` where one router serves several runs (the CLI's
+ * session), or `getStats()` where it serves one (the desktop app's).
+ *
+ * `before` subtracts a snapshot instead. Avoid it where runs share a router:
+ * a call from the previous run that settles late lands in the session totals
+ * between the two snapshots and is billed to this run.
+ */
+export function cloudRunReport(input: {
+  stats: RouterStats;
+  before?: RouterStats;
+  /** The model T1 runs on, which savings are measured against. */
+  t1Model: ModelInfo | null | undefined;
+  decisions: CloudRunReport['decisions'];
+  durationMs: number;
+}): CloudRunReport {
+  const { stats } = input;
+  // Stats that went down were reset since: all they hold is this run's.
+  const before = input.before
+    && stats.totalTokens >= input.before.totalTokens
+    && stats.totalCostUsd >= input.before.totalCostUsd
+    ? input.before
+    : undefined;
+
+  const costByTier = minus(stats.costByTier, before?.costByTier);
+  const tokensByTier = minus(stats.tokensByTier, before?.tokensByTier);
+  const costByModel = minusNested(stats.costByTierModel, before?.costByTierModel);
+  const tokensByModel = minusNested(stats.tokensByTierModel, before?.tokensByTierModel);
+  const unpricedByModel = minusNested(stats.untrackedByTierModel ?? {}, before?.untrackedByTierModel);
+  const totalCostUsd = Math.max(0, stats.totalCostUsd - (before?.totalCostUsd ?? 0));
+  const totalTokens = Math.max(0, stats.totalTokens - (before?.totalTokens ?? 0));
+  const savings = computeDelegationSavings({
+    totalCostUsd,
+    inputTokensByTier: minus(stats.inputTokensByTier, before?.inputTokensByTier),
+    outputTokensByTier: minus(stats.outputTokensByTier, before?.outputTokensByTier),
+    untrackedCostCalls: Math.max(0, stats.untrackedCostCalls - (before?.untrackedCostCalls ?? 0)),
+  }, input.t1Model);
+
+  const models: Record<string, string> = {};
+  for (const tier of new Set([...Object.keys(tokensByModel), ...Object.keys(costByModel)])) {
+    const model = top(tokensByModel[tier] ?? {}) ?? top(costByModel[tier] ?? {});
+    if (model) models[tier] = model;
+  }
+  const tier = top(tokensByTier) ?? top(costByTier) ?? null;
+
+  return {
+    tier,
+    model: (tier && models[tier]) || null,
+    decisions: input.decisions,
+    savedUsd: savings.savedUsd,
+    savedPct: savings.savedPct,
+    totalCostUsd,
+    totalTokens,
+    durationMs: input.durationMs,
+    costByTier,
+    tokensByTier,
+    costByModel,
+    tokensByModel,
+    unpricedByModel,
+    models,
+  };
+}
+
+/** The reply's accounting as the cloud's `/turns` takes it. */
+export function cloudTurnAccounting(report: CloudRunReport): { costUsd: number; why: string } {
+  return { costUsd: report.totalCostUsd, why: JSON.stringify(report) };
+}
+
+/** The router calls a run's report is built from. */
+export interface RunStatsSource {
+  getRunStats(generation: number): RouterStats;
+  whenRunSettled(generation: number): Promise<boolean>;
+}
+
+/**
+ * Starts a finished run's report now: it waits for the run's calls to settle
+ * and is built the moment they do. Start it as the run ends, not when a send
+ * queue reaches it: a run's usage is only kept while it is still settling or
+ * someone is waiting on it, so later runs could otherwise drop it first.
+ * Run stats only grow, so the figures read once settled are kept unless they
+ * shrank, which means the usage was dropped; then the ones read at the start
+ * are used.
+ *
+ * `after` is follow-up work the run started on the same router once it
+ * answered (the CLI's session title): it is waited for first, up to
+ * `FOLLOW_UP_WAIT_MS`, so its calls count even when they begin after the
+ * run's own calls settled.
+ */
+export function settledRunReport(
+  router: RunStatsSource,
+  generation: number,
+  input: Omit<Parameters<typeof cloudRunReport>[0], 'stats' | 'before'>,
+  after?: Promise<unknown>,
+): Promise<CloudRunReport> {
+  const atEnd = router.getRunStats(generation);
+  const followUp = after ? boundedWait(after, FOLLOW_UP_WAIT_MS) : Promise.resolve();
+  return followUp.then(() => router.whenRunSettled(generation)).then(() => {
+    const settled = router.getRunStats(generation);
+    const kept = settled.totalTokens >= atEnd.totalTokens && settled.totalCostUsd >= atEnd.totalCostUsd
+      && settled.untrackedCostCalls >= atEnd.untrackedCostCalls;
+    return cloudRunReport({ ...input, stats: kept ? settled : atEnd });
+  });
+}
+
+/** How long a run's report waits for its follow-up work (`after`). */
+export const FOLLOW_UP_WAIT_MS = 60_000;
+
+/** Resolves when `work` settles or `ms` pass, whichever is first; never rejects. */
+function boundedWait(work: Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    work.then(() => undefined, () => undefined),
+    new Promise<void>((resolve) => { timer = setTimeout(resolve, ms); (timer as { unref?: () => void }).unref?.(); }),
+  ]).finally(() => clearTimeout(timer));
+}

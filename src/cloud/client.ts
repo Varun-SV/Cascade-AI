@@ -64,6 +64,12 @@ export interface CloudTurnInput {
   editOfMessageId?: string;
   /** Re-answer this user turn (reply saved as a sibling; no new user message). */
   regenerateFromUserMessageId?: string;
+  /** The device's id for the run: the same turn sent again is added once. */
+  runId?: string;
+  /** 'stopped' for a run the user stopped, sent with its partial reply. */
+  outcome?: 'answered' | 'stopped';
+  /** When the run finished (epoch ms): it counts on that day, however late it is sent. */
+  endedAt?: number;
 }
 
 interface TokenResponse {
@@ -324,6 +330,24 @@ export class CloudClient {
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(turn) },
     );
     return b.messages ?? [];
+  }
+
+  /**
+   * Add a run with no turn to sync to the account's spend ledger: one that
+   * failed, was stopped, or answered with no text or from somewhere that is
+   * not copied as a chat. Its calls were billed all the same. `why` is the
+   * run's report (`cloudRunReport`), as JSON.
+   */
+  async recordRunSpend(run: {
+    conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string;
+    /** The device's id for this run: the same id sent twice is recorded once. */
+    runId?: string;
+    /** When the run finished (epoch ms): it counts on that day, however late it is sent. */
+    endedAt?: number;
+  }): Promise<{ recorded: boolean }> {
+    return this.authed<{ recorded: boolean }>('/api/usage/runs', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(run),
+    });
   }
 
   /** Branching: switch the active path to a sibling; returns the new path. */

@@ -38,7 +38,7 @@ function renderSidebar(over: Partial<React.ComponentProps<typeof ConversationSid
     usageRefreshSignal: 0,
     onSelect: noop, onNewChat: noop, onClose: noop, onOpenSettings: noop, onOpenFiles: noop,
     onOpenSkills: noop, onOpenMemory: noop, onOpenConnectors: noop, onOpenKeys: noop,
-    onOpenContinue: noop, onOpenUpgrade: noop, onLogout: noop, onDeleted: noop, onImported: noop,
+    onOpenContinue: noop, onOpenUpgrade: noop, onOpenSpend: noop, onLogout: noop, onDeleted: noop, onImported: noop,
     ...over,
   };
   const { rerender } = render(<ConversationSidebar {...props} />);
@@ -122,9 +122,17 @@ describe('ConversationSidebar', () => {
   it('keeps every account action in the account menu', () => {
     renderSidebar();
     fireEvent.click(screen.getByRole('button', { name: 'Account' }));
-    for (const name of ['Settings', 'Memory', 'Connectors', 'API keys', 'Files', 'Import chats or memories',
+    for (const name of ['Spend & savings', 'Settings', 'Memory', 'Connectors', 'API keys', 'Files', 'Import chats or memories',
       'Continue on another device', 'Upgrade', 'Documentation', 'Sign out']) {
       expect(screen.getByRole('menuitem', { name })).toBeInTheDocument();
     }
+  });
+
+  it('opens the spend & savings report from the account menu', () => {
+    const onOpenSpend = vi.fn();
+    renderSidebar({ onOpenSpend });
+    fireEvent.click(screen.getByRole('button', { name: 'Account' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Spend & savings' }));
+    expect(onOpenSpend).toHaveBeenCalledTimes(1);
   });
 });
