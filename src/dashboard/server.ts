@@ -148,8 +148,20 @@ export class DashboardServer {
   private globalStore: MemoryStore | null = null;
   private broadcastTimer: NodeJS.Timeout | null = null;
   private activeSessions = new Map<string, import('../core/cascade.js').Cascade>();
-  /** Run accounting no window has confirmed yet (see PendingAccounting). */
-  private readonly pendingAccounting: PendingAccounting<Record<string, unknown>>;
+  /**
+   * Run accounting no desktop window has confirmed yet (see PendingAccounting).
+   * Kept only when the host is the desktop app, the one client that sends it
+   * on to the cloud; another host has nothing to replay it to.
+   */
+  private readonly pendingAccounting: PendingAccounting<Record<string, unknown>> | null;
+  /** The desktop's token for its own windows; unset for any other host. */
+  private readonly desktopToken: string | undefined;
+  /**
+   * Reports journaled by this process for runs still waiting on late calls:
+   * not replayed until final. One left from a previous process (the app quit
+   * during the wait) is replayed as it was written.
+   */
+  private readonly settlingAccounting = new Set<string>();
   /**
    * Supplied by the desktop shell so a run can read the page the user has
    * open in the built-in browser. Absent in the CLI, where there is no
@@ -213,6 +225,13 @@ export class DashboardServer {
        * port is new each time). Default: per port, in the global folder.
        */
       pendingAccountingFile?: string;
+      /**
+       * The token the desktop app gives its own windows, which they present
+       * when they connect. Run accounting (prompts and replies included) goes
+       * only to a connection that presents it, and only such a connection can
+       * confirm it, even with dashboard auth off. Without it, nothing is kept.
+       */
+      desktopToken?: string;
     } = {},
   ) {
     this.config = config;
@@ -223,8 +242,10 @@ export class DashboardServer {
     this.dashboardSecret = this.resolveDashboardSecret();
     // On disk, so nothing waiting for a window is lost, even across restarts.
     // One file per host: another dashboard on this machine keeps its own.
-    this.pendingAccounting = new PendingAccounting(options.pendingAccountingFile
-      ?? path.join(globalDir(), `pending-accounting-${this.port}.jsonl`));
+    this.desktopToken = options.desktopToken || undefined;
+    this.pendingAccounting = this.desktopToken
+      ? new PendingAccounting(options.pendingAccountingFile ?? path.join(globalDir(), `pending-accounting-${this.port}.jsonl`))
+      : null;
     this.app = express();
     this.httpServer = createServer(this.app);
     this.socket = new DashboardSocket(this.httpServer, {
@@ -239,12 +260,11 @@ export class DashboardServer {
     this.scheduler = new TaskScheduler(store, (task) => this.runScheduledTask(task));
     this.setupMiddleware();
     this.setupRoutes();
-    // Run accounting reaches the cloud from a window: replay what none has
-    // confirmed to each window that connects, and forget what one confirms.
-    this.socket.onConnect((socketId) => {
-      for (const report of this.pendingAccounting.unconfirmed()) this.socket.emitToSocket(socketId, 'run:accounting', report);
-    });
-    this.socket.onAccountingConfirmed((id) => this.pendingAccounting.confirm(id));
+    // Run accounting reaches the cloud from a desktop window: replay what none
+    // has confirmed to each of the desktop's windows that connects, and forget
+    // what one of them confirms. Any other connection gets neither.
+    this.socket.onConnect((socketId) => this.replayAccountingTo(socketId));
+    this.socket.onAccountingConfirmed((id, socketId) => this.confirmAccounting(id, socketId));
     this.socket.onSessionRate((sessionId, rating) => {
       this.activeSessions.get(sessionId)?.rateLastRun(rating);
     });
@@ -778,18 +798,62 @@ export class DashboardServer {
     // When the run finished, before waiting for its late calls: the cloud
     // counts it on that day, however long it waits to be sent.
     const endedAt = Date.now();
+    let journaled: string | undefined;
     try {
       const router = cascade.getRouter();
       const decisions = cascade.getDecisionLog();
+      const t1Model = router.getTierModel('T1');
+      const reportNow = () => cloudRunReport({ stats: router.getStats(), t1Model, decisions, durationMs: run.durationMs });
+      // Written down before the wait, from what the run spent so far: if the
+      // app quits while it waits, this is replayed when it next starts. Not
+      // sent while this process is still waiting.
+      if (this.pendingAccounting) {
+        journaled = this.pendingAccounting.add({ sessionId, ...run, endedAt, cloud: cloudTurnAccounting(reportNow()) }).id;
+        this.settlingAccounting.add(journaled);
+      }
       await router.whenRunSettled();
-      const report = cloudRunReport({ stats: router.getStats(), t1Model: router.getTierModel('T1'), decisions, durationMs: run.durationMs });
+      const report = reportNow();
       // A call with no price and no usage reported still happened, and may have cost money.
-      if (report.totalCostUsd <= 0 && report.totalTokens <= 0 && Object.keys(report.unpricedByModel).length === 0 && !run.output) return;
-      // Kept until a window confirms it: a run can end with no window open.
-      emit('run:accounting', this.pendingAccounting.add({ sessionId, ...run, endedAt, cloud: cloudTurnAccounting(report) }));
+      if (journaled) this.settlingAccounting.delete(journaled);
+      if (report.totalCostUsd <= 0 && report.totalTokens <= 0 && Object.keys(report.unpricedByModel).length === 0 && !run.output) {
+        if (journaled) this.pendingAccounting?.confirm(journaled);
+        return;
+      }
+      const payload = { sessionId, ...run, endedAt, cloud: cloudTurnAccounting(report) };
+      if (!this.pendingAccounting || !journaled) { emit('run:accounting', payload); return; }
+      // Kept until a desktop window confirms it (a run can end with none
+      // open), and sent only to the desktop's own windows.
+      const kept = this.pendingAccounting.replace(journaled, payload);
+      for (const socketId of this.socket.socketIds()) {
+        if (this.isDesktopWindow(socketId)) this.socket.emitToSocket(socketId, 'run:accounting', kept);
+      }
     } catch (err) {
+      // What was journaled stays, and is replayed as written.
+      if (journaled) this.settlingAccounting.delete(journaled);
       console.warn('[dashboard] failed to report run accounting:', err);
     }
+  }
+
+  /** Every report no desktop window has confirmed, to one that just connected. */
+  private replayAccountingTo(socketId: string): void {
+    if (!this.pendingAccounting || !this.isDesktopWindow(socketId)) return;
+    for (const report of this.pendingAccounting.unconfirmed()) {
+      if (!this.settlingAccounting.has(report.id)) this.socket.emitToSocket(socketId, 'run:accounting', report);
+    }
+  }
+
+  /** A desktop window handled a report; a confirmation from anyone else is ignored. */
+  private confirmAccounting(id: unknown, socketId: string): void {
+    if (this.isDesktopWindow(socketId)) this.pendingAccounting?.confirm(id);
+  }
+
+  /** A connection from one of the desktop app's own windows. */
+  private isDesktopWindow(socketId: string): boolean {
+    const presented = this.socket.handshakeToken(socketId);
+    if (!this.desktopToken || !presented) return false;
+    const a = Buffer.from(presented);
+    const b = Buffer.from(this.desktopToken);
+    return a.length === b.length && timingSafeEqual(a, b);
   }
 
   /**

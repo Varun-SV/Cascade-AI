@@ -886,6 +886,15 @@ function recordRunSpend(store: CloudStore, entry: SpendEntry): void {
   }
 }
 
+/** As `recordRunSpend`, replacing the run's row if it was written down already. */
+function replaceRunSpend(store: CloudStore, entry: SpendEntry): void {
+  try {
+    store.replaceSpend(entry);
+  } catch (err) {
+    console.error(`[spend] could not record run ${entry.id}:`, err);
+  }
+}
+
 /**
  * Add a run to the spend ledger once every call it made has settled (up to
  * 30 s), from the router's stats as they are then: a parallel call that lands
@@ -905,6 +914,14 @@ export function recordSettledRunSpend(
   build: (stats: RouterStats, savedUsd: number) => SpendEntry | null,
   after?: Promise<unknown>,
 ): Promise<void> {
+  // Written down now, from what the run has spent so far: the wait below can
+  // be cut short by a restart, and the reply is already saved. The row is
+  // completed in place once the run's calls have settled.
+  let provisional: SpendEntry | null = null;
+  try {
+    provisional = build(router.getStats(), router.getDelegationSavings().savedUsd);
+  } catch { /* the final record below still runs */ }
+  if (provisional) recordRunSpend(store, provisional);
   return (async () => {
     if (after) {
       // Bounded, so a hung follow-up call cannot keep the run out of the ledger.
@@ -917,7 +934,7 @@ export function recordSettledRunSpend(
     }
     try { await router.whenRunSettled(); } catch { /* record what there is */ }
     const entry = build(router.getStats(), router.getDelegationSavings().savedUsd);
-    if (entry) recordRunSpend(store, entry);
+    if (entry) replaceRunSpend(store, entry);
   })();
 }
 
@@ -2425,10 +2442,12 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
     // A call with no price and no usage reported still happened, and may
     // have cost money, so it counts as spending too.
     const failedAt = Date.now();
+    // One id for the run: its row is written now and completed in place.
+    const failedId = randomUUID();
     void recordSettledRunSpend(store, cascade.getRouter(), (spent, savedUsd) =>
       spent.totalCostUsd > 0 || spent.totalTokens > 0 || spent.untrackedCostCalls > 0
         ? spendEntryFromRun({
-          id: randomUUID(), userId, conversationId: conversation.id, at: failedAt, costUsd: spent.totalCostUsd,
+          id: failedId, userId, conversationId: conversation.id, at: failedAt, costUsd: spent.totalCostUsd,
           why: {
             costByModel: spent.costByTierModel, tokensByModel: spent.tokensByTierModel,
             unpricedByModel: spent.untrackedByTierModel, totalTokens: spent.totalTokens, savedUsd,

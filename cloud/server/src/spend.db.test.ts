@@ -240,7 +240,7 @@ describe('spend ledger', () => {
     expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals).toMatchObject({ runs: 1, spentUsd: 0.02 });
   });
 
-  it('records a hosted run once its late calls have settled', async () => {
+  it('writes a hosted run down when it answers, and completes it once its late calls settle', async () => {
     const u = user('late');
     // The router as a run leaves it: one call still in flight.
     let tokens = 1000; let settle!: () => void;
@@ -254,10 +254,14 @@ describe('spend ledger', () => {
       why: { costByModel: st.costByTierModel, tokensByModel: st.tokensByTierModel, unpricedByModel: {}, totalTokens: st.totalTokens },
     }));
     await new Promise((r) => setTimeout(r, 0));
-    expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals.runs).toBe(0);
+    // Already there, with what it had spent when it answered: a restart now keeps it.
+    expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals).toMatchObject({ runs: 1, tokens: 1000 });
     settle();
     await done;
-    expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals).toMatchObject({ runs: 1, tokens: 1500 });
+    // The same row, completed: still one run, its lines replaced, not added to.
+    const report = buildSpendReport(store.spend, u.id, 'all', 0, Date.now());
+    expect(report.totals).toMatchObject({ runs: 1, tokens: 1500 });
+    expect(report.tiers[0]!.models[0]).toMatchObject({ model: 'openai:mini', tokens: 1500 });
   });
 
   it('counts a follow-up call the run starts after its own calls settled', async () => {
@@ -275,7 +279,7 @@ describe('spend ledger', () => {
       why: { costByModel: st.costByTierModel, tokensByModel: st.tokensByTierModel, unpricedByModel: {}, totalTokens: st.totalTokens },
     }), distillation);
     await new Promise((r) => setTimeout(r, 0));
-    expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals.runs).toBe(0);
+    expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals).toMatchObject({ runs: 1, tokens: 1000 });
     finish();
     await done;
     expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals).toMatchObject({ runs: 1, tokens: 1300 });

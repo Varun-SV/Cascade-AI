@@ -268,7 +268,9 @@ describe('a device run\'s end time', () => {
     expect(deviceEndedAt(lastNight, now)).toBe(lastNight);
     expect(deviceEndedAt(undefined, now)).toBe(now);
   });
-  it('does not trust a clock far ahead or a time long past', () => {
+  it('never counts a run later than it arrived, nor trusts a time long past', () => {
+    // A clock four minutes fast at 23:58 would otherwise say tomorrow.
+    expect(deviceEndedAt(now + 4 * 60_000, now)).toBe(now);
     expect(deviceEndedAt(now + 10 * 60_000, now)).toBe(now);
     expect(deviceEndedAt(now - 31 * 86_400_000, now)).toBe(now);
   });

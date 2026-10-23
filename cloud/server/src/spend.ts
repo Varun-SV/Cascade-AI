@@ -51,14 +51,15 @@ export function deviceRunSpendId(userId: string, runId: string): string {
 /**
  * When a device's run finished, as it reported it: a run can reach the cloud
  * well after it ended (a queued send, a closed window), and counts on the day
- * it ended. A clock more than 5 minutes ahead, or a time over 30 days back,
- * is not trusted and the receipt time is used. Undefined for a value that is
- * not a time at all.
+ * it ended. Never later than its receipt: a device clock running ahead would
+ * otherwise put a run in a day the report has not reached yet, counted in the
+ * totals but in no chart slot. A time over 30 days back is not trusted either;
+ * both use the receipt time. Undefined for a value that is not a time at all.
  */
 export function deviceEndedAt(value: unknown, nowMs: number): number | undefined {
   if (value === undefined || value === null) return nowMs;
   if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
-  return value > nowMs + 5 * 60_000 || value < nowMs - 30 * 86_400_000 ? nowMs : Math.floor(value);
+  return value > nowMs || value < nowMs - 30 * 86_400_000 ? nowMs : Math.floor(value);
 }
 
 /** A device's run id as `/turns` and `/usage/runs` accept it. */

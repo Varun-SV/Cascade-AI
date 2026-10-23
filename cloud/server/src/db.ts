@@ -1161,16 +1161,39 @@ export class CloudStore {
         )
         .run(e.id, e.userId, e.conversationId, e.at, e.costUsd, e.savedUsd, e.tokens, e.outcome);
       if (added.changes === 0) return;
-      const line = this.db.prepare(
-        `INSERT INTO spend_ledger_models (run_id, tier, model, cost_usd, tokens, unpriced) VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(run_id, tier, model) DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd, tokens = tokens + excluded.tokens,
-           unpriced = CASE WHEN unpriced IS NULL THEN excluded.unpriced
-                           WHEN excluded.unpriced IS NULL THEN unpriced
-                           ELSE MAX(unpriced, excluded.unpriced) END`,
-      );
-      for (const l of e.lines) line.run(e.id, l.tier, l.model, l.costUsd, l.tokens, l.unpriced === null ? null : l.unpriced ? 1 : 0);
+      this.insertSpendLines(e);
     });
     tx();
+  }
+
+  /**
+   * Writes a run's ledger row whether or not it is there yet, replacing its
+   * figures and lines: a hosted run is written down when it answers and
+   * completed once its late calls settle, so a restart in between keeps it.
+   */
+  replaceSpend(e: SpendEntry): void {
+    const tx = this.db.transaction(() => {
+      this.db.prepare(
+        `INSERT INTO spend_ledger (id, user_id, conversation_id, at, cost_usd, saved_usd, tokens, outcome)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET user_id = excluded.user_id, conversation_id = excluded.conversation_id, at = excluded.at,
+           cost_usd = excluded.cost_usd, saved_usd = excluded.saved_usd, tokens = excluded.tokens, outcome = excluded.outcome`,
+      ).run(e.id, e.userId, e.conversationId, e.at, e.costUsd, e.savedUsd, e.tokens, e.outcome);
+      this.db.prepare('DELETE FROM spend_ledger_models WHERE run_id = ?').run(e.id);
+      this.insertSpendLines(e);
+    });
+    tx();
+  }
+
+  private insertSpendLines(e: SpendEntry): void {
+    const line = this.db.prepare(
+      `INSERT INTO spend_ledger_models (run_id, tier, model, cost_usd, tokens, unpriced) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(run_id, tier, model) DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd, tokens = tokens + excluded.tokens,
+         unpriced = CASE WHEN unpriced IS NULL THEN excluded.unpriced
+                         WHEN excluded.unpriced IS NULL THEN unpriced
+                         ELSE MAX(unpriced, excluded.unpriced) END`,
+    );
+    for (const l of e.lines) line.run(e.id, l.tier, l.model, l.costUsd, l.tokens, l.unpriced === null ? null : l.unpriced ? 1 : 0);
   }
 
   /** The queries behind a spend report, all owner-scoped. `fromMs` null is all time. */

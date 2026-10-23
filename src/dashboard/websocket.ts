@@ -296,10 +296,21 @@ export class DashboardSocket {
   }
 
   /** A window confirmed it has handled a `run:accounting` report. */
-  onAccountingConfirmed(callback: (id: unknown) => void): void {
+  onAccountingConfirmed(callback: (id: unknown, socketId: string) => void): void {
     this.io.on('connection', (socket) => {
-      socket.on('run:accounting:ack', (payload: { id?: unknown }) => callback(payload?.id));
+      socket.on('run:accounting:ack', (payload: { id?: unknown }) => callback(payload?.id, socket.id));
     });
+  }
+
+  /** The token a live connection presented when it connected, if any. */
+  handshakeToken(socketId: string): string | undefined {
+    const token = this.io.sockets.sockets.get(socketId)?.handshake.auth?.token;
+    return typeof token === 'string' ? token : undefined;
+  }
+
+  /** Every live connection's id. */
+  socketIds(): string[] {
+    return [...this.io.sockets.sockets.keys()];
   }
 
   emitToSocket(socketId: string, event: string, data: unknown): void {

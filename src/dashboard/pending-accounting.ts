@@ -55,6 +55,17 @@ export class PendingAccounting<T extends object> {
     return kept;
   }
 
+  /**
+   * Replaces a kept report with its final form, under the same id: written
+   * down provisionally when a run ended, completed once its calls settled.
+   */
+  replace(id: string, report: T): T & { id: string } {
+    const kept = { ...report, id };
+    this.pending.set(id, kept);
+    this.append({ add: kept });
+    return kept;
+  }
+
   /** A window handled this report (sent it to the cloud, or skipped it). */
   confirm(id: unknown): void {
     if (typeof id !== 'string' || !this.pending.delete(id)) return;
