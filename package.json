@@ -78,7 +78,7 @@
     "quickjs-emscripten-core": "^0.32.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "simple-git": "^3.27.0",
+    "simple-git": "^4.0.1",
     "socket.io": "^4.8.0",
     "socket.io-msgpack-parser": "^3.0.2",
     "undici": "^6.21.0",
