@@ -51,7 +51,7 @@
     "@types/react-dom": "^19.0.0",
     "@types/react-syntax-highlighter": "^15.5.13",
     "@vitejs/plugin-react": "^6.1.1",
-    "concurrently": "^9.0.0",
+    "concurrently": "^9.2.5",
     "cross-env": "^7.0.3",
     "electron": "33.0.0",
     "electron-builder": "^25.0.0",
