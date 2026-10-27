@@ -305,13 +305,12 @@ export function periodRange(period: SpendPeriod, zone: TimeZone, nowMs: number, 
   if (period === 'today') {
     const next = addDays(today.y, today.mo, today.d, 1);
     const end = startOfDate(next.y, next.mo, next.d, zone);
-    const keys: string[] = [];
-    // Hour by hour to the next midnight; an hour the clocks repeat is one slot.
-    for (let t = todayStart; t < end; t += HOUR) {
-      const key = bucketKey(t, zone, 'hour');
-      if (keys[keys.length - 1] !== key) keys.push(key);
-    }
-    return { fromMs: todayStart, bucket: 'hour', keys };
+    // Hour by hour to the next midnight; an hour the clocks repeat is one slot,
+    // even when the clocks go back by more than an hour and the repeats are not
+    // next to each other (a Set keeps each key's first place).
+    const keys = new Set<string>();
+    for (let t = todayStart; t < end; t += HOUR) keys.add(bucketKey(t, zone, 'hour'));
+    return { fromMs: todayStart, bucket: 'hour', keys: [...keys] };
   }
   const datesFrom = (from: { y: number; mo: number; d: number }, days: number) =>
     Array.from({ length: days }, (_, i) => { const x = addDays(from.y, from.mo, from.d, i); return dateKey(x.y, x.mo, x.d); });

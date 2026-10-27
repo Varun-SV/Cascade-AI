@@ -213,6 +213,26 @@ describe('report periods', () => {
       expect(bucketKey(Date.UTC(2019, 2, 16, 13, 30), 'Antarctica/Casey', 'day')).toBe('2019-03-17');
     });
 
+    it('keeps each hour once when the clocks go back by two, and counts a run there once', () => {
+      // Troll went from UTC+2 to UTC+0 at 01:00 UTC on 25 Oct 2026: local
+      // 01 and 02 came twice, not next to each other (01, 02, 01, 02).
+      const TROLL = 'Antarctica/Troll';
+      const noon = Date.UTC(2026, 9, 25, 12, 0);
+      const r = periodRange('today', TROLL, noon, null);
+      expect(new Set(r.keys).size).toBe(r.keys.length);
+      expect(r.keys.slice(0, 4)).toEqual(['2026-10-25 00', '2026-10-25 01', '2026-10-25 02', '2026-10-25 03']);
+      expect(r.keys).toHaveLength(24);
+      const source: SpendSource = {
+        firstSpendAt: () => null,
+        spendTotals: () => ({ spentUsd: 1, savedUsd: 0, runs: 1, tokens: 0, failedRuns: 0, failedUsd: 0 }),
+        spendRuns: () => [{ at: Date.UTC(2026, 9, 25, 1, 30), spentUsd: 1, savedUsd: 0 }], // the second 01:30
+        spendByTierModel: () => [],
+        spendTopChats: () => [],
+      };
+      const report = buildSpendReport(source, 'u1', 'today', TROLL, noon);
+      expect(report.series.reduce((sum, s) => sum + s.spentUsd, 0)).toBe(1);
+    });
+
     it('starts a day with no midnight at its first instant', () => {
       // Santiago skipped from 00:00 to 01:00 on 12 Aug 2018 (UTC-4 to UTC-3).
       const r = periodRange('today', 'America/Santiago', Date.UTC(2018, 7, 12, 15, 0), null);
