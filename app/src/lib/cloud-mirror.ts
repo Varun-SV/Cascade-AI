@@ -6,9 +6,9 @@
 // which comes once per run after its calls have settled, whichever session or
 // view is on screen. It never blocks or breaks a run, and does nothing when
 // signed out or opted out (`cascade.noCloudSync`). Each report ends as
-// delivered, skipped on purpose, or to be retried: only the first two are
-// confirmed to the backend, which keeps the third and replays it on the next
-// connect (see `mirrorAndConfirm`).
+// delivered, skipped on purpose, refused for good, or to be retried: all but
+// the last are confirmed to the backend, which keeps that one and replays it
+// on the next connect (see `mirrorAndConfirm`).
 
 /** What a run reports for the cloud: its cost and its /why, as JSON. */
 export interface RunAccounting { costUsd: number; why: string }
@@ -75,10 +75,24 @@ const isNotFound = (error: string | undefined): boolean => /\(404\)/.test(error 
 /**
  * How a report ended. 'delivered': the cloud has it. 'skipped': on purpose
  * (opted out, signed out, another account now, nothing to send) and never
- * worth sending again. 'retry': the cloud could not be reached or answered
- * with an error, so the backend must keep it.
+ * worth sending again. 'rejected': the cloud refused it in a way it would
+ * refuse it again (a 4xx such as a report too large), so sending it again
+ * would only repeat that forever. 'retry': no answer, a server error, or a
+ * sign-in to renew, so the backend must keep it.
  */
-export type MirrorResult = 'delivered' | 'skipped' | 'retry';
+export type MirrorResult = 'delivered' | 'skipped' | 'rejected' | 'retry';
+
+/**
+ * Whether a failed request is worth sending again: no answer at all (no
+ * status), a server error, a sign-in to renew (401), a timeout (408) or a
+ * rate limit (429). Any other 4xx would fail the same way every time.
+ */
+const isRetryable = (error: string | undefined): boolean => {
+  const status = /\((\d{3})\)/.exec(error ?? '');
+  if (!status) return true;
+  const code = Number(status[1]);
+  return code >= 500 || code === 401 || code === 408 || code === 429;
+};
 
 type CloudStatus = Awaited<ReturnType<CloudMirrorApi['status']>>;
 
@@ -133,6 +147,7 @@ export class CloudMirror {
     }
     const key = `${who?.serverUrl ?? ''}|${who?.user?.id ?? ''}|${sid}`;
     const outcome = run.outcome ?? 'answered';
+    let turnToRetry = false;
     // One id for this run, however it is sent and however often: the cloud
     // adds its turn to a chat once, and counts the run once, per id. The
     // backend's id when it gave one, so a replayed report is the same run.
@@ -147,14 +162,19 @@ export class CloudMirror {
         assistant: { content: run.output, ...run.cloud },
       };
       const known = this.chats.get(key);
-      const sent = known ? await this.appendTurn(api, known, turn) : 'gone';
+      let sent = known ? await this.appendTurn(api, known, turn) : 'gone';
       if (sent === 'ok') return 'delivered';
       if (sent === 'gone') {
         // No chat yet, or the one linked is gone or not this account's.
         if (known) this.chats.delete(key);
         const chat = await this.newChat(key, run.prompt, api);
-        if (chat && (await this.appendTurn(api, chat, turn)) === 'ok') return 'delivered';
+        sent = chat ? await this.appendTurn(api, chat, turn) : 'retry';
+        if (sent === 'ok') return 'delivered';
       }
+      // The turn could not be copied this time: send it again later, after
+      // its cost is counted below. The cloud adds a turn to a chat once per
+      // run id, and counts the run once, so the resend repeats neither.
+      turnToRetry = sent === 'retry';
     }
     // Anything else still spent money: its cost alone, under the chat already
     // copied for this session if there is one. It never creates an empty chat.
@@ -167,7 +187,7 @@ export class CloudMirror {
       .catch(() => ({ ok: false, error: undefined }));
     let recorded = await send(conversationId);
     // No answer: once more, to the same chat (the run id keeps it to one).
-    if (!recorded.ok && !isNotFound(recorded.error)) recorded = await send(conversationId);
+    if (!recorded.ok && !isNotFound(recorded.error) && isRetryable(recorded.error)) recorded = await send(conversationId);
     // Only a chat the cloud says is gone loses its link (and the run is
     // counted on its own): a lost answer or a passing error leaves the
     // session's later turns in the chat they belong to.
@@ -175,25 +195,36 @@ export class CloudMirror {
       this.chats.delete(key);
       recorded = await send(null);
     }
-    // Not counted: kept by the backend and sent again, under the same run id.
-    return recorded.ok ? 'delivered' : 'retry';
+    if (!recorded.ok && !isRetryable(recorded.error)) {
+      // Refused for good: kept, it would be sent and refused on every connect.
+      console.warn('[cloud] the cloud refused a run report and will not take it:', recorded.error);
+      return 'rejected';
+    }
+    // Not counted, or counted but its turn not copied: kept by the backend and
+    // sent again, under the same run id.
+    if (!recorded.ok || turnToRetry) return 'retry';
+    return 'delivered';
   }
 
   /**
    * Sends a turn to a chat, and once more if no answer came back: the cloud
    * then answers from what the first request added, so a lost response does
    * not copy the turn twice or start another chat. 'gone' when the chat no
-   * longer exists or is not this account's (the cloud answers 404).
+   * longer exists or is not this account's (the cloud answers 404); 'rejected'
+   * when the cloud refuses the turn for good; 'retry' otherwise.
    */
   private async appendTurn(
     api: Partial<CloudMirrorApi>, chat: string, turn: Parameters<CloudMirrorApi['appendTurn']>[1],
-  ): Promise<'ok' | 'gone' | 'failed'> {
+  ): Promise<'ok' | 'gone' | 'rejected' | 'retry'> {
+    let error: string | undefined;
     for (let attempt = 0; attempt < 2; attempt++) {
       const result = await api.appendTurn!(chat, turn).catch(() => ({ ok: false, error: undefined }));
       if (result.ok) return 'ok';
       if (isNotFound(result.error)) return 'gone';
+      error = result.error;
+      if (!isRetryable(error)) return 'rejected';
     }
-    return 'failed';
+    return isRetryable(error) ? 'retry' : 'rejected';
   }
 
   private async newChat(key: string, prompt: string, api: Partial<CloudMirrorApi>): Promise<string | null> {
@@ -205,8 +236,8 @@ export class CloudMirror {
 }
 
 /**
- * Mirrors one `run:accounting` report and confirms it to the backend only once
- * it was delivered or skipped on purpose. A report that failed is left
+ * Mirrors one `run:accounting` report and confirms it to the backend unless it
+ * is to be retried. A report that failed in a way worth retrying is left
  * unconfirmed, so the backend keeps it on disk and replays it on the next
  * connect, under the same id.
  */

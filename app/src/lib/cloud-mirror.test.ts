@@ -212,8 +212,10 @@ describe('CloudMirror', () => {
     await on.mirror.accounted({ sessionId: 's1', outcome: 'failed' });
     expect(on.api.recordRunSpend).not.toHaveBeenCalled();
     on.api.appendTurn.mockRejectedValueOnce(new Error('offline')).mockRejectedValueOnce(new Error('offline'));
-    // The turn could not be copied, but its cost was counted on its own.
-    await expect(on.mirror.accounted(answered('s1'))).resolves.toBe('delivered');
+    // The turn could not be copied: its cost was counted on its own, and the
+    // report is kept so the turn is copied when it is replayed.
+    await expect(on.mirror.accounted(answered('s1'))).resolves.toBe('retry');
+    expect(on.api.recordRunSpend).toHaveBeenCalledTimes(1);
     // A failure does not stop the next run from being sent.
     await on.mirror.accounted(answered('s1', { output: 'next' }));
     expect(on.api.appendTurn).toHaveBeenLastCalledWith('c1', expect.objectContaining({ assistant: expect.objectContaining({ content: 'next' }) }));
@@ -266,6 +268,53 @@ describe('which reports are confirmed to the backend', () => {
     await expect(mirrorAndConfirm(out.mirror, answered('s1', { id: 'run-0008' }), confirm)).resolves.toBe('skipped');
     await expect(mirrorAndConfirm(setup().mirror, { id: 'run-0009', sessionId: 's1', outcome: 'failed' }, confirm)).resolves.toBe('skipped');
     expect(confirm.mock.calls.map((c) => c[0])).toEqual(['run-0006', 'run-0007', 'run-0008', 'run-0009']);
+  });
+
+  it('a report the cloud refuses for good, once, so it is not resent on every connect', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { api, mirror } = setup();
+    // A 400, as /usage/runs gives a report whose /why is too long.
+    api.recordRunSpend.mockResolvedValue({ ok: false, error: 'Request failed (400).' });
+    const confirm = vi.fn();
+    await expect(mirrorAndConfirm(mirror, { id: 'run-0012', sessionId: 's1', outcome: 'failed', cloud: accounting }, confirm)).resolves.toBe('rejected');
+    expect(api.recordRunSpend).toHaveBeenCalledTimes(1);
+    expect(confirm).toHaveBeenCalledWith('run-0012');
+    warn.mockRestore();
+  });
+
+  it('none whose sign-in needs renewing, or that was rate limited', async () => {
+    const confirm = vi.fn();
+    for (const error of ['Request failed (401).', 'Request failed (429).', 'Request failed (408).']) {
+      const { api, mirror } = setup();
+      api.recordRunSpend.mockResolvedValue({ ok: false, error });
+      await expect(mirrorAndConfirm(mirror, { id: 'run-0013', sessionId: 's1', outcome: 'failed', cloud: accounting }, confirm)).resolves.toBe('retry');
+    }
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it('none whose turn was not copied, though its cost was counted; the replay copies it once', async () => {
+    const { api, mirror } = setup(false, links([['https://cloud|u1|s1', 'chat']]));
+    api.appendTurn.mockResolvedValue(failing);
+    const confirm = vi.fn();
+    const report = answered('s1', { id: 'run-0014' });
+    await expect(mirrorAndConfirm(mirror, report, confirm)).resolves.toBe('retry');
+    // The cost is counted now, under the run's id.
+    expect(api.recordRunSpend).toHaveBeenCalledWith(expect.objectContaining({ conversationId: 'chat', runId: 'run-0014' }));
+    expect(confirm).not.toHaveBeenCalled();
+    // Replayed on the next connect, with the cloud back: the turn goes to the same chat, same id.
+    api.appendTurn.mockResolvedValue({ ok: true });
+    await expect(mirrorAndConfirm(mirror, report, confirm)).resolves.toBe('delivered');
+    expect(api.appendTurn).toHaveBeenLastCalledWith('chat', expect.objectContaining({ runId: 'run-0014' }));
+    expect(confirm).toHaveBeenCalledWith('run-0014');
+  });
+
+  it('a turn refused for good is not retried, once its cost is counted', async () => {
+    const { api, mirror } = setup(false, links([['https://cloud|u1|s1', 'chat']]));
+    api.appendTurn.mockResolvedValue({ ok: false, error: 'Request failed (413).' });
+    const confirm = vi.fn();
+    await expect(mirrorAndConfirm(mirror, answered('s1', { id: 'run-0015' }), confirm)).resolves.toBe('delivered');
+    expect(api.appendTurn).toHaveBeenCalledTimes(1);
+    expect(confirm).toHaveBeenCalledWith('run-0015');
   });
 
   it('a failure does not hold up the runs queued behind it', async () => {

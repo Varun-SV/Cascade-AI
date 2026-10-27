@@ -125,7 +125,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never counted. A report is now confirmed only when the cloud has it or it
   was skipped on purpose (opted out, signed out, another account signed in);
   otherwise it stays on disk and is sent again, under the same run id, the
-  next time a desktop window connects.
+  next time a desktop window connects. A turn that could not be copied is
+  sent again the same way, once its cost is counted. A report the cloud
+  refuses for good (a 4xx other than a sign-in to renew, a timeout or a rate
+  limit) is not kept, so it is not resent on every connect.
 - **You can start a new chat from the session sidebar.** Before, only the Code
   view's chat picker and the command palette could. The sidebar (and its
   collapsed rail) now has a New chat button: Mission Control and Chat start the
