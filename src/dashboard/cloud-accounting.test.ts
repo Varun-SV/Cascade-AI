@@ -58,10 +58,10 @@ type Internals = {
 };
 
 /** A desktop backend whose socket layer has one desktop window and one stranger. */
-function desktopServer(file: string, port = 51001) {
+function desktopServer(file: string, port = 51001, cloudAccount?: () => { userId: string; serverUrl: string } | null) {
   const server = new DashboardServer({ ...config, dashboard: { ...config.dashboard, port } } as CascadeConfig, store, '/tmp',
-    { pendingAccountingFile: file, desktopToken: 'desk-token' }) as unknown as Internals;
-  const delivered: Array<{ socketId: string; payload: { id: string; cloud: { costUsd: number } } }> = [];
+    { pendingAccountingFile: file, desktopToken: 'desk-token', cloudAccount }) as unknown as Internals;
+  const delivered: Array<{ socketId: string; payload: { id: string; sessionId: string; prompt: string; cloud: { costUsd: number }; account?: unknown } }> = [];
   server.socket = {
     socketIds: () => ['desk', 'stranger'],
     handshakeToken: (id: string) => (id === 'desk' ? 'desk-token' : id === 'stranger' ? 'guess' : undefined),
@@ -158,7 +158,7 @@ describe('the desktop\'s run accounting for the cloud', () => {
 
     it('stays on disk when the signed-in desktop cannot upload it, and goes once a replay is delivered', async () => {
       const router = await routerWith(100, 0.0001);
-      const { server, delivered } = desktopServer(file);
+      const { server, delivered } = desktopServer(file, 51001, () => ({ userId: 'u1', serverUrl: 'https://cloud' }));
       await server.emitRunAccounting(vi.fn(), 's1', { getRouter: () => router, getDecisionLog: () => [] }, { ...run, copyTurn: true });
       // The desktop window's mirror, signed in, while the cloud answers 502.
       const failing = { ok: false, error: 'Cloud request failed (502)' };
@@ -192,6 +192,59 @@ describe('the desktop\'s run accounting for the cloud', () => {
       expect(new Set(api.appendTurn.mock.calls.map((c) => (c[1] as { runId: string }).runId))).toEqual(new Set([report.id]));
       expect(server.pendingAccounting!.unconfirmed()).toEqual([]);
       expect(desktopServer(file, 51004).server.pendingAccounting!.unconfirmed()).toEqual([]);
+    });
+
+    it('is never sent to an account that signed in after the run ended, even when replayed', async () => {
+      const router = await routerWith(100, 0.0001);
+      let signedIn: { userId: string; serverUrl: string } | null = { userId: 'u1', serverUrl: 'https://cloud' };
+      let settle!: () => void;
+      vi.spyOn(router, 'whenRunSettled').mockImplementation(() => new Promise((r) => { settle = () => r(true); }));
+      const { server, delivered } = desktopServer(file, 51001, () => signedIn);
+      const done = server.emitRunAccounting(vi.fn(), 's1', { getRouter: () => router, getDecisionLog: () => [] }, { ...run, copyTurn: true });
+      // u1 signs out and u2 signs in while the run's late calls settle: the run is still u1's.
+      signedIn = { userId: 'u2', serverUrl: 'https://cloud' };
+      settle();
+      await done;
+      expect(delivered[0]!.payload.account).toEqual({ userId: 'u1', serverUrl: 'https://cloud' });
+      expect(desktopServer(file, 51005).server.pendingAccounting!.unconfirmed()[0]).toMatchObject({ account: { userId: 'u1' } });
+
+      // The window, signed in as u2 now, gets the report (or its replay after a failed upload under u1).
+      const api = {
+        status: vi.fn().mockResolvedValue({ signedIn: true, user: { id: 'u2' }, serverUrl: 'https://cloud' }),
+        createConversation: vi.fn().mockResolvedValue({ ok: true, conversation: { id: 'c2' } }),
+        appendTurn: vi.fn().mockResolvedValue({ ok: true }),
+        recordRunSpend: vi.fn().mockResolvedValue({ ok: true }),
+      };
+      const mirror = new CloudMirror(() => api, () => false, { get: () => undefined, set: () => {}, delete: () => {} });
+      server.replayAccountingTo('desk');
+      const replayed = delivered[1]!.payload as unknown as AccountedRun & { id: string };
+      expect(await mirrorAndConfirm(mirror, replayed, (id) => server.confirmAccounting(id, 'desk'))).toBe('skipped');
+      expect(api.createConversation).not.toHaveBeenCalled();
+      expect(api.appendTurn).not.toHaveBeenCalled();
+      expect(api.recordRunSpend).not.toHaveBeenCalled();
+    });
+
+    it('is sent in the order the session\'s runs ended, not the order their late calls settled', async () => {
+      const slow = await routerWith(100, 0.0001);
+      const fast = await routerWith(100, 0.0001);
+      const other = await routerWith(100, 0.0001);
+      let settle!: () => void;
+      vi.spyOn(slow, 'whenRunSettled').mockImplementation(() => new Promise((r) => { settle = () => r(true); }));
+      const { server, delivered } = desktopServer(file);
+      const cascade = (router: CascadeRouter) => ({ getRouter: () => router, getDecisionLog: () => [] });
+      const first = server.emitRunAccounting(vi.fn(), 's1', cascade(slow), { ...run, prompt: 'first' });
+      const second = server.emitRunAccounting(vi.fn(), 's1', cascade(fast), { ...run, prompt: 'second' });
+      const elsewhere = server.emitRunAccounting(vi.fn(), 's2', cascade(other), { ...run, prompt: 'other session' });
+      await elsewhere;
+      await new Promise((r) => setTimeout(r, 0));
+      // Another session is not held up; this one's second run waits for its first.
+      expect(delivered.map((d) => d.payload.prompt)).toEqual(['other session']);
+      // A window connecting meanwhile is not sent the second run ahead of the first either.
+      server.replayAccountingTo('desk');
+      expect(delivered.map((d) => d.payload.prompt)).toEqual(['other session', 'other session']);
+      settle();
+      await first; await second;
+      expect(delivered.map((d) => d.payload.prompt)).toEqual(['other session', 'other session', 'first', 'second']);
     });
   });
 });

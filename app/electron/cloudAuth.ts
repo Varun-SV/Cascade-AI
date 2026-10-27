@@ -191,7 +191,10 @@ class SafeStorageSessionStore implements SessionStore {
  * bundle (same loader `main.ts` uses for the backend), from which we pull the
  * shared `CloudClient` and default cloud URL.
  */
-export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks): void {
+/** What the backend reads as a run ends: who is signed in, to which server. */
+export interface CloudAuthHandle { account(): { userId: string; serverUrl: string } | null }
+
+export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks): CloudAuthHandle {
   const store = new SafeStorageSessionStore();
   const core = () => loadCore() as CoreExports;
   const serverUrl = (process.env['CASCADE_CLOUD_URL'] || '').trim().replace(/\/$/, '') || core().DEFAULT_CLOUD_URL;
@@ -508,4 +511,11 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
     }
     return { ok: true };
   });
+
+  return {
+    account: () => {
+      const s = store.load();
+      return s?.user?.id ? { userId: s.user.id, serverUrl } : null;
+    },
+  };
 }

@@ -129,6 +129,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sent again the same way, once its cost is counted. A report the cloud
   refuses for good (a 4xx other than a sign-in to renew, a timeout or a rate
   limit) is not kept, so it is not resent on every connect.
+- **A desktop run's turn and cost go only to the account it ran under, in
+  order.** The backend now records which cloud account the desktop was
+  signed in to when each run ended, and a report sent later (a retry, or one
+  kept while no window was open) is skipped rather than uploaded if another
+  account is signed in by then. Runs in the same chat are also sent in the
+  order they ended: a run whose late calls were still settling used to let
+  the next run's turn reach the cloud chat first.
 - **You can start a new chat from the session sidebar.** Before, only the Code
   view's chat picker and the command palette could. The sidebar (and its
   collapsed rail) now has a New chat button: Mission Control and Chat start the

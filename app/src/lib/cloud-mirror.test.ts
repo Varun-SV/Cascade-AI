@@ -317,6 +317,29 @@ describe('which reports are confirmed to the backend', () => {
     expect(confirm).toHaveBeenCalledWith('run-0015');
   });
 
+  it('sends a report only to the account the backend stamped as the run ended', async () => {
+    const confirm = vi.fn();
+    const stampedU1 = { userId: 'u1', serverUrl: 'https://cloud' };
+    // u2 is signed in now: u1's run is skipped, not uploaded into u2's account.
+    const now2 = setup();
+    now2.api.status.mockResolvedValue(as('u2'));
+    await expect(mirrorAndConfirm(now2.mirror, answered('s1', { id: 'run-0112', account: stampedU1 }), confirm)).resolves.toBe('skipped');
+    expect(now2.api.createConversation).not.toHaveBeenCalled();
+    expect(now2.api.recordRunSpend).not.toHaveBeenCalled();
+    // The same account on another server is another account.
+    const elsewhere = setup();
+    await expect(mirrorAndConfirm(elsewhere.mirror, answered('s1', { id: 'run-0113', account: { userId: 'u1', serverUrl: 'https://other' } }), confirm)).resolves.toBe('skipped');
+    // Signed out when it ended: nothing goes, whoever is signed in now.
+    const out = setup();
+    await expect(mirrorAndConfirm(out.mirror, answered('s1', { id: 'run-0114', account: null }), confirm)).resolves.toBe('skipped');
+    expect(out.api.appendTurn).not.toHaveBeenCalled();
+    // Still u1: sent, into u1's chat for the session.
+    const chats = links([['https://cloud|u1|s1', 'u1-chat']]);
+    const same = setup(false, chats);
+    await expect(mirrorAndConfirm(same.mirror, answered('s1', { id: 'run-0115', account: stampedU1 }), confirm)).resolves.toBe('delivered');
+    expect(same.api.appendTurn).toHaveBeenCalledWith('u1-chat', expect.anything());
+  });
+
   it('a failure does not hold up the runs queued behind it', async () => {
     const { api, mirror } = setup();
     api.recordRunSpend.mockResolvedValueOnce(failing).mockResolvedValueOnce(failing);

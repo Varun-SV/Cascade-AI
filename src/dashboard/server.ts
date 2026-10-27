@@ -48,6 +48,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  */
 const ORPHANED_ESCALATION_GRACE_MS = 30_000;
 
+/** A cloud account on a given server, as the desktop is signed in to it. */
+export interface CloudAccountRef { userId: string; serverUrl: string }
+
 /** A prompt a run is parked on, held so a late or reconnecting client can get it. */
 interface PendingEscalationEntry {
   payload: Record<string, unknown>;
@@ -163,6 +166,15 @@ export class DashboardServer {
    */
   private readonly settlingAccounting = new Set<string>();
   /**
+   * Per session, the send of the run that ended last: each run's accounting
+   * waits for the one before it in the same session, so the turns reach the
+   * cloud chat in the order the runs ended, not the order their late calls
+   * settled.
+   */
+  private readonly accountingTail = new Map<string, Promise<void>>();
+  /** Which cloud account the desktop is signed in to (see the option). */
+  private readonly cloudAccount: (() => CloudAccountRef | null | undefined) | undefined;
+  /**
    * Supplied by the desktop shell so a run can read the page the user has
    * open in the built-in browser. Absent in the CLI, where there is no
    * browser — so the tool is simply not registered rather than present and
@@ -232,6 +244,12 @@ export class DashboardServer {
        * confirm it, even with dashboard auth off. Without it, nothing is kept.
        */
       desktopToken?: string;
+      /**
+       * The desktop's cloud account (user and server), or null when signed
+       * out. Read when a run ends and kept with its accounting, so a report
+       * replayed later is sent only to the account the run ended under.
+       */
+      cloudAccount?: () => CloudAccountRef | null | undefined;
     } = {},
   ) {
     this.config = config;
@@ -243,6 +261,7 @@ export class DashboardServer {
     // On disk, so nothing waiting for a window is lost, even across restarts.
     // One file per host: another dashboard on this machine keeps its own.
     this.desktopToken = options.desktopToken || undefined;
+    this.cloudAccount = options.cloudAccount;
     this.pendingAccounting = this.desktopToken
       ? new PendingAccounting(options.pendingAccountingFile ?? path.join(globalDir(), `pending-accounting-${this.port}.jsonl`))
       : null;
@@ -798,6 +817,14 @@ export class DashboardServer {
     // When the run finished, before waiting for its late calls: the cloud
     // counts it on that day, however long it waits to be sent.
     const endedAt = Date.now();
+    // Whose run it is, as it ends: a report sent later goes to this account or nowhere.
+    const owner = this.accountAtRunEnd();
+    const account = owner === undefined ? {} : { account: owner };
+    // This session's previous run is sent first, however long its calls take.
+    const previous = this.accountingTail.get(sessionId) ?? Promise.resolve();
+    let release!: () => void;
+    const mine = new Promise<void>((resolve) => { release = resolve; });
+    this.accountingTail.set(sessionId, mine);
     let journaled: string | undefined;
     try {
       const router = cascade.getRouter();
@@ -808,18 +835,19 @@ export class DashboardServer {
       // app quits while it waits, this is replayed when it next starts. Not
       // sent while this process is still waiting.
       if (this.pendingAccounting) {
-        journaled = this.pendingAccounting.add({ sessionId, ...run, endedAt, cloud: cloudTurnAccounting(reportNow()) }).id;
+        journaled = this.pendingAccounting.add({ sessionId, ...run, endedAt, ...account, cloud: cloudTurnAccounting(reportNow()) }).id;
         this.settlingAccounting.add(journaled);
       }
       await router.whenRunSettled();
       const report = reportNow();
+      await previous;
       // A call with no price and no usage reported still happened, and may have cost money.
       if (journaled) this.settlingAccounting.delete(journaled);
       if (report.totalCostUsd <= 0 && report.totalTokens <= 0 && Object.keys(report.unpricedByModel).length === 0 && !run.output) {
         if (journaled) this.pendingAccounting?.confirm(journaled);
         return;
       }
-      const payload = { sessionId, ...run, endedAt, cloud: cloudTurnAccounting(report) };
+      const payload = { sessionId, ...run, endedAt, ...account, cloud: cloudTurnAccounting(report) };
       if (!this.pendingAccounting || !journaled) { emit('run:accounting', payload); return; }
       // Kept until a desktop window confirms it (a run can end with none
       // open), and sent only to the desktop's own windows.
@@ -831,7 +859,21 @@ export class DashboardServer {
       // What was journaled stays, and is replayed as written.
       if (journaled) this.settlingAccounting.delete(journaled);
       console.warn('[dashboard] failed to report run accounting:', err);
+    } finally {
+      release();
+      if (this.accountingTail.get(sessionId) === mine) this.accountingTail.delete(sessionId);
     }
+  }
+
+  /** The cloud account as a run ends; undefined when it cannot be told (not the desktop). */
+  private accountAtRunEnd(): CloudAccountRef | null | undefined {
+    if (!this.cloudAccount) return undefined;
+    try {
+      const a = this.cloudAccount();
+      if (a === null) return null;
+      return a && typeof a.userId === 'string' && typeof a.serverUrl === 'string'
+        ? { userId: a.userId, serverUrl: a.serverUrl } : undefined;
+    } catch { return undefined; }
   }
 
   /** Every report no desktop window has confirmed, to one that just connected. */

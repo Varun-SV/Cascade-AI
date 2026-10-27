@@ -25,6 +25,13 @@ export interface AccountedRun {
   copyTurn?: boolean;
   /** When the run finished (epoch ms), so it counts on that day in the cloud. */
   endedAt?: number;
+  /**
+   * The account the desktop was signed in to when the run ended (null: signed
+   * out), stamped by the backend. A report replayed later, maybe after another
+   * account signed in, is sent only to this one. Absent from hosts that cannot
+   * tell, where the account signed in when the report arrives is used.
+   */
+  account?: { userId: string; serverUrl: string } | null;
   cloud?: RunAccounting;
 }
 
@@ -134,7 +141,13 @@ export class CloudMirror {
     const api = this.api();
     if (!api) return 'skipped';
     // Links belong to the account they were made under; signed out, nothing goes.
-    const ended = await atEnd;
+    // The account the run ended under, as the backend stamped it; else the one
+    // signed in when this report arrived.
+    const stamped = run.account;
+    if (stamped === null) return 'skipped';
+    const ended = stamped && typeof stamped.userId === 'string' && typeof stamped.serverUrl === 'string'
+      ? { signedIn: true, user: { id: stamped.userId }, serverUrl: stamped.serverUrl }
+      : await atEnd;
     // Not knowing who is signed in is not the same as nobody being signed in.
     if (ended === 'error') return 'retry';
     const who = ended ?? null;
