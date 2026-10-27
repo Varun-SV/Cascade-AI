@@ -372,6 +372,60 @@ describe('which reports are confirmed to the backend', () => {
     expect(spend.api.recordRunSpend).toHaveBeenCalledTimes(1);
   });
 
+  describe('an account switch before any one request of a send', () => {
+    const stamped = { userId: 'u1', serverUrl: 'https://cloud' };
+    type Step = { op: 'createConversation' | 'appendTurn' | 'recordRunSpend'; answer: Record<string, unknown> };
+    // Each send below goes through every request the mirror can make; u2 signs in after request n.
+    const sends: Array<{ name: string; known?: string; steps: Step[] }> = [
+      { name: 'new chat, turn and spend failing', steps: [
+        { op: 'createConversation', answer: { ok: true, conversation: { id: 'c1' } } },
+        { op: 'appendTurn', answer: { ok: false, error: 'Request failed (503).' } },
+        { op: 'appendTurn', answer: { ok: false, error: 'Request failed (503).' } },
+        { op: 'recordRunSpend', answer: { ok: false, error: 'Request failed (503).' } },
+        { op: 'recordRunSpend', answer: { ok: false, error: 'Request failed (503).' } },
+      ] },
+      { name: 'gone chat, replacement, then spend with a gone chat', known: 'old', steps: [
+        { op: 'appendTurn', answer: { ok: false, error: 'Request failed (404).' } },
+        { op: 'createConversation', answer: { ok: true, conversation: { id: 'c2' } } },
+        { op: 'appendTurn', answer: { ok: false, error: 'Request failed (503).' } },
+        { op: 'appendTurn', answer: { ok: false, error: 'Request failed (503).' } },
+        { op: 'recordRunSpend', answer: { ok: false, error: 'Request failed (404).' } },
+        { op: 'recordRunSpend', answer: { ok: true } },
+      ] },
+    ];
+    for (const send of sends) {
+      for (let n = 1; n < send.steps.length; n++) {
+        it(`${send.name}: switch after request ${n}`, async () => {
+          let current = 'u1';
+          const made: Array<{ op: string; as: string; refused: boolean }> = [];
+          let i = 0;
+          const answer = (op: Step['op']) => async (...args: unknown[]) => {
+            const account = args[args.length - 1] as { userId?: string } | undefined;
+            const refused = account?.userId !== current;
+            made.push({ op, as: current, refused });
+            if (refused) return { ok: false, accountChanged: true };
+            const step = send.steps[i++]!;
+            expect(step.op).toBe(op);
+            if (i === n) current = 'u2';
+            return step.answer;
+          };
+          const { api, mirror } = setup(false, links(send.known ? [['https://cloud|u1|s1', send.known]] : []));
+          api.createConversation.mockImplementation(answer('createConversation'));
+          api.appendTurn.mockImplementation(answer('appendTurn'));
+          api.recordRunSpend.mockImplementation(answer('recordRunSpend'));
+          const confirm = vi.fn();
+          await expect(mirrorAndConfirm(mirror, answered('s1', { id: 'run-0100', account: stamped }), confirm)).resolves.toBe('skipped');
+          // Requests ran as u1 up to the switch; the next one was refused and nothing followed it.
+          expect(made.filter((m) => !m.refused).every((m) => m.as === 'u1')).toBe(true);
+          expect(made.filter((m) => m.refused)).toHaveLength(1);
+          expect(made[made.length - 1]!).toMatchObject({ op: send.steps[n]!.op, as: 'u2', refused: true });
+          // Skipped under the account-switch rule: confirmed, and so not kept for u1.
+          expect(confirm).toHaveBeenCalledWith('run-0100');
+        });
+      }
+    }
+  });
+
   it('a failure does not hold up the runs queued behind it', async () => {
     const { api, mirror } = setup();
     api.recordRunSpend.mockResolvedValueOnce(failing).mockResolvedValueOnce(failing);
