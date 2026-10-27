@@ -133,7 +133,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   order.** The backend now records which cloud account the desktop was
   signed in to when each run ended, and a report sent later (a retry, or one
   kept while no window was open) is skipped rather than uploaded if another
-  account is signed in by then. Runs in the same chat are also sent in the
+  account is signed in by then. Each request also names that account, and
+  the app's main process refuses it if another account has signed in
+  meanwhile, even part-way through a send. Runs in the same chat are also sent in the
   order they ended: a run whose late calls were still settling used to let
   the next run's turn reach the cloud chat first.
 - **You can start a new chat from the session sidebar.** Before, only the Code

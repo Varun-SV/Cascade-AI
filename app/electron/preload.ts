@@ -37,6 +37,9 @@ interface CloudMsg {
   siblingIds?: string[];
 }
 
+/** The account a cloud request is meant for. */
+interface CloudAccount { userId: string; serverUrl: string }
+
 /** A locally-executed turn to persist into the shared cloud conversation. */
 interface CloudTurn {
   userContent: string;
@@ -196,14 +199,16 @@ contextBridge.exposeInMainWorld('cascade', {
     }>,
     // Cloud-backed sessions: write a locally-executed turn + branch operations,
     // so desktop chats join the shared cloud session tree (web + CLI too).
-    createConversation: (title?: string) => ipcRenderer.invoke('cloud:createConversation', title) as Promise<{
-      ok: boolean; error?: string; conversation?: { id: string; title: string | null };
+    // `account`: the account the request is for. The main process refuses it
+    // (`accountChanged`) if another account is signed in by then.
+    createConversation: (title?: string, account?: CloudAccount) => ipcRenderer.invoke('cloud:createConversation', title, account) as Promise<{
+      ok: boolean; error?: string; accountChanged?: boolean; conversation?: { id: string; title: string | null };
     }>,
-    appendTurn: (id: string, turn: CloudTurn) => ipcRenderer.invoke('cloud:appendTurn', id, turn) as Promise<{
-      ok: boolean; error?: string; messages: CloudMsg[];
+    appendTurn: (id: string, turn: CloudTurn, account?: CloudAccount) => ipcRenderer.invoke('cloud:appendTurn', id, turn, account) as Promise<{
+      ok: boolean; error?: string; accountChanged?: boolean; messages: CloudMsg[];
     }>,
-    recordRunSpend: (run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string; endedAt?: number }) =>
-      ipcRenderer.invoke('cloud:recordRunSpend', run) as Promise<{ ok: boolean; error?: string; recorded?: boolean }>,
+    recordRunSpend: (run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string; endedAt?: number }, account?: CloudAccount) =>
+      ipcRenderer.invoke('cloud:recordRunSpend', run, account) as Promise<{ ok: boolean; error?: string; accountChanged?: boolean; recorded?: boolean }>,
     selectBranch: (id: string, messageId: string) => ipcRenderer.invoke('cloud:selectBranch', id, messageId) as Promise<{
       ok: boolean; error?: string; messages: CloudMsg[];
     }>,

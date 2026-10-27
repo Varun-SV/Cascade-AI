@@ -18,6 +18,7 @@ import { app, ipcMain, safeStorage, shell } from 'electron';
 import { join } from 'node:path';
 import { readFileSync, writeFileSync, rmSync, mkdirSync, chmodSync } from 'node:fs';
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
+import { accountMismatch, ACCOUNT_CHANGED } from './cloud-account';
 
 // ── Shapes shared with the renderer (mirror the SDK's cloud types) ──
 
@@ -241,19 +242,25 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
   });
 
   // ── Cloud-backed sessions: write + branch ops (shared with web + CLI) ──
-  ipcMain.handle('cloud:createConversation', async (_e, title: unknown) => {
+  // A request may name the account it is for (the run mirror does): checked
+  // against the session signed in now, just before the request reads it.
+  const otherAccount = (expected: unknown) => accountMismatch(expected, store.load()?.user?.id, serverUrl);
+
+  ipcMain.handle('cloud:createConversation', async (_e, title: unknown, expected?: unknown) => {
+    if (otherAccount(expected)) return ACCOUNT_CHANGED;
     try { return { ok: true, conversation: await client().createConversation(typeof title === 'string' ? title : undefined) }; }
     catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not create a cloud chat.' }; }
   });
 
-  ipcMain.handle('cloud:appendTurn', async (_e, id: unknown, turn: unknown) => {
+  ipcMain.handle('cloud:appendTurn', async (_e, id: unknown, turn: unknown, expected?: unknown) => {
+    if (otherAccount(expected)) return { ...ACCOUNT_CHANGED, messages: [] };
     try { return { ok: true, messages: await client().appendTurn(String(id), turn as CloudTurn) }; }
     catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not save that turn.', messages: [] }; }
   });
 
   // A local run with no turn to copy: its spend goes to the account's report
   // all the same. The renderer's input is checked, not trusted.
-  ipcMain.handle('cloud:recordRunSpend', async (_e, run: unknown) => {
+  ipcMain.handle('cloud:recordRunSpend', async (_e, run: unknown, expected?: unknown) => {
     const r = (run && typeof run === 'object' ? run : {}) as Record<string, unknown>;
     const outcome = r['outcome'] === 'answered' || r['outcome'] === 'failed' || r['outcome'] === 'stopped' ? r['outcome'] : null;
     const costUsd = typeof r['costUsd'] === 'number' && Number.isFinite(r['costUsd']) && r['costUsd'] >= 0 ? r['costUsd'] : null;
@@ -262,6 +269,7 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
     const runId = typeof r['runId'] === 'string' ? r['runId'] : undefined;
     const endedAt = typeof r['endedAt'] === 'number' && Number.isFinite(r['endedAt']) ? r['endedAt'] : undefined;
     if (!outcome || costUsd === null || why === null) return { ok: false, error: 'Invalid run.' };
+    if (otherAccount(expected)) return ACCOUNT_CHANGED;
     try { return { ok: true, ...(await client().recordRunSpend({ conversationId, outcome, costUsd, why, ...(runId ? { runId } : {}), ...(endedAt !== undefined ? { endedAt } : {}) })) }; }
     catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not record that run.' }; }
   });

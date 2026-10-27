@@ -27,8 +27,8 @@ describe('CloudMirror', () => {
   it('copies an answered turn with its cost, by the prompt the backend sends', async () => {
     const { api, mirror } = setup();
     await mirror.accounted(answered('s1', { prompt: 'from the cockpit' }));
-    expect(api.createConversation).toHaveBeenCalledWith('from the cockpit');
-    expect(api.appendTurn).toHaveBeenCalledWith('c1', { userContent: 'from the cockpit', runId: expect.any(String), assistant: { content: 'answer', ...accounting } });
+    expect(api.createConversation).toHaveBeenCalledWith('from the cockpit', expect.anything());
+    expect(api.appendTurn).toHaveBeenCalledWith('c1', { userContent: 'from the cockpit', runId: expect.any(String), assistant: { content: 'answer', ...accounting } }, expect.anything());
     expect(api.recordRunSpend).not.toHaveBeenCalled();
   });
 
@@ -37,14 +37,14 @@ describe('CloudMirror', () => {
     await mirror.accounted({ sessionId: 's1', prompt: 'q', output: '', outcome: 'stopped', copyTurn: true, cloud: accounting });
     await mirror.accounted({ sessionId: 's2', prompt: 'q', output: '', outcome: 'answered', copyTurn: true, cloud: accounting });
     expect(api.createConversation).not.toHaveBeenCalled();
-    expect(api.recordRunSpend).toHaveBeenNthCalledWith(1, { conversationId: null, outcome: 'stopped', runId: expect.any(String), ...accounting });
-    expect(api.recordRunSpend).toHaveBeenNthCalledWith(2, { conversationId: null, outcome: 'answered', runId: expect.any(String), ...accounting });
+    expect(api.recordRunSpend).toHaveBeenNthCalledWith(1, { conversationId: null, outcome: 'stopped', runId: expect.any(String), ...accounting }, { userId: 'u1', serverUrl: 'https://cloud' });
+    expect(api.recordRunSpend).toHaveBeenNthCalledWith(2, { conversationId: null, outcome: 'answered', runId: expect.any(String), ...accounting }, { userId: 'u1', serverUrl: 'https://cloud' });
   });
 
   it('copies what a stopped run had written, marked as stopped', async () => {
     const { api, mirror } = setup();
     await mirror.accounted(answered('s1', { output: 'half an ans', outcome: 'stopped' }));
-    expect(api.appendTurn).toHaveBeenCalledWith('c1', { userContent: 'q', runId: expect.any(String), outcome: 'stopped', assistant: { content: 'half an ans', ...accounting } });
+    expect(api.appendTurn).toHaveBeenCalledWith('c1', { userContent: 'q', runId: expect.any(String), outcome: 'stopped', assistant: { content: 'half an ans', ...accounting } }, expect.anything());
     expect(api.recordRunSpend).not.toHaveBeenCalled();
   });
 
@@ -69,21 +69,21 @@ describe('CloudMirror', () => {
     const { api, mirror } = setup();
     await mirror.accounted(answered('sched', { copyTurn: false }));
     expect(api.appendTurn).not.toHaveBeenCalled();
-    expect(api.recordRunSpend).toHaveBeenCalledWith({ conversationId: null, outcome: 'answered', runId: expect.any(String), ...accounting });
+    expect(api.recordRunSpend).toHaveBeenCalledWith({ conversationId: null, outcome: 'answered', runId: expect.any(String), ...accounting }, expect.anything());
   });
 
   it('records a failed run against the chat already copied', async () => {
     const { api, mirror } = setup();
     await mirror.accounted(answered('s1'));
     await mirror.accounted({ sessionId: 's1', outcome: 'failed', cloud: accounting });
-    expect(api.recordRunSpend).toHaveBeenCalledWith({ conversationId: 'c1', outcome: 'failed', runId: expect.any(String), ...accounting });
+    expect(api.recordRunSpend).toHaveBeenCalledWith({ conversationId: 'c1', outcome: 'failed', runId: expect.any(String), ...accounting }, expect.anything());
   });
 
   it('continues the same cloud chat after a restart', async () => {
     const { api, mirror } = setup(false, links([['https://cloud|u1|s1', 'kept-chat']]));
     await mirror.accounted(answered('s1'));
     expect(api.createConversation).not.toHaveBeenCalled();
-    expect(api.appendTurn).toHaveBeenCalledWith('kept-chat', expect.anything());
+    expect(api.appendTurn).toHaveBeenCalledWith('kept-chat', expect.anything(), expect.anything());
   });
 
   it('starts a new chat for a session when another account signs in', async () => {
@@ -92,7 +92,7 @@ describe('CloudMirror', () => {
     api.createConversation.mockResolvedValue({ ok: true, conversation: { id: 'chat-of-u2' } });
     await mirror.accounted(answered('s1'));
     expect(api.appendTurn).toHaveBeenCalledTimes(1);
-    expect(api.appendTurn).toHaveBeenCalledWith('chat-of-u2', expect.anything());
+    expect(api.appendTurn).toHaveBeenCalledWith('chat-of-u2', expect.anything(), expect.anything());
   });
 
   it('replaces a chat that can no longer be reached, and still counts a run with no turn', async () => {
@@ -130,11 +130,11 @@ describe('CloudMirror', () => {
     expect(api.createConversation).not.toHaveBeenCalled();
     const turnId = (api.appendTurn.mock.calls[0]![1] as { runId: string }).runId;
     // If a turn got through after all, the cloud counts the run once.
-    expect(api.recordRunSpend).toHaveBeenCalledWith({ conversationId: 'chat', outcome: 'answered', runId: turnId, ...accounting });
+    expect(api.recordRunSpend).toHaveBeenCalledWith({ conversationId: 'chat', outcome: 'answered', runId: turnId, ...accounting }, expect.anything());
     // The link is kept for the next run.
     api.appendTurn.mockResolvedValue({ ok: true });
     await mirror.accounted(answered('s1', { output: 'next' }));
-    expect(api.appendTurn).toHaveBeenLastCalledWith('chat', expect.anything());
+    expect(api.appendTurn).toHaveBeenLastCalledWith('chat', expect.anything(), expect.anything());
   });
 
   it('does not send a queued run to an account that signed in after it ended', async () => {
@@ -179,7 +179,7 @@ describe('CloudMirror', () => {
     // The session's next answered turn still goes to the same chat.
     await mirror.accounted(answered('s1'));
     expect(api.createConversation).not.toHaveBeenCalled();
-    expect(api.appendTurn).toHaveBeenCalledWith('live-chat', expect.anything());
+    expect(api.appendTurn).toHaveBeenCalledWith('live-chat', expect.anything(), expect.anything());
   });
 
   it('sends nothing while signed out', async () => {
@@ -218,7 +218,7 @@ describe('CloudMirror', () => {
     expect(on.api.recordRunSpend).toHaveBeenCalledTimes(1);
     // A failure does not stop the next run from being sent.
     await on.mirror.accounted(answered('s1', { output: 'next' }));
-    expect(on.api.appendTurn).toHaveBeenLastCalledWith('c1', expect.objectContaining({ assistant: expect.objectContaining({ content: 'next' }) }));
+    expect(on.api.appendTurn).toHaveBeenLastCalledWith('c1', expect.objectContaining({ assistant: expect.objectContaining({ content: 'next' }) }), expect.anything());
   });
 });
 
@@ -299,12 +299,12 @@ describe('which reports are confirmed to the backend', () => {
     const report = answered('s1', { id: 'run-0014' });
     await expect(mirrorAndConfirm(mirror, report, confirm)).resolves.toBe('retry');
     // The cost is counted now, under the run's id.
-    expect(api.recordRunSpend).toHaveBeenCalledWith(expect.objectContaining({ conversationId: 'chat', runId: 'run-0014' }));
+    expect(api.recordRunSpend).toHaveBeenCalledWith(expect.objectContaining({ conversationId: 'chat', runId: 'run-0014' }), expect.anything());
     expect(confirm).not.toHaveBeenCalled();
     // Replayed on the next connect, with the cloud back: the turn goes to the same chat, same id.
     api.appendTurn.mockResolvedValue({ ok: true });
     await expect(mirrorAndConfirm(mirror, report, confirm)).resolves.toBe('delivered');
-    expect(api.appendTurn).toHaveBeenLastCalledWith('chat', expect.objectContaining({ runId: 'run-0014' }));
+    expect(api.appendTurn).toHaveBeenLastCalledWith('chat', expect.objectContaining({ runId: 'run-0014' }), expect.anything());
     expect(confirm).toHaveBeenCalledWith('run-0014');
   });
 
@@ -337,7 +337,39 @@ describe('which reports are confirmed to the backend', () => {
     const chats = links([['https://cloud|u1|s1', 'u1-chat']]);
     const same = setup(false, chats);
     await expect(mirrorAndConfirm(same.mirror, answered('s1', { id: 'run-0115', account: stampedU1 }), confirm)).resolves.toBe('delivered');
-    expect(same.api.appendTurn).toHaveBeenCalledWith('u1-chat', expect.anything());
+    expect(same.api.appendTurn).toHaveBeenCalledWith('u1-chat', expect.anything(), expect.anything());
+  });
+
+  it('stops, sending nothing more, when another account signs in part-way through', async () => {
+    // Like the main process: a request meant for another account than the one signed in is refused.
+    let current = 'u1';
+    const check = (account?: { userId: string }) => (account && account.userId !== current ? { ok: false, accountChanged: true } : null);
+    const { api, mirror } = setup(false, links([['https://cloud|u1|s1', 'u1-chat']]));
+    api.appendTurn.mockImplementation(async (_chat: string, _turn: unknown, account?: { userId: string }) => {
+      const refused = check(account);
+      if (refused) return refused;
+      // u1 signs out and u2 signs in while this request is out; it then answers 404.
+      current = 'u2';
+      return { ok: false, error: 'Request failed (404).' };
+    });
+    api.createConversation.mockImplementation(async (_t?: string, account?: { userId: string }) => check(account) ?? { ok: true, conversation: { id: 'u2-chat' } });
+    api.recordRunSpend.mockImplementation(async (_r: unknown, account?: { userId: string }) => check(account) ?? { ok: true });
+    const confirm = vi.fn();
+    const stamped = { userId: 'u1', serverUrl: 'https://cloud' };
+    await expect(mirrorAndConfirm(mirror, answered('s1', { id: 'run-0016', account: stamped }), confirm)).resolves.toBe('skipped');
+    // Every request named u1; the replacement chat was refused, and nothing reached u2.
+    expect(api.appendTurn.mock.calls.map((c) => c[2])).toEqual([stamped]);
+    expect(api.createConversation.mock.calls.map((c) => c[1])).toEqual([stamped]);
+    expect(api.recordRunSpend).not.toHaveBeenCalled();
+    expect(confirm).toHaveBeenCalledWith('run-0016');
+    // The spend-only path stops the same way.
+    current = 'u2';
+    const spend = setup();
+    spend.api.status.mockResolvedValue(as('u1'));
+    spend.api.recordRunSpend.mockImplementation(async (_r: unknown, account?: { userId: string }) => { const r = check(account); current = 'u1'; return r ?? { ok: true }; });
+    spend.api.status.mockResolvedValueOnce(as('u1')).mockResolvedValueOnce(as('u1'));
+    await expect(mirrorAndConfirm(spend.mirror, { id: 'run-0017', sessionId: 's1', outcome: 'failed', cloud: accounting, account: stamped }, confirm)).resolves.toBe('skipped');
+    expect(spend.api.recordRunSpend).toHaveBeenCalledTimes(1);
   });
 
   it('a failure does not hold up the runs queued behind it', async () => {

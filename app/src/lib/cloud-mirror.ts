@@ -35,12 +35,17 @@ export interface AccountedRun {
   cloud?: RunAccounting;
 }
 
+/** A user on a given cloud server. */
+export interface CloudAccount { userId: string; serverUrl: string }
+
 export interface CloudMirrorApi {
   /** Who is signed in, and to which server: the links below belong to them. */
   status(): Promise<{ signedIn: boolean; user: { id: string } | null; serverUrl: string }>;
-  createConversation(title?: string): Promise<{ ok: boolean; conversation?: { id: string } }>;
-  appendTurn(id: string, turn: { userContent: string; runId?: string; outcome?: 'answered' | 'stopped'; endedAt?: number; assistant: { content: string; costUsd?: number; why?: string } }): Promise<{ ok: boolean; error?: string }>;
-  recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string; endedAt?: number }): Promise<{ ok: boolean; error?: string }>;
+  // `account`: who the request is for. The main process answers
+  // `accountChanged` instead of sending it if another account is signed in.
+  createConversation(title?: string, account?: CloudAccount): Promise<{ ok: boolean; accountChanged?: boolean; conversation?: { id: string } }>;
+  appendTurn(id: string, turn: { userContent: string; runId?: string; outcome?: 'answered' | 'stopped'; endedAt?: number; assistant: { content: string; costUsd?: number; why?: string } }, account?: CloudAccount): Promise<{ ok: boolean; accountChanged?: boolean; error?: string }>;
+  recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string; endedAt?: number }, account?: CloudAccount): Promise<{ ok: boolean; accountChanged?: boolean; error?: string }>;
 }
 
 /**
@@ -103,6 +108,17 @@ const isRetryable = (error: string | undefined): boolean => {
 
 type CloudStatus = Awaited<ReturnType<CloudMirrorApi['status']>>;
 
+/**
+ * Another account signed in while a report was being sent: the rest of it is
+ * not sent, to anyone. Thrown from any request so the send stops at once.
+ */
+class AccountChanged extends Error {}
+type Answer = { ok: boolean; error?: string; accountChanged?: boolean };
+const guard = <T extends Answer>(result: T): T => {
+  if (result.accountChanged) throw new AccountChanged();
+  return result;
+};
+
 const newRunId = (): string =>
   (globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`);
 
@@ -126,7 +142,9 @@ export class CloudMirror {
     const optedOut = this.optedOut();
     const atEnd = optedOut ? Promise.resolve(null) : this.api()?.status?.().catch(() => 'error' as const);
     // Anything that throws (a bridge call rejecting) is a failure to retry.
-    const result = this.queue.then(() => this.send(run, optedOut, atEnd)).catch((): MirrorResult => 'retry');
+    // Another account signing in part-way is a skip, like one signed in before.
+    const result = this.queue.then(() => this.send(run, optedOut, atEnd))
+      .catch((err): MirrorResult => (err instanceof AccountChanged ? 'skipped' : 'retry'));
     this.queue = result.then(() => undefined);
     return result;
   }
@@ -159,6 +177,9 @@ export class CloudMirror {
       if (!now?.signedIn || now.user?.id !== who.user.id || now.serverUrl !== who.serverUrl) return 'skipped';
     }
     const key = `${who?.serverUrl ?? ''}|${who?.user?.id ?? ''}|${sid}`;
+    // Every request names this account, and the main process checks it just
+    // before sending: another account signing in mid-send gets nothing.
+    const owner: CloudAccount | undefined = who?.user ? { userId: who.user.id, serverUrl: who.serverUrl } : undefined;
     const outcome = run.outcome ?? 'answered';
     let turnToRetry = false;
     // One id for this run, however it is sent and however often: the cloud
@@ -175,13 +196,13 @@ export class CloudMirror {
         assistant: { content: run.output, ...run.cloud },
       };
       const known = this.chats.get(key);
-      let sent = known ? await this.appendTurn(api, known, turn) : 'gone';
+      let sent = known ? await this.appendTurn(api, known, turn, owner) : 'gone';
       if (sent === 'ok') return 'delivered';
       if (sent === 'gone') {
         // No chat yet, or the one linked is gone or not this account's.
         if (known) this.chats.delete(key);
-        const chat = await this.newChat(key, run.prompt, api);
-        sent = chat ? await this.appendTurn(api, chat, turn) : 'retry';
+        const chat = await this.newChat(key, run.prompt, api, owner);
+        sent = chat ? await this.appendTurn(api, chat, turn, owner) : 'retry';
         if (sent === 'ok') return 'delivered';
       }
       // The turn could not be copied this time: send it again later, after
@@ -196,8 +217,8 @@ export class CloudMirror {
     if (!api.recordRunSpend) return 'skipped';
     const conversationId = this.chats.get(key) ?? null;
     const cost = run.cloud;
-    const send = (chat: string | null) => api.recordRunSpend!({ conversationId: chat, outcome, runId, ...endedAt, ...cost })
-      .catch(() => ({ ok: false, error: undefined }));
+    const send = (chat: string | null) => api.recordRunSpend!({ conversationId: chat, outcome, runId, ...endedAt, ...cost }, owner)
+      .catch((): Answer => ({ ok: false })).then(guard);
     let recorded = await send(conversationId);
     // No answer: once more, to the same chat (the run id keeps it to one).
     if (!recorded.ok && !isNotFound(recorded.error) && isRetryable(recorded.error)) recorded = await send(conversationId);
@@ -227,11 +248,11 @@ export class CloudMirror {
    * when the cloud refuses the turn for good; 'retry' otherwise.
    */
   private async appendTurn(
-    api: Partial<CloudMirrorApi>, chat: string, turn: Parameters<CloudMirrorApi['appendTurn']>[1],
+    api: Partial<CloudMirrorApi>, chat: string, turn: Parameters<CloudMirrorApi['appendTurn']>[1], owner?: CloudAccount,
   ): Promise<'ok' | 'gone' | 'rejected' | 'retry'> {
     let error: string | undefined;
     for (let attempt = 0; attempt < 2; attempt++) {
-      const result = await api.appendTurn!(chat, turn).catch(() => ({ ok: false, error: undefined }));
+      const result = guard(await api.appendTurn!(chat, turn, owner).catch((): Answer => ({ ok: false })));
       if (result.ok) return 'ok';
       if (isNotFound(result.error)) return 'gone';
       error = result.error;
@@ -240,8 +261,8 @@ export class CloudMirror {
     return isRetryable(error) ? 'retry' : 'rejected';
   }
 
-  private async newChat(key: string, prompt: string, api: Partial<CloudMirrorApi>): Promise<string | null> {
-    const created = await api.createConversation!(prompt.slice(0, 72));
+  private async newChat(key: string, prompt: string, api: Partial<CloudMirrorApi>, owner?: CloudAccount): Promise<string | null> {
+    const created = guard(await api.createConversation!(prompt.slice(0, 72), owner));
     if (!created.ok || !created.conversation) return null; // signed out / error
     this.chats.set(key, created.conversation.id);
     return created.conversation.id;
