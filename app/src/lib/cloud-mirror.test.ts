@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { CloudMirror, type ChatLinks } from './cloud-mirror.js';
+import { CloudMirror, mirrorAndConfirm, type ChatLinks } from './cloud-mirror.js';
 
 const accounting = { costUsd: 0.01, why: '{"totalCostUsd":0.01}' };
 
@@ -212,9 +212,67 @@ describe('CloudMirror', () => {
     await on.mirror.accounted({ sessionId: 's1', outcome: 'failed' });
     expect(on.api.recordRunSpend).not.toHaveBeenCalled();
     on.api.appendTurn.mockRejectedValueOnce(new Error('offline')).mockRejectedValueOnce(new Error('offline'));
-    await expect(on.mirror.accounted(answered('s1'))).resolves.toBeUndefined();
+    // The turn could not be copied, but its cost was counted on its own.
+    await expect(on.mirror.accounted(answered('s1'))).resolves.toBe('delivered');
     // A failure does not stop the next run from being sent.
     await on.mirror.accounted(answered('s1', { output: 'next' }));
     expect(on.api.appendTurn).toHaveBeenLastCalledWith('c1', expect.objectContaining({ assistant: expect.objectContaining({ content: 'next' }) }));
+  });
+});
+
+describe('which reports are confirmed to the backend', () => {
+  const failing = { ok: false, error: 'Cloud request failed (502)' };
+
+  it('none whose upload failed: both turn attempts and both spend attempts', async () => {
+    const { api, mirror } = setup();
+    api.appendTurn.mockResolvedValue(failing);
+    api.recordRunSpend.mockResolvedValue(failing);
+    const confirm = vi.fn();
+    await expect(mirrorAndConfirm(mirror, answered('s1', { id: 'run-0001' }), confirm)).resolves.toBe('retry');
+    expect(api.appendTurn).toHaveBeenCalledTimes(2);
+    expect(api.recordRunSpend).toHaveBeenCalledTimes(2);
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it('none when the cloud is unreachable, the bridge throws, or who is signed in cannot be read', async () => {
+    const offline = setup();
+    offline.api.recordRunSpend.mockRejectedValue(new Error('offline'));
+    const confirm = vi.fn();
+    await expect(mirrorAndConfirm(offline.mirror, { id: 'run-0002', sessionId: 's1', outcome: 'failed', cloud: accounting }, confirm)).resolves.toBe('retry');
+    const throwing = setup();
+    throwing.api.createConversation.mockRejectedValue(new Error('bridge gone'));
+    await expect(mirrorAndConfirm(throwing.mirror, answered('s1', { id: 'run-0003' }), confirm)).resolves.toBe('retry');
+    const unknown = setup();
+    unknown.api.status.mockRejectedValue(new Error('ipc failed'));
+    await expect(mirrorAndConfirm(unknown.mirror, answered('s1', { id: 'run-0004' }), confirm)).resolves.toBe('retry');
+    expect(unknown.api.appendTurn).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it('none when a gone chat\'s cost could not be counted on its own either', async () => {
+    const { api, mirror } = setup(false, links([['https://cloud|u1|s1', 'gone-chat']]));
+    api.recordRunSpend.mockResolvedValueOnce({ ok: false, error: 'Not found (404)' }).mockResolvedValue(failing);
+    const confirm = vi.fn();
+    await expect(mirrorAndConfirm(mirror, { id: 'run-0005', sessionId: 's1', outcome: 'failed', cloud: accounting }, confirm)).resolves.toBe('retry');
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it('a delivered report, and one skipped on purpose (opted out, signed out, nothing to send)', async () => {
+    const confirm = vi.fn();
+    await expect(mirrorAndConfirm(setup().mirror, answered('s1', { id: 'run-0006' }), confirm)).resolves.toBe('delivered');
+    await expect(mirrorAndConfirm(setup(true).mirror, answered('s1', { id: 'run-0007' }), confirm)).resolves.toBe('skipped');
+    const out = setup();
+    out.api.status.mockResolvedValue({ signedIn: false, user: null, serverUrl: 'https://cloud' });
+    await expect(mirrorAndConfirm(out.mirror, answered('s1', { id: 'run-0008' }), confirm)).resolves.toBe('skipped');
+    await expect(mirrorAndConfirm(setup().mirror, { id: 'run-0009', sessionId: 's1', outcome: 'failed' }, confirm)).resolves.toBe('skipped');
+    expect(confirm.mock.calls.map((c) => c[0])).toEqual(['run-0006', 'run-0007', 'run-0008', 'run-0009']);
+  });
+
+  it('a failure does not hold up the runs queued behind it', async () => {
+    const { api, mirror } = setup();
+    api.recordRunSpend.mockResolvedValueOnce(failing).mockResolvedValueOnce(failing);
+    const first = mirror.accounted({ id: 'run-0010', sessionId: 's1', outcome: 'failed', cloud: accounting });
+    const second = mirror.accounted({ id: 'run-0011', sessionId: 's1', outcome: 'failed', cloud: accounting });
+    expect([await first, await second]).toEqual(['retry', 'delivered']);
   });
 });

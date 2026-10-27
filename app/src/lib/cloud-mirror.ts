@@ -4,8 +4,11 @@
 //
 // Driven by the backend's `run:accounting` event, which App listens for and
 // which comes once per run after its calls have settled, whichever session or
-// view is on screen. Everything here is best-effort: it never blocks or breaks
-// a run, and does nothing when signed out or opted out (`cascade.noCloudSync`).
+// view is on screen. It never blocks or breaks a run, and does nothing when
+// signed out or opted out (`cascade.noCloudSync`). Each report ends as
+// delivered, skipped on purpose, or to be retried: only the first two are
+// confirmed to the backend, which keeps the third and replays it on the next
+// connect (see `mirrorAndConfirm`).
 
 /** What a run reports for the cloud: its cost and its /why, as JSON. */
 export interface RunAccounting { costUsd: number; why: string }
@@ -69,6 +72,16 @@ export function storedChatLinks(key = 'cascade.cloudChats', max = 500): ChatLink
 /** The cloud answers 404 for a chat that was deleted, or is not this account's. */
 const isNotFound = (error: string | undefined): boolean => /\(404\)/.test(error ?? '');
 
+/**
+ * How a report ended. 'delivered': the cloud has it. 'skipped': on purpose
+ * (opted out, signed out, another account now, nothing to send) and never
+ * worth sending again. 'retry': the cloud could not be reached or answered
+ * with an error, so the backend must keep it.
+ */
+export type MirrorResult = 'delivered' | 'skipped' | 'retry';
+
+type CloudStatus = Awaited<ReturnType<CloudMirrorApi['status']>>;
+
 const newRunId = (): string =>
   (globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`);
 
@@ -83,34 +96,40 @@ export class CloudMirror {
   ) {}
 
   /**
-   * A run's `run:accounting`. Resolves once it has been sent, or skipped.
+   * A run's `run:accounting`. Resolves with how it ended (see MirrorResult).
    * Who is signed in, and whether syncing is on, are taken now, as the run
    * ends: a send can wait behind a slow one, and if the account changes in
    * the meantime the run is not sent to the new one.
    */
-  accounted(run: AccountedRun | undefined): Promise<void> {
+  accounted(run: AccountedRun | undefined): Promise<MirrorResult> {
     const optedOut = this.optedOut();
-    const atEnd = optedOut ? Promise.resolve(null) : this.api()?.status?.().catch(() => null);
-    this.queue = this.queue.then(() => this.send(run, optedOut, atEnd)).catch(() => { /* best-effort mirror */ });
-    return this.queue;
+    const atEnd = optedOut ? Promise.resolve(null) : this.api()?.status?.().catch(() => 'error' as const);
+    // Anything that throws (a bridge call rejecting) is a failure to retry.
+    const result = this.queue.then(() => this.send(run, optedOut, atEnd)).catch((): MirrorResult => 'retry');
+    this.queue = result.then(() => undefined);
+    return result;
   }
 
   private async send(
     run: AccountedRun | undefined,
     optedOut: boolean,
-    atEnd: Promise<Awaited<ReturnType<CloudMirrorApi['status']>> | null> | undefined,
-  ): Promise<void> {
+    atEnd: Promise<CloudStatus | null | 'error'> | undefined,
+  ): Promise<MirrorResult> {
     const sid = run?.sessionId;
-    if (!sid || !run?.cloud || optedOut || this.optedOut()) return;
+    if (!sid || !run?.cloud || optedOut || this.optedOut()) return 'skipped';
     const api = this.api();
-    if (!api) return;
+    if (!api) return 'skipped';
     // Links belong to the account they were made under; signed out, nothing goes.
-    const who = await atEnd;
+    const ended = await atEnd;
+    // Not knowing who is signed in is not the same as nobody being signed in.
+    if (ended === 'error') return 'retry';
+    const who = ended ?? null;
     if (api.status) {
-      if (!who?.signedIn || !who.user) return;
+      if (!who?.signedIn || !who.user) return 'skipped';
       // Still the account the run ended under, on the same server.
-      const now = await api.status().catch(() => null);
-      if (!now?.signedIn || now.user?.id !== who.user.id || now.serverUrl !== who.serverUrl) return;
+      const now = await api.status().catch(() => 'error' as const);
+      if (now === 'error') return 'retry';
+      if (!now?.signedIn || now.user?.id !== who.user.id || now.serverUrl !== who.serverUrl) return 'skipped';
     }
     const key = `${who?.serverUrl ?? ''}|${who?.user?.id ?? ''}|${sid}`;
     const outcome = run.outcome ?? 'answered';
@@ -118,33 +137,33 @@ export class CloudMirror {
     // adds its turn to a chat once, and counts the run once, per id. The
     // backend's id when it gave one, so a replayed report is the same run.
     const runId = typeof run.id === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(run.id) ? run.id : newRunId();
-    const ended = typeof run.endedAt === 'number' ? { endedAt: run.endedAt } : {};
+    const endedAt = typeof run.endedAt === 'number' ? { endedAt: run.endedAt } : {};
     // A turn from the desktop's own views is copied, with its cost: an answer,
     // or what a run the user stopped had written so far (counted as stopped).
     if ((outcome === 'answered' || outcome === 'stopped') && run.output && run.prompt && run.copyTurn !== false
       && api.appendTurn && api.createConversation) {
       const turn = {
-        userContent: run.prompt, runId, ...(outcome === 'stopped' ? { outcome } : {}), ...ended,
+        userContent: run.prompt, runId, ...(outcome === 'stopped' ? { outcome } : {}), ...endedAt,
         assistant: { content: run.output, ...run.cloud },
       };
       const known = this.chats.get(key);
       const sent = known ? await this.appendTurn(api, known, turn) : 'gone';
-      if (sent === 'ok') return;
+      if (sent === 'ok') return 'delivered';
       if (sent === 'gone') {
         // No chat yet, or the one linked is gone or not this account's.
         if (known) this.chats.delete(key);
         const chat = await this.newChat(key, run.prompt, api);
-        if (chat && (await this.appendTurn(api, chat, turn)) === 'ok') return;
+        if (chat && (await this.appendTurn(api, chat, turn)) === 'ok') return 'delivered';
       }
     }
     // Anything else still spent money: its cost alone, under the chat already
     // copied for this session if there is one. It never creates an empty chat.
     // Under the same run id, so a turn that was added after all is not counted
     // a second time.
-    if (!api.recordRunSpend) return;
+    if (!api.recordRunSpend) return 'skipped';
     const conversationId = this.chats.get(key) ?? null;
     const cost = run.cloud;
-    const send = (chat: string | null) => api.recordRunSpend!({ conversationId: chat, outcome, runId, ...ended, ...cost })
+    const send = (chat: string | null) => api.recordRunSpend!({ conversationId: chat, outcome, runId, ...endedAt, ...cost })
       .catch(() => ({ ok: false, error: undefined }));
     let recorded = await send(conversationId);
     // No answer: once more, to the same chat (the run id keeps it to one).
@@ -154,8 +173,10 @@ export class CloudMirror {
     // session's later turns in the chat they belong to.
     if (!recorded.ok && conversationId && isNotFound(recorded.error)) {
       this.chats.delete(key);
-      await send(null);
+      recorded = await send(null);
     }
+    // Not counted: kept by the backend and sent again, under the same run id.
+    return recorded.ok ? 'delivered' : 'retry';
   }
 
   /**
@@ -181,6 +202,20 @@ export class CloudMirror {
     this.chats.set(key, created.conversation.id);
     return created.conversation.id;
   }
+}
+
+/**
+ * Mirrors one `run:accounting` report and confirms it to the backend only once
+ * it was delivered or skipped on purpose. A report that failed is left
+ * unconfirmed, so the backend keeps it on disk and replays it on the next
+ * connect, under the same id.
+ */
+export async function mirrorAndConfirm(
+  mirror: Pick<CloudMirror, 'accounted'>, run: AccountedRun | undefined, confirm: (id: string) => void,
+): Promise<MirrorResult> {
+  const result = await mirror.accounted(run);
+  if (result !== 'retry' && typeof run?.id === 'string') confirm(run.id);
+  return result;
 }
 
 /** The desktop's one mirror, over the preload bridge. */

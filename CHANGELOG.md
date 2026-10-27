@@ -118,6 +118,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose `node-gyp` recognises Visual Studio 2026 as well as 2019 and 2022.
 
 ### Fixed
+- **A desktop run's cost is no longer lost when the cloud is unreachable.**
+  The app told the backend a run's report was handled even when both tries
+  to copy the turn and both tries to record its cost had failed (offline, or
+  a 5xx), so the backend deleted the only copy kept on disk and the run was
+  never counted. A report is now confirmed only when the cloud has it or it
+  was skipped on purpose (opted out, signed out, another account signed in);
+  otherwise it stays on disk and is sent again, under the same run id, the
+  next time a desktop window connects.
 - **You can start a new chat from the session sidebar.** Before, only the Code
   view's chat picker and the command palette could. The sidebar (and its
   collapsed rail) now has a New chat button: Mission Control and Chat start the

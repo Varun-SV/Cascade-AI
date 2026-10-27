@@ -14,6 +14,7 @@ import path from 'node:path';
 import { DashboardServer } from './server.js';
 import { CascadeRouter } from '../core/router/index.js';
 import type { CascadeConfig, ModelInfo } from '../types.js';
+import { CloudMirror, mirrorAndConfirm, type AccountedRun } from '../../app/src/lib/cloud-mirror.js';
 
 const config = {
   version: '1.0',
@@ -153,6 +154,44 @@ describe('the desktop\'s run accounting for the cloud', () => {
       // No window confirmed it. The app restarts and its backend gets a new port.
       const next = desktopServer(file, 51002);
       expect(next.server.pendingAccounting!.unconfirmed().map((r) => r.id)).toEqual([first.delivered[0]!.payload.id]);
+    });
+
+    it('stays on disk when the signed-in desktop cannot upload it, and goes once a replay is delivered', async () => {
+      const router = await routerWith(100, 0.0001);
+      const { server, delivered } = desktopServer(file);
+      await server.emitRunAccounting(vi.fn(), 's1', { getRouter: () => router, getDecisionLog: () => [] }, { ...run, copyTurn: true });
+      // The desktop window's mirror, signed in, while the cloud answers 502.
+      const failing = { ok: false, error: 'Cloud request failed (502)' };
+      const api = {
+        status: vi.fn().mockResolvedValue({ signedIn: true, user: { id: 'u1' }, serverUrl: 'https://cloud' }),
+        createConversation: vi.fn().mockResolvedValue({ ok: true, conversation: { id: 'c1' } }),
+        appendTurn: vi.fn().mockResolvedValue(failing),
+        recordRunSpend: vi.fn().mockResolvedValue(failing),
+      };
+      const chats = new Map<string, string>();
+      const mirror = new CloudMirror(() => api, () => false,
+        { get: (k) => chats.get(k), set: (k, c) => { chats.set(k, c); }, delete: (k) => { chats.delete(k); } });
+      const confirm = (id: string) => server.confirmAccounting(id, 'desk');
+      const report = delivered[0]!.payload as unknown as AccountedRun & { id: string };
+
+      expect(await mirrorAndConfirm(mirror, report, confirm)).toBe('retry');
+      expect(api.appendTurn).toHaveBeenCalledTimes(2);
+      expect(api.recordRunSpend).toHaveBeenCalledTimes(2);
+      // Not confirmed: still kept, and still there after a restart.
+      expect(server.pendingAccounting!.unconfirmed().map((r) => r.id)).toEqual([report.id]);
+      expect(desktopServer(file, 51003).server.pendingAccounting!.unconfirmed().map((r) => r.id)).toEqual([report.id]);
+
+      // The window reconnects with the cloud back: the replay is uploaded once, then confirmed.
+      api.appendTurn.mockResolvedValue({ ok: true });
+      server.replayAccountingTo('desk');
+      const replayed = delivered[1]!.payload as unknown as AccountedRun & { id: string };
+      expect(replayed.id).toBe(report.id);
+      expect(await mirrorAndConfirm(mirror, replayed, confirm)).toBe('delivered');
+      expect(api.appendTurn).toHaveBeenCalledTimes(3);
+      // The same run id every time, so the cloud counts it once.
+      expect(new Set(api.appendTurn.mock.calls.map((c) => (c[1] as { runId: string }).runId))).toEqual(new Set([report.id]));
+      expect(server.pendingAccounting!.unconfirmed()).toEqual([]);
+      expect(desktopServer(file, 51004).server.pendingAccounting!.unconfirmed()).toEqual([]);
     });
   });
 });
