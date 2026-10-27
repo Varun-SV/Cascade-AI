@@ -151,7 +151,13 @@ export class CloudMirror {
     // Anything that throws (a bridge call rejecting) is a failure to retry.
     // Another account signing in part-way is a skip, like one signed in before.
     const result = this.queue.then(() => this.send(run, optedOut, atEnd))
-      .catch((err): MirrorResult => (err instanceof AccountChanged ? 'skipped' : 'retry'));
+      .catch((err): MirrorResult => (err instanceof AccountChanged ? 'skipped' : 'retry'))
+      .then((outcome) => {
+        // Settled for good (sent, skipped, refused): it is confirmed and never
+        // replayed, so nothing may stay held behind it.
+        if (outcome !== 'retry' && typeof run?.id === 'string') this.releaseRun(run.id);
+        return outcome;
+      });
     this.queue = result.then(() => undefined);
     return result;
   }
@@ -257,6 +263,11 @@ export class CloudMirror {
   /** This report's turn is settled (copied, or never will be): later turns go on. */
   private release(key: string, runId: string): void {
     if (this.heldBy.get(key) === runId) this.heldBy.delete(key);
+  }
+
+  /** Every hold this report has, whichever account and session it was under. */
+  private releaseRun(runId: string): void {
+    for (const [key, holder] of this.heldBy) if (holder === runId) this.heldBy.delete(key);
   }
 
   /**

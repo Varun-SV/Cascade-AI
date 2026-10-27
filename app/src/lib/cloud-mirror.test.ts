@@ -441,6 +441,54 @@ describe('which reports are confirmed to the backend', () => {
     expect(copied()).toEqual(['first', 'first', 'elsewhere', 'first', 'second']);
   });
 
+  describe('a held session is let go once the report holding it is settled for good', () => {
+    const copied = (api: { appendTurn: { mock: { calls: unknown[][] } } }) =>
+      api.appendTurn.mock.calls.map((c) => (c[1] as { assistant: { content: string } }).assistant.content);
+
+    it('when its spend is then refused (400): confirmed, and the next turn goes', async () => {
+      const { api, mirror } = setup(false, links([['https://cloud|u1|s1', 'chat1'], ['https://cloud|u1|s2', 'chat2']]));
+      api.appendTurn.mockResolvedValueOnce(failing).mockResolvedValueOnce(failing);
+      api.recordRunSpend.mockResolvedValueOnce({ ok: false, error: 'Request failed (400).' });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const confirm = vi.fn();
+      await expect(mirrorAndConfirm(mirror, answered('s1', { id: 'run-0300', output: 'first' }), confirm)).resolves.toBe('rejected');
+      expect(confirm).toHaveBeenCalledWith('run-0300');
+      await expect(mirrorAndConfirm(mirror, answered('s1', { id: 'run-0301', output: 'second' }), confirm)).resolves.toBe('delivered');
+      await expect(mirrorAndConfirm(mirror, answered('s2', { id: 'run-0302', output: 'elsewhere' }), confirm)).resolves.toBe('delivered');
+      expect(copied(api)).toEqual(['first', 'first', 'second', 'elsewhere']);
+      warn.mockRestore();
+    });
+
+    it('when there is no spend bridge to count it: skipped, and the next turn goes', async () => {
+      const api = {
+        status: vi.fn().mockResolvedValue(as('u1')),
+        createConversation: vi.fn().mockResolvedValue({ ok: true, conversation: { id: 'c1' } }),
+        appendTurn: vi.fn().mockResolvedValueOnce(failing).mockResolvedValueOnce(failing).mockResolvedValue({ ok: true }),
+      };
+      const mirror = new CloudMirror(() => api, () => false, links([['https://cloud|u1|s1', 'chat1']]));
+      expect(await mirror.accounted(answered('s1', { id: 'run-0310', output: 'first' }))).toBe('skipped');
+      expect(await mirror.accounted(answered('s1', { id: 'run-0311', output: 'second' }))).toBe('delivered');
+      expect(copied(api)).toEqual(['first', 'first', 'second']);
+    });
+
+    it('when its replay comes while syncing is off: skipped, and once back on the next turn goes', async () => {
+      let off = false;
+      const api = {
+        status: vi.fn().mockResolvedValue(as('u1')),
+        createConversation: vi.fn().mockResolvedValue({ ok: true, conversation: { id: 'c1' } }),
+        appendTurn: vi.fn().mockResolvedValueOnce(failing).mockResolvedValueOnce(failing).mockResolvedValue({ ok: true }),
+        recordRunSpend: vi.fn().mockResolvedValue({ ok: true }),
+      };
+      const mirror = new CloudMirror(() => api, () => off, links([['https://cloud|u1|s1', 'chat1']]));
+      expect(await mirror.accounted(answered('s1', { id: 'run-0320', output: 'first' }))).toBe('retry');
+      off = true;
+      expect(await mirror.accounted(answered('s1', { id: 'run-0320', output: 'first' }))).toBe('skipped');
+      off = false;
+      expect(await mirror.accounted(answered('s1', { id: 'run-0321', output: 'second' }))).toBe('delivered');
+      expect(copied(api)).toEqual(['first', 'first', 'second']);
+    });
+  });
+
   it('a failure does not hold up the runs queued behind it', async () => {
     const { api, mirror } = setup();
     api.recordRunSpend.mockResolvedValueOnce(failing).mockResolvedValueOnce(failing);
