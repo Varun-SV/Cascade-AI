@@ -1160,7 +1160,16 @@ export class CloudStore {
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(e.id, e.userId, e.conversationId, e.at, e.costUsd, e.savedUsd, e.tokens, e.outcome);
-      if (added.changes === 0) return;
+      if (added.changes === 0) {
+        // Counted already, with no chat (its spend went alone while its turn
+        // could not be copied): the turn now copied gives it its chat. Only
+        // the same user's run, and never one already in another chat.
+        if (e.conversationId !== null) {
+          this.db.prepare('UPDATE spend_ledger SET conversation_id = ? WHERE id = ? AND user_id = ? AND conversation_id IS NULL')
+            .run(e.conversationId, e.id, e.userId);
+        }
+        return;
+      }
       this.insertSpendLines(e);
     });
     tx();

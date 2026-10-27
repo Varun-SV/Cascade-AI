@@ -237,7 +237,26 @@ describe('spend ledger', () => {
     // What /api/usage/runs records for the device's run id.
     store.recordSpend(spendEntryFromRun({ id: deviceRunSpendId(u.id, 'run-0003-cccc'), userId: u.id, conversationId: null, at: Date.now(), costUsd: 0.02, why, outcome: 'answered' }));
     store.appendTurn(c.id, u.id, { userContent: 'hi', runId: 'run-0003-cccc', assistant: { content: 'hello', costUsd: 0.02, why } });
-    expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).totals).toMatchObject({ runs: 1, spentUsd: 0.02 });
+    const report = buildSpendReport(store.spend, u.id, 'all', 0, Date.now());
+    expect(report.totals).toMatchObject({ runs: 1, spentUsd: 0.02 });
+    // The turn copied later gives the run its chat: it is the chat's cost now, not a run with no chat.
+    expect(report.chats).toEqual([expect.objectContaining({ conversationId: c.id, noChat: false, runs: 1, spentUsd: 0.02 })]);
+  });
+
+  it('never moves a run already in a chat, or another user\'s run, to a chat', () => {
+    const u = user('linked');
+    const other = user('stranger');
+    const first = store.createConversation(u.id, 'First');
+    const second = store.createConversation(u.id, 'Second');
+    const why = JSON.stringify({ totalTokens: 100 });
+    store.appendTurn(first.id, u.id, { userContent: 'hi', runId: 'run-0004-dddd', assistant: { content: 'hello', costUsd: 0.02, why } });
+    store.appendTurn(second.id, u.id, { userContent: 'hi', runId: 'run-0004-dddd', assistant: { content: 'hello', costUsd: 0.02, why } });
+    expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).chats.map((r) => r.conversationId)).toEqual([first.id]);
+    // The same ledger id under another user's name does not touch this user's row.
+    store.recordSpend(spendEntryFromRun({ id: 'shared-id', userId: u.id, conversationId: null, at: Date.now(), costUsd: 0.01, why, outcome: 'failed' }));
+    const theirs = store.createConversation(other.id, 'Theirs');
+    store.recordSpend(spendEntryFromRun({ id: 'shared-id', userId: other.id, conversationId: theirs.id, at: Date.now(), costUsd: 0.01, why, outcome: 'failed' }));
+    expect(buildSpendReport(store.spend, u.id, 'all', 0, Date.now()).chats.find((r) => r.noChat)).toMatchObject({ runs: 1 });
   });
 
   it('writes a hosted run down when it answers, and completes it once its late calls settle', async () => {
