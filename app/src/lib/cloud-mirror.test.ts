@@ -426,6 +426,21 @@ describe('which reports are confirmed to the backend', () => {
     }
   });
 
+  it('holds a session\'s later turns behind one that failed to copy, but not its spend-only runs or other sessions', async () => {
+    const { api, mirror } = setup(false, links([['https://cloud|u1|s1', 'chat1'], ['https://cloud|u1|s2', 'chat2']]));
+    api.appendTurn.mockResolvedValueOnce(failing).mockResolvedValueOnce(failing);
+    expect(await mirror.accounted(answered('s1', { id: 'run-0200', output: 'first' }))).toBe('retry');
+    expect(await mirror.accounted(answered('s1', { id: 'run-0201', output: 'second' }))).toBe('retry');
+    expect(await mirror.accounted({ id: 'run-0202', sessionId: 's1', outcome: 'failed', cloud: accounting })).toBe('delivered');
+    expect(await mirror.accounted(answered('s2', { id: 'run-0203', output: 'elsewhere' }))).toBe('delivered');
+    const copied = () => api.appendTurn.mock.calls.map((c) => (c[1] as { assistant: { content: string } }).assistant.content);
+    expect(copied()).toEqual(['first', 'first', 'elsewhere']);
+    // The replay, oldest first: the first turn goes, which lets the second go after it.
+    expect(await mirror.accounted(answered('s1', { id: 'run-0200', output: 'first' }))).toBe('delivered');
+    expect(await mirror.accounted(answered('s1', { id: 'run-0201', output: 'second' }))).toBe('delivered');
+    expect(copied()).toEqual(['first', 'first', 'elsewhere', 'first', 'second']);
+  });
+
   it('a failure does not hold up the runs queued behind it', async () => {
     const { api, mirror } = setup();
     api.recordRunSpend.mockResolvedValueOnce(failing).mockResolvedValueOnce(failing);

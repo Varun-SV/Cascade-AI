@@ -136,8 +136,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   account is signed in by then. Each request also names that account, and
   the app's main process refuses it if another account has signed in
   meanwhile, even part-way through a send. Runs in the same chat are also sent in the
-  order they ended: a run whose late calls were still settling used to let
-  the next run's turn reach the cloud chat first.
+  order they ended: a run whose late calls were still settling, or whose
+  upload failed and was sent again later, used to let the next run's turn
+  reach the cloud chat first.
 - **You can start a new chat from the session sidebar.** Before, only the Code
   view's chat picker and the command palette could. The sidebar (and its
   collapsed rail) now has a New chat button: Mission Control and Chat start the

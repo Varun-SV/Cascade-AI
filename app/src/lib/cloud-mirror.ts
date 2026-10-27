@@ -125,6 +125,13 @@ const newRunId = (): string =>
 export class CloudMirror {
   /** Runs are sent one at a time, in the order they ended. */
   private queue: Promise<void> = Promise.resolve();
+  /**
+   * Per account and session, the report whose turn failed to copy and is to
+   * be sent again: later turns of that session wait behind it (as 'retry'),
+   * so the replay, which comes oldest first, copies them in the order the
+   * runs ended. Spend-only reports and other sessions are not held.
+   */
+  private readonly heldBy = new Map<string, string>();
 
   constructor(
     private readonly api: () => Partial<CloudMirrorApi> | undefined,
@@ -185,30 +192,37 @@ export class CloudMirror {
     // One id for this run, however it is sent and however often: the cloud
     // adds its turn to a chat once, and counts the run once, per id. The
     // backend's id when it gave one, so a replayed report is the same run.
-    const runId = typeof run.id === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(run.id) ? run.id : newRunId();
+    const stableId = typeof run.id === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(run.id);
+    const runId = stableId ? run.id! : newRunId();
     const endedAt = typeof run.endedAt === 'number' ? { endedAt: run.endedAt } : {};
     // A turn from the desktop's own views is copied, with its cost: an answer,
     // or what a run the user stopped had written so far (counted as stopped).
     if ((outcome === 'answered' || outcome === 'stopped') && run.output && run.prompt && run.copyTurn !== false
       && api.appendTurn && api.createConversation) {
+      // An earlier turn of this session is still to be copied: this one goes after it.
+      const holder = this.heldBy.get(key);
+      if (holder && holder !== runId) return 'retry';
       const turn = {
         userContent: run.prompt, runId, ...(outcome === 'stopped' ? { outcome } : {}), ...endedAt,
         assistant: { content: run.output, ...run.cloud },
       };
       const known = this.chats.get(key);
       let sent = known ? await this.appendTurn(api, known, turn, owner) : 'gone';
-      if (sent === 'ok') return 'delivered';
+      if (sent === 'ok') { this.release(key, runId); return 'delivered'; }
       if (sent === 'gone') {
         // No chat yet, or the one linked is gone or not this account's.
         if (known) this.chats.delete(key);
         const chat = await this.newChat(key, run.prompt, api, owner);
         sent = chat ? await this.appendTurn(api, chat, turn, owner) : 'retry';
-        if (sent === 'ok') return 'delivered';
+        if (sent === 'ok') { this.release(key, runId); return 'delivered'; }
       }
       // The turn could not be copied this time: send it again later, after
       // its cost is counted below. The cloud adds a turn to a chat once per
       // run id, and counts the run once, so the resend repeats neither.
       turnToRetry = sent === 'retry';
+      // Held only for a report the backend keeps and replays (it has an id).
+      if (turnToRetry && stableId) this.heldBy.set(key, runId);
+      else this.release(key, runId);
     }
     // Anything else still spent money: its cost alone, under the chat already
     // copied for this session if there is one. It never creates an empty chat.
@@ -238,6 +252,11 @@ export class CloudMirror {
     // sent again, under the same run id.
     if (!recorded.ok || turnToRetry) return 'retry';
     return 'delivered';
+  }
+
+  /** This report's turn is settled (copied, or never will be): later turns go on. */
+  private release(key: string, runId: string): void {
+    if (this.heldBy.get(key) === runId) this.heldBy.delete(key);
   }
 
   /**

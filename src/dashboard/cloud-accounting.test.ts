@@ -194,6 +194,42 @@ describe('the desktop\'s run accounting for the cloud', () => {
       expect(desktopServer(file, 51004).server.pendingAccounting!.unconfirmed()).toEqual([]);
     });
 
+    it('keeps a session\'s turns in order when one fails to upload and is replayed later', async () => {
+      const account = () => ({ userId: 'u1', serverUrl: 'https://cloud' });
+      const { server, delivered } = desktopServer(file, 51001, account);
+      const cascade = async () => { const router = await routerWith(100, 0.0001); return { getRouter: () => router, getDecisionLog: () => [] }; };
+      await server.emitRunAccounting(vi.fn(), 's1', await cascade(), { ...run, copyTurn: true, prompt: 'first question' });
+      await server.emitRunAccounting(vi.fn(), 's1', await cascade(), { ...run, copyTurn: true, prompt: 'second question' });
+      // The cloud's chat, as it ends up: the first turn's uploads fail during an outage.
+      const chat: string[] = [];
+      let outage = true;
+      const api = {
+        status: vi.fn().mockResolvedValue({ signedIn: true, user: { id: 'u1' }, serverUrl: 'https://cloud' }),
+        createConversation: vi.fn().mockResolvedValue({ ok: true, conversation: { id: 'c1' } }),
+        appendTurn: vi.fn().mockImplementation(async (_c: string, turn: { userContent: string }) => {
+          if (outage) return { ok: false, error: 'Request failed (503).' };
+          chat.push(turn.userContent);
+          return { ok: true };
+        }),
+        recordRunSpend: vi.fn().mockResolvedValue({ ok: true }),
+      };
+      const chats = new Map<string, string>();
+      const mirror = new CloudMirror(() => api, () => false,
+        { get: (k) => chats.get(k), set: (k, c) => { chats.set(k, c); }, delete: (k) => { chats.delete(k); } });
+      const confirm = (id: string) => server.confirmAccounting(id, 'desk');
+      const [first, second] = delivered.map((d) => d.payload as unknown as AccountedRun & { id: string });
+      expect(await mirrorAndConfirm(mirror, first, confirm)).toBe('retry');
+      // The outage ends; the second run arrives before any replay of the first. It waits.
+      outage = false;
+      expect(await mirrorAndConfirm(mirror, second, confirm)).toBe('retry');
+      expect(chat).toEqual([]);
+      // The window reconnects: both are replayed, oldest first, and copied in order.
+      server.replayAccountingTo('desk');
+      for (const replay of delivered.slice(2)) await mirrorAndConfirm(mirror, replay.payload as unknown as AccountedRun, confirm);
+      expect(chat).toEqual(['first question', 'second question']);
+      expect(server.pendingAccounting!.unconfirmed()).toEqual([]);
+    });
+
     it('is never sent to an account that signed in after the run ended, even when replayed', async () => {
       const router = await routerWith(100, 0.0001);
       let signedIn: { userId: string; serverUrl: string } | null = { userId: 'u1', serverUrl: 'https://cloud' };
