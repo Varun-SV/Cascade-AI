@@ -18,7 +18,7 @@ import { app, ipcMain, safeStorage, shell } from 'electron';
 import { join } from 'node:path';
 import { readFileSync, writeFileSync, rmSync, mkdirSync, chmodSync } from 'node:fs';
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
-import { accountMismatch, ACCOUNT_CHANGED } from './cloud-account';
+import { accountMismatch, ACCOUNT_CHANGED, pinnedStore } from './cloud-account';
 
 // ── Shapes shared with the renderer (mirror the SDK's cloud types) ──
 
@@ -245,16 +245,22 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
   // A request may name the account it is for (the run mirror does): checked
   // against the session signed in now, just before the request reads it.
   const otherAccount = (expected: unknown) => accountMismatch(expected, store.load()?.user?.id, serverUrl);
+  // And the client for such a request sees only that account's session, so a
+  // refresh-and-retry on a 401 cannot go out under an account signed in since.
+  const clientFor = (expected: unknown): CloudClientLike => {
+    const userId = expected && typeof expected === 'object' ? (expected as { userId?: unknown }).userId : undefined;
+    return typeof userId === 'string' ? new (core().CloudClient)(serverUrl, undefined, pinnedStore(store, userId)) : client();
+  };
 
   ipcMain.handle('cloud:createConversation', async (_e, title: unknown, expected?: unknown) => {
     if (otherAccount(expected)) return ACCOUNT_CHANGED;
-    try { return { ok: true, conversation: await client().createConversation(typeof title === 'string' ? title : undefined) }; }
+    try { return { ok: true, conversation: await clientFor(expected).createConversation(typeof title === 'string' ? title : undefined) }; }
     catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not create a cloud chat.' }; }
   });
 
   ipcMain.handle('cloud:appendTurn', async (_e, id: unknown, turn: unknown, expected?: unknown) => {
     if (otherAccount(expected)) return { ...ACCOUNT_CHANGED, messages: [] };
-    try { return { ok: true, messages: await client().appendTurn(String(id), turn as CloudTurn) }; }
+    try { return { ok: true, messages: await clientFor(expected).appendTurn(String(id), turn as CloudTurn) }; }
     catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not save that turn.', messages: [] }; }
   });
 
@@ -270,7 +276,7 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
     const endedAt = typeof r['endedAt'] === 'number' && Number.isFinite(r['endedAt']) ? r['endedAt'] : undefined;
     if (!outcome || costUsd === null || why === null) return { ok: false, error: 'Invalid run.' };
     if (otherAccount(expected)) return ACCOUNT_CHANGED;
-    try { return { ok: true, ...(await client().recordRunSpend({ conversationId, outcome, costUsd, why, ...(runId ? { runId } : {}), ...(endedAt !== undefined ? { endedAt } : {}) })) }; }
+    try { return { ok: true, ...(await clientFor(expected).recordRunSpend({ conversationId, outcome, costUsd, why, ...(runId ? { runId } : {}), ...(endedAt !== undefined ? { endedAt } : {}) })) }; }
     catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not record that run.' }; }
   });
 
