@@ -81,7 +81,7 @@
     "simple-git": "^3.27.0",
     "socket.io": "^4.8.0",
     "socket.io-msgpack-parser": "^3.0.2",
-    "undici": "^6.21.0",
+    "undici": "^8.12.3",
     "update-notifier": "^7.3.0",
     "winston": "^3.15.0",
     "wrap-ansi": "^10.0.0",
