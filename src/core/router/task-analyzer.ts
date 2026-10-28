@@ -196,6 +196,25 @@ function hashPrompt(prompt: string): string {
 /** Prompt hash cache — avoids repeated analysis of the same input within a session. */
 const analysisCache = new Map<string, TaskProfile>();
 
+/**
+ * How much of a model's benchmark score comes from the agentic boards
+ * (Terminal-Bench, SWE-bench, τ²-bench) rather than its task-type score.
+ *
+ * T1 and T2 do not write the answer — they run tool loops that plan, brief,
+ * check and hand off. When one of them drops a tool call or loses the thread,
+ * every worker under it is stranded, which is how a run fails as a whole
+ * rather than producing a weaker paragraph. So for those tiers, holding a tool
+ * loop together counts as much as the task itself. A worker that calls tools
+ * gets a smaller share; one that only writes is judged on the task alone.
+ */
+export const AGENTIC_WEIGHT: Record<TierRole, number> = { T1: 0.5, T2: 0.5, T3: 0 };
+export const AGENTIC_WEIGHT_T3_TOOLS = 0.35;
+
+export function agenticWeightFor(tier: TierRole, opts?: SelectOptions): number {
+  if (tier === 'T3') return opts?.requiresToolUse ? AGENTIC_WEIGHT_T3_TOOLS : 0;
+  return AGENTIC_WEIGHT[tier];
+}
+
 // Map from task type to relevant model specialization tags
 const TASK_TYPE_TAGS: Record<TaskType, string[]> = {
   code: ['code', 'instruction'],
@@ -418,10 +437,11 @@ export class TaskAnalyzer {
     // evidence arrives. Without it, `perf` was an absorbing state: a model that
     // failed once was ranked below everything and so never ran again to prove
     // otherwise.
+    const agentic = agenticWeightFor(tier, opts);
     const scored = candidates.map(m => ({
       model: m,
-      belief: this.scoreModel(m, profile, 'mean'),
-      score: this.scoreModel(m, profile, 'sample'),
+      belief: this.scoreModel(m, profile, 'mean', agentic),
+      score: this.scoreModel(m, profile, 'sample', agentic),
     }));
     scored.sort((a, b) => b.score - a.score);
 
@@ -433,7 +453,7 @@ export class TaskAnalyzer {
       ? this.describeExploration(chosen.model, byBelief.model, profile)
       : null;
     if (chosen && candidates !== unbudgeted) {
-      const preferred = [...unbudgeted].sort((a, b) => this.scoreModel(b, profile, 'mean') - this.scoreModel(a, profile, 'mean'))[0];
+      const preferred = [...unbudgeted].sort((a, b) => this.scoreModel(b, profile, 'mean', agentic) - this.scoreModel(a, profile, 'mean', agentic))[0];
       if (preferred && preferred.id !== chosen.model.id) {
         note = overBudget(chosen.model, preferred);
       }
@@ -560,7 +580,12 @@ export class TaskAnalyzer {
    *        the benchmark, the price, the specialization match — so this is the
    *        only term where exploration could live.
    */
-  private scoreModel(model: ModelInfo, profile: TaskProfile, perfMode: 'mean' | 'sample' = 'mean'): number {
+  private scoreModel(
+    model: ModelInfo,
+    profile: TaskProfile,
+    perfMode: 'mean' | 'sample' = 'mean',
+    agenticWeight = 0,
+  ): number {
     const perf = this.perfFor(model, profile, perfMode);
     const costEff = this.costEfficiency(model, profile.complexity);
     const match = this.taskMatchScore(model, profile);
@@ -574,7 +599,7 @@ export class TaskAnalyzer {
     // agreement can break a near-tie. See router/feedback-prior.ts for why the
     // data deserves exactly that much weight and no more.
     const rated = this.feedback?.(model.id);
-    const publicScore = benchmarkScore01(model, profile.type);
+    const publicScore = benchmarkScore01(model, profile.type, agenticWeight);
     const adjusted = rated ? applyFeedback(publicScore, rated) : publicScore;
     const benchmark = 0.3 + 0.7 * adjusted;
 

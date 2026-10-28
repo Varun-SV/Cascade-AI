@@ -10,6 +10,98 @@
   },
   "entries": [
     {
+      "model": "claude-fable-5-1",
+      "provider": "anthropic",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-10-28",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 10,
+          "outputPer1m": 50,
+          "cachedInputPer1m": 0.25,
+          "cacheWritePer1m": 12.5,
+          "reasoningOutputPer1m": 50
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1000000,
+      "notes": "Cache reads are 2.5% of input on Fable 5.1 (not the usual 10%)."
+    },
+    {
+      "model": "claude-opus-5-5",
+      "provider": "anthropic",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-10-28",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 4,
+          "outputPer1m": 20,
+          "cachedInputPer1m": 0.2,
+          "cacheWritePer1m": 5,
+          "reasoningOutputPer1m": 20
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1000000,
+      "notes": "Cache reads are 5% of input on Opus 5.5."
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "provider": "anthropic",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-10-28",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 2,
+          "outputPer1m": 10,
+          "cachedInputPer1m": 0.1,
+          "cacheWritePer1m": 2.5,
+          "reasoningOutputPer1m": 10
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1000000,
+      "notes": "Cache reads are 5% of input on Sonnet 5.5."
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "provider": "anthropic",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-10-28",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "maxInputTokens": 100000,
+          "inputPer1m": 0.1,
+          "outputPer1m": 0.5,
+          "cachedInputPer1m": 0.01,
+          "cacheWritePer1m": 0.125,
+          "reasoningOutputPer1m": 0.5
+        },
+        {
+          "inputPer1m": 0.5,
+          "outputPer1m": 2.5,
+          "cachedInputPer1m": 0.05,
+          "cacheWritePer1m": 0.625,
+          "reasoningOutputPer1m": 2.5
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1000000,
+      "notes": "Priced by prompt length: $0.10/$0.50 per 1M up to 100K input tokens (cache reads and writes count), $0.50/$2.50 above."
+    },
+    {
       "model": "claude-opus-5",
       "provider": "anthropic",
       "modality": "text",
@@ -280,6 +372,82 @@
       ],
       "batchMultiplier": 0.5,
       "contextWindow": 200000
+    },
+    {
+      "model": "gpt-6-astra",
+      "provider": "openai",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-10-28",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 10,
+          "outputPer1m": 50,
+          "cachedInputPer1m": 1
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1050000,
+      "notes": "Standard tier from the vendor pricing page. Context window not on the pricing page; 1.05M as for the rest of GPT-6."
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "provider": "openai",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-10-28",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 2,
+          "outputPer1m": 10,
+          "cachedInputPer1m": 0.1
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1050000,
+      "notes": "Standard (short-context) tier. OpenAI charges more above 272K prompt tokens; that tier is not captured here."
+    },
+    {
+      "model": "gpt-6.1-terra",
+      "provider": "openai",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-10-28",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 1,
+          "outputPer1m": 5,
+          "cachedInputPer1m": 0.05
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1050000,
+      "notes": "Standard (short-context) tier; the >272K tier is not captured here."
+    },
+    {
+      "model": "gpt-6-luna",
+      "provider": "openai",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-10-28",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 0.1,
+          "outputPer1m": 0.5,
+          "cachedInputPer1m": 0.01
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1050000,
+      "notes": "Standard (short-context) tier; the >272K tier is not captured here."
     },
     {
       "model": "gpt-5.6-sol",
@@ -858,6 +1026,45 @@
       ],
       "contextWindow": 128000,
       "notes": "Azure charges $0.165/$0.66 per 1M for gpt-4o-mini vs $0.15/$0.60 on OpenAI — same model, different price."
+    },
+    {
+      "model": "gemini-3.8-flash",
+      "provider": "gemini",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-10-28",
+      "source": "https://ai.google.dev/gemini-api/docs/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 0.75,
+          "outputPer1m": 3.75,
+          "reasoningOutputPer1m": 3.75
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1048576,
+      "notes": "Listed through 2026-12-31; rises to $1.50/$7.50 per 1M from 2027-01-01 — re-check this entry then."
+    },
+    {
+      "model": "gemini-4-argon",
+      "provider": "gemini",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-10-28",
+      "source": "https://cloud.google.com/blog/products/ai-machine-learning/gemini-4-argon-available-on-google-cloud",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 2,
+          "outputPer1m": 10,
+          "cachedInputPer1m": 0.1,
+          "reasoningOutputPer1m": 10
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1048576,
+      "notes": "Introductory pricing through 2026-11-30 (cached input 95% off). Standard $4/$20 per 1M takes effect after that — re-check this entry then. Context window not stated in the launch post."
     },
     {
       "model": "gemini-3.1-pro",

@@ -124,7 +124,7 @@ function fromLiteLLM(key, { model, provider, region, aliases, tierBoundary, note
 }
 
 /** Build an entry from a vendor pricing page that was fetched directly. */
-function vendor({ model, provider, region, aliases, source, tiers, batchMultiplier, notes, contextWindow, modality = 'text', rates }) {
+function vendor({ model, provider, region, aliases, source, tiers, batchMultiplier, notes, contextWindow, modality = 'text', rates, asOf = AS_OF }) {
   return {
     model,
     provider,
@@ -132,7 +132,7 @@ function vendor({ model, provider, region, aliases, source, tiers, batchMultipli
     ...(aliases ? { aliases } : {}),
     modality,
     currency: 'USD',
-    asOf: AS_OF,
+    asOf,
     source,
     provenance: 'vendor-pricing-page',
     ...(tiers ? { tiers } : {}),
@@ -185,7 +185,46 @@ function anthropic(model, input, output, { aliases, notes, contextWindow, tiers 
   });
 }
 
+// Read 2026-10-28 off each vendor's own page, so they carry that date rather
+// than AS_OF. OpenAI's pricing page answered this time; it is the source here
+// instead of the litellm catalogue, which had not listed GPT-6 yet.
+const OCT_2026 = '2026-10-28';
+const OPENAI_SRC = 'https://developers.openai.com/api/docs/pricing';
+const GEMINI_SRC = 'https://ai.google.dev/gemini-api/docs/pricing';
+const ARGON_SRC = 'https://cloud.google.com/blog/products/ai-machine-learning/gemini-4-argon-available-on-google-cloud';
+const tier = (i, o, c, w) => ({ inputPer1m: i, outputPer1m: o, cachedInputPer1m: c, cacheWritePer1m: w, reasoningOutputPer1m: o });
+const flat = (i, o, c) => ({ inputPer1m: i, outputPer1m: o, ...(c != null ? { cachedInputPer1m: c } : {}) });
+
 const entries = [
+  // ── Anthropic — current generation (cache-read ratios differ per model) ──
+  vendor({ model: 'claude-fable-5-1', provider: 'anthropic', source: ANTHROPIC_SRC, asOf: OCT_2026, contextWindow: 1_000_000, batchMultiplier: 0.5,
+    tiers: [tier(10, 50, 0.25, 12.5)], notes: 'Cache reads are 2.5% of input on Fable 5.1 (not the usual 10%).' }),
+  vendor({ model: 'claude-opus-5-5', provider: 'anthropic', source: ANTHROPIC_SRC, asOf: OCT_2026, contextWindow: 1_000_000, batchMultiplier: 0.5,
+    tiers: [tier(4, 20, 0.2, 5)], notes: 'Cache reads are 5% of input on Opus 5.5.' }),
+  vendor({ model: 'claude-sonnet-5-5', provider: 'anthropic', source: ANTHROPIC_SRC, asOf: OCT_2026, contextWindow: 1_000_000, batchMultiplier: 0.5,
+    tiers: [tier(2, 10, 0.1, 2.5)], notes: 'Cache reads are 5% of input on Sonnet 5.5.' }),
+  vendor({ model: 'claude-haiku-5-5', provider: 'anthropic', source: ANTHROPIC_SRC, asOf: OCT_2026, contextWindow: 1_000_000, batchMultiplier: 0.5,
+    tiers: [{ maxInputTokens: 100_000, ...tier(0.1, 0.5, 0.01, 0.125) }, tier(0.5, 2.5, 0.05, 0.625)],
+    notes: 'Priced by prompt length: $0.10/$0.50 per 1M up to 100K input tokens (cache reads and writes count), $0.50/$2.50 above.' }),
+
+  // ── OpenAI — GPT-6 (vendor page; the >272K long-context tier is not captured) ──
+  vendor({ model: 'gpt-6-astra', provider: 'openai', source: OPENAI_SRC, asOf: OCT_2026, contextWindow: 1_050_000, batchMultiplier: 0.5,
+    tiers: [flat(10, 50, 1)], notes: 'Standard tier from the vendor pricing page. Context window not on the pricing page; 1.05M as for the rest of GPT-6.' }),
+  vendor({ model: 'gpt-6.1-sol', provider: 'openai', source: OPENAI_SRC, asOf: OCT_2026, contextWindow: 1_050_000, batchMultiplier: 0.5,
+    tiers: [flat(2, 10, 0.1)], notes: 'Standard (short-context) tier. OpenAI charges more above 272K prompt tokens; that tier is not captured here.' }),
+  vendor({ model: 'gpt-6.1-terra', provider: 'openai', source: OPENAI_SRC, asOf: OCT_2026, contextWindow: 1_050_000, batchMultiplier: 0.5,
+    tiers: [flat(1, 5, 0.05)], notes: 'Standard (short-context) tier; the >272K tier is not captured here.' }),
+  vendor({ model: 'gpt-6-luna', provider: 'openai', source: OPENAI_SRC, asOf: OCT_2026, contextWindow: 1_050_000, batchMultiplier: 0.5,
+    tiers: [flat(0.1, 0.5, 0.01)], notes: 'Standard (short-context) tier; the >272K tier is not captured here.' }),
+
+  // ── Gemini — current generation ──────────────────────────────────────────
+  vendor({ model: 'gemini-3.8-flash', provider: 'gemini', source: GEMINI_SRC, asOf: OCT_2026, contextWindow: 1_048_576, batchMultiplier: 0.5,
+    tiers: [{ inputPer1m: 0.75, outputPer1m: 3.75, reasoningOutputPer1m: 3.75 }],
+    notes: 'Listed through 2026-12-31; rises to $1.50/$7.50 per 1M from 2027-01-01 — re-check this entry then.' }),
+  vendor({ model: 'gemini-4-argon', provider: 'gemini', source: ARGON_SRC, asOf: OCT_2026, contextWindow: 1_048_576, batchMultiplier: 0.5,
+    tiers: [{ inputPer1m: 2, outputPer1m: 10, cachedInputPer1m: 0.1, reasoningOutputPer1m: 10 }],
+    notes: 'Introductory pricing through 2026-11-30 (cached input 95% off). Standard $4/$20 per 1M takes effect after that — re-check this entry then. Context window not stated in the launch post.' }),
+
   // ── Anthropic (first-party Claude API) ───────────────────────────────────
   anthropic('claude-opus-5', 5, 25, { contextWindow: 1_000_000 }),
   anthropic('claude-opus-4-8', 5, 25, { contextWindow: 1_000_000 }),
@@ -233,7 +272,7 @@ const entries = [
   fromLiteLLM('gpt-5-nano', { model: 'gpt-5-nano', provider: 'openai' }),
   fromLiteLLM('gpt-4.1', { model: 'gpt-4.1', provider: 'openai' }),
   fromLiteLLM('gpt-4.1-mini', { model: 'gpt-4.1-mini', provider: 'openai' }),
-  fromLiteLLM('gpt-4.1-nano', { model: 'gpt-4.1-nano', provider: 'openai' }),
+  fromLiteLLM('gpt-4.1-nano', { model: 'gpt-4.1-nano', provider: 'openai', notes: 'Retired by OpenAI 2026-10-23; priced for historical/cost-reporting accuracy.' }),
   fromLiteLLM('gpt-4o', { model: 'gpt-4o', provider: 'openai' }),
   fromLiteLLM('gpt-4o-mini', { model: 'gpt-4o-mini', provider: 'openai' }),
 

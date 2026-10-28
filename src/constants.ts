@@ -42,7 +42,58 @@ export const DEFAULT_RETENTION_DAYS = 90;
 // authoritative and overwrites it by MODEL × PROVIDER (× region where relevant).
 
 export const MODELS: Record<string, ModelInfo> = {
-  // Anthropic — active Claude API models (2026-08-27).
+  // Anthropic — Claude API models (lineup and prices read 2026-10-28 from
+  // platform.claude.com/docs/en/models/overview and /about-claude/pricing).
+  'claude-fable-5-1': {
+    id: 'claude-fable-5-1',
+    name: 'Claude Fable 5.1',
+    provider: 'anthropic',
+    contextWindow: 1_000_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.01,
+    outputCostPer1kTokens: 0.05,
+    maxOutputTokens: 128_000,
+    supportsStreaming: true,
+    isLocal: false,
+  },
+  'claude-opus-5-5': {
+    id: 'claude-opus-5-5',
+    name: 'Claude Opus 5.5',
+    provider: 'anthropic',
+    contextWindow: 1_000_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.004,
+    outputCostPer1kTokens: 0.02,
+    maxOutputTokens: 128_000,
+    supportsStreaming: true,
+    isLocal: false,
+  },
+  'claude-sonnet-5-5': {
+    id: 'claude-sonnet-5-5',
+    name: 'Claude Sonnet 5.5',
+    provider: 'anthropic',
+    contextWindow: 1_000_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.002,
+    outputCostPer1kTokens: 0.01,
+    maxOutputTokens: 128_000,
+    supportsStreaming: true,
+    isLocal: false,
+  },
+  // Haiku 5.5 bills $0.10/$0.50 per 1M up to 100K prompt tokens and
+  // $0.50/$2.50 above — the tier is in pricing-data.json.
+  'claude-haiku-5-5': {
+    id: 'claude-haiku-5-5',
+    name: 'Claude Haiku 5.5',
+    provider: 'anthropic',
+    contextWindow: 1_000_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.0001,
+    outputCostPer1kTokens: 0.0005,
+    maxOutputTokens: 128_000,
+    supportsStreaming: true,
+    isLocal: false,
+  },
   'claude-fable-5': {
     id: 'claude-fable-5',
     name: 'Claude Fable 5',
@@ -164,7 +215,57 @@ export const MODELS: Record<string, ModelInfo> = {
     isLocal: false,
   },
 
-  // OpenAI — active chat-capable models used by Cascade's Chat Completions path.
+  // OpenAI — chat-capable models used by Cascade's Chat Completions path
+  // (developers.openai.com/api/docs/pricing, read 2026-10-28). GPT-6 Sol is
+  // left out: GPT-6.1 Sol replaced it and the pricing page no longer lists it.
+  'gpt-6-astra': {
+    id: 'gpt-6-astra',
+    name: 'GPT-6 Astra',
+    provider: 'openai',
+    contextWindow: 1_050_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.01,
+    outputCostPer1kTokens: 0.05,
+    maxOutputTokens: 128_000,
+    supportsStreaming: true,
+    isLocal: false,
+  },
+  'gpt-6.1-sol': {
+    id: 'gpt-6.1-sol',
+    name: 'GPT-6.1 Sol',
+    provider: 'openai',
+    contextWindow: 1_050_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.002,
+    outputCostPer1kTokens: 0.01,
+    maxOutputTokens: 128_000,
+    supportsStreaming: true,
+    isLocal: false,
+  },
+  'gpt-6.1-terra': {
+    id: 'gpt-6.1-terra',
+    name: 'GPT-6.1 Terra',
+    provider: 'openai',
+    contextWindow: 1_050_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.001,
+    outputCostPer1kTokens: 0.005,
+    maxOutputTokens: 128_000,
+    supportsStreaming: true,
+    isLocal: false,
+  },
+  'gpt-6-luna': {
+    id: 'gpt-6-luna',
+    name: 'GPT-6 Luna',
+    provider: 'openai',
+    contextWindow: 1_050_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.0001,
+    outputCostPer1kTokens: 0.0005,
+    maxOutputTokens: 128_000,
+    supportsStreaming: true,
+    isLocal: false,
+  },
   'gpt-5.6-sol': {
     id: 'gpt-5.6-sol',
     name: 'GPT-5.6 Sol',
@@ -321,18 +422,6 @@ export const MODELS: Record<string, ModelInfo> = {
     supportsStreaming: true,
     isLocal: false,
   },
-  'gpt-4.1-nano': {
-    id: 'gpt-4.1-nano',
-    name: 'GPT-4.1 Nano',
-    provider: 'openai',
-    contextWindow: 1_047_576,
-    isVisionCapable: true,
-    inputCostPer1kTokens: 0.0001,
-    outputCostPer1kTokens: 0.0004,
-    maxOutputTokens: 32_768,
-    supportsStreaming: true,
-    isLocal: false,
-  },
   'gpt-4o': {
     id: 'gpt-4o',
     name: 'GPT-4o',
@@ -358,8 +447,38 @@ export const MODELS: Record<string, ModelInfo> = {
     isLocal: false,
   },
 
-  // Google Gemini — active GA + preview chat models. Gemini 2.0/1.5 are no
-  // longer advertised because the Gemini API shut those generations down.
+  // Google Gemini — GA + preview chat models (ai.google.dev pricing and
+  // deprecations, read 2026-10-28). Gemini 2.0/1.5 are no longer advertised
+  // because the Gemini API shut those generations down; 2.5 is kept for pins
+  // but limited to existing customers (see router/lifecycle.ts).
+  // Gemini 4 Argon: introductory $2/$10 per 1M through 2026-11-30, then
+  // $4/$20. Google's post does not state the context window; 1M is the
+  // Gemini Pro-class window and is what discovery will confirm or correct.
+  'gemini-4-argon': {
+    id: 'gemini-4-argon',
+    name: 'Gemini 4 Argon',
+    provider: 'gemini',
+    contextWindow: 1_048_576,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.002,
+    outputCostPer1kTokens: 0.01,
+    maxOutputTokens: 65_536,
+    supportsStreaming: true,
+    isLocal: false,
+  },
+  // $0.75/$3.75 per 1M through 2026-12-31, then $1.50/$7.50.
+  'gemini-3.8-flash': {
+    id: 'gemini-3.8-flash',
+    name: 'Gemini 3.8 Flash',
+    provider: 'gemini',
+    contextWindow: 1_048_576,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.00075,
+    outputCostPer1kTokens: 0.00375,
+    maxOutputTokens: 65_536,
+    supportsStreaming: true,
+    isLocal: false,
+  },
   'gemini-3.7-flash': {
     id: 'gemini-3.7-flash',
     name: 'Gemini 3.7 Flash',
@@ -561,62 +680,65 @@ for (const _m of Object.values(MODELS)) {
 // ── Tier Model Priority Chains ─────────────────
 // These are candidate chains, not a declaration that the first item always
 // wins: Cascade Auto still scores benchmark quality, observed outcomes and cost.
+// Only models their provider still fully serves belong here — a retired,
+// deprecated, restricted or re-routed id (router/lifecycle.ts) stays in the
+// catalogue for pins but never in a chain, or Auto would keep reaching for it.
 
 export const T1_MODEL_PRIORITY: string[] = [
+  'claude-opus-5-5',
+  'gpt-6-astra',
+  'gpt-6.1-sol',
+  'claude-fable-5-1',
+  'claude-sonnet-5-5',
+  'gemini-4-argon',
   'gpt-5.6-sol',
-  'claude-fable-5',
   'claude-opus-5',
+  'claude-fable-5',
   'gpt-5.5',
-  'gpt-5.4',
+  'gemini-3.8-flash',
   'gemini-3.1-pro-preview',
   'claude-opus-4-8',
+  'gpt-5.4',
   'claude-sonnet-5',
-  'gemini-3.7-flash',
-  'gpt-5.2',
-  'gpt-5',
-  'gemini-2.5-pro',
-  'gpt-4.1',
-  'gpt-4o',
 ];
 
 export const T2_MODEL_PRIORITY: string[] = [
+  'claude-sonnet-5-5',
+  'gpt-6.1-terra',
+  'gemini-3.8-flash',
+  'gpt-6.1-sol',
+  'claude-haiku-5-5',
   'gpt-5.6-terra',
   'claude-sonnet-5',
-  'gemini-3.7-flash',
   'gemini-3.6-flash',
+  'gpt-6-luna',
   'gpt-5.4-mini',
-  'gpt-5-mini',
   'claude-sonnet-4-6',
   'claude-haiku-4-5',
-  'gemini-3.5-flash',
-  'gemini-2.5-flash',
-  'gpt-4.1-mini',
-  'gpt-4o-mini',
   'llama3:70b',
 ];
 
 export const T3_MODEL_PRIORITY: string[] = [
+  'gpt-6-luna',
+  'claude-haiku-5-5',
   'gpt-5.6-luna',
-  'gpt-5.4-nano',
   'gemini-3.5-flash-lite',
-  'gemini-3.1-flash-lite',
+  'gemini-3.6-flash',
+  'gpt-5.4-mini',
   'claude-haiku-4-5',
-  'gpt-5-nano',
-  'gemini-2.5-flash-lite',
   'llama3.2:3b',
   'mistral:7b',
-  'gpt-4.1-nano',
-  'gpt-4o-mini',
-  'gemini-2.5-flash',
 ];
 
 export const VISION_MODEL_PRIORITY: string[] = [
+  'gpt-6.1-sol',
+  'claude-sonnet-5-5',
+  'gemini-3.8-flash',
+  'claude-opus-5-5',
   'gpt-5.6-sol',
-  'claude-fable-5',
   'claude-sonnet-5',
-  'gemini-3.7-flash',
-  'gpt-4o',
-  'gemini-2.5-flash',
+  'gemini-3.6-flash',
+  'claude-haiku-5-5',
   'llava',
 ];
 

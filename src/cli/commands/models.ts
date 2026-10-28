@@ -6,6 +6,7 @@ import chalk from 'chalk';
 import { ConfigManager } from '../../config/index.js';
 import { CascadeRouter } from '../../core/router/index.js';
 import { benchmarkScore01 } from '../../core/router/benchmarks.js';
+import { describeLifecycle, lifecycleOf } from '../../core/router/lifecycle.js';
 import { isPricingUnknown, pricingDatasetMeta } from '../../core/router/pricing.js';
 import { withTimeout } from '../../utils/retry.js';
 
@@ -64,6 +65,10 @@ export async function modelsCommand(options: { verbose?: boolean } = {}): Promis
           : `${chalk.gray(col(ctx, 10))}${chalk.gray(`bench ${bench}/100`)}`) +
         local + vision,
       );
+      // A pinned tier can name a model its provider is phasing out; Auto
+      // never picks one, but a pin is honoured, so say so where it is set.
+      const lifecycle = lifecycleOf(model);
+      if (lifecycle) console.log(chalk.yellow(`        ⚠ ${describeLifecycle(lifecycle)}`));
     } else {
       console.log(`  ${color.bold(tier)}  ${chalk.red('No model available')}  ${chalk.gray(`(check provider config for ${label})`)}`);
       anyMissing = true;

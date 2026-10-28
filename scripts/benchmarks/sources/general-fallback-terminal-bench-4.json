@@ -1,0 +1,108 @@
+{
+  "source": "general-fallback-terminal-bench-4",
+  "label": "Fallback: Terminal-Bench 4.0 fitted onto the analysis/data anchor (Vals Index)",
+  "url": "https://www.vals.ai/benchmarks/terminal-bench-4",
+  "capturedAt": "2026-10-28",
+  "provenance": "derived",
+  "role": "fallback",
+  "scale": "percent",
+  "calibration": {
+    "analysis": {
+      "fitTo": "vals-index"
+    },
+    "data": {
+      "fitTo": "vals-index"
+    }
+  },
+  "note": "Not a measurement of analysis or data work. A FALLBACK (role \"fallback\") that fills a cell only when no primary source rates that model for that task, so a current model the Vals Index has not run (GPT-5.6, Opus 5, Fable 5, Gemini 3.x) is scored from a real single-harness board instead of a hand-typed seed. Terminal-Bench 4.0 is itself one of the Vals Index's coding components and tracks it closely (Spearman 0.97 over 9 shared models), so it is fitted onto the index. Terminal-Bench 2.1 was tried in this role and fails the aggregator's correlation gate against the index (0.43), and no agentic board predicts writing preference (0.23 against LMArena creative), so neither is used; a cell nothing measures is imputed from the model's own measured cells instead. Same raw numbers as vals-terminal-bench-4.json.",
+  "models": {
+    "claude-opus-5.5": {
+      "analysis": 65.15,
+      "data": 65.15
+    },
+    "claude-sonnet-5.5": {
+      "analysis": 64.14,
+      "data": 64.14
+    },
+    "gpt-6-astra": {
+      "analysis": 59.6,
+      "data": 59.6
+    },
+    "claude-fable-5.1": {
+      "analysis": 58.08,
+      "data": 58.08
+    },
+    "gemini-4-argon": {
+      "analysis": 57.58,
+      "data": 57.58
+    },
+    "gpt-6.1-sol": {
+      "analysis": 55.05,
+      "data": 55.05
+    },
+    "claude-opus-5": {
+      "analysis": 53.53,
+      "data": 53.53
+    },
+    "gpt-6.1-terra": {
+      "analysis": 49.49,
+      "data": 49.49
+    },
+    "gpt-6-sol": {
+      "analysis": 44.44,
+      "data": 44.44
+    },
+    "claude-fable-5": {
+      "analysis": 41.41,
+      "data": 41.41
+    },
+    "gpt-5.6-sol": {
+      "analysis": 37.88,
+      "data": 37.88
+    },
+    "claude-haiku-5.5": {
+      "analysis": 36.36,
+      "data": 36.36
+    },
+    "claude-opus-4.8": {
+      "analysis": 23.23,
+      "data": 23.23
+    },
+    "gpt-5.6-terra": {
+      "analysis": 22.73,
+      "data": 22.73
+    },
+    "gemini-3.8-flash": {
+      "analysis": 19.7,
+      "data": 19.7
+    },
+    "gpt-6-luna": {
+      "analysis": 13.64,
+      "data": 13.64
+    },
+    "gemini-3.7-flash": {
+      "analysis": 12.12,
+      "data": 12.12
+    },
+    "gpt-5.6-luna": {
+      "analysis": 11.62,
+      "data": 11.62
+    },
+    "claude-sonnet-5": {
+      "analysis": 10.61,
+      "data": 10.61
+    },
+    "gemini-3.5-flash": {
+      "analysis": 6.06,
+      "data": 6.06
+    },
+    "gemini-3.1-pro": {
+      "analysis": 2.52,
+      "data": 2.52
+    },
+    "gpt-5.4-mini": {
+      "analysis": 2.52,
+      "data": 2.52
+    }
+  }
+}

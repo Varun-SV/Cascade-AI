@@ -24,7 +24,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { bareMap } from './bare-map.mjs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { TASK_KEYS } from './aggregate.mjs';
+import { ALL_KEYS } from './aggregate.mjs';
 
 const VALID_SCALES = new Set(['percent', 'index0-100', 'elo']);
 
@@ -74,7 +74,7 @@ export function validateSource(raw, filename = '<inline>') {
   const models = bareMap();
   for (const [family, profile] of Object.entries(raw.models)) {
     if (!profile || typeof profile !== 'object') continue;
-    const hasAnyTask = TASK_KEYS.some((t) => Number.isFinite(Number(profile[t])));
+    const hasAnyTask = ALL_KEYS.some((t) => Number.isFinite(Number(profile[t])));
     if (hasAnyTask) models[family] = profile;
   }
   if (Object.keys(models).length === 0) {

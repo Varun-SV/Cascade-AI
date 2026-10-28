@@ -1,13 +1,19 @@
 // ─────────────────────────────────────────────
 //  Cascade AI — Benchmark-routing scores
 // ─────────────────────────────────────────────
+//
+// These assert what the captured boards say (scripts/benchmarks/sources/),
+// not a preferred ordering. The old suite pinned "GPT-4.1 is the best writer"
+// and "Claude beats GPT-4o at code" against hand-typed seeds; when the seeds
+// went, those orderings had nothing under them.
 
 import { describe, expect, it } from 'vitest';
-import { benchmarkScore01 } from './benchmarks.js';
+import { benchmarkProfile, benchmarkScore01, resolveFamily } from './benchmarks.js';
 import { MODELS } from '../../constants.js';
 import type { ModelInfo } from '../../types.js';
+import benchmarkData from './benchmark-data.json' with { type: 'json' };
 
-function syntheticCloudModel(id: string, provider: ModelInfo['provider'] = 'openai', baseModelId?: string): ModelInfo {
+function m(id: string, provider: ModelInfo['provider'] = 'openai', baseModelId?: string): ModelInfo {
   return {
     id,
     name: id,
@@ -23,51 +29,83 @@ function syntheticCloudModel(id: string, provider: ModelInfo['provider'] = 'open
   };
 }
 
+describe('resolveFamily', () => {
+  it('gives every model version its own family', () => {
+    expect(resolveFamily(m('claude-opus-5-5', 'anthropic'))).toBe('claude-opus-5.5');
+    expect(resolveFamily(m('claude-opus-5', 'anthropic'))).toBe('claude-opus-5');
+    expect(resolveFamily(m('claude-opus-4-5-20251101', 'anthropic'))).toBe('claude-opus-4.5');
+    expect(resolveFamily(m('claude-haiku-4-5-20251001', 'anthropic'))).toBe('claude-haiku-4.5');
+    expect(resolveFamily(m('gpt-6.1-sol'))).toBe('gpt-6.1-sol');
+    expect(resolveFamily(m('gpt-6-sol'))).toBe('gpt-6-sol');
+    expect(resolveFamily(m('gpt-5.4-nano'))).toBe('gpt-5.4-nano');
+    expect(resolveFamily(m('gpt-5-2025-08-07'))).toBe('gpt-5');
+    expect(resolveFamily(m('gemini-3.5-flash-lite', 'gemini'))).toBe('gemini-3.5-flash-lite');
+    expect(resolveFamily(m('gemini-3.1-pro-preview', 'gemini'))).toBe('gemini-3.1-pro');
+  });
+
+  it('reads a version out of a display name and a gateway id', () => {
+    expect(resolveFamily({ ...m('x', 'anthropic'), name: 'Claude Opus 4.5' })).toBe('claude-opus-4.5');
+    expect(resolveFamily(m('anthropic/claude-sonnet-4.5', 'openai-compatible'))).toBe('claude-sonnet-4.5');
+  });
+
+  it('scores Mythos as Fable — the same model', () => {
+    expect(resolveFamily(m('claude-mythos-5-1', 'anthropic'))).toBe('claude-fable-5.1');
+  });
+
+  it('never scores a retired model as the newest of its line', () => {
+    // These would otherwise fall into the "newer than this table" rules.
+    for (const id of ['claude-3-7-sonnet-20250219', 'claude-sonnet-4-20250514', 'claude-opus-4-1-20250805', 'claude-3-5-haiku-20241022']) {
+      expect(benchmarkScore01(m(id, 'anthropic'), 'code'), id).toBe(0.5);
+    }
+    expect(benchmarkScore01(m('gemini-2.0-flash-lite', 'gemini'), 'code')).toBe(0.5);
+    expect(benchmarkScore01(m('gemini-1.5-pro', 'gemini'), 'code')).toBe(0.5);
+  });
+
+  it('scores a newer release than the table by the newest measured model of its line', () => {
+    expect(resolveFamily(m('claude-opus-6', 'anthropic'))).toBe('claude-opus-5.5');
+    expect(resolveFamily(m('gemini-3.9-flash', 'gemini'))).toBe('gemini-3.8-flash');
+  });
+
+  it('resolves an arbitrarily named Azure deployment through baseModelId', () => {
+    expect(benchmarkScore01(m('prod-west', 'azure', 'gpt-5.6-sol'), 'analysis'))
+      .toBe(benchmarkScore01(m('gpt-5.6-sol'), 'analysis'));
+  });
+});
+
 describe('benchmarkScore01', () => {
-  it('rates Claude highest for coding among the frontier models', () => {
-    const claude = benchmarkScore01(syntheticCloudModel('claude-sonnet-4', 'anthropic'), 'code');
-    const gpt = benchmarkScore01(MODELS['gpt-4o']!, 'code');
-    const gemini = benchmarkScore01(MODELS['gemini-2.5-flash']!, 'code');
-    expect(claude).toBeGreaterThan(gpt);
-    expect(claude).toBeGreaterThan(gemini);
+  it('separates versions the old generic families scored as one', () => {
+    // Terminal-Bench 2.1: Opus 5.5 87.6%, Opus 4.5 not run; SWE-bench
+    // Verified puts Opus 4.5 at 76.4% — well behind the current generation.
+    expect(benchmarkScore01(MODELS['claude-opus-5-5']!, 'code'))
+      .toBeGreaterThan(benchmarkScore01(MODELS['claude-opus-4-5']!, 'code') + 0.2);
+    expect(benchmarkScore01(MODELS['claude-haiku-5-5']!, 'code'))
+      .toBeGreaterThan(benchmarkScore01(MODELS['claude-haiku-4-5']!, 'code'));
   });
 
-  it('rates Gemini Pro above a small Claude for analysis', () => {
-    const gemini = benchmarkScore01(MODELS['gemini-2.5-pro']!, 'analysis');
-    const claudeHaiku = benchmarkScore01(MODELS['claude-haiku-4-5']!, 'analysis');
-    expect(gemini).toBeGreaterThan(claudeHaiku);
+  it('rates the GPT-6.1 tiers in order and above the model they replace', () => {
+    const sol = benchmarkScore01(MODELS['gpt-6.1-sol']!, 'code');
+    const terra = benchmarkScore01(MODELS['gpt-6.1-terra']!, 'code');
+    const luna = benchmarkScore01(MODELS['gpt-6-luna']!, 'code');
+    expect(sol).toBeGreaterThan(terra);
+    expect(terra).toBeGreaterThan(luna);
+    expect(luna).toBeGreaterThan(benchmarkScore01(m('gpt-4o'), 'code'));
   });
 
-  it('rates GPT-4.1 highest for creative writing vs a flash model', () => {
-    const gpt = benchmarkScore01(MODELS['gpt-4.1']!, 'creative');
-    const gemFlash = benchmarkScore01(syntheticCloudModel('gemini-2.0-flash', 'gemini'), 'creative');
-    expect(gpt).toBeGreaterThan(gemFlash);
+  it('no longer credits models shut down or being shut down with seed scores', () => {
+    // τ²-bench (AA): GPT-4o 25%, Gemini 2.5 Flash 15% — they could not hold a
+    // tool loop together, whatever the old seed table said (85 and 82).
+    expect(benchmarkScore01(MODELS['gpt-4o']!, 'code')).toBeLessThan(0.6);
+    expect(benchmarkScore01(MODELS['gemini-2.5-flash']!, 'code')).toBeLessThan(0.6);
+    expect(benchmarkScore01(MODELS['gpt-4o-mini']!, 'code')).toBe(0.5);
   });
 
-  it('scores a newer Gemini model discovered live (not in the table) by its class', () => {
-    const g35Flash: ModelInfo = {
-      id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash', provider: 'gemini',
-      contextWindow: 1_000_000, isVisionCapable: true,
-      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0,
-      maxOutputTokens: 8_000, supportsStreaming: true, isLocal: false,
-    };
-    expect(benchmarkScore01(g35Flash, 'code')).toBeGreaterThan(0.5);
-    const g3Pro: ModelInfo = { ...g35Flash, id: 'gemini-3-pro', name: 'Gemini 3 Pro' };
-    expect(benchmarkScore01(g3Pro, 'analysis')).toBeGreaterThan(benchmarkScore01(g35Flash, 'analysis'));
+  it('keeps gemini-2.5-flash-lite apart from the full gemini-2.5-flash', () => {
+    expect(resolveFamily(MODELS['gemini-2.5-flash-lite']!)).toBe('gemini-2.5-flash-lite');
+    expect(resolveFamily(MODELS['gemini-2.5-flash']!)).toBe('gemini-2.5-flash');
   });
 
-  it('scores gemini-2.5-flash-lite BELOW the full gemini-2.5-flash, not the same', () => {
-    const lite: ModelInfo = {
-      id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite', provider: 'gemini',
-      contextWindow: 1_000_000, isVisionCapable: true,
-      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0,
-      maxOutputTokens: 8_000, supportsStreaming: true, isLocal: false,
-    };
-    const full = benchmarkScore01(MODELS['gemini-2.5-flash']!, 'code');
-    const liteScore = benchmarkScore01(lite, 'code');
-    expect(liteScore).toBeLessThan(full);
-    const oldLite = benchmarkScore01(syntheticCloudModel('gemini-2.0-flash-lite', 'gemini'), 'code');
-    expect(liteScore).toBeGreaterThan(oldLite);
+  it('does not score GPT-5.4 Nano as the full GPT-5.4 model', () => {
+    expect(benchmarkScore01(m('gpt-5.4-nano'), 'code')).toBeLessThan(benchmarkScore01(MODELS['gpt-5.4']!, 'code'));
   });
 
   it('returns a neutral 0.5 for a model with no benchmark profile', () => {
@@ -75,49 +113,61 @@ describe('benchmarkScore01', () => {
     expect(benchmarkScore01(unknown, 'code')).toBe(0.5);
   });
 
-  it('scores the gpt-5 family (no longer a neutral 0.5)', () => {
-    expect(benchmarkScore01(MODELS['gpt-5']!, 'code')).toBeGreaterThan(0.9);
-    const azureDeploy = { id: 'prod-fast', name: 'Prod', provider: 'azure', baseModelId: 'gpt-5' } as ModelInfo;
-    expect(benchmarkScore01(azureDeploy, 'analysis')).toBeGreaterThan(0.9);
-    expect(benchmarkScore01(MODELS['gpt-5-mini']!, 'code'))
-      .toBeLessThan(benchmarkScore01(MODELS['gpt-5']!, 'code'));
+  it('produces an in-range score for the mixed task type, ignoring the agentic key', () => {
+    const model = MODELS['claude-sonnet-5']!;
+    const p = benchmarkProfile(model)!;
+    const mean = (p.code! + p.analysis! + p.creative! + p.data!) / 4;
+    expect(benchmarkScore01(model, 'mixed')).toBeCloseTo(mean / 100, 5);
+  });
+});
+
+describe('agentic weighting', () => {
+  it('blends the agentic score in by the weight given', () => {
+    const model = MODELS['gemini-3.8-flash']!;
+    const p = benchmarkProfile(model)!;
+    expect(p.agentic).toBeTypeOf('number');
+    expect(benchmarkScore01(model, 'creative', 0.5)).toBeCloseTo((p.creative! + p.agentic!) / 200, 5);
+    expect(benchmarkScore01(model, 'creative', 0)).toBeCloseTo(p.creative! / 100, 5);
   });
 
-  it('scores distinct gpt-5 point releases (5.5 > 5.4 > 5.4-mini)', () => {
-    const v55 = benchmarkScore01(MODELS['gpt-5.5']!, 'code');
-    const v54 = benchmarkScore01(MODELS['gpt-5.4']!, 'code');
-    const v54mini = benchmarkScore01(MODELS['gpt-5.4-mini']!, 'code');
-    expect(v55).toBeGreaterThan(v54);
-    expect(v54).toBeGreaterThan(v54mini);
-    const azure54 = { id: 'gpt-5.4', name: 'gpt-5.4', provider: 'azure', baseModelId: 'gpt-5.4' } as ModelInfo;
-    const azure54mini = { id: 'gpt-5.4-mini', name: 'gpt-5.4-mini', provider: 'azure', baseModelId: 'gpt-5.4-mini' } as ModelInfo;
-    expect(benchmarkScore01(azure54, 'code')).toBeGreaterThan(benchmarkScore01(azure54mini, 'code'));
+  it('scores a model no agentic board measured on the task alone', () => {
+    const local = { ...m('qwen2.5:7b', 'ollama'), isLocal: true };
+    expect(benchmarkScore01(local, 'code', 0.5)).toBe(benchmarkScore01(local, 'code', 0));
   });
 
-  it('keeps GPT-5.6 Sol, Terra and Luna as distinct benchmark families', () => {
-    const sol = syntheticCloudModel('gpt-5.6-sol');
-    const terra = syntheticCloudModel('gpt-5.6-terra');
-    const luna = syntheticCloudModel('gpt-5.6-luna');
-    expect(benchmarkScore01(sol, 'code')).toBeGreaterThan(benchmarkScore01(terra, 'code'));
-    expect(benchmarkScore01(terra, 'code')).toBeGreaterThan(benchmarkScore01(luna, 'code'));
-    expect(benchmarkScore01(sol, 'creative')).toBeGreaterThan(benchmarkScore01(terra, 'creative'));
-    expect(benchmarkScore01(terra, 'creative')).toBeGreaterThan(benchmarkScore01(luna, 'creative'));
+  it('puts a planner that holds tool loops together ahead of one that does not', () => {
+    // On analysis alone Gemini 4 Argon leads the Vals Index; on Terminal-Bench
+    // 2.1 it trails Opus 5.5 by 30 points. The planner weighting sees both.
+    const argon = MODELS['gemini-4-argon']!;
+    const opus = MODELS['claude-opus-5-5']!;
+    expect(benchmarkScore01(opus, 'analysis', 0.5) - benchmarkScore01(argon, 'analysis', 0.5))
+      .toBeGreaterThan(benchmarkScore01(opus, 'analysis', 0) - benchmarkScore01(argon, 'analysis', 0));
+  });
+});
+
+describe('the committed snapshot', () => {
+  const families = (benchmarkData as { families: Record<string, Record<string, number>> }).families;
+
+  it('has a family for every model in the catalogue Auto can route to', () => {
+    const unscored = Object.values(MODELS)
+      .filter((model) => !model.isLocal)
+      .filter((model) => benchmarkProfile(model) === null)
+      .map((model) => model.id);
+    // gpt-4o-mini: no current board measures it and it shuts down 2027-01-14.
+    expect(unscored).toEqual(['gpt-4o-mini']);
   });
 
-  it('resolves an arbitrarily named Azure GPT-5.6 deployment through baseModelId', () => {
-    const azureSol = syntheticCloudModel('prod-west', 'azure', 'gpt-5.6-sol');
-    const directSol = syntheticCloudModel('gpt-5.6-sol');
-    expect(benchmarkScore01(azureSol, 'analysis')).toBe(benchmarkScore01(directSol, 'analysis'));
+  it('keeps the generic family keys older builds still look up', () => {
+    for (const legacy of ['claude-opus', 'claude-sonnet', 'claude-haiku']) {
+      expect(families[legacy], legacy).toBeDefined();
+    }
   });
 
-  it('does not score GPT-5.4 Nano as the full GPT-5.4 model', () => {
-    const nano = syntheticCloudModel('gpt-5.4-nano');
-    expect(benchmarkScore01(nano, 'analysis')).toBeLessThan(benchmarkScore01(MODELS['gpt-5.4']!, 'analysis'));
-  });
-
-  it('produces an in-range score for the mixed task type', () => {
-    const s = benchmarkScore01(MODELS['claude-sonnet-5']!, 'mixed');
-    expect(s).toBeGreaterThan(0);
-    expect(s).toBeLessThanOrEqual(1);
+  it('every score is an integer in [0, 100]', () => {
+    for (const [fam, profile] of Object.entries(families)) {
+      for (const [task, v] of Object.entries(profile)) {
+        expect(Number.isInteger(v) && v >= 0 && v <= 100, `${fam}.${task}=${v}`).toBe(true);
+      }
+    }
   });
 });

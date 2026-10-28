@@ -1,0 +1,86 @@
+{
+  "source": "aa-tau2-bench-telecom",
+  "label": "Artificial Analysis \u00b7 \u03c4\u00b2-Bench Telecom (via BenchLM mirror)",
+  "url": "https://benchlm.ai/benchmarks/tau2-bench",
+  "primaryUrl": "https://artificialanalysis.ai/evaluations/tau2-bench",
+  "capturedAt": "2026-10-28",
+  "provenance": "mirror-captured",
+  "scale": "percent",
+  "calibration": {
+    "agentic": {
+      "fitTo": "vals-terminal-bench-2-1"
+    }
+  },
+  "note": "Multi-turn tool calling against a simulated user and policy (the closest public measure of a manager/worker holding a tool loop together). Artificial Analysis blocks automated fetches, so this is read from BenchLM, which republishes AA rows labelled with their setup; ONLY rows labelled \"AA\" are used, so every number shares one harness. Vendor-published telecom rows (GPT-5.4/5.5, Gemini 3.1 Pro) use other setups and are excluded. Agentic only, fitted onto Terminal-Bench 2.1. It covers the older models the Vals boards never ran, which is where it earns its place: GPT-4o, GPT-4.1 and Gemini 2.x hold a tool loop together far worse than their old seed scores claimed. Where AA lists a model twice the default (non-thinking) row is used.",
+  "models": {
+    "claude-fable-5": {
+      "agentic": 98.5
+    },
+    "gemini-3.5-flash": {
+      "agentic": 95.3
+    },
+    "claude-opus-4.8": {
+      "agentic": 94.4
+    },
+    "claude-opus-4.6": {
+      "agentic": 84.8
+    },
+    "claude-opus-4.5": {
+      "agentic": 86.3
+    },
+    "claude-opus-4.7": {
+      "agentic": 74.0
+    },
+    "gemini-3-pro": {
+      "agentic": 87.1
+    },
+    "gpt-5": {
+      "agentic": 86.5
+    },
+    "gpt-5.6-terra": {
+      "agentic": 86.3
+    },
+    "gpt-5.6-sol": {
+      "agentic": 85.1
+    },
+    "gpt-5.2": {
+      "agentic": 84.8
+    },
+    "claude-sonnet-4.6": {
+      "agentic": 79.5
+    },
+    "gpt-5-mini": {
+      "agentic": 68.4
+    },
+    "gemini-2.5-pro": {
+      "agentic": 54.1
+    },
+    "gpt-4.1-mini": {
+      "agentic": 52.9
+    },
+    "gpt-4.1": {
+      "agentic": 47.1
+    },
+    "gemini-3-flash": {
+      "agentic": 43.3
+    },
+    "gpt-5-nano": {
+      "agentic": 36.5
+    },
+    "gemini-2.0-flash": {
+      "agentic": 29.5
+    },
+    "gpt-4o": {
+      "agentic": 25.1
+    },
+    "gemini-2.5-flash-lite": {
+      "agentic": 19.0
+    },
+    "gpt-4.1-nano": {
+      "agentic": 17.3
+    },
+    "gemini-2.5-flash": {
+      "agentic": 14.9
+    }
+  }
+}

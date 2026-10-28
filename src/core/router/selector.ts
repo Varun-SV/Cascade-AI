@@ -11,6 +11,19 @@ import {
   MODELS,
 } from '../../constants.js';
 import { withResolvedPricing } from './pricing.js';
+import { excludedFromAuto } from './lifecycle.js';
+
+/**
+ * Models Cascade may choose on its own: the provider has not retired,
+ * deprecated, restricted or re-routed them (router/lifecycle.ts). SOFT — when
+ * every candidate is excluded, all of them stay in, because a run on a model
+ * the provider is phasing out may still work and a run with no model cannot.
+ * Never applied to a pinned model: pinning one is the user's call.
+ */
+function preferActive(models: ModelInfo[]): ModelInfo[] {
+  const active = models.filter((m) => !excludedFromAuto(m));
+  return active.length > 0 ? active : models;
+}
 
 /** Normalize a model id for cross-source comparison (Gemini prefixes `models/`). */
 function normalizeModelId(id: string): string {
@@ -145,17 +158,15 @@ export class ModelSelector {
     }
 
     const priority = this.getPriorityList(tier);
-    for (const key of priority) {
-      const model = this.availableModels.get(key);
-      if (model && this.isUsable(model)) return model;
-    }
+    const inChain = priority
+      .map((key) => this.availableModels.get(key))
+      .filter((m): m is ModelInfo => !!m && this.isUsable(m));
+    const fromChain = inChain.find((m) => !excludedFromAuto(m));
+    if (fromChain) return fromChain;
 
-    // Fallback: any model from available providers
-    for (const [, model] of this.availableModels) {
-      if (this.isUsable(model)) return model;
-    }
-
-    return null;
+    // Fallback: any model from available providers, one still in service first.
+    const usable = [...this.availableModels.values()].filter((m) => this.isUsable(m));
+    return usable.find((m) => !excludedFromAuto(m)) ?? inChain[0] ?? usable[0] ?? null;
   }
 
   selectVisionModel(): ModelInfo | null {
@@ -188,7 +199,7 @@ export class ModelSelector {
     for (const model of this.availableModels.values()) {
       if (this.isUsable(model) && model.isVisionCapable && !out.has(model.id)) out.set(model.id, model);
     }
-    return [...out.values()];
+    return preferActive([...out.values()]);
   }
 
   getNextFallback(currentModelId: string, tier: TierRole): ModelInfo | null {
@@ -201,12 +212,20 @@ export class ModelSelector {
     // pin: an explicit `azure:…`/`openai-compatible:…`/
     // Ollama-tag override, or a live-discovered model the bundled catalog
     // doesn't know about) skips straight past this loop to the widening below.
+    // A failover is the worst moment to land on a model its provider is
+    // shutting down, so in-service models are tried first on both walks.
     if (currentIdx !== -1) {
+      let phasedOut: ModelInfo | null = null;
       for (let i = currentIdx + 1; i < priority.length; i++) {
         const key = priority[i]!;
         const model = this.availableModels.get(key);
-        if (model && this.isUsable(model)) return model;
+        if (!model || !this.isUsable(model)) continue;
+        if (!excludedFromAuto(model)) return model;
+        phasedOut ??= model;
       }
+      const widened = this.widenedFallback(currentModelId, true);
+      if (widened) return widened;
+      if (phasedOut) return phasedOut;
     }
 
     // Reached either because the failed model was never in the static chain
@@ -216,8 +235,15 @@ export class ModelSelector {
     // don't report "no fallback" while another configured provider could
     // still serve the tier — fall to any other usable model, the same
     // worst-case widening selectForTier() already uses.
+    return this.widenedFallback(currentModelId, true) ?? this.widenedFallback(currentModelId, false);
+  }
+
+  /** Any other usable model; with `activeOnly`, only ones still in service. */
+  private widenedFallback(currentModelId: string, activeOnly: boolean): ModelInfo | null {
     for (const [id, model] of this.availableModels) {
-      if (id !== currentModelId && this.isUsable(model)) return model;
+      if (id === currentModelId || !this.isUsable(model)) continue;
+      if (activeOnly && excludedFromAuto(model)) continue;
+      return model;
     }
     return null;
   }
@@ -286,7 +312,7 @@ export class ModelSelector {
         }
       }
     }
-    return candidates;
+    return preferActive(candidates);
   }
 
   isProviderAvailable(provider: ProviderType): boolean {
