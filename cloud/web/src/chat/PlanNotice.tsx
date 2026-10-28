@@ -1,4 +1,47 @@
+import { motion } from 'framer-motion';
 import type { PlanApproval } from './useChatSession.js';
+
+/**
+ * The plan as a tree that grows: T1 at the top, a branch to each section's
+ * manager, and a short stem for each of that section's workers. Drawn from the
+ * plan itself, so the shape on screen is the shape of the run.
+ */
+function PlanTree({ sections }: { sections: Array<{ title?: string; t3Subtasks?: unknown[] }> }) {
+  const shown = sections.slice(0, 6);
+  if (shown.length === 0) return null;
+  const W = 100, rootY = 10, midY = 46, leafY = 78;
+  const xs = shown.map((_, i) => (shown.length === 1 ? 50 : 8 + (i * 84) / (shown.length - 1)));
+  const curve = (x1: number, y1: number, x2: number, y2: number) => `M${x1} ${y1} C${x1} ${(y1 + y2) / 2} ${x2} ${(y1 + y2) / 2} ${x2} ${y2}`;
+  return (
+    <svg viewBox={`0 0 ${W} 86`} preserveAspectRatio="none" className="h-[86px] w-full overflow-visible" aria-hidden="true">
+      {xs.map((x, i) => (
+        <motion.path
+          key={`b${i}`} d={curve(50, rootY, x, midY)} fill="none" stroke="rgb(var(--c-t2))" strokeOpacity={0.7} strokeWidth={1.4}
+          vectorEffect="non-scaling-stroke" initial={{ pathLength: 0 }} animate={{ pathLength: 1 }} transition={{ duration: 0.55, delay: 0.1 + i * 0.12, ease: 'easeOut' }}
+        />
+      ))}
+      {xs.map((x, i) => {
+        const n = Math.min(5, Math.max(1, shown[i].t3Subtasks?.length ?? 1));
+        return Array.from({ length: n }, (_, k) => {
+          const lx = x + (n === 1 ? 0 : (k / (n - 1) - 0.5) * Math.min(12, 70 / shown.length));
+          return (
+            <motion.path
+              key={`l${i}-${k}`} d={curve(x, midY, lx, leafY)} fill="none" stroke="rgb(var(--c-t3))" strokeOpacity={0.6} strokeWidth={1.2}
+              vectorEffect="non-scaling-stroke" initial={{ pathLength: 0 }} animate={{ pathLength: 1 }} transition={{ duration: 0.45, delay: 0.55 + i * 0.12 + k * 0.05, ease: 'easeOut' }}
+            />
+          );
+        });
+      })}
+      <motion.circle cx={50} cy={rootY} r={3.2} fill="rgb(var(--c-t1))" initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: 'spring', stiffness: 420, damping: 18 }} style={{ transformOrigin: '50px 10px' }} />
+      {xs.map((x, i) => (
+        <motion.circle
+          key={`m${i}`} cx={x} cy={midY} r={2.4} fill="rgb(var(--c-t2))" initial={{ scale: 0 }} animate={{ scale: 1 }}
+          transition={{ type: 'spring', stiffness: 420, damping: 18, delay: 0.45 + i * 0.12 }} style={{ transformOrigin: `${x}px ${midY}px` }}
+        />
+      ))}
+    </svg>
+  );
+}
 
 /**
  * What Cascade planned for the current run, read-only: one mono line of how
@@ -21,6 +64,7 @@ export default function PlanNotice({ approval }: { approval: PlanApproval }) {
         {cost !== undefined && <span>~${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}</span>}
         {approval.plan?.complexity && <span className="text-ink-500">{approval.plan.complexity}</span>}
       </div>
+      {sections.length > 1 && <PlanTree sections={sections} />}
       {approval.summary && <p className="m-0 text-[13px] text-ink-300">{approval.summary}</p>}
       {sections.length > 0 && (
         <ol className="m-0 flex list-none flex-col gap-[3px] p-0 text-[13px] text-ink-300">

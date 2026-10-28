@@ -279,7 +279,7 @@ export default function Composer({
   return (
     <div
       className={clsx(
-        'flex flex-col rounded-[20px] bg-card p-2 transition-shadow',
+        'cz-composer flex flex-col rounded-[20px] bg-card p-2 transition-shadow',
         dragOver ? 'ring-2 ring-accent-500' : '',
       )}
       style={{ boxShadow: 'var(--glass-shadow), inset 0 0 0 1px rgb(var(--c-elev) / 0.17)' }}
@@ -379,13 +379,14 @@ export default function Composer({
           <ChevronDown size={14} />
         </button>
         {busy ? (
-          <button type="button" aria-label="Stop" title="Stop this run" onClick={onStop} className="inline-flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[10px] bg-ink-50 text-paper">
+          <button type="button" aria-label="Stop" title="Stop this run" onClick={onStop} data-composer-action="" className="inline-flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[10px] bg-ink-50 text-paper">
             <Square size={14} fill="currentColor" />
           </button>
         ) : (
           <button
             type="button"
             aria-label="Send"
+            data-composer-action=""
             onClick={submit}
             disabled={!canSend}
             className={clsx(
