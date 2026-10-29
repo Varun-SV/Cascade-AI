@@ -16,6 +16,7 @@ import { BrowserLiveView } from './BrowserLiveView.js';
 import type { BrowserInputEvent } from './BrowserLiveView.js';
 import { ToolApprovalPrompt } from './ToolApprovalPrompt.js';
 import { ClarificationPrompt } from './ClarificationPrompt.js';
+import { takePendingPrompt } from '../lib/pendingPrompt.js';
 import type { ToolApproval } from './useChatSession.js';
 
 interface Props {
@@ -119,6 +120,12 @@ export default function ChatPanel({
   const wasBusy = useRef(busy);
   const [activityOpen, setActivityOpen] = useState(false);
   const [draftRequest, setDraftRequest] = useState<{ text: string; seq: number } | null>(null);
+  // A prompt poured into the landing page before signing in lands in the
+  // composer, ready to edit or send. Taken once, and never sent by itself.
+  useEffect(() => {
+    const pending = takePendingPrompt();
+    if (pending) setDraftRequest({ text: pending, seq: Date.now() });
+  }, []);
   // The browser gets a pane of its own where there is room for one beside the
   // thread; on a narrower screen it stays above the composer, so its Stop
   // control is never scrolled away with the messages.

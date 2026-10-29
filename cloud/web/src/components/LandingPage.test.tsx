@@ -14,6 +14,8 @@ vi.mock('../lib/downloads.js', async () => {
 });
 
 afterEach(cleanup);
+// jsdom has no Element.scrollTo; pouring a prompt scrolls the descent.
+if (!Element.prototype.scrollTo) Element.prototype.scrollTo = () => {};
 
 const config = { githubEnabled: false, googleEnabled: false, devLoginEnabled: true } as never;
 
@@ -63,5 +65,29 @@ describe('LandingPage says the descent is a simulation', () => {
     expect(screen.queryByText('That was Cascade.')).toBeNull();
     expect(screen.getByText(/^A simulated walkthrough: one prompt becomes a plan/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Sign in to run this for real' })).toBeInTheDocument();
+  });
+});
+
+describe('LandingPage keeps the visitor\'s prompt for after sign-in', () => {
+  const pending = () => JSON.parse(sessionStorage.getItem('cascade-cloud-pending-prompt') ?? 'null')?.prompt ?? null;
+  afterEach(() => sessionStorage.clear());
+
+  it('saves a poured prompt', () => {
+    render(<LandingPage config={config} onDevLogin={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Plan a two-week trip with a budget sheet' }));
+    expect(pending()).toBe('Plan a two-week trip with a budget sheet');
+  });
+
+  it('saves a typed prompt when sign-in opens, even if it was never poured', () => {
+    render(<LandingPage config={config} onDevLogin={() => {}} />);
+    fireEvent.change(screen.getByLabelText('Your prompt'), { target: { value: 'Audit our cloud bill' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in', exact: true } as never));
+    expect(pending()).toBe('Audit our cloud bill');
+  });
+
+  it('saves nothing for a visitor who never wrote or chose a prompt', () => {
+    render(<LandingPage config={config} onDevLogin={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in', exact: true } as never));
+    expect(pending()).toBeNull();
   });
 });

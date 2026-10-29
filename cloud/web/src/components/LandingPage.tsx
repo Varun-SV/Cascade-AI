@@ -3,6 +3,7 @@ import { AnimatePresence, useReducedMotion } from 'framer-motion';
 import { Github, Check, Sparkles } from 'lucide-react';
 import type { CloudConfig } from '../lib/api.js';
 import { devLogin } from '../lib/api.js';
+import { savePendingPrompt } from '../lib/pendingPrompt.js';
 import CascadeMark from './CascadeMark.js';
 import DownloadSection from './DownloadSection.js';
 import Modal from './Modal.js';
@@ -199,9 +200,17 @@ export default function LandingPage({ config, onDevLogin, reduceMotion = false }
     const typed = text.trim() || EXAMPLES[0].prompt;
     const match = EXAMPLES.find((e) => e.prompt === typed);
     chosenRef.current = { prompt: typed, plan: match?.plan ?? GENERIC_PLAN };
+    // Kept for after sign-in, so "run this for real" means THIS prompt.
+    savePendingPrompt(typed);
     sceneRef.current?.setPrompt(chosenRef.current.prompt, chosenRef.current.plan);
     setEcho(typed.length > 46 ? `${typed.slice(0, 45)}…` : typed);
     jump(1);
+  }
+
+  // Whatever is in the prompt box when sign-in opens goes with it, poured or not.
+  function openSignIn() {
+    if (prompt.trim()) savePendingPrompt(prompt);
+    setSigningIn(true);
   }
 
   async function handleDevLogin() {
@@ -246,8 +255,8 @@ export default function LandingPage({ config, onDevLogin, reduceMotion = false }
           <a href={REPO} target="_blank" rel="noopener noreferrer">GitHub</a>
         </nav>
         <span className="flex-1" />
-        <button type="button" onClick={() => setSigningIn(true)} className="dv-btn dv-btn-g">Sign in</button>
-        <button type="button" onClick={() => setSigningIn(true)} className="dv-btn dv-btn-p dv-try">Try Cascade</button>
+        <button type="button" onClick={openSignIn} className="dv-btn dv-btn-g">Sign in</button>
+        <button type="button" onClick={openSignIn} className="dv-btn dv-btn-p dv-try">Try Cascade</button>
       </header>
 
       <section ref={heroRef} className="dv-hero" aria-labelledby="dv-hero-h">
@@ -292,7 +301,7 @@ export default function LandingPage({ config, onDevLogin, reduceMotion = false }
         <h2 id="dv-rev-h">That's how Cascade runs it.</h2>
         <p>A simulated walkthrough: one prompt becomes a plan, a few managers and a floor of workers, and comes back as one result. Sign in to run your own prompt for real, free to start with your own API keys.</p>
         <div className="dv-ctas">
-          <button type="button" className="dv-btn dv-btn-p" onClick={() => setSigningIn(true)}>Sign in to run this for real</button>
+          <button type="button" className="dv-btn dv-btn-p" onClick={openSignIn}>Sign in to run this for real</button>
           <a className="dv-btn dv-btn-g" href="#download">Download the desktop app</a>
           <button type="button" className="dv-npm" onClick={copyNpm} title="Copy">
             {NPM} {copied ? <Check size={14} className="text-success-500" /> : <span style={{ color: TIER_HEX[1] }}>Copy</span>}
