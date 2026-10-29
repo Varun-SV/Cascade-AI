@@ -1,5 +1,5 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import LandingPage from './LandingPage.js';
 
@@ -29,5 +29,23 @@ describe('LandingPage', () => {
   it('uses the still layout when Settings → Reduce motion is on', () => {
     const { container } = render(<LandingPage config={config} onDevLogin={() => {}} reduceMotion />);
     expect(container.querySelector('.descent')).toHaveClass('still');
+  });
+});
+
+describe('LandingPage navigation in the still layout', () => {
+  it('"How it works" goes to the text story, not the empty descent', () => {
+    const { container } = render(<LandingPage config={config} onDevLogin={() => {}} reduceMotion />);
+    const root = container.querySelector('.descent') as HTMLDivElement;
+    const scrolls: ScrollToOptions[] = [];
+    root.scrollTo = ((opts: ScrollToOptions) => { scrolls.push(opts); }) as never;
+    const story = screen.getByRole('heading', { name: 'How one prompt moves through Cascade.' });
+    // Lay the story out 900px into the scroll container.
+    root.getBoundingClientRect = () => ({ top: 0 }) as DOMRect;
+    story.getBoundingClientRect = () => ({ top: 900 }) as DOMRect;
+
+    fireEvent.click(screen.getByRole('link', { name: 'How it works' }));
+
+    expect(scrolls).toEqual([{ top: 876, behavior: 'auto' }]);
+    expect(document.activeElement).toBe(story);
   });
 });

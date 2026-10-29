@@ -1,4 +1,4 @@
-import { motion } from 'framer-motion';
+import { motion, useReducedMotionConfig } from 'framer-motion';
 import type { PlanApproval } from './useChatSession.js';
 
 /**
@@ -7,6 +7,11 @@ import type { PlanApproval } from './useChatSession.js';
  * plan itself, so the shape on screen is the shape of the run.
  */
 function PlanTree({ sections }: { sections: Array<{ title?: string; t3Subtasks?: unknown[] }> }) {
+  // MotionConfig's reducedMotion stops transform and layout animations, not
+  // pathLength, so the tree would keep drawing itself for someone who asked
+  // for less motion (OS setting, or Settings → Reduce motion, which App passes
+  // as reducedMotion="always"). Reduced: render it already grown.
+  const still = useReducedMotionConfig() ?? false;
   const shown = sections.slice(0, 6);
   if (shown.length === 0) return null;
   const W = 100, rootY = 10, midY = 46, leafY = 78;
@@ -17,7 +22,7 @@ function PlanTree({ sections }: { sections: Array<{ title?: string; t3Subtasks?:
       {xs.map((x, i) => (
         <motion.path
           key={`b${i}`} d={curve(50, rootY, x, midY)} fill="none" stroke="rgb(var(--c-t2))" strokeOpacity={0.7} strokeWidth={1.4}
-          vectorEffect="non-scaling-stroke" initial={{ pathLength: 0 }} animate={{ pathLength: 1 }} transition={{ duration: 0.55, delay: 0.1 + i * 0.12, ease: 'easeOut' }}
+          vectorEffect="non-scaling-stroke" initial={still ? false : { pathLength: 0 }} animate={{ pathLength: 1 }} transition={{ duration: 0.55, delay: 0.1 + i * 0.12, ease: 'easeOut' }}
         />
       ))}
       {xs.map((x, i) => {
@@ -27,15 +32,15 @@ function PlanTree({ sections }: { sections: Array<{ title?: string; t3Subtasks?:
           return (
             <motion.path
               key={`l${i}-${k}`} d={curve(x, midY, lx, leafY)} fill="none" stroke="rgb(var(--c-t3))" strokeOpacity={0.6} strokeWidth={1.2}
-              vectorEffect="non-scaling-stroke" initial={{ pathLength: 0 }} animate={{ pathLength: 1 }} transition={{ duration: 0.45, delay: 0.55 + i * 0.12 + k * 0.05, ease: 'easeOut' }}
+              vectorEffect="non-scaling-stroke" initial={still ? false : { pathLength: 0 }} animate={{ pathLength: 1 }} transition={{ duration: 0.45, delay: 0.55 + i * 0.12 + k * 0.05, ease: 'easeOut' }}
             />
           );
         });
       })}
-      <motion.circle cx={50} cy={rootY} r={3.2} fill="rgb(var(--c-t1))" initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: 'spring', stiffness: 420, damping: 18 }} style={{ transformOrigin: '50px 10px' }} />
+      <motion.circle cx={50} cy={rootY} r={3.2} fill="rgb(var(--c-t1))" initial={still ? false : { scale: 0 }} animate={{ scale: 1 }} transition={{ type: 'spring', stiffness: 420, damping: 18 }} style={{ transformOrigin: '50px 10px' }} />
       {xs.map((x, i) => (
         <motion.circle
-          key={`m${i}`} cx={x} cy={midY} r={2.4} fill="rgb(var(--c-t2))" initial={{ scale: 0 }} animate={{ scale: 1 }}
+          key={`m${i}`} cx={x} cy={midY} r={2.4} fill="rgb(var(--c-t2))" initial={still ? false : { scale: 0 }} animate={{ scale: 1 }}
           transition={{ type: 'spring', stiffness: 420, damping: 18, delay: 0.45 + i * 0.12 }} style={{ transformOrigin: `${x}px ${midY}px` }}
         />
       ))}

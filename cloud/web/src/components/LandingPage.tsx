@@ -68,6 +68,7 @@ export default function LandingPage({ config, onDevLogin, reduceMotion = false }
   const afterRef = useRef<HTMLDivElement>(null);
   const heroRef = useRef<HTMLElement>(null);
   const revealRef = useRef<HTMLElement>(null);
+  const storyRef = useRef<HTMLHeadingElement>(null);
   const railRef = useRef<HTMLElement>(null);
   const chapterRefs = useRef<Array<HTMLDivElement | null>>([]);
   const sceneRef = useRef<DescentScene | null>(null);
@@ -171,6 +172,22 @@ export default function LandingPage({ config, onDevLogin, reduceMotion = false }
     if (still) reveal.classList.remove('on');
   }, [still]);
 
+  // "How it works": the descent's first chapter when it is animated; in the
+  // still layout the track has no height and the chapters are hidden, so the
+  // story lives as text below — go there, and put focus on it so a keyboard or
+  // screen-reader user lands where they asked to go.
+  function howItWorks() {
+    const story = storyRef.current;
+    if (!still || !story) { jump(1); return; }
+    const root = rootRef.current;
+    if (root) {
+      // Relative to the scroll container, not the story's positioned parent.
+      const top = root.scrollTop + story.getBoundingClientRect().top - root.getBoundingClientRect().top - 24;
+      root.scrollTo({ top: Math.max(0, top), behavior: 'auto' });
+    }
+    story.focus({ preventScroll: true });
+  }
+
   function jump(i: number) {
     const root = rootRef.current, track = trackRef.current;
     if (!root || !track) return;
@@ -223,7 +240,7 @@ export default function LandingPage({ config, onDevLogin, reduceMotion = false }
           <b className="font-serif text-[20px] font-medium tracking-[-0.01em]">Cascade</b>
         </span>
         <nav aria-label="Primary">
-          <a href="#how" onClick={(e) => { e.preventDefault(); jump(1); }}>How it works</a>
+          <a href="#how" onClick={(e) => { e.preventDefault(); howItWorks(); }}>How it works</a>
           <a href="/docs">Docs</a>
           <a href="#download">Download</a>
           <a href={REPO} target="_blank" rel="noopener noreferrer">GitHub</a>
@@ -287,7 +304,7 @@ export default function LandingPage({ config, onDevLogin, reduceMotion = false }
         <div className="mx-auto max-w-[1080px] px-6 pb-2">
           {still && (
             <section className="pt-[72px]">
-              <h2 className={h2}>How one prompt moves through Cascade.</h2>
+              <h2 ref={storyRef} id="how-story" tabIndex={-1} className={`${h2} outline-none`}>How one prompt moves through Cascade.</h2>
               <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(210px,1fr))]">
                 {story.map((c) => (
                   <div key={c.tier} className="flex flex-col gap-1.5 rounded-2xl bg-card p-[18px]">
