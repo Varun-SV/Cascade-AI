@@ -136,7 +136,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   account is signed in by then. Each request also names that account, and
   the app's main process refuses it if another account has signed in
   meanwhile, even part-way through a send or when retrying after renewing
-  the sign-in. Runs in the same chat are also sent in the
+  the sign-in. If the sign-in changes while it is being renewed, the request
+  is not sent or retried with the renewed tokens. Runs in the same chat are also sent in the
   order they ended: a run whose late calls were still settling, or whose
   upload failed and was sent again later, used to let the next run's turn
   reach the cloud chat first.

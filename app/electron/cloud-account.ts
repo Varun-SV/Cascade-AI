@@ -24,6 +24,14 @@ export function accountMismatch(expected: unknown, signedInUserId: string | unde
 /** What a refused request answers, so the renderer can tell it from a failure. */
 export const ACCOUNT_CHANGED = { ok: false as const, accountChanged: true as const, error: 'Signed in to another account.' };
 
+/**
+ * True for the error `CloudClient` throws when the sign-in changed while a
+ * refresh was out (matched by its code: the core bundle is loaded separately).
+ */
+export function isAccountChangedError(err: unknown): boolean {
+  return !!err && typeof err === 'object' && (err as { code?: unknown }).code === 'CLOUD_ACCOUNT_CHANGED';
+}
+
 /** A session store, as `CloudClient` reads and writes it. */
 export interface SessionStoreLike<S extends { user: { id: string } }> {
   load(): S | null;

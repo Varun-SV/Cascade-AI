@@ -127,7 +127,7 @@ export { nodeHttpFetch, preferIpv4Host } from './utils/net.js';
 export { AZURE_BASE_MODELS, azureModelForDeployment, inferAzureBaseModel } from './providers/azure.js';
 
 // Native cloud login (CLI + desktop reuse the same client).
-export { CloudClient, DEFAULT_CLOUD_URL } from './cloud/client.js';
+export { CloudClient, CloudAccountChangedError, DEFAULT_CLOUD_URL } from './cloud/client.js';
 export type {
   CloudConversation, CloudMessage, CloudTurnInput, DeviceStart, NativeProvider, CloudSessionStore,
 } from './cloud/client.js';

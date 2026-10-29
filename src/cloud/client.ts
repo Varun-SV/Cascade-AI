@@ -99,6 +99,16 @@ class FileCloudSessionStore implements CloudSessionStore {
   clear(): void { clearCloudSession(this.dir); }
 }
 
+/**
+ * Thrown when the signed-in session changed while a refresh was out, so the
+ * request it was refreshing for is neither sent nor retried. `code` lets a
+ * caller that loads this module separately (the desktop) recognise it.
+ */
+export class CloudAccountChangedError extends Error {
+  readonly code = 'CLOUD_ACCOUNT_CHANGED';
+  constructor() { super('Signed in to another account.'); this.name = 'CloudAccountChangedError'; }
+}
+
 export class CloudClient {
   private readonly store: CloudSessionStore;
 
@@ -249,6 +259,11 @@ export class CloudClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refresh_token: s.refreshToken }),
     });
+    // The sign-in may have changed while the refresh was out (another account,
+    // a sign-out, or the same account signed in again). Its tokens are then
+    // dropped, the session held now is left alone, and nothing is sent or
+    // retried: the caller's request was meant for the session it started with.
+    if (!this.stillHolds(s)) throw new CloudAccountChangedError();
     if (!res.ok) {
       this.store.clear(); // refresh rejected → sign-in is dead
       throw new Error('Your session expired. Run `cascade login` again.');
@@ -261,7 +276,16 @@ export class CloudClient {
       refreshToken: tokens.refresh_token, // rotated
     };
     this.store.save(next);
+    // A store that refuses the save (one pinned to another account) must not
+    // be answered with tokens it never kept.
+    if (!this.stillHolds(next)) throw new CloudAccountChangedError();
     return next;
+  }
+
+  /** True while the store still holds exactly `s` (same user, same refresh token). */
+  private stillHolds(s: CloudSession): boolean {
+    const now = this.store.load();
+    return !!now && now.user?.id === s.user?.id && now.refreshToken === s.refreshToken && now.serverUrl === s.serverUrl;
   }
 
   private async accessToken(): Promise<string> {
