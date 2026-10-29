@@ -226,7 +226,7 @@ export default function App() {
   }
 
   if (!user) {
-    return <LandingPage config={config} onDevLogin={refreshMe} />;
+    return <LandingPage config={config} onDevLogin={refreshMe} reduceMotion={reduceMotion} />;
   }
 
   const activeTitle = titleOf(chat.conversationId, conversations, opened);

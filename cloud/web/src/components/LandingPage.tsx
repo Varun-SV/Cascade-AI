@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { AnimatePresence, useReducedMotion } from 'framer-motion';
 import { Github, Check, Sparkles } from 'lucide-react';
 import type { CloudConfig } from '../lib/api.js';
@@ -10,6 +10,13 @@ import type { DescentPlan, DescentScene } from './landing/descentScene.js';
 import './landing/descent.css';
 
 interface Props {
+  /**
+   * Settings → Reduce motion. App renders the landing outside its
+   * MotionConfig, so the saved preference has to be handed in; the OS
+   * preference alone would leave a visitor who turned motion off in Cascade
+   * watching a camera flight the moment they sign out.
+   */
+  reduceMotion?: boolean;
   config: CloudConfig;
   onDevLogin: () => void;
 }
@@ -45,7 +52,7 @@ const seg = (p: number, a: number, b: number) => Math.max(0, Math.min(1, (p - a)
 const ARC_D = ['M3.5 7.5 Q12 14.5 20.5 7.5', 'M6.25 12.5 Q12 17.75 17.75 12.5', 'M9 17.5 Q12 20.5 15 17.5'];
 const TIER_HEX = ['#6FA3FF', '#4CC3EC', '#3EDFC9'];
 
-export default function LandingPage({ config, onDevLogin }: Props) {
+export default function LandingPage({ config, onDevLogin, reduceMotion = false }: Props) {
   const [devName, setDevName] = useState('');
   const [busy, setBusy] = useState(false);
   const [signingIn, setSigningIn] = useState(false);
@@ -53,7 +60,7 @@ export default function LandingPage({ config, onDevLogin }: Props) {
   const [prompt, setPromptText] = useState('');
   const [echo, setEcho] = useState(EXAMPLES[0].prompt);
   const canSignIn = config.githubEnabled || config.googleEnabled;
-  const reduced = useReducedMotion() ?? false;
+  const reduced = (useReducedMotion() ?? false) || reduceMotion;
 
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -64,7 +71,15 @@ export default function LandingPage({ config, onDevLogin }: Props) {
   const railRef = useRef<HTMLElement>(null);
   const chapterRefs = useRef<Array<HTMLDivElement | null>>([]);
   const sceneRef = useRef<DescentScene | null>(null);
-  const [still, setStill] = useState(reduced);
+  // The prompt the scene should show. Kept outside the scene because the scene
+  // loads lazily: a visitor on a slow connection can pour a prompt in before it
+  // exists, and initialising it with the first example would then contradict
+  // the prompt they chose.
+  const chosenRef = useRef<{ prompt: string; plan: DescentPlan }>({ prompt: EXAMPLES[0].prompt, plan: EXAMPLES[0].plan });
+  // Still when motion is reduced, or when WebGL is unavailable. Derived, not
+  // seeded once, so turning reduce-motion on or off takes effect immediately.
+  const [noWebgl, setNoWebgl] = useState(false);
+  const still = reduced || noWebgl;
 
   // The page's own chapter text follows the scene's smoothed progress, written
   // straight to the DOM each frame so React never re-renders at 60 fps.
@@ -77,7 +92,14 @@ export default function LandingPage({ config, onDevLogin }: Props) {
     }
     chapterRefs.current.forEach((c, i) => c?.classList.toggle('on', p >= CHAPTERS[i][0] && p <= CHAPTERS[i][1]));
     const past = (afterRef.current?.getBoundingClientRect().top ?? Infinity) < window.innerHeight * 0.9;
-    revealRef.current?.classList.toggle('on', p > 0.94 && !past);
+    const reveal = revealRef.current;
+    if (reveal && !rootRef.current?.classList.contains('still')) {
+      const on = p > 0.94 && !past;
+      reveal.classList.toggle('on', on);
+      // Invisible is not enough: opacity 0 leaves its buttons in the tab order,
+      // so a keyboard user could focus and press controls they cannot see.
+      reveal.inert = !on;
+    }
     const rail = railRef.current;
     if (rail) {
       rail.style.opacity = past ? '0' : '1';
@@ -104,9 +126,9 @@ export default function LandingPage({ config, onDevLogin }: Props) {
     void import('./landing/descentScene.js').then(({ createDescentScene }) => {
       if (disposed) return;
       const scene = createDescentScene(canvas, { still: reduced, onFrame: paint });
-      if (!scene) { setStill(true); return; }
+      if (!scene) { setNoWebgl(true); return; }
       sceneRef.current = scene;
-      scene.setPrompt(EXAMPLES[0].prompt, EXAMPLES[0].plan);
+      scene.setPrompt(chosenRef.current.prompt, chosenRef.current.plan);
       if (reduced) { paint(1); return; }
       scene.setTarget(progress());
     });
@@ -122,6 +144,15 @@ export default function LandingPage({ config, onDevLogin }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reduced]);
 
+  // The reveal starts out of the tab order until the descent reaches it; in the
+  // still layout it is ordinary page content, always reachable.
+  useLayoutEffect(() => {
+    const reveal = revealRef.current;
+    if (!reveal) return;
+    reveal.inert = !still && !reveal.classList.contains('on');
+    if (still) reveal.classList.remove('on');
+  }, [still]);
+
   function jump(i: number) {
     const root = rootRef.current, track = trackRef.current;
     if (!root || !track) return;
@@ -132,7 +163,8 @@ export default function LandingPage({ config, onDevLogin }: Props) {
   function pour(text: string) {
     const typed = text.trim() || EXAMPLES[0].prompt;
     const match = EXAMPLES.find((e) => e.prompt === typed);
-    sceneRef.current?.setPrompt(typed, match?.plan ?? GENERIC_PLAN);
+    chosenRef.current = { prompt: typed, plan: match?.plan ?? GENERIC_PLAN };
+    sceneRef.current?.setPrompt(chosenRef.current.prompt, chosenRef.current.plan);
     setEcho(typed.length > 46 ? `${typed.slice(0, 45)}…` : typed);
     jump(1);
   }
