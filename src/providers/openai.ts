@@ -33,23 +33,28 @@ export function isReasoningModel(id: string): boolean {
 
 /**
  * Models whose function calling works ONLY through the Responses API.
- * OpenAI's model pages for GPT-6.1 Sol and Terra: "Tool calling requires the
- * Responses API." Sent through Chat Completions with `tools`, they cannot run
- * a tool loop — which is everything T1 and T2 do.
+ * OpenAI's GPT-6 guide: tool calling requires Responses for GPT-6 Astra,
+ * GPT-6.1 Sol and GPT-6.1 Terra. Sent through Chat Completions with `tools`,
+ * they cannot run a tool loop — which is everything T1 and T2 do.
  */
 export function requiresResponsesForTools(id: string): boolean {
-  return /gpt-?6\.1-(?:sol|terra)/i.test(id || '');
+  return /gpt-?6(?:\.1-(?:sol|terra)|-astra)/i.test(id || '');
 }
 
 /**
  * Models that call functions through Chat Completions only at
- * `reasoning_effort: 'none'`. GPT-6 Luna's page: "Chat Completions supports
- * function calling only with `reasoning_effort` set to `none`." Its default is
- * `medium`, so a tool request that does not say so gets no working tool calls.
+ * `reasoning_effort: 'none'`: GPT-6 Luna and GPT-6 Sol (OpenAI's GPT-6 guide;
+ * Luna's page: "Chat Completions supports function calling only with
+ * `reasoning_effort` set to `none`"). Their default is `medium`, so a tool
+ * request that does not say so gets no working tool calls. GPT-6.1 Sol is a
+ * different model and goes through Responses instead.
  */
 export function chatToolsNeedNoReasoning(id: string): boolean {
-  return /gpt-?6-luna/i.test(id || '');
+  return /gpt-?6-(?:luna|sol)(?![\w.])/i.test(id || '');
 }
+
+/** How many tool calls' reasoning items a provider keeps for replay. */
+export const REASONING_REPLAY_LIMIT = 1000;
 
 /** Tool definitions in the Responses API's flat function shape. */
 export function toResponsesTools(tools: readonly ToolDefinition[]): OpenAI.Responses.FunctionTool[] {
@@ -119,6 +124,18 @@ export function toOpenAIToolCalls(
 
 export class OpenAIProvider extends BaseProvider {
   protected client: OpenAI;
+  /**
+   * Reasoning items a Responses call returned alongside its function calls,
+   * keyed by call_id. OpenAI: "any reasoning items returned in model responses
+   * with tool calls must also be passed back with tool call outputs." Calls
+   * are stateless (`store: false`), so the encrypted items are the only copy;
+   * they are replayed before the matching function_call on the next turn of
+   * the same loop. The router keeps one provider per model for its lifetime,
+   * which is what lets a planner's second turn find its first turn's items.
+   * Bounded, oldest out first; a missing entry just means no replay, which is
+   * how every call behaved before.
+   */
+  protected reasoningByCallId = new Map<string, OpenAI.Responses.ResponseReasoningItem[]>();
   /** Once we learn (from the model id or an API error) that this deployment
    *  needs max_completion_tokens, remember it so we don't re-fail every call. */
   protected useMaxCompletionTokens: boolean;
@@ -282,6 +299,9 @@ export class OpenAIProvider extends BaseProvider {
       tools: toResponsesTools(options.tools ?? []),
       max_output_tokens: options.maxTokens ?? this.model.maxOutputTokens,
       store: false,
+      // Without storage, the encrypted reasoning is the only way the next
+      // turn can carry this turn's reasoning forward.
+      include: ['reasoning.encrypted_content' as const],
       stream: true as const,
     };
     const stream = await this.client.responses.create(params, { signal: options.signal });
@@ -293,6 +313,7 @@ export class OpenAIProvider extends BaseProvider {
     let finishReason: GenerateResult['finishReason'] = 'stop';
     // Keyed by output item id, in the order the items appear.
     const calls = new Map<string, { id: string; name: string; args: string }>();
+    const reasoning: OpenAI.Responses.ResponseReasoningItem[] = [];
 
     const closeThinking = () => {
       if (!isThinking) return;
@@ -332,6 +353,10 @@ export class OpenAIProvider extends BaseProvider {
           if (call) call.args += event.delta;
           break;
         }
+        case 'response.output_item.done': {
+          if (event.item.type === 'reasoning') reasoning.push(event.item);
+          break;
+        }
         case 'response.function_call_arguments.done': {
           // The complete string, authoritative over the accumulated deltas.
           const call = calls.get(event.item_id);
@@ -356,6 +381,11 @@ export class OpenAIProvider extends BaseProvider {
           const err = event.response.error;
           throw new Error(err ? `${err.code}: ${err.message}` : 'OpenAI Responses API request failed');
         }
+        // A stream-level error (not a failed response). Returning normally here
+        // would hand the tier an empty "success" instead of letting the router
+        // retry or fail over.
+        case 'error':
+          throw new Error(`${event.code ?? 'error'}: ${event.message}`);
         default:
           break;
       }
@@ -374,6 +404,7 @@ export class OpenAIProvider extends BaseProvider {
       return { id: tc.id, name: tc.name, input };
     });
     if (toolCalls.length && finishReason === 'stop') finishReason = 'tool_use';
+    if (reasoning.length) for (const tc of toolCalls) this.rememberReasoning(tc.id, reasoning);
 
     onChunk({ text: '', finishReason });
     return {
@@ -382,6 +413,16 @@ export class OpenAIProvider extends BaseProvider {
       toolCalls: toolCalls.length ? toolCalls : undefined,
       finishReason,
     };
+  }
+
+  private rememberReasoning(callId: string, items: OpenAI.Responses.ResponseReasoningItem[]): void {
+    this.reasoningByCallId.delete(callId);
+    this.reasoningByCallId.set(callId, items);
+    while (this.reasoningByCallId.size > REASONING_REPLAY_LIMIT) {
+      const oldest = this.reasoningByCallId.keys().next().value;
+      if (oldest === undefined) break;
+      this.reasoningByCallId.delete(oldest);
+    }
   }
 
   /**
@@ -402,6 +443,17 @@ export class OpenAIProvider extends BaseProvider {
         continue;
       }
       if (m.role === 'assistant') {
+        // The model's own order: reasoning, then its message, then the calls.
+        // Several calls from one response share the same reasoning items, so
+        // each is sent once.
+        const sent = new Set<string>();
+        for (const tc of m.toolCalls ?? []) {
+          for (const item of this.reasoningByCallId.get(tc.id) ?? []) {
+            if (sent.has(item.id)) continue;
+            sent.add(item.id);
+            out.push(item);
+          }
+        }
         const text = typeof m.content === 'string'
           ? m.content
           : m.content.map((b) => (b.type === 'text' ? b.text : '')).join('');
