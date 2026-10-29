@@ -26,7 +26,9 @@ function PlanTree({ sections }: { sections: Array<{ title?: string; t3Subtasks?:
         />
       ))}
       {xs.map((x, i) => {
-        const n = Math.min(5, Math.max(1, shown[i].t3Subtasks?.length ?? 1));
+        // The shape of the run: a section with no worker subtasks gets no stems.
+        const n = Math.min(5, shown[i].t3Subtasks?.length ?? 0);
+        if (n === 0) return null;
         return Array.from({ length: n }, (_, k) => {
           const lx = x + (n === 1 ? 0 : (k / (n - 1) - 0.5) * Math.min(12, 70 / shown.length));
           return (

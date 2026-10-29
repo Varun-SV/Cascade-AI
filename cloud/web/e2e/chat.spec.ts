@@ -54,7 +54,7 @@ test('dev login -> add a key -> pick a skill -> attach an image -> send -> reply
 
     // Sign-in lives in a dialog opened from the landing page.
 
-    await page.getByRole('button', { name: 'Sign in' }).click();
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
 
     await page.getByPlaceholder('Your name').fill('E2E Tester');
     await page.getByText('Dev login').click();

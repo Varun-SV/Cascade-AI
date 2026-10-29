@@ -227,7 +227,7 @@ export default function LandingPage({ config, onDevLogin, reduceMotion = false }
     { tier: 'T2 · Manages', color: TIER_HEX[1], title: 'Managers take a section each.', body: 'They brief their workers, check what comes back, and push back on anything unclear instead of guessing.' },
     { tier: 'T3 · Works', color: TIER_HEX[2], title: 'Workers fan out, in parallel.', body: 'They search, browse, write code and build documents. Small, fast models do this work, local ones included.' },
     { tier: 'Comms', color: '#F5F6F9', title: 'They talk while they work.', body: 'Messages, file locks and hand-offs between workers, on your screen. Risky actions climb the tiers to you for approval.' },
-    { tier: 'Result', color: TIER_HEX[2], title: 'Everything rejoins into one answer.', body: 'With a receipt for every step: which model did what, and why it was chosen.' },
+    { tier: 'Result', color: TIER_HEX[2], title: 'Everything rejoins into one answer.', body: 'In a real run it comes with a receipt for every step: which model did what, and why it was chosen.' },
   ];
 
   return (
@@ -252,10 +252,10 @@ export default function LandingPage({ config, onDevLogin, reduceMotion = false }
 
       <section ref={heroRef} className="dv-hero" aria-labelledby="dv-hero-h">
         <h1 id="dv-hero-h">One prompt.<br />A whole organization.</h1>
-        <p>Hand Cascade anything you would give a team. Then scroll, and follow it down.</p>
+        <p>Hand Cascade anything you would give a team. Then scroll, and follow how it would run.</p>
         <form className="dv-ask" onSubmit={(e) => { e.preventDefault(); pour(prompt); }}>
           <label htmlFor="dv-ask-in" className="sr-only">Your prompt</label>
-          <input id="dv-ask-in" autoComplete="off" maxLength={90} placeholder="What should your organization do?" value={prompt} onChange={(e) => setPromptText(e.target.value)} />
+          <input id="dv-ask-in" aria-describedby="dv-sim-note" autoComplete="off" maxLength={90} placeholder="What should your organization do?" value={prompt} onChange={(e) => setPromptText(e.target.value)} />
           <button type="submit" className="dv-btn dv-btn-p">Pour it in</button>
         </form>
         <div className="dv-chips" role="group" aria-label="Example prompts">
@@ -263,6 +263,9 @@ export default function LandingPage({ config, onDevLogin, reduceMotion = false }
             <button key={ex.prompt} type="button" className="dv-chip" onClick={() => { setPromptText(ex.prompt); pour(ex.prompt); }}>{ex.prompt}</button>
           ))}
         </div>
+        {/* The descent is scripted: the plan comes from the examples, not from
+            running the prompt, so it says so before anything is poured in. */}
+        <p id="dv-sim-note" className="dv-note">A simulated walkthrough. Your prompt isn't sent anywhere; sign in to run it for real.</p>
         <span className="dv-hint">Scroll to descend</span>
       </section>
 
@@ -271,7 +274,7 @@ export default function LandingPage({ config, onDevLogin, reduceMotion = false }
           <p className="ey"><i style={{ background: c.color }} />{c.tier}</p>
           <h2>{c.title}</h2>
           <p>{c.body}</p>
-          {i === 0 && <p className="echo">“{echo}”</p>}
+          {i === 0 && <p className="echo">Walkthrough for “{echo}”</p>}
         </div>
       ))}
 
@@ -286,10 +289,10 @@ export default function LandingPage({ config, onDevLogin, reduceMotion = false }
       </nav>
 
       <section ref={revealRef} className="dv-reveal" aria-labelledby="dv-rev-h">
-        <h2 id="dv-rev-h">That was Cascade.</h2>
-        <p>One prompt became a plan, a few managers and a floor of workers, and came back as one result. Free to start, with your own API keys.</p>
+        <h2 id="dv-rev-h">That's how Cascade runs it.</h2>
+        <p>A simulated walkthrough: one prompt becomes a plan, a few managers and a floor of workers, and comes back as one result. Sign in to run your own prompt for real, free to start with your own API keys.</p>
         <div className="dv-ctas">
-          <button type="button" className="dv-btn dv-btn-p" onClick={() => setSigningIn(true)}>Try Cascade</button>
+          <button type="button" className="dv-btn dv-btn-p" onClick={() => setSigningIn(true)}>Sign in to run this for real</button>
           <a className="dv-btn dv-btn-g" href="#download">Download the desktop app</a>
           <button type="button" className="dv-npm" onClick={copyNpm} title="Copy">
             {NPM} {copied ? <Check size={14} className="text-success-500" /> : <span style={{ color: TIER_HEX[1] }}>Copy</span>}

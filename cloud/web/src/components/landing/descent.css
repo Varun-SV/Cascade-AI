@@ -52,6 +52,7 @@
 .dv-chip { min-height: 34px; padding: 7px 13px; line-height: 1.35; text-align: center; border-radius: 17px; border: 0; background: rgba(233, 235, 240, 0.06); box-shadow: inset 0 0 0 1px var(--dv-line);
   color: var(--dv-ink-2); font-family: inherit; font-size: 13px; font-weight: 400; cursor: pointer; }
 .dv-chip:hover { color: var(--dv-ink); }
+.dv-hero .dv-note { margin: 0; font-size: 13px; max-width: none; color: var(--dv-ink-3); text-shadow: 0 2px 16px var(--dv-void); }
 .dv-hint { font-family: 'Geist Mono Variable', ui-monospace, monospace; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dv-ink-3); }
 
 .dv-ch { position: fixed; z-index: 3; left: max(24px, env(safe-area-inset-left, 0px)); bottom: max(64px, 12vh); width: min(440px, calc(100% - 48px));

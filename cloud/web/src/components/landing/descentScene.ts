@@ -125,7 +125,7 @@ function resultCard(file: string): THREE.Sprite {
   g.fill();
   g.fillStyle = '#808693';
   g.font = `500 22px ${MONO}`;
-  g.fillText('RESULT', 40, 58);
+  g.fillText('EXAMPLE RESULT', 40, 58);
   g.fillStyle = '#F5F6F9';
   g.font = `400 40px ${SERIF}`;
   g.fillText(file, 40, 118);
@@ -151,7 +151,8 @@ function resultCard(file: string): THREE.Sprite {
   g.lineTo(680, 368);
   g.stroke();
   g.fillStyle = '#3EDFC9';
-  g.fillText('receipt attached', 40, 408);
+  // A walkthrough, not a run: nothing the visitor typed was sent anywhere.
+  g.fillText('simulated · sign in to run it', 40, 408);
   const t = new THREE.CanvasTexture(c);
   t.minFilter = THREE.LinearFilter;
   const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthWrite: false, fog: false }));

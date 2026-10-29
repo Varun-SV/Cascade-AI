@@ -23,7 +23,7 @@ describe('LandingPage', () => {
     await waitFor(() => expect(container.querySelector('.descent')).toHaveClass('still'));
     // The story is told as text instead of leaving a blank track to scroll.
     expect(screen.getByRole('heading', { name: 'How one prompt moves through Cascade.' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'That was Cascade.' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: "That's how Cascade runs it." })).toBeVisible();
   });
 
   it('uses the still layout when Settings → Reduce motion is on', () => {
@@ -47,5 +47,21 @@ describe('LandingPage navigation in the still layout', () => {
 
     expect(scrolls).toEqual([{ top: 876, behavior: 'auto' }]);
     expect(document.activeElement).toBe(story);
+  });
+});
+
+describe('LandingPage says the descent is a simulation', () => {
+  it('discloses it before anything is submitted, on the prompt itself', () => {
+    render(<LandingPage config={config} onDevLogin={() => {}} />);
+    const input = screen.getByLabelText('Your prompt');
+    const note = document.getElementById(input.getAttribute('aria-describedby')!);
+    expect(note).toHaveTextContent("A simulated walkthrough. Your prompt isn't sent anywhere");
+  });
+
+  it('ends on the walkthrough, with a way to run it for real', () => {
+    render(<LandingPage config={config} onDevLogin={() => {}} reduceMotion />);
+    expect(screen.queryByText('That was Cascade.')).toBeNull();
+    expect(screen.getByText(/^A simulated walkthrough: one prompt becomes a plan/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Sign in to run this for real' })).toBeInTheDocument();
   });
 });
