@@ -58,10 +58,10 @@ type Internals = {
 };
 
 /** A desktop backend whose socket layer has one desktop window and one stranger. */
-function desktopServer(file: string, port = 51001, cloudAccount?: () => { userId: string; serverUrl: string } | null) {
+function desktopServer(file: string, port = 51001, cloudAccount?: () => { userId: string; serverUrl: string } | null, cloudSyncAllowed?: () => boolean | undefined) {
   const server = new DashboardServer({ ...config, dashboard: { ...config.dashboard, port } } as CascadeConfig, store, '/tmp',
-    { pendingAccountingFile: file, desktopToken: 'desk-token', cloudAccount }) as unknown as Internals;
-  const delivered: Array<{ socketId: string; payload: { id: string; sessionId: string; prompt: string; cloud: { costUsd: number }; account?: unknown } }> = [];
+    { pendingAccountingFile: file, desktopToken: 'desk-token', cloudAccount, cloudSyncAllowed }) as unknown as Internals;
+  const delivered: Array<{ socketId: string; payload: { id: string; sessionId: string; prompt: string; cloud: { costUsd: number }; account?: unknown; sync?: boolean } }> = [];
   server.socket = {
     socketIds: () => ['desk', 'stranger'],
     handshakeToken: (id: string) => (id === 'desk' ? 'desk-token' : id === 'stranger' ? 'guess' : undefined),
@@ -258,6 +258,87 @@ describe('the desktop\'s run accounting for the cloud', () => {
       expect(api.createConversation).not.toHaveBeenCalled();
       expect(api.appendTurn).not.toHaveBeenCalled();
       expect(api.recordRunSpend).not.toHaveBeenCalled();
+    });
+
+    describe('whether syncing was on as the run ended', () => {
+      const u1 = { userId: 'u1', serverUrl: 'https://cloud' };
+      const slowRun = async () => {
+        const router = await routerWith(100, 0.0001);
+        let settle!: () => void;
+        vi.spyOn(router, 'whenRunSettled').mockImplementation(() => new Promise((r) => { settle = () => r(true); }));
+        return { cascade: { getRouter: () => router, getDecisionLog: () => [] }, settle: () => settle() };
+      };
+      // The window's side: the main process answers `syncOff` while syncing is off now.
+      const window = (syncOnNow: () => boolean) => {
+        const refuse = <T>(ok: T) => async () => (syncOnNow() ? ok : { ok: false, syncOff: true, error: 'Cloud sync is off.' });
+        const api = {
+          status: vi.fn().mockResolvedValue({ signedIn: true, user: { id: 'u1' }, serverUrl: 'https://cloud' }),
+          createConversation: vi.fn().mockImplementation(refuse({ ok: true, conversation: { id: 'c1' } })),
+          appendTurn: vi.fn().mockImplementation(refuse({ ok: true })),
+          recordRunSpend: vi.fn().mockImplementation(refuse({ ok: true })),
+        };
+        const mirror = new CloudMirror(() => api, () => false, { get: () => undefined, set: () => {}, delete: () => {} });
+        const calls = () => api.createConversation.mock.calls.length + api.appendTurn.mock.calls.length + api.recordRunSpend.mock.calls.length;
+        return { api, mirror, calls };
+      };
+
+      it('off at run end, on again before it is sent or replayed after a restart: nothing is uploaded', async () => {
+        let on = false;
+        const { cascade, settle } = await slowRun();
+        const { server, delivered } = desktopServer(file, 51001, () => u1, () => on);
+        const done = server.emitRunAccounting(vi.fn(), 's1', cascade, { ...run, copyTurn: true });
+        // Turned back on during the settle wait.
+        on = true;
+        settle();
+        await done;
+        expect(delivered[0]!.payload.sync).toBe(false);
+        const { mirror, calls } = window(() => on);
+        const confirm = (id: string) => server.confirmAccounting(id, 'desk');
+        // The app quits before the window handles it: the journal keeps the stamp.
+        const restarted = desktopServer(file, 51006, () => u1, () => on);
+        expect(restarted.server.pendingAccounting!.unconfirmed()[0]).toMatchObject({ sync: false });
+        restarted.server.replayAccountingTo('desk');
+        expect(await mirrorAndConfirm(mirror, restarted.delivered[0]!.payload as unknown as AccountedRun,
+          (id) => restarted.server.confirmAccounting(id, 'desk'))).toBe('skipped');
+        expect(await mirrorAndConfirm(mirror, delivered[0]!.payload as unknown as AccountedRun, confirm)).toBe('skipped');
+        expect(calls()).toBe(0);
+        expect(desktopServer(file, 51007).server.pendingAccounting!.unconfirmed()).toEqual([]);
+      });
+
+      it('on at run end, off before it is sent: the main process refuses every upload and it is not retried', async () => {
+        let on = true;
+        const { cascade, settle } = await slowRun();
+        const { server, delivered } = desktopServer(file, 51001, () => u1, () => on);
+        const done = server.emitRunAccounting(vi.fn(), 's1', cascade, { ...run, copyTurn: true });
+        on = false;
+        settle();
+        await done;
+        expect(delivered[0]!.payload.sync).toBe(true);
+        const { api, mirror } = window(() => on);
+        const restarted = desktopServer(file, 51006, () => u1, () => on);
+        restarted.server.replayAccountingTo('desk');
+        for (const report of [delivered[0]!.payload, restarted.delivered[0]!.payload]) {
+          expect(await mirrorAndConfirm(mirror, report as unknown as AccountedRun, (id) => restarted.server.confirmAccounting(id, 'desk'))).toBe('skipped');
+        }
+        // Each send stopped at its first refused request: nothing reached the cloud.
+        expect(api.appendTurn).not.toHaveBeenCalled();
+        expect(api.recordRunSpend).not.toHaveBeenCalled();
+        expect(desktopServer(file, 51007).server.pendingAccounting!.unconfirmed()).toEqual([]);
+      });
+
+      it('is off when it cannot be told, and not stamped by hosts that do not say', async () => {
+        const router = await routerWith(100, 0.0001);
+        const cascade = { getRouter: () => router, getDecisionLog: () => [] };
+        const throwing = desktopServer(file, 51001, () => u1, () => { throw new Error('no settings'); });
+        await throwing.server.emitRunAccounting(vi.fn(), 's1', cascade, { ...run });
+        const unknown = desktopServer(file, 51002, () => u1, () => undefined);
+        await unknown.server.emitRunAccounting(vi.fn(), 's2', cascade, { ...run });
+        const silent = desktopServer(file, 51003, () => u1);
+        await silent.server.emitRunAccounting(vi.fn(), 's3', cascade, { ...run });
+        expect(throwing.delivered[0]!.payload.sync).toBe(false);
+        expect(unknown.delivered[0]!.payload.sync).toBe(false);
+        expect(silent.delivered[0]!.payload).not.toHaveProperty('sync');
+      });
     });
 
     it('is sent in the order the session\'s runs ended, not the order their late calls settled', async () => {

@@ -32,6 +32,13 @@ export interface AccountedRun {
    * tell, where the account signed in when the report arrives is used.
    */
   account?: { userId: string; serverUrl: string } | null;
+  /**
+   * Whether syncing to the cloud was on when the run ended, stamped by the
+   * backend. false: never uploaded, even if syncing is on again by now.
+   * Absent from hosts that cannot tell (and from reports kept by older
+   * builds), where only the opt-out in force when it is sent applies.
+   */
+  sync?: boolean;
   cloud?: RunAccounting;
 }
 
@@ -42,10 +49,13 @@ export interface CloudMirrorApi {
   /** Who is signed in, and to which server: the links below belong to them. */
   status(): Promise<{ signedIn: boolean; user: { id: string } | null; serverUrl: string }>;
   // `account`: who the request is for. The main process answers
-  // `accountChanged` instead of sending it if another account is signed in.
-  createConversation(title?: string, account?: CloudAccount): Promise<{ ok: boolean; accountChanged?: boolean; conversation?: { id: string } }>;
-  appendTurn(id: string, turn: { userContent: string; runId?: string; outcome?: 'answered' | 'stopped'; endedAt?: number; assistant: { content: string; costUsd?: number; why?: string } }, account?: CloudAccount): Promise<{ ok: boolean; accountChanged?: boolean; error?: string }>;
-  recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string; endedAt?: number }, account?: CloudAccount): Promise<{ ok: boolean; accountChanged?: boolean; error?: string }>;
+  // `accountChanged` instead of sending it if another account is signed in,
+  // and `syncOff` if syncing is off now.
+  createConversation(title?: string, account?: CloudAccount): Promise<{ ok: boolean; accountChanged?: boolean; syncOff?: boolean; conversation?: { id: string } }>;
+  appendTurn(id: string, turn: { userContent: string; runId?: string; outcome?: 'answered' | 'stopped'; endedAt?: number; assistant: { content: string; costUsd?: number; why?: string } }, account?: CloudAccount): Promise<{ ok: boolean; accountChanged?: boolean; syncOff?: boolean; error?: string }>;
+  recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string; endedAt?: number }, account?: CloudAccount): Promise<{ ok: boolean; accountChanged?: boolean; syncOff?: boolean; error?: string }>;
+  /** Records the opt-out in the main process, where the backend and the uploads read it. */
+  setSyncOptOut?(optedOut: boolean): Promise<{ ok: boolean }>;
 }
 
 /**
@@ -113,9 +123,12 @@ type CloudStatus = Awaited<ReturnType<CloudMirrorApi['status']>>;
  * not sent, to anyone. Thrown from any request so the send stops at once.
  */
 class AccountChanged extends Error {}
-type Answer = { ok: boolean; error?: string; accountChanged?: boolean };
+/** Syncing was turned off while a report was being sent: the rest is not sent either. */
+class SyncOff extends Error {}
+type Answer = { ok: boolean; error?: string; accountChanged?: boolean; syncOff?: boolean };
 const guard = <T extends Answer>(result: T): T => {
   if (result.accountChanged) throw new AccountChanged();
+  if (result.syncOff) throw new SyncOff();
   return result;
 };
 
@@ -146,12 +159,13 @@ export class CloudMirror {
    * the meantime the run is not sent to the new one.
    */
   accounted(run: AccountedRun | undefined): Promise<MirrorResult> {
-    const optedOut = this.optedOut();
+    // Off as the run ended (the backend's stamp) or off now: nothing is asked or sent.
+    const optedOut = run?.sync === false || this.optedOut();
     const atEnd = optedOut ? Promise.resolve(null) : this.api()?.status?.().catch(() => 'error' as const);
     // Anything that throws (a bridge call rejecting) is a failure to retry.
     // Another account signing in part-way is a skip, like one signed in before.
     const result = this.queue.then(() => this.send(run, optedOut, atEnd))
-      .catch((err): MirrorResult => (err instanceof AccountChanged ? 'skipped' : 'retry'))
+      .catch((err): MirrorResult => (err instanceof AccountChanged || err instanceof SyncOff ? 'skipped' : 'retry'))
       .then((outcome) => {
         // Settled for good (sent, skipped, refused): it is confirmed and never
         // replayed, so nothing may stay held behind it.
@@ -168,7 +182,8 @@ export class CloudMirror {
     atEnd: Promise<CloudStatus | null | 'error'> | undefined,
   ): Promise<MirrorResult> {
     const sid = run?.sessionId;
-    if (!sid || !run?.cloud || optedOut || this.optedOut()) return 'skipped';
+    // Off when the run ended is off for good; off now is off too.
+    if (!sid || !run?.cloud || run.sync === false || optedOut || this.optedOut()) return 'skipped';
     const api = this.api();
     if (!api) return 'skipped';
     // Links belong to the account they were made under; signed out, nothing goes.
@@ -313,9 +328,21 @@ export async function mirrorAndConfirm(
   return result;
 }
 
+/**
+ * An opt-out kept by an earlier build in this window's storage is handed to
+ * the main process, which owns the setting now. Only ever turns syncing off:
+ * a stored opt-in never overrides what the main process has.
+ */
+export async function migrateSyncOptOut(
+  api: Partial<CloudMirrorApi> | undefined, storedOptOut: () => boolean,
+): Promise<boolean> {
+  if (!storedOptOut() || !api?.setSyncOptOut) return false;
+  try { return (await api.setSyncOptOut(true)).ok; } catch { return false; }
+}
+
 /** The desktop's one mirror, over the preload bridge. */
-export const cloudMirror = new CloudMirror(
-  () => (typeof window === 'undefined' ? undefined : (window as unknown as { cascade?: { cloud?: Partial<CloudMirrorApi> } }).cascade?.cloud),
-  () => { try { return localStorage.getItem('cascade.noCloudSync') === '1'; } catch { return false; } },
-  storedChatLinks(),
-);
+export const cloudBridge = (): Partial<CloudMirrorApi> | undefined =>
+  (typeof window === 'undefined' ? undefined : (window as unknown as { cascade?: { cloud?: Partial<CloudMirrorApi> } }).cascade?.cloud);
+/** The opt-out an earlier build kept in this window's storage. */
+export const storedSyncOptOut = (): boolean => { try { return localStorage.getItem('cascade.noCloudSync') === '1'; } catch { return false; } };
+export const cloudMirror = new CloudMirror(cloudBridge, storedSyncOptOut, storedChatLinks());

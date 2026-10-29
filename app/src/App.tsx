@@ -30,7 +30,7 @@ import { CommandPalette } from './components/CommandPalette.js';
 import { ChangesModal } from './components/ChangesModal.js';
 import { ContinueModal } from './components/ContinueModal.js';
 import { useThemeSync } from './theme/useTheme.js';
-import { cloudMirror, mirrorAndConfirm, type AccountedRun } from './lib/cloud-mirror.js';
+import { cloudBridge, cloudMirror, migrateSyncOptOut, mirrorAndConfirm, storedSyncOptOut, type AccountedRun } from './lib/cloud-mirror.js';
 
 /** A message on a cloud conversation's active path (with branching data). */
 export interface CloudMsg {
@@ -400,6 +400,9 @@ export function App() {
     // Confirmed only once delivered or skipped on purpose, so the backend stops
     // replaying it; one that failed to upload stays on disk and is replayed on
     // the next connect.
+    // An opt-out an earlier build kept here moves to the main process, which
+    // stamps it on each run as it ends and checks it before every upload.
+    void migrateSyncOptOut(cloudBridge(), storedSyncOptOut);
     socket.on('run:accounting', (data: AccountedRun) => {
       void mirrorAndConfirm(cloudMirror, data, (id) => socket.emit('run:accounting:ack', { id }));
     });

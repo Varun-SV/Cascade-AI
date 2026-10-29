@@ -174,6 +174,8 @@ export class DashboardServer {
   private readonly accountingTail = new Map<string, Promise<void>>();
   /** Which cloud account the desktop is signed in to (see the option). */
   private readonly cloudAccount: (() => CloudAccountRef | null | undefined) | undefined;
+  /** Whether syncing to the cloud is on (see the option). */
+  private readonly cloudSyncAllowed: (() => boolean | undefined) | undefined;
   /**
    * Supplied by the desktop shell so a run can read the page the user has
    * open in the built-in browser. Absent in the CLI, where there is no
@@ -250,6 +252,14 @@ export class DashboardServer {
        * replayed later is sent only to the account the run ended under.
        */
       cloudAccount?: () => CloudAccountRef | null | undefined;
+      /**
+       * Whether the user lets the desktop copy runs to the cloud. Read when a
+       * run ends and kept with its accounting (`sync`), so a run that ended
+       * while syncing was off is never uploaded, even if it is turned back on
+       * before the report is sent or replayed. Anything but `true` (it throws,
+       * or cannot tell) is taken as off.
+       */
+      cloudSyncAllowed?: () => boolean | undefined;
     } = {},
   ) {
     this.config = config;
@@ -262,6 +272,7 @@ export class DashboardServer {
     // One file per host: another dashboard on this machine keeps its own.
     this.desktopToken = options.desktopToken || undefined;
     this.cloudAccount = options.cloudAccount;
+    this.cloudSyncAllowed = options.cloudSyncAllowed;
     this.pendingAccounting = this.desktopToken
       ? new PendingAccounting(options.pendingAccountingFile ?? path.join(globalDir(), `pending-accounting-${this.port}.jsonl`))
       : null;
@@ -820,6 +831,8 @@ export class DashboardServer {
     // Whose run it is, as it ends: a report sent later goes to this account or nowhere.
     const owner = this.accountAtRunEnd();
     const account = owner === undefined ? {} : { account: owner };
+    // And whether the user let it be copied, as it ends: off then is off for good.
+    const consent = this.cloudSyncAllowed ? { sync: this.syncAllowedAtRunEnd() } : {};
     // This session's previous run is sent first, however long its calls take.
     const previous = this.accountingTail.get(sessionId) ?? Promise.resolve();
     let release!: () => void;
@@ -835,7 +848,7 @@ export class DashboardServer {
       // app quits while it waits, this is replayed when it next starts. Not
       // sent while this process is still waiting.
       if (this.pendingAccounting) {
-        journaled = this.pendingAccounting.add({ sessionId, ...run, endedAt, ...account, cloud: cloudTurnAccounting(reportNow()) }).id;
+        journaled = this.pendingAccounting.add({ sessionId, ...run, endedAt, ...account, ...consent, cloud: cloudTurnAccounting(reportNow()) }).id;
         this.settlingAccounting.add(journaled);
       }
       await router.whenRunSettled();
@@ -847,7 +860,7 @@ export class DashboardServer {
         if (journaled) this.pendingAccounting?.confirm(journaled);
         return;
       }
-      const payload = { sessionId, ...run, endedAt, ...account, cloud: cloudTurnAccounting(report) };
+      const payload = { sessionId, ...run, endedAt, ...account, ...consent, cloud: cloudTurnAccounting(report) };
       if (!this.pendingAccounting || !journaled) { emit('run:accounting', payload); return; }
       // Kept until a desktop window confirms it (a run can end with none
       // open), and sent only to the desktop's own windows.
@@ -863,6 +876,11 @@ export class DashboardServer {
       release();
       if (this.accountingTail.get(sessionId) === mine) this.accountingTail.delete(sessionId);
     }
+  }
+
+  /** Whether syncing is on as a run ends: only a plain `true` is on; failing to tell is off. */
+  private syncAllowedAtRunEnd(): boolean {
+    try { return this.cloudSyncAllowed?.() === true; } catch { return false; }
   }
 
   /** The cloud account as a run ends; undefined when it cannot be told (not the desktop). */

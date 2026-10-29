@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import { readFileSync, writeFileSync, rmSync, mkdirSync, chmodSync } from 'node:fs';
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
 import { accountMismatch, ACCOUNT_CHANGED, isAccountChangedError, pinnedStore } from './cloud-account';
+import { fileSyncConsent, SYNC_OFF } from './cloud-sync-consent';
 
 // ── Shapes shared with the renderer (mirror the SDK's cloud types) ──
 
@@ -192,14 +193,19 @@ class SafeStorageSessionStore implements SessionStore {
  * bundle (same loader `main.ts` uses for the backend), from which we pull the
  * shared `CloudClient` and default cloud URL.
  */
-/** What the backend reads as a run ends: who is signed in, to which server. */
-export interface CloudAuthHandle { account(): { userId: string; serverUrl: string } | null }
+/** What the backend reads as a run ends: who is signed in, to which server, and whether syncing is on. */
+export interface CloudAuthHandle {
+  account(): { userId: string; serverUrl: string } | null;
+  syncAllowed(): boolean;
+}
 
 export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks): CloudAuthHandle {
   const store = new SafeStorageSessionStore();
   const core = () => loadCore() as CoreExports;
   const serverUrl = (process.env['CASCADE_CLOUD_URL'] || '').trim().replace(/\/$/, '') || core().DEFAULT_CLOUD_URL;
   const client = (): CloudClientLike => new (core().CloudClient)(serverUrl, undefined, store);
+  // Whether the user lets runs be copied to the cloud (see cloud-sync-consent.ts).
+  const consent = fileSyncConsent(join(app.getPath('userData'), 'cloud-sync.json'));
 
   let loginAbort: AbortController | null = null;
 
@@ -255,9 +261,20 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
   // refresh, say) answers as refused, so the mirror applies the account-switch
   // rule to it rather than retrying it.
   const changedUnder = (err: unknown, expected: unknown) => isAccountChangedError(err) || otherAccount(expected);
+  // The run mirror's requests (they name an account) are refused while syncing
+  // is off now, whatever it was when the run ended.
+  const syncOff = (expected: unknown) => expected !== undefined && expected !== null && !consent.allowed();
+
+  ipcMain.handle('cloud:syncOptOut', () => ({ ok: true, optedOut: !consent.allowed() }));
+  ipcMain.handle('cloud:setSyncOptOut', (_e, optedOut: unknown) => {
+    if (typeof optedOut !== 'boolean') return { ok: false, error: 'Invalid setting.' };
+    try { consent.setOptedOut(optedOut); return { ok: true, optedOut: !consent.allowed() }; }
+    catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not save that setting.' }; }
+  });
 
   ipcMain.handle('cloud:createConversation', async (_e, title: unknown, expected?: unknown) => {
     if (otherAccount(expected)) return ACCOUNT_CHANGED;
+    if (syncOff(expected)) return SYNC_OFF;
     try { return { ok: true, conversation: await clientFor(expected).createConversation(typeof title === 'string' ? title : undefined) }; }
     catch (err) {
       if (changedUnder(err, expected)) return ACCOUNT_CHANGED;
@@ -267,6 +284,7 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
 
   ipcMain.handle('cloud:appendTurn', async (_e, id: unknown, turn: unknown, expected?: unknown) => {
     if (otherAccount(expected)) return { ...ACCOUNT_CHANGED, messages: [] };
+    if (syncOff(expected)) return { ...SYNC_OFF, messages: [] };
     try { return { ok: true, messages: await clientFor(expected).appendTurn(String(id), turn as CloudTurn) }; }
     catch (err) {
       if (changedUnder(err, expected)) return { ...ACCOUNT_CHANGED, messages: [] };
@@ -286,6 +304,7 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
     const endedAt = typeof r['endedAt'] === 'number' && Number.isFinite(r['endedAt']) ? r['endedAt'] : undefined;
     if (!outcome || costUsd === null || why === null) return { ok: false, error: 'Invalid run.' };
     if (otherAccount(expected)) return ACCOUNT_CHANGED;
+    if (syncOff(expected)) return SYNC_OFF;
     try { return { ok: true, ...(await clientFor(expected).recordRunSpend({ conversationId, outcome, costUsd, why, ...(runId ? { runId } : {}), ...(endedAt !== undefined ? { endedAt } : {}) })) }; }
     catch (err) {
       if (changedUnder(err, expected)) return ACCOUNT_CHANGED;
@@ -544,5 +563,6 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
       const s = store.load();
       return s?.user?.id ? { userId: s.user.id, serverUrl } : null;
     },
+    syncAllowed: () => consent.allowed(),
   };
 }

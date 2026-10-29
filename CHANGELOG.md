@@ -141,6 +141,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   order they ended: a run whose late calls were still settling, or whose
   upload failed and was sent again later, used to let the next run's turn
   reach the cloud chat first.
+- **A desktop run that ended while cloud sync was off is never uploaded.**
+  The opt-out was read only when a report reached a window, so a run that
+  ended while syncing was off could be uploaded if syncing was turned back
+  on before it was sent (during the wait for late calls, while no window was
+  open, or on a replay after a restart). The app's main process now keeps
+  the setting (an opt-out set by an earlier build is carried over), the
+  backend records it with each run as it ends, and the main process also
+  refuses each upload while syncing is off now. A setting it cannot read
+  counts as off.
 - **You can start a new chat from the session sidebar.** Before, only the Code
   view's chat picker and the command palette could. The sidebar (and its
   collapsed rail) now has a New chat button: Mission Control and Chat start the

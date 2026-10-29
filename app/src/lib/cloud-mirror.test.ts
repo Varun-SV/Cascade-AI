@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { CloudMirror, mirrorAndConfirm, type ChatLinks } from './cloud-mirror.js';
+import { CloudMirror, migrateSyncOptOut, mirrorAndConfirm, type ChatLinks } from './cloud-mirror.js';
 
 const accounting = { costUsd: 0.01, why: '{"totalCostUsd":0.01}' };
 
@@ -495,5 +495,45 @@ describe('which reports are confirmed to the backend', () => {
     const first = mirror.accounted({ id: 'run-0010', sessionId: 's1', outcome: 'failed', cloud: accounting });
     const second = mirror.accounted({ id: 'run-0011', sessionId: 's1', outcome: 'failed', cloud: accounting });
     expect([await first, await second]).toEqual(['retry', 'delivered']);
+  });
+});
+
+describe('run-end sync consent', () => {
+  it('never uploads a run stamped as ended while syncing was off, though syncing is on now', async () => {
+    const { api, mirror } = setup(false);
+    expect(await mirror.accounted({ ...answered('s1', { sync: false }), id: 'run-off-00001' })).toBe('skipped');
+    expect(await mirror.accounted({ sessionId: 's2', outcome: 'failed', sync: false, cloud: accounting })).toBe('skipped');
+    expect(api.status).not.toHaveBeenCalled();
+    expect(api.createConversation).not.toHaveBeenCalled();
+    expect(api.recordRunSpend).not.toHaveBeenCalled();
+  });
+
+  it('uploads one stamped on, and still lets the opt-out in force now veto it', async () => {
+    const on = setup(false);
+    expect(await on.mirror.accounted(answered('s1', { sync: true }))).toBe('delivered');
+    const off = setup(true);
+    expect(await off.mirror.accounted(answered('s1', { sync: true }))).toBe('skipped');
+    expect(off.api.createConversation).not.toHaveBeenCalled();
+  });
+
+  it('stops at the first request the main process refuses because syncing is off now, and confirms it', async () => {
+    const { api, mirror } = setup(false);
+    api.createConversation.mockResolvedValue({ ok: false, syncOff: true, error: 'Cloud sync is off.' });
+    const confirm = vi.fn();
+    expect(await mirrorAndConfirm(mirror, { ...answered('s1'), id: 'run-sync-0001' }, confirm)).toBe('skipped');
+    expect(confirm).toHaveBeenCalledWith('run-sync-0001');
+    expect(api.appendTurn).not.toHaveBeenCalled();
+    expect(api.recordRunSpend).not.toHaveBeenCalled();
+  });
+
+  it('hands an opt-out kept by an earlier build to the main process, and never an opt-in', async () => {
+    const setSyncOptOut = vi.fn().mockResolvedValue({ ok: true });
+    expect(await migrateSyncOptOut({ setSyncOptOut }, () => true)).toBe(true);
+    expect(setSyncOptOut).toHaveBeenCalledWith(true);
+    setSyncOptOut.mockClear();
+    expect(await migrateSyncOptOut({ setSyncOptOut }, () => false)).toBe(false);
+    expect(setSyncOptOut).not.toHaveBeenCalled();
+    expect(await migrateSyncOptOut({ setSyncOptOut: vi.fn().mockRejectedValue(new Error('x')) }, () => true)).toBe(false);
+    expect(await migrateSyncOptOut(undefined, () => true)).toBe(false);
   });
 });

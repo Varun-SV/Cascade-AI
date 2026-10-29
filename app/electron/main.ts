@@ -159,6 +159,8 @@ async function startBackend(): Promise<void> {
       // goes to that account or is not sent at all.
       // null when signed out; undefined only before the sign-in is registered.
       cloudAccount: () => (cloudAuth ? cloudAuth.account() : undefined),
+      // Whether syncing was on as the run ended; not known yet counts as off.
+      cloudSyncAllowed: () => (cloudAuth ? cloudAuth.syncAllowed() : false),
     });
     // The other half of the built-in browser: a run can read the page the user
     // is actually on. Wired only here — the backend runs in this process, so it
