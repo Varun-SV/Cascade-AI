@@ -207,9 +207,11 @@ export default function LandingPage({ config, onDevLogin, reduceMotion = false }
     jump(1);
   }
 
-  // Whatever is in the prompt box when sign-in opens goes with it, poured or not.
+  // What the prompt box holds when sign-in opens is what goes with it, poured
+  // or not — and an emptied box carries nothing, so a cleared example does
+  // not resurface in the chat. savePendingPrompt('') removes the entry.
   function openSignIn() {
-    if (prompt.trim()) savePendingPrompt(prompt);
+    savePendingPrompt(prompt);
     setSigningIn(true);
   }
 
@@ -264,7 +266,12 @@ export default function LandingPage({ config, onDevLogin, reduceMotion = false }
         <p>Hand Cascade anything you would give a team. Then scroll, and follow how it would run.</p>
         <form className="dv-ask" onSubmit={(e) => { e.preventDefault(); pour(prompt); }}>
           <label htmlFor="dv-ask-in" className="sr-only">Your prompt</label>
-          <input id="dv-ask-in" aria-describedby="dv-sim-note" autoComplete="off" maxLength={90} placeholder="What should your organization do?" value={prompt} onChange={(e) => setPromptText(e.target.value)} />
+          <input id="dv-ask-in" aria-describedby="dv-sim-note" autoComplete="off" maxLength={90} placeholder="What should your organization do?" value={prompt} onChange={(e) => {
+            setPromptText(e.target.value);
+            // Clearing the box withdraws an earlier pour right away, not only
+            // when sign-in opens: an abandoned dialog must not leave it behind.
+            if (!e.target.value.trim()) savePendingPrompt('');
+          }} />
           <button type="submit" className="dv-btn dv-btn-p">Pour it in</button>
         </form>
         <div className="dv-chips" role="group" aria-label="Example prompts">

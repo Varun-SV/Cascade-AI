@@ -85,6 +85,24 @@ describe('LandingPage keeps the visitor\'s prompt for after sign-in', () => {
     expect(pending()).toBe('Audit our cloud bill');
   });
 
+  it('forgets a chosen example once the visitor clears the box, before and at sign-in', () => {
+    render(<LandingPage config={config} onDevLogin={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Plan a two-week trip with a budget sheet' }));
+    expect(pending()).toBe('Plan a two-week trip with a budget sheet');
+    fireEvent.change(screen.getByLabelText('Your prompt'), { target: { value: '' } });
+    expect(pending()).toBeNull(); // withdrawn as soon as it is cleared
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in', exact: true } as never));
+    expect(pending()).toBeNull();
+  });
+
+  it('carries the edited text, not the earlier pour', () => {
+    render(<LandingPage config={config} onDevLogin={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Plan a two-week trip with a budget sheet' }));
+    fireEvent.change(screen.getByLabelText('Your prompt'), { target: { value: 'Plan a weekend trip instead' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in', exact: true } as never));
+    expect(pending()).toBe('Plan a weekend trip instead');
+  });
+
   it('saves nothing for a visitor who never wrote or chose a prompt', () => {
     render(<LandingPage config={config} onDevLogin={() => {}} />);
     fireEvent.click(screen.getByRole('button', { name: 'Sign in', exact: true } as never));
