@@ -52,8 +52,10 @@ export interface LifecycleEntry {
 
 // An optional dated snapshot suffix: gpt-4o-2024-08-06, claude-…-20250929.
 const SNAP = '(?:-\\d{4}-\\d{2}-\\d{2}|-\\d{8})?';
+/** Escape every regex metacharacter, so an id is matched literally. */
+const escapeRegExp = (id: string) => id.replace(/[\\^$.*+?()[\]{}|/-]/g, '\\$&');
 const exact = (...ids: string[]) =>
-  new RegExp(`^(?:${ids.map((id) => id.replace(/\./g, '\\.')).join('|')})${SNAP}$`, 'i');
+  new RegExp(`^(?:${ids.map(escapeRegExp).join('|')})${SNAP}$`, 'i');
 
 export const MODEL_LIFECYCLE: readonly LifecycleEntry[] = [
   // ── Anthropic ──────────────────────────────────────────────────────────────
