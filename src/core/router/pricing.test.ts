@@ -138,6 +138,30 @@ describe('context-tier price selection', () => {
     expect(tierFor(gpt.entry, 272_001)!.inputPer1m).toBe(10);
     expect(tierFor(gpt.entry, 272_001)!.outputPer1m).toBe(45);
   });
+
+  it('prices GPT-6 above 272K at 2x input and cache and 1.5x output, for the whole request', () => {
+    // A 300K-token orchestration call billed at the short-context rate would
+    // be underestimated by half, and could slip past a user's spend cap.
+    const expected: Record<string, [number, number, number, number]> = {
+      'gpt-6-astra': [10, 50, 1, 12.5],
+      'gpt-6.1-sol': [2, 10, 0.1, 2.5],
+      'gpt-6.1-terra': [1, 5, 0.05, 1.25],
+      'gpt-6-luna': [0.1, 0.5, 0.01, 0.125],
+    };
+    for (const [model, [input, output, cached, write]] of Object.entries(expected)) {
+      const { entry } = findPricing(model, 'openai')!;
+      expect(tierFor(entry, 272_000), model).toMatchObject({ inputPer1m: input, outputPer1m: output, cachedInputPer1m: cached, cacheWritePer1m: write });
+      const long = tierFor(entry, 272_001)!;
+      expect(long.inputPer1m, model).toBeCloseTo(input * 2, 9);
+      expect(long.outputPer1m, model).toBeCloseTo(output * 1.5, 9);
+      expect(long.cachedInputPer1m, model).toBeCloseTo(cached * 2, 9);
+      expect(long.cacheWritePer1m, model).toBeCloseTo(write * 2, 9);
+    }
+    // And through the per-1k rates the router actually budgets with.
+    const sol = findPricing('gpt-6.1-sol', 'openai')!.entry;
+    expect(tokenRatesPer1k(sol, { inputTokens: 300_000 })!.input).toBeCloseTo(0.004, 9);
+    expect(tokenRatesPer1k(sol, { inputTokens: 100_000 })!.input).toBeCloseTo(0.002, 9);
+  });
 });
 
 // ─────────────────────────────────────────────

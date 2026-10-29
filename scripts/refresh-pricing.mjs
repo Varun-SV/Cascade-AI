@@ -193,7 +193,15 @@ const OPENAI_SRC = 'https://developers.openai.com/api/docs/pricing';
 const GEMINI_SRC = 'https://ai.google.dev/gemini-api/docs/pricing';
 const ARGON_SRC = 'https://cloud.google.com/blog/products/ai-machine-learning/gemini-4-argon-available-on-google-cloud';
 const tier = (i, o, c, w) => ({ inputPer1m: i, outputPer1m: o, cachedInputPer1m: c, cacheWritePer1m: w, reasoningOutputPer1m: o });
-const flat = (i, o, c) => ({ inputPer1m: i, outputPer1m: o, ...(c != null ? { cachedInputPer1m: c } : {}) });
+// GPT-6: "Prompts with more than 272K input tokens are priced at 2x input and
+// cache rates and 1.5x output for the full request" (OpenAI's model pages).
+// tierFor() reads maxInputTokens inclusively, so 272,000 is the short tier and
+// 272,001 the long one — the whole request, not just the excess.
+const OPENAI_LONG_CONTEXT = 272_000;
+const longContext = (i, o, c, w) => [
+  { maxInputTokens: OPENAI_LONG_CONTEXT, inputPer1m: i, outputPer1m: o, cachedInputPer1m: c, cacheWritePer1m: w },
+  { inputPer1m: i * 2, outputPer1m: o * 1.5, cachedInputPer1m: c * 2, cacheWritePer1m: w * 2 },
+];
 
 const entries = [
   // ── Anthropic — current generation (cache-read ratios differ per model) ──
@@ -207,15 +215,15 @@ const entries = [
     tiers: [{ maxInputTokens: 100_000, ...tier(0.1, 0.5, 0.01, 0.125) }, tier(0.5, 2.5, 0.05, 0.625)],
     notes: 'Priced by prompt length: $0.10/$0.50 per 1M up to 100K input tokens (cache reads and writes count), $0.50/$2.50 above.' }),
 
-  // ── OpenAI — GPT-6 (vendor page; the >272K long-context tier is not captured) ──
-  vendor({ model: 'gpt-6-astra', provider: 'openai', source: OPENAI_SRC, asOf: OCT_2026, contextWindow: 1_050_000, batchMultiplier: 0.5,
-    tiers: [flat(10, 50, 1)], notes: 'Standard tier from the vendor pricing page. Context window not on the pricing page; 1.05M as for the rest of GPT-6.' }),
-  vendor({ model: 'gpt-6.1-sol', provider: 'openai', source: OPENAI_SRC, asOf: OCT_2026, contextWindow: 1_050_000, batchMultiplier: 0.5,
-    tiers: [flat(2, 10, 0.1)], notes: 'Standard (short-context) tier. OpenAI charges more above 272K prompt tokens; that tier is not captured here.' }),
-  vendor({ model: 'gpt-6.1-terra', provider: 'openai', source: OPENAI_SRC, asOf: OCT_2026, contextWindow: 1_050_000, batchMultiplier: 0.5,
-    tiers: [flat(1, 5, 0.05)], notes: 'Standard (short-context) tier; the >272K tier is not captured here.' }),
-  vendor({ model: 'gpt-6-luna', provider: 'openai', source: OPENAI_SRC, asOf: OCT_2026, contextWindow: 1_050_000, batchMultiplier: 0.5,
-    tiers: [flat(0.1, 0.5, 0.01)], notes: 'Standard (short-context) tier; the >272K tier is not captured here.' }),
+  // ── OpenAI — GPT-6 (each model's own page, which also states the >272K tier) ──
+  vendor({ model: 'gpt-6-astra', provider: 'openai', source: `https://developers.openai.com/api/docs/models/gpt-6-astra`, asOf: OCT_2026, contextWindow: 1_050_000, batchMultiplier: 0.5,
+    tiers: longContext(10, 50, 1, 12.5), notes: 'Context window not on the pricing page; 1.05M per the model page. Prompts over 272K input tokens are billed at 2x input and cache rates and 1.5x output for the whole request.' }),
+  vendor({ model: 'gpt-6.1-sol', provider: 'openai', source: `https://developers.openai.com/api/docs/models/gpt-6.1-sol`, asOf: OCT_2026, contextWindow: 1_050_000, batchMultiplier: 0.5,
+    tiers: longContext(2, 10, 0.1, 2.5), notes: 'Prompts over 272K input tokens are billed at 2x input and cache rates and 1.5x output for the whole request.' }),
+  vendor({ model: 'gpt-6.1-terra', provider: 'openai', source: `https://developers.openai.com/api/docs/models/gpt-6.1-terra`, asOf: OCT_2026, contextWindow: 1_050_000, batchMultiplier: 0.5,
+    tiers: longContext(1, 5, 0.05, 1.25), notes: 'Prompts over 272K input tokens are billed at 2x input and cache rates and 1.5x output for the whole request.' }),
+  vendor({ model: 'gpt-6-luna', provider: 'openai', source: `https://developers.openai.com/api/docs/models/gpt-6-luna`, asOf: OCT_2026, contextWindow: 1_050_000, batchMultiplier: 0.5,
+    tiers: longContext(0.1, 0.5, 0.01, 0.125), notes: 'Prompts over 272K input tokens are billed at 2x input and cache rates and 1.5x output for the whole request.' }),
 
   // ── Gemini — current generation ──────────────────────────────────────────
   vendor({ model: 'gemini-3.8-flash', provider: 'gemini', source: GEMINI_SRC, asOf: OCT_2026, contextWindow: 1_048_576, batchMultiplier: 0.5,

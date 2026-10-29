@@ -379,18 +379,26 @@
       "modality": "text",
       "currency": "USD",
       "asOf": "2026-10-28",
-      "source": "https://developers.openai.com/api/docs/pricing",
+      "source": "https://developers.openai.com/api/docs/models/gpt-6-astra",
       "provenance": "vendor-pricing-page",
       "tiers": [
         {
+          "maxInputTokens": 272000,
           "inputPer1m": 10,
           "outputPer1m": 50,
-          "cachedInputPer1m": 1
+          "cachedInputPer1m": 1,
+          "cacheWritePer1m": 12.5
+        },
+        {
+          "inputPer1m": 20,
+          "outputPer1m": 75,
+          "cachedInputPer1m": 2,
+          "cacheWritePer1m": 25
         }
       ],
       "batchMultiplier": 0.5,
       "contextWindow": 1050000,
-      "notes": "Standard tier from the vendor pricing page. Context window not on the pricing page; 1.05M as for the rest of GPT-6."
+      "notes": "Context window not on the pricing page; 1.05M per the model page. Prompts over 272K input tokens are billed at 2x input and cache rates and 1.5x output for the whole request."
     },
     {
       "model": "gpt-6.1-sol",
@@ -398,18 +406,26 @@
       "modality": "text",
       "currency": "USD",
       "asOf": "2026-10-28",
-      "source": "https://developers.openai.com/api/docs/pricing",
+      "source": "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
       "provenance": "vendor-pricing-page",
       "tiers": [
         {
+          "maxInputTokens": 272000,
           "inputPer1m": 2,
           "outputPer1m": 10,
-          "cachedInputPer1m": 0.1
+          "cachedInputPer1m": 0.1,
+          "cacheWritePer1m": 2.5
+        },
+        {
+          "inputPer1m": 4,
+          "outputPer1m": 15,
+          "cachedInputPer1m": 0.2,
+          "cacheWritePer1m": 5
         }
       ],
       "batchMultiplier": 0.5,
       "contextWindow": 1050000,
-      "notes": "Standard (short-context) tier. OpenAI charges more above 272K prompt tokens; that tier is not captured here."
+      "notes": "Prompts over 272K input tokens are billed at 2x input and cache rates and 1.5x output for the whole request."
     },
     {
       "model": "gpt-6.1-terra",
@@ -417,18 +433,26 @@
       "modality": "text",
       "currency": "USD",
       "asOf": "2026-10-28",
-      "source": "https://developers.openai.com/api/docs/pricing",
+      "source": "https://developers.openai.com/api/docs/models/gpt-6.1-terra",
       "provenance": "vendor-pricing-page",
       "tiers": [
         {
+          "maxInputTokens": 272000,
           "inputPer1m": 1,
           "outputPer1m": 5,
-          "cachedInputPer1m": 0.05
+          "cachedInputPer1m": 0.05,
+          "cacheWritePer1m": 1.25
+        },
+        {
+          "inputPer1m": 2,
+          "outputPer1m": 7.5,
+          "cachedInputPer1m": 0.1,
+          "cacheWritePer1m": 2.5
         }
       ],
       "batchMultiplier": 0.5,
       "contextWindow": 1050000,
-      "notes": "Standard (short-context) tier; the >272K tier is not captured here."
+      "notes": "Prompts over 272K input tokens are billed at 2x input and cache rates and 1.5x output for the whole request."
     },
     {
       "model": "gpt-6-luna",
@@ -436,18 +460,26 @@
       "modality": "text",
       "currency": "USD",
       "asOf": "2026-10-28",
-      "source": "https://developers.openai.com/api/docs/pricing",
+      "source": "https://developers.openai.com/api/docs/models/gpt-6-luna",
       "provenance": "vendor-pricing-page",
       "tiers": [
         {
+          "maxInputTokens": 272000,
           "inputPer1m": 0.1,
           "outputPer1m": 0.5,
-          "cachedInputPer1m": 0.01
+          "cachedInputPer1m": 0.01,
+          "cacheWritePer1m": 0.125
+        },
+        {
+          "inputPer1m": 0.2,
+          "outputPer1m": 0.75,
+          "cachedInputPer1m": 0.02,
+          "cacheWritePer1m": 0.25
         }
       ],
       "batchMultiplier": 0.5,
       "contextWindow": 1050000,
-      "notes": "Standard (short-context) tier; the >272K tier is not captured here."
+      "notes": "Prompts over 272K input tokens are billed at 2x input and cache rates and 1.5x output for the whole request."
     },
     {
       "model": "gpt-5.6-sol",
