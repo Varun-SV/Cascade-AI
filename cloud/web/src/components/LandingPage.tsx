@@ -88,6 +88,9 @@ export default function LandingPage({ config, onDevLogin, reduceMotion = false }
     if (hero) {
       hero.style.opacity = String(1 - seg(p, 0.012, 0.05));
       hero.style.pointerEvents = p < 0.03 ? 'auto' : 'none';
+      // Faded is not gone: without inert, Tab still lands on the prompt
+      // input and example chips after they have scrolled out of sight.
+      hero.inert = p >= 0.03;
       hero.hidden = p > 0.06;
     }
     chapterRefs.current.forEach((c, i) => c?.classList.toggle('on', p >= CHAPTERS[i][0] && p <= CHAPTERS[i][1]));
@@ -104,6 +107,7 @@ export default function LandingPage({ config, onDevLogin, reduceMotion = false }
     if (rail) {
       rail.style.opacity = past ? '0' : '1';
       rail.style.pointerEvents = past ? 'none' : '';
+      rail.inert = past;
       const tiers = [seg(p, 0.05, 0.22), seg(p, 0.24, 0.45), seg(p, 0.45, 0.9)];
       rail.querySelectorAll<SVGPathElement>('.rp').forEach((el, i) => { el.style.strokeDashoffset = String(1 - tiers[i]); });
       const cur = p < 0.22 ? 0 : p < 0.45 ? 1 : p < 0.9 ? 2 : 3;
@@ -123,7 +127,7 @@ export default function LandingPage({ config, onDevLogin, reduceMotion = false }
     const canvas = canvasRef.current;
     if (!canvas) return;
     // three.js loads only here, so signed-in visitors never download it.
-    void import('./landing/descentScene.js').then(({ createDescentScene }) => {
+    import('./landing/descentScene.js').then(({ createDescentScene }) => {
       if (disposed) return;
       const scene = createDescentScene(canvas, { still: reduced, onFrame: paint });
       if (!scene) { setNoWebgl(true); return; }
@@ -131,9 +135,23 @@ export default function LandingPage({ config, onDevLogin, reduceMotion = false }
       scene.setPrompt(chosenRef.current.prompt, chosenRef.current.plan);
       if (reduced) { paint(1); return; }
       scene.setTarget(progress());
+      onScroll();
+    }).catch(() => {
+      // The chunk can fail to download (a flaky network, or a deploy that
+      // replaced it). Without this the story text never appears and the
+      // visitor scrolls a blank track; the still layout tells it instead.
+      if (!disposed) setNoWebgl(true);
     });
     const root = rootRef.current;
-    const onScroll = () => sceneRef.current?.setTarget(progress());
+    const onScroll = () => {
+      const scene = sceneRef.current;
+      if (!scene) return;
+      scene.setTarget(progress());
+      // Once the page below covers the fixed canvas there is nothing to draw.
+      const covered = (afterRef.current?.getBoundingClientRect().top ?? Infinity) <= 0;
+      if (covered) paint(progress());
+      scene.setActive(!covered);
+    };
     root?.addEventListener('scroll', onScroll, { passive: true });
     return () => {
       disposed = true;

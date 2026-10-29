@@ -27,6 +27,11 @@ export interface DescentScene {
   setPrompt(text: string, plan: DescentPlan): void;
   /** Re-render once at the final logo frame (reduced motion). */
   renderStill(): void;
+  /**
+   * Whether the scene is on screen. While it is not (the content below the
+   * descent covers the fixed canvas), no frames are scheduled at all.
+   */
+  setActive(active: boolean): void;
   dispose(): void;
 }
 
@@ -483,12 +488,29 @@ export function createDescentScene(canvas: HTMLCanvasElement, opts: Options = {}
   window.addEventListener('resize', onResize);
   resize();
 
+  // The loop runs only while there is something to see: not in the still
+  // layout, not while the page below covers the canvas, not in a background
+  // tab. Stopped means NO frames scheduled — an idle rAF that returns early
+  // still wakes the page sixty times a second for as long as it stays open.
   let target = 0, pNow = 0, raf = 0, last = performance.now(), tAcc = 0;
+  let active = true, running = false;
+  function sync() {
+    const want = !opts.still && active && !document.hidden;
+    if (want && !running) {
+      running = true;
+      last = performance.now();
+      raf = requestAnimationFrame(frame);
+    } else if (!want && running) {
+      running = false;
+      cancelAnimationFrame(raf);
+    }
+  }
+  document.addEventListener('visibilitychange', sync);
   function frame(now: number) {
+    if (!running) return;
     raf = requestAnimationFrame(frame);
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
-    if (document.hidden) return;
     tAcc += dt;
     pNow += (target - pNow) * Math.min(1, dt * 5);
     mouse.sx += (mouse.x - mouse.sx) * 0.05;
@@ -497,14 +519,17 @@ export function createDescentScene(canvas: HTMLCanvasElement, opts: Options = {}
     opts.onFrame?.(pNow);
   }
   if (opts.still) render(1, 4);
-  else raf = requestAnimationFrame(frame);
+  else sync();
 
   return {
     setTarget(p) { target = cl(p); },
     setPrompt,
     renderStill() { render(1, 4); },
+    setActive(next) { active = next; sync(); },
     dispose() {
+      running = false;
       cancelAnimationFrame(raf);
+      document.removeEventListener('visibilitychange', sync);
       window.removeEventListener('pointermove', onPointer);
       window.removeEventListener('resize', onResize);
       [promptSprite, card, ...secSprites, ...toolSprites].forEach(dropSprite);

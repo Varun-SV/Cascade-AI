@@ -146,14 +146,30 @@ export default function ConversationSidebar({
   const listed = useRef(false);
   useEffect(() => { listed.current = true; }, []);
   const [justDone, setJustDone] = useState<string[]>([]);
+  // One expiry timer PER conversation, owned by a ref rather than by the
+  // effect's cleanup: the running set changes whenever any run starts (App
+  // even passes a fresh [] while idle), and clearing the timer on every change
+  // left a finished run's check stuck on screen if another run began within
+  // its 2.6 s.
+  const doneTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   useEffect(() => {
     const ended = prevRunning.current.filter((id) => !runningConversationIds.includes(id));
     prevRunning.current = runningConversationIds;
     if (ended.length === 0) return;
-    setJustDone((d) => [...d, ...ended]);
-    const t = setTimeout(() => setJustDone((d) => d.filter((id) => !ended.includes(id))), 2600);
-    return () => clearTimeout(t);
+    setJustDone((d) => [...d.filter((id) => !ended.includes(id)), ...ended]);
+    for (const id of ended) {
+      const timers = doneTimers.current;
+      clearTimeout(timers.get(id));
+      timers.set(id, setTimeout(() => {
+        timers.delete(id);
+        setJustDone((d) => d.filter((x) => x !== id));
+      }, 2600));
+    }
   }, [runningConversationIds]);
+  useEffect(() => {
+    const timers = doneTimers.current;
+    return () => { timers.forEach(clearTimeout); timers.clear(); };
+  }, []);
 
   const shown = !q
     ? conversations
