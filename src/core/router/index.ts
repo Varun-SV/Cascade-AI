@@ -1725,7 +1725,16 @@ export class CascadeRouter extends EventEmitter {
         // The dead id above is a durable fact and worth keeping whoever found
         // it. Repointing a tier is not: that is this run's routing state, and
         // a finished run has no business rewriting it.
-        const next = currentRun && depth <= 3 ? this.selector.selectForTier(tier) : null;
+        // A credential-scoped 403 says the KEY is fine and this one model is
+        // not enabled for it, so another model on the same key is the move that
+        // keeps the spend where the user put it. This used to fall out of the
+        // T1 chain happening to start with the same provider; it is now asked
+        // for directly, so reordering a chain cannot quietly move the spend.
+        const sameKey = credentialScoped
+          ? this.selector.getCandidatesForTier(tier)
+            .find((m) => m.provider === model.provider && m.id !== model.id && !this.isModelOut(m))
+          : undefined;
+        const next = currentRun && depth <= 3 ? sameKey ?? this.selector.selectForTier(tier) : null;
         if (next && next.id !== model.id) {
           this.tierModels.set(tier, next);
           this.ensureProvider(next, this.config.providers);

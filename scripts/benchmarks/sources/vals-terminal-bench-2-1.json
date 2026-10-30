@@ -1,0 +1,134 @@
+{
+  "source": "vals-terminal-bench-2-1",
+  "label": "Vals AI \u00b7 Terminal-Bench 2.1 (Terminus 2 harness, pass@1)",
+  "url": "https://www.vals.ai/benchmarks/terminal-bench-2-1",
+  "capturedAt": "2026-10-28",
+  "sourceUpdatedAt": "2026-10-01",
+  "provenance": "captured",
+  "scale": "percent",
+  "calibration": {
+    "code": {
+      "min": 0,
+      "max": 90
+    },
+    "agentic": {
+      "min": 0,
+      "max": 90
+    }
+  },
+  "note": "ANCHOR for code and agentic: every other code/agentic source is fitted onto this scale over the models both rate (see \"fitTo\"). One harness (Terminus 2), 89 terminal tasks, a task scores only if all its tests pass. Archived by Vals on 2026-10-01 in favour of Terminal-Bench 4.0, so it stops gaining models, but it rates more current models than any other single-harness agentic benchmark. Band 0..90: the frontier (~88%) reads ~97. Rows run under a different harness (Claude Code, Codex, Factory, Cursor) are left out. gemini-3.1-flash-lite is the Preview snapshot (the only one rated).",
+  "models": {
+    "claude-opus-5.5": {
+      "code": 87.64,
+      "agentic": 87.64
+    },
+    "gpt-6-astra": {
+      "code": 87.27,
+      "agentic": 87.27
+    },
+    "gpt-5.6-sol": {
+      "code": 85.77,
+      "agentic": 85.77
+    },
+    "claude-fable-5.1": {
+      "code": 85.02,
+      "agentic": 85.02
+    },
+    "claude-opus-5": {
+      "code": 84.64,
+      "agentic": 84.64
+    },
+    "gpt-6-sol": {
+      "code": 83.15,
+      "agentic": 83.15
+    },
+    "claude-sonnet-5.5": {
+      "code": 83.15,
+      "agentic": 83.15
+    },
+    "gemini-3.8-flash": {
+      "code": 81.27,
+      "agentic": 81.27
+    },
+    "claude-fable-5": {
+      "code": 80.52,
+      "agentic": 80.52
+    },
+    "gpt-5.6-luna": {
+      "code": 79.03,
+      "agentic": 79.03
+    },
+    "gemini-3.7-flash": {
+      "code": 77.53,
+      "agentic": 77.53
+    },
+    "gpt-5.6-terra": {
+      "code": 77.53,
+      "agentic": 77.53
+    },
+    "gpt-5.5": {
+      "code": 76.4,
+      "agentic": 76.4
+    },
+    "claude-sonnet-5": {
+      "code": 74.53,
+      "agentic": 74.53
+    },
+    "gemini-3.5-flash": {
+      "code": 74.16,
+      "agentic": 74.16
+    },
+    "gemini-3.6-flash": {
+      "code": 73.78,
+      "agentic": 73.78
+    },
+    "gpt-6-luna": {
+      "code": 73.03,
+      "agentic": 73.03
+    },
+    "claude-opus-4.8": {
+      "code": 71.91,
+      "agentic": 71.91
+    },
+    "gemini-3.1-pro": {
+      "code": 70.79,
+      "agentic": 70.79
+    },
+    "claude-opus-4.7": {
+      "code": 68.54,
+      "agentic": 68.54
+    },
+    "gemini-4-argon": {
+      "code": 57.68,
+      "agentic": 57.68
+    },
+    "claude-sonnet-4.6": {
+      "code": 57.3,
+      "agentic": 57.3
+    },
+    "gpt-5.4-mini": {
+      "code": 54.68,
+      "agentic": 54.68
+    },
+    "gemini-3-flash": {
+      "code": 53.93,
+      "agentic": 53.93
+    },
+    "gemini-3.5-flash-lite": {
+      "code": 50.19,
+      "agentic": 50.19
+    },
+    "claude-haiku-4.5": {
+      "code": 43.82,
+      "agentic": 43.82
+    },
+    "gpt-5.4-nano": {
+      "code": 41.57,
+      "agentic": 41.57
+    },
+    "gemini-3.1-flash-lite": {
+      "code": 34.08,
+      "agentic": 34.08
+    }
+  }
+}

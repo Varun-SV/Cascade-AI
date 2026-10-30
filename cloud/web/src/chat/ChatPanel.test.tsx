@@ -80,3 +80,24 @@ describe('ChatPanel — a live run', () => {
     expect(screen.queryByLabelText('Cascade planned this run')).not.toBeInTheDocument();
   });
 });
+
+describe('ChatPanel — a prompt carried in from the landing page', () => {
+  afterEach(() => sessionStorage.clear());
+
+  it('opens with it in the composer after sign-in, including a redirect sign-in, and never sends it', () => {
+    // A GitHub/Google sign-in navigates away and back: everything in memory is
+    // gone and only the tab's sessionStorage carries the prompt to this mount.
+    sessionStorage.setItem('cascade-cloud-pending-prompt', JSON.stringify({ prompt: 'Audit our cloud bill', at: Date.now() }));
+    const onSend = vi.fn();
+    renderPanel({ messages: [], busy: false, approval: null, activity: [], onSend });
+    expect(document.querySelector('textarea')).toHaveValue('Audit our cloud bill');
+    expect(onSend).not.toHaveBeenCalled();
+    // Taken once: the next chat opened in this tab starts empty.
+    expect(sessionStorage.getItem('cascade-cloud-pending-prompt')).toBeNull();
+  });
+
+  it('starts empty when nothing was carried in', () => {
+    renderPanel({ messages: [], busy: false, approval: null, activity: [] });
+    expect(document.querySelector('textarea')).toHaveValue('');
+  });
+});

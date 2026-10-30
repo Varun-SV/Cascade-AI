@@ -11,6 +11,10 @@ import {
   normalizeSource,
   conservativeAggregate,
   buildFamilies,
+  resolveBands,
+  theilSen,
+  spearman,
+  MIN_FIT_SPEARMAN,
 } from './aggregate.mjs';
 
 describe('clampScore', () => {
@@ -127,12 +131,21 @@ describe('buildFamilies', () => {
     ]);
   });
 
-  it('keeps the committed baseline for any cell no source covers', () => {
-    const partial = [{ source: 'aa', scale: 'index0-100', models: { fam: { code: 90 } } }];
+  it('imputes a cell no source covers from the family\'s measured cells, ahead of the baseline', () => {
+    // A hand-typed baseline is exactly what outlived the data before: GPT-4o
+    // kept code 85 from a seed long after every agentic board put it near 50.
+    const partial = [{ source: 'aa', scale: 'index0-100', models: { fam: { code: 90, analysis: 70 } } }];
     const base = { fam: { code: 70, analysis: 60, creative: 55, data: 65 } };
-    const { families } = buildFamilies(partial, { base });
-    // code overridden by the source (min(90)=90); the rest fall back to baseline.
-    expect(families.fam).toEqual({ code: 90, analysis: 60, creative: 55, data: 65 });
+    const { families, trace } = buildFamilies(partial, { base });
+    expect(families.fam).toEqual({ code: 90, analysis: 70, creative: 80, data: 80 });
+    expect(trace.fam.creative.mode).toBe('imputed');
+  });
+
+  it('keeps the committed baseline for a family nothing measures at all', () => {
+    const base = { fam: { code: 70, analysis: 60, creative: 55, data: 65 } };
+    const { families, trace } = buildFamilies([], { base });
+    expect(families.fam).toEqual(base.fam);
+    expect(trace.fam.code.mode).toBe('baseline');
   });
 
   it('carries an uncovered baseline family through unchanged', () => {
@@ -142,10 +155,33 @@ describe('buildFamilies', () => {
     expect(families.fam).toBeDefined();
   });
 
-  it('does not emit a family that lacks a full task profile and has no baseline', () => {
+  it('emits a family measured on one task, imputing the rest from it', () => {
     const partial = [{ source: 'aa', scale: 'index0-100', models: { fam: { code: 90 } } }];
     const { families } = buildFamilies(partial, {}); // no base
-    expect(families.fam).toBeUndefined();
+    expect(families.fam).toEqual({ code: 90, analysis: 90, creative: 90, data: 90 });
+  });
+
+  it('carries an optional agentic score without requiring it', () => {
+    const src = [
+      { source: 'a', scale: 'percent', models: { both: { code: 80, analysis: 80, creative: 80, data: 80, agentic: 60 }, taskOnly: { code: 70, analysis: 70, creative: 70, data: 70 } } },
+    ];
+    const { families } = buildFamilies(src, {});
+    expect(families.both.agentic).toBe(60);
+    expect(families.taskOnly).toEqual({ code: 70, analysis: 70, creative: 70, data: 70 });
+    // agentic is not imputed: an unmeasured tool loop is not assumed to hold.
+    expect(families.taskOnly.agentic).toBeUndefined();
+  });
+
+  it('uses a fallback source only where no primary source rates the cell', () => {
+    const src = [
+      { source: 'primary', scale: 'percent', models: { a: { code: 60, analysis: 60, creative: 60, data: 60 }, b: { code: 50 } } },
+      { source: 'fb', role: 'fallback', scale: 'percent', models: { a: { analysis: 99 }, b: { analysis: 40, data: 40 } } },
+    ];
+    const { families, trace } = buildFamilies(src, {});
+    expect(families.a.analysis).toBe(60); // a measurement is never overridden by a fallback
+    expect(families.b.analysis).toBe(40);
+    expect(trace.b.analysis.mode).toBe('fallback');
+    expect(trace.a.analysis.contributors.map((c) => c.source)).toEqual(['primary']);
   });
 
   it('robust mode ignores one low outlier when three sources cover a cell', () => {
@@ -161,5 +197,77 @@ describe('buildFamilies', () => {
 
   it('covers every task key in TASK_KEYS', () => {
     expect(TASK_KEYS).toEqual(['code', 'analysis', 'creative', 'data']);
+  });
+});
+
+describe('fitTo calibration', () => {
+  const anchor = {
+    source: 'anchor', scale: 'percent', calibration: { code: { min: 0, max: 90 } },
+    models: { m1: { code: 50 }, m2: { code: 60 }, m3: { code: 70 }, m4: { code: 80 }, m5: { code: 90 } },
+  };
+  // A harder benchmark: same order, raw numbers 40 points lower.
+  const hard = {
+    source: 'hard', scale: 'percent', calibration: { code: { fitTo: 'anchor' } },
+    models: { m1: { code: 10 }, m2: { code: 20 }, m3: { code: 30 }, m4: { code: 40 }, m5: { code: 50 }, newer: { code: 45 } },
+  };
+
+  it('theilSen recovers a straight line and ignores one outlier', () => {
+    const line = theilSen([[0, 1], [1, 3], [2, 5], [3, 7], [4, 100]]);
+    expect(line.slope).toBeCloseTo(2);
+    expect(line.intercept).toBeCloseTo(1);
+  });
+
+  it('spearman is 1 for the same order and -1 for the reverse', () => {
+    expect(spearman([[1, 10], [2, 20], [3, 30]])).toBeCloseTo(1);
+    expect(spearman([[1, 30], [2, 20], [3, 10]])).toBeCloseTo(-1);
+  });
+
+  it('maps a harder benchmark onto the anchor scale over shared models', () => {
+    const { bands, fits } = resolveBands(hard, { anchor });
+    expect(bands.code.min).toBeCloseTo(-40);
+    expect(bands.code.max).toBeCloseTo(50);
+    expect(fits.code).toMatchObject({ fitTo: 'anchor', n: 5 });
+    // So "lowest across sources" compares like with like: m5 is 100 on both.
+    const { families } = buildFamilies([anchor, hard], {});
+    expect(families.m5.code).toBe(100);
+    // And a model only the harder board rated lands where the anchor would put it.
+    expect(families.newer.code).toBe(94); // 45 + 40 = 85 on the anchor; 85/90
+  });
+
+  it('skips a task whose fit is too weak to trust', () => {
+    const scrambled = {
+      source: 'noise', scale: 'percent', calibration: { code: { fitTo: 'anchor' } },
+      models: { m1: { code: 50 }, m2: { code: 10 }, m3: { code: 40 }, m4: { code: 20 }, m5: { code: 30 } },
+    };
+    expect(spearman([[50, 50], [10, 60], [40, 70], [20, 80], [30, 90]])).toBeLessThan(MIN_FIT_SPEARMAN);
+    const { bands } = resolveBands(scrambled, { anchor });
+    expect(bands.code).toBeUndefined();
+  });
+
+  it('skips a task when too few models are shared', () => {
+    const few = { ...hard, models: { m1: { code: 10 }, m2: { code: 20 }, x: { code: 5 } } };
+    expect(resolveBands(few, { anchor }).bands.code).toBeUndefined();
+  });
+});
+
+describe('committed text sources', () => {
+  it('every fitTo calibration in the repo clears the gate', async () => {
+    const { loadSources } = await import('./sources.mjs');
+    const sources = await loadSources();
+    const byName = Object.fromEntries(sources.map((s) => [s.source, s]));
+    for (const s of sources) {
+      for (const [task, spec] of Object.entries(s.calibration ?? {})) {
+        if (spec.fitTo === undefined) continue;
+        const { bands, fits } = resolveBands(s, byName);
+        expect(bands[task], `${s.source}.${task}`).toBeDefined();
+        expect(fits[task].spearman, `${s.source}.${task}`).toBeGreaterThanOrEqual(MIN_FIT_SPEARMAN);
+      }
+    }
+  });
+
+  it('ships no seed-approximation text sources', async () => {
+    const { loadSources } = await import('./sources.mjs');
+    const sources = await loadSources();
+    expect(sources.filter((s) => s.provenance === 'seed-approximation').map((s) => s.source)).toEqual([]);
   });
 });

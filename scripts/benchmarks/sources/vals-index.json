@@ -1,0 +1,58 @@
+{
+  "source": "vals-index",
+  "label": "Vals AI \u00b7 Vals Index v2.2 (finance, coding, legal, tax agent tasks)",
+  "url": "https://www.vals.ai/benchmarks/vals_index",
+  "capturedAt": "2026-10-28",
+  "sourceUpdatedAt": "2026-10-27",
+  "provenance": "captured",
+  "scale": "percent",
+  "calibration": {
+    "analysis": {
+      "min": 0,
+      "max": 73
+    },
+    "data": {
+      "min": 0,
+      "max": 73
+    }
+  },
+  "note": "ANCHOR for analysis and data. A GDP-weighted average of Finance Agent v2.1 + Excel Modeling (finance), Terminal-Bench 4.0 + Vibe Code + Code Migration (coding), Legal Research + HLAB (legal) and Tax Agent Bench: real multi-step knowledge work with tools, which is what a Cascade section actually asks of a model. One harness for every model. Band 0..73: the top (~71%) reads ~97. Only rates the current generation.",
+  "models": {
+    "claude-sonnet-5.5": {
+      "analysis": 70.85,
+      "data": 70.85
+    },
+    "claude-opus-5.5": {
+      "analysis": 70.18,
+      "data": 70.18
+    },
+    "gemini-4-argon": {
+      "analysis": 69.24,
+      "data": 69.24
+    },
+    "gpt-6-astra": {
+      "analysis": 65.02,
+      "data": 65.02
+    },
+    "gpt-6.1-sol": {
+      "analysis": 63.94,
+      "data": 63.94
+    },
+    "gpt-6.1-terra": {
+      "analysis": 60.17,
+      "data": 60.17
+    },
+    "claude-haiku-5.5": {
+      "analysis": 58.73,
+      "data": 58.73
+    },
+    "gemini-3.8-flash": {
+      "analysis": 55.95,
+      "data": 55.95
+    },
+    "gpt-6-luna": {
+      "analysis": 52.32,
+      "data": 52.32
+    }
+  }
+}

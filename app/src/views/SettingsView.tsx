@@ -60,10 +60,10 @@ const ADVANCED_DEFAULTS: AdvancedSettings = {
 interface ProviderDef { id: string; label: string; models: string[]; freeText?: boolean }
 const TIER_PROVIDERS: ProviderDef[] = [
   { id: 'auto', label: 'Auto (best model)', models: [] },
-  { id: 'anthropic', label: 'Anthropic', models: ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'] },
-  { id: 'openai', label: 'OpenAI', models: ['gpt-4o', 'gpt-4o-mini', 'o1', 'o3-mini'] },
+  { id: 'anthropic', label: 'Anthropic', models: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'] },
+  { id: 'openai', label: 'OpenAI', models: ['gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna'] },
   { id: 'azure', label: 'Azure OpenAI', models: [], freeText: true },
-  { id: 'gemini', label: 'Google Gemini', models: ['gemini-2.0-flash', 'gemini-2.0-pro'] },
+  { id: 'gemini', label: 'Google Gemini', models: ['gemini-4-argon', 'gemini-3.8-flash', 'gemini-3.5-flash-lite'] },
   // No static catalog (models.github.ai's catalog is fully live-discovered),
   // same treatment as azure/openai-compatible/ollama below.
   { id: 'openai-compatible', label: 'OpenAI-Compatible', models: [], freeText: true },

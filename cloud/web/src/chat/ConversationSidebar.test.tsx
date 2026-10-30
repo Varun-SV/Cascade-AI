@@ -1,6 +1,7 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
+import { MotionGlobalConfig } from 'framer-motion';
 import ConversationSidebar from './ConversationSidebar.js';
 import { searchConversations } from '../lib/api.js';
 
@@ -134,5 +135,25 @@ describe('ConversationSidebar', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Account' }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Spend & savings' }));
     expect(onOpenSpend).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears a finished run\'s check on time even when another run starts meanwhile', async () => {
+    vi.useFakeTimers();
+    MotionGlobalConfig.skipAnimations = true; // so the check's exit completes at once
+    try {
+      const update = renderSidebar({ runningConversationIds: ['c1'] });
+      update({ runningConversationIds: [] }); // c1 finished: its check shows
+      const finished = () => document.querySelectorAll('[aria-label="Finished"]').length;
+      expect(finished()).toBe(1);
+      act(() => { vi.advanceTimersByTime(1000); });
+      update({ runningConversationIds: ['c2'] }); // another run starts before c1's check expires
+      act(() => { vi.advanceTimersByTime(2000); });
+      // The running-set change must not have cancelled c1's expiry.
+      await act(async () => { await vi.runOnlyPendingTimersAsync(); });
+      expect(finished()).toBe(0);
+    } finally {
+      MotionGlobalConfig.skipAnimations = false;
+      vi.useRealTimers();
+    }
   });
 });

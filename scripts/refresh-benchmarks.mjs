@@ -32,7 +32,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { TASK_KEYS, buildFamilies } from './benchmarks/aggregate.mjs';
+import { TASK_KEYS, OPTIONAL_KEYS, ALL_KEYS, buildFamilies } from './benchmarks/aggregate.mjs';
 import { loadSources } from './benchmarks/sources.mjs';
 import { buildAllModalities } from './benchmarks/modality-aggregate.mjs';
 import { loadModalitySources } from './benchmarks/modality-sources.mjs';
@@ -64,6 +64,10 @@ function sanitizeFamilies(raw) {
       const score = clampScore(profile[key]);
       if (score === null) { ok = false; break; }
       clean[key] = score;
+    }
+    for (const key of OPTIONAL_KEYS) {
+      const score = clampScore(profile[key]);
+      if (score !== null) clean[key] = score;
     }
     if (ok) out[family] = clean;
   }
@@ -113,7 +117,7 @@ function serialize(snapshot) {
   lines.push('  "families": {');
   const families = Object.entries(snapshot.families);
   families.forEach(([family, profile], i) => {
-    const inner = TASK_KEYS.map((k) => `"${k}": ${profile[k]}`).join(', ');
+    const inner = ALL_KEYS.filter((k) => Number.isFinite(profile[k])).map((k) => `"${k}": ${profile[k]}`).join(', ');
     lines.push(`    ${JSON.stringify(family)}: { ${inner} }${i < families.length - 1 ? ',' : ''}`);
   });
   lines.push(hasModalities ? '  },' : '  }');
@@ -140,7 +144,7 @@ function canonicalFamilies(families) {
   for (const family of Object.keys(families).sort()) {
     const profile = families[family];
     const sortedProfile = {};
-    for (const key of TASK_KEYS) sortedProfile[key] = profile[key];
+    for (const key of ALL_KEYS) if (profile[key] !== undefined) sortedProfile[key] = profile[key];
     sortedFamilies[family] = sortedProfile;
   }
   return JSON.stringify(sortedFamilies);
@@ -162,7 +166,7 @@ function canonicalModalities(modalities) {
 function printTrace(trace) {
   for (const family of Object.keys(trace).sort()) {
     console.log(`\n${family}`);
-    for (const task of TASK_KEYS) {
+    for (const task of ALL_KEYS) {
       const cell = trace[family][task];
       if (!cell) continue;
       const from = cell.contributors.length
@@ -184,6 +188,72 @@ function printModalityTrace(traces) {
         ? cell.contributors.map((c) => `${c.source}=${c.value}`).join(', ')
         : cell.mode;
       console.log(`  ${family.padEnd(28)} ${String(cell.value).padStart(3)}  [${cell.mode}]  ${from}`);
+    }
+  }
+}
+
+/**
+ * Families were split by model VERSION in 2026-10: one `claude-opus` row used
+ * to score Opus 4.5 and Opus 5.5 identically, though Terminal-Bench puts them
+ * 20+ points apart. A versioned family that no source rates for some task
+ * inherits that cell from the old generic row it was split from (as
+ * 'baseline' in the trace), instead of vanishing from routing.
+ */
+const RENAMED_FROM = {
+  'claude-haiku-4.5': 'claude-haiku',
+  'claude-sonnet-4.5': 'claude-sonnet',
+};
+
+function seedRenamedFamilies(families) {
+  const out = { ...families };
+  for (const [next, prev] of Object.entries(RENAMED_FROM)) {
+    if (!out[next] && families[prev]) out[next] = { ...families[prev] };
+  }
+  return out;
+}
+
+/**
+ * Cascade fetches this file live from GitHub, so builds released before the
+ * version split still read it — and they look families up by the OLD generic
+ * keys. Those keys are kept, each a copy of the version an older build's own
+ * catalogue most likely routes to under that name, so an older install keeps
+ * real scores instead of falling to the neutral 0.5.
+ */
+const LEGACY_ALIASES = {
+  'claude-opus': 'claude-opus-5',
+  'claude-sonnet': 'claude-sonnet-5',
+  'claude-haiku': 'claude-haiku-4.5',
+};
+
+/**
+ * Families no source measures any more AND whose models the provider has shut
+ * down. Their only numbers were hand-typed seeds; keeping them would hand an
+ * older build a confident score for a model that now fails every call. Without
+ * a row they read as the neutral 0.5 — which is all anyone knows about them.
+ */
+const DROPPED_FAMILIES = new Set([
+  'gemini-1.5-pro', // shut down on the Gemini API
+  'gemini-flash-lite', // gemini-2.0-flash-lite, shut down 2026-06-01
+  'gpt-4o-mini', // shutdown 2027-01-14; unmeasured by any current board
+]);
+
+function withLegacyAliases(families) {
+  const out = { ...families };
+  for (const fam of DROPPED_FAMILIES) delete out[fam];
+  for (const [legacy, modern] of Object.entries(LEGACY_ALIASES)) {
+    if (out[modern]) out[legacy] = { ...out[modern] };
+  }
+  return Object.fromEntries(Object.entries(out).sort(([a], [b]) => a.localeCompare(b)));
+}
+
+/** Print every fitted calibration, so a weak fit is visible on every refresh. */
+function printFits(fits) {
+  for (const [source, tasks] of Object.entries(fits ?? {})) {
+    for (const [task, f] of Object.entries(tasks)) {
+      const rho = f.spearman == null ? 'n/a' : f.spearman.toFixed(2);
+      console.log(
+        `  fit ${source}.${task} → ${f.fitTo}: n=${f.n}, y = ${f.slope.toFixed(3)}x + ${f.intercept.toFixed(1)}, spearman ${rho}`,
+      );
     }
   }
 }
@@ -210,13 +280,15 @@ async function main() {
       // single mis-captured number can't tank a model; BENCHMARK_AGG_MODE=min
       // forces the stricter pure-lowest.
       const mode = process.env.BENCHMARK_AGG_MODE === 'min' ? 'min' : 'robust';
-      const { families, trace } = buildFamilies(sources, { mode, base: currentFamilies });
-      nextFamilies = families;
+      const base = seedRenamedFamilies(currentFamilies);
+      const { families, trace, fits } = buildFamilies(sources, { mode, base });
+      nextFamilies = withLegacyAliases(families);
       usedAggregator = true;
       console.log(
         `Aggregated ${sources.length} text source(s) [${sources.map((s) => s.source).join(', ')}] ` +
         `in '${mode}' mode → ${Object.keys(families).length} families.`,
       );
+      printFits(fits);
       if (explain) printTrace(trace);
     } else {
       console.log('No text benchmark sources found — keeping the committed snapshot as the baseline.');

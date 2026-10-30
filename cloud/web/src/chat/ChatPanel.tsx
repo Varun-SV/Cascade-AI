@@ -3,6 +3,7 @@ import type { BrowserAllowanceView } from './browserAllowance.js';
 import { AnimatePresence, motion } from 'framer-motion';
 import { AlertTriangle, KeyRound, Layers, ChevronDown, Search, BookOpen, Calendar, Globe, GitBranch } from 'lucide-react';
 import CascadeMark from '../components/CascadeMark.js';
+import { flyDrop } from './motion.js';
 import Message from './Message.js';
 import Composer from './Composer.js';
 import PlanNotice from './PlanNotice.js';
@@ -15,6 +16,7 @@ import { BrowserLiveView } from './BrowserLiveView.js';
 import type { BrowserInputEvent } from './BrowserLiveView.js';
 import { ToolApprovalPrompt } from './ToolApprovalPrompt.js';
 import { ClarificationPrompt } from './ClarificationPrompt.js';
+import { takePendingPrompt } from '../lib/pendingPrompt.js';
 import type { ToolApproval } from './useChatSession.js';
 
 interface Props {
@@ -116,8 +118,16 @@ export default function ChatPanel({
   toolApprovals, onDecideToolApproval,
 }: Props) {
   const threadRef = useRef<HTMLDivElement>(null);
+  const statusMarkRef = useRef<HTMLSpanElement>(null);
+  const wasBusy = useRef(busy);
   const [activityOpen, setActivityOpen] = useState(false);
   const [draftRequest, setDraftRequest] = useState<{ text: string; seq: number } | null>(null);
+  // A prompt poured into the landing page before signing in lands in the
+  // composer, ready to edit or send. Taken once, and never sent by itself.
+  useEffect(() => {
+    const pending = takePendingPrompt();
+    if (pending) setDraftRequest({ text: pending, seq: Date.now() });
+  }, []);
   // The browser gets a pane of its own where there is room for one beside the
   // thread; on a narrower screen it stays above the composer, so its Stop
   // control is never scrolled away with the messages.
@@ -132,6 +142,29 @@ export default function ChatPanel({
     if (el.scrollTo) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
     else el.scrollTop = el.scrollHeight;
   }, [messages, status]);
+
+  // A run starting: a drop leaves the composer's button and falls into the
+  // run's Cascade mark, so the hand-off from you to the organization is seen.
+  useEffect(() => {
+    const started = busy && !wasBusy.current;
+    wasBusy.current = busy;
+    if (!started) return;
+    let raf = 0, tries = 0;
+    const launch = () => {
+      const from = document.querySelector('[data-composer-action]');
+      const to = statusMarkRef.current;
+      if (from && to) { void flyDrop(from, to); return; }
+      if (tries++ < 90) raf = requestAnimationFrame(launch);
+    };
+    raf = requestAnimationFrame(launch);
+    return () => cancelAnimationFrame(raf);
+  }, [busy]);
+
+  // Which tiers are working right now, to light those arcs of the status mark.
+  const litTiers = Array.from(new Set(activity
+    .filter((n) => !/COMPLETE|DONE|FAIL|ERROR|BLOCK|SKIP|CANCEL/i.test(n.status))
+    .map((n) => (n.role.startsWith('T1') ? 0 : n.role.startsWith('T2') ? 1 : n.role.startsWith('T3') ? 2 : -1))
+    .filter((i) => i >= 0)));
 
   // The most recent verdict across the live tiers. Reviews come from T1, so
   // there is at most one in flight; scanning the whole list rather than
@@ -193,7 +226,7 @@ export default function ChatPanel({
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.4 }}
             >
-              <CascadeMark size={40} animate={false} />
+              <CascadeMark size={40} animate={false} className="cz-draw-mark" />
               <h1 className="m-0 font-serif text-[clamp(28px,4.2vw,38px)] font-normal tracking-[-0.015em] text-ink-50">
                 {greeting()}{userName ? `, ${userName}` : ''}
               </h1>
@@ -205,10 +238,10 @@ export default function ChatPanel({
                   <motion.div
                     key={m.id}
                     layout="position"
-                    initial={{ opacity: 0, y: 6 }}
-                    animate={{ opacity: 1, y: 0 }}
+                    initial={m.role === 'user' ? { opacity: 0, y: 28, scale: 0.97 } : { opacity: 0, y: 6 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
                     exit={{ opacity: 0 }}
-                    transition={{ duration: 0.25, ease: 'easeOut' }}
+                    transition={m.role === 'user' ? { type: 'spring', stiffness: 380, damping: 26 } : { duration: 0.25, ease: 'easeOut' }}
                   >
                     <Message
                       message={m}
@@ -248,8 +281,19 @@ export default function ChatPanel({
                       className={`group flex items-center gap-[9px] self-start text-[14px] text-ink-300 ${!runDetail && activity.length > 0 ? 'cursor-pointer hover:text-ink-50' : 'cursor-default'}`}
                       aria-expanded={runDetail ? undefined : activityOpen}
                     >
-                      <CascadeMark size={18} />
-                      <span className="shimmer-text">{status}</span>
+                      <span ref={statusMarkRef} className="inline-flex"><CascadeMark size={18} lit={litTiers} /></span>
+                      <AnimatePresence mode="wait" initial={false}>
+                        <motion.span
+                          key={status}
+                          className="shimmer-text"
+                          initial={{ opacity: 0, y: 4 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: -4 }}
+                          transition={{ duration: 0.18 }}
+                        >
+                          {status}
+                        </motion.span>
+                      </AnimatePresence>
                       {!runDetail && activity.length > 0 && (
                         <ChevronDown size={13} className={`text-ink-500 transition-transform group-hover:text-ink-300 ${activityOpen ? 'rotate-180' : ''}`} />
                       )}

@@ -2,33 +2,38 @@
 //  Cascade AI — Public-benchmark model strengths
 // ─────────────────────────────────────────────────────────────────────────────
 //
-//  Curated 0–100 scores per model family per task type, approximated from
-//  public benchmarks so Cascade Auto can route each subtask to the model that
-//  is actually strongest at it, rather than always defaulting to the
-//  cheapest-or-first model:
-//    - code     ← SWE-bench / HumanEval
-//    - analysis ← MMLU / GPQA / reasoning suites
-//    - creative ← writing evals / LMArena
-//    - data     ← GSM8K / MATH / data-wrangling
+//  0–100 scores per model family, per task type, from public benchmarks, so
+//  Cascade Auto routes each subtask to the model that is actually strongest at
+//  it rather than the cheapest-or-first:
+//    - code     ← Terminal-Bench 2.1 / 4.0, SWE-bench Verified (Vals AI)
+//    - analysis ← Vals Index (multi-step finance, legal, tax, coding work)
+//    - creative ← LMArena creative-writing arena
+//    - data     ← Vals Index
+//    - agentic  ← Terminal-Bench, SWE-bench, τ²-bench: how well a model holds a
+//                 tool loop together. Weighted for the tiers that orchestrate.
 //
-//  These are deliberately editable knobs, not gospel — they only set the
-//  *relative* preference between available models for a given task type.
-//
-//  This bundled table is the OFFLINE fallback. The live/cached snapshot
-//  (benchmark-data.json) is produced by the aggregator: each benchmark source
-//  in scripts/benchmarks/sources/ is normalized to a common 0–100 quality scale,
-//  then the conservative (lowest) value per family/task is taken across covering
-//  sources. See docs/benchmark-aggregation.md.
+//  The numbers live in benchmark-data.json, produced by
+//  scripts/refresh-benchmarks.mjs from the captures in
+//  scripts/benchmarks/sources/ (see docs/benchmark-aggregation.md). This file
+//  holds NO scores of its own. It used to carry a hand-typed copy as the
+//  offline fallback, and that copy is exactly how invented numbers outlived
+//  the data: the two drifted, and the fallback still rated GPT-4o above
+//  models that beat it by thirty points on every agentic board. The bundled
+//  fallback is now the committed snapshot itself.
 
 import type { ModelInfo } from '../../types.js';
 import type { TaskType } from './task-analyzer.js';
 import type { LiveDataProvider } from './live-data.js';
+import benchmarkData from './benchmark-data.json' with { type: 'json' };
 
-export type BenchmarkProfile = Partial<Record<Exclude<TaskType, 'mixed'>, number>>;
+export type BenchmarkTask = Exclude<TaskType, 'mixed'>;
+export type BenchmarkProfile = Partial<Record<BenchmarkTask | 'agentic', number>>;
+
+const TASKS: readonly BenchmarkTask[] = ['code', 'analysis', 'creative', 'data'];
 
 // Optional live/cached data source. When set (Cascade Auto with benchmarks.live
-// on), current public scores override the bundled table below; otherwise the
-// bundled table is the offline baseline. Type-only import keeps this decoupled.
+// on), current public scores override the bundled snapshot; otherwise the
+// bundled snapshot is the offline baseline. Type-only import keeps this decoupled.
 let liveProvider: LiveDataProvider | null = null;
 
 /** Wire a live data source so benchmarkScore01 prefers current public scores. */
@@ -36,98 +41,98 @@ export function setBenchmarkLiveProvider(provider: LiveDataProvider | null): voi
   liveProvider = provider;
 }
 
-const FAMILY_BENCHMARKS: Record<string, BenchmarkProfile> = {
-  // Anthropic — strongest at coding and agentic tool-use.
-  'claude-opus':       { code: 95, analysis: 92, creative: 90, data: 88 },
-  'claude-sonnet':     { code: 93, analysis: 88, creative: 87, data: 85 },
-  'claude-haiku':      { code: 80, analysis: 75, creative: 76, data: 72 },
-  // OpenAI GPT-5 family. GPT-5.6 is split by durable capability tier instead
-  // of being folded into generic gpt-5: Sol, Terra and Luna have materially
-  // different benchmark/cost envelopes and should compete independently.
-  // Scores are the committed normalized snapshot; provenance is in
-  // scripts/benchmarks/sources/openai-gpt-5.6-2026-08.json.
-  'gpt-5.6-sol':       { code: 100, analysis: 98, creative: 88, data: 88 },
-  'gpt-5.6-terra':     { code: 97, analysis: 92, creative: 82, data: 85 },
-  'gpt-5.6-luna':      { code: 93, analysis: 85, creative: 74, data: 60 },
-  // Older GPT-5 point releases remain distinct where public data supports it.
-  'gpt-5.5':           { code: 97, analysis: 96, creative: 94, data: 95 },
-  'gpt-5.4':           { code: 94, analysis: 94, creative: 92, data: 92 },
-  'gpt-5.4-mini':      { code: 86, analysis: 85, creative: 85, data: 83 },
-  'gpt-5':             { code: 96, analysis: 95, creative: 93, data: 93 },
-  'gpt-5-mini':        { code: 88, analysis: 86, creative: 86, data: 84 },
-  'gpt-5-nano':        { code: 78, analysis: 75, creative: 78, data: 73 },
-  // OpenAI — strong all-round, particularly creative/writing.
-  'gpt-4.1':           { code: 90, analysis: 89, creative: 91, data: 87 },
-  'gpt-4.1-mini':      { code: 82, analysis: 80, creative: 83, data: 79 },
-  'gpt-4.1-nano':      { code: 70, analysis: 68, creative: 72, data: 66 },
-  'gpt-4o':            { code: 86, analysis: 85, creative: 90, data: 84 },
-  'gpt-4o-mini':       { code: 76, analysis: 74, creative: 80, data: 72 },
-  // Google — strongest at analysis/data and long-context.
-  'gemini-2.5-pro':    { code: 90, analysis: 93, creative: 86, data: 92 },
-  'gemini-2.5-flash':  { code: 82, analysis: 83, creative: 80, data: 82 },
-  // The 2.5-lite tier scores below full 2.5-flash but above the older 2.0
-  // lite tier — it exists because a naive `gemini-?2\.5-flash` regex swallows
-  // "gemini-2.5-flash-lite" as a substring match (no lite variant of its own
-  // to fall into), so the weaker lite model got credited with the full
-  // flash's benchmark score and kept winning Cascade Auto's "best value" pick.
-  'gemini-2.5-flash-lite': { code: 72, analysis: 72, creative: 74, data: 72 },
-  'gemini-1.5-pro':    { code: 82, analysis: 84, creative: 82, data: 85 },
-  'gemini-2.0-flash':  { code: 79, analysis: 80, creative: 79, data: 80 },
-  'gemini-flash-lite': { code: 68, analysis: 68, creative: 70, data: 68 },
-  // Local (Ollama) — lower absolute scores; the ordering is what matters when a
-  // tier is restricted to local-only models.
-  'deepseek':          { code: 80, analysis: 72, creative: 68, data: 74 },
-  'qwen':              { code: 78, analysis: 73, creative: 72, data: 74 },
-  'codellama':         { code: 76, analysis: 60, creative: 55, data: 60 },
-  'llama-70b':         { code: 74, analysis: 72, creative: 73, data: 70 },
-  'mistral':           { code: 62, analysis: 64, creative: 66, data: 60 },
-  'gemma':             { code: 58, analysis: 60, creative: 62, data: 57 },
-  'llama-small':       { code: 55, analysis: 56, creative: 60, data: 54 },
-};
+const BUNDLED: Record<string, BenchmarkProfile> =
+  (benchmarkData as { families?: Record<string, BenchmarkProfile> }).families ?? {};
 
-// Ordered most-specific → least so e.g. "gpt-4.1-mini" doesn't match "gpt-4.1".
+// One family per model VERSION. A single `claude-opus` row used to score Opus
+// 4.5 and Opus 5.5 the same, though Terminal-Bench 2.1 puts them 23 points
+// apart — so Auto could not tell the model a provider recommends from the one
+// it is about to retire.
+//
+// Ordered most-specific → least: "claude-opus-4-5" must not fall into an
+// "opus-4" rule, "gpt-5.4-nano" must not fall into "gpt-5.4". Separators are
+// `[-.]` (plus a space after the line name) because the same version is spelled `opus-4-5` by Anthropic,
+// `opus-4.5` by most gateways and `Opus 4.5` in a display name.
 const FAMILY_MATCHERS: Array<[RegExp, string]> = [
-  [/fable/i, 'claude-opus'],
-  [/opus/i, 'claude-opus'],
-  [/sonnet/i, 'claude-sonnet'],
-  [/haiku/i, 'claude-haiku'],
-  // GPT-5 family — ordered most-specific first. GPT-5.6 durable tiers carry
-  // their own profiles. 5.4 Nano intentionally maps to the nano class rather
-  // than being swallowed by the generic 5.4 rule.
+  // Anthropic. Mythos is the same model as Fable without Fable's extra
+  // safeguards, so it scores as Fable.
+  [/(?:fable|mythos)[\s.-]?5[-.]1/i, 'claude-fable-5.1'],
+  [/(?:fable|mythos)[\s.-]?5(?![-.]?\d)/i, 'claude-fable-5'],
+  [/opus[\s.-]?5[-.]5/i, 'claude-opus-5.5'],
+  [/opus[\s.-]?5(?![-.]?\d)/i, 'claude-opus-5'],
+  [/opus[\s.-]?4[-.]8/i, 'claude-opus-4.8'],
+  [/opus[\s.-]?4[-.]7/i, 'claude-opus-4.7'],
+  [/opus[\s.-]?4[-.]6/i, 'claude-opus-4.6'],
+  [/opus[\s.-]?4[-.]5/i, 'claude-opus-4.5'],
+  [/sonnet[\s.-]?5[-.]5/i, 'claude-sonnet-5.5'],
+  [/sonnet[\s.-]?5(?![-.]?\d)/i, 'claude-sonnet-5'],
+  [/sonnet[\s.-]?4[-.]6/i, 'claude-sonnet-4.6'],
+  [/sonnet[\s.-]?4[-.]5/i, 'claude-sonnet-4.5'],
+  [/haiku[\s.-]?5[-.]5/i, 'claude-haiku-5.5'],
+  [/haiku[\s.-]?4[-.]5/i, 'claude-haiku-4.5'],
+  // Anything older that got this far (Claude 3.x, Opus/Sonnet 4.0–4.1) is
+  // retired. It must not fall into the "newer than this table" rules below and
+  // be scored as the newest model; a family with no data reads as 0.5.
+  [/claude-(?:[1-3]|instant)|(?:opus|sonnet|haiku)[\s.-]?[1-4](?!\d)/i, 'claude-legacy'],
+  // A Claude version newer than this table scores as the newest one we have
+  // measured in its line — newer releases have not scored lower on these
+  // boards — instead of a neutral 0.5 that would lose to everything measured.
+  [/fable|mythos/i, 'claude-fable-5.1'],
+  [/opus/i, 'claude-opus-5.5'],
+  [/sonnet/i, 'claude-sonnet-5.5'],
+  [/haiku/i, 'claude-haiku-5.5'],
+
+  // OpenAI GPT-6.
+  [/gpt-?6[-.]1.*sol/i, 'gpt-6.1-sol'],
+  [/gpt-?6[-.]1.*terra/i, 'gpt-6.1-terra'],
+  [/gpt-?6.*astra/i, 'gpt-6-astra'],
+  [/gpt-?6.*sol/i, 'gpt-6-sol'],
+  [/gpt-?6.*luna/i, 'gpt-6-luna'],
+  // GPT-5.6 durable tiers; bare "gpt-5.6" is OpenAI's alias for Sol.
   [/gpt-?5\.6.*sol/i, 'gpt-5.6-sol'],
   [/gpt-?5\.6.*terra/i, 'gpt-5.6-terra'],
   [/gpt-?5\.6.*luna/i, 'gpt-5.6-luna'],
-  [/gpt-?5\.6(?:\s|$)/i, 'gpt-5.6-sol'],
+  [/gpt-?5\.6(?![\w.-])/i, 'gpt-5.6-sol'],
   [/gpt-?5\.5/i, 'gpt-5.5'],
-  [/gpt-?5\.4.*nano/i, 'gpt-5-nano'],
+  [/gpt-?5\.4.*nano/i, 'gpt-5.4-nano'],
   [/gpt-?5\.4.*mini/i, 'gpt-5.4-mini'],
   [/gpt-?5\.4/i, 'gpt-5.4'],
-  [/gpt-?5.*nano/i, 'gpt-5-nano'],
-  [/gpt-?5.*mini/i, 'gpt-5-mini'],
-  [/gpt-?5/i, 'gpt-5'],
+  [/gpt-?5\.2/i, 'gpt-5.2'],
+  [/gpt-?5(?![.\d]).*nano/i, 'gpt-5-nano'],
+  [/gpt-?5(?![.\d]).*mini/i, 'gpt-5-mini'],
+  [/gpt-?5(?![.\d])/i, 'gpt-5'],
   [/gpt-?4\.1-nano/i, 'gpt-4.1-nano'],
   [/gpt-?4\.1-mini/i, 'gpt-4.1-mini'],
   [/gpt-?4\.1/i, 'gpt-4.1'],
-  [/gpt-?4o-mini/i, 'gpt-4o-mini'],
-  [/gpt-?4o/i, 'gpt-4o'],
-  [/gemini-?2\.5-pro/i, 'gemini-2.5-pro'],
-  // Must precede the bare `2\.5-flash` rule below: that pattern has no word
-  // boundary after "flash" and matches "gemini-2.5-flash-lite" as a plain
-  // substring, so the lite variant would otherwise be scored as the full
-  // flash model (see the FAMILY_BENCHMARKS comment above).
+  [/gpt-?4o(?![\s-]?mini)/i, 'gpt-4o'],
+
+  // Google Gemini.
+  [/gemini-?4.*argon/i, 'gemini-4-argon'],
+  [/gemini-?3\.8-flash(?!-lite)/i, 'gemini-3.8-flash'],
+  [/gemini-?3\.7-flash(?!-lite)/i, 'gemini-3.7-flash'],
+  [/gemini-?3\.6-flash(?!-lite)/i, 'gemini-3.6-flash'],
+  [/gemini-?3\.5-flash-lite/i, 'gemini-3.5-flash-lite'],
+  [/gemini-?3\.5-flash/i, 'gemini-3.5-flash'],
+  [/gemini-?3\.1-pro/i, 'gemini-3.1-pro'],
+  [/gemini-?3\.1-flash-lite/i, 'gemini-3.1-flash-lite'],
+  [/gemini-?3-pro/i, 'gemini-3-pro'],
+  [/gemini-?3-flash/i, 'gemini-3-flash'],
+  // 2.5 flash-lite must precede 2.5 flash: the bare flash rule would match it
+  // as a substring and credit the lite model with the full model's score.
   [/gemini-?2\.5-flash-lite/i, 'gemini-2.5-flash-lite'],
   [/gemini-?2\.5-flash/i, 'gemini-2.5-flash'],
-  [/gemini-?1\.5-pro/i, 'gemini-1.5-pro'],
-  [/gemini-?2\.0-flash-lite/i, 'gemini-flash-lite'],
-  [/gemini-?2\.0-flash/i, 'gemini-2.0-flash'],
-  // Generic Gemini fallbacks — a model released after this table was written
-  // (e.g. a Gemini 3.x flash discovered live from the provider) still gets a
-  // sensible score by its class instead of a neutral 0.5, so it can compete in
-  // AUTO ranking. Ordered after the specific rows above; most-specific first.
-  [/gemini.*flash.?lite/i, 'gemini-flash-lite'],
-  [/gemini.*pro/i, 'gemini-2.5-pro'],
-  [/gemini.*flash/i, 'gemini-2.5-flash'],
-  [/gemini/i, 'gemini-2.5-flash'],
+  [/gemini-?2\.5-pro/i, 'gemini-2.5-pro'],
+  [/gemini-?2\.0-flash(?!-lite)/i, 'gemini-2.0-flash'],
+  [/gemini-?(?:1\.\d|2\.0)/i, 'gemini-legacy'], // shut down; see claude-legacy
+  // A Gemini released after this table (discovered live from the provider)
+  // scores as the newest measured model of its class.
+  [/gemini.*flash.?lite/i, 'gemini-3.5-flash-lite'],
+  [/gemini.*(?:pro|argon|ultra)/i, 'gemini-4-argon'],
+  [/gemini.*flash/i, 'gemini-3.8-flash'],
+
+  // Local (Ollama) tags. No current board measures these builds; their
+  // scores are carried seeds that only rank local models against each other
+  // when a tier is restricted to local-only.
   [/codellama|code-llama|starcoder|stable-code/i, 'codellama'],
   [/deepseek/i, 'deepseek'],
   [/qwen/i, 'qwen'],
@@ -147,24 +152,39 @@ export function resolveFamily(model: ModelInfo): string | null {
   return null;
 }
 
+/** The family's scores: live/cached snapshot first, the bundled snapshot otherwise. */
+export function benchmarkProfile(model: ModelInfo): BenchmarkProfile | null {
+  const fam = resolveFamily(model);
+  if (!fam) return null;
+  return liveProvider?.getQualityProfile(fam) ?? BUNDLED[fam] ?? null;
+}
+
 /**
  * Benchmark strength of a model for a task type, normalised to 0–1. Returns a
  * neutral 0.5 for models with no benchmark profile so they neither win nor lose
  * on this factor alone.
+ *
+ * `agenticWeight` (0–1) blends in the agentic score: how reliably the model
+ * runs a multi-step tool loop. The tiers that orchestrate (T1 plans, T2
+ * manages) fail differently from a worker writing one answer — a planner that
+ * drops a tool call strands a whole wave — so they pass a high weight. A model
+ * no agentic board has measured is scored on the task alone.
  */
-export function benchmarkScore01(model: ModelInfo, taskType: TaskType): number {
-  const fam = resolveFamily(model);
-  if (!fam) return 0.5;
-  // Prefer current live/cached scores; fall back to the bundled table.
-  const profile = liveProvider?.getQualityProfile(fam) ?? FAMILY_BENCHMARKS[fam];
+export function benchmarkScore01(model: ModelInfo, taskType: TaskType, agenticWeight = 0): number {
+  const profile = benchmarkProfile(model);
   if (!profile) return 0.5;
 
   let score: number;
   if (taskType === 'mixed') {
-    const vals = Object.values(profile).filter((v): v is number => typeof v === 'number');
+    // The four task types only — an `agentic` key must not leak into "general".
+    const vals = TASKS.map((t) => profile[t]).filter((v): v is number => typeof v === 'number');
     score = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 50;
   } else {
     score = profile[taskType] ?? 50;
+  }
+  const w = Math.max(0, Math.min(1, agenticWeight));
+  if (w > 0 && typeof profile.agentic === 'number') {
+    score = (1 - w) * score + w * profile.agentic;
   }
   return Math.max(0, Math.min(1, score / 100));
 }

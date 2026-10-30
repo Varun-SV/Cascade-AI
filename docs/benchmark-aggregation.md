@@ -13,18 +13,18 @@ conservatively, so routing stays honest about the quality-to-cost trade-off.
 
 Different benchmark sites measure quality on incompatible scales:
 
-- **SWE-bench Verified** — raw solve rate `%` (frontier tops out near ~75%).
-- **MMLU / GPQA / MATH** — raw accuracy `%`.
-- **Artificial Analysis** — a 0–100 Intelligence Index.
-- **LMArena / Chatbot Arena** — Elo ratings (~1000–1500).
+- **Terminal-Bench / SWE-bench Verified** — raw solve rate `%`, and a harder board
+  gives every model a lower number (Gemini 3.8 Flash: 81% on Terminal-Bench 2.1,
+  20% on 4.0).
+- **Vals Index** — a weighted `%` over finance, coding, legal and tax agent tasks.
+- **LMArena** — Elo-like ratings (~1000–1550).
 
 You cannot take "the lowest of 80 and 77" across those until they mean the same thing.
 So the aggregator does two steps:
 
 1. **Normalize** every source onto a common 0–100 quality scale.
 2. **Aggregate conservatively**: for each `family × task`, take the **lowest** value
-   across the sources that cover it. If SWE-bench says a model is 80 for code and Arena
-   says 77, routing uses **77** — we would rather under-claim quality than pay for
+   across the sources that cover it. We would rather under-claim quality than pay for
    quality that isn't reliably there.
 
 ## Normalization
@@ -37,77 +37,136 @@ Each source declares a `scale`, which implies a linear band `raw → (raw − mi
 | `percent`    | `0 … 100`         | a raw accuracy %                                   |
 | `elo`        | `eloFloor … eloCeil` (default `1000 … 1500`) | Arena Elo → 0–100 |
 
-A raw benchmark **%** is *not* a quality percentage — SWE-bench Verified near 70% is a
-frontier result, not a "70/100". So a source may override the band **per task** via
-`calibration`, mapping against a documented reference-max:
+A source may override the band **per task** via `calibration`:
 
 ```json
-"scale": "percent",
-"calibration": { "code": { "min": 0, "max": 75 } }
+"calibration": { "code": { "min": 0, "max": 90 } }
 ```
 
 Bands are **fixed**, not within-source min–max, so a model's score does not move just
 because another model was added to (or dropped from) a capture.
 
+### Anchors and `fitTo`
+
+A fixed band per source is not enough once two sources rate the same task at different
+difficulty: "the lowest of Terminal-Bench 2.1 and 4.0" would only ever report which
+board is harder. So each task has one **anchor** source with a fixed band, and every
+other source for that task is **fitted onto the anchor**:
+
+```json
+"calibration": { "code": { "fitTo": "vals-terminal-bench-2-1" } }
+```
+
+The aggregator takes the models both sources rate, fits a Theil–Sen line from this
+source's raw numbers to the anchor's (the median of pairwise slopes, so one model run
+under a broken config cannot tilt it), and normalizes through the anchor's band. A fit
+needs **≥ 5 shared models**, a positive slope and **Spearman ≥ 0.6**; otherwise the task
+is skipped for that source with a warning. Every fit is printed on every refresh:
+
+```
+fit vals-terminal-bench-4.code → vals-terminal-bench-2-1: n=19, y = 0.233x + 72.2, spearman 0.70
+fit vals-swebench-verified.code → vals-terminal-bench-2-1: n=21, y = 1.417x + -50.6, spearman 0.89
+```
+
+| task              | anchor (fixed band)                          |
+| ----------------- | -------------------------------------------- |
+| `code`, `agentic` | Vals Terminal-Bench 2.1, `0 … 90`            |
+| `analysis`, `data`| Vals Index, `0 … 73`                         |
+| `creative`        | LMArena creative writing, `1000 … 1550` Elo  |
+
 ## Conservative aggregation
 
-For each `family × task`, gather the normalized values from every source that covers it,
-then:
+For each `family × task`, in order:
 
-- **`robust` (default for the refresh)** — when **≥ 3** sources cover the cell, drop
-  the single lowest as a possible mis-capture and take the next-lowest; with fewer than
-  3, fall back to `min`. Guards against one bad number tanking a model.
-- **`min`** — take the single lowest. Strictest quality-to-cost. Force with
-  `BENCHMARK_AGG_MODE=min`.
+1. **Primary sources.** Gather the normalized values from every source that covers the
+   cell, then:
+   - **`robust` (default for the refresh)** — when **≥ 3** sources cover the cell, drop
+     the single lowest as a possible mis-capture and take the next-lowest; with fewer
+     than 3, fall back to `min`.
+   - **`min`** — take the single lowest. Force with `BENCHMARK_AGG_MODE=min`.
+2. **Fallback sources** (`"role": "fallback"`) — only when no primary source rates the
+   cell. A fallback never moves a cell a real measurement covers.
+3. **Imputed** — the mean of the family's own measured cells this run. A task no board
+   has run the model on is assumed to sit at the model's general level, never above it.
+   `agentic` is never imputed: a tool loop nobody measured is not assumed to hold.
+4. **Baseline** — the committed value, only for a family nothing measures at all (today:
+   the local Ollama families).
 
 (The pure `buildFamilies` engine still defaults to `min`; the refresh script opts into
 `robust` unless `BENCHMARK_AGG_MODE=min` is set.)
 
-Any cell **no source covers** keeps its committed baseline value, so partial coverage
-never blanks a score. A family is only emitted once it has all four task scores (from
-sources or baseline).
+A family is emitted once it has all four task scores; `agentic` is optional.
 
 Every score carries an auditable trace — run with `--explain` (or `BENCHMARK_EXPLAIN=1`)
 to see which source set each value and what every source reported:
 
 ```
-gpt-5
-  code        93  [min]  artificial-analysis=96, lmarena=93, suite-leaderboards=96
-  analysis    94  [min]  artificial-analysis=96, lmarena=94, suite-leaderboards=95
+claude-fable-5
+  code       91  [robust]  vals-swebench-verified=93, vals-terminal-bench-2-1=89, vals-terminal-bench-4=91
+  analysis   85  [fallback]  general-fallback-terminal-bench-4=85
+  creative   91  [robust]  lmarena-creative-writing=91
+  agentic    89  [robust]  aa-tau2-bench-telecom=89, vals-swebench-verified=93, vals-terminal-bench-2-1=89, vals-terminal-bench-4=91
 ```
 
 ## Sources
 
-One JSON file per site in `scripts/benchmarks/sources/`:
+One JSON file per board in `scripts/benchmarks/sources/` (text sources, as of 2026-10-28):
+
+| file | measures | tasks | provenance |
+| --- | --- | --- | --- |
+| `vals-terminal-bench-2-1` | 89 terminal tasks, one harness | code, agentic (**anchor**) | captured |
+| `vals-terminal-bench-4` | 66 long-horizon terminal tasks | code, agentic (fitted) | captured |
+| `vals-swebench-verified` | real GitHub issues, bash-only agent | code, agentic (fitted) | captured |
+| `aa-tau2-bench-telecom` | multi-turn tool use under a policy | agentic (fitted) | mirror-captured |
+| `vals-index` | finance/coding/legal/tax agent work | analysis, data (**anchor**) | captured |
+| `general-fallback-terminal-bench-4` | Terminal-Bench 4.0 fitted to the index | analysis, data (fallback) | derived |
+| `lmarena-creative-writing` | human preference on writing | creative (**anchor**) | mirror-captured |
+| `openai-gpt-5.6-2026-08` | OpenAI's GPT-5.6 launch evals | all four | captured |
 
 ```json
 {
-  "source":     "suite-leaderboards",
-  "label":      "SWE-bench Verified, MMLU/GPQA, writing evals, MATH/GSM8K",
-  "url":        "https://www.swebench.com/ , …",
-  "capturedAt": "2026-07-21",
-  "provenance": "captured" | "seed-approximation",
+  "source":     "vals-terminal-bench-4",
+  "label":      "Vals AI · Terminal-Bench 4.0 (mini-swe-agent, bash only, avg@3)",
+  "url":        "https://www.vals.ai/benchmarks/terminal-bench-4",
+  "capturedAt": "2026-10-28",
+  "provenance": "captured",
   "scale":      "percent",
-  "calibration": { "code": { "min": 0, "max": 75 } },
-  "models":     { "claude-opus": { "code": 70, "analysis": 87, … } }
+  "calibration": { "code": { "fitTo": "vals-terminal-bench-2-1" }, "agentic": { "fitTo": "vals-terminal-bench-2-1" } },
+  "models":     { "claude-opus-5.5": { "code": 65.15, "agentic": 65.15 } }
 }
 ```
 
-- Family keys match the router's canonical families (see `resolveFamily` in
-  `src/core/router/benchmarks.ts`): `claude-opus`, `gpt-5`, `gemini-2.5-pro`, …
+- Family keys are one per model **version** and match `resolveFamily` in
+  `src/core/router/benchmarks.ts`: `claude-opus-5.5`, `gpt-6.1-sol`, `gemini-3.8-flash`, …
+  A single `claude-opus` row used to score Opus 4.5 and Opus 5.5 identically, though
+  Terminal-Bench puts them over twenty points apart.
 - A source may cover only some families and only some task types — the aggregator uses
   whatever cells are present.
 - Malformed rows/files are skipped with a warning, never aborting the refresh.
+- `role: "fallback"` marks a source that only fills cells no primary source rates.
 
 ### Provenance and honesty
 
-The committed source files ship as **`seed-approximation`** — maintainer-approximated
-starting values, because Artificial Analysis blocks automated fetch and Arena/suite
-numbers move. They are honestly labelled, not passed off as exact official captures.
-To improve accuracy, read the live leaderboard at each source's `url`, replace the
-numbers, set `"provenance": "captured"` and a fresh `capturedAt`, and commit — the next
-refresh re-aggregates automatically. **Do not invent numbers**; leave a cell out (partial
-coverage) rather than guess, and the baseline holds it.
+Every committed text source is a real capture. The three `seed-approximation` files that
+used to ship (maintainer-typed numbers labelled Artificial Analysis, LMArena and "suite
+leaderboards") were removed on 2026-10-28: they still rated GPT-4o at 85 for code and
+Gemini 2.5 Flash at 82 when every agentic board put them near 50, and Auto was routing a
+majority of picks to models their providers had since deprecated. A test now fails if a
+`seed-approximation` text source is added back. To improve accuracy, re-read the board at
+each source's `url`, replace the numbers, set a fresh `capturedAt`, and commit. **Do not
+invent numbers**; leave a cell out rather than guess.
+
+`derived` (new) marks a source computed from a captured one by a documented fit, such as
+the Terminal-Bench 4.0 fallback.
+
+The refresh also maintains two compatibility rules in `scripts/refresh-benchmarks.mjs`:
+
+- **Legacy keys.** Cascade fetches this file live from GitHub, so builds released before
+  the version split still look up `claude-opus`, `claude-sonnet` and `claude-haiku`. Those
+  keys are kept as copies of `claude-opus-5`, `claude-sonnet-5` and `claude-haiku-4.5`.
+- **Dropped families.** A family nothing measures any more and whose model its provider
+  has shut down (`gemini-1.5-pro`, `gemini-2.0-flash-lite`, `gpt-4o-mini`) is removed, so it
+  reads as the neutral 0.5 instead of a confident seed.
 
 > **Why not OpenRouter rankings here?** OpenRouter's rankings measure token *popularity*,
 > not per-task quality, so folding them into a quality-min would be a category error.
@@ -133,11 +192,33 @@ the next scheduled run re-aggregates and proposes the update.
 
 ## Where the scores are used
 
-`benchmarkScore01(model, taskType)` in `src/core/router/benchmarks.ts` resolves a model
-to its family, reads the live/cached snapshot (falling back to the bundled table), and
+`benchmarkScore01(model, taskType, agenticWeight)` in `src/core/router/benchmarks.ts`
+resolves a model to its family, reads the live/cached snapshot (falling back to the
+bundled copy of this same file — there is no separate hand-typed table any more), and
 returns the 0–1 strength the router multiplies against cost. Azure deployments resolve
 through their `baseModelId`, so a deployment named `prod-fast` still scores as its real
 base model.
+
+`agenticWeight` blends in the `agentic` score. Cascade Auto passes **0.5 for T1 and T2**
+(they plan, brief, check and hand off in tool loops; when one of them drops a call the
+whole wave under it is stranded), **0.35 for a T3 worker that calls tools**, and 0 for
+one that only writes (`agenticWeightFor` in `task-analyzer.ts`).
+
+### Model lifecycle
+
+Scores alone cannot keep Auto off a model the provider is shutting down — a deprecated
+model can still score well. `src/core/router/lifecycle.ts` records what Anthropic, OpenAI
+and Google have published (`retired`, `deprecated`, `restricted` to existing customers,
+or `superseded` by an auto-routed newer id), and the selector keeps those models out of
+Auto's candidates, chains and failovers. A user can still **pin** one, and Auto still
+falls back to one when nothing else is usable. The tier chains in `src/constants.ts` hold
+only fully served models, which `lifecycle.test.ts` enforces.
+
+### Reviewing a refresh
+
+`npx tsx scripts/benchmarks/routing-snapshot.ts` prints Auto's pick for every provider set
+× bias × tier × task type, from the benchmark data alone (no history, no feedback). Run it
+before and after a data change and diff the two to see what the change does to routing.
 
 ## Non-text modalities
 

@@ -20,7 +20,7 @@ function snapshotResponse() {
     json: async () => ({
       generatedAt: '2099-01-01T00:00:00.000Z',
       source: 'test',
-      families: { 'claude-opus': { code: 99, analysis: 99, creative: 99, data: 99 } },
+      families: { 'claude-opus-4.8': { code: 99, analysis: 99, creative: 99, data: 99 } },
     }),
   };
 }
@@ -91,7 +91,7 @@ describe('LiveDataProvider — live fetch', () => {
     await ld.refresh(true);
 
     expect(ld.getDataSource()).toBe('live');
-    expect(ld.getQualityProfile('claude-opus')?.code).toBe(99);
+    expect(ld.getQualityProfile('claude-opus-4.8')?.code).toBe(99);
     expect(ld.hasLivePricing()).toBe(true);
 
     const price = ld.getLivePrice('gemini-2.5-flash');
@@ -191,7 +191,7 @@ describe('LiveDataProvider — live fetch', () => {
     const reloaded = new LiveDataProvider({ cacheFile });
     await reloaded.load();
     expect(reloaded.getDataSource()).toBe('cache');
-    expect(reloaded.getQualityProfile('claude-opus')?.code).toBe(99);
+    expect(reloaded.getQualityProfile('claude-opus-4.8')?.code).toBe(99);
   });
 
   it('skips the network when the cache is still fresh', async () => {
@@ -259,7 +259,7 @@ describe('LiveDataProvider — offline fallback', () => {
     await ld.refresh(true);
 
     expect(ld.getDataSource()).toBe('bundled');
-    expect(ld.getQualityProfile('claude-opus')).toBeNull();
+    expect(ld.getQualityProfile('claude-opus-4.8')).toBeNull();
     expect(ld.hasLivePricing()).toBe(false);
     const original = MODELS['gpt-4o']!;
     expect(ld.applyLivePricing([original])[0]).toBe(original);
@@ -273,10 +273,10 @@ describe('benchmarkScore01 with a live provider', () => {
     await ld.refresh(true);
     setBenchmarkLiveProvider(ld);
 
-    // Use an active Opus catalog entry; it resolves to the same claude-opus
-    // benchmark family that the live snapshot overrides.
+    // Opus 4.8 resolves to the claude-opus-4.8 family the live snapshot
+    // overrides; a family the live snapshot lacks falls back to the bundled one.
     expect(benchmarkScore01(MODELS['claude-opus-4-8']!, 'code')).toBeCloseTo(0.99, 5);
-    expect(benchmarkScore01(MODELS['gpt-4o']!, 'code')).toBeGreaterThan(0.5);
+    expect(benchmarkScore01(MODELS['claude-opus-5-5']!, 'code')).toBeGreaterThan(0.9);
   });
 });
 

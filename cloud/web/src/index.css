@@ -455,3 +455,59 @@ body {
 /* KaTeX sets a display equation nowrap, so a long one would push its message
    past the edge of the screen. It scrolls inside the message instead. */
 .katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+
+/* ───────────────── Chat motion ─────────────────
+   Every effect below is off when the visitor asked for less motion, in the OS
+   or in Settings → Reduce motion (App sets html[data-reduce-motion="1"]). */
+
+/* The status mark, lit by the tiers actually working right now. */
+.cascade-mark-lit > path { transition: opacity 0.4s ease, filter 0.4s ease; transform-origin: center; }
+.cascade-mark-lit > path[data-on='0'] { opacity: 0.25; }
+.cascade-mark-lit > path[data-on='1'] { filter: drop-shadow(0 0 2.5px currentColor); animation: cascadeLit 1.6s ease-in-out infinite; }
+@keyframes cascadeLit { 0%, 100% { opacity: 0.75; } 50% { opacity: 1; } }
+
+/* The composer: while you write, the tier ramp flows around its edge. */
+@property --cz-ang { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
+.cz-composer { position: relative; }
+.cz-composer::before {
+  content: ''; position: absolute; inset: -1.5px; border-radius: 21.5px; padding: 1.5px; pointer-events: none; opacity: 0;
+  background: conic-gradient(from var(--cz-ang), rgb(var(--c-t1)), rgb(var(--c-t2)), rgb(var(--c-t3)), rgb(var(--c-t2)), rgb(var(--c-t1)));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude;
+  transition: opacity 0.4s ease; animation: czSpin 4s linear infinite;
+}
+.cz-composer:focus-within::before { opacity: 1; }
+@keyframes czSpin { to { --cz-ang: 360deg; } }
+
+/* A send: the drop that flies from the button into the run's mark. */
+.cz-drop { position: fixed; left: 0; top: 0; z-index: 90; width: 14px; height: 14px; border-radius: 50%; pointer-events: none;
+  background: radial-gradient(circle, #fff 0 30%, rgb(var(--c-t1)) 55%, transparent 72%); box-shadow: 0 0 18px rgb(var(--c-t1)); }
+.cz-ripple { position: fixed; z-index: 90; width: 10px; height: 10px; border-radius: 50%; border: 2px solid; pointer-events: none; }
+
+/* The answer: a tier-coloured caret while it streams, one soft sweep when it lands. */
+.cascade-answer.is-streaming > :last-child::after {
+  content: ''; display: inline-block; width: 0.5em; height: 1.05em; margin-left: 2px; vertical-align: -0.18em; border-radius: 2px;
+  background: linear-gradient(180deg, rgb(var(--c-t1)), rgb(var(--c-t3))); animation: czCaret 1s steps(1) infinite;
+}
+@keyframes czCaret { 50% { opacity: 0; } }
+.cascade-answer.cz-settle { animation: czSettle 1.1s ease-out 1; }
+@keyframes czSettle { from { filter: brightness(1.25) saturate(1.1); } to { filter: none; } }
+
+/* Ambient: the logo draws itself on an empty chat, and breathes in the sidebar. */
+.cz-draw-mark > path { stroke-dasharray: 30; stroke-dashoffset: 30; animation: czDrawIn 0.9s cubic-bezier(.2,.8,.2,1) forwards; }
+.cz-draw-mark > path:nth-child(2) { animation-delay: 0.15s; }
+.cz-draw-mark > path:nth-child(3) { animation-delay: 0.3s; }
+@keyframes czDrawIn { to { stroke-dashoffset: 0; } }
+.cz-idle-mark > path { animation: czIdle 9s ease-in-out infinite; }
+.cz-idle-mark > path:nth-child(2) { animation-delay: 0.18s; }
+.cz-idle-mark > path:nth-child(3) { animation-delay: 0.36s; }
+@keyframes czIdle { 0%, 88%, 100% { opacity: 1; } 92% { opacity: 0.35; } 96% { opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .cascade-mark-lit > path[data-on='1'], .cz-composer::before, .cascade-answer.is-streaming > :last-child::after,
+  .cascade-answer.cz-settle, .cz-idle-mark > path { animation: none; }
+  .cz-draw-mark > path { animation: none; stroke-dashoffset: 0; }
+}
+html[data-reduce-motion='1'] .cascade-mark-lit > path[data-on='1'], html[data-reduce-motion='1'] .cz-composer::before,
+html[data-reduce-motion='1'] .cascade-answer.is-streaming > :last-child::after, html[data-reduce-motion='1'] .cascade-answer.cz-settle,
+html[data-reduce-motion='1'] .cz-idle-mark > path { animation: none; }
+html[data-reduce-motion='1'] .cz-draw-mark > path { animation: none; stroke-dashoffset: 0; }

@@ -567,6 +567,11 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
   const docs = attachments.filter((a) => a.kind === 'document' || (!a.mime.startsWith('image/') && !!a.filename));
   const [whyOpen, setWhyOpen] = useState(false);
   const whyRef = useRef<HTMLDivElement>(null);
+  // Results animate only for a reply this view watched stream in: history
+  // loaded from the server appears as it is, with nothing replaying.
+  const sawStreaming = useRef(!!message.streaming);
+  if (message.streaming) sawStreaming.current = true;
+  const justFinished = sawStreaming.current && !message.streaming;
   // Scroll once the panel has finished opening: before then it has no height,
   // and a long one would open below the viewport.
   const scrollToWhy = useRef(false);
@@ -710,13 +715,23 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
                 has no managers, and "0 managers" says nothing. */}
             {!message.streaming && message.why?.trace?.some((n) => n.role.startsWith('T2')) && <TraceFold trace={message.why.trace} />}
             {rest && (
-              <div className="cascade-answer prose prose-invert max-w-none text-ink-100">
+              <div className={`cascade-answer prose prose-invert max-w-none text-ink-100${message.streaming ? ' is-streaming' : justFinished ? ' cz-settle' : ''}`}>
                 <Markdown>{rest}</Markdown>
               </div>
             )}
             {(files.length > 0 || unsavedMedia.length > 0) && (
               <div className="mt-1 flex flex-col gap-2">
-                {files.map((f, i) => <GeneratedFileCard key={`${f.name}-${i}`} file={f} />)}
+                {files.map((f, i) => (
+                  // A finished file drops into the thread with a small bounce.
+                  <motion.div
+                    key={`${f.name}-${i}`}
+                    initial={justFinished ? { opacity: 0, y: -22, rotate: -2 } : false}
+                    animate={{ opacity: 1, y: 0, rotate: 0 }}
+                    transition={{ type: 'spring', stiffness: 360, damping: 18, delay: 0.35 + i * 0.12 }}
+                  >
+                    <GeneratedFileCard file={f} />
+                  </motion.div>
+                ))}
                 {unsavedMedia.map((m) => (
                   <GeneratedMediaCard key={m.id} media={m} saved={savedIds.has(m.id)} />
                 ))}
@@ -729,7 +744,13 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
           has no content but still needs "stopped" and its /why. The actions
           act on the text, so they wait for some. */}
       {!message.streaming && (message.content || hasReceipt) && (
-        <div className="flex min-h-[28px] flex-wrap items-center gap-1.5">
+        // The receipt prints out, left to right, once the answer has landed.
+        <motion.div
+          className="flex min-h-[28px] flex-wrap items-center gap-1.5"
+          initial={justFinished ? { opacity: 0, y: -6, clipPath: 'inset(0 100% 0 0)' } : false}
+          animate={{ opacity: 1, y: 0, clipPath: 'inset(0 0% 0 0)' }}
+          transition={{ duration: 0.7, ease: [0.2, 0.8, 0.2, 1], delay: 0.15 }}
+        >
           {hasReceipt && (
             <Receipt
               message={message}
@@ -756,7 +777,7 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
               )}
             </div>
           )}
-        </div>
+        </motion.div>
       )}
       <AnimatePresence initial={false}>
         {whyOpen && message.why && (
