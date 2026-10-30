@@ -158,7 +158,7 @@ describe('the desktop\'s run accounting for the cloud', () => {
 
     it('stays on disk when the signed-in desktop cannot upload it, and goes once a replay is delivered', async () => {
       const router = await routerWith(100, 0.0001);
-      const { server, delivered } = desktopServer(file, 51001, () => ({ userId: 'u1', serverUrl: 'https://cloud' }));
+      const { server, delivered } = desktopServer(file, 51001, () => ({ userId: 'u1', serverUrl: 'https://cloud' }), () => true);
       await server.emitRunAccounting(vi.fn(), 's1', { getRouter: () => router, getDecisionLog: () => [] }, { ...run, copyTurn: true });
       // The desktop window's mirror, signed in, while the cloud answers 502.
       const failing = { ok: false, error: 'Cloud request failed (502)' };
@@ -196,7 +196,7 @@ describe('the desktop\'s run accounting for the cloud', () => {
 
     it('keeps a session\'s turns in order when one fails to upload and is replayed later', async () => {
       const account = () => ({ userId: 'u1', serverUrl: 'https://cloud' });
-      const { server, delivered } = desktopServer(file, 51001, account);
+      const { server, delivered } = desktopServer(file, 51001, account, () => true);
       const cascade = async () => { const router = await routerWith(100, 0.0001); return { getRouter: () => router, getDecisionLog: () => [] }; };
       await server.emitRunAccounting(vi.fn(), 's1', await cascade(), { ...run, copyTurn: true, prompt: 'first question' });
       await server.emitRunAccounting(vi.fn(), 's1', await cascade(), { ...run, copyTurn: true, prompt: 'second question' });
@@ -302,6 +302,24 @@ describe('the desktop\'s run accounting for the cloud', () => {
           (id) => restarted.server.confirmAccounting(id, 'desk'))).toBe('skipped');
         expect(await mirrorAndConfirm(mirror, delivered[0]!.payload as unknown as AccountedRun, confirm)).toBe('skipped');
         expect(calls()).toBe(0);
+        expect(desktopServer(file, 51007).server.pendingAccounting!.unconfirmed()).toEqual([]);
+      });
+
+      it('kept by an older build with no stamp, replayed after the upgrade with syncing on: nothing is uploaded', async () => {
+        // The older build could not say (the user had opted out in the window then).
+        const router = await routerWith(100, 0.0001);
+        const older = desktopServer(file, 51001, () => u1);
+        await older.server.emitRunAccounting(vi.fn(), 's1', { getRouter: () => router, getDecisionLog: () => [] }, { ...run, copyTurn: true });
+        expect(older.delivered[0]!.payload).not.toHaveProperty('sync');
+        // Upgraded and restarted, with syncing on now.
+        const upgraded = desktopServer(file, 51006, () => u1, () => true);
+        upgraded.server.replayAccountingTo('desk');
+        const { mirror, calls, api } = window(() => true);
+        expect(await mirrorAndConfirm(mirror, upgraded.delivered[0]!.payload as unknown as AccountedRun,
+          (id) => upgraded.server.confirmAccounting(id, 'desk'))).toBe('skipped');
+        expect(calls()).toBe(0);
+        expect(api.status).not.toHaveBeenCalled();
+        // Settled for good: not replayed on the next start.
         expect(desktopServer(file, 51007).server.pendingAccounting!.unconfirmed()).toEqual([]);
       });
 

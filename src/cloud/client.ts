@@ -97,6 +97,16 @@ export interface CloudSessionStore {
   replace?(prev: CloudSession, next: CloudSession): boolean;
 }
 
+/** Options for a client. */
+export interface CloudClientOptions {
+  /**
+   * Called just before each authenticated request goes out, after any token
+   * refresh and before a retry after a 401. Throwing stops the request: no
+   * bytes of it are sent. The desktop uses it to re-check the sync opt-out.
+   */
+  beforeSend?: () => void;
+}
+
 /** Default store: the 0600 JSON file next to the global provider credentials. */
 class FileCloudSessionStore implements CloudSessionStore {
   constructor(private readonly dir?: string) {}
@@ -118,12 +128,16 @@ export class CloudAccountChangedError extends Error {
 export class CloudClient {
   private readonly store: CloudSessionStore;
 
+  private readonly beforeSend: (() => void) | undefined;
+
   constructor(
     private readonly serverUrl: string,
     dir?: string,
     store?: CloudSessionStore,
+    options: CloudClientOptions = {},
   ) {
     this.store = store ?? new FileCloudSessionStore(dir);
+    this.beforeSend = options.beforeSend;
   }
 
   /** Build a client from a stored session, or null if not signed in. */
@@ -312,8 +326,12 @@ export class CloudClient {
 
   /** Authenticated request that refreshes once on a 401 (e.g. server-side revoke). */
   private async authed<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const call = (token: string) =>
-      fetch(this.url(path), { ...init, headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}` } });
+    // The send-time check runs here, once the token is in hand, so a refresh
+    // that was awaited first cannot carry a request past it.
+    const call = (token: string) => {
+      this.beforeSend?.();
+      return fetch(this.url(path), { ...init, headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}` } });
+    };
     let res = await call(await this.accessToken());
     if (res.status === 401) res = await call((await this.refresh()).accessToken);
     if (!res.ok) throw new Error(`Request failed (${res.status}).`);

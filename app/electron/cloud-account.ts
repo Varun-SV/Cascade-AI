@@ -32,6 +32,34 @@ export function isAccountChangedError(err: unknown): boolean {
   return !!err && typeof err === 'object' && (err as { code?: unknown }).code === 'CLOUD_ACCOUNT_CHANGED';
 }
 
+/**
+ * Thrown just before a run-mirror request would go out while syncing is off
+ * now: nothing of that request is sent. Matched by its code, like the
+ * client's account error.
+ */
+export class SyncOffError extends Error {
+  readonly code = 'CLOUD_SYNC_OFF';
+  constructor() { super('Cloud sync is off.'); this.name = 'SyncOffError'; }
+}
+
+/** True for the error `sendGate` throws. */
+export function isSyncOffError(err: unknown): boolean {
+  return !!err && typeof err === 'object' && (err as { code?: unknown }).code === 'CLOUD_SYNC_OFF';
+}
+
+/**
+ * A client's `beforeSend` for the run mirror: checked right before each
+ * request leaves (after a token refresh, and before a retry after a 401), so
+ * an opt-out kept while a request waits stops it there.
+ */
+export function sendGate(allowed: () => boolean): () => void {
+  return () => {
+    let ok = false;
+    try { ok = allowed() === true; } catch { ok = false; }
+    if (!ok) throw new SyncOffError();
+  };
+}
+
 type SessionLike = { user: { id: string }; refreshToken?: string; serverUrl?: string };
 
 /** A session store, as `CloudClient` reads and writes it. */

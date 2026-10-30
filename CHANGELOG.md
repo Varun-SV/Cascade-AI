@@ -136,8 +136,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   account is signed in by then. Each request also names that account, and
   the app's main process refuses it if another account has signed in
   meanwhile, even part-way through a send or when retrying after renewing
-  the sign-in. If the sign-in changes while it is being renewed, the request
-  is not sent or retried with the renewed tokens. Runs in the same chat are also sent in the
+  the sign-in. If the sign-in changes while it is being renewed (including
+  while the renewed tokens are being read), the request is not sent or
+  retried, and the renewed tokens never replace the newer sign-in. Runs in the same chat are also sent in the
   order they ended: a run whose late calls were still settling, or whose
   upload failed and was sent again later, used to let the next run's turn
   reach the cloud chat first.
@@ -148,8 +149,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   open, or on a replay after a restart). The app's main process now keeps
   the setting (an opt-out set by an earlier build is carried over), the
   backend records it with each run as it ends, and the main process also
-  refuses each upload while syncing is off now. A setting it cannot read
-  counts as off.
+  refuses each upload while syncing is off now, checked again just before
+  each request leaves (after renewing the sign-in, and before a retry), so
+  turning syncing off stops a request that was waiting. A setting it cannot
+  read counts as off, and so does the time before the earlier build's
+  opt-out has been carried over at the first start. Reports an earlier build
+  kept on disk, which cannot show whether syncing was on when the run ended,
+  are not uploaded.
 - **You can start a new chat from the session sidebar.** Before, only the Code
   view's chat picker and the command palette could. The sidebar (and its
   collapsed rail) now has a New chat button: Mission Control and Chat start the

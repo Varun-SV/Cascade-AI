@@ -34,9 +34,10 @@ export interface AccountedRun {
   account?: { userId: string; serverUrl: string } | null;
   /**
    * Whether syncing to the cloud was on when the run ended, stamped by the
-   * backend. false: never uploaded, even if syncing is on again by now.
-   * Absent from hosts that cannot tell (and from reports kept by older
-   * builds), where only the opt-out in force when it is sent applies.
+   * backend. Only true is uploaded. Absent from reports an older build kept
+   * on disk: those cannot show the user agreed as the run ended, so they are
+   * never uploaded either, whatever the setting is now. (Hosts that cannot
+   * stamp it have no cloud bridge, so nothing of theirs is uploaded anyway.)
    */
   sync?: boolean;
   cloud?: RunAccounting;
@@ -56,6 +57,11 @@ export interface CloudMirrorApi {
   recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string; endedAt?: number }, account?: CloudAccount): Promise<{ ok: boolean; accountChanged?: boolean; syncOff?: boolean; error?: string }>;
   /** Records the opt-out in the main process, where the backend and the uploads read it. */
   setSyncOptOut?(optedOut: boolean): Promise<{ ok: boolean }>;
+  /**
+   * Hands the main process the opt-out an earlier build kept here. Until it
+   * has, the main process counts syncing as off.
+   */
+  adoptSyncSetting?(legacyOptedOut: boolean): Promise<{ ok: boolean; optedOut?: boolean }>;
 }
 
 /**
@@ -160,7 +166,8 @@ export class CloudMirror {
    */
   accounted(run: AccountedRun | undefined): Promise<MirrorResult> {
     // Off as the run ended (the backend's stamp) or off now: nothing is asked or sent.
-    const optedOut = run?.sync === false || this.optedOut();
+    // Only a report stamped on as it ended can be uploaded (see `sync`).
+    const optedOut = run?.sync !== true || this.optedOut();
     const atEnd = optedOut ? Promise.resolve(null) : this.api()?.status?.().catch(() => 'error' as const);
     // Anything that throws (a bridge call rejecting) is a failure to retry.
     // Another account signing in part-way is a skip, like one signed in before.
@@ -183,7 +190,7 @@ export class CloudMirror {
   ): Promise<MirrorResult> {
     const sid = run?.sessionId;
     // Off when the run ended is off for good; off now is off too.
-    if (!sid || !run?.cloud || run.sync === false || optedOut || this.optedOut()) return 'skipped';
+    if (!sid || !run?.cloud || run.sync !== true || optedOut || this.optedOut()) return 'skipped';
     const api = this.api();
     if (!api) return 'skipped';
     // Links belong to the account they were made under; signed out, nothing goes.
@@ -329,15 +336,20 @@ export async function mirrorAndConfirm(
 }
 
 /**
- * An opt-out kept by an earlier build in this window's storage is handed to
- * the main process, which owns the setting now. Only ever turns syncing off:
- * a stored opt-in never overrides what the main process has.
+ * The window's stored opt-out (kept by an earlier build) is handed to the main
+ * process, which owns the setting now and counts syncing as off until this has
+ * run. A stored opt-in never overrides an opt-out the main process has.
+ * Answers whether the main process now has syncing off.
  */
 export async function migrateSyncOptOut(
   api: Partial<CloudMirrorApi> | undefined, storedOptOut: () => boolean,
 ): Promise<boolean> {
-  if (!storedOptOut() || !api?.setSyncOptOut) return false;
-  try { return (await api.setSyncOptOut(true)).ok; } catch { return false; }
+  const legacy = storedOptOut();
+  try {
+    if (api?.adoptSyncSetting) return (await api.adoptSyncSetting(legacy)).optedOut !== false;
+    if (legacy && api?.setSyncOptOut) return (await api.setSyncOptOut(true)).ok;
+  } catch { /* not handed over: the main process keeps counting syncing as off */ }
+  return legacy;
 }
 
 /** The desktop's one mirror, over the preload bridge. */

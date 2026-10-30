@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { accountMismatch, isAccountChangedError, pinnedStore } from './cloud-account';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { accountMismatch, isAccountChangedError, isSyncOffError, pinnedStore, sendGate, SyncOffError } from './cloud-account';
+import { fileSyncConsent } from './cloud-sync-consent';
 import { CloudAccountChangedError, CloudClient } from '../../src/cloud/client';
 
 /** The session `CloudClient` keeps, as its store holds it. */
@@ -242,4 +246,51 @@ describe('a client on the store pinned to one account', () => {
     expect(store.load()?.user.id).toBe('u2');
   });
 
+  describe('the sync opt-out, checked as each request leaves', () => {
+    let dir: string;
+    const consentFile = () => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-gate-'));
+      const c = fileSyncConsent(path.join(dir, 'cloud-sync.json'));
+      c.adoptLegacy(false); // on, as a run ended
+      return c;
+    };
+    afterEach(() => { if (dir) fs.rmSync(dir, { recursive: true, force: true }); });
+
+    it.each([
+      ['appendTurn under a nearly expired token', 'expired' as const, (c: CloudClient) => c.appendTurn('c1', { userContent: 'u1 prompt', assistant: { content: 'r' } } as never)],
+      ['appendTurn retried after a 401', 401 as const, (c: CloudClient) => c.appendTurn('c1', { userContent: 'u1 prompt', assistant: { content: 'r' } } as never)],
+      ['createConversation retried after a 401', 401 as const, (c: CloudClient) => c.createConversation('u1 prompt')],
+      ['recordRunSpend under a nearly expired token', 'expired' as const, (c: CloudClient) => c.recordRunSpend({ conversationId: null, outcome: 'answered', costUsd: 0.01, why: 'w' })],
+    ])('%s: no request leaves after an opt-out kept while the refresh was out', async (_what, first, op) => {
+      const consent = consentFile();
+      const store = shared(first === 'expired' ? { ...session('u1'), accessExpiresAt: Date.now() - 1 } : session('u1'));
+      const f = pausedRefresh(store, first);
+      const client = new CloudClient('https://cloud', undefined, pinnedStore(store, 'u1'), { beforeSend: sendGate(() => consent.allowed()) });
+      const done = op(client);
+      await f.refreshStarted;
+      const before = sends(f.calls).length;
+      consent.setOptedOut(true);
+      f.resolveRefresh();
+      const err = await done.catch((e: unknown) => e);
+      // Refused as sync-off (skipped, not retried), and nothing more was sent.
+      expect(err).toBeInstanceOf(SyncOffError);
+      expect(isSyncOffError(err)).toBe(true);
+      expect(isAccountChangedError(err)).toBe(false);
+      expect(sends(f.calls).length).toBe(before);
+      expect(before).toBe(first === 401 ? 1 : 0);
+    });
+
+    it('lets requests through while syncing stays on, and treats a consent it cannot read as off', async () => {
+      const consent = consentFile();
+      const store = shared(session('u1'));
+      const f = pausedRefresh(store, 401);
+      const client = new CloudClient('https://cloud', undefined, pinnedStore(store, 'u1'), { beforeSend: sendGate(() => consent.allowed()) });
+      const done = client.createConversation('t');
+      await f.refreshStarted;
+      f.resolveRefresh();
+      await expect(done).resolves.toMatchObject({ id: 'c1' });
+      expect(sends(f.calls).map((c) => c.auth)).toEqual(['Bearer u1-access', 'Bearer u1-access-2']);
+      expect(() => sendGate(() => { throw new Error('io'); })()).toThrow(SyncOffError);
+    });
+  });
 });

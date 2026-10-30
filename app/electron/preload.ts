@@ -223,6 +223,7 @@ contextBridge.exposeInMainWorld('cascade', {
     // Whether runs are copied to the cloud, kept by the main process.
     syncOptOut: () => ipcRenderer.invoke('cloud:syncOptOut') as Promise<{ ok: boolean; optedOut?: boolean }>,
     setSyncOptOut: (optedOut: boolean) => ipcRenderer.invoke('cloud:setSyncOptOut', optedOut) as Promise<{ ok: boolean; optedOut?: boolean; error?: string }>,
+    adoptSyncSetting: (legacyOptedOut: boolean) => ipcRenderer.invoke('cloud:adoptSyncSetting', legacyOptedOut) as Promise<{ ok: boolean; optedOut?: boolean; error?: string }>,
     syncPush: (passphrase: string) => ipcRenderer.invoke('cloud:syncPush', passphrase) as Promise<{ ok: boolean; error?: string; version?: number }>,
     syncPull: (passphrase: string) => ipcRenderer.invoke('cloud:syncPull', passphrase) as Promise<{ ok: boolean; error?: string; empty?: boolean; applied?: boolean; skipped?: { removed: string[]; clearedPins: string[]; revokedCredentials?: number; unusableCredentials?: number } }>,
   },

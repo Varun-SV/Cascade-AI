@@ -18,7 +18,7 @@ import { app, ipcMain, safeStorage, shell } from 'electron';
 import { join } from 'node:path';
 import { readFileSync, writeFileSync, rmSync, mkdirSync, chmodSync } from 'node:fs';
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
-import { accountMismatch, ACCOUNT_CHANGED, isAccountChangedError, pinnedStore } from './cloud-account';
+import { accountMismatch, ACCOUNT_CHANGED, isAccountChangedError, isSyncOffError, pinnedStore, sendGate } from './cloud-account';
 import { fileSyncConsent, SYNC_OFF } from './cloud-sync-consent';
 
 // ── Shapes shared with the renderer (mirror the SDK's cloud types) ──
@@ -80,7 +80,7 @@ interface CloudClientLike {
   logout(): Promise<void>;
 }
 
-type CloudClientCtor = new (serverUrl: string, dir?: string, store?: SessionStore) => CloudClientLike;
+type CloudClientCtor = new (serverUrl: string, dir?: string, store?: SessionStore, options?: { beforeSend?: () => void }) => CloudClientLike;
 
 // The subset of the Cascade core bundle this module uses.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -253,9 +253,13 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
   const otherAccount = (expected: unknown) => accountMismatch(expected, store.load()?.user?.id, serverUrl);
   // And the client for such a request sees only that account's session, so a
   // refresh-and-retry on a 401 cannot go out under an account signed in since.
+  // Its requests also re-check the sync opt-out just before each one leaves
+  // (after a refresh, and before a retry after a 401), not only on entry.
   const clientFor = (expected: unknown): CloudClientLike => {
     const userId = expected && typeof expected === 'object' ? (expected as { userId?: unknown }).userId : undefined;
-    return typeof userId === 'string' ? new (core().CloudClient)(serverUrl, undefined, pinnedStore(store, userId)) : client();
+    return typeof userId === 'string'
+      ? new (core().CloudClient)(serverUrl, undefined, pinnedStore(store, userId), { beforeSend: sendGate(() => consent.allowed()) })
+      : client();
   };
   // A request that failed because the sign-in changed under it (during a
   // refresh, say) answers as refused, so the mirror applies the account-switch
@@ -266,10 +270,17 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
   const syncOff = (expected: unknown) => expected !== undefined && expected !== null && !consent.allowed();
 
   ipcMain.handle('cloud:syncOptOut', () => ({ ok: true, optedOut: !consent.allowed() }));
+  // The window hands over the opt-out an earlier build kept in its storage.
+  // Until this has run once, syncing reads as off (see cloud-sync-consent.ts).
+  ipcMain.handle('cloud:adoptSyncSetting', (_e, legacyOptedOut: unknown) => {
+    if (typeof legacyOptedOut !== 'boolean') return { ok: false, error: 'Invalid setting.' };
+    try { return { ok: true, optedOut: !consent.adoptLegacy(legacyOptedOut) }; }
+    catch (err) { return { ok: false, optedOut: !consent.allowed(), error: err instanceof Error ? err.message : 'Could not save that setting.' }; }
+  });
   ipcMain.handle('cloud:setSyncOptOut', (_e, optedOut: unknown) => {
     if (typeof optedOut !== 'boolean') return { ok: false, error: 'Invalid setting.' };
     try { consent.setOptedOut(optedOut); return { ok: true, optedOut: !consent.allowed() }; }
-    catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not save that setting.' }; }
+    catch (err) { return { ok: false, optedOut: !consent.allowed(), error: err instanceof Error ? err.message : 'Could not save that setting.' }; }
   });
 
   ipcMain.handle('cloud:createConversation', async (_e, title: unknown, expected?: unknown) => {
@@ -278,6 +289,7 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
     try { return { ok: true, conversation: await clientFor(expected).createConversation(typeof title === 'string' ? title : undefined) }; }
     catch (err) {
       if (changedUnder(err, expected)) return ACCOUNT_CHANGED;
+      if (isSyncOffError(err)) return SYNC_OFF;
       return { ok: false, error: err instanceof Error ? err.message : 'Could not create a cloud chat.' };
     }
   });
@@ -288,6 +300,7 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
     try { return { ok: true, messages: await clientFor(expected).appendTurn(String(id), turn as CloudTurn) }; }
     catch (err) {
       if (changedUnder(err, expected)) return { ...ACCOUNT_CHANGED, messages: [] };
+      if (isSyncOffError(err)) return { ...SYNC_OFF, messages: [] };
       return { ok: false, error: err instanceof Error ? err.message : 'Could not save that turn.', messages: [] };
     }
   });
@@ -308,6 +321,7 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
     try { return { ok: true, ...(await clientFor(expected).recordRunSpend({ conversationId, outcome, costUsd, why, ...(runId ? { runId } : {}), ...(endedAt !== undefined ? { endedAt } : {}) })) }; }
     catch (err) {
       if (changedUnder(err, expected)) return ACCOUNT_CHANGED;
+      if (isSyncOffError(err)) return SYNC_OFF;
       return { ok: false, error: err instanceof Error ? err.message : 'Could not record that run.' };
     }
   });

@@ -21,7 +21,7 @@ function setup(optedOut = false, chats = links()) {
 }
 
 const answered = (sessionId: string, extra: Record<string, unknown> = {}) =>
-  ({ sessionId, prompt: 'q', output: 'answer', outcome: 'answered' as const, copyTurn: true, cloud: accounting, ...extra });
+  ({ sessionId, prompt: 'q', output: 'answer', outcome: 'answered' as const, copyTurn: true, sync: true, cloud: accounting, ...extra });
 
 describe('CloudMirror', () => {
   it('copies an answered turn with its cost, by the prompt the backend sends', async () => {
@@ -34,8 +34,8 @@ describe('CloudMirror', () => {
 
   it('records a stopped run, and an empty answer, as spend only, with no chat made for them', async () => {
     const { api, mirror } = setup();
-    await mirror.accounted({ sessionId: 's1', prompt: 'q', output: '', outcome: 'stopped', copyTurn: true, cloud: accounting });
-    await mirror.accounted({ sessionId: 's2', prompt: 'q', output: '', outcome: 'answered', copyTurn: true, cloud: accounting });
+    await mirror.accounted({ sessionId: 's1', prompt: 'q', output: '', outcome: 'stopped', copyTurn: true, sync: true, cloud: accounting });
+    await mirror.accounted({ sessionId: 's2', prompt: 'q', output: '', outcome: 'answered', copyTurn: true, sync: true, cloud: accounting });
     expect(api.createConversation).not.toHaveBeenCalled();
     expect(api.recordRunSpend).toHaveBeenNthCalledWith(1, { conversationId: null, outcome: 'stopped', runId: expect.any(String), ...accounting }, { userId: 'u1', serverUrl: 'https://cloud' });
     expect(api.recordRunSpend).toHaveBeenNthCalledWith(2, { conversationId: null, outcome: 'answered', runId: expect.any(String), ...accounting }, { userId: 'u1', serverUrl: 'https://cloud' });
@@ -51,8 +51,8 @@ describe('CloudMirror', () => {
   it('sends a report replayed by the backend under the backend\'s id, so it is counted once', async () => {
     const { api, mirror } = setup();
     const id = '6a1c2f3e-0000-4000-8000-123456789abc';
-    await mirror.accounted({ id, sessionId: 'sched', outcome: 'answered', copyTurn: false, prompt: 'q', output: 'a', cloud: accounting });
-    await mirror.accounted({ id, sessionId: 'sched', outcome: 'answered', copyTurn: false, prompt: 'q', output: 'a', cloud: accounting });
+    await mirror.accounted({ id, sessionId: 'sched', outcome: 'answered', copyTurn: false, prompt: 'q', output: 'a', sync: true, cloud: accounting });
+    await mirror.accounted({ id, sessionId: 'sched', outcome: 'answered', copyTurn: false, prompt: 'q', output: 'a', sync: true, cloud: accounting });
     expect(api.recordRunSpend.mock.calls.map((c) => (c[0] as { runId: string }).runId)).toEqual([id, id]);
   });
 
@@ -60,7 +60,7 @@ describe('CloudMirror', () => {
     const { api, mirror } = setup();
     const endedAt = Date.UTC(2026, 9, 21, 23, 58);
     await mirror.accounted(answered('s1', { endedAt }));
-    await mirror.accounted({ sessionId: 's2', outcome: 'failed', endedAt, cloud: accounting });
+    await mirror.accounted({ sessionId: 's2', outcome: 'failed', endedAt, sync: true, cloud: accounting });
     expect((api.appendTurn.mock.calls[0]![1] as { endedAt?: number }).endedAt).toBe(endedAt);
     expect((api.recordRunSpend.mock.calls[0]![0] as { endedAt?: number }).endedAt).toBe(endedAt);
   });
@@ -75,7 +75,7 @@ describe('CloudMirror', () => {
   it('records a failed run against the chat already copied', async () => {
     const { api, mirror } = setup();
     await mirror.accounted(answered('s1'));
-    await mirror.accounted({ sessionId: 's1', outcome: 'failed', cloud: accounting });
+    await mirror.accounted({ sessionId: 's1', outcome: 'failed', sync: true, cloud: accounting });
     expect(api.recordRunSpend).toHaveBeenCalledWith({ conversationId: 'c1', outcome: 'failed', runId: expect.any(String), ...accounting }, expect.anything());
   });
 
@@ -103,7 +103,7 @@ describe('CloudMirror', () => {
 
     const other = setup(false, links([['https://cloud|u1|s2', 'deleted-chat']]));
     other.api.recordRunSpend.mockResolvedValueOnce({ ok: false, error: 'Request failed (404).' }).mockResolvedValue({ ok: true });
-    await other.mirror.accounted({ sessionId: 's2', outcome: 'failed', cloud: accounting });
+    await other.mirror.accounted({ sessionId: 's2', outcome: 'failed', sync: true, cloud: accounting });
     const calls = other.api.recordRunSpend.mock.calls.map((c) => c[0] as { conversationId: string | null; runId: string });
     expect(calls.map((c) => c.conversationId)).toEqual(['deleted-chat', null]);
     // The same run id both times: if the first was recorded after all, the second is not.
@@ -172,7 +172,7 @@ describe('CloudMirror', () => {
     const chats = links([['https://cloud|u1|s1', 'live-chat']]);
     const { api, mirror } = setup(false, chats);
     api.recordRunSpend.mockResolvedValueOnce({ ok: false, error: 'socket hang up' }).mockResolvedValue({ ok: true });
-    await mirror.accounted({ sessionId: 's1', outcome: 'failed', cloud: accounting });
+    await mirror.accounted({ sessionId: 's1', outcome: 'failed', sync: true, cloud: accounting });
     const calls = api.recordRunSpend.mock.calls.map((c) => c[0] as { conversationId: string | null; runId: string });
     expect(calls.map((c) => c.conversationId)).toEqual(['live-chat', 'live-chat']);
     expect(calls[1]!.runId).toBe(calls[0]!.runId);
@@ -240,7 +240,7 @@ describe('which reports are confirmed to the backend', () => {
     const offline = setup();
     offline.api.recordRunSpend.mockRejectedValue(new Error('offline'));
     const confirm = vi.fn();
-    await expect(mirrorAndConfirm(offline.mirror, { id: 'run-0002', sessionId: 's1', outcome: 'failed', cloud: accounting }, confirm)).resolves.toBe('retry');
+    await expect(mirrorAndConfirm(offline.mirror, { id: 'run-0002', sessionId: 's1', outcome: 'failed', sync: true, cloud: accounting }, confirm)).resolves.toBe('retry');
     const throwing = setup();
     throwing.api.createConversation.mockRejectedValue(new Error('bridge gone'));
     await expect(mirrorAndConfirm(throwing.mirror, answered('s1', { id: 'run-0003' }), confirm)).resolves.toBe('retry');
@@ -255,7 +255,7 @@ describe('which reports are confirmed to the backend', () => {
     const { api, mirror } = setup(false, links([['https://cloud|u1|s1', 'gone-chat']]));
     api.recordRunSpend.mockResolvedValueOnce({ ok: false, error: 'Not found (404)' }).mockResolvedValue(failing);
     const confirm = vi.fn();
-    await expect(mirrorAndConfirm(mirror, { id: 'run-0005', sessionId: 's1', outcome: 'failed', cloud: accounting }, confirm)).resolves.toBe('retry');
+    await expect(mirrorAndConfirm(mirror, { id: 'run-0005', sessionId: 's1', outcome: 'failed', sync: true, cloud: accounting }, confirm)).resolves.toBe('retry');
     expect(confirm).not.toHaveBeenCalled();
   });
 
@@ -276,7 +276,7 @@ describe('which reports are confirmed to the backend', () => {
     // A 400, as /usage/runs gives a report whose /why is too long.
     api.recordRunSpend.mockResolvedValue({ ok: false, error: 'Request failed (400).' });
     const confirm = vi.fn();
-    await expect(mirrorAndConfirm(mirror, { id: 'run-0012', sessionId: 's1', outcome: 'failed', cloud: accounting }, confirm)).resolves.toBe('rejected');
+    await expect(mirrorAndConfirm(mirror, { id: 'run-0012', sessionId: 's1', outcome: 'failed', sync: true, cloud: accounting }, confirm)).resolves.toBe('rejected');
     expect(api.recordRunSpend).toHaveBeenCalledTimes(1);
     expect(confirm).toHaveBeenCalledWith('run-0012');
     warn.mockRestore();
@@ -287,7 +287,7 @@ describe('which reports are confirmed to the backend', () => {
     for (const error of ['Request failed (401).', 'Request failed (429).', 'Request failed (408).']) {
       const { api, mirror } = setup();
       api.recordRunSpend.mockResolvedValue({ ok: false, error });
-      await expect(mirrorAndConfirm(mirror, { id: 'run-0013', sessionId: 's1', outcome: 'failed', cloud: accounting }, confirm)).resolves.toBe('retry');
+      await expect(mirrorAndConfirm(mirror, { id: 'run-0013', sessionId: 's1', outcome: 'failed', sync: true, cloud: accounting }, confirm)).resolves.toBe('retry');
     }
     expect(confirm).not.toHaveBeenCalled();
   });
@@ -368,7 +368,7 @@ describe('which reports are confirmed to the backend', () => {
     spend.api.status.mockResolvedValue(as('u1'));
     spend.api.recordRunSpend.mockImplementation(async (_r: unknown, account?: { userId: string }) => { const r = check(account); current = 'u1'; return r ?? { ok: true }; });
     spend.api.status.mockResolvedValueOnce(as('u1')).mockResolvedValueOnce(as('u1'));
-    await expect(mirrorAndConfirm(spend.mirror, { id: 'run-0017', sessionId: 's1', outcome: 'failed', cloud: accounting, account: stamped }, confirm)).resolves.toBe('skipped');
+    await expect(mirrorAndConfirm(spend.mirror, { id: 'run-0017', sessionId: 's1', outcome: 'failed', sync: true, cloud: accounting, account: stamped }, confirm)).resolves.toBe('skipped');
     expect(spend.api.recordRunSpend).toHaveBeenCalledTimes(1);
   });
 
@@ -431,7 +431,7 @@ describe('which reports are confirmed to the backend', () => {
     api.appendTurn.mockResolvedValueOnce(failing).mockResolvedValueOnce(failing);
     expect(await mirror.accounted(answered('s1', { id: 'run-0200', output: 'first' }))).toBe('retry');
     expect(await mirror.accounted(answered('s1', { id: 'run-0201', output: 'second' }))).toBe('retry');
-    expect(await mirror.accounted({ id: 'run-0202', sessionId: 's1', outcome: 'failed', cloud: accounting })).toBe('delivered');
+    expect(await mirror.accounted({ id: 'run-0202', sessionId: 's1', outcome: 'failed', sync: true, cloud: accounting })).toBe('delivered');
     expect(await mirror.accounted(answered('s2', { id: 'run-0203', output: 'elsewhere' }))).toBe('delivered');
     const copied = () => api.appendTurn.mock.calls.map((c) => (c[1] as { assistant: { content: string } }).assistant.content);
     expect(copied()).toEqual(['first', 'first', 'elsewhere']);
@@ -492,8 +492,8 @@ describe('which reports are confirmed to the backend', () => {
   it('a failure does not hold up the runs queued behind it', async () => {
     const { api, mirror } = setup();
     api.recordRunSpend.mockResolvedValueOnce(failing).mockResolvedValueOnce(failing);
-    const first = mirror.accounted({ id: 'run-0010', sessionId: 's1', outcome: 'failed', cloud: accounting });
-    const second = mirror.accounted({ id: 'run-0011', sessionId: 's1', outcome: 'failed', cloud: accounting });
+    const first = mirror.accounted({ id: 'run-0010', sessionId: 's1', outcome: 'failed', sync: true, cloud: accounting });
+    const second = mirror.accounted({ id: 'run-0011', sessionId: 's1', outcome: 'failed', sync: true, cloud: accounting });
     expect([await first, await second]).toEqual(['retry', 'delivered']);
   });
 });
@@ -526,14 +526,37 @@ describe('run-end sync consent', () => {
     expect(api.recordRunSpend).not.toHaveBeenCalled();
   });
 
-  it('hands an opt-out kept by an earlier build to the main process, and never an opt-in', async () => {
-    const setSyncOptOut = vi.fn().mockResolvedValue({ ok: true });
-    expect(await migrateSyncOptOut({ setSyncOptOut }, () => true)).toBe(true);
-    expect(setSyncOptOut).toHaveBeenCalledWith(true);
-    setSyncOptOut.mockClear();
-    expect(await migrateSyncOptOut({ setSyncOptOut }, () => false)).toBe(false);
-    expect(setSyncOptOut).not.toHaveBeenCalled();
-    expect(await migrateSyncOptOut({ setSyncOptOut: vi.fn().mockRejectedValue(new Error('x')) }, () => true)).toBe(false);
-    expect(await migrateSyncOptOut(undefined, () => true)).toBe(false);
+  it('never uploads a report an older build journaled without the stamp, though syncing is on now', async () => {
+    // Kept on disk by an earlier build, with no `sync`: it cannot show the
+    // user agreed as it ended (they may have opted out then), so after an
+    // upgrade with syncing on it is confirmed as skipped and nothing is sent.
+    const { api, mirror } = setup(false);
+    const confirm = vi.fn();
+    const legacy = { id: 'run-legacy-01', sessionId: 's1', prompt: 'old prompt', output: 'old reply', outcome: 'answered' as const, copyTurn: true, account: { userId: 'u1', serverUrl: 'https://cloud' }, cloud: accounting };
+    expect(await mirrorAndConfirm(mirror, legacy, confirm)).toBe('skipped');
+    expect(await mirror.accounted({ sessionId: 's2', outcome: 'failed', cloud: accounting })).toBe('skipped');
+    expect(confirm).toHaveBeenCalledWith('run-legacy-01');
+    expect(api.status).not.toHaveBeenCalled();
+    expect(api.createConversation).not.toHaveBeenCalled();
+    expect(api.appendTurn).not.toHaveBeenCalled();
+    expect(api.recordRunSpend).not.toHaveBeenCalled();
+  });
+
+  it('hands the window\'s stored choice to the main process, which settles it', async () => {
+    const adoptSyncSetting = vi.fn(async (legacy: boolean) => ({ ok: true, optedOut: legacy }));
+    expect(await migrateSyncOptOut({ adoptSyncSetting }, () => true)).toBe(true);
+    expect(adoptSyncSetting).toHaveBeenLastCalledWith(true);
+    // No stored opt-out is handed over too, so the main process can settle on on.
+    expect(await migrateSyncOptOut({ adoptSyncSetting }, () => false)).toBe(false);
+    expect(adoptSyncSetting).toHaveBeenLastCalledWith(false);
+    // The main process kept an opt-out already: a stored opt-in does not undo it.
+    expect(await migrateSyncOptOut({ adoptSyncSetting: vi.fn().mockResolvedValue({ ok: true, optedOut: true }) }, () => false)).toBe(true);
+  });
+
+  it('counts syncing as off when the hand-over fails or there is no bridge', async () => {
+    expect(await migrateSyncOptOut({ adoptSyncSetting: vi.fn().mockRejectedValue(new Error('x')) }, () => true)).toBe(true);
+    expect(await migrateSyncOptOut({ adoptSyncSetting: vi.fn().mockResolvedValue({ ok: false }) }, () => true)).toBe(true);
+    expect(await migrateSyncOptOut(undefined, () => true)).toBe(true);
+    expect(await migrateSyncOptOut(undefined, () => false)).toBe(false);
   });
 });

@@ -402,6 +402,7 @@ export function App() {
     // the next connect.
     // An opt-out an earlier build kept here moves to the main process, which
     // stamps it on each run as it ends and checks it before every upload.
+    // Until it has, the main process counts syncing as off, so no run ends stamped on.
     void migrateSyncOptOut(cloudBridge(), storedSyncOptOut);
     socket.on('run:accounting', (data: AccountedRun) => {
       void mirrorAndConfirm(cloudMirror, data, (id) => socket.emit('run:accounting:ack', { id }));
