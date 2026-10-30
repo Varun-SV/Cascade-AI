@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
+import { AnimatePresence, motion } from 'framer-motion';
 import {
   SquarePen, Search, Folder, Sparkles, Trash2, PanelLeftClose, ChevronsUpDown,
   Settings, Brain, Plug, KeyRound, Upload, MonitorSmartphone, Gem, BookOpen, LogOut,
@@ -138,6 +139,38 @@ export default function ConversationSidebar({
   }
 
   // The recent page's matches show at once; the full search replaces them when it answers.
+  // A conversation whose run just ended swaps its pulsing dot for a check that
+  // draws itself, then settles back to a plain row.
+  const prevRunning = useRef<string[]>(runningConversationIds);
+  // Rows present on first paint appear as they are; later ones slide in.
+  const listed = useRef(false);
+  useEffect(() => { listed.current = true; }, []);
+  const [justDone, setJustDone] = useState<string[]>([]);
+  // One expiry timer PER conversation, owned by a ref rather than by the
+  // effect's cleanup: the running set changes whenever any run starts (App
+  // even passes a fresh [] while idle), and clearing the timer on every change
+  // left a finished run's check stuck on screen if another run began within
+  // its 2.6 s.
+  const doneTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  useEffect(() => {
+    const ended = prevRunning.current.filter((id) => !runningConversationIds.includes(id));
+    prevRunning.current = runningConversationIds;
+    if (ended.length === 0) return;
+    setJustDone((d) => [...d.filter((id) => !ended.includes(id)), ...ended]);
+    for (const id of ended) {
+      const timers = doneTimers.current;
+      clearTimeout(timers.get(id));
+      timers.set(id, setTimeout(() => {
+        timers.delete(id);
+        setJustDone((d) => d.filter((x) => x !== id));
+      }, 2600));
+    }
+  }, [runningConversationIds]);
+  useEffect(() => {
+    const timers = doneTimers.current;
+    return () => { timers.forEach(clearTimeout); timers.clear(); };
+  }, []);
+
   const shown = !q
     ? conversations
     : answered
@@ -177,7 +210,7 @@ export default function ConversationSidebar({
   return (
     <div className="flex h-full w-full min-w-0 flex-col gap-0.5 px-2.5 py-3">
       <div className="flex items-center gap-[9px] px-2 pb-3 pt-1">
-        <CascadeMark size={22} animate={false} />
+        <CascadeMark size={22} animate={false} className="cz-idle-mark" />
         <span className="flex-1 font-serif text-[20px] font-medium tracking-[-0.01em] text-ink-50">Cascade</span>
         <button type="button" aria-label="Close sidebar" onClick={onClose} className="cz-ib cz-ib-sm">
           <PanelLeftClose size={14} />
@@ -218,8 +251,12 @@ export default function ConversationSidebar({
         {shown.map((c) => {
           const active = c.id === activeConversationId;
           return (
-            <div
+            <motion.div
               key={c.id}
+              layout="position"
+              initial={listed.current ? { opacity: 0, x: -12 } : false}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ type: 'spring', stiffness: 420, damping: 32 }}
               className={clsx(
                 'group flex items-center rounded-lg',
                 active ? 'bg-sunk text-ink-50' : 'text-ink-300 hover:bg-elev/[0.05] hover:text-ink-50',
@@ -234,9 +271,42 @@ export default function ConversationSidebar({
               >
                 {c.title ?? 'Untitled conversation'}
               </button>
-              {runningConversationIds.includes(c.id) && (
-                <span title="Working" className="mr-1.5 h-[7px] w-[7px] shrink-0 animate-pulse rounded-full bg-accent-500" />
-              )}
+              <AnimatePresence initial={false} mode="popLayout">
+                {runningConversationIds.includes(c.id) ? (
+                  <motion.span
+                    key="running"
+                    title="Working"
+                    className="mr-1.5 h-[7px] w-[7px] shrink-0 animate-pulse rounded-full bg-accent-500"
+                    initial={{ scale: 0 }}
+                    animate={{ scale: 1 }}
+                    exit={{ scale: 0 }}
+                  />
+                ) : justDone.includes(c.id) ? (
+                  <motion.svg
+                    key="done"
+                    width="12"
+                    height="12"
+                    viewBox="0 0 12 12"
+                    className="mr-1 shrink-0"
+                    initial={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    aria-label="Finished"
+                    role="img"
+                  >
+                    <motion.path
+                      d="M2 6.5 5 9l5-6"
+                      fill="none"
+                      stroke="rgb(var(--c-t3))"
+                      strokeWidth={1.8}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      initial={{ pathLength: 0 }}
+                      animate={{ pathLength: 1 }}
+                      transition={{ duration: 0.4, ease: 'easeOut' }}
+                    />
+                  </motion.svg>
+                ) : null}
+              </AnimatePresence>
               <button
                 type="button"
                 aria-label="Delete chat"
@@ -245,7 +315,7 @@ export default function ConversationSidebar({
               >
                 <Trash2 size={13} />
               </button>
-            </div>
+            </motion.div>
           );
         })}
         {shown.length === 0 && (
