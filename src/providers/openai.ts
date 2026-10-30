@@ -28,7 +28,45 @@ import { isChatModel } from './model-filter.js';
  */
 export function isReasoningModel(id: string): boolean {
   const m = (id || '').toLowerCase();
-  return /(^o[1345]\b)|(^o[1345]-)|gpt-?5/.test(m);
+  return /(^o[1345]\b)|(^o[1345]-)|gpt-?[56]/.test(m);
+}
+
+/**
+ * Models whose function calling works ONLY through the Responses API.
+ * OpenAI's GPT-6 guide: tool calling requires Responses for GPT-6 Astra,
+ * GPT-6.1 Sol and GPT-6.1 Terra. Sent through Chat Completions with `tools`,
+ * they cannot run a tool loop — which is everything T1 and T2 do.
+ */
+export function requiresResponsesForTools(id: string): boolean {
+  return /gpt-?6(?:\.1-(?:sol|terra)|-astra)/i.test(id || '');
+}
+
+/**
+ * Models that call functions through Chat Completions only at
+ * `reasoning_effort: 'none'`: GPT-6 Luna and GPT-6 Sol (OpenAI's GPT-6 guide;
+ * Luna's page: "Chat Completions supports function calling only with
+ * `reasoning_effort` set to `none`"). Their default is `medium`, so a tool
+ * request that does not say so gets no working tool calls. GPT-6.1 Sol is a
+ * different model and goes through Responses instead.
+ */
+export function chatToolsNeedNoReasoning(id: string): boolean {
+  return /gpt-?6-(?:luna|sol)(?![\w.])/i.test(id || '');
+}
+
+/** How many tool calls' reasoning items a provider keeps for replay. */
+export const REASONING_REPLAY_LIMIT = 1000;
+
+/** Tool definitions in the Responses API's flat function shape. */
+export function toResponsesTools(tools: readonly ToolDefinition[]): OpenAI.Responses.FunctionTool[] {
+  return tools.map((t) => ({
+    type: 'function' as const,
+    name: t.name,
+    description: t.description,
+    parameters: t.inputSchema as Record<string, unknown>,
+    // Cascade's tool schemas are not written for strict mode (optional fields,
+    // open objects), which strict would reject outright.
+    strict: false,
+  }));
 }
 
 /** True when an API error indicates the wrong token param / temperature was sent. */
@@ -86,6 +124,18 @@ export function toOpenAIToolCalls(
 
 export class OpenAIProvider extends BaseProvider {
   protected client: OpenAI;
+  /**
+   * Reasoning items a Responses call returned alongside its function calls,
+   * keyed by call_id. OpenAI: "any reasoning items returned in model responses
+   * with tool calls must also be passed back with tool call outputs." Calls
+   * are stateless (`store: false`), so the encrypted items are the only copy;
+   * they are replayed before the matching function_call on the next turn of
+   * the same loop. The router keeps one provider per model for its lifetime,
+   * which is what lets a planner's second turn find its first turn's items.
+   * Bounded, oldest out first; a missing entry just means no replay, which is
+   * how every call behaved before.
+   */
+  protected reasoningByCallId = new Map<string, OpenAI.Responses.ResponseReasoningItem[]>();
   /** Once we learn (from the model id or an API error) that this deployment
    *  needs max_completion_tokens, remember it so we don't re-fail every call. */
   protected useMaxCompletionTokens: boolean;
@@ -108,6 +158,13 @@ export class OpenAIProvider extends BaseProvider {
     options: GenerateOptions,
     onChunk: (chunk: StreamChunk) => void,
   ): Promise<GenerateResult> {
+    const modelId = this.model.baseModelId ?? this.model.id;
+    // First-party OpenAI only: Azure and OpenAI-compatible gateways extend this
+    // class but publish their own Responses support, so they stay on Chat
+    // Completions (Azure marks these deployments tool-less instead).
+    if (options.tools?.length && this.model.provider === 'openai' && requiresResponsesForTools(modelId)) {
+      return this.generateViaResponses(options, onChunk);
+    }
     const messages = this.convertMessages(options.messages, options.systemPrompt);
     const tools = options.tools && toOpenAITools(options.tools);
 
@@ -126,6 +183,7 @@ export class OpenAIProvider extends BaseProvider {
       ...(useCompletionTokens ? { max_completion_tokens: budget } : { max_tokens: budget }),
       ...(useCompletionTokens ? {} : { temperature: options.temperature ?? 0.7 }),
       tools: tools?.length ? tools : undefined,
+      ...(tools?.length && chatToolsNeedNoReasoning(modelId) ? { reasoning_effort: 'none' } : {}),
       stream: true,
       stream_options: { include_usage: true },
     });
@@ -219,6 +277,207 @@ export class OpenAIProvider extends BaseProvider {
       toolCalls: toolCalls.length ? toolCalls : undefined,
       finishReason,
     };
+  }
+
+  /**
+   * The same contract as the Chat Completions path — streamed text, tool calls
+   * with parsed input, usage, finish reason — over the Responses API, for the
+   * models that only call tools there.
+   *
+   * Stateless (`store: false`): Cascade owns the conversation and resends it
+   * each turn, exactly as it does for Chat Completions, so nothing is kept on
+   * OpenAI's side between calls.
+   */
+  protected async generateViaResponses(
+    options: GenerateOptions,
+    onChunk: (chunk: StreamChunk) => void,
+  ): Promise<GenerateResult> {
+    const params = {
+      model: this.model.id,
+      input: this.convertToResponsesInput(options.messages),
+      ...(options.systemPrompt ? { instructions: options.systemPrompt } : {}),
+      tools: toResponsesTools(options.tools ?? []),
+      max_output_tokens: options.maxTokens ?? this.model.maxOutputTokens,
+      store: false,
+      // Without storage, the encrypted reasoning is the only way the next
+      // turn can carry this turn's reasoning forward.
+      include: ['reasoning.encrypted_content' as const],
+      stream: true as const,
+    };
+    const stream = await this.client.responses.create(params, { signal: options.signal });
+
+    let fullContent = '';
+    let isThinking = false;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let finishReason: GenerateResult['finishReason'] = 'stop';
+    // Keyed by output item id, in the order the items appear.
+    const calls = new Map<string, { id: string; name: string; args: string }>();
+    const reasoning: OpenAI.Responses.ResponseReasoningItem[] = [];
+
+    const closeThinking = () => {
+      if (!isThinking) return;
+      isThinking = false;
+      fullContent += '\n</think>\n\n';
+      onChunk({ text: '\n</think>\n\n', finishReason: null });
+    };
+
+    for await (const event of stream) {
+      switch (event.type) {
+        case 'response.reasoning_summary_text.delta': {
+          if (!isThinking) {
+            isThinking = true;
+            fullContent += '<think>\n';
+            onChunk({ text: '<think>\n', finishReason: null });
+          }
+          fullContent += event.delta;
+          onChunk({ text: event.delta, finishReason: null });
+          break;
+        }
+        case 'response.output_text.delta': {
+          closeThinking();
+          fullContent += event.delta;
+          onChunk({ text: event.delta, finishReason: null });
+          break;
+        }
+        case 'response.output_item.added': {
+          if (event.item.type === 'function_call') {
+            calls.set(event.item.id ?? event.item.call_id, {
+              id: event.item.call_id, name: event.item.name, args: event.item.arguments ?? '',
+            });
+          }
+          break;
+        }
+        case 'response.function_call_arguments.delta': {
+          const call = calls.get(event.item_id);
+          if (call) call.args += event.delta;
+          break;
+        }
+        case 'response.output_item.done': {
+          if (event.item.type === 'reasoning') reasoning.push(event.item);
+          break;
+        }
+        case 'response.function_call_arguments.done': {
+          // The complete string, authoritative over the accumulated deltas.
+          const call = calls.get(event.item_id);
+          if (call) call.args = event.arguments;
+          break;
+        }
+        case 'response.completed':
+        case 'response.incomplete': {
+          const usage = event.response.usage;
+          if (usage) {
+            inputTokens = usage.input_tokens;
+            outputTokens = usage.output_tokens;
+          }
+          if (event.type === 'response.incomplete') {
+            // A content-filter stop has no slot in GenerateResult; only a
+            // token-budget stop is a truncation the caller can act on.
+            if (event.response.incomplete_details?.reason === 'max_output_tokens') finishReason = 'length';
+          }
+          break;
+        }
+        case 'response.failed': {
+          const err = event.response.error;
+          throw new Error(err ? `${err.code}: ${err.message}` : 'OpenAI Responses API request failed');
+        }
+        // A stream-level error (not a failed response). Returning normally here
+        // would hand the tier an empty "success" instead of letting the router
+        // retry or fail over.
+        case 'error':
+          throw new Error(`${event.code ?? 'error'}: ${event.message}`);
+        default:
+          break;
+      }
+    }
+    closeThinking();
+
+    const toolCalls = [...calls.values()].map((tc) => {
+      // Same degradation as the Chat Completions path: a truncated argument
+      // string is surfaced, not thrown.
+      let input: Record<string, unknown> = {};
+      try {
+        input = JSON.parse(tc.args || '{}') as Record<string, unknown>;
+      } catch {
+        input = { __rawArguments: tc.args, __parseError: true };
+      }
+      return { id: tc.id, name: tc.name, input };
+    });
+    if (toolCalls.length && finishReason === 'stop') finishReason = 'tool_use';
+    if (reasoning.length) for (const tc of toolCalls) this.rememberReasoning(tc.id, reasoning);
+
+    onChunk({ text: '', finishReason });
+    return {
+      content: fullContent,
+      usage: this.makeUsage(inputTokens, outputTokens),
+      toolCalls: toolCalls.length ? toolCalls : undefined,
+      finishReason,
+    };
+  }
+
+  private rememberReasoning(callId: string, items: OpenAI.Responses.ResponseReasoningItem[]): void {
+    this.reasoningByCallId.delete(callId);
+    this.reasoningByCallId.set(callId, items);
+    while (this.reasoningByCallId.size > REASONING_REPLAY_LIMIT) {
+      const oldest = this.reasoningByCallId.keys().next().value;
+      if (oldest === undefined) break;
+      this.reasoningByCallId.delete(oldest);
+    }
+  }
+
+  /**
+   * Cascade's conversation as Responses input items. A tool round trip is two
+   * ITEMS here, not message fields: the assistant's `function_call` and the
+   * matching `function_call_output`, joined by `call_id`. System prompts go in
+   * `instructions`; system messages mid-conversation stay system messages.
+   */
+  protected convertToResponsesInput(messages: ConversationMessage[]): OpenAI.Responses.ResponseInputItem[] {
+    const out: OpenAI.Responses.ResponseInputItem[] = [];
+    for (const m of messages) {
+      if (m.role === 'tool') {
+        out.push({
+          type: 'function_call_output',
+          call_id: m.toolCallId ?? '',
+          output: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+        });
+        continue;
+      }
+      if (m.role === 'assistant') {
+        // The model's own order: reasoning, then its message, then the calls.
+        // Several calls from one response share the same reasoning items, so
+        // each is sent once.
+        const sent = new Set<string>();
+        for (const tc of m.toolCalls ?? []) {
+          for (const item of this.reasoningByCallId.get(tc.id) ?? []) {
+            if (sent.has(item.id)) continue;
+            sent.add(item.id);
+            out.push(item);
+          }
+        }
+        const text = typeof m.content === 'string'
+          ? m.content
+          : m.content.map((b) => (b.type === 'text' ? b.text : '')).join('');
+        if (text) out.push({ role: 'assistant', content: text });
+        for (const tc of m.toolCalls ?? []) {
+          out.push({ type: 'function_call', call_id: tc.id, name: tc.name, arguments: JSON.stringify(tc.input) });
+        }
+        continue;
+      }
+      if (typeof m.content === 'string') {
+        out.push({ role: m.role as 'user' | 'system', content: m.content });
+        continue;
+      }
+      const parts: OpenAI.Responses.ResponseInputContent[] = m.content.map((block) => {
+        if (block.type === 'image') {
+          const img = block.image as ImageAttachment;
+          const url = img.type === 'base64' ? `data:${img.mimeType};base64,${img.data}` : img.data;
+          return { type: 'input_image' as const, image_url: url, detail: 'auto' as const };
+        }
+        return { type: 'input_text' as const, text: block.type === 'text' ? block.text : '' };
+      });
+      out.push({ role: m.role as 'user' | 'system', content: parts });
+    }
+    return out;
   }
 
   async countTokens(text: string): Promise<number> {

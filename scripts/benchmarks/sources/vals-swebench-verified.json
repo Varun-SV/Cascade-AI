@@ -1,0 +1,140 @@
+{
+  "source": "vals-swebench-verified",
+  "label": "Vals AI \u00b7 SWE-bench Verified (mini-swe-agent, bash only)",
+  "url": "https://www.vals.ai/benchmarks/swebench",
+  "capturedAt": "2026-10-28",
+  "sourceUpdatedAt": "2026-09-01",
+  "provenance": "captured",
+  "scale": "percent",
+  "calibration": {
+    "code": {
+      "fitTo": "vals-terminal-bench-2-1"
+    },
+    "agentic": {
+      "fitTo": "vals-terminal-bench-2-1"
+    }
+  },
+  "note": "Real GitHub issues solved end to end by an agent with one bash tool. Archived by Vals on 2026-09-01, so it predates the 5.5/6.x generation, but it is the broadest single-harness coding board for the models just behind the frontier. Fitted onto Terminal-Bench 2.1. Only mini-swe-agent rows; where a model is listed in a thinking mode, that row is used (gpt-5.4 = xhigh, opus 4.5/4.6, sonnet 4.5, haiku 4.5 = Thinking). gemini-3.1-flash-lite is the Preview snapshot.",
+  "models": {
+    "claude-opus-5": {
+      "code": 97.0,
+      "agentic": 97.0
+    },
+    "gpt-5.6-sol": {
+      "code": 96.2,
+      "agentic": 96.2
+    },
+    "gpt-5.6-terra": {
+      "code": 95.4,
+      "agentic": 95.4
+    },
+    "claude-fable-5": {
+      "code": 95.0,
+      "agentic": 95.0
+    },
+    "gpt-5.6-luna": {
+      "code": 93.0,
+      "agentic": 93.0
+    },
+    "claude-opus-4.8": {
+      "code": 88.6,
+      "agentic": 88.6
+    },
+    "gpt-5.5": {
+      "code": 82.6,
+      "agentic": 82.6
+    },
+    "claude-opus-4.7": {
+      "code": 82.0,
+      "agentic": 82.0
+    },
+    "gemini-3.7-flash": {
+      "code": 80.8,
+      "agentic": 80.8
+    },
+    "gemini-3.8-flash": {
+      "code": 80.0,
+      "agentic": 80.0
+    },
+    "gemini-3.6-flash": {
+      "code": 79.6,
+      "agentic": 79.6
+    },
+    "claude-sonnet-5": {
+      "code": 79.6,
+      "agentic": 79.6
+    },
+    "gemini-3.5-flash": {
+      "code": 78.8,
+      "agentic": 78.8
+    },
+    "gemini-3.1-pro": {
+      "code": 78.8,
+      "agentic": 78.8
+    },
+    "gpt-5.4": {
+      "code": 78.2,
+      "agentic": 78.2
+    },
+    "claude-opus-4.6": {
+      "code": 78.2,
+      "agentic": 78.2
+    },
+    "claude-sonnet-4.6": {
+      "code": 77.4,
+      "agentic": 77.4
+    },
+    "claude-opus-4.5": {
+      "code": 76.4,
+      "agentic": 76.4
+    },
+    "gemini-3-pro": {
+      "code": 76.4,
+      "agentic": 76.4
+    },
+    "gpt-5.2": {
+      "code": 75.8,
+      "agentic": 75.8
+    },
+    "gemini-3-flash": {
+      "code": 75.0,
+      "agentic": 75.0
+    },
+    "gemini-3.5-flash-lite": {
+      "code": 75.0,
+      "agentic": 75.0
+    },
+    "gpt-5.4-mini": {
+      "code": 73.0,
+      "agentic": 73.0
+    },
+    "claude-sonnet-4.5": {
+      "code": 70.0,
+      "agentic": 70.0
+    },
+    "gpt-5.4-nano": {
+      "code": 69.8,
+      "agentic": 69.8
+    },
+    "gpt-5": {
+      "code": 69.0,
+      "agentic": 69.0
+    },
+    "claude-haiku-4.5": {
+      "code": 66.6,
+      "agentic": 66.6
+    },
+    "gemini-3.1-flash-lite": {
+      "code": 62.8,
+      "agentic": 62.8
+    },
+    "gpt-5-mini": {
+      "code": 60.8,
+      "agentic": 60.8
+    },
+    "gemini-2.5-pro": {
+      "code": 54.4,
+      "agentic": 54.4
+    }
+  }
+}

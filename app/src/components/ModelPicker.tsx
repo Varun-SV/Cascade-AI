@@ -16,12 +16,12 @@ export interface ModelOption {
 // embedded router is preferred when available.
 export const MODELS: ModelOption[] = [
   { provider: 'auto',      id: 'auto',                     label: 'Auto (best model)' },
-  { provider: 'anthropic', id: 'claude-sonnet-4-6',        label: 'Claude Sonnet 4.6' },
-  { provider: 'anthropic', id: 'claude-opus-4-8',          label: 'Claude Opus 4.8' },
-  { provider: 'anthropic', id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5' },
-  { provider: 'openai',    id: 'gpt-4o',                   label: 'GPT-4o' },
-  { provider: 'openai',    id: 'gpt-4o-mini',              label: 'GPT-4o Mini' },
-  { provider: 'google',    id: 'gemini-2.0-flash',         label: 'Gemini 2.0 Flash' },
+  { provider: 'anthropic', id: 'claude-sonnet-5-5',        label: 'Claude Sonnet 5.5' },
+  { provider: 'anthropic', id: 'claude-opus-5-5',          label: 'Claude Opus 5.5' },
+  { provider: 'anthropic', id: 'claude-haiku-5-5',         label: 'Claude Haiku 5.5' },
+  { provider: 'openai',    id: 'gpt-6.1-sol',              label: 'GPT-6.1 Sol' },
+  { provider: 'openai',    id: 'gpt-6-luna',               label: 'GPT-6 Luna' },
+  { provider: 'google',    id: 'gemini-3.8-flash',         label: 'Gemini 3.8 Flash' },
   { provider: 'ollama',    id: 'llama3.2',                 label: 'Llama 3.2 (Ollama)' },
   { provider: 'ollama',    id: 'qwen2.5',                  label: 'Qwen 2.5 (Ollama)' },
   { provider: 'ollama',    id: 'mistral',                  label: 'Mistral (Ollama)' },

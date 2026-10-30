@@ -104,7 +104,9 @@ export function azureModelForDeployment(cfg: ProviderConfig): ModelInfo | null {
     );
     const exactAzurePrice = !azurePrice.unknown && !azurePrice.estimatedFromProvider;
 
-    const nativeToolsOnThisTransport = /^gpt-5\.6-(?:sol|terra|luna)$/i.test(baseModelId)
+    // GPT-6.1 Sol/Terra call tools only through the Responses API (OpenAI's
+    // model pages), which this transport does not use for Azure.
+    const nativeToolsOnThisTransport = /^gpt-(?:5\.6-(?:sol|terra|luna)|6\.1-(?:sol|terra))$/i.test(baseModelId)
       ? false
       : (base.supportsToolUse ?? true);
 

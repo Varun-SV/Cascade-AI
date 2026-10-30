@@ -184,4 +184,10 @@ describe('AzureOpenAIProvider.isAvailable', () => {
     await expect(provider.isAvailable()).resolves.toBe(false);
     expect(create).toHaveBeenCalledTimes(1);
   });
+
+  it('marks a GPT-6.1 Sol deployment tool-less: its tools need the Responses API', () => {
+    const sol = azureModelForDeployment({ type: 'azure', deploymentName: 'gpt-6.1-sol-prod' })!;
+    expect(sol.baseModelId).toBe('gpt-6.1-sol');
+    expect(sol.supportsToolUse).toBe(false);
+  });
 });

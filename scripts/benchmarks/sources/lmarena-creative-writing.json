@@ -1,0 +1,89 @@
+{
+  "source": "lmarena-creative-writing",
+  "label": "LMArena \u00b7 Creative Writing arena (style-controlled, via BenchLeader mirror)",
+  "url": "https://www.benchleader.com/benchmarks/lmarena_text_creative",
+  "primaryUrl": "https://lmarena.ai/leaderboard/text/creative-writing",
+  "capturedAt": "2026-10-28",
+  "provenance": "mirror-captured",
+  "scale": "elo",
+  "eloFloor": 1000,
+  "eloCeil": 1550,
+  "note": "ANCHOR for creative. Human pairwise preference on writing prompts (Bradley-Terry, Elo-like, style control on), newest result 2026-10-22. Read from a mirror because the arena page renders client-side; treat as lower confidence than the Vals captures. Where a model is listed at several reasoning efforts, the default row is used, else the lower of the listed rows. Ceiling 1550 because the top now exceeds the old 1500 default.",
+  "models": {
+    "claude-opus-5.5": {
+      "creative": 1520
+    },
+    "gemini-4-argon": {
+      "creative": 1512
+    },
+    "claude-fable-5": {
+      "creative": 1501
+    },
+    "gemini-3.7-flash": {
+      "creative": 1492
+    },
+    "claude-fable-5.1": {
+      "creative": 1487
+    },
+    "gemini-3.8-flash": {
+      "creative": 1485
+    },
+    "gemini-3-pro": {
+      "creative": 1485
+    },
+    "claude-opus-4.7": {
+      "creative": 1482
+    },
+    "gemini-3.1-pro": {
+      "creative": 1481
+    },
+    "claude-opus-4.6": {
+      "creative": 1478
+    },
+    "claude-opus-5": {
+      "creative": 1471
+    },
+    "gemini-3.6-flash": {
+      "creative": 1471
+    },
+    "gpt-5.6-sol": {
+      "creative": 1470
+    },
+    "gemini-3.5-flash": {
+      "creative": 1464
+    },
+    "claude-opus-4.8": {
+      "creative": 1463
+    },
+    "claude-sonnet-5.5": {
+      "creative": 1466
+    },
+    "claude-opus-4.5": {
+      "creative": 1462
+    },
+    "gemini-3-flash": {
+      "creative": 1457
+    },
+    "claude-sonnet-4.5": {
+      "creative": 1454
+    },
+    "gpt-6.1-sol": {
+      "creative": 1453
+    },
+    "gpt-6-astra": {
+      "creative": 1450
+    },
+    "claude-sonnet-4.6": {
+      "creative": 1449
+    },
+    "gpt-5.5": {
+      "creative": 1448
+    },
+    "gemini-2.5-pro": {
+      "creative": 1443
+    },
+    "gpt-5.4": {
+      "creative": 1442
+    }
+  }
+}

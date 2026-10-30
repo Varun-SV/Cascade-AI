@@ -1,0 +1,108 @@
+{
+  "source": "vals-terminal-bench-4",
+  "label": "Vals AI \u00b7 Terminal-Bench 4.0 (mini-swe-agent, bash only, avg@3)",
+  "url": "https://www.vals.ai/benchmarks/terminal-bench-4",
+  "capturedAt": "2026-10-28",
+  "sourceUpdatedAt": "2026-10-26",
+  "provenance": "captured",
+  "scale": "percent",
+  "calibration": {
+    "code": {
+      "fitTo": "vals-terminal-bench-2-1"
+    },
+    "agentic": {
+      "fitTo": "vals-terminal-bench-2-1"
+    }
+  },
+  "note": "66 new long-horizon terminal tasks (software, science, ML, ops, hardware, security, media), 8-hour limit, no partial credit. Much harder than 2.1 (scores are not comparable raw), so it is FITTED onto Terminal-Bench 2.1 over the models both rate rather than given its own band. It is the current Vals agentic board and the only one here that rates GPT-6.1 Sol/Terra and Claude Haiku 5.5.",
+  "models": {
+    "claude-opus-5.5": {
+      "code": 65.15,
+      "agentic": 65.15
+    },
+    "claude-sonnet-5.5": {
+      "code": 64.14,
+      "agentic": 64.14
+    },
+    "gpt-6-astra": {
+      "code": 59.6,
+      "agentic": 59.6
+    },
+    "claude-fable-5.1": {
+      "code": 58.08,
+      "agentic": 58.08
+    },
+    "gemini-4-argon": {
+      "code": 57.58,
+      "agentic": 57.58
+    },
+    "gpt-6.1-sol": {
+      "code": 55.05,
+      "agentic": 55.05
+    },
+    "claude-opus-5": {
+      "code": 53.53,
+      "agentic": 53.53
+    },
+    "gpt-6.1-terra": {
+      "code": 49.49,
+      "agentic": 49.49
+    },
+    "gpt-6-sol": {
+      "code": 44.44,
+      "agentic": 44.44
+    },
+    "claude-fable-5": {
+      "code": 41.41,
+      "agentic": 41.41
+    },
+    "gpt-5.6-sol": {
+      "code": 37.88,
+      "agentic": 37.88
+    },
+    "claude-haiku-5.5": {
+      "code": 36.36,
+      "agentic": 36.36
+    },
+    "claude-opus-4.8": {
+      "code": 23.23,
+      "agentic": 23.23
+    },
+    "gpt-5.6-terra": {
+      "code": 22.73,
+      "agentic": 22.73
+    },
+    "gemini-3.8-flash": {
+      "code": 19.7,
+      "agentic": 19.7
+    },
+    "gpt-6-luna": {
+      "code": 13.64,
+      "agentic": 13.64
+    },
+    "gemini-3.7-flash": {
+      "code": 12.12,
+      "agentic": 12.12
+    },
+    "gpt-5.6-luna": {
+      "code": 11.62,
+      "agentic": 11.62
+    },
+    "claude-sonnet-5": {
+      "code": 10.61,
+      "agentic": 10.61
+    },
+    "gemini-3.5-flash": {
+      "code": 6.06,
+      "agentic": 6.06
+    },
+    "gemini-3.1-pro": {
+      "code": 2.52,
+      "agentic": 2.52
+    },
+    "gpt-5.4-mini": {
+      "code": 2.52,
+      "agentic": 2.52
+    }
+  }
+}
