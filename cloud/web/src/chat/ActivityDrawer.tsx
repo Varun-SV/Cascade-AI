@@ -1,4 +1,4 @@
-import { motion } from 'framer-motion';
+import { AnimatePresence, motion } from 'framer-motion';
 import { CheckCircle2, AlertTriangle, ArrowUpCircle, Ban } from 'lucide-react';
 import CascadeMark from '../components/CascadeMark.js';
 import type { ActivityNode } from './useChatSession.js';
@@ -11,6 +11,16 @@ function tierMeta(role: string): { name: string; level: number } {
   if (role.startsWith('T2')) return { name: 'Manager', level: 1 };
   if (role.startsWith('T3')) return { name: 'Worker', level: 2 };
   return { name: role || 'Tier', level: 0 };
+}
+
+/** Coarse status, so an icon only re-animates when the state really changes. */
+function statusKind(status: string): string {
+  const s = status.toUpperCase();
+  if (s.includes('COMPLETE') || s.includes('DONE')) return 'done';
+  if (s.includes('BLOCK') || s.includes('SKIP')) return 'blocked';
+  if (s.includes('FAIL') || s.includes('ERROR')) return 'failed';
+  if (s.includes('ESCALAT')) return 'escalated';
+  return 'active';
 }
 
 function StatusIcon({ status }: { status: string }) {
@@ -53,29 +63,73 @@ export default function ActivityDrawer({ activity }: { activity: ActivityNode[] 
           const tier = n.role.slice(0, 2);
           const dot = tier === 'T1' ? 'bg-t1' : tier === 'T2' ? 'bg-t2' : tier === 'T3' ? 'bg-t3' : 'bg-ink-500';
           return (
-            <div
+            <motion.div
               key={n.tierId}
-              className="grid grid-cols-[14px_1fr_auto] items-center gap-x-2 py-1 text-[13px]"
+              layout="position"
+              // A worker springs out of its manager: it arrives from the left,
+              // one indent up, as the tree spawns it.
+              initial={{ opacity: 0, x: -12, scale: 0.97 }}
+              animate={{ opacity: 1, x: 0, scale: 1 }}
+              transition={{ type: 'spring', stiffness: 420, damping: 30 }}
+              className="relative grid grid-cols-[14px_1fr_auto] items-center gap-x-2 rounded-md py-1 text-[13px]"
               style={{ paddingLeft: level * 16 }}
             >
-              <StatusIcon status={n.status} />
-              <span className="min-w-0 truncate text-ink-100" title={name}>
-                {detail || name}
-              </span>
-              <span className="receipt flex items-center gap-1.5 whitespace-nowrap text-[11px] text-ink-500">
+              <AnimatePresence initial={false}>
+                {statusKind(n.status) === 'done' && (
+                  // Finishing flashes the row once in its tier's colour.
+                  <motion.span
+                    key="flash"
+                    aria-hidden="true"
+                    className="pointer-events-none absolute inset-0 rounded-md"
+                    style={{ background: `rgb(var(--c-${tier === 'T1' || tier === 'T2' || tier === 'T3' ? tier.toLowerCase() : 't3'}) / 0.16)` }}
+                    initial={{ opacity: 1 }}
+                    animate={{ opacity: 0 }}
+                    transition={{ duration: 1.1, ease: 'easeOut' }}
+                  />
+                )}
+              </AnimatePresence>
+              <AnimatePresence mode="popLayout" initial={false}>
+                <motion.span
+                  key={statusKind(n.status)}
+                  className="relative inline-flex"
+                  initial={{ scale: 0.3, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ scale: 0.3, opacity: 0 }}
+                  transition={{ type: 'spring', stiffness: 520, damping: 22 }}
+                >
+                  <StatusIcon status={n.status} />
+                </motion.span>
+              </AnimatePresence>
+              <AnimatePresence mode="wait" initial={false}>
+                <motion.span
+                  key={detail || name}
+                  className="relative min-w-0 truncate text-ink-100"
+                  title={name}
+                  initial={{ opacity: 0, y: 3 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -3 }}
+                  transition={{ duration: 0.16 }}
+                >
+                  {detail || name}
+                </motion.span>
+              </AnimatePresence>
+              <span className="receipt relative flex items-center gap-1.5 whitespace-nowrap text-[11px] text-ink-500">
                 <span className={`h-1.5 w-1.5 rounded-full ${dot}`} aria-hidden="true" />
                 {n.role}
                 {n.model && <span>· {shortModel(n.model)}</span>}
               </span>
               {typeof n.progressPct === 'number' && n.progressPct > 0 && n.progressPct < 100 && (
                 <div className="col-span-2 col-start-2 mt-1 h-0.5 overflow-hidden rounded-full bg-elev/10">
-                  <div
-                    className="h-full rounded-full transition-all"
-                    style={{ width: `${Math.min(100, Math.max(0, n.progressPct))}%`, background: 'var(--cascade-ramp-x)' }}
+                  <motion.div
+                    className="h-full rounded-full"
+                    initial={false}
+                    animate={{ width: `${Math.min(100, Math.max(0, n.progressPct))}%` }}
+                    transition={{ type: 'spring', stiffness: 120, damping: 22 }}
+                    style={{ background: 'var(--cascade-ramp-x)' }}
                   />
                 </div>
               )}
-            </div>
+            </motion.div>
           );
         })}
       </div>

@@ -41,7 +41,7 @@ test('a long reply scrolls the thread, not the page; the account menu stays on s
   const stub = await startStubLLM();
   try {
     await page.goto('/');
-    await page.getByRole('button', { name: 'Sign in' }).click();
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     await page.getByPlaceholder('Your name').fill('Layout Tester');
     await page.getByText('Dev login').click();
     await expect(page.getByRole('button', { name: 'Account' })).toBeVisible();

@@ -1,0 +1,96 @@
+/* The Descent — landing page. Always dark: the 3D scene is light on black, so
+   the landing pins the dark theme's tokens on its own root, and everything
+   inside it (the download section, the sign-in dialog) reads them. */
+.descent {
+  --c-ink-50: 245 246 249; --c-ink-100: 233 235 240; --c-ink-200: 196 200 209; --c-ink-300: 162 168 180; --c-ink-400: 128 134 147;
+  --c-ink-500: 110 117 131; --c-ink-600: 52 58 70; --c-ink-700: 34 39 49; --c-ink-800: 27 32 41; --c-ink-900: 22 26 34; --c-ink-950: 10 13 18;
+  --c-accent-300: 143 186 255; --c-accent-400: 111 163 255; --c-accent-500: 76 141 255; --c-accent-600: 47 111 228; --c-accent-700: 32 90 200;
+  --c-elev: 233 235 240; --c-t1: 111 163 255; --c-t2: 76 195 236; --c-t3: 62 223 201;
+  --c-success-300: 134 239 222; --c-success-500: 62 223 201; --c-success-800: 14 62 56; --c-success-950: 9 38 35;
+  --c-warning-300: 240 206 140; --c-warning-500: 230 178 92; --c-danger-300: 246 170 162; --c-danger-500: 240 138 128;
+  --c-paper: 14 17 23; --c-side: 10 13 18; --c-card: 22 26 34; --c-sunk: 27 32 41; --c-bubble: 27 32 41;
+  --glass-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 30px rgba(0, 0, 0, 0.3); --glass-shadow-strong: 0 24px 60px rgba(0, 0, 0, 0.5);
+  --dv-void: #0a0d12; --dv-ink: #f5f6f9; --dv-ink-2: #c4c8d1; --dv-ink-3: #8a909c; --dv-line: rgba(233, 235, 240, 0.12);
+  --dv-t1: #6fa3ff; --dv-t2: #4cc3ec; --dv-t3: #3edfc9;
+  color-scheme: dark;
+  height: 100dvh;
+  overflow-y: auto;
+  overflow-x: clip;
+  background: var(--dv-void);
+  color: var(--dv-ink);
+}
+.descent ::selection { background: var(--dv-t1); color: #05070b; }
+/* Author display rules (.dv-hero is flex) beat the browser's [hidden] default. */
+.descent [hidden] { display: none !important; }
+.dv-stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; z-index: 0; }
+
+.dv-hdr { position: fixed; z-index: 6; top: env(safe-area-inset-top, 0px); left: 0; right: 0; display: flex; align-items: center; gap: 22px;
+  padding-block: 14px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.dv-hdr nav { display: flex; gap: 18px; font-size: 14px; }
+.dv-hdr nav a { color: var(--dv-ink-2); text-decoration: none; }
+.dv-hdr nav a:hover { color: var(--dv-ink); }
+@media (max-width: 760px) { .dv-hdr nav { display: none; } }
+@media (max-width: 400px) { .dv-hdr .dv-try { display: none; } }
+
+.dv-btn { display: inline-flex; align-items: center; gap: 8px; height: 40px; padding: 0 16px; border-radius: 12px; border: 0; cursor: pointer;
+  font-family: inherit; font-size: 14px; font-weight: 500; line-height: 1; white-space: nowrap; text-decoration: none; }
+.dv-btn-p { background: var(--dv-t1); color: #05070b; }
+.dv-btn-g { background: rgba(233, 235, 240, 0.06); color: var(--dv-ink); box-shadow: inset 0 0 0 1px var(--dv-line); }
+.dv-btn:focus-visible, .dv-chip:focus-visible, .dv-ask input:focus-visible, .dv-rail button:focus-visible { outline: 2px solid var(--dv-t2); outline-offset: 3px; }
+
+.dv-hero { position: fixed; z-index: 4; left: 0; right: 0; top: 50%; transform: translateY(-38%); display: flex; flex-direction: column; align-items: center; gap: 18px;
+  text-align: center; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.dv-hero h1 { margin: 0; font-family: 'Source Serif 4 Variable', Georgia, serif; font-weight: 400; font-size: clamp(40px, 7vw, 84px); line-height: 1.02;
+  letter-spacing: -0.03em; text-wrap: balance; text-shadow: 0 4px 40px var(--dv-void); }
+.dv-hero p { margin: 0; color: var(--dv-ink-2); font-size: clamp(16px, 1.6vw, 19px); max-width: 46ch; line-height: 1.55; text-shadow: 0 2px 20px var(--dv-void); }
+.dv-ask { width: min(640px, 100%); display: flex; gap: 8px; padding: 8px; border-radius: 18px; background: rgba(22, 26, 34, 0.82);
+  box-shadow: inset 0 0 0 1px var(--dv-line), 0 24px 60px rgba(0, 0, 0, 0.5); backdrop-filter: blur(14px); }
+.dv-ask input { flex: 1; min-width: 0; height: 46px; border: 0; border-radius: 12px; background: transparent; color: var(--dv-ink); font-family: inherit; font-size: 16px; font-weight: 400; padding: 0 12px; outline: none; }
+.dv-ask input::placeholder { color: var(--dv-ink-3); }
+.dv-ask .dv-btn { height: 46px; padding: 0 18px; }
+.dv-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; max-width: 700px; }
+.dv-chip { min-height: 34px; padding: 7px 13px; line-height: 1.35; text-align: center; border-radius: 17px; border: 0; background: rgba(233, 235, 240, 0.06); box-shadow: inset 0 0 0 1px var(--dv-line);
+  color: var(--dv-ink-2); font-family: inherit; font-size: 13px; font-weight: 400; cursor: pointer; }
+.dv-chip:hover { color: var(--dv-ink); }
+.dv-hero .dv-note { margin: 0; font-size: 13px; max-width: none; color: var(--dv-ink-3); text-shadow: 0 2px 16px var(--dv-void); }
+.dv-hint { font-family: 'Geist Mono Variable', ui-monospace, monospace; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dv-ink-3); }
+
+.dv-ch { position: fixed; z-index: 3; left: max(24px, env(safe-area-inset-left, 0px)); bottom: max(64px, 12vh); width: min(440px, calc(100% - 48px));
+  opacity: 0; transform: translateY(16px); pointer-events: none; transition: opacity 0.35s ease, transform 0.5s ease; }
+.dv-ch.on { opacity: 1; transform: none; }
+.dv-ch .ey { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; font-family: 'Geist Mono Variable', ui-monospace, monospace; font-size: 12px;
+  letter-spacing: 0.14em; text-transform: uppercase; color: var(--dv-ink-2); }
+.dv-ch .ey i { width: 9px; height: 9px; border-radius: 50%; }
+.dv-ch h2 { margin: 0 0 12px; font-family: 'Source Serif 4 Variable', Georgia, serif; font-weight: 400; font-size: clamp(30px, 3.6vw, 46px); line-height: 1.06;
+  letter-spacing: -0.02em; text-wrap: balance; text-shadow: 0 2px 30px var(--dv-void); }
+.dv-ch p { margin: 0; color: var(--dv-ink-2); font-size: 17px; line-height: 1.6; text-shadow: 0 2px 20px var(--dv-void); }
+.dv-ch .echo { margin-top: 14px; font-family: 'Geist Mono Variable', ui-monospace, monospace; font-size: 12.5px; color: var(--dv-ink-3); }
+@media (max-width: 760px) {
+  .dv-ch { left: 16px; right: 16px; width: auto; bottom: max(28px, env(safe-area-inset-bottom, 0px)); padding: 16px 18px; border-radius: 16px;
+    background: rgba(10, 13, 18, 0.72); backdrop-filter: blur(10px); }
+}
+
+.dv-rail { position: fixed; z-index: 5; right: max(18px, env(safe-area-inset-right, 0px)); top: 50%; transform: translateY(-50%); display: flex; flex-direction: column;
+  align-items: center; gap: 10px; transition: opacity 0.35s; }
+.dv-rail svg { width: 46px; height: 46px; overflow: visible; }
+.dv-rail button { all: unset; cursor: pointer; font-family: 'Geist Mono Variable', ui-monospace, monospace; font-size: 10px; letter-spacing: 0.12em; color: var(--dv-ink-3); padding: 4px; }
+.dv-rail button[aria-current='step'] { color: var(--dv-ink); }
+@media (max-width: 760px) { .dv-rail { top: calc(64px + env(safe-area-inset-top, 0px)); transform: none; } .dv-rail button { display: none; } }
+
+.dv-reveal { position: fixed; z-index: 4; left: 0; right: 0; bottom: max(7vh, 40px); display: flex; flex-direction: column; align-items: center; gap: 16px; text-align: center;
+  opacity: 0; pointer-events: none; transition: opacity 0.4s; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.dv-reveal.on { opacity: 1; pointer-events: auto; }
+.dv-reveal h2 { margin: 0; font-family: 'Source Serif 4 Variable', Georgia, serif; font-weight: 400; font-size: clamp(36px, 5.4vw, 68px); line-height: 1.02;
+  letter-spacing: -0.03em; text-shadow: 0 4px 40px var(--dv-void); }
+.dv-reveal p { margin: 0; color: var(--dv-ink-2); max-width: 48ch; line-height: 1.55; }
+.dv-ctas { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
+.dv-npm { display: inline-flex; align-items: center; gap: 10px; height: 40px; padding: 0 12px; border-radius: 12px; background: rgb(22 26 34);
+  font-family: 'Geist Mono Variable', ui-monospace, monospace; font-size: 13px; color: var(--dv-ink-2); border: 0; cursor: pointer; }
+
+.dv-track { position: relative; z-index: 1; height: 820vh; }
+.dv-after { position: relative; z-index: 2; background: rgb(var(--c-paper)); border-top: 1px solid var(--dv-line); }
+
+/* Visitors who asked for less motion get the final frame and the story as text. */
+.descent.still .dv-track { height: 0; }
+.descent.still .dv-ch, .descent.still .dv-hero, .descent.still .dv-rail { display: none; }
+.descent.still .dv-reveal { position: relative; opacity: 1; pointer-events: auto; bottom: auto; padding-block: 120px 60px; }
