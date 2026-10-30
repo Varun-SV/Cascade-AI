@@ -159,6 +159,80 @@ describe('a client on the store pinned to one account', () => {
     expect(store.load()?.user.id).toBe('u2');
   });
 
+  // The refresh's headers have arrived; its body is still being read when the
+  // sign-in changes. Nothing may be saved over the newer sign-in, or sent.
+  const pausedBody = (firstAnswer: 'expired' | 401, refreshStatus = 200) => {
+    const calls: Call[] = [];
+    let release!: () => void;
+    const bodyStarted = new Promise<void>((started) => {
+      vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit = {}) => {
+        calls.push({ url, auth: (init.headers as Record<string, string> | undefined)?.['Authorization'] });
+        if (url.endsWith('/api/native/refresh')) {
+          const body = { access_token: 'u1-access-2', refresh_token: 'u1-refresh-2', expires_in: 3600 };
+          if (refreshStatus !== 200) { started(); return new Response('', { status: refreshStatus }); }
+          return { ok: true, status: 200, json: async () => { started(); await new Promise<void>((r) => { release = r; }); return body; } } as unknown as Response;
+        }
+        if (firstAnswer === 401 && sends(calls).length === 1) return new Response('', { status: 401 });
+        return new Response(JSON.stringify({ conversation: { id: 'c1', title: 't' }, messages: [], recorded: true }), { status: 200 });
+      }));
+    });
+    return { calls, bodyStarted, releaseBody: () => release?.() };
+  };
+
+  it.each([
+    ['the same account signs in again', (): CloudSession => ({ ...session('u1'), accessToken: 'u1-again', refreshToken: 'u1-refresh-again' })],
+    ['another account signs in', (): CloudSession => session('u2')],
+  ] as Array<[string, () => CloudSession]>)('saves nothing and sends nothing when %s while the refresh body is read', async (_what, next) => {
+    for (const pinned of [true, false]) {
+      for (const first of [401, 'expired'] as const) {
+        const store = shared(first === 'expired' ? { ...session('u1'), accessExpiresAt: Date.now() - 1 } : session('u1'));
+        const f = pausedBody(first);
+        const client = new CloudClient('https://cloud', undefined, pinned ? pinnedStore(store, 'u1') : store);
+        const done = client.appendTurn('c1', { userContent: 'u1 prompt', assistant: { content: 'r' } } as never);
+        await f.bodyStarted;
+        const newer = next();
+        store.set(newer);
+        f.releaseBody();
+        await expect(done).rejects.toBeInstanceOf(CloudAccountChangedError);
+        // No append after the change; only the first 401'd one, if any.
+        expect(sends(f.calls).map((c) => c.auth)).toEqual(first === 401 ? ['Bearer u1-access'] : []);
+        // The newer sign-in is left exactly as it was: not overwritten by A's rotated tokens.
+        expect(store.load()).toEqual(newer);
+      }
+    }
+  });
+
+  it('a refresh refused while the sign-in changed neither clears the newer sign-in nor sends', async () => {
+    const store = shared(session('u1'));
+    const f = pausedBody(401, 401);
+    // The refusal arrives after u1 signed in again: the check runs before any clear.
+    const client = new CloudClient('https://cloud', undefined, pinnedStore(store, 'u1'));
+    vi.mocked(fetch).mockImplementation(async (url: string | URL | Request, init: RequestInit = {}) => {
+      f.calls.push({ url: String(url), auth: (init.headers as Record<string, string> | undefined)?.['Authorization'] });
+      if (String(url).endsWith('/api/native/refresh')) {
+        store.set({ ...session('u1'), refreshToken: 'u1-refresh-again' });
+        return new Response('', { status: 401 });
+      }
+      return new Response('', { status: 401 });
+    });
+    await expect(client.createConversation('u1 prompt')).rejects.toBeInstanceOf(CloudAccountChangedError);
+    expect(sends(f.calls).map((c) => c.auth)).toEqual(['Bearer u1-access']);
+    expect(store.load()?.refreshToken).toBe('u1-refresh-again');
+  });
+
+  it('the pinned store replaces only the session a refresh started from', () => {
+    const store = shared(session('u1'));
+    const pinned = pinnedStore(store, 'u1');
+    const rotated = { ...session('u1'), refreshToken: 'u1-refresh-2' };
+    expect(pinned.replace!(session('u1'), rotated)).toBe(true);
+    expect(store.load()?.refreshToken).toBe('u1-refresh-2');
+    // Started from the old token: the newer one stays.
+    expect(pinned.replace!(session('u1'), { ...session('u1'), refreshToken: 'stale' })).toBe(false);
+    expect(store.load()?.refreshToken).toBe('u1-refresh-2');
+    store.set(session('u2'));
+    expect(pinned.replace!(session('u2'), session('u2'))).toBe(false);
+  });
+
   it('reads as signed out while another account is signed in, and never saves over or clears it', () => {
     const store = shared(session('u2'));
     const pinned = pinnedStore(store, 'u1');
@@ -167,4 +241,5 @@ describe('a client on the store pinned to one account', () => {
     pinned.clear();
     expect(store.load()?.user.id).toBe('u2');
   });
+
 });

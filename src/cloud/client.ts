@@ -89,6 +89,12 @@ export interface CloudSessionStore {
   load(): CloudSession | null;
   save(session: CloudSession): void;
   clear(): void;
+  /**
+   * Optional compare-and-swap: saves `next` only while the store still holds
+   * `prev` (same user, server and refresh token), and answers whether it did.
+   * Without it the client checks, then saves, in one synchronous step.
+   */
+  replace?(prev: CloudSession, next: CloudSession): boolean;
 }
 
 /** Default store: the 0600 JSON file next to the global provider credentials. */
@@ -275,11 +281,21 @@ export class CloudClient {
       accessExpiresAt: Date.now() + tokens.expires_in * 1000,
       refreshToken: tokens.refresh_token, // rotated
     };
-    this.store.save(next);
+    // Checked again after reading the body (the sign-in can change while it
+    // is read), and saved only over the session the refresh started from, so
+    // a newer sign-in is never overwritten with these older rotated tokens.
     // A store that refuses the save (one pinned to another account) must not
-    // be answered with tokens it never kept.
-    if (!this.stillHolds(next)) throw new CloudAccountChangedError();
+    // be answered with tokens it never kept either.
+    if (!this.replaceSession(s, next) || !this.stillHolds(next)) throw new CloudAccountChangedError();
     return next;
+  }
+
+  /** Saves `next` only while the store still holds `prev`; answers whether it did. */
+  private replaceSession(prev: CloudSession, next: CloudSession): boolean {
+    if (this.store.replace) return this.store.replace(prev, next);
+    if (!this.stillHolds(prev)) return false;
+    this.store.save(next);
+    return true;
   }
 
   /** True while the store still holds exactly `s` (same user, same refresh token). */
