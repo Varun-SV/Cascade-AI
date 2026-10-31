@@ -138,7 +138,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   meanwhile, even part-way through a send or when retrying after renewing
   the sign-in. If the sign-in changes while it is being renewed (including
   while the renewed tokens are being read), the request is not sent or
-  retried, and the renewed tokens never replace the newer sign-in. Runs in the same chat are also sent in the
+  retried, and the renewed tokens never replace the newer sign-in. Requests
+  that find the sign-in expired at the same moment (a run's upload and a chat
+  list, say) now share one renewal instead of each spending the same refresh
+  token, so the second is no longer mistaken for an account switch and its
+  run is no longer dropped from the cloud report. Runs in the same chat are also sent in the
   order they ended: a run whose late calls were still settling, or whose
   upload failed and was sent again later, used to let the next run's turn
   reach the cloud chat first.
@@ -155,7 +159,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read counts as off, and so does the time before the earlier build's
   opt-out has been carried over at the first start. Reports an earlier build
   kept on disk, which cannot show whether syncing was on when the run ended,
-  are not uploaded.
+  are not uploaded. This is deliberate, so that an opt-out set before the
+  upgrade is honoured: those runs are left out of the cloud spend report for
+  good. They still count in the desktop's own Insights → Costs, which reads
+  the locally stored sessions, not the upload queue.
 - **You can start a new chat from the session sidebar.** Before, only the Code
   view's chat picker and the command palette could. The sidebar (and its
   collapsed rail) now has a New chat button: Mission Control and Chat start the

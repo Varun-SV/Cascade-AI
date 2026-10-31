@@ -120,6 +120,10 @@ class FileCloudSessionStore implements CloudSessionStore {
  * request it was refreshing for is neither sent nor retried. `code` lets a
  * caller that loads this module separately (the desktop) recognise it.
  */
+/** Refreshes in flight, by the session generation (server, user, refresh token) they rotate. */
+const inflightRefreshes = new Map<string, Promise<CloudSession>>();
+const refreshKey = (s: CloudSession): string => JSON.stringify([s.serverUrl, s.user?.id ?? '', s.refreshToken]);
+
 export class CloudAccountChangedError extends Error {
   readonly code = 'CLOUD_ACCOUNT_CHANGED';
   constructor() { super('Signed in to another account.'); this.name = 'CloudAccountChangedError'; }
@@ -272,8 +276,31 @@ export class CloudClient {
     return s;
   }
 
+  /**
+   * One refresh per sign-in generation in this process. Clients built on the
+   * same session (the desktop makes one per request) that find its token
+   * expired together share the first one's refresh instead of each spending
+   * the same refresh token: the loser of such a race would otherwise find the
+   * token rotated under it and fail as if the account had changed.
+   */
   private async refresh(): Promise<CloudSession> {
     const s = this.session();
+    const key = refreshKey(s);
+    const running = inflightRefreshes.get(key);
+    if (running) {
+      const next = await running;
+      // The same rotation, joined: usable only while the store still holds it.
+      if (!this.stillHolds(next)) throw new CloudAccountChangedError();
+      return next;
+    }
+    const mine = this.rotate(s);
+    inflightRefreshes.set(key, mine);
+    const forget = () => { if (inflightRefreshes.get(key) === mine) inflightRefreshes.delete(key); };
+    mine.then(forget, forget);
+    return mine;
+  }
+
+  private async rotate(s: CloudSession): Promise<CloudSession> {
     const res = await fetch(this.url('/api/native/refresh'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

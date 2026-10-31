@@ -5,6 +5,7 @@ import path from 'node:path';
 import { accountMismatch, isAccountChangedError, isSyncOffError, pinnedStore, sendGate, SyncOffError } from './cloud-account';
 import { fileSyncConsent } from './cloud-sync-consent';
 import { CloudAccountChangedError, CloudClient } from '../../src/cloud/client';
+import { CloudMirror, mirrorAndConfirm } from '../src/lib/cloud-mirror';
 
 /** The session `CloudClient` keeps, as its store holds it. */
 type CloudSession = Exclude<ReturnType<NonNullable<ConstructorParameters<typeof CloudClient>[2]>['load']>, null>;
@@ -244,6 +245,144 @@ describe('a client on the store pinned to one account', () => {
     pinned.save(session('u1'));
     pinned.clear();
     expect(store.load()?.user.id).toBe('u2');
+  });
+
+  // Two clients on one sign-in (the desktop builds one per request) whose
+  // token runs out together. The server rotates refresh tokens and refuses a
+  // spent one, as a real one does. Its refresh answers are held until released.
+  describe('two clients refreshing the same sign-in at once', () => {
+    const rotatingServer = (opts: { refreshStatus?: number; firstAccess?: 'expired' | 401 } = {}) => {
+      const calls: Call[] = [];
+      const bodies: string[] = [];
+      let live = 'u1-refresh';
+      const held: Array<() => void> = [];
+      let refreshes = 0;
+      let notifyRefresh: () => void = () => {};
+      const refreshSeen = () => new Promise<void>((r) => { if (refreshes > 0) r(); else notifyRefresh = r; });
+      vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit = {}) => {
+        const auth = (init.headers as Record<string, string> | undefined)?.['Authorization'];
+        calls.push({ url, auth });
+        if (url.endsWith('/api/native/refresh')) {
+          refreshes++;
+          notifyRefresh();
+          const sent = (JSON.parse(String(init.body)) as { refresh_token: string }).refresh_token;
+          await new Promise<void>((r) => { held.push(r); });
+          if (opts.refreshStatus && opts.refreshStatus !== 200) return new Response('', { status: opts.refreshStatus });
+          if (sent !== live) return new Response('', { status: 401 }); // a spent token
+          live = `${sent}-2`;
+          return new Response(JSON.stringify({ access_token: 'u1-access-2', refresh_token: live, expires_in: 3600 }), { status: 200 });
+        }
+        if (auth !== 'Bearer u1-access-2') return new Response('', { status: 401 });
+        if (init.body) bodies.push(String(init.body));
+        if (url.endsWith('/api/conversations') && !init.method) return new Response(JSON.stringify({ conversations: [] }), { status: 200 });
+        return new Response(JSON.stringify({ conversation: { id: 'c1', title: 't' }, messages: [], recorded: true }), { status: 200 });
+      }));
+      const releaseAll = async () => {
+        // Let any second refresh (the race this guards) reach the server first.
+        for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+        while (held.length) held.shift()!();
+      };
+      return { calls, bodies, refreshSeen, releaseAll, refreshCount: () => refreshes };
+    };
+    const start = (first: 'expired' | 401) => shared(first === 'expired' ? { ...session('u1'), accessExpiresAt: Date.now() - 1 } : session('u1'));
+    const two = (store: ReturnType<typeof shared>, beforeSend?: () => void) => [0, 1].map(() =>
+      new CloudClient('https://cloud', undefined, pinnedStore(store, 'u1'), beforeSend ? { beforeSend } : undefined));
+    const spend = { conversationId: null, outcome: 'answered' as const, costUsd: 0.01, why: 'w', runId: 'run-1' };
+
+    it.each(['expired', 401] as const)('token %s: one rotation is shared, and both requests go out under it', async (first) => {
+      const store = start(first);
+      const srv = rotatingServer();
+      const [a, b] = two(store);
+      const listing = a.listConversations();
+      const spending = b.recordRunSpend(spend);
+      await srv.refreshSeen();
+      await srv.releaseAll();
+      await expect(listing).resolves.toEqual([]);
+      await expect(spending).resolves.toMatchObject({ recorded: true });
+      // One refresh with the old token; the second client never spent it again.
+      expect(srv.refreshCount()).toBe(1);
+      expect(srv.bodies.filter((x) => x.includes('run-1'))).toHaveLength(1);
+      expect(store.load()).toMatchObject({ user: { id: 'u1' }, accessToken: 'u1-access-2', refreshToken: 'u1-refresh-2' });
+    });
+
+    it('a refused refresh fails both as an expired sign-in, not as an account change, and sends nothing', async () => {
+      const store = start('expired');
+      const srv = rotatingServer({ refreshStatus: 401 });
+      const [a, b] = two(store);
+      const done = [a.listConversations(), b.recordRunSpend(spend)].map((p) => p.catch((e: unknown) => e));
+      await srv.refreshSeen();
+      await srv.releaseAll();
+      for (const err of await Promise.all(done)) {
+        expect(err).toBeInstanceOf(Error);
+        expect(isAccountChangedError(err)).toBe(false);
+        expect((err as Error).message).toMatch(/session expired/i);
+      }
+      expect(srv.refreshCount()).toBe(1);
+      expect(sends(srv.calls)).toEqual([]);
+      expect(store.load()).toBeNull();
+    });
+
+    it.each([
+      ['another account signs in', (): CloudSession => session('u2')],
+      ['the same account signs in again', (): CloudSession => ({ ...session('u1'), accessToken: 'u1-again', refreshToken: 'u1-refresh-again' })],
+    ] as Array<[string, () => CloudSession]>)('when %s during the shared refresh, neither client sends and the newer sign-in stays', async (_what, next) => {
+      const store = start('expired');
+      const srv = rotatingServer();
+      const [a, b] = two(store);
+      const done = [a.recordRunSpend(spend), b.appendTurn('c1', { userContent: 'u1 prompt', assistant: { content: 'r' } } as never)]
+        .map((p) => p.catch((e: unknown) => e));
+      await srv.refreshSeen();
+      const newer = next();
+      store.set(newer);
+      await srv.releaseAll();
+      for (const err of await Promise.all(done)) expect(err).toBeInstanceOf(CloudAccountChangedError);
+      expect(sends(srv.calls)).toEqual([]);
+      expect(store.load()).toEqual(newer);
+    });
+
+    it('an opt-out kept during the shared refresh stops both clients\' requests', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-gate-'));
+      try {
+        const consent = fileSyncConsent(path.join(dir, 'cloud-sync.json'));
+        consent.adoptLegacy(false);
+        const store = start('expired');
+        const srv = rotatingServer();
+        const [a, b] = two(store, sendGate(() => consent.allowed()));
+        const done = [a.recordRunSpend(spend), b.createConversation('t')].map((p) => p.catch((e: unknown) => e));
+        await srv.refreshSeen();
+        consent.setOptedOut(true);
+        await srv.releaseAll();
+        for (const err of await Promise.all(done)) expect(err).toBeInstanceOf(SyncOffError);
+        expect(sends(srv.calls)).toEqual([]);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    });
+
+    it('a run report sent while another request refreshes is delivered once and only then confirmed', async () => {
+      const store = start('expired');
+      const srv = rotatingServer();
+      const [other, mine] = two(store);
+      // The run mirror's bridge, answering as the desktop's IPC handler does.
+      const api = {
+        status: async () => ({ signedIn: true, user: { id: 'u1' }, serverUrl: 'https://cloud' }),
+        recordRunSpend: async (run: Parameters<CloudClient['recordRunSpend']>[0]) => {
+          try { return { ok: true, ...(await mine.recordRunSpend(run)) }; }
+          catch (err) { return isAccountChangedError(err) ? { ok: false, accountChanged: true } : { ok: false, error: (err as Error).message }; }
+        },
+      };
+      const mirror = new CloudMirror(() => api, () => false, { get: () => undefined, set: () => {}, delete: () => {} });
+      const confirmed: string[] = [];
+      const listing = other.listConversations();
+      const report = mirrorAndConfirm(mirror, {
+        id: 'run-0001', sessionId: 's1', outcome: 'stopped', prompt: 'q', output: '', copyTurn: true, sync: true,
+        cloud: { costUsd: 0.01, why: 'w' }, account: { userId: 'u1', serverUrl: 'https://cloud' },
+      } as never, (id) => confirmed.push(id));
+      await srv.refreshSeen();
+      await srv.releaseAll();
+      await expect(listing).resolves.toEqual([]);
+      await expect(report).resolves.toBe('delivered');
+      expect(srv.bodies.filter((x) => x.includes('run-0001'))).toHaveLength(1);
+      expect(confirmed).toEqual(['run-0001']);
+    });
   });
 
   describe('the sync opt-out, checked as each request leaves', () => {
