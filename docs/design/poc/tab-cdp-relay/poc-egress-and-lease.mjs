@@ -20,6 +20,10 @@
 //         script from agent script. This is the stated limit of §4.2.
 //     The agent's own Fetch.* stays denied, so it can neither see nor turn
 //     off the policy's interception.
+//     Fetch never pauses a WebSocket handshake, so the browser also runs
+//     behind a device-side egress proxy (loopback included). Chromium sends
+//     every ws:/wss: through it as a CONNECT, which is refused for a
+//     private-network destination without consent before it connects.
 //     Out-of-process frames and workers are their own targets, which the
 //     tab's interception does not see. The policy auto-attaches every child
 //     target paused and intercepts it before it runs; a browser-level guard
@@ -88,11 +92,15 @@ const TRY_FETCH = "(u) => fetch(u).then(() => 'reached', (e) => 'failed: ' + e.m
 
 // ── Chromium with host mapping and one tab ──────────────────────────────────
 
-async function launchChromium(mapRules) {
+async function launchChromium(mapRules, proxyPort) {
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cdp-poc2-'));
+  // Every connection the browser makes goes through the device-side egress
+  // proxy, loopback included (Chromium bypasses a proxy for loopback unless
+  // told not to). That is the layer that sees WebSocket handshakes.
+  const proxy = proxyPort ? [`--proxy-server=http://127.0.0.1:${proxyPort}`, '--proxy-bypass-list=<-loopback>'] : [];
   const proc = spawn(process.env.CHROMIUM || chromium.executablePath(), [
     '--headless=new', '--no-sandbox', '--remote-debugging-port=0',
-    `--user-data-dir=${userDataDir}`, `--host-resolver-rules=${mapRules}`,
+    `--user-data-dir=${userDataDir}`, `--host-resolver-rules=${mapRules}`, ...proxy,
     // Service workers need a secure context; the mapped test origins are http.
     '--unsafely-treat-insecure-origin-as-secure=http://allowed.test,http://allowed2.test', 'about:blank',
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -201,13 +209,16 @@ function isPrivateHost(host) {
 function egressVerdict(rawUrl, resourceType, consentedOrigins) {
   let url;
   try { url = new URL(rawUrl); } catch { return { verdict: 'block', reason: 'unparseable URL' }; }
-  const web = url.protocol === 'http:' || url.protocol === 'https:';
+  // A WebSocket handshake is an HTTP request to the same host: it gets the
+  // same private-network rule. (Fetch interception never sees it: see
+  // startEgressProxy, which enforces this verdict for it.)
+  const web = url.protocol === 'http:' || url.protocol === 'https:' || url.protocol === 'ws:' || url.protocol === 'wss:';
   if (!web) {
     if (resourceType === 'Document') return { verdict: 'block', reason: `${url.protocol} document` };
     if (url.protocol === 'file:') return { verdict: 'block', reason: 'file: request' };
     return { verdict: 'allow', reason: '' };
   }
-  const consented = consentedOrigins.has(url.origin);
+  const consented = consentedOrigins.has(url.origin) || consentedOrigins.has(url.origin.replace(/^ws/, 'http'));
   if (resourceType === 'Document' && !consented) return { verdict: 'block', reason: 'navigation to an origin without consent' };
   if (isPrivateHost(url.hostname) && !consented) return { verdict: 'block', reason: 'private-network destination' };
   return { verdict: 'allow', reason: '' };
@@ -272,6 +283,62 @@ async function startEgressPolicy(tabWsUrl, consentedOrigins) {
   await send('Fetch.enable', INTERCEPT_ALL);
   await send('Target.setAutoAttach', AUTO_ATTACH_PAUSED);
   return { decisions, children, close: () => client.close() };
+}
+
+/**
+ * The device-side egress proxy. Chromium's Fetch interception does not pause
+ * WebSocket handshakes (checked: a `ws://127.0.0.1/…` opened by a consented
+ * page reaches the server with Fetch enabled for every URL, and
+ * Network.setBlockedURLs does not stop it either). Through an HTTP proxy,
+ * Chromium sends every WebSocket, ws: and wss:, as a CONNECT to host:port,
+ * so the proxy decides it by the same private-network rule before any byte
+ * reaches the destination. Plain http requests pass through it too, as a
+ * second layer behind the request policy. It answers 403 and never connects
+ * for a blocked destination.
+ *
+ * `hostMap` stands in for DNS, as --host-resolver-rules does for Chromium.
+ * Production resolves the name on the device, checks the address it got, and
+ * connects to that same address (no second lookup to rebind).
+ */
+function startEgressProxy(hostMap, consentedOrigins) {
+  const decisions = [];
+  const defaultPort = (proto) => (proto === 'https:' || proto === 'wss:' ? '443' : '80');
+  const consentedHostPorts = new Set([...consentedOrigins].map((o) => { const u = new URL(o); return `${u.hostname}:${u.port || defaultPort(u.protocol)}`; }));
+  const decide = (kind, host, port) => {
+    const bare = host.replace(/^\[|\]$/g, '');
+    const consented = consentedHostPorts.has(`${host}:${port}`);
+    const verdict = !consented && isPrivateHost(bare) ? 'block' : 'allow';
+    decisions.push({ verdict, kind, host, port, reason: verdict === 'block' ? 'private-network destination' : '' });
+    return verdict === 'allow';
+  };
+  const upstream = (host, port) => hostMap.get(host.toLowerCase()) ?? { host: host.replace(/^\[|\]$/g, ''), port: Number(port) };
+  const server = http.createServer((req, res) => {
+    let u;
+    try { u = new URL(req.url); } catch { res.statusCode = 400; return res.end(); }
+    const port = u.port || defaultPort(u.protocol);
+    if (!decide('http', u.hostname, port)) { res.statusCode = 403; return res.end(); }
+    const to = upstream(u.hostname, port);
+    const out = http.request({ host: to.host, port: to.port, method: req.method, path: u.pathname + u.search, headers: req.headers }, (r) => {
+      res.writeHead(r.statusCode ?? 502, r.headers);
+      r.pipe(res);
+    });
+    out.on('error', () => { res.statusCode = 502; res.end(); });
+    req.pipe(out);
+  });
+  server.on('connect', (req, socket, head) => {
+    const m = /^(\[[^\]]+\]|[^:]+):(\d+)$/.exec(req.url);
+    if (!m || !decide('connect', m[1], m[2])) { socket.end('HTTP/1.1 403 Forbidden\r\n\r\n'); return; }
+    const to = upstream(m[1], m[2]);
+    const out = net.connect(to.port, to.host, () => {
+      socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      if (head?.length) out.write(head);
+      out.pipe(socket);
+      socket.pipe(out);
+    });
+    out.on('error', () => socket.destroy());
+    socket.on('error', () => out.destroy());
+  });
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, decisions, port: server.address().port })));
 }
 
 // ── 2. Relay with single-use capabilities and an exclusive lease ────────────
@@ -690,6 +757,12 @@ const offlist = await countingServer('offlist.test', {
 const SESSION_SECRET = `S3SS10N-${crypto.randomBytes(8).toString('hex')}`;
 const BODY_SECRET = `B0DY-${crypto.randomBytes(8).toString('hex')}`;
 const priv = await countingServer('127.0.0.1 (private)', { '/admin': (req, res) => res.end('router admin') });
+// Every TCP connection that reaches the private server, so a WebSocket (or a
+// TLS hello for wss:) counts even if it never becomes an HTTP request.
+let privConnections = 0;
+priv.server.on('connection', () => { privConnections++; });
+const wsEcho = new WebSocketServer({ noServer: true });
+priv.server.on('upgrade', (req, socket, head) => { priv.hits.push(`UPGRADE ${req.url}`); wsEcho.handleUpgrade(req, socket, head, (w) => w.send('private')); });
 const allowed = await countingServer('allowed.test', {
   '/': html(`<title>allowed</title>
     <a id="off" href="http://offlist.test/">off-list link</a>
@@ -731,8 +804,15 @@ const allowed = await countingServer('allowed.test', {
     <script>document.querySelector('#blob').href = URL.createObjectURL(new Blob(['local note']));</script>`),
 });
 
+allowed.server.on('upgrade', (req, socket, head) => { allowed.hits.push(`UPGRADE ${req.url}`); wsEcho.handleUpgrade(req, socket, head, (w) => w.send('consented')); });
+
 const rules = `MAP allowed.test 127.0.0.1:${allowed.port}, MAP allowed2.test 127.0.0.1:${allowed.port}, MAP sub.allowed.test 127.0.0.1:${allowed.port}, MAP offlist.test 127.0.0.1:${offlist.port}`;
-const { proc, port: cdpPort, tab, browserWs } = await launchChromium(rules);
+const hostMap = new Map([
+  ['allowed.test', { host: '127.0.0.1', port: allowed.port }], ['allowed2.test', { host: '127.0.0.1', port: allowed.port }],
+  ['sub.allowed.test', { host: '127.0.0.1', port: allowed.port }], ['offlist.test', { host: '127.0.0.1', port: offlist.port }],
+]);
+const egressProxy = await startEgressProxy(hostMap, new Set(['http://allowed.test', 'http://allowed2.test']));
+const { proc, port: cdpPort, tab, browserWs } = await launchChromium(rules, egressProxy.port);
 const ALLOWED = 'http://allowed.test';
 const policy = await startEgressPolicy(tab.webSocketDebuggerUrl, new Set([ALLOWED, 'http://allowed2.test']));
 const caps = createCapabilityStore();
@@ -881,6 +961,51 @@ try {
     const frameBlocked = policy.decisions.some((d) => d.verdict === 'block' && d.where === 'child' && d.url === `http://127.0.0.1:${priv.port}/admin`);
     check('P2: a consented cross-site frame cannot reach a private-network address', priv.hits.length === before && frameBlocked && result !== 'reached',
       `private server saw ${priv.hits.length - before}; blocked in the frame's own target: ${frameBlocked}; frame: ${result}`);
+  }
+
+  {
+    // WebSockets: Fetch interception never pauses their handshake, so the
+    // proxy is what must stop them. Opened by the consented page (as page
+    // script, or the agent through the allowlisted Runtime.evaluate) and by a
+    // dedicated worker; the private server must see no connection at all.
+    await page.goto(`${ALLOWED}/workers`);
+    const openWs = (u) => page.evaluate((url) => new Promise((resolve) => {
+      const w = new WebSocket(url);
+      w.onmessage = (e) => { resolve(`open: ${e.data}`); w.close(); };
+      w.onerror = () => resolve('failed');
+      setTimeout(() => resolve('timeout'), 3000);
+    }), u);
+    const proxyBlocks = (host) => egressProxy.decisions.filter((d) => d.verdict === 'block' && d.kind === 'connect' && d.host === host).length;
+    for (const [label, url, host] of [
+      ['ws: to a private-network address', `ws://127.0.0.1:${priv.port}/admin`, '127.0.0.1'],
+      ['ws: to a private address written as IPv4-mapped IPv6', `ws://[::ffff:127.0.0.1]:${priv.port}/admin`, '[::ffff:7f00:1]'],
+      ['wss: to a private-network address', `wss://127.0.0.1:${priv.port}/admin`, '127.0.0.1'],
+    ]) {
+      const before = privConnections;
+      const blocksBefore = proxyBlocks(host);
+      const result = await openWs(url);
+      await sleep(200);
+      check(`P2: a WebSocket (${label}) is refused before it connects`,
+        privConnections === before && proxyBlocks(host) > blocksBefore && !result.startsWith('open'),
+        `private server saw ${privConnections - before} connection(s); proxy blocks ${proxyBlocks(host) - blocksBefore}; page: ${result}`);
+    }
+    {
+      const before = privConnections;
+      const viaWorker = await page.evaluate((url) => new Promise((resolve) => {
+        const src = `onmessage = (m) => { const w = new WebSocket(m.data); w.onmessage = (e) => postMessage('open: ' + e.data); w.onerror = () => postMessage('failed'); };`;
+        const worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+        worker.onmessage = (e) => resolve(e.data);
+        worker.postMessage(url);
+        setTimeout(() => resolve('timeout'), 3000);
+      }), `ws://127.0.0.1:${priv.port}/admin`);
+      await sleep(200);
+      check('P2: a WebSocket a worker opens to a private-network address is refused before it connects',
+        privConnections === before && !viaWorker.startsWith('open'), `private server saw ${privConnections - before}; worker: ${viaWorker}`);
+    }
+    const consented = await openWs('ws://allowed.test/socket');
+    check('a WebSocket to the consented origin still opens', consented === 'open: consented', consented);
+    const verdicts = [`ws://127.0.0.1:${priv.port}/admin`, 'wss://192.168.1.1/admin', 'ws://[::ffff:127.0.0.1]:9000/'].map((u) => egressVerdict(u, 'WebSocket', new Set([ALLOWED])).verdict);
+    check('P2: the request policy gives ws: and wss: the private-network rule of http(s)', verdicts.every((v) => v === 'block') && egressVerdict('ws://allowed.test/socket', 'WebSocket', new Set([ALLOWED])).verdict === 'allow', verdicts.join(', '));
   }
 
   {
@@ -1188,6 +1313,7 @@ try {
   popups.close();
   relay.server.close();
   for (const s of [allowed, offlist, priv]) s.server.close();
+  egressProxy.server.close();
   proc.kill();
 }
 

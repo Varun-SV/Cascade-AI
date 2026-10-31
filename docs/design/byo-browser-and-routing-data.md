@@ -327,7 +327,7 @@ depth.
   - Changing the list is a reviewed policy change with a version number.
   - Method names alone don't express side effects. `Runtime.evaluate`
     stays privileged page script by design (§4.3, honest limit).
-  - `poc-egress-and-lease.mjs` checks all of this (60/60):
+  - `poc-egress-and-lease.mjs` checks all of this (66/66):
     - an allowlisted method works on a nested cross-site iframe session
     - `Emulation.setGeolocationOverride` through that nested session is
       refused
@@ -380,9 +380,9 @@ can neither see nor disable that channel:
 
 | Source | Mechanism |
 |---|---|
-| CLI | The policy's own CDP session on the tab: `Fetch.enable` for every URL at the **Request** stage. Out-of-process frames and workers are their own targets, which the tab's interception does not see, so the policy also auto-attaches every child target **paused**, puts the same interception on it, and only then resumes it; a child it cannot intercept stays paused (a dedicated worker, whose requests go through its parent frame, runs). A browser-level session does the same for new top-level targets (service and shared workers) and keeps a browser-wide interception as a backstop |
-| Desktop | `session.webRequest.onBeforeRequest` on the built-in browser's partition, in Electron's main process |
-| Extension | `declarativeNetRequest` session rules scoped to the leased tab; `Fetch` through `chrome.debugger` as a fallback. Requests from service and shared workers carry no tab id (`-1`), so tab-scoped rules miss them; the extension's P2 run must show workers the page starts are covered too |
+| CLI | The policy's own CDP session on the tab: `Fetch.enable` for every URL at the **Request** stage. Out-of-process frames and workers are their own targets, which the tab's interception does not see, so the policy also auto-attaches every child target **paused**, puts the same interception on it, and only then resumes it; a child it cannot intercept stays paused (a dedicated worker, whose requests go through its parent frame, runs). A browser-level session does the same for new top-level targets (service and shared workers) and keeps a browser-wide interception as a backstop. **`Fetch` never pauses a WebSocket handshake**, so Cascade also launches the browser behind a device-side egress proxy (`--proxy-server`, with `--proxy-bypass-list=<-loopback>` so loopback is not exempt). Chromium sends every `ws:`/`wss:` through it as a `CONNECT host:port`, and the proxy applies the same private-network rule before connecting. It is also where the resolved address is checked and pinned |
+| Desktop | `session.webRequest.onBeforeRequest` on the built-in browser's partition, in Electron's main process. Its filter includes WebSocket handshakes (resource type `webSocket`), which the desktop's P2 run must show with a server-side check |
+| Extension | `declarativeNetRequest` session rules scoped to the leased tab; `Fetch` through `chrome.debugger` as a fallback. Requests from service and shared workers carry no tab id (`-1`), so tab-scoped rules miss them; the extension's P2 run must show workers the page starts are covered too. WebSocket handshakes need a rule with resource type `websocket`; the `Fetch` fallback does not see them at all, so the extension cannot rely on it for P2 |
 
 **Rules, applied to every request before it is sent:**
 
@@ -427,7 +427,13 @@ A `fetch` to a 127.0.0.1 address was failed by the policy, not merely by
 the browser. So was the same `fetch` from a dedicated worker, a shared
 worker and a service worker the page started, and from a consented
 cross-site frame (its own process): the private server saw 0 requests and
-the block is in the policy's own log. Before child targets were policed,
+the block is in the policy's own log. A WebSocket to the same private
+server (`ws:`, `wss:`, the IPv4-mapped IPv6 form, and from a dedicated
+worker) reached it with only `Fetch` in place: Chromium's `Fetch` domain
+never paused the handshake, and `Network.setBlockedURLs` didn't stop it
+either. Behind the egress proxy, the private server saw **0 TCP
+connections** for each, the proxy logged the refused `CONNECT`, and a
+WebSocket to the consented origin still opened. Before child targets were policed,
 the shared worker, the service worker and the frame each reached it. The
 same workers still reach the consented origin. A public script from a non-consented origin loaded, which is
 the stated limit. `Fetch.disable` from the agent was refused.
