@@ -30,6 +30,7 @@ import { CommandPalette } from './components/CommandPalette.js';
 import { ChangesModal } from './components/ChangesModal.js';
 import { ContinueModal } from './components/ContinueModal.js';
 import { useThemeSync } from './theme/useTheme.js';
+import { cloudBridge, cloudMirror, migrateSyncOptOut, mirrorAndConfirm, storedSyncOptOut, type AccountedRun } from './lib/cloud-mirror.js';
 
 /** A message on a cloud conversation's active path (with branching data). */
 export interface CloudMsg {
@@ -46,9 +47,15 @@ export interface CloudMsg {
 /** A locally-executed turn to persist into the shared cloud conversation. */
 export interface CloudTurn {
   userContent: string;
-  assistant: { content: string; tier?: string | null; model?: string | null; costUsd?: number | null };
+  assistant: { content: string; tier?: string | null; model?: string | null; costUsd?: number | null; why?: string | null };
   editOfMessageId?: string;
   regenerateFromUserMessageId?: string;
+  /** The device's id for the run: the same turn sent again is added once. */
+  runId?: string;
+  /** 'stopped' for a run the user stopped, sent with its partial reply. */
+  outcome?: 'answered' | 'stopped';
+  /** When the run finished (epoch ms). */
+  endedAt?: number;
 }
 
 /** Live state of the built-in browser, pushed on every navigation. */
@@ -133,6 +140,7 @@ declare global {
         messages(id: string): Promise<{ ok: boolean; error?: string; messages: CloudMsg[] }>;
         createConversation(title?: string): Promise<{ ok: boolean; error?: string; conversation?: { id: string; title: string | null } }>;
         appendTurn(id: string, turn: CloudTurn): Promise<{ ok: boolean; error?: string; messages: CloudMsg[] }>;
+        recordRunSpend(run: { conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string; runId?: string; endedAt?: number }): Promise<{ ok: boolean; error?: string; recorded?: boolean }>;
         selectBranch(id: string, messageId: string): Promise<{ ok: boolean; error?: string; messages: CloudMsg[] }>;
         deleteMessage(id: string, messageId: string): Promise<{ ok: boolean; error?: string; messages: CloudMsg[] }>;
         renameConversation(id: string, title: string): Promise<{ ok: boolean; error?: string }>;
@@ -387,6 +395,18 @@ export function App() {
     // unmounts), so they also own ending the run lifecycle: runEnded keeps the
     // persistent Stop control honest, and finalizeLastMessage un-sticks the
     // transcript's streaming flag when a run finishes while another view is open.
+    // Each finished run's cost, sent once its calls have settled: copied to the
+    // cloud account whichever session or view is on screen.
+    // Confirmed only once delivered or skipped on purpose, so the backend stops
+    // replaying it; one that failed to upload stays on disk and is replayed on
+    // the next connect.
+    // An opt-out an earlier build kept here moves to the main process, which
+    // stamps it on each run as it ends and checks it before every upload.
+    // Until it has, the main process counts syncing as off, so no run ends stamped on.
+    void migrateSyncOptOut(cloudBridge(), storedSyncOptOut);
+    socket.on('run:accounting', (data: AccountedRun) => {
+      void mirrorAndConfirm(cloudMirror, data, (id) => socket.emit('run:accounting:ack', { id }));
+    });
     socket.on('session:error', (data: { sessionId?: string; error?: string }) => {
       dispatch(setBackendError(data?.error ? `Run failed: ${data.error}` : 'Run failed — check your model/key and try again.'));
       dispatch(clearApprovals());

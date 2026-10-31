@@ -12,6 +12,12 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { SqliteVectorStore, mcpServerPrefix } from '#cascade-ai';
 import { randomUUID } from 'node:crypto';
+import {
+  deviceRunSpendId,
+  legacyCliRunCost,
+  spendEntryFromRun,
+  type SpendChatRow, type SpendEntry, type SpendSource, type SpendTotals,
+} from './spend.js';
 
 export type OAuthProvider = 'github' | 'google' | 'dev';
 
@@ -57,6 +63,8 @@ export interface CloudMessage {
   why: string | null;
   costUsd: number | null;
   createdAt: number;
+  /** A reply from a run the user stopped: what it had written by then. */
+  cancelled?: true;
 }
 
 export interface CloudMemory {
@@ -258,6 +266,8 @@ interface DbMessageRow {
   why_json: string | null;
   cost_usd: number | null;
   created_at: number;
+  /** 1 for a reply from a run the user stopped. */
+  cancelled?: number | null;
 }
 
 export class CloudStore {
@@ -562,6 +572,108 @@ export class CloudStore {
     // Index the branching pointer once the column is guaranteed to exist (fresh
     // installs get it from CREATE TABLE, upgrades from the ALTER above).
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id)');
+
+    this.migrateSpendLedger();
+  }
+
+  /**
+   * The spend & savings ledger: one row per run, and one per tier and model it
+   * spent on. It deliberately has no link to messages or conversations that
+   * would delete it with them: a deleted chat's money was still spent. Only the
+   * user's own deletion removes it.
+   *
+   * Created together with a one-time back-fill from the replies already stored,
+   * inside one transaction, so a crash part-way leaves neither behind and the
+   * next boot simply tries again. Runs whose chat was deleted before the ledger
+   * existed cannot be recovered: nothing of them is left to read.
+   */
+  private hasColumn(table: string, col: string): boolean {
+    return (this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === col);
+  }
+
+  private migrateSpendLedger(): void {
+    // The device's id for the run a synced reply came from, so the same turn
+    // sent twice (a retry after a lost response) is added once.
+    if (!this.hasColumn('messages', 'client_run_id')) {
+      this.db.exec('ALTER TABLE messages ADD COLUMN client_run_id TEXT');
+    }
+    this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_run
+      ON messages(conversation_id, client_run_id) WHERE client_run_id IS NOT NULL`);
+    // A reply from a run the user stopped keeps saying so after a reload.
+    if (!this.hasColumn('messages', 'cancelled')) this.db.exec('ALTER TABLE messages ADD COLUMN cancelled INTEGER');
+    // The last running total an old CLI sent for this chat (see appendTurn),
+    // kept apart from its messages so deleting a reply cannot lower it.
+    if (!this.hasColumn('conversations', 'legacy_cli_total')) {
+      this.db.exec('ALTER TABLE conversations ADD COLUMN legacy_cli_total REAL');
+      // Seeded from each chat's newest such reply as it stands now, so a reply
+      // deleted after the upgrade cannot lower the total the next sync is
+      // measured against.
+      if (this.hasColumn('messages', 'cost_usd')) {
+        this.db.exec(`UPDATE conversations SET legacy_cli_total = (
+          SELECT m.cost_usd FROM messages m
+           WHERE m.conversation_id = conversations.id AND m.role = 'assistant'
+             AND m.why_json IS NULL AND m.cost_usd IS NOT NULL
+           ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1)`);
+      }
+    }
+    const exists = this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'spend_ledger'")
+      .get();
+    if (exists) {
+      // Whether a line's calls had a price: 1 unpriced, 0 priced, NULL unknown.
+      const cols = this.db.prepare('PRAGMA table_info(spend_ledger_models)').all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === 'unpriced')) this.db.exec('ALTER TABLE spend_ledger_models ADD COLUMN unpriced INTEGER');
+      return;
+    }
+    const create = this.db.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE spend_ledger (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          conversation_id TEXT,
+          at INTEGER NOT NULL,
+          cost_usd REAL NOT NULL DEFAULT 0,
+          saved_usd REAL NOT NULL DEFAULT 0,
+          tokens INTEGER NOT NULL DEFAULT 0,
+          outcome TEXT NOT NULL DEFAULT 'answered'
+        );
+        CREATE INDEX idx_spend_user_at ON spend_ledger(user_id, at);
+        CREATE TABLE spend_ledger_models (
+          run_id TEXT NOT NULL REFERENCES spend_ledger(id) ON DELETE CASCADE,
+          tier TEXT NOT NULL,
+          model TEXT NOT NULL DEFAULT '',
+          cost_usd REAL NOT NULL DEFAULT 0,
+          tokens INTEGER NOT NULL DEFAULT 0,
+          unpriced INTEGER,
+          PRIMARY KEY (run_id, tier, model)
+        );
+      `);
+      // A reply with neither a report nor a cost was not a run here: an
+      // imported or handed-off transcript carries neither. The oldest
+      // databases predate the cost column; their replies have a report or nothing.
+      const hasCost = (this.db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>).some((c) => c.name === 'cost_usd');
+      const cost = hasCost ? 'm.cost_usd' : 'NULL';
+      // In order within each chat: an old CLI's replies carry a running total,
+      // and each run is what it grew by (`legacyCliRunCost`).
+      const replies = this.db.prepare(
+        `SELECT m.id, c.user_id, m.conversation_id, m.created_at, ${cost} AS cost_usd, m.why_json
+           FROM messages m JOIN conversations c ON c.id = m.conversation_id
+          WHERE m.role = 'assistant' AND (m.why_json IS NOT NULL OR ${cost} IS NOT NULL)
+          ORDER BY m.conversation_id, m.created_at, m.rowid`,
+      ).all() as Array<{ id: string; user_id: string; conversation_id: string; created_at: number; cost_usd: number | null; why_json: string | null }>;
+      const runningTotal = new Map<string, number>();
+      for (const r of replies) {
+        let costUsd = r.cost_usd;
+        if (r.why_json === null && r.cost_usd !== null) {
+          costUsd = legacyCliRunCost(r.cost_usd, runningTotal.get(r.conversation_id) ?? null);
+          runningTotal.set(r.conversation_id, r.cost_usd);
+        }
+        this.recordSpend(spendEntryFromRun({
+          id: r.id, userId: r.user_id, conversationId: r.conversation_id, at: r.created_at, costUsd, why: r.why_json,
+        }));
+      }
+    });
+    create();
   }
 
   // ── Users ─────────────────────────────────────
@@ -757,6 +869,8 @@ export class CloudStore {
     tier?: string | null;
     why?: string | null;
     costUsd?: number | null;
+    /** A reply from a run the user stopped. */
+    cancelled?: boolean;
   }): CloudMessage {
     const row: DbMessageRow = {
       id: randomUUID(),
@@ -769,13 +883,14 @@ export class CloudStore {
       why_json: input.why ?? null,
       cost_usd: input.costUsd ?? null,
       created_at: Date.now(),
+      cancelled: input.cancelled ? 1 : null,
     };
     this.db
       .prepare(
-        `INSERT INTO messages (id, conversation_id, parent_id, role, content, model, tier, why_json, cost_usd, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages (id, conversation_id, parent_id, role, content, model, tier, why_json, cost_usd, created_at, cancelled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(row.id, row.conversation_id, row.parent_id, row.role, row.content, row.model, row.tier, row.why_json, row.cost_usd, row.created_at);
+      .run(row.id, row.conversation_id, row.parent_id, row.role, row.content, row.model, row.tier, row.why_json, row.cost_usd, row.created_at, row.cancelled);
     // The newly appended message becomes the tip of the active path.
     this.db.prepare('UPDATE conversations SET active_leaf_id = ? WHERE id = ?').run(row.id, input.conversationId);
     this.touchConversation(input.conversationId);
@@ -876,10 +991,24 @@ export class CloudStore {
       assistant: { content: string; model?: string | null; tier?: string | null; why?: string | null; costUsd?: number | null };
       editOfMessageId?: string | null;
       regenerateFromUserMessageId?: string | null;
+      /**
+       * The device's id for the run. The same turn sent again to this chat
+       * (its first response was lost) is not added twice, and the run is
+       * counted once in the ledger, under the same id `/api/usage/runs` uses.
+       */
+      runId?: string | null;
+      /** A run the user stopped, whose partial reply is kept: counted as stopped. */
+      outcome?: 'answered' | 'stopped';
+      /** When the run finished, which the ledger counts it at (the reply's time otherwise). */
+      endedAt?: number;
     },
   ): CloudMessage[] | null {
     const convo = this.getConversation(conversationId, userId);
     if (!convo) return null;
+    const runId = input.runId ?? null;
+    if (runId && this.db.prepare('SELECT 1 FROM messages WHERE conversation_id = ? AND client_run_id = ?').get(conversationId, runId)) {
+      return this.getActivePath(conversationId);
+    }
 
     const ownedUserTurn = (id?: string | null) => {
       if (!id) return null;
@@ -891,14 +1020,44 @@ export class CloudStore {
     const branchParentId = regen ? regen.parentId : edited ? edited.parentId : convo.activeLeafId;
 
     const tx = this.db.transaction(() => {
+      // An old CLI sends its session's running total, not the run's cost. Read
+      // the chat's previous total before this reply joins it.
+      // Kept on the chat, not read back from its replies: a deleted reply's
+      // total would otherwise be counted again by the next one.
+      let spent = input.assistant.costUsd ?? null;
+      if (input.assistant.why == null && spent != null) {
+        const kept = this.db.prepare('SELECT legacy_cli_total FROM conversations WHERE id = ?')
+          .get(conversationId) as { legacy_cli_total: number | null } | undefined;
+        // A chat from before the total was kept: its newest such reply.
+        const previous = kept?.legacy_cli_total ?? (this.db.prepare(
+          `SELECT cost_usd FROM messages
+            WHERE conversation_id = ? AND role = 'assistant' AND why_json IS NULL AND cost_usd IS NOT NULL
+            ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+        ).get(conversationId) as { cost_usd: number } | undefined)?.cost_usd ?? null;
+        this.db.prepare('UPDATE conversations SET legacy_cli_total = ? WHERE id = ?').run(spent, conversationId);
+        spent = legacyCliRunCost(spent, previous);
+      }
       const userMsg = regen ?? this.addMessage({
         conversationId, role: 'user', content: input.userContent, parentId: branchParentId,
       });
-      this.addMessage({
+      const reply = this.addMessage({
         conversationId, role: 'assistant', content: input.assistant.content, parentId: userMsg.id,
         model: input.assistant.model ?? null, tier: input.assistant.tier ?? null,
         why: input.assistant.why ?? null, costUsd: input.assistant.costUsd ?? null,
+        cancelled: input.outcome === 'stopped',
       });
+      if (runId) this.db.prepare('UPDATE messages SET client_run_id = ? WHERE id = ?').run(runId, reply.id);
+      // A run on the user's own device, synced here: it spent their money all
+      // the same, so it counts in their report as the chat's saved chip does.
+      // With the device's run id, a run already counted (its turn went to
+      // another chat, or its spend alone was sent) is not counted again.
+      if (input.assistant.why != null || input.assistant.costUsd != null) {
+        this.recordSpend(spendEntryFromRun({
+          id: runId ? deviceRunSpendId(userId, runId) : reply.id,
+          userId, conversationId, at: input.endedAt ?? reply.createdAt, costUsd: spent, why: input.assistant.why,
+          outcome: input.outcome ?? 'answered',
+        }));
+      }
     });
     tx();
     return this.getActivePath(conversationId);
@@ -988,6 +1147,124 @@ export class CloudStore {
     });
     tx();
     return this.getActivePath(conversationId);
+  }
+
+  // ── Spend & savings ledger ────────────────────
+
+  /** Record one run's spend. Recording the same run twice keeps the first. */
+  recordSpend(e: SpendEntry): void {
+    const tx = this.db.transaction(() => {
+      const added = this.db
+        .prepare(
+          `INSERT OR IGNORE INTO spend_ledger (id, user_id, conversation_id, at, cost_usd, saved_usd, tokens, outcome)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(e.id, e.userId, e.conversationId, e.at, e.costUsd, e.savedUsd, e.tokens, e.outcome);
+      if (added.changes === 0) {
+        // Counted already, with no chat (its spend went alone while its turn
+        // could not be copied): the turn now copied gives it its chat. Only
+        // the same user's run, and never one already in another chat.
+        if (e.conversationId !== null) {
+          this.db.prepare('UPDATE spend_ledger SET conversation_id = ? WHERE id = ? AND user_id = ? AND conversation_id IS NULL')
+            .run(e.conversationId, e.id, e.userId);
+        }
+        return;
+      }
+      this.insertSpendLines(e);
+    });
+    tx();
+  }
+
+  /**
+   * Writes a run's ledger row whether or not it is there yet, replacing its
+   * figures and lines: a hosted run is written down when it answers and
+   * completed once its late calls settle, so a restart in between keeps it.
+   */
+  replaceSpend(e: SpendEntry): void {
+    const tx = this.db.transaction(() => {
+      this.db.prepare(
+        `INSERT INTO spend_ledger (id, user_id, conversation_id, at, cost_usd, saved_usd, tokens, outcome)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET user_id = excluded.user_id, conversation_id = excluded.conversation_id, at = excluded.at,
+           cost_usd = excluded.cost_usd, saved_usd = excluded.saved_usd, tokens = excluded.tokens, outcome = excluded.outcome`,
+      ).run(e.id, e.userId, e.conversationId, e.at, e.costUsd, e.savedUsd, e.tokens, e.outcome);
+      this.db.prepare('DELETE FROM spend_ledger_models WHERE run_id = ?').run(e.id);
+      this.insertSpendLines(e);
+    });
+    tx();
+  }
+
+  private insertSpendLines(e: SpendEntry): void {
+    const line = this.db.prepare(
+      `INSERT INTO spend_ledger_models (run_id, tier, model, cost_usd, tokens, unpriced) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(run_id, tier, model) DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd, tokens = tokens + excluded.tokens,
+         unpriced = CASE WHEN unpriced IS NULL THEN excluded.unpriced
+                         WHEN excluded.unpriced IS NULL THEN unpriced
+                         ELSE MAX(unpriced, excluded.unpriced) END`,
+    );
+    for (const l of e.lines) line.run(e.id, l.tier, l.model, l.costUsd, l.tokens, l.unpriced === null ? null : l.unpriced ? 1 : 0);
+  }
+
+  /** The queries behind a spend report, all owner-scoped. `fromMs` null is all time. */
+  get spend(): SpendSource {
+    const since = 'l.user_id = ? AND (? IS NULL OR l.at >= ?)';
+    return {
+      firstSpendAt: (userId) => {
+        const row = this.db.prepare('SELECT MIN(at) AS first FROM spend_ledger WHERE user_id = ?').get(userId) as { first: number | null };
+        return row.first ?? null;
+      },
+      spendTotals: (userId, fromMs): SpendTotals => {
+        const row = this.db.prepare(
+          `SELECT COALESCE(SUM(l.cost_usd), 0) AS spentUsd, COALESCE(SUM(l.saved_usd), 0) AS savedUsd,
+                  COUNT(*) AS runs, COALESCE(SUM(l.tokens), 0) AS tokens,
+                  COALESCE(SUM(l.outcome = 'failed'), 0) AS failedRuns,
+                  COALESCE(SUM(CASE WHEN l.outcome = 'failed' THEN l.cost_usd ELSE 0 END), 0) AS failedUsd
+             FROM spend_ledger l WHERE ${since}`,
+        ).get(userId, fromMs, fromMs) as SpendTotals;
+        return row;
+      },
+      spendRuns: (userId, fromMs) =>
+        this.db.prepare(
+          `SELECT l.at, l.cost_usd AS spentUsd, l.saved_usd AS savedUsd FROM spend_ledger l WHERE ${since}`,
+        ).all(userId, fromMs, fromMs) as Array<{ at: number; spentUsd: number; savedUsd: number }>,
+      spendByTierModel: (userId, fromMs) => {
+        const rows = this.db.prepare(
+          `SELECT m.tier, m.model, SUM(m.cost_usd) AS spentUsd, SUM(m.tokens) AS tokens, COUNT(DISTINCT m.run_id) AS runs,
+                  COALESCE(SUM(m.unpriced = 1), 0) AS unpricedRuns,
+                  COALESCE(SUM(m.unpriced IS NULL AND m.cost_usd = 0 AND m.tokens > 0), 0) AS priceUnknownRuns
+             FROM spend_ledger_models m JOIN spend_ledger l ON l.id = m.run_id
+            WHERE ${since}
+            GROUP BY m.tier, m.model`,
+        ).all(userId, fromMs, fromMs) as Array<{
+          tier: string; model: string; spentUsd: number; tokens: number; runs: number; unpricedRuns: number; priceUnknownRuns: number;
+        }>;
+        // A run that used two models on one tier is still one run of that tier.
+        const tierRuns = new Map((this.db.prepare(
+          `SELECT m.tier, COUNT(DISTINCT m.run_id) AS runs
+             FROM spend_ledger_models m JOIN spend_ledger l ON l.id = m.run_id
+            WHERE ${since}
+            GROUP BY m.tier`,
+        ).all(userId, fromMs, fromMs) as Array<{ tier: string; runs: number }>).map((r) => [r.tier, r.runs]));
+        return rows.map((r) => ({ ...r, tierRuns: tierRuns.get(r.tier) ?? r.runs }));
+      },
+      spendTopChats: (userId, fromMs, limit): SpendChatRow[] =>
+        // Deleted chats are counted together under one row with no id or title.
+        this.db.prepare(
+          `SELECT CASE WHEN c.id IS NULL THEN NULL ELSE l.conversation_id END AS conversationId,
+                  (l.conversation_id IS NULL) AS noChat,
+                  MAX(c.title) AS title,
+                  SUM(l.cost_usd) AS spentUsd, SUM(l.saved_usd) AS savedUsd, COUNT(*) AS runs
+             FROM spend_ledger l
+             LEFT JOIN conversations c ON c.id = l.conversation_id AND c.user_id = l.user_id
+            WHERE ${since}
+            GROUP BY conversationId, noChat
+            ORDER BY spentUsd DESC, runs DESC
+            LIMIT ?`,
+        ).all(userId, fromMs, fromMs, limit).map((r) => {
+          const row = r as Omit<SpendChatRow, 'noChat'> & { noChat: number };
+          return { ...row, noChat: row.noChat === 1 };
+        }),
+    };
   }
 
   // ── Usage / entitlements ──────────────────────
@@ -1746,6 +2023,7 @@ export class CloudStore {
       why: row.why_json ?? null,
       costUsd: row.cost_usd,
       createdAt: row.created_at,
+      ...(row.cancelled ? { cancelled: true as const } : {}),
     };
   }
 

@@ -64,6 +64,12 @@ export interface CloudTurnInput {
   editOfMessageId?: string;
   /** Re-answer this user turn (reply saved as a sibling; no new user message). */
   regenerateFromUserMessageId?: string;
+  /** The device's id for the run: the same turn sent again is added once. */
+  runId?: string;
+  /** 'stopped' for a run the user stopped, sent with its partial reply. */
+  outcome?: 'answered' | 'stopped';
+  /** When the run finished (epoch ms): it counts on that day, however late it is sent. */
+  endedAt?: number;
 }
 
 interface TokenResponse {
@@ -83,6 +89,22 @@ export interface CloudSessionStore {
   load(): CloudSession | null;
   save(session: CloudSession): void;
   clear(): void;
+  /**
+   * Optional compare-and-swap: saves `next` only while the store still holds
+   * `prev` (same user, server and refresh token), and answers whether it did.
+   * Without it the client checks, then saves, in one synchronous step.
+   */
+  replace?(prev: CloudSession, next: CloudSession): boolean;
+}
+
+/** Options for a client. */
+export interface CloudClientOptions {
+  /**
+   * Called just before each authenticated request goes out, after any token
+   * refresh and before a retry after a 401. Throwing stops the request: no
+   * bytes of it are sent. The desktop uses it to re-check the sync opt-out.
+   */
+  beforeSend?: () => void;
 }
 
 /** Default store: the 0600 JSON file next to the global provider credentials. */
@@ -93,15 +115,33 @@ class FileCloudSessionStore implements CloudSessionStore {
   clear(): void { clearCloudSession(this.dir); }
 }
 
+/**
+ * Thrown when the signed-in session changed while a refresh was out, so the
+ * request it was refreshing for is neither sent nor retried. `code` lets a
+ * caller that loads this module separately (the desktop) recognise it.
+ */
+/** Refreshes in flight, by the session generation (server, user, refresh token) they rotate. */
+const inflightRefreshes = new Map<string, Promise<CloudSession>>();
+const refreshKey = (s: CloudSession): string => JSON.stringify([s.serverUrl, s.user?.id ?? '', s.refreshToken]);
+
+export class CloudAccountChangedError extends Error {
+  readonly code = 'CLOUD_ACCOUNT_CHANGED';
+  constructor() { super('Signed in to another account.'); this.name = 'CloudAccountChangedError'; }
+}
+
 export class CloudClient {
   private readonly store: CloudSessionStore;
+
+  private readonly beforeSend: (() => void) | undefined;
 
   constructor(
     private readonly serverUrl: string,
     dir?: string,
     store?: CloudSessionStore,
+    options: CloudClientOptions = {},
   ) {
     this.store = store ?? new FileCloudSessionStore(dir);
+    this.beforeSend = options.beforeSend;
   }
 
   /** Build a client from a stored session, or null if not signed in. */
@@ -236,13 +276,41 @@ export class CloudClient {
     return s;
   }
 
+  /**
+   * One refresh per sign-in generation in this process. Clients built on the
+   * same session (the desktop makes one per request) that find its token
+   * expired together share the first one's refresh instead of each spending
+   * the same refresh token: the loser of such a race would otherwise find the
+   * token rotated under it and fail as if the account had changed.
+   */
   private async refresh(): Promise<CloudSession> {
     const s = this.session();
+    const key = refreshKey(s);
+    const running = inflightRefreshes.get(key);
+    if (running) {
+      const next = await running;
+      // The same rotation, joined: usable only while the store still holds it.
+      if (!this.stillHolds(next)) throw new CloudAccountChangedError();
+      return next;
+    }
+    const mine = this.rotate(s);
+    inflightRefreshes.set(key, mine);
+    const forget = () => { if (inflightRefreshes.get(key) === mine) inflightRefreshes.delete(key); };
+    mine.then(forget, forget);
+    return mine;
+  }
+
+  private async rotate(s: CloudSession): Promise<CloudSession> {
     const res = await fetch(this.url('/api/native/refresh'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refresh_token: s.refreshToken }),
     });
+    // The sign-in may have changed while the refresh was out (another account,
+    // a sign-out, or the same account signed in again). Its tokens are then
+    // dropped, the session held now is left alone, and nothing is sent or
+    // retried: the caller's request was meant for the session it started with.
+    if (!this.stillHolds(s)) throw new CloudAccountChangedError();
     if (!res.ok) {
       this.store.clear(); // refresh rejected → sign-in is dead
       throw new Error('Your session expired. Run `cascade login` again.');
@@ -254,8 +322,27 @@ export class CloudClient {
       accessExpiresAt: Date.now() + tokens.expires_in * 1000,
       refreshToken: tokens.refresh_token, // rotated
     };
-    this.store.save(next);
+    // Checked again after reading the body (the sign-in can change while it
+    // is read), and saved only over the session the refresh started from, so
+    // a newer sign-in is never overwritten with these older rotated tokens.
+    // A store that refuses the save (one pinned to another account) must not
+    // be answered with tokens it never kept either.
+    if (!this.replaceSession(s, next) || !this.stillHolds(next)) throw new CloudAccountChangedError();
     return next;
+  }
+
+  /** Saves `next` only while the store still holds `prev`; answers whether it did. */
+  private replaceSession(prev: CloudSession, next: CloudSession): boolean {
+    if (this.store.replace) return this.store.replace(prev, next);
+    if (!this.stillHolds(prev)) return false;
+    this.store.save(next);
+    return true;
+  }
+
+  /** True while the store still holds exactly `s` (same user, same refresh token). */
+  private stillHolds(s: CloudSession): boolean {
+    const now = this.store.load();
+    return !!now && now.user?.id === s.user?.id && now.refreshToken === s.refreshToken && now.serverUrl === s.serverUrl;
   }
 
   private async accessToken(): Promise<string> {
@@ -266,8 +353,12 @@ export class CloudClient {
 
   /** Authenticated request that refreshes once on a 401 (e.g. server-side revoke). */
   private async authed<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const call = (token: string) =>
-      fetch(this.url(path), { ...init, headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}` } });
+    // The send-time check runs here, once the token is in hand, so a refresh
+    // that was awaited first cannot carry a request past it.
+    const call = (token: string) => {
+      this.beforeSend?.();
+      return fetch(this.url(path), { ...init, headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}` } });
+    };
     let res = await call(await this.accessToken());
     if (res.status === 401) res = await call((await this.refresh()).accessToken);
     if (!res.ok) throw new Error(`Request failed (${res.status}).`);
@@ -324,6 +415,24 @@ export class CloudClient {
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(turn) },
     );
     return b.messages ?? [];
+  }
+
+  /**
+   * Add a run with no turn to sync to the account's spend ledger: one that
+   * failed, was stopped, or answered with no text or from somewhere that is
+   * not copied as a chat. Its calls were billed all the same. `why` is the
+   * run's report (`cloudRunReport`), as JSON.
+   */
+  async recordRunSpend(run: {
+    conversationId: string | null; outcome: 'answered' | 'failed' | 'stopped'; costUsd: number; why: string;
+    /** The device's id for this run: the same id sent twice is recorded once. */
+    runId?: string;
+    /** When the run finished (epoch ms): it counts on that day, however late it is sent. */
+    endedAt?: number;
+  }): Promise<{ recorded: boolean }> {
+    return this.authed<{ recorded: boolean }>('/api/usage/runs', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(run),
+    });
   }
 
   /** Branching: switch the active path to a sibling; returns the new path. */

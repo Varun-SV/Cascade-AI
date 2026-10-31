@@ -1,14 +1,15 @@
 import { useState } from 'react';
 import type { Socket } from 'socket.io-client';
-import { Trash2, MessageSquare, PanelLeftClose, PanelLeftOpen, RotateCcw, Download, GitCompareArrows, MonitorSmartphone } from 'lucide-react';
+import { Trash2, MessageSquare, PanelLeftClose, PanelLeftOpen, RotateCcw, Download, GitCompareArrows, MonitorSmartphone, Plus } from 'lucide-react';
 import {
   useAppDispatch, useAppSelector,
-  setActiveSessionId, removeSession, loadTranscript,
+  setActiveSessionId, removeSession, loadTranscript, setView,
   toggleSessionSidebar, setSessionSidebarCollapsed, setChangesSessionId, setShowContinue,
   type RuntimeSession,
 } from '../store/index.js';
 import { fetchSessionTranscript } from '../utils/sessionLoad.js';
 import { PromptDialog } from '../components/PromptDialog.js';
+import { newChatView } from '../lib/new-chat.js';
 
 function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
@@ -172,9 +173,19 @@ function SessionRow({
 
 export function SessionSidebar({ socket }: { socket: Socket | null }) {
   const dispatch = useAppDispatch();
-  const { sessions, activeSessionId, sessionId, authToken, backendPort, sessionSidebarCollapsed } = useAppSelector((s) => s.app);
+  const { sessions, activeSessionId, sessionId, authToken, backendPort, sessionSidebarCollapsed, view } = useAppSelector((s) => s.app);
 
   const currentActiveId = activeSessionId ?? sessionId;
+
+  // New chat: leave the open session (as picking another one does, so its
+  // still-streaming tokens don't land in the fresh transcript) and start an
+  // empty one under a new id, which the first send persists.
+  const handleNewChat = () => {
+    if (currentActiveId && socket) socket.emit('leave:session', { sessionId: currentActiveId });
+    dispatch(loadTranscript({ sessionId: crypto.randomUUID(), messages: [] }));
+    const next = newChatView(view);
+    if (next) dispatch(setView(next));
+  };
 
   const handleSelect = async (session: RuntimeSession) => {
     // Picking a session tucks the list away so it stops taking real estate.
@@ -231,6 +242,9 @@ export function SessionSidebar({ socket }: { socket: Socket | null }) {
         <button title="Show sessions" onClick={() => dispatch(toggleSessionSidebar())} style={railBtnStyle}>
           <PanelLeftOpen size={15} />
         </button>
+        <button title="New chat" aria-label="New chat" onClick={handleNewChat} style={railBtnStyle}>
+          <Plus size={15} />
+        </button>
         <span title={`${sorted.length} sessions`} style={{ fontSize: 9, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>{sorted.length}</span>
       </aside>
     );
@@ -265,6 +279,9 @@ export function SessionSidebar({ socket }: { socket: Socket | null }) {
         }}>
           {sorted.length}
         </span>
+        <button title="New chat" aria-label="New chat" onClick={handleNewChat} style={railBtnStyle}>
+          <Plus size={13} />
+        </button>
         <button title="Continue elsewhere — hand off to / from the web" onClick={() => dispatch(setShowContinue(true))} style={railBtnStyle}>
           <MonitorSmartphone size={13} />
         </button>

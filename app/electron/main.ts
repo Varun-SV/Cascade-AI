@@ -13,7 +13,7 @@ import {
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
-import { registerCloudAuthIpc } from './cloudAuth';
+import { registerCloudAuthIpc, type CloudAuthHandle } from './cloudAuth';
 import { registerBrowserHandlers, readCurrentPage, actOnCurrentPage, setAgentControlEnabled, resumeAgentControl, agentRunEnded, agentActorEnded, setApprovalWaitCeiling, setLifecycleReleaseWired, approvalWaitCeilingFor } from './browser';
 
 const isDev = process.env.ELECTRON_DEV === '1';
@@ -51,6 +51,8 @@ let cascadeConfig: any = null;
 // rebind its workspace live without restarting the socket/port.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let dashboardServer: any = null;
+/** The cloud sign-in, once registered: the backend stamps each run's accounting with its account. */
+let cloudAuth: CloudAuthHandle | null = null;
 
 // Onboarding provider ids → Cascade core ProviderType (+ default base URL).
 // 'auto' has no single provider; keys are configured per concrete provider.
@@ -146,7 +148,20 @@ async function startBackend(): Promise<void> {
       host: '127.0.0.1',
       auth: false,
     };
-    const server = new DashboardServer(cascadeConfig, configManager.getStore(), workspace);
+    // Run accounting no window has handled yet survives a restart here: the
+    // port is new on every start, so it is kept in this app's own data folder.
+    const server = new DashboardServer(cascadeConfig, configManager.getStore(), workspace, {
+      pendingAccountingFile: join(app.getPath('userData'), 'pending-accounting.jsonl'),
+      // This app's windows present it when they connect: only they receive
+      // run accounting, which carries prompts and replies.
+      desktopToken: authToken,
+      // Who a run's cost belongs to, read as it ends: a report replayed later
+      // goes to that account or is not sent at all.
+      // null when signed out; undefined only before the sign-in is registered.
+      cloudAccount: () => (cloudAuth ? cloudAuth.account() : undefined),
+      // Whether syncing was on as the run ended; not known yet counts as off.
+      cloudSyncAllowed: () => (cloudAuth ? cloudAuth.syncAllowed() : false),
+    });
     // The other half of the built-in browser: a run can read the page the user
     // is actually on. Wired only here — the backend runs in this process, so it
     // can reach the live view directly. In the CLI there is no browser and the
@@ -771,7 +786,7 @@ function registerIPC(): void {
   // Optional Cascade Cloud sign-in (loopback OAuth + encrypted token storage) so
   // the user can browse/continue their web chats, plus E2E key sync. Reuses the
   // same core loader; sync applies onto the live config so it takes effect at once.
-  registerCloudAuthIpc(loadCore, {
+  cloudAuth = registerCloudAuthIpc(loadCore, {
     getConfig: () => cascadeConfig,
     persistConfig: () => (configManager ? configManager.save() : Promise.resolve()),
   });

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Copy, Check, ArrowRight, Loader2, RefreshCw, Send, Download, Globe, X,
-  Cloud, LogOut, Github, MessageSquare, ShieldCheck, ChevronRight, ChevronLeft, Trash2,
+  Cloud, LogOut, GitBranch, MessageSquare, ShieldCheck, ChevronRight, ChevronLeft, Trash2,
   UploadCloud, DownloadCloud, KeyRound,
 } from 'lucide-react';
 import { CascadeMark } from './CascadeMark.js';
@@ -222,7 +222,7 @@ function AccountHeader({ account, onChange, onSignedIn }: {
           {busy === 'google' ? <Loader2 size={13} className="spin" /> : <Globe size={13} />} Google
         </button>
         <button style={{ ...oauthBtn, opacity: busy ? 0.6 : 1 }} onClick={() => signIn('github')} disabled={!!busy}>
-          {busy === 'github' ? <Loader2 size={13} className="spin" /> : <Github size={13} />} GitHub
+          {busy === 'github' ? <Loader2 size={13} className="spin" /> : <GitBranch size={13} />} GitHub
         </button>
       </div>
       {busy && <p style={{ margin: '8px 0 0', fontSize: 10.5, color: 'var(--text-dim)' }}>Finish signing in in the browser tab that just opened…</p>}

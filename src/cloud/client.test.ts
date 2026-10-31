@@ -191,6 +191,20 @@ describe('CloudClient', () => {
     expect(loadCloudSession(dir)?.refreshToken).toBe('refresh-2'); // rotated
   });
 
+  it('two CLI clients on one session file whose token expired together share one refresh', async () => {
+    const a = new CloudClient(stub.url, dir);
+    await a.runDeviceLogin(() => {});
+    const s = loadCloudSession(dir)!;
+    fs.writeFileSync(path.join(dir, 'cloud-session.json'), JSON.stringify({ ...s, accessExpiresAt: Date.now() - 1000 }));
+    const b = new CloudClient(stub.url, dir);
+    // Without sharing, the second refresh finds the token rotated under it and
+    // fails as if another account had signed in.
+    const [user, convos] = await Promise.all([a.me(), b.listConversations()]);
+    expect(user.name).toBe('Alice');
+    expect(convos.map((c) => c.id)).toEqual(['c1', 'c2']);
+    expect(loadCloudSession(dir)?.refreshToken).toBe('refresh-2'); // rotated once, not twice
+  });
+
   it('logout revokes and clears the local session', async () => {
     const client = new CloudClient(stub.url, dir);
     await client.runDeviceLogin(() => {});

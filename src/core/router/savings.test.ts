@@ -59,6 +59,17 @@ describe('computeDelegationSavings', () => {
     expect(s).toEqual({ savedUsd: 0, savedPct: 0, counterfactualUsd: 0 });
   });
 
+  it('claims no savings while some calls have no price', () => {
+    // The total leaves those calls out, so "all on T1 minus the total" would
+    // count money that may have been spent as saved.
+    const priced = { totalCostUsd: 0.001, inputTokensByTier: { T3: 100_000 }, outputTokensByTier: { T3: 10_000 } };
+    expect(computeDelegationSavings(priced, t1Model).savedUsd).toBeGreaterThan(0);
+    const s = computeDelegationSavings({ ...priced, untrackedCostCalls: 1 }, t1Model);
+    expect(s.savedUsd).toBe(0);
+    expect(s.savedPct).toBe(0);
+    expect(computeDelegationSavings({ ...priced, untrackedCostCalls: 0 }, t1Model).savedUsd).toBeGreaterThan(0);
+  });
+
   it('returns zeros for an empty session', () => {
     const s = computeDelegationSavings({ totalCostUsd: 0, inputTokensByTier: {}, outputTokensByTier: {} }, t1Model);
     expect(s.savedUsd).toBe(0);
