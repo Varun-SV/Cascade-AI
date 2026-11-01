@@ -327,7 +327,7 @@ depth.
   - Changing the list is a reviewed policy change with a version number.
   - Method names alone don't express side effects. `Runtime.evaluate`
     stays privileged page script by design (§4.3, honest limit).
-  - `poc-egress-and-lease.mjs` checks all of this (66/66):
+  - `poc-egress-and-lease.mjs` checks all of this (73/73):
     - an allowlisted method works on a nested cross-site iframe session
     - `Emulation.setGeolocationOverride` through that nested session is
       refused
@@ -380,7 +380,7 @@ can neither see nor disable that channel:
 
 | Source | Mechanism |
 |---|---|
-| CLI | The policy's own CDP session on the tab: `Fetch.enable` for every URL at the **Request** stage. Out-of-process frames and workers are their own targets, which the tab's interception does not see, so the policy also auto-attaches every child target **paused**, puts the same interception on it, and only then resumes it; a child it cannot intercept stays paused (a dedicated worker, whose requests go through its parent frame, runs). A browser-level session does the same for new top-level targets (service and shared workers) and keeps a browser-wide interception as a backstop. **`Fetch` never pauses a WebSocket handshake**, so Cascade also launches the browser behind a device-side egress proxy (`--proxy-server`, with `--proxy-bypass-list=<-loopback>` so loopback is not exempt). Chromium sends every `ws:`/`wss:` through it as a `CONNECT host:port`, and the proxy applies the same private-network rule before connecting. It is also where the resolved address is checked and pinned |
+| CLI | The policy's own CDP session on the tab: `Fetch.enable` for every URL at the **Request** stage. Out-of-process frames and workers are their own targets, which the tab's interception does not see, so the policy also auto-attaches every child target **paused**, puts the same interception on it, and only then resumes it; a child it cannot intercept stays paused (a dedicated worker, whose requests go through its parent frame, runs). A browser-level session does the same for new top-level targets (service and shared workers) and keeps a browser-wide interception as a backstop. **`Fetch` never pauses a WebSocket handshake**, so Cascade also launches the browser behind a device-side egress proxy (`--proxy-server`, with `--proxy-bypass-list=<-loopback>` so loopback is not exempt). Chromium sends every `ws:`/`wss:` through it as a `CONNECT host:port`, and every plain http request with its absolute URL; Chromium does not resolve those names itself. The proxy resolves the name once, applies the private-network rule to the name **and every address it resolved to**, and dials exactly the address it checked (no second lookup), before any byte goes upstream |
 | Desktop | `session.webRequest.onBeforeRequest` on the built-in browser's partition, in Electron's main process. Its filter includes WebSocket handshakes (resource type `webSocket`), which the desktop's P2 run must show with a server-side check |
 | Extension | `declarativeNetRequest` session rules scoped to the leased tab; `Fetch` through `chrome.debugger` as a fallback. Requests from service and shared workers carry no tab id (`-1`), so tab-scoped rules miss them; the extension's P2 run must show workers the page starts are covered too. WebSocket handshakes need a rule with resource type `websocket`; the `Fetch` fallback does not see them at all, so the extension cannot rely on it for P2 |
 
@@ -390,12 +390,21 @@ can neither see nor disable that channel:
 |---|---|
 | Document (top-level navigation or iframe), any initiator: agent command, click, form, page script or redirect hop | Allowed only over http(s) to a **consented origin**. Any other scheme (`file:`, `chrome:`, `data:`…) and any other origin are failed before sending |
 | Any `file:` request, of any type | Failed |
-| Any request to a **private-network destination** (loopback, RFC 1918, link-local, CGNAT, unspecified, multicast, unique-local IPv6, `localhost`, `*.localhost`, `*.local`, each with or without the root dot as in `localhost.`), including IPv6 forms that reach an IPv4 address (IPv4-mapped, IPv4-compatible, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`), checked as that IPv4 address | Failed unless that exact origin was consented |
+| Any request to a **private-network destination** (loopback, RFC 1918, link-local, CGNAT, unspecified, multicast, unique-local IPv6, `localhost`, `*.localhost`, `*.local`, each with or without the root dot as in `localhost.`), including IPv6 forms that reach an IPv4 address (IPv4-mapped, IPv4-compatible, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`), checked as that IPv4 address | Failed unless that exact origin was consented **and** names a private host itself (e.g. `http://192.168.1.1`, `http://localhost:3000`). A public-looking name that resolves to a private address is failed, consented or not (see Hostnames) |
 | Subresources (script, style, image, font, fetch/XHR, WebSocket) to **public** origins | **Allowed** |
 
-**Hostnames:** the policy resolves the name on the device and checks the
-resulting address. It pins that address for the request (CLI and desktop),
-which defends against DNS rebinding. The extension cannot resolve names
+**Hostnames:** the request policy sees only the name, so a name that
+resolves to a private address (a DNS alias, or a rebinding answer) is not
+caught there. On the CLI path the egress proxy resolves the name once,
+refuses it if the name or any of its addresses is private, and dials exactly
+the address it checked, for http requests and `CONNECT` alike. Consent
+covers the origin the user saw, not whatever a DNS answer points at.
+Desktop must show the same pinning with its own P2 run. **Open (stage 1):**
+an intranet site whose public-looking name resolves to a private address
+(split-horizon DNS) is refused by this rule even when consented. A possible
+fix is for the consent prompt to resolve the name and record "this site is
+on your private network" as part of the consent; that needs a decision
+before stage 1 ships. The extension cannot resolve names
 itself. Chrome's Private Network Access checks are **not** a demonstrated
 request firewall, so the extension makes **no** private-network claim until
 its own P2 run (§9) passes; until then the UI and docs say private-network
@@ -433,7 +442,16 @@ worker) reached it with only `Fetch` in place: Chromium's `Fetch` domain
 never paused the handshake, and `Network.setBlockedURLs` didn't stop it
 either. Behind the egress proxy, the private server saw **0 TCP
 connections** for each, the proxy logged the refused `CONNECT`, and a
-WebSocket to the consented origin still opened. Before child targets were policed,
+WebSocket to the consented origin still opened. DNS aliases: a name with
+no consent that resolves to `127.0.0.1` (`ws:`, `wss:` and a plain http
+`fetch`), a name with one public and one private answer, and a name that
+resolves to `::1` were each refused; the private server saw **0 TCP
+connections** and the proxy never dialed the private address. A name whose
+answer changed from public to private between two connections was allowed
+the first time and refused the second. Across the run the proxy did one
+lookup per connection and dialed only addresses it had checked. With the
+resolved-address check removed, 6 of these 7 checks fail (67/73): the
+private server accepted the aliased WebSocket and the http request. Before child targets were policed,
 the shared worker, the service worker and the frame each reached it. The
 same workers still reach the consented origin. A public script from a non-consented origin loaded, which is
 the stated limit. `Fetch.disable` from the agent was refused.

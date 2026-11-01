@@ -24,6 +24,9 @@
 //     behind a device-side egress proxy (loopback included). Chromium sends
 //     every ws:/wss: through it as a CONNECT, which is refused for a
 //     private-network destination without consent before it connects.
+//     The proxy resolves each name once and checks every address it got,
+//     so a public-looking name that resolves to a private address is
+//     refused too, and it dials only the address it checked.
 //     Out-of-process frames and workers are their own targets, which the
 //     tab's interception does not see. The policy auto-attaches every child
 //     target paused and intercepts it before it runs; a browser-level guard
@@ -195,8 +198,8 @@ function isPrivateHost(host) {
       || (g[0] & 0xffc0) === 0xfe80 // link-local fe80::/10
       || (g[0] & 0xff00) === 0xff00; // multicast
   }
-  // Hostnames: production resolves and checks the address on the device
-  // (and pins it for the request, against DNS rebinding). Not done here.
+  // Hostnames are not resolved here: the egress proxy resolves each name
+  // and checks the addresses it got (startEgressProxy).
   return false;
 }
 
@@ -291,45 +294,69 @@ async function startEgressPolicy(tabWsUrl, consentedOrigins) {
  * page reaches the server with Fetch enabled for every URL, and
  * Network.setBlockedURLs does not stop it either). Through an HTTP proxy,
  * Chromium sends every WebSocket, ws: and wss:, as a CONNECT to host:port,
- * so the proxy decides it by the same private-network rule before any byte
- * reaches the destination. Plain http requests pass through it too, as a
- * second layer behind the request policy. It answers 403 and never connects
- * for a blocked destination.
+ * and every plain http request with its absolute URL. Chromium does not
+ * resolve those names itself; the proxy does. It answers 403 and never
+ * connects for a blocked destination.
  *
- * `hostMap` stands in for DNS, as --host-resolver-rules does for Chromium.
- * Production resolves the name on the device, checks the address it got, and
- * connects to that same address (no second lookup to rebind).
+ * For every HTTP request and every CONNECT, before any upstream byte:
+ *  1. Resolve the requested host ONCE (an IP literal is its own address).
+ *  2. The destination is private if the requested host is private
+ *     (isPrivateHost) or ANY address it resolved to is.
+ *  3. Consent covers a private destination only when the consented origin
+ *     itself names a private host (a router at http://192.168.1.1, a dev
+ *     server at http://localhost:3000). A public-looking name that resolves
+ *     to a private address is refused, consented or not: consent is for the
+ *     origin the user saw, not for whatever a DNS answer points at.
+ *  4. Dial exactly the first checked address. There is no second lookup, so
+ *     a DNS answer that changes (rebinding) cannot swap the address after
+ *     the check.
+ * The request policy (CDP) checks only the hostname it sees. This proxy is
+ * what enforces the private-network rule for names, on every path.
+ *
+ * `network` is what the proxy sits on: `resolve(name)` is DNS and returns
+ * every address of the name; `dial(address, port)` opens a TCP connection to
+ * exactly that address. Production passes dns.lookup({ all: true }) and
+ * net.connect. This run passes a stand-in network (see testNet below).
  */
-function startEgressProxy(hostMap, consentedOrigins) {
+function startEgressProxy(network, consentedOrigins) {
   const decisions = [];
   const defaultPort = (proto) => (proto === 'https:' || proto === 'wss:' ? '443' : '80');
   const consentedHostPorts = new Set([...consentedOrigins].map((o) => { const u = new URL(o); return `${u.hostname}:${u.port || defaultPort(u.protocol)}`; }));
-  const decide = (kind, host, port) => {
-    const bare = host.replace(/^\[|\]$/g, '');
-    const consented = consentedHostPorts.has(`${host}:${port}`);
-    const verdict = !consented && isPrivateHost(bare) ? 'block' : 'allow';
-    decisions.push({ verdict, kind, host, port, reason: verdict === 'block' ? 'private-network destination' : '' });
-    return verdict === 'allow';
+  const decide = async (kind, host, port) => {
+    const bare = host.replace(/^\[|\]$/g, '').toLowerCase().replace(/\.+$/, '');
+    const record = { verdict: 'block', kind, host, port, addresses: [], dialed: null, reason: '' };
+    decisions.push(record);
+    try { record.addresses = net.isIP(bare) ? [bare] : await network.resolve(bare); } catch { record.addresses = []; }
+    if (!record.addresses.length) { record.reason = 'name does not resolve'; return null; }
+    const privateAddrs = record.addresses.filter((a) => isPrivateHost(a));
+    const consentCovers = consentedHostPorts.has(`${host.toLowerCase()}:${port}`) && isPrivateHost(bare);
+    if ((isPrivateHost(bare) || privateAddrs.length) && !consentCovers) {
+      record.reason = isPrivateHost(bare) ? 'private-network destination' : `resolves to a private-network address (${privateAddrs.join(', ')})`;
+      return null;
+    }
+    record.verdict = 'allow';
+    record.dialed = record.addresses[0];
+    return { address: record.dialed, port: Number(port) };
   };
-  const upstream = (host, port) => hostMap.get(host.toLowerCase()) ?? { host: host.replace(/^\[|\]$/g, ''), port: Number(port) };
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(async (req, res) => {
     let u;
     try { u = new URL(req.url); } catch { res.statusCode = 400; return res.end(); }
-    const port = u.port || defaultPort(u.protocol);
-    if (!decide('http', u.hostname, port)) { res.statusCode = 403; return res.end(); }
-    const to = upstream(u.hostname, port);
-    const out = http.request({ host: to.host, port: to.port, method: req.method, path: u.pathname + u.search, headers: req.headers }, (r) => {
+    const to = await decide('http', u.hostname, u.port || defaultPort(u.protocol));
+    if (!to) { res.statusCode = 403; return res.end(); }
+    const out = http.request({ createConnection: () => network.dial(to.address, to.port), method: req.method, path: u.pathname + u.search, headers: req.headers }, (r) => {
       res.writeHead(r.statusCode ?? 502, r.headers);
       r.pipe(res);
     });
     out.on('error', () => { res.statusCode = 502; res.end(); });
     req.pipe(out);
   });
-  server.on('connect', (req, socket, head) => {
+  server.on('connect', async (req, socket, head) => {
+    socket.on('error', () => {});
     const m = /^(\[[^\]]+\]|[^:]+):(\d+)$/.exec(req.url);
-    if (!m || !decide('connect', m[1], m[2])) { socket.end('HTTP/1.1 403 Forbidden\r\n\r\n'); return; }
-    const to = upstream(m[1], m[2]);
-    const out = net.connect(to.port, to.host, () => {
+    const to = m && await decide('connect', m[1], m[2]);
+    if (!to) { socket.end('HTTP/1.1 403 Forbidden\r\n\r\n'); return; }
+    const out = network.dial(to.address, to.port);
+    out.on('connect', () => {
       socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (head?.length) out.write(head);
       out.pipe(socket);
@@ -807,11 +834,47 @@ const allowed = await countingServer('allowed.test', {
 allowed.server.on('upgrade', (req, socket, head) => { allowed.hits.push(`UPGRADE ${req.url}`); wsEcho.handleUpgrade(req, socket, head, (w) => w.send('consented')); });
 
 const rules = `MAP allowed.test 127.0.0.1:${allowed.port}, MAP allowed2.test 127.0.0.1:${allowed.port}, MAP sub.allowed.test 127.0.0.1:${allowed.port}, MAP offlist.test 127.0.0.1:${offlist.port}`;
-const hostMap = new Map([
-  ['allowed.test', { host: '127.0.0.1', port: allowed.port }], ['allowed2.test', { host: '127.0.0.1', port: allowed.port }],
-  ['sub.allowed.test', { host: '127.0.0.1', port: allowed.port }], ['offlist.test', { host: '127.0.0.1', port: offlist.port }],
+// The network the egress proxy sits on. `dnsTable` stands in for DNS. The
+// test sites resolve to public documentation addresses (203.0.113.0/24),
+// which `dial` routes to their local servers, the way the internet routes a
+// public address. The aliases resolve to real private addresses, which `dial`
+// connects to as they are. `lookups` and `dials` record every call, so a check
+// can show which address was checked and which was dialed.
+const PUBLIC_ALLOWED = '203.0.113.10';
+const PUBLIC_OFFLIST = '203.0.113.20';
+let flipAnswer = PUBLIC_OFFLIST; // flip.test: a DNS answer that changes
+const dnsTable = new Map([
+  ['allowed.test', [PUBLIC_ALLOWED]], ['allowed2.test', [PUBLIC_ALLOWED]], ['sub.allowed.test', [PUBLIC_ALLOWED]],
+  ['offlist.test', [PUBLIC_OFFLIST]],
+  ['alias.test', ['127.0.0.1']], // public-looking, not consented, private address
+  ['alias6.test', ['::1']], // the same, to a private IPv6 address
+  ['mixed.test', [PUBLIC_OFFLIST, '127.0.0.1']], // one public and one private answer
 ]);
-const egressProxy = await startEgressProxy(hostMap, new Set(['http://allowed.test', 'http://allowed2.test']));
+const publicRoutes = new Map([[PUBLIC_ALLOWED, allowed.port], [PUBLIC_OFFLIST, offlist.port]]);
+const lookups = [];
+const dials = [];
+const testNet = {
+  resolve: async (name) => {
+    lookups.push(name);
+    if (name === 'flip.test') return [flipAnswer];
+    const a = dnsTable.get(name);
+    if (!a) throw new Error('ENOTFOUND');
+    return a;
+  },
+  dial: (address, port) => {
+    dials.push({ address, port });
+    return publicRoutes.has(address) ? net.connect(publicRoutes.get(address), '127.0.0.1') : net.connect(port, address);
+  },
+};
+// The private server on ::1 too, where this machine has IPv6, so the IPv6
+// alias check can count accepts. Without IPv6 it is checked at `dial`.
+const priv6 = await new Promise((resolve) => {
+  const s = net.createServer((c) => { s.accepts++; c.destroy(); });
+  s.accepts = 0;
+  s.on('error', () => resolve(null));
+  s.listen(0, '::1', () => resolve(s));
+});
+const egressProxy = await startEgressProxy(testNet, new Set(['http://allowed.test', 'http://allowed2.test']));
 const { proc, port: cdpPort, tab, browserWs } = await launchChromium(rules, egressProxy.port);
 const ALLOWED = 'http://allowed.test';
 const policy = await startEgressPolicy(tab.webSocketDebuggerUrl, new Set([ALLOWED, 'http://allowed2.test']));
@@ -1001,6 +1064,71 @@ try {
       await sleep(200);
       check('P2: a WebSocket a worker opens to a private-network address is refused before it connects',
         privConnections === before && !viaWorker.startsWith('open'), `private server saw ${privConnections - before}; worker: ${viaWorker}`);
+    }
+    {
+      // DNS aliases: a public-looking name that resolves to a private address.
+      // The request policy sees only the name, so the proxy must resolve it,
+      // check the address and dial exactly that address.
+      const dialsTo = (addr) => dials.filter((d) => d.address === addr).length;
+      const proxyBlocksWhy = (host) => egressProxy.decisions.filter((d) => d.verdict === 'block' && d.host === host && /resolves to a private/.test(d.reason)).length;
+      for (const [label, url, host] of [
+        ['ws: to a name that resolves to 127.0.0.1', `ws://alias.test:${priv.port}/admin`, 'alias.test'],
+        ['wss: to a name that resolves to 127.0.0.1', `wss://alias.test:${priv.port}/admin`, 'alias.test'],
+        ['ws: to a name with one public and one private answer', `ws://mixed.test:${priv.port}/admin`, 'mixed.test'],
+      ]) {
+        const before = privConnections;
+        const dialsBefore = dialsTo('127.0.0.1');
+        const blocksBefore = proxyBlocksWhy(host);
+        const result = await openWs(url);
+        await sleep(200);
+        check(`P2: a WebSocket (${label}) is refused before it connects`,
+          privConnections === before && dialsTo('127.0.0.1') === dialsBefore && proxyBlocksWhy(host) > blocksBefore && !result.startsWith('open'),
+          `private server saw ${privConnections - before} connection(s); proxy dialed 127.0.0.1 ${dialsTo('127.0.0.1') - dialsBefore} time(s); blocks ${proxyBlocksWhy(host) - blocksBefore}; page: ${result}`);
+      }
+      {
+        const before = privConnections;
+        const blocksBefore = proxyBlocksWhy('alias.test');
+        const result = await page.evaluate((u) => fetch(u).then(() => 'reached', (e) => `failed: ${e.message}`), `http://alias.test:${priv.port}/admin`);
+        await sleep(200);
+        check('P2: an http request to a name that resolves to 127.0.0.1 is refused before it connects',
+          privConnections === before && proxyBlocksWhy('alias.test') > blocksBefore,
+          `private server saw ${privConnections - before}; blocks ${proxyBlocksWhy('alias.test') - blocksBefore}; page: ${result}`);
+      }
+      {
+        const accepts = () => priv6?.accepts ?? 0;
+        const before = accepts();
+        const dialsBefore = dialsTo('::1');
+        const blocksBefore = proxyBlocksWhy('alias6.test');
+        const result = await openWs(`ws://alias6.test:${priv6?.address().port ?? priv.port}/admin`);
+        await sleep(200);
+        check(`P2: a WebSocket to a name that resolves to ::1 is refused before it connects${priv6 ? '' : ' (no IPv6 here: checked at dial)'}`,
+          accepts() === before && dialsTo('::1') === dialsBefore && proxyBlocksWhy('alias6.test') > blocksBefore && !result.startsWith('open'),
+          `::1 server ${priv6 ? `saw ${accepts() - before}` : 'not available'}; proxy dialed ::1 ${dialsTo('::1') - dialsBefore} time(s); blocks ${proxyBlocksWhy('alias6.test') - blocksBefore}; page: ${result}`);
+      }
+      {
+        // A changing answer: each connection is resolved and checked once,
+        // and the address dialed is the one checked.
+        const before = privConnections;
+        flipAnswer = PUBLIC_OFFLIST;
+        const first = await openWs('ws://flip.test/socket');
+        flipAnswer = '127.0.0.1';
+        const second = await openWs(`ws://flip.test:${priv.port}/admin`);
+        await sleep(200);
+        const flips = egressProxy.decisions.filter((d) => d.host === 'flip.test');
+        check('P2: a name whose answer changes to a private address is checked again and refused',
+          flips.length === 2 && flips[0].verdict === 'allow' && flips[0].dialed === PUBLIC_OFFLIST && flips[1].verdict === 'block' && privConnections === before && !second.startsWith('open'),
+          `decisions: ${flips.map((d) => `${d.verdict} ${d.addresses.join('/')}`).join(' | ')}; private server saw ${privConnections - before}; first: ${first}; second: ${second}`);
+      }
+      {
+        // Pinning: one lookup per decision on a name, and every allowed
+        // connection dialed exactly the address that was checked.
+        const named = egressProxy.decisions.filter((d) => !net.isIP(d.host.replace(/^\[|\]$/g, '')));
+        const allowedDials = egressProxy.decisions.filter((d) => d.verdict === 'allow');
+        const unchecked = allowedDials.filter((d) => !d.addresses.includes(d.dialed));
+        check('P2: the proxy dials only addresses it checked, with one lookup per connection',
+          lookups.length === named.length && unchecked.length === 0 && dials.length === allowedDials.length && dials.every((x, i) => x.address === allowedDials[i].dialed),
+          `lookups ${lookups.length} for ${named.length} named decisions; dials ${dials.length} for ${allowedDials.length} allowed; unchecked ${unchecked.length}`);
+      }
     }
     const consented = await openWs('ws://allowed.test/socket');
     check('a WebSocket to the consented origin still opens', consented === 'open: consented', consented);
@@ -1314,6 +1442,7 @@ try {
   relay.server.close();
   for (const s of [allowed, offlist, priv]) s.server.close();
   egressProxy.server.close();
+  priv6?.close();
   proc.kill();
 }
 
