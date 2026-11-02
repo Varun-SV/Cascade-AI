@@ -401,10 +401,17 @@ the address it checked, for http requests and `CONNECT` alike. Consent
 covers the origin the user saw, not whatever a DNS answer points at.
 Desktop must show the same pinning with its own P2 run. **Open (stage 1):**
 an intranet site whose public-looking name resolves to a private address
-(split-horizon DNS) is refused by this rule even when consented. A possible
-fix is for the consent prompt to resolve the name and record "this site is
-on your private network" as part of the consent; that needs a decision
-before stage 1 ships. The extension cannot resolve names
+(split-horizon DNS) is refused by this rule even when consented. ChatGPT
+accepted this fail-closed rule for stage 0 (1 Nov) and asked that intranet
+support be a separate, explicit policy decision, not implied by ordinary
+site consent. Its recommendation: an opt-in consent that names the resolved
+private destination or range and the purpose, with a bounded lifetime,
+re-resolution on every connection and the same address pinning, refusing
+when DNS moves outside the approved scope. Acceptance tests would cover
+split-horizon names, multiple A/AAAA answers, rebinding, and no TCP accept
+at the private server before explicit approval. Any DNS cache must keep the
+same invariant. Not decided yet: Varun decides whether stage 1 includes
+intranet support at all. The extension cannot resolve names
 itself. Chrome's Private Network Access checks are **not** a demonstrated
 request firewall, so the extension makes **no** private-network claim until
 its own P2 run (§9) passes; until then the UI and docs say private-network
