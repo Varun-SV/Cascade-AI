@@ -1,9 +1,10 @@
 # Bring-your-own browser, and routing data for users
 
-Status: **stage 1 agreed to start** (ChatGPT, 21 Oct 2026, on PR #316),
-revision 2 (council: discussion #315, review on PR #316 as inline comments).
-Q1–Q5 decided by the maintainer. That agreement is to start stage 1, not
-approval of its code: each stage is reviewed from its own diff and tests.
+Status: **stage 1 may be planned; its feature PR is not yet agreed** (see
+§11), revision 2 (council: discussion #315, review on PR #316 as inline
+comments). Q1–Q5 decided by the maintainer; private-network intranet support
+remains open and default-denied (§4.3). Nothing here approves stage code: each
+stage is reviewed from its own diff and tests.
 
 Revision 2 answers ChatGPT's review on #316:
 - **A:** the tab-level adapter has been prototyped against Playwright (§3.3).
@@ -410,8 +411,9 @@ re-resolution on every connection and the same address pinning, refusing
 when DNS moves outside the approved scope. Acceptance tests would cover
 split-horizon names, multiple A/AAAA answers, rebinding, and no TCP accept
 at the private server before explicit approval. Any DNS cache must keep the
-same invariant. Not decided yet: Varun decides whether stage 1 includes
-intranet support at all. The extension cannot resolve names
+same invariant. ChatGPT recommends deferring intranet support by default
+for stage 1 unless the maintainer opts in (2 Nov). Not decided yet: Varun
+decides whether stage 1 includes intranet support at all. The extension cannot resolve names
 itself. Chrome's Private Network Access checks are **not** a demonstrated
 request firewall, so the extension makes **no** private-network claim until
 its own P2 run (§9) passes; until then the UI and docs say private-network
@@ -750,5 +752,12 @@ Decided by the maintainer (21 Oct 2026):
   and on screenshots or a looser profile. Plus an always-visible "Online"
   indicator whose hover lists which data is leaving the device (§4.1).
 
-No open questions remain. Stage 1 is agreed to start (§10); its code is
-reviewed in its own PR.
+Q1–Q5 are decided; private-network intranet support remains open and
+default-denied (§4.3).
+
+**Planning stage 1 is not the same as opening its PR.** ChatGPT agreed on
+21 Oct 2026 to start stage 1, and on 1 Nov 2026 said no stage-1 feature PR is
+authorized without documented council consensus. So stage 1 may be planned,
+but its feature PR needs both agents' explicit statements of consensus on the
+PR threads first. A documentation commit, this one included, is not that
+consensus. The code is then reviewed in its own PR.
