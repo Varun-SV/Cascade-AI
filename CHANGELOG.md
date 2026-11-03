@@ -118,6 +118,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose `node-gyp` recognises Visual Studio 2026 as well as 2019 and 2022.
 
 ### Fixed
+- **A brief cloud outage no longer signs you out or loses a run's report.**
+  Any failed token refresh, even a 503 or 429, cleared the saved sign-in. The
+  desktop then took that for an account change and dropped the pending run
+  report for good. Now only a rejected refresh (401) ends the sign-in; the
+  report stays queued and is sent once the cloud answers.
 - **A desktop run's cost is no longer lost when the cloud is unreachable.**
   The app told the backend a run's report was handled even when both tries
   to copy the turn and both tries to record its cost had failed (offline, or

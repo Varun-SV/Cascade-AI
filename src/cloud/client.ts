@@ -311,10 +311,13 @@ export class CloudClient {
     // dropped, the session held now is left alone, and nothing is sent or
     // retried: the caller's request was meant for the session it started with.
     if (!this.stillHolds(s)) throw new CloudAccountChangedError();
-    if (!res.ok) {
+    if (res.status === 401) {
       this.store.clear(); // refresh rejected → sign-in is dead
       throw new Error('Your session expired. Run `cascade login` again.');
     }
+    // Anything else (a 503, a 429) says nothing about the sign-in: it stays, so
+    // the caller can retry, and a run report is not taken for an account change.
+    if (!res.ok) throw new Error(`Could not refresh your session (HTTP ${res.status}). Try again shortly.`);
     const tokens = (await res.json()) as TokenResponse;
     const next: CloudSession = {
       ...s,

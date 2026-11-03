@@ -383,6 +383,62 @@ describe('a client on the store pinned to one account', () => {
       expect(srv.bodies.filter((x) => x.includes('run-0001'))).toHaveLength(1);
       expect(confirmed).toEqual(['run-0001']);
     });
+
+    describe('a refresh that fails', () => {
+      // The run mirror's bridge, answering as the desktop's IPC handler does:
+      // a sign-in gone from the store reads as an account change.
+      const bridge = (store: ReturnType<typeof shared>) => ({
+        status: async () => ({ signedIn: !!store.load(), user: store.load()?.user, serverUrl: 'https://cloud' }),
+        recordRunSpend: async (run: Parameters<CloudClient['recordRunSpend']>[0], account?: unknown) => {
+          const expected = account as { userId: string; serverUrl: string };
+          try { return { ok: true, ...(await new CloudClient('https://cloud', undefined, pinnedStore(store, 'u1')).recordRunSpend(run)) }; }
+          catch (err) {
+            if (isAccountChangedError(err) || accountMismatch(expected, store.load()?.user?.id, 'https://cloud')) return { ok: false, accountChanged: true };
+            return { ok: false, error: (err as Error).message };
+          }
+        },
+      });
+      const run = {
+        id: 'run-0002', sessionId: 's1', outcome: 'stopped', prompt: 'q', output: '', copyTurn: true, sync: true,
+        cloud: { costUsd: 0.01, why: 'w' }, account: { userId: 'u1', serverUrl: 'https://cloud' },
+      } as never;
+      // Answers every refresh until the work settles (the mirror tries twice).
+      const answered = async <T,>(srv: { releaseAll: () => Promise<void> }, work: Promise<T>): Promise<T> => {
+        let settled = false;
+        const done = () => { settled = true; };
+        work.then(done, done);
+        while (!settled) await srv.releaseAll();
+        return work;
+      };
+
+      it.each([503, 429, 500])('HTTP %i keeps the sign-in, and the run report stays unconfirmed until it is delivered', async (status) => {
+        const store = shared({ ...session('u1'), accessExpiresAt: Date.now() - 1 });
+        const held = store.load();
+        const opts = { refreshStatus: status };
+        const srv = rotatingServer(opts);
+        const mirror = new CloudMirror(() => bridge(store) as never, () => false, { get: () => undefined, set: () => {}, delete: () => {} });
+        const confirmed: string[] = [];
+
+        await expect(answered(srv, mirrorAndConfirm(mirror, run, (id) => confirmed.push(id)))).resolves.toBe('retry');
+        expect(store.load()).toEqual(held);
+        expect(srv.bodies).toEqual([]);
+        expect(confirmed).toEqual([]);
+
+        // The server recovers: the same report goes out, once, and is confirmed.
+        opts.refreshStatus = 200;
+        await expect(answered(srv, mirrorAndConfirm(mirror, run, (id) => confirmed.push(id)))).resolves.toBe('delivered');
+        expect(srv.bodies.filter((x) => x.includes('run-0002'))).toHaveLength(1);
+        expect(confirmed).toEqual(['run-0002']);
+      });
+
+      it('HTTP 401 still ends the sign-in', async () => {
+        const store = shared({ ...session('u1'), accessExpiresAt: Date.now() - 1 });
+        const srv = rotatingServer({ refreshStatus: 401 });
+        const failed = new CloudClient('https://cloud', undefined, pinnedStore(store, 'u1')).listConversations();
+        await expect(answered(srv, failed)).rejects.toThrow(/session expired/i);
+        expect(store.load()).toBeNull();
+      });
+    });
   });
 
   describe('the sync opt-out, checked as each request leaves', () => {
