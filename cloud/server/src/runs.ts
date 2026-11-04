@@ -17,6 +17,7 @@ import {
 import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ApprovalRequest, ProviderConfig, BrowserAllowance, BrowserInput } from '#cascade-ai';
 import { attachRemoteBrowser, providerRationsSessions } from './remote-browser.js';
 import type { ClarificationAnswer } from '#cascade-ai';
+type RouterStats = ReturnType<ReturnType<Cascade['getRouter']>['getStats']>;
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { z, type ZodError } from 'zod';
@@ -27,6 +28,8 @@ import { beginRun, checkDailyLimit, checkPendingMediaCap, claimBrowserSession, P
 import { getSkill } from './skills.js';
 import { tenantScratchDir, tenantStateDir } from './paths.js';
 import { pendingMediaDir, sweepPendingMedia } from './pending-media.js';
+import { spendEntryFromRun, type SpendEntry } from './spend.js';
+import { randomUUID } from 'node:crypto';
 
 export { tenantScratchDir };
 
@@ -789,6 +792,12 @@ export interface WhyReport {
   durationMs: number;
   costByTier: Record<string, number>;
   tokensByTier: Record<string, number>;
+  /** tier → `provider:id` → cost and tokens: a tier's spend split by the
+   *  models that served it, which the spend report keeps per model. */
+  costByModel?: Record<string, Record<string, number>>;
+  tokensByModel?: Record<string, Record<string, number>>;
+  /** tier → `provider:id` → calls with no known price (see the SDK's run report). */
+  unpricedByModel?: Record<string, Record<string, number>>;
   /** tier → model that served it (from tier:status). */
   models: Record<string, string>;
   /** The agents that worked the run, each as it last reported — the tree the
@@ -863,6 +872,70 @@ export function primaryTierOf(
   // the whole run, it is the answering one all the same.
   const served = Object.keys(servedBy);
   return rank(tokensByTier) ?? rank(costByTier) ?? (served.length === 1 ? served[0]! : null);
+}
+
+/**
+ * Add a run to the spend ledger. The reply is already saved and the user is
+ * waiting on it, so a ledger that cannot be written is logged, not thrown.
+ */
+function recordRunSpend(store: CloudStore, entry: SpendEntry): void {
+  try {
+    store.recordSpend(entry);
+  } catch (err) {
+    console.error(`[spend] could not record run ${entry.id}:`, err);
+  }
+}
+
+/** As `recordRunSpend`, replacing the run's row if it was written down already. */
+function replaceRunSpend(store: CloudStore, entry: SpendEntry): void {
+  try {
+    store.replaceSpend(entry);
+  } catch (err) {
+    console.error(`[spend] could not record run ${entry.id}:`, err);
+  }
+}
+
+/**
+ * Add a run to the spend ledger once every call it made has settled (up to
+ * 30 s), from the router's stats as they are then: a parallel call that lands
+ * after `cascade.run()` returned is still this run's spend. The reply itself
+ * is not held back for it. Each hosted run has its own router.
+ *
+ * `after` is follow-up work the run started on the same router once it
+ * answered (the opt-in memory distillation): it is waited for first, so its
+ * calls are counted even when they start after the run's own calls settled.
+ */
+/** How long a run's spend record waits for its follow-up work (`after`). */
+export const FOLLOW_UP_WAIT_MS = 60_000;
+
+export function recordSettledRunSpend(
+  store: CloudStore,
+  router: { whenRunSettled(): Promise<boolean>; getStats(): RouterStats; getDelegationSavings(): { savedUsd: number } },
+  build: (stats: RouterStats, savedUsd: number) => SpendEntry | null,
+  after?: Promise<unknown>,
+): Promise<void> {
+  // Written down now, from what the run has spent so far: the wait below can
+  // be cut short by a restart, and the reply is already saved. The row is
+  // completed in place once the run's calls have settled.
+  let provisional: SpendEntry | null = null;
+  try {
+    provisional = build(router.getStats(), router.getDelegationSavings().savedUsd);
+  } catch { /* the final record below still runs */ }
+  if (provisional) recordRunSpend(store, provisional);
+  return (async () => {
+    if (after) {
+      // Bounded, so a hung follow-up call cannot keep the run out of the ledger.
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        after.catch(() => { /* its calls are counted either way */ }),
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, FOLLOW_UP_WAIT_MS); timer.unref?.(); }),
+      ]);
+      clearTimeout(timer);
+    }
+    try { await router.whenRunSettled(); } catch { /* record what there is */ }
+    const entry = build(router.getStats(), router.getDelegationSavings().savedUsd);
+    if (entry) replaceRunSpend(store, entry);
+  })();
 }
 
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
@@ -2286,10 +2359,14 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
       durationMs: result.durationMs,
       costByTier,
       tokensByTier,
+      costByModel: stats.costByTierModel,
+      tokensByModel: stats.tokensByTierModel,
+      unpricedByModel: stats.untrackedByTierModel,
       models: tierModels,
       ...(trace.size > 0 ? { trace: [...trace.values()] } : {}),
     };
 
+    const cancelled = signal?.aborted ?? false;
     const assistantMessage = store.addMessage({
       conversationId: conversation.id,
       role: 'assistant',
@@ -2302,18 +2379,18 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
       tier,
       why: JSON.stringify(why),
       costUsd: result.usage.estimatedCostUsd,
+      // A stopped run's partial reply keeps saying so after a reload.
+      cancelled,
     });
     store.incrementUsage(userId, todayKey());
-    const cancelled = signal?.aborted ?? false;
-    socket.emit('run:why', { conversationId: conversation.id, messageId: assistantMessage.id, ...why });
-    socket.emit('session:complete', { conversationId: conversation.id, result, cancelled });
 
     // Opt-in session → memory: distill the conversation into durable memories the
     // user's future runs will see (they're injected via buildRunPrompt). Best-
     // effort and non-blocking; skips trivial exchanges. The user manages/prunes
-    // these from the Memory panel exactly like hand-added ones.
-    if (payload.rememberSession && !cancelled && sessionWorthRemembering(conversationHistory, payload.prompt, result.output)) {
-      void (async () => {
+    // these from the Memory panel exactly like hand-added ones. Started before
+    // the spend is recorded, which waits for it: its T3 call is billed too.
+    const remembered = payload.rememberSession && !cancelled && sessionWorthRemembering(conversationHistory, payload.prompt, result.output)
+      ? (async () => {
         try {
           const transcript = buildSessionTranscript(conversationHistory, payload.prompt, result.output);
           const facts = await distillSessionFacts(transcript, async (p) => {
@@ -2326,8 +2403,24 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
             if (!existing.has(content)) { store.addMemory(userId, content, 'session'); existing.add(content); }
           }
         } catch { /* best-effort — never affects the run */ }
-      })();
-    }
+      })()
+      : undefined;
+    // The ledger takes the run's final figures, late calls included; the
+    // reply keeps the /why it was answered with.
+    void recordSettledRunSpend(store, cascade.getRouter(), (settled, savedUsd) => spendEntryFromRun({
+      id: assistantMessage.id, userId, conversationId: conversation.id, at: assistantMessage.createdAt,
+      costUsd: Math.max(result.usage.estimatedCostUsd, settled.totalCostUsd),
+      why: {
+        ...why, savedUsd,
+        totalCostUsd: settled.totalCostUsd, totalTokens: settled.totalTokens,
+        costByModel: settled.costByTierModel, tokensByModel: settled.tokensByTierModel,
+        unpricedByModel: settled.untrackedByTierModel,
+      },
+      outcome: cancelled ? 'stopped' : 'answered',
+    }), remembered);
+    socket.emit('run:why', { conversationId: conversation.id, messageId: assistantMessage.id, ...why });
+    socket.emit('session:complete', { conversationId: conversation.id, result, cancelled });
+
     return {
       conversationId: conversation.id,
       output: result.output,
@@ -2344,6 +2437,24 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
     // Log the full error (with stack) server-side — the client only gets the
     // message, but the stack is what pins a crash like the FK violation.
     console.error(`[run ${conversation.id}] failed:`, err);
+    // A run that failed part-way leaves no reply, but its calls were billed —
+    // and what its cheaper tiers saved is as real as on an answered run.
+    // A call with no price and no usage reported still happened, and may
+    // have cost money, so it counts as spending too.
+    const failedAt = Date.now();
+    // One id for the run: its row is written now and completed in place.
+    const failedId = randomUUID();
+    void recordSettledRunSpend(store, cascade.getRouter(), (spent, savedUsd) =>
+      spent.totalCostUsd > 0 || spent.totalTokens > 0 || spent.untrackedCostCalls > 0
+        ? spendEntryFromRun({
+          id: failedId, userId, conversationId: conversation.id, at: failedAt, costUsd: spent.totalCostUsd,
+          why: {
+            costByModel: spent.costByTierModel, tokensByModel: spent.tokensByTierModel,
+            unpricedByModel: spent.untrackedByTierModel, totalTokens: spent.totalTokens, savedUsd,
+          },
+          outcome: 'failed',
+        })
+        : null);
     socket.emit('session:error', { conversationId: conversation.id, error: message });
     throw err;
   } finally {

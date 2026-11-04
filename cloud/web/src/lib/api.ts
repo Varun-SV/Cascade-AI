@@ -495,6 +495,57 @@ export function fetchUsage(): Promise<UsageInfo> {
   return json(fetch('/api/usage', { credentials: 'include' }));
 }
 
+// ── Spend & savings report ──
+
+export type SpendPeriod = 'today' | '7d' | '30d' | 'all';
+
+export interface SpendReport {
+  period: SpendPeriod;
+  /** How `series` is sliced: hours of today, days, or months. */
+  bucket: 'hour' | 'day' | 'month';
+  totals: {
+    spentUsd: number;
+    savedUsd: number;
+    runs: number;
+    tokens: number;
+    /** Runs that ended in an error, and what they had cost by then. */
+    failedRuns: number;
+    failedUsd: number;
+  };
+  /** One slot per hour, day or month, in order; `key` is local time
+   *  ("2026-09-29 13", "2026-09-29" or "2026-09"). */
+  series: Array<{ key: string; spentUsd: number; savedUsd: number; runs: number }>;
+  tiers: Array<{
+    tier: string;
+    spentUsd: number;
+    tokens: number;
+    runs: number;
+    /** `provider:id`, or '' when a run did not say which model served the tier. */
+    models: Array<{
+      model: string; spentUsd: number; tokens: number; runs: number;
+      /** Runs where some of its calls had no price: the cost shown is an undercount. */
+      unpricedRuns: number;
+      /** Runs at $0 with tokens, from before reports said whether that was priced. */
+      priceUnknownRuns: number;
+    }>;
+  }>;
+  /** Costliest chats first. A null id is every deleted chat, counted together,
+   *  or (with `noChat`) the runs that never had a chat. */
+  chats: Array<{ conversationId: string | null; noChat?: boolean; title: string | null; spentUsd: number; savedUsd: number; runs: number }>;
+}
+
+/**
+ * Days in the report end at this browser's local midnight. The time zone is
+ * sent by name, so a day on the other side of a daylight-saving change ends
+ * at its own midnight; today's offset is the fallback where it has no name.
+ */
+export function fetchSpendReport(period: SpendPeriod): Promise<SpendReport> {
+  let tz = '';
+  try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone ?? ''; } catch { /* no Intl zone: use the offset */ }
+  if (!tz) tz = String(-new Date().getTimezoneOffset());
+  return json(fetch(`/api/usage/report?period=${period}&tz=${encodeURIComponent(tz)}`, { credentials: 'include' }));
+}
+
 // ── Conversation handoff (open-and-continue, web ↔ desktop) ──
 
 export interface HandoffMessage {

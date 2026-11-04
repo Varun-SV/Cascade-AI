@@ -49,6 +49,8 @@ export function toChatMessage(m: {
   id: string; role: string; content: string; parentId?: string | null; siblingIds?: string[];
   costUsd?: number | null; tier?: string | null; model?: string | null; why?: string | null;
   attachments?: Array<{ id: string; mime: string }>;
+  /** A reply from a run the user stopped. */
+  cancelled?: boolean;
 }): ChatMessage {
   let why: WhyReport | null = null;
   if (m.why) { try { why = JSON.parse(m.why) as WhyReport; } catch { why = null; } }
@@ -63,6 +65,7 @@ export function toChatMessage(m: {
     model: m.model,
     why,
     attachments: m.attachments?.map((a) => ({ id: a.id, mime: a.mime })),
+    ...(m.cancelled ? { cancelled: true } : {}),
   };
 }
 

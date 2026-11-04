@@ -9,6 +9,7 @@ import ConnectorsModal from './components/ConnectorsModal.js';
 import FilesPanel from './components/FilesPanel.js';
 import SkillsModal from './components/SkillsModal.js';
 import SettingsModal from './components/SettingsModal.js';
+import SpendReport from './components/SpendReport.js';
 import ConversationSidebar from './chat/ConversationSidebar.js';
 import ChatPanel from './chat/ChatPanel.js';
 import ChatTopBar from './chat/ChatTopBar.js';
@@ -63,6 +64,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showContinue, setShowContinue] = useState(false);
   const [showFiles, setShowFiles] = useState(false);
+  const [showSpend, setShowSpend] = useState(false);
   const [reduceMotion, setReduceMotion] = useState(() => reduceMotionEnabled());
   const [theme, setTheme] = useState<ThemeMode>(() => themeMode());
   const [densityMode, setDensityMode] = useState<Density>(() => density());
@@ -296,6 +298,7 @@ export default function App() {
       onOpenKeys={() => setShowVault(true)}
       onOpenContinue={() => setShowContinue(true)}
       onOpenUpgrade={() => setShowUpgrade(true)}
+      onOpenSpend={() => { setShowSpend(true); if (narrow()) setSidebarOpen(false); }}
       onLogout={() => void handleLogout()}
       onDeleted={removedConversation}
       onImported={refreshConversations}
@@ -371,6 +374,7 @@ export default function App() {
           spentUsd={spentUsd}
           savedReplies={savedReplies}
           onShowWhy={() => { if (lastWithWhy) setWhyRequest({ messageId: lastWithWhy.id, seq: Date.now() }); }}
+          onOpenSpend={() => setShowSpend(true)}
           onRename={renameChat}
           onContinueElsewhere={() => setShowContinue(true)}
           onOpenFiles={() => setShowFiles(true)}
@@ -428,6 +432,7 @@ export default function App() {
             onManageSkills={() => setShowSkills(true)}
             onManageConnectors={() => setShowConnectors(true)}
             whyRequest={whyRequest}
+            onOpenSpend={() => setShowSpend(true)}
             approval={chat.approval}
             compactionNotice={chat.compactionNotice}
             providerNotice={chat.providerNotice}
@@ -500,6 +505,12 @@ export default function App() {
         )}
         {showMemory && <MemoryModal onClose={() => setShowMemory(false)} />}
         {showConnectors && <ConnectorsModal onClose={() => setShowConnectors(false)} />}
+        {showSpend && (
+          <SpendReport
+            onClose={() => setShowSpend(false)}
+            onOpenChat={(id) => { setShowSpend(false); void selectConversation(id); }}
+          />
+        )}
         {showFiles && <FilesPanel onClose={() => setShowFiles(false)} onUpgrade={() => { setShowFiles(false); setShowUpgrade(true); }} />}
         {showSkills && (
           <SkillsModal

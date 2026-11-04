@@ -15,6 +15,7 @@ import {
   type ThemeMode, type Density, type TierParams, type TierParam, type ExtendedContextPref, type RoutingBias,
 } from '../lib/prefs.js';
 import type { CloudUser } from '../lib/types.js';
+import Segmented from './Segmented.js';
 
 const TIERS: Array<{ key: 't1' | 't2' | 't3'; label: string; role: string; dot: string }> = [
   { key: 't1', label: 'T1', role: 'Planner', dot: 'bg-t1' },
@@ -51,30 +52,6 @@ function TierParamRow({ tier, value, onChange }: {
         placeholder="temp 0–2"
         className="w-24 rounded-md border border-elev/10 bg-elev/[0.04] px-2 py-1 text-xs text-ink-100 outline-none placeholder:text-ink-500 focus:border-accent-500/40"
       />
-    </div>
-  );
-}
-
-/** The prototype's segmented control: a sunken well, the chosen option raised. */
-function Segmented<T extends string>({ value, onChange, options, label }: {
-  value: T; onChange: (v: T) => void; label: string;
-  options: Array<{ value: T; label: string }>;
-}) {
-  return (
-    <div role="group" aria-label={label} className="inline-flex shrink-0 gap-0.5 rounded-[10px] bg-sunk p-[3px]">
-      {options.map((o) => (
-        <button
-          key={o.value}
-          type="button"
-          aria-pressed={value === o.value}
-          onClick={() => onChange(o.value)}
-          className={`rounded-[7px] px-[11px] py-1 text-[13px] font-medium ${
-            value === o.value ? 'bg-card text-ink-50 shadow-[0_1px_2px_rgba(0,0,0,0.1)]' : 'text-ink-300 hover:text-ink-50'
-          }`}
-        >
-          {o.label}
-        </button>
-      ))}
     </div>
   );
 }

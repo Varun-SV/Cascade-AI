@@ -188,8 +188,6 @@ export function ChatPanel({ socket, compact }: Props) {
   // Cloud session mirror: the last prompt (to pair with the completed output on
   // session:complete) and a per-local-session → cloud-conversation map, so each
   // finished turn is appended to a SHARED cloud conversation (web + CLI too).
-  const lastPromptRef = useRef<string>('');
-  const cloudConvRef = useRef<Map<string, string>>(new Map());
 
   // Compact mode (Code view's docked panel): a small picker replaces the full
   // session sidebar — select a past session to load and continue it in place.
@@ -216,7 +214,12 @@ export function ChatPanel({ socket, compact }: Props) {
     // Streaming tokens are appended by the global handler in App.tsx (so they
     // also update when you're on another view). Here we only react to
     // completion to stop the cursor and offer rating.
-    const onComplete = (data?: { sessionId?: string; result?: { output?: string; costByFeature?: Record<string, number> } }) => {
+    const onComplete = (data?: {
+      sessionId?: string;
+      result?: { output?: string; costByFeature?: Record<string, number> };
+      /** What the run cost, as the cloud takes it with the copied chat. */
+      cloud?: { costUsd: number; why: string };
+    }) => {
       // Ignore completions for a session other than the one this panel is
       // currently showing — otherwise a background session finishing marked
       // THIS panel's unrelated transcript done and swapped in its cost data.
@@ -226,29 +229,9 @@ export function ChatPanel({ socket, compact }: Props) {
       dispatch(finalizeLastMessage({ finalOutput: data?.result?.output }));
       setCostByFeature(data?.result?.costByFeature ?? null);
       setSessionDone(true);
-      // Mirror the finished turn into the shared cloud session (best-effort). The
-      // run executed locally with the user's own keys + tools; we only store the
-      // resulting messages so the chat also appears on web + CLI. Never blocks or
-      // breaks the run; a no-op when signed out or opted out.
-      const sid = data?.sessionId ?? currentSessionIdRef.current;
-      const output = data?.result?.output;
-      const prompt = lastPromptRef.current;
-      if (sid && output && prompt && localStorage.getItem('cascade.noCloudSync') !== '1') {
-        void (async () => {
-          const api = window.cascade?.cloud;
-          if (!api?.appendTurn || !api.createConversation) return;
-          try {
-            let convId = cloudConvRef.current.get(sid);
-            if (!convId) {
-              const created = await api.createConversation(prompt.slice(0, 72));
-              if (!created.ok || !created.conversation) return; // signed out / error → skip
-              convId = created.conversation.id;
-              cloudConvRef.current.set(sid, convId);
-            }
-            await api.appendTurn(convId, { userContent: prompt, assistant: { content: output } });
-          } catch { /* best-effort mirror — offline, revoked token, etc. */ }
-        })();
-      }
+      // Copying the run to the cloud account is App's job (lib/cloud-mirror),
+      // so it also happens for a run that finishes while another session or
+      // view is open.
     };
     socket.on('session:complete', onComplete);
     return () => { socket.off('session:complete', onComplete); };
@@ -261,7 +244,6 @@ export function ChatPanel({ socket, compact }: Props) {
     // the list immediately; subsequent sends continue the same session.
     let sid = sessionId;
     if (!sid) { sid = crypto.randomUUID(); dispatch(setSessionId(sid)); }
-    lastPromptRef.current = input.trim(); // pair with the completed output for the cloud mirror
     const userMsg = { id: crypto.randomUUID(), role: 'user' as const, content: input.trim(), timestamp: Date.now() };
     const assistantMsg = { id: crypto.randomUUID(), role: 'assistant' as const, content: '', timestamp: Date.now(), streaming: true };
     dispatch(appendMessage(userMsg));

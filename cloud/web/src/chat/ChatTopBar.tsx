@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { PanelLeft, ChevronDown, TrendingDown, Pencil, Folder, MonitorSmartphone, Trash2 } from 'lucide-react';
+import { PanelLeft, ChevronDown, TrendingDown, Pencil, Folder, MonitorSmartphone, Trash2, ChartColumn } from 'lucide-react';
 import Menu, { type MenuItem } from '../components/Menu.js';
 
 interface Props {
@@ -15,6 +15,8 @@ interface Props {
   savedReplies?: number;
   /** Opens /why on the latest reply. */
   onShowWhy: () => void;
+  /** Opens the spend & savings report for every chat. */
+  onOpenSpend: () => void;
   onRename: (conversationId: string, title: string) => Promise<void>;
   onContinueElsewhere: () => void;
   onOpenFiles: () => void;
@@ -26,7 +28,7 @@ function money(v: number): string {
 }
 
 export default function ChatTopBar({
-  title, conversationId, sidebarOpen, onOpenSidebar, savedUsd, spentUsd = 0, savedReplies = 0, onShowWhy,
+  title, conversationId, sidebarOpen, onOpenSidebar, savedUsd, spentUsd = 0, savedReplies = 0, onShowWhy, onOpenSpend,
   onRename, onContinueElsewhere, onOpenFiles, onDeleteChat,
 }: Props) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
@@ -79,6 +81,7 @@ export default function ChatTopBar({
     },
     { kind: 'separator' },
     { kind: 'action', label: 'Explain the latest reply', onSelect: onShowWhy },
+    { kind: 'action', label: 'All spending and savings', icon: <ChartColumn size={15} />, onSelect: onOpenSpend },
   ];
 
   async function submitRename(e: React.FormEvent) {

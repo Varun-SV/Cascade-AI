@@ -30,6 +30,8 @@ import { writeProjectConfig } from '../../config/write-config.js';
 import { Cascade, type DecisionLogEntry } from '../../core/cascade.js';
 import { MemoryStore } from '../../memory/store.js';
 import { CloudClient } from '../../cloud/client.js';
+import { cloudTurnAccounting, settledRunReport, type CloudRunReport } from '../../cloud/run-report.js';
+import { syncRunSpend, syncTurn } from '../../cloud/device-sync.js';
 import { ModelSelector } from '../../core/router/selector.js';
 import { OpenAIProvider } from '../../providers/openai.js';
 import { GeminiProvider } from '../../providers/gemini.js';
@@ -359,27 +361,64 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   // turn, and the whole thing is best-effort: it never blocks or breaks a run,
   // and `CASCADE_NO_CLOUD_SYNC=1` opts out.
   const cloudMirrorRef = useRef<{ client: CloudClient; convId: string | null } | null>(null);
-  const mirrorTurnToCloud = useCallback(async (userContent: string, assistant: { content: string; costUsd?: number }) => {
+  const ensureCloudConversation = useCallback(async (mirror: { client: CloudClient; convId: string | null }, title: string): Promise<string> => {
+    if (mirror.convId) return mirror.convId;
+    const convo = await mirror.client.createConversation(title.slice(0, 72));
+    mirror.convId = convo.id;
+    dispatch({
+      type: 'ADD_MESSAGE',
+      message: {
+        id: randomUUID(), role: 'system',
+        content: `☁ Synced to your Cascade account — this chat is on web + desktop too (id ${convo.id.slice(0, 8)}).`,
+        timestamp: new Date().toISOString(),
+      },
+    });
+    return convo.id;
+  }, []);
+  const mirrorTurnToCloud = useCallback(async (
+    userContent: string,
+    assistant: { content: string; costUsd: number; why: string },
+    /** 'stopped' when the user stopped the run: its partial reply is kept. */
+    outcome: 'answered' | 'stopped' = 'answered',
+    /** When the run finished: it counts on that day, however late it is sent. */
+    endedAt?: number,
+  ) => {
     const mirror = cloudMirrorRef.current;
     if (!mirror || process.env['CASCADE_NO_CLOUD_SYNC']) return;
-    try {
-      if (!mirror.convId) {
-        const convo = await mirror.client.createConversation(userContent.slice(0, 72));
-        mirror.convId = convo.id;
-        dispatch({
-          type: 'ADD_MESSAGE',
-          message: {
-            id: randomUUID(), role: 'system',
-            content: `☁ Synced to your Cascade account — this chat is on web + desktop too (id ${convo.id.slice(0, 8)}).`,
-            timestamp: new Date().toISOString(),
-          },
-        });
-      }
-      await mirror.client.appendTurn(mirror.convId, {
-        userContent,
-        assistant: { content: assistant.content, costUsd: assistant.costUsd ?? null },
-      });
-    } catch { /* best-effort mirror — offline, revoked token, etc. Local run is unaffected. */ }
+    // One id for this run: the cloud adds its turn once and counts it once,
+    // so a turn whose answer was lost can be sent again.
+    const runId = randomUUID();
+    const turn = {
+      userContent, runId, ...(outcome === 'stopped' ? { outcome } : {}), ...(endedAt !== undefined ? { endedAt } : {}),
+      assistant: { content: assistant.content, costUsd: assistant.costUsd, why: assistant.why },
+    };
+    // Best-effort mirror: offline, revoked token, etc. The local run is
+    // unaffected, and what it spent still counts.
+    await syncTurn(mirror, turn, () => ensureCloudConversation(mirror, userContent)).catch(() => { /* best-effort */ });
+  }, [ensureCloudConversation]);
+  /**
+   * A run with no turn to sync still spent money: add it to the account's
+   * spend report, as a hosted run that fails is. Best-effort. It joins the
+   * chat already synced, if any; it never creates one, since a chat with no
+   * messages would be left behind for it.
+   */
+  const recordRunSpendInCloud = useCallback(async (outcome: 'answered' | 'failed' | 'stopped', report: CloudRunReport, endedAt?: number) => {
+    const mirror = cloudMirrorRef.current;
+    if (!mirror || process.env['CASCADE_NO_CLOUD_SYNC']) return;
+    // A call with no price and no usage reported still happened, and may have cost money.
+    if (report.totalCostUsd <= 0 && report.totalTokens <= 0 && Object.keys(report.unpricedByModel).length === 0) return;
+    // Best-effort — the local run's error is what the user sees.
+    await syncRunSpend(mirror, { conversationId: mirror.convId, outcome, runId: randomUUID(), ...(endedAt !== undefined ? { endedAt } : {}), ...cloudTurnAccounting(report) })
+      .catch(() => { /* best-effort */ });
+  }, []);
+  /**
+   * Runs are sent to the cloud one at a time, in the order they ended: a run
+   * still waiting for a late call holds back the next, so the cloud chat keeps
+   * the turns in the order they happened.
+   */
+  const cloudQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const queueCloud = useCallback((send: () => Promise<unknown>) => {
+    cloudQueueRef.current = cloudQueueRef.current.then(send).catch(() => { /* best-effort mirror */ });
   }, []);
 
   /**
@@ -1010,6 +1049,33 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       });
       approvalResolverRef.current = ({ approved }) => cascade.resolveMcpApproval(server.name, approved);
     });
+    // The router serves the whole session. Its generation moves on when the
+    // run begins, and that run's own stats are kept under it: a call from the
+    // previous run that settles late stays with that run.
+    const generationBefore = cascade.getRouter().getRunGeneration();
+    const runGeneration = () => {
+      const generation = cascade.getRouter().getRunGeneration();
+      return generation === generationBefore ? null : generation;
+    };
+    /**
+     * This run's report, once every call it made has settled (or 30 s have
+     * passed): a call that lands after the run returned still belongs to it.
+     * Null for a run that never began, which has no stats of its own.
+     * Started now, as the run ends, with this run's decisions and T1 model:
+     * its cloud send may wait behind earlier ones, by which time later runs
+     * have begun, and could have dropped this run's usage.
+     */
+    const runReportLater = (durationMs: number, after?: Promise<unknown>): (() => Promise<CloudRunReport | null>) => {
+      const generation = runGeneration();
+      if (generation === null) return async () => null;
+      const router = cascade.getRouter();
+      // The T1 model savings are measured against, as it was for this run:
+      // a later model pick must not change what this run saved.
+      const report = settledRunReport(router, generation, {
+        t1Model: router.getTierModel('T1'), decisions: cascade.getDecisionLog(), durationMs,
+      }, after);
+      return () => report;
+    };
     try {
       runAbortRef.current = new AbortController();
       const result = await cascade.run({
@@ -1033,26 +1099,53 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier, costByFeature: stats.costByFeature, savedUsd: savings.savedUsd, savedPct: savings.savedPct });
       dispatch({ type: 'COMMIT_STREAM', finalText: result.output, timestamp: new Date().toISOString() });
       persistMessage('assistant', result.output, new Date().toISOString());
-      // Mirror the finished turn into the shared cloud session (best-effort).
-      void mirrorTurnToCloud(trimmed, { content: result.output, costUsd: stats.totalCostUsd });
-      // One-line run receipt — the delegation economics in scrollback.
-      const receipt = formatRunReceipt(result, stats.totalCostUsd, savings);
-      if (receipt) {
-        dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'system', content: receipt, timestamp: new Date().toISOString() } });
-      }
-      // Generate AI session name on first exchange (async, fire-and-forget)
+      // Mirror the finished turn into the shared cloud session (best-effort),
+      // with what this run cost: the cloud's /why and spend report read it.
+      // A run with no text resolves normally: stopped by the user, or a model
+      // that answered with nothing. What it spent is recorded either way,
+      // with no empty reply.
+      const output = result.output;
+      const stopped = runAbortRef.current?.signal.aborted === true;
+      // Name the session on its first exchange (async). Started before the
+      // run's report, which waits for it: the title's model call is part of
+      // what this run spent.
+      let titled: Promise<unknown> | undefined;
       if (!sessionTitleGeneratedRef.current && storeRef.current) {
         sessionTitleGeneratedRef.current = true;
-        generateSessionName(trimmed, cascadeRef.current).then(name => {
+        titled = generateSessionName(trimmed, cascadeRef.current).then(name => {
           if (name && storeRef.current) {
             storeRef.current.updateSession(sessionIdRef.current, { title: name, updatedAt: new Date().toISOString() });
             persistRuntimeSession('ACTIVE');
           }
         }).catch(() => { /* non-critical */ });
       }
+      const reportFor = runReportLater(result.durationMs, titled);
+      // When it finished: a send queued behind a slow one still counts on this day.
+      const endedAt = Date.now();
+      queueCloud(async () => {
+        const report = await reportFor();
+        if (!report) return;
+        // A stopped run returns what it had written so far: kept, as a stop.
+        if (output) return mirrorTurnToCloud(trimmed, { content: output, ...cloudTurnAccounting(report) }, stopped ? 'stopped' : 'answered', endedAt);
+        return recordRunSpendInCloud(stopped ? 'stopped' : 'answered', report, endedAt);
+      });
+      // One-line run receipt — the delegation economics in scrollback.
+      const receipt = formatRunReceipt(result, stats.totalCostUsd, savings);
+      if (receipt) {
+        dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'system', content: receipt, timestamp: new Date().toISOString() } });
+      }
     } catch (err: unknown) { 
       const message = err instanceof Error ? err.message : String(err);
       dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'error', content: message, timestamp: new Date().toISOString() } }); 
+      // Its calls were billed all the same. A run that never began (setup
+      // failed before it) has no stats of its own, and nothing is sent.
+      const outcome = runAbortRef.current?.signal.aborted ? 'stopped' : 'failed';
+      const reportFor = runReportLater(0);
+      const endedAt = Date.now();
+      queueCloud(async () => {
+        const report = await reportFor();
+        if (report) await recordRunSpendInCloud(outcome, report, endedAt);
+      });
     }
     finally {
       if (streamThrottleTimeout) { clearTimeout(streamThrottleTimeout); streamThrottleTimeout = null; }

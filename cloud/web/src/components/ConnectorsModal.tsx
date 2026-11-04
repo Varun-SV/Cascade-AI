@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Plug, Trash2, Plus, Github, Slack, Globe, ShieldCheck, Loader2, ExternalLink, LogIn, Search, Zap, ChevronDown, ChevronRight, Wrench } from 'lucide-react';
+import { Plug, Trash2, Plus, GitBranch, Hash, Globe, ShieldCheck, Loader2, ExternalLink, LogIn, Search, Zap, ChevronDown, ChevronRight, Wrench } from 'lucide-react';
 import Modal from './Modal.js';
 import {
   fetchConnectors, fetchMcpServers, addMcpServer, setMcpServerEnabled, deleteMcpServer, startMcpOAuth,
@@ -25,8 +25,8 @@ function Toggle({ on, onChange, disabled }: { on: boolean; onChange: (v: boolean
 }
 
 function ConnectorIcon({ id, color, name }: { id: string | null; color?: string; name?: string }) {
-  if (id === 'github') return <Github size={16} className="text-ink-200" />;
-  if (id === 'slack') return <Slack size={16} className="text-ink-200" />;
+  if (id === 'github') return <GitBranch size={16} className="text-ink-200" />;
+  if (id === 'slack') return <Hash size={16} className="text-ink-200" />;
   if (id === 'google') return <Globe size={16} className="text-ink-200" />;
   // Brand letter-badge for the rest (no lucide brand icon), tinted with the
   // connector's colour so the directory reads at a glance.
