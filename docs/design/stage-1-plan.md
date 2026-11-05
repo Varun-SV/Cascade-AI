@@ -488,7 +488,7 @@ stage. The unused library adds no production overhead in stage 1.
 - **ExtraInfo flags** are forced to `false`, as nothing forwards those events and
   Playwright would otherwise wait for ever.
 - **Workers on revoke:** a shared or service worker outlives a navigation, so
-  `endPageActivity` closes them first, in either mode. Tested with a shared worker's timer.
+  `endPageActivity` closes them first, in either mode. Tested with a service worker's timer.
 - **Frame ids** must rise on a connection. A lower one fails closed, like a malformed
   frame. This stands in for the sequence numbers in design §5.
 
@@ -514,12 +514,12 @@ stage. The unused library adds no production overhead in stage 1.
   has no server on `::1`.
 - **The real nonce store,** device keys and server endpoint are stage 2. O1 is proved at
   library level only.
-- **The relay isn't wired end to end with `capability.ts`:** `acquireLease` joins them, and each
-  is tested, but the browser suite grants its lease directly. Stage 2 connects them.
+- **The browser suite grants its lease directly.** `capability.test.ts` runs the real grant,
+  approval, claim and lease together; a server connecting them to a live relay is stage 2.
 - **Open for Varun:** tab behaviour on revoke for desktop and extension, and whether leases
   survive a store outage.
 
-**Measurements** (`scripts/measure-relay.ts`, Chromium 1243, one local run on this sandbox,
+**Measurements** (`docs/design/poc/tab-cdp-relay/measure-relay.ts`, Chromium 1243, one local run on this sandbox,
 local site with no real network, so a comparison and not a bound):
 
 | Measure (ms) | Baseline median | Baseline p95 | Enforced median | Enforced p95 |
@@ -532,3 +532,9 @@ local site with no real network, so a comparison and not a bound):
 - 462 proxy decisions and 640 policy decisions in that run.
 - Proxy close noticed in 1.09 ms; ending page activity 24.46 ms; a new proxy and browser through
   the canary 561 ms.
+
+**Revert checks run on the final code,** each failing as it should with the guard removed: the
+unlisted-event filter, both fence checks (5 race tests), the resolved-address check, both WebRTC
+layers together (one alone still holds, by design), revoke's page step (2 tests) and closing
+workers. A first version of the worker test, using a shared worker, passed with the guard removed,
+because a shared worker dies with its last page, so it was replaced.

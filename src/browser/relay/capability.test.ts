@@ -9,6 +9,7 @@ import {
   type ApprovalPayload, type GrantPayload, type IssuedRun, type NonceStore, type Signed,
 } from './capability.js';
 import { POLICY_VERSION } from './command-policy.js';
+import { acquireLease, createTabLease } from './tab-lease.js';
 
 const T0 = 1_800_000_000_000;
 const scope = { tabTargetId: 'tab-1', allowedOrigins: ['https://ok.test'], privateOrigins: [] };
@@ -199,6 +200,71 @@ describe('when the store fails', () => {
     expect(await w.claim(grant, a, down)).toEqual({ outcome: 'unavailable' });
     expect(await w.claim(grant, a, lost)).toEqual({ outcome: 'unknown' });
     expect(await w.claim(grant, a)).toEqual({ outcome: 'claimed' });
+  });
+});
+
+describe('the whole path: grant, approval, claim, lease', () => {
+  const flow = (w: ReturnType<typeof world>, d: ReturnType<ReturnType<typeof world>['approvals']>, lease: ReturnType<typeof createTabLease>, grant: Signed<GrantPayload>, a: Signed<ApprovalPayload>, store?: NonceStore) => acquireLease({
+    lease,
+    admit: () => d.admit(a),
+    claim: () => w.claim(grant, a, store),
+    burn: () => d.burn(a.payload.nonce),
+  });
+
+  it('after a disconnect, only a fresh grant and approval get the tab back', async () => {
+    const w = world();
+    const d = w.approvals();
+    const lease = createTabLease();
+    const grant = w.grantFor('user-a', 'device-a');
+    const a = approved(d.approve(grant, scope, 60_000));
+    const first = await flow(w, d, lease, grant, a);
+    expect(first.outcome).toBe('leased');
+    lease.revoke('the connection dropped');
+    // The same approval, and a new approval of the same grant, both fail.
+    expect(await flow(w, d, lease, grant, a)).toMatchObject({ outcome: 'refused', reusable: false });
+    const again = approved(d.approve(grant, scope, 60_000));
+    expect(await flow(w, d, lease, grant, again)).toMatchObject({ outcome: 'refused', reusable: false });
+    expect(lease.state()).toBe('idle');
+    const grant2 = w.grantFor('user-a', 'device-a', 'run-2');
+    const fresh = await flow(w, d, lease, grant2, approved(d.approve(grant2, scope, 60_000)));
+    expect(fresh.outcome).toBe('leased');
+    if (first.outcome === 'leased' && fresh.outcome === 'leased') {
+      expect(fresh.fence.generation).toBeGreaterThan(first.fence.generation);
+      expect(lease.isCurrent(first.fence)).toBe(false);
+    }
+  });
+  it('an approval refused only because the tab is leased stays usable', async () => {
+    const w = world();
+    const d = w.approvals();
+    const lease = createTabLease();
+    const g1 = w.grantFor('user-a', 'device-a', 'run-1');
+    const g2 = w.grantFor('user-a', 'device-a', 'run-2');
+    const a1 = approved(d.approve(g1, scope, 60_000));
+    const a2 = approved(d.approve(g2, scope, 60_000));
+    expect((await flow(w, d, lease, g1, a1)).outcome).toBe('leased');
+    expect(await flow(w, d, lease, g2, a2)).toEqual({ outcome: 'tab-leased' });
+    lease.revoke('run ended');
+    expect((await flow(w, d, lease, g2, a2)).outcome).toBe('leased');
+  });
+  it('with the store down: refused and retryable, then fine when it recovers', async () => {
+    const w = world();
+    const d = w.approvals();
+    const lease = createTabLease();
+    const grant = w.grantFor('user-a', 'device-a');
+    const a = approved(d.approve(grant, scope, 60_000));
+    const down: NonceStore = { claimOnce: async () => { throw new StoreUnavailable(); } };
+    expect(await flow(w, d, lease, grant, a, down)).toMatchObject({ outcome: 'refused', reusable: true });
+    expect((await flow(w, d, lease, grant, a)).outcome).toBe('leased');
+  });
+  it('an unknown store result burns the approval: the user is asked again', async () => {
+    const w = world();
+    const d = w.approvals();
+    const lease = createTabLease();
+    const grant = w.grantFor('user-a', 'device-a');
+    const a = approved(d.approve(grant, scope, 60_000));
+    const lost: NonceStore = { claimOnce: async () => { throw new StoreOutcomeUnknown(); } };
+    expect(await flow(w, d, lease, grant, a, lost)).toMatchObject({ outcome: 'refused', reusable: false });
+    expect(d.admit(a)).toEqual({ ok: false, reason: 'approval already used' });
   });
 });
 

@@ -561,10 +561,10 @@ suite('what a revoke does in a real browser', { timeout: 60_000 }, () => {
     expect(pageSrv.hits.length).toBeGreaterThan(n);
     await b.close(); pageSrv.close();
   });
-  it('a shared worker\'s timer stops too, since workers outlive a navigation', async () => {
+  it('a service worker\'s timer stops too, since it outlives a navigation', async () => {
     const r = await startRig({ pageEnd: 'blank' });
-    await r.page.evaluate("window.__s = new SharedWorker('/timer-worker.js')");
-    await sleep(400);
+    await r.page.evaluate("navigator.serviceWorker.register('/timer-worker.js')");
+    await sleep(500);
     const workerHits = () => r.allowed.hits.filter((h) => h.includes('worker-timer')).length;
     expect(workerHits()).toBeGreaterThan(0);
     r.lease.revoke('stop');
