@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   ALLOWED_COMMANDS, ALLOWED_EVENTS, ALWAYS_DENIED, ALWAYS_DENIED_PREFIXES, HIDDEN_HISTORY_URL, POLICY_VERSION,
-  agentUrl, checkCommand, filterEvent, filterReply, parseFrame,
+  agentUrl, checkCommand, filterEvent, filterReply, filterTargetInfo, parseFrame, policySchemaSnapshot,
 } from './command-policy.js';
 import { makeConsent } from './egress-rules.js';
 
@@ -66,11 +66,11 @@ describe('the compatibility rule', () => {
   it('a list cannot change without a version bump', () => {
     const lists = JSON.stringify({
       commands: [...ALLOWED_COMMANDS].sort(), denied: [...ALWAYS_DENIED].sort(),
-      prefixes: [...ALWAYS_DENIED_PREFIXES].sort(), events: [...ALLOWED_EVENTS].sort(),
+      prefixes: [...ALWAYS_DENIED_PREFIXES].sort(), events: policySchemaSnapshot(),
     });
     const digest = createHash('sha256').update(lists).digest('hex').slice(0, 16);
     // Change a list → bump POLICY_VERSION and update both values, in one reviewed commit.
-    expect({ POLICY_VERSION, digest }).toEqual({ POLICY_VERSION: 1, digest: 'd706799b5cae3f2b' });
+    expect({ POLICY_VERSION, digest }).toEqual({ POLICY_VERSION: 2, digest: '40ac177c7c8f15e6' });
   });
 });
 
@@ -106,7 +106,7 @@ describe('events are default deny at name, field and URL level', () => {
       requestId: 'r', type: 'Fetch',
       response: { url: 'https://ok.test/a', status: 200, headersText: 'raw', remoteIPAddress: '1.2.3.4', securityDetails: {}, headers: { 'Set-Cookie': 'c=1', Location: 'https://evil.test' } },
     }, consent);
-    expect(res).toEqual({ requestId: 'r', type: 'Fetch', hasExtraInfo: false, response: { url: 'https://ok.test/a', status: 200, headers: {} } });
+    expect(res).toEqual({ requestId: 'r', type: 'Fetch', hasExtraInfo: false, response: { url: 'https://ok.test/a', status: 200, statusText: '', headers: {} } });
   });
   it('applies the URL rule', () => {
     expect(agentUrl('https://u:p@ok.test/a?q=1#f', 'document', consent)).toBe('https://ok.test/a?q=1#f');
@@ -134,6 +134,23 @@ describe('events are default deny at name, field and URL level', () => {
       ['Runtime.executionContextCreated', { context: { id: 1, origin: 'https://offlist.test' } }],
     ];
     for (const [m, p] of cases) expect(filterEvent(m, p, consent), m).toBeNull();
+  });
+});
+
+describe('page-controlled text stays out', () => {
+  it('removes fragments, frame names, titles and free-form auxData', () => {
+    const nav = filterEvent('Page.frameNavigated', { frame: { id: 'f', url: 'https://ok.test/', urlFragment: '#SECRET', name: 'SECRET', domainAndRegistry: 'x' } }, consent);
+    expect(nav).toEqual({ frame: { id: 'f', url: 'https://ok.test/' } });
+    const t = filterEvent('Target.targetInfoChanged', { targetInfo: { targetId: 't', url: 'https://ok.test/', title: 'SECRET' } }, consent);
+    expect(t).toEqual({ targetInfo: { targetId: 't', url: 'https://ok.test/' } });
+    const ctx = filterEvent('Runtime.executionContextCreated', { context: { id: 1, origin: 'https://ok.test', auxData: { isDefault: true, type: 'default', frameId: 'f', nested: { url: 'https://offlist.test/SECRET' }, future: 'SECRET' } } }, consent);
+    expect(JSON.stringify(ctx)).not.toContain('SECRET');
+    expect(ctx).toMatchObject({ context: { auxData: { isDefault: true, type: 'default', frameId: 'f' } } });
+    expect(filterEvent('Network.responseReceived', { requestId: 'r', response: { url: 'https://ok.test/', status: 200, statusText: 'SECRET' } }, consent)).toMatchObject({ response: { statusText: '' } });
+  });
+  it('filters target info in replies too', () => {
+    expect(filterTargetInfo({ targetId: 't', url: 'https://ok.test/', title: 'SECRET', canAccessOpener: false }, consent)).toEqual({ targetId: 't', url: 'https://ok.test/' });
+    expect(filterTargetInfo({ targetId: 't', url: 'https://offlist.test/' }, consent)).toBeNull();
   });
 });
 

@@ -23,7 +23,7 @@ export interface LaunchedBrowser {
 }
 
 export async function launchBehindProxy(opts: {
-  chromiumPath: string; proxy: EgressProxy; extraArgs?: string[]; canaryTimeoutMs?: number;
+  chromiumPath: string; proxy: EgressProxy; extraArgs?: string[]; canaryTimeoutMs?: number; env?: NodeJS.ProcessEnv;
 }): Promise<LaunchedBrowser> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-relay-'));
   fs.mkdirSync(path.join(dir, 'Default'));
@@ -31,7 +31,7 @@ export async function launchBehindProxy(opts: {
   const proc = spawn(opts.chromiumPath, [
     '--headless=new', '--no-sandbox', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1',
     `--user-data-dir=${dir}`, ...browserProxyArgs(opts.proxy.port), ...(opts.extraArgs ?? []), 'about:blank',
-  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  ], { stdio: ['ignore', 'ignore', 'pipe'], ...(opts.env ? { env: opts.env } : {}) });
   const cleanup = async (): Promise<void> => {
     proc.kill('SIGKILL');
     await new Promise((r) => setTimeout(r, 150));

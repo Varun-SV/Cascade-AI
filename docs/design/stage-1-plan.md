@@ -183,8 +183,9 @@ So no script-level removal of WebTransport is needed: the network layer stopped 
 workers too. `--disable-quic` stays as a second layer, though forced QUIC was already 0
 with the proxy flags alone, and it is added to the launch arguments above.
 
-**Not covered:** QUIC reached through an `Alt-Svc` upgrade from a real server, as opposed
-to the forcing flag. Stage 1 adds that with a real HTTP/3 server.
+**`Alt-Svc`** is covered in the vitest suite, with a control: with no proxy, and a locally
+trusted CA, the header made Chromium send UDP to the advertised port, and behind the proxy it sent 0. No HTTP/3 server is
+needed, as the first packets show the attempt.
 
 **P2 gate.** Stage 1 can't pass P2 until these controls pass on the Chromium version
 pinned in CI, in every context in the table. A path the tests don't cover fails closed
@@ -482,6 +483,13 @@ stage. The unused library adds no production overhead in stage 1.
   rather than filtered, as nothing needed it.
 - **`initiator`:** `Network.requestWillBeSent` keeps `initiator.type` alone, which
   Playwright reads. Its URL and stack are removed.
+- **Fields removed in review (policy version 2):** `urlFragment`, frame `name`,
+  `domainAndRegistry` and target `title`. `auxData` is reduced to `isDefault`, `type` and
+  `frameId`. `statusText` is blanked, as Playwright needs the field to exist. A consented URL
+  still keeps its fragment under the URL rule, as `location` shows it to the page anyway.
+- **Child targets:** every setup step must succeed before a target resumes, or it stays paused and
+  is closed. Only a dedicated worker may lack its own interception; the test asserts the block in the
+  policy's own log for each worker type, not only at the proxy.
 - **Fields added after testing:** `Page.documentOpened`, `Page.navigatedWithinDocument`,
   `Runtime.executionContextDestroyed` and `Inspector.targetCrashed`. A blocked-field
   test covers each URL they carry.
@@ -497,19 +505,15 @@ stage. The unused library adds no production overhead in stage 1.
 - **Playwright's `page.setContent` hangs over the relay.** It waits for a console message,
   and console events stay denied. Nothing in `src/` calls it today. Stage 2 must keep it that
   way, or decide otherwise deliberately.
-- **Dialogs can't be accepted** by the agent. `beforeunload` isn't tested yet.
+- **Dialogs can't be accepted** by the agent. `beforeunload` is the exception, which the device
+  accepts so a page can't hold itself open through a revoke. If leaving still doesn't finish in 3 s,
+  revoke closes the tab.
 - **A command already written can't be recalled.** Revoke then ends the page's activity,
   so the tab doesn't stay on what it did.
 - **Consented pages can read much of this anyway** through `evaluate`, as §4.3 states.
 
 **Known gaps**
 
-- **`Alt-Svc` has no positive control.** With a private certificate, Chromium 1243 didn't try
-  HTTP/3 from the header even with no proxy, so the test's 0 packets behind the proxy prove
-  little alone. Why isn't established; I didn't get as far as a trusted certificate or a real
-  HTTP/3 server. The network path is covered with controls by forced QUIC and WebTransport.
-- **TURN and forced QUIC** have controls in `poc-bypass-and-revoke.mjs`, not in the vitest
-  suite, which has them for STUN and WebTransport.
 - **IPv6 at the destination:** `alias6.test` is asserted by the absence of a dial, as the suite
   has no server on `::1`.
 - **The real nonce store,** device keys and server endpoint are stage 2. O1 is proved at
@@ -533,8 +537,13 @@ local site with no real network, so a comparison and not a bound):
 - Proxy close noticed in 1.09 ms; ending page activity 24.46 ms; a new proxy and browser through
   the canary 561 ms.
 
+**Correction:** an earlier revision had no `Alt-Svc` control. With a self-signed certificate and
+`--ignore-certificate-errors`, Chromium 1243 sent no UDP after the header. With a certificate from a
+CA trusted in a throwaway browser profile it did, so the control now uses that. CI installs
+`certutil` for this, and the tests fail on CI without it.
+
 **Revert checks run on the final code,** each failing as it should with the guard removed: the
 unlisted-event filter, both fence checks (5 race tests), the resolved-address check, both WebRTC
-layers together (one alone still holds, by design), revoke's page step (2 tests) and closing
-workers. A first version of the worker test, using a shared worker, passed with the guard removed,
+layers together (one alone still holds, by design), revoke's page step (2 tests), closing
+workers and accepting `beforeunload`. A first version of the worker test, using a shared worker, passed with the guard removed,
 because a shared worker dies with its last page, so it was replaced.

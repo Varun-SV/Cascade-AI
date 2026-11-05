@@ -28,6 +28,7 @@ interface PwPage {
   goto(u: string, o?: object): Promise<unknown>;
   evaluate<T>(fn: string | ((a: never) => T), a?: unknown): Promise<T>;
   click(s: string, o?: object): Promise<void>;
+  mouse: { click(x: number, y: number): Promise<void> };
   setContent(h: string): Promise<void>;
   url(): string;
   goBack(o: object): Promise<unknown>;
@@ -54,11 +55,11 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface Counting { hits: string[]; accepts: number; port: number; close(): void }
 /** `handle` answers the paths it knows and returns true; anything else gets a plain page. */
-function countingServer(handle: (path: string, res: http.ServerResponse) => boolean = () => false): Promise<Counting> {
+function countingServer(handle: (path: string, res: http.ServerResponse, req: http.IncomingMessage) => boolean = () => false): Promise<Counting> {
   const state = { hits: [] as string[], accepts: 0 };
   const server = http.createServer((req, res) => {
     state.hits.push(`${req.method} ${req.url}`);
-    if (handle((req.url ?? '/').split('?')[0]!, res)) return;
+    if (handle((req.url ?? '/').split('?')[0]!, res, req)) return;
     res.setHeader('content-type', 'text/html');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.end('<!doctype html><title>page</title><body>page</body>');
@@ -98,8 +99,9 @@ const rigs: Rig[] = [];
 async function startRig(opts: { pageEnd?: PageEndMode; consent?: Consent; raw?: boolean } = {}): Promise<Rig> {
   const script = (res: http.ServerResponse, extra = ''): boolean => { res.setHeader('content-type', 'text/javascript'); res.end(WORKER_JS + extra); return true; };
   const redirect = (res: http.ServerResponse, to: string): boolean => { res.statusCode = 302; res.setHeader('location', to); res.end(); return true; };
-  const allowed = await countingServer((path, res) => {
+  const allowed = await countingServer((path, res, req) => {
     switch (path) {
+      case '/sw-private.js': return script(res, `fetch(${JSON.stringify(decodeURIComponent((req.url ?? '').split('u=')[1] ?? ''))}, { mode: 'no-cors' }).catch(() => {});`);
       case '/worker.js': case '/sw.js': return script(res);
       case '/timer-worker.js': return script(res, "setInterval(() => fetch('/beacon?worker-timer').catch(() => {}), 50);");
       case '/redirect': return redirect(res, 'http://offlist.test/from-redirect');
@@ -125,7 +127,7 @@ async function startRig(opts: { pageEnd?: PageEndMode; consent?: Consent; raw?: 
   privPortRef.port = priv.port;
   let flip = PUBLIC_OFFLIST;
   const dns = new Map<string, string[]>([
-    ['allowed.test', [PUBLIC_ALLOWED]], ['offlist.test', [PUBLIC_OFFLIST]],
+    ['allowed.test', [PUBLIC_ALLOWED]], ['other.test', [PUBLIC_ALLOWED]], ['offlist.test', [PUBLIC_OFFLIST]],
     ['alias.test', ['127.0.0.1']], ['alias6.test', ['::1']], ['mixed.test', [PUBLIC_OFFLIST, '127.0.0.1']],
   ]);
   const routes = new Map([[PUBLIC_ALLOWED, allowed.port], [PUBLIC_OFFLIST, offlist.port]]);
@@ -251,7 +253,7 @@ suite('P1 in a real browser', { timeout: 60_000 }, () => {
 suite('P2: no request reaches a destination without consent', { timeout: 90_000 }, () => {
   it('control: with no policy, the same attempts do reach the servers', async () => {
     const off = await countingServer();
-    const b = await pw.chromium.launch({ executablePath: CHROMIUM!, args: [`--host-resolver-rules=MAP offlist.test 127.0.0.1:${off.port}`, '--no-sandbox'] });
+    const b = await pw.chromium.launch({ executablePath: CHROMIUM!, args: [`--host-resolver-rules=MAP offlist.test 127.0.0.1:${off.port}`, '--no-sandbox', '--no-proxy-server'] });
     try {
       const p = await b.newPage();
       await p.goto(`http://127.0.0.1:${off.port}/`);
@@ -357,6 +359,29 @@ suite('P2: no request reaches a destination without consent', { timeout: 90_000 
     expect(r.allowed.hits.filter((h) => h.includes('/beacon?ran')).length).toBeGreaterThan(0);
   });
 
+  it('the request policy itself blocks what each worker type sends, not only the proxy', async () => {
+    const r = await startRig();
+    const port = r.priv.port;
+    const url = `http://127.0.0.1:${port}/`;
+    const targets = { dedicated: 'dedicated-marker', shared: 'shared-marker', service: 'service-marker' };
+    await r.page.evaluate(((a: { url: string; t: typeof targets }) => {
+      const code = (m: string) => `fetch(${JSON.stringify(a.url + m)}, { mode: 'no-cors' }).catch(() => {});`;
+      const blob = (m: string) => URL.createObjectURL(new Blob([code(m)], { type: 'text/javascript' }));
+      (globalThis as never as { __k: unknown[] }).__k = [new Worker(blob(a.t.dedicated)), new SharedWorker(blob(a.t.shared))];
+    }) as never, { url, t: targets });
+    await r.page.evaluate(`navigator.serviceWorker.register('/sw-private.js?u=' + ${JSON.stringify(encodeURIComponent(`${url}${targets.service}`))}).catch(() => {})`);
+    await sleep(900);
+    expect(r.priv.accepts).toBe(0);
+    for (const marker of Object.values(targets)) {
+      const hit = r.enforcer.decisions.find((d) => d.url === `${url}${marker}`);
+      expect(hit, `${marker} reached the policy`).toBeDefined();
+      expect(hit!.allowed, marker).toBe(false);
+    }
+    expect(r.enforcer.children.every((c) => c.coverage !== null), JSON.stringify(r.enforcer.children)).toBe(true);
+    const types = new Set(r.enforcer.children.map((c) => c.type));
+    for (const t of ['worker', 'shared_worker', 'service_worker']) expect(types.has(t), t).toBe(true);
+  });
+
   it('a new page is closed, and sends nothing, including a burst', async () => {
     const r = await startRig();
     await r.page.evaluate("for (let i = 0; i < 10; i++) window.open('http://offlist.test/popup' + i)");
@@ -388,10 +413,61 @@ suite('P2: no request reaches a destination without consent', { timeout: 90_000 
     } finally { udp.close(); }
   });
 
+  const turn = (p: PwPage, url: string) => p.evaluate(`(async () => {
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: ${JSON.stringify(url)}, username: 'u', credential: 'c' }], iceTransportPolicy: 'relay' });
+    pc.createDataChannel('x');
+    await pc.setLocalDescription(await pc.createOffer());
+    await new Promise((res) => setTimeout(res, 1200));
+    pc.close();
+  })()`);
+  const tcpCounter = () => new Promise<{ count(): number; port: number; close(): void }>((resolve) => {
+    let n = 0;
+    const s = net.createServer((c) => { n += 1; c.on('error', () => {}); c.destroy(); });
+    s.listen(0, '127.0.0.1', () => resolve({ count: () => n, port: (s.address() as AddressInfo).port, close: () => s.close() }));
+  });
+
+  it('control: with no proxy, TURN and forced QUIC do reach the sockets', async () => {
+    const udp = await udpCounter(); const tcp = await tcpCounter(); const quic = await udpCounter();
+    const pageSrv = await countingServer();
+    const b = await pw.chromium.launch({ executablePath: CHROMIUM!, args: ['--no-sandbox', '--no-proxy-server', '--enable-quic', `--origin-to-force-quic-on=127.0.0.1:${quic.port}`] });
+    try {
+      const p = await b.newPage();
+      await p.goto(`http://127.0.0.1:${pageSrv.port}/`);
+      await turn(p, `turn:127.0.0.1:${udp.port}?transport=udp`);
+      await turn(p, `turn:127.0.0.1:${tcp.port}?transport=tcp`);
+      await p.evaluate(tryFetch(`https://127.0.0.1:${quic.port}/`));
+      await sleep(400);
+      expect(udp.count()).toBeGreaterThan(0);
+      expect(tcp.count()).toBeGreaterThan(0);
+      expect(quic.count()).toBeGreaterThan(0);
+    } finally { await b.close(); udp.close(); tcp.close(); quic.close(); pageSrv.close(); }
+  });
+  it('TURN over UDP and TCP stay inside the proxy', async () => {
+    const r = await startRig();
+    const udp = await udpCounter(); const tcp = await tcpCounter();
+    try {
+      await turn(r.page, `turn:127.0.0.1:${udp.port}?transport=udp`);
+      await turn(r.page, `turn:127.0.0.1:${tcp.port}?transport=tcp`);
+      expect(udp.count()).toBe(0);
+      expect(tcp.count()).toBe(0);
+    } finally { udp.close(); tcp.close(); }
+  });
+  it('forced QUIC stays inside the proxy', async () => {
+    const quic = await udpCounter();
+    const consent = makeConsent(['http://allowed.test']);
+    const proxy = await startEgressProxy({ consent });
+    const browser = await launchBehindProxy({ chromiumPath: CHROMIUM!, proxy, extraArgs: ['--enable-quic', `--origin-to-force-quic-on=127.0.0.1:${quic.port}`] });
+    const raw = await connectCdp(browser.tabWs);
+    try {
+      await raw.send('Runtime.evaluate', { expression: tryFetch(`https://127.0.0.1:${quic.port}/`), awaitPromise: true });
+      await sleep(400);
+      expect(quic.count()).toBe(0);
+    } finally { raw.close(); await browser.close(); await proxy.close(); quic.close(); }
+  });
   it('control: with no proxy, WebRTC and WebTransport do send UDP', async () => {
     const udp = await udpCounter();
     const pageSrv = await countingServer();
-    const b = await pw.chromium.launch({ executablePath: CHROMIUM!, args: ['--no-sandbox'] });
+    const b = await pw.chromium.launch({ executablePath: CHROMIUM!, args: ['--no-sandbox', '--no-proxy-server'] });
     try {
       const p = await b.newPage();
       await p.goto(`http://127.0.0.1:${pageSrv.port}/`);
@@ -411,33 +487,60 @@ suite('P2: no request reaches a destination without consent', { timeout: 90_000 
   });
 });
 
-/** An https server that advertises HTTP/3 on a UDP socket which only counts. */
-function altSvcServer(udpPort: number): { port: number; close(): void; hits(): number; ready: Promise<void> } {
+/**
+ * An https server that advertises HTTP/3 on a UDP socket which only counts, with a
+ * certificate from a CA trusted in a throwaway browser home. With a self-signed
+ * certificate and --ignore-certificate-errors, Chromium 1243 sent nothing, so the
+ * control couldn't have detected a leak. Needs openssl and certutil.
+ */
+function altSvcServer(udpPort: number) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-altsvc-'));
-  execFileSync('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-days', '1', '-subj', '/CN=h3.test',
-    '-addext', 'subjectAltName=DNS:h3.test', '-keyout', path.join(dir, 'k.pem'), '-out', path.join(dir, 'c.pem')], { stdio: 'ignore' });
+  const f = (n: string) => path.join(dir, n);
+  const run = (cmd: string, args: string[]) => execFileSync(cmd, args, { stdio: 'ignore', cwd: dir });
+  const ec = ['-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes'];
+  run('openssl', ['req', '-x509', ...ec, '-days', '1', '-subj', '/CN=Relay Test CA', '-addext', 'basicConstraints=critical,CA:TRUE', '-keyout', 'ca.key', '-out', 'ca.pem']);
+  run('openssl', ['req', ...ec, '-subj', '/CN=h3.test', '-keyout', 'k.pem', '-out', 'c.csr']);
+  fs.writeFileSync(f('ext'), 'subjectAltName=DNS:h3.test\n');
+  run('openssl', ['x509', '-req', '-in', 'c.csr', '-CA', 'ca.pem', '-CAkey', 'ca.key', '-CAcreateserial', '-days', '1', '-extfile', 'ext', '-out', 'c.pem']);
+  const nss = path.join(dir, 'home', '.pki', 'nssdb');
+  fs.mkdirSync(nss, { recursive: true });
+  run('certutil', ['-d', `sql:${nss}`, '-N', '--empty-password']);
+  run('certutil', ['-d', `sql:${nss}`, '-A', '-t', 'C,,', '-n', 'relay-test', '-i', 'ca.pem']);
   let hits = 0;
-  const server = https.createServer({ key: fs.readFileSync(path.join(dir, 'k.pem')), cert: fs.readFileSync(path.join(dir, 'c.pem')) }, (_q, res) => {
+  const server = https.createServer({ key: fs.readFileSync(f('k.pem')), cert: fs.readFileSync(f('c.pem')) }, (_q, res) => {
     hits += 1;
     res.setHeader('alt-svc', `h3=":${udpPort}"; ma=3600`);
     res.setHeader('cache-control', 'no-store');
     res.setHeader('content-type', 'text/html');
     res.end('<!doctype html>page');
   });
-  const handle = { port: 0, hits: () => hits, close() { server.closeAllConnections(); server.close(); fs.rmSync(dir, { recursive: true, force: true }); }, ready: Promise.resolve() };
+  const handle = {
+    port: 0, hits: () => hits, env: { ...process.env, HOME: path.join(dir, 'home') },
+    close() { server.closeAllConnections(); server.close(); fs.rmSync(dir, { recursive: true, force: true }); },
+    ready: Promise.resolve(),
+  };
   handle.ready = new Promise((r) => server.listen(0, '127.0.0.1', () => { handle.port = (server.address() as AddressInfo).port; r(); }));
   return handle;
 }
+const hasCertTools = (() => { try { execFileSync('certutil', ['-H'], { stdio: 'ignore' }); return true; } catch (e) { return (e as { code?: string }).code !== 'ENOENT'; } })();
+if (CHROMIUM && !hasCertTools && process.env.CI) throw new Error('The Alt-Svc tests need certutil on CI (libnss3-tools).');
 
-suite('P2: an Alt-Svc upgrade to HTTP/3', { timeout: 60_000 }, () => {
+(hasCertTools ? suite : describe.skip)('P2: an Alt-Svc upgrade to HTTP/3', { timeout: 60_000 }, () => {
   const visit = async (p: PwPage, url: string) => {
-    for (let i = 0; i < 4; i++) { await p.goto(url).catch(() => {}); await sleep(250); }
+    for (let i = 0; i < 5; i++) { await p.goto(url, { timeout: 3000 }).catch(() => {}); await sleep(300); }
   };
-  // No positive control here: with a private certificate, Chromium 1243 didn't try
-  // HTTP/3 from this header even with no proxy, so 0 below proves little alone. The
-  // path it would use is covered with a control by the forced-QUIC prototype and by
-  // the WebTransport control above. See stage-1-plan.md section 3, "Known gaps".
-  it('behind the proxy, the header sends nothing to the UDP socket', async () => {
+  it('control: with no proxy, the browser does try HTTP/3 after the header', async () => {
+    const udp = await udpCounter();
+    const srv = altSvcServer(udp.port);
+    await srv.ready;
+    const b = await pw.chromium.launch({ executablePath: CHROMIUM!, env: srv.env, args: ['--no-sandbox', '--no-proxy-server', '--host-resolver-rules=MAP h3.test 127.0.0.1'] });
+    try {
+      await visit(await b.newPage(), `https://h3.test:${srv.port}/`);
+      expect(srv.hits()).toBeGreaterThan(0);
+      expect(udp.count()).toBeGreaterThan(0);
+    } finally { await b.close(); udp.close(); srv.close(); }
+  });
+  it('behind the proxy, the same header sends nothing to the UDP socket', async () => {
     const udp = await udpCounter();
     const srv = altSvcServer(udp.port);
     await srv.ready;
@@ -446,7 +549,7 @@ suite('P2: an Alt-Svc upgrade to HTTP/3', { timeout: 60_000 }, () => {
       consent,
       network: { resolve: async () => ['203.0.113.30'], dial: () => net.connect(srv.port, '127.0.0.1') },
     });
-    const browser = await launchBehindProxy({ chromiumPath: CHROMIUM!, proxy, extraArgs: ['--ignore-certificate-errors'] });
+    const browser = await launchBehindProxy({ chromiumPath: CHROMIUM!, proxy, env: srv.env });
     const pb = await pw.chromium.connectOverCDP(`http://127.0.0.1:${browser.port}`);
     try {
       await visit(pb.contexts()[0]!.pages()[0]!, `https://h3.test:${srv.port}/`);
@@ -512,6 +615,34 @@ suite('no-leak markers: nothing forbidden reaches the agent', { timeout: 60_000 
   });
 });
 
+suite('no-leak markers: page-controlled text, root and child sessions', { timeout: 60_000 }, () => {
+  it('title, window.name and fragments never reach the agent, from the tab or a child', async () => {
+    const consent = makeConsent(['http://allowed.test', 'http://other.test']);
+    const r = await startRig({ consent });
+    const raw = await connectCdp(r.browser.browserWs);
+    const rawFrames: string[] = [];
+    raw.on((m) => rawFrames.push(JSON.stringify(m)));
+    await raw.send('Target.setDiscoverTargets', { discover: true });
+    const p = r.page;
+    await p.goto('http://allowed.test/');
+    await p.evaluate("document.title = 'MARKTITLE'; window.name = 'MARKNAME'; history.replaceState(null, '', '#keep');");
+    // Cross-site, so it's an out-of-process frame with its own session.
+    await p.evaluate("(() => { const f = document.createElement('iframe'); f.name = 'MARKFRAMENAME'; f.src = 'http://other.test/child'; document.body.append(f); return new Promise((res) => { f.onload = res; }); })()");
+    await sleep(300);
+    await p.goto('http://allowed.test/page#MARKFRAGMENT');
+    await sleep(200);
+    raw.close();
+    expect(rawFrames.join('\n'), 'control: the browser did emit the title').toContain('MARKTITLE');
+    const stream = r.agentFrames.filter((f) => !/"result":\{"(result|exceptionDetails)"/.test(f));
+    expect(stream.some((f) => /"sessionId":"(?!cascade-tab-1)/.test(f)), 'a child session really was served').toBe(true);
+    const joined = stream.join('\n');
+    for (const m of ['MARKTITLE', 'MARKNAME', 'MARKFRAMENAME']) expect(joined.includes(m), m).toBe(false);
+    // A consented URL keeps its fragment by the URL rule; the separate field is gone.
+    expect(joined).not.toContain('urlFragment');
+    expect(joined).not.toContain('"title"');
+  });
+});
+
 suite('dialogs', { timeout: 30_000 }, () => {
   it('the device dismisses them, and the agent sees no dialog', async () => {
     const r = await startRig();
@@ -547,6 +678,32 @@ suite('R-A2: history over the relay', { timeout: 30_000 }, () => {
   });
 });
 
+suite('beforeunload', { timeout: 30_000 }, () => {
+  it('does not hold a page open through a revoke, and the revoke finishes in bounded time', async () => {
+    const r = await startRig({ pageEnd: 'blank' });
+    await r.page.goto('http://allowed.test/links');
+    await r.page.evaluate("window.addEventListener('beforeunload', (e) => { e.preventDefault(); e.returnValue = 'x'; }); window.__t = setInterval(() => fetch('/beacon?unload-timer').catch(() => {}), 50);");
+    // Chromium only shows this dialog after a user gesture.
+    await r.page.click('#a', { noWaitAfter: true, trial: true });
+    await r.page.mouse.click(300, 300);
+    await sleep(100);
+    const t0 = Date.now();
+    r.lease.revoke('stop');
+    await r.serving;
+    expect(Date.now() - t0).toBeLessThan(5000);
+    expect(r.enforcer.dismissedDialogs).toContain('beforeunload');
+    await sleep(100);
+    const hits = () => r.allowed.hits.filter((h) => h.includes('unload-timer')).length;
+    const after = hits();
+    await sleep(300);
+    expect(hits()).toBe(after);
+    const raw = await connectCdp(r.browser.tabWs);
+    const info = await raw.send('Target.getTargetInfo') as { targetInfo: { url: string } };
+    raw.close();
+    expect(info.targetInfo.url).toBe('about:blank');
+  });
+});
+
 suite('what a revoke does in a real browser', { timeout: 60_000 }, () => {
   const setTimer = "window.__t = setInterval(() => fetch('/beacon?timer').catch(() => {}), 50)";
   const timerHits = (r: Rig) => r.allowed.hits.filter((h) => h.includes('beacon?timer')).length;
@@ -567,7 +724,7 @@ suite('what a revoke does in a real browser', { timeout: 60_000 }, () => {
   });
   it('control: detaching alone leaves the timer running', async () => {
     const pageSrv = await countingServer();
-    const b = await pw.chromium.launch({ executablePath: CHROMIUM!, args: ['--no-sandbox'] });
+    const b = await pw.chromium.launch({ executablePath: CHROMIUM!, args: ['--no-sandbox', '--no-proxy-server'] });
     const p = await b.newPage();
     await p.goto(`http://127.0.0.1:${pageSrv.port}/`);
     const list = await (async () => p.evaluate(setTimer))();

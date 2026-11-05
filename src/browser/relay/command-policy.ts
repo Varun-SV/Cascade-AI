@@ -12,7 +12,7 @@
 
 import { type Consent, bareHost, isPrivateHost, onConsentedSite, requestVerdict } from './egress-rules.js';
 
-export const POLICY_VERSION = 1;
+export const POLICY_VERSION = 2;
 
 export const ALLOWED_COMMANDS: ReadonlySet<string> = new Set([
   'DOM.describeNode',
@@ -154,13 +154,13 @@ type Field = true | 'documentUrl' | 'subresourceUrl' | 'headers' | Schema;
 interface Schema { [field: string]: Field }
 
 const RESPONSE: Schema = {
-  url: 'subresourceUrl', status: true, statusText: true, mimeType: true, headers: 'headers',
+  url: 'subresourceUrl', status: true, mimeType: true, headers: 'headers',
   connectionReused: true, connectionId: true, fromDiskCache: true, fromServiceWorker: true,
   fromPrefetchCache: true, encodedDataLength: true, timing: true, protocol: true,
 };
 
 const TARGET_INFO: Schema = {
-  targetId: true, type: true, url: 'documentUrl', attached: true, browserContextId: true, title: true,
+  targetId: true, type: true, url: 'documentUrl', attached: true, browserContextId: true,
 };
 
 const SCHEMAS: Readonly<Record<string, Schema>> = {
@@ -188,12 +188,11 @@ const SCHEMAS: Readonly<Record<string, Schema>> = {
   'Page.frameNavigated': {
     type: true,
     frame: {
-      id: true, parentId: true, loaderId: true, name: true, url: 'documentUrl', urlFragment: true,
-      domainAndRegistry: true, securityOrigin: 'documentUrl', mimeType: true,
+      id: true, parentId: true, loaderId: true, url: 'documentUrl', securityOrigin: 'documentUrl', mimeType: true,
     },
   },
   'Page.documentOpened': {
-    frame: { id: true, parentId: true, loaderId: true, name: true, url: 'documentUrl', urlFragment: true, securityOrigin: 'documentUrl', mimeType: true },
+    frame: { id: true, parentId: true, loaderId: true, url: 'documentUrl', securityOrigin: 'documentUrl', mimeType: true },
   },
   'Page.navigatedWithinDocument': { frameId: true, url: 'documentUrl', navigationType: true },
   'Page.frameRequestedNavigation': { frameId: true, reason: true, url: 'documentUrl', disposition: true },
@@ -202,7 +201,7 @@ const SCHEMAS: Readonly<Record<string, Schema>> = {
   'Page.downloadWillBegin': { frameId: true, guid: true, url: 'documentUrl' },
   'Page.downloadProgress': { guid: true, state: true, totalBytes: true, receivedBytes: true },
   'Runtime.executionContextCreated': {
-    context: { id: true, uniqueId: true, name: true, origin: 'documentUrl', auxData: true },
+    context: { id: true, uniqueId: true, name: true, origin: 'documentUrl', auxData: { isDefault: true, type: true, frameId: true } },
   },
   'Runtime.executionContextDestroyed': { executionContextId: true, executionContextUniqueId: true },
   'Runtime.executionContextsCleared': {},
@@ -214,6 +213,19 @@ const SCHEMAS: Readonly<Record<string, Schema>> = {
 };
 
 export const ALLOWED_EVENTS: ReadonlySet<string> = new Set(Object.keys(SCHEMAS));
+
+/** Every field of every allowed event, for the test that ties changes to a version bump. */
+export function policySchemaSnapshot(): string {
+  return JSON.stringify(SCHEMAS);
+}
+
+/** Target info as the agent may see it, or null if it names a blocked destination. */
+export function filterTargetInfo(info: Record<string, unknown>, consent: Consent): Record<string, unknown> | null {
+  try { return applySchema(info, TARGET_INFO, consent); } catch (e) {
+    if (e instanceof DropEvent) return null;
+    throw e;
+  }
+}
 
 class DropEvent extends Error {}
 
@@ -249,10 +261,13 @@ export function filterEvent(method: string, params: Record<string, unknown>, con
     if (method === 'Network.requestWillBeSent') {
       if (params.type === 'Document' && agentUrl((params.request as { url?: unknown } | undefined)?.url, 'document', consent) === null) return null;
       out.redirectHasExtraInfo = false;
+      if (out.redirectResponse) (out.redirectResponse as Record<string, unknown>).statusText = '';
     }
     if (method === 'Network.responseReceived') {
       if (params.type === 'Document' && agentUrl((params.response as { url?: unknown } | undefined)?.url, 'document', consent) === null) return null;
       out.hasExtraInfo = false;
+      // Server-controlled text, removed; Playwright needs the field to exist.
+      if (out.response) (out.response as Record<string, unknown>).statusText = '';
     }
     return out;
   } catch (e) {

@@ -12,6 +12,7 @@ import { type CdpClient, type CdpMessage, connectCdp } from './cdp-client.js';
 import { type Consent, onConsentedSite, requestVerdict } from './egress-rules.js';
 
 const INTERCEPT_ALL = { patterns: [{ urlPattern: '*', requestStage: 'Request' }] };
+const PAGE_END_TIMEOUT_MS = 3000;
 const AUTO_ATTACH_PAUSED = { autoAttach: true, waitForDebuggerOnStart: true, flatten: true };
 
 export interface RequestDecision { allowed: boolean; url: string; resourceType: string; reason: string; where: string }
@@ -20,6 +21,8 @@ export interface RequestEnforcer {
   readonly decisions: readonly RequestDecision[];
   /** New pages the guard closed. */
   readonly closedPages: readonly string[];
+  /** Child targets, and how each was policed. */
+  readonly children: readonly { type: string; coverage: ChildCoverage }[];
   /** Dialogs the device dismissed, by type. */
   readonly dismissedDialogs: readonly string[];
   /**
@@ -39,15 +42,29 @@ export interface RequestEnforcer {
 /** CLI: `close`, as the tab is the run's. Desktop and extension: Varun's decision. */
 export type PageEndMode = 'close' | 'blank';
 
-async function policeChild(client: CdpClient, sessionId: string, type: string): Promise<boolean> {
+/** How a child target's requests are policed, or null if they can't be. */
+export type ChildCoverage = 'own-interception' | 'parent-interception' | null;
+
+/**
+ * Puts the policy on one attached, paused target, and resumes it only if every step
+ * succeeded. On null it stays paused for the caller to close: a target the policy
+ * can't police never runs.
+ *
+ * Only a dedicated worker may lack interception of its own. Its requests go through
+ * the frame that started it, which is policed, because children only attach through
+ * policed sessions. Tests assert the block in the policy's own log for this case.
+ */
+export async function policeChild(client: Pick<CdpClient, 'send'>, sessionId: string, type: string): Promise<ChildCoverage> {
+  let coverage: ChildCoverage = 'own-interception';
   try { await client.send('Fetch.enable', INTERCEPT_ALL, sessionId); } catch {
-    // A dedicated worker has no interception of its own: its requests go through
-    // its parent frame, which is already policed. Nothing else gets this pass.
-    if (type !== 'worker') return false;
+    if (type !== 'worker') return null;
+    coverage = 'parent-interception';
   }
-  await client.send('Target.setAutoAttach', AUTO_ATTACH_PAUSED, sessionId).catch(() => {});
-  await client.send('Runtime.runIfWaitingForDebugger', {}, sessionId).catch(() => {});
-  return true;
+  try {
+    await client.send('Target.setAutoAttach', AUTO_ATTACH_PAUSED, sessionId);
+    await client.send('Runtime.runIfWaitingForDebugger', {}, sessionId);
+  } catch { return null; }
+  return coverage;
 }
 
 export async function startRequestPolicy(opts: {
@@ -57,6 +74,7 @@ export async function startRequestPolicy(opts: {
   const decisions: RequestDecision[] = [];
   const closedPages: string[] = [];
   const dismissedDialogs: string[] = [];
+  const children: { type: string; coverage: ChildCoverage }[] = [];
   const tab = await connectCdp(opts.tabWs);
   const browser = await connectCdp(opts.browserWs);
 
@@ -74,14 +92,18 @@ export async function startRequestPolicy(opts: {
     if (msg.method === 'Fetch.requestPaused') void decide(tab, msg, msg.sessionId ? 'child' : 'tab');
     else if (msg.method === 'Target.attachedToTarget') {
       const { sessionId, targetInfo } = msg.params as { sessionId: string; targetInfo: { type: string; targetId: string } };
-      void policeChild(tab, sessionId, targetInfo.type).then((policed) => {
-        if (!policed) void browser.send('Target.closeTarget', { targetId: targetInfo.targetId }).catch(() => {});
+      void policeChild(tab, sessionId, targetInfo.type).then((coverage) => {
+        children.push({ type: targetInfo.type, coverage });
+        if (!coverage) void browser.send('Target.closeTarget', { targetId: targetInfo.targetId }).catch(() => {});
       });
     } else if (msg.method === 'Page.javascriptDialogOpening') {
-      // Dismissed by the device, never shown to the agent: a dialog would otherwise
-      // block its command, and it can't accept one the user hasn't seen.
-      dismissedDialogs.push(String(msg.params?.type));
-      void tab.send('Page.handleJavaScriptDialog', { accept: false }, msg.sessionId).catch(() => {});
+      // Answered by the device, never shown to the agent: a dialog would otherwise block
+      // its command, and it can't accept one the user hasn't seen. `beforeunload` is the
+      // exception, because refusing it would keep the page, and any timer on it, alive
+      // through revoke's own navigation.
+      const type = String(msg.params?.type);
+      dismissedDialogs.push(type);
+      void tab.send('Page.handleJavaScriptDialog', { accept: type === 'beforeunload' }, msg.sessionId).catch(() => {});
     }
   });
   await tab.send('Page.enable');
@@ -116,9 +138,9 @@ export async function startRequestPolicy(opts: {
         await browser.send('Target.closeTarget', { targetId: targetInfo.targetId }).catch(() => {});
         return;
       }
-      if (!await policeChild(browser, sessionId, targetInfo.type)) {
-        await browser.send('Target.closeTarget', { targetId: targetInfo.targetId }).catch(() => {});
-      }
+      const coverage = await policeChild(browser, sessionId, targetInfo.type);
+      children.push({ type: targetInfo.type, coverage });
+      if (!coverage) await browser.send('Target.closeTarget', { targetId: targetInfo.targetId }).catch(() => {});
     })();
   });
   // Browser-wide interception as a measured backstop: without it, some pop-ups in a
@@ -128,7 +150,7 @@ export async function startRequestPolicy(opts: {
   await browser.send('Target.setAutoAttach', AUTO_ATTACH_PAUSED);
 
   return {
-    decisions, closedPages, dismissedDialogs,
+    decisions, closedPages, children, dismissedDialogs,
     async checkTabBeforeLease() {
       const info = await tab.send('Target.getTargetInfo') as { targetInfo?: { url?: string } };
       const url = info.targetInfo?.url ?? '';
@@ -143,8 +165,14 @@ export async function startRequestPolicy(opts: {
       const { targetInfos } = await browser.send('Target.getTargets') as { targetInfos?: { targetId: string; type: string }[] };
       const workers = (targetInfos ?? []).filter((t) => t.type === 'service_worker' || t.type === 'shared_worker');
       await Promise.all(workers.map((t) => browser.send('Target.closeTarget', { targetId: t.targetId }).catch(() => {})));
-      if (mode === 'close') await browser.send('Target.closeTarget', { targetId: tabTargetId }).catch(() => {});
-      else await tab.send('Page.navigate', { url: 'about:blank' }).catch(() => {});
+      const closeTab = (): Promise<unknown> => browser.send('Target.closeTarget', { targetId: tabTargetId }).catch(() => {});
+      if (mode === 'close') { await closeTab(); return; }
+      // Bounded: a page that won't let go is closed rather than left running.
+      const left = await Promise.race([
+        tab.send('Page.navigate', { url: 'about:blank' }).then(() => true, () => false),
+        new Promise<boolean>((r) => { setTimeout(() => r(false), PAGE_END_TIMEOUT_MS).unref?.(); }),
+      ]);
+      if (!left) await closeTab();
     },
     close() { tab.close(); browser.close(); },
   };

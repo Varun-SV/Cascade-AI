@@ -10,7 +10,7 @@
 
 import type { WebSocket } from 'ws';
 import { type CdpMessage, connectCdp } from './cdp-client.js';
-import { type CommandFrame, HIDDEN_HISTORY_URL, checkCommand, filterEvent, filterReply, parseFrame } from './command-policy.js';
+import { type CommandFrame, HIDDEN_HISTORY_URL, checkCommand, filterEvent, filterReply, filterTargetInfo, parseFrame } from './command-policy.js';
 import { type Consent, onConsentedSite } from './egress-rules.js';
 import type { PageEndMode, RequestEnforcer } from './request-enforcer.js';
 import { CommandFenced, type CommandTransport, type TabLease, createFencedForwarder } from './tab-lease.js';
@@ -143,7 +143,7 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
           out({ id: f.id, result: {} });
           return;
         case 'Target.getTargetInfo':
-          out({ id: f.id, result: { targetInfo: targetInfo ?? { targetId: 'browser', type: 'browser', title: '', url: '', attached: true } } });
+          out({ id: f.id, result: { targetInfo: (targetInfo && filterTargetInfo(targetInfo, consent)) ?? { targetId: 'browser', type: 'browser', url: '', attached: true } } });
           return;
         case 'Target.setAutoAttach':
           out({ id: f.id, result: {} });
