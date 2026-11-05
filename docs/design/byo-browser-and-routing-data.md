@@ -427,7 +427,8 @@ the user can set.** With it off, that source makes no private-network claim
 and the consent prompt says so. A proxy failure while it is on fails closed.
 **WebRTC goes around the proxy** unless the browser also runs with
 `--webrtc-ip-handling-policy=disable_non_proxied_udp` (`poc-proxy-fail-closed.mjs`);
-`docs/design/stage-1-plan.md` section 3 has the evidence and the required tests.
+`docs/design/stage-1-plan.md` section 3 has the evidence and the required tests,
+including QUIC and WebTransport (`poc-bypass-and-revoke.mjs`).
 
 **What is guaranteed, and what is not.** This is not network egress
 isolation:

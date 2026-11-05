@@ -94,6 +94,8 @@ const proxied = (port) => [`--proxy-server=http://127.0.0.1:${port}`, '--proxy-b
 const attempt = (page, port) => page.evaluate(async (p) => {
   await fetch(`http://127.0.0.1:${p}/f`, { mode: 'no-cors' }).catch(() => {});
   await new Promise((r) => { const w = new WebSocket(`ws://127.0.0.1:${p}/w`); w.onerror = r; w.onclose = r; w.onopen = r; setTimeout(r, 1500); });
+  // Plain http to the test's own counting server on purpose: it must see 0
+  // connections when the proxy is down. Test fixture, loads no third-party content.
   const f = document.createElement('iframe'); f.src = `http://127.0.0.1:${p}/i`; document.body?.append(f);
   await new Promise((r) => setTimeout(r, 500));
 }, port);

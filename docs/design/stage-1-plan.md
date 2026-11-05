@@ -1,7 +1,7 @@
 # Stage 1 plan: relay contract library
 
-Status: **plan under review. Scope is not agreed.** Revision 2, answering
-ChatGPT's review of 4 Nov on PR #316 (thread 4331289034). No stage-1 code may
+Status: **plan under review. Scope is not agreed.** Revision 3, answering
+ChatGPT's reviews of 4 Nov on PR #316 (thread 4331289034) and 5 Nov on this PR. No stage-1 code may
 land until Claude and ChatGPT have each stated "Stage 1 scope agreed for
 implementation" on this PR. The design is
 [`byo-browser-and-routing-data.md`](byo-browser-and-routing-data.md); this
@@ -67,14 +67,43 @@ new grant and a new approval.
   that any store must pass.
 - The device keeps its own used set too, so it refuses a replay even if the
   server is compromised.
-- A connection refused only because the tab is leased doesn't claim the nonce.
+
+**Claim order.** Reserving the tab comes first, because it is local, atomic and
+can't fail for outside reasons:
+
+1. The device takes a synchronous `lease.reserve(tab)`. If the tab is reserved or
+   leased, it refuses with "tab leased", without contacting the store. The nonce
+   stays unused and the approval stays valid.
+2. The server calls `claimOnce(nonce, exp)`. Exactly one caller wins.
+3. On a win, the device adds the nonce to its used set and promotes the
+   reservation to a lease with a new generation.
+
+| Outcome of step 2 | Reservation | Nonce |
+|---|---|---|
+| Won | Promoted | Used |
+| Already claimed | Released | Used; refused as a replay |
+| Store says it did not insert (down, refused) | Released | Unused; retryable |
+| Unknown (timeout, connection lost mid-call) | Released | Treated as used; takes a new approval |
+
+The last row fails closed: a retry after an unknown result could otherwise claim
+twice, so the user is asked again.
+
+**Tests:**
+- Simultaneous contenders, with barriers: two approvals for one tab, and one approval
+  on two sockets. One lease results, and the losing approval still works afterwards.
+- Each row of the table, using a store that fails on demand.
+- **Cross-process contract test** that any store must pass: N forked processes race
+  `claimOnce` on one nonce against a store shared between them, and exactly one wins.
+  Stage 1's production store is in-memory and so can't pass this by nature; the test
+  runs against a file-backed test store, so the contract exists before stage 2 needs it.
 
 **When something is unavailable: fail closed.**
 - The nonce store or a verifier being down refuses new claims, with a
   retryable error.
 - A lease already claimed keeps running until its `exp` or a revoke, because
-  the device enforces it locally and its claim is already recorded. Say if you
-  would rather revoke these too.
+  the device enforces it locally and its claim is already recorded. Tests: with the
+  store down, local expiry and revoke still end the lease, and no new approval can be
+  claimed. Varun hasn't decided this yet.
 - An unreadable device key refuses to approve.
 
 Key enrollment and revocation are stage 2. Stage 1 tests exercise this
@@ -91,6 +120,7 @@ these arguments. It never attaches to a browser it didn't launch on this path:
 --proxy-server=http://127.0.0.1:<port>
 --proxy-bypass-list=<-loopback>
 --webrtc-ip-handling-policy=disable_non_proxied_udp
+--disable-quic
 ```
 
 The same WebRTC setting is written to the dedicated profile's preferences as a
@@ -134,11 +164,29 @@ ports are not special-cased.
 - an origin whose DNS answer changes between connections
 - forced proxy failure before launch and mid-session
 - WebRTC, including a TURN-over-TCP candidate
-- QUIC and WebTransport. **Not tested yet.** The plan adds `--disable-quic` and
-  needs an HTTP/3 server to assert 0 packets. If WebTransport still gets out, the
-  page gets it removed through the privileged session, as done for WebRTC in a
-  throwaway check (`RTCPeerConnection` removed before page scripts, in the main
-  frame and in an iframe)
+- QUIC, WebTransport, STUN and TURN, as below
+
+**QUIC and WebTransport** (`poc-bypass-and-revoke.mjs`, 26/26 with the revoke and
+dialog checks, Chromium 1243). A client sends its first packets whether or not a server
+answers, so a counting UDP socket shows a leak without an HTTP/3 server.
+
+| Case | No proxy (control) | With the plan's flags |
+|---|---|---|
+| WebTransport from page, iframe, dedicated, shared and service worker | 4–6 UDP packets each | 0 each; worker confirmed running |
+| QUIC forced for an origin (`--origin-to-force-quic-on`) | 6 packets | 0 |
+| TURN over UDP, proxy down | 6 packets | 0 |
+| TURN over TCP, proxy down | 1 accept | 0 |
+
+So no script-level removal of WebTransport is needed: the network layer stopped it in
+workers too. `--disable-quic` stays as a second layer, though forced QUIC was already 0
+with the proxy flags alone, and it is added to the launch arguments above.
+
+**Not covered:** QUIC reached through an `Alt-Svc` upgrade from a real server, as opposed
+to the forcing flag. Stage 1 adds that with a real HTTP/3 server.
+
+**P2 gate.** Stage 1 can't pass P2 until these controls pass on the Chromium version
+pinned in CI, in every context in the table. A path the tests don't cover fails closed
+or is named as not covered; Cascade makes no claim of egress isolation for it.
 
 **Decided by Varun (4 Nov).**
 - The proxy is on by default, with a per-device opt-out only the user can set.
@@ -167,11 +215,27 @@ under. It is checked twice:
 `revoke`, `suspend` and a disconnect change the fence synchronously, before
 anything else runs, then reject everything queued and detach the debugger.
 
-**Precise limit.** A command already written to the browser's socket can't be
-recalled. So the guarantee is: nothing is *forwarded* after the fence changes,
-and any reply to an earlier command is dropped rather than delivered. The
-ordering is what the tests pin down. Suspend works the same way, except queued
-commands are rejected, not held for hand-back.
+**Revoke does not undo what has already started.** The fence stops new forwarding only.
+Measured on Chromium 1243 (`poc-bypass-and-revoke.mjs`):
+
+| After the session ends | Result at the server |
+|---|---|
+| A `Page.navigate` already written to the socket | Still happened (1 request) |
+| A `setInterval` the agent set earlier | Kept sending (10 requests in 500 ms) |
+| Then: navigate the tab to `about:blank` | Stopped (0), tab stays open |
+| Or: close the target | Stopped (0) |
+
+So detaching isn't enough, and this limit goes in the consent text and security docs.
+Replies to earlier commands are dropped.
+
+**What `revoke` does,** in order: change the fence, reject the queue, end the page's
+activity, then detach. Ending the page's activity:
+- **CLI:** close the target. It's a dedicated profile, so the tab isn't the user's.
+- **Desktop and extension:** the tab is the user's, and S1 says it stays open, so closing
+  it isn't available. `about:blank` stops the script but loses their page. Stage 1 takes
+  this as a parameter and tests both; the choice is Varun's, before stage 2.
+
+The request policy and the proxy stay in place until this step finishes.
 
 **Deterministic race tests,** using an injected transport with barriers rather
 than timing, and a fake browser that logs every frame it receives:
@@ -184,6 +248,7 @@ than timing, and a fake browser that logs every frame it receives:
 | N commands queued | `revoke` | All N rejected, 0 received |
 | Old-generation frame arriving after a new lease | none | Refused, new lease unaffected |
 | Reply to a forwarded command, after `revoke` | none | Not delivered |
+| A timer set before `revoke` (real browser) | `revoke` | 0 requests at the server afterwards |
 
 The barrier lives in the test's transport; production code gets no hook or off
 switch.
@@ -256,57 +321,84 @@ Target.createTarget
 
 `Browser.setDownloadBehavior` is answered `{}` and never applied.
 
+### Dialogs
+
+**The device dismisses them; `Page.handleJavaScriptDialog` stays off the list.** An
+unanswered `alert()` blocks the agent's command. A privileged device session answering
+with `accept: false` freed it: `alert` returned, `confirm` returned `false`, `prompt`
+returned `null`, and the agent saw neither the dialog nor its text.
+
+The cost is that the agent can't accept a dialog, so a flow that needs "OK" on a
+`confirm` fails. That is the safer default for an action the user hasn't seen. Dialog
+events stay dropped, and `beforeunload` needs its own test.
+
 ### Allowed events
 
-Seen forwarded in a full run of `poc-egress-and-lease.mjs` (31):
+**Default deny at three levels:** event name, field and URL. The same filter runs on every
+session, nested ones included, and on replies that carry URLs (`Page.getFrameTree`,
+`Page.getNavigationHistory`). Events from a session on a site without consent are dropped.
+An event isn't added because Playwright asks for it; it's added when a test shows what
+breaks without it and its fields have been reviewed.
 
-```
-Inspector.workerScriptLoaded
-Log.entryAdded
-Network.dataReceived
-Network.loadingFailed
-Network.loadingFinished
-Network.policyUpdated
-Network.requestServedFromCache
-Network.requestWillBeSent      (redacted)
-Network.responseReceived       (redacted)
-Network.webSocketClosed
-Network.webSocketCreated
-Page.domContentEventFired
-Page.downloadProgress
-Page.downloadWillBegin
-Page.frameAttached
-Page.frameClearedScheduledNavigation
-Page.frameDetached
-Page.frameNavigated
-Page.frameRequestedNavigation
-Page.frameScheduledNavigation
-Page.frameStartedLoading
-Page.frameStartedNavigating
-Page.frameStoppedLoading
-Page.lifecycleEvent
-Page.loadEventFired
-Page.windowOpen
-Runtime.executionContextCreated
-Runtime.executionContextsCleared
-Target.attachedToTarget
-Target.detachedFromTarget
-Target.targetInfoChanged
-```
+**Why this is needed.** In a full prototype run, frames naming an off-list or private
+destination reached the agent from `Network.requestWillBeSent` (11), `Page.windowOpen` (13),
+`Page.frameStartedNavigating` (6), `Page.frameNavigated` (7), `Network.responseReceived` (5),
+`Page.frameRequestedNavigation` (4) and `Page.frameScheduledNavigation` (3). Some of these are
+public subresources the design allows and some are the blocked cases; I didn't separate them.
+The prototype's "0 requests" results stand, but the agent can learn a blocked URL from these.
 
-Not seen in that run but likely needed by Playwright, each to be confirmed by a
-test before it's added: `Inspector.targetCrashed`,
-`Page.javascriptDialogClosed`, `Page.javascriptDialogOpening`,
-`Page.navigatedWithinDocument`, `Runtime.consoleAPICalled`,
-`Runtime.exceptionThrown`, `Runtime.executionContextDestroyed`.
+**URL rule,** applied to every URL field in an allowed event:
 
-**To review during implementation:**
-- `Page.windowOpen`, `Page.frameRequestedNavigation`,
-  `Page.frameScheduledNavigation` and `Network.webSocketCreated` carry URLs, and
-  can name a destination the policy blocked. The history rule hides those, so
-  these need the same treatment or a reason they don't.
-- `Page.handleJavaScriptDialog` isn't allowed, so a dialog would stall the agent.
-  Allow it, or have the device dismiss dialogs itself.
+| Destination | Treatment |
+|---|---|
+| Consented origin | Kept, without any `user:password@` |
+| Public subresource on another origin (allowed by §4.3) | Origin and path only; query and fragment removed |
+| Blocked, private without consent, or not http(s) | The whole event is dropped |
+
+**Limit:** on a consented page, the agent can still read much of this through `evaluate`
+(`location`, `performance.getEntries()`), as §4.3 states. The filter stops the event stream
+disclosing things, in particular URLs the page never got to load. It doesn't hide what the
+page can read.
+
+**Allowed fields.** A field not listed is removed. `url` means the URL rule applies, and
+each of these also carries its own `frameId`, `loaderId`, `requestId` and timestamps.
+
+| Event | Other allowed fields |
+|---|---|
+| `Network.requestWillBeSent` | `request.url`, `request.method`, `type`, `documentURL` (`url`), `redirectResponse` as below; `request.headers` per the header rule; no `postData`, `postDataEntries` or `initiator` |
+| `Network.responseReceived` | `response.url`, `response.status`, `response.mimeType`, `type`; `response.headers` per the header rule; no `securityDetails`, `remoteIPAddress` or `headersText` |
+| `Network.loadingFailed` | `type`, `canceled`; only when the request was forwarded; no `errorText` for a blocked request, because it names the policy |
+| `Network.dataReceived`, `loadingFinished`, `requestServedFromCache` | Sizes only |
+| `Network.webSocketCreated` | `url` |
+| `Network.webSocketClosed` | None |
+| `Page.frameAttached`, `frameDetached`, `frameStartedLoading`, `frameStoppedLoading`, `frameClearedScheduledNavigation`, `lifecycleEvent`, `domContentEventFired`, `loadEventFired` | Ids and names |
+| `Page.frameNavigated` | `frame.id`, `frame.parentId`, `frame.url`, `frame.urlFragment`, `frame.securityOrigin` (`url`); no `unreachableUrl` |
+| `Page.frameRequestedNavigation`, `frameScheduledNavigation`, `frameStartedNavigating` | `url`, `reason` |
+| `Page.downloadWillBegin`, `downloadProgress` | `url` only on the first; no `suggestedFilename` |
+| `Runtime.executionContextCreated` | `context.id`, `context.origin` (`url`), `context.auxData` |
+| `Runtime.executionContextsCleared`, `Inspector.workerScriptLoaded` | None |
+| `Target.attachedToTarget`, `detachedFromTarget`, `targetInfoChanged` | `sessionId`, `targetInfo.targetId`, `targetInfo.type`, `targetInfo.url` (`url`), `waitingForDebugger` |
+
+**Header rule:** an allowlist, not a removal list: `content-type`, `content-length`, and
+`location` with the URL rule. Everything else is removed, credential headers included.
+
+**Removed from the list since revision 2:**
+- `Page.windowOpen`: a second page is always closed, and this names where it was going.
+- `Log.entryAdded` and `Network.policyUpdated`: log text can name a blocked URL, and neither
+  is needed to drive a page. `Log.enable` is answered without being applied.
+
+**Stays denied:** `Runtime.consoleAPICalled`, `Runtime.exceptionThrown`, and the dialog events.
+Page script can write anything to the console, and enabling them later needs its own review.
+
+**May be added if a test shows the need:** `Inspector.targetCrashed`,
+`Page.navigatedWithinDocument` (`url`), `Runtime.executionContextDestroyed`.
+
+**Regression test.** Trigger blocked private and cross-origin destinations, through each of
+navigation, redirect, `window.open`, WebSocket, iframe and a nested session, using URLs with a
+unique marker in the path, query, fragment and userinfo, plus a unique cookie, `Authorization`
+header and POST body. No frame to the agent, on any session, contains any marker. **Control:**
+with the filter off, the markers do appear. Playwright must still drive normal pages with the
+filter on; any breakage shows here, and is the case for adding an event or field.
 
 ### Compatibility rule
 
@@ -347,16 +439,17 @@ Unit tests in vitest. Browser tests assert at counting servers.
 - **R-A2:** back/forward with the back-forward cache on. **Control:** `waitUntil:
   'load'` hangs there.
 - **Revert checks,** reported per commit, for the event filter, the resolved-address
-  check, the WebRTC setting and fencing.
+  check, the WebRTC setting, fencing and revoke's page step.
 
-**CI.** `CHROMIUM` is set to a browser in the workflow, and browser tests **fail
+**CI.** `CHROMIUM` is set to a pinned browser version in the workflow, and browser tests **fail
 rather than skip** when `CI` is set and none is found. CI has no browser step
 today.
 
-**Performance.** A measurement, with no target until there is a baseline: median
-and p95 navigation latency, and per-request proxy overhead, baseline against
-enforced, on the same browser and local site. Reported in the PR; no throughput
-claim.
+**Performance.** Measurements, with no target or overhead claim until there is a
+baseline: median and p95 navigation latency, per-request proxy overhead, proxy CPU and
+memory, connection count, and how long failure and recovery take, baseline against
+enforced, on the same browser and local site. Reported in the PR before the adapter
+stage. The unused library adds no production overhead in stage 1.
 
 ## 7. Excluded from stage 1
 
