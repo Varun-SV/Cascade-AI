@@ -53,13 +53,12 @@ const suite = CHROMIUM ? describe : describe.skip;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface Counting { hits: string[]; accepts: number; port: number; close(): void }
-function countingServer(routeTable: Record<string, (req: http.IncomingMessage, res: http.ServerResponse) => void> = {}): Promise<Counting> {
-  const routes = new Map(Object.entries(routeTable));
+/** `handle` answers the paths it knows and returns true; anything else gets a plain page. */
+function countingServer(handle: (path: string, res: http.ServerResponse) => boolean = () => false): Promise<Counting> {
   const state = { hits: [] as string[], accepts: 0 };
   const server = http.createServer((req, res) => {
     state.hits.push(`${req.method} ${req.url}`);
-    const route = routes.get((req.url ?? '/').split('?')[0]!);
-    if (route) return route(req, res);
+    if (handle((req.url ?? '/').split('?')[0]!, res)) return;
     res.setHeader('content-type', 'text/html');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.end('<!doctype html><title>page</title><body>page</body>');
@@ -97,18 +96,30 @@ interface Rig {
 const rigs: Rig[] = [];
 
 async function startRig(opts: { pageEnd?: PageEndMode; consent?: Consent; raw?: boolean } = {}): Promise<Rig> {
-  const workerScript = (extra = '') => (_q: http.IncomingMessage, res: http.ServerResponse) => { res.setHeader('content-type', 'text/javascript'); res.end(WORKER_JS + extra); };
-  const allowed = await countingServer({
-    '/worker.js': workerScript(), '/sw.js': workerScript(),
-    '/timer-worker.js': workerScript("setInterval(() => fetch('/beacon?worker-timer').catch(() => {}), 50);"),
-    '/redirect': (req, res) => { res.statusCode = 302; res.setHeader('location', `http://offlist.test/from-redirect${req.url?.includes('?') ? `?${req.url.split('?')[1]}` : ''}`); res.end(); },
-    '/redirect-marked': (_q, res) => { res.statusCode = 302; res.setHeader('location', 'http://offlist.test/MARKPATH?q=MARKQUERY'); res.end(); },
-    '/redirect-https': (_q, res) => { res.statusCode = 302; res.setHeader('location', 'https://offlist.test/from-redirect-https'); res.end(); },
-    '/redirect-private': (_q, res) => { res.statusCode = 302; res.setHeader('location', `http://127.0.0.1:${privPortRef.port}/from-redirect`); res.end(); },
-    '/links': (_q, res) => { res.setHeader('content-type', 'text/html'); res.end('<!doctype html><a id=a href="/two">two</a> <a id=off href="http://offlist.test/link">off</a>'); },
-    '/redirect-self': (_q, res) => { res.statusCode = 302; res.setHeader('location', '/landed'); res.end(); },
+  const script = (res: http.ServerResponse, extra = ''): boolean => { res.setHeader('content-type', 'text/javascript'); res.end(WORKER_JS + extra); return true; };
+  const redirect = (res: http.ServerResponse, to: string): boolean => { res.statusCode = 302; res.setHeader('location', to); res.end(); return true; };
+  const allowed = await countingServer((path, res) => {
+    switch (path) {
+      case '/worker.js': case '/sw.js': return script(res);
+      case '/timer-worker.js': return script(res, "setInterval(() => fetch('/beacon?worker-timer').catch(() => {}), 50);");
+      case '/redirect': return redirect(res, 'http://offlist.test/from-redirect');
+      case '/redirect-marked': return redirect(res, 'http://offlist.test/MARKPATH?q=MARKQUERY');
+      case '/redirect-https': return redirect(res, 'https://offlist.test/from-redirect-https');
+      case '/redirect-private': return redirect(res, `http://127.0.0.1:${privPortRef.port}/from-redirect`);
+      case '/redirect-self': return redirect(res, '/landed');
+      case '/links':
+        res.setHeader('content-type', 'text/html');
+        res.end('<!doctype html><a id=a href="/two">two</a> <a id=off href="http://offlist.test/link">off</a>');
+        return true;
+      default: return false;
+    }
   });
-  const offlist = await countingServer({ '/lib.js': (_q, res) => { res.setHeader('content-type', 'text/javascript'); res.end('window.__lib = 1;'); } });
+  const offlist = await countingServer((path, res) => {
+    if (path !== '/lib.js') return false;
+    res.setHeader('content-type', 'text/javascript');
+    res.end('window.__lib = 1;');
+    return true;
+  });
   const privPortRef = { port: 0 };
   const priv = await countingServer();
   privPortRef.port = priv.port;
