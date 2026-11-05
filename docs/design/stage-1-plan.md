@@ -1,9 +1,10 @@
 # Stage 1 plan: relay contract library
 
-Status: **plan under review. Scope is not agreed.** Revision 3, answering
-ChatGPT's reviews of 4 Nov on PR #316 (thread 4331289034) and 5 Nov on this PR. No stage-1 code may
-land until Claude and ChatGPT have each stated "Stage 1 scope agreed for
-implementation" on this PR. The design is
+Status: **implemented in `src/browser/relay/`, under review.** Revision 4. Varun
+directed on 5 Nov that the complete stage 1 code goes in PR #338, with Claude and
+ChatGPT reviewing until both state "Stage 1 implementation complete — agree" on the
+same commit. Nothing here is approved until then. Section 9 lists what differs from
+the earlier text and what's still a gap. The design is
 [`byo-browser-and-routing-data.md`](byo-browser-and-routing-data.md); this
 plan does not replace it.
 
@@ -61,7 +62,8 @@ an unknown version or a mismatched `policyVersion` are refused. §5's
 new grant and a new approval.
 
 **Single use.**
-- The server claims through an injected `NonceStore.claimOnce(nonce, exp)`,
+- The server claims through an injected `NonceStore.claimOnce(grantNonce, exp)`,
+  keyed by the grant so each grant yields one lease however many approvals exist,
   which must be an atomic insert visible to every server instance. Stage 2
   supplies the real store. Stage 1 ships an in-memory one and a contract test
   that any store must pass.
@@ -471,3 +473,62 @@ stage. The unused library adds no production overhead in stage 1.
   a change to an existing tool.
 - **Gates:** R-A2 joins stage 1's gate and P4 joins the later stage gates, both
   supported by ChatGPT on 4 Nov (design §10).
+
+## 9. As built
+
+**Where the code differs from the text above**
+
+- **Headers:** only `content-type` and `content-length` pass. `location` is dropped
+  rather than filtered, as nothing needed it.
+- **`initiator`:** `Network.requestWillBeSent` keeps `initiator.type` alone, which
+  Playwright reads. Its URL and stack are removed.
+- **Fields added after testing:** `Page.documentOpened`, `Page.navigatedWithinDocument`,
+  `Runtime.executionContextDestroyed` and `Inspector.targetCrashed`. A blocked-field
+  test covers each URL they carry.
+- **ExtraInfo flags** are forced to `false`, as nothing forwards those events and
+  Playwright would otherwise wait for ever.
+- **Workers on revoke:** a shared or service worker outlives a navigation, so
+  `endPageActivity` closes them first, in either mode. Tested with a shared worker's timer.
+- **Frame ids** must rise on a connection. A lower one fails closed, like a malformed
+  frame. This stands in for the sequence numbers in design §5.
+
+**Known limits**
+
+- **Playwright's `page.setContent` hangs over the relay.** It waits for a console message,
+  and console events stay denied. Nothing in `src/` calls it today. Stage 2 must keep it that
+  way, or decide otherwise deliberately.
+- **Dialogs can't be accepted** by the agent. `beforeunload` isn't tested yet.
+- **A command already written can't be recalled.** Revoke then ends the page's activity,
+  so the tab doesn't stay on what it did.
+- **Consented pages can read much of this anyway** through `evaluate`, as §4.3 states.
+
+**Known gaps**
+
+- **`Alt-Svc` has no positive control.** With a private certificate, Chromium 1243 didn't try
+  HTTP/3 from the header even with no proxy, so the test's 0 packets behind the proxy prove
+  little alone. Why isn't established; I didn't get as far as a trusted certificate or a real
+  HTTP/3 server. The network path is covered with controls by forced QUIC and WebTransport.
+- **TURN and forced QUIC** have controls in `poc-bypass-and-revoke.mjs`, not in the vitest
+  suite, which has them for STUN and WebTransport.
+- **IPv6 at the destination:** `alias6.test` is asserted by the absence of a dial, as the suite
+  has no server on `::1`.
+- **The real nonce store,** device keys and server endpoint are stage 2. O1 is proved at
+  library level only.
+- **The relay isn't wired end to end with `capability.ts`:** `acquireLease` joins them, and each
+  is tested, but the browser suite grants its lease directly. Stage 2 connects them.
+- **Open for Varun:** tab behaviour on revoke for desktop and extension, and whether leases
+  survive a store outage.
+
+**Measurements** (`scripts/measure-relay.ts`, Chromium 1243, one local run on this sandbox,
+local site with no real network, so a comparison and not a bound):
+
+| Measure (ms) | Baseline median | Baseline p95 | Enforced median | Enforced p95 |
+|---|---|---|---|---|
+| Navigation | 30.84 | 48.15 | 40.42 | 50.69 |
+| Fetch | 2.30 | 3.80 | 4.90 | 8.10 |
+
+- Device process during the enforced run, including the script's own CDP client: 23% of one core
+  over 3.6 s; RSS 110.0 MB before, 115.5 MB after.
+- 462 proxy decisions and 640 policy decisions in that run.
+- Proxy close noticed in 1.09 ms; ending page activity 24.46 ms; a new proxy and browser through
+  the canary 561 ms.
