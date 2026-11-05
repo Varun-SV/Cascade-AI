@@ -53,11 +53,12 @@ const suite = CHROMIUM ? describe : describe.skip;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface Counting { hits: string[]; accepts: number; port: number; close(): void }
-function countingServer(routes: Record<string, (req: http.IncomingMessage, res: http.ServerResponse) => void> = {}): Promise<Counting> {
+function countingServer(routeTable: Record<string, (req: http.IncomingMessage, res: http.ServerResponse) => void> = {}): Promise<Counting> {
+  const routes = new Map(Object.entries(routeTable));
   const state = { hits: [] as string[], accepts: 0 };
   const server = http.createServer((req, res) => {
     state.hits.push(`${req.method} ${req.url}`);
-    const route = routes[(req.url ?? '/').split('?')[0]!];
+    const route = routes.get((req.url ?? '/').split('?')[0]!);
     if (route) return route(req, res);
     res.setHeader('content-type', 'text/html');
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -205,7 +206,12 @@ async function startRig(opts: { pageEnd?: PageEndMode; consent?: Consent; raw?: 
 afterEach(async () => { for (const r of rigs.splice(0)) await r.stop().catch(() => {}); });
 
 const tryFetch = (u: string) => `fetch(${JSON.stringify(u)}, { mode: 'no-cors' }).then(() => 'reached', () => 'failed')`;
-const tryWs = (u: string) => `new Promise((r) => { const w = new WebSocket(${JSON.stringify(u)}); w.onopen = () => r('open'); w.onerror = () => r('failed'); setTimeout(() => r('timeout'), 1500); })`;
+const tryWs = (u: string) => new Promise<string>((res) => {
+  const w = new (globalThis as unknown as { WebSocket: new (u: string) => { onopen: unknown; onerror: unknown } }).WebSocket(u);
+  w.onopen = () => res('open');
+  w.onerror = () => res('failed');
+  setTimeout(() => res('timeout'), 1500);
+});
 
 suite('P1 in a real browser', { timeout: 60_000 }, () => {
   it('normal Playwright use hits no refusals, and refused methods never work', async () => {
@@ -292,7 +298,7 @@ suite('P2: no request reaches a destination without consent', { timeout: 90_000 
       expect(await r.page.evaluate(tryFetch(u)), u).toBe('failed');
     }
     for (const u of [`ws://127.0.0.1:${port}/`, `wss://127.0.0.1:${port}/`, `ws://[::ffff:127.0.0.1]:${port}/`]) {
-      expect(await r.page.evaluate(tryWs(u)), u).not.toBe('open');
+      expect(await r.page.evaluate(tryWs as never, u), u).not.toBe('open');
     }
     expect(r.priv.accepts).toBe(0);
     expect(r.proxy.decisions.some((d) => d.kind === 'connect' && !d.allowed)).toBe(true);
@@ -305,7 +311,7 @@ suite('P2: no request reaches a destination without consent', { timeout: 90_000 
       // The proxy answers 403 itself, which a no-cors fetch can't tell from a reply;
       // what matters is below, at the private server.
       await r.page.evaluate(tryFetch(`http://${host}:${port}/`));
-      expect(await r.page.evaluate(tryWs(`ws://${host}:${port}/`)), host).not.toBe('open');
+      expect(await r.page.evaluate(tryWs as never, `ws://${host}:${port}/`), host).not.toBe('open');
     }
     expect(r.priv.accepts).toBe(0);
     expect(r.dials.some((d) => d.address === '127.0.0.1' || d.address === '::1')).toBe(false);
@@ -478,12 +484,12 @@ suite('no-leak markers: nothing forbidden reaches the agent', { timeout: 60_000 
     await p.evaluate(`document.cookie = '${M.cookie}=1'`);
     await p.evaluate(`fetch('/echo', { method: 'POST', body: '${M.body}', headers: { Authorization: '${M.auth}', 'X-Marker': '${M.auth}' } })`);
     await p.evaluate(tryFetch(privUrl));
-    await p.evaluate(`window.open(${JSON.stringify(blockedUrl)})`);
-    await p.evaluate(tryWs(`ws://127.0.0.1:${r.priv.port}/${M.path}`));
-    await p.evaluate(`location.href = ${JSON.stringify(blockedUrl)}`).catch(() => {});
+    await p.evaluate(((u: string) => { window.open(u); }) as never, blockedUrl);
+    await p.evaluate(tryWs as never, `ws://127.0.0.1:${r.priv.port}/${M.path}`);
+    await p.evaluate(((u: string) => { location.href = u; }) as never, blockedUrl).catch(() => {});
     await sleep(300);
     await p.goto('http://allowed.test/').catch(() => {});
-    await p.evaluate(`(() => { const f = document.createElement('iframe'); f.src = ${JSON.stringify(blockedUrl)}; document.body.append(f); })()`);
+    await p.evaluate(((u: string) => { const f = document.createElement('iframe'); f.src = u; document.body.append(f); }) as never, blockedUrl);
     await p.goto('http://allowed.test/redirect-marked').catch(() => {});
     await sleep(400);
     raw.close();
