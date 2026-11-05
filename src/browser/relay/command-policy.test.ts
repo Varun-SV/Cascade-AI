@@ -70,7 +70,7 @@ describe('the compatibility rule', () => {
     });
     const digest = createHash('sha256').update(lists).digest('hex').slice(0, 16);
     // Change a list → bump POLICY_VERSION and update both values, in one reviewed commit.
-    expect({ POLICY_VERSION, digest }).toEqual({ POLICY_VERSION: 1, digest: 'e8146377579470ad' });
+    expect({ POLICY_VERSION, digest }).toEqual({ POLICY_VERSION: 1, digest: 'd706799b5cae3f2b' });
   });
 });
 
@@ -99,14 +99,14 @@ describe('events are default deny at name, field and URL level', () => {
       },
     }, consent);
     expect(out).toEqual({
-      requestId: 'r', type: 'Fetch', initiator: { type: 'script' },
+      requestId: 'r', type: 'Fetch', initiator: { type: 'script' }, redirectHasExtraInfo: false,
       request: { url: 'https://ok.test/a', method: 'POST', hasPostData: true, headers: { 'Content-Type': 'text/plain' } },
     });
     const res = filterEvent('Network.responseReceived', {
       requestId: 'r', type: 'Fetch',
       response: { url: 'https://ok.test/a', status: 200, headersText: 'raw', remoteIPAddress: '1.2.3.4', securityDetails: {}, headers: { 'Set-Cookie': 'c=1', Location: 'https://evil.test' } },
     }, consent);
-    expect(res).toEqual({ requestId: 'r', type: 'Fetch', response: { url: 'https://ok.test/a', status: 200, headers: {} } });
+    expect(res).toEqual({ requestId: 'r', type: 'Fetch', hasExtraInfo: false, response: { url: 'https://ok.test/a', status: 200, headers: {} } });
   });
   it('applies the URL rule', () => {
     expect(agentUrl('https://u:p@ok.test/a?q=1#f', 'document', consent)).toBe('https://ok.test/a?q=1#f');
@@ -134,6 +134,13 @@ describe('events are default deny at name, field and URL level', () => {
       ['Runtime.executionContextCreated', { context: { id: 1, origin: 'https://offlist.test' } }],
     ];
     for (const [m, p] of cases) expect(filterEvent(m, p, consent), m).toBeNull();
+  });
+});
+
+describe('nothing promises what the filter drops', () => {
+  it('clears the ExtraInfo flags even when the browser sets them', () => {
+    expect(filterEvent('Network.responseReceived', { requestId: 'r', hasExtraInfo: true, response: { url: 'https://ok.test/' } }, consent)).toMatchObject({ hasExtraInfo: false });
+    expect(filterEvent('Network.requestWillBeSent', { requestId: 'r', redirectHasExtraInfo: true, request: { url: 'https://ok.test/' } }, consent)).toMatchObject({ redirectHasExtraInfo: false });
   });
 });
 

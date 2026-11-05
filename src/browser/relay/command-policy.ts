@@ -122,6 +122,8 @@ export function checkCommand(frame: CommandFrame, ctx: CommandContext): CommandD
 export function agentUrl(raw: unknown, kind: 'document' | 'subresource', consent: Consent): string | null {
   if (typeof raw !== 'string') return null;
   if (raw === '' || raw === 'about:blank' || raw === 'about:srcdoc') return raw;
+  // What Chromium reports as the origin of about:blank and sandboxed documents.
+  if (raw === '://' || raw === 'null') return raw;
   if (kind === 'document') {
     if (!onConsentedSite(raw, consent)) return null;
     return withoutUserinfo(raw);
@@ -164,11 +166,11 @@ const TARGET_INFO: Schema = {
 const SCHEMAS: Readonly<Record<string, Schema>> = {
   'Network.requestWillBeSent': {
     requestId: true, loaderId: true, documentURL: 'documentUrl', timestamp: true, wallTime: true, type: true,
-    frameId: true, hasUserGesture: true, redirectHasExtraInfo: true, redirectResponse: RESPONSE,
+    frameId: true, hasUserGesture: true, redirectResponse: RESPONSE,
     initiator: { type: true },
     request: { url: 'subresourceUrl', method: true, headers: 'headers', initialPriority: true, referrerPolicy: true, hasPostData: true },
   },
-  'Network.responseReceived': { requestId: true, loaderId: true, timestamp: true, type: true, frameId: true, hasExtraInfo: true, response: RESPONSE },
+  'Network.responseReceived': { requestId: true, loaderId: true, timestamp: true, type: true, frameId: true, response: RESPONSE },
   'Network.loadingFailed': { requestId: true, timestamp: true, type: true, canceled: true },
   'Network.dataReceived': { requestId: true, timestamp: true, dataLength: true, encodedDataLength: true },
   'Network.loadingFinished': { requestId: true, timestamp: true, encodedDataLength: true },
@@ -189,6 +191,9 @@ const SCHEMAS: Readonly<Record<string, Schema>> = {
       id: true, parentId: true, loaderId: true, name: true, url: 'documentUrl', urlFragment: true,
       domainAndRegistry: true, securityOrigin: 'documentUrl', mimeType: true,
     },
+  },
+  'Page.documentOpened': {
+    frame: { id: true, parentId: true, loaderId: true, name: true, url: 'documentUrl', urlFragment: true, securityOrigin: 'documentUrl', mimeType: true },
   },
   'Page.navigatedWithinDocument': { frameId: true, url: 'documentUrl', navigationType: true },
   'Page.frameRequestedNavigation': { frameId: true, reason: true, url: 'documentUrl', disposition: true },
@@ -239,13 +244,15 @@ export function filterEvent(method: string, params: Record<string, unknown>, con
   if (!schema) return null;
   try {
     const out = applySchema(params, schema, consent);
-    if (method === 'Network.requestWillBeSent' && params.type === 'Document') {
-      const url = (params.request as { url?: unknown } | undefined)?.url;
-      if (agentUrl(url, 'document', consent) === null) return null;
+    // ExtraInfo events are never forwarded, so nothing may promise them: Playwright
+    // would wait for them for ever.
+    if (method === 'Network.requestWillBeSent') {
+      if (params.type === 'Document' && agentUrl((params.request as { url?: unknown } | undefined)?.url, 'document', consent) === null) return null;
+      out.redirectHasExtraInfo = false;
     }
-    if (method === 'Network.responseReceived' && params.type === 'Document') {
-      const url = (params.response as { url?: unknown } | undefined)?.url;
-      if (agentUrl(url, 'document', consent) === null) return null;
+    if (method === 'Network.responseReceived') {
+      if (params.type === 'Document' && agentUrl((params.response as { url?: unknown } | undefined)?.url, 'document', consent) === null) return null;
+      out.hasExtraInfo = false;
     }
     return out;
   } catch (e) {
