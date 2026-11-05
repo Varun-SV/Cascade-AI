@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { endPageActivity, policeChild } from './request-enforcer.js';
+import { historyIsSafe, endPageActivity, policeChild } from './request-enforcer.js';
+import { makeConsent } from './egress-rules.js';
 
 /** A CDP client that fails the named steps, and records the order of the rest. */
 function fakeClient(failing: string[] = []) {
@@ -11,6 +12,7 @@ function fakeClient(failing: string[] = []) {
   });
   return { send, calls };
 }
+const OWNED = new Set(['sw', 'shw']);
 const RESUME = 'Runtime.runIfWaitingForDebugger';
 
 describe('a child target runs only if every setup step succeeded', () => {
@@ -66,32 +68,61 @@ describe('the page step of a revoke always finishes, and ends the tab', () => {
 
   it('blank: closes shared and service workers, leaves the tab open on about:blank', async () => {
     const tab = cdp(); const browser = cdp(WORKERS);
-    expect(await endPageActivity(tab, browser, TAB, 'blank', 20)).toBe(true);
+    expect(await endPageActivity(tab, browser, TAB, 'blank', OWNED, 20)).toBe(true);
     expect(closed(browser)).toEqual(['sw', 'shw']);
     expect(tab.calls.map((c) => c.method)).toEqual(['Page.navigate']);
   });
   it('close: closes the workers and the tab, without navigating', async () => {
     const tab = cdp(); const browser = cdp(WORKERS);
-    expect(await endPageActivity(tab, browser, TAB, 'close', 20)).toBe(true);
+    expect(await endPageActivity(tab, browser, TAB, 'close', OWNED, 20)).toBe(true);
     expect(closed(browser)).toEqual(['sw', 'shw', TAB]);
     expect(tab.calls).toEqual([]);
   });
   it.each(['hang', 'fail'] as const)('blank: a navigation that will %s closes the tab instead', async (how) => {
     const browser = cdp();
-    expect(await endPageActivity(cdp({ 'Page.navigate': how }), browser, TAB, 'blank', 20)).toBe(true);
+    expect(await endPageActivity(cdp({ 'Page.navigate': how }), browser, TAB, 'blank', OWNED, 20)).toBe(true);
     expect(closed(browser)).toEqual([TAB]);
   });
   it.each(['hang', 'fail'] as const)('listing the workers will %s: the tab still ends', async (how) => {
     const tab = cdp(); const browser = cdp({ 'Target.getTargets': how });
-    expect(await endPageActivity(tab, browser, TAB, 'blank', 20)).toBe(true);
+    expect(await endPageActivity(tab, browser, TAB, 'blank', OWNED, 20)).toBe(true);
     expect(tab.calls.map((c) => c.method)).toEqual(['Page.navigate']);
     const browser2 = cdp({ 'Target.getTargets': how });
-    expect(await endPageActivity(cdp(), browser2, TAB, 'close', 20)).toBe(true);
+    expect(await endPageActivity(cdp(), browser2, TAB, 'close', OWNED, 20)).toBe(true);
     expect(closed(browser2)).toEqual([TAB]);
   });
   it.each(['hang', 'fail'] as const)('a close that will %s is reported as unconfirmed, not success', async (how) => {
     const browser = cdp({ 'Target.closeTarget': how });
-    expect(await endPageActivity(cdp({ 'Page.navigate': 'hang' }), browser, TAB, 'blank', 20)).toBe(false);
-    expect(await endPageActivity(cdp(), cdp({ 'Target.closeTarget': how }), TAB, 'close', 20)).toBe(false);
+    expect(await endPageActivity(cdp({ 'Page.navigate': 'hang' }), browser, TAB, 'blank', OWNED, 20)).toBe(false);
+    expect(await endPageActivity(cdp(), cdp({ 'Target.closeTarget': how }), TAB, 'close', OWNED, 20)).toBe(false);
+  });
+});
+
+describe('historyIsSafe', () => {
+  const consent = makeConsent(['https://ok.test']);
+  const entry = (url: string) => ({ id: 1, url });
+  it.each<[string, unknown]>([
+    ['no reply', undefined], ['null', null], ['no entries', { currentIndex: 0 }], ['empty entries', { currentIndex: 0, entries: [] }],
+    ['entries not a list', { currentIndex: 0, entries: {} }], ['no index', { entries: [entry('about:blank')] }],
+    ['index past the end', { currentIndex: 1, entries: [entry('about:blank')] }], ['negative index', { currentIndex: -1, entries: [entry('about:blank')] }],
+    ['an entry with no URL', { currentIndex: 0, entries: [{ id: 1 }] }], ['an empty URL', { currentIndex: 0, entries: [entry('')] }],
+    ['a null entry', { currentIndex: 0, entries: [null] }],
+    ['an entry on another site', { currentIndex: 0, entries: [entry('https://ok.test/'), entry('https://offlist.test/')] }],
+  ])('refuses %s', (_n, reply) => { expect(historyIsSafe(reply, consent)).toBe(false); });
+  it('accepts a well-formed history on consented sites', () => {
+    expect(historyIsSafe({ currentIndex: 1, entries: [entry('about:blank'), entry('https://ok.test/a')] }, consent)).toBe(true);
+  });
+});
+
+describe('a revoke closes only workers the lease saw start', () => {
+  it('leaves other workers alone, and still ends the tab', async () => {
+    const closed: string[] = [];
+    const browser = { send: async (m: string, p?: { targetId?: string }) => {
+      if (m === 'Target.getTargets') return { targetInfos: [{ targetId: 'mine', type: 'service_worker' }, { targetId: 'theirs', type: 'service_worker' }, { targetId: 'theirs2', type: 'shared_worker' }, { targetId: 'mine2', type: 'shared_worker' }] };
+      if (m === 'Target.closeTarget') closed.push(p!.targetId!);
+      return {};
+    } };
+    expect(await endPageActivity({ send: async () => ({}) }, browser as never, 'tab', 'close', new Set(['mine', 'mine2']))).toBe(true);
+    expect(closed.sort()).toEqual(['mine', 'mine2', 'tab']);
   });
 });

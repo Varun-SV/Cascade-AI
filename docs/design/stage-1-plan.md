@@ -487,6 +487,17 @@ stage. The unused library adds no production overhead in stage 1.
   `domainAndRegistry` and target `title`. `auxData` is reduced to `isDefault`, `type` and
   `frameId`. `statusText` is blanked, as Playwright needs the field to exist. A consented URL
   still keeps its fragment under the URL rule, as `location` shows it to the page anyway.
+- **The request policy needs a dedicated browser.** It's browser-wide: it closes new pages and
+  intercepts every request. So `startRequestPolicy` refuses a browser with any other tab open.
+  Desktop and the extension share a browser with the user and need their own scoped enforcer.
+- **A revoke closes only workers the lease saw start,** not every worker in the browser.
+- **History must be well formed** before it counts as safe: at least one entry, a valid index, a
+  URL on each.
+- **Prerender is only partly exercised.** A same-origin prerender ran, and activating it keeps the
+  lease. One redirected off-list got 0 at the server, but no entry in the policy's log, so that
+  stop isn't shown to be the policy's. Chromium 1243 didn't attempt a cross-origin prerender here.
+  No prerender test reaches the main-frame backstop, so that backstop is tested only through the
+  back-forward path.
 - **History titles (policy version 3)** are blanked on every entry; ids and the index stay.
 - **`context.name` stays.** A page can't set it (tested with `window.name`, a frame name and a
   title), and Playwright can't click without it (tested: `page.click` times out with it removed).

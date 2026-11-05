@@ -96,13 +96,19 @@ interface Rig {
 }
 const rigs: Rig[] = [];
 
-async function startRig(opts: { pageEnd?: PageEndMode; consent?: Consent; raw?: boolean } = {}): Promise<Rig> {
+async function startRig(opts: { pageEnd?: PageEndMode; consent?: Consent; raw?: boolean; beforePolicy?: (b: LaunchedBrowser) => Promise<void> } = {}): Promise<Rig> {
   const script = (res: http.ServerResponse, extra = ''): boolean => { res.setHeader('content-type', 'text/javascript'); res.end(WORKER_JS + extra); return true; };
   const redirect = (res: http.ServerResponse, to: string): boolean => { res.statusCode = 302; res.setHeader('location', to); res.end(); return true; };
   const allowed = await countingServer((path, res, req) => {
     switch (path) {
       case '/sw-private.js': return script(res, `fetch(${JSON.stringify(decodeURIComponent((req.url ?? '').split('u=')[1] ?? ''))}, { mode: 'no-cors' }).catch(() => {});`);
       case '/worker.js': case '/sw.js': return script(res);
+      case '/other-timer-worker.js': return script(res, "setInterval(() => fetch('/beacon?other-timer').catch(() => {}), 50);");
+      case '/prerender-rules':
+        res.setHeader('content-type', 'text/html');
+        res.end('<!doctype html><script type="speculationrules">' + JSON.stringify({ prerender: [{ urls: ['/pre-same', '/pre-redirect'] }] }) + '</script>');
+        return true;
+      case '/pre-redirect': return redirect(res, 'http://offlist.test/pre-foreign');
       case '/timer-worker.js': return script(res, "setInterval(() => fetch('/beacon?worker-timer').catch(() => {}), 50);");
       case '/redirect': return redirect(res, 'http://offlist.test/from-redirect');
       case '/redirect-marked': return redirect(res, 'http://offlist.test/MARKPATH?q=MARKQUERY');
@@ -127,7 +133,7 @@ async function startRig(opts: { pageEnd?: PageEndMode; consent?: Consent; raw?: 
   privPortRef.port = priv.port;
   let flip = PUBLIC_OFFLIST;
   const dns = new Map<string, string[]>([
-    ['allowed.test', [PUBLIC_ALLOWED]], ['other.test', [PUBLIC_ALLOWED]], ['offlist.test', [PUBLIC_OFFLIST]],
+    ['allowed.test', [PUBLIC_ALLOWED]], ['sub.allowed.test', [PUBLIC_ALLOWED]], ['other.test', [PUBLIC_ALLOWED]], ['offlist.test', [PUBLIC_OFFLIST]],
     ['alias.test', ['127.0.0.1']], ['alias6.test', ['::1']], ['mixed.test', [PUBLIC_OFFLIST, '127.0.0.1']],
   ]);
   const routes = new Map([[PUBLIC_ALLOWED, allowed.port], [PUBLIC_OFFLIST, offlist.port]]);
@@ -149,8 +155,9 @@ async function startRig(opts: { pageEnd?: PageEndMode; consent?: Consent; raw?: 
   const proxy = await startEgressProxy({ consent, network });
   const browser = await launchBehindProxy({
     chromiumPath: CHROMIUM!, proxy,
-    extraArgs: ['--unsafely-treat-insecure-origin-as-secure=http://allowed.test'],
+    extraArgs: ['--unsafely-treat-insecure-origin-as-secure=http://allowed.test,http://other.test'],
   });
+  await opts.beforePolicy?.(browser);
   const enforcer = await startRequestPolicy({ browserWs: browser.browserWs, tabWs: browser.tabWs, tabTargetId: browser.tabTargetId, consent });
   const lease = createTabLease();
   proxy.onClose(() => lease.revoke('egress-proxy-down'));
@@ -838,6 +845,70 @@ suite('beforeunload', { timeout: 30_000 }, () => {
     const info = await raw.send('Target.getTargetInfo') as { targetInfo: { url: string } };
     raw.close();
     expect(info.targetInfo.url).toBe('about:blank');
+  });
+});
+
+suite('isolation from what the lease did not start', { timeout: 60_000 }, () => {
+  it('a revoke stops the lease\'s worker and leaves an unrelated one running', async () => {
+    const r = await startRig({
+      pageEnd: 'blank',
+      beforePolicy: async (b) => {
+        // Registered before the policy exists, on another origin: not this lease's.
+        const raw = await connectCdp(b.tabWs);
+        await raw.send('Page.enable');
+        await raw.send('Page.navigate', { url: 'http://other.test/' });
+        await sleep(200);
+        await raw.send('Runtime.evaluate', { expression: "navigator.serviceWorker.register('/other-timer-worker.js').then(() => 1)", awaitPromise: true });
+        await sleep(300);
+        await raw.send('Page.navigate', { url: 'about:blank' });
+        await sleep(100);
+        raw.close();
+      },
+    });
+    await r.page.evaluate("navigator.serviceWorker.register('/timer-worker.js')");
+    await sleep(500);
+    const count = (m: string) => r.allowed.hits.filter((h) => h.includes(m)).length;
+    expect(count('worker-timer'), 'the lease\'s worker ran').toBeGreaterThan(0);
+    expect(count('other-timer'), 'the unrelated worker ran').toBeGreaterThan(0);
+    r.lease.revoke('stop');
+    await r.serving;
+    await sleep(100);
+    const mine = count('worker-timer'); const theirs = count('other-timer');
+    await sleep(400);
+    expect(count('worker-timer')).toBe(mine);
+    expect(count('other-timer')).toBeGreaterThan(theirs);
+  });
+  it('the policy refuses a browser with another tab open', async () => {
+    const consent = makeConsent(['http://allowed.test']);
+    const proxy = await startEgressProxy({ consent });
+    const browser = await launchBehindProxy({ chromiumPath: CHROMIUM!, proxy });
+    try {
+      const made = await fetch(`http://127.0.0.1:${browser.port}/json/new?about:blank`, { method: 'PUT' });
+      expect(made.ok).toBe(true);
+      await expect(startRequestPolicy({ browserWs: browser.browserWs, tabWs: browser.tabWs, tabTargetId: browser.tabTargetId, consent })).rejects.toThrow(/dedicated browser/);
+    } finally { await browser.close(); await proxy.close(); }
+  });
+});
+
+suite('prerender', { timeout: 30_000 }, () => {
+  it('a prerender redirected to a site without consent never reaches it', async () => {
+    const r = await startRig();
+    await r.page.goto('http://allowed.test/prerender-rules');
+    await sleep(1200);
+    // Control: Chromium really did prerender here, or this test shows nothing.
+    expect(r.allowed.hits, 'same-origin prerender ran').toContain('GET /pre-same');
+    expect(r.allowed.hits, 'the redirect ran').toContain('GET /pre-redirect');
+    expect(r.offlist.hits).toEqual([]);
+    // Chromium drops the prerender at the redirect itself, so the policy log has no entry to check.
+  });
+  it('activating a consented prerender keeps the lease', async () => {
+    const r = await startRig();
+    await r.page.goto('http://allowed.test/prerender-rules');
+    await sleep(800);
+    await r.page.evaluate("location.href = '/pre-same'").catch(() => {});
+    await sleep(400);
+    expect(r.lease.state()).toBe('held');
+    expect(r.page.url()).toBe('http://allowed.test/pre-same');
   });
 });
 

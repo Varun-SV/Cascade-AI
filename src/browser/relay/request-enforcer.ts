@@ -86,19 +86,32 @@ export function settlesWithin(call: Promise<unknown>, ms: number): Promise<boole
 }
 
 /**
+ * Whether a history reply is well formed and every entry may be kept: at least the
+ * current entry, an index that points at one, and a URL on each. Anything else isn't safe.
+ */
+export function historyIsSafe(reply: unknown, consent: Consent): boolean {
+  const h = reply as { currentIndex?: unknown; entries?: unknown } | null | undefined;
+  if (!h || !Array.isArray(h.entries) || h.entries.length === 0) return false;
+  if (!Number.isInteger(h.currentIndex) || (h.currentIndex as number) < 0 || (h.currentIndex as number) >= h.entries.length) return false;
+  return (h.entries as { url?: unknown }[]).every((e) => typeof e?.url === 'string' && e.url !== '' && onConsentedSite(e.url, consent));
+}
+
+/**
  * The page step of a revoke. Nothing the page or the browser does can hold it up, and
  * a failure at one step doesn't skip the next: if the workers can't be listed, the
  * tab still ends. A page that won't leave is closed rather than left running.
  */
 export async function endPageActivity(
-  tab: Pick<CdpClient, 'send'>, browser: Pick<CdpClient, 'send'>, tabTargetId: string, mode: PageEndMode, timeoutMs = PAGE_END_TIMEOUT_MS,
+  tab: Pick<CdpClient, 'send'>, browser: Pick<CdpClient, 'send'>, tabTargetId: string, mode: PageEndMode,
+  ownedWorkers: ReadonlySet<string>, timeoutMs = PAGE_END_TIMEOUT_MS,
 ): Promise<boolean> {
   // Workers outlive a navigation, so they go first, whichever the mode.
   let targets: { targetId: string; type: string }[] = [];
   await settlesWithin(browser.send('Target.getTargets').then((r) => {
     targets = (r as { targetInfos?: typeof targets }).targetInfos ?? [];
   }), timeoutMs);
-  const workers = targets.filter((t) => t.type === 'service_worker' || t.type === 'shared_worker');
+  // Only workers this lease saw start. Anything else in the browser isn't its to close.
+  const workers = targets.filter((t) => (t.type === 'service_worker' || t.type === 'shared_worker') && ownedWorkers.has(t.targetId));
   await Promise.all(workers.map((t) => settlesWithin(browser.send('Target.closeTarget', { targetId: t.targetId }), timeoutMs)));
   if (mode === 'blank' && await settlesWithin(tab.send('Page.navigate', { url: 'about:blank' }), timeoutMs)) return true;
   return settlesWithin(browser.send('Target.closeTarget', { targetId: tabTargetId }), timeoutMs);
@@ -116,6 +129,21 @@ export async function startRequestPolicy(opts: {
   let foreignDocument = false;
   const tab = await connectCdp(opts.tabWs);
   const browser = await connectCdp(opts.browserWs);
+
+  // This policy is browser-wide: it closes new pages and intercepts every request. So it
+  // needs a browser the run has to itself, and refuses anything else. Desktop and the
+  // extension share a browser with the user and need their own scoped enforcer.
+  const before = ((await browser.send('Target.getTargets')) as { targetInfos?: { targetId: string; type: string }[] }).targetInfos ?? [];
+  const pages = before.filter((t) => t.type === 'page');
+  if (pages.length !== 1 || pages[0]!.targetId !== tabTargetId) {
+    tab.close(); browser.close();
+    throw new Error('The request policy needs a dedicated browser with only the leased tab open.');
+  }
+  const preexisting = new Set(before.map((t) => t.targetId));
+  const ownedWorkers = new Set<string>();
+  const noteWorker = (t: { targetId: string; type: string }): void => {
+    if (!preexisting.has(t.targetId) && (t.type === 'service_worker' || t.type === 'shared_worker')) ownedWorkers.add(t.targetId);
+  };
 
   const decide = async (client: CdpClient, msg: CdpMessage, where: string): Promise<void> => {
     const p = msg.params as { requestId: string; request: { url: string }; resourceType: string };
@@ -138,6 +166,7 @@ export async function startRequestPolicy(opts: {
       for (const l of foreignListeners) l();
     } else if (msg.method === 'Target.attachedToTarget') {
       const { sessionId, targetInfo } = msg.params as { sessionId: string; targetInfo: { type: string; targetId: string } };
+      noteWorker(targetInfo);
       void policeChild(tab, sessionId, targetInfo.type).then((coverage) => {
         children.push({ type: targetInfo.type, coverage });
         if (!coverage) void browser.send('Target.closeTarget', { targetId: targetInfo.targetId }).catch(() => {});
@@ -167,6 +196,7 @@ export async function startRequestPolicy(opts: {
     }
     if (msg.method !== 'Target.attachedToTarget') return;
     const { sessionId, targetInfo } = msg.params as { sessionId: string; targetInfo: { type: string; targetId: string; url: string } };
+    noteWorker(targetInfo);
     void (async () => {
       if (targetInfo.targetId === tabTargetId) {
         // The leased tab has its own policy session.
@@ -207,10 +237,7 @@ export async function startRequestPolicy(opts: {
       return walk(tree.frameTree) ? { ok: true } : { ok: false, reason: 'a frame on a site without consent' };
     },
     async clearForeignHistory() {
-      const allConsented = async (): Promise<boolean> => {
-        const h = await tab.send('Page.getNavigationHistory') as { entries?: { url?: string }[] };
-        return (h.entries ?? []).every((e) => onConsentedSite(e.url ?? '', consent));
-      };
+      const allConsented = async (): Promise<boolean> => historyIsSafe(await tab.send('Page.getNavigationHistory'), consent);
       try {
         if (await allConsented()) return true;
         await tab.send('Page.resetNavigationHistory');
@@ -221,7 +248,7 @@ export async function startRequestPolicy(opts: {
       foreignListeners.push(listener);
       if (foreignDocument) listener();
     },
-    endPageActivity: (mode) => endPageActivity(tab, browser, tabTargetId, mode),
+    endPageActivity: (mode) => endPageActivity(tab, browser, tabTargetId, mode, ownedWorkers),
     close() { tab.close(); browser.close(); },
   };
 }
