@@ -12,7 +12,7 @@
 
 import { type Consent, bareHost, isPrivateHost, onConsentedSite, requestVerdict } from './egress-rules.js';
 
-export const POLICY_VERSION = 2;
+export const POLICY_VERSION = 3;
 
 export const ALLOWED_COMMANDS: ReadonlySet<string> = new Set([
   'DOM.describeNode',
@@ -163,6 +163,7 @@ const TARGET_INFO: Schema = {
   targetId: true, type: true, url: 'documentUrl', attached: true, browserContextId: true,
 };
 
+// `context.name` below stays: a page can't set it, and Playwright finds its utility world by it.
 const SCHEMAS: Readonly<Record<string, Schema>> = {
   'Network.requestWillBeSent': {
     requestId: true, loaderId: true, documentURL: 'documentUrl', timestamp: true, wallTime: true, type: true,
@@ -304,7 +305,7 @@ export function filterReply(method: string, result: Record<string, unknown>, con
         const shown = agentUrl(e.url, 'document', consent);
         return shown === null
           ? { id: e.id, url: HIDDEN_HISTORY_URL, userTypedURL: HIDDEN_HISTORY_URL, title: '', transitionType: e.transitionType }
-          : { id: e.id, url: shown, userTypedURL: shown, title: e.title ?? '', transitionType: e.transitionType };
+          : { id: e.id, url: shown, userTypedURL: shown, title: '', transitionType: e.transitionType };
       }),
     };
   }

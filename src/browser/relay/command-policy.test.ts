@@ -70,7 +70,7 @@ describe('the compatibility rule', () => {
     });
     const digest = createHash('sha256').update(lists).digest('hex').slice(0, 16);
     // Change a list → bump POLICY_VERSION and update both values, in one reviewed commit.
-    expect({ POLICY_VERSION, digest }).toEqual({ POLICY_VERSION: 2, digest: '40ac177c7c8f15e6' });
+    expect({ POLICY_VERSION, digest }).toEqual({ POLICY_VERSION: 3, digest: '40ac177c7c8f15e6' });
   });
 });
 
@@ -178,6 +178,16 @@ describe('replies that carry URLs', () => {
     }, consent);
     expect(JSON.stringify(out)).not.toContain('SECRET');
     expect((out.entries as { url: string }[]).map((e) => e.url)).toEqual([HIDDEN_HISTORY_URL, 'https://ok.test/']);
+  });
+  it('blanks every history title, on a consented entry too, and keeps ids and the index', () => {
+    const out = filterReply('Page.getNavigationHistory', {
+      currentIndex: 1,
+      entries: [{ id: 7, url: 'https://ok.test/a', title: 'MARKTITLE' }, { id: 9, url: 'https://offlist.test/MARKURL', title: 'MARKTITLE' }],
+    }, consent) as { currentIndex: number; entries: { id: number; title: string }[] };
+    expect(JSON.stringify(out)).not.toMatch(/MARKTITLE|MARKURL/);
+    expect(out.currentIndex).toBe(1);
+    expect(out.entries.map((e) => e.id)).toEqual([7, 9]);
+    expect(out.entries.map((e) => e.title)).toEqual(['', '']);
   });
   it('leaves other replies alone', () => {
     expect(filterReply('Runtime.evaluate', { result: { value: 1 } }, consent)).toEqual({ result: { value: 1 } });

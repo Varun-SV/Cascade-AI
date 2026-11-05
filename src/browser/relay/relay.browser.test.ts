@@ -731,6 +731,42 @@ suite('beforeunload', { timeout: 30_000 }, () => {
   });
 });
 
+suite('titles and context names', { timeout: 30_000 }, () => {
+  it('a real history reply carries no title, and back still works', async () => {
+    const r = await startRig({ raw: true });
+    await r.command('Page.enable');
+    await r.command('Page.navigate', { url: 'http://allowed.test/one' });
+    await sleep(200);
+    await r.command('Runtime.evaluate', { expression: "document.title = 'MARKHISTORYTITLE'" });
+    await r.command('Page.navigate', { url: 'http://allowed.test/two' });
+    await sleep(200);
+    const raw = await connectCdp(r.browser.tabWs);
+    const direct = await raw.send('Page.getNavigationHistory');
+    raw.close();
+    expect(JSON.stringify(direct), 'control: the browser reports the title').toContain('MARKHISTORYTITLE');
+    const h = (await r.command('Page.getNavigationHistory')).result as { currentIndex: number; entries: { id: number; url: string }[] };
+    expect(JSON.stringify(h)).not.toContain('MARKHISTORYTITLE');
+    const one = h.entries.find((e) => e.url === 'http://allowed.test/one');
+    expect((await r.command('Page.navigateToHistoryEntry', { entryId: one!.id })).error).toBeUndefined();
+    await sleep(200);
+    const now = (await r.command('Page.getNavigationHistory')).result as { currentIndex: number; entries: { url: string }[] };
+    expect(now.entries[now.currentIndex]!.url).toBe('http://allowed.test/one');
+  });
+  it('a page cannot put anything in a context name', async () => {
+    const r = await startRig({ raw: true });
+    await r.command('Runtime.enable');
+    await r.command('Page.enable');
+    await r.command('Page.navigate', { url: 'http://allowed.test/ctx' });
+    await sleep(200);
+    await r.command('Runtime.evaluate', { expression: "window.name = 'MARKCTX'; document.title = 'MARKCTX'; const f = document.createElement('iframe'); f.name = 'MARKCTX'; document.body.append(f);" });
+    await sleep(200);
+    const names = r.agentFrames.filter((f) => f.includes('executionContextCreated')).map((f) => (JSON.parse(f) as { params: { context: { name?: string } } }).params.context.name);
+    expect(names.length).toBeGreaterThan(1);
+    expect(names.every((n) => n === '')).toBe(true);
+    expect(r.agentFrames.filter((f) => f.includes('MARKCTX') && !f.includes('"result"'))).toEqual([]);
+  });
+});
+
 suite('what a revoke does in a real browser', { timeout: 60_000 }, () => {
   const setTimer = "window.__t = setInterval(() => fetch('/beacon?timer').catch(() => {}), 50)";
   const timerHits = (r: Rig) => r.allowed.hits.filter((h) => h.includes('beacon?timer')).length;

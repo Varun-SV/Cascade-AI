@@ -487,6 +487,12 @@ stage. The unused library adds no production overhead in stage 1.
   `domainAndRegistry` and target `title`. `auxData` is reduced to `isDefault`, `type` and
   `frameId`. `statusText` is blanked, as Playwright needs the field to exist. A consented URL
   still keeps its fragment under the URL rule, as `location` shows it to the page anyway.
+- **History titles (policy version 3)** are blanked on every entry; ids and the index stay.
+- **`context.name` stays.** A page can't set it (tested with `window.name`, a frame name and a
+  title), and Playwright can't click without it (tested: `page.click` times out with it removed).
+  The only non-empty names are the agent's own, from `Page.createIsolatedWorld`.
+- **Revoke can close a user's tab even in `blank` mode,** if leaving the page doesn't finish in 3 s.
+  Stage 2's decision and consent text must say so; it isn't approved by being here.
 - **Child targets:** every setup step must succeed before a target resumes, or it stays paused and
   is closed. Only a dedicated worker may lack its own interception; the test asserts the block in the
   policy's own log for each worker type, not only at the proxy.
