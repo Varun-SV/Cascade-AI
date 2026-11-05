@@ -510,12 +510,16 @@ stage. The unused library adds no production overhead in stage 1.
   revoke closes the tab.
 - **A command already written can't be recalled.** Revoke then ends the page's activity,
   so the tab doesn't stay on what it did.
+- **A page that doesn't answer loses its tab, in either mode.** A spinning page answers no CDP call,
+  so every step of revoke's page step is bounded. If `about:blank` isn't reached in 3 s the tab is
+  closed, and if an agent's new-document script can't be removed in 1 s it's closed straight away, as
+  that script would run on `about:blank` too. This bears on Varun's revoke decision for the user's own tab.
 - **Consented pages can read much of this anyway** through `evaluate`, as §4.3 states.
 
 **Known gaps**
 
-- **IPv6 at the destination:** `alias6.test` is asserted by the absence of a dial, as the suite
-  has no server on `::1`.
+- **IPv6 at the destination:** a real server on `::1` is asserted on CI, with a no-proxy control. The
+  test fails on CI if `::1` can't be bound, and skips only elsewhere, because some sandboxes have no IPv6.
 - **The real nonce store,** device keys and server endpoint are stage 2. O1 is proved at
   library level only.
 - **The browser suite grants its lease directly.** `capability.test.ts` runs the real grant,
@@ -528,14 +532,14 @@ local site with no real network, so a comparison and not a bound):
 
 | Measure (ms) | Baseline median | Baseline p95 | Enforced median | Enforced p95 |
 |---|---|---|---|---|
-| Navigation | 30.84 | 48.15 | 40.42 | 50.69 |
-| Fetch | 2.30 | 3.80 | 4.90 | 8.10 |
+| Navigation | 26.72 | 41.13 | 40.25 | 60.99 |
+| Fetch | 1.90 | 3.10 | 4.10 | 6.10 |
 
-- Device process during the enforced run, including the script's own CDP client: 23% of one core
-  over 3.6 s; RSS 110.0 MB before, 115.5 MB after.
-- 462 proxy decisions and 640 policy decisions in that run.
-- Proxy close noticed in 1.09 ms; ending page activity 24.46 ms; a new proxy and browser through
-  the canary 561 ms.
+- Device process during the enforced run, including the script's own CDP client: 21.9% of one core
+  over 3.4 s; RSS 106.8 MB before, 111.7 MB after.
+- 463 proxy decisions and 640 policy decisions in that run.
+- Proxy close noticed in 2.11 ms; ending page activity 15.29 ms; a new proxy and browser through
+  the canary 487 ms.
 
 **Correction:** an earlier revision had no `Alt-Svc` control. With a self-signed certificate and
 `--ignore-certificate-errors`, Chromium 1243 sent no UDP after the header. With a certificate from a
@@ -545,5 +549,6 @@ CA trusted in a throwaway browser profile it did, so the control now uses that. 
 **Revert checks run on the final code,** each failing as it should with the guard removed: the
 unlisted-event filter, both fence checks (5 race tests), the resolved-address check, both WebRTC
 layers together (one alone still holds, by design), revoke's page step (2 tests), closing
-workers and accepting `beforeunload`. A first version of the worker test, using a shared worker, passed with the guard removed,
+workers, accepting `beforeunload`, bounding the page step (the revoke never finishes without it) and
+closing when a script can't be removed. A first version of the worker test, using a shared worker, passed with the guard removed,
 because a shared worker dies with its last page, so it was replaced.

@@ -55,7 +55,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface Counting { hits: string[]; accepts: number; port: number; close(): void }
 /** `handle` answers the paths it knows and returns true; anything else gets a plain page. */
-function countingServer(handle: (path: string, res: http.ServerResponse, req: http.IncomingMessage) => boolean = () => false): Promise<Counting> {
+function countingServer(handle: (path: string, res: http.ServerResponse, req: http.IncomingMessage) => boolean = () => false, host = '127.0.0.1'): Promise<Counting> {
   const state = { hits: [] as string[], accepts: 0 };
   const server = http.createServer((req, res) => {
     state.hits.push(`${req.method} ${req.url}`);
@@ -66,7 +66,7 @@ function countingServer(handle: (path: string, res: http.ServerResponse, req: ht
   });
   server.on('connection', () => { state.accepts += 1; });
   server.on('upgrade', (_q, s) => s.destroy());
-  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => {
+  return new Promise((resolve, reject) => server.once('error', reject).listen(0, host, () => {
     const port = (server.address() as AddressInfo).port;
     resolve({ get hits() { return state.hits; }, get accepts() { return state.accepts; }, port, close() { server.closeAllConnections(); server.close(); } });
   }));
@@ -334,6 +334,33 @@ suite('P2: no request reaches a destination without consent', { timeout: 90_000 
     await r.page.evaluate(tryFetch(`http://flip.test:${port}/second`));
     expect(r.priv.accepts).toBe(0);
     expect(r.dials.filter((d) => d.address === '127.0.0.1')).toEqual([]);
+  });
+
+  it('IPv6: a real server on ::1 gets 0 accepts through the relay, and is reached by the control', async (ctx) => {
+    const six = await countingServer(() => false, '::1').catch((e: NodeJS.ErrnoException) => {
+      // Some sandboxes have no IPv6 at all. CI must, or this gate would silently vanish.
+      if (e.code === 'EAFNOSUPPORT' && !process.env.CI) return null;
+      throw e;
+    });
+    if (!six) return ctx.skip();
+    const literal = `http://[::1]:${six.port}/`;
+    const b = await pw.chromium.launch({ executablePath: CHROMIUM!, args: ['--no-sandbox', '--no-proxy-server'] });
+    const control = await b.newPage();
+    await control.goto(literal);
+    await b.close();
+    expect(six.accepts, 'control: with no proxy the server is reachable').toBeGreaterThan(0);
+    const before = six.accepts;
+
+    const r = await startRig();
+    expect(await r.page.evaluate(tryFetch(literal))).toBe('failed');
+    expect(await r.page.evaluate(tryWs as never, `ws://[::1]:${six.port}/`)).not.toBe('open');
+    await r.page.evaluate(tryFetch(`http://alias6.test:${six.port}/`));
+    expect(await r.page.evaluate(tryWs as never, `ws://alias6.test:${six.port}/`)).not.toBe('open');
+    await r.page.evaluate(`(() => { const f = document.createElement('iframe'); f.src = ${JSON.stringify(literal)}; document.body.append(f); })()`);
+    await sleep(200);
+    expect(six.accepts).toBe(before);
+    expect(r.dials.some((d) => d.address === '::1')).toBe(false);
+    six.close();
   });
 
   it('a public subresource still loads: the stated limit, with its query kept from the agent', async () => {
@@ -721,6 +748,35 @@ suite('what a revoke does in a real browser', { timeout: 60_000 }, () => {
     expect(timerHits(r)).toBe(after);
     const list = await (await fetch(`http://127.0.0.1:${r.browser.port}/json/list`)).json() as { type: string }[];
     expect(list.filter((t) => t.type === 'page')).toHaveLength(tabs);
+  });
+  // Revoke must finish while the page spins, and whatever the spin was hiding must not
+  // run when it ends. With a script still registered, leaving for about:blank would run
+  // it again, so that case closes the tab even in blank mode.
+  it.each<[PageEndMode, boolean, number]>([['blank', false, 1], ['blank', true, 0], ['close', true, 0], ['close', false, 0]])('a page spinning in a loop can\'t hold up a revoke (pageEnd=%s, injected script=%s, %i tab(s) remain)', async (pageEnd, injected, tabs) => {
+    const r = await startRig({ pageEnd, raw: true });
+    if (injected) await r.command('Page.addScriptToEvaluateOnNewDocument', { source: '0' });
+    void r.command('Runtime.evaluate', { expression: "const end = Date.now() + 2000; while (Date.now() < end) {} setInterval(() => fetch('/beacon?after-spin').catch(() => {}), 50);" });
+    await sleep(200);
+    const t0 = Date.now();
+    r.lease.revoke('stop');
+    await r.serving;
+    expect(Date.now() - t0).toBeLessThan(5000);
+    await sleep(Math.max(0, 2600 - (Date.now() - t0)));
+    const list = await (await fetch(`http://127.0.0.1:${r.browser.port}/json/list`)).json() as { type: string; url: string }[];
+    const pages = list.filter((t) => t.type === 'page');
+    expect(pages).toHaveLength(tabs);
+    if (tabs) expect(pages[0]!.url).toBe('about:blank');
+    expect(r.allowed.hits.filter((h) => h.includes('after-spin'))).toEqual([]);
+    expect(r.relay.refusals).not.toContain('the browser did not confirm the page ended');
+  });
+  it.each<PageEndMode>(['blank', 'close'])('a page that never stops spinning can\'t hold up a revoke either (pageEnd=%s)', async (pageEnd) => {
+    const r = await startRig({ pageEnd, raw: true });
+    void r.command('Runtime.evaluate', { expression: 'while (true) {}' });
+    await sleep(200);
+    const t0 = Date.now();
+    r.lease.revoke('stop');
+    await r.serving;
+    expect(Date.now() - t0).toBeLessThan(5000);
   });
   it('control: detaching alone leaves the timer running', async () => {
     const pageSrv = await countingServer();

@@ -12,10 +12,11 @@ import type { WebSocket } from 'ws';
 import { type CdpMessage, connectCdp } from './cdp-client.js';
 import { type CommandFrame, HIDDEN_HISTORY_URL, checkCommand, filterEvent, filterReply, filterTargetInfo, parseFrame } from './command-policy.js';
 import { type Consent, onConsentedSite } from './egress-rules.js';
-import type { PageEndMode, RequestEnforcer } from './request-enforcer.js';
+import { type PageEndMode, type RequestEnforcer, settlesWithin } from './request-enforcer.js';
 import { CommandFenced, type CommandTransport, type TabLease, createFencedForwarder } from './tab-lease.js';
 
 const TAB_SESSION = 'cascade-tab-1';
+const SCRIPT_REMOVE_TIMEOUT_MS = 1000;
 
 export interface RelayEvents {
   /** Why a command was refused or the lease ended, for the device's log. Never sent to the server. */
@@ -93,10 +94,12 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
       void (async () => {
         // In order: the fence has changed and the queue is rejected; now end what's
         // running, and only then let go. Policy and proxy stay on until this is done.
-        for (const { identifier, sessionId } of injected.splice(0)) {
-          await tab.send('Page.removeScriptToEvaluateOnNewDocument', { identifier }, sessionId).catch(() => {});
-        }
-        await enforcer.endPageActivity(opts.pageEnd).catch(() => {});
+        // A spinning page answers neither call, so each is bounded. A script that's still
+        // registered would run on about:blank too, so then the tab is closed instead.
+        const removed = await Promise.all(injected.splice(0).map(({ identifier, sessionId }) =>
+          settlesWithin(tab.send('Page.removeScriptToEvaluateOnNewDocument', { identifier }, sessionId), SCRIPT_REMOVE_TIMEOUT_MS)));
+        const ended = await enforcer.endPageActivity(removed.every(Boolean) ? opts.pageEnd : 'close').catch(() => false);
+        if (!ended) refusals.push('the browser did not confirm the page ended');
         tab.close();
         try { agent.close(1011, 'lease ended'); } catch { /* already closing */ }
         finish();

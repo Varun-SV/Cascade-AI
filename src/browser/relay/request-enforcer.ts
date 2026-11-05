@@ -33,8 +33,9 @@ export interface RequestEnforcer {
   /**
    * Ends what the agent left running, since detaching doesn't: script timers and
    * workers keep going. `close` closes the tab; `blank` keeps it open on about:blank.
+   * Always finishes in bounded time. False means the browser never confirmed it.
    */
-  endPageActivity(mode: PageEndMode): Promise<void>;
+  endPageActivity(mode: PageEndMode): Promise<boolean>;
   /** Stops policing. Call only after endPageActivity. */
   close(): void;
 }
@@ -65,6 +66,34 @@ export async function policeChild(client: Pick<CdpClient, 'send'>, sessionId: st
     await client.send('Runtime.runIfWaitingForDebugger', {}, sessionId);
   } catch { return null; }
   return coverage;
+}
+
+/** Whether a CDP call succeeded in time. A page spinning in a loop never answers. */
+export function settlesWithin(call: Promise<unknown>, ms: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    const finish = (ok: boolean): void => { clearTimeout(timer); resolve(ok); };
+    call.then(() => finish(true), () => finish(false));
+  });
+}
+
+/**
+ * The page step of a revoke. Nothing the page or the browser does can hold it up, and
+ * a failure at one step doesn't skip the next: if the workers can't be listed, the
+ * tab still ends. A page that won't leave is closed rather than left running.
+ */
+export async function endPageActivity(
+  tab: Pick<CdpClient, 'send'>, browser: Pick<CdpClient, 'send'>, tabTargetId: string, mode: PageEndMode, timeoutMs = PAGE_END_TIMEOUT_MS,
+): Promise<boolean> {
+  // Workers outlive a navigation, so they go first, whichever the mode.
+  let targets: { targetId: string; type: string }[] = [];
+  await settlesWithin(browser.send('Target.getTargets').then((r) => {
+    targets = (r as { targetInfos?: typeof targets }).targetInfos ?? [];
+  }), timeoutMs);
+  const workers = targets.filter((t) => t.type === 'service_worker' || t.type === 'shared_worker');
+  await Promise.all(workers.map((t) => settlesWithin(browser.send('Target.closeTarget', { targetId: t.targetId }), timeoutMs)));
+  if (mode === 'blank' && await settlesWithin(tab.send('Page.navigate', { url: 'about:blank' }), timeoutMs)) return true;
+  return settlesWithin(browser.send('Target.closeTarget', { targetId: tabTargetId }), timeoutMs);
 }
 
 export async function startRequestPolicy(opts: {
@@ -160,20 +189,7 @@ export async function startRequestPolicy(opts: {
       const walk = (n: FrameNode): boolean => onConsentedSite(n.frame?.url ?? '', consent) && (n.childFrames ?? []).every(walk);
       return walk(tree.frameTree) ? { ok: true } : { ok: false, reason: 'a frame on a site without consent' };
     },
-    async endPageActivity(mode) {
-      // Workers outlive a navigation, so they go first, whichever the mode.
-      const { targetInfos } = await browser.send('Target.getTargets') as { targetInfos?: { targetId: string; type: string }[] };
-      const workers = (targetInfos ?? []).filter((t) => t.type === 'service_worker' || t.type === 'shared_worker');
-      await Promise.all(workers.map((t) => browser.send('Target.closeTarget', { targetId: t.targetId }).catch(() => {})));
-      const closeTab = (): Promise<unknown> => browser.send('Target.closeTarget', { targetId: tabTargetId }).catch(() => {});
-      if (mode === 'close') { await closeTab(); return; }
-      // Bounded: a page that won't let go is closed rather than left running.
-      const left = await Promise.race([
-        tab.send('Page.navigate', { url: 'about:blank' }).then(() => true, () => false),
-        new Promise<boolean>((r) => { setTimeout(() => r(false), PAGE_END_TIMEOUT_MS).unref?.(); }),
-      ]);
-      if (!left) await closeTab();
-    },
+    endPageActivity: (mode) => endPageActivity(tab, browser, tabTargetId, mode),
     close() { tab.close(); browser.close(); },
   };
 }
