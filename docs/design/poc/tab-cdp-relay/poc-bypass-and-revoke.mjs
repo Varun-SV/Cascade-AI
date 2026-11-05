@@ -80,7 +80,14 @@ const proxyArgs = (p) => [`--proxy-server=http://127.0.0.1:${p}`, '--proxy-bypas
 async function webTransportFrom(page, where, udpPort) {
   const attempt = `try { const t = new WebTransport('https://127.0.0.1:${udpPort}/'); t.ready.catch(() => {}); t.closed.catch(() => {}); } catch {}`;
   if (where === 'page') await page.evaluate(attempt);
-  if (where === 'iframe') await page.evaluate(`(() => { const f = document.createElement('iframe'); document.body.append(f); f.contentWindow.eval(${JSON.stringify(attempt)}); })()`);
+  if (where === 'iframe') {
+    await page.evaluate((port) => {
+      const f = document.createElement('iframe');
+      document.body.append(f);
+      const t = new f.contentWindow.WebTransport(`https://127.0.0.1:${port}/`);
+      t.ready.catch(() => {}); t.closed.catch(() => {});
+    }, udpPort);
+  }
   if (where === 'dedicated worker') await page.evaluate(() => { window.__w = new Worker('/w.js'); });
   if (where === 'shared worker') await page.evaluate(() => { window.__s = new SharedWorker('/w.js'); });
   if (where === 'service worker') await page.evaluate(() => navigator.serviceWorker.register('/sw.js').catch(() => {}));
