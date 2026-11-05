@@ -356,7 +356,7 @@ suite('P2: no request reaches a destination without consent', { timeout: 90_000 
     expect(await r.page.evaluate(tryWs as never, `ws://[::1]:${six.port}/`)).not.toBe('open');
     await r.page.evaluate(tryFetch(`http://alias6.test:${six.port}/`));
     expect(await r.page.evaluate(tryWs as never, `ws://alias6.test:${six.port}/`)).not.toBe('open');
-    await r.page.evaluate(`(() => { const f = document.createElement('iframe'); f.src = ${JSON.stringify(literal)}; document.body.append(f); })()`);
+    await r.page.evaluate(((u: string) => { const f = document.createElement('iframe'); f.src = u; document.body.append(f); }) as never, literal);
     await sleep(200);
     expect(six.accepts).toBe(before);
     expect(r.dials.some((d) => d.address === '::1')).toBe(false);
