@@ -10,10 +10,13 @@ function fakeClock(start = 1000) {
   };
   return { clock, advance(ms: number) { t += ms; for (const e of timers) if (!e.off && e.at <= t) { e.off = true; e.fn(); } } };
 }
+// Later than any test runs. A time already past would end a lease on the system clock
+// as soon as its timer fired, which made a test fail only under load.
+const FAR = Date.now() + 600_000;
 const leased = (clock?: LeaseClock) => {
   const lease = createTabLease(clock);
   const r = lease.reserve()!;
-  const fence = lease.promote(r, { expiresAt: 1_000_000 })!;
+  const fence = lease.promote(r, { expiresAt: FAR })!;
   return { lease, fence };
 };
 
@@ -22,7 +25,7 @@ describe('O2: one lease per tab', () => {
     const lease = createTabLease();
     const r = lease.reserve()!;
     expect(lease.reserve()).toBeNull();
-    lease.promote(r, { expiresAt: 1_000_000 });
+    lease.promote(r, { expiresAt: FAR });
     expect(lease.reserve()).toBeNull();
     lease.suspend();
     expect(lease.reserve()).toBeNull();
@@ -53,9 +56,9 @@ describe('O2: one lease per tab', () => {
 describe('O3: generations and expiry', () => {
   it('a fence from an older generation is never current', () => {
     const lease = createTabLease();
-    const f1 = lease.promote(lease.reserve()!, { expiresAt: 1_000_000 })!;
+    const f1 = lease.promote(lease.reserve()!, { expiresAt: FAR })!;
     lease.revoke('drop');
-    const f2 = lease.promote(lease.reserve()!, { expiresAt: 1_000_000 })!;
+    const f2 = lease.promote(lease.reserve()!, { expiresAt: FAR })!;
     expect(f2.generation).toBeGreaterThan(f1.generation);
     expect(lease.isCurrent(f1)).toBe(false);
     expect(lease.isCurrent(f2)).toBe(true);
@@ -146,7 +149,7 @@ describe('O3: deterministic races, with a barrier between dispatch and forward',
     const outcome = expect(f.dispatch('old', 1)).rejects.toBeInstanceOf(CommandFenced);
     await t.reached('old');
     lease.revoke('drop');
-    const f2 = lease.promote(lease.reserve()!, { expiresAt: 1_000_000 })!;
+    const f2 = lease.promote(lease.reserve()!, { expiresAt: FAR })!;
     t.release('old');
     await outcome;
     await settle();

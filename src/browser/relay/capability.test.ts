@@ -12,6 +12,9 @@ import { POLICY_VERSION } from './command-policy.js';
 import { acquireLease, createTabLease } from './tab-lease.js';
 
 const T0 = 1_800_000_000_000;
+// These leases have times around T0. On the system clock that's past Node's timer limit, which
+// fires at once and ended a lease early. Expiry itself is tested in tab-lease.test.ts.
+const TEST_CLOCK = { now: () => T0, setTimer: () => () => {} };
 const scope = { tabTargetId: 'tab-1', allowedOrigins: ['https://ok.test'], privateOrigins: [] };
 
 function world(now = { t: T0 }) {
@@ -214,7 +217,7 @@ describe('the whole path: grant, approval, claim, lease', () => {
   it('after a disconnect, only a fresh grant and approval get the tab back', async () => {
     const w = world();
     const d = w.approvals();
-    const lease = createTabLease();
+    const lease = createTabLease(TEST_CLOCK);
     const grant = w.grantFor('user-a', 'device-a');
     const a = approved(d.approve(grant, scope, 60_000));
     const first = await flow(w, d, lease, grant, a);
@@ -236,7 +239,7 @@ describe('the whole path: grant, approval, claim, lease', () => {
   it('an approval refused only because the tab is leased stays usable', async () => {
     const w = world();
     const d = w.approvals();
-    const lease = createTabLease();
+    const lease = createTabLease(TEST_CLOCK);
     const g1 = w.grantFor('user-a', 'device-a', 'run-1');
     const g2 = w.grantFor('user-a', 'device-a', 'run-2');
     const a1 = approved(d.approve(g1, scope, 60_000));
@@ -249,7 +252,7 @@ describe('the whole path: grant, approval, claim, lease', () => {
   it('with the store down: refused and retryable, then fine when it recovers', async () => {
     const w = world();
     const d = w.approvals();
-    const lease = createTabLease();
+    const lease = createTabLease(TEST_CLOCK);
     const grant = w.grantFor('user-a', 'device-a');
     const a = approved(d.approve(grant, scope, 60_000));
     const down: NonceStore = { claimOnce: async () => { throw new StoreUnavailable(); } };
@@ -259,7 +262,7 @@ describe('the whole path: grant, approval, claim, lease', () => {
   it('an unknown store result burns the approval: the user is asked again', async () => {
     const w = world();
     const d = w.approvals();
-    const lease = createTabLease();
+    const lease = createTabLease(TEST_CLOCK);
     const grant = w.grantFor('user-a', 'device-a');
     const a = approved(d.approve(grant, scope, 60_000));
     const lost: NonceStore = { claimOnce: async () => { throw new StoreOutcomeUnknown(); } };
