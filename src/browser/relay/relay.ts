@@ -9,7 +9,7 @@
 //  lease fails closed: there is no resume.
 
 import type { WebSocket } from 'ws';
-import { type CdpMessage, connectCdp } from './cdp-client.js';
+import { type CdpClient, type CdpMessage, connectCdp } from './cdp-client.js';
 import { type CommandFrame, HIDDEN_HISTORY_URL, checkCommand, filterEvent, filterReply, filterTargetInfo, parseFrame } from './command-policy.js';
 import { type Consent, onConsentedSite } from './egress-rules.js';
 import { type PageEndMode, type RequestEnforcer, settlesWithin } from './request-enforcer.js';
@@ -17,6 +17,7 @@ import { CommandFenced, type CommandTransport, type TabLease, createFencedForwar
 
 const TAB_SESSION = 'cascade-tab-1';
 const SCRIPT_REMOVE_TIMEOUT_MS = 1000;
+const TAB_READY_TIMEOUT_MS = 3000;
 
 export interface RelayEvents {
   /** Why a command was refused or the lease ended, for the device's log. Never sent to the server. */
@@ -42,6 +43,20 @@ export interface DeviceRelay extends RelayEvents {
   serve(agent: WebSocket): Promise<void>;
 }
 
+/** Why the tab can't be served yet, or null. A spinning page must not hold this up. */
+async function tabReadyRefusal(enforcer: RequestEnforcer): Promise<string | null> {
+  const check = async (): Promise<string | null> => {
+    const tab = await enforcer.checkTabBeforeLease();
+    if (!tab.ok) return tab.reason;
+    return await enforcer.clearForeignHistory() ? null : 'the history of sites without consent could not be cleared';
+  };
+  let timer!: NodeJS.Timeout;
+  const late = new Promise<string>((r) => { timer = setTimeout(() => r('the tab did not answer'), TAB_READY_TIMEOUT_MS); });
+  try {
+    return await Promise.race([check().catch(() => 'the tab could not be checked'), late]);
+  } finally { clearTimeout(timer); }
+}
+
 export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
   const { consent, lease, enforcer } = opts;
   const refusals: string[] = [];
@@ -53,7 +68,20 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
     const early: string[] = [];
     let onFrame = (raw: string): void => { early.push(raw); };
     agent.on('message', (raw) => onFrame(String(raw)));
-    const tab = await connectCdp(opts.tabWs);
+    // And for it going away: an 'error' with no listener would take the process down.
+    let gone: string | null = null;
+    let onGone = (why: string): void => { gone ??= why; };
+    agent.on('close', () => onGone('the connection dropped'));
+    agent.on('error', () => onGone('the connection failed'));
+    let tab: CdpClient;
+    try {
+      tab = await connectCdp(opts.tabWs);
+    } catch {
+      refusals.push('lease ended: could not reach the tab');
+      lease.revoke('could not reach the tab');
+      try { agent.close(1011, 'lease ended'); } catch { /* already closing */ }
+      return;
+    }
     const knownSessions = new Set([TAB_SESSION]);
     const hiddenSessions = new Set<string>();
     const injected: { identifier: string; sessionId?: string }[] = [];
@@ -107,8 +135,9 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
     };
     lease.onChange((why, state) => { if (state === 'idle') end(why); });
     tab.onClose(() => end('the tab went away'));
-    agent.on('close', () => end('the connection dropped'));
-    agent.on('error', () => end('the connection failed'));
+    enforcer.onForeignDocument(() => end('the tab is showing a page without consent'));
+    onGone = end;
+    if (gone !== null) end(gone);
     if (lease.state() === 'idle') end('the lease is no longer held');
 
     tab.on((msg: CdpMessage) => {
@@ -208,6 +237,9 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
       if (f.sessionId === undefined) { handleRoot(f); return; }
       void run(f).catch(() => end('relay error'));
     };
+    // No command runs until the tab has been checked. Frames wait in `early` until then.
+    const refusal = await tabReadyRefusal(enforcer);
+    if (refusal) end(refusal);
     for (const raw of early.splice(0)) onFrame(raw);
     return done;
   };

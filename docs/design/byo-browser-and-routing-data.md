@@ -292,7 +292,9 @@ depth.
     entries from other sites (the tab's past, or a navigation the policy
     failed) with no URL or title, and `Page.navigateToHistoryEntry` is
     refused for them: a page restored from the back-forward cache sends no
-    request for the request policy to stop.
+    request for the request policy to stop. Script can go back too, so the
+    relay removes the tab's history before serving if any entry is on a
+    site without consent, and ends the lease if the tab shows one anyway.
   - **What the tab already held stays out of reach.** A page or frame the
     tab loaded before the lease never went through the request policy.
     The relay serves no command until it has checked the tab is on a

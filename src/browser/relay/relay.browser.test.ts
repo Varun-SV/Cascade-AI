@@ -705,6 +705,116 @@ suite('R-A2: history over the relay', { timeout: 30_000 }, () => {
   });
 });
 
+// The tab's past, as a user's tab or an earlier lease leaves it: a page on another site,
+// held in the back-forward cache, then a consented page in front of it.
+async function foreignHistoryRig(opts: { stayOnForeign?: boolean; wrap?: (e: RequestEnforcer) => RequestEnforcer } = {}) {
+  const server = await countingServer();
+  const wide = makeConsent(['http://allowed.test', 'http://offlist.test']);
+  const consent = makeConsent(['http://allowed.test']);
+  const proxy = await startEgressProxy({ consent: wide, network: { resolve: async () => [PUBLIC_ALLOWED], dial: () => net.connect(server.port, '127.0.0.1') } });
+  const browser = await launchBehindProxy({ chromiumPath: CHROMIUM!, proxy });
+  const raw = await connectCdp(browser.tabWs);
+  await raw.send('Page.enable');
+  await raw.send('Page.navigate', { url: 'http://offlist.test/secret' });
+  await sleep(400);
+  await raw.send('Runtime.evaluate', { expression: "window.__secret = 'MARKSTATE'" });
+  if (!opts.stayOnForeign) {
+    await raw.send('Page.navigate', { url: 'http://allowed.test/front' });
+    await sleep(400);
+  }
+  const started = await startRequestPolicy({ browserWs: browser.browserWs, tabWs: browser.tabWs, tabTargetId: browser.tabTargetId, consent });
+  const enforcer = opts.wrap ? opts.wrap(started) : started;
+  const lease = createTabLease();
+  lease.promote(lease.reserve()!, { expiresAt: Date.now() + 600_000 });
+  const relay = createDeviceRelay({ tabWs: browser.tabWs, consent, lease, enforcer, pageEnd: 'blank' });
+  const http2 = http.createServer();
+  const wss = new WebSocketServer({ server: http2 });
+  let serving: Promise<void> = Promise.resolve();
+  wss.on('connection', (ws) => { serving = relay.serve(ws); });
+  await new Promise<void>((r) => http2.listen(0, '127.0.0.1', r));
+  const agent = new WsClient(`ws://127.0.0.1:${(http2.address() as AddressInfo).port}/`);
+  const frames: string[] = [];
+  const replies = new Map<number, (m: Record<string, never>) => void>();
+  agent.on('message', (d) => {
+    frames.push(String(d));
+    const m = JSON.parse(String(d)) as Record<string, never> & { id?: number };
+    if (m.id !== undefined) replies.get(m.id)?.(m);
+  });
+  await new Promise((res) => agent.once('open', res));
+  let id = 0;
+  const command = (method: string, params: object = {}) => new Promise<{ result?: { result?: { value?: unknown } }; error?: { message: string } }>((resolve) => {
+    id += 1;
+    replies.set(id, resolve as never);
+    agent.once('close', () => resolve({ error: { message: 'closed' } }));
+    agent.send(JSON.stringify({ id, method, params, sessionId: 'cascade-tab-1' }));
+  });
+  return {
+    server, raw, browser, lease, relay, frames, command, agent, get serving() { return serving; },
+    async stop() {
+      agent.close(); raw.close(); started.close();
+      await browser.close(); await proxy.close();
+      http2.closeAllConnections(); http2.close(); server.close();
+    },
+  };
+}
+
+suite('a page the back-forward cache could restore', { timeout: 60_000 }, () => {
+  const READ = { expression: "location.href + ' ' + window.__secret", returnByValue: true };
+  const keepHistory = (e: RequestEnforcer): RequestEnforcer => ({ ...e, clearForeignHistory: async () => true });
+
+  it('control: with both guards off, script goes back and the agent reads the old page, with no request sent', async () => {
+    const r = await foreignHistoryRig({ wrap: (e) => ({ ...keepHistory(e), onForeignDocument: () => {} }) });
+    try {
+      await r.command('Runtime.enable');
+      const before = r.server.hits.length;
+      await r.command('Runtime.evaluate', { expression: 'history.back(); 1' });
+      await sleep(800);
+      expect((await r.command('Runtime.evaluate', READ)).result?.result?.value).toBe('http://offlist.test/secret MARKSTATE');
+      expect(r.server.hits.length).toBe(before);
+    } finally { await r.stop(); }
+  });
+
+  it('the history is cleared first, so script going back goes nowhere', async () => {
+    const r = await foreignHistoryRig();
+    try {
+      await r.command('Runtime.enable');
+      await r.command('Runtime.evaluate', { expression: 'history.back(); 1' });
+      await sleep(800);
+      const read = await r.command('Runtime.evaluate', READ);
+      expect(read.result?.result?.value).toBe('http://allowed.test/front undefined');
+      expect(r.lease.state()).toBe('held');
+      expect(r.frames.join()).not.toContain('MARKSTATE');
+    } finally { await r.stop(); }
+  });
+
+  it('a page without consent showing anyway ends the lease and leaves it', async () => {
+    const r = await foreignHistoryRig({ wrap: keepHistory });
+    try {
+      await r.command('Runtime.enable');
+      await r.command('Runtime.evaluate', { expression: 'history.back(); 1' });
+      await r.serving;
+      expect(r.lease.state()).toBe('idle');
+      expect(r.relay.refusals.join()).toContain('without consent');
+      expect(r.frames.join()).not.toContain('MARKSTATE');
+      await sleep(300);
+      const info = await r.raw.send('Target.getTargetInfo') as { targetInfo: { url: string } };
+      expect(info.targetInfo.url).toBe('about:blank');
+    } finally { await r.stop(); }
+  });
+
+  it('a tab already on a page without consent is never served, whatever the caller checked', async () => {
+    const r = await foreignHistoryRig({ stayOnForeign: true });
+    try {
+      const read = await r.command('Runtime.evaluate', READ);
+      expect(read.result).toBeUndefined();
+      await r.serving;
+      expect(r.lease.state()).toBe('idle');
+      expect(r.relay.refusals.join()).toContain('site without consent');
+      expect(r.frames.join()).not.toContain('MARKSTATE');
+    } finally { await r.stop(); }
+  });
+});
+
 suite('beforeunload', { timeout: 30_000 }, () => {
   it('does not hold a page open through a revoke, and the revoke finishes in bounded time', async () => {
     const r = await startRig({ pageEnd: 'blank' });

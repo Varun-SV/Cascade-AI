@@ -31,6 +31,14 @@ export interface RequestEnforcer {
    */
   checkTabBeforeLease(): Promise<{ ok: true } | { ok: false; reason: string }>;
   /**
+   * Removes the tab's history if any entry is on a site without consent, because the
+   * back-forward cache can restore one with no request for the policy to stop. False
+   * means such an entry may remain. This costs the user their back history for the tab.
+   */
+  clearForeignHistory(): Promise<boolean>;
+  /** Called when the tab's main frame shows a document without consent, however it got there. */
+  onForeignDocument(listener: () => void): void;
+  /**
    * Ends what the agent left running, since detaching doesn't: script timers and
    * workers keep going. `close` closes the tab; `blank` keeps it open on about:blank.
    * Always finishes in bounded time. False means the browser never confirmed it.
@@ -104,6 +112,8 @@ export async function startRequestPolicy(opts: {
   const closedPages: string[] = [];
   const dismissedDialogs: string[] = [];
   const children: { type: string; coverage: ChildCoverage }[] = [];
+  const foreignListeners: (() => void)[] = [];
+  let foreignDocument = false;
   const tab = await connectCdp(opts.tabWs);
   const browser = await connectCdp(opts.browserWs);
 
@@ -119,7 +129,14 @@ export async function startRequestPolicy(opts: {
 
   tab.on((msg) => {
     if (msg.method === 'Fetch.requestPaused') void decide(tab, msg, msg.sessionId ? 'child' : 'tab');
-    else if (msg.method === 'Target.attachedToTarget') {
+    else if (msg.method === 'Page.frameNavigated') {
+      // The backstop for documents no request brought here. Only the main frame: a
+      // restore replaces the whole page, and a failed navigation's error page is ours.
+      const { frame } = msg.params as { frame: { parentId?: string; url?: string; unreachableUrl?: string } };
+      if (frame.parentId || frame.unreachableUrl || onConsentedSite(frame.url ?? '', consent)) return;
+      foreignDocument = true;
+      for (const l of foreignListeners) l();
+    } else if (msg.method === 'Target.attachedToTarget') {
       const { sessionId, targetInfo } = msg.params as { sessionId: string; targetInfo: { type: string; targetId: string } };
       void policeChild(tab, sessionId, targetInfo.type).then((coverage) => {
         children.push({ type: targetInfo.type, coverage });
@@ -188,6 +205,21 @@ export async function startRequestPolicy(opts: {
       if (!tree?.frameTree) return { ok: false, reason: 'frame tree unavailable' };
       const walk = (n: FrameNode): boolean => onConsentedSite(n.frame?.url ?? '', consent) && (n.childFrames ?? []).every(walk);
       return walk(tree.frameTree) ? { ok: true } : { ok: false, reason: 'a frame on a site without consent' };
+    },
+    async clearForeignHistory() {
+      const allConsented = async (): Promise<boolean> => {
+        const h = await tab.send('Page.getNavigationHistory') as { entries?: { url?: string }[] };
+        return (h.entries ?? []).every((e) => onConsentedSite(e.url ?? '', consent));
+      };
+      try {
+        if (await allConsented()) return true;
+        await tab.send('Page.resetNavigationHistory');
+        return await allConsented();
+      } catch { return false; }
+    },
+    onForeignDocument(listener) {
+      foreignListeners.push(listener);
+      if (foreignDocument) listener();
     },
     endPageActivity: (mode) => endPageActivity(tab, browser, tabTargetId, mode),
     close() { tab.close(); browser.close(); },

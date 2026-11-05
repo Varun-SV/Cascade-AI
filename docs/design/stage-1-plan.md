@@ -491,6 +491,11 @@ stage. The unused library adds no production overhead in stage 1.
 - **`context.name` stays.** A page can't set it (tested with `window.name`, a frame name and a
   title), and Playwright can't click without it (tested: `page.click` times out with it removed).
   The only non-empty names are the agent's own, from `Page.createIsolatedWorld`.
+- **Script can go back without the agent's command.** `history.back()` in `Runtime.evaluate` restored a
+  page on a site without consent from the back-forward cache, with no request, and the agent read its
+  state. Refusing `Page.navigateToHistoryEntry` didn't cover this. `serve` now checks the tab and removes
+  its history if any entry is on a site without consent, before any command runs, and a main frame showing
+  a document without consent ends the lease. Stage 2's consent text must say the tab's back history can be lost.
 - **Revoke can close a user's tab even in `blank` mode,** if leaving the page doesn't finish in 3 s.
   Stage 2's decision and consent text must say so; it isn't approved by being here.
 - **Child targets:** every setup step must succeed before a target resumes, or it stays paused and
@@ -514,6 +519,9 @@ stage. The unused library adds no production overhead in stage 1.
 - **Dialogs can't be accepted** by the agent. `beforeunload` is the exception, which the device
   accepts so a page can't hold itself open through a revoke. If leaving still doesn't finish in 3 s,
   revoke closes the tab.
+- **The backstop isn't instant.** If a foreign document ever did commit, a command sent before the
+  device saw the commit could still run on it. Removing the history is what prevents it; this
+  is the second layer.
 - **A command already written can't be recalled.** Revoke then ends the page's activity,
   so the tab doesn't stay on what it did.
 - **A page that doesn't answer loses its tab, in either mode.** A spinning page answers no CDP call,
@@ -556,5 +564,6 @@ CA trusted in a throwaway browser profile it did, so the control now uses that. 
 unlisted-event filter, both fence checks (5 race tests), the resolved-address check, both WebRTC
 layers together (one alone still holds, by design), revoke's page step (2 tests), closing
 workers, accepting `beforeunload`, bounding the page step (the revoke never finishes without it) and
-closing when a script can't be removed. A first version of the worker test, using a shared worker, passed with the guard removed,
+closing when a script can't be removed. Each of clearing history and the foreign-document check has its own test
+with the other off, and with both off the agent reads the old page. A first version of the worker test, using a shared worker, passed with the guard removed,
 because a shared worker dies with its last page, so it was replaced.
