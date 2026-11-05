@@ -96,7 +96,11 @@ interface Rig {
 }
 const rigs: Rig[] = [];
 
-async function startRig(opts: { pageEnd?: PageEndMode; consent?: Consent; raw?: boolean; beforePolicy?: (b: LaunchedBrowser) => Promise<void> } = {}): Promise<Rig> {
+async function startRig(opts: {
+  pageEnd?: PageEndMode; consent?: Consent; raw?: boolean; beforePolicy?: (b: LaunchedBrowser) => Promise<void>;
+  /** For controls: a later --user-data-dir wins, so the profile has none of the launch's preferences. Production has no such option. */
+  bareProfile?: boolean;
+} = {}): Promise<Rig> {
   const script = (res: http.ServerResponse, extra = ''): boolean => { res.setHeader('content-type', 'text/javascript'); res.end(WORKER_JS + extra); return true; };
   const redirect = (res: http.ServerResponse, to: string): boolean => { res.statusCode = 302; res.setHeader('location', to); res.end(); return true; };
   const allowed = await countingServer((path, res, req) => {
@@ -109,6 +113,19 @@ async function startRig(opts: { pageEnd?: PageEndMode; consent?: Consent; raw?: 
         res.end('<!doctype html><script type="speculationrules">' + JSON.stringify({ prerender: [{ urls: ['/pre-same', '/pre-redirect'] }] }) + '</script>');
         return true;
       case '/pre-redirect': return redirect(res, 'http://offlist.test/pre-foreign');
+      case '/prerender-same-site':
+        res.setHeader('content-type', 'text/html');
+        res.end('<!doctype html><script type="speculationrules">' + JSON.stringify({ prerender: [{ urls: ['http://sub.allowed.test/pre-same-site'] }] }) + '</script>');
+        return true;
+      case '/prefetch-rules':
+        res.setHeader('content-type', 'text/html');
+        res.end('<!doctype html><script type="speculationrules">' + JSON.stringify({ prefetch: [{ urls: ['http://offlist.test/pf-cross-site', 'http://sub.allowed.test/pf-same-site'] }] }) + '</script>');
+        return true;
+      case '/pre-same-site':
+        res.setHeader('content-type', 'text/html');
+        res.setHeader('Supports-Loading-Mode', 'credentialed-prerender');
+        res.end('<!doctype html><title>PRERENDERTITLE</title>PRERENDERBODY');
+        return true;
       case '/timer-worker.js': return script(res, "setInterval(() => fetch('/beacon?worker-timer').catch(() => {}), 50);");
       case '/redirect': return redirect(res, 'http://offlist.test/from-redirect');
       case '/redirect-marked': return redirect(res, 'http://offlist.test/MARKPATH?q=MARKQUERY');
@@ -153,9 +170,13 @@ async function startRig(opts: { pageEnd?: PageEndMode; consent?: Consent; raw?: 
   };
   const consent = opts.consent ?? makeConsent(['http://allowed.test']);
   const proxy = await startEgressProxy({ consent, network });
+  const bareDir = opts.bareProfile ? fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-relay-bare-')) : null;
   const browser = await launchBehindProxy({
     chromiumPath: CHROMIUM!, proxy,
-    extraArgs: ['--unsafely-treat-insecure-origin-as-secure=http://allowed.test,http://other.test'],
+    extraArgs: [
+      '--unsafely-treat-insecure-origin-as-secure=http://allowed.test,http://other.test,http://sub.allowed.test',
+      ...(bareDir ? [`--user-data-dir=${bareDir}`] : []),
+    ],
   });
   await opts.beforePolicy?.(browser);
   const enforcer = await startRequestPolicy({ browserWs: browser.browserWs, tabWs: browser.tabWs, tabTargetId: browser.tabTargetId, consent });
@@ -214,6 +235,7 @@ async function startRig(opts: { pageEnd?: PageEndMode; consent?: Consent; raw?: 
       await proxy.close();
       http2.closeAllConnections(); http2.close();
       allowed.close(); offlist.close(); priv.close();
+      if (bareDir) fs.rmSync(bareDir, { recursive: true, force: true });
     },
   } as Rig;
   rigs.push(rig);
@@ -890,21 +912,53 @@ suite('isolation from what the lease did not start', { timeout: 60_000 }, () => 
   });
 });
 
-suite('prerender', { timeout: 30_000 }, () => {
-  it('a prerender redirected to a site without consent never reaches it', async () => {
-    const r = await startRig();
-    await r.page.goto('http://allowed.test/prerender-rules');
-    await sleep(1200);
-    // Control: Chromium really did prerender here, or this test shows nothing.
-    expect(r.allowed.hits, 'same-origin prerender ran').toContain('GET /pre-same');
+suite('speculative loads', { timeout: 30_000 }, () => {
+  const load = async (r: Rig, at: string, ms = 1500): Promise<void> => { await r.page.goto(`http://allowed.test${at}`); await sleep(ms); };
+  const speculated = (r: Rig): string[] => r.allowed.hits.filter((h) => /\/(pre|pf)-/.test(h));
+
+  it('control: in a profile without the preference, a prerender of a site without consent goes round the policy', async () => {
+    const r = await startRig({ bareProfile: true });
+    await load(r, '/prerender-same-site');
+    // Sent from the browser process, so Fetch interception never pauses it.
+    expect(r.allowed.hits).toContain('GET /pre-same-site');
+    expect(r.enforcer.decisions.filter((d) => d.url.includes('pre-same-site'))).toEqual([]);
+    expect(r.lease.state()).toBe('held');
+    await load(r, '/prerender-rules');
+    expect(r.allowed.hits).toContain('GET /pre-same');
     expect(r.allowed.hits, 'the redirect ran').toContain('GET /pre-redirect');
     expect(r.offlist.hits).toEqual([]);
-    // Chromium drops the prerender at the redirect itself, so the policy log has no entry to check.
   });
-  it('activating a consented prerender keeps the lease', async () => {
+  it('the launch\'s preference stops every speculative load', async () => {
     const r = await startRig();
-    await r.page.goto('http://allowed.test/prerender-rules');
+    for (const p of ['/prerender-same-site', '/prerender-rules', '/prefetch-rules']) await load(r, p);
+    expect(speculated(r)).toEqual([]);
+    expect(r.offlist.hits).toEqual([]);
+    expect(r.lease.state()).toBe('held');
+  });
+  it('a stray <link rel=prerender> to a site without consent is the policy\'s to stop', async () => {
+    const r = await startRig();
+    await r.page.goto('http://allowed.test/');
+    await r.page.evaluate("document.head.insertAdjacentHTML('beforeend', '<link rel=prerender href=\"http://offlist.test/link-prerender\">')");
     await sleep(800);
+    expect(r.offlist.hits).toEqual([]);
+  });
+  it('backstop: activating a prerender of a site without consent ends the lease and leaves the page', async () => {
+    const r = await startRig({ bareProfile: true });
+    await load(r, '/prerender-same-site');
+    expect(r.allowed.hits, 'it was prerendered').toContain('GET /pre-same-site');
+    const before = r.allowed.hits.filter((h) => h === 'GET /pre-same-site').length;
+    await r.page.evaluate("location.href = 'http://sub.allowed.test/pre-same-site'").catch(() => {});
+    await sleep(800);
+    // Activation sends no second request, so only the main-frame check can notice this.
+    expect(r.allowed.hits.filter((h) => h === 'GET /pre-same-site').length).toBe(before);
+    expect(r.lease.state()).not.toBe('held');
+    const list = await (await fetch(`http://127.0.0.1:${r.browser.port}/json/list`)).json() as { type: string; url: string }[];
+    expect(list.filter((t) => t.type === 'page').map((t) => t.url)).toEqual(['about:blank']);
+    expect(r.agentFrames.join()).not.toMatch(/PRERENDERTITLE|PRERENDERBODY/);
+  });
+  it('control: activating a prerender on the consented site keeps the lease, so the backstop isn\'t just firing on every activation', async () => {
+    const r = await startRig({ bareProfile: true });
+    await load(r, '/prerender-rules', 800);
     await r.page.evaluate("location.href = '/pre-same'").catch(() => {});
     await sleep(400);
     expect(r.lease.state()).toBe('held');

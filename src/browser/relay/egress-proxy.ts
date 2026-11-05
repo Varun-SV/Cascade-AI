@@ -176,5 +176,14 @@ export function browserProxyArgs(port: number): string[] {
   ];
 }
 
-/** The same WebRTC rule as a profile preference, a second layer. */
-export const PROFILE_PREFERENCES = { webrtc: { ip_handling_policy: 'disable_non_proxied_udp' } } as const;
+/**
+ * The same WebRTC rule as a second layer, and the one switch that stops speculative
+ * loads. Speculation rules prefetch and prerender from the browser process, so request
+ * interception never sees them: a page could load a same-site document without consent,
+ * with its cookies. Chromium 1243 has no flag that stops this (`--disable-features=Prerender2`
+ * and `--disable-blink-features=SpeculationRules` don't, nor does `Page.setPrerenderingAllowed`).
+ */
+export const PROFILE_PREFERENCES = {
+  net: { network_prediction_options: 2 },
+  webrtc: { ip_handling_policy: 'disable_non_proxied_udp' },
+} as const;

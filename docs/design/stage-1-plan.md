@@ -202,6 +202,8 @@ or is named as not covered; Cascade makes no claim of egress isolation for it.
 - Public-looking names that resolve to private addresses stay denied. No intranet
   opt-in ships in stage 1.
 
+**Speculative loads** go round request interception, so the launch turns them off (§9).
+
 **Carried limit:** why the browser-wide interception stops a pop-up's first
 request isn't understood, so the burst test (ten `window.open`) stays as a
 regression gate.
@@ -493,11 +495,18 @@ stage. The unused library adds no production overhead in stage 1.
 - **A revoke closes only workers the lease saw start,** not every worker in the browser.
 - **History must be well formed** before it counts as safe: at least one entry, a valid index, a
   URL on each.
-- **Prerender is only partly exercised.** A same-origin prerender ran, and activating it keeps the
-  lease. One redirected off-list got 0 at the server, but no entry in the policy's log, so that
-  stop isn't shown to be the policy's. Chromium 1243 didn't attempt a cross-origin prerender here.
-  No prerender test reaches the main-frame backstop, so that backstop is tested only through the
-  back-forward path.
+- **Speculative loads are off (`net.network_prediction_options: 2` in the launch's profile).** A speculation
+  rule prerendered a same-site document without consent, and its request reached the server with no entry in the
+  policy's log, because the browser process sends it and interception never pauses it. The cookies for that site
+  go with it. `--disable-features=Prerender2`, `--disable-blink-features=SpeculationRules` and
+  `Page.setPrerenderingAllowed` each left it running on Chromium 1243, so the preference is a single layer, with
+  a test that fails if it goes. A speculative prefetch hit the server in some runs and not others without the
+  preference, so its 0 has no control of its own. A cross-site prerender and prefetch were never attempted here,
+  with or without it. Desktop and the extension can't set this on the user's profile, so their scoped enforcer
+  must handle it.
+- **The main-frame backstop is now also tested through prerender.** In a control profile without the preference,
+  activating that prerender sends no second request, the lease ends, the tab goes to `about:blank`, and no frame
+  carries the page's title or body. Activating a consented prerender keeps the lease.
 - **History titles (policy version 3)** are blanked on every entry; ids and the index stay.
 - **`context.name` stays.** A page can't set it (tested with `window.name`, a frame name and a
   title), and Playwright can't click without it (tested: `page.click` times out with it removed).
@@ -575,6 +584,6 @@ CA trusted in a throwaway browser profile it did, so the control now uses that. 
 unlisted-event filter, both fence checks (5 race tests), the resolved-address check, both WebRTC
 layers together (one alone still holds, by design), revoke's page step (2 tests), closing
 workers, accepting `beforeunload`, bounding the page step (the revoke never finishes without it) and
-closing when a script can't be removed. Each of clearing history and the foreign-document check has its own test
+closing when a script can't be removed, and the speculative-load preference. Each of clearing history and the foreign-document check has its own test
 with the other off, and with both off the agent reads the old page. A first version of the worker test, using a shared worker, passed with the guard removed,
 because a shared worker dies with its last page, so it was replaced.
