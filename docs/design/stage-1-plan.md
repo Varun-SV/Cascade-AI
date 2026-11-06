@@ -498,8 +498,8 @@ stage. The unused library adds no production overhead in stage 1.
   between our launch and our policy could add one. Desktop and the extension share a browser with the user and
   need their own scoped enforcer.
 - **The launch checks what the browser reports.** Before anything can take the browser, it refuses any Chromium
-  major version but the tested one (`TESTED_CHROMIUM_MAJOR`, 153), reads the settings in force from
-  `chrome://prefs-internals` rather than the file it wrote, and requires the tab to be the only target. A changed
+  major version but the tested one (`TESTED_CHROMIUM_MAJORS`: 153, the development sandbox, and 156, which Playwright pins and CI runs), reads the settings in force from
+  `chrome://prefs-internals` rather than the file it wrote, and requires the tab to be the only target, apart from the browser's own `chrome://` interface (`browser_ui`), which can appear at any moment. A changed
   page or setting fails the launch. This shows the preference is set, not that it still works: that proof is the
   speculative-load tests, which is why a new version has to come through this number.
 - **A revoke closes only workers the lease saw start.** With the rule above, those should be the only ones there.

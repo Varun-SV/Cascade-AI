@@ -10,7 +10,7 @@
 
 import { type CdpClient, type CdpMessage, connectCdp } from './cdp-client.js';
 import { type Consent, onConsentedSite, requestVerdict } from './egress-rules.js';
-import { type LaunchedBrowser, claimFreshBrowser } from './launch.js';
+import { type LaunchedBrowser, claimFreshBrowser, isBrowserOwnUi } from './launch.js';
 
 const INTERCEPT_ALL = { patterns: [{ urlPattern: '*', requestStage: 'Request' }] };
 const PAGE_END_TIMEOUT_MS = 3000;
@@ -138,7 +138,8 @@ export async function startRequestPolicy(opts: {
   const tab = await connectCdp(tabWs);
   const browser = await connectCdp(browserWs);
 
-  const before = ((await browser.send('Target.getTargets')) as { targetInfos?: { targetId: string; type: string }[] }).targetInfos ?? [];
+  const before = (((await browser.send('Target.getTargets')) as { targetInfos?: { targetId: string; type: string; url: string }[] }).targetInfos ?? [])
+    .filter((t) => !isBrowserOwnUi(t));
   // Not only pages: a worker already running isn't this lease's, and a revoke wouldn't stop it.
   if (before.length !== 1 || before[0]!.targetId !== tabTargetId) {
     tab.close(); browser.close();

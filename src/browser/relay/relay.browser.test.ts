@@ -19,7 +19,7 @@ import { connectCdp } from './cdp-client.js';
 import { type EgressProxy, type ProxyNetwork, browserProxyArgs, startEgressProxy } from './egress-proxy.js';
 import { type Consent, makeConsent } from './egress-rules.js';
 import { navigateHistory } from './history.js';
-import { type LaunchedBrowser, launchBehindProxy, verifyLaunchedProfile } from './launch.js';
+import { type LaunchedBrowser, isBrowserOwnUi, launchBehindProxy, verifyLaunchedProfile } from './launch.js';
 import { type DeviceRelay, createDeviceRelay } from './relay.js';
 import { type PageEndMode, type RequestEnforcer, startRequestPolicy } from './request-enforcer.js';
 import { createTabLease, type TabLease } from './tab-lease.js';
@@ -926,8 +926,8 @@ suite('isolation from what the lease did not start', { timeout: 60_000 }, () => 
     const proxy = await startEgressProxy({ consent });
     const browser = await launchBehindProxy({ chromiumPath: CHROMIUM!, proxy });
     try {
-      const list = await (await fetch(`http://127.0.0.1:${browser.port}/json/list`)).json() as { type: string }[];
-      expect(list.map((t) => t.type)).toEqual(['page']);
+      const list = await (await fetch(`http://127.0.0.1:${browser.port}/json/list`)).json() as { type: string; url: string }[];
+      expect(list.filter((t) => !isBrowserOwnUi(t)).map((t) => t.type)).toEqual(['page']);
     } finally { await browser.close(); await proxy.close(); }
   });
   it('the launch chooses the profile', async () => {

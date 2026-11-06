@@ -20,7 +20,8 @@ import { type EgressProxy, PROFILE_PREFERENCES, browserProxyArgs } from './egres
  * could change without notice. So another version is refused: moving this number is a
  * reviewed change that the speculative-load tests have to pass.
  */
-export const TESTED_CHROMIUM_MAJOR = 153;
+// 156 is what Playwright pins and CI runs; 153 is what the development sandbox has.
+export const TESTED_CHROMIUM_MAJORS: readonly number[] = [153, 156];
 
 /**
  * The browser's own traffic, which no page asked for and the proxy would let out to
@@ -51,7 +52,7 @@ export function claimFreshBrowser(browser: object): boolean {
 /** Why this browser version isn't acceptable, or null. */
 export function versionProblem(browser: string): string | null {
   const major = /^(?:HeadlessChrome|Chrome)\/(\d+)\./.exec(browser)?.[1];
-  return Number(major) === TESTED_CHROMIUM_MAJOR ? null : `untested browser version: ${browser || 'unknown'}`;
+  return TESTED_CHROMIUM_MAJORS.includes(Number(major)) ? null : `untested browser version: ${browser || 'unknown'}`;
 }
 
 const UNREADABLE = 'browser settings unreadable';
@@ -67,6 +68,14 @@ export function preferencesProblem(report: string): string | null {
     }
   }
   return null;
+}
+
+/**
+ * The browser's own interface, such as its omnibox popup, which may appear at any moment.
+ * It's chrome:// only, so nothing from a page or an earlier run can be running in it.
+ */
+export function isBrowserOwnUi(t: { type: string; url: string }): boolean {
+  return t.type === 'browser_ui' && t.url.startsWith('chrome://');
 }
 
 /**
@@ -96,7 +105,7 @@ export async function verifyLaunchedProfile(browserWs: string, tabTargetId: stri
     for (let i = 0; i < 40 && others.length; i++) {
       if (i) await new Promise((r) => setTimeout(r, 25));
       const { targetInfos } = await browser.send('Target.getTargets') as { targetInfos: { targetId: string; type: string; url: string }[] };
-      others = targetInfos.filter((t) => t.targetId !== tabTargetId).map((t) => `${t.type} ${t.url}`);
+      others = targetInfos.filter((t) => t.targetId !== tabTargetId && !isBrowserOwnUi(t)).map((t) => `${t.type} ${t.url}`);
     }
     if (others.length) throw new Error(`the new browser is already running something else: ${others.join(', ')}`);
   } finally { browser.close(); }
