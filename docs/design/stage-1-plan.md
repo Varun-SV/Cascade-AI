@@ -521,10 +521,11 @@ stage. The unused library adds no production overhead in stage 1.
     `<link rel=prefetch>`, beacon, keepalive fetch, `<a ping>`, CSP `report-uri`.
   - **Blocked by the policy, 0 at the server:** a download from a site without consent.
   - **Sends nothing:** preconnect and dns-prefetch, under the preference. No control without it.
-  - **Goes round the policy (open limit):** a service worker's update check. The worker's script and its imported
-    scripts are fetched again at both servers, with nothing in the policy's log and no way to refuse them there.
-    The URLs are ones the policy already allowed at install. Pointed at a private address by a DNS change, the
-    proxy refuses it and nothing is dialled.
+  - **Goes round the policy (accepted limit for this CLI path, not for desktop or the extension):** a service
+    worker's update check. The worker's script and its imported scripts are fetched again at both servers, with
+    nothing in the policy's log and no way to refuse them there. So there's no per-request enforcement of this
+    traffic. The URLs are ones the policy already allowed at install. Pointed at a private address by a DNS change,
+    the proxy refuses it and nothing is dialled. After a revoke it reaches nothing (below).
   - **The browser's own background traffic:** a browser with only the proxy arguments asks for names while idle
     (sign-in, push and update hosts were seen), and the launch's flags take this to 0 over 15 s. Longer idle isn't tested,
     and a name the flags miss would get out to a public address.
@@ -533,13 +534,31 @@ stage. The unused library adds no production overhead in stage 1.
 - **The main-frame backstop is now also tested through prerender.** In a control profile without the preference,
   activating that prerender sends no second request, the lease ends, the tab goes to `about:blank`, and no frame
   carries the page's title or body. Activating a consented prerender keeps the lease.
-- **The proxy stays closed until the policy is on.** On Chromium 153 here and 156 in CI, a launched
-  browser asks for `clients2.google.com`, `www.google.com` and `redirector.gvt1.com` within about a
-  second of starting, despite the launch's flags. The proxy refuses everything but the canary, before
-  any lookup, until `startRequestPolicy` opens it. An idle browser then asked for nothing over 15 s
-  after opening. **Limit:** a request the browser makes later, during a lease, to a public host would
-  pass the proxy like any public subresource, and the proxy can't tell who sent it. Longer idle
-  periods aren't measured.
+- **The proxy stays closed until the policy is on, and shuts when the lease's page has ended.** On Chromium 153
+  here and 156 in CI, a launched browser asks for `clients2.google.com`, `www.google.com` and
+  `redirector.gvt1.com` within about a second of starting, despite the launch's flags. The proxy refuses
+  everything but the canary, before any lookup, until `startRequestPolicy` opens it. `endPageActivity`, and
+  `close`, then shut it for good, and cut connections already through it. The reason is a service worker
+  registration, which survives a revoke: with the tab back in its scope from the HTTP cache, its update check
+  reached the server with the proxy open, and reaches nothing once it's shut (test with both modes; removing
+  the shut fails it).
+- **What is and isn't governed during a lease.** The policy governs requests from pages and workers. It
+  doesn't govern everything the browser sends, and stage 1 makes no such claim. **While a lease is held**, a
+  connection the browser makes by itself to a public host passes the proxy like any public subresource. The proxy
+  can't tell who sent it. Gating the proxy on hosts the policy has logged would stop it, but it would also stop
+  public WebSockets, which Fetch never pauses and §4.3 allows, so that isn't done. Measured instead: with a
+  service worker registered, no connection left the proxy for a host and port missing from the policy's log,
+  over 30 s in the test and 8 min once on Chromium 153 (`CASCADE_RELAY_IDLE_MS`). That's a measurement, not a
+  guarantee. The test's own control shows such a connection would be let out and would be seen. A service
+  worker's update check is logged nowhere, as above; its hosts are ones the policy allowed at install.
+- **The launch takes no switches.** `launchBehindProxy` takes the binary, the proxy and a timeout, and refuses
+  any other option. A switch later on the line wins, so `--no-proxy-server` after ours reached a server directly
+  with the proxy seeing nothing (the control). `launchForRelayTests` adds a short allowlist of test switches,
+  and a test fails if anything else in `src/` names it. The launch also reads `chrome://version`: everything it
+  asked for must be there, and no switch from a list of those controlling traffic, debugging, profile or
+  extensions may be added or repeated. So a wrapper around the binary adding one fails the launch. **Limit:** it's a
+  list. Other switches must pass, because wrappers and the browser add their own (the sandbox's adds about ten),
+  so a harmful switch not on the list would pass. The binary path itself is trusted.
 - **History titles (policy version 3)** are blanked on every entry; ids and the index stay.
 - **`context.name` stays.** A page can't set it (tested with `window.name`, a frame name and a
   title), and Playwright can't click without it (tested: `page.click` times out with it removed).

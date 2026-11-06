@@ -42,10 +42,12 @@ export interface RequestEnforcer {
   /**
    * Ends what the agent left running, since detaching doesn't: script timers and
    * workers keep going. `close` closes the tab; `blank` keeps it open on about:blank.
-   * Always finishes in bounded time. False means the browser never confirmed it.
+   * Always finishes in bounded time. False means the browser never confirmed it. Either
+   * way the proxy is then shut for good: a service worker registration survives this,
+   * and its update checks don't come through the policy.
    */
   endPageActivity(mode: PageEndMode): Promise<boolean>;
-  /** Stops policing. Call only after endPageActivity. */
+  /** Stops policing and shuts the proxy. Call only after endPageActivity. */
   close(): void;
 }
 
@@ -255,8 +257,10 @@ export async function startRequestPolicy(opts: {
       foreignListeners.push(listener);
       if (foreignDocument) listener();
     },
-    endPageActivity: (mode) => endPageActivity(tab, browser, tabTargetId, mode, ownedWorkers),
-    close() { tab.close(); browser.close(); },
+    async endPageActivity(mode) {
+      try { return await endPageActivity(tab, browser, tabTargetId, mode, ownedWorkers); } finally { opts.browser.shutEgress(); }
+    },
+    close() { opts.browser.shutEgress(); tab.close(); browser.close(); },
   };
 }
 

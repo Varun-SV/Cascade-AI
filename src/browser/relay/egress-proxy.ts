@@ -56,6 +56,11 @@ export interface EgressProxy {
    * nothing should leave before the policy is on.
    */
   open(): void;
+  /**
+   * Stops traffic for good: everything is refused again, and connections already through
+   * are cut. The browser outlives the lease, with anything it still has registered.
+   */
+  shut(): void;
   /** Called once when the proxy stops, for any reason. Revoke the lease here. */
   onClose(fn: () => void): void;
   close(): Promise<void>;
@@ -77,13 +82,16 @@ export async function startEgressProxy(opts: { consent: Consent; network?: Proxy
     return `${bareHost(u.hostname)}:${u.port || defaultPort(u.protocol)}`;
   }));
 
-  let opened = false;
+  let phase: 'closed' | 'open' | 'shut' = 'closed';
   const decide = async (kind: ProxyDecision['kind'], host: string, port: string): Promise<{ address: string; port: number } | null> => {
     const bare = bareHost(host);
     const record: ProxyDecision = { kind, host, port, allowed: false, addresses: [], dialed: null, reason: '' };
     decisions.push(record);
-    if (!opened) { record.reason = 'no policy is on yet'; return null; }
+    if (phase === 'closed') { record.reason = 'no policy is on yet'; return null; }
+    if (phase === 'shut') { record.reason = 'the lease is over'; return null; }
     try { record.addresses = net.isIP(bare) ? [bare] : await network.resolve(bare); } catch { record.addresses = []; }
+    // The lookup takes time, and the lease may have ended during it.
+    if ((phase as string) === 'shut') { record.reason = 'the lease is over'; return null; }
     if (!record.addresses.length) { record.reason = 'name does not resolve'; return null; }
     const privateAddresses = record.addresses.filter((a) => isPrivateHost(a));
     const nameIsPrivate = isPrivateHost(bare);
@@ -154,7 +162,11 @@ export async function startEgressProxy(opts: { consent: Consent; network?: Proxy
   return {
     port: (server.address() as AddressInfo).port,
     decisions,
-    open() { opened = true; },
+    open() { if (phase === 'closed') phase = 'open'; },
+    shut() {
+      phase = 'shut';
+      for (const s of sockets) s.destroy();
+    },
     canaryUrl() {
       const token = randomBytes(12).toString('hex');
       canaries.add(token);

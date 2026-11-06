@@ -5,13 +5,14 @@
 //  On this path the relay launches the browser itself and never attaches to one it
 //  didn't launch. A dedicated profile, so nothing of the user's is in reach. Nothing
 //  is usable until a request from the tab has been seen at the proxy, and the browser
-//  has shown it is a version we tested, with the settings we asked for in force.
+//  has shown it is a version we tested, with the settings and switches we asked for in
+//  force. The caller chooses no switches: one later on the line would win over ours.
 
 import { type ChildProcess, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { connectCdp } from './cdp-client.js';
+import { type CdpClient, connectCdp } from './cdp-client.js';
 import { type EgressProxy, PROFILE_PREFERENCES, browserProxyArgs } from './egress-proxy.js';
 
 /**
@@ -55,6 +56,33 @@ export function versionProblem(browser: string): string | null {
   return TESTED_CHROMIUM_MAJORS.includes(Number(major)) ? null : `untested browser version: ${browser || 'unknown'}`;
 }
 
+/**
+ * Switches that choose where traffic goes, what can drive the browser or what runs in
+ * it. Not every switch: a wrapper around the binary and the browser itself add others
+ * (the development sandbox's adds several), so the rest are allowed through.
+ */
+const CONTROLLING_SWITCH = /^--?(no-proxy-server|proxy-|winhttp-proxy|host-resolver-rules|host-rules|ip-address-space-overrides|remote-debugging|remote-allow-origins|user-data-dir|profile-directory|load-extension|disable-extensions-except|enable-features|enable-blink-features|enable-quic|origin-to-force-quic-on|disable-web-security|ignore-certificate-errors|test-type|gaia-url|gcm-checkin-url|component-updater|webrtc-|force-webrtc-|net-log|log-net-log|ssl-key-log-file)/;
+const switchName = (s: string): string => s.split('=')[0]!.replace(/^-+/, '');
+
+/**
+ * Why the running browser's own command line doesn't carry what the launch asked for,
+ * or null. Everything asked for must be there, and a controlling switch must be one of
+ * them, because something around the binary could add one that a request through the
+ * proxy would never show. A switch given twice is refused too: the last one wins.
+ */
+export function commandLineProblem(reported: string, expected: readonly string[]): string | null {
+  if (!reported.trim()) return 'browser command line unreadable';
+  let rest = ` ${reported.replace(/\s+/g, ' ').trim()} `;
+  for (const arg of expected) {
+    const found = rest.indexOf(` ${arg} `);
+    if (found < 0) return `missing switch: ${arg}`;
+    rest = `${rest.slice(0, found)} ${rest.slice(found + arg.length + 2)}`;
+  }
+  const ours = new Set(expected.map(switchName));
+  const extra = rest.split(' ').filter((t) => t.startsWith('-') && (CONTROLLING_SWITCH.test(t) || ours.has(switchName(t))));
+  return extra.length ? `switches the launch did not ask for: ${extra.join(' ')}` : null;
+}
+
 const UNREADABLE = 'browser settings unreadable';
 
 /** Why the browser's own report of its settings isn't acceptable, or null. Anything unreadable is a problem. */
@@ -78,29 +106,37 @@ export function isBrowserOwnUi(t: { type: string; url: string }): boolean {
   return t.type === 'browser_ui' && t.url.startsWith('chrome://');
 }
 
+/** A chrome:// page's text, once `whole` accepts it, or whatever it last showed. Bounded. */
+async function readBrowserPage(browser: CdpClient, url: string, expression: string, whole: (text: string) => boolean): Promise<string> {
+  const { targetId } = await browser.send('Target.createTarget', { url }) as { targetId: string };
+  let text = '';
+  try {
+    const { sessionId } = await browser.send('Target.attachToTarget', { targetId, flatten: true }) as { sessionId: string };
+    for (let i = 0; i < 100 && !whole(text); i++) {
+      if (i) await new Promise((r) => setTimeout(r, 50));
+      const got = await browser.send('Runtime.evaluate', { expression, returnByValue: true }, sessionId) as { result?: { value?: unknown } };
+      text = typeof got.result?.value === 'string' ? got.result.value : '';
+    }
+  } finally {
+    await browser.send('Target.closeTarget', { targetId }).catch(() => {});
+  }
+  return text;
+}
+
 /**
- * Asks the running browser, rather than trusting the file written before it started:
- * a preference the browser ignored or rewrote would otherwise pass unnoticed. Also
- * requires the leased tab to be the only target. Throws on anything else.
+ * Asks the running browser, rather than trusting what was written before it started:
+ * a preference it ignored or rewrote, or a switch something else added, would otherwise
+ * pass unnoticed. Also requires the leased tab to be the only target. Throws on anything else.
  */
-export async function verifyLaunchedProfile(browserWs: string, tabTargetId: string): Promise<void> {
+export async function verifyLaunchedProfile(browserWs: string, tabTargetId: string, switches: readonly string[]): Promise<void> {
   const browser = await connectCdp(browserWs);
   try {
-    const { targetId } = await browser.send('Target.createTarget', { url: 'chrome://prefs-internals/' }) as { targetId: string };
-    let report = '';
-    try {
-      const { sessionId } = await browser.send('Target.attachToTarget', { targetId, flatten: true }) as { sessionId: string };
-      // The page may still be loading, so it counts once it's whole. Bounded: otherwise this fails below.
-      for (let i = 0; i < 100 && preferencesProblem(report) === UNREADABLE; i++) {
-        if (i) await new Promise((r) => setTimeout(r, 50));
-        const got = await browser.send('Runtime.evaluate', { expression: 'document.body ? document.body.innerText : ""', returnByValue: true }, sessionId) as { result?: { value?: unknown } };
-        report = typeof got.result?.value === 'string' ? got.result.value : '';
-      }
-    } finally {
-      await browser.send('Target.closeTarget', { targetId }).catch(() => {});
-    }
+    const report = await readBrowserPage(browser, 'chrome://prefs-internals/', 'document.body ? document.body.innerText : ""', (t) => preferencesProblem(t) !== UNREADABLE);
     const problem = preferencesProblem(report);
     if (problem) throw new Error(problem);
+    const line = await readBrowserPage(browser, 'chrome://version/', 'document.getElementById("command_line")?.textContent ?? ""', (t) => t.trim() !== '');
+    const lineProblem = commandLineProblem(line, switches);
+    if (lineProblem) throw new Error(lineProblem);
     let others = ['(not checked)'];
     for (let i = 0; i < 40 && others.length; i++) {
       if (i) await new Promise((r) => setTimeout(r, 25));
@@ -117,27 +153,58 @@ export interface LaunchedBrowser {
   readonly browserWs: string;
   readonly tabWs: string;
   readonly tabTargetId: string;
+  /** Exactly what it was started with, which the running browser has to report back. */
+  readonly switches: readonly string[];
   /** Opens the proxy. The policy calls this once it's on; nothing else should in production. */
   openEgress(): void;
+  /** Shuts the proxy for good, and whatever is going through it. The policy calls this when the lease's page has ended. */
+  shutEgress(): void;
   close(): Promise<void>;
 }
 
-export async function launchBehindProxy(opts: {
-  chromiumPath: string; proxy: EgressProxy; extraArgs?: string[]; canaryTimeoutMs?: number; env?: NodeJS.ProcessEnv;
-  /** Control tests only, to show what the settings prevent: a profile with none of them, unverified. */
-  testOnlyBareProfileDir?: string;
-}): Promise<LaunchedBrowser> {
-  // A later --user-data-dir would win, and the run would get a profile that isn't fresh.
-  if (opts.extraArgs?.some((a) => a.startsWith('--user-data-dir'))) throw new Error('the launch chooses the profile');
-  const dir = opts.testOnlyBareProfileDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-relay-'));
-  if (!opts.testOnlyBareProfileDir) {
+/** Everything a production launch may choose. Nothing here reaches the command line. */
+export interface LaunchOptions { chromiumPath: string; proxy: EgressProxy; canaryTimeoutMs?: number }
+const LAUNCH_OPTION_NAMES: readonly string[] = ['chromiumPath', 'proxy', 'canaryTimeoutMs'];
+
+/**
+ * The launch every real path uses. An option it doesn't know is refused rather than
+ * ignored, so code still passing switches or an environment finds out at once.
+ */
+export function launchBehindProxy(opts: LaunchOptions): Promise<LaunchedBrowser> {
+  const unknown = Object.keys(opts).filter((k) => !LAUNCH_OPTION_NAMES.includes(k));
+  if (unknown.length) return Promise.reject(new Error(`the launch takes no ${unknown.join(', ')}`));
+  return launch(opts);
+}
+
+/** The only switches a test may add, each needed to reach something a test measures. None chooses where traffic goes. */
+const TEST_SWITCHES = ['--unsafely-treat-insecure-origin-as-secure', '--enable-quic', '--origin-to-force-quic-on'];
+
+export function testArgProblem(arg: string): string | null {
+  return TEST_SWITCHES.includes(arg.split('=')[0]!) ? null : `not a test switch: ${arg}`;
+}
+
+/**
+ * Tests only, and a test fails if anything else in src/ names this. Adds a listed
+ * switch or an environment, or a control profile with none of the settings, unverified.
+ */
+export function launchForRelayTests(opts: LaunchOptions & { testArgs?: string[]; env?: NodeJS.ProcessEnv; bareProfileDir?: string }): Promise<LaunchedBrowser> {
+  const problem = (opts.testArgs ?? []).map(testArgProblem).find(Boolean);
+  return problem ? Promise.reject(new Error(problem)) : launch(opts);
+}
+
+async function launch(opts: LaunchOptions & { testArgs?: string[]; env?: NodeJS.ProcessEnv; bareProfileDir?: string }): Promise<LaunchedBrowser> {
+  const dir = opts.bareProfileDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-relay-'));
+  if (!opts.bareProfileDir) {
     fs.mkdirSync(path.join(dir, 'Default'));
     fs.writeFileSync(path.join(dir, 'Default', 'Preferences'), JSON.stringify(PROFILE_PREFERENCES));
   }
-  const proc = spawn(opts.chromiumPath, [
+  // Ours last: on a repeated switch, the last one wins.
+  const switches = [
+    ...(opts.testArgs ?? []),
     '--headless=new', '--no-sandbox', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1',
-    `--user-data-dir=${dir}`, ...LAUNCH_ARGS, ...browserProxyArgs(opts.proxy.port), ...(opts.extraArgs ?? []), 'about:blank',
-  ], { stdio: ['ignore', 'ignore', 'pipe'], ...(opts.env ? { env: opts.env } : {}) });
+    `--user-data-dir=${dir}`, ...LAUNCH_ARGS, ...browserProxyArgs(opts.proxy.port),
+  ];
+  const proc = spawn(opts.chromiumPath, [...switches, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'], ...(opts.env ? { env: opts.env } : {}) });
   const cleanup = async (): Promise<void> => {
     proc.kill('SIGKILL');
     await new Promise((r) => setTimeout(r, 150));
@@ -179,8 +246,8 @@ export async function launchBehindProxy(opts: {
       if (Date.now() > deadline) throw new Error('egress canary did not reach the proxy');
       await new Promise((r) => setTimeout(r, 20));
     }
-    if (!opts.testOnlyBareProfileDir) await verifyLaunchedProfile(version.webSocketDebuggerUrl, tab.id);
-    const launched: LaunchedBrowser = { process: proc, port, browserWs: version.webSocketDebuggerUrl, tabWs: tab.webSocketDebuggerUrl, tabTargetId: tab.id, openEgress: () => opts.proxy.open(), close: cleanup };
+    if (!opts.bareProfileDir) await verifyLaunchedProfile(version.webSocketDebuggerUrl, tab.id, switches);
+    const launched: LaunchedBrowser = { process: proc, port, browserWs: version.webSocketDebuggerUrl, tabWs: tab.webSocketDebuggerUrl, tabTargetId: tab.id, switches, openEgress: () => opts.proxy.open(), shutEgress: () => opts.proxy.shut(), close: cleanup };
     fresh.add(launched);
     return launched;
   } catch (e) {
