@@ -229,6 +229,8 @@ export async function startRequestPolicy(opts: {
   // so the burst test stays a regression gate.
   await browser.send('Fetch.enable', INTERCEPT_ALL);
   await browser.send('Target.setAutoAttach', AUTO_ATTACH_PAUSED);
+  // Only now: with no policy on, the proxy lets nothing out.
+  opts.browser.openEgress();
 
   return {
     decisions, closedPages, children, dismissedDialogs,

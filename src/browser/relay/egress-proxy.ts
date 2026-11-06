@@ -50,6 +50,12 @@ export interface EgressProxy {
   /** A URL only this proxy answers, for checking traffic really goes through it. */
   canaryUrl(): string;
   canarySeen(url: string): boolean;
+  /**
+   * Lets traffic through. Until then everything but the canary is refused, before any
+   * name is looked up: a browser asks for update and suggestion hosts as it starts, and
+   * nothing should leave before the policy is on.
+   */
+  open(): void;
   /** Called once when the proxy stops, for any reason. Revoke the lease here. */
   onClose(fn: () => void): void;
   close(): Promise<void>;
@@ -71,10 +77,12 @@ export async function startEgressProxy(opts: { consent: Consent; network?: Proxy
     return `${bareHost(u.hostname)}:${u.port || defaultPort(u.protocol)}`;
   }));
 
+  let opened = false;
   const decide = async (kind: ProxyDecision['kind'], host: string, port: string): Promise<{ address: string; port: number } | null> => {
     const bare = bareHost(host);
     const record: ProxyDecision = { kind, host, port, allowed: false, addresses: [], dialed: null, reason: '' };
     decisions.push(record);
+    if (!opened) { record.reason = 'no policy is on yet'; return null; }
     try { record.addresses = net.isIP(bare) ? [bare] : await network.resolve(bare); } catch { record.addresses = []; }
     if (!record.addresses.length) { record.reason = 'name does not resolve'; return null; }
     const privateAddresses = record.addresses.filter((a) => isPrivateHost(a));
@@ -146,6 +154,7 @@ export async function startEgressProxy(opts: { consent: Consent; network?: Proxy
   return {
     port: (server.address() as AddressInfo).port,
     decisions,
+    open() { opened = true; },
     canaryUrl() {
       const token = randomBytes(12).toString('hex');
       canaries.add(token);

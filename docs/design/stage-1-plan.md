@@ -533,6 +533,13 @@ stage. The unused library adds no production overhead in stage 1.
 - **The main-frame backstop is now also tested through prerender.** In a control profile without the preference,
   activating that prerender sends no second request, the lease ends, the tab goes to `about:blank`, and no frame
   carries the page's title or body. Activating a consented prerender keeps the lease.
+- **The proxy stays closed until the policy is on.** On Chromium 153 here and 156 in CI, a launched
+  browser asks for `clients2.google.com`, `www.google.com` and `redirector.gvt1.com` within about a
+  second of starting, despite the launch's flags. The proxy refuses everything but the canary, before
+  any lookup, until `startRequestPolicy` opens it. An idle browser then asked for nothing over 15 s
+  after opening. **Limit:** a request the browser makes later, during a lease, to a public host would
+  pass the proxy like any public subresource, and the proxy can't tell who sent it. Longer idle
+  periods aren't measured.
 - **History titles (policy version 3)** are blanked on every entry; ids and the index stay.
 - **`context.name` stays.** A page can't set it (tested with `window.name`, a frame name and a
   title), and Playwright can't click without it (tested: `page.click` times out with it removed).

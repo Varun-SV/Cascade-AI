@@ -117,6 +117,8 @@ export interface LaunchedBrowser {
   readonly browserWs: string;
   readonly tabWs: string;
   readonly tabTargetId: string;
+  /** Opens the proxy. The policy calls this once it's on; nothing else should in production. */
+  openEgress(): void;
   close(): Promise<void>;
 }
 
@@ -178,7 +180,7 @@ export async function launchBehindProxy(opts: {
       await new Promise((r) => setTimeout(r, 20));
     }
     if (!opts.testOnlyBareProfileDir) await verifyLaunchedProfile(version.webSocketDebuggerUrl, tab.id);
-    const launched: LaunchedBrowser = { process: proc, port, browserWs: version.webSocketDebuggerUrl, tabWs: tab.webSocketDebuggerUrl, tabTargetId: tab.id, close: cleanup };
+    const launched: LaunchedBrowser = { process: proc, port, browserWs: version.webSocketDebuggerUrl, tabWs: tab.webSocketDebuggerUrl, tabTargetId: tab.id, openEgress: () => opts.proxy.open(), close: cleanup };
     fresh.add(launched);
     return launched;
   } catch (e) {

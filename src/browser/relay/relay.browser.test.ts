@@ -615,6 +615,7 @@ if (CHROMIUM && !hasCertTools && process.env.CI) throw new Error('The Alt-Svc te
       network: { resolve: async () => ['203.0.113.30'], dial: () => net.connect(srv.port, '127.0.0.1') },
     });
     const browser = await launchBehindProxy({ chromiumPath: CHROMIUM!, proxy, env: srv.env });
+    browser.openEgress();
     const pb = await pw.chromium.connectOverCDP(`http://127.0.0.1:${browser.port}`);
     try {
       await visit(pb.contexts()[0]!.pages()[0]!, `https://h3.test:${srv.port}/`);
@@ -751,6 +752,7 @@ async function foreignHistoryRig(opts: { stayOnForeign?: boolean; wrap?: (e: Req
   const consent = makeConsent(['http://allowed.test']);
   const proxy = await startEgressProxy({ consent: wide, network: { resolve: async () => [PUBLIC_ALLOWED], dial: () => net.connect(server.port, '127.0.0.1') } });
   const browser = await launchBehindProxy({ chromiumPath: CHROMIUM!, proxy });
+  browser.openEgress(); // This setup runs before any policy.
   const raw = await connectCdp(browser.tabWs);
   await raw.send('Page.enable');
   await raw.send('Page.navigate', { url: 'http://offlist.test/secret' });
@@ -891,6 +893,7 @@ suite('isolation from what the lease did not start', { timeout: 60_000 }, () => 
     const consent = makeConsent(['http://allowed.test']);
     const proxy = await startEgressProxy({ consent, network: { resolve: async () => [PUBLIC_ALLOWED], dial: () => net.connect(site.port, '127.0.0.1') } });
     const browser = await launchBehindProxy({ chromiumPath: CHROMIUM!, proxy, extraArgs: ['--unsafely-treat-insecure-origin-as-secure=http://allowed.test'] });
+    browser.openEgress(); // The worker has to start before any policy, as it could in a reused profile.
     const raw = await connectCdp(browser.tabWs);
     await raw.send('Page.enable');
     await raw.send('Page.navigate', { url: 'http://allowed.test/' });
@@ -1222,6 +1225,7 @@ suite('what the browser sends that no agent asked for', { timeout: 60_000 }, () 
 
   it('control: an idle browser behind the proxy, with only its proxy arguments, does ask for names', async () => {
     const names = await idleNames(async (proxy) => {
+      proxy.open();
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-relay-idle-'));
       const proc = spawn(CHROMIUM!, ['--headless=new', '--no-sandbox', `--user-data-dir=${dir}`, ...browserProxyArgs(proxy.port), 'about:blank'], { stdio: 'ignore' });
       return async () => { proc.kill('SIGKILL'); await sleep(150); fs.rmSync(dir, { recursive: true, force: true }); };
@@ -1232,6 +1236,16 @@ suite('what the browser sends that no agent asked for', { timeout: 60_000 }, () 
     const names = await idleNames(async (proxy) => {
       const b = await launchBehindProxy({ chromiumPath: CHROMIUM!, proxy });
       return () => b.close();
+    });
+    expect(names).toEqual([]);
+  });
+
+  it('after the policy opens the proxy, an idle browser still asks for nothing', async () => {
+    const names = await idleNames(async (proxy) => {
+      const consent = makeConsent(['http://allowed.test']);
+      const b = await launchBehindProxy({ chromiumPath: CHROMIUM!, proxy });
+      const enforcer = await startRequestPolicy({ browser: b, consent });
+      return async () => { enforcer.close(); await b.close(); };
     });
     expect(names).toEqual([]);
   });
