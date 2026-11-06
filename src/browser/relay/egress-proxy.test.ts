@@ -283,3 +283,129 @@ describe('the proxy\'s three phases', () => {
     });
   });
 });
+
+describe('what a confirmed private origin lets through the proxy', () => {
+  let proxy: EgressProxy;
+  let site: net.Server;
+  let accepted = 0;
+  let received = 0;
+  const dials: string[] = [];
+  const conns: Socket[] = [];
+
+  /** A proxy whose every dial lands on one counting destination, whatever address it names. */
+  const start = async (privateOrigins: string[]): Promise<void> => {
+    accepted = 0;
+    received = 0;
+    site = net.createServer((s) => {
+      accepted += 1;
+      s.on('data', (d) => { received += d.length; });
+      s.on('error', () => {});
+    });
+    await new Promise<void>((r) => site.listen(0, '127.0.0.1', r));
+    const port = (site.address() as AddressInfo).port;
+    proxy = await startEgressProxy({
+      consent: makeConsent([], privateOrigins),
+      network: {
+        resolve: async () => { throw new Error('IP literals are never looked up'); },
+        dial: (address, p) => { dials.push(`${address}:${p}`); return net.connect(port, '127.0.0.1'); },
+      },
+    });
+    proxy.open();
+  };
+  /** Raw bytes to the proxy, as a browser-process client that CDP never sees would send them. */
+  const send = (raw: string): Promise<string> => new Promise((resolve) => {
+    const s = net.connect(proxy.port, '127.0.0.1');
+    conns.push(s);
+    s.on('error', () => {});
+    s.once('data', (d) => resolve(String(d)));
+    s.write(raw);
+  });
+  const connect = (hostPort: string): Promise<string> => send(`CONNECT ${hostPort} HTTP/1.1\r\nHost: ${hostPort}\r\n\r\n`);
+  const get = (url: string): Promise<string> => send(`GET ${url} HTTP/1.1\r\nHost: ${new URL(url).host}\r\n\r\n`);
+
+  afterEach(async () => {
+    for (const s of conns.splice(0)) s.destroy();
+    dials.length = 0;
+    await proxy.close();
+    site.close();
+  });
+
+  const cases: { v: string; tls: string; plain: string; tlsHost: string; plainHost: string }[] = [
+    { v: 'IPv4', tls: 'https://127.0.0.1:8443', plain: 'http://127.0.0.1:8080', tlsHost: '127.0.0.1:8443', plainHost: '127.0.0.1:8080' },
+    { v: 'IPv6', tls: 'https://[::1]:8443', plain: 'http://[::1]:8080', tlsHost: '[::1]:8443', plainHost: '[::1]:8080' },
+  ];
+
+  for (const c of cases) {
+    describe(c.v, () => {
+      it('a confirmed https origin lets its CONNECT through', async () => {
+        await start([c.tls]);
+        expect(await connect(c.tlsHost)).toMatch(/^HTTP\/1\.1 200/);
+        expect(dials).toHaveLength(1);
+        await sleep(30);
+        expect(accepted, 'control: the tunnel reached the destination').toBe(1);
+      });
+
+      it('a confirmed https origin does not let plain http to the same host and port through', async () => {
+        await start([c.tls]);
+        expect(await get(`http://${c.tlsHost}/`)).toMatch(/^HTTP\/1\.1 403/);
+        expect(proxy.decisions.at(-1)?.reason).toBe('private-network destination');
+        await sleep(30);
+        expect({ dials, accepted, received }).toEqual({ dials: [], accepted: 0, received: 0 });
+      });
+
+      it('a confirmed http origin lets plain http through', async () => {
+        await start([c.plain]);
+        void get(`http://${c.plainHost}/x`); // The destination never answers; it only counts.
+        await sleep(50);
+        expect(dials, 'control').toHaveLength(1);
+        expect(accepted).toBe(1);
+        expect(received).toBeGreaterThan(0);
+      });
+
+      it('a confirmed http origin does not let a CONNECT to the same host and port through', async () => {
+        await start([c.plain]);
+        expect(await connect(c.plainHost)).toMatch(/^HTTP\/1\.1 403/);
+        expect(proxy.decisions.at(-1)?.reason).toBe('private-network destination');
+        await sleep(30);
+        expect({ dials, accepted }).toEqual({ dials: [], accepted: 0 });
+      });
+
+      it('another port on the same host is not covered, either way', async () => {
+        await start([c.tls, c.plain]);
+        const host = c.tlsHost.slice(0, c.tlsHost.lastIndexOf(':'));
+        expect(await connect(`${host}:9443`)).toMatch(/^HTTP\/1\.1 403/);
+        expect(await get(`http://${host}:9080/`)).toMatch(/^HTTP\/1\.1 403/);
+        await sleep(30);
+        expect({ dials, accepted }).toEqual({ dials: [], accepted: 0 });
+      });
+    });
+  }
+
+  it('default ports count: https://10.0.0.1 covers CONNECT :443, not plain http on :80', async () => {
+    await start(['https://10.0.0.1']);
+    expect(await get('http://10.0.0.1/')).toMatch(/^HTTP\/1\.1 403/);
+    expect(dials).toEqual([]);
+    expect(await connect('10.0.0.1:443')).toMatch(/^HTTP\/1\.1 200/);
+    expect(dials).toEqual(['10.0.0.1:443']);
+  });
+
+  it('a request line naming https is refused unread, even for a confirmed https origin', async () => {
+    await start(['https://127.0.0.1:8443']);
+    expect(await get('https://127.0.0.1:8443/')).toMatch(/^HTTP\/1\.1 403/);
+    await sleep(30);
+    expect({ dials, accepted }).toEqual({ dials: [], accepted: 0 });
+  });
+
+  it('a request line naming https on a public host is refused too, not sent in plain text', async () => {
+    await start([]);
+    expect(await get('https://203.0.113.9/')).toMatch(/^HTTP\/1\.1 403/);
+    await sleep(30);
+    expect({ dials, accepted }).toEqual({ dials: [], accepted: 0 });
+  });
+
+  it('a public origin confirmed as private covers nothing on a private address', async () => {
+    await start(['https://intranet.example:8443']);
+    expect(await connect('127.0.0.1:8443')).toMatch(/^HTTP\/1\.1 403/);
+    expect(dials).toEqual([]);
+  });
+});

@@ -8,12 +8,20 @@
 //  request and every CONNECT, before any upstream byte:
 //
 //    1. Resolve the host once. An IP literal is its own address.
-//    2. Refuse if the host, or ANY address it resolved to, is private, unless the
-//       exact origin was confirmed as private AND names a private host itself.
+//    2. Refuse if the host, or ANY address it resolved to, is private, unless a
+//       confirmed private origin covers it (below) AND names a private host itself.
 //    3. Dial exactly a checked address. There is no second lookup.
 //
 //  TLS passes through as CONNECT host:port: this proxy doesn't terminate it, installs
 //  no certificate and never sees content. See docs/design/stage-1-plan.md section 3.
+//
+//  What a confirmed private origin covers here is narrower than an origin, and says so:
+//    - A plain http request is covered only by the same `http:` origin, port included.
+//    - A CONNECT is covered only by an `https:` origin on the same host and port. The
+//      tunnel's content can't be seen, so this is host:port for TLS, not per request:
+//      it carries that origin's `https:` and `wss:` alike. Chromium also tunnels a
+//      plain `ws:` this way, so a `ws:` to a private `http:` origin is refused here.
+//  The CDP checks stay the per-request, exact-origin check wherever CDP sees a request.
 
 import { randomBytes } from 'node:crypto';
 import dns from 'node:dns/promises';
@@ -79,10 +87,13 @@ export async function startEgressProxy(opts: { consent: Consent; network?: Proxy
   const sockets = new Set<Socket>();
   const track = (s: Socket): void => { sockets.add(s); s.on('close', () => sockets.delete(s)); };
   const cutEverything = (): void => { for (const s of sockets) s.destroy(); };
-  const confirmedPrivate = new Set([...opts.consent.privateOrigins].map((o) => {
+  // Keyed by the scheme the proxy can actually tell apart: plain http, or a tunnel.
+  const confirmedPrivate = { http: new Set<string>(), connect: new Set<string>() };
+  for (const o of opts.consent.privateOrigins) {
     const u = new URL(o);
-    return `${bareHost(u.hostname)}:${u.port || defaultPort(u.protocol)}`;
-  }));
+    const kind = u.protocol === 'http:' || u.protocol === 'ws:' ? 'http' : u.protocol === 'https:' || u.protocol === 'wss:' ? 'connect' : null;
+    if (kind) confirmedPrivate[kind].add(`${bareHost(u.hostname)}:${u.port || defaultPort(u.protocol)}`);
+  }
 
   let phase: 'closed' | 'open' | 'shut' = 'closed';
   const decide = async (kind: ProxyDecision['kind'], host: string, port: string): Promise<{ address: string; port: number } | null> => {
@@ -98,7 +109,7 @@ export async function startEgressProxy(opts: { consent: Consent; network?: Proxy
     const privateAddresses = record.addresses.filter((a) => isPrivateHost(a));
     const nameIsPrivate = isPrivateHost(bare);
     // Consent covers the origin the user saw, not whatever a DNS answer points at.
-    const covered = nameIsPrivate && confirmedPrivate.has(`${bare}:${port}`);
+    const covered = nameIsPrivate && confirmedPrivate[kind].has(`${bare}:${port}`);
     if ((nameIsPrivate || privateAddresses.length) && !covered) {
       record.reason = nameIsPrivate ? 'private-network destination' : 'resolves to a private-network address';
       return null;
@@ -120,6 +131,9 @@ export async function startEgressProxy(opts: { consent: Consent; network?: Proxy
         res.end();
         return;
       }
+      // Only plain http is forwarded as a request. Anything else asked for this way
+      // would be sent unencrypted to a port meant for TLS, so it is refused unread.
+      if (u.protocol !== 'http:') { res.statusCode = 403; res.end(); return; }
       const to = await decide('http', u.hostname, u.port || defaultPort(u.protocol));
       if (!to) { res.statusCode = 403; res.end(); return; }
       // The browser may have gone during the lookup, or the proxy shut just after it.

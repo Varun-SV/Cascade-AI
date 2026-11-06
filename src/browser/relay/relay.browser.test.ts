@@ -379,6 +379,22 @@ suite('P2: no request reaches a destination without consent', { timeout: 90_000 
     expect(r.proxy.decisions.some((d) => d.kind === 'connect' && !d.allowed)).toBe(true);
   });
 
+  it('a confirmed private http origin loads, but a ws: to it is a CONNECT the proxy refuses', async () => {
+    const mine = await countingServer();
+    const r = await startRig({ consent: makeConsent(['http://allowed.test'], [`http://127.0.0.1:${mine.port}`]) });
+    try {
+      await r.page.goto(`http://127.0.0.1:${mine.port}/page`);
+      expect(mine.hits, 'control: the confirmed origin is reachable through the proxy').toContain('GET /page');
+      expect(await r.page.evaluate(tryWs as never, `ws://127.0.0.1:${mine.port}/ws`)).not.toBe('open');
+      await sleep(200);
+      const tunnels = r.proxy.decisions.filter((d) => d.kind === 'connect' && d.port === String(mine.port));
+      // Chromium tunnels a plain ws: through an http proxy, and a confirmed http: origin doesn't cover a tunnel.
+      expect(tunnels.length, 'the ws: reached the proxy as a CONNECT').toBeGreaterThan(0);
+      expect(tunnels.every((d) => !d.allowed && d.reason === 'private-network destination')).toBe(true);
+      expect(mine.hits.filter((h) => h.includes('/ws'))).toEqual([]);
+    } finally { mine.close(); }
+  });
+
   it('DNS: an alias, a mixed answer and a rebinding answer never reach a private address', async () => {
     const r = await startRig();
     const port = r.priv.port;

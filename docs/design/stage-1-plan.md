@@ -160,6 +160,19 @@ checks the name and every resolved address, then dials exactly the checked
 address. Plain `http:` and `ws:` are handled as in §4.3 of the design. Non-TLS
 ports are not special-cased.
 
+**What a confirmed private origin covers at the proxy.** The proxy can't see the
+scheme or path inside a tunnel, so for private destinations it enforces less than an
+exact origin, and this says exactly what:
+- A plain `http:` request is let through only when the same `http:` origin, port
+  included, was confirmed. A request line naming any other scheme is refused unread.
+- A `CONNECT` is let through only when an `https:` origin on the same host and port
+  was confirmed. That is host:port for TLS: one tunnel can carry that origin's
+  `https:` and `wss:`, and any path. It is not a per-request check.
+- Chromium sends a plain `ws:` through an http proxy as a `CONNECT` too, so a `ws:` to
+  a confirmed private `http:` origin is refused in stage 1. A browser test shows it.
+- The exact-origin, per-request check is the CDP request policy's, wherever CDP sees
+  the request. Traffic CDP doesn't see (§9) gets only the proxy's check above.
+
 **Required tests,** each asserted at the destination:
 - service, shared and dedicated workers, WebSocket upgrades, IPv4 and IPv6
 - redirects across scheme and across host, counting each hop
