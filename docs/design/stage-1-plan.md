@@ -21,7 +21,7 @@ stays unchanged.
 | `command-policy.ts` | `parseFrame(raw)`, `checkCommand(frame, ctx)`, `filterEvent(method, params, ctx)`, `POLICY_VERSION` | nothing (pure) |
 | `egress-rules.ts` | `classifyHost(host)`, `requestVerdict(url, resourceType, consent)` | nothing (pure) |
 | `egress-proxy.ts` | `startEgressProxy({ resolve, consent })`, `browserProxyArgs(port)` | `node:net`, injected resolver |
-| `request-enforcer.ts` | `startRequestPolicy({ browserWs, tabTargetId, consent })` | CDP socket |
+| `request-enforcer.ts` | `startRequestPolicy({ browser, consent })` | CDP socket |
 | `capability.ts` | `issueGrant`, `approveGrant`, `verifyApproval`, `claim`, `burn` | injected keys, nonce store, clock |
 | `tab-lease.ts` | `createTabLease()`: `acquire`, `suspend`, `handBack`, `revoke(reason)`, `fence()` | injected clock |
 | `relay.ts` | `createDeviceRelay({ tab, capabilities, lease, policy, transport })` | the above |
@@ -489,10 +489,20 @@ stage. The unused library adds no production overhead in stage 1.
   `domainAndRegistry` and target `title`. `auxData` is reduced to `isDefault`, `type` and
   `frameId`. `statusText` is blanked, as Playwright needs the field to exist. A consented URL
   still keeps its fragment under the URL rule, as `location` shows it to the page anyway.
-- **The request policy needs a dedicated browser.** It's browser-wide: it closes new pages and
-  intercepts every request. So `startRequestPolicy` refuses a browser with any other tab open.
-  Desktop and the extension share a browser with the user and need their own scoped enforcer.
-- **A revoke closes only workers the lease saw start,** not every worker in the browser.
+- **The request policy needs a dedicated browser, used once.** It's browser-wide: it closes new pages,
+  intercepts every request and judges all of it under this lease's consent. So `startRequestPolicy` takes only
+  a browser `launchBehindProxy` launched into a new profile, takes it once, and refuses it if anything but the
+  leased tab is running, workers included: a running service or shared worker isn't the lease's, and a revoke
+  wouldn't stop it. Chromium's built-in extensions run two service workers in a new profile, so the launch turns
+  them off. A dormant service worker registration shows no target, so this relies on the new profile: only code
+  between our launch and our policy could add one. Desktop and the extension share a browser with the user and
+  need their own scoped enforcer.
+- **The launch checks what the browser reports.** Before anything can take the browser, it refuses any Chromium
+  major version but the tested one (`TESTED_CHROMIUM_MAJOR`, 153), reads the settings in force from
+  `chrome://prefs-internals` rather than the file it wrote, and requires the tab to be the only target. A changed
+  page or setting fails the launch. This shows the preference is set, not that it still works: that proof is the
+  speculative-load tests, which is why a new version has to come through this number.
+- **A revoke closes only workers the lease saw start.** With the rule above, those should be the only ones there.
 - **History must be well formed** before it counts as safe: at least one entry, a valid index, a
   URL on each.
 - **Speculative loads are off (`net.network_prediction_options: 2` in the launch's profile).** A speculation
@@ -504,6 +514,22 @@ stage. The unused library adds no production overhead in stage 1.
   preference, so its 0 has no control of its own. A cross-site prerender and prefetch were never attempted here,
   with or without it. Desktop and the extension can't set this on the user's profile, so their scoped enforcer
   must handle it.
+- **Fetch doesn't enforce origins on what the browser process sends itself.** The proxy is the only gate shown to
+  hold there, and it stops private addresses, not public off-list ones. Tested on Chromium 1243, with servers that
+  count and the policy's log:
+  - **Reaches the server through the policy (logged, allowed as public subresources under §4.3):** favicon, manifest,
+    `<link rel=prefetch>`, beacon, keepalive fetch, `<a ping>`, CSP `report-uri`.
+  - **Blocked by the policy, 0 at the server:** a download from a site without consent.
+  - **Sends nothing:** preconnect and dns-prefetch, under the preference. No control without it.
+  - **Goes round the policy (open limit):** a service worker's update check. The worker's script and its imported
+    scripts are fetched again at both servers, with nothing in the policy's log and no way to refuse them there.
+    The URLs are ones the policy already allowed at install. Pointed at a private address by a DNS change, the
+    proxy refuses it and nothing is dialled.
+  - **The browser's own background traffic:** a browser with only the proxy arguments asks for names while idle
+    (sign-in, push and update hosts were seen), and the launch's flags take this to 0 over 15 s. Longer idle isn't tested,
+    and a name the flags miss would get out to a public address.
+  - **Not tested:** the Reporting API (`report-to`, no request in 75 s, so no control), NEL (needs HTTPS), and
+    an extension's traffic, as extensions are off and a worker running at the start is refused.
 - **The main-frame backstop is now also tested through prerender.** In a control profile without the preference,
   activating that prerender sends no second request, the lease ends, the tab goes to `about:blank`, and no frame
   carries the page's title or body. Activating a consented prerender keeps the lease.

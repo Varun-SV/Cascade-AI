@@ -4,7 +4,7 @@
 //
 // Set CHROMIUM to a browser. On CI these fail rather than skip when none is found.
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import dgram from 'node:dgram';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -16,10 +16,10 @@ import type { AddressInfo, Socket } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WebSocket as WsClient, type WebSocket, WebSocketServer } from 'ws';
 import { connectCdp } from './cdp-client.js';
-import { type EgressProxy, type ProxyNetwork, startEgressProxy } from './egress-proxy.js';
+import { type EgressProxy, type ProxyNetwork, browserProxyArgs, startEgressProxy } from './egress-proxy.js';
 import { type Consent, makeConsent } from './egress-rules.js';
 import { navigateHistory } from './history.js';
-import { type LaunchedBrowser, launchBehindProxy } from './launch.js';
+import { type LaunchedBrowser, launchBehindProxy, verifyLaunchedProfile } from './launch.js';
 import { type DeviceRelay, createDeviceRelay } from './relay.js';
 import { type PageEndMode, type RequestEnforcer, startRequestPolicy } from './request-enforcer.js';
 import { createTabLease, type TabLease } from './tab-lease.js';
@@ -86,6 +86,8 @@ interface Rig {
   allowed: Counting; offlist: Counting; priv: Counting;
   proxy: EgressProxy; browser: LaunchedBrowser; enforcer: RequestEnforcer; lease: TabLease; relay: DeviceRelay; consent: Consent;
   dials: { address: string; port: number }[];
+  /** Every name the browser asked the proxy to reach. */
+  resolved: string[];
   setFlip(a: string): void;
   agentFrames: string[];
   page: PwPage; pwBrowser: PwBrowser; agent: { close(): void; send(raw: string): void };
@@ -98,7 +100,7 @@ const rigs: Rig[] = [];
 
 async function startRig(opts: {
   pageEnd?: PageEndMode; consent?: Consent; raw?: boolean; beforePolicy?: (b: LaunchedBrowser) => Promise<void>;
-  /** For controls: a later --user-data-dir wins, so the profile has none of the launch's preferences. Production has no such option. */
+  /** For controls: a profile with none of the launch's preferences. */
   bareProfile?: boolean;
 } = {}): Promise<Rig> {
   const script = (res: http.ServerResponse, extra = ''): boolean => { res.setHeader('content-type', 'text/javascript'); res.end(WORKER_JS + extra); return true; };
@@ -107,7 +109,6 @@ async function startRig(opts: {
     switch (path) {
       case '/sw-private.js': return script(res, `fetch(${JSON.stringify(decodeURIComponent((req.url ?? '').split('u=')[1] ?? ''))}, { mode: 'no-cors' }).catch(() => {});`);
       case '/worker.js': case '/sw.js': return script(res);
-      case '/other-timer-worker.js': return script(res, "setInterval(() => fetch('/beacon?other-timer').catch(() => {}), 50);");
       case '/prerender-rules':
         res.setHeader('content-type', 'text/html');
         res.end('<!doctype html><script type="speculationrules">' + JSON.stringify({ prerender: [{ urls: ['/pre-same', '/pre-redirect'] }] }) + '</script>');
@@ -127,6 +128,12 @@ async function startRig(opts: {
         res.end('<!doctype html><title>PRERENDERTITLE</title>PRERENDERBODY');
         return true;
       case '/timer-worker.js': return script(res, "setInterval(() => fetch('/beacon?worker-timer').catch(() => {}), 50);");
+      case '/sw-import.js': res.setHeader('content-type', 'text/javascript'); res.end("importScripts('http://flip.test/imported.js');"); return true;
+      case '/csp':
+        res.setHeader('content-type', 'text/html');
+        res.setHeader('Content-Security-Policy', "img-src 'none'; report-uri http://offlist.test/csp-report");
+        res.end('<!doctype html><img src="/blocked.png">');
+        return true;
       case '/redirect': return redirect(res, 'http://offlist.test/from-redirect');
       case '/redirect-marked': return redirect(res, 'http://offlist.test/MARKPATH?q=MARKQUERY');
       case '/redirect-https': return redirect(res, 'https://offlist.test/from-redirect-https');
@@ -140,9 +147,9 @@ async function startRig(opts: {
     }
   });
   const offlist = await countingServer((path, res) => {
-    if (path !== '/lib.js') return false;
+    if (path !== '/lib.js' && path !== '/imported.js') return false;
     res.setHeader('content-type', 'text/javascript');
-    res.end('window.__lib = 1;');
+    res.end('self.__lib = 1;');
     return true;
   });
   const privPortRef = { port: 0 };
@@ -155,8 +162,10 @@ async function startRig(opts: {
   ]);
   const routes = new Map([[PUBLIC_ALLOWED, allowed.port], [PUBLIC_OFFLIST, offlist.port]]);
   const dials: { address: string; port: number }[] = [];
+  const resolved: string[] = [];
   const network: ProxyNetwork = {
     resolve: async (name) => {
+      resolved.push(name);
       if (name === 'flip.test') return [flip];
       const a = dns.get(name);
       if (!a) throw new Error('ENOTFOUND');
@@ -175,11 +184,11 @@ async function startRig(opts: {
     chromiumPath: CHROMIUM!, proxy,
     extraArgs: [
       '--unsafely-treat-insecure-origin-as-secure=http://allowed.test,http://other.test,http://sub.allowed.test',
-      ...(bareDir ? [`--user-data-dir=${bareDir}`] : []),
     ],
+    ...(bareDir ? { testOnlyBareProfileDir: bareDir } : {}),
   });
   await opts.beforePolicy?.(browser);
-  const enforcer = await startRequestPolicy({ browserWs: browser.browserWs, tabWs: browser.tabWs, tabTargetId: browser.tabTargetId, consent });
+  const enforcer = await startRequestPolicy({ browser, consent });
   const lease = createTabLease();
   proxy.onClose(() => lease.revoke('egress-proxy-down'));
   lease.promote(lease.reserve()!, { expiresAt: Date.now() + 600_000 });
@@ -216,7 +225,7 @@ async function startRig(opts: {
     page = ctx.pages()[0] ?? await ctx.waitForEvent('page', { timeout: 5000 });
   }
   const rig: Rig = {
-    allowed, offlist, priv, proxy, browser, enforcer, lease, relay, consent, dials, agentFrames, page, pwBrowser,
+    allowed, offlist, priv, proxy, browser, enforcer, lease, relay, consent, dials, resolved, agentFrames, page, pwBrowser,
     setFlip: (a) => { flip = a; },
     agent: { close: () => agentSocket.close(), send: (raw: string) => (rawClient ?? agentSocket).send(raw) },
     command(method: string, params: object = {}) {
@@ -751,7 +760,7 @@ async function foreignHistoryRig(opts: { stayOnForeign?: boolean; wrap?: (e: Req
     await raw.send('Page.navigate', { url: 'http://allowed.test/front' });
     await sleep(400);
   }
-  const started = await startRequestPolicy({ browserWs: browser.browserWs, tabWs: browser.tabWs, tabTargetId: browser.tabTargetId, consent });
+  const started = await startRequestPolicy({ browser, consent });
   const enforcer = opts.wrap ? opts.wrap(started) : started;
   const lease = createTabLease();
   lease.promote(lease.reserve()!, { expiresAt: Date.now() + 600_000 });
@@ -871,34 +880,71 @@ suite('beforeunload', { timeout: 30_000 }, () => {
 });
 
 suite('isolation from what the lease did not start', { timeout: 60_000 }, () => {
-  it('a revoke stops the lease\'s worker and leaves an unrelated one running', async () => {
-    const r = await startRig({
-      pageEnd: 'blank',
-      beforePolicy: async (b) => {
-        // Registered before the policy exists, on another origin: not this lease's.
-        const raw = await connectCdp(b.tabWs);
-        await raw.send('Page.enable');
-        await raw.send('Page.navigate', { url: 'http://other.test/' });
-        await sleep(200);
-        await raw.send('Runtime.evaluate', { expression: "navigator.serviceWorker.register('/other-timer-worker.js').then(() => 1)", awaitPromise: true });
-        await sleep(300);
-        await raw.send('Page.navigate', { url: 'about:blank' });
-        await sleep(100);
-        raw.close();
-      },
+  // A browser where something started before the policy did, at a server that counts.
+  const withEarlyWorker = async (start: string): Promise<{ browser: LaunchedBrowser; hits: () => number; consent: Consent; stop(): Promise<void> }> => {
+    const site = await countingServer((path, res) => {
+      if (path !== '/early-worker.js') return false;
+      res.setHeader('content-type', 'text/javascript');
+      res.end("setInterval(() => fetch('/beacon?early').catch(() => {}), 50);");
+      return true;
     });
-    await r.page.evaluate("navigator.serviceWorker.register('/timer-worker.js')");
+    const consent = makeConsent(['http://allowed.test']);
+    const proxy = await startEgressProxy({ consent, network: { resolve: async () => [PUBLIC_ALLOWED], dial: () => net.connect(site.port, '127.0.0.1') } });
+    const browser = await launchBehindProxy({ chromiumPath: CHROMIUM!, proxy, extraArgs: ['--unsafely-treat-insecure-origin-as-secure=http://allowed.test'] });
+    const raw = await connectCdp(browser.tabWs);
+    await raw.send('Page.enable');
+    await raw.send('Page.navigate', { url: 'http://allowed.test/' });
+    await sleep(200);
+    await raw.send('Runtime.evaluate', { expression: start, awaitPromise: true });
     await sleep(500);
-    const count = (m: string) => r.allowed.hits.filter((h) => h.includes(m)).length;
-    expect(count('worker-timer'), 'the lease\'s worker ran').toBeGreaterThan(0);
-    expect(count('other-timer'), 'the unrelated worker ran').toBeGreaterThan(0);
-    r.lease.revoke('stop');
-    await r.serving;
-    await sleep(100);
-    const mine = count('worker-timer'); const theirs = count('other-timer');
-    await sleep(400);
-    expect(count('worker-timer')).toBe(mine);
-    expect(count('other-timer')).toBeGreaterThan(theirs);
+    raw.close();
+    return { browser, consent, hits: () => site.hits.filter((h) => h.includes('early')).length, async stop() { await browser.close(); await proxy.close(); site.close(); } };
+  };
+  it.each([
+    ['service worker', "navigator.serviceWorker.register('/early-worker.js').then(() => 1)"],
+    ['shared worker', "window.__w = new SharedWorker('/early-worker.js'); 1"],
+  ])('a %s already running means no policy, so no lease over it', async (_name, start) => {
+    const e = await withEarlyWorker(start);
+    try {
+      expect(e.hits(), 'control: it is running and reaches its server').toBeGreaterThan(0);
+      await expect(startRequestPolicy({ browser: e.browser, consent: e.consent })).rejects.toThrow(/dedicated browser/);
+    } finally { await e.stop(); }
+  });
+  it('a browser this run did not launch, or one a lease already used, is refused', async () => {
+    const consent = makeConsent(['http://allowed.test']);
+    const proxy = await startEgressProxy({ consent });
+    const browser = await launchBehindProxy({ chromiumPath: CHROMIUM!, proxy });
+    try {
+      await expect(startRequestPolicy({ browser: { ...browser }, consent }), 'a look-alike').rejects.toThrow(/not freshly launched/);
+      const first = await startRequestPolicy({ browser, consent });
+      first.close();
+      await expect(startRequestPolicy({ browser, consent })).rejects.toThrow(/not freshly launched/);
+    } finally { await browser.close(); await proxy.close(); }
+  });
+  it('the launch has only the leased tab running, with its built-in extensions off', async () => {
+    const consent = makeConsent(['http://allowed.test']);
+    const proxy = await startEgressProxy({ consent });
+    const browser = await launchBehindProxy({ chromiumPath: CHROMIUM!, proxy });
+    try {
+      const list = await (await fetch(`http://127.0.0.1:${browser.port}/json/list`)).json() as { type: string }[];
+      expect(list.map((t) => t.type)).toEqual(['page']);
+    } finally { await browser.close(); await proxy.close(); }
+  });
+  it('the launch chooses the profile', async () => {
+    const proxy = await startEgressProxy({ consent: makeConsent(['http://allowed.test']) });
+    await expect(launchBehindProxy({ chromiumPath: CHROMIUM!, proxy, extraArgs: ['--user-data-dir=/tmp/reused'] })).rejects.toThrow(/chooses the profile/);
+    await proxy.close();
+  });
+  it('the running browser\'s own report must show the settings: a profile without them fails, the launch\'s passes', async () => {
+    const consent = makeConsent(['http://allowed.test']);
+    const proxy = await startEgressProxy({ consent });
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-relay-bare-'));
+    const bare = await launchBehindProxy({ chromiumPath: CHROMIUM!, proxy, testOnlyBareProfileDir: dir });
+    const good = await launchBehindProxy({ chromiumPath: CHROMIUM!, proxy });
+    try {
+      await expect(verifyLaunchedProfile(bare.browserWs, bare.tabTargetId)).rejects.toThrow(/network_prediction_options is not in force/);
+      await expect(verifyLaunchedProfile(good.browserWs, good.tabTargetId)).resolves.toBeUndefined();
+    } finally { await bare.close(); await good.close(); await proxy.close(); }
   });
   it('the policy refuses a browser with another tab open', async () => {
     const consent = makeConsent(['http://allowed.test']);
@@ -907,7 +953,7 @@ suite('isolation from what the lease did not start', { timeout: 60_000 }, () => 
     try {
       const made = await fetch(`http://127.0.0.1:${browser.port}/json/new?about:blank`, { method: 'PUT' });
       expect(made.ok).toBe(true);
-      await expect(startRequestPolicy({ browserWs: browser.browserWs, tabWs: browser.tabWs, tabTargetId: browser.tabTargetId, consent })).rejects.toThrow(/dedicated browser/);
+      await expect(startRequestPolicy({ browser, consent })).rejects.toThrow(/dedicated browser/);
     } finally { await browser.close(); await proxy.close(); }
   });
 });
@@ -1141,7 +1187,7 @@ suite('before a lease is served', { timeout: 30_000 }, () => {
       await raw.send('Page.navigate', { url: 'data:text/html,<title>held</title>' });
       await sleep(150);
       raw.close();
-      const enforcer = await startRequestPolicy({ browserWs: browser.browserWs, tabWs: browser.tabWs, tabTargetId: browser.tabTargetId, consent });
+      const enforcer = await startRequestPolicy({ browser, consent });
       expect(await enforcer.checkTabBeforeLease()).toMatchObject({ ok: false });
       enforcer.close();
     } finally { await browser.close(); await proxy.close(); pageSrv.close(); }
@@ -1151,10 +1197,103 @@ suite('before a lease is served', { timeout: 30_000 }, () => {
     const proxy = await startEgressProxy({ consent });
     const browser = await launchBehindProxy({ chromiumPath: CHROMIUM!, proxy });
     try {
-      const enforcer = await startRequestPolicy({ browserWs: browser.browserWs, tabWs: browser.tabWs, tabTargetId: browser.tabTargetId, consent });
+      const enforcer = await startRequestPolicy({ browser, consent });
       expect(await enforcer.checkTabBeforeLease()).toEqual({ ok: true });
       enforcer.close();
     } finally { await browser.close(); await proxy.close(); }
   });
 });
 
+
+suite('what the browser sends that no agent asked for', { timeout: 60_000 }, () => {
+  const IDLE_MS = 15_000;
+  const idleNames = async (launch: (proxy: EgressProxy) => Promise<() => Promise<void>>): Promise<string[]> => {
+    const names: string[] = [];
+    const proxy = await startEgressProxy({
+      consent: makeConsent(['http://allowed.test']),
+      network: { resolve: async (name) => { names.push(name); throw new Error('ENOTFOUND'); }, dial: () => { throw new Error('no dial'); } },
+    });
+    const stop = await launch(proxy);
+    await sleep(IDLE_MS);
+    await stop();
+    await proxy.close();
+    return names;
+  };
+
+  it('control: an idle browser behind the proxy, with only its proxy arguments, does ask for names', async () => {
+    const names = await idleNames(async (proxy) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-relay-idle-'));
+      const proc = spawn(CHROMIUM!, ['--headless=new', '--no-sandbox', `--user-data-dir=${dir}`, ...browserProxyArgs(proxy.port), 'about:blank'], { stdio: 'ignore' });
+      return async () => { proc.kill('SIGKILL'); await sleep(150); fs.rmSync(dir, { recursive: true, force: true }); };
+    });
+    expect(names.length).toBeGreaterThan(0);
+  });
+  it('the launched browser asks for no names at all while idle', async () => {
+    const names = await idleNames(async (proxy) => {
+      const b = await launchBehindProxy({ chromiumPath: CHROMIUM!, proxy });
+      return () => b.close();
+    });
+    expect(names).toEqual([]);
+  });
+
+  // Each of these is a public subresource under plan §4.3, so it's allowed. What matters is
+  // that it reaches the policy: none of them go round it the way a prerender did.
+  it.each([
+    ['favicon', "document.head.insertAdjacentHTML('beforeend', '<link rel=icon href=\"http://offlist.test/probe-icon\">')", 'probe-icon'],
+    ['manifest', "document.head.insertAdjacentHTML('beforeend', '<link rel=manifest href=\"http://offlist.test/probe-manifest\">')", 'probe-manifest'],
+    ['link prefetch', "document.head.insertAdjacentHTML('beforeend', '<link rel=prefetch href=\"http://offlist.test/probe-prefetch\">')", 'probe-prefetch'],
+    ['beacon', "navigator.sendBeacon('http://offlist.test/probe-beacon')", 'probe-beacon'],
+    ['keepalive fetch', "fetch('http://offlist.test/probe-keepalive', { mode: 'no-cors', keepalive: true }).catch(() => {}), 1", 'probe-keepalive'],
+    ['link ping', "document.body.insertAdjacentHTML('beforeend', '<a id=pg href=\"/two\" ping=\"http://offlist.test/probe-ping\">x</a>'); document.getElementById('pg').click(); 1", 'probe-ping'],
+  ])('%s: reaches the server only through the policy', async (_name, script, marker) => {
+    const r = await startRig();
+    await r.page.evaluate(script);
+    await sleep(1200);
+    expect(r.offlist.hits.join()).toContain(marker);
+    expect(r.enforcer.decisions.some((d) => d.url.includes(marker) && d.allowed)).toBe(true);
+    expect(r.lease.state()).toBe('held');
+  });
+  it('a CSP report reaches the server only through the policy', async () => {
+    const r = await startRig();
+    await r.page.goto('http://allowed.test/csp');
+    await sleep(1200);
+    expect(r.offlist.hits).toContain('POST /csp-report');
+    expect(r.enforcer.decisions.filter((d) => d.url.includes('csp-report')).every((d) => d.allowed)).toBe(true);
+    expect(r.enforcer.decisions.some((d) => d.url.includes('csp-report'))).toBe(true);
+  });
+  it('a download from a site without consent is blocked, and sends nothing', async () => {
+    const r = await startRig();
+    await r.page.evaluate("document.body.insertAdjacentHTML('beforeend', '<a id=dl download href=\"http://offlist.test/probe-download\">x</a>'); document.getElementById('dl').click(); 1");
+    await sleep(1000);
+    expect(r.offlist.hits).toEqual([]);
+    expect(r.enforcer.decisions.some((d) => d.url.includes('probe-download') && !d.allowed)).toBe(true);
+  });
+  it('preconnect and dns-prefetch ask the proxy for nothing, under the launch\'s preference', async () => {
+    const r = await startRig();
+    await r.page.evaluate("document.head.insertAdjacentHTML('beforeend', '<link rel=preconnect href=\"http://probe-preconnect.test/\"><link rel=dns-prefetch href=\"http://probe-dns.test/\">')");
+    await sleep(1000);
+    expect(r.resolved.filter((n) => n.startsWith('probe-'))).toEqual([]);
+  });
+  it('the stated limit: a service worker\'s update check goes round the policy, and the proxy still holds', async () => {
+    const r = await startRig();
+    await r.page.evaluate("navigator.serviceWorker.register('/sw-import.js').then(() => new Promise((res) => setTimeout(res, 600)))");
+    expect(r.offlist.hits, 'installed, through the policy').toContain('GET /imported.js');
+    const updateWas = r.allowed.hits.filter((h) => h === 'GET /sw-import.js').length;
+    const logged = r.enforcer.decisions.length;
+    const importsWere = r.offlist.hits.length;
+    const update = "navigator.serviceWorker.getRegistration().then((x) => x.update()).then(() => 1, () => 0)";
+    await r.page.evaluate(update);
+    await sleep(600);
+    // Sent from the browser process, like a prerender: at both servers, in the policy's log nowhere.
+    expect(r.allowed.hits.filter((h) => h === 'GET /sw-import.js').length).toBeGreaterThan(updateWas);
+    expect(r.offlist.hits.length).toBeGreaterThan(importsWere);
+    expect(r.enforcer.decisions.slice(logged).filter((d) => /sw-import|imported/.test(d.url))).toEqual([]);
+    // The name now answers with a private address. The update check tries it, and the proxy refuses.
+    const asked = r.resolved.filter((n) => n === 'flip.test').length;
+    r.setFlip('127.0.0.1');
+    await r.page.evaluate(update);
+    await sleep(600);
+    expect(r.resolved.filter((n) => n === 'flip.test').length, 'it did try').toBeGreaterThan(asked);
+    expect(r.dials.filter((d) => d.address === '127.0.0.1')).toEqual([]);
+  });
+});

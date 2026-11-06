@@ -10,6 +10,7 @@
 
 import { type CdpClient, type CdpMessage, connectCdp } from './cdp-client.js';
 import { type Consent, onConsentedSite, requestVerdict } from './egress-rules.js';
+import { type LaunchedBrowser, claimFreshBrowser } from './launch.js';
 
 const INTERCEPT_ALL = { patterns: [{ urlPattern: '*', requestStage: 'Request' }] };
 const PAGE_END_TIMEOUT_MS = 3000;
@@ -118,31 +119,34 @@ export async function endPageActivity(
 }
 
 export async function startRequestPolicy(opts: {
-  browserWs: string; tabWs: string; tabTargetId: string; consent: Consent;
+  browser: LaunchedBrowser; consent: Consent;
 }): Promise<RequestEnforcer> {
-  const { consent, tabTargetId } = opts;
+  const { consent } = opts;
+  const { browserWs, tabWs, tabTargetId } = opts.browser;
+  // This policy is browser-wide: it closes new pages and intercepts every request, and
+  // whatever is already running would be judged under this lease's consent. So it needs
+  // a freshly launched browser with nothing in it but the leased tab, used for one lease.
+  // Desktop and the extension share a browser with the user and need their own scoped enforcer.
+  const notDedicated = 'The request policy needs a dedicated browser with only the leased tab open.';
+  if (!claimFreshBrowser(opts.browser)) throw new Error(`${notDedicated} This one is not freshly launched by this run.`);
   const decisions: RequestDecision[] = [];
   const closedPages: string[] = [];
   const dismissedDialogs: string[] = [];
   const children: { type: string; coverage: ChildCoverage }[] = [];
   const foreignListeners: (() => void)[] = [];
   let foreignDocument = false;
-  const tab = await connectCdp(opts.tabWs);
-  const browser = await connectCdp(opts.browserWs);
+  const tab = await connectCdp(tabWs);
+  const browser = await connectCdp(browserWs);
 
-  // This policy is browser-wide: it closes new pages and intercepts every request. So it
-  // needs a browser the run has to itself, and refuses anything else. Desktop and the
-  // extension share a browser with the user and need their own scoped enforcer.
   const before = ((await browser.send('Target.getTargets')) as { targetInfos?: { targetId: string; type: string }[] }).targetInfos ?? [];
-  const pages = before.filter((t) => t.type === 'page');
-  if (pages.length !== 1 || pages[0]!.targetId !== tabTargetId) {
+  // Not only pages: a worker already running isn't this lease's, and a revoke wouldn't stop it.
+  if (before.length !== 1 || before[0]!.targetId !== tabTargetId) {
     tab.close(); browser.close();
-    throw new Error('The request policy needs a dedicated browser with only the leased tab open.');
+    throw new Error(notDedicated);
   }
-  const preexisting = new Set(before.map((t) => t.targetId));
   const ownedWorkers = new Set<string>();
   const noteWorker = (t: { targetId: string; type: string }): void => {
-    if (!preexisting.has(t.targetId) && (t.type === 'service_worker' || t.type === 'shared_worker')) ownedWorkers.add(t.targetId);
+    if ((t.type === 'service_worker' || t.type === 'shared_worker')) ownedWorkers.add(t.targetId);
   };
 
   const decide = async (client: CdpClient, msg: CdpMessage, where: string): Promise<void> => {
