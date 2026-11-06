@@ -58,7 +58,7 @@ export interface EgressProxy {
   open(): void;
   /**
    * Stops traffic for good: everything is refused again, and connections already through
-   * are cut. The browser outlives the lease, with anything it still has registered.
+   * are cut, plain http on its way upstream included. The browser outlives the lease, with anything it still has registered.
    */
   shut(): void;
   /** Called once when the proxy stops, for any reason. Revoke the lease here. */
@@ -67,7 +67,7 @@ export interface EgressProxy {
 }
 
 const CANARY_HOST = 'cascade-egress-canary.invalid';
-const HOP_BY_HOP = /^(proxy-connection|proxy-authorization|proxy-authenticate|keep-alive|te|trailer|transfer-encoding|upgrade)$/i;
+const HOP_BY_HOP = /^(connection|proxy-connection|proxy-authorization|proxy-authenticate|keep-alive|te|trailer|transfer-encoding|upgrade)$/i;
 const defaultPort = (proto: string): string => (proto === 'https:' || proto === 'wss:' ? '443' : '80');
 
 export async function startEgressProxy(opts: { consent: Consent; network?: ProxyNetwork }): Promise<EgressProxy> {
@@ -77,6 +77,8 @@ export async function startEgressProxy(opts: { consent: Consent; network?: Proxy
   const seenCanaries = new Set<string>();
   const closers: (() => void)[] = [];
   const sockets = new Set<Socket>();
+  const track = (s: Socket): void => { sockets.add(s); s.on('close', () => sockets.delete(s)); };
+  const cutEverything = (): void => { for (const s of sockets) s.destroy(); };
   const confirmedPrivate = new Set([...opts.consent.privateOrigins].map((o) => {
     const u = new URL(o);
     return `${bareHost(u.hostname)}:${u.port || defaultPort(u.protocol)}`;
@@ -120,20 +122,29 @@ export async function startEgressProxy(opts: { consent: Consent; network?: Proxy
       }
       const to = await decide('http', u.hostname, u.port || defaultPort(u.protocol));
       if (!to) { res.statusCode = 403; res.end(); return; }
+      // The browser may have gone during the lookup, or the proxy shut just after it.
+      if (req.socket.destroyed || (phase as string) === 'shut') { res.destroy(); return; }
       const headers = Object.fromEntries(Object.entries(req.headers).filter(([k]) => !HOP_BY_HOP.test(k)));
       const out = http.request({
-        createConnection: () => network.dial(to.address, to.port),
+        createConnection: () => {
+          const upstream = network.dial(to.address, to.port);
+          track(upstream);
+          return upstream;
+        },
         method: req.method, path: `${u.pathname}${u.search}`, headers,
       }, (upstream) => {
         res.writeHead(upstream.statusCode ?? 502, upstream.headers);
+        upstream.on('error', () => res.destroy());
         upstream.pipe(res);
       });
       out.on('error', () => { if (!res.headersSent) res.statusCode = 502; res.end(); });
+      // Piping doesn't pass a closed browser connection along, so end the upstream one here.
+      res.on('close', () => out.destroy());
       req.pipe(out);
     })();
   });
 
-  server.on('connection', (s) => { sockets.add(s); s.on('close', () => sockets.delete(s)); });
+  server.on('connection', track);
 
   server.on('connect', (req, socket: Socket, head) => {
     socket.on('error', () => {});
@@ -141,9 +152,9 @@ export async function startEgressProxy(opts: { consent: Consent; network?: Proxy
       const m = /^(\[[^\]]+\]|[^:]+):(\d+)$/.exec(req.url ?? '');
       const to = m ? await decide('connect', m[1]!, m[2]!) : null;
       if (!to) { socket.end('HTTP/1.1 403 Forbidden\r\n\r\n'); return; }
+      if ((phase as string) === 'shut') { socket.destroy(); return; }
       const out = network.dial(to.address, to.port);
-      sockets.add(out);
-      out.on('close', () => sockets.delete(out));
+      track(out);
       out.once('connect', () => {
         socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
         if (head?.length) out.write(head);
@@ -165,7 +176,7 @@ export async function startEgressProxy(opts: { consent: Consent; network?: Proxy
     open() { if (phase === 'closed') phase = 'open'; },
     shut() {
       phase = 'shut';
-      for (const s of sockets) s.destroy();
+      cutEverything();
     },
     canaryUrl() {
       const token = randomBytes(12).toString('hex');
@@ -176,8 +187,9 @@ export async function startEgressProxy(opts: { consent: Consent; network?: Proxy
     onClose(fn) { closers.push(fn); },
     close() {
       closing ??= new Promise<void>((resolve) => {
+        phase = 'shut';
         server.close(() => resolve());
-        for (const s of sockets) s.destroy();
+        cutEverything();
       });
       return closing;
     },

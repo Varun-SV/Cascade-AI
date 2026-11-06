@@ -541,7 +541,13 @@ stage. The unused library adds no production overhead in stage 1.
   `close`, then shut it for good, and cut connections already through it. The reason is a service worker
   registration, which survives a revoke: with the tab back in its scope from the HTTP cache, its update check
   reached the server with the proxy open, and reaches nothing once it's shut (test with both modes; removing
-  the shut fails it).
+  the shut fails it). Plain http still on its way upstream is cut too. Until this was fixed, only `CONNECT`
+  upstreams were: in a real browser, a held response and a part-sent upload kept both their connections to the
+  server open after a revoke, and at unit level a request whose connection was still being made sent its bytes after
+  the shut. The proxy now owns each upstream socket, and ends it if the browser's side closes, which is either
+  layer alone enough for a shut; with both removed the tests fail. An upload's bytes already in the destination's
+  own socket buffers can't be recalled, so the browser test checks that the connections go and the upload stops
+  short of its size, not that the count stops the instant of the revoke.
 - **What is and isn't governed during a lease.** The policy governs requests from pages and workers. It
   doesn't govern everything the browser sends, and stage 1 makes no such claim. **While a lease is held**, a
   connection the browser makes by itself to a public host passes the proxy like any public subresource. The proxy
@@ -551,6 +557,11 @@ stage. The unused library adds no production overhead in stage 1.
   over 30 s in the test and 8 min once on Chromium 153 (`CASCADE_RELAY_IDLE_MS`). That's a measurement, not a
   guarantee. The test's own control shows such a connection would be let out and would be seen. A service
   worker's update check is logged nowhere, as above; its hosts are ones the policy allowed at install.
+  **The stage 1 contract, then:** for all of this browser's traffic, the proxy enforces the address rules, the pinned
+  dial and the shut at the end of the lease. For requests Fetch intercepts, the policy also enforces origins and
+  resource types. This holds for the dedicated, fresh-profile, single-run browser only, and says nothing for desktop or
+  the extension. The test for a private destination that the policy never sees is the service worker update pointed at a
+  private address, above.
 - **The launch takes no switches.** `launchBehindProxy` takes the binary, the proxy and a timeout, and refuses
   any other option. A switch later on the line wins, so `--no-proxy-server` after ours reached a server directly
   with the proxy seeing nothing (the control). `launchForRelayTests` adds a short allowlist of test switches,

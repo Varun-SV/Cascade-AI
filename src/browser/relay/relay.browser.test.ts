@@ -78,6 +78,24 @@ function udpCounter(): Promise<{ count(): number; port: number; close(): void }>
   return new Promise((resolve) => s.bind(0, '127.0.0.1', () => resolve({ count: () => n, port: s.address().port, close: () => s.close() })));
 }
 
+/** What `/hold` has seen: a response it never finishes, and a slowly read upload. */
+const held = { open: 0, uploaded: 0, slow: true };
+function holdOpen(req: http.IncomingMessage, res: http.ServerResponse): void {
+  held.open += 1;
+  res.on('close', () => { held.open -= 1; });
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  if (req.method === 'POST') {
+    // Slow enough that the upload is still going when the lease ends.
+    req.on('data', (d: Buffer) => {
+      held.uploaded += d.length;
+      if (!held.slow) return;
+      req.pause();
+      setTimeout(() => req.resume(), 100);
+    });
+  }
+  res.write('first');
+}
+
 const PUBLIC_ALLOWED = '203.0.113.10';
 const PUBLIC_OFFLIST = '203.0.113.20';
 const WORKER_JS = "fetch(self.location.origin + '/beacon?ran').catch(() => {});";
@@ -109,6 +127,7 @@ async function startRig(opts: {
     switch (path) {
       case '/sw-private.js': return script(res, `fetch(${JSON.stringify(decodeURIComponent((req.url ?? '').split('u=')[1] ?? ''))}, { mode: 'no-cors' }).catch(() => {});`);
       case '/worker.js': case '/sw.js': return script(res);
+      case '/hold': holdOpen(req, res); return true;
       case '/prerender-rules':
         res.setHeader('content-type', 'text/html');
         res.end('<!doctype html><script type="speculationrules">' + JSON.stringify({ prerender: [{ urls: ['/pre-same', '/pre-redirect'] }] }) + '</script>');
@@ -1370,6 +1389,28 @@ suite('what the browser sends that no agent asked for', { timeout: 60_000 }, () 
 });
 
 suite('what reaches the network after a revoke', { timeout: 30_000 }, () => {
+  it('plain http still in flight at a revoke: the destination\'s connections go, and the upload stops short', async () => {
+    Object.assign(held, { open: 0, uploaded: 0, slow: true });
+    const r = await startRig({ pageEnd: 'blank' });
+    await r.page.goto('http://allowed.test/links');
+    const SIZE = 32 * 1024 * 1024;
+    await r.page.evaluate(`void fetch('/hold').catch(() => {}); void fetch('/hold', { method: 'POST', body: new Blob([new Uint8Array(${SIZE})]) }).catch(() => {}); void 0`);
+    // Chromium takes a few seconds to start sending a body this size under interception.
+    for (let i = 0; i < 150 && !(held.open === 2 && held.uploaded > 0); i++) await sleep(100);
+    expect(held.open, 'control: both are in flight').toBe(2);
+    expect(held.uploaded, 'control: the upload is arriving').toBeGreaterThan(0);
+
+    r.lease.revoke('test');
+    await r.serving;
+    const dials = r.dials.length;
+    // Whatever the destination's own buffers still hold, it can now read to the end of.
+    held.slow = false;
+    await sleep(1000);
+    expect(held.open).toBe(0);
+    expect(held.uploaded).toBeLessThan(SIZE);
+    expect(r.dials.length).toBe(dials);
+  });
+
   it.each([['blank' as const], ['close' as const]])('%s: a surviving service worker registration reaches nothing, however late its update', async (mode) => {
     const r = await startRig({ pageEnd: mode });
     await r.page.goto('http://allowed.test/cached');
