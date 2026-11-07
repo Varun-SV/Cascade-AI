@@ -281,6 +281,45 @@ describe('the proxy\'s three phases', () => {
       expect(c.text()).toMatch(/200 OK[\s\S]*ok$/);
       expect(upstreamOpen).toBe(0);
     });
+
+    // Any public server a consented page fetches from can send these. Each must end only
+    // its own exchange: vitest fails the run on an uncaught error, and the next request
+    // shows the proxy still serving.
+    const replies: [string, string][] = [
+      ['a status Node won\'t write (099)', 'HTTP/1.1 099 x\r\nContent-Length: 0\r\n\r\n'],
+      ['a status of 000', 'HTTP/1.1 000 x\r\nContent-Length: 0\r\n\r\n'],
+      ['more body bytes than declared', 'HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nABCDEFGH'],
+    ];
+    for (const [name, reply] of replies) {
+      it(`a destination sending ${name} ends that exchange, not the proxy`, async () => {
+        let first = true;
+        onUpstream = (s) => {
+          s.once('data', () => {
+            s.write(first ? reply : 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok');
+            first = false;
+          });
+        };
+        await startHttp();
+        const bad = client();
+        bad.s.write(GET);
+        await sleep(100);
+        expect(bad.closed()).toBe(true);
+        expect(bad.text()).not.toMatch(/ABCDEFGH/);
+        const next = client();
+        next.s.write(GET);
+        await sleep(100);
+        expect(next.text()).toMatch(/200 OK[\s\S]*ok$/);
+      });
+    }
+
+    it('a CONNECT to a port above 65535 is refused, and dials nothing', async () => {
+      await startHttp();
+      const c = client();
+      c.s.write('CONNECT a.test:70000 HTTP/1.1\r\nHost: a.test:70000\r\n\r\n');
+      await sleep(50);
+      expect(c.text()).toMatch(/^HTTP\/1\.1 403/);
+      expect(dials).toEqual([]);
+    });
   });
 });
 

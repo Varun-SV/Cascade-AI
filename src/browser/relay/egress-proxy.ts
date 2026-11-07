@@ -147,15 +147,20 @@ export async function startEgressProxy(opts: { consent: Consent; network?: Proxy
         },
         method: req.method, path: `${u.pathname}${u.search}`, headers,
       }, (upstream) => {
-        res.writeHead(upstream.statusCode ?? 502, upstream.headers);
         upstream.on('error', () => res.destroy());
+        // Any public server can answer, so its reply mustn't be able to throw here: a
+        // status or header Node won't write ends this exchange, not the process.
+        try { res.writeHead(upstream.statusCode ?? 502, upstream.headers); } catch { out.destroy(); res.destroy(); return; }
         upstream.pipe(res);
       });
-      out.on('error', () => { if (!res.headersSent) res.statusCode = 502; res.end(); });
+      // Once the reply has started, a broken upstream (such as more body bytes than it
+      // declared) can only cut the browser's connection; ending it would race the pipe.
+      out.on('error', () => { if (res.headersSent) { res.destroy(); return; } res.statusCode = 502; res.end(); });
+      res.on('error', () => out.destroy());
       // Piping doesn't pass a closed browser connection along, so end the upstream one here.
       res.on('close', () => out.destroy());
       req.pipe(out);
-    })();
+    })().catch(() => { res.destroy(); });
   });
 
   server.on('connection', track);
@@ -164,7 +169,8 @@ export async function startEgressProxy(opts: { consent: Consent; network?: Proxy
     socket.on('error', () => {});
     void (async () => {
       const m = /^(\[[^\]]+\]|[^:]+):(\d+)$/.exec(req.url ?? '');
-      const to = m ? await decide('connect', m[1]!, m[2]!) : null;
+      const port = m ? Number(m[2]) : 0;
+      const to = m && port >= 1 && port <= 65535 ? await decide('connect', m[1]!, m[2]!) : null;
       if (!to) { socket.end('HTTP/1.1 403 Forbidden\r\n\r\n'); return; }
       if ((phase as string) === 'shut') { socket.destroy(); return; }
       const out = network.dial(to.address, to.port);
@@ -177,7 +183,7 @@ export async function startEgressProxy(opts: { consent: Consent; network?: Proxy
       });
       out.on('error', () => socket.destroy());
       socket.on('close', () => out.destroy());
-    })();
+    })().catch(() => { socket.destroy(); });
   });
 
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
