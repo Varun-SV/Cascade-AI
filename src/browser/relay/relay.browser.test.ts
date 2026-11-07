@@ -118,6 +118,8 @@ const rigs: Rig[] = [];
 
 async function startRig(opts: {
   pageEnd?: PageEndMode; consent?: Consent; raw?: boolean; beforePolicy?: (b: LaunchedBrowser) => Promise<void>;
+  /** For one test: the relay's consent, narrower than the network policy's. */
+  relayConsent?: Consent;
   /** For controls: a profile with none of the launch's preferences. */
   bareProfile?: boolean;
 } = {}): Promise<Rig> {
@@ -216,7 +218,7 @@ async function startRig(opts: {
   const lease = createTabLease();
   proxy.onClose(() => lease.revoke('egress-proxy-down'));
   lease.promote(lease.reserve()!, { expiresAt: Date.now() + 600_000 });
-  const relay = createDeviceRelay({ tabWs: browser.tabWs, consent, lease, enforcer, pageEnd: opts.pageEnd ?? 'blank' });
+  const relay = createDeviceRelay({ tabWs: browser.tabWs, consent: opts.relayConsent ?? consent, lease, enforcer, pageEnd: opts.pageEnd ?? 'blank' });
   const http2 = http.createServer();
   const wss = new WebSocketServer({ server: http2 });
   const agentFrames: string[] = [];
@@ -363,6 +365,33 @@ suite('P2: no request reaches a destination without consent', { timeout: 90_000 
     const r = await startRig();
     await r.page.goto('http://allowed.test/redirect-private').catch(() => {});
     await sleep(100);
+    expect(r.priv.accepts).toBe(0);
+  });
+
+  it('a blocked redirect leaves no error page holding its URL, in the tab or an iframe', async () => {
+    // Chromium's error page for a blocked navigation keeps the URL it was refused, query
+    // included, and any allowed script could read it. A blocked document is aborted
+    // instead, so no error page commits and the frame keeps what it had.
+    const r = await startRig();
+    const p = r.page;
+    const read = async (): Promise<string> => (await Promise.all(p.frames().map((f) => f.evaluate(
+      () => `${location.href} ${document.documentElement.outerHTML}`,
+    ).catch((e: Error) => `unreadable ${e.message}`)))).join('\n');
+    await p.goto('http://allowed.test/');
+    await p.goto('http://allowed.test/redirect-marked').catch(() => {});
+    await p.goto('http://allowed.test/redirect-private').catch(() => {});
+    await sleep(200);
+    const tabText = await read();
+    await p.goto('http://allowed.test/');
+    await p.evaluate("(() => { for (const u of ['/redirect-marked', '/redirect-private']) { const f = document.createElement('iframe'); f.src = u; document.body.append(f); } })()");
+    await sleep(400);
+    const frameText = await read();
+    expect(r.allowed.hits.filter((h) => h === 'GET /redirect-marked'), 'the redirects ran').toHaveLength(2);
+    expect(p.frames().length, 'the iframes are there to read').toBe(3);
+    for (const text of [tabText, frameText]) {
+      expect(text).not.toMatch(/MARKPATH|MARKQUERY|from-redirect|chrome-error/);
+    }
+    expect(r.offlist.accepts).toBe(0);
     expect(r.priv.accepts).toBe(0);
   });
 
@@ -768,18 +797,32 @@ suite('R-A2: history over the relay', { timeout: 30_000 }, () => {
     await navigateHistory(r.page, 1);
     expect(r.page.url()).toBe('http://allowed.test/two');
   });
-  it('a history entry on a site without consent is hidden and refused', async () => {
+  it('a blocked navigation leaves no history entry', async () => {
     const r = await startRig({ raw: true });
     await r.command('Page.navigate', { url: 'http://allowed.test/one' });
     await sleep(150);
+    const before = (await r.command('Page.getNavigationHistory')).result;
     await r.command('Page.navigate', { url: 'http://offlist.test/blocked' });
+    await sleep(150);
+    const after = (await r.command('Page.getNavigationHistory')).result as { currentIndex: number; entries: { url: string }[] };
+    expect(after).toEqual(before);
+    expect(after.entries[after.currentIndex]!.url).toBe('http://allowed.test/one');
+    expect(r.offlist.accepts).toBe(0);
+  });
+  it('a history entry on a site without consent is hidden and refused', async () => {
+    // Blocked navigations no longer leave entries, so this one comes from a network policy
+    // wider than the relay's consent: the relay's own check is what's under test.
+    const r = await startRig({ raw: true, consent: makeConsent(['http://allowed.test', 'http://offlist.test']), relayConsent: makeConsent(['http://allowed.test']) });
+    await r.command('Page.navigate', { url: 'http://allowed.test/one' });
+    await sleep(150);
+    await r.command('Page.navigate', { url: 'http://offlist.test/elsewhere' });
+    await sleep(150);
+    await r.command('Page.navigate', { url: 'http://allowed.test/two' });
     await sleep(150);
     const h = (await r.command('Page.getNavigationHistory')).result as { entries: { id: number; url: string }[] };
     expect(JSON.stringify(h)).not.toContain('offlist.test');
-    // A blocked navigation leaves an entry only on some Chromium versions, so the check
-    // that matters needs one: this entry is forced, by id, against the real history.
     const hidden = h.entries.find((e) => e.url.includes('not-consented'));
-    expect(hidden, 'the blocked navigation left a hidden entry').toBeDefined();
+    expect(hidden, 'the entry is there, hidden').toBeDefined();
     expect((await r.command('Page.navigateToHistoryEntry', { entryId: hidden!.id })).error?.message).toContain('not on a consented site');
   });
 });

@@ -158,7 +158,10 @@ export async function startRequestPolicy(opts: {
     decisions.push({ allowed: v.allow, url: p.request.url, resourceType: p.resourceType, reason: v.allow ? '' : v.reason, where });
     try {
       if (v.allow) await client.send('Fetch.continueRequest', { requestId: p.requestId }, msg.sessionId);
-      else await client.send('Fetch.failRequest', { requestId: p.requestId, errorReason: 'BlockedByClient' }, msg.sessionId);
+      // A blocked document is aborted, not failed: a failure commits Chromium's error page,
+      // which keeps the refused URL, query included, where any allowed script can read it.
+      // An abort commits nothing, so the frame keeps the document it had.
+      else await client.send('Fetch.failRequest', { requestId: p.requestId, errorReason: p.resourceType === 'Document' ? 'Aborted' : 'BlockedByClient' }, msg.sessionId);
     } catch { /* the request is already gone */ }
   };
 
