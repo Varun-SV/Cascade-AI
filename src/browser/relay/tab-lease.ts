@@ -26,6 +26,8 @@ export interface TabLease {
   promote(r: Reservation, opts: { expiresAt: number }): Fence | null;
   /** The current fence, or null when commands may not run. */
   fence(): Fence | null;
+  /** The generation of the lease held or suspended now, or null when there's none. */
+  generation(): number | null;
   isCurrent(f: Fence): boolean;
   suspend(): void;
   handBack(): void;
@@ -81,6 +83,7 @@ export function createTabLease(clock: LeaseClock = systemClock): TabLease {
       return { generation, epoch };
     },
     fence: () => (state === 'held' ? { generation, epoch } : null),
+    generation: () => (state === 'held' || state === 'suspended' ? generation : null),
     isCurrent: (f) => state === 'held' && f.generation === generation && f.epoch === epoch,
     suspend() {
       if (state !== 'held') return;
@@ -123,7 +126,8 @@ export interface FencedForwarder<C, R> {
   deliver(key: number, reply: R): void;
 }
 
-export function createFencedForwarder<C, R>(lease: TabLease, transport: CommandTransport<C>): FencedForwarder<C, R> {
+/** With `generation`, nothing is dispatched under any other generation's lease. */
+export function createFencedForwarder<C, R>(lease: TabLease, transport: CommandTransport<C>, generation?: number): FencedForwarder<C, R> {
   interface Entry { resolve(r: R): void; reject(e: Error): void; fence: Fence }
   const inFlight = new Map<number, Entry>();
   lease.onChange((reason) => {
@@ -135,6 +139,7 @@ export function createFencedForwarder<C, R>(lease: TabLease, transport: CommandT
     async dispatch(command, key) {
       const fence = lease.fence();
       if (!fence) throw new CommandFenced('the lease is not active');
+      if (generation !== undefined && fence.generation !== generation) throw new CommandFenced('the lease changed');
       return new Promise<R>((resolve, reject) => {
         inFlight.set(key, { resolve, reject, fence });
         const forward = async (): Promise<void> => {

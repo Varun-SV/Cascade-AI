@@ -64,6 +64,17 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
   const droppedEvents = new Set<string>();
 
   const serve = async (agent: WebSocket): Promise<void> => {
+    // The lease this connection serves, pinned before anything is awaited. A later
+    // grant on the same tab is another lease: this connection never runs under it.
+    const generation = lease.generation();
+    if (generation === null) {
+      refusals.push('lease ended: the lease is no longer held');
+      try { agent.close(1011, 'lease ended'); } catch { /* already closing */ }
+      return;
+    }
+    const ours = (): boolean => lease.generation() === generation;
+    /** Another lease holds the tab now: its page isn't this connection's to touch. */
+    const superseded = (): boolean => lease.generation() !== null && !ours();
     // Listen from the start: the agent speaks as soon as it connects.
     const early: string[] = [];
     let onFrame = (raw: string): void => { early.push(raw); };
@@ -73,12 +84,14 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
     let onGone = (why: string): void => { gone ??= why; };
     agent.on('close', () => onGone('the connection dropped'));
     agent.on('error', () => onGone('the connection failed'));
+    // And for the lease ending while the tab is still being reached.
+    lease.onChange((why, state) => { if (state === 'idle') onGone(why); });
     let tab: CdpClient;
     try {
       tab = await connectCdp(opts.tabWs);
     } catch {
       refusals.push('lease ended: could not reach the tab');
-      lease.revoke('could not reach the tab');
+      if (ours()) lease.revoke('could not reach the tab');
       try { agent.close(1011, 'lease ended'); } catch { /* already closing */ }
       return;
     }
@@ -108,7 +121,7 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
         );
       },
     };
-    const forwarder = createFencedForwarder<Outbound, { result?: Record<string, unknown>; error?: string }>(lease, transport);
+    const forwarder = createFencedForwarder<Outbound, { result?: Record<string, unknown>; error?: string }>(lease, transport, generation);
     const forward = (method: string, params: Record<string, unknown>, sessionId: string | undefined) => {
       const key = nextKey++;
       return forwarder.dispatch({ key, method, params, ...(toTab(sessionId) ? { sessionId: toTab(sessionId)! } : {}) }, key);
@@ -118,7 +131,15 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
       if (ended) return;
       ended = true;
       refusals.push(`lease ended: ${why}`);
-      lease.revoke(why);
+      if (ours()) lease.revoke(why);
+      if (superseded()) {
+        // Ours ended while setting up, before anything ran, and the tab is now
+        // another lease's: let go without touching its page.
+        tab.close();
+        try { agent.close(1011, 'lease ended'); } catch { /* already closing */ }
+        finish();
+        return;
+      }
       void (async () => {
         // In order: the fence has changed and the queue is rejected; now end what's
         // running, and only then let go. Policy and proxy stay on until this is done.
@@ -133,12 +154,11 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
         finish();
       })();
     };
-    lease.onChange((why, state) => { if (state === 'idle') end(why); });
     tab.onClose(() => end('the tab went away'));
     enforcer.onForeignDocument(() => end('the tab is showing a page without consent'));
     onGone = end;
     if (gone !== null) end(gone);
-    if (lease.state() === 'idle') end('the lease is no longer held');
+    if (!ours()) end('the lease is no longer held');
 
     tab.on((msg: CdpMessage) => {
       if (ended || !msg.method) return;
@@ -240,6 +260,7 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
     // No command runs until the tab has been checked. Frames wait in `early` until then.
     const refusal = await tabReadyRefusal(enforcer);
     if (refusal) end(refusal);
+    if (!ours()) end('the lease is no longer held');
     for (const raw of early.splice(0)) onFrame(raw);
     return done;
   };

@@ -263,3 +263,28 @@ describe('claim order: reserve, then claim, then promote', () => {
     expect(lease.state()).toBe('idle');
   });
 });
+
+describe('a forwarder pinned to one generation', () => {
+  it('generation() is held or suspended, and null once idle', () => {
+    const { lease, fence } = leased();
+    expect(lease.generation()).toBe(fence.generation);
+    lease.suspend();
+    expect(lease.generation()).toBe(fence.generation);
+    lease.revoke('stop');
+    expect(lease.generation()).toBeNull();
+  });
+  it('dispatches nothing under a later lease on the same tab', async () => {
+    const { lease, fence } = leased();
+    const written: string[] = [];
+    const fwd = createFencedForwarder<string, string>(lease, { write: (c) => { written.push(c); } }, fence.generation);
+    lease.revoke('stop');
+    lease.promote(lease.reserve()!, { expiresAt: FAR });
+    await expect(fwd.dispatch('old', 1)).rejects.toBeInstanceOf(CommandFenced);
+    expect(written).toEqual([]);
+    // An unpinned forwarder takes whatever lease is current: the reason relay pins.
+    const loose = createFencedForwarder<string, string>(lease, { write: (c) => { written.push(c); } });
+    void loose.dispatch('new', 2);
+    await Promise.resolve(); await Promise.resolve();
+    expect(written).toEqual(['new']);
+  });
+});

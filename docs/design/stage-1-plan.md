@@ -594,6 +594,12 @@ stage. The unused library adds no production overhead in stage 1.
   a document without consent ends the lease. Stage 2's consent text must say the tab's back history can be lost.
 - **Revoke can close a user's tab even in `blank` mode,** if leaving the page doesn't finish in 3 s.
   Stage 2's decision and consent text must say so; it isn't approved by being here.
+- **A connection is pinned to the lease it started under.** `serve()` takes the lease's generation
+  before its first `await`, listens for the lease ending from then on, and its forwarder dispatches
+  only under that generation. A revoke and a new grant while the tab is being reached or checked end
+  the old connection with nothing sent to the tab; it never revokes the new lease or ends its page.
+  A revoked lease's page step still runs after the lease is idle, so a grant made in that window has
+  the page ended under it (fail-closed). Stage 2 should grant only once the page step has finished.
 - **Child targets:** every setup step must succeed before a target resumes, or it stays paused and
   is closed. Only a dedicated worker may lack its own interception; the test asserts the block in the
   policy's own log for each worker type, not only at the proxy.
