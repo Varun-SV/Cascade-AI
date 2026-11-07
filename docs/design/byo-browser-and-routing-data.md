@@ -1,9 +1,10 @@
 # Bring-your-own browser, and routing data for users
 
-Status: **stage 1 may be planned; its feature PR is not yet agreed** (see
-§11), revision 2 (council: discussion #315, review on PR #316 as inline
-comments). Q1–Q5 decided by the maintainer; private-network intranet support
-remains open and default-denied (§4.3). Nothing here approves stage code: each
+Status: **stage 1 is being planned; its scope is not yet agreed** (see §11 and
+[`stage-1-plan.md`](stage-1-plan.md)), revision 2 (council: discussion #315,
+review on PR #316 as inline comments, then each stage's PR). Q1–Q5 decided by
+the maintainer; private-network intranet support stays out of stage 1 and
+default-denied (§4.3). Nothing here approves stage code: each
 stage is reviewed from its own diff and tests.
 
 Revision 2 answers ChatGPT's review on #316:
@@ -291,7 +292,9 @@ depth.
     entries from other sites (the tab's past, or a navigation the policy
     failed) with no URL or title, and `Page.navigateToHistoryEntry` is
     refused for them: a page restored from the back-forward cache sends no
-    request for the request policy to stop.
+    request for the request policy to stop. Script can go back too, so the
+    relay removes the tab's history before serving if any entry is on a
+    site without consent, and ends the lease if the tab shows one anyway.
   - **What the tab already held stays out of reach.** A page or frame the
     tab loaded before the lease never went through the request policy.
     The relay serves no command until it has checked the tab is on a
@@ -412,12 +415,22 @@ when DNS moves outside the approved scope. Acceptance tests would cover
 split-horizon names, multiple A/AAAA answers, rebinding, and no TCP accept
 at the private server before explicit approval. Any DNS cache must keep the
 same invariant. ChatGPT recommends deferring intranet support by default
-for stage 1 unless the maintainer opts in (2 Nov). Not decided yet: Varun
-decides whether stage 1 includes intranet support at all. The extension cannot resolve names
+for stage 1 unless the maintainer opts in (2 Nov). **Decided by Varun (4 Nov):** stage 1
+leaves it out, so these names stay refused. An exact private origin the user
+consented to stays allowed, but always takes a separate confirmation naming the
+origin and that it is on their private network, for that run only. The extension cannot resolve names
 itself. Chrome's Private Network Access checks are **not** a demonstrated
 request firewall, so the extension makes **no** private-network claim until
 its own P2 run (§9) passes; until then the UI and docs say private-network
 blocking is not enforced for that source.
+
+**The proxy is on by default (Varun, 4 Nov), with a per-device opt-out only
+the user can set.** With it off, that source makes no private-network claim
+and the consent prompt says so. A proxy failure while it is on fails closed.
+**WebRTC goes around the proxy** unless the browser also runs with
+`--webrtc-ip-handling-policy=disable_non_proxied_udp` (`poc-proxy-fail-closed.mjs`);
+`docs/design/stage-1-plan.md` section 3 has the evidence and the required tests,
+including QUIC and WebTransport (`poc-bypass-and-revoke.mjs`).
 
 **What is guaranteed, and what is not.** This is not network egress
 isolation:
@@ -479,7 +492,9 @@ the stated limit. `Fetch.disable` from the agent was refused.
   session for the extension.
 - A run receives a **run capability**: a signed, single-use token naming
   user, device, run id and expiry (≤ the run's budget time, max 30 min,
-  renewable while the run is active).
+  renewable while the run is active). Under review:
+  `docs/design/stage-1-plan.md` section 2 proposes a server-signed grant plus a
+  device-signed approval, and no renewal in stage 1.
 
 **Single use, and no resume (model (a)):**
 - A capability opens **one** connection and **one** lease. It is consumed
@@ -725,12 +740,20 @@ off by default:
 | Stage | Contents | Flag | Gate |
 |---|---|---|---|
 | 0 | Dependency updates, #305 (done) | — | CI green; E1 manual smoke test |
-| 1 | Threat model, command contract and lease library, with tests; request-origin policy; history `commit` fix | — | P1, P2 (CLI-style path), O1–O3 at library level |
-| 2 | A: CLI relay, then desktop adapter | `browser.relay.cli`, `browser.relay.desktop` | R-A1 (CLI, desktop), S1, P2, P3 |
-| 3 | B: Chrome extension | `browser.relay.extension` | R-A1 (extension), S1 incl. service-worker restart |
+| 1 | Threat model, command contract and lease library, with tests; request-origin policy; history `commit` fix | — | P1, P2 (CLI-style path), O1–O3 at library level, R-A2 |
+| 2 | A: CLI relay, then desktop adapter | `browser.relay.cli`, `browser.relay.desktop` | R-A1 (CLI, desktop), S1, P2, P3, P4 |
+| 3 | B: Chrome extension | `browser.relay.extension` | R-A1 (extension), S1 incl. service-worker restart, P4 |
 | 4 | Remove hosted browser and `REMOTE_BROWSER_*`; drop the allowance | — | no remaining references; self-host docs updated |
 | 5 | `surface` on ledger rows; You tabs; opt-in Everyone with protections | `insights.everyone` | D1–D3 |
 | 6 | C and D | per source | R-A1 against each |
+
+**Proposed, not decided (4 Nov):** build the extension before the desktop
+adapter, since cascadeai.in users have no browser source at all while desktop
+users have a local one: server relay and CLI, then extension, then desktop, and
+stage 4 once the first two are live. Also, §3.1 hardcodes cascadeai.in, so a
+self-hosted server can't use the extension as written. The proposal is that the
+user adds their server's address in the extension and approves it by name; a
+site must never be able to connect itself.
 
 Independent review happens per stage, from the diff and tests rather than
 the implementer's summary. The maintainer decided (21 Oct 2026) that PR #316
@@ -752,12 +775,16 @@ Decided by the maintainer (21 Oct 2026):
   and on screenshots or a looser profile. Plus an always-visible "Online"
   indicator whose hover lists which data is leaving the device (§4.1).
 
-Q1–Q5 are decided; private-network intranet support remains open and
-default-denied (§4.3).
+Q1–Q5 are decided. Varun decided on 4 Nov that intranet support stays out of
+stage 1 and default-denied, that exact private origins need a separate
+confirmation, and that the egress proxy is on by default with a user opt-out
+(§4.3).
 
 **Planning stage 1 is not the same as opening its PR.** ChatGPT agreed on
 21 Oct 2026 to start stage 1, and on 1 Nov 2026 said no stage-1 feature PR is
 authorized without documented council consensus. So stage 1 may be planned,
-but its feature PR needs both agents' explicit statements of consensus on the
-PR threads first. A documentation commit, this one included, is not that
-consensus. The code is then reviewed in its own PR.
+but its code needs both agents' explicit statements of consensus on the PR
+threads first. A documentation commit, this one included, is not that
+consensus. On 4 Nov Varun asked for the stage-1 PR to be opened; it starts as a
+draft holding the plan and this update, with no feature code until that
+consensus exists. The code is then reviewed in that PR.

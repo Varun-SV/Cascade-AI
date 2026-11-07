@@ -1,0 +1,269 @@
+// ─────────────────────────────────────────────
+//  Cascade AI — The device relay
+// ─────────────────────────────────────────────
+//
+//  One agent connection to one leased tab. Presents a browser-level CDP endpoint,
+//  which is what Playwright expects, over the tab's session. Every command goes
+//  through the policy and the fence; every event and URL-bearing reply goes through
+//  the filter. The agent's connection dropping, a bad frame, or anything ending the
+//  lease fails closed: there is no resume.
+
+import type { WebSocket } from 'ws';
+import { type CdpClient, type CdpMessage, connectCdp } from './cdp-client.js';
+import { type CommandFrame, HIDDEN_HISTORY_URL, checkCommand, filterEvent, filterReply, filterTargetInfo, parseFrame } from './command-policy.js';
+import { type Consent, onConsentedSite } from './egress-rules.js';
+import { type PageEndMode, type RequestEnforcer, settlesWithin } from './request-enforcer.js';
+import { CommandFenced, type CommandTransport, type TabLease, createFencedForwarder } from './tab-lease.js';
+
+const TAB_SESSION = 'cascade-tab-1';
+const SCRIPT_REMOVE_TIMEOUT_MS = 1000;
+const TAB_READY_TIMEOUT_MS = 3000;
+
+export interface RelayEvents {
+  /** Why a command was refused or the lease ended, for the device's log. Never sent to the server. */
+  refusals: string[];
+  /** Commands refused for not being on the list, and events dropped for the same reason. */
+  refusedMethods: Set<string>;
+  droppedEvents: Set<string>;
+}
+
+export interface DeviceRelayOptions {
+  tabWs: string;
+  consent: Consent;
+  lease: TabLease;
+  enforcer: RequestEnforcer;
+  /** What revoke does to the tab. See RequestEnforcer.endPageActivity. */
+  pageEnd: PageEndMode;
+  /** Test seam only: a barrier between dispatch and forward. */
+  beforeForward?: CommandTransport<unknown>['beforeForward'];
+}
+
+export interface DeviceRelay extends RelayEvents {
+  /** Serves one agent connection under the lease already held. Resolves when it's over. */
+  serve(agent: WebSocket): Promise<void>;
+}
+
+/** Why the tab can't be served yet, or null. A spinning page must not hold this up. */
+async function tabReadyRefusal(enforcer: RequestEnforcer): Promise<string | null> {
+  const check = async (): Promise<string | null> => {
+    const tab = await enforcer.checkTabBeforeLease();
+    if (!tab.ok) return tab.reason;
+    return await enforcer.clearForeignHistory() ? null : 'the history of sites without consent could not be cleared';
+  };
+  let timer!: NodeJS.Timeout;
+  const late = new Promise<string>((r) => { timer = setTimeout(() => r('the tab did not answer'), TAB_READY_TIMEOUT_MS); });
+  try {
+    return await Promise.race([check().catch(() => 'the tab could not be checked'), late]);
+  } finally { clearTimeout(timer); }
+}
+
+export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
+  const { consent, lease, enforcer } = opts;
+  const refusals: string[] = [];
+  const refusedMethods = new Set<string>();
+  const droppedEvents = new Set<string>();
+
+  const serve = async (agent: WebSocket): Promise<void> => {
+    // The lease this connection serves, pinned before anything is awaited. A later
+    // grant on the same tab is another lease: this connection never runs under it.
+    const generation = lease.generation();
+    if (generation === null) {
+      refusals.push('lease ended: the lease is no longer held');
+      try { agent.close(1011, 'lease ended'); } catch { /* already closing */ }
+      return;
+    }
+    const ours = (): boolean => lease.generation() === generation;
+    /** Another lease holds the tab now: its page isn't this connection's to touch. */
+    const superseded = (): boolean => lease.generation() !== null && !ours();
+    // Listen from the start: the agent speaks as soon as it connects.
+    const early: string[] = [];
+    let onFrame = (raw: string): void => { early.push(raw); };
+    agent.on('message', (raw) => onFrame(String(raw)));
+    // And for it going away: an 'error' with no listener would take the process down.
+    let gone: string | null = null;
+    let onGone = (why: string): void => { gone ??= why; };
+    agent.on('close', () => onGone('the connection dropped'));
+    agent.on('error', () => onGone('the connection failed'));
+    // And for the lease ending while the tab is still being reached.
+    lease.onChange((why, state) => { if (state === 'idle') onGone(why); });
+    let tab: CdpClient;
+    try {
+      tab = await connectCdp(opts.tabWs);
+    } catch {
+      refusals.push('lease ended: could not reach the tab');
+      if (ours()) lease.revoke('could not reach the tab');
+      try { agent.close(1011, 'lease ended'); } catch { /* already closing */ }
+      return;
+    }
+    const knownSessions = new Set([TAB_SESSION]);
+    const hiddenSessions = new Set<string>();
+    const injected: { identifier: string; sessionId?: string }[] = [];
+    let targetInfo: Record<string, unknown> | null = null;
+    let lastId = -1;
+    let ended = false;
+    let finish!: () => void;
+    const done = new Promise<void>((r) => { finish = r; });
+
+    const out = (m: object): void => { if (agent.readyState === agent.OPEN) agent.send(JSON.stringify(m)); };
+    const replyError = (id: number, sessionId: string | undefined, message: string): void => {
+      out({ id, ...(sessionId ? { sessionId } : {}), error: { code: -32000, message } });
+    };
+    const toTab = (sessionId: string | undefined): string | undefined => (sessionId === TAB_SESSION ? undefined : sessionId);
+
+    interface Outbound { key: number; method: string; params: Record<string, unknown>; sessionId?: string }
+    let nextKey = 1;
+    const transport: CommandTransport<Outbound> = {
+      ...(opts.beforeForward ? { beforeForward: opts.beforeForward as (c: Outbound) => Promise<void> } : {}),
+      write(c) {
+        tab.send(c.method, c.params, c.sessionId).then(
+          (result) => forwarder.deliver(c.key, { result }),
+          (e: Error) => forwarder.deliver(c.key, { error: e.message }),
+        );
+      },
+    };
+    const forwarder = createFencedForwarder<Outbound, { result?: Record<string, unknown>; error?: string }>(lease, transport, generation);
+    const forward = (method: string, params: Record<string, unknown>, sessionId: string | undefined) => {
+      const key = nextKey++;
+      return forwarder.dispatch({ key, method, params, ...(toTab(sessionId) ? { sessionId: toTab(sessionId)! } : {}) }, key);
+    };
+
+    const end = (why: string): void => {
+      if (ended) return;
+      ended = true;
+      refusals.push(`lease ended: ${why}`);
+      if (ours()) lease.revoke(why);
+      if (superseded()) {
+        // Ours ended while setting up, before anything ran, and the tab is now
+        // another lease's: let go without touching its page.
+        tab.close();
+        try { agent.close(1011, 'lease ended'); } catch { /* already closing */ }
+        finish();
+        return;
+      }
+      void (async () => {
+        // In order: the fence has changed and the queue is rejected; now end what's
+        // running, and only then let go. Policy and proxy stay on until this is done.
+        // A spinning page answers neither call, so each is bounded. A script that's still
+        // registered would run on about:blank too, so then the tab is closed instead.
+        const removed = await Promise.all(injected.splice(0).map(({ identifier, sessionId }) =>
+          settlesWithin(tab.send('Page.removeScriptToEvaluateOnNewDocument', { identifier }, sessionId), SCRIPT_REMOVE_TIMEOUT_MS)));
+        const ended = await enforcer.endPageActivity(removed.every(Boolean) ? opts.pageEnd : 'close').catch(() => false);
+        if (!ended) refusals.push('the browser did not confirm the page ended');
+        tab.close();
+        try { agent.close(1011, 'lease ended'); } catch { /* already closing */ }
+        finish();
+      })();
+    };
+    tab.onClose(() => end('the tab went away'));
+    enforcer.onForeignDocument(() => end('the tab is showing a page without consent'));
+    onGone = end;
+    if (gone !== null) end(gone);
+    if (!ours()) end('the lease is no longer held');
+
+    tab.on((msg: CdpMessage) => {
+      if (ended || !msg.method) return;
+      if (lease.fence() === null) return; // Suspended: nothing reaches the agent.
+      if (msg.sessionId && (hiddenSessions.has(msg.sessionId) || !knownSessions.has(msg.sessionId))) return;
+      const params = msg.params ?? {};
+      if (msg.method === 'Target.attachedToTarget') {
+        const { sessionId: child, targetInfo: info, waitingForDebugger } = params as { sessionId: string; targetInfo?: { url?: string }; waitingForDebugger?: boolean };
+        // A frame or worker on a site without consent is never given to the agent.
+        if (!onConsentedSite(info?.url ?? '', consent)) {
+          hiddenSessions.add(child);
+          if (waitingForDebugger) void tab.send('Runtime.runIfWaitingForDebugger', {}, child).catch(() => {});
+          return;
+        }
+        knownSessions.add(child);
+      }
+      if (msg.method === 'Target.detachedFromTarget') {
+        const child = (params as { sessionId: string }).sessionId;
+        if (hiddenSessions.delete(child)) return;
+        knownSessions.delete(child);
+      }
+      const safe = filterEvent(msg.method, params, consent);
+      if (safe === null) { droppedEvents.add(msg.method); return; }
+      out({ method: msg.method, params: safe, sessionId: msg.sessionId ?? TAB_SESSION });
+    });
+
+    const handleRoot = (f: CommandFrame): void => {
+      switch (f.method) {
+        case 'Browser.getVersion':
+          out({ id: f.id, result: { protocolVersion: '1.3', product: 'Chrome/Cascade-Relay', revision: '', userAgent: 'Cascade-Relay', jsVersion: '' } });
+          return;
+        // Answered and never applied: the agent doesn't choose where downloads go.
+        case 'Browser.setDownloadBehavior':
+          out({ id: f.id, result: {} });
+          return;
+        case 'Target.getTargetInfo':
+          out({ id: f.id, result: { targetInfo: (targetInfo && filterTargetInfo(targetInfo, consent)) ?? { targetId: 'browser', type: 'browser', url: '', attached: true } } });
+          return;
+        case 'Target.setAutoAttach':
+          out({ id: f.id, result: {} });
+          void tab.send('Target.getTargetInfo').then((r) => {
+            const info = (r as { targetInfo: Record<string, unknown> }).targetInfo;
+            targetInfo = { ...info, attached: true, browserContextId: 'cascade-default' };
+            const safe = filterEvent('Target.attachedToTarget', { sessionId: TAB_SESSION, targetInfo, waitingForDebugger: false }, consent);
+            if (safe) out({ method: 'Target.attachedToTarget', params: safe });
+          }).catch(() => end('the tab went away'));
+          return;
+        default:
+          out({ id: f.id, error: { code: -32601, message: `Relay: browser-level ${f.method} not supported` } });
+      }
+    };
+
+    const run = async (f: CommandFrame): Promise<void> => {
+      const { id, method, params, sessionId } = f;
+      const decision = checkCommand(f, { knownSessions });
+      if (!decision.forward) {
+        refusals.push(decision.reason);
+        if (decision.reason.includes('not on the allowlist')) refusedMethods.add(method);
+        replyError(id, sessionId, decision.reason);
+        return;
+      }
+      if (method === 'Log.enable') { out({ id, sessionId, result: {} }); return; }
+      try {
+        if (method === 'Page.navigateToHistoryEntry') {
+          // A page restored from the back-forward cache sends no request, so the
+          // request policy alone would never see it.
+          const h = await forward('Page.getNavigationHistory', {}, sessionId);
+          const entries = (h.result?.entries ?? []) as { id: unknown; url?: string }[];
+          const entry = entries.find((e) => e.id === params.entryId);
+          if (!entry?.url || entry.url === HIDDEN_HISTORY_URL || !onConsentedSite(entry.url, consent)) {
+            replyError(id, sessionId, 'Denied by Cascade relay policy: that history entry is not on a consented site');
+            return;
+          }
+        }
+        const r = await forward(method, params, sessionId);
+        if (r.error !== undefined) { replyError(id, sessionId, r.error); return; }
+        const result = r.result ?? {};
+        if (method === 'Page.addScriptToEvaluateOnNewDocument' && typeof result.identifier === 'string') {
+          const s = toTab(sessionId);
+          injected.push({ identifier: result.identifier, ...(s ? { sessionId: s } : {}) });
+        }
+        out({ id, sessionId, result: filterReply(method, result, consent) });
+      } catch (e) {
+        if (e instanceof CommandFenced) { replyError(id, sessionId, e.message); return; }
+        throw e;
+      }
+    };
+
+    // Replies may finish out of order, as CDP allows; forwarding stays in arrival order.
+    onFrame = (raw) => {
+      if (ended) return;
+      const f = parseFrame(raw);
+      // Frame ids rise on one connection, so a replayed frame fails closed too.
+      if (!f || f.id <= lastId) { refusals.push('malformed frame'); end('malformed frame'); return; }
+      lastId = f.id;
+      if (f.sessionId === undefined) { handleRoot(f); return; }
+      void run(f).catch(() => end('relay error'));
+    };
+    // No command runs until the tab has been checked. Frames wait in `early` until then.
+    const refusal = await tabReadyRefusal(enforcer);
+    if (refusal) end(refusal);
+    if (!ours()) end('the lease is no longer held');
+    for (const raw of early.splice(0)) onFrame(raw);
+    return done;
+  };
+
+  return { refusals, refusedMethods, droppedEvents, serve };
+}
