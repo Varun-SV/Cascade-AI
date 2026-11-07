@@ -604,6 +604,15 @@ stage. The unused library adds no production overhead in stage 1.
   Playwright would otherwise wait for ever.
 - **Workers on revoke:** a shared or service worker outlives a navigation, so
   `endPageActivity` closes them first, in either mode. Tested with a service worker's timer.
+- **Blocked documents are aborted** (`net::ERR_ABORTED`), not failed. A failed navigation commits
+  Chromium's error page, whose DOM keeps the refused URL, query included, and `Runtime.evaluate` could
+  read it: an OAuth code on a redirect to a site without consent, for example. An abort commits nothing,
+  so the frame keeps what it had. The agent sees `net::ERR_ABORTED` on a refused navigation. Other
+  resource types still fail with `BlockedByClient`.
+- **More private ranges** than design §4.3's table names: `192.0.0.0/24`, IPv4-translated
+  `::ffff:0:0/96` (judged as its IPv4), local-use NAT64 `64:ff9b:1::/48` (all of it, as the IPv4's
+  place depends on the operator's prefix), the discard prefix `100::/64` and the deprecated site-local
+  `fec0::/10`. Each fails closed.
 - **Frame ids** must rise on a connection. A lower one fails closed, like a malformed
   frame. This stands in for the sequence numbers in design §5.
 

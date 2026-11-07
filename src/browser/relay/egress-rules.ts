@@ -32,6 +32,7 @@ function isPrivateV4(host: string): boolean {
     || (a === 169 && b === 254)
     || (a === 172 && b >= 16 && b <= 31)
     || (a === 192 && b === 168)
+    || (a === 192 && b === 0 && host.split('.')[2] === '0')
     || (a === 100 && b >= 64 && b <= 127)
     || (a === 198 && (b === 18 || b === 19))
     || a >= 224;
@@ -69,10 +70,18 @@ export function isPrivateHost(host: string): boolean {
     const zeros = (n: number): boolean => g.slice(0, n).every((x) => x === 0);
     // IPv4 inside IPv6 is judged as the IPv4 it reaches.
     if (zeros(5) && g[5] === 0xffff) return isPrivateV4(v4From(g[6]!, g[7]!));
+    // IPv4-translated (::ffff:0:0/96).
+    if (zeros(4) && g[4] === 0xffff && g[5] === 0) return isPrivateV4(v4From(g[6]!, g[7]!));
+    // Local-use NAT64 (RFC 8215): where the IPv4 sits depends on the operator's prefix
+    // length, so the whole /48 is private.
+    if (g[0] === 0x64 && g[1] === 0xff9b && g[2] === 1) return true;
+    // The discard prefix (100::/64).
+    if (g[0] === 0x100 && g.slice(1, 4).every((x) => x === 0)) return true;
     if (zeros(6)) return g[6] === 0 && g[7]! <= 1 ? true : isPrivateV4(v4From(g[6]!, g[7]!));
     if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) return isPrivateV4(v4From(g[6]!, g[7]!));
     if (g[0] === 0x2002) return isPrivateV4(v4From(g[1]!, g[2]!));
-    return (g[0]! & 0xfe00) === 0xfc00 || (g[0]! & 0xffc0) === 0xfe80 || (g[0]! & 0xff00) === 0xff00;
+    // Unique-local, link-local, the deprecated site-local (fec0::/10), multicast.
+    return (g[0]! & 0xfe00) === 0xfc00 || (g[0]! & 0xffc0) === 0xfe80 || (g[0]! & 0xffc0) === 0xfec0 || (g[0]! & 0xff00) === 0xff00;
   }
   return false;
 }
