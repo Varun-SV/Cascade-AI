@@ -18,6 +18,7 @@ import { CommandFenced, type CommandTransport, type TabLease, createFencedForwar
 const TAB_SESSION = 'cascade-tab-1';
 const SCRIPT_REMOVE_TIMEOUT_MS = 1000;
 const TAB_READY_TIMEOUT_MS = 3000;
+const TAB_CONNECT_TIMEOUT_MS = 3000;
 
 export interface RelayEvents {
   /** Why a command was refused or the lease ended, for the device's log. Never sent to the server. */
@@ -39,8 +40,21 @@ export interface DeviceRelayOptions {
 }
 
 export interface DeviceRelay extends RelayEvents {
-  /** Serves one agent connection under the lease already held. Resolves when it's over. */
+  /**
+   * Serves one agent connection under the lease already held. Resolves when it's over,
+   * including the page step. One relay serves one lease generation: its enforcer and
+   * browser are that lease's alone, so a later lease needs a fresh launch and relay.
+   */
   serve(agent: WebSocket): Promise<void>;
+}
+
+/** The tab's connection, or null if it can't be had in time. One that opens late is closed. */
+async function connectWithin(url: string, ms: number): Promise<CdpClient | null> {
+  let timer!: NodeJS.Timeout;
+  let late = false;
+  const attempt = connectCdp(url).then((c) => { if (late) { c.close(); return null; } return c; }, () => null);
+  const timeout = new Promise<null>((r) => { timer = setTimeout(() => { late = true; r(null); }, ms); });
+  try { return await Promise.race([attempt, timeout]); } finally { clearTimeout(timer); }
 }
 
 /** Why the tab can't be served yet, or null. A spinning page must not hold this up. */
@@ -62,6 +76,7 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
   const refusals: string[] = [];
   const refusedMethods = new Set<string>();
   const droppedEvents = new Set<string>();
+  let servedGeneration: number | null = null;
 
   const serve = async (agent: WebSocket): Promise<void> => {
     // The lease this connection serves, pinned before anything is awaited. A later
@@ -72,9 +87,20 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
       try { agent.close(1011, 'lease ended'); } catch { /* already closing */ }
       return;
     }
+    if (servedGeneration !== null && servedGeneration !== generation) {
+      // The enforcer ended the last lease's page and shut its proxy for good.
+      refusals.push('lease ended: this browser has already served a lease; a fresh launch is needed');
+      lease.revoke('this browser has already served a lease');
+      try { agent.close(1011, 'lease ended'); } catch { /* already closing */ }
+      return;
+    }
+    servedGeneration = generation;
+    // Held until the page step below is over: until then the tab can't be leased again,
+    // so nothing this teardown does can reach another lease's page.
+    const releaseTeardown = lease.holdTeardown()!;
+    let finish!: () => void;
+    const done = new Promise<void>((r) => { finish = () => { releaseTeardown(); r(); }; });
     const ours = (): boolean => lease.generation() === generation;
-    /** Another lease holds the tab now: its page isn't this connection's to touch. */
-    const superseded = (): boolean => lease.generation() !== null && !ours();
     // Listen from the start: the agent speaks as soon as it connects.
     const early: string[] = [];
     let onFrame = (raw: string): void => { early.push(raw); };
@@ -85,24 +111,24 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
     agent.on('close', () => onGone('the connection dropped'));
     agent.on('error', () => onGone('the connection failed'));
     // And for the lease ending while the tab is still being reached.
-    lease.onChange((why, state) => { if (state === 'idle') onGone(why); });
-    let tab: CdpClient;
-    try {
-      tab = await connectCdp(opts.tabWs);
-    } catch {
+    lease.onChange((why, state) => { if (state === 'ending' || state === 'idle') onGone(why); });
+    const reached = await connectWithin(opts.tabWs, TAB_CONNECT_TIMEOUT_MS);
+    if (!reached) {
       refusals.push('lease ended: could not reach the tab');
       if (ours()) lease.revoke('could not reach the tab');
+      // Nothing ran, but the page step still ends the page and shuts the proxy.
+      if (!await enforcer.endPageActivity(opts.pageEnd).catch(() => false)) refusals.push('the browser did not confirm the page ended');
       try { agent.close(1011, 'lease ended'); } catch { /* already closing */ }
-      return;
+      finish();
+      return done;
     }
+    const tab: CdpClient = reached;
     const knownSessions = new Set([TAB_SESSION]);
     const hiddenSessions = new Set<string>();
     const injected: { identifier: string; sessionId?: string }[] = [];
     let targetInfo: Record<string, unknown> | null = null;
     let lastId = -1;
     let ended = false;
-    let finish!: () => void;
-    const done = new Promise<void>((r) => { finish = r; });
 
     const out = (m: object): void => { if (agent.readyState === agent.OPEN) agent.send(JSON.stringify(m)); };
     const replyError = (id: number, sessionId: string | undefined, message: string): void => {
@@ -131,27 +157,22 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
       if (ended) return;
       ended = true;
       refusals.push(`lease ended: ${why}`);
+      // The tab stays `ending` until finish(): no other lease can be granted meanwhile.
       if (ours()) lease.revoke(why);
-      if (superseded()) {
-        // Ours ended while setting up, before anything ran, and the tab is now
-        // another lease's: let go without touching its page.
-        tab.close();
-        try { agent.close(1011, 'lease ended'); } catch { /* already closing */ }
-        finish();
-        return;
-      }
       void (async () => {
         // In order: the fence has changed and the queue is rejected; now end what's
         // running, and only then let go. Policy and proxy stay on until this is done.
         // A spinning page answers neither call, so each is bounded. A script that's still
         // registered would run on about:blank too, so then the tab is closed instead.
-        const removed = await Promise.all(injected.splice(0).map(({ identifier, sessionId }) =>
-          settlesWithin(tab.send('Page.removeScriptToEvaluateOnNewDocument', { identifier }, sessionId), SCRIPT_REMOVE_TIMEOUT_MS)));
-        const ended = await enforcer.endPageActivity(removed.every(Boolean) ? opts.pageEnd : 'close').catch(() => false);
-        if (!ended) refusals.push('the browser did not confirm the page ended');
-        tab.close();
-        try { agent.close(1011, 'lease ended'); } catch { /* already closing */ }
-        finish();
+        // Whatever happens here, the hold is released: a teardown can't keep the tab forever.
+        try {
+          const removed = await Promise.all(injected.splice(0).map(({ identifier, sessionId }) =>
+            settlesWithin(tab.send('Page.removeScriptToEvaluateOnNewDocument', { identifier }, sessionId), SCRIPT_REMOVE_TIMEOUT_MS)));
+          const ended = await enforcer.endPageActivity(removed.every(Boolean) ? opts.pageEnd : 'close').catch(() => false);
+          if (!ended) refusals.push('the browser did not confirm the page ended');
+          tab.close();
+          try { agent.close(1011, 'lease ended'); } catch { /* already closing */ }
+        } finally { finish(); }
       })();
     };
     tab.onClose(() => end('the tab went away'));

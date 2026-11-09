@@ -10,8 +10,12 @@
 //  in the same synchronous step as the socket write. So nothing is FORWARDED after
 //  the fence changes. A command already written to the browser can't be recalled:
 //  that limit, and what revoke does about it, is in stage-1-plan.md section 4.
+//
+//  A revoke doesn't free the tab while a teardown holds it: the lease waits in
+//  `ending`, refusing every reservation, until each hold is released. So nothing a
+//  revoked lease's cleanup does to the page can land on a later lease.
 
-export type LeaseState = 'idle' | 'reserved' | 'held' | 'suspended';
+export type LeaseState = 'idle' | 'reserved' | 'held' | 'suspended' | 'ending';
 
 export interface Fence { generation: number; epoch: number }
 
@@ -31,7 +35,14 @@ export interface TabLease {
   isCurrent(f: Fence): boolean;
   suspend(): void;
   handBack(): void;
+  /** Ends the lease. With a teardown holding it, the tab stays `ending`, not `idle`, until that's released. */
   revoke(reason: string): void;
+  /**
+   * Keeps the tab from being leased again, once this lease is revoked, until the
+   * returned release is called. Null when no lease is held or suspended. Releasing
+   * twice does nothing.
+   */
+  holdTeardown(): (() => void) | null;
   /** Called synchronously on every fence change. */
   onChange(fn: (reason: string, state: LeaseState) => void): void;
 }
@@ -57,6 +68,7 @@ export function createTabLease(clock: LeaseClock = systemClock): TabLease {
   let reservation: Reservation | null = null;
   let nextReservation = 1;
   let cancelExpiry: (() => void) | null = null;
+  let holds = 0;
   const listeners: ((reason: string, s: LeaseState) => void)[] = [];
   const changed = (reason: string): void => { epoch += 1; for (const fn of listeners) fn(reason, state); };
 
@@ -97,10 +109,22 @@ export function createTabLease(clock: LeaseClock = systemClock): TabLease {
     },
     revoke(reason) {
       if (state !== 'held' && state !== 'suspended') return;
-      state = 'idle';
+      state = holds > 0 ? 'ending' : 'idle';
       cancelExpiry?.();
       cancelExpiry = null;
       changed(reason);
+    },
+    holdTeardown() {
+      if (state !== 'held' && state !== 'suspended') return null;
+      holds += 1;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        holds -= 1;
+        // No later generation can exist while a hold is out: reserve() refuses until now.
+        if (holds === 0 && state === 'ending') { state = 'idle'; changed('teardown finished'); }
+      };
     },
     onChange(fn) { listeners.push(fn); },
   };
@@ -187,6 +211,7 @@ export async function acquireLease(opts: {
 }): Promise<LeaseClaim> {
   const admitted = opts.admit();
   if (!admitted.ok) return { outcome: 'refused', reason: admitted.reason, reusable: false };
+  // Held, or still ending: the approval isn't touched, so it can be used once the tab is free.
   const reservation = opts.lease.reserve();
   if (!reservation) return { outcome: 'tab-leased' };
   let result: ServerClaim;

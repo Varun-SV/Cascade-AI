@@ -596,10 +596,17 @@ stage. The unused library adds no production overhead in stage 1.
   Stage 2's decision and consent text must say so; it isn't approved by being here.
 - **A connection is pinned to the lease it started under.** `serve()` takes the lease's generation
   before its first `await`, listens for the lease ending from then on, and its forwarder dispatches
-  only under that generation. A revoke and a new grant while the tab is being reached or checked end
-  the old connection with nothing sent to the tab; it never revokes the new lease or ends its page.
-  A revoked lease's page step still runs after the lease is idle, so a grant made in that window has
-  the page ended under it (fail-closed). Stage 2 should grant only once the page step has finished.
+  only under that generation. A revoke while the tab is being reached or checked ends the connection
+  with nothing sent to the tab.
+- **No new lease until the last one's teardown is done.** `serve()` takes a teardown hold on its
+  lease. A revoke under a hold leaves the tab `ending`, not `idle`: `reserve()` refuses (a claim gets
+  `tab-leased`, so its approval isn't used up) until script removal and the page step have finished,
+  including when either times out or fails, and only then is the tab `idle`. So nothing a revoked
+  lease's cleanup does can reach a later lease. Unreachable tabs run the page step too, and the tab's
+  connection is bounded at 3 s, so every hold is released in bounded time.
+- **One relay serves one lease.** The page step shuts the proxy for good, and the policy needs a
+  freshly launched browser, so a relay refuses and ends any later lease it's asked to serve. A new
+  lease on the CLI is a new launch, policy and relay.
 - **Child targets:** every setup step must succeed before a target resumes, or it stays paused and
   is closed. Only a dedicated worker may lack its own interception; the test asserts the block in the
   policy's own log for each worker type, not only at the proxy.

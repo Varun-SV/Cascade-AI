@@ -288,3 +288,54 @@ describe('a forwarder pinned to one generation', () => {
     expect(written).toEqual(['new']);
   });
 });
+
+describe('a teardown hold keeps the tab until it is done', () => {
+  it('revoked under a hold, the tab is ending and refuses every reservation until released', () => {
+    const { lease, fence } = leased();
+    const release = lease.holdTeardown()!;
+    lease.revoke('stop');
+    expect(lease.state()).toBe('ending');
+    expect(lease.fence()).toBeNull();
+    expect(lease.generation()).toBeNull();
+    expect(lease.isCurrent(fence)).toBe(false);
+    expect(lease.reserve()).toBeNull();
+    lease.suspend(); lease.handBack(); lease.revoke('again');
+    expect(lease.state()).toBe('ending');
+    release();
+    expect(lease.state()).toBe('idle');
+    release();
+    expect(lease.state()).toBe('idle');
+    expect(lease.reserve()).not.toBeNull();
+  });
+  it('waits for every hold, and with none a revoke frees the tab at once', () => {
+    const { lease } = leased();
+    const one = lease.holdTeardown()!;
+    const two = lease.holdTeardown()!;
+    lease.revoke('stop');
+    one();
+    expect(lease.state()).toBe('ending');
+    two();
+    expect(lease.state()).toBe('idle');
+    const next = leased();
+    next.lease.revoke('stop');
+    expect(next.lease.state()).toBe('idle');
+  });
+  it('no hold without a lease, and a hold released before revoke leaves nothing behind', () => {
+    const lease = createTabLease();
+    expect(lease.holdTeardown()).toBeNull();
+    const { lease: held } = leased();
+    held.holdTeardown()!();
+    held.revoke('stop');
+    expect(held.state()).toBe('idle');
+  });
+  it('the expiry timer ends into ending too, under a hold', () => {
+    const { clock, advance } = fakeClock();
+    const lease = createTabLease(clock);
+    lease.promote(lease.reserve()!, { expiresAt: clock.now() + 100 });
+    const release = lease.holdTeardown()!;
+    advance(100);
+    expect(lease.state()).toBe('ending');
+    release();
+    expect(lease.state()).toBe('idle');
+  });
+});
