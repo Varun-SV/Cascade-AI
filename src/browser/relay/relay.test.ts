@@ -216,6 +216,33 @@ describe('a connection is pinned to the lease it started under', () => {
     } finally { tab.close(); }
   });
 
+  for (const [what, frames] of [
+    ['more commands', () => Array.from({ length: 1001 }, (_, i) => evaluate(i + 1))],
+    ['more bytes', () => [JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: { expression: 'x'.repeat(4 * 1024 * 1024 + 1) } })]],
+  ] as const) {
+    it(`${what} than may wait during the check end the connection, and none reach the tab`, async () => {
+      const tab = await heldTab();
+      tab.letGo();
+      try {
+        let pass!: () => void;
+        const passed = new Promise<void>((r) => { pass = r; });
+        let checked!: () => void;
+        const started = new Promise<void>((r) => { checked = r; });
+        const { lease, relay, agent } = setup(tab.url, { checkTabBeforeLease: async () => { checked(); await passed; return { ok: true as const }; } });
+        const served = relay.serve(agent as unknown as WebSocket);
+        await started;
+        for (const f of frames()) agent.emit('message', f);
+        pass();
+        await served;
+        await settle();
+        expect(tab.frames).toEqual([]);
+        expect(agent.closed).toBe(1011);
+        expect(lease.state()).toBe('idle');
+        expect(relay.refusals.join()).toContain('too many commands before the tab was ready');
+      } finally { tab.close(); }
+    });
+  }
+
   it("a tab that can't be reached still runs the page step before the tab is free", async () => {
     const tab = await heldTab();
     try {

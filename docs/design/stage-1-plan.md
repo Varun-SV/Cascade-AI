@@ -599,6 +599,9 @@ stage. The unused library adds no production overhead in stage 1.
   before its first `await`, listens for the lease ending from then on, and its forwarder dispatches
   only under that generation. A revoke while the tab is being reached or checked ends the connection
   with nothing sent to the tab.
+- **Nothing runs until the tab has been checked.** Commands that arrive while the tab is being reached
+  or checked wait, and are dropped if the lease ends. At most 1000 commands or 4 MiB may wait; past
+  that the connection ends and none of them reach the tab.
 - **No new lease until the last one's teardown is done.** `serve()` takes a teardown hold on its
   lease. A revoke under a hold leaves the tab `ending`, not `idle`: `reserve()` refuses (a claim gets
   `tab-leased`, so its approval isn't used up) until script removal and the page step have finished,

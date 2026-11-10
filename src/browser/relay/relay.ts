@@ -19,6 +19,9 @@ const TAB_SESSION = 'cascade-tab-1';
 const SCRIPT_REMOVE_TIMEOUT_MS = 1000;
 const TAB_READY_TIMEOUT_MS = 3000;
 const TAB_CONNECT_TIMEOUT_MS = 3000;
+// What may wait while the tab is reached and checked. A client's setup burst is far smaller.
+const EARLY_FRAMES_MAX = 1000;
+const EARLY_BYTES_MAX = 4 * 1024 * 1024;
 
 export interface RelayEvents {
   /** Why a command was refused or the lease ended, for the device's log. Never sent to the server. */
@@ -101,13 +104,27 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
     let finish!: () => void;
     const done = new Promise<void>((r) => { finish = () => { releaseTeardown(); r(); }; });
     const ours = (): boolean => lease.generation() === generation;
-    // Listen from the start: the agent speaks as soon as it connects.
-    const early: string[] = [];
-    let onFrame = (raw: string): void => { early.push(raw); };
-    agent.on('message', (raw) => onFrame(String(raw)));
-    // And for it going away: an 'error' with no listener would take the process down.
+    // Why the connection must end, recorded until `end` exists.
     let gone: string | null = null;
     let onGone = (why: string): void => { gone ??= why; };
+    // Listen from the start: the agent speaks as soon as it connects.
+    // Bounded: past the limit the connection ends rather than holding more in memory.
+    const early: string[] = [];
+    let earlyBytes = 0;
+    let overflowed = false;
+    let onFrame = (raw: string): void => {
+      if (overflowed) return;
+      earlyBytes += raw.length;
+      if (early.length >= EARLY_FRAMES_MAX || earlyBytes > EARLY_BYTES_MAX) {
+        overflowed = true;
+        early.length = 0;
+        onGone('too many commands before the tab was ready');
+        return;
+      }
+      early.push(raw);
+    };
+    agent.on('message', (raw) => onFrame(String(raw)));
+    // And for it going away: an 'error' with no listener would take the process down.
     agent.on('close', () => onGone('the connection dropped'));
     agent.on('error', () => onGone('the connection failed'));
     // And for the lease ending while the tab is still being reached.
