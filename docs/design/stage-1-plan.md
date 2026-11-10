@@ -105,7 +105,7 @@ twice, so the user is asked again.
 - A lease already claimed keeps running until its `exp` or a revoke, because
   the device enforces it locally and its claim is already recorded. Tests: with the
   store down, local expiry and revoke still end the lease, and no new approval can be
-  claimed. Varun hasn't decided this yet.
+  claimed. Decided by Varun (10 Nov): running leases continue.
 - An unreadable device key refuses to approve.
 
 Key enrollment and revocation are stage 2. Stage 1 tests exercise this
@@ -251,7 +251,8 @@ activity, then detach. Ending the page's activity:
 - **CLI:** close the target. It's a dedicated profile, so the tab isn't the user's.
 - **Desktop and extension:** the tab is the user's, and S1 says it stays open, so closing
   it isn't available. `about:blank` stops the script but loses their page. Stage 1 takes
-  this as a parameter and tests both; the choice is Varun's, before stage 2.
+  this as a parameter and tests both. **Decided by Varun (10 Nov): `blank`.** If leaving the
+  page doesn't finish within its bound, the tab is closed, as recorded in section 9.
 
 The request policy and the proxy stay in place until this step finishes.
 
@@ -645,7 +646,8 @@ stage. The unused library adds no production overhead in stage 1.
 - **A page that doesn't answer loses its tab, in either mode.** A spinning page answers no CDP call,
   so every step of revoke's page step is bounded. If `about:blank` isn't reached in 3 s the tab is
   closed, and if an agent's new-document script can't be removed in 1 s it's closed straight away, as
-  that script would run on `about:blank` too. This bears on Varun's revoke decision for the user's own tab.
+  that script would run on `about:blank` too. So under Varun's `blank` decision for the user's own tab,
+  stage 2's consent text must say the tab can still be closed.
 - **Consented pages can read much of this anyway** through `evaluate`, as §4.3 states.
 
 **Known gaps**
@@ -656,8 +658,11 @@ stage. The unused library adds no production overhead in stage 1.
   library level only.
 - **The browser suite grants its lease directly.** `capability.test.ts` runs the real grant,
   approval, claim and lease together; a server connecting them to a live relay is stage 2.
-- **Open for Varun:** tab behaviour on revoke for desktop and extension, and whether leases
-  survive a store outage.
+- **Decided by Varun (10 Nov):**
+  - On revoke, desktop and the extension use `blank`. A page that doesn't leave within its bound
+    still has its tab closed, and stage 2's consent text says so.
+  - Leases already running continue through a nonce-store outage. New claims are refused.
+  - No version bump or changelog entry for this PR, as nothing changes for users.
 
 **Measurements** (`docs/design/poc/tab-cdp-relay/measure-relay.ts`, Chromium 1243, one local run on this sandbox,
 local site with no real network, so a comparison and not a bound):
