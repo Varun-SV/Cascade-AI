@@ -747,13 +747,13 @@ off by default:
 | 5 | `surface` on ledger rows; You tabs; opt-in Everyone with protections | `insights.everyone` | D1–D3 |
 | 6 | C and D | per source | R-A1 against each |
 
-**Proposed, not decided (4 Nov):** build the extension before the desktop
-adapter, since cascadeai.in users have no browser source at all while desktop
-users have a local one: server relay and CLI, then extension, then desktop, and
-stage 4 once the first two are live. Also, §3.1 hardcodes cascadeai.in, so a
-self-hosted server can't use the extension as written. The proposal is that the
-user adds their server's address in the extension and approves it by name; a
-site must never be able to connect itself.
+**Decided by Varun (10 Nov): build the extension before the desktop adapter,
+and support self-hosted servers.** cascadeai.in users have no browser source at all,
+while desktop users have a local one. So the order is: server relay and CLI, then
+extension, then desktop, and stage 4 once the first two are live. §3.1 hardcodes
+cascadeai.in, so the extension can't reach a self-hosted server as written. The user
+adds their server's address in the extension and approves it by name; a site must
+never be able to connect itself.
 
 Independent review happens per stage, from the diff and tests rather than
 the implementer's summary. The maintainer decided (21 Oct 2026) that PR #316
