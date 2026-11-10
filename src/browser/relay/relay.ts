@@ -269,7 +269,7 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
     };
 
     // Replies may finish out of order, as CDP allows; forwarding stays in arrival order.
-    onFrame = (raw) => {
+    const live = (raw: string): void => {
       if (ended) return;
       const f = parseFrame(raw);
       // Frame ids rise on one connection, so a replayed frame fails closed too.
@@ -278,10 +278,13 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
       if (f.sessionId === undefined) { handleRoot(f); return; }
       void run(f).catch(() => end('relay error'));
     };
-    // No command runs until the tab has been checked. Frames wait in `early` until then.
+    // No command runs until the tab has been checked. Frames, including any that arrive
+    // during the check, wait in `early`: the live handler is installed only after it.
     const refusal = await tabReadyRefusal(enforcer);
     if (refusal) end(refusal);
     if (!ours()) end('the lease is no longer held');
+    if (ended) { early.length = 0; return done; }
+    onFrame = live;
     for (const raw of early.splice(0)) onFrame(raw);
     return done;
   };

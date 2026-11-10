@@ -173,6 +173,49 @@ describe('a connection is pinned to the lease it started under', () => {
     } finally { tab.close(); }
   });
 
+  it('a command sent while the tab is being checked waits for the check, and a refused tab never gets it', async () => {
+    const tab = await heldTab();
+    tab.letGo();
+    try {
+      let answer!: (r: { ok: true } | { ok: false; reason: string }) => void;
+      const verdict = new Promise<{ ok: true } | { ok: false; reason: string }>((r) => { answer = r; });
+      let checked!: () => void;
+      const started = new Promise<void>((r) => { checked = r; });
+      const { lease, relay, agent } = setup(tab.url, { checkTabBeforeLease: async () => { checked(); return verdict; } });
+      const served = relay.serve(agent as unknown as WebSocket);
+      await started;
+      // Arrives after the live handler used to be installed, but before the check answers.
+      agent.emit('message', evaluate(1));
+      await settle();
+      expect(tab.frames).toEqual([]);
+      answer({ ok: false, reason: 'the tab is on a site without consent' });
+      await served;
+      await settle();
+      expect(tab.frames).toEqual([]);
+      expect(lease.state()).toBe('idle');
+      expect(relay.refusals.join()).toContain('site without consent');
+    } finally { tab.close(); }
+  });
+
+  it('a command sent while the tab is being checked runs once the check passes', async () => {
+    const tab = await heldTab();
+    tab.letGo();
+    try {
+      let pass!: () => void;
+      const passed = new Promise<void>((r) => { pass = r; });
+      let checked!: () => void;
+      const started = new Promise<void>((r) => { checked = r; });
+      const { relay, agent } = setup(tab.url, { checkTabBeforeLease: async () => { checked(); await passed; return { ok: true as const }; } });
+      void relay.serve(agent as unknown as WebSocket);
+      await started;
+      agent.emit('message', evaluate(1));
+      await settle();
+      expect(tab.frames).toEqual([]);
+      pass();
+      await vi.waitFor(() => expect(tab.frames.some((f) => f.includes('Runtime.evaluate'))).toBe(true));
+    } finally { tab.close(); }
+  });
+
   it("a tab that can't be reached still runs the page step before the tab is free", async () => {
     const tab = await heldTab();
     try {
