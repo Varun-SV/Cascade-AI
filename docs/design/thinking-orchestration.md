@@ -1,7 +1,22 @@
 # Thinking as a routed resource
 
-Status: **draft for discussion, revision 1.** Nothing here is implemented and
-nothing here approves code. Section 9 lists the decisions still open.
+Status: **draft for discussion, revision 2.** Nothing here is implemented and
+nothing here approves code. Section 9 lists the decisions still open; none of
+them has been decided by the maintainer yet.
+
+Revision 2 answers the council review on PR #340. Claude's position on each
+point is recorded here and on the review threads:
+
+- **A, control semantics:** accepted. Models declare a capability class, and
+  an effort that cannot be honoured is never mapped silently (4.1, 4.3,
+  invariants 1 and 2).
+- **B, statistical identification:** accepted. Effort lift is learned only
+  from randomized, propensity-logged assignments; retries are kept separate
+  (4.2, 4.6).
+- **C, budget enforcement:** accepted with one change. Calls are capped to
+  what was reserved instead of reserving each model's worst case, because the
+  router deliberately moved away from worst-case reservation (4.9).
+- **D, evaluation:** accepted in full (section 8).
 
 ## 1. Decisions already made by the maintainer
 
@@ -74,12 +89,29 @@ type EffortLevel = 'none' | 'low' | 'medium' | 'high' | 'max';
 ```
 
 - `GenerateOptions.effort?: EffortLevel` carries the request.
-- Each provider maps the level to its own control. A model declares which
-  levels it supports (`ModelInfo.effortLevels`); a model with no control
-  declares none.
-- A requested level the model lacks becomes the nearest supported level below
-  it. The call result reports the level that was **applied**, and only that is
-  recorded as evidence.
+- Each provider maps the level to its own control. Every model declares one
+  capability class:
+
+  | Class | Meaning |
+  |---|---|
+  | `controllable` | Lists the levels it accepts, and whether `none` is one of them. |
+  | `always-on` | Thinks, and cannot be turned off or lowered. |
+  | `no-thinking` | Has no thinking at all. |
+  | `unknown` | Not yet classified. Treated as uncontrolled. |
+
+- **Eligibility is decided at selection time, not at the provider.** A pair
+  is only offered to the router if the model can honour that level. A
+  requested level between two supported ones becomes the nearest supported
+  level **below** it, never above.
+- **Nothing is mapped silently to a provider default.** A call on an
+  `always-on` or `unknown` model is labelled `uncontrolled` in the result and
+  in `/why`, and it contributes no effort evidence.
+- The call result reports both the **requested** and the **applied** level.
+  Only the applied level is recorded as evidence.
+- **Version drift.** If a provider rejects an effort parameter the model was
+  declared to accept, the model is reclassified `unknown` for the session and
+  the rejection is reported. Whether that call is then retried is governed by
+  the mode (4.3).
 - The exact native parameters differ by provider and by model generation and
   have changed recently. Each mapping must be checked against the provider's
   current documentation when it is written, not taken from this document.
@@ -101,16 +133,40 @@ expected success and expected cost.
     it has enough samples at that effort.
 - **Selection** stays a Thompson draw, now over pairs.
 
+**Identifying the lift.** The router chooses effort from difficulty, so
+outcomes from its own choices confound effort with difficulty and model. The
+lift table is therefore not learned from them.
+
+- A small, budget-bounded share of calls has its effort **randomized** among
+  the eligible levels around the chosen one. Each records the probability
+  with which its level was assigned.
+- The lift is estimated only from those calls, within strata of (task type,
+  complexity band, model family), weighted by the logged probability.
+- Each estimate carries an interval. A level is preferred over a cheaper one
+  only when the interval excludes "no lift".
+- **No extrapolation.** A stratum with too few randomized samples has no
+  lift estimate; the router uses the starting prior from 4.5 there.
+- Model-specific corrections are kept, under the same rules.
+- Randomized calls never exceed the ceiling and count toward the run budget.
+
 ### 4.3 The top-level control
 
 ```ts
 thinking: { mode: 'none' | 'absolute' | 'maximum', ceiling: EffortLevel }
 ```
 
-- `none`: effort `none` on every call.
-- `absolute`: automatic, never above `ceiling`.
-- `maximum`: the highest level each model supports, on every call.
-- The run cost cap still applies in every mode, including `maximum`.
+- `none`: only models that can run without thinking are eligible
+  (`controllable` with `none`, or `no-thinking`). `always-on` and `unknown`
+  models are excluded from automatic selection.
+- `absolute`: automatic, never above `ceiling`. `always-on` and `unknown`
+  models are excluded from automatic selection, because their effort cannot
+  be shown to respect the ceiling.
+- `maximum`: the highest level each model supports, on every call. The
+  ceiling does not apply in this mode; that is its purpose.
+- The run budget applies in every mode, including `maximum`.
+- **Fail closed.** If a mode leaves no eligible model, or the user has pinned
+  a model the mode excludes, the run does not quietly proceed with
+  uncontrolled thinking. What it does instead is open decision 7.
 
 ### 4.4 How the two quality settings use it
 
@@ -141,8 +197,12 @@ When a subtask fails a check:
    gain worth its cost, retry on the same model one level up.
 2. Otherwise switch model through the existing failover path.
 
-The prototype allows one effort raise per subtask. The level that passed is
-recorded, which is how the lift table learns.
+The prototype allows one effort raise per subtask.
+
+A retry is not a clean comparison with the first attempt: it also sees the
+failure. So retry outcomes are recorded in their own table, used only to
+decide whether raising effort on a retry is worth it. They never feed the
+first-attempt lift estimate in 4.2.
 
 ### 4.7 A per-subtask quality signal
 
@@ -177,8 +237,31 @@ The judge:
 
 ### 4.9 Budget and visibility
 
-- Preflight cost estimates and the run budget include expected thinking
-  tokens.
+An estimate of thinking tokens is not a cap. Enforcement works by
+reservation:
+
+- **Reserve, then cap the call to the reservation.** Before a call starts, the
+  router reserves its input plus an output allowance that includes thinking,
+  and sends that allowance as the provider's output-token limit. Where the
+  provider enforces the limit over thinking as well as the answer, the call
+  cannot spend more than was reserved.
+- **Why not each model's worst case.** `admitWork` reserves expected output
+  today because reserving the worst case refused the first call of a run on a
+  small cap. Capping the call to an affordable allowance gives a bounded
+  worst case without that failure.
+- **One ledger.** First attempts, effort raises, randomized calls and judge
+  calls all reserve from the same run ledger. A reservation is taken
+  atomically, so concurrent T2 and T3 workers cannot each be admitted against
+  the same remaining budget. No call starts without one.
+- **Reconciliation.** A reservation is released against reported usage when
+  the call settles, including on timeout, cancellation and a stream that
+  ends early.
+- **When the budget is exhausted**, further work calls are refused and the
+  run wraps up, as today.
+- **What cannot be guaranteed.** Where a provider has no enforced limit that
+  covers thinking, the amount finally billed can exceed the reservation. Such
+  a model is marked unbounded, is not offered above its lowest level while a
+  cost cap is set, and the limit is stated in the documentation.
 - When a run is wrapping up, effort drops to the lowest level that still
   produces an answer.
 - `/why` and the routing data show the effort applied to each call and the
@@ -198,11 +281,15 @@ The judge:
 
 These hold regardless of what the learned part decides, and each gets a test.
 
-1. Effort never exceeds the ceiling. `none` never sends a thinking request
-   where the provider allows turning it off.
-2. Effort never breaks a call. An unsupported level is lowered, and a
-   parameter-shape rejection retries once without effort.
-3. The run cost cap is the hard limit in every mode.
+1. In `absolute` mode, applied effort never exceeds the ceiling. In `none`
+   mode, no automatically selected call thinks. Neither mode escalates on its
+   own.
+2. An effort that cannot be honoured is never replaced silently by a provider
+   default. The call is either not offered, refused, or labelled
+   `uncontrolled`, according to the mode.
+3. No call starts without a budget reservation that fits what is left. Where
+   the provider enforces the output limit, spend cannot exceed the cap; where
+   it does not, that is documented and the model is restricted (4.9).
 4. Evidence is recorded only for the effort that was applied, and only for
    calls that reached a provider.
 5. Existing thinking-state replay is untouched: OpenAI reasoning items, Gemini
@@ -214,8 +301,8 @@ These hold regardless of what the learned part decides, and each gets a test.
 | Stage | Content | Routing change |
 |---|---|---|
 | 0 | `effort` in `GenerateOptions`, provider mappings, the top-level control, the Anthropic id fix | none; fixed per-tier levels |
-| 1 | Per-subtask outcomes; applied effort recorded | none; data only |
-| 2 | (model, effort) selection, the lift table, the effort raise, behind a flag | yes |
+| 1 | Per-subtask outcomes; requested and applied effort and assignment probability recorded; the reservation ledger | none; data only |
+| 2 | Randomized effort assignment, (model, effort) selection, the lift table, the effort raise, behind a flag | yes |
 | 3 | Sampled judge | yes |
 | 4 | WebGPU hint in the web app | yes, web only |
 
@@ -223,13 +310,40 @@ Each stage is reviewed from its own diff and tests.
 
 ## 8. How we will know it works
 
-- A fixed set of tasks with mechanical acceptance checks, run with the flag
-  off and on.
-- Default mode passes when the acceptance pass rate is not lower and cost per
-  passed task is lower.
-- Quality mode passes when the acceptance pass rate is higher.
+**Controlled comparison.** Baseline routing against effort-aware routing on:
+
+- the same stratified task set (by task type and complexity), each with
+  mechanical acceptance checks;
+- the same provider and model versions, recorded with the results;
+- the same run budget.
+
+**Reported for both arms:**
+
+- acceptance pass rate, with confidence intervals;
+- total spend per successful task;
+- p50 and p95 latency;
+- exploration and judge overhead, as a share of spend.
+
+**Pass conditions.**
+
+- Default mode: pass rate not lower beyond its interval, and spend per
+  successful task lower.
+- Quality mode: pass rate higher beyond its interval.
 - If neither holds after stage 2, the routing stages are not shipped and
   stage 0 stays as a manual control.
+
+**Acceptance tests named by the review.**
+
+- A capability matrix per provider and model: `none`, an unsupported level,
+  tool calls and a rejected parameter, asserting requested against applied
+  effort and no unintended escalation.
+- Synthetic no-lift and positive-lift data: the estimator is calibrated and
+  shows no preference for high effort when there is no lift.
+- Budget: concurrent fan-out, timeout, retry, streamed-usage reconciliation
+  and judge overhead, proving that no unreserved call starts.
+
+**Rollback.** Everything from stage 2 on sits behind one flag. Turning it off
+restores today's requests (invariant 6).
 
 ## 9. Open decisions
 
@@ -244,15 +358,24 @@ Each stage is reviewed from its own diff and tests.
    start: 10% of subtasks, at most 5% of run spend.
 6. **Shared data.** Whether effort outcomes join the shared routing data that
    opted-in users contribute, or stay local at first.
+7. **When a mode excludes the only available model, or a pinned one.**
+   Options: refuse the run with a message naming the model and the mode, or
+   run it labelled `uncontrolled` after a visible notice. Suggested: refuse
+   under automatic selection; for a pinned model, run with the notice, since
+   the pin is the user's explicit choice.
+8. **Randomized share.** How many calls have their effort randomized, and its
+   share of the run budget. Suggested start: 5% of calls, at most 3% of run
+   spend, and none on runs with a cost cap below a set floor.
 
 ## 10. Risks
 
-- **Sparse evidence.** The lift table pools across models to compensate; a
-  model that responds unusually to effort is learned slowly.
+- **Sparse evidence.** Learning only from randomized calls is slower than
+  learning from every call. Until a stratum has support, effort there is the
+  fixed prior, so early gains will be small.
 - **Judge error.** A cheap judge can be wrong. It is down-weighted and never
   overrides a mechanical check.
 - **Latency.** Higher effort is slower. Speed is not a goal here, so a run can
   get slower while getting cheaper or better.
-- **Provider drift.** Thinking controls change between model generations.
-  Invariant 2 keeps a wrong mapping from failing a run, at the price of
-  silently running without thinking until the mapping is fixed.
+- **Provider drift.** Thinking controls change between model generations. A
+  wrong mapping is reported and the model is reclassified, which can make a
+  model unavailable in `none` and `absolute` until the mapping is fixed.
