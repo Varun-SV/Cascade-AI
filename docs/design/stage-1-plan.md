@@ -584,6 +584,18 @@ stage. The unused library adds no production overhead in stage 1.
   extensions may be added or repeated. So a wrapper around the binary adding one fails the launch. **Limit:** it's a
   list. Other switches must pass, because wrappers and the browser add their own (the sandbox's adds about ten),
   so a harmful switch not on the list would pass. The binary path itself is trusted.
+- **The policy losing a connection ends the lease (Codex, 12 Nov).** If either of the policy's own
+  CDP connections drops while the browser lives on, the proxy shuts at once and the relay ends the
+  lease. This happened in a real test: a 32 MB upload's paused-request event overran the default
+  100 MiB WebSocket frame limit and dropped the tab connection. Before this fix, the page then went on
+  unpoliced. The limit is now 512 MiB. A larger body still drops the connection, and now ends the lease.
+  No browser test forces the drop on purpose; `relay.test.ts` covers the relay's side.
+- **One connection per lease (Codex, 12 Nov).** A second connection for a lease already being served
+  is refused without touching that lease.
+- **A script registration still unanswered at a revoke** means the page step closes the tab, since its
+  identifier can't be removed (Codex, 12 Nov).
+- **The device's record of an approval is frozen,** so neither the caller's arrays nor an admission
+  result can widen it (Codex, 12 Nov).
 - **History titles (policy version 3)** are blanked on every entry; ids and the index stay.
 - **`context.name` stays.** A page can't set it (tested with `window.name`, a frame name and a
   title), and Playwright can't click without it (tested: `page.click` times out with it removed).

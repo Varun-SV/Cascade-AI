@@ -216,6 +216,14 @@ export interface DeviceApprovals {
   burn(nonce: string): void;
 }
 
+function frozenScope(scope: ApprovedScope): ApprovedScope {
+  return Object.freeze({
+    tabTargetId: scope.tabTargetId,
+    allowedOrigins: Object.freeze([...scope.allowedOrigins]) as string[],
+    privateOrigins: Object.freeze([...scope.privateOrigins]) as string[],
+  });
+}
+
 export function createDeviceApprovals(opts: {
   device: Identity; serverId: string; serverKey: KeyObject; now: () => number;
 }): DeviceApprovals {
@@ -232,7 +240,8 @@ export function createDeviceApprovals(opts: {
         iat: t, exp: Math.min(t + ttlMs, grant.payload.exp),
         nonce: randomBytes(18).toString('base64url'), policyVersion: POLICY_VERSION,
       };
-      records.set(payload.nonce, { scope: { ...scope }, exp: payload.exp, used: false });
+      // The device's own copy, which nothing the caller holds can change.
+      records.set(payload.nonce, { scope: frozenScope(scope), exp: payload.exp, used: false });
       return { payload, sig: device.sign(toSign(APPROVAL_DOMAIN, payload)) };
     },
     admit(approval) {
@@ -240,7 +249,7 @@ export function createDeviceApprovals(opts: {
       if (!r) return { ok: false, reason: 'not an approval this device gave' };
       if (r.used) return { ok: false, reason: 'approval already used' };
       if (now() >= r.exp) return { ok: false, reason: 'approval expired' };
-      return { ok: true, scope: r.scope, exp: r.exp };
+      return { ok: true, scope: frozenScope(r.scope), exp: r.exp };
     },
     burn(nonce) {
       const r = records.get(nonce);

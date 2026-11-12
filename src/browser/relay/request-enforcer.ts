@@ -40,6 +40,11 @@ export interface RequestEnforcer {
   /** Called when the tab's main frame shows a document without consent, however it got there. */
   onForeignDocument(listener: () => void): void;
   /**
+   * Called once if either of the policy's own connections drops while the browser lives
+   * on. Interception and the pop-up guard are gone then, so the proxy is shut at once.
+   */
+  onPolicyLost(listener: () => void): void;
+  /**
    * Ends what the agent left running, since detaching doesn't: script timers and
    * workers keep going. `close` closes the tab; `blank` keeps it open on about:blank.
    * Always finishes in bounded time. False means the browser never confirmed it. Either
@@ -136,6 +141,9 @@ export async function startRequestPolicy(opts: {
   const dismissedDialogs: string[] = [];
   const children: { type: string; coverage: ChildCoverage }[] = [];
   const foreignListeners: (() => void)[] = [];
+  const lostListeners: (() => void)[] = [];
+  let closing = false;
+  let policyLost = false;
   let foreignDocument = false;
   const tab = await connectCdp(tabWs);
   const browser = await connectCdp(browserWs);
@@ -147,6 +155,14 @@ export async function startRequestPolicy(opts: {
     tab.close(); browser.close();
     throw new Error(notDedicated);
   }
+  const loseAll = (): void => {
+    if (closing || policyLost) return;
+    policyLost = true;
+    opts.browser.shutEgress();
+    for (const l of lostListeners) l();
+  };
+  tab.onClose(loseAll);
+  browser.onClose(loseAll);
   const ownedWorkers = new Set<string>();
   const noteWorker = (t: { targetId: string; type: string }): void => {
     if ((t.type === 'service_worker' || t.type === 'shared_worker')) ownedWorkers.add(t.targetId);
@@ -260,10 +276,14 @@ export async function startRequestPolicy(opts: {
       foreignListeners.push(listener);
       if (foreignDocument) listener();
     },
+    onPolicyLost(listener) {
+      lostListeners.push(listener);
+      if (policyLost) listener();
+    },
     async endPageActivity(mode) {
       try { return await endPageActivity(tab, browser, tabTargetId, mode, ownedWorkers); } finally { opts.browser.shutEgress(); }
     },
-    close() { opts.browser.shutEgress(); tab.close(); browser.close(); },
+    close() { closing = true; opts.browser.shutEgress(); tab.close(); browser.close(); },
   };
 }
 

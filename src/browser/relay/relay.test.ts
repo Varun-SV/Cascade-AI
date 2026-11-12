@@ -14,6 +14,7 @@ const enforcer = {
   checkTabBeforeLease: async () => ({ ok: true as const }),
   clearForeignHistory: async () => true,
   onForeignDocument: () => {},
+  onPolicyLost: () => {},
   endPageActivity: async () => true,
   close: () => {},
 } satisfies RequestEnforcer;
@@ -412,6 +413,81 @@ describe('a revoked lease is torn down before the tab can be leased again', () =
       expect(lease.state()).toBe('idle');
       expect(a.ends).toEqual(['close']);
       expect(tab.methods.length).toBe(before);
+    } finally { tab.close(); }
+  });
+});
+
+describe('findings from Codex on 37e54b3', () => {
+  it('a second connection for the same lease is refused, and the first keeps it', async () => {
+    const tab = await answeringTab(new Set());
+    try {
+      const { lease, relay, agent } = setup(tab.url);
+      const first = relay.serve(agent as unknown as WebSocket);
+      const second = fakeAgent();
+      await relay.serve(second as unknown as WebSocket);
+      expect(second.closed).toBe(1011);
+      expect(relay.refusals.join()).toContain('already has a connection');
+      expect(lease.state()).toBe('held');
+      agent.emit('message', evaluate(1));
+      await vi.waitFor(() => expect(tab.methods).toContain('Runtime.evaluate'));
+      lease.revoke('done');
+      await first;
+    } finally { tab.close(); }
+  });
+
+  it('a script registration still unanswered at a revoke makes the page step close the tab', async () => {
+    const tab = await answeringTab(new Set(['Page.addScriptToEvaluateOnNewDocument']));
+    try {
+      const lease = createTabLease();
+      lease.promote(lease.reserve()!, { expiresAt: Date.now() + 60_000 });
+      const ends: PageEndMode[] = [];
+      const relay = createDeviceRelay({
+        tabWs: tab.url, consent: makeConsent(['https://a.test']), lease, pageEnd: 'blank',
+        enforcer: { ...enforcer, endPageActivity: async (mode) => { ends.push(mode); return true; } },
+      });
+      const agent = fakeAgent();
+      const served = relay.serve(agent as unknown as WebSocket);
+      agent.emit('message', addScript(1));
+      await vi.waitFor(() => expect(tab.methods).toContain('Page.addScriptToEvaluateOnNewDocument'));
+      lease.revoke('user revoked');
+      await served;
+      expect(ends).toEqual(['close']);
+    } finally { tab.release(); tab.close(); }
+  });
+
+  it('control: with every registration answered, the page step keeps blank', async () => {
+    const tab = await answeringTab(new Set());
+    try {
+      const lease = createTabLease();
+      lease.promote(lease.reserve()!, { expiresAt: Date.now() + 60_000 });
+      const ends: PageEndMode[] = [];
+      const relay = createDeviceRelay({
+        tabWs: tab.url, consent: makeConsent(['https://a.test']), lease, pageEnd: 'blank',
+        enforcer: { ...enforcer, endPageActivity: async (mode) => { ends.push(mode); return true; } },
+      });
+      const agent = fakeAgent();
+      const out: string[] = [];
+      (agent as unknown as { send(d: string): void }).send = (d: string) => { out.push(d); };
+      const served = relay.serve(agent as unknown as WebSocket);
+      agent.emit('message', addScript(1));
+      await vi.waitFor(() => expect(replied(out, 1)).toBe(true));
+      lease.revoke('user revoked');
+      await served;
+      expect(ends).toEqual(['blank']);
+    } finally { tab.close(); }
+  });
+
+  it('the policy losing its connection ends the lease', async () => {
+    const tab = await answeringTab(new Set());
+    try {
+      let lose!: () => void;
+      const { lease, relay, agent } = setup(tab.url, { onPolicyLost: (l) => { lose = l; } });
+      const served = relay.serve(agent as unknown as WebSocket);
+      await vi.waitFor(() => expect(lose).toBeDefined());
+      lose();
+      await served;
+      expect(lease.state()).toBe('idle');
+      expect(relay.refusals.join()).toContain('request policy lost its connection');
     } finally { tab.close(); }
   });
 });

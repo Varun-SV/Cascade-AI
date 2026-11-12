@@ -23,8 +23,14 @@ export interface CdpClient {
   readonly closed: boolean;
 }
 
+export const CDP_MAX_FRAME_BYTES = 512 * 1024 * 1024;
+
 export async function connectCdp(url: string): Promise<CdpClient> {
-  const ws = new WebSocket(url, { perMessageDeflate: false });
+  // A paused request's event carries its body, twice and base64-encoded, so a 32 MB upload
+  // overran ws's default 100 MiB frame limit and dropped the policy's connection. Larger
+  // frames are allowed; one past even this still drops the connection, which the
+  // policy treats as lost: the proxy shuts and the lease ends.
+  const ws = new WebSocket(url, { perMessageDeflate: false, maxPayload: CDP_MAX_FRAME_BYTES });
   await new Promise<void>((resolve, reject) => { ws.once('open', () => resolve()); ws.once('error', reject); });
   let nextId = 1;
   let closed = false;

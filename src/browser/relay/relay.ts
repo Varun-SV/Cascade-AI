@@ -90,6 +90,13 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
       try { agent.close(1011, 'lease ended'); } catch { /* already closing */ }
       return;
     }
+    if (servedGeneration === generation) {
+      // One connection per lease. Refused without touching the lease, which another
+      // connection of this relay is serving.
+      refusals.push('refused: this lease already has a connection');
+      try { agent.close(1011, 'lease already has a connection'); } catch { /* already closing */ }
+      return;
+    }
     if (servedGeneration !== null && servedGeneration !== generation) {
       // The enforcer ended the last lease's page and shut its proxy for good.
       refusals.push('lease ended: this browser has already served a lease; a fresh launch is needed');
@@ -143,6 +150,9 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
     const knownSessions = new Set([TAB_SESSION]);
     const hiddenSessions = new Set<string>();
     const injected: { identifier: string; sessionId?: string }[] = [];
+    // Registrations forwarded but not yet answered. A revoke can discard such a reply,
+    // so its identifier is never known; the page step then closes the tab instead.
+    let pendingScripts = 0;
     let targetInfo: Record<string, unknown> | null = null;
     let lastId = -1;
     let ended = false;
@@ -185,7 +195,8 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
         try {
           const removed = await Promise.all(injected.splice(0).map(({ identifier, sessionId }) =>
             settlesWithin(tab.send('Page.removeScriptToEvaluateOnNewDocument', { identifier }, sessionId), SCRIPT_REMOVE_TIMEOUT_MS)));
-          const ended = await enforcer.endPageActivity(removed.every(Boolean) ? opts.pageEnd : 'close').catch(() => false);
+          const accounted = removed.every(Boolean) && pendingScripts === 0;
+          const ended = await enforcer.endPageActivity(accounted ? opts.pageEnd : 'close').catch(() => false);
           if (!ended) refusals.push('the browser did not confirm the page ended');
           tab.close();
           try { agent.close(1011, 'lease ended'); } catch { /* already closing */ }
@@ -194,6 +205,7 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
     };
     tab.onClose(() => end('the tab went away'));
     enforcer.onForeignDocument(() => end('the tab is showing a page without consent'));
+    enforcer.onPolicyLost(() => end('the request policy lost its connection'));
     onGone = end;
     if (gone !== null) end(gone);
     if (!ours()) end('the lease is no longer held');
@@ -271,10 +283,18 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
             return;
           }
         }
-        const r = await forward(method, params, sessionId);
+        const registering = method === 'Page.addScriptToEvaluateOnNewDocument';
+        if (registering) pendingScripts += 1;
+        let r: Awaited<ReturnType<typeof forward>>;
+        try { r = await forward(method, params, sessionId); } catch (e) {
+          // Fenced: whether it was written is unknown, so it stays counted as pending.
+          if (registering && !(e instanceof CommandFenced)) pendingScripts -= 1;
+          throw e;
+        }
+        if (registering) pendingScripts -= 1;
         if (r.error !== undefined) { replyError(id, sessionId, r.error); return; }
         const result = r.result ?? {};
-        if (method === 'Page.addScriptToEvaluateOnNewDocument' && typeof result.identifier === 'string') {
+        if (registering && typeof result.identifier === 'string') {
           const s = toTab(sessionId);
           injected.push({ identifier: result.identifier, ...(s ? { sessionId: s } : {}) });
         }

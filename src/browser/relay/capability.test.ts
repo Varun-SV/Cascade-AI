@@ -180,6 +180,22 @@ describe('O3: expiry and single use on the device', () => {
     const r = d.admit(wider);
     expect(r.ok && r.scope.allowedOrigins).toEqual(['https://ok.test']);
   });
+  it('changing the caller\'s scope or an admission result changes nothing the device enforces', () => {
+    const w = world();
+    const d = w.approvals();
+    const mine = { tabTargetId: 'tab-1', allowedOrigins: ['https://ok.test'], privateOrigins: ['http://192.168.1.1'] };
+    const a = approved(d.approve(w.grantFor('user-a', 'device-a'), mine, 60_000));
+    mine.allowedOrigins.push('https://evil.test');
+    mine.privateOrigins.push('http://10.0.0.1');
+    const first = d.admit(a);
+    expect(first.ok && first.scope.allowedOrigins).toEqual(['https://ok.test']);
+    if (first.ok) {
+      try { first.scope.allowedOrigins.push('https://evil.test'); } catch { /* frozen */ }
+      try { first.scope.privateOrigins.push('http://10.0.0.1'); } catch { /* frozen */ }
+    }
+    const second = d.admit(a);
+    expect(second.ok && second.scope).toEqual({ tabTargetId: 'tab-1', allowedOrigins: ['https://ok.test'], privateOrigins: ['http://192.168.1.1'] });
+  });
   it('an approval this device never gave is refused', () => {
     const w = world();
     const other = w.approvals(w.deviceB);
