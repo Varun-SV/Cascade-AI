@@ -25,12 +25,13 @@ import { randomBytes } from 'node:crypto';
 import type { WebSocket } from 'ws';
 import {
   type ApprovalPayload, type GrantPayload, type Identity, type NonceStore, type Signed,
-  MAX_LIFETIME_MS, claimAtServer, issueGrant,
+  MAX_LIFETIME_MS, claimAtServer, issueGrant, verifyHello,
 } from './capability.js';
 
 export const HUB_PROTOCOL = 1;
 const OFFER_TIMEOUT_MS = 120_000;
 const CLAIM_FRAME_TIMEOUT_MS = 10_000;
+const HELLO_TIMEOUT_MS = 10_000;
 const AGENT_ATTACH_TIMEOUT_MS = 30_000;
 /** A claim is two signed objects. Anything bigger isn't one. */
 const CLAIM_FRAME_MAX_BYTES = 64 * 1024;
@@ -38,9 +39,13 @@ const CLAIM_FRAME_MAX_BYTES = 64 * 1024;
 const PENDING_FRAMES_MAX = 256;
 
 export type ControlFrame =
+  | { v: 1; t: 'challenge'; serverId: string; challenge: string }
+  | { v: 1; t: 'welcome' }
   | { v: 1; t: 'offer'; grant: Signed<GrantPayload> }
   | { v: 1; t: 'cancel'; nonce: string };
-export type DeviceControlFrame = { v: 1; t: 'decline'; nonce: string; reason?: string };
+export type DeviceControlFrame =
+  | { v: 1; t: 'hello'; deviceId: string; sig: string }
+  | { v: 1; t: 'decline'; nonce: string; reason?: string };
 export type ClaimFrame = { v: 1; t: 'claim'; grant: Signed<GrantPayload>; approval: Signed<ApprovalPayload> };
 /** `outcome` tells the device what became of its approval: see `acquireLease`. */
 export type ClaimOutcome = 'refused' | 'replay' | 'unavailable' | 'unknown';
@@ -113,6 +118,15 @@ const OPEN = 1;
 const send = (ws: WebSocket, frame: object): void => { if (ws.readyState === OPEN) ws.send(JSON.stringify(frame)); };
 const shut = (ws: WebSocket, code: number, reason: string): void => { try { ws.close(code, reason.slice(0, 100)); } catch { /* already closing */ } };
 
+/** A frame from the device, if it's JSON of this protocol version and small enough to be one. */
+function parseDeviceFrame(raw: string): Record<string, unknown> | null {
+  if (raw.length > CLAIM_FRAME_MAX_BYTES) return null;
+  try {
+    const f = JSON.parse(raw) as Record<string, unknown> | null;
+    return f && typeof f === 'object' && f.v === HUB_PROTOCOL ? f : null;
+  } catch { return null; }
+}
+
 function parseClaim(raw: string): ClaimFrame | null {
   if (raw.length > CLAIM_FRAME_MAX_BYTES) return null;
   let f: unknown;
@@ -120,6 +134,45 @@ function parseClaim(raw: string): ClaimFrame | null {
   const c = f as Partial<ClaimFrame> | null;
   if (!c || c.v !== HUB_PROTOCOL || c.t !== 'claim' || typeof c.grant !== 'object' || typeof c.approval !== 'object' || !c.grant || !c.approval) return null;
   return c as ClaimFrame;
+}
+
+/**
+ * Who is on a new control connection, or null. The device signs the server's fresh
+ * challenge with its registered key, so a connection needs no bearer token that could
+ * be copied: holding the device's key is the proof. The user is the one the device was
+ * registered to, read from the server's own record and never from the device.
+ * A socket that fails is closed. Call `attachDevice` only with what this returns.
+ */
+export function authenticateControl(socket: WebSocket, opts: {
+  serverId: string;
+  /** The server's record of this device, or null if unknown or revoked. */
+  device(deviceId: string): { userId: string; key: KeyObject } | null;
+  timeoutMs?: number;
+}): Promise<{ userId: string; deviceId: string } | null> {
+  return new Promise((resolve) => {
+    const challenge = randomBytes(24).toString('base64url');
+    let done = false;
+    const finish = (who: { userId: string; deviceId: string } | null): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (who) send(socket, { v: HUB_PROTOCOL, t: 'welcome' } satisfies ControlFrame);
+      else shut(socket, 1008, 'not a registered device');
+      resolve(who);
+    };
+    const timer = setTimeout(() => finish(null), opts.timeoutMs ?? HELLO_TIMEOUT_MS);
+    socket.once('close', () => finish(null));
+    socket.once('error', () => finish(null));
+    socket.once('message', (raw) => {
+      const f = parseDeviceFrame(String(raw));
+      const deviceId = f?.deviceId;
+      if (!f || f.t !== 'hello' || typeof deviceId !== 'string') { finish(null); return; }
+      const record = opts.device(deviceId);
+      if (!record || !verifyHello(f.sig, record.key, { deviceId, serverId: opts.serverId, challenge })) { finish(null); return; }
+      finish({ userId: record.userId, deviceId });
+    });
+    send(socket, { v: HUB_PROTOCOL, t: 'challenge', serverId: opts.serverId, challenge } satisfies ControlFrame);
+  });
 }
 
 export function createRelayHub(opts: RelayHubOptions): RelayHub {
@@ -159,12 +212,12 @@ export function createRelayHub(opts: RelayHubOptions): RelayHub {
     const entry = { userId: who.userId, socket };
     controls.set(who.deviceId, entry);
     socket.on('message', (raw) => {
-      let f: Partial<DeviceControlFrame> | null = null;
-      try { f = JSON.parse(String(raw)) as Partial<DeviceControlFrame>; } catch { /* ignored below */ }
-      if (!f || f.v !== HUB_PROTOCOL || f.t !== 'decline' || typeof f.nonce !== 'string') return;
-      const p = pending.get(f.nonce);
+      const f = parseDeviceFrame(String(raw));
+      const nonce = f?.nonce;
+      if (!f || f.t !== 'decline' || typeof nonce !== 'string') return;
+      const p = pending.get(nonce);
       // Only for an offer made to this device: a device can't decline another's.
-      if (p && p.run.deviceId === who.deviceId && !p.claiming) settle(f.nonce, new RelayRefused('the request was declined on the device'));
+      if (p && p.run.deviceId === who.deviceId && !p.claiming) settle(nonce, new RelayRefused('the request was declined on the device'));
     });
     const gone = (): void => {
       if (controls.get(who.deviceId) !== entry) return;

@@ -13,7 +13,7 @@ import { type Identity, createIdentity, createMemoryNonceStore } from './capabil
 import { startDedicatedBrowser } from './dedicated-browser.js';
 import { type DeviceClient, type LeasedBrowser, type UserConsent, connectDeviceClient } from './device.js';
 import type { ProxyNetwork } from './egress-proxy.js';
-import { RelayRefused, createRelayHub } from './hub.js';
+import { RelayRefused, authenticateControl, createRelayHub } from './hub.js';
 import { launchForRelayTests } from './launch.js';
 
 interface PwPage { goto(u: string, o?: object): Promise<unknown>; evaluate<T>(fn: string): Promise<T>; url(): string }
@@ -59,15 +59,17 @@ async function rig(over: { answer?: UserConsent | null } = {}) {
   };
   const server = createIdentity('server');
   const keys = new Map<string, Identity>();
+  const owners = new Map<string, string>();
   const hub = createRelayHub({ server, store: createMemoryNonceStore(Date.now), deviceKey: (id) => keys.get(id)?.publicKey ?? null });
   const httpServer = http.createServer();
   const wss = new WebSocketServer({ server: httpServer });
   wss.on('connection', (ws, req) => {
     const url = new URL(req.url ?? '/', 'http://x');
-    // The control connection is authenticated by the caller. Here, a header stands in for the session.
     if (url.pathname === '/control') {
-      const [userId, deviceId] = String(req.headers['x-test-auth']).split(':');
-      hub.attachDevice({ userId: userId!, deviceId: deviceId! }, ws);
+      void authenticateControl(ws, {
+        serverId: server.id,
+        device: (id) => (owners.has(id) && keys.has(id) ? { userId: owners.get(id)!, key: keys.get(id)!.publicKey } : null),
+      }).then((who) => { if (who) hub.attachDevice(who, ws); });
     } else if (url.pathname === '/run') hub.attachRun(ws);
     else if (url.pathname.startsWith('/agent/')) hub.attachAgent(url.pathname.slice('/agent/'.length), ws);
     else ws.close();
@@ -81,9 +83,10 @@ async function rig(over: { answer?: UserConsent | null } = {}) {
   const device = async (userId: string, name: string): Promise<DeviceClient> => {
     const id = createIdentity(name);
     keys.set(name, id);
+    owners.set(name, userId);
     const log: string[] = [];
     const client = connectDeviceClient({
-      controlUrl: `${base}/control`, runUrl: `${base}/run`, headers: { 'x-test-auth': `${userId}:${name}` },
+      controlUrl: `${base}/control`, runUrl: `${base}/run`,
       device: id, serverId: server.id, serverKey: server.publicKey, log: (l) => log.push(l),
       askUser: async (run) => {
         asked.push({ userId: run.userId, runId: run.runId });

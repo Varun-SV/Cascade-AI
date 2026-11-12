@@ -15,11 +15,12 @@
 //  ask but can't widen. A compromised device can sign only for itself: the server
 //  refuses an approval whose grant doesn't match what it issued.
 
-import { createHash, generateKeyPairSync, randomBytes, sign as edSign, verify as edVerify } from 'node:crypto';
+import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign as edSign, verify as edVerify } from 'node:crypto';
 import type { KeyObject } from 'node:crypto';
 import { POLICY_VERSION } from './command-policy.js';
 
 const GRANT_DOMAIN = 'cascade.relay.grant.v1';
+const HELLO_DOMAIN = 'cascade.relay.hello.v1';
 const APPROVAL_DOMAIN = 'cascade.relay.approval.v1';
 /** The longest any grant or approval may live. */
 export const MAX_LIFETIME_MS = 30 * 60_000;
@@ -62,6 +63,50 @@ export interface Identity { id: string; sign(bytes: Buffer): string; publicKey: 
 export function createIdentity(id: string): Identity {
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
   return { id, publicKey, sign: (bytes) => edSign(null, bytes, privateKey).toString('base64url') };
+}
+
+/** A new key pair, as text that can be stored: the private key as PKCS#8 PEM, the public as SPKI base64url. */
+export function generateStoredKey(): { privateKeyPem: string; publicKey: string } {
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  return {
+    privateKeyPem: privateKey.export({ type: 'pkcs8', format: 'pem' }) as string,
+    publicKey: (publicKey.export({ type: 'spki', format: 'der' }) as Buffer).toString('base64url'),
+  };
+}
+
+/** An identity from a stored private key. Throws on anything but an Ed25519 key. */
+export function identityFromPrivateKey(id: string, privateKeyPem: string): Identity {
+  const privateKey = createPrivateKey(privateKeyPem);
+  if (privateKey.asymmetricKeyType !== 'ed25519') throw new Error('relay keys are Ed25519');
+  return { id, publicKey: createPublicKey(privateKey), sign: (bytes) => edSign(null, bytes, privateKey).toString('base64url') };
+}
+
+/** A public key as registered: SPKI, base64url. Null on anything but an Ed25519 key. */
+export function publicKeyFromText(text: string): KeyObject | null {
+  try {
+    const key = createPublicKey({ key: Buffer.from(text, 'base64url'), format: 'der', type: 'spki' });
+    return key.asymmetricKeyType === 'ed25519' ? key : null;
+  } catch { return null; }
+}
+
+export function publicKeyToText(key: KeyObject): string {
+  return (key.export({ type: 'spki', format: 'der' }) as Buffer).toString('base64url');
+}
+
+/**
+ * The device proves it holds its registered key, to this server, for this one
+ * connection: a signature over the server's fresh challenge. Nothing here can be
+ * replayed on another connection or to another server.
+ */
+export function signHello(device: Identity, serverId: string, challenge: string): string {
+  return device.sign(toSign(HELLO_DOMAIN, { challenge, deviceId: device.id, serverId }));
+}
+
+export function verifyHello(sig: unknown, deviceKey: KeyObject, fields: { deviceId: string; serverId: string; challenge: string }): boolean {
+  if (typeof sig !== 'string') return false;
+  try {
+    return edVerify(null, toSign(HELLO_DOMAIN, { challenge: fields.challenge, deviceId: fields.deviceId, serverId: fields.serverId }), deviceKey, Buffer.from(sig, 'base64url'));
+  } catch { return false; }
 }
 
 function verifySig(domain: string, signed: Signed<object>, key: KeyObject): boolean {

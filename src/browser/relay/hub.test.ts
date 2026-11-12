@@ -6,9 +6,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
   type ApprovalPayload, type GrantPayload, type Identity, type NonceStore, type Signed,
-  StoreOutcomeUnknown, StoreUnavailable, createDeviceApprovals, createIdentity, createMemoryNonceStore,
+  StoreOutcomeUnknown, StoreUnavailable, createDeviceApprovals, createIdentity, createMemoryNonceStore, signHello,
 } from './capability.js';
-import { type ClaimReply, type ControlFrame, RelayRefused, type RelayHub, createRelayHub } from './hub.js';
+import { type ClaimReply, type ControlFrame, RelayRefused, type RelayHub, authenticateControl, createRelayHub } from './hub.js';
 
 const scope = { tabTargetId: 'tab-1', allowedOrigins: ['https://ok.test'], privateOrigins: [] };
 const closers: (() => void)[] = [];
@@ -18,6 +18,8 @@ afterEach(() => { for (const c of closers.splice(0)) c(); });
 async function world(over: { store?: NonceStore; offerTimeoutMs?: number; agentAttachTimeoutMs?: number; now?: () => number } = {}) {
   const server = createIdentity('server');
   const keys = new Map<string, Identity>();
+  /** The server's own record of whose device each is. */
+  const owners = new Map<string, string>();
   const device = (id: string): Identity => { const d = createIdentity(id); keys.set(id, d); return d; };
   const hub = createRelayHub({
     server, store: over.store ?? createMemoryNonceStore(over.now ?? Date.now), deviceKey: (id) => keys.get(id)?.publicKey ?? null,
@@ -29,7 +31,12 @@ async function world(over: { store?: NonceStore; offerTimeoutMs?: number; agentA
   const wss = new WebSocketServer({ server: httpServer });
   wss.on('connection', (ws, req) => {
     const url = new URL(req.url ?? '/', 'http://x');
-    if (url.pathname === '/control') hub.attachDevice({ userId: url.searchParams.get('user')!, deviceId: url.searchParams.get('device')! }, ws);
+    if (url.pathname === '/control') {
+      void authenticateControl(ws, {
+        serverId: server.id, timeoutMs: 500,
+        device: (id) => (owners.has(id) && keys.has(id) ? { userId: owners.get(id)!, key: keys.get(id)!.publicKey } : null),
+      }).then((who) => { if (who) hub.attachDevice(who, ws); });
+    }
     else if (url.pathname === '/run') hub.attachRun(ws);
     else if (url.pathname.startsWith('/agent/')) hub.attachAgent(url.pathname.slice('/agent/'.length), ws);
     else ws.close();
@@ -42,7 +49,7 @@ async function world(over: { store?: NonceStore; offerTimeoutMs?: number; agentA
     await new Promise((res, rej) => { ws.once('open', res); ws.once('error', rej); });
     return ws;
   };
-  return { hub, server, device, open, base };
+  return { hub, server, device, open, base, owners, forget: (id: string) => { keys.delete(id); } };
 }
 
 const next = (ws: WebSocket): Promise<string> => new Promise((res) => ws.once('message', (d) => res(String(d))));
@@ -50,16 +57,23 @@ const closedWith = (ws: WebSocket): Promise<number> => new Promise((res) => (ws.
 
 /** A device: its control connection, and how it answers an offer. */
 async function connectDevice(w: Awaited<ReturnType<typeof world>>, userId: string, id: Identity) {
-  const control = await w.open(`/control?user=${userId}&device=${id.id}`);
+  w.owners.set(id.id, userId);
+  const control = new WebSocket(`${w.base}/control`);
   const offers: Signed<GrantPayload>[] = [];
   const waiters: ((g: Signed<GrantPayload>) => void)[] = [];
   const cancels: string[] = [];
+  let welcomed!: () => void;
+  const welcome = new Promise<void>((r) => { welcomed = r; });
   control.on('message', (d) => {
     const f = JSON.parse(String(d)) as ControlFrame;
+    if (f.t === 'challenge') { control.send(JSON.stringify({ v: 1, t: 'hello', deviceId: id.id, sig: signHello(id, f.serverId, f.challenge) })); return; }
+    if (f.t === 'welcome') { welcomed(); return; }
     if (f.t === 'cancel') { cancels.push(f.nonce); return; }
     const w2 = waiters.shift();
     if (w2) w2(f.grant); else offers.push(f.grant);
   });
+  await welcome;
+  await vi.waitFor(() => expect(w.hub.deviceOnline(userId, id.id)).toBe(true));
   const approvals = createDeviceApprovals({ device: id, serverId: w.server.id, serverKey: w.server.publicKey, now: Date.now });
   const offer = (): Promise<Signed<GrantPayload>> => (offers.length ? Promise.resolve(offers.shift()!) : new Promise((r) => waiters.push(r)));
   const approve = (grant: Signed<GrantPayload>): Signed<ApprovalPayload> => {
@@ -275,10 +289,10 @@ describe('a request that does not become a lease', () => {
     expect(await refusal(asked)).toBe('the device went offline');
   });
 
-  it('a device with no registered key is not asked', async () => {
+  it('a device whose key was unregistered while it was connected is not asked', async () => {
     const w = await world();
-    const stranger = createIdentity('device-x');
-    await connectDevice(w, 'user-a', stranger);
+    await connectDevice(w, 'user-a', w.device('device-x'));
+    w.forget('device-x');
     expect(await refusal(w.hub.requestBrowser({ userId: 'user-a', deviceId: 'device-x', runId: 'run-1' }))).toBe('the device is not registered');
   });
 
@@ -347,5 +361,74 @@ describe('what ends a lease from the server', () => {
     const grant = await second.offer();
     expect((await second.claim(grant, second.approve(grant))).reply.t).toBe('claimed');
     await asked;
+  });
+});
+
+describe('who is on a control connection', () => {
+  /** A raw control connection that answers the challenge however it's told to. */
+  async function raw(w: Awaited<ReturnType<typeof world>>, answer: (f: Extract<ControlFrame, { t: 'challenge' }>) => object | string | null) {
+    const ws = new WebSocket(`${w.base}/control`);
+    const frames: ControlFrame[] = [];
+    ws.on('message', (d) => {
+      const f = JSON.parse(String(d)) as ControlFrame;
+      frames.push(f);
+      if (f.t !== 'challenge') return;
+      const reply = answer(f);
+      if (reply !== null) ws.send(typeof reply === 'string' ? reply : JSON.stringify(reply));
+    });
+    const code = await closedWith(ws);
+    return { code, frames };
+  }
+
+  it("a device is its registered key, and the user is the server's record, not the device's word", async () => {
+    const w = await world();
+    const id = w.device('device-a');
+    await connectDevice(w, 'user-a', id);
+    expect(w.hub.deviceOnline('user-a', 'device-a')).toBe(true);
+    expect(w.hub.deviceOnline('user-b', 'device-a')).toBe(false);
+  });
+
+  const bad: [string, (w: Awaited<ReturnType<typeof world>>, id: Identity) => (f: Extract<ControlFrame, { t: 'challenge' }>) => object | string | null][] = [
+    ['a signature from another key', (w) => (f) => ({ v: 1, t: 'hello', deviceId: 'device-a', sig: signHello({ ...createIdentity('device-a') }, f.serverId, f.challenge) })],
+    ['a signature over another challenge', (_w, id) => (f) => ({ v: 1, t: 'hello', deviceId: 'device-a', sig: signHello(id, f.serverId, 'another-challenge') })],
+    ['a signature made for another server', (_w, id) => (f) => ({ v: 1, t: 'hello', deviceId: 'device-a', sig: signHello(id, 'another-server', f.challenge) })],
+    ["another device's name on a good signature", (w) => (f) => { const b = w.device('device-b'); w.owners.set('device-b', 'user-b'); return { v: 1, t: 'hello', deviceId: 'device-a', sig: signHello(b, f.serverId, f.challenge) }; }],
+    ['a device the server has no record of', () => (f) => { const x = createIdentity('device-x'); return { v: 1, t: 'hello', deviceId: 'device-x', sig: signHello(x, f.serverId, f.challenge) }; }],
+    ['no signature', () => () => ({ v: 1, t: 'hello', deviceId: 'device-a' })],
+    ['something that is not a hello', () => () => 'not json'],
+    ['no answer at all', () => () => null],
+  ];
+  for (const [name, make] of bad) {
+    it(`${name} is refused, and never becomes a device`, async () => {
+      const w = await world();
+      const id = w.device('device-a');
+      w.owners.set('device-a', 'user-a');
+      const { code, frames } = await raw(w, make(w, id));
+      expect(code).toBe(1008);
+      expect(frames.map((f) => f.t)).toEqual(['challenge']);
+      expect(w.hub.deviceOnline('user-a', 'device-a')).toBe(false);
+      await expect(w.hub.requestBrowser({ userId: 'user-a', deviceId: 'device-a', runId: 'run-1' })).rejects.toBeInstanceOf(RelayRefused);
+    });
+  }
+
+  it('a signature seen on one connection is useless on the next', async () => {
+    const w = await world();
+    const id = w.device('device-a');
+    w.owners.set('device-a', 'user-a');
+    let captured: object | null = null;
+    // A real device connects; someone on the path keeps what it sent.
+    const ws = new WebSocket(`${w.base}/control`);
+    ws.on('message', (d) => {
+      const f = JSON.parse(String(d)) as ControlFrame;
+      if (f.t !== 'challenge') return;
+      captured = { v: 1, t: 'hello', deviceId: 'device-a', sig: signHello(id, f.serverId, f.challenge) };
+      ws.send(JSON.stringify(captured));
+    });
+    await vi.waitFor(() => expect(w.hub.deviceOnline('user-a', 'device-a')).toBe(true));
+    ws.close();
+    await vi.waitFor(() => expect(w.hub.deviceOnline('user-a', 'device-a')).toBe(false));
+    const replay = await raw(w, () => captured);
+    expect(replay.code).toBe(1008);
+    expect(w.hub.deviceOnline('user-a', 'device-a')).toBe(false);
   });
 });

@@ -13,7 +13,7 @@
 
 import type { KeyObject } from 'node:crypto';
 import { WebSocket } from 'ws';
-import { type ApprovalPayload, type GrantPayload, type Identity, type Signed, createDeviceApprovals, verifyGrant } from './capability.js';
+import { type ApprovalPayload, type GrantPayload, type Identity, type Signed, createDeviceApprovals, signHello, verifyGrant } from './capability.js';
 import { type Consent, makeConsent } from './egress-rules.js';
 import { type ClaimFrame, type ClaimReply, type ControlFrame, type DeviceControlFrame, HUB_PROTOCOL } from './hub.js';
 import { type DeviceRelay, createDeviceRelay } from './relay.js';
@@ -41,8 +41,6 @@ export interface DeviceClientOptions {
   /** The control endpoint, and the run endpoint beside it. */
   controlUrl: string;
   runUrl: string;
-  /** How this device proves itself on the control connection. Never sent on a run connection. */
-  headers?: Record<string, string>;
   device: Identity;
   serverId: string;
   serverKey: KeyObject;
@@ -57,7 +55,7 @@ export interface DeviceClientOptions {
 }
 
 export interface DeviceClient {
-  /** Resolves once the control connection is open. */
+  /** Resolves once the server has accepted this device's proof of its key. */
   ready: Promise<void>;
   /** The lease being served now, if any. */
   lease(): TabLease | null;
@@ -76,13 +74,17 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
   const now = opts.now ?? Date.now;
   const log = opts.log ?? (() => {});
   const approvals = createDeviceApprovals({ device: opts.device, serverId: opts.serverId, serverKey: opts.serverKey, now });
-  const control = new WebSocket(opts.controlUrl, { perMessageDeflate: false, ...(opts.headers ? { headers: opts.headers } : {}) });
+  const control = new WebSocket(opts.controlUrl, { perMessageDeflate: false });
   let active: { nonce: string; lease: TabLease; relay: DeviceRelay | null; cancelled: boolean } | null = null;
   let closing = false;
   let finished!: (why: string) => void;
   const closed = new Promise<string>((r) => { finished = r; });
-  const ready = new Promise<void>((resolve, reject) => { control.once('open', () => resolve()); control.once('error', reject); });
+  let welcomed!: () => void;
+  let notWelcomed!: (e: Error) => void;
+  const ready = new Promise<void>((resolve, reject) => { welcomed = resolve; notWelcomed = reject; });
   ready.catch(() => {});
+  control.once('error', (e) => notWelcomed(e));
+  let authenticated = false;
 
   const tell = (frame: DeviceControlFrame): void => { if (control.readyState === OPEN) control.send(JSON.stringify(frame)); };
   const decline = (nonce: string, reason: string): void => { log(`declined: ${reason}`); tell({ v: HUB_PROTOCOL, t: 'decline', nonce, reason }); };
@@ -172,6 +174,16 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
     let f: Partial<ControlFrame> | null = null;
     try { f = JSON.parse(String(raw)) as Partial<ControlFrame>; } catch { return; }
     if (!f || f.v !== HUB_PROTOCOL) return;
+    if (f.t === 'challenge') {
+      // Signed only for the server this device was registered with: another server's
+      // challenge gets no signature to use anywhere.
+      if (authenticated || f.serverId !== opts.serverId || typeof f.challenge !== 'string') { control.close(); return; }
+      tell({ v: HUB_PROTOCOL, t: 'hello', deviceId: opts.device.id, sig: signHello(opts.device, opts.serverId, f.challenge) });
+      return;
+    }
+    if (f.t === 'welcome') { authenticated = true; welcomed(); return; }
+    // Nothing is acted on before the server has accepted this device.
+    if (!authenticated) return;
     if (f.t === 'offer' && f.grant) void onOffer(f.grant);
     else if (f.t === 'cancel' && active && active.nonce === f.nonce) {
       active.cancelled = true;
@@ -179,6 +191,7 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
     }
   });
   const gone = (why: string): void => {
+    notWelcomed(new Error(why));
     // A network drop: the lease ends here, without waiting to be told.
     if (active) { active.cancelled = true; active.lease.revoke(why); }
     finished(why);
