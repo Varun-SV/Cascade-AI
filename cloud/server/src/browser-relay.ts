@@ -100,7 +100,9 @@ export interface BrowserRelay {
   routes(app: Express, sessionSecret: string): void;
   /** Takes the two public WebSocket paths on this server. */
   attach(server: http.Server): void;
-  /** Where the run's CDP client connects. Loopback only, and good once. */
+  /** Resolves once the loopback endpoint for runs is listening. */
+  readonly ready: Promise<void>;
+  /** Where the run's CDP client connects. Loopback only, and good once. Only after `ready`. */
   agentUrl(token: string): string;
   close(): Promise<void>;
 }
@@ -108,7 +110,7 @@ export interface BrowserRelay {
 /** What a client may see of a device. The public key is not secret, but nothing needs it. */
 const publicDevice = (d: RelayDevice, online: boolean) => ({ id: d.id, name: d.name, kind: d.kind, createdAt: d.createdAt, lastSeenAt: d.lastSeenAt, online });
 
-export async function createBrowserRelay(opts: { dataDir: string; store: CloudStore; now?: () => number }): Promise<BrowserRelay> {
+export function createBrowserRelay(opts: { dataDir: string; store: CloudStore; now?: () => number }): BrowserRelay {
   const { store } = opts;
   const now = opts.now ?? Date.now;
   const identity = loadRelayIdentity(opts.dataDir);
@@ -129,8 +131,9 @@ export async function createBrowserRelay(opts: { dataDir: string; store: CloudSt
     const token = (req.url ?? '').replace(/^\/agent\//, '');
     hub.attachAgent(token, ws);
   });
-  await new Promise<void>((resolve, reject) => { agentHttp.once('error', reject); agentHttp.listen(0, '127.0.0.1', resolve); });
-  const agentPort = (agentHttp.address() as AddressInfo).port;
+  const ready = new Promise<void>((resolve, reject) => { agentHttp.once('error', reject); agentHttp.listen(0, '127.0.0.1', resolve); });
+  // A failure to listen is the caller's to see when it awaits; unawaited, it must not end the process.
+  ready.catch(() => {});
 
   const publicWss = new WebSocketServer({ noServer: true, maxPayload: MAX_PUBLIC_FRAME_BYTES, perMessageDeflate: false });
   const onUpgrade = (req: http.IncomingMessage, socket: Duplex, head: Buffer): void => {
@@ -155,8 +158,12 @@ export async function createBrowserRelay(opts: { dataDir: string; store: CloudSt
   let attached: http.Server | null = null;
 
   return {
-    hub, identity,
-    agentUrl: (token) => `ws://127.0.0.1:${agentPort}/agent/${token}`,
+    hub, identity, ready,
+    agentUrl(token) {
+      const address = agentHttp.address() as AddressInfo | null;
+      if (!address) throw new Error('the relay is not listening yet');
+      return `ws://127.0.0.1:${address.port}/agent/${token}`;
+    },
     attach(server) { attached = server; server.on('upgrade', onUpgrade); },
     routes(app, sessionSecret) {
       const auth = sessionMiddleware(sessionSecret);

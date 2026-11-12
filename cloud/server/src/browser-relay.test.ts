@@ -28,7 +28,8 @@ function tmpDir(): string {
 async function server() {
   const dir = tmpDir();
   const store = new CloudStore(path.join(dir, 'cloud.db'));
-  const relay = await createBrowserRelay({ dataDir: dir, store });
+  const relay = createBrowserRelay({ dataDir: dir, store });
+  await relay.ready;
   const app = express();
   app.use(express.json());
   relay.routes(app, SECRET);

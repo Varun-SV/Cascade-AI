@@ -11,6 +11,7 @@ import { CloudStore } from './db.js';
 import { createApp } from './app.js';
 import { attachSocket } from './socket.js';
 import { startPendingMediaSweeper } from './pending-media.js';
+import { createBrowserRelay } from './browser-relay.js';
 
 export function bootstrap() {
   dotenv.config();
@@ -30,8 +31,11 @@ export function bootstrap() {
     console.log(`[storage] DATA_DIR=${path.resolve(env.DATA_DIR)} · db=${dbPath}`);
   }
   const store = new CloudStore(dbPath);
-  const app = createApp(env, store);
+  // Off unless the operator turns it on: with it off, none of its endpoints exist.
+  const browserRelay = env.BROWSER_RELAY ? createBrowserRelay({ dataDir: path.resolve(env.DATA_DIR), store }) : undefined;
+  const app = createApp(env, store, browserRelay ? { browserRelay } : {});
   const httpServer = http.createServer(app);
+  browserRelay?.attach(httpServer);
   const io = attachSocket(httpServer, env, store);
   // Unsaved generated media expires. Request paths sweep opportunistically,
   // but an asset nobody ever opens again is exactly the one that would
@@ -42,7 +46,7 @@ export function bootstrap() {
     console.log(`Cascade Cloud server listening on :${env.PORT}`);
   });
 
-  return { httpServer, app, io, store, env, stopMediaSweeper };
+  return { httpServer, app, io, store, env, stopMediaSweeper, browserRelay };
 }
 
 const isMainModule = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
