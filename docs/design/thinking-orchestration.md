@@ -1,6 +1,6 @@
 # Thinking as a routed resource
 
-Status: **draft for discussion, revision 2.** Nothing here is implemented and
+Status: **draft for discussion, revision 3.** Nothing here is implemented and
 nothing here approves code. Section 9 lists the decisions still open; none of
 them has been decided by the maintainer yet.
 
@@ -17,6 +17,16 @@ point is recorded here and on the review threads:
   what was reserved instead of reserving each model's worst case, because the
   router deliberately moved away from worst-case reservation (4.9).
 - **D, evaluation:** accepted in full (section 8).
+
+Revision 3 answers the council follow-up on revision 2. Claude's position:
+
+- **E, pinned models:** accepted. A notice does not override `none` or
+  `absolute`. A pinned model the mode excludes fails closed, with a separate
+  explicit opt-in (4.3, decision 7).
+- **F, reservation against billing:** accepted. An output limit is not a
+  total-cost bound. Models declare how enforceable their cost is, and the
+  budget is only called a hard limit where it is (4.9, invariant 3,
+  decision 9).
 
 ## 1. Decisions already made by the maintainer
 
@@ -110,8 +120,8 @@ type EffortLevel = 'none' | 'low' | 'medium' | 'high' | 'max';
   Only the applied level is recorded as evidence.
 - **Version drift.** If a provider rejects an effort parameter the model was
   declared to accept, the model is reclassified `unknown` for the session and
-  the rejection is reported. Whether that call is then retried is governed by
-  the mode (4.3).
+  the rejection is reported. In `none` and `absolute` the call is not
+  retried without the parameter; the model has become ineligible (4.3).
 - The exact native parameters differ by provider and by model generation and
   have changed recently. Each mapping must be checked against the provider's
   current documentation when it is written, not taken from this document.
@@ -161,12 +171,19 @@ thinking: { mode: 'none' | 'absolute' | 'maximum', ceiling: EffortLevel }
 - `absolute`: automatic, never above `ceiling`. `always-on` and `unknown`
   models are excluded from automatic selection, because their effort cannot
   be shown to respect the ceiling.
-- `maximum`: the highest level each model supports, on every call. The
-  ceiling does not apply in this mode; that is its purpose.
+- `maximum`: the highest level each model supports, on every call. This mode
+  **overrides the automatic ceiling**, and the setting says so where the user
+  chooses it. It still respects the run budget.
 - The run budget applies in every mode, including `maximum`.
-- **Fail closed.** If a mode leaves no eligible model, or the user has pinned
-  a model the mode excludes, the run does not quietly proceed with
-  uncontrolled thinking. What it does instead is open decision 7.
+- **Fail closed, including for pinned models.** If a mode leaves no eligible
+  model, or the user has pinned a model the mode excludes, no call is sent. A
+  notice is not enough to override a constraint the user set explicitly. This
+  covers a pinned-only setup, an `unknown` model, a provider that rejects the
+  effort parameter, and a model whose version changes mid-run.
+- **The way forward is a separate, explicit opt-in.** The run stops with a
+  message naming the model and the mode, and offers to change the mode or the
+  model. Nothing is dispatched until the user chooses. The form of that
+  opt-in is open decision 7.
 
 ### 4.4 How the two quality settings use it
 
@@ -237,31 +254,56 @@ The judge:
 
 ### 4.9 Budget and visibility
 
-An estimate of thinking tokens is not a cap. Enforcement works by
-reservation:
+An estimate of thinking tokens is not a cap, and neither is an output-token
+limit. A provider's limit may not cover hidden reasoning tokens, never covers
+input charges or provider minimums, and a call can be billed after it timed
+out here. So the design separates what the router controls from what it can
+promise.
 
-- **Reserve, then cap the call to the reservation.** Before a call starts, the
-  router reserves its input plus an output allowance that includes thinking,
-  and sends that allowance as the provider's output-token limit. Where the
-  provider enforces the limit over thinking as well as the answer, the call
-  cannot spend more than was reserved.
-- **Why not each model's worst case.** `admitWork` reserves expected output
-  today because reserving the worst case refused the first call of a run on a
-  small cap. Capping the call to an affordable allowance gives a bounded
-  worst case without that failure.
+**What the router controls: dispatch.**
+
 - **One ledger.** First attempts, effort raises, randomized calls and judge
   calls all reserve from the same run ledger. A reservation is taken
   atomically, so concurrent T2 and T3 workers cannot each be admitted against
-  the same remaining budget. No call starts without one.
-- **Reconciliation.** A reservation is released against reported usage when
-  the call settles, including on timeout, cancellation and a stream that
-  ends early.
+  the same remaining budget. No call is dispatched without one.
+- **Reserve from a conservative upper bound** where the model has one: input
+  at its counted size, plus the output limit sent with the call, at the
+  current price. The call is capped to that allowance instead of reserving
+  the model's largest possible output, because `admitWork` moved away from
+  worst-case reservation after it refused the first call of a run on a small
+  cap.
+- **Oversized input** is refused at reservation, before dispatch.
+- **Reconciliation.** A reservation is settled against the charge actually
+  reported, including after a stream is cancelled and after a timeout that
+  the provider had already accepted. A call whose usage never arrives is
+  settled at its full reservation.
+- **A negative balance authorizes nothing.** If settled charges exceed what
+  was reserved, the overrun is debited, and no further call is admitted until
+  the balance covers a new reservation.
 - **When the budget is exhausted**, further work calls are refused and the
   run wraps up, as today.
-- **What cannot be guaranteed.** Where a provider has no enforced limit that
-  covers thinking, the amount finally billed can exceed the reservation. Such
-  a model is marked unbounded, is not offered above its lowest level while a
-  cost cap is set, and the limit is stated in the documentation.
+
+**What the router can promise: it depends on the model.** Each model declares
+a cost-enforcement class, checked against provider documentation and
+versioned with the pricing data:
+
+| Class | The provider enforces | What the run budget means |
+|---|---|---|
+| `total-bounded` | A limit covering answer and reasoning tokens | A hard limit, given current prices |
+| `output-only` | A limit on answer tokens only | A dispatch limit; reasoning can overrun |
+| `unbounded` | No usable limit | A dispatch limit only |
+
+- The run budget is described to the user as a hard limit **only** for
+  `total-bounded` models. For the other two classes it is described as a
+  limit on what Cascade dispatches, at every effort level including the
+  lowest.
+- Under a strict cap, calls to `output-only` and `unbounded` models are
+  either refused or need an explicit risk allowance from the user. Which one
+  is open decision 9.
+- **Stale prices.** A reservation records the price version it used. If
+  prices changed, settlement uses the new price and reports the difference.
+- **Truthful reporting.** Any overrun is shown in the run report and `/why`,
+  with the call that caused it. It is never absorbed silently.
 - When a run is wrapping up, effort drops to the lowest level that still
   produces an answer.
 - `/why` and the routing data show the effort applied to each call and the
@@ -287,9 +329,10 @@ These hold regardless of what the learned part decides, and each gets a test.
 2. An effort that cannot be honoured is never replaced silently by a provider
    default. The call is either not offered, refused, or labelled
    `uncontrolled`, according to the mode.
-3. No call starts without a budget reservation that fits what is left. Where
-   the provider enforces the output limit, spend cannot exceed the cap; where
-   it does not, that is documented and the model is restricted (4.9).
+3. No call is dispatched without a budget reservation that fits what is
+   left, and a negative balance never authorizes one. The budget is called a
+   hard limit only for models whose provider enforces a total bound; any
+   overrun elsewhere is reported (4.9).
 4. Evidence is recorded only for the effort that was applied, and only for
    calls that reached a provider.
 5. Existing thinking-state replay is untouched: OpenAI reasoning items, Gemini
@@ -337,10 +380,15 @@ Each stage is reviewed from its own diff and tests.
 - A capability matrix per provider and model: `none`, an unsupported level,
   tool calls and a rejected parameter, asserting requested against applied
   effort and no unintended escalation.
+- Fail closed: pinned-only, unknown capability, a provider that rejects the
+  effort parameter and a model version that changes at runtime, each proving
+  that zero calls are sent before the user authorizes a change.
 - Synthetic no-lift and positive-lift data: the estimator is calibrated and
   shows no preference for high effort when there is no lift.
-- Budget: concurrent fan-out, timeout, retry, streamed-usage reconciliation
-  and judge overhead, proving that no unreserved call starts.
+- Budget: concurrent reservations, oversized input, hidden-reasoning
+  overage, streaming cancellation, timeout after the provider accepted the
+  call, retries, judge overhead and stale prices. Each verifies both that no
+  unreserved call is dispatched and that any overrun is reported truthfully.
 
 **Rollback.** Everything from stage 2 on sits behind one flag. Turning it off
 restores today's requests (invariant 6).
@@ -358,14 +406,20 @@ restores today's requests (invariant 6).
    start: 10% of subtasks, at most 5% of run spend.
 6. **Shared data.** Whether effort outcomes join the shared routing data that
    opted-in users contribute, or stay local at first.
-7. **When a mode excludes the only available model, or a pinned one.**
-   Options: refuse the run with a message naming the model and the mode, or
-   run it labelled `uncontrolled` after a visible notice. Suggested: refuse
-   under automatic selection; for a pinned model, run with the notice, since
-   the pin is the user's explicit choice.
+7. **The opt-in when a mode excludes the only available model, or a pinned
+   one.** The run fails closed in both cases (4.3); a notice alone is no
+   longer proposed. Still to decide: what the explicit opt-in looks like.
+   Suggested: a prompt offering to switch the mode for this run or to pick
+   another model, never remembered beyond the run unless the user changes
+   the setting.
 8. **Randomized share.** How many calls have their effort randomized, and its
    share of the run budget. Suggested start: 5% of calls, at most 3% of run
    spend, and none on runs with a cost cap below a set floor.
+
+9. **Models without an enforceable total cost, under a strict cap.** Refuse
+   those calls, or allow them after an explicit risk allowance from the user.
+   Suggested: refuse by default, with the allowance as a setting that states
+   the budget is then not a hard limit.
 
 ## 10. Risks
 
