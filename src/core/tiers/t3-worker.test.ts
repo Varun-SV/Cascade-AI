@@ -591,6 +591,81 @@ describe('T3Worker.selfTest — fails closed, not open, when grading itself brea
   });
 });
 
+describe('a failed self-test says what was wrong, to the correction and to the person', () => {
+  const PASS = '{"completeness":"pass","correctness":"pass","compliance":"pass","notes":""}';
+  const fail = (notes: string, checks = ['completeness', 'compliance']) => JSON.stringify({
+    completeness: checks.includes('completeness') ? 'fail' : 'pass',
+    correctness: checks.includes('correctness') ? 'fail' : 'pass',
+    compliance: checks.includes('compliance') ? 'fail' : 'pass',
+    notes,
+  });
+
+  /** A worker whose grader answers with `grades` in turn. Records every prompt the model is sent. */
+  function workerWith(grades: string[]) {
+    const prompts: string[] = [];
+    let graded = 0;
+    const generate = vi.fn(async (_tier: unknown, options: { messages: { role: string; content: unknown }[] }) => {
+      const last = [...options.messages].reverse().find((m) => m.role === 'user');
+      const text = typeof last?.content === 'string' ? last.content : JSON.stringify(last?.content);
+      prompts.push(text);
+      if (text.startsWith('Self-test this output')) return makeResult(grades[graded++] ?? PASS);
+      if (text.includes('failed these checks')) return makeResult('The corrected answer');
+      return makeResult('The first answer');
+    });
+    const worker = new T3Worker(makeRouter(generate as unknown as CascadeRouter['generate']), makeToolRegistry(), 't2-parent');
+    return { worker, prompts, correction: () => prompts.find((p) => p.includes('failed these checks')) };
+  }
+
+  const MISSING = 'The keys were never pressed: no browser action followed the page load.';
+
+  it('the correction round is told what the check found, not only which check failed', async () => {
+    const w = workerWith([fail(MISSING), PASS]);
+    const result = await w.worker.execute(makeAssignment(), 'task-notes');
+    expect(w.correction()).toContain('completeness, compliance');
+    expect(w.correction()).toContain(MISSING);
+    // And with that, the one correction was enough.
+    expect(result.status).toBe('COMPLETED');
+    expect(result.output).toBe('The corrected answer');
+  });
+
+  it('the reported reason carries what was wrong, at the first failure and after the correction', async () => {
+    const STILL = 'The solo was described but still not played.';
+    const w = workerWith([fail(MISSING), fail(STILL, ['completeness'])]);
+    const result = await w.worker.execute(makeAssignment(), 'task-still');
+    expect(result.status).toBe('ESCALATED');
+    expect(result.issues).toEqual([
+      `Initial check failed: completeness, compliance — ${MISSING}`,
+      `Still failing after one correction: completeness — ${STILL}`,
+    ]);
+  });
+
+  it('a grader that gives no notes leaves the old wording, and the correction prompt has no empty section', async () => {
+    const w = workerWith([fail(''), PASS]);
+    const result = await w.worker.execute(makeAssignment(), 'task-no-notes');
+    expect(result.issues).toEqual(['Initial check failed: completeness, compliance']);
+    expect(w.correction()).not.toContain('What the check found');
+  });
+
+  it('notes are one line, bounded, and never carried for a pass', async () => {
+    const selfTest = (worker: T3Worker, output = 'x') => (worker as unknown as {
+      selfTest: (a: T2ToT3Assignment, o: string) => Promise<{ failed: string[]; notes?: string }>;
+    }).selfTest(makeAssignment(), output);
+    const long = workerWith([fail(`line one\n\n  line two ${'x'.repeat(2000)}`)]);
+    const graded = await selfTest(long.worker);
+    expect(graded.notes).toMatch(/^line one line two x+$/);
+    expect(graded.notes!.length).toBe(600);
+    const passing = workerWith(['{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"all good"}']);
+    expect((await selfTest(passing.worker)).notes).toBeUndefined();
+  });
+
+  it('the grader is asked to say what is missing', async () => {
+    const w = workerWith([PASS]);
+    await w.worker.execute(makeAssignment(), 'task-ask');
+    const asked = w.prompts.find((p) => p.startsWith('Self-test this output'))!;
+    expect(asked).toContain('exactly what is missing or wrong');
+  });
+});
+
 describe('shouldRequireArtifact', () => {
   const fileTask = { description: 'Write a spec to specs/pump.md', expectedOutput: 'A saved file specs/pump.md' };
 
