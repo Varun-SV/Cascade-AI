@@ -606,6 +606,19 @@ stage. The unused library adds no production overhead in stage 1.
   identifier can't be removed (Codex, 12 Nov).
 - **The device's record of an approval is frozen,** so neither the caller's arrays nor an admission
   result can widen it (Codex, 12 Nov).
+- **The page step checks what the navigation said (Codex, 12 Nov).** `Page.navigate` resolves with an
+  `errorText` when it didn't happen, an abort by a competing navigation for one. That was taken for
+  success, so `blank` could report the page ended with the old document still running. Only a clean
+  answer counts now; anything else closes the tab.
+- **The deadline is part of the fence (Codex, 12 Nov).** Expiry was a timer alone, and a timer runs
+  only when JavaScript yields: a burst of commands crossing the deadline was still forwarded. `fence()`,
+  `isCurrent()`, `generation()` and `state()` now check the deadline themselves and end the lease there.
+  The timer stays, to end a lease nobody is using.
+- **Child sessions through a human takeover (Codex, 12 Nov).** While suspended the relay returned
+  before recording a new frame or worker, so after the hand-back it was an unknown session for good.
+  It now records them, resumes one that is waiting (the user's page needs it and the agent can't), tells
+  the agent nothing during the takeover, and at the hand-back announces what went and then what came.
+  A frame that came and went in between is never mentioned.
 - **History titles (policy version 3)** are blanked on every entry; ids and the index stay.
 - **`context.name` stays.** A page can't set it (tested with `window.name`, a frame name and a
   title), and Playwright can't click without it (tested: `page.click` times out with it removed).

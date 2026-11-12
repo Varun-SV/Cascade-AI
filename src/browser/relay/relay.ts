@@ -210,9 +210,29 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
     if (gone !== null) end(gone);
     if (!ours()) end('the lease is no longer held');
 
+    // What happened to child sessions while the user had the tab, for the agent to be told
+    // when it's handed back. Nothing is disclosed during the takeover itself.
+    interface Missed { method: string; params: Record<string, unknown>; sessionId?: string }
+    const missedAttach = new Map<string, Missed>();
+    const missedDetach: Missed[] = [];
+    const announce = (m: Missed): void => {
+      const safe = filterEvent(m.method, m.params, consent);
+      if (safe === null) { droppedEvents.add(m.method); return; }
+      out({ method: m.method, params: safe, sessionId: m.sessionId ?? TAB_SESSION });
+    };
+    lease.onChange((_why, state) => {
+      if (ended || state !== 'held' || lease.generation() !== generation) return;
+      // Handed back. Detachments first, so a session that went and one that came never overlap.
+      for (const m of missedDetach.splice(0)) announce(m);
+      for (const m of [...missedAttach.values()]) announce(m);
+      missedAttach.clear();
+    });
+
     tab.on((msg: CdpMessage) => {
       if (ended || !msg.method) return;
-      if (lease.fence() === null) return; // Suspended: nothing reaches the agent.
+      // Suspended: nothing reaches the agent. The bookkeeping below still runs, or a frame
+      // that appeared during the takeover would be an unknown session for ever after.
+      const suspended = lease.fence() === null;
       if (msg.sessionId && (hiddenSessions.has(msg.sessionId) || !knownSessions.has(msg.sessionId))) return;
       const params = msg.params ?? {};
       if (msg.method === 'Target.attachedToTarget') {
@@ -224,12 +244,22 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
           return;
         }
         knownSessions.add(child);
+        if (suspended) {
+          // The agent can't resume it now, and the user's page needs it running.
+          if (waitingForDebugger) void tab.send('Runtime.runIfWaitingForDebugger', {}, child).catch(() => {});
+          missedAttach.set(child, { method: msg.method, params: { ...params, waitingForDebugger: false }, ...(msg.sessionId ? { sessionId: msg.sessionId } : {}) });
+          return;
+        }
       }
       if (msg.method === 'Target.detachedFromTarget') {
         const child = (params as { sessionId: string }).sessionId;
         if (hiddenSessions.delete(child)) return;
         knownSessions.delete(child);
+        // Came and went during the takeover: the agent never heard of it.
+        if (missedAttach.delete(child)) return;
+        if (suspended) { missedDetach.push({ method: msg.method, params, ...(msg.sessionId ? { sessionId: msg.sessionId } : {}) }); return; }
       }
+      if (suspended) return;
       const safe = filterEvent(msg.method, params, consent);
       if (safe === null) { droppedEvents.add(msg.method); return; }
       out({ method: msg.method, params: safe, sessionId: msg.sessionId ?? TAB_SESSION });

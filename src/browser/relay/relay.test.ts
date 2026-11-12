@@ -261,14 +261,19 @@ describe('a connection is pinned to the lease it started under', () => {
 });
 
 /** A tab that answers every command, except the methods it's told to hold until let go. */
-async function answeringTab(held: Set<string>): Promise<{ url: string; methods: string[]; release(): void; close(): void }> {
+async function answeringTab(held: Set<string>): Promise<{
+  url: string; methods: string[]; frames: { method: string; sessionId?: string }[]; emit(event: object): void; release(): void; close(): void;
+}> {
   const methods: string[] = [];
+  const frames: { method: string; sessionId?: string }[] = [];
+  const sockets: WebSocket[] = [];
   const waiting: (() => void)[] = [];
   let releasing = false;
   const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' });
-  wss.on('connection', (ws) => ws.on('message', (raw) => {
-    const { id, method } = JSON.parse(String(raw)) as { id: number; method: string };
+  wss.on('connection', (ws) => { sockets.push(ws); ws.on('message', (raw) => {
+    const { id, method, sessionId } = JSON.parse(String(raw)) as { id: number; method: string; sessionId?: string };
     methods.push(method);
+    frames.push({ method, ...(sessionId ? { sessionId } : {}) });
     const reply = (): void => {
       const result = method === 'Page.addScriptToEvaluateOnNewDocument' ? { identifier: `s${id}` }
         : method === 'Target.getTargetInfo' ? { targetInfo: { targetId: 't1', type: 'page', title: 't', url: 'https://a.test/inbox?q=WHERETHEUSERIS' } }
@@ -276,10 +281,11 @@ async function answeringTab(held: Set<string>): Promise<{ url: string; methods: 
       ws.send(JSON.stringify({ id, result }));
     };
     if (held.has(method) && !releasing) waiting.push(reply); else reply();
-  }));
+  }); });
   await new Promise((r) => wss.once('listening', r));
   return {
-    url: `ws://127.0.0.1:${(wss.address() as AddressInfo).port}/`, methods,
+    url: `ws://127.0.0.1:${(wss.address() as AddressInfo).port}/`, methods, frames,
+    emit: (event) => { for (const s of sockets) s.send(JSON.stringify(event)); },
     release: () => { releasing = true; for (const w of waiting.splice(0)) w(); },
     close: () => wss.close(),
   };
@@ -571,5 +577,106 @@ describe('asking where the tab is, while the user has it (Codex on e1bf934)', ()
       lease.revoke('done');
       await served;
     } finally { tab.close(); }
+  });
+});
+
+describe('child sessions while the user has the tab (Codex on 9b35690)', () => {
+  const attached = (sessionId: string, url: string, waitingForDebugger = true) => ({
+    method: 'Target.attachedToTarget',
+    params: { sessionId, waitingForDebugger, targetInfo: { targetId: `t-${sessionId}`, type: 'iframe', title: '', url, attached: true } },
+  });
+  const detached = (sessionId: string) => ({ method: 'Target.detachedFromTarget', params: { sessionId, targetId: `t-${sessionId}` } });
+  const onSession = (id: number, sessionId: string) => JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression: '1' }, sessionId });
+  const events = (out: string[], method: string) => out.map((s) => JSON.parse(s) as { method?: string; params?: { sessionId?: string; waitingForDebugger?: boolean } }).filter((m) => m.method === method);
+  const errorFor = (out: string[], id: number) => (out.map((s) => JSON.parse(s) as { id?: number; error?: { message: string } }).find((m) => m.id === id)?.error?.message);
+
+  async function serving() {
+    const tab = await answeringTab(new Set());
+    const { lease, relay, agent } = setup(tab.url);
+    const out = sent(agent);
+    const served = relay.serve(agent as unknown as WebSocket);
+    agent.emit('message', evaluate(1));
+    await vi.waitFor(() => expect(replied(out, 1)).toBe(true));
+    return { tab, lease, agent, out, served, done: async () => { lease.revoke('done'); await served; tab.close(); } };
+  }
+
+  it('a consented frame that attaches during the takeover runs, is not disclosed, and is usable after the hand-back', async () => {
+    const s = await serving();
+    s.lease.suspend();
+    s.tab.emit(attached('child-1', 'https://a.test/frame?where=USERWASHERE'));
+    await settle();
+    // The page needs it running, and the agent can't resume it now.
+    expect(s.tab.frames).toContainEqual({ method: 'Runtime.runIfWaitingForDebugger', sessionId: 'child-1' });
+    expect(events(s.out, 'Target.attachedToTarget')).toEqual([]);
+    expect(s.out.join()).not.toContain('USERWASHERE');
+    s.lease.handBack();
+    await vi.waitFor(() => expect(events(s.out, 'Target.attachedToTarget')).toHaveLength(1));
+    const told = events(s.out, 'Target.attachedToTarget')[0]!;
+    expect(told.params).toMatchObject({ sessionId: 'child-1', waitingForDebugger: false });
+    // And it's a session the agent can use: the bug was an unknown-session error here.
+    s.agent.emit('message', onSession(2, 'child-1'));
+    await vi.waitFor(() => expect(replied(s.out, 2)).toBe(true));
+    expect(errorFor(s.out, 2)).toBeUndefined();
+    expect(s.tab.frames).toContainEqual({ method: 'Runtime.evaluate', sessionId: 'child-1' });
+    await s.done();
+  });
+
+  it('a frame that came and went during the takeover is never mentioned', async () => {
+    const s = await serving();
+    s.lease.suspend();
+    s.tab.emit(attached('child-1', 'https://a.test/frame'));
+    s.tab.emit(detached('child-1'));
+    await settle();
+    s.lease.handBack();
+    await settle();
+    expect(events(s.out, 'Target.attachedToTarget')).toEqual([]);
+    expect(events(s.out, 'Target.detachedFromTarget')).toEqual([]);
+    s.agent.emit('message', onSession(2, 'child-1'));
+    await vi.waitFor(() => expect(errorFor(s.out, 2)).toContain('unknown session'));
+    await s.done();
+  });
+
+  it('a frame the agent knew that goes during the takeover is reported gone at the hand-back, before anything new', async () => {
+    const s = await serving();
+    s.tab.emit(attached('child-1', 'https://a.test/one', false));
+    await vi.waitFor(() => expect(events(s.out, 'Target.attachedToTarget')).toHaveLength(1));
+    s.lease.suspend();
+    s.tab.emit(detached('child-1'));
+    s.tab.emit(attached('child-2', 'https://a.test/two'));
+    await settle();
+    expect(events(s.out, 'Target.detachedFromTarget')).toEqual([]);
+    const before = s.out.length;
+    s.lease.handBack();
+    await vi.waitFor(() => expect(s.out.length).toBe(before + 2));
+    const order = s.out.slice(before).map((x) => (JSON.parse(x) as { method: string; params: { sessionId: string } })).map((m) => `${m.method}:${m.params.sessionId}`);
+    expect(order).toEqual(['Target.detachedFromTarget:child-1', 'Target.attachedToTarget:child-2']);
+    s.agent.emit('message', onSession(2, 'child-1'));
+    await vi.waitFor(() => expect(errorFor(s.out, 2)).toContain('unknown session'));
+    await s.done();
+  });
+
+  it('a frame on a site without consent stays hidden through a takeover and after it', async () => {
+    const s = await serving();
+    s.lease.suspend();
+    s.tab.emit(attached('child-x', 'https://elsewhere.test/frame'));
+    await settle();
+    expect(s.tab.frames).toContainEqual({ method: 'Runtime.runIfWaitingForDebugger', sessionId: 'child-x' });
+    s.lease.handBack();
+    await settle();
+    expect(events(s.out, 'Target.attachedToTarget')).toEqual([]);
+    s.agent.emit('message', onSession(2, 'child-x'));
+    await vi.waitFor(() => expect(errorFor(s.out, 2)).toContain('unknown session'));
+    await s.done();
+  });
+
+  it('a lease that ends during the takeover announces nothing', async () => {
+    const s = await serving();
+    s.lease.suspend();
+    s.tab.emit(attached('child-1', 'https://a.test/frame'));
+    await settle();
+    s.lease.revoke('user revoked');
+    await s.served;
+    expect(events(s.out, 'Target.attachedToTarget')).toEqual([]);
+    s.tab.close();
   });
 });

@@ -8,7 +8,7 @@ import {
   type ApprovalPayload, type GrantPayload, type Identity, type NonceStore, type Signed,
   StoreOutcomeUnknown, StoreUnavailable, createDeviceApprovals, createIdentity, createMemoryNonceStore, signHello,
 } from './capability.js';
-import { type ClaimReply, type ControlFrame, RelayRefused, type RelayHub, authenticateControl, createRelayHub } from './hub.js';
+import { type ClaimReply, type ControlFrame, PENDING_BYTES_MAX, RelayRefused, type RelayHub, authenticateControl, createRelayHub } from './hub.js';
 
 const scope = { tabTargetId: 'tab-1', allowedOrigins: ['https://ok.test'], privateOrigins: [] };
 const closers: (() => void)[] = [];
@@ -430,5 +430,66 @@ describe('who is on a control connection', () => {
     const replay = await raw(w, () => captured);
     expect(replay.code).toBe(1008);
     expect(w.hub.deviceOnline('user-a', 'device-a')).toBe(false);
+  });
+});
+
+describe('what waits for the run to connect is bounded in bytes (council review on 71cc8a1)', () => {
+  it('a few small frames wait, and are counted', async () => {
+    const w = await world();
+    const { run } = await leased(w);
+    run.send('x'.repeat(1000)); run.send('y'.repeat(1000));
+    await vi.waitFor(() => expect(w.hub.waitingBytes()).toBe(2000));
+  });
+
+  it('one frame over the limit ends the lease, and nothing of it is kept', async () => {
+    const w = await world();
+    const { run, browser } = await leased(w);
+    run.send('x'.repeat(PENDING_BYTES_MAX + 1));
+    expect(await browser.closed).toBe('the device sent too much before the run connected');
+    await closedWith(run);
+    expect(w.hub.waitingBytes()).toBe(0);
+  });
+
+  it('frames that cross the limit together end the lease, with what was held released', async () => {
+    const w = await world();
+    const { run, browser } = await leased(w);
+    const chunk = 'x'.repeat(Math.floor(PENDING_BYTES_MAX / 4));
+    let peak = 0;
+    const watch = setInterval(() => { peak = Math.max(peak, w.hub.waitingBytes()); }, 1);
+    for (let i = 0; i < 8; i++) run.send(chunk);
+    expect(await browser.closed).toBe('the device sent too much before the run connected');
+    clearInterval(watch);
+    expect(peak).toBeLessThanOrEqual(PENDING_BYTES_MAX);
+    expect(w.hub.waitingBytes()).toBe(0);
+    // The token died with the lease.
+    expect(await closedWith(await w.open(`/agent/${browser.token}`))).toBe(1008);
+  });
+
+  it('many small frames end the lease at the frame limit, well under the byte limit', async () => {
+    const w = await world();
+    const { run, browser } = await leased(w);
+    for (let i = 0; i < 300; i++) run.send('x');
+    expect(await browser.closed).toBe('the device sent too much before the run connected');
+    expect(w.hub.waitingBytes()).toBe(0);
+  });
+
+  it('with no agent ever attaching, what is held stays bounded until the lease is taken back', async () => {
+    const w = await world({ agentAttachTimeoutMs: 150 });
+    const { run, browser } = await leased(w);
+    run.send('x'.repeat(PENDING_BYTES_MAX - 10));
+    await vi.waitFor(() => expect(w.hub.waitingBytes()).toBe(PENDING_BYTES_MAX - 10));
+    expect(await browser.closed).toBe('the run never connected');
+    expect(w.hub.waitingBytes()).toBe(0);
+  });
+
+  it('once the run is connected, frames pass straight through and nothing is held', async () => {
+    const w = await world();
+    const { run, browser } = await leased(w);
+    const agent = await w.open(`/agent/${browser.token}`);
+    const big = 'x'.repeat(PENDING_BYTES_MAX * 2);
+    const got = next(agent);
+    run.send(big);
+    expect((await got).length).toBe(big.length);
+    expect(w.hub.waitingBytes()).toBe(0);
   });
 });

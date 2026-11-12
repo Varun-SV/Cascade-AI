@@ -339,3 +339,82 @@ describe('a teardown hold keeps the tab until it is done', () => {
     expect(lease.state()).toBe('idle');
   });
 });
+
+describe('the deadline is checked where the fence is, not only by a timer (Codex on 9b35690)', () => {
+  /** A clock whose timers never run: what a burst of commands with no yield looks like. */
+  function stuckClock(start = 1000) {
+    let t = start;
+    const clock: LeaseClock = { now: () => t, setTimer: () => () => {} };
+    return { clock, advance: (ms: number) => { t += ms; } };
+  }
+
+  it('past the deadline there is no fence, the old one is not current, and the lease has ended', () => {
+    const c = stuckClock();
+    const lease = createTabLease(c.clock);
+    const why: string[] = [];
+    lease.onChange((reason) => why.push(reason));
+    const fence = lease.promote(lease.reserve()!, { expiresAt: 2000 })!;
+    c.advance(999);
+    expect(lease.isCurrent(fence)).toBe(true);
+    expect(lease.fence()).not.toBeNull();
+    c.advance(1);
+    expect(lease.isCurrent(fence)).toBe(false);
+    expect(lease.fence()).toBeNull();
+    expect(lease.generation()).toBeNull();
+    expect(lease.state()).toBe('idle');
+    expect(why).toEqual(['capability expired']);
+  });
+
+  it('a command queued before the deadline and reaching the write after it is not written', async () => {
+    const c = stuckClock();
+    const lease = createTabLease(c.clock);
+    lease.promote(lease.reserve()!, { expiresAt: 2000 });
+    const written: number[] = [];
+    let letGo!: () => void;
+    const barrier = new Promise<void>((r) => { letGo = r; });
+    const forwarder = createFencedForwarder<number, string>(lease, { beforeForward: () => barrier, write: (n) => { written.push(n); } });
+    const sent = forwarder.dispatch(1, 1);
+    c.advance(1001);
+    letGo();
+    await expect(sent).rejects.toBeInstanceOf(CommandFenced);
+    expect(written).toEqual([]);
+    // And nothing new is accepted.
+    await expect(forwarder.dispatch(2, 2)).rejects.toBeInstanceOf(CommandFenced);
+    expect(written).toEqual([]);
+  });
+
+  it('a suspended lease expires too, and cannot be handed back afterwards', () => {
+    const c = stuckClock();
+    const lease = createTabLease(c.clock);
+    lease.promote(lease.reserve()!, { expiresAt: 2000 });
+    lease.suspend();
+    c.advance(2000);
+    expect(lease.state()).toBe('idle');
+    lease.handBack();
+    expect(lease.fence()).toBeNull();
+  });
+
+  it('a reply to a command written before the deadline is dropped after it', async () => {
+    const c = stuckClock();
+    const lease = createTabLease(c.clock);
+    lease.promote(lease.reserve()!, { expiresAt: 2000 });
+    const forwarder = createFencedForwarder<number, string>(lease, { write: () => {} });
+    const sent = forwarder.dispatch(1, 1);
+    await Promise.resolve();
+    c.advance(1001);
+    forwarder.deliver(1, 'a reply');
+    await expect(sent).rejects.toBeInstanceOf(CommandFenced);
+  });
+
+  it('with the holder of a teardown hold, an expired lease is ending, not free', () => {
+    const c = stuckClock();
+    const lease = createTabLease(c.clock);
+    lease.promote(lease.reserve()!, { expiresAt: 2000 });
+    const release = lease.holdTeardown()!;
+    c.advance(1001);
+    expect(lease.state()).toBe('ending');
+    expect(lease.reserve()).toBeNull();
+    release();
+    expect(lease.state()).toBe('idle');
+  });
+});

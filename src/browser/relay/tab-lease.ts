@@ -68,12 +68,18 @@ export function createTabLease(clock: LeaseClock = systemClock): TabLease {
   let reservation: Reservation | null = null;
   let nextReservation = 1;
   let cancelExpiry: (() => void) | null = null;
+  let expiresAt: number | null = null;
   let holds = 0;
   const listeners: ((reason: string, s: LeaseState) => void)[] = [];
   const changed = (reason: string): void => { epoch += 1; for (const fn of listeners) fn(reason, state); };
 
+  /** Checked synchronously wherever the fence is: past the deadline, the lease is over now. */
+  const expireIfDue = (): void => {
+    if (expiresAt !== null && (state === 'held' || state === 'suspended') && clock.now() >= expiresAt) lease.revoke('capability expired');
+  };
+
   const lease: TabLease = {
-    state: () => state,
+    state: () => { expireIfDue(); return state; },
     reserve() {
       if (state !== 'idle') return null;
       state = 'reserved';
@@ -85,18 +91,21 @@ export function createTabLease(clock: LeaseClock = systemClock): TabLease {
       reservation = null;
       state = 'idle';
     },
-    promote(r, { expiresAt }) {
+    promote(r, { expiresAt: deadline }) {
       if (reservation !== r || state !== 'reserved') return null;
       reservation = null;
       state = 'held';
       generation += 1;
       epoch += 1;
-      cancelExpiry = clock.setTimer(() => lease.revoke('capability expired'), Math.max(0, expiresAt - clock.now()));
+      expiresAt = deadline;
+      // The timer ends a lease nobody is using. It can't be the only check: it runs when
+      // JavaScript next yields, and a burst of commands crossing the deadline doesn't yield.
+      cancelExpiry = clock.setTimer(() => lease.revoke('capability expired'), Math.max(0, deadline - clock.now()));
       return { generation, epoch };
     },
-    fence: () => (state === 'held' ? { generation, epoch } : null),
-    generation: () => (state === 'held' || state === 'suspended' ? generation : null),
-    isCurrent: (f) => state === 'held' && f.generation === generation && f.epoch === epoch,
+    fence: () => { expireIfDue(); return state === 'held' ? { generation, epoch } : null; },
+    generation: () => { expireIfDue(); return state === 'held' || state === 'suspended' ? generation : null; },
+    isCurrent: (f) => { expireIfDue(); return state === 'held' && f.generation === generation && f.epoch === epoch; },
     suspend() {
       if (state !== 'held') return;
       state = 'suspended';
@@ -112,6 +121,7 @@ export function createTabLease(clock: LeaseClock = systemClock): TabLease {
       state = holds > 0 ? 'ending' : 'idle';
       cancelExpiry?.();
       cancelExpiry = null;
+      expiresAt = null;
       changed(reason);
     },
     holdTeardown() {

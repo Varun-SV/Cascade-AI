@@ -78,6 +78,21 @@ describe('the page step of a revoke always finishes, and ends the tab', () => {
     expect(closed(browser)).toEqual(['sw', 'shw', TAB]);
     expect(tab.calls).toEqual([]);
   });
+  it.each(['net::ERR_ABORTED', 'net::ERR_FAILED'])('blank: a navigation that answers with %s did not happen, so the tab is closed instead', async (errorText) => {
+    const browser = cdp();
+    const tab = cdp({ 'Page.navigate': { frameId: 'f', errorText } });
+    expect(await endPageActivity(tab, browser, TAB, 'blank', OWNED, 20)).toBe(true);
+    expect(closed(browser)).toEqual([TAB]);
+  });
+  it('blank: a navigation that answers with an error, and a tab that then will not close, is not confirmed', async () => {
+    const tab = cdp({ 'Page.navigate': { errorText: 'net::ERR_ABORTED' } });
+    expect(await endPageActivity(tab, cdp({ 'Target.closeTarget': 'fail' }), TAB, 'blank', OWNED, 20)).toBe(false);
+  });
+  it('blank: a clean answer with no errorText leaves the tab open', async () => {
+    const browser = cdp();
+    expect(await endPageActivity(cdp({ 'Page.navigate': { frameId: 'f', loaderId: 'l' } }), browser, TAB, 'blank', OWNED, 20)).toBe(true);
+    expect(closed(browser)).toEqual([]);
+  });
   it.each(['hang', 'fail'] as const)('blank: a navigation that will %s closes the tab instead', async (how) => {
     const browser = cdp();
     expect(await endPageActivity(cdp({ 'Page.navigate': how }), browser, TAB, 'blank', OWNED, 20)).toBe(true);

@@ -121,7 +121,13 @@ export async function endPageActivity(
   // Only workers this lease saw start. Anything else in the browser isn't its to close.
   const workers = targets.filter((t) => (t.type === 'service_worker' || t.type === 'shared_worker') && ownedWorkers.has(t.targetId));
   await Promise.all(workers.map((t) => settlesWithin(browser.send('Target.closeTarget', { targetId: t.targetId }), timeoutMs)));
-  if (mode === 'blank' && await settlesWithin(tab.send('Page.navigate', { url: 'about:blank' }), timeoutMs)) return true;
+  // A navigation that didn't happen still answers: `Page.navigate` resolves with an
+  // `errorText` (a competing navigation aborts it, say) rather than rejecting. Taking that
+  // for success would leave the old document running, so only a clean answer counts.
+  const blanked = (): Promise<void> => tab.send('Page.navigate', { url: 'about:blank' }).then((r) => {
+    if (typeof r?.errorText === 'string' && r.errorText !== '') throw new Error(r.errorText);
+  });
+  if (mode === 'blank' && await settlesWithin(blanked(), timeoutMs)) return true;
   return settlesWithin(browser.send('Target.closeTarget', { targetId: tabTargetId }), timeoutMs);
 }
 

@@ -35,8 +35,12 @@ const HELLO_TIMEOUT_MS = 10_000;
 const AGENT_ATTACH_TIMEOUT_MS = 30_000;
 /** A claim is two signed objects. Anything bigger isn't one. */
 const CLAIM_FRAME_MAX_BYTES = 64 * 1024;
-/** What may wait for the agent to attach. The device only answers, so this is normally nothing. */
+/**
+ * What may wait for the agent to attach, in frames and in bytes. The device only answers,
+ * so this is normally nothing. A count alone is no bound: one frame can be very large.
+ */
 const PENDING_FRAMES_MAX = 256;
+export const PENDING_BYTES_MAX = 1024 * 1024;
 
 export type ControlFrame =
   | { v: 1; t: 'challenge'; serverId: string; challenge: string }
@@ -90,6 +94,8 @@ export interface RelayHub {
   deviceOnline(userId: string, deviceId: string): boolean;
   /** Logout, token rotation, device unregistered: its control connection and every lease it serves end. */
   dropDevice(deviceId: string, reason: string): void;
+  /** Bytes held for agents that haven't attached yet, across every lease. For tests and metrics. */
+  waitingBytes(): number;
   /** A run ended: whatever it was offered or holds ends with it. */
   endRun(runId: string, reason: string): void;
   close(): void;
@@ -110,6 +116,7 @@ interface Session {
   agent: WebSocket | null;
   token: string | null;
   waiting: string[];
+  waitingBytes: number;
   timers: NodeJS.Timeout[];
   end(reason: string): void;
 }
@@ -234,12 +241,14 @@ export function createRelayHub(opts: RelayHubOptions): RelayHub {
     let finish!: (reason: string) => void;
     const closedPromise = new Promise<string>((r) => { finish = r; });
     const session: Session = {
-      run: p.run, device, agent: null, token, waiting: [], timers: [],
+      run: p.run, device, agent: null, token, waiting: [], waitingBytes: 0, timers: [],
       end(reason) {
         if (over) return;
         over = true;
         for (const t of session.timers) clearTimeout(t);
         sessions.delete(session);
+        session.waiting.length = 0;
+        session.waitingBytes = 0;
         if (session.token) byToken.delete(session.token);
         shut(device, 1000, reason);
         if (session.agent) shut(session.agent, 1000, reason);
@@ -253,10 +262,15 @@ export function createRelayHub(opts: RelayHubOptions): RelayHub {
     session.timers.push(setTimeout(() => { if (!session.agent) session.end('the run never connected'); }, agentAttachTimeoutMs));
     device.on('message', (raw) => {
       if (over) return;
-      const frame = String(raw);
-      if (session.agent) { if (session.agent.readyState === OPEN) session.agent.send(frame); return; }
-      if (session.waiting.length >= PENDING_FRAMES_MAX) { session.end('the device sent too much before the run connected'); return; }
-      session.waiting.push(frame);
+      if (session.agent) { if (session.agent.readyState === OPEN) session.agent.send(String(raw)); return; }
+      // Measured before it is copied into a string, and before it is kept.
+      const size = Array.isArray(raw) ? raw.reduce((n, b) => n + b.byteLength, 0) : (raw as { byteLength: number }).byteLength;
+      if (session.waiting.length >= PENDING_FRAMES_MAX || session.waitingBytes + size > PENDING_BYTES_MAX) {
+        session.end('the device sent too much before the run connected');
+        return;
+      }
+      session.waitingBytes += size;
+      session.waiting.push(String(raw));
     });
     device.on('close', () => session.end('the device disconnected'));
     device.on('error', () => session.end('the device connection failed'));
@@ -327,6 +341,7 @@ export function createRelayHub(opts: RelayHubOptions): RelayHub {
     session.token = null;
     session.agent = socket;
     for (const frame of session.waiting.splice(0)) socket.send(frame);
+    session.waitingBytes = 0;
     socket.on('message', (raw) => { if (session.device.readyState === OPEN) session.device.send(String(raw)); });
     socket.on('close', () => session.end('the run disconnected'));
     socket.on('error', () => session.end('the run connection failed'));
@@ -352,6 +367,7 @@ export function createRelayHub(opts: RelayHubOptions): RelayHub {
 
   return {
     attachDevice, attachRun, attachAgent, requestBrowser,
+    waitingBytes: () => [...sessions].reduce((n, s) => n + s.waitingBytes, 0),
     deviceOnline: (userId, deviceId) => {
       const c = controls.get(deviceId);
       return !!c && c.userId === userId && c.socket.readyState === OPEN;
