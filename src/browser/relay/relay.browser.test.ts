@@ -122,6 +122,8 @@ async function startRig(opts: {
   relayConsent?: Consent;
   /** For controls: a profile with none of the launch's preferences. */
   bareProfile?: boolean;
+  /** For one suite: how the policy's own connections are made, so a test can drop one. */
+  policyConnect?: typeof connectCdp;
 } = {}): Promise<Rig> {
   const script = (res: http.ServerResponse, extra = ''): boolean => { res.setHeader('content-type', 'text/javascript'); res.end(WORKER_JS + extra); return true; };
   const redirect = (res: http.ServerResponse, to: string): boolean => { res.statusCode = 302; res.setHeader('location', to); res.end(); return true; };
@@ -214,7 +216,7 @@ async function startRig(opts: {
     ...(bareDir ? { bareProfileDir: bareDir } : {}),
   });
   await opts.beforePolicy?.(browser);
-  const enforcer = await startRequestPolicy({ browser, consent });
+  const enforcer = await startRequestPolicy({ browser, consent, ...(opts.policyConnect ? { connect: opts.policyConnect } : {}) });
   const lease = createTabLease();
   proxy.onClose(() => lease.revoke('egress-proxy-down'));
   lease.promote(lease.reserve()!, { expiresAt: Date.now() + 600_000 });
@@ -714,6 +716,57 @@ suite('fail closed when the proxy is unavailable', { timeout: 60_000 }, () => {
     raw.close();
     expect(r.priv.accepts).toBe(0);
   });
+});
+
+suite("the policy's own connection dropping while the browser runs", { timeout: 60_000 }, () => {
+  // The policy's two connections, in the order it makes them: the tab's, then the browser's.
+  const droppable = () => {
+    const made: Awaited<ReturnType<typeof connectCdp>>[] = [];
+    const policyConnect: typeof connectCdp = async (u) => { const c = await connectCdp(u); made.push(c); return c; };
+    return { made, policyConnect };
+  };
+  // What only the request policy stops: a document from a public site without consent.
+  // The proxy alone lets it through, so with the policy gone this is what would get out.
+  const addFrame = (path: string) => `(() => { const f = document.createElement('iframe'); f.src = 'http://offlist.test${path}?' + Math.random(); document.body.append(f); })()`;
+  const frameHits = (r: Rig) => r.offlist.hits.filter((h) => h.includes('/frame-'));
+
+  it('control: with the policy on, an off-list frame is stopped by the policy and never sent', async () => {
+    const r = await startRig();
+    await r.page.evaluate(addFrame('/frame-control'));
+    await sleep(400);
+    expect(frameHits(r)).toEqual([]);
+    expect(r.enforcer.decisions.some((d) => !d.allowed && d.resourceType === 'Document' && d.url.includes('/frame-control'))).toBe(true);
+  });
+
+  for (const [name, index] of [['tab', 0], ['browser', 1]] as const) {
+    it(`the ${name} connection: egress shuts, the lease ends, and no off-list frame is ever sent`, async () => {
+      const d = droppable();
+      const r = await startRig({ policyConnect: d.policyConnect });
+      expect(d.made).toHaveLength(2);
+      // Page script that keeps going by itself: every 20 ms it asks the consented site
+      // for something and adds an off-list frame.
+      const page = await connectCdp(r.browser.tabWs);
+      await page.send('Runtime.evaluate', { expression: `setInterval(() => { fetch('/tick').catch(() => {}); ${addFrame('/frame-after-loss')}; }, 20); 0` });
+      await sleep(200);
+      expect(r.allowed.hits.some((h) => h.includes('/tick'))).toBe(true);
+
+      d.made[index]!.close();
+      await r.serving;
+      expect(r.lease.state()).toBe('idle');
+      expect(r.relay.refusals.join()).toContain('request policy lost its connection');
+      // Let anything already on the wire land; after that nothing more may arrive anywhere.
+      await sleep(300);
+      const allowedAfter = r.allowed.hits.length;
+      const offlistAfter = r.offlist.hits.length;
+      const dialsAfter = r.dials.length;
+      await sleep(600);
+      expect(r.allowed.hits.length).toBe(allowedAfter);
+      expect(r.offlist.hits.length).toBe(offlistAfter);
+      expect(r.dials.length).toBe(dialsAfter);
+      expect(frameHits(r)).toEqual([]);
+      page.close();
+    });
+  }
 });
 
 suite('no-leak markers: nothing forbidden reaches the agent', { timeout: 60_000 }, () => {

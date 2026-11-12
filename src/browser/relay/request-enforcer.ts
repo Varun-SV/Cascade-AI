@@ -127,6 +127,8 @@ export async function endPageActivity(
 
 export async function startRequestPolicy(opts: {
   browser: LaunchedBrowser; consent: Consent;
+  /** Test seam only: how the policy's own connections are made, so a test can drop one. */
+  connect?: typeof connectCdp;
 }): Promise<RequestEnforcer> {
   const { consent } = opts;
   const { browserWs, tabWs, tabTargetId } = opts.browser;
@@ -145,8 +147,9 @@ export async function startRequestPolicy(opts: {
   let closing = false;
   let policyLost = false;
   let foreignDocument = false;
-  const tab = await connectCdp(tabWs);
-  const browser = await connectCdp(browserWs);
+  const connect = opts.connect ?? connectCdp;
+  const tab = await connect(tabWs);
+  const browser = await connect(browserWs);
 
   const before = (((await browser.send('Target.getTargets')) as { targetInfos?: { targetId: string; type: string; url: string }[] }).targetInfos ?? [])
     .filter((t) => !isBrowserOwnUi(t));

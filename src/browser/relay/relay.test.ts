@@ -270,7 +270,9 @@ async function answeringTab(held: Set<string>): Promise<{ url: string; methods: 
     const { id, method } = JSON.parse(String(raw)) as { id: number; method: string };
     methods.push(method);
     const reply = (): void => {
-      const result = method === 'Page.addScriptToEvaluateOnNewDocument' ? { identifier: `s${id}` } : { result: { type: 'number', value: 1 } };
+      const result = method === 'Page.addScriptToEvaluateOnNewDocument' ? { identifier: `s${id}` }
+        : method === 'Target.getTargetInfo' ? { targetInfo: { targetId: 't1', type: 'page', title: 't', url: 'https://a.test/inbox?q=WHERETHEUSERIS' } }
+        : { result: { type: 'number', value: 1 } };
       ws.send(JSON.stringify({ id, result }));
     };
     if (held.has(method) && !releasing) waiting.push(reply); else reply();
@@ -488,6 +490,86 @@ describe('findings from Codex on 37e54b3', () => {
       await served;
       expect(lease.state()).toBe('idle');
       expect(relay.refusals.join()).toContain('request policy lost its connection');
+    } finally { tab.close(); }
+  });
+});
+
+const autoAttach = (id: number) => JSON.stringify({ id, method: 'Target.setAutoAttach', params: { autoAttach: true, waitForDebuggerOnStart: true, flatten: true } });
+const attachments = (out: string[]) => out.filter((s) => (JSON.parse(s) as { method?: string }).method === 'Target.attachedToTarget');
+const errored = (out: string[], id: number) => out.some((s) => { const m = JSON.parse(s) as { id?: number; error?: unknown }; return m.id === id && m.error !== undefined; });
+
+describe('asking where the tab is, while the user has it (Codex on e1bf934)', () => {
+  it('control: under a held lease, the query is answered and names the current URL', async () => {
+    const tab = await answeringTab(new Set());
+    try {
+      const { lease, relay, agent } = setup(tab.url);
+      const out = sent(agent);
+      const served = relay.serve(agent as unknown as WebSocket);
+      agent.emit('message', autoAttach(1));
+      await vi.waitFor(() => expect(attachments(out)).toHaveLength(1));
+      expect(attachments(out)[0]).toContain('WHERETHEUSERIS');
+      lease.revoke('done');
+      await served;
+    } finally { tab.close(); }
+  });
+
+  it('suspended: the query is refused, the tab is not asked, and nothing names the URL', async () => {
+    const tab = await answeringTab(new Set());
+    try {
+      const { lease, relay, agent } = setup(tab.url);
+      const out = sent(agent);
+      const served = relay.serve(agent as unknown as WebSocket);
+      agent.emit('message', evaluate(1));
+      await vi.waitFor(() => expect(replied(out, 1)).toBe(true));
+      lease.suspend();
+      const before = tab.methods.length;
+      for (const id of [2, 3, 4]) agent.emit('message', autoAttach(id));
+      await settle();
+      expect(lease.state()).toBe('suspended');
+      for (const id of [2, 3, 4]) expect(errored(out, id)).toBe(true);
+      expect(tab.methods.slice(before)).toEqual([]);
+      expect(out.join()).not.toContain('WHERETHEUSERIS');
+      lease.revoke('done');
+      await served;
+    } finally { tab.close(); }
+  });
+
+  for (const [name, change] of [['a suspend', (l: ReturnType<typeof createTabLease>) => l.suspend()], ['a revoke', (l: ReturnType<typeof createTabLease>) => l.revoke('user revoked')]] as const) {
+    it(`an answer still on its way at ${name} never reaches the agent`, async () => {
+      const tab = await answeringTab(new Set(['Target.getTargetInfo']));
+      try {
+        const { lease, relay, agent } = setup(tab.url);
+        const out = sent(agent);
+        const served = relay.serve(agent as unknown as WebSocket);
+        agent.emit('message', autoAttach(1));
+        await vi.waitFor(() => expect(tab.methods).toContain('Target.getTargetInfo'));
+        change(lease);
+        tab.release();
+        await settle();
+        expect(attachments(out)).toEqual([]);
+        expect(out.join()).not.toContain('WHERETHEUSERIS');
+        lease.revoke('done');
+        await served;
+      } finally { tab.close(); }
+    });
+  }
+
+  it('after a hand-back the query works again', async () => {
+    const tab = await answeringTab(new Set());
+    try {
+      const { lease, relay, agent } = setup(tab.url);
+      const out = sent(agent);
+      const served = relay.serve(agent as unknown as WebSocket);
+      await settle();
+      lease.suspend();
+      agent.emit('message', autoAttach(1));
+      await settle();
+      expect(attachments(out)).toEqual([]);
+      lease.handBack();
+      agent.emit('message', autoAttach(2));
+      await vi.waitFor(() => expect(attachments(out)).toHaveLength(1));
+      lease.revoke('done');
+      await served;
     } finally { tab.close(); }
   });
 });

@@ -589,7 +589,17 @@ stage. The unused library adds no production overhead in stage 1.
   lease. This happened in a real test: a 32 MB upload's paused-request event overran the default
   100 MiB WebSocket frame limit and dropped the tab connection. Before this fix, the page then went on
   unpoliced. The limit is now 512 MiB. A larger body still drops the connection, and now ends the lease.
-  No browser test forces the drop on purpose; `relay.test.ts` covers the relay's side.
+  `relay.test.ts` covers the relay's side. The browser suite forces the drop of each connection in
+  turn, through a test seam on how the policy connects, while page script keeps adding off-list
+  frames: the lease ends, and no frame and nothing else reaches any server afterwards. With the watch
+  disabled, both tests fail. Measured before the fix with the 32 MB upload: the lease stayed `held`
+  and 359 off-list frame documents reached the server.
+- **Asking where the tab is goes through the fence (Codex, 12 Nov).** The browser-level
+  `Target.setAutoAttach` asks the tab for its target info and sends the agent an attachment event
+  naming the current URL. It bypassed the fence, so during a human takeover the agent could keep
+  reading where the user was on a consented site. It's now refused while the lease is suspended, and
+  an answer that comes back after a suspend or revoke is dropped. With the old `relay.ts`, 4 of its
+  5 tests fail; the fifth is the control.
 - **One connection per lease (Codex, 12 Nov).** A second connection for a lease already being served
   is refused without touching that lease.
 - **A script registration still unanswered at a revoke** means the page step closes the tab, since its

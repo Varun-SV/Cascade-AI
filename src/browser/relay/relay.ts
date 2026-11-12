@@ -247,15 +247,25 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
         case 'Target.getTargetInfo':
           out({ id: f.id, result: { targetInfo: (targetInfo && filterTargetInfo(targetInfo, consent)) ?? { targetId: 'browser', type: 'browser', url: '', attached: true } } });
           return;
-        case 'Target.setAutoAttach':
+        case 'Target.setAutoAttach': {
+          // This asks the tab where it is, and its answer names the current URL. So it's
+          // fenced like any forwarded command: refused while the lease is suspended for the
+          // user, and an answer that comes back after the fence changed is dropped.
+          const fence = lease.fence();
+          if (!fence || fence.generation !== generation) {
+            out({ id: f.id, error: { code: -32000, message: 'Denied by Cascade relay: the lease is not active' } });
+            return;
+          }
           out({ id: f.id, result: {} });
           void tab.send('Target.getTargetInfo').then((r) => {
+            if (ended || !lease.isCurrent(fence)) return;
             const info = (r as { targetInfo: Record<string, unknown> }).targetInfo;
             targetInfo = { ...info, attached: true, browserContextId: 'cascade-default' };
             const safe = filterEvent('Target.attachedToTarget', { sessionId: TAB_SESSION, targetInfo, waitingForDebugger: false }, consent);
             if (safe) out({ method: 'Target.attachedToTarget', params: safe });
           }).catch(() => end('the tab went away'));
           return;
+        }
         default:
           out({ id: f.id, error: { code: -32601, message: `Relay: browser-level ${f.method} not supported` } });
       }

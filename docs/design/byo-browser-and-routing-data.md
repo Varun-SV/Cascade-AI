@@ -755,6 +755,12 @@ cascadeai.in, so the extension can't reach a self-hosted server as written. The 
 adds their server's address in the extension and approves it by name; a site must
 never be able to connect itself.
 
+**Decided by Varun (12 Nov): the remaining stages are completed in PR #338,**
+not one PR per stage. This replaces the 21 Oct decision below for stages 2 to 4.
+The goal he stated: cascadeai.in runs with no hosted browser, and any user can
+bring their own Chrome through the extension. Each stage still lands as its own
+commits with its own tests, behind its flag, and is reviewed from its diff.
+
 Independent review happens per stage, from the diff and tests rather than
 the implementer's summary. The maintainer decided (21 Oct 2026) that PR #316
 carries this design, the prototypes and stage 0, and **each later stage gets
