@@ -41,6 +41,11 @@ const CLAIM_FRAME_MAX_BYTES = 64 * 1024;
  */
 const PENDING_FRAMES_MAX = 256;
 export const PENDING_BYTES_MAX = 1024 * 1024;
+/**
+ * How much may be queued towards a side that isn't reading. Past it the lease ends:
+ * a relay that kept queuing would hold whatever a busy page or a slow link produced.
+ */
+const OUTBOUND_BYTES_MAX = 32 * 1024 * 1024;
 
 export type ControlFrame =
   | { v: 1; t: 'challenge'; serverId: string; challenge: string }
@@ -80,6 +85,8 @@ export interface RelayHubOptions {
   now?: () => number;
   offerTimeoutMs?: number;
   agentAttachTimeoutMs?: number;
+  /** How much may be queued towards a side that isn't reading, before the lease ends. */
+  outboundLimitBytes?: number;
 }
 
 export interface RelayHub {
@@ -186,6 +193,14 @@ export function createRelayHub(opts: RelayHubOptions): RelayHub {
   const now = opts.now ?? Date.now;
   const offerTimeoutMs = opts.offerTimeoutMs ?? OFFER_TIMEOUT_MS;
   const agentAttachTimeoutMs = opts.agentAttachTimeoutMs ?? AGENT_ATTACH_TIMEOUT_MS;
+  const outboundLimit = opts.outboundLimitBytes ?? OUTBOUND_BYTES_MAX;
+  /** Forwards one frame, unless the far side has stopped reading: then the lease ends. */
+  const pipe = (session: Session, to: WebSocket, raw: unknown, slow: string): void => {
+    if (to.readyState !== OPEN) return;
+    const size = Array.isArray(raw) ? raw.reduce((n: number, b: { byteLength: number }) => n + b.byteLength, 0) : (raw as { byteLength: number }).byteLength;
+    if (to.bufferedAmount + size > outboundLimit) { session.end(slow); return; }
+    to.send(String(raw));
+  };
   const controls = new Map<string, { userId: string; socket: WebSocket }>();
   const pending = new Map<string, Pending>();
   const sessions = new Set<Session>();
@@ -262,7 +277,7 @@ export function createRelayHub(opts: RelayHubOptions): RelayHub {
     session.timers.push(setTimeout(() => { if (!session.agent) session.end('the run never connected'); }, agentAttachTimeoutMs));
     device.on('message', (raw) => {
       if (over) return;
-      if (session.agent) { if (session.agent.readyState === OPEN) session.agent.send(String(raw)); return; }
+      if (session.agent) { pipe(session, session.agent, raw, 'the run was not reading what the device sent'); return; }
       // Measured before it is copied into a string, and before it is kept.
       const size = Array.isArray(raw) ? raw.reduce((n, b) => n + b.byteLength, 0) : (raw as { byteLength: number }).byteLength;
       if (session.waiting.length >= PENDING_FRAMES_MAX || session.waitingBytes + size > PENDING_BYTES_MAX) {
@@ -342,7 +357,7 @@ export function createRelayHub(opts: RelayHubOptions): RelayHub {
     session.agent = socket;
     for (const frame of session.waiting.splice(0)) socket.send(frame);
     session.waitingBytes = 0;
-    socket.on('message', (raw) => { if (session.device.readyState === OPEN) session.device.send(String(raw)); });
+    socket.on('message', (raw) => pipe(session, session.device, raw, 'the device was not reading what the run sent'));
     socket.on('close', () => session.end('the run disconnected'));
     socket.on('error', () => session.end('the run connection failed'));
     return true;

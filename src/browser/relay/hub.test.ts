@@ -15,7 +15,7 @@ const closers: (() => void)[] = [];
 afterEach(() => { for (const c of closers.splice(0)) c(); });
 
 /** The hub behind a real server, routed the way the cloud server routes it. */
-async function world(over: { store?: NonceStore; offerTimeoutMs?: number; agentAttachTimeoutMs?: number; now?: () => number } = {}) {
+async function world(over: { store?: NonceStore; offerTimeoutMs?: number; agentAttachTimeoutMs?: number; now?: () => number; outboundLimitBytes?: number } = {}) {
   const server = createIdentity('server');
   const keys = new Map<string, Identity>();
   /** The server's own record of whose device each is. */
@@ -26,6 +26,7 @@ async function world(over: { store?: NonceStore; offerTimeoutMs?: number; agentA
     ...(over.now ? { now: over.now } : {}),
     ...(over.offerTimeoutMs ? { offerTimeoutMs: over.offerTimeoutMs } : {}),
     ...(over.agentAttachTimeoutMs ? { agentAttachTimeoutMs: over.agentAttachTimeoutMs } : {}),
+    ...(over.outboundLimitBytes ? { outboundLimitBytes: over.outboundLimitBytes } : {}),
   });
   const httpServer = http.createServer();
   const wss = new WebSocketServer({ server: httpServer });
@@ -491,5 +492,49 @@ describe('what waits for the run to connect is bounded in bytes (council review 
     run.send(big);
     expect((await got).length).toBe(big.length);
     expect(w.hub.waitingBytes()).toBe(0);
+  });
+});
+
+describe('a side that stops reading does not make the server queue without limit (Codex on d144a3d)', () => {
+  const stopReading = (ws: WebSocket) => (ws as unknown as { _socket: { pause(): void } })._socket.pause();
+  const chunk = 'x'.repeat(256 * 1024);
+
+  it('the run stops reading while the device keeps sending: the lease ends', async () => {
+    const w = await world({ outboundLimitBytes: 1024 * 1024 });
+    const { run, browser } = await leased(w);
+    const agent = await w.open(`/agent/${browser.token}`);
+    stopReading(agent);
+    // Far more than any socket buffer between them holds.
+    for (let i = 0; i < 400 && run.readyState === run.OPEN; i++) run.send(chunk);
+    expect(await browser.closed).toBe('the run was not reading what the device sent');
+    await closedWith(run);
+  });
+
+  it('the device stops reading while the run keeps sending: the lease ends', async () => {
+    const w = await world({ outboundLimitBytes: 1024 * 1024 });
+    const { run, browser } = await leased(w);
+    const agent = await w.open(`/agent/${browser.token}`);
+    stopReading(run);
+    for (let i = 0; i < 400 && agent.readyState === agent.OPEN; i++) agent.send(chunk);
+    expect(await browser.closed).toBe('the device was not reading what the run sent');
+  });
+
+  it('control: both sides reading, the same amount passes and the lease stays', async () => {
+    const w = await world({ outboundLimitBytes: 1024 * 1024 });
+    const { run, browser } = await leased(w);
+    const agent = await w.open(`/agent/${browser.token}`);
+    let got = 0;
+    for (let i = 0; i < 100; i++) {
+      // One at a time, as a consumer that keeps up sees it.
+      const arrived = next(agent);
+      run.send(chunk);
+      got += (await arrived).length;
+    }
+    expect(got).toBe(100 * chunk.length);
+    expect(run.readyState).toBe(run.OPEN);
+    let ended = false;
+    void browser.closed.then(() => { ended = true; });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(ended).toBe(false);
   });
 });

@@ -21,6 +21,16 @@ import type { PageEndMode, RequestEnforcer } from './request-enforcer.js';
 import { type ServerClaim, type TabLease, acquireLease, createTabLease } from './tab-lease.js';
 
 const CLAIM_REPLY_TIMEOUT_MS = 15_000;
+// What the run may send between the server accepting the claim and the relay listening.
+const HELD_FRAMES_MAX = 1000;
+const HELD_BYTES_MAX = 4 * 1024 * 1024;
+
+/** A run connection that won its claim, with whatever arrived right behind the reply. */
+interface ClaimedSocket {
+  socket: WebSocket;
+  /** Call in the same synchronous step as the relay starts listening: hands it what was held, in order. */
+  release(): void;
+}
 
 /** What the user agreed to for one run. */
 export interface UserConsent { allowedOrigins: string[]; privateOrigins: string[] }
@@ -90,7 +100,7 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
   const decline = (nonce: string, reason: string): void => { log(`declined: ${reason}`); tell({ v: HUB_PROTOCOL, t: 'decline', nonce, reason }); };
 
   /** One claim over a fresh run connection. The socket is returned only on a win. */
-  const claimOverRun = (grant: Signed<GrantPayload>, approval: Signed<ApprovalPayload>): Promise<{ result: ServerClaim; socket: WebSocket | null }> =>
+  const claimOverRun = (grant: Signed<GrantPayload>, approval: Signed<ApprovalPayload>): Promise<{ result: ServerClaim; claimed: ClaimedSocket | null }> =>
     new Promise((resolve) => {
       const socket = new WebSocket(opts.runUrl, { perMessageDeflate: false });
       let done = false;
@@ -98,8 +108,29 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
         if (done) return;
         done = true;
         clearTimeout(timer);
-        if (!keep) { try { socket.close(); } catch { /* already closing */ } }
-        resolve({ result, socket: keep ? socket : null });
+        if (!keep) { try { socket.close(); } catch { /* already closing */ } resolve({ result, claimed: null }); return; }
+        // The server may send the run's first commands right behind its reply, in the same
+        // read. The relay isn't listening yet: that takes several steps more. So they're
+        // held from this very step, and handed over when it is. Bounded, like everything held.
+        const held: unknown[] = [];
+        let heldBytes = 0;
+        const hold = (raw: unknown): void => {
+          const size = Array.isArray(raw) ? raw.reduce((n: number, b: { byteLength: number }) => n + b.byteLength, 0) : (raw as { byteLength: number }).byteLength;
+          if (held.length >= HELD_FRAMES_MAX || heldBytes + size > HELD_BYTES_MAX) { held.length = 0; try { socket.close(1009, 'too much before the relay was ready'); } catch { /* already closing */ } return; }
+          heldBytes += size;
+          held.push(raw);
+        };
+        socket.on('message', hold);
+        resolve({
+          result,
+          claimed: {
+            socket,
+            release() {
+              socket.off('message', hold);
+              for (const raw of held.splice(0)) socket.emit('message', raw, false);
+            },
+          },
+        });
       };
       // No answer: the server may or may not have recorded the claim.
       const timer = setTimeout(() => finish({ outcome: 'unknown' }), CLAIM_REPLY_TIMEOUT_MS);
@@ -139,25 +170,30 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
       if (mine.cancelled) return;
       const approval = approvals.approve(grant, { tabTargetId: browser.tabTargetId, ...answer }, opts.approvalTtlMs ?? 30 * 60_000);
       if ('refused' in approval) { decline(nonce, approval.refused); return; }
-      let runSocket: WebSocket | null = null;
+      let claimed = null as ClaimedSocket | null;
       const claim = await acquireLease({
         lease: mine.lease,
         admit: () => approvals.admit(approval),
-        claim: async () => { const c = await claimOverRun(grant, approval); runSocket = c.socket; return c.result; },
+        claim: async () => { const c = await claimOverRun(grant, approval); claimed = c.claimed; return c.result; },
         burn: () => approvals.burn(approval.payload.nonce),
       });
-      if (claim.outcome !== 'leased' || !runSocket) {
+      if (claim.outcome !== 'leased' || !claimed) {
         log(`no lease: ${claim.outcome === 'refused' ? claim.reason : claim.outcome}`);
-        (runSocket as WebSocket | null)?.close();
+        claimed?.socket.close();
         if (claim.outcome === 'leased') mine.lease.revoke('no run connection');
         return;
       }
+      const run: ClaimedSocket = claimed;
       if (mine.cancelled) { mine.lease.revoke('the request was withdrawn'); }
       const lease = mine.lease;
       browser.onEgressDown(() => lease.revoke('egress-proxy-down'));
       mine.relay = createDeviceRelay({ tabWs: browser.tabWs, consent, lease, enforcer: browser.enforcer, pageEnd: browser.pageEnd });
+      // The relay starts listening before its first await, so nothing arrives between
+      // that and the hand-over on the next line.
+      const served = mine.relay.serve(run.socket);
+      run.release();
       // Resolves when the lease is over, page step included.
-      await mine.relay.serve(runSocket);
+      await served;
       log(`lease over: ${mine.relay.refusals.filter((r) => r.startsWith('lease ended')).join('; ')}`);
     } catch (e) {
       log(`offer failed: ${e instanceof Error ? e.message : String(e)}`);
