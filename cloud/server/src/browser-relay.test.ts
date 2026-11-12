@@ -152,6 +152,17 @@ describe('registering a device', () => {
   });
 });
 
+describe('the routes are rate-limited by themselves', () => {
+  it('a burst past the limit is refused, signed in or not', async () => {
+    const s = await server();
+    const alice = s.user('alice');
+    const codes: number[] = [];
+    for (let i = 0; i < 70; i++) codes.push((await s.api('/api/browser-relay/devices', { cookie: alice.cookie })).status);
+    expect(codes.slice(0, 60).every((c) => c === 200)).toBe(true);
+    expect(codes.slice(60).every((c) => c === 429)).toBe(true);
+  });
+});
+
 describe('a device connecting', () => {
   it('with its registered key is online for its own user, and for no one else', async () => {
     const s = await server();

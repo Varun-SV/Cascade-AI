@@ -22,6 +22,7 @@ import { createHash } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
 import type { Express, Response } from 'express';
+import rateLimit from 'express-rate-limit';
 import { WebSocketServer } from 'ws';
 import {
   RELAY_MAX_LIFETIME_MS,
@@ -166,22 +167,26 @@ export function createBrowserRelay(opts: { dataDir: string; store: CloudStore; n
     },
     attach(server) { attached = server; server.on('upgrade', onUpgrade); },
     routes(app, sessionSecret) {
+      // Its own limit, whatever the app puts in front of it: these routes check a
+      // session and write to the database, and registering a device is something a
+      // person does a handful of times.
+      const limited = rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: true, legacyHeaders: false });
       const auth = sessionMiddleware(sessionSecret);
       const mine = (req: AuthedRequest) => req.session!.userId;
       const bad = (res: Response, error: string) => { res.status(400).json({ error }); };
 
       // What a device needs to pin before it trusts anything from this server.
-      app.get('/api/browser-relay/server', (_req, res) => {
+      app.get('/api/browser-relay/server', limited, (_req, res) => {
         res.json({ serverId: identity.id, serverKey: relayPublicKeyToText(identity.publicKey), controlPath: RELAY_CONTROL_PATH, runPath: RELAY_RUN_PATH });
       });
 
-      app.get('/api/browser-relay/devices', auth, (req: AuthedRequest, res) => {
+      app.get('/api/browser-relay/devices', limited, auth, (req: AuthedRequest, res) => {
         res.json({ devices: store.listRelayDevices(mine(req)).map((d) => publicDevice(d, hub.deviceOnline(d.userId, d.id))) });
       });
 
       // Registers the key of a device the signed-in user is holding. The key pair
       // is made on the device, and only its public half is sent.
-      app.post('/api/browser-relay/devices', auth, (req: AuthedRequest, res) => {
+      app.post('/api/browser-relay/devices', limited, auth, (req: AuthedRequest, res) => {
         const body = (req.body ?? {}) as { name?: unknown; kind?: unknown; publicKey?: unknown };
         const name = typeof body.name === 'string' ? body.name.trim().slice(0, 80) : '';
         if (!name) { bad(res, 'A device needs a name.'); return; }
@@ -192,7 +197,7 @@ export function createBrowserRelay(opts: { dataDir: string; store: CloudStore; n
         res.status(201).json({ device: publicDevice(device, false), serverId: identity.id, serverKey: relayPublicKeyToText(identity.publicKey) });
       });
 
-      app.delete('/api/browser-relay/devices/:id', auth, (req: AuthedRequest, res) => {
+      app.delete('/api/browser-relay/devices/:id', limited, auth, (req: AuthedRequest, res) => {
         const id = String(req.params['id']);
         // Only the owner's own: someone else's id reads as not found.
         if (!store.revokeRelayDevice(mine(req), id, now())) { res.status(404).json({ error: 'No such device.' }); return; }
