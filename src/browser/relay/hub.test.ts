@@ -151,7 +151,7 @@ describe('routing is by grant, never by user alone', () => {
     const forged = createDeviceApprovals({ device: { ...bId, id: 'device-a' }, serverId: 'server', serverKey: w.server.publicKey, now: Date.now });
     const stolen = forged.approve(grant, scope, 600_000) as Signed<ApprovalPayload>;
     const theft = await b.claim(grant, stolen);
-    expect(theft.reply).toEqual({ v: 1, t: 'refused', reason: 'bad approval signature' });
+    expect(theft.reply).toMatchObject({ v: 1, t: 'refused', reason: 'bad approval signature' });
     const honest = await a.claim(grant, a.approve(grant));
     expect(honest.reply.t).toBe('claimed');
     await asked;
@@ -162,7 +162,7 @@ describe('routing is by grant, never by user alone', () => {
     const { d, grant } = await leased(w);
     // The same grant again, after it was claimed.
     const again = await d.claim(grant, d.approve(grant));
-    expect(again.reply).toEqual({ v: 1, t: 'refused', reason: 'no such request' });
+    expect(again.reply).toMatchObject({ v: 1, t: 'refused', reason: 'no such request' });
     expect(await closedWith(again.run)).toBe(1008);
   });
 
@@ -288,7 +288,7 @@ describe('a request that does not become a lease', () => {
       const run = await w.open('/run');
       const reply = next(run);
       run.send(frame);
-      expect(JSON.parse(await reply)).toEqual({ v: 1, t: 'refused', reason: 'malformed claim' });
+      expect(JSON.parse(await reply)).toMatchObject({ v: 1, t: 'refused', reason: 'malformed claim' });
     }
   });
 
@@ -302,7 +302,7 @@ describe('a request that does not become a lease', () => {
       const asked = refusal(w.hub.requestBrowser({ userId: 'user-a', deviceId: 'device-a', runId: 'run-1' }));
       const grant = await d.offer();
       const { reply } = await d.claim(grant, d.approve(grant));
-      expect(reply).toEqual({ v: 1, t: 'refused', reason });
+      expect(reply).toMatchObject({ v: 1, t: 'refused', reason });
       expect(await asked).toBe(reason);
     });
   }

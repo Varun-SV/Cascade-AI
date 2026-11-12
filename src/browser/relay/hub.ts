@@ -42,7 +42,9 @@ export type ControlFrame =
   | { v: 1; t: 'cancel'; nonce: string };
 export type DeviceControlFrame = { v: 1; t: 'decline'; nonce: string; reason?: string };
 export type ClaimFrame = { v: 1; t: 'claim'; grant: Signed<GrantPayload>; approval: Signed<ApprovalPayload> };
-export type ClaimReply = { v: 1; t: 'claimed' } | { v: 1; t: 'refused'; reason: string };
+/** `outcome` tells the device what became of its approval: see `acquireLease`. */
+export type ClaimOutcome = 'refused' | 'replay' | 'unavailable' | 'unknown';
+export type ClaimReply = { v: 1; t: 'claimed' } | { v: 1; t: 'refused'; outcome: ClaimOutcome; reason: string };
 
 /** Why a run didn't get a browser. `reason` is safe to show the run's owner. */
 export class RelayRefused extends Error {
@@ -211,11 +213,11 @@ export function createRelayHub(opts: RelayHubOptions): RelayHub {
   const attachRun: RelayHub['attachRun'] = (socket) => {
     if (closed) { shut(socket, 1001, 'server closing'); return; }
     let decided = false;
-    const refuse = (reason: string): void => {
+    const refuse = (reason: string, outcome: ClaimOutcome = 'refused'): void => {
       if (decided) return;
       decided = true;
       clearTimeout(timer);
-      send(socket, { v: HUB_PROTOCOL, t: 'refused', reason } satisfies ClaimReply);
+      send(socket, { v: HUB_PROTOCOL, t: 'refused', outcome, reason } satisfies ClaimReply);
       shut(socket, 1008, reason);
     };
     const timer = setTimeout(() => refuse('no claim arrived'), CLAIM_FRAME_TIMEOUT_MS);
@@ -242,7 +244,7 @@ export function createRelayHub(opts: RelayHubOptions): RelayHub {
           const reason = result.outcome === 'refused' ? result.reason
             : result.outcome === 'replay' ? 'approval was already claimed'
               : result.outcome === 'unavailable' ? 'nonce store unavailable' : 'claim outcome unknown';
-          refuse(reason);
+          refuse(reason, result.outcome);
           // A claim that failed its checks leaves the offer open for the real device.
           // Anything that may have used the nonce up ends it.
           if (result.outcome === 'refused') p.claiming = false;
@@ -260,7 +262,7 @@ export function createRelayHub(opts: RelayHubOptions): RelayHub {
         const browser = openSession(p, socket);
         send(socket, { v: HUB_PROTOCOL, t: 'claimed' } satisfies ClaimReply);
         settle(nonce!, browser);
-      }, () => { refuse('claim failed'); p.claiming = false; });
+      }, () => { refuse('claim failed', 'unknown'); settle(nonce!, new RelayRefused('claim failed')); });
     });
   };
 
