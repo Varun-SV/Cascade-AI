@@ -377,6 +377,15 @@ const READS_SEEN = new Set([
   'web_search', 'web_fetch', 'peer_message',
 ]);
 
+/** The most of a grader's notes that is carried into a prompt or a status. */
+const MAX_CHECK_NOTES_CHARS = 600;
+
+/** A failed self-test in words: which checks, and what the grader said was wrong. */
+export function describeFailedCheck(label: string, result: { failed: string[]; notes?: string }): string {
+  const which = result.failed.join(', ');
+  return result.notes ? `${label}: ${which} — ${result.notes}` : `${label}: ${which}`;
+}
+
 export class T3Worker extends BaseTier {
   protected router: CascadeRouter;
   private toolRegistry: ToolRegistry;
@@ -733,13 +742,20 @@ export class T3Worker extends BaseTier {
 
       if (testResult.failed.length > 0) {
         correctionAttempts++;
-        issues.push(`Initial check failed: ${testResult.failed.join(', ')}`);
-        const corrected = await this.correctOutput(output, testResult.failed);
+        // With what the check FOUND, not only which check it was. "completeness,
+        // compliance" tells the person nothing they can act on, and told the
+        // correction round below nothing either: it was asked to fix a failure
+        // it had never been shown, which is a paid call that can only guess.
+        issues.push(describeFailedCheck('Initial check failed', testResult));
+        const corrected = await this.correctOutput(output, testResult.failed, testResult.notes);
         output = corrected;
         const retest = await this.selfTest(assignment, output, pendingAcceptance);
         passed.push(...retest.passed);
         if (retest.failed.length > 0) {
           failed.push(...retest.failed);
+          // What is still wrong after the one correction is the reason the
+          // subtask ended, so it is said too.
+          issues.push(describeFailedCheck('Still failing after one correction', retest));
           this.setStatus('FAILED');
           this.publishOutcome(assignment.subtaskId, output, 'ESCALATED');
           return this.buildResult('ESCALATED', output, { checksRun, passed, failed }, issues, correctionAttempts);
@@ -2040,7 +2056,7 @@ ${current}`,
      * that stat already decided invites the model to overturn a fact.
      */
     pendingAcceptance?: readonly string[],
-  ): Promise<{ checksRun: string[]; passed: string[]; failed: string[] }> {
+  ): Promise<{ checksRun: string[]; passed: string[]; failed: string[]; notes?: string }> {
     const acceptance = pendingAcceptance ?? assignment.acceptance ?? [];
     // Secrets out of the output as well as the record: the grader can be a
     // different provider, and an output can quote what a tool returned.
@@ -2065,7 +2081,8 @@ ${describeHandedWork(this.handedWork, shownOutput)}
 ` : ''}
 "correctness" MUST be "fail" if the output presents simulated, hypothetical or invented results as real, or claims an action — visiting a site, logging in, running code, fetching a page, writing a file, sending something — that no tool call above actually performed — a call that returned an error or a refusal performed nothing, but a later retry that succeeded did.${this.handedWork.length ? ' An action or result that the handed work above reports is supported too: the subtask that did that work made those calls, so the output may pass it on.' : ''} An output that plainly says it could not do something is honest: judge that on completeness, not correctness.
 
-Reply with JSON: { "completeness": "pass"|"fail", "correctness": "pass"|"fail", "compliance": "pass"|"fail", "notes": "string" }`;
+Reply with JSON: { "completeness": "pass"|"fail", "correctness": "pass"|"fail", "compliance": "pass"|"fail", "notes": "string" }
+In "notes", for every check you fail, say in one sentence exactly what is missing or wrong, specifically enough that it could be fixed from your sentence alone. Leave "notes" empty when everything passes.`;
 
     const testMessages: ConversationMessage[] = [{ role: 'user', content: prompt }];
     const testResult = await this.generateAuxiliary('T3', {
@@ -2090,8 +2107,13 @@ Reply with JSON: { "completeness": "pass"|"fail", "correctness": "pass"|"fail", 
       const checksRun = ['completeness', 'correctness', 'compliance'];
       const passed = checksRun.filter((c) => parsed[c as keyof typeof parsed] === 'pass');
       const failed = checksRun.filter((c) => parsed[c as keyof typeof parsed] === 'fail');
+      // Kept only for a failure: it is what the correction round and the person
+      // are told. Bounded, since it travels into a prompt and onto a status line.
+      const notes = failed.length > 0 && typeof parsed.notes === 'string'
+        ? RedactionLayer.redactSecrets(parsed.notes.replace(/\s+/g, ' ').trim()).slice(0, MAX_CHECK_NOTES_CHARS)
+        : '';
 
-      return { checksRun, passed, failed };
+      return { checksRun, passed, failed, ...(notes ? { notes } : {}) };
     } catch {
       // Fail CLOSED, not open. This used to report all three checks as
       // passing whenever the grading call itself threw or its response
@@ -2151,8 +2173,11 @@ ${output.slice(0, 4000)}`;
     }
   }
 
-  private async correctOutput(originalOutput: string, failures: string[]): Promise<string> {
-    const correctionPrompt = `The following output failed these checks: ${failures.join(', ')}.
+  private async correctOutput(originalOutput: string, failures: string[], notes?: string): Promise<string> {
+    const correctionPrompt = `The following output failed these checks: ${failures.join(', ')}.${notes ? `
+
+What the check found:
+${notes}` : ''}
 
 Original output:
 ${originalOutput}
