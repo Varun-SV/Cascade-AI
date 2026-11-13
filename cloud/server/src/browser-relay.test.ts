@@ -84,6 +84,31 @@ describe("the server's own key", () => {
     expect(fs.statSync(path.join(dir, 'relay-server-key.pem')).mode & 0o077).toBe(0);
   });
 
+  it('leaves nothing but the key behind', () => {
+    const dir = tmpDir();
+    loadRelayIdentity(dir);
+    expect(fs.readdirSync(dir)).toEqual(['relay-server-key.pem']);
+  });
+
+  it('several processes booting at once agree on one key, and none reads a partial one', async () => {
+    const dir = tmpDir();
+    const script = path.join(dir, 'boot.mts');
+    fs.writeFileSync(script, `
+      import { loadRelayIdentity } from ${JSON.stringify(path.join(process.cwd(), 'src/browser-relay.ts'))};
+      try { process.send({ id: loadRelayIdentity(${JSON.stringify(path.join(dir, 'data'))}).id }); }
+      catch (e) { process.send({ error: String(e) }); }
+    `);
+    const N = 8;
+    const results = await Promise.all(Array.from({ length: N }, () => new Promise<{ id?: string; error?: string }>((resolve, reject) => {
+      const child = fork(script, { stdio: 'ignore', execArgv: ['--import', 'tsx'] });
+      child.once('message', (m) => resolve(m as { id?: string; error?: string }));
+      child.once('error', reject);
+    })));
+    expect(results.map((r) => r.error).filter(Boolean)).toEqual([]);
+    expect(new Set(results.map((r) => r.id)).size).toBe(1);
+    expect(fs.readdirSync(path.join(dir, 'data'))).toEqual(['relay-server-key.pem']);
+  }, 60_000);
+
   it('a different key is a different server', () => {
     expect(loadRelayIdentity(tmpDir()).id).not.toBe(loadRelayIdentity(tmpDir()).id);
   });

@@ -18,7 +18,7 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
 import type { Express, Response } from 'express';
@@ -66,11 +66,18 @@ export function loadRelayIdentity(dataDir: string): RelayIdentity {
   } catch {
     fs.mkdirSync(dataDir, { recursive: true });
     pem = generateRelayKey().privateKeyPem;
-    // Created exclusively: two instances booting together must agree on one key.
+    // Two instances booting together must agree on one key, and neither may read the
+    // other's half-written one. So the key is written whole to a file of this process's
+    // own, then given its real name with a hard link: that appears complete or not at
+    // all, and fails if the name is taken. Whoever loses reads the winner's finished key.
+    const mine = path.join(dataDir, `${KEY_FILE}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`);
+    fs.writeFileSync(mine, pem, { mode: 0o600, flag: 'wx' });
     try {
-      fs.writeFileSync(file, pem, { mode: 0o600, flag: 'wx' });
+      fs.linkSync(mine, file);
     } catch {
       pem = fs.readFileSync(file, 'utf8');
+    } finally {
+      fs.rmSync(mine, { force: true });
     }
   }
   const unnamed = relayIdentityFromPrivateKey('', pem);
