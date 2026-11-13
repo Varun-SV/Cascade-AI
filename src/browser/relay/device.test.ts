@@ -2,10 +2,10 @@
 
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { createIdentity, issueGrant } from './capability.js';
-import { type LeasedBrowser, connectDeviceClient } from './device.js';
+import { type LeasedBrowser, type UserConsent, connectDeviceClient } from './device.js';
 import { authenticateControl } from './hub.js';
 import type { RequestEnforcer } from './request-enforcer.js';
 
@@ -91,5 +91,63 @@ describe("the run's first commands, arriving in the same read as the claim's rep
     while (s.fromDevice.length < 3 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
     const ids = s.fromDevice.map((f) => (JSON.parse(f) as { id?: number; result?: { product?: string } })).filter((m) => m.result?.product).map((m) => m.id);
     expect(ids).toEqual([1, 2, 3]);
+  });
+});
+
+describe('a request withdrawn while the user is still being asked (Codex on 3d07398)', () => {
+  /** A server that offers, then withdraws, and offers again; and records what the device declined. */
+  async function withdrawingServer() {
+    const server = createIdentity('server');
+    const device = createIdentity('device-a');
+    const httpServer = http.createServer();
+    const wss = new WebSocketServer({ server: httpServer });
+    let control!: WebSocket;
+    const declined: string[] = [];
+    wss.on('connection', (ws: WebSocket) => {
+      void authenticateControl(ws, { serverId: server.id, device: (id) => (id === device.id ? { userId: 'user-a', key: device.publicKey } : null) }).then((who) => {
+        if (!who) return;
+        control = ws;
+        ws.on('message', (raw) => { const f = JSON.parse(String(raw)) as { t: string; reason?: string }; if (f.t === 'decline') declined.push(f.reason ?? ''); });
+      });
+    });
+    await new Promise<void>((r) => httpServer.listen(0, '127.0.0.1', r));
+    const base = `ws://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
+    closers.push(() => { httpServer.closeAllConnections(); httpServer.close(); });
+    const offer = (runId: string) => {
+      const grant = issueGrant(server, { userId: 'user-a', deviceId: device.id, runId, ttlMs: 600_000, now: Date.now() });
+      control.send(JSON.stringify({ v: 1, t: 'offer', grant }));
+      return grant.payload.nonce;
+    };
+    const cancel = (nonce: string) => control.send(JSON.stringify({ v: 1, t: 'cancel', nonce }));
+    return { server, device, base, offer, cancel, declined };
+  }
+
+  it('the question is taken down, the device is free at once, and a late yes starts nothing', async () => {
+    const s = await withdrawingServer();
+    const questions: { runId: string; signal: AbortSignal; answer(c: UserConsent | null): void }[] = [];
+    let started = 0;
+    const client = connectDeviceClient({
+      controlUrl: s.base, runUrl: s.base, device: s.device, serverId: s.server.id, serverKey: s.server.publicKey,
+      askUser: (run) => new Promise((answer) => { questions.push({ runId: run.runId, signal: run.signal, answer }); }),
+      startBrowser: async () => { started += 1; throw new Error('not in this test'); },
+    });
+    closers.push(() => client.close());
+    await client.ready;
+
+    const first = s.offer('run-1');
+    await vi.waitFor(() => expect(questions).toHaveLength(1));
+    s.cancel(first);
+    await vi.waitFor(() => expect(questions[0]!.signal.aborted).toBe(true));
+    await vi.waitFor(() => expect(client.lease()).toBeNull());
+
+    // Another run is asked, not declined as "in use".
+    s.offer('run-2');
+    await vi.waitFor(() => expect(questions).toHaveLength(2));
+    expect(s.declined).not.toContain('the browser is already in use');
+
+    // The withdrawn question answered late starts nothing.
+    questions[0]!.answer({ allowedOrigins: ['https://a.test'], privateOrigins: [] });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(started).toBe(0);
   });
 });

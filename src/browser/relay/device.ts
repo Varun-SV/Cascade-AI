@@ -55,7 +55,11 @@ export interface DeviceClientOptions {
   serverId: string;
   serverKey: KeyObject;
   /** Ask the user, showing what the grant names. Null means no. */
-  askUser(run: { userId: string; runId: string; expiresAt: number }): Promise<UserConsent | null>;
+  /**
+   * `signal` fires if the server withdraws the request, or it ends some other way,
+   * before the user answers: take the question down. A later answer is ignored.
+   */
+  askUser(run: { userId: string; runId: string; expiresAt: number; signal: AbortSignal }): Promise<UserConsent | null>;
   startBrowser(consent: Consent): Promise<LeasedBrowser>;
   /** How long an approval lasts. Never longer than the grant. */
   approvalTtlMs?: number;
@@ -85,7 +89,14 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
   const log = opts.log ?? (() => {});
   const approvals = createDeviceApprovals({ device: opts.device, serverId: opts.serverId, serverKey: opts.serverKey, now });
   const control = new WebSocket(opts.controlUrl, { perMessageDeflate: false });
-  let active: { nonce: string; lease: TabLease; relay: DeviceRelay | null; cancelled: boolean } | null = null;
+  interface Active { nonce: string; lease: TabLease; relay: DeviceRelay | null; cancelled: boolean; withdrawn: AbortController }
+  let active: Active | null = null;
+  /** Ends whatever this offer has got to: the question, the browser starting, or the lease. */
+  const withdraw = (a: Active, reason: string): void => {
+    a.cancelled = true;
+    a.withdrawn.abort(new Error(reason));
+    a.lease.revoke(reason);
+  };
   let closing = false;
   let finished!: (why: string) => void;
   const closed = new Promise<string>((r) => { finished = r; });
@@ -158,11 +169,19 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
     if (!g.ok) { decline(nonce, g.reason); return; }
     // One tab, one lease. Refused without asking the user, and without touching the grant.
     if (active) { decline(nonce, 'the browser is already in use'); return; }
-    const mine = { nonce, lease: createTabLease(), relay: null as DeviceRelay | null, cancelled: false };
+    const mine: Active = { nonce, lease: createTabLease(), relay: null, cancelled: false, withdrawn: new AbortController() };
+    // Settles as soon as the offer is withdrawn, so nothing waits on a question nobody needs answered.
+    const unlessWithdrawn = <T>(p: Promise<T>): Promise<T | null> => Promise.race([
+      p,
+      new Promise<null>((resolve) => {
+        if (mine.withdrawn.signal.aborted) resolve(null);
+        else mine.withdrawn.signal.addEventListener('abort', () => resolve(null), { once: true });
+      }),
+    ]);
     active = mine;
     let browser: LeasedBrowser | null = null;
     try {
-      const answer = await opts.askUser({ userId: grant.payload.userId, runId: grant.payload.runId, expiresAt: grant.payload.exp });
+      const answer = await unlessWithdrawn(opts.askUser({ userId: grant.payload.userId, runId: grant.payload.runId, expiresAt: grant.payload.exp, signal: mine.withdrawn.signal }));
       if (mine.cancelled) return;
       if (!answer) { decline(nonce, 'the user said no'); return; }
       const consent = makeConsent(answer.allowedOrigins, answer.privateOrigins);
@@ -221,15 +240,12 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
     // Nothing is acted on before the server has accepted this device.
     if (!authenticated) return;
     if (f.t === 'offer' && f.grant) void onOffer(f.grant);
-    else if (f.t === 'cancel' && active && active.nonce === f.nonce) {
-      active.cancelled = true;
-      active.lease.revoke('the request was withdrawn');
-    }
+    else if (f.t === 'cancel' && active && active.nonce === f.nonce) withdraw(active, 'the request was withdrawn');
   });
   const gone = (why: string): void => {
     notWelcomed(new Error(why));
     // A network drop: the lease ends here, without waiting to be told.
-    if (active) { active.cancelled = true; active.lease.revoke(why); }
+    if (active) withdraw(active, why);
     finished(why);
   };
   control.on('close', () => gone(closing ? 'closed' : 'the connection to the server dropped'));
@@ -239,10 +255,10 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
     ready, closed,
     lease: () => active?.lease ?? null,
     relay: () => active?.relay ?? null,
-    revoke(reason) { if (active) { active.cancelled = true; active.lease.revoke(reason); } },
+    revoke(reason) { if (active) withdraw(active, reason); },
     async close() {
       closing = true;
-      if (active) { active.cancelled = true; active.lease.revoke('the device signed out'); }
+      if (active) withdraw(active, 'the device signed out');
       try { control.close(); } catch { /* already closing */ }
       await closed;
     },

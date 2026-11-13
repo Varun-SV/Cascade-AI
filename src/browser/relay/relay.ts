@@ -215,6 +215,27 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
     interface Missed { method: string; params: Record<string, unknown>; sessionId?: string }
     const missedAttach = new Map<string, Missed>();
     const missedDetach: Missed[] = [];
+    // Whether the tab's own document or its script contexts changed while the user had it.
+    // The agent's client then holds a page and contexts that no longer exist.
+    let documentChanged = false;
+    // Agent commands that arrive while the client is being brought up to date: held, so none
+    // runs against a page or a script context the client no longer has. Bounded like `early`.
+    let reconciling: string[] | null = null;
+    let reconcilingBytes = 0;
+    /**
+     * Brings the agent's client up to the tab as it is now, after a takeover, without having
+     * told it anything during one: the contexts it holds are cleared, the main frame is
+     * reported where it is, and Runtime is restarted so the current contexts are announced
+     * through the usual filter.
+     */
+    const reconcileDocument = async (): Promise<void> => {
+      const tree = await tab.send('Page.getFrameTree') as { frameTree?: { frame?: Record<string, unknown> } };
+      if (ended || lease.fence() === null) return;
+      announce({ method: 'Runtime.executionContextsCleared', params: {} });
+      if (tree.frameTree?.frame) announce({ method: 'Page.frameNavigated', params: { frame: tree.frameTree.frame, type: 'Navigation' } });
+      await tab.send('Runtime.disable');
+      await tab.send('Runtime.enable');
+    };
     const announce = (m: Missed): void => {
       const safe = filterEvent(m.method, m.params, consent);
       if (safe === null) { droppedEvents.add(m.method); return; }
@@ -226,6 +247,17 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
       for (const m of missedDetach.splice(0)) announce(m);
       for (const m of [...missedAttach.values()]) announce(m);
       missedAttach.clear();
+      if (documentChanged) {
+        documentChanged = false;
+        // A tab that can't say where it is can't be handed back to a client that doesn't know.
+        reconciling = [];
+        reconcilingBytes = 0;
+        void reconcileDocument().then(() => {
+          const held = reconciling ?? [];
+          reconciling = null;
+          for (const raw of held) live(raw);
+        }, () => { reconciling = null; end('the tab could not be brought up to date after the takeover'); });
+      }
     });
 
     tab.on((msg: CdpMessage) => {
@@ -259,7 +291,13 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
         if (missedAttach.delete(child)) return;
         if (suspended) { missedDetach.push({ method: msg.method, params, ...(msg.sessionId ? { sessionId: msg.sessionId } : {}) }); return; }
       }
-      if (suspended) return;
+      if (suspended) {
+        // The tab's own session: its document or contexts moved on without the agent.
+        if (!msg.sessionId && (msg.method === 'Runtime.executionContextsCleared' || msg.method === 'Runtime.executionContextCreated'
+          || msg.method === 'Runtime.executionContextDestroyed'
+          || (msg.method === 'Page.frameNavigated' && !(params as { frame?: { parentId?: string } }).frame?.parentId))) documentChanged = true;
+        return;
+      }
       const safe = filterEvent(msg.method, params, consent);
       if (safe === null) { droppedEvents.add(msg.method); return; }
       out({ method: msg.method, params: safe, sessionId: msg.sessionId ?? TAB_SESSION });
@@ -352,6 +390,12 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
 
     // Replies may finish out of order, as CDP allows; forwarding stays in arrival order.
     const live = (raw: string): void => {
+      if (reconciling) {
+        reconcilingBytes += raw.length;
+        if (reconciling.length >= EARLY_FRAMES_MAX || reconcilingBytes > EARLY_BYTES_MAX) { reconciling = null; end('too many commands while the tab was being brought up to date'); return; }
+        reconciling.push(raw);
+        return;
+      }
       if (ended) return;
       const f = parseFrame(raw);
       // Frame ids rise on one connection, so a replayed frame fails closed too.

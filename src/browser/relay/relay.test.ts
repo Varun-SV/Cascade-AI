@@ -716,3 +716,57 @@ describe('the tab is announced before the reply to setAutoAttach, as Chrome does
     } finally { tab.close(); }
   });
 });
+
+describe('the page the user moved to during a takeover is the page the agent has after it (Codex on 3d07398)', () => {
+  const navigated = (url: string) => ({ method: 'Page.frameNavigated', params: { frame: { id: 'main', loaderId: 'l2', url }, type: 'Navigation' } });
+  const methodsOut = (out: string[]) => out.map((s) => (JSON.parse(s) as { method?: string }).method).filter(Boolean);
+
+  async function serving() {
+    const tab = await answeringTab(new Set());
+    const { lease, relay, agent } = setup(tab.url);
+    const out = sent(agent);
+    const served = relay.serve(agent as unknown as WebSocket);
+    agent.emit('message', evaluate(1));
+    await vi.waitFor(() => expect(replied(out, 1)).toBe(true));
+    return { tab, lease, out, done: async () => { lease.revoke('done'); await served; tab.close(); } };
+  }
+
+  it('a navigation during the takeover: nothing is said then, and at the hand-back the contexts are reset and Runtime restarted', async () => {
+    const s = await serving();
+    s.lease.suspend();
+    s.tab.emit(navigated('https://a.test/elsewhere?where=USERWASHERE'));
+    s.tab.emit({ method: 'Runtime.executionContextsCleared', params: {} });
+    await settle();
+    expect(methodsOut(s.out)).toEqual([]);
+    expect(s.out.join()).not.toContain('USERWASHERE');
+    const before = s.tab.methods.length;
+    s.lease.handBack();
+    await vi.waitFor(() => expect(s.tab.methods.slice(before)).toEqual(['Page.getFrameTree', 'Runtime.disable', 'Runtime.enable']));
+    expect(methodsOut(s.out)).toContain('Runtime.executionContextsCleared');
+    await s.done();
+  });
+
+  it('control: a takeover in which the page did not move changes nothing at the hand-back', async () => {
+    const s = await serving();
+    s.lease.suspend();
+    await settle();
+    const before = s.tab.methods.length;
+    s.lease.handBack();
+    await settle();
+    expect(s.tab.methods.slice(before)).toEqual([]);
+    expect(methodsOut(s.out)).toEqual([]);
+    await s.done();
+  });
+
+  it('a navigation in a child frame alone is not the main document moving', async () => {
+    const s = await serving();
+    s.lease.suspend();
+    s.tab.emit({ method: 'Page.frameNavigated', params: { frame: { id: 'child', parentId: 'main', url: 'https://a.test/frame' } } });
+    await settle();
+    const before = s.tab.methods.length;
+    s.lease.handBack();
+    await settle();
+    expect(s.tab.methods.slice(before)).toEqual([]);
+    await s.done();
+  });
+});

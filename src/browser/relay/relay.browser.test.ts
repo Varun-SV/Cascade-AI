@@ -772,6 +772,39 @@ suite("the policy's own connection dropping while the browser runs", { timeout: 
   }
 });
 
+suite('the user takes the tab over and navigates, then hands it back (Codex on 3d07398)', { timeout: 60_000 }, () => {
+  it("the agent's Playwright page works on the page the user left it on", async () => {
+    const r = await startRig();
+    await r.page.goto('http://allowed.test/links');
+    expect(await r.page.evaluate('location.pathname')).toBe('/links');
+
+    r.lease.suspend();
+    // The user, in their own tab: a navigation that goes nowhere near the agent.
+    const user = await connectCdp(r.browser.tabWs);
+    await user.send('Runtime.evaluate', { expression: "location.href = 'http://allowed.test/two'" });
+    for (let i = 0; i < 100 && !r.allowed.hits.includes('GET /two'); i++) await sleep(50);
+    await sleep(300);
+    user.close();
+    expect(r.allowed.hits).toContain('GET /two');
+
+    expect(r.page.url(), 'during the takeover the agent was told nothing').toContain('/links');
+    r.lease.handBack();
+    // After the hand-back the agent's client learns where the page is: Playwright's own view
+    // moves to it. A command racing the hand-back itself can still meet a destroyed context,
+    // as one racing any navigation does in Chrome.
+    for (let i = 0; i < 100 && !r.page.url().endsWith('/two'); i++) await sleep(50);
+    expect(r.page.url()).toBe('http://allowed.test/two');
+    // And its script contexts are the page's current ones.
+    const where = await Promise.race([
+      r.page.evaluate('location.pathname'),
+      sleep(10_000).then(() => 'timed out'),
+    ]);
+    expect(where).toBe('/two');
+    expect(await r.page.evaluate('document.body.textContent')).toBe('page');
+    expect(r.lease.state()).toBe('held');
+  });
+});
+
 suite('no-leak markers: nothing forbidden reaches the agent', { timeout: 60_000 }, () => {
   it('blocked URLs, credentials, cookies and bodies stay out of every frame', async () => {
     const r = await startRig();

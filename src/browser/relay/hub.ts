@@ -32,6 +32,7 @@ export const HUB_PROTOCOL = 1;
 const OFFER_TIMEOUT_MS = 120_000;
 const CLAIM_FRAME_TIMEOUT_MS = 10_000;
 const HELLO_TIMEOUT_MS = 10_000;
+const REVALIDATE_MS = 10_000;
 const AGENT_ATTACH_TIMEOUT_MS = 30_000;
 /** A claim is two signed objects. Anything bigger isn't one. */
 const CLAIM_FRAME_MAX_BYTES = 64 * 1024;
@@ -87,6 +88,12 @@ export interface RelayHubOptions {
   agentAttachTimeoutMs?: number;
   /** How much may be queued towards a side that isn't reading, before the lease ends. */
   outboundLimitBytes?: number;
+  /**
+   * How often each device with a lease or a connection is checked against the registry.
+   * A device removed through another server instance is only seen this way: removal
+   * there reaches this instance's memory through nothing else.
+   */
+  revalidateMs?: number;
 }
 
 export interface RelayHub {
@@ -194,6 +201,15 @@ export function createRelayHub(opts: RelayHubOptions): RelayHub {
   const offerTimeoutMs = opts.offerTimeoutMs ?? OFFER_TIMEOUT_MS;
   const agentAttachTimeoutMs = opts.agentAttachTimeoutMs ?? AGENT_ATTACH_TIMEOUT_MS;
   const outboundLimit = opts.outboundLimitBytes ?? OUTBOUND_BYTES_MAX;
+  const revalidate = setInterval(() => {
+    const devices = new Set([...controls.keys(), ...[...sessions].map((s) => s.run.deviceId)]);
+    for (const deviceId of devices) {
+      let known = false;
+      try { known = opts.deviceKey(deviceId) !== null; } catch { known = false; }
+      if (!known) hub.dropDevice(deviceId, 'the device was removed');
+    }
+  }, opts.revalidateMs ?? REVALIDATE_MS);
+  revalidate.unref?.();
   /** Forwards one frame, unless the far side has stopped reading: then the lease ends. */
   const pipe = (session: Session, to: WebSocket, raw: unknown, slow: string): void => {
     if (to.readyState !== OPEN) return;
@@ -380,7 +396,7 @@ export function createRelayHub(opts: RelayHubOptions): RelayHub {
     send(control.socket, { v: HUB_PROTOCOL, t: 'offer', grant } satisfies ControlFrame);
   });
 
-  return {
+  const hub: RelayHub = {
     attachDevice, attachRun, attachAgent, requestBrowser,
     waitingBytes: () => [...sessions].reduce((n, s) => n + s.waitingBytes, 0),
     deviceOnline: (userId, deviceId) => {
@@ -399,10 +415,12 @@ export function createRelayHub(opts: RelayHubOptions): RelayHub {
     },
     close() {
       closed = true;
+      clearInterval(revalidate);
       for (const nonce of [...pending.keys()]) withdraw(nonce, 'the server is shutting down');
       for (const s of [...sessions]) s.end('the server is shutting down');
       for (const c of controls.values()) shut(c.socket, 1001, 'server closing');
       controls.clear();
     },
   };
+  return hub;
 }

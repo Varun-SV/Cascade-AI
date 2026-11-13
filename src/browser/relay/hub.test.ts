@@ -15,7 +15,7 @@ const closers: (() => void)[] = [];
 afterEach(() => { for (const c of closers.splice(0)) c(); });
 
 /** The hub behind a real server, routed the way the cloud server routes it. */
-async function world(over: { store?: NonceStore; offerTimeoutMs?: number; agentAttachTimeoutMs?: number; now?: () => number; outboundLimitBytes?: number } = {}) {
+async function world(over: { store?: NonceStore; offerTimeoutMs?: number; agentAttachTimeoutMs?: number; now?: () => number; outboundLimitBytes?: number; revalidateMs?: number } = {}) {
   const server = createIdentity('server');
   const keys = new Map<string, Identity>();
   /** The server's own record of whose device each is. */
@@ -27,6 +27,7 @@ async function world(over: { store?: NonceStore; offerTimeoutMs?: number; agentA
     ...(over.offerTimeoutMs ? { offerTimeoutMs: over.offerTimeoutMs } : {}),
     ...(over.agentAttachTimeoutMs ? { agentAttachTimeoutMs: over.agentAttachTimeoutMs } : {}),
     ...(over.outboundLimitBytes ? { outboundLimitBytes: over.outboundLimitBytes } : {}),
+    ...(over.revalidateMs ? { revalidateMs: over.revalidateMs } : {}),
   });
   const httpServer = http.createServer();
   const wss = new WebSocketServer({ server: httpServer });
@@ -535,6 +536,30 @@ describe('a side that stops reading does not make the server queue without limit
     let ended = false;
     void browser.closed.then(() => { ended = true; });
     await new Promise((r) => setTimeout(r, 50));
+    expect(ended).toBe(false);
+  });
+});
+
+describe('a device removed through another server instance loses its lease here too (Codex on 8e5817a)', () => {
+  it('its lease and its control connection end once the registry no longer has it', async () => {
+    const w = await world({ revalidateMs: 50 });
+    const { run, browser, d } = await leased(w);
+    const agent = await w.open(`/agent/${browser.token}`);
+    // Removed elsewhere: only the shared registry changes. This instance's hub is told nothing.
+    w.forget('device-a');
+    expect(await browser.closed).toBe('the device was removed');
+    await closedWith(run);
+    await closedWith(agent);
+    await closedWith(d.control);
+    expect(w.hub.deviceOnline('user-a', 'device-a')).toBe(false);
+  });
+
+  it('control: a device still registered keeps its lease through the checks', async () => {
+    const w = await world({ revalidateMs: 50 });
+    const { browser } = await leased(w);
+    let ended = false;
+    void browser.closed.then(() => { ended = true; });
+    await new Promise((r) => setTimeout(r, 300));
     expect(ended).toBe(false);
   });
 });
