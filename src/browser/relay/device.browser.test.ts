@@ -15,6 +15,8 @@ import { type DeviceClient, type LeasedBrowser, type UserConsent, connectDeviceC
 import type { ProxyNetwork } from './egress-proxy.js';
 import { RelayRefused, authenticateControl, createRelayHub } from './hub.js';
 import { launchForRelayTests } from './launch.js';
+import { RemoteBrowserController } from '../remote/controller.js';
+import { RelayBrowserProvider } from '../remote/relay-provider.js';
 
 interface PwPage { goto(u: string, o?: object): Promise<unknown>; evaluate<T>(fn: string): Promise<T>; url(): string }
 interface PwBrowser { contexts(): { pages(): PwPage[]; waitForEvent(e: string, o: object): Promise<PwPage> }[]; close(): Promise<void>; isConnected(): boolean }
@@ -116,7 +118,7 @@ async function rig(over: { answer?: UserConsent | null } = {}) {
     const page = ctx.pages()[0] ?? await ctx.waitForEvent('page', { timeout: 5000 });
     return { relayed, pwBrowser, page };
   };
-  return { hub, allowed, offlist, device, drive, asked, browsers };
+  return { hub, allowed, offlist, device, drive, asked, browsers, agentUrl: (token: string) => `${base}/agent/${token}` };
 }
 
 suite('a run on the server drives a browser on the device', { timeout: 60_000 }, () => {
@@ -199,5 +201,63 @@ suite('a run on the server drives a browser on the device', { timeout: 60_000 },
     expect(r.browsers).toHaveLength(2);
     await second.page.goto('http://allowed.test/second');
     expect(r.allowed.hits).toContain('GET /second');
+  });
+});
+
+suite("the server's own browser controller, with the user's browser behind it", { timeout: 90_000 }, () => {
+  const ctx = (sessionId: string, actorId: string) => ({ sessionId, actorId });
+
+  it('navigating, reading, waiting and a page view work through the relay, and the device refuses nothing they need', async () => {
+    const r = await rig();
+    const d = await r.device('user-a', 'device-a');
+    const provider = new RelayBrowserProvider({ hub: r.hub, agentUrl: r.agentUrl, userId: 'user-a', deviceId: 'device-a', runId: 'run-1' });
+    const c = new RemoteBrowserController({ provider });
+    closers.push(() => c.dispose());
+
+    const nav = await c.controller({ kind: 'navigate', url: 'http://allowed.test/form' }, ctx('run-1', 'w1'));
+    expect(nav.ok, nav.detail).toBe(true);
+    expect(r.asked).toEqual([{ userId: 'user-a', runId: 'run-1' }]);
+    const text = await c.controller({ kind: 'extract_text' }, ctx('run-1', 'w1'));
+    expect(text.ok, text.detail).toBe(true);
+    expect(text.detail).toContain('ALLOWEDPAGE');
+    const waited = await c.controller({ kind: 'wait_for', selector: 'body' }, ctx('run-1', 'w1'));
+    expect(waited.ok, waited.detail).toBe(true);
+    const observed = await c.controller({ kind: 'observe' }, ctx('run-1', 'w1'));
+    expect(observed.ok, observed.detail).toBe(true);
+
+    // A site the user did not agree to: refused on the device, nothing sent.
+    const off = await c.controller({ kind: 'navigate', url: 'http://offlist.test/secret' }, ctx('run-1', 'w1'));
+    expect(off.ok).toBe(false);
+    expect(r.offlist.hits).toEqual([]);
+
+    // What the controller asked for that the device would not do. Recorded, so a change
+    // in either that breaks the pairing shows up here.
+    expect([...d.relay()!.refusedMethods].sort()).toEqual([]);
+
+    await c.endRun('run-1');
+    await vi.waitFor(() => expect(d.lease()).toBeNull(), { timeout: 15_000 });
+    expect(r.browsers[0]!.closed).toBe(true);
+  });
+
+  it('a user who says no gives the run a refusal it can show, and no browser', async () => {
+    const r = await rig({ answer: null });
+    await r.device('user-a', 'device-a');
+    const provider = new RelayBrowserProvider({ hub: r.hub, agentUrl: r.agentUrl, userId: 'user-a', deviceId: 'device-a', runId: 'run-1' });
+    const c = new RemoteBrowserController({ provider });
+    closers.push(() => c.dispose());
+    const nav = await c.controller({ kind: 'navigate', url: 'http://allowed.test/' }, ctx('run-1', 'w1'));
+    expect(nav.ok).toBe(false);
+    expect(nav.detail).toContain('declined on the device');
+    expect(r.browsers).toEqual([]);
+  });
+
+  it('with the device offline the run is told so at once', async () => {
+    const r = await rig();
+    const provider = new RelayBrowserProvider({ hub: r.hub, agentUrl: r.agentUrl, userId: 'user-a', deviceId: 'device-a', runId: 'run-1' });
+    const c = new RemoteBrowserController({ provider });
+    closers.push(() => c.dispose());
+    const nav = await c.controller({ kind: 'navigate', url: 'http://allowed.test/' }, ctx('run-1', 'w1'));
+    expect(nav.ok).toBe(false);
+    expect(nav.detail).toContain('not connected');
   });
 });
