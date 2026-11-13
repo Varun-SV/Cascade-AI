@@ -22,6 +22,7 @@ import {
   sessionBranchCommand, sessionRemoveMessageCommand, sessionRenameCommand, sessionDeleteCommand,
   syncPushCommand, syncPullCommand,
 } from './commands/cloud.js';
+import { relayDevicesCommand, relayForgetCommand, relayPairCommand, relayServeCommand } from './commands/relay.js';
 import { mcpConnectCommand, mcpListCommand, mcpRemoveCommand } from './commands/mcp.js';
 import { updateCommand } from './commands/update.js';
 import { dashboardCommand } from './commands/dashboard.js';
@@ -174,6 +175,37 @@ program
   .description('Show the signed-in Cascade Cloud account')
   .action(async () => {
     await whoamiCommand();
+  });
+
+// ── This machine's browser, for your cloud runs ──
+const relay = program
+  .command('relay')
+  .description("Let your Cascade Cloud runs use a browser on this machine, with your yes each time");
+relay
+  .command('pair')
+  .description('Register this machine as one of your devices (a key made here; only its public half is sent)')
+  .option('--name <name>', 'What to call it (default: the hostname)')
+  .action(async (opts: { name?: string }) => {
+    await relayPairCommand(opts);
+  });
+relay
+  .command('serve')
+  .description('Stay connected, and ask here before any run gets a browser')
+  .option('--chromium <path>', "The Chromium to run (default: Playwright's, or CASCADE_RELAY_CHROMIUM)")
+  .action(async (opts: { chromium?: string }) => {
+    await relayServeCommand(opts);
+  });
+relay
+  .command('devices')
+  .description('Your registered devices, and which are online')
+  .action(async () => {
+    await relayDevicesCommand();
+  });
+relay
+  .command('forget')
+  .description('Remove this machine, on the server and here')
+  .action(async () => {
+    await relayForgetCommand();
   });
 
 const sessions = program

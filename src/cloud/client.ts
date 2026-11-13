@@ -124,6 +124,9 @@ class FileCloudSessionStore implements CloudSessionStore {
 const inflightRefreshes = new Map<string, Promise<CloudSession>>();
 const refreshKey = (s: CloudSession): string => JSON.stringify([s.serverUrl, s.user?.id ?? '', s.refreshToken]);
 
+export interface RelayServerInfo { serverId: string; serverKey: string; controlPath: string; runPath: string }
+export interface RelayDeviceInfo { id: string; name: string; kind: string; createdAt: number; lastSeenAt: number | null; online: boolean }
+
 export class CloudAccountChangedError extends Error {
   readonly code = 'CLOUD_ACCOUNT_CHANGED';
   constructor() { super('Signed in to another account.'); this.name = 'CloudAccountChangedError'; }
@@ -385,6 +388,35 @@ export class CloudClient {
   async me(): Promise<CloudUser> {
     const b = await this.authedGet<{ user?: CloudUser }>('/api/me');
     return b.user ?? { id: '', email: null, name: null };
+  }
+
+  // ── Browser relay: this machine as one of the user's devices ───
+
+  /** The server this client talks to. */
+  get server(): string { return this.serverUrl.replace(/\/$/, ''); }
+
+  /** What a device pins before it trusts the server. Public: no session needed. */
+  async relayServer(): Promise<RelayServerInfo> {
+    const res = await fetch(this.url('/api/browser-relay/server'));
+    if (res.status === 404) throw new Error('This server does not offer your own browser to runs.');
+    if (!res.ok) throw new Error(`Could not reach the browser relay (${res.status}).`);
+    return (await res.json()) as RelayServerInfo;
+  }
+
+  /** Registers a key made on this machine. Only its public half is sent. */
+  async registerRelayDevice(input: { name: string; kind: 'cli' | 'desktop'; publicKey: string }): Promise<{ device: RelayDeviceInfo; serverId: string; serverKey: string }> {
+    return this.authed('/api/browser-relay/devices', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+    });
+  }
+
+  async listRelayDevices(): Promise<RelayDeviceInfo[]> {
+    const b = await this.authedGet<{ devices?: RelayDeviceInfo[] }>('/api/browser-relay/devices');
+    return b.devices ?? [];
+  }
+
+  async removeRelayDevice(id: string): Promise<void> {
+    await this.authed(`/api/browser-relay/devices/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 
   async listConversations(): Promise<CloudConversation[]> {
