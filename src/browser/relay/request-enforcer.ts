@@ -84,14 +84,8 @@ export async function policeChild(client: Pick<CdpClient, 'send'>, sessionId: st
   return coverage;
 }
 
-/** Whether a CDP call succeeded in time. A page spinning in a loop never answers. */
-export function settlesWithin(call: Promise<unknown>, ms: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(false), ms);
-    const finish = (ok: boolean): void => { clearTimeout(timer); resolve(ok); };
-    call.then(() => finish(true), () => finish(false));
-  });
-}
+import { settlesWithin } from './settles.js';
+export { settlesWithin };
 
 /**
  * Whether a history reply is well formed and every entry may be kept: at least the

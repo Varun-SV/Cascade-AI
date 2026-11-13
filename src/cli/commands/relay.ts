@@ -25,8 +25,10 @@ import { CloudClient, type RelayServerInfo } from '../../cloud/client.js';
 import { globalDir } from '../../cloud/session-store.js';
 import { generateStoredKey, identityFromPrivateKey, publicKeyFromText } from '../../browser/relay/capability.js';
 import { connectDeviceClient, type DeviceClient, type DeviceClientOptions, type UserConsent } from '../../browser/relay/device.js';
+
+export { parseSites };
 import { startDedicatedBrowser } from '../../browser/relay/dedicated-browser.js';
-import { bareHost, isPrivateHost } from '../../browser/relay/egress-rules.js';
+import { parseSites } from '../../browser/relay/consent-input.js';
 
 export const RELAY_DEVICE_FILE = 'relay-device.json';
 
@@ -73,29 +75,6 @@ export function relayEndpoints(serverUrl: string, info: Pick<RelayServerInfo, 'c
   base.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
   const at = (p: string): string => new URL(p, base).toString();
   return { controlUrl: at(info.controlPath), runUrl: at(info.runPath) };
-}
-
-/**
- * The user's answer, as the sites a run may use. Empty is a no.
- *
- * Each site is an origin: `example.com` means https://example.com, and a path is
- * dropped. A site on a private network (localhost, a LAN address) is allowed only
- * because it was typed here, and is marked so: the proxy refuses those otherwise.
- */
-export function parseSites(answer: string): { consent: UserConsent } | { error: string } | null {
-  const words = answer.split(/[\s,]+/).map((w) => w.trim()).filter(Boolean);
-  if (words.length === 0) return null;
-  const allowedOrigins: string[] = [];
-  const privateOrigins: string[] = [];
-  for (const w of words) {
-    let u: URL;
-    try { u = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(w) ? w : `https://${w}`); } catch { return { error: `"${w}" is not a site.` }; }
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return { error: `"${w}" is not an http or https site.` };
-    if (u.username || u.password) return { error: `"${w}" has a password in it: give the site alone.` };
-    const list = isPrivateHost(bareHost(u.hostname)) ? privateOrigins : allowedOrigins;
-    if (!list.includes(u.origin)) list.push(u.origin);
-  }
-  return { consent: { allowedOrigins, privateOrigins } };
 }
 
 /** Registers this machine with the signed-in account, pinning the server it registered with. */

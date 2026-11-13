@@ -12,7 +12,8 @@ import type { WebSocket } from 'ws';
 import { type CdpClient, type CdpMessage, connectCdp } from './cdp-client.js';
 import { type CommandFrame, type FrameTreeNode, HIDDEN_HISTORY_URL, checkCommand, filterEvent, filterReply, filterTargetInfo, parseFrame } from './command-policy.js';
 import { type Consent, onConsentedSite } from './egress-rules.js';
-import { type PageEndMode, type RequestEnforcer, settlesWithin } from './request-enforcer.js';
+import type { PageEndMode, RequestEnforcer } from './request-enforcer.js';
+import { settlesWithin } from './settles.js';
 import { CommandFenced, type CommandTransport, type TabLease, createFencedForwarder } from './tab-lease.js';
 
 const TAB_SESSION = 'cascade-tab-1';
@@ -33,6 +34,11 @@ export interface RelayEvents {
 
 export interface DeviceRelayOptions {
   tabWs: string;
+  /**
+   * How the device reaches the tab, where it isn't a DevTools WebSocket: the extension's
+   * `chrome.debugger`. Absent, the relay connects to `tabWs`.
+   */
+  connectTab?: () => Promise<CdpClient>;
   consent: Consent;
   lease: TabLease;
   enforcer: RequestEnforcer;
@@ -52,10 +58,10 @@ export interface DeviceRelay extends RelayEvents {
 }
 
 /** The tab's connection, or null if it can't be had in time. One that opens late is closed. */
-async function connectWithin(url: string, ms: number): Promise<CdpClient | null> {
-  let timer!: NodeJS.Timeout;
+async function connectWithin(connect: () => Promise<CdpClient>, ms: number): Promise<CdpClient | null> {
+  let timer!: ReturnType<typeof setTimeout>;
   let late = false;
-  const attempt = connectCdp(url).then((c) => { if (late) { c.close(); return null; } return c; }, () => null);
+  const attempt = connect().then((c) => { if (late) { c.close(); return null; } return c; }, () => null);
   const timeout = new Promise<null>((r) => { timer = setTimeout(() => { late = true; r(null); }, ms); });
   try { return await Promise.race([attempt, timeout]); } finally { clearTimeout(timer); }
 }
@@ -136,7 +142,7 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
     agent.on('error', () => onGone('the connection failed'));
     // And for the lease ending while the tab is still being reached.
     lease.onChange((why, state) => { if (state === 'ending' || state === 'idle') onGone(why); });
-    const reached = await connectWithin(opts.tabWs, TAB_CONNECT_TIMEOUT_MS);
+    const reached = await connectWithin(opts.connectTab ?? (() => connectCdp(opts.tabWs)), TAB_CONNECT_TIMEOUT_MS);
     if (!reached) {
       refusals.push('lease ended: could not reach the tab');
       if (ours()) lease.revoke('could not reach the tab');

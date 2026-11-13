@@ -12,6 +12,7 @@
 //  app and the extension each have their own.
 
 import type { KeyObject } from 'node:crypto';
+import type { CdpClient } from './cdp-client.js';
 import { WebSocket } from 'ws';
 import { type ApprovalPayload, type GrantPayload, type Identity, type Signed, createDeviceApprovals, signHello, verifyGrant } from './capability.js';
 import { type Consent, makeConsent } from './egress-rules.js';
@@ -38,6 +39,8 @@ export interface UserConsent { allowedOrigins: string[]; privateOrigins: string[
 /** A browser started for one lease, with its policy already on. */
 export interface LeasedBrowser {
   tabWs: string;
+  /** Where the tab isn't reached by WebSocket: see DeviceRelayOptions.connectTab. */
+  connectTab?: () => Promise<CdpClient>;
   tabTargetId: string;
   enforcer: RequestEnforcer;
   pageEnd: PageEndMode;
@@ -66,6 +69,11 @@ export interface DeviceClientOptions {
   now?: () => number;
   /** For the device's own log. Never sent to the server. */
   log?(line: string): void;
+  /**
+   * Sends a `ping` this often once accepted. For a device whose process lives only
+   * while its connections carry traffic: an MV3 extension's service worker.
+   */
+  keepaliveMs?: number;
 }
 
 export interface DeviceClient {
@@ -206,7 +214,10 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
       if (mine.cancelled) { mine.lease.revoke('the request was withdrawn'); }
       const lease = mine.lease;
       browser.onEgressDown(() => lease.revoke('egress-proxy-down'));
-      mine.relay = createDeviceRelay({ tabWs: browser.tabWs, consent, lease, enforcer: browser.enforcer, pageEnd: browser.pageEnd });
+      mine.relay = createDeviceRelay({
+        tabWs: browser.tabWs, consent, lease, enforcer: browser.enforcer, pageEnd: browser.pageEnd,
+        ...(browser.connectTab ? { connectTab: browser.connectTab } : {}),
+      });
       // The relay starts listening before its first await, so nothing arrives between
       // that and the hand-over on the next line.
       const served = mine.relay.serve(run.socket);
@@ -236,13 +247,20 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
       tell({ v: HUB_PROTOCOL, t: 'hello', deviceId: opts.device.id, sig: signHello(opts.device, opts.serverId, f.challenge) });
       return;
     }
-    if (f.t === 'welcome') { authenticated = true; welcomed(); return; }
+    if (f.t === 'welcome') {
+      authenticated = true;
+      if (opts.keepaliveMs) keepalive = setInterval(() => tell({ v: HUB_PROTOCOL, t: 'ping' }), opts.keepaliveMs);
+      welcomed();
+      return;
+    }
     // Nothing is acted on before the server has accepted this device.
     if (!authenticated) return;
     if (f.t === 'offer' && f.grant) void onOffer(f.grant);
     else if (f.t === 'cancel' && active && active.nonce === f.nonce) withdraw(active, 'the request was withdrawn');
   });
+  let keepalive: ReturnType<typeof setInterval> | undefined;
   const gone = (why: string): void => {
+    clearInterval(keepalive);
     notWelcomed(new Error(why));
     // A network drop: the lease ends here, without waiting to be told.
     if (active) withdraw(active, why);

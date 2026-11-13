@@ -55,6 +55,9 @@ export type ControlFrame =
   | { v: 1; t: 'cancel'; nonce: string };
 export type DeviceControlFrame =
   | { v: 1; t: 'hello'; deviceId: string; sig: string }
+  // Ignored here. A device in a browser extension sends it to stay awake: an MV3
+  // service worker lives only while its connections carry traffic.
+  | { v: 1; t: 'ping' }
   | { v: 1; t: 'decline'; nonce: string; reason?: string };
 export type ClaimFrame = { v: 1; t: 'claim'; grant: Signed<GrantPayload>; approval: Signed<ApprovalPayload> };
 /** `outcome` tells the device what became of its approval: see `acquireLease`. */
