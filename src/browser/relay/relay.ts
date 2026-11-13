@@ -286,14 +286,19 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
             out({ id: f.id, error: { code: -32000, message: 'Denied by Cascade relay: the lease is not active' } });
             return;
           }
-          out({ id: f.id, result: {} });
+          // The tab is announced BEFORE the reply, as Chrome does: a client reads its pages
+          // as soon as the reply arrives, and one that finds none opens a new page, which
+          // the relay refuses. Replying first left that to the order of two network reads.
+          const refused = (): void => out({ id: f.id, error: { code: -32000, message: 'Denied by Cascade relay: the lease is not active' } });
           void tab.send('Target.getTargetInfo').then((r) => {
-            if (ended || !lease.isCurrent(fence)) return;
+            // Late: nothing about the tab, but still an answer, so the client isn't left waiting.
+            if (ended || !lease.isCurrent(fence)) { refused(); return; }
             const info = (r as { targetInfo: Record<string, unknown> }).targetInfo;
             targetInfo = { ...info, attached: true, browserContextId: 'cascade-default' };
             const safe = filterEvent('Target.attachedToTarget', { sessionId: TAB_SESSION, targetInfo, waitingForDebugger: false }, consent);
             if (safe) out({ method: 'Target.attachedToTarget', params: safe });
-          }).catch(() => end('the tab went away'));
+            out({ id: f.id, result: {} });
+          }).catch(() => { refused(); end('the tab went away'); });
           return;
         }
         default:

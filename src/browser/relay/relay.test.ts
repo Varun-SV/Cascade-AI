@@ -680,3 +680,39 @@ describe('child sessions while the user has the tab (Codex on 9b35690)', () => {
     s.tab.close();
   });
 });
+
+describe('the tab is announced before the reply to setAutoAttach, as Chrome does (CI on 8e5817a)', () => {
+  it('a client reading its pages on the reply finds the tab', async () => {
+    const tab = await answeringTab(new Set());
+    try {
+      const { lease, relay, agent } = setup(tab.url);
+      const out = sent(agent);
+      const served = relay.serve(agent as unknown as WebSocket);
+      agent.emit('message', autoAttach(1));
+      await vi.waitFor(() => expect(replied(out, 1)).toBe(true));
+      const order = out.map((s) => JSON.parse(s) as { id?: number; method?: string })
+        .map((m) => (m.method === 'Target.attachedToTarget' ? 'attached' : m.id === 1 ? 'reply' : 'other'));
+      expect(order.indexOf('attached')).toBeGreaterThanOrEqual(0);
+      expect(order.indexOf('attached')).toBeLessThan(order.indexOf('reply'));
+      lease.revoke('done');
+      await served;
+    } finally { tab.close(); }
+  });
+
+  it('an answer that comes back after the lease changed still gets a refusal, not silence', async () => {
+    const tab = await answeringTab(new Set(['Target.getTargetInfo']));
+    try {
+      const { lease, relay, agent } = setup(tab.url);
+      const out = sent(agent);
+      const served = relay.serve(agent as unknown as WebSocket);
+      agent.emit('message', autoAttach(1));
+      await vi.waitFor(() => expect(tab.methods).toContain('Target.getTargetInfo'));
+      lease.suspend();
+      tab.release();
+      await vi.waitFor(() => expect(errored(out, 1)).toBe(true));
+      expect(attachments(out)).toEqual([]);
+      lease.revoke('done');
+      await served;
+    } finally { tab.close(); }
+  });
+});
