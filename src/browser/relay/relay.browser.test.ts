@@ -747,8 +747,11 @@ suite("the policy's own connection dropping while the browser runs", { timeout: 
       // for something and adds an off-list frame.
       const page = await connectCdp(r.browser.tabWs);
       await page.send('Runtime.evaluate', { expression: `setInterval(() => { fetch('/tick').catch(() => {}); ${addFrame('/frame-after-loss')}; }, 20); 0` });
-      await sleep(200);
-      expect(r.allowed.hits.some((h) => h.includes('/tick'))).toBe(true);
+      // Until the page's own requests are arriving, however long a slow machine takes to
+      // start them: a fixed wait here failed on CI, and said nothing about the guard.
+      const ticking = (): boolean => r.allowed.hits.some((h) => h.includes('/tick'));
+      for (let i = 0; i < 100 && !ticking(); i++) await sleep(50);
+      expect(ticking(), 'control: the page is sending requests by itself').toBe(true);
 
       d.made[index]!.close();
       await r.serving;
