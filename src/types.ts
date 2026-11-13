@@ -904,7 +904,7 @@ export interface ToolsConfig {
    * `src/browser/remote/provider.ts`.
    */
   remoteBrowser?: {
-    provider?: 'cdp' | 'steel';
+    provider?: 'cdp' | 'steel' | 'relay';
     url?: string;
     apiKey?: string;
     cdpHostHeader?: string;

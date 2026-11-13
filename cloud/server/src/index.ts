@@ -36,7 +36,7 @@ export function bootstrap() {
   const app = createApp(env, store, browserRelay ? { browserRelay } : {});
   const httpServer = http.createServer(app);
   browserRelay?.attach(httpServer);
-  const io = attachSocket(httpServer, env, store);
+  const io = attachSocket(httpServer, env, store, browserRelay ? { browserRelay } : {});
   // Unsaved generated media expires. Request paths sweep opportunistically,
   // but an asset nobody ever opens again is exactly the one that would
   // otherwise sit on the volume forever — so the process sweeps on a timer too.

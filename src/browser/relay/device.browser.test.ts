@@ -41,6 +41,12 @@ async function site(body: string): Promise<{ hits: string[]; port: number }> {
   const server = http.createServer((req, res) => {
     hits.push(`${req.method} ${req.url}`);
     res.setHeader('content-type', 'text/html');
+    if (req.url === '/signup') {
+      res.end(`<!doctype html><title>${body}</title><body><label for=q>Name</label><input id=q>
+        <button id=go onclick="document.getElementById('out').textContent = 'SENT:' + document.getElementById('q').value">Send</button>
+        <button id=again onclick="document.getElementById('out').textContent += '+AGAIN'">Again</button><p id=out></p></body>`);
+      return;
+    }
     res.end(`<!doctype html><title>${body}</title><body>${body}</body>`);
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
@@ -237,6 +243,31 @@ suite("the server's own browser controller, with the user's browser behind it", 
     await c.endRun('run-1');
     await vi.waitFor(() => expect(d.lease()).toBeNull(), { timeout: 15_000 });
     expect(r.browsers[0]!.closed).toBe(true);
+  });
+
+  it('fill and click work through the relay, by selector and by a ref from a page view', async () => {
+    const r = await rig();
+    const d = await r.device('user-a', 'device-a');
+    const provider = new RelayBrowserProvider({ hub: r.hub, agentUrl: r.agentUrl, userId: 'user-a', deviceId: 'device-a', runId: 'run-1' });
+    const c = new RemoteBrowserController({ provider });
+    closers.push(() => c.dispose());
+    const act = async (a: Parameters<typeof c.controller>[0]) => {
+      const out = await c.controller(a, ctx('run-1', 'w1'));
+      expect(out.ok, `${a.kind}: ${out.detail}`).toBe(true);
+      return out;
+    };
+    await act({ kind: 'navigate', url: 'http://allowed.test/signup' });
+    await act({ kind: 'fill', selector: '#q', value: 'relay user' });
+    await act({ kind: 'click', selector: '#go' });
+    expect((await act({ kind: 'extract_text', selector: '#out' })).detail).toContain('SENT:relay user');
+
+    const seen = await act({ kind: 'observe' });
+    const again = Object.entries(seen.view?.labels ?? {}).find(([, label]) => label.includes('Again'))?.[0];
+    expect(again, seen.view?.text).toBeTruthy();
+    await act({ kind: 'click', ref: again! });
+    expect((await act({ kind: 'extract_text', selector: '#out' })).detail).toContain('SENT:relay user+AGAIN');
+    expect([...d.relay()!.refusedMethods].sort()).toEqual([]);
+    await c.endRun('run-1');
   });
 
   it('a user who says no gives the run a refusal it can show, and no browser', async () => {

@@ -115,8 +115,8 @@ export interface RemoteBrowserProvider {
 
 /** How the host was told to obtain browsers. */
 export interface RemoteBrowserConfig {
-  /** `cdp` for an endpoint you run; `steel` for a Steel deployment. */
-  provider?: 'cdp' | 'steel';
+  /** `cdp` for an endpoint you run; `steel` for a Steel deployment; `relay` for the user's own browser. */
+  provider?: 'cdp' | 'steel' | 'relay';
   /**
    * For `cdp`, the websocket endpoint to connect to.
    * For `steel`, the API base — defaults to Steel's hosted API.

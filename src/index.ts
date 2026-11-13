@@ -74,6 +74,7 @@ export { ALLOWANCE_UNAVAILABLE, RemoteBrowserController } from './browser/remote
 export type { BrowserFrame, BrowserInput, BrowserControlState, BrowserBusyInfo, BrowserAllowance } from './browser/remote/controller.js';
 export { GenericCdpProvider, isCdpEndpoint } from './browser/remote/generic-cdp.js';
 export { SteelProvider, isHostedSteel, isUsableSteelBase, isUsableSteelKey } from './browser/remote/steel.js';
+export { RelayBrowserProvider } from './browser/remote/relay-provider.js';
 export { BrowserLease } from './browser/lease.js';
 export type { RemoteBrowserProvider, RemoteBrowserSession, RemoteBrowserConfig } from './browser/remote/provider.js';
 // The browser relay: a user's own browser, on their own device, serving a run on

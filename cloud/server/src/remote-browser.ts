@@ -19,9 +19,11 @@
 //      one conversation holds many runs — and using the wrong one meant
 //      cleanup matched nothing, which cost a review round on the desktop.
 
+import { randomUUID } from 'node:crypto';
 import {
   ALLOWANCE_UNAVAILABLE,
   RemoteBrowserController,
+  RelayBrowserProvider,
   GenericCdpProvider,
   SteelProvider,
   isHostedSteel,
@@ -33,7 +35,28 @@ import {
   type Cascade,
   type CascadeConfig,
   type RemoteBrowserProvider,
+  type RelayHub,
 } from '#cascade-ai';
+
+/**
+ * The user's own browser, for one run: the relay that reaches it, and the device it's on.
+ *
+ * Chosen by the run, not here: which of the user's devices, and whether one is online,
+ * is known where the run starts.
+ */
+export interface RelayForRun {
+  hub: RelayHub;
+  /** Where the run's own CDP client reaches a claimed lease. Loopback only. */
+  agentUrl(token: string): string;
+  userId: string;
+  device: { id: string; name: string };
+}
+
+/**
+ * Said to the person and the model when something asks for what only the device has.
+ * The tab is in the user's own browser: they watch it and take it over there.
+ */
+export const ON_DEVICE_ONLY = 'This browser is on your own device. Watch it and take it over there.';
 
 /**
  * Only the slice this needs.
@@ -69,6 +92,11 @@ interface AttachOptions {
    * it when no session came of it. See `RemoteBrowserController.allowances`.
    */
   allowance?: BrowserAllowance;
+  /**
+   * For `provider: 'relay'`: the user's own browser. Without it a relay setting attaches
+   * nothing, as an unconfigured provider does.
+   */
+  relay?: RelayForRun;
 }
 
 /** Attached browser, or null when the deployment has no provider configured. */
@@ -209,13 +237,15 @@ export function frameEmitter(opts: Pick<AttachOptions, 'emit' | 'emitFrame'>): (
 export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null {
   const settings = opts.config.tools?.remoteBrowser;
   if (!settings?.provider) return null;
+  if (settings.provider === 'relay') {
+    if (!opts.relay) {
+      opts.warn?.("remoteBrowser.provider 'relay' needs the browser relay, which this server does not have on");
+      return null;
+    }
+    return attachRun(opts, ownDeviceController(opts.relay, opts.conversationId), opts.relay.device);
+  }
   const provider = buildProvider(settings, opts.warn);
   if (!provider) return null;
-
-  // The run's own id, learned when the run starts rather than when it ends: a
-  // run that throws is exactly the one whose session needs releasing, and a
-  // result is not available on that path.
-  let taskId: string | null = null;
 
   // Reused across runs. A settings change makes a new one and retires the old
   // rather than leaving its sessions running at the operator's expense.
@@ -269,7 +299,43 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
       }),
     };
   }
-  const controller = shared.controller;
+  return attachRun(opts, shared.controller, null);
+}
+
+/**
+ * A controller of the run's own, for the user's browser on their device.
+ *
+ * Not the shared one: that one's sessions are the deployment's, rationed across every
+ * run, while this browser is one person's on one device and serves nobody else. Nothing
+ * is allocated or billed, so there is no allowance to claim either.
+ */
+function ownDeviceController(relay: RelayForRun, conversationId: string): RemoteBrowserController {
+  return new RemoteBrowserController({
+    provider: new RelayBrowserProvider({
+      hub: relay.hub,
+      agentUrl: (token) => relay.agentUrl(token),
+      userId: relay.userId,
+      deviceId: relay.device.id,
+      // One per attach: a conversation holds many runs, and each asks the device anew.
+      runId: `${conversationId}:${randomUUID()}`,
+    }),
+    maxSessions: 1,
+    onReleaseFailed: (runId, sessionId, err) => {
+      console.error(`[browser ${runId}] the device's tab ${sessionId} was not handed back; the device ends it when the run's connection closes:`, err);
+    },
+  });
+}
+
+/** Wires a run to its controller: who hears about the page, and what the person may do. */
+function attachRun(
+  opts: AttachOptions,
+  controller: RemoteBrowserController,
+  device: RelayForRun['device'] | null,
+): AttachedBrowser {
+  // The run's own id, learned when the run starts rather than when it ends: a
+  // run that throws is exactly the one whose session needs releasing, and a
+  // result is not available on that path.
+  let taskId: string | null = null;
 
   // Bound to the TASK id, and only once the run announces it.
   //
@@ -312,7 +378,8 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
     // remembered by what it said, not only that there was one.
     let lastLimit: string | undefined;
     let busyAnnounced = false;
-    if (opts.allowance) {
+    // The user's own browser costs nobody a session, whatever the caller passed.
+    if (opts.allowance && !device) {
       const allowance = opts.allowance;
       controller.setAllowanceFor(id, {
         take: () => {
@@ -364,6 +431,9 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
         // and not-attached-at-all both have no URL, and the UI must tell them
         // apart: the first still needs a Stop control, the second needs no panel.
         active,
+        // Where the page is when it's the user's own: on this device, to watch and take
+        // over there. The name is the one the user gave it.
+        ...(device ? { device: { name: device.name } } : {}),
       });
     });
   });
@@ -375,8 +445,33 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
   opts.cascade.setRemoteBrowserController(
     controller.controller,
     (actorId) => controller.actorEnded(actorId),
-    controller.features,
+    // On the user's device the agent reads pages, but no picture of one leaves it.
+    device ? { ...controller.features, screenshots: false, marked: false } : controller.features,
   );
+
+  if (device) {
+    // Everything that would put the page on this screen, or this screen's input on the
+    // page, is the device's to do. Refused plainly, so no panel waits for frames.
+    return {
+      get taskId() { return taskId; },
+      async endRun() {
+        try {
+          if (taskId) await controller.endRun(taskId);
+        } finally {
+          // The controller was this run's alone.
+          await controller.dispose();
+        }
+      },
+      stop() { if (taskId) controller.stopRun(taskId); },
+      watch: async () => false,
+      unwatch: async () => {},
+      takeOver: async () => ({ ok: false, detail: ON_DEVICE_ONLY }),
+      handBack: () => false,
+      input: async () => ({ ok: false, detail: ON_DEVICE_ONLY }),
+      setCapture: async () => false,
+      frameSeen: () => {},
+    };
+  }
 
   return {
     get taskId() { return taskId; },
@@ -502,6 +597,8 @@ function buildProvider(
   warn?: (message: string) => void,
 ): RemoteBrowserProvider | null {
   if (!settings?.provider) return null;
+  // The user's own browser is one run's, never a deployment's: see `ownDeviceController`.
+  if (settings.provider === 'relay') return null;
 
   if (settings.provider === 'cdp') {
     // Named at attach time rather than as an obscure Playwright failure on the
