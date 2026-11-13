@@ -279,7 +279,7 @@ export function filterEvent(method: string, params: Record<string, unknown>, con
 
 // ── Replies that carry URLs ──────────────────────────────────────────────────
 
-interface FrameTreeNode { frame?: Record<string, unknown>; childFrames?: FrameTreeNode[] }
+export interface FrameTreeNode { frame?: Record<string, unknown> & { id?: string }; childFrames?: FrameTreeNode[] }
 
 const FRAME_SCHEMA = SCHEMAS['Page.frameNavigated']!.frame as Schema;
 

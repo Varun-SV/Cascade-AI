@@ -261,7 +261,7 @@ describe('a connection is pinned to the lease it started under', () => {
 });
 
 /** A tab that answers every command, except the methods it's told to hold until let go. */
-async function answeringTab(held: Set<string>): Promise<{
+async function answeringTab(held: Set<string>, results: Record<string, object> = {}): Promise<{
   url: string; methods: string[]; frames: { method: string; sessionId?: string }[]; emit(event: object): void; release(): void; close(): void;
 }> {
   const methods: string[] = [];
@@ -275,7 +275,8 @@ async function answeringTab(held: Set<string>): Promise<{
     methods.push(method);
     frames.push({ method, ...(sessionId ? { sessionId } : {}) });
     const reply = (): void => {
-      const result = method === 'Page.addScriptToEvaluateOnNewDocument' ? { identifier: `s${id}` }
+      const result = Object.hasOwn(results, method) ? results[method]
+        : method === 'Page.addScriptToEvaluateOnNewDocument' ? { identifier: `s${id}` }
         : method === 'Target.getTargetInfo' ? { targetInfo: { targetId: 't1', type: 'page', title: 't', url: 'https://a.test/inbox?q=WHERETHEUSERIS' } }
         : { result: { type: 'number', value: 1 } };
       ws.send(JSON.stringify({ id, result }));
@@ -721,8 +722,8 @@ describe('the page the user moved to during a takeover is the page the agent has
   const navigated = (url: string) => ({ method: 'Page.frameNavigated', params: { frame: { id: 'main', loaderId: 'l2', url }, type: 'Navigation' } });
   const methodsOut = (out: string[]) => out.map((s) => (JSON.parse(s) as { method?: string }).method).filter(Boolean);
 
-  async function serving() {
-    const tab = await answeringTab(new Set());
+  async function serving(results: Record<string, object> = {}) {
+    const tab = await answeringTab(new Set(), results);
     const { lease, relay, agent } = setup(tab.url);
     const out = sent(agent);
     const served = relay.serve(agent as unknown as WebSocket);
@@ -758,15 +759,43 @@ describe('the page the user moved to during a takeover is the page the agent has
     await s.done();
   });
 
-  it('a navigation in a child frame alone is not the main document moving', async () => {
+  it('a navigation in a child frame alone still brings the frames up to date (Codex on ca21b23)', async () => {
     const s = await serving();
     s.lease.suspend();
     s.tab.emit({ method: 'Page.frameNavigated', params: { frame: { id: 'child', parentId: 'main', url: 'https://a.test/frame' } } });
     await settle();
+    expect(methodsOut(s.out)).toEqual([]);
     const before = s.tab.methods.length;
     s.lease.handBack();
     await settle();
-    expect(s.tab.methods.slice(before)).toEqual([]);
+    expect(s.tab.methods.slice(before)).toEqual(['Page.getFrameTree', 'Runtime.disable', 'Runtime.enable']);
+    await s.done();
+  });
+
+  it('the frames are announced parents first; one without consent is left out with everything under it (Codex on ca21b23)', async () => {
+    const frame = (id: string, url: string, parentId?: string) => ({ id, url, loaderId: `l-${id}`, securityOrigin: new URL(url).origin, mimeType: 'text/html', ...(parentId ? { parentId } : {}), name: 'MARKNAME' });
+    const s = await serving({ 'Page.getFrameTree': { frameTree: {
+      frame: frame('main', 'https://a.test/now'),
+      childFrames: [
+        { frame: frame('c1', 'https://a.test/c1', 'main'), childFrames: [{ frame: frame('c1a', 'https://a.test/c1a', 'c1') }] },
+        { frame: frame('off', 'https://elsewhere.test/MARKPATH', 'main'), childFrames: [{ frame: frame('under-off', 'https://a.test/under', 'off') }] },
+        { frame: frame('c2', 'https://a.test/c2', 'main') },
+      ],
+    } } });
+    s.lease.suspend();
+    s.tab.emit(navigated('https://a.test/now'));
+    await settle();
+    s.lease.handBack();
+    await vi.waitFor(() => expect(methodsOut(s.out)).toContain('Page.frameNavigated'));
+    await settle();
+    const told = s.out.map((m) => JSON.parse(m) as { method?: string; params?: { frameId?: string; parentFrameId?: string; frame?: { id: string } } })
+      .filter((m) => m.method === 'Page.frameAttached' || m.method === 'Page.frameNavigated')
+      .map((m) => m.method === 'Page.frameAttached' ? `attach ${m.params!.frameId} to ${m.params!.parentFrameId}` : `navigated ${m.params!.frame!.id}`);
+    expect(told).toEqual(['navigated main', 'attach c1 to main', 'navigated c1', 'attach c1a to c1', 'navigated c1a', 'attach c2 to main', 'navigated c2']);
+    const all = s.out.join('');
+    expect(all).not.toContain('MARKPATH');
+    expect(all).not.toContain('MARKNAME');
+    expect(all).not.toContain('under');
     await s.done();
   });
 });

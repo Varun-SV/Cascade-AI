@@ -254,6 +254,10 @@ export async function startRequestPolicy(opts: {
       if (!coverage) await browser.send('Target.closeTarget', { targetId: targetInfo.targetId }).catch(() => {});
     })();
   });
+  // No file is written by this browser, whatever a page or the agent asks: a download
+  // from a consented site is still the page's bytes landing on the user's disk, and a blob
+  // download never crosses the proxy at all. Before egress opens, like everything here.
+  await browser.send('Browser.setDownloadBehavior', { behavior: 'deny' });
   // Browser-wide interception as a measured backstop: without it, some pop-ups in a
   // burst send a first request before they're paused. Why it helps isn't pinned down,
   // so the burst test stays a regression gate.

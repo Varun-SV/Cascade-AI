@@ -10,7 +10,7 @@
 
 import type { WebSocket } from 'ws';
 import { type CdpClient, type CdpMessage, connectCdp } from './cdp-client.js';
-import { type CommandFrame, HIDDEN_HISTORY_URL, checkCommand, filterEvent, filterReply, filterTargetInfo, parseFrame } from './command-policy.js';
+import { type CommandFrame, type FrameTreeNode, HIDDEN_HISTORY_URL, checkCommand, filterEvent, filterReply, filterTargetInfo, parseFrame } from './command-policy.js';
 import { type Consent, onConsentedSite } from './egress-rules.js';
 import { type PageEndMode, type RequestEnforcer, settlesWithin } from './request-enforcer.js';
 import { CommandFenced, type CommandTransport, type TabLease, createFencedForwarder } from './tab-lease.js';
@@ -229,10 +229,26 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
      * through the usual filter.
      */
     const reconcileDocument = async (): Promise<void> => {
-      const tree = await tab.send('Page.getFrameTree') as { frameTree?: { frame?: Record<string, unknown> } };
+      const raw = await tab.send('Page.getFrameTree') as { frameTree?: FrameTreeNode };
       if (ended || lease.fence() === null) return;
+      // The same filter as the agent's own Page.getFrameTree: a frame on a site without
+      // consent is left out, with everything under it.
+      const tree = raw.frameTree ? filterReply('Page.getFrameTree', raw as Record<string, unknown>, consent).frameTree as FrameTreeNode : undefined;
       announce({ method: 'Runtime.executionContextsCleared', params: {} });
-      if (tree.frameTree?.frame) announce({ method: 'Page.frameNavigated', params: { frame: tree.frameTree.frame, type: 'Navigation' } });
+      if (tree?.frame?.id) {
+        // A new document in the main frame drops every child frame the client knew of;
+        // the ones there now are attached again, each after its parent.
+        announce({ method: 'Page.frameNavigated', params: { frame: tree.frame, type: 'Navigation' } });
+        const attachChildren = (node: FrameTreeNode): void => {
+          for (const child of node.childFrames ?? []) {
+            if (!child.frame?.id) continue;
+            announce({ method: 'Page.frameAttached', params: { frameId: child.frame.id, parentFrameId: node.frame!.id } });
+            announce({ method: 'Page.frameNavigated', params: { frame: child.frame, type: 'Navigation' } });
+            attachChildren(child);
+          }
+        };
+        attachChildren(tree);
+      }
       await tab.send('Runtime.disable');
       await tab.send('Runtime.enable');
     };
@@ -295,7 +311,7 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
         // The tab's own session: its document or contexts moved on without the agent.
         if (!msg.sessionId && (msg.method === 'Runtime.executionContextsCleared' || msg.method === 'Runtime.executionContextCreated'
           || msg.method === 'Runtime.executionContextDestroyed'
-          || (msg.method === 'Page.frameNavigated' && !(params as { frame?: { parentId?: string } }).frame?.parentId))) documentChanged = true;
+          || msg.method === 'Page.frameNavigated' || msg.method === 'Page.frameAttached' || msg.method === 'Page.frameDetached')) documentChanged = true;
         return;
       }
       const safe = filterEvent(msg.method, params, consent);

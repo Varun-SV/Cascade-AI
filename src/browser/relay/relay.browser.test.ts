@@ -124,6 +124,8 @@ async function startRig(opts: {
   bareProfile?: boolean;
   /** For one suite: how the policy's own connections are made, so a test can drop one. */
   policyConnect?: typeof connectCdp;
+  /** For one suite: the browser's environment, so its download folder is a test's own. */
+  env?: NodeJS.ProcessEnv;
 } = {}): Promise<Rig> {
   const script = (res: http.ServerResponse, extra = ''): boolean => { res.setHeader('content-type', 'text/javascript'); res.end(WORKER_JS + extra); return true; };
   const redirect = (res: http.ServerResponse, to: string): boolean => { res.statusCode = 302; res.setHeader('location', to); res.end(); return true; };
@@ -167,6 +169,19 @@ async function startRig(opts: {
       case '/redirect-https': return redirect(res, 'https://offlist.test/from-redirect-https');
       case '/redirect-private': return redirect(res, `http://127.0.0.1:${privPortRef.port}/from-redirect`);
       case '/redirect-self': return redirect(res, '/landed');
+      case '/attachment':
+        res.setHeader('content-type', 'application/octet-stream');
+        res.setHeader('content-disposition', 'attachment; filename="report.bin"');
+        res.end('ATTACHMENT-BYTES');
+        return true;
+      case '/framed':
+        res.setHeader('content-type', 'text/html');
+        res.end('<!doctype html><iframe name=inner src="/inner"></iframe><iframe src="http://offlist.test/frame"></iframe>');
+        return true;
+      case '/inner':
+        res.setHeader('content-type', 'text/html');
+        res.end('<!doctype html><iframe name=leaf src="/two"></iframe>');
+        return true;
       case '/links':
         res.setHeader('content-type', 'text/html');
         res.end('<!doctype html><a id=a href="/two">two</a> <a id=off href="http://offlist.test/link">off</a>');
@@ -214,6 +229,7 @@ async function startRig(opts: {
       '--unsafely-treat-insecure-origin-as-secure=http://allowed.test,http://other.test,http://sub.allowed.test',
     ],
     ...(bareDir ? { bareProfileDir: bareDir } : {}),
+    ...(opts.env ? { env: opts.env } : {}),
   });
   await opts.beforePolicy?.(browser);
   const enforcer = await startRequestPolicy({ browser, consent, ...(opts.policyConnect ? { connect: opts.policyConnect } : {}) });
@@ -772,6 +788,55 @@ suite("the policy's own connection dropping while the browser runs", { timeout: 
   }
 });
 
+suite('nothing from a consented site is written to disk (Codex on ca21b23)', { timeout: 60_000 }, () => {
+  /** A home of the test's own, so whatever Chromium would download lands where it can be counted. */
+  const home = () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-relay-home-'));
+    const downloads = path.join(dir, 'Downloads');
+    fs.mkdirSync(downloads);
+    return { env: { ...process.env, HOME: dir, XDG_DOWNLOAD_DIR: downloads }, downloads, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
+  };
+  const files = (dir: string): string[] => {
+    const out: string[] = [];
+    const walk = (d: string): void => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else out.push(e.name); } };
+    walk(dir);
+    return out;
+  };
+  const tryAll = async (r: Rig) => {
+    await r.page.evaluate(`(() => {
+      const a = document.createElement('a'); a.href = '/attachment'; document.body.append(a); a.click();
+      const b = document.createElement('a'); b.href = URL.createObjectURL(new Blob(['BLOB-BYTES'])); b.download = 'blob.txt'; document.body.append(b); b.click();
+      location.assign('/attachment');
+      return 1;
+    })()`).catch(() => 1);
+    await sleep(2000);
+  };
+
+  it('control: with downloads allowed, these do write files, so the test can see one', async () => {
+    const h = home();
+    try {
+      const r = await startRig({ env: h.env });
+      await r.page.goto('http://allowed.test/links');
+      const own = await connectCdp(r.browser.browserWs);
+      await own.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: h.downloads });
+      own.close();
+      await tryAll(r);
+      expect(files(h.downloads).length).toBeGreaterThan(0);
+    } finally { h.cleanup(); }
+  });
+
+  it('an attachment, a blob and a script-started download from the consented site write nothing', async () => {
+    const h = home();
+    try {
+      const r = await startRig({ env: h.env });
+      await r.page.goto('http://allowed.test/links');
+      await tryAll(r);
+      expect(files(h.downloads)).toEqual([]);
+      expect(files(path.dirname(h.downloads)).filter((f) => /report|blob|\.crdownload$/.test(f))).toEqual([]);
+    } finally { h.cleanup(); }
+  });
+});
+
 suite('the user takes the tab over and navigates, then hands it back (Codex on 3d07398)', { timeout: 60_000 }, () => {
   it("the agent's Playwright page works on the page the user left it on", async () => {
     const r = await startRig();
@@ -802,6 +867,49 @@ suite('the user takes the tab over and navigates, then hands it back (Codex on 3
     expect(where).toBe('/two');
     expect(await r.page.evaluate('document.body.textContent')).toBe('page');
     expect(r.lease.state()).toBe('held');
+  });
+
+  /** The agent's frames as Playwright holds them, each as its parent's path and its own. */
+  const path_ = (u: string): string => { try { return new URL(u).pathname; } catch { return `<${u}>`; } };
+  const childFrames = (r: Rig) => r.page.frames().filter((f) => f !== r.page.mainFrame())
+    .map((f) => `${path_(f.parentFrame()!.url())} > ${path_(f.url())}`).sort();
+
+  it('its frames are the ones on the page now, nested ones too, as its own visit would show them (Codex on ca21b23)', async () => {
+    const r = await startRig();
+    // What the agent is shown when it goes there itself: the off-list frame exists, with no URL.
+    await r.page.goto('http://allowed.test/framed');
+    for (let i = 0; i < 100 && childFrames(r).length < 3; i++) await sleep(50);
+    const ownVisit = childFrames(r);
+    expect(ownVisit).toEqual(['/framed > /inner', '/framed > <>', '/inner > /two']);
+    await r.page.goto('http://allowed.test/links');
+    expect(childFrames(r)).toEqual([]);
+    r.lease.suspend();
+    const user = await connectCdp(r.browser.tabWs);
+    await user.send('Runtime.evaluate', { expression: "location.href = 'http://allowed.test/framed'" });
+    for (let i = 0; i < 100 && !r.allowed.hits.includes('GET /two'); i++) await sleep(50);
+    await sleep(500);
+    user.close();
+    r.lease.handBack();
+    for (let i = 0; i < 100 && childFrames(r).length < 3; i++) await sleep(50);
+    expect(childFrames(r)).toEqual(ownVisit);
+    expect(r.page.frames().map((f) => f.url()).join(' ')).not.toContain('offlist');
+    const leaf = r.page.frames().find((f) => f.url().endsWith('/two'))!;
+    expect(await leaf.evaluate('location.pathname')).toBe('/two');
+  });
+
+  it('an iframe the user added without leaving the page is there too', async () => {
+    const r = await startRig();
+    await r.page.goto('http://allowed.test/links');
+    expect(childFrames(r)).toEqual([]);
+    r.lease.suspend();
+    const user = await connectCdp(r.browser.tabWs);
+    await user.send('Runtime.evaluate', { expression: "(() => { const f = document.createElement('iframe'); f.name = 'added'; f.src = '/two'; document.body.append(f); return new Promise((res) => { f.onload = () => res(1); }); })()", awaitPromise: true });
+    user.close();
+    r.lease.handBack();
+    for (let i = 0; i < 100 && childFrames(r).length < 1; i++) await sleep(50);
+    expect(childFrames(r)).toEqual(['/links > /two']);
+    const added = r.page.frames().find((f) => f.url().endsWith('/two'))!;
+    expect(await added.evaluate('location.pathname')).toBe('/two');
   });
 });
 
