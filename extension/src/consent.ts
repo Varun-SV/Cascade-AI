@@ -18,13 +18,16 @@ async function main(): Promise<void> {
     e.preventDefault();
     const sites = $<HTMLInputElement>('sites').value;
     if (!sites.trim()) { showError('Type at least one site, or press Say no.'); return; }
-    void send<{ ok?: boolean; error?: string }>({ type: 'consent:answer', ask, sites }).then((r) => {
-      if (r?.error) showError(r.error); else window.close();
-    });
+    void answer(sites);
   });
-  $('decline').addEventListener('click', () => {
-    void send({ type: 'consent:answer', ask, sites: '' }).then(() => window.close());
-  });
+  $('decline').addEventListener('click', () => { void answer(''); });
+}
+
+/** Closes only once the extension says it has the answer: a lost reply is not a yes. */
+async function answer(sites: string): Promise<void> {
+  const r = await send<{ ok?: boolean; error?: string } | undefined>({ type: 'consent:answer', ask, sites }).catch(() => undefined);
+  if (r?.ok) { window.close(); return; }
+  showError(r?.error ?? 'Cascade did not get your answer. Try again.');
 }
 
 function showError(text: string): void {
