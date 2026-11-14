@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Cascade</title>
+  <link rel="stylesheet" href="ui.css">
+</head>
+<body class="popup">
+  <main>
+    <h1>Cascade</h1>
+
+    <section id="unpaired" hidden>
+      <p>Let runs on your Cascade server use this browser, with your yes each time.</p>
+      <form id="pair-form">
+        <label for="server">Your Cascade server</label>
+        <input id="server" value="https://cascadeai.in" spellcheck="false" autocomplete="off">
+        <label for="name">Call this browser</label>
+        <input id="name" value="Chrome" autocomplete="off">
+        <p class="muted">Chrome will ask you to allow that site. Then you sign in there and approve the code shown below.</p>
+        <button type="submit">Pair this browser</button>
+      </form>
+    </section>
+
+    <section id="pairing" hidden>
+      <p>Approve this code on the page that just opened:</p>
+      <p class="code" id="code"></p>
+    </section>
+
+    <section id="paired" hidden>
+      <p><span id="dot" class="dot" aria-hidden="true"></span><strong id="state"></strong></p>
+      <p class="muted" id="device"></p>
+      <div id="run" hidden>
+        <p><strong>A run is using this browser</strong> on <span id="run-sites"></span>.</p>
+        <p class="muted">Page addresses, text and structure from its window are being sent to your server.</p>
+        <button type="button" id="stop">Stop the run</button>
+      </div>
+      <div class="buttons">
+        <button type="button" id="retry" class="secondary" hidden>Try again</button>
+        <button type="button" id="forget" class="secondary">Forget this browser</button>
+      </div>
+    </section>
+
+    <p id="notice" class="error" role="status" hidden></p>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

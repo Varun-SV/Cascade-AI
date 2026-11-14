@@ -10,6 +10,7 @@ import { parseCookies, verifySessionToken, SESSION_COOKIE_NAME } from './auth/se
 import type { CloudEnv } from './env.js';
 import type { CloudStore } from './db.js';
 import { formatZodError, parseChatRunPayload, runChatTurn, type ChatRunResult, type RunSocket } from './runs.js';
+import type { BrowserRelay } from './browser-relay.js';
 
 interface CloudSocketData {
   userId: string;
@@ -612,6 +613,8 @@ export interface SocketOptions {
   /** Overridable for tests. See OWNER_PROBE_MS. */
   /** Accepted and ignored; kept so existing callers do not break. */
   ownerProbeMs?: number;
+  /** The browser relay, when the server has it on: runs can use the user's own browser. */
+  browserRelay?: BrowserRelay;
 }
 
 export function attachSocket(
@@ -929,6 +932,7 @@ export function attachSocket(
         run.conversationId = parsed.conversationId;
         const result: ChatRunResult = await runChatTurn(parsed, {
           env, store, userId, socket: run.transport, signal: run.controller.signal,
+          ...(options.browserRelay ? { browserRelay: options.browserRelay } : {}),
         });
         run.conversationId = result.conversationId;
         ack?.(result);

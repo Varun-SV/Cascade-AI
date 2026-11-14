@@ -82,6 +82,15 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           bwrap --unshare-pid --bind / / --proc /proc --dev /dev -- true && echo "bubblewrap works"
 
+      # The relay's browser tests assert at real destinations, and fail rather than
+      # skip on CI when there's no browser. Playwright pins this build in its lockfile
+      # version, so an upgrade shows up as a reviewed change.
+      - name: Install the pinned Chromium for the relay tests
+        run: |
+          npx playwright install --with-deps chromium
+          sudo apt-get install -y -q --no-install-recommends libnss3-tools
+          echo "CHROMIUM=$(node -e "console.log(require('playwright').chromium.executablePath())")" >> "$GITHUB_ENV"
+
       - name: Test
         run: npm test
 

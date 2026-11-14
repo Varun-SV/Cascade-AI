@@ -48,6 +48,13 @@ const EnvSchema = z.object({
     .string()
     .optional()
     .transform((v) => v === '1' || v === 'true'),
+  // The browser relay: a user's own device serves their runs a browser, and the
+  // server hosts none. Off by default while it is being built; with it off, the
+  // endpoints do not exist at all (docs/design/byo-browser-and-routing-data.md).
+  BROWSER_RELAY: z
+    .string()
+    .optional()
+    .transform((v) => v === '1' || v === 'true'),
   // Hard per-run cost ceiling passed straight to Cascade's own budget guard
   // (src/core/router — maxCostPerRunUsd). A safety rail on the shared server
   // ahead of real per-plan entitlements (task #29).

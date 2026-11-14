@@ -21,6 +21,23 @@ import {
 
 export type OAuthProvider = 'github' | 'google' | 'dev';
 
+export type RelayDeviceKind = 'cli' | 'extension' | 'desktop';
+/** A device registered to serve its user's runs a browser. The key is public. */
+export interface RelayDevice {
+  id: string;
+  userId: string;
+  name: string;
+  kind: RelayDeviceKind;
+  /** Ed25519, SPKI, base64url. */
+  publicKey: string;
+  createdAt: number;
+  lastSeenAt: number | null;
+}
+interface RelayDeviceRow { id: string; user_id: string; name: string; kind: string; public_key: string; created_at: number; last_seen_at: number | null }
+function relayDeviceFromRow(r: RelayDeviceRow): RelayDevice {
+  return { id: r.id, userId: r.user_id, name: r.name, kind: r.kind as RelayDeviceKind, publicKey: r.public_key, createdAt: r.created_at, lastSeenAt: r.last_seen_at };
+}
+
 export interface CloudUser {
   id: string;
   provider: OAuthProvider;
@@ -491,6 +508,31 @@ export class CloudStore {
       );
       CREATE INDEX IF NOT EXISTS idx_pending_media_user ON pending_media(user_id);
       CREATE INDEX IF NOT EXISTS idx_pending_media_expiry ON pending_media(expires_at);
+
+      -- Browser relay: a user's own devices that may serve a run a browser.
+      -- Only the PUBLIC key is here. The private key never leaves the device,
+      -- so nothing in this table lets the server (or a copy of this database)
+      -- act as a device. A revoked row is kept, so its id is never reissued.
+      CREATE TABLE IF NOT EXISTS relay_devices (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        public_key TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        last_seen_at INTEGER,
+        revoked_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_relay_devices_user ON relay_devices(user_id);
+
+      -- Browser relay: grant nonces already claimed. The PRIMARY KEY is the
+      -- whole mechanism: of any number of concurrent claims for one grant,
+      -- across every process sharing this database, exactly one insert lands.
+      CREATE TABLE IF NOT EXISTS relay_nonces (
+        key TEXT PRIMARY KEY,
+        expires_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_relay_nonces_expiry ON relay_nonces(expires_at);
     `);
 
     // Additive columns — ALTER ... ADD COLUMN throws if the column already
@@ -1882,6 +1924,52 @@ export class CloudStore {
   }
 
   // ── In-flight native sign-in artifacts ──
+  // ── Browser relay ──
+
+  /**
+   * Claims a grant nonce. True for exactly one caller per key, however many
+   * ask at once and from however many processes: the insert either lands or
+   * hits the primary key. Rows are kept until `keepUntil`, which the caller
+   * sets past the grant's expiry so a late replay still finds its nonce used.
+   */
+  claimRelayNonce(key: string, keepUntil: number, now: number): boolean {
+    this.db.prepare('DELETE FROM relay_nonces WHERE expires_at <= ?').run(now);
+    return this.db.prepare('INSERT OR IGNORE INTO relay_nonces (key, expires_at) VALUES (?, ?)').run(key, keepUntil).changes === 1;
+  }
+
+  /** Registers a device's public key to a user. Null when the user already has `max` live devices. */
+  createRelayDevice(userId: string, input: { name: string; kind: RelayDeviceKind; publicKey: string }, max: number, now: number): RelayDevice | null {
+    const create = this.db.transaction((): RelayDevice | null => {
+      const live = (this.db.prepare('SELECT COUNT(*) AS n FROM relay_devices WHERE user_id = ? AND revoked_at IS NULL').get(userId) as { n: number }).n;
+      if (live >= max) return null;
+      const id = `dev_${randomUUID()}`;
+      this.db.prepare('INSERT INTO relay_devices (id, user_id, name, kind, public_key, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(id, userId, input.name, input.kind, input.publicKey, now);
+      return { id, userId, name: input.name, kind: input.kind, publicKey: input.publicKey, createdAt: now, lastSeenAt: null };
+    });
+    return create();
+  }
+
+  /** A device that may still connect, or null: unknown and revoked look the same. */
+  getRelayDevice(id: string): RelayDevice | null {
+    const r = this.db.prepare('SELECT * FROM relay_devices WHERE id = ? AND revoked_at IS NULL').get(id) as RelayDeviceRow | undefined;
+    return r ? relayDeviceFromRow(r) : null;
+  }
+
+  listRelayDevices(userId: string): RelayDevice[] {
+    return (this.db.prepare('SELECT * FROM relay_devices WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at').all(userId) as RelayDeviceRow[])
+      .map(relayDeviceFromRow);
+  }
+
+  /** Revokes one of this user's devices. False when it isn't theirs or is already revoked. */
+  revokeRelayDevice(userId: string, id: string, now: number): boolean {
+    return this.db.prepare('UPDATE relay_devices SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL').run(now, id, userId).changes === 1;
+  }
+
+  touchRelayDevice(id: string, now: number): void {
+    this.db.prepare('UPDATE relay_devices SET last_seen_at = ? WHERE id = ?').run(now, id);
+  }
+
   // Backs NativeAuthPersistence so a redeploy mid-sign-in doesn't strand the
   // user. Both artifact kinds are create-once/consume-once, so `take` is a
   // read-and-delete in one transaction (a code can never be redeemed twice,

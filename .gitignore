@@ -82,3 +82,6 @@ cloud/web/playwright-report/
 # fine, the lockfiles were not.
 /*/package-lock.json
 /cloud/*/package-lock.json
+
+# The Chrome extension build (node extension/build.mjs)
+extension/dist/
