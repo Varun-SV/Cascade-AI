@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>A Cascade run wants your browser</title>
+  <link rel="stylesheet" href="ui.css">
+</head>
+<body>
+  <main>
+    <h1>A Cascade run wants to use this browser</h1>
+    <p class="muted" id="who">Loading…</p>
+
+    <form id="form">
+      <label for="sites">Sites it may open</label>
+      <input id="sites" autocomplete="off" spellcheck="false" placeholder="example.com docs.example.com" aria-describedby="sites-help">
+      <p id="sites-help" class="muted">Separate sites with spaces. Pages on any other site won't load in the run's window.</p>
+      <p id="error" class="error" role="alert" hidden></p>
+      <div class="buttons">
+        <button type="submit" id="allow">Allow these sites</button>
+        <button type="button" id="decline" class="secondary">Say no</button>
+      </div>
+    </form>
+
+    <details open>
+      <summary>What happens if you allow it</summary>
+      <ul>
+        <li>The run gets a <strong>new window</strong>, not any tab you have open. It closes when the run ends.</li>
+        <li>That window is your own Chrome, so <strong>sites you're signed in to see you signed in</strong>.</li>
+        <li>Sent to your Cascade server while it runs: the addresses of pages in that window, their text and structure, and what the run types into them. No screenshots.</li>
+        <li>A page in the run can save a file to your Downloads. Cascade stops the run when that happens but doesn't delete the file.</li>
+        <li>Sites on your private network (localhost, your router, office addresses) can't be allowed here. Use the Cascade CLI or desktop app for those.</li>
+        <li>You can stop it any time: close the window, or press Stop in the Cascade button in the toolbar.</li>
+      </ul>
+    </details>
+  </main>
+  <script src="consent.js"></script>
+</body>
+</html>

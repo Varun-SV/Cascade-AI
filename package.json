@@ -103,8 +103,10 @@
     }
   },
   "devDependencies": {
+    "@noble/curves": "^1.9.7",
     "@types/bcryptjs": "^2.4.6",
     "@types/better-sqlite3": "^7.6.13",
+    "@types/chrome": "^0.3.5",
     "@types/diff": "^5.2.3",
     "@types/express": "^5.0.0",
     "@types/jsonwebtoken": "^9.0.7",

@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Cascade: your browser for your runs",
+  "short_name": "Cascade",
+  "version": "0.1.0",
+  "description": "Lets runs on your Cascade server use this browser, in a window of their own, on sites you allow each time.",
+  "minimum_chrome_version": "125",
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_popup": "popup.html", "default_title": "Cascade", "default_icon": { "32": "icon-32.png", "128": "icon-128.png" } },
+  "icons": { "32": "icon-32.png", "128": "icon-128.png" },
+  "permissions": ["debugger", "declarativeNetRequest", "storage", "alarms", "notifications"],
+  "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"]
+}
