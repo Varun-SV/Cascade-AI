@@ -911,6 +911,39 @@ suite('the user takes the tab over and navigates, then hands it back (Codex on 3
     const added = r.page.frames().find((f) => f.url().endsWith('/two'))!;
     expect(await added.evaluate('location.pathname')).toBe('/two');
   });
+
+  it('an SPA route the user moved to, with no new document, is where the agent is after (Codex on 6c4ae2b)', async () => {
+    const r = await startRig();
+    await r.page.goto('http://allowed.test/links');
+    r.lease.suspend();
+    const user = await connectCdp(r.browser.tabWs);
+    await user.send('Runtime.evaluate', { expression: "history.pushState({}, '', '/app/settings'); location.hash = 'profile'; 1" });
+    user.close();
+    expect(r.page.url(), 'nothing said during the takeover').toBe('http://allowed.test/links');
+    r.lease.handBack();
+    for (let i = 0; i < 100 && !r.page.url().endsWith('#profile'); i++) await sleep(50);
+    expect(r.page.url()).toBe('http://allowed.test/app/settings#profile');
+    expect(await r.page.evaluate('location.pathname + location.hash')).toBe('/app/settings#profile');
+  });
+
+  it('a cross-site frame the agent already had, navigated during the takeover, is current after (Codex on 6c4ae2b)', async () => {
+    const r = await startRig({ consent: makeConsent(['http://allowed.test', 'http://other.test']) });
+    await r.page.goto('http://allowed.test/links');
+    await r.page.evaluate("(() => { const f = document.createElement('iframe'); f.src = 'http://other.test/one'; document.body.append(f); return new Promise((res) => { f.onload = () => res(1); }); })()");
+    for (let i = 0; i < 100 && childFrames(r).length < 1; i++) await sleep(50);
+    expect(childFrames(r)).toEqual(['/links > /one']);
+    const frameBefore = r.page.frames().find((f) => f.url().endsWith('/one'))!;
+    expect(await frameBefore.evaluate('location.host')).toBe('other.test');
+    r.lease.suspend();
+    const user = await connectCdp(r.browser.tabWs);
+    await user.send('Runtime.evaluate', { expression: "(() => { const f = document.querySelector('iframe'); f.src = 'http://other.test/two'; return new Promise((res) => { f.onload = () => res(1); }); })()", awaitPromise: true });
+    user.close();
+    r.lease.handBack();
+    for (let i = 0; i < 100 && !childFrames(r).includes('/links > /two'); i++) await sleep(50);
+    expect(childFrames(r)).toEqual(['/links > /two']);
+    const frame = r.page.frames().find((f) => f.url().endsWith('/two'))!;
+    expect(await Promise.race([frame.evaluate('location.pathname'), sleep(10_000).then(() => 'timed out')])).toBe('/two');
+  });
 });
 
 suite('no-leak markers: nothing forbidden reaches the agent', { timeout: 60_000 }, () => {

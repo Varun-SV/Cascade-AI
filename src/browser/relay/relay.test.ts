@@ -772,6 +772,55 @@ describe('the page the user moved to during a takeover is the page the agent has
     await s.done();
   });
 
+  it('a same-document navigation during the takeover (a fragment, an SPA route) brings the page up to date (Codex on 6c4ae2b)', async () => {
+    const s = await serving();
+    s.lease.suspend();
+    s.tab.emit({ method: 'Page.navigatedWithinDocument', params: { frameId: 'main', url: 'https://a.test/app#/settings', navigationType: 'historyApi' } });
+    await settle();
+    expect(methodsOut(s.out)).toEqual([]);
+    const before = s.tab.methods.length;
+    s.lease.handBack();
+    await settle();
+    expect(s.tab.methods.slice(before)).toEqual(['Page.getFrameTree', 'Runtime.disable', 'Runtime.enable']);
+    await s.done();
+  });
+
+  it('a child session the agent already had, moving on during the takeover, is brought up to date on its own session (Codex on 6c4ae2b)', async () => {
+    const s = await serving();
+    const child = { method: 'Target.attachedToTarget', params: { sessionId: 'child-1', waitingForDebugger: false, targetInfo: { targetId: 't-child-1', type: 'iframe', title: '', url: 'https://a.test/frame', attached: true } } };
+    s.tab.emit(child);
+    await vi.waitFor(() => expect(methodsOut(s.out)).toContain('Target.attachedToTarget'));
+    s.lease.suspend();
+    s.tab.emit({ method: 'Page.frameNavigated', params: { frame: { id: 't-child-1', parentId: 'main', loaderId: 'l9', url: 'https://a.test/frame2' }, type: 'Navigation' }, sessionId: 'child-1' });
+    await settle();
+    const before = s.tab.frames.length;
+    s.lease.handBack();
+    await settle();
+    expect(s.tab.frames.slice(before)).toEqual([
+      { method: 'Page.getFrameTree', sessionId: 'child-1' },
+      { method: 'Runtime.disable', sessionId: 'child-1' },
+      { method: 'Runtime.enable', sessionId: 'child-1' },
+    ]);
+    // Told on the child's own session: its contexts are gone.
+    const cleared = s.out.map((m) => JSON.parse(m) as { method?: string; sessionId?: string }).filter((m) => m.method === 'Runtime.executionContextsCleared');
+    expect(cleared).toEqual([{ method: 'Runtime.executionContextsCleared', params: {}, sessionId: 'child-1' }]);
+    await s.done();
+  });
+
+  it('a child that attached during the takeover is announced, not reconciled: its client starts it afresh', async () => {
+    const s = await serving();
+    s.lease.suspend();
+    s.tab.emit({ method: 'Target.attachedToTarget', params: { sessionId: 'child-2', waitingForDebugger: false, targetInfo: { targetId: 't-child-2', type: 'iframe', title: '', url: 'https://a.test/frame', attached: true } } });
+    s.tab.emit({ method: 'Runtime.executionContextCreated', params: { context: { id: 4 } }, sessionId: 'child-2' });
+    await settle();
+    const before = s.tab.frames.length;
+    s.lease.handBack();
+    await settle();
+    expect(s.tab.frames.slice(before).filter((f) => f.method !== 'Runtime.runIfWaitingForDebugger')).toEqual([]);
+    expect(methodsOut(s.out)).toContain('Target.attachedToTarget');
+    await s.done();
+  });
+
   it('the frames are announced parents first; one without consent is left out with everything under it (Codex on ca21b23)', async () => {
     const frame = (id: string, url: string, parentId?: string) => ({ id, url, loaderId: `l-${id}`, securityOrigin: new URL(url).origin, mimeType: 'text/html', ...(parentId ? { parentId } : {}), name: 'MARKNAME' });
     const s = await serving({ 'Page.getFrameTree': { frameTree: {

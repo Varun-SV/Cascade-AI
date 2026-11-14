@@ -57,6 +57,14 @@ export interface DeviceRelay extends RelayEvents {
   serve(agent: WebSocket): Promise<void>;
 }
 
+/** What, seen during a takeover, leaves the agent's client holding state that's gone. */
+const TAKEOVER_CHANGES = new Set([
+  'Runtime.executionContextsCleared', 'Runtime.executionContextCreated', 'Runtime.executionContextDestroyed',
+  'Page.frameNavigated', 'Page.frameAttached', 'Page.frameDetached',
+  // A fragment link or an SPA route: no new document, but a new address.
+  'Page.navigatedWithinDocument',
+]);
+
 /** The tab's connection, or null if it can't be had in time. One that opens late is closed. */
 async function connectWithin(connect: () => Promise<CdpClient>, ms: number): Promise<CdpClient | null> {
   let timer!: ReturnType<typeof setTimeout>;
@@ -221,42 +229,72 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
     interface Missed { method: string; params: Record<string, unknown>; sessionId?: string }
     const missedAttach = new Map<string, Missed>();
     const missedDetach: Missed[] = [];
-    // Whether the tab's own document or its script contexts changed while the user had it.
-    // The agent's client then holds a page and contexts that no longer exist.
-    let documentChanged = false;
+    // The sessions whose document, frames, address or script contexts moved on while the
+    // user had the tab: the tab's own ('') and any child the agent already knew. Its client
+    // then holds pages, frames and contexts that no longer exist.
+    const changedSessions = new Set<string>();
     // Agent commands that arrive while the client is being brought up to date: held, so none
     // runs against a page or a script context the client no longer has. Bounded like `early`.
     let reconciling: string[] | null = null;
     let reconcilingBytes = 0;
     /**
-     * Brings the agent's client up to the tab as it is now, after a takeover, without having
-     * told it anything during one: the contexts it holds are cleared, the main frame is
-     * reported where it is, and Runtime is restarted so the current contexts are announced
-     * through the usual filter.
+     * Brings the agent's client up to one session as it is now, after a takeover, without
+     * having told it anything during one: the contexts it holds are cleared, its frames are
+     * reported where they are, and Runtime is restarted so the current contexts are
+     * announced through the usual filter. `''` is the tab's own session.
      */
-    const reconcileDocument = async (): Promise<void> => {
-      const raw = await tab.send('Page.getFrameTree') as { frameTree?: FrameTreeNode };
+    const reconcileSession = async (session: string): Promise<void> => {
+      const sessionId = session || undefined;
+      // A worker has no frames to report; its contexts are still brought up to date.
+      const raw = await tab.send('Page.getFrameTree', {}, sessionId).catch((e: Error) => {
+        if (!sessionId) throw e;
+        return {};
+      }) as { frameTree?: FrameTreeNode };
       if (ended || lease.fence() === null) return;
       // The same filter as the agent's own Page.getFrameTree: a frame on a site without
       // consent is left out, with everything under it.
       const tree = raw.frameTree ? filterReply('Page.getFrameTree', raw as Record<string, unknown>, consent).frameTree as FrameTreeNode : undefined;
-      announce({ method: 'Runtime.executionContextsCleared', params: {} });
+      const tell = (method: string, params: Record<string, unknown>): void => announce({ method, params, ...(sessionId ? { sessionId } : {}) });
+      // A frame's fragment travels in its own field, which the agent is never sent. Where
+      // there is one, the address it reached is told as a move within the document, its
+      // whole URL through the usual URL rule: what a fragment link shows the agent anyway.
+      const fragments = new Map<string, string>();
+      const noteFragments = (node: FrameTreeNode | undefined): void => {
+        const f = node?.frame as { id?: string; url?: string; urlFragment?: string } | undefined;
+        if (f?.id && typeof f.url === 'string' && typeof f.urlFragment === 'string' && f.urlFragment.startsWith('#')) fragments.set(f.id, f.url + f.urlFragment);
+        for (const c of node?.childFrames ?? []) noteFragments(c);
+      };
+      noteFragments(raw.frameTree);
+      const toldWhere = (frameId: string): void => {
+        const url = fragments.get(frameId);
+        if (url) tell('Page.navigatedWithinDocument', { frameId, url, navigationType: 'fragment' });
+      };
+      tell('Runtime.executionContextsCleared', {});
       if (tree?.frame?.id) {
-        // A new document in the main frame drops every child frame the client knew of;
-        // the ones there now are attached again, each after its parent.
-        announce({ method: 'Page.frameNavigated', params: { frame: tree.frame, type: 'Navigation' } });
+        // A new document in the session's top frame drops every child frame the client
+        // knew of; the ones there now are attached again, each after its parent.
+        tell('Page.frameNavigated', { frame: tree.frame, type: 'Navigation' });
+        toldWhere(tree.frame.id);
         const attachChildren = (node: FrameTreeNode): void => {
           for (const child of node.childFrames ?? []) {
             if (!child.frame?.id) continue;
-            announce({ method: 'Page.frameAttached', params: { frameId: child.frame.id, parentFrameId: node.frame!.id } });
-            announce({ method: 'Page.frameNavigated', params: { frame: child.frame, type: 'Navigation' } });
+            tell('Page.frameAttached', { frameId: child.frame.id, parentFrameId: node.frame!.id });
+            tell('Page.frameNavigated', { frame: child.frame, type: 'Navigation' });
+            toldWhere(child.frame.id);
             attachChildren(child);
           }
         };
         attachChildren(tree);
       }
-      await tab.send('Runtime.disable');
-      await tab.send('Runtime.enable');
+      await tab.send('Runtime.disable', {}, sessionId);
+      await tab.send('Runtime.enable', {}, sessionId);
+    };
+    /** The tab first, then each child still there, in turn. */
+    const reconcileChanged = async (sessions: string[]): Promise<void> => {
+      for (const session of sessions) {
+        if (session && !knownSessions.has(session)) continue;
+        await reconcileSession(session);
+      }
     };
     const announce = (m: Missed): void => {
       const safe = filterEvent(m.method, m.params, consent);
@@ -266,15 +304,18 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
     lease.onChange((_why, state) => {
       if (ended || state !== 'held' || lease.generation() !== generation) return;
       // Handed back. Detachments first, so a session that went and one that came never overlap.
+      // A child that attaches during the takeover is announced below, and its client starts
+      // it from scratch: only sessions the client already had are brought up to date.
+      const stale = [...changedSessions].filter((sid) => !sid || !missedAttach.has(sid)).sort();
+      changedSessions.clear();
       for (const m of missedDetach.splice(0)) announce(m);
       for (const m of [...missedAttach.values()]) announce(m);
       missedAttach.clear();
-      if (documentChanged) {
-        documentChanged = false;
+      if (stale.length) {
         // A tab that can't say where it is can't be handed back to a client that doesn't know.
         reconciling = [];
         reconcilingBytes = 0;
-        void reconcileDocument().then(() => {
+        void reconcileChanged(stale).then(() => {
           const held = reconciling ?? [];
           reconciling = null;
           for (const raw of held) live(raw);
@@ -314,10 +355,8 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
         if (suspended) { missedDetach.push({ method: msg.method, params, ...(msg.sessionId ? { sessionId: msg.sessionId } : {}) }); return; }
       }
       if (suspended) {
-        // The tab's own session: its document or contexts moved on without the agent.
-        if (!msg.sessionId && (msg.method === 'Runtime.executionContextsCleared' || msg.method === 'Runtime.executionContextCreated'
-          || msg.method === 'Runtime.executionContextDestroyed'
-          || msg.method === 'Page.frameNavigated' || msg.method === 'Page.frameAttached' || msg.method === 'Page.frameDetached')) documentChanged = true;
+        // A session's document, frames, address or contexts moved on without the agent.
+        if (TAKEOVER_CHANGES.has(msg.method)) changedSessions.add(msg.sessionId ?? '');
         return;
       }
       const safe = filterEvent(msg.method, params, consent);
