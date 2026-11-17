@@ -1213,6 +1213,60 @@ describe('cloud/server app', () => {
     expect(foreign.status).toBe(404);
   });
 
+  it('handoff files: only a signed-in sender may attach them, and a redeem returns them', async () => {
+    const files = [
+      { kind: 'image', mime: 'image/png', filename: 'shot.png', data: TINY_PNG_BASE64 },
+      { kind: 'document', filename: 'notes.txt', text: 'the notes' },
+    ];
+    const payload = JSON.stringify({ messages: [{ role: 'user', content: 'open this', attachments: files }] });
+    const anon = await fetch(`${baseUrl}/api/handoff`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload });
+    expect(anon.status).toBe(400);
+    expect(((await anon.json()) as { error: string }).error).toMatch(/Sign in/);
+
+    const alice = await login('Alice');
+    const created = await fetch(`${baseUrl}/api/handoff`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice }, body: payload });
+    expect(created.status).toBe(200);
+    const { code } = (await created.json()) as { code: string };
+    // The keyless desktop app redeems it without signing in.
+    const read = (await (await fetch(`${baseUrl}/api/handoff/${code}`)).json()) as { messages: Array<{ attachments?: unknown }> };
+    expect(read.messages[0]!.attachments).toEqual(files);
+
+    // Redeemed into the web, the chat keeps its text.
+    const imported = await fetch(`${baseUrl}/api/conversations/import`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice }, body: JSON.stringify(read),
+    });
+    expect(imported.status).toBe(200);
+  });
+
+  it('a signed-in handoff can carry more than the anonymous body limit', async () => {
+    const alice = await login('Alice');
+    const data = 'A'.repeat(6_000_000);
+    const created = await fetch(`${baseUrl}/api/handoff`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'big', attachments: [{ kind: 'image', mime: 'image/png', filename: null, data }] }] }),
+    });
+    expect(created.status).toBe(200);
+  });
+
+  it("uploads: a document's text is its owner's alone, and an image has none", async () => {
+    const alice = await login('Alice');
+    const bob = await login('Bob');
+    const doc = await fetch(`${baseUrl}/api/uploads`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ mime: 'text/plain', filename: 'notes.txt', dataBase64: Buffer.from('hello notes').toString('base64') }),
+    });
+    const { id } = (await doc.json()) as { id: string };
+    const own = await fetch(`${baseUrl}/api/uploads/${id}/text`, { headers: { Cookie: alice } });
+    expect(await own.json()).toEqual({ filename: 'notes.txt', text: 'hello notes' });
+    expect((await fetch(`${baseUrl}/api/uploads/${id}/text`, { headers: { Cookie: bob } })).status).toBe(404);
+    const img = await fetch(`${baseUrl}/api/uploads`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ mime: 'image/png', dataBase64: TINY_PNG_BASE64 }),
+    });
+    const imgId = ((await img.json()) as { id: string }).id;
+    expect((await fetch(`${baseUrl}/api/uploads/${imgId}/text`, { headers: { Cookie: alice } })).status).toBe(404);
+  });
+
   it('POST /api/uploads rejects an unsupported type and missing data', async () => {
     const alice = await login('Alice');
     // A type that is neither an image nor a supported document.

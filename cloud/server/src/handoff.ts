@@ -19,9 +19,21 @@
 
 import { randomInt } from 'node:crypto';
 
+/**
+ * A file that goes with a message: an image as its bytes (base64), or a document
+ * as the text a run reads from it. Only a signed-in sender can attach files.
+ */
+export type HandoffAttachment =
+  | { kind: 'image'; mime: HandoffImageMime; filename: string | null; data: string }
+  | { kind: 'document'; filename: string; text: string };
+
+export type HandoffImageMime = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif';
+const HANDOFF_IMAGE_MIMES: ReadonlySet<string> = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+
 export interface HandoffMessage {
   role: 'user' | 'assistant';
   content: string;
+  attachments?: HandoffAttachment[];
 }
 
 export interface HandoffSnapshot {
@@ -52,7 +64,10 @@ interface HandoffRecord extends HandoffSnapshot {
 const BYTES_PER_CODE_UNIT = 2;
 function snapshotBytes(s: HandoffSnapshot): number {
   let units = (s.title?.length ?? 0) + (s.skillId?.length ?? 0);
-  for (const m of s.messages) units += m.content.length;
+  for (const m of s.messages) {
+    units += m.content.length;
+    for (const a of m.attachments ?? []) units += (a.filename?.length ?? 0) + (a.kind === 'image' ? a.data.length : a.text.length);
+  }
   return units * BYTES_PER_CODE_UNIT;
 }
 
@@ -69,6 +84,13 @@ const MAX_CONTENT_LEN = 500_000;
 const MAX_TOTAL_CHARS = 500_000;
 const MAX_TITLE_LEN = 200;
 const MAX_SKILL_ID_LEN = 64;
+/** Files on one message, and their size across the whole chat (base64 counted as sent). */
+export const MAX_ATTACHMENTS_PER_MESSAGE = 10;
+export const MAX_IMAGE_DATA_CHARS = 7_000_000; // about 5 MB of image
+export const MAX_ATTACHMENT_CHARS = 12_000_000;
+export const MAX_DOCUMENT_TEXT_CHARS = 8_000_000;
+const MAX_FILENAME_LEN = 200;
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
 // Bounds memory for a courier that anyone can POST to (rate-limited too). Well
 // above any realistic count of simultaneously-pending handoffs.
 const MAX_RECORDS = 5_000;
@@ -118,7 +140,12 @@ function generateCode(): string {
  * user-facing error. Drops empty-content messages and caps every dimension so a
  * single POST can't balloon the in-memory store.
  */
-export function parseHandoffBody(body: unknown): HandoffSnapshot | { error: string } {
+export function parseHandoffBody(
+  body: unknown,
+  opts: { attachments?: 'allow' | 'refuse' | 'ignore' } = {},
+): HandoffSnapshot | { error: string } {
+  const files = opts.attachments ?? 'refuse';
+  let fileChars = 0;
   const b = (body ?? {}) as Record<string, unknown>;
 
   const rawTitle = typeof b['title'] === 'string' ? b['title'].trim().slice(0, MAX_TITLE_LEN) : '';
@@ -147,11 +174,46 @@ export function parseHandoffBody(body: unknown): HandoffSnapshot | { error: stri
     if (!content.trim()) continue; // skip blank turns (e.g. an aborted stream)
     total += content.length;
     if (total > MAX_TOTAL_CHARS) return { error: 'This chat is too large to transfer' };
-    messages.push({ role, content });
+    const rawFiles = (m as { attachments?: unknown }).attachments;
+    if (rawFiles === undefined || files === 'ignore') { messages.push({ role, content }); continue; }
+    if (files === 'refuse') return { error: 'Sign in to send files with a chat.' };
+    const parsedFiles = parseAttachments(rawFiles);
+    if ('error' in parsedFiles) return parsedFiles;
+    for (const a of parsedFiles.files) fileChars += a.kind === 'image' ? a.data.length : a.text.length;
+    if (fileChars > MAX_ATTACHMENT_CHARS) return { error: 'This chat\'s files are too large to transfer' };
+    messages.push(parsedFiles.files.length ? { role, content, attachments: parsedFiles.files } : { role, content });
   }
 
   if (messages.length === 0) return { error: 'Nothing to continue — this chat has no messages yet' };
   return { title, messages, skillId };
+}
+
+/** A message's files, refused whole when any is malformed: a courier doesn't guess. */
+function parseAttachments(raw: unknown): { files: HandoffAttachment[] } | { error: string } {
+  if (!Array.isArray(raw)) return { error: 'attachments must be an array' };
+  if (raw.length > MAX_ATTACHMENTS_PER_MESSAGE) return { error: `A message can carry at most ${MAX_ATTACHMENTS_PER_MESSAGE} files` };
+  const files: HandoffAttachment[] = [];
+  for (const a of raw as unknown[]) {
+    const f = (a ?? {}) as Record<string, unknown>;
+    const name = typeof f['filename'] === 'string' ? f['filename'].trim().slice(0, MAX_FILENAME_LEN) : '';
+    if (f['kind'] === 'image') {
+      const mime = f['mime'];
+      const data = f['data'];
+      if (typeof mime !== 'string' || !HANDOFF_IMAGE_MIMES.has(mime)) return { error: 'An image must be PNG, JPEG, WebP or GIF' };
+      if (typeof data !== 'string' || !data || !BASE64.test(data)) return { error: 'An image could not be read' };
+      if (data.length > MAX_IMAGE_DATA_CHARS) return { error: 'An image is too large to transfer' };
+      files.push({ kind: 'image', mime: mime as HandoffImageMime, filename: name || null, data });
+    } else if (f['kind'] === 'document') {
+      const text = f['text'];
+      if (typeof text !== 'string' || !text.trim()) return { error: 'A document had no text to send' };
+      // The desktop app keeps a document of up to this much text (src/dashboard/run-files.ts).
+      if (text.length > MAX_DOCUMENT_TEXT_CHARS) return { error: 'A document is too long to transfer' };
+      files.push({ kind: 'document', filename: name || 'document', text });
+    } else {
+      return { error: 'A file must be an image or a document' };
+    }
+  }
+  return { files };
 }
 
 export class HandoffStore {

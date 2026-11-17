@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { Server as SocketServer } from 'socket.io';
+import { attachmentIdsFrom } from './run-files.js';
 import parser from 'socket.io-msgpack-parser';
 import type { Server as HttpServer } from 'node:http';
 import type {
@@ -323,15 +324,15 @@ export class DashboardSocket {
     });
   }
 
-  onCascadeRun(callback: (prompt: string, model: string, socketId: string, sessionId?: string, forceTier?: string) => void): void {
+  onCascadeRun(callback: (prompt: string, model: string, socketId: string, sessionId?: string, forceTier?: string, attachmentIds?: string[]) => void): void {
     this.io.on('connection', (socket) => {
-      socket.on('cascade:run', (payload: { prompt?: string; model?: string; sessionId?: string; forceTier?: string }) => {
+      socket.on('cascade:run', (payload: { prompt?: string; model?: string; sessionId?: string; forceTier?: string; attachmentIds?: unknown }) => {
         if (typeof payload?.prompt === 'string' && payload.prompt.trim()) {
           const sessionId = typeof payload.sessionId === 'string' && payload.sessionId.trim()
             ? payload.sessionId.trim()
             : undefined;
           const forceTier = ['T1', 'T2', 'T3'].includes(payload.forceTier as string) ? payload.forceTier : undefined;
-          callback(payload.prompt.trim(), payload.model ?? 'auto', socket.id, sessionId, forceTier);
+          callback(payload.prompt.trim(), payload.model ?? 'auto', socket.id, sessionId, forceTier, attachmentIdsFrom(payload.attachmentIds));
         }
       });
     });

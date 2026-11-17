@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Copy, Check, ArrowRight, Loader2, RefreshCw, Send, Download, Monitor } from 'lucide-react';
 import Modal from '../components/Modal.js';
+import { toast } from '../lib/toast.js';
 import { createHandoff, fetchHandoff, importConversation, type HandoffMessage } from '../lib/api.js';
 
 export interface Transcript {
@@ -198,6 +199,9 @@ function ReceiveTab({ onRedeemed }: { onRedeemed: (conversationId: string) => vo
         skillId: snap.skillId,
         messages: snap.messages,
       });
+      // Files a handoff carried are for the desktop app; here the chat keeps its text.
+      const files = snap.messages.reduce((n, m) => n + (m.attachments?.length ?? 0), 0);
+      if (files) toast(`${files === 1 ? 'A file' : `${files} files`} in that chat stayed behind: files go to the desktop app only.`);
       onRedeemed(conversation.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'That code is invalid or has expired.');

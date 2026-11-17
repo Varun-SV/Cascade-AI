@@ -683,7 +683,24 @@ export interface StoredMessage {
   timestamp: string;
   tokens?: TokenUsage;
   agentMessages?: CascadeMessage[];
+  /** Files sent with this message: what they are, not their contents. */
+  attachments?: MessageAttachmentRef[];
 }
+
+/** An image or document sent with a message in the desktop app. */
+export interface MessageAttachmentRef {
+  id: string;
+  kind: 'image' | 'document';
+  mime: string;
+  filename: string | null;
+  /** Bytes of an image, characters of a document's text. */
+  size: number;
+}
+
+/** A file to keep: an image as base64, or a document as its text. */
+export type NewMessageAttachment =
+  | { kind: 'image'; mime: string; filename: string | null; data: string }
+  | { kind: 'document'; filename: string; text: string };
 
 export interface SessionMetadata {
   totalTokens: number;

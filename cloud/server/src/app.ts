@@ -191,6 +191,10 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   // whole secret), so its body ceiling is a memory-exposure surface and stays
   // as tight as the advertised limit allows.
   const handoffJson = express.json({ limit: '4mb' });
+  // A SIGNED-IN sender may attach files to a handoff (images as base64, documents as
+  // text: parseHandoffBody caps them at MAX_ATTACHMENT_CHARS), so its body may be
+  // larger. The anonymous ceiling above is unchanged.
+  const handoffFilesJson = express.json({ limit: '24mb' });
   // Routes that accept large bodies (file saves, chat/memory imports, chat
   // handoff) run their own parser; keep them off the tight 100kb default.
   const rawBodyRoutes = new Set([
@@ -1186,6 +1190,18 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     fs.createReadStream(att.path).on('error', () => res.status(404).end()).pipe(res);
   });
 
+  // A document upload's text, as a run reads it: what a handoff to the desktop app
+  // carries for a document, since the desktop doesn't parse PDF or DOCX itself.
+  app.get('/api/uploads/:id/text', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const id = req.params['id'];
+    if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid upload id' }); return; }
+    const userId = req.session!.userId;
+    const att = store.getOwnedAttachment(id, userId);
+    const text = att?.kind === 'document' ? store.getOwnedAttachmentText(id, userId) : null;
+    if (!att || !text) { res.status(404).json({ error: 'Not found' }); return; }
+    res.json({ filename: att.filename || 'document', text });
+  });
+
   // ── Cascade Files (saved generated files) ──
   const MAX_SINGLE_FILE_BYTES = 5 * 1024 * 1024;
   const filesDir = (userId: string) => path.join(tenantScratchDir(env, userId), 'files');
@@ -1575,8 +1591,10 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     message: { error: 'Too many attempts. Slow down.' },
   });
 
-  app.post('/api/handoff', handoffCreateLimiter, handoffJson, (req, res) => {
-    const parsed = parseHandoffBody(req.body);
+  app.post('/api/handoff', handoffCreateLimiter, sessionMiddleware(env.SESSION_SECRET, false), (req: AuthedRequest, res, next) => {
+    (req.session ? handoffFilesJson : handoffJson)(req, res, next);
+  }, (req: AuthedRequest, res) => {
+    const parsed = parseHandoffBody(req.body, { attachments: req.session ? 'allow' : 'refuse' });
     if ('error' in parsed) { res.status(400).json({ error: parsed.error }); return; }
     const { code, expiresAt } = handoffs.create(parsed);
     res.json({ code, expiresAt });
@@ -1593,8 +1611,9 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   // Seed a NEW conversation from a redeemed transcript — the web side of a
   // redeem. Authenticated + owner-scoped: the imported chat becomes the
   // caller's own conversation, ready to continue in the cloud.
-  app.post('/api/conversations/import', sessionMiddleware(env.SESSION_SECRET), handoffJson, (req: AuthedRequest, res) => {
-    const parsed = parseHandoffBody(req.body);
+  app.post('/api/conversations/import', sessionMiddleware(env.SESSION_SECRET), handoffFilesJson, (req: AuthedRequest, res) => {
+    // A chat redeemed here keeps its text; files a handoff carried are for the desktop app.
+    const parsed = parseHandoffBody(req.body, { attachments: 'ignore' });
     if ('error' in parsed) { res.status(400).json({ error: parsed.error }); return; }
     const convo = store.importConversation(req.session!.userId, parsed.title, parsed.skillId, parsed.messages);
     res.json({ conversation: { id: convo.id, title: convo.title, skillId: convo.skillId } });

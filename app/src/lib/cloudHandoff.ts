@@ -8,9 +8,42 @@
 // unauthenticated HTTPS: POST a transcript → get a code; GET a code → the
 // transcript. The code is the only bearer secret; nothing is stored durably.
 
+import type { ChatAttachmentRef } from '../store/index.js';
+import type { NewAttachment } from './attachments.js';
+
+/** A file with a message: an image's bytes, or a document's text (carried web → desktop). */
+export type HandoffAttachment =
+  | { kind: 'image'; mime: string; filename: string | null; data: string }
+  | { kind: 'document'; filename: string; text: string };
+
 export interface HandoffMessage {
   role: string;
   content: string;
+  attachments?: HandoffAttachment[];
+}
+
+/**
+ * Keep a redeemed chat's files in the local backend, each message with the ids of
+ * its own. One the backend won't take is named, so it isn't lost silently.
+ */
+export async function keepHandoffFiles(
+  messages: HandoffMessage[],
+  upload: (file: NewAttachment) => Promise<ChatAttachmentRef>,
+): Promise<{ messages: Array<HandoffMessage & { files: ChatAttachmentRef[] }>; missed: string[] }> {
+  const missed: string[] = [];
+  const out: Array<HandoffMessage & { files: ChatAttachmentRef[] }> = [];
+  for (const m of messages) {
+    const files: ChatAttachmentRef[] = [];
+    for (const a of m.attachments ?? []) {
+      try {
+        files.push(await upload(a));
+      } catch {
+        missed.push(a.filename || (a.kind === 'document' ? 'a document' : 'an image'));
+      }
+    }
+    out.push({ role: m.role, content: m.content, files });
+  }
+  return { messages: out, missed };
 }
 
 export interface HandoffSnapshot {

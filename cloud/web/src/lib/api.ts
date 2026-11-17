@@ -556,9 +556,30 @@ export function fetchSpendReport(period: SpendPeriod): Promise<SpendReport> {
 
 // ── Conversation handoff (open-and-continue, web ↔ desktop) ──
 
+/** A file going with a handed-off message: an image's bytes, or a document's text. */
+export type HandoffAttachment =
+  | { kind: 'image'; mime: string; filename: string | null; data: string }
+  | { kind: 'document'; filename: string; text: string };
+
 export interface HandoffMessage {
   role: string;
   content: string;
+  attachments?: HandoffAttachment[];
+}
+
+/** An image upload's bytes, base64, for a handoff to the desktop app. */
+export async function fetchUploadBase64(id: string): Promise<{ mime: string; data: string }> {
+  const res = await fetch(`/api/uploads/${encodeURIComponent(id)}`, { credentials: 'include' });
+  if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return { mime: (res.headers.get('content-type') ?? '').split(';')[0]!.trim(), data: btoa(bin) };
+}
+
+/** A document upload's text, as a run reads it. */
+export function fetchUploadText(id: string): Promise<{ filename: string; text: string }> {
+  return json(fetch(`/api/uploads/${encodeURIComponent(id)}/text`, { credentials: 'include' }));
 }
 
 export interface HandoffInput {

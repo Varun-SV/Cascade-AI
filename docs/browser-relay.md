@@ -109,7 +109,8 @@ are online, and removes one; removing a device also ends a run it is serving.
   approved in the chat, as with a hosted browser.
 - **Run on my desktop**: a message that needs the browser hands the chat to the
   Cascade desktop app instead, with a one-time code, and the run happens there,
-  with the app's own browser.
+  with the app's own browser. The message's files go with it (images as they
+  are, documents as their text), and in the app it opens ready to send.
 
 ## Running your own server
 

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import type { Socket } from 'socket.io-client';
-import { Send, Bot, User, ChevronRight, ChevronDown, Square } from 'lucide-react';
+import { Send, Bot, User, ChevronRight, ChevronDown, Square, Paperclip, X, FileText } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
@@ -8,7 +8,8 @@ import 'katex/dist/katex.min.css';
 import { MermaidBlock } from './MermaidBlock.js';
 import { CHAT_REHYPE_PLUGINS, CHAT_REMARK_PLUGINS, createAnswerPreparer, usePacedText } from '../lib/markdown.js';
 import { SessionRating } from './SessionRating.js';
-import { useAppDispatch, useAppSelector, appendMessage, finalizeLastMessage, setSessionId, loadTranscript, runStarted } from '../store/index.js';
+import { useAppDispatch, useAppSelector, appendMessage, finalizeLastMessage, setSessionId, loadTranscript, runStarted, setComposerDraft, type ChatAttachmentRef } from '../store/index.js';
+import { IMAGE_TYPES, MAX_FILES, attachmentName, readImageFile, uploadAttachment, useAttachmentImage } from '../lib/attachments.js';
 import { fetchSessionTranscript } from '../utils/sessionLoad.js';
 
 // Reasoning-tuned models (Anthropic thinking_delta, OpenAI reasoning_content,
@@ -104,7 +105,27 @@ const markdownComponents = {
   td: ({ children }: { children?: React.ReactNode }) => <td style={{ padding: '4px 8px', borderBottom: '1px solid var(--border)', color: 'var(--text)' }}>{children}</td>,
 };
 
-function MessageBubble({ message, compact }: { message: { role: string; content: string; streaming?: boolean }; compact?: boolean }) {
+/** One file on a message or in the composer: an image's thumbnail, or a document's name. */
+function AttachmentChip({ file, compact, onRemove }: { file: ChatAttachmentRef; compact?: boolean; onRemove?: () => void }) {
+  const { backendPort, authToken } = useAppSelector((s) => s.app);
+  const src = useAttachmentImage(backendPort, authToken, file.kind === 'image' ? file.id : '');
+  const name = attachmentName(file);
+  const size = compact ? 44 : 64;
+  return (
+    <div title={name} style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 6, maxWidth: 220, border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg-raised)', padding: file.kind === 'image' && src ? 0 : '5px 8px', fontSize: 11.5, color: 'var(--text)' }}>
+      {file.kind === 'image' && src
+        ? <img src={src} alt={name} style={{ width: size, height: size, objectFit: 'cover', borderRadius: 7, display: 'block' }} />
+        : <><FileText size={13} style={{ flexShrink: 0, color: 'var(--text-muted)' }} /><span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span></>}
+      {onRemove && (
+        <button type="button" aria-label={`Remove ${name}`} onClick={onRemove} style={{ position: 'absolute', top: -6, right: -6, width: 18, height: 18, borderRadius: '50%', border: '1px solid var(--border)', background: 'var(--bg-surface)', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', padding: 0 }}>
+          <X size={10} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function MessageBubble({ message, compact }: { message: { role: string; content: string; streaming?: boolean; attachments?: ChatAttachmentRef[] }; compact?: boolean }) {
   const isUser = message.role === 'user';
   const { thinking, answer, thinkingOpen } = isUser
     ? { thinking: '', answer: message.content, thinkingOpen: false }
@@ -140,6 +161,11 @@ function MessageBubble({ message, compact }: { message: { role: string; content:
         fontSize: compact ? 12 : 13, lineHeight: 1.65, wordBreak: 'break-word',
         color: 'var(--text)',
       }}>
+        {message.attachments && message.attachments.length > 0 && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: hasAnswer ? 6 : 0 }}>
+            {message.attachments.map((f) => <AttachmentChip key={f.id} file={f} compact={compact} />)}
+          </div>
+        )}
         {hasThinking && <ThinkingBlock text={thinking} open={thinkingOpen} />}
         {hasAnswer ? (
           isUser
@@ -172,6 +198,12 @@ export function ChatPanel({ socket, compact }: Props) {
   const { activeModel, sessions, activeSessionId, backendPort, authToken, forceTier } = useAppSelector((s) => s.app);
   const [input, setInput] = useState('');
   const [focused, setFocused] = useState(false);
+  // Files for the next message: uploaded to the local backend as they're added.
+  const [pending, setPending] = useState<ChatAttachmentRef[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const composerDraft = useAppSelector((s) => s.app.composerDraft);
   // Run-in-flight lives in the STORE (runActive), not component state: views are
   // conditionally mounted, so local state died on view switch and took the Stop
   // button with it while the backend kept running.
@@ -237,24 +269,63 @@ export function ChatPanel({ socket, compact }: Props) {
     return () => { socket.off('session:complete', onComplete); };
   }, [socket, dispatch]);
 
+  // A chat handed over from the web: its last message waits here, files and all, to send.
+  useEffect(() => {
+    if (!composerDraft || composerDraft.sessionId !== (activeSessionId ?? sessionId)) return;
+    setInput(composerDraft.prompt);
+    setPending(composerDraft.attachments);
+    setFileError(null);
+    dispatch(setComposerDraft(null));
+  }, [composerDraft, activeSessionId, sessionId, dispatch]);
+
+  const addFiles = async (files: File[]) => {
+    if (!files.length) return;
+    setFileError(null);
+    setUploading(true);
+    try {
+      let room = MAX_FILES - pending.length;
+      for (const file of files) {
+        if (room <= 0) { setFileError(`A message can carry ${MAX_FILES} files.`); break; }
+        const read = await readImageFile(file);
+        if ('error' in read) { setFileError(read.error); continue; }
+        try {
+          const ref = await uploadAttachment(backendPort, authToken, read);
+          setPending((p) => [...p, ref]);
+          room -= 1;
+        } catch (e) {
+          setFileError(e instanceof Error ? e.message : 'That file could not be added.');
+        }
+      }
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const send = () => {
-    if (!input.trim() || !socket || streaming) return;
+    if (!input.trim() || !socket || streaming || uploading) return;
     // The client owns the session id: generate one on the first send of a
     // fresh chat so the backend persists under it and the session appears in
     // the list immediately; subsequent sends continue the same session.
     let sid = sessionId;
     if (!sid) { sid = crypto.randomUUID(); dispatch(setSessionId(sid)); }
-    const userMsg = { id: crypto.randomUUID(), role: 'user' as const, content: input.trim(), timestamp: Date.now() };
+    const files = pending;
+    const userMsg = { id: crypto.randomUUID(), role: 'user' as const, content: input.trim(), timestamp: Date.now(), ...(files.length ? { attachments: files } : {}) };
     const assistantMsg = { id: crypto.randomUUID(), role: 'assistant' as const, content: '', timestamp: Date.now(), streaming: true };
     dispatch(appendMessage(userMsg));
     dispatch(appendMessage(assistantMsg));
-    socket.emit('cascade:run', { prompt: input.trim(), model: activeModel.chat, sessionId: sid, ...(forceTier !== 'auto' ? { forceTier } : {}) });
+    socket.emit('cascade:run', {
+      prompt: input.trim(), model: activeModel.chat, sessionId: sid,
+      ...(forceTier !== 'auto' ? { forceTier } : {}),
+      ...(files.length ? { attachmentIds: files.map((f) => f.id) } : {}),
+    });
     setInput('');
+    setPending([]);
+    setFileError(null);
     dispatch(runStarted({ sessionId: sid }));
     setSessionDone(false);
   };
 
-  const canSend = !!input.trim() && !!socket && !streaming;
+  const canSend = !!input.trim() && !!socket && !streaming && !uploading;
 
   const sortedSessions = [...sessions].sort(
     (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
@@ -321,13 +392,37 @@ export function ChatPanel({ socket, compact }: Props) {
         <div ref={bottomRef} />
       </div>
 
+      {/* Files for the next message */}
+      {(pending.length > 0 || uploading || fileError) && (
+        <div style={{ padding: compact ? '8px 8px 0' : '10px 12px 0', borderTop: '1px solid var(--border)', background: 'var(--bg-surface)', display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+          {pending.map((f) => <AttachmentChip key={f.id} file={f} compact={compact} onRemove={() => setPending((p) => p.filter((x) => x.id !== f.id))} />)}
+          {uploading && <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>Adding…</span>}
+          {fileError && <span role="alert" style={{ fontSize: 11.5, color: 'var(--danger)' }}>{fileError}</span>}
+        </div>
+      )}
       {/* Input */}
       <div style={{
         padding: compact ? 8 : 12, borderTop: '1px solid var(--border)',
         background: 'var(--bg-surface)', display: 'flex', gap: compact ? 6 : 10, alignItems: 'flex-end',
       }}>
+        <input
+          ref={fileInputRef} type="file" accept={IMAGE_TYPES.join(',')} multiple hidden
+          onChange={(e) => { const list = Array.from(e.target.files ?? []); e.target.value = ''; void addFiles(list); }}
+        />
+        <button
+          type="button" title="Attach images" aria-label="Attach images"
+          disabled={uploading || pending.length >= MAX_FILES}
+          onClick={() => fileInputRef.current?.click()}
+          style={{ width: compact ? 34 : 42, height: compact ? 34 : 42, flexShrink: 0, background: 'var(--bg-raised)', color: 'var(--text-muted)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+        >
+          <Paperclip size={compact ? 14 : 16} />
+        </button>
         <textarea
           value={input}
+          onPaste={(e) => {
+            const images = Array.from(e.clipboardData.files).filter((f) => (IMAGE_TYPES as readonly string[]).includes(f.type));
+            if (images.length) { e.preventDefault(); void addFiles(images); }
+          }}
           onChange={(e) => setInput(e.target.value)}
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}

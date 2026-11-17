@@ -8,6 +8,8 @@ import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import type {
   AuditEntry,
+  MessageAttachmentRef,
+  NewMessageAttachment,
   Identity,
   ModelInfo,
   ProviderType,
@@ -114,12 +116,14 @@ export class MemoryStore {
   }
 
   deleteSession(id: string): void {
+    this.db.prepare('DELETE FROM message_attachments WHERE session_id = ?').run(id);
     this.db.prepare('DELETE FROM messages WHERE session_id = ?').run(id);
     this.db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
   }
 
   deleteAllSessions(): void {
     this.db.prepare('DELETE FROM file_snapshots').run();
+    this.db.prepare('DELETE FROM message_attachments').run();
     this.db.prepare('DELETE FROM messages').run();
     this.db.prepare('DELETE FROM sessions').run();
   }
@@ -152,8 +156,16 @@ export class MemoryStore {
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
 
+    const fileStmt = this.db.prepare(`
+      INSERT INTO message_attachments (id, message_id, session_id, kind, mime, filename, data, size, created_at)
+      SELECT ?, ?, ?, kind, mime, filename, data, size, created_at FROM message_attachments WHERE id = ?
+    `);
+    const filesOf = this.db.prepare('SELECT id FROM message_attachments WHERE message_id = ?');
     for (const msg of messages) {
-      stmt.run(randomUUID(), newId, msg.role, msg.content, msg.timestamp, msg.tokens, msg.agent_messages);
+      const copyId = randomUUID();
+      stmt.run(copyId, newId, msg.role, msg.content, msg.timestamp, msg.tokens, msg.agent_messages);
+      // The branch's messages keep their files.
+      for (const f of filesOf.all(msg.id) as Array<{ id: string }>) fileStmt.run(randomUUID(), copyId, newId, f.id);
     }
 
     const snapshots = this.db.prepare('SELECT * FROM file_snapshots WHERE session_id = ?').all(originalId) as DbFileSnapshot[];
@@ -359,7 +371,68 @@ export class MemoryStore {
 
   getSessionMessages(sessionId: string): StoredMessage[] {
     const rows = this.db.prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY timestamp ASC').all(sessionId) as DbMessage[];
-    return rows.map(this.deserializeMessage);
+    const files = new Map<string, MessageAttachmentRef[]>();
+    const fileRows = this.db.prepare(
+      'SELECT id, message_id, kind, mime, filename, size FROM message_attachments WHERE session_id = ? AND message_id IS NOT NULL ORDER BY created_at ASC',
+    ).all(sessionId) as Array<{ id: string; message_id: string; kind: string; mime: string; filename: string | null; size: number }>;
+    for (const f of fileRows) {
+      const list = files.get(f.message_id) ?? [];
+      list.push({ id: f.id, kind: f.kind as MessageAttachmentRef['kind'], mime: f.mime, filename: f.filename, size: f.size });
+      files.set(f.message_id, list);
+    }
+    return rows.map((r) => {
+      const m = this.deserializeMessage(r);
+      const own = files.get(m.id);
+      return own ? { ...m, attachments: own } : m;
+    });
+  }
+
+  // ── Message attachments ──────────────────────
+  //
+  //  Uploaded first, then claimed by the message they're sent with. One a message
+  //  never claimed is dropped after a day.
+
+  static readonly UNCLAIMED_ATTACHMENT_MS = 24 * 60 * 60 * 1000;
+
+  /** Keep a file for a message to come. Synchronous: the id is used at once. */
+  addAttachment(file: NewMessageAttachment, now = new Date()): MessageAttachmentRef {
+    const cutoff = new Date(now.getTime() - MemoryStore.UNCLAIMED_ATTACHMENT_MS).toISOString();
+    this.db.prepare('DELETE FROM message_attachments WHERE message_id IS NULL AND created_at < ?').run(cutoff);
+    const id = randomUUID();
+    const data = file.kind === 'image' ? file.data : file.text;
+    const mime = file.kind === 'image' ? file.mime : 'text/plain';
+    const size = file.kind === 'image' ? Math.floor((data.length * 3) / 4) : data.length;
+    this.db.prepare(
+      'INSERT INTO message_attachments (id, message_id, session_id, kind, mime, filename, data, size, created_at) VALUES (?, NULL, NULL, ?, ?, ?, ?, ?, ?)',
+    ).run(id, file.kind, mime, file.filename, data, size, now.toISOString());
+    return { id, kind: file.kind, mime, filename: file.filename, size };
+  }
+
+  /** Files not yet claimed by a message, in the order asked; unknown or claimed ids are left out. */
+  getUnclaimedAttachments(ids: string[]): Array<MessageAttachmentRef & { data: string }> {
+    const out: Array<MessageAttachmentRef & { data: string }> = [];
+    const get = this.db.prepare('SELECT id, kind, mime, filename, size, data FROM message_attachments WHERE id = ? AND message_id IS NULL');
+    for (const id of new Set(ids)) {
+      const r = get.get(id) as { id: string; kind: string; mime: string; filename: string | null; size: number; data: string } | undefined;
+      if (r) out.push({ id: r.id, kind: r.kind as MessageAttachmentRef['kind'], mime: r.mime, filename: r.filename, size: r.size, data: r.data });
+    }
+    return out;
+  }
+
+  /** A file's contents: an image's base64, or a document's text. */
+  getAttachment(id: string): (MessageAttachmentRef & { data: string }) | null {
+    const r = this.db.prepare('SELECT id, kind, mime, filename, size, data FROM message_attachments WHERE id = ?').get(id) as
+      { id: string; kind: string; mime: string; filename: string | null; size: number; data: string } | undefined;
+    return r ? { id: r.id, kind: r.kind as MessageAttachmentRef['kind'], mime: r.mime, filename: r.filename, size: r.size, data: r.data } : null;
+  }
+
+  /** Give unclaimed files to a message. Queued after the message's own write. */
+  claimAttachments(messageId: string, sessionId: string, ids: string[]): void {
+    if (!ids.length) return;
+    this.enqueueWrite(() => {
+      const claim = this.db.prepare('UPDATE message_attachments SET message_id = ?, session_id = ? WHERE id = ? AND message_id IS NULL');
+      for (const id of ids) claim.run(messageId, sessionId, id);
+    });
   }
 
   searchMessages(query: string, limit = 20): StoredMessage[] {
@@ -414,8 +487,15 @@ export class MemoryStore {
       `).run(newId, title, s.createdAt ?? now, s.updatedAt ?? now, s.identityId ?? 'default', s.workspacePath ?? '', JSON.stringify(metadata));
       for (const m of (Array.isArray(s.messages) ? s.messages : [])) {
         if (!m || (m.role !== 'user' && m.role !== 'assistant' && m.role !== 'system')) continue;
+        const messageId = randomUUID();
+        // A bundle may name files uploaded just before it (a handoff from the web).
+        const fileIds = (m as { attachmentIds?: unknown }).attachmentIds;
+        if (Array.isArray(fileIds)) {
+          const claim = this.db.prepare('UPDATE message_attachments SET message_id = ?, session_id = ? WHERE id = ? AND message_id IS NULL');
+          for (const id of fileIds.slice(0, 20)) if (typeof id === 'string') claim.run(messageId, newId, id);
+        }
         msgStmt.run(
-          randomUUID(), newId, m.role,
+          messageId, newId, m.role,
           typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
           m.timestamp ?? now,
           m.tokens ? JSON.stringify(m.tokens) : null,
@@ -751,6 +831,22 @@ export class MemoryStore {
       );
 
       CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+
+      -- Files sent with a message. Kept before the message exists (uploaded, then
+      -- sent), so message_id is null until a run or an import claims it.
+      CREATE TABLE IF NOT EXISTS message_attachments (
+        id TEXT PRIMARY KEY,
+        message_id TEXT,
+        session_id TEXT,
+        kind TEXT NOT NULL,
+        mime TEXT NOT NULL,
+        filename TEXT,
+        data TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_message_attachments_message ON message_attachments(message_id);
+      CREATE INDEX IF NOT EXISTS idx_message_attachments_session ON message_attachments(session_id);
       CREATE INDEX IF NOT EXISTS idx_messages_content ON messages(content);
 
       CREATE TABLE IF NOT EXISTS identities (

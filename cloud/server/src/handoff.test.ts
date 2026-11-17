@@ -199,3 +199,43 @@ describe('HandoffStore', () => {
     expect(codes.size).toBe(50);
   });
 });
+
+describe('files on a handoff', () => {
+  const image = { kind: 'image', mime: 'image/png', filename: 'shot.png', data: 'iVBORw0KGgo=' };
+  const doc = { kind: 'document', filename: 'report.pdf', text: 'Q3 revenue rose.' };
+  const body = (attachments: unknown) => ({ messages: [{ role: 'user', content: 'look at these', attachments }] });
+
+  it('are kept for a signed-in sender, images as data and documents as text', () => {
+    const out = parseHandoffBody(body([image, doc]), { attachments: 'allow' });
+    if ('error' in out) throw new Error(out.error);
+    expect(out.messages[0]!.attachments).toEqual([image, doc]);
+  });
+
+  it('are refused from an anonymous sender, and dropped on a redeem into the web', () => {
+    expect(parseHandoffBody(body([image]))).toEqual({ error: 'Sign in to send files with a chat.' });
+    const out = parseHandoffBody(body([image]), { attachments: 'ignore' });
+    if ('error' in out) throw new Error(out.error);
+    expect(out.messages[0]).toEqual({ role: 'user', content: 'look at these' });
+  });
+
+  it('refuses, never skips, a file it cannot carry', () => {
+    const allow = { attachments: 'allow' as const };
+    expect(parseHandoffBody(body([{ ...image, mime: 'image/svg+xml' }]), allow)).toMatchObject({ error: expect.stringContaining('PNG') });
+    expect(parseHandoffBody(body([{ ...image, data: 'not base64!' }]), allow)).toMatchObject({ error: expect.stringContaining('could not be read') });
+    expect(parseHandoffBody(body([{ ...doc, text: '  ' }]), allow)).toMatchObject({ error: expect.stringContaining('no text') });
+    expect(parseHandoffBody(body([{ kind: 'video' }]), allow)).toMatchObject({ error: expect.any(String) });
+    expect(parseHandoffBody(body(Array(11).fill(doc)), allow)).toMatchObject({ error: expect.stringContaining('at most 10') });
+    expect(parseHandoffBody(body([{ ...image, data: 'A'.repeat(7_000_004) }]), allow)).toMatchObject({ error: expect.stringContaining('too large') });
+    expect(parseHandoffBody(body([{ ...doc, text: 'x'.repeat(8_000_001) }]), allow)).toMatchObject({ error: expect.stringContaining('too long') });
+    const big = { ...doc, text: 'x'.repeat(4_100_000) };
+    expect(parseHandoffBody(body([big, big, big]), allow)).toMatchObject({ error: expect.stringContaining('files are too large') });
+  });
+
+  it('count toward what the store holds', () => {
+    const store = new HandoffStore();
+    const out = parseHandoffBody(body([image, doc]), { attachments: 'allow' });
+    if ('error' in out) throw new Error(out.error);
+    store.create(out);
+    expect(store.storedByteCount()).toBe(('look at these'.length + 'shot.png'.length + image.data.length + 'report.pdf'.length + doc.text.length) * 2);
+  });
+});

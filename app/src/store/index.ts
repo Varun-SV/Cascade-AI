@@ -39,6 +39,23 @@ export interface ChatMessage {
   model?: string;
   timestamp: number;
   streaming?: boolean;
+  /** Files sent with the message, kept by the local backend. */
+  attachments?: ChatAttachmentRef[];
+}
+
+/** An image or document kept by the local backend (GET /api/attachments/:id). */
+export interface ChatAttachmentRef {
+  id: string;
+  kind: 'image' | 'document';
+  mime: string;
+  filename: string | null;
+}
+
+/** A message waiting in the composer: a chat handed over from the web lands here, to send. */
+export interface ComposerDraft {
+  sessionId: string;
+  prompt: string;
+  attachments: ChatAttachmentRef[];
 }
 
 export interface RuntimeSession {
@@ -164,6 +181,7 @@ export interface AppState {
   changesSessionId: string | null;
   /** The "Continue elsewhere" handoff modal (web ↔ desktop) is open. */
   showContinue: boolean;
+  composerDraft: ComposerDraft | null;
 }
 
 /** A live T3↔T3 / T2↔T2 message, drawn as a transient edge in the graph. */
@@ -298,6 +316,7 @@ const initialState: AppState = {
   showPalette: false,
   changesSessionId: null,
   showContinue: false,
+  composerDraft: null,
 };
 
 // ─── Slice ────────────────────────────────────────────────────────────────────
@@ -570,11 +589,15 @@ const appSlice = createSlice({
     setShowContinue(state, action: PayloadAction<boolean>) {
       state.showContinue = action.payload;
     },
+    setComposerDraft(state, action: PayloadAction<ComposerDraft | null>) {
+      state.composerDraft = action.payload;
+    },
   },
 });
 
 export const {
   setView, setConnected, setReconnecting, setBackendError, setShowSettings, setMeta, setSessionId, updateCost,
+  setComposerDraft,
   setAgents, upsertAgent, appendMessage, updateLastMessage, finalizeLastMessage, loadTranscript,
   setWorkspacePath, toggleTerminal, openTerminalAt, toggleCodeChat, setHelpContext, setTheme, setActiveModel, setActiveModelT1, setActiveModelChat,
   setSessions, setActiveSessionId, removeSession, toggleSessionSidebar, setSessionSidebarCollapsed,

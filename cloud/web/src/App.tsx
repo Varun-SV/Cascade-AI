@@ -14,7 +14,8 @@ import ConversationSidebar from './chat/ConversationSidebar.js';
 import ChatPanel from './chat/ChatPanel.js';
 import ChatTopBar from './chat/ChatTopBar.js';
 import ContinueModal from './chat/ContinueModal.js';
-import { desktopHandoffNotice } from './lib/desktopHandoff.js';
+import { desktopHandoffNotice, handoffFileName, handoffFiles } from './lib/desktopHandoff.js';
+import type { HandoffAttachment } from './lib/api.js';
 import EscalationModal from './chat/EscalationModal.js';
 import ContextApprovalDialog from './chat/ContextApprovalDialog.js';
 import KeyVault from './keys/KeyVault.js';
@@ -165,11 +166,11 @@ export default function App() {
   const ownEndpoint = browserPrefs?.source === 'endpoint' && browserPrefs.endpoint !== null && browserPrefs.offers.endpoint;
   const toDesktop = browserPrefs?.source === 'desktop';
   // A message that needs the browser, under "Run on my desktop": handed to the desktop app.
-  // A handoff carries text only, so files attached to the message are named, not lost silently.
-  const [desktopHandoff, setDesktopHandoff] = useState<{ prompt: string; files: string[] } | null>(null);
+  // Its files go with it (images as bytes, documents as text); any that can't be read are named.
+  const [desktopHandoff, setDesktopHandoff] = useState<{ prompt: string; files: HandoffAttachment[]; missed: string[] } | null>(null);
   const send: typeof chat.send = (input) => {
     if (chat.browserMode && toDesktop) {
-      setDesktopHandoff({ prompt: input.prompt, files: (input.attachments ?? []).map((a) => a.filename ?? (a.kind === 'document' ? 'a document' : 'an image')) });
+      void handoffFiles(input.attachments ?? []).then(({ files, missed }) => setDesktopHandoff({ prompt: input.prompt, files, missed }));
       return;
     }
     chat.send(input);
@@ -559,8 +560,14 @@ export default function App() {
         )}
         {desktopHandoff !== null && (
           <ContinueModal
-            transcript={{ ...continueTranscript, messages: [...continueTranscript.messages, { role: 'user', content: desktopHandoff.prompt }] }}
-            notice={desktopHandoffNotice(desktopHandoff.files)}
+            transcript={{
+              ...continueTranscript,
+              messages: [
+                ...continueTranscript.messages,
+                { role: 'user', content: desktopHandoff.prompt, ...(desktopHandoff.files.length ? { attachments: desktopHandoff.files } : {}) },
+              ],
+            }}
+            notice={desktopHandoffNotice(desktopHandoff.files.map(handoffFileName), desktopHandoff.missed)}
             onClose={() => setDesktopHandoff(null)}
             onRedeemed={handleRedeemed}
           />

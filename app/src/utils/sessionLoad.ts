@@ -5,6 +5,7 @@ interface StoredMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: string;
+  attachments?: Array<{ id: string; kind: 'image' | 'document'; mime: string; filename: string | null }>;
 }
 
 /**
@@ -31,6 +32,9 @@ export async function fetchSessionTranscript(
         role: m.role,
         content: typeof m.content === 'string' ? m.content : String(m.content),
         timestamp: Date.parse(m.timestamp) || Date.now(),
+        ...(m.attachments?.length
+          ? { attachments: m.attachments.map(({ id, kind, mime, filename }) => ({ id, kind, mime, filename })) }
+          : {}),
       }));
   } catch {
     return null;

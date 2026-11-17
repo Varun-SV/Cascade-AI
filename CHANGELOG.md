@@ -55,6 +55,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Cloud use a browser in the app while it's open. Each run asks in the app, and
   gets a window of its own with an empty, in-memory profile, policed in the
   app's main process as the CLI's browser is.
+- **Images and documents in the desktop app.** The desktop chat takes images
+  (attach or paste), shows them on the message, and gives them to the run. A
+  chat handed from the web to the desktop app brings its files: images as
+  they are, documents as the text a run reads. If the chat ends on a message
+  not yet answered, it opens with that message ready to send. Only a signed-in
+  sender can attach files to a handoff. A chat sent the other way, or redeemed
+  on the web, keeps its text, and says its files stayed behind.
+- **Web search names what it uses.** Settings in the web and desktop apps say
+  which search is in use, and that with no backend it's "Free: DuckDuckGo, no
+  key needed", which is also the fallback when a configured one fails.
 - **`BROWSER_ENDPOINTS=true`** offers users their own CDP endpoint. Only public
   addresses are accepted, resolved once and pinned for the run, unless
   **`BROWSER_ENDPOINTS_PRIVATE=true`**, for a server on the same network as its
