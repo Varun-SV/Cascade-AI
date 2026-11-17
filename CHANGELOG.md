@@ -45,14 +45,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user's own. On unless set off, so a hosted browser keeps working until its
   operator turns it off.
 - **Settings → Browser** in the web app lists your paired devices, whether each
-  is online, and removes one (which also ends a run it is serving).
+  is online, and removes one (which also ends a run it is serving). It also
+  chooses where your runs' browser comes from: your devices, **your own CDP
+  endpoint** (a `wss://` browser you run, kept encrypted and shown back only as
+  its host), or **the desktop app**, which a chat is handed to when a message
+  needs the browser.
+- **The desktop app as a device.** Settings → Cloud runs lets runs on Cascade
+  Cloud use a browser in the app while it's open. Each run asks in the app, and
+  gets a window of its own with an empty, in-memory profile, policed in the
+  app's main process as the CLI's browser is.
+- **`BROWSER_ENDPOINTS=true`** offers users their own CDP endpoint. Only public
+  addresses are accepted, resolved once and pinned for the run, unless
+  **`BROWSER_ENDPOINTS_PRIVATE=true`**, for a server on the same network as its
+  users' browsers.
 
 ### Changed
 - **cascadeai.in no longer hosts a browser.** Runs there use your own Chrome
   through the extension or `cascade relay`. The Free and Pro daily browser
   session counts applied to the hosted browser only, and go with it.
 - The SDK exports the relay's server and device pieces (`src/browser/relay`),
-  which the cloud server and the extension build on.
+  which the cloud server, the extension and the desktop app build on.
 
 ## 0.84.0 - 2026-10-22
 

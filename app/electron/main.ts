@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 import { registerCloudAuthIpc, type CloudAuthHandle } from './cloudAuth';
+import { registerRelayIpc } from './relay-ipc';
 import { registerBrowserHandlers, readCurrentPage, actOnCurrentPage, setAgentControlEnabled, resumeAgentControl, agentRunEnded, agentActorEnded, setApprovalWaitCeiling, setLifecycleReleaseWired, approvalWaitCeilingFor } from './browser';
 
 const isDev = process.env.ELECTRON_DEV === '1';
@@ -792,6 +793,8 @@ function registerIPC(): void {
   });
 
   registerBrowserHandlers(() => mainWindow);
+  // This app as one of the user's devices, for their cloud runs: off until turned on in Settings.
+  registerRelayIpc({ loadCore, cloudAuth: () => cloudAuth, mainWindow: () => mainWindow });
 }
 
 // ─── Desktop meta store (persistent JSON in userData) ─────────────────────────

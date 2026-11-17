@@ -169,6 +169,25 @@ contextBridge.exposeInMainWorld('cascade', {
     },
   },
 
+  // This app as one of the user's devices for their cloud runs (relay-ipc.ts):
+  // turned on in Settings, and every run asked about in this window.
+  relay: {
+    status: () => ipcRenderer.invoke('relay:status'),
+    enable: () => ipcRenderer.invoke('relay:enable'),
+    disable: () => ipcRenderer.invoke('relay:disable'),
+    forget: () => ipcRenderer.invoke('relay:forget'),
+    answer: (id: number, sites: string) => ipcRenderer.invoke('relay:answer', id, sites),
+    onAsk: (cb: (a: { id: number; runId: string; expiresAt: number }) => void) => {
+      ipcRenderer.on('relay:ask', (_e, a) => cb(a));
+    },
+    onAskClosed: (cb: (a: { id: number }) => void) => {
+      ipcRenderer.on('relay:ask-closed', (_e, a) => cb(a));
+    },
+    onStatus: (cb: (s: unknown) => void) => {
+      ipcRenderer.on('relay:status', (_e, s) => cb(s));
+    },
+  },
+
   // Cascade Cloud account: optional sign-in (loopback OAuth, tokens encrypted at
   // rest in the main process) + browsing the chats you started on the web.
   cloud: {

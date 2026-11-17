@@ -94,6 +94,17 @@ export { connectDeviceClient } from './browser/relay/device.js';
 export { isPrivateHost as isPrivateNetworkHost, bareHost } from './browser/relay/egress-rules.js';
 export type { DeviceClient, DeviceClientOptions, LeasedBrowser, UserConsent } from './browser/relay/device.js';
 export { startDedicatedBrowser } from './browser/relay/dedicated-browser.js';
+// For a device that isn't the CLI: the desktop app polices its own run sessions with
+// the same proxy, consent and request rules, and stays connected with the same loop.
+export { serveDevice, relayEndpoints } from './browser/relay/serve.js';
+export type { ServeOptions as RelayServeOptions, PairedDeviceKey as RelayPairedDeviceKey } from './browser/relay/serve.js';
+export { startEgressProxy } from './browser/relay/egress-proxy.js';
+export { makeConsent, onConsentedSite, requestVerdict } from './browser/relay/egress-rules.js';
+export type { Consent as RelayConsent } from './browser/relay/egress-rules.js';
+export { parseSites as parseRelaySites } from './browser/relay/consent-input.js';
+export { settlesWithin } from './browser/relay/settles.js';
+export type { CdpClient as RelayCdpClient, CdpMessage as RelayCdpMessage } from './browser/relay/cdp-client.js';
+export type { RequestEnforcer as RelayRequestEnforcer } from './browser/relay/request-enforcer.js';
 export type { CurrentPageProvider, CurrentPageSnapshot } from './tools/current-page.js';
 export type { DiscoveredMcpTool, McpDiscoveryResult } from './mcp/discover.js';
 export {

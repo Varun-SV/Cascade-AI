@@ -78,7 +78,13 @@ interface CloudClientLike {
   pullSecrets(): Promise<{ blob: EncBlob | null; version?: number; updatedAt?: number }>;
   pushSecrets(blob: EncBlob): Promise<{ version: number; updatedAt: number }>;
   logout(): Promise<void>;
+  relayServer(): Promise<{ serverId: string; serverKey: string; controlPath: string; runPath: string }>;
+  registerRelayDevice(input: { name: string; kind: 'cli' | 'desktop'; publicKey: string }): Promise<{ device: { id: string; name: string }; serverId: string; serverKey: string }>;
+  removeRelayDevice(id: string): Promise<void>;
 }
+
+/** What pairing this app as a relay device needs of the signed-in account. */
+export type RelayCloudClient = Pick<CloudClientLike, 'relayServer' | 'registerRelayDevice' | 'removeRelayDevice'>;
 
 type CloudClientCtor = new (serverUrl: string, dir?: string, store?: SessionStore, options?: { beforeSend?: () => void }) => CloudClientLike;
 
@@ -197,6 +203,8 @@ class SafeStorageSessionStore implements SessionStore {
 export interface CloudAuthHandle {
   account(): { userId: string; serverUrl: string } | null;
   syncAllowed(): boolean;
+  /** The signed-in account's client, for pairing this app as a relay device; null when signed out. */
+  relayClient(): RelayCloudClient | null;
 }
 
 export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks): CloudAuthHandle {
@@ -578,5 +586,6 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
       return s?.user?.id ? { userId: s.user.id, serverUrl } : null;
     },
     syncAllowed: () => consent.allowed(),
+    relayClient: () => (store.load() ? client() : null),
   };
 }

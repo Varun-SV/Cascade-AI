@@ -71,6 +71,19 @@ cascade relay forget         # remove this machine, on the server and here
 
 `serve` uses Playwright's Chromium, or `--chromium <path>` / `CASCADE_RELAY_CHROMIUM`.
 
+## Desktop app
+
+**Settings → Cloud runs** in the Cascade desktop app turns the app itself into a
+device, while you're signed in to Cascade Cloud. It pairs once (the key is kept by
+your operating system's keychain), and then stays connected while the app is open.
+A run that asks is shown in the app: type the sites it may use, or say no. A yes
+opens a **Cascade run** window with an empty, in-memory profile; it is not the
+app's own browser, and nothing you're signed in to is in it. The app's main
+process polices that window as the CLI does: its traffic goes through a proxy that
+resolves and checks every address, other sites' pages, downloads, permissions and
+pop-ups are refused, and the window and its storage go when the run ends.
+**Remove this app as a device** removes it on the server and here.
+
 ## Using it from the web
 
 Turn on **Browser** in the composer's Tools menu. A run that needs a browser asks
@@ -79,6 +92,20 @@ a browser, so keep the extension or `cascade relay serve` running.
 
 You can register up to 10 devices. **Settings → Browser** lists them, shows which
 are online, and removes one; removing a device also ends a run it is serving.
+
+**Settings → Browser** also chooses where your runs' browser comes from:
+
+- **My devices**: the extension, the CLI or the desktop app, as above.
+- **My CDP endpoint**, where the server offers it: a `wss://` address of a browser
+  you run (Browserless, your own Chromium with `--remote-debugging-port` behind
+  TLS, and so on). The server keeps it encrypted, never shows it back (only its
+  host), and accepts only public addresses: the host is resolved once, every
+  address it gives is checked, and the run connects to the address checked, so a
+  name can't be pointed at the server's own network afterwards. A run on it is
+  approved in the chat, as with a hosted browser.
+- **Run on my desktop**: a message that needs the browser hands the chat to the
+  Cascade desktop app instead, with a one-time code, and the run happens there,
+  with the app's own browser.
 
 ## Running your own server
 
@@ -94,6 +121,11 @@ To retire the hosted browser, set `HOSTED_BROWSER=off`. `REMOTE_BROWSER_*` are t
 ignored, the daily browser-session allowance goes with them, and every run's browser
 is the user's own. Turn `BROWSER_RELAY` on first, or runs have no browser at all
 (the server warns about this at start).
+
+`BROWSER_ENDPOINTS=true` offers users **My CDP endpoint**. Endpoints must be
+public `wss://` addresses; `BROWSER_ENDPOINTS_PRIVATE=true` also accepts private
+ones, and `ws://`, for a server whose users' browsers are on its own network. Leave
+it off on a public server: it lets any user point a run at the server's network.
 
 The relay keeps its connections in the server process, so run one instance (one
 replica) per deployment.
