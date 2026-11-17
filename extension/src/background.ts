@@ -16,7 +16,7 @@ import { parseSites } from '../../src/browser/relay/consent-input.js';
 import { type DeviceClient, type UserConsent, connectDeviceClient } from '../../src/browser/relay/device.js';
 import { makeConsent } from '../../src/browser/relay/egress-rules.js';
 import { type PairedDevice, endpointsOf, pairWithServer } from './pairing.js';
-import { RUN_RULE_IDS_FROM, openRunTab } from './tab-policy.js';
+import { RUN_RULE_IDS_FROM, openRunTab, releaseWebRtcAfterRestart } from './tab-policy.js';
 
 // ── State ────────────────────────────────────
 
@@ -73,6 +73,8 @@ async function cleanUpAfterRestart(): Promise<void> {
   const rules = (await chrome.declarativeNetRequest.getSessionRules()).filter((r) => r.id >= RUN_RULE_IDS_FROM);
   if (rules.length) await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: rules.map((r) => r.id) });
   await chrome.storage.session.set({ runWindows: [] });
+  // A run held WebRTC's UDP off; with no run left, it goes back to the user's setting.
+  await releaseWebRtcAfterRestart();
 }
 
 async function rememberWindow(windowId: number, add: boolean): Promise<void> {

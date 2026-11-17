@@ -31,7 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   private-network addresses, popups, dialogs and downloads are stopped on your
   device, before anything is sent, and no screenshot or live view leaves it: you
   watch, and take over, where it runs. Devices sign in with a key made on them,
-  and the server holds only its public half. See `docs/browser-relay.md`.
+  and the server holds only its public half. In the extension a run also
+  reaches past its window, and says so when it asks: while it's open, WebRTC
+  sends no UDP in any tab (a call elsewhere may get worse), and until Chrome
+  restarts, workers of the sites you allowed can't reach your private network.
+  See `docs/browser-relay.md`.
 - **`BROWSER_RELAY=true`** turns this on for a server you run. It needs no
   other setting, and can run alongside a hosted browser: a run uses the user's
   own device when one is online. Only the hosted browser counts against a

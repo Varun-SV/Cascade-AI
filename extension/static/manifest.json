@@ -8,6 +8,6 @@
   "background": { "service_worker": "background.js", "type": "module" },
   "action": { "default_popup": "popup.html", "default_title": "Cascade", "default_icon": { "32": "icon-32.png", "128": "icon-128.png" } },
   "icons": { "32": "icon-32.png", "128": "icon-128.png" },
-  "permissions": ["debugger", "declarativeNetRequest", "storage", "alarms", "notifications"],
+  "permissions": ["debugger", "declarativeNetRequest", "storage", "alarms", "notifications", "privacy"],
   "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"]
 }

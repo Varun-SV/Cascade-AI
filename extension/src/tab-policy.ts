@@ -146,6 +146,64 @@ export interface TabPolicyOptions {
   firstRuleId: number;
 }
 
+// ── WebRTC ──────────────────────────────────
+//
+// WebRTC sends its own packets, which no declarativeNetRequest rule sees: a page could
+// reach a private address over a STUN or TURN server it names. Two layers, both only
+// while a run is open:
+//
+// - Chrome-wide, WebRTC sends no UDP except through a proxy (there is none), so STUN
+//   and TURN over UDP go nowhere. The user's other tabs feel it too: a call there falls
+//   back to TCP relays, or fails, until the run ends. Chosen by Varun.
+// - In the run's tab, RTCPeerConnection is taken away, which leaves TURN over TCP (the
+//   setting above doesn't stop it) with no way in from the page or the agent. Best
+//   effort: a cross-origin frame in a process of its own starts with its own copy.
+
+const WEBRTC_UDP_OFF = 'disable_non_proxied_udp';
+let webRtcHolds = 0;
+let webRtcChain: Promise<unknown> = Promise.resolve();
+const serially = <T>(f: () => Promise<T>): Promise<T> => {
+  const next = webRtcChain.then(f);
+  webRtcChain = next.catch(() => {});
+  return next;
+};
+
+/** Turns WebRTC's direct UDP off for as long as any run holds it; the returned call lets go. */
+export async function holdWebRtcUdpOff(): Promise<() => Promise<void>> {
+  await serially(async () => {
+    const policy = chrome.privacy.network.webRTCIPHandlingPolicy;
+    if (webRtcHolds === 0) await policy.set({ value: WEBRTC_UDP_OFF as chrome.privacy.IPHandlingPolicy });
+    const now = await policy.get({});
+    if (now.value !== WEBRTC_UDP_OFF) {
+      if (webRtcHolds === 0) await policy.clear({}).catch(() => {});
+      throw new Error("Chrome's WebRTC setting is managed by something else here, so Cascade can't keep a run's WebRTC off your private network. Use the Cascade CLI for this run.");
+    }
+    webRtcHolds += 1;
+  });
+  let released = false;
+  return () => serially(async () => {
+    if (released) return;
+    released = true;
+    webRtcHolds -= 1;
+    if (webRtcHolds === 0) await chrome.privacy.network.webRTCIPHandlingPolicy.clear({}).catch(() => {});
+  });
+}
+
+/** After the extension's worker restarts, no run is open: the setting goes back to the user's. */
+export async function releaseWebRtcAfterRestart(): Promise<void> {
+  await serially(async () => {
+    webRtcHolds = 0;
+    await chrome.privacy.network.webRTCIPHandlingPolicy.clear({}).catch(() => {});
+  });
+}
+
+/** Run in every document of the run's tab before its own scripts. */
+export const NO_WEBRTC_SCRIPT = `(() => {
+  for (const name of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCIceTransport']) {
+    try { Object.defineProperty(globalThis, name, { value: undefined, writable: false, configurable: false }); } catch {}
+  }
+})();`;
+
 /**
  * Opens the run's window and puts its rules in place before anything loads, then
  * attaches the debugger. A failure at any step takes down what came before it.
@@ -170,10 +228,13 @@ export async function openRunTab(opts: TabPolicyOptions): Promise<LeasedBrowser 
   const closedPages: string[] = [];
   const dismissedDialogs: string[] = [];
 
+  let releaseWebRtc: (() => Promise<void>) | undefined;
   const removeEverything = async (): Promise<void> => {
     if (attached) { attached = false; await chrome.debugger.detach({ tabId }).catch(() => {}); }
     await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ruleIds }).catch(() => {});
     await chrome.windows.remove(windowId).catch(() => {});
+    // Only once the run's pages are gone.
+    await releaseWebRtc?.();
   };
 
   let own: CdpClient;
@@ -181,10 +242,13 @@ export async function openRunTab(opts: TabPolicyOptions): Promise<LeasedBrowser 
     await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ruleIds, addRules: rules });
     // Before anything loads: what this run's sites start may outlive the run.
     await keepWorkersOffPrivateNetwork(consentedHosts(opts.consent));
+    releaseWebRtc = await holdWebRtcUdpOff();
     await chrome.debugger.attach({ tabId }, '1.3');
     attached = true;
     own = chromeTabCdp(tabId);
     await own.send('Page.enable');
+    await own.send('Page.addScriptToEvaluateOnNewDocument', { source: NO_WEBRTC_SCRIPT, runImmediately: true });
+    await own.send('Runtime.evaluate', { expression: NO_WEBRTC_SCRIPT });
   } catch (e) {
     await removeEverything();
     throw e;

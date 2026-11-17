@@ -22,6 +22,18 @@ device shows which run is asking, and you type the sites it may use. Then:
   matches names and addresses as written, and can't see a public name that resolves
   to a private address; the CLI checks the resolved address too. A run that needs a
   site on your own network has to use the CLI.
+- In the extension, two things reach past the run's window, so that nothing the
+  run's sites start can get onto your private network another way:
+  - **WebRTC, while a run is open:** Chrome sends no WebRTC traffic over UDP, in
+    any tab, and the run's own tab has no WebRTC at all. A call in another tab may
+    drop to a slower relay, or fail, until the run ends; your setting comes back
+    when it does.
+  - **Workers, until Chrome restarts:** background workers of the sites you allowed
+    can't reach private-network addresses, even in your own tabs, because a worker
+    can outlive the run that started it. Other sites are untouched.
+- One gap the extension can't close: a frame from another site, in a process of its
+  own inside the run's page, still has WebRTC over TCP. The CLI has no such gap: its
+  browser sends everything through Cascade's own proxy.
 - Popups the page opens are closed, and dialogs are dismissed.
 - Downloads: the CLI's browser refuses them. In the extension a download ends the
   run (Chrome can't tell it which download is the run's, so none is touched), and

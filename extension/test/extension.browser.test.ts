@@ -8,9 +8,10 @@
 //  destination server.
 
 import { execFileSync } from 'node:child_process';
+import dgram from 'node:dgram';
 import fs from 'node:fs';
 import http from 'node:http';
-import type { AddressInfo } from 'node:net';
+import net, { type AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -70,6 +71,31 @@ function workerScript(req: http.IncomingMessage, res: http.ServerResponse): bool
   res.setHeader('content-type', 'text/javascript');
   res.end(WORKER_JS);
   return true;
+}
+
+/** Sockets on loopback that count what reaches them: a private STUN/TURN server. */
+function udpCounter(): Promise<{ count(): number; port: number; close(): void }> {
+  let n = 0;
+  const s = dgram.createSocket('udp4');
+  s.on('message', () => { n += 1; });
+  return new Promise((res) => s.bind(0, '127.0.0.1', () => res({ count: () => n, port: s.address().port, close: () => s.close() })));
+}
+function tcpCounter(): Promise<{ count(): number; port: number; close(): void }> {
+  let n = 0;
+  const s = net.createServer((c) => { n += 1; c.on('error', () => {}); c.destroy(); });
+  return new Promise((res) => s.listen(0, '127.0.0.1', () => res({ count: () => n, port: (s.address() as AddressInfo).port, close: () => s.close() })));
+}
+/** Asks a page for a WebRTC connection through `url`; 'none' if it has no RTCPeerConnection. */
+function iceProbe(page: PwPage, url: string, relayOnly: boolean): Promise<string> {
+  return page.evaluate(`(async () => {
+    if (typeof RTCPeerConnection !== 'function') return 'none';
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: ${JSON.stringify(url)}, username: 'u', credential: 'c' }]${relayOnly ? ", iceTransportPolicy: 'relay'" : ''} });
+    pc.createDataChannel('x');
+    await pc.setLocalDescription(await pc.createOffer());
+    await new Promise((r) => setTimeout(r, 1500));
+    pc.close();
+    return 'tried';
+  })()`) as Promise<string>;
 }
 
 async function rig() {
@@ -353,6 +379,41 @@ suite('the extension in a real Chromium', { timeout: 90_000 }, () => {
     await mine.goto('http://offlist.test/mine');
     expect(await mine.evaluate(`(${viaWorker})(${lanUrl})`)).toBe('reached');
     expect(r.lan.hits).toEqual(['GET /from-worker']);
+  });
+
+  it('WebRTC reaches no private address during a run, and the user has it back after', async () => {
+    const r = await rig();
+    const stun = await udpCounter(); const turnUdp = await udpCounter(); const turnTcp = await tcpCounter();
+    closers.push(() => { stun.close(); turnUdp.close(); turnTcp.close(); });
+    const mine = await r.ctx.newPage();
+    await mine.goto('http://offlist.test/mine');
+    // Control, before any run: the same probes from the user's own tab do get there.
+    expect(await iceProbe(mine, `stun:127.0.0.1:${stun.port}`, false)).toBe('tried');
+    expect(await iceProbe(mine, `turn:127.0.0.1:${turnTcp.port}?transport=tcp`, true)).toBe('tried');
+    expect(stun.count()).toBeGreaterThan(0);
+    expect(turnTcp.count()).toBeGreaterThan(0);
+    const before = { stun: stun.count(), tcp: turnTcp.count() };
+
+    const { page, relayed } = await r.run('run-1');
+    await page.goto('http://allowed.test/hello');
+    // The run's tab: no RTCPeerConnection, for the page or the agent.
+    expect(await iceProbe(page, `turn:127.0.0.1:${turnTcp.port}?transport=tcp`, true)).toBe('none');
+    // The user's other tabs while the run is open: no direct UDP.
+    expect(await iceProbe(mine, `stun:127.0.0.1:${stun.port}`, false)).toBe('tried');
+    expect(await iceProbe(mine, `turn:127.0.0.1:${turnUdp.port}?transport=udp`, true)).toBe('tried');
+    expect(stun.count()).toBe(before.stun);
+    expect(turnUdp.count()).toBe(0);
+
+    // Once the run ends, the user's setting is back.
+    const extId = new URL(r.sw.url()).host;
+    const popup = r.ctx.pages()[0]!;
+    await popup.goto(`chrome-extension://${extId}/popup.html`);
+    await vi.waitFor(async () => expect(await popup.evaluate<boolean>("!document.getElementById('run').hidden")).toBe(true));
+    await popup.click('#stop');
+    await Promise.race([relayed.closed, sleep(5000).then(() => { throw new Error('the run did not stop'); })]);
+    await vi.waitFor(async () => expect((await r.sw.evaluate(() => chrome.privacy.network.webRTCIPHandlingPolicy.get({}))).levelOfControl).not.toBe('controlled_by_this_extension'), { timeout: 5000 });
+    expect(await iceProbe(mine, `stun:127.0.0.1:${stun.port}`, false)).toBe('tried');
+    expect(stun.count()).toBeGreaterThan(before.stun);
   });
 
   it('attempts to connect that overlap make one client, not two that knock each other off', async () => {
