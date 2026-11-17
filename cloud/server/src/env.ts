@@ -51,6 +51,18 @@ const EnvSchema = z.object({
   // The browser relay: a user's own device serves their runs a browser, and the
   // server hosts none. Off by default while it is being built; with it off, the
   // endpoints do not exist at all (docs/design/byo-browser-and-routing-data.md).
+  // Source C: a user may give their runs their own CDP endpoint (a wss:// connect URL
+  // for Steel, Browserless or a Chrome). Off by default. The server dials only public
+  // addresses, checked and pinned (user-endpoint.ts), unless BROWSER_ENDPOINTS_PRIVATE
+  // is on, for a self-hosted server whose users' browsers are on its own network.
+  BROWSER_ENDPOINTS: z
+    .string()
+    .optional()
+    .transform((v) => v === '1' || v === 'true'),
+  BROWSER_ENDPOINTS_PRIVATE: z
+    .string()
+    .optional()
+    .transform((v) => v === '1' || v === 'true'),
   BROWSER_RELAY: z
     .string()
     .optional()

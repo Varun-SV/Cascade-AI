@@ -395,6 +395,36 @@ describe('cloud/server app', () => {
     expect(body.browserSessionLimit).toBe(5);
   });
 
+  it('a user\'s own CDP endpoint: offered only when on, public only, stored encrypted, shown as its host (stage 6, C)', async () => {
+    const cookie = await login('Endpoint owner');
+    const j = { 'Content-Type': 'application/json', Cookie: cookie };
+    const put = (url: unknown) => fetch(`${baseUrl}/api/browser/endpoint`, { method: 'PUT', headers: j, body: JSON.stringify({ url }) });
+    const prefs = async () => (await (await fetch(`${baseUrl}/api/browser/prefs`, { headers: { Cookie: cookie } })).json()) as {
+      source: string; endpoint: { host: string } | null; offers: Record<string, boolean>;
+    };
+    expect(await prefs()).toMatchObject({ source: 'device', endpoint: null, offers: { endpoint: false, desktop: true } });
+    expect((await put('wss://connect.example.com/?apiKey=SECRETTOKEN')).status).toBe(404);
+    expect((await fetch(`${baseUrl}/api/browser/prefs`, { method: 'PUT', headers: j, body: JSON.stringify({ source: 'endpoint' }) })).status).toBe(400);
+
+    await restartWith({ BROWSER_ENDPOINTS: true });
+    for (const bad of ['ws://connect.example.com', 'wss://127.0.0.1:9222', 'wss://localhost', 'https://x.example.com', 'wss://u:p@x.example.com']) {
+      expect([bad, (await put(bad)).status]).toEqual([bad, 400]);
+    }
+    const saved = await put('wss://connect.example.com/?apiKey=SECRETTOKEN');
+    expect(saved.status).toBe(200);
+    const text = await saved.text();
+    expect(text).toContain('connect.example.com');
+    expect(text).not.toContain('SECRETTOKEN');
+    expect(JSON.stringify(await prefs())).not.toContain('SECRETTOKEN');
+    // At rest it is ciphertext: the token is nowhere in the database file.
+    expect((await fs.readFile(path.join(dir, 'cloud.db'))).includes('SECRETTOKEN')).toBe(false);
+    expect((await (await fetch(`${baseUrl}/api/browser/prefs`, { method: 'PUT', headers: j, body: JSON.stringify({ source: 'endpoint' }) })).json() as { source: string }).source).toBe('endpoint');
+    expect((await fetch(`${baseUrl}/api/browser/prefs`, { method: 'PUT', headers: j, body: JSON.stringify({ source: 'phone' }) })).status).toBe(400);
+    expect((await (await fetch(`${baseUrl}/api/browser/endpoint`, { method: 'DELETE', headers: { Cookie: cookie } })).json() as { endpoint: unknown }).endpoint).toBeNull();
+    expect((await fetch(`${baseUrl}/api/browser/prefs`)).status).toBe(401);
+    expect(((await (await fetch(`${baseUrl}/api/config`)).json()) as { browserEndpoints?: boolean }).browserEndpoints).toBe(true);
+  });
+
   it('GET /api/usage/report is the signed-in user\'s own spend, and checks its inputs', async () => {
     expect((await fetch(`${baseUrl}/api/usage/report`)).status).toBe(401);
 

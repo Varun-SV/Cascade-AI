@@ -20,6 +20,7 @@
 //      cleanup matched nothing, which cost a review round on the desktop.
 
 import { randomUUID } from 'node:crypto';
+import { UserEndpointProvider } from './user-endpoint.js';
 import {
   ALLOWANCE_UNAVAILABLE,
   RemoteBrowserController,
@@ -97,6 +98,11 @@ interface AttachOptions {
    * nothing, as an unconfigured provider does.
    */
   relay?: RelayForRun;
+  /**
+   * For `provider: 'endpoint'`: the user's own CDP endpoint, decrypted for this run.
+   * Without it an endpoint setting attaches nothing.
+   */
+  userEndpoint?: { url: string; allowPrivate: boolean };
 }
 
 /** Attached browser, or null when the deployment has no provider configured. */
@@ -244,6 +250,24 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
     }
     return attachRun(opts, ownDeviceController(opts.relay, opts.conversationId), opts.relay.device);
   }
+  if (settings.provider === 'endpoint') {
+    if (!opts.userEndpoint) {
+      opts.warn?.("remoteBrowser.provider 'endpoint' needs the user's endpoint, which this run wasn't given");
+      return null;
+    }
+    // The run's own controller, as for the relay: the endpoint is one user's, and
+    // the deployment's pool has nothing to say about it.
+    const provider = new UserEndpointProvider(opts.userEndpoint.url, { allowPrivate: opts.userEndpoint.allowPrivate });
+    const controller = new RemoteBrowserController({
+      provider,
+      maxSessions: 1,
+      onReleaseFailed: (runId, sessionId, err) => console.error(`[browser ${runId}] the bridge to the user's endpoint (${sessionId}) did not close:`, err),
+    });
+    return attachRun(opts, controller, null, async () => {
+      await controller.dispose();
+      await provider.closeAll();
+    });
+  }
   const provider = buildProvider(settings, opts.warn);
   if (!provider) return null;
 
@@ -331,6 +355,8 @@ function attachRun(
   opts: AttachOptions,
   controller: RemoteBrowserController,
   device: RelayForRun['device'] | null,
+  /** For a controller of the run's own: what ends it with the run. */
+  dispose?: () => Promise<void>,
 ): AttachedBrowser {
   // The run's own id, learned when the run starts rather than when it ends: a
   // run that throws is exactly the one whose session needs releasing, and a
@@ -476,11 +502,15 @@ function attachRun(
   return {
     get taskId() { return taskId; },
     async endRun() {
-      // Only this run's session. The controller outlives the run.
-      if (taskId) {
-        await controller.endRun(taskId);
-        controller.offLiveViewFor(taskId);
-        controller.offControlFor(taskId);
+      try {
+        // Only this run's session. A shared controller outlives the run.
+        if (taskId) {
+          await controller.endRun(taskId);
+          controller.offLiveViewFor(taskId);
+          controller.offControlFor(taskId);
+        }
+      } finally {
+        await dispose?.();
       }
     },
     stop() {
@@ -598,7 +628,7 @@ function buildProvider(
 ): RemoteBrowserProvider | null {
   if (!settings?.provider) return null;
   // The user's own browser is one run's, never a deployment's: see `ownDeviceController`.
-  if (settings.provider === 'relay') return null;
+  if (settings.provider === 'relay' || settings.provider === 'endpoint') return null;
 
   if (settings.provider === 'cdp') {
     // Named at attach time rather than as an obscure Playwright failure on the

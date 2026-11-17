@@ -19,6 +19,14 @@ import {
   type SpendChatRow, type SpendEntry, type SpendSource, type SpendTotals,
 } from './spend.js';
 
+/**
+ * Where a user's runs get a browser: one of their own devices through the relay (the
+ * default), their own CDP endpoint, or their desktop app, which the web hands the chat to.
+ */
+export const BROWSER_SOURCES = ['device', 'endpoint', 'desktop'] as const;
+export type BrowserSource = (typeof BROWSER_SOURCES)[number];
+export interface BrowserPrefs { source: BrowserSource; endpointEnc: string | null; endpointHost: string | null }
+
 export type OAuthProvider = 'github' | 'google' | 'dev';
 
 export type RelayDeviceKind = 'cli' | 'extension' | 'desktop';
@@ -616,6 +624,41 @@ export class CloudStore {
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id)');
 
     this.migrateSpendLedger();
+    // Where each user's runs get a browser, and their own endpoint, encrypted (user-endpoint.ts).
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS user_browser (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        source TEXT NOT NULL DEFAULT 'device',
+        endpoint_enc TEXT,
+        endpoint_host TEXT,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+  }
+
+  // ── Where a user's runs get a browser ─────────
+
+  getBrowserPrefs(userId: string): BrowserPrefs {
+    const row = this.db.prepare('SELECT source, endpoint_enc, endpoint_host FROM user_browser WHERE user_id = ?').get(userId) as
+      { source: string; endpoint_enc: string | null; endpoint_host: string | null } | undefined;
+    const source = row && (BROWSER_SOURCES as readonly string[]).includes(row.source) ? (row.source as BrowserSource) : 'device';
+    return { source, endpointEnc: row?.endpoint_enc ?? null, endpointHost: row?.endpoint_host ?? null };
+  }
+
+  setBrowserSource(userId: string, source: BrowserSource, now = Date.now()): void {
+    this.db.prepare(
+      `INSERT INTO user_browser (user_id, source, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET source = excluded.source, updated_at = excluded.updated_at`,
+    ).run(userId, source, now);
+  }
+
+  /** Stores the endpoint (already encrypted) and its host, or clears both with nulls. */
+  setBrowserEndpoint(userId: string, enc: string | null, host: string | null, now = Date.now()): void {
+    this.db.prepare(
+      `INSERT INTO user_browser (user_id, endpoint_enc, endpoint_host, updated_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET endpoint_enc = excluded.endpoint_enc, endpoint_host = excluded.endpoint_host,
+         updated_at = excluded.updated_at`,
+    ).run(userId, enc, host, now);
   }
 
   /**

@@ -116,9 +116,11 @@ export const ToolsConfigSchema = z.object({
     /**
      * `cdp` for an endpoint you run; `steel` for a Steel deployment; `relay` for the
      * user's own browser on their own device, which only a server with the browser
-     * relay can serve, one run at a time (see cloud/server/src/remote-browser.ts).
+     * relay can serve, one run at a time (see cloud/server/src/remote-browser.ts);
+     * `endpoint` for a user's own CDP endpoint, which only a server serves, per run
+     * (cloud/server/src/user-endpoint.ts).
      */
-    provider: z.enum(['cdp', 'steel', 'relay']).optional(),
+    provider: z.enum(['cdp', 'steel', 'relay', 'endpoint']).optional(),
     /** The websocket endpoint for `cdp`, or the API base for `steel`. */
     url: z.string().optional(),
     apiKey: z.string().optional(),

@@ -26,6 +26,8 @@ import { remoteBrowserControls } from './runs.js';
 import { NativeAuthStore, isLoopbackRedirect, hashRefreshToken } from './native-auth.js';
 import { githubAuthUrl, exchangeGithubCode, googleAuthUrl, exchangeGoogleCode, type OAuthProfile } from './auth/oauth.js';
 import { limitsForPlan, ORPHAN_UPLOAD_TTL_MS, todayKey, checkStorageQuota } from './entitlements.js';
+import { checkEndpointUrl, endpointLabel } from './user-endpoint.js';
+import { encryptAtRest } from './secrets.js';
 import { buildSpendReport, DEVICE_RUN_ID, deviceEndedAt, deviceRunSpendId, parsePeriod, parseTimeZone, spendEntryFromRun } from './spend.js';
 import { skillCatalog } from './skills.js';
 import { renderDocsPage } from './docs.js';
@@ -247,6 +249,8 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       devLoginEnabled: env.CLOUD_DEV_BYPASS,
       // Whether a user's own device can serve their runs a browser here.
       browserRelay: Boolean(options.browserRelay),
+      // Whether a user may give their runs their own CDP endpoint here.
+      browserEndpoints: env.BROWSER_ENDPOINTS === true,
       // Whether this deployment can actually produce a hosted browser. The
       // capability does not exist until an operator supplies a WORKING
       // endpoint, so the control for it must not either: a Browser toggle on a
@@ -1411,6 +1415,44 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   // viewer's IANA time zone (e.g. Europe/London), so each day ends at their
   // midnight under the rules in force that day; a bare offset in minutes east
   // of UTC is still accepted, as a fixed offset.
+  // ── Where the user's runs get a browser (Settings → Browser) ──
+  // Their own: the source they chose, and their CDP endpoint, which is stored encrypted
+  // and only ever shown back as its host (user-endpoint.ts).
+  const browserLimiter = rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: true, legacyHeaders: false });
+  const browserPrefsView = (userId: string) => {
+    const p = store.getBrowserPrefs(userId);
+    return {
+      source: p.source,
+      endpoint: p.endpointHost ? { host: p.endpointHost } : null,
+      // What this server offers: the relay for devices, endpoints if turned on. Handing
+      // a chat to the desktop app needs nothing from the server.
+      offers: { device: Boolean(options.browserRelay), endpoint: env.BROWSER_ENDPOINTS === true, desktop: true },
+      privateEndpoints: env.BROWSER_ENDPOINTS_PRIVATE === true,
+    };
+  };
+  app.get('/api/browser/prefs', browserLimiter, sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    res.json(browserPrefsView(req.session!.userId));
+  });
+  app.put('/api/browser/prefs', browserLimiter, sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const source = (req.body as { source?: unknown } | undefined)?.source;
+    if (source !== 'device' && source !== 'endpoint' && source !== 'desktop') { res.status(400).json({ error: 'source must be device, endpoint or desktop' }); return; }
+    if (source === 'endpoint' && !env.BROWSER_ENDPOINTS) { res.status(400).json({ error: 'This server doesn\'t offer your own CDP endpoint.' }); return; }
+    store.setBrowserSource(req.session!.userId, source);
+    res.json(browserPrefsView(req.session!.userId));
+  });
+  app.put('/api/browser/endpoint', browserLimiter, sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    if (!env.BROWSER_ENDPOINTS) { res.status(404).json({ error: 'Not found' }); return; }
+    const check = checkEndpointUrl((req.body as { url?: unknown } | undefined)?.url, { allowPrivate: env.BROWSER_ENDPOINTS_PRIVATE === true });
+    if (!check.ok) { res.status(400).json({ error: check.error }); return; }
+    const url = check.url.toString();
+    store.setBrowserEndpoint(req.session!.userId, encryptAtRest(url, env.SESSION_SECRET, 'cascade-browser-endpoint-v1'), endpointLabel(url));
+    res.json(browserPrefsView(req.session!.userId));
+  });
+  app.delete('/api/browser/endpoint', browserLimiter, sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    store.setBrowserEndpoint(req.session!.userId, null, null);
+    res.json(browserPrefsView(req.session!.userId));
+  });
+
   app.get('/api/usage/report', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
     const period = parsePeriod(req.query['period'] ?? '30d');
     const tz = parseTimeZone(req.query['tz']);

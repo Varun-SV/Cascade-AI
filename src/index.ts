@@ -90,6 +90,8 @@ export {
 } from './browser/relay/capability.js';
 export type { NonceStore as RelayNonceStore, Identity as RelayIdentity } from './browser/relay/capability.js';
 export { connectDeviceClient } from './browser/relay/device.js';
+// The private-network rule, for a server deciding whether it may dial an address a user gave.
+export { isPrivateHost as isPrivateNetworkHost, bareHost } from './browser/relay/egress-rules.js';
 export type { DeviceClient, DeviceClientOptions, LeasedBrowser, UserConsent } from './browser/relay/device.js';
 export { startDedicatedBrowser } from './browser/relay/dedicated-browser.js';
 export type { CurrentPageProvider, CurrentPageSnapshot } from './tools/current-page.js';
