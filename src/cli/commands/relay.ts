@@ -177,26 +177,41 @@ function defaultChromium(): string | null {
   }
 }
 
-/** Asks in this terminal. The question is taken down if the run stops asking. */
-function terminalAsk(): DeviceClientOptions['askUser'] {
+/** Where the question is asked: this terminal, or a test's streams. */
+export interface TerminalIo { input: NodeJS.ReadableStream; output: NodeJS.WritableStream; terminal?: boolean }
+
+/**
+ * Asks in this terminal. The question is taken down if the run stops asking.
+ *
+ * Ctrl-C while it's asking stops serving, as it does at any other time: readline
+ * takes the keystroke itself, so the process's own SIGINT handler never hears it,
+ * and the question used to stay open with the device still serving. `onInterrupt`
+ * is that handler's job, and a prompt that closes unanswered counts as a no.
+ */
+export function terminalAsk(onInterrupt: () => void, io: TerminalIo = { input: process.stdin, output: process.stdout }): DeviceClientOptions['askUser'] {
   let queue = Promise.resolve();
   return (run) => {
     // One question at a time: two runs asking at once are answered in turn.
-    const answer = queue.then(() => new Promise<UserConsent | null>((resolve) => {
+    const answer = queue.then(() => new Promise<UserConsent | null>((settle) => {
+      let settled = false;
+      const resolve = (c: UserConsent | null): void => { if (!settled) { settled = true; settle(c); } };
       if (run.signal.aborted) { resolve(null); return; }
       const mins = Math.max(1, Math.round((run.expiresAt - Date.now()) / 60_000));
       console.log(chalk.magenta('\n  ◈ A cloud run wants a browser on this machine'));
       console.log(chalk.dim(`  run ${run.runId} · this question lapses in about ${mins} min`));
       console.log(chalk.dim('  It gets a fresh browser with an empty profile, closed when the run ends.'));
-      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const rl = readline.createInterface({ input: io.input, output: io.output, ...(io.terminal !== undefined ? { terminal: io.terminal } : {}) });
+      rl.on('SIGINT', () => { console.log(chalk.dim('\n  Declined.')); rl.close(); onInterrupt(); });
+      rl.on('close', () => resolve(null));
       const ask = (): void => {
         rl.question('  Sites it may use (e.g. example.com docs.example.com), or Enter to say no: ', (text) => {
           const parsed = parseSites(text);
           if (parsed && 'error' in parsed) { console.log(chalk.yellow(`  ${parsed.error}`)); ask(); return; }
-          rl.close();
           if (!parsed) console.log(chalk.dim('  Declined.'));
           else console.log(chalk.green(`  Allowed: ${[...parsed.consent.allowedOrigins, ...parsed.consent.privateOrigins].join(' ')}`));
+          // Settled before closing: closing settles an unanswered question as a no.
           resolve(parsed ? parsed.consent : null);
+          rl.close();
         });
       };
       run.signal.addEventListener('abort', () => { console.log(chalk.dim('\n  The run stopped asking.')); rl.close(); resolve(null); }, { once: true });
@@ -244,7 +259,7 @@ export async function relayServeCommand(opts: { chromium?: string } = {}): Promi
   try {
     const outcome = await serveDevice({
       stored, endpoints, signal: stopping.signal,
-      askUser: terminalAsk(),
+      askUser: terminalAsk(onSignal),
       startBrowser: (consent) => startDedicatedBrowser({ consent, chromiumPath }),
       log: (line) => console.log(chalk.dim(`  ${line}`)),
     });

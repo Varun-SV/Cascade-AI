@@ -2,11 +2,12 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocketServer } from 'ws';
 import {
-  loadRelayDevice, pairDevice, parseSites, relayDevicePath, relayEndpoints, saveRelayDevice, serveDevice,
+  loadRelayDevice, pairDevice, parseSites, relayDevicePath, relayEndpoints, saveRelayDevice, serveDevice, terminalAsk,
   type StoredRelayDevice,
 } from './relay.js';
 import { createIdentity, createMemoryNonceStore, generateStoredKey, publicKeyFromText, publicKeyToText } from '../../browser/relay/capability.js';
@@ -182,5 +183,42 @@ describe('serving', () => {
     const h = await hubWithDevice();
     await serveDevice({ stored: h.stored, endpoints: h.endpoints, signal: stop.signal, askUser: async () => null, startBrowser: noBrowser, log: () => {}, connect, sleep: async (ms) => { waits.push(ms); }, maxRefusals: 10 });
     expect(waits).toEqual([1000, 2000, 4000, 1000, 2000]);
+  });
+});
+
+describe('the question in the terminal', () => {
+  const run = (signal = new AbortController().signal) => ({ runId: 'run-1', expiresAt: Date.now() + 60_000, signal });
+  const io = () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    output.resume();
+    // A terminal, so readline treats Ctrl-C as a keystroke, as it does for a person.
+    return { input, output, terminal: true };
+  };
+
+  it('Ctrl-C while it asks stops serving, and the run gets no browser', async () => {
+    const t = io();
+    const interrupted = vi.fn();
+    const answer = terminalAsk(interrupted, t)(run());
+    await new Promise((r) => setTimeout(r, 20));
+    t.input.write('\x03');
+    await expect(answer).resolves.toBeNull();
+    expect(interrupted).toHaveBeenCalledTimes(1);
+  });
+
+  it('an answer still counts, and the next question is asked', async () => {
+    const t = io();
+    const interrupted = vi.fn();
+    const ask = terminalAsk(interrupted, t);
+    const first = ask(run());
+    await new Promise((r) => setTimeout(r, 20));
+    t.input.write('example.com\r');
+    const consent = await first;
+    expect(consent && [...consent.allowedOrigins]).toEqual(['https://example.com']);
+    const second = ask(run());
+    await new Promise((r) => setTimeout(r, 20));
+    t.input.write('\r');
+    await expect(second).resolves.toBeNull();
+    expect(interrupted).not.toHaveBeenCalled();
   });
 });
