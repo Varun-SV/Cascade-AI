@@ -3,8 +3,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import '@testing-library/jest-dom/vitest';
 import type { SpendReport as Report } from '../lib/api.js';
 
-vi.mock('../lib/api.js', () => ({ fetchSpendReport: vi.fn(), fetchEveryone: vi.fn() }));
-import { fetchEveryone, fetchSpendReport } from '../lib/api.js';
+vi.mock('../lib/api.js', () => ({ fetchSpendReport: vi.fn() }));
+import { fetchSpendReport } from '../lib/api.js';
 import SpendReport from './SpendReport.js';
 
 const mocked = vi.mocked(fetchSpendReport);
@@ -44,7 +44,7 @@ describe('SpendReport', () => {
   it('opens on the last 30 days: spent, saved, runs', async () => {
     mocked.mockResolvedValue(report());
     render(<SpendReport onClose={() => {}} onOpenChat={() => {}} />);
-    expect(mocked).toHaveBeenCalledWith('30d', 'all');
+    expect(mocked).toHaveBeenCalledWith('30d');
     await screen.findByText('Spent and saved by day');
     expect(screen.getByText('$0.64')).toBeInTheDocument();
     expect(screen.getByText('$1.92')).toBeInTheDocument();
@@ -63,7 +63,7 @@ describe('SpendReport', () => {
     let answer: (r: Report) => void = () => {};
     mocked.mockReturnValueOnce(new Promise((r) => { answer = r; }));
     fireEvent.click(screen.getByRole('button', { name: '7 days' }));
-    expect(mocked).toHaveBeenLastCalledWith('7d', 'all');
+    expect(mocked).toHaveBeenLastCalledWith('7d');
     expect(screen.getByText('$0.64').closest('[aria-busy]')).toHaveAttribute('aria-busy', 'true');
     answer(report({ period: '7d', totals: { ...report().totals, spentUsd: 0.25 } }));
     await screen.findByText('$0.25');
@@ -195,53 +195,5 @@ describe('SpendReport', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await screen.findByText('$0.64');
     expect(screen.queryByRole('alert')).toBeNull();
-  });
-});
-
-describe('SpendReport by surface, and Everyone (stage 5)', () => {
-  const everyoneMock = vi.mocked(fetchEveryone);
-  beforeEach(() => everyoneMock.mockReset());
-
-  it('asks for one surface\'s runs, and says how they went', async () => {
-    mocked.mockResolvedValue(report({ totals: {
-      spentUsd: 0.64, savedUsd: 0, runs: 10, tokens: 1000, failedRuns: 2, failedUsd: 0.1, stoppedRuns: 1,
-      durationMs: 45_000, timedRuns: 9, failovers: 3, agents: { completed: 7, failed: 2, escalated: 1, other: 0 },
-    } }));
-    render(<SpendReport onClose={() => {}} onOpenChat={() => {}} />);
-    await screen.findByText('How runs went');
-    const runs = screen.getByRole('heading', { name: 'How runs went' }).closest('section')!;
-    expect(within(runs).getByText('Answered').nextSibling).toHaveTextContent('7');
-    expect(within(runs).getByText('Stopped').nextSibling).toHaveTextContent('1');
-    expect(within(runs).getByText('Average time').nextSibling).toHaveTextContent('5.0 s');
-    expect(within(runs).getByText('Failovers').nextSibling).toHaveTextContent('3');
-    expect(within(runs).getByText(/7 completed, 2 failed, 1 escalated/)).toBeInTheDocument();
-    fireEvent.click(within(screen.getByRole('group', { name: 'Where they ran' })).getByRole('button', { name: 'CLI' }));
-    await waitFor(() => expect(mocked).toHaveBeenLastCalledWith('30d', 'cli'));
-  });
-
-  it('offers Everyone only where the server publishes it', async () => {
-    mocked.mockResolvedValue(report());
-    render(<SpendReport onClose={() => {}} onOpenChat={() => {}} />);
-    await screen.findByText('Spent and saved by day');
-    expect(screen.queryByRole('group', { name: 'Whose runs' })).not.toBeInTheDocument();
-  });
-
-  it('Everyone shows published weeks, by whole weeks, and says what is held back', async () => {
-    mocked.mockResolvedValue(report());
-    everyoneMock.mockResolvedValue({
-      surface: 'all', label: 'weeks 2026-W42–2026-W45', minimums: { runs: 20, users: 5 },
-      weeks: [], rows: [{ tier: 'T3', model: 'openai:mini', runs: 120, costUsd: 1.5, tokens: 90_000 }],
-    });
-    render(<SpendReport onClose={() => {}} onOpenChat={() => {}} everyone />);
-    await screen.findByText('Spent and saved by day');
-    fireEvent.click(within(screen.getByRole('group', { name: 'Whose runs' })).getByRole('button', { name: 'Everyone' }));
-    expect(await screen.findByText('Across all users, weeks 2026-W42–2026-W45.')).toBeInTheDocument();
-    expect(everyoneMock).toHaveBeenLastCalledWith('all', 4);
-    expect(screen.getByText('openai:mini')).toBeInTheDocument();
-    expect(screen.getByText(/at least 20 runs from at least 5 people/)).toBeInTheDocument();
-    // Weeks, not a calendar period.
-    expect(screen.queryByRole('group', { name: 'Period' })).not.toBeInTheDocument();
-    fireEvent.click(within(screen.getByRole('group', { name: 'Weeks' })).getByRole('button', { name: '12 weeks' }));
-    await waitFor(() => expect(everyoneMock).toHaveBeenLastCalledWith('all', 12));
   });
 });

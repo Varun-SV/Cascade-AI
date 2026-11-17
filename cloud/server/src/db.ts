@@ -18,7 +18,6 @@ import {
   spendEntryFromRun,
   type SpendChatRow, type SpendEntry, type SpendSource, type SpendSurface, type SpendTotals,
 } from './spend.js';
-import type { InsightsStore, PublishedCell, WeekCell } from './insights.js';
 
 /** A ledger row's columns, in the order `spendValues` gives them. */
 const SPEND_COLUMNS = `(id, user_id, conversation_id, at, cost_usd, saved_usd, tokens, outcome,
@@ -626,16 +625,6 @@ export class CloudStore {
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id)');
 
     this.migrateSpendLedger();
-    // Everyone's releases (insights.ts): written once per closed week, never revised.
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS insights_weeks (week TEXT PRIMARY KEY, released_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS insights_cells (
-        week TEXT NOT NULL REFERENCES insights_weeks(week),
-        surface TEXT NOT NULL, tier TEXT NOT NULL, model TEXT NOT NULL,
-        runs INTEGER NOT NULL, cost_usd REAL NOT NULL, tokens INTEGER NOT NULL,
-        PRIMARY KEY (week, surface, tier, model)
-      );
-    `);
   }
 
   /**
@@ -1359,39 +1348,6 @@ export class CloudStore {
           const row = r as Omit<SpendChatRow, 'noChat'> & { noChat: number };
           return { ...row, noChat: row.noChat === 1 };
         }),
-    };
-  }
-
-  // ── Everyone: weekly releases ─────────────────
-
-  get insights(): InsightsStore {
-    return {
-      firstSurfacedRunAt: () => (this.db.prepare('SELECT MIN(at) AS first FROM spend_ledger WHERE surface IS NOT NULL').get() as { first: number | null }).first ?? null,
-      isReleased: (week) => this.db.prepare('SELECT 1 FROM insights_weeks WHERE week = ?').get(week) !== undefined,
-      weekCells: (startMs, endMs) => this.db.prepare(
-        `SELECT l.surface AS surface, m.tier AS tier, m.model AS model,
-                COUNT(DISTINCT l.id) AS runs, COUNT(DISTINCT l.user_id) AS users,
-                SUM(m.cost_usd) AS costUsd, SUM(m.tokens) AS tokens
-           FROM spend_ledger_models m JOIN spend_ledger l ON l.id = m.run_id
-          WHERE l.surface IS NOT NULL AND l.at >= ? AND l.at < ?
-          GROUP BY l.surface, m.tier, m.model`,
-      ).all(startMs, endMs) as WeekCell[],
-      release: (week, cells, atMs) => {
-        const tx = this.db.transaction(() => {
-          // Once: a week already released keeps what it was released with.
-          if (this.db.prepare('INSERT OR IGNORE INTO insights_weeks (week, released_at) VALUES (?, ?)').run(week, atMs).changes === 0) return;
-          const put = this.db.prepare('INSERT INTO insights_cells (week, surface, tier, model, runs, cost_usd, tokens) VALUES (?, ?, ?, ?, ?, ?, ?)');
-          for (const c of cells) put.run(week, c.surface, c.tier, c.model, c.runs, c.costUsd, c.tokens);
-        });
-        tx();
-      },
-      released: (weeks) => {
-        const out = new Map<string, PublishedCell[]>();
-        const isWeek = this.db.prepare('SELECT 1 FROM insights_weeks WHERE week = ?');
-        const cells = this.db.prepare('SELECT surface, tier, model, runs, cost_usd AS costUsd, tokens FROM insights_cells WHERE week = ?');
-        for (const w of weeks) if (isWeek.get(w) !== undefined) out.set(w, cells.all(w) as PublishedCell[]);
-        return out;
-      },
     };
   }
 

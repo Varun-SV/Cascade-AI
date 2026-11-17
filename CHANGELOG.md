@@ -42,15 +42,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator turns it off.
 - **Settings → Browser** in the web app lists your paired devices, whether each
   is online, and removes one (which also ends a run it is serving).
-- **The spend report by where runs ran.** All, Cloud, Desktop or CLI: runs
-  synced from the desktop app and the CLI now say which they came from. It also
-  shows how runs went: answered, stopped and failed, their average time,
-  failovers, and how their agents finished.
-- **Everyone, beside You, in the spend report**, where a server turns on
-  `INSIGHTS_EVERYONE`: runs, tokens and spend by tier and model across all users,
-  published a whole week at a time once the week is over and never changed, and
-  only for a model used in at least 20 runs by at least 5 people that week. Every
-  total adds up only what is shown. No success rates yet.
 
 ### Changed
 - **cascadeai.in no longer hosts a browser.** Runs there use your own Chrome

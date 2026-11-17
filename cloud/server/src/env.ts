@@ -51,13 +51,6 @@ const EnvSchema = z.object({
   // The browser relay: a user's own device serves their runs a browser, and the
   // server hosts none. Off by default while it is being built; with it off, the
   // endpoints do not exist at all (docs/design/byo-browser-and-routing-data.md).
-  // Everyone's routing and spend (docs/design/byo-browser-and-routing-data.md §8):
-  // weekly releases across all users, with minimum cells and nothing revised. Off by
-  // default; with it off the endpoint doesn't exist and nothing is released.
-  INSIGHTS_EVERYONE: z
-    .string()
-    .optional()
-    .transform((v) => v === '1' || v === 'true'),
   BROWSER_RELAY: z
     .string()
     .optional()

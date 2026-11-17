@@ -3,27 +3,7 @@ import { ChevronRight } from 'lucide-react';
 import Modal from './Modal.js';
 import Segmented from './Segmented.js';
 import SpendChart, { fmtUsd, slotTitle } from './SpendChart.js';
-import { fetchEveryone, fetchSpendReport, type EveryoneView, type SpendPeriod, type SpendReport as Report, type SpendSurfaceFilter } from '../lib/api.js';
-
-const SURFACES: Array<{ value: SpendSurfaceFilter; label: string }> = [
-  { value: 'all', label: 'All' },
-  { value: 'cloud', label: 'Cloud' },
-  { value: 'desktop', label: 'Desktop' },
-  { value: 'cli', label: 'CLI' },
-];
-type Whose = 'you' | 'everyone';
-const WHOSE: Array<{ value: Whose; label: string }> = [{ value: 'you', label: 'You' }, { value: 'everyone', label: 'Everyone' }];
-type WeekSpan = '1' | '4' | '12';
-const SPANS: Array<{ value: WeekSpan; label: string }> = [
-  { value: '1', label: 'Last week' }, { value: '4', label: '4 weeks' }, { value: '12', label: '12 weeks' },
-];
-
-function fmtDuration(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)} ms`;
-  const s = ms / 1000;
-  if (s < 90) return `${s.toFixed(s < 10 ? 1 : 0)} s`;
-  return `${(s / 60).toFixed(1)} min`;
-}
+import { fetchSpendReport, type SpendPeriod, type SpendReport as Report } from '../lib/api.js';
 
 const PERIODS: Array<{ value: SpendPeriod; label: string }> = [
   { value: 'today', label: 'Today' },
@@ -211,8 +191,6 @@ function Body({ report, onOpenChat }: { report: Report; onOpenChat: (id: string)
         </section>
       )}
 
-      <HowRunsWent totals={totals} />
-
       {report.chats.length > 0 && (
         <section className="flex flex-col gap-2" aria-labelledby="spend-chats-h">
           <h3 id="spend-chats-h" className="m-0 text-[13.5px] font-medium text-ink-50">Costliest chats</h3>
@@ -266,91 +244,13 @@ function Body({ report, onOpenChat }: { report: Report; onOpenChat: (id: string)
   );
 }
 
-/** How the runs ended, how long they took, and how their agents and tiers fared: counts only. */
-function HowRunsWent({ totals }: { totals: Report['totals'] }) {
-  const stopped = totals.stoppedRuns ?? 0;
-  const answered = Math.max(0, totals.runs - totals.failedRuns - stopped);
-  const timed = totals.timedRuns ?? 0;
-  const agents = totals.agents;
-  const agentCount = agents ? agents.completed + agents.failed + agents.escalated + agents.other : 0;
-  return (
-    <section className="flex flex-col gap-2" aria-labelledby="spend-runs-h">
-      <h3 id="spend-runs-h" className="m-0 text-[13.5px] font-medium text-ink-50">How runs went</h3>
-      <dl className="m-0 grid grid-cols-2 gap-x-6 gap-y-1.5 text-[13px] sm:grid-cols-4">
-        <div><dt className="text-[12px] text-ink-500">Answered</dt><dd className="m-0 tabular-nums text-ink-50">{answered.toLocaleString('en-US')}</dd></div>
-        <div><dt className="text-[12px] text-ink-500">Stopped</dt><dd className="m-0 tabular-nums text-ink-50">{stopped.toLocaleString('en-US')}</dd></div>
-        <div><dt className="text-[12px] text-ink-500">Failed</dt><dd className="m-0 tabular-nums text-ink-50">{totals.failedRuns.toLocaleString('en-US')}</dd></div>
-        <div><dt className="text-[12px] text-ink-500">Average time</dt><dd className="m-0 tabular-nums text-ink-50">{timed > 0 ? fmtDuration((totals.durationMs ?? 0) / timed) : '—'}</dd></div>
-        <div><dt className="text-[12px] text-ink-500">Failovers</dt><dd className="m-0 tabular-nums text-ink-50">{(totals.failovers ?? 0).toLocaleString('en-US')}</dd></div>
-        {agents && agentCount > 0 && (
-          <div className="col-span-2 sm:col-span-3">
-            <dt className="text-[12px] text-ink-500">Agents</dt>
-            <dd className="m-0 text-ink-50">
-              {agents.completed.toLocaleString('en-US')} completed, {agents.failed.toLocaleString('en-US')} failed, {agents.escalated.toLocaleString('en-US')} escalated
-              {agents.other > 0 ? `, ${agents.other.toLocaleString('en-US')} unfinished` : ''}
-            </dd>
-          </div>
-        )}
-      </dl>
-    </section>
-  );
-}
-
-/** Everyone: whole published weeks, cells over the minimums, sums of those only. */
-function Everyone({ view }: { view: EveryoneView }) {
-  return (
-    <div className="flex flex-col gap-3">
-      <p className="m-0 text-[13px] text-ink-300">{view.label === 'no weeks released yet' ? 'No weeks released yet.' : `Across all users, ${view.label}.`}</p>
-      {view.rows.length === 0 ? (
-        <p className="m-0 py-6 text-center text-[14px] text-ink-400">Nothing to show for these weeks.</p>
-      ) : (
-        <table className="w-full text-[13px]">
-          <caption className="sr-only">Runs, tokens and spend by tier and model, across all users</caption>
-          <thead>
-            <tr className="text-left text-[11.5px] text-ink-500">
-              <th scope="col" className="pb-1.5 font-normal">Tier and model</th>
-              <th scope="col" className="pb-1.5 text-right font-normal">Runs</th>
-              <th scope="col" className="hidden pb-1.5 text-right font-normal sm:table-cell">Tokens</th>
-              <th scope="col" className="pb-1.5 text-right font-normal">Spent</th>
-            </tr>
-          </thead>
-          <tbody>
-            {view.rows.map((r) => (
-              <tr key={`${r.tier}|${r.model}`} className="border-t border-elev/10">
-                <td className="py-1.5"><span className="text-ink-400">{r.tier}</span> <span className="text-ink-50">{r.model || 'model not recorded'}</span></td>
-                <td className="py-1.5 text-right tabular-nums">{r.runs.toLocaleString('en-US')}</td>
-                <td className="hidden py-1.5 text-right tabular-nums sm:table-cell">{fmtTokens(r.tokens)}</td>
-                <td className="py-1.5 text-right tabular-nums text-ink-50">{fmtUsd(r.costUsd)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-      <p className="m-0 text-[12px] leading-relaxed text-ink-500">
-        Published a whole week at a time, once the week is over, and never changed after. A model on a tier is shown only
-        where at least {view.minimums.runs} runs from at least {view.minimums.users} people used it that week, and every
-        total here adds up only what is shown. Success rates aren&apos;t shown yet.
-      </p>
-    </div>
-  );
-}
-
 /**
  * What your runs cost and what delegating below T1 saved, over a period: the
  * totals, the days (or hours, or months), each tier's spend split by the models
  * that served it, and the chats that cost the most.
  */
-export default function SpendReport({ onClose, onOpenChat, everyone = false }: {
-  onClose: () => void;
-  onOpenChat: (id: string) => void;
-  /** Whether the server publishes Everyone: the switch for it shows only then. */
-  everyone?: boolean;
-}) {
+export default function SpendReport({ onClose, onOpenChat }: { onClose: () => void; onOpenChat: (id: string) => void }) {
   const [period, setPeriod] = useState<SpendPeriod>('30d');
-  const [surface, setSurface] = useState<SpendSurfaceFilter>('all');
-  const [whose, setWhose] = useState<Whose>('you');
-  const [span, setSpan] = useState<WeekSpan>('4');
-  const [everyoneView, setEveryoneView] = useState<EveryoneView | null>(null);
   const [report, setReport] = useState<Report | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -360,42 +260,28 @@ export default function SpendReport({ onClose, onOpenChat, everyone = false }: {
     let live = true;
     setLoading(true);
     setError(null);
-    const load = whose === 'everyone'
-      ? fetchEveryone(surface, Number(span)).then((v) => { if (live) setEveryoneView(v); })
-      : fetchSpendReport(period, surface).then((r) => { if (live) setReport(r); });
-    load
+    fetchSpendReport(period)
+      .then((r) => { if (live) setReport(r); })
       .catch((e: unknown) => { if (live) setError(e instanceof Error ? e.message : String(e)); })
       .finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
-  }, [period, surface, whose, span, attempt]);
+  }, [period, attempt]);
 
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
   // A failed load hides the last report: it was for another period.
-  const current = error || whose !== 'you' ? null : report;
-  const currentEveryone = error || whose !== 'everyone' ? null : everyoneView;
+  const current = error ? null : report;
 
   return (
     <Modal title="Spend & savings" onClose={onClose} maxWidth="max-w-3xl" sheetOnPhone>
       <div className="flex flex-col gap-4 px-5 pb-6 pt-1">
-        <div className="flex flex-wrap items-center gap-2">
-          {everyone && <Segmented label="Whose runs" value={whose} onChange={setWhose} options={WHOSE} />}
-          <Segmented label="Where they ran" value={surface} onChange={setSurface} options={SURFACES} />
-        </div>
-        {whose === 'you'
-          ? <Segmented label="Period" value={period} onChange={setPeriod} options={PERIODS} />
-          : <Segmented label="Weeks" value={span} onChange={setSpan} options={SPANS} />}
+        <Segmented label="Period" value={period} onChange={setPeriod} options={PERIODS} />
         {error && (
           <p role="alert" className="m-0 flex items-center gap-3 text-[13px] text-ink-300">
             Couldn&apos;t load your spending: {error}
             <button type="button" onClick={retry} className="cz-btn cz-btn-ghost cz-btn-sm">Try again</button>
           </p>
         )}
-        {!current && !currentEveryone && loading && <p className="m-0 py-10 text-center text-[14px] text-ink-400">Loading…</p>}
-        {currentEveryone && (
-          <div aria-busy={loading} className={loading ? 'opacity-60 transition-opacity' : 'transition-opacity'}>
-            <Everyone view={currentEveryone} />
-          </div>
-        )}
+        {!current && loading && <p className="m-0 py-10 text-center text-[14px] text-ink-400">Loading…</p>}
         {current && (
           // While another period loads, the last one stays in place, dimmed.
           <div aria-busy={loading} className={loading ? 'opacity-60 transition-opacity' : 'transition-opacity'}>
