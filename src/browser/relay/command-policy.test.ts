@@ -33,6 +33,12 @@ describe('P1: commands are default deny', () => {
       expect(JSON.stringify(d)).toContain('not on the allowlist');
     }
   });
+  it('refuses a screenshot or a screencast of the page, whatever session asks', () => {
+    // The device's own promise to the user, not only the server's choice not to ask.
+    for (const m of ['Page.captureScreenshot', 'Page.startScreencast']) {
+      for (const sess of ['tab', 'nested']) expect(checkCommand(cmd(m, {}, sess), ctx).forward, `${m} ${sess}`).toBe(false);
+    }
+  });
   it('refuses a fabricated session id, and an allowed method with no session', () => {
     expect(checkCommand(cmd('Runtime.evaluate', {}, 'made-up'), ctx).forward).toBe(false);
     expect(checkCommand(cmd('Runtime.evaluate', {}, undefined), ctx).forward).toBe(false);
@@ -70,7 +76,7 @@ describe('the compatibility rule', () => {
     });
     const digest = createHash('sha256').update(lists).digest('hex').slice(0, 16);
     // Change a list → bump POLICY_VERSION and update both values, in one reviewed commit.
-    expect({ POLICY_VERSION, digest }).toEqual({ POLICY_VERSION: 3, digest: '40ac177c7c8f15e6' });
+    expect({ POLICY_VERSION, digest }).toEqual({ POLICY_VERSION: 4, digest: '06b6da0576d7119c' });
   });
 });
 

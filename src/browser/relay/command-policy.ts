@@ -12,7 +12,7 @@
 
 import { type Consent, bareHost, isPrivateHost, onConsentedSite, requestVerdict } from './egress-rules.js';
 
-export const POLICY_VERSION = 3;
+export const POLICY_VERSION = 4;
 
 export const ALLOWED_COMMANDS: ReadonlySet<string> = new Set([
   'DOM.describeNode',
@@ -28,7 +28,6 @@ export const ALLOWED_COMMANDS: ReadonlySet<string> = new Set([
   'Log.enable',
   'Network.enable',
   'Page.addScriptToEvaluateOnNewDocument',
-  'Page.captureScreenshot',
   'Page.createIsolatedWorld',
   'Page.enable',
   'Page.getFrameTree',
@@ -49,6 +48,11 @@ export const ALLOWED_COMMANDS: ReadonlySet<string> = new Set([
 /** Denied whatever the allowlist says, so a bad edit to it can't open these. */
 export const ALWAYS_DENIED_PREFIXES: readonly string[] = ['Fetch.', 'Storage.', 'SystemInfo.', 'Browser.'];
 export const ALWAYS_DENIED: ReadonlySet<string> = new Set([
+  // No picture of the user's page leaves their device, from the CLI or the
+  // extension: both tell the user so when they approve. The server doesn't ask
+  // for one on a device run, and this holds even if it did (policy 4).
+  'Page.captureScreenshot',
+  'Page.startScreencast',
   'Network.clearBrowserCookies',
   'Network.deleteCookies',
   'Network.getAllCookies',

@@ -279,7 +279,7 @@ event handling, which forwards anything not on a drop list, so a new Chromium
 event would pass. Stage 1 changes that: an event not listed is dropped and
 counted.
 
-### Allowed commands (29)
+### Allowed commands (28)
 
 ```
 DOM.describeNode
@@ -295,7 +295,6 @@ Inspector.enable
 Log.enable
 Network.enable
 Page.addScriptToEvaluateOnNewDocument
-Page.captureScreenshot
 Page.createIsolatedWorld
 Page.enable
 Page.getFrameTree
@@ -331,7 +330,9 @@ Network.setCookies
 Network.setRequestInterception
 Network.streamResourceContent
 Network.takeResponseBodyForInterceptionAsStream
+Page.captureScreenshot
 Page.setDownloadBehavior
+Page.startScreencast
 Target.attachToTarget
 Target.closeTarget
 Target.createBrowserContext
