@@ -73,3 +73,17 @@ describe('ContinueModal', () => {
     expect(mockImport).not.toHaveBeenCalled();
   });
 });
+
+describe('ContinueModal handing a browser message to the desktop (stage 6, D)', () => {
+  it('says why, opens on Send, and sends the chat with the new message in it', async () => {
+    mockCreate.mockReset();
+    mockCreate.mockResolvedValue({ code: 'ABCD-1234', expiresAt: Date.now() + 600_000 });
+    const withMessage = { ...transcript, messages: [...transcript.messages, { role: 'user', content: 'book the table' }] };
+    render(<ContinueModal transcript={withMessage} notice="Browser runs happen in your desktop app." onClose={() => {}} onRedeemed={() => {}} />);
+    expect(screen.getByRole('note')).toHaveTextContent('Browser runs happen in your desktop app.');
+    fireEvent.click(screen.getByRole('button', { name: /Create a code/ }));
+    await waitFor(() => expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({
+      messages: expect.arrayContaining([{ role: 'user', content: 'book the table' }]),
+    })));
+  });
+});

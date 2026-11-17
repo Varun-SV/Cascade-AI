@@ -16,7 +16,8 @@ import {
 } from '../lib/prefs.js';
 import type { CloudUser } from '../lib/types.js';
 import Segmented from './Segmented.js';
-import BrowserDevices from './BrowserDevices.js';
+import BrowserSettings from './BrowserSettings.js';
+import type { BrowserPrefs } from '../lib/api.js';
 
 const TIERS: Array<{ key: 't1' | 't2' | 't3'; label: string; role: string; dot: string }> = [
   { key: 't1', label: 'T1', role: 'Planner', dot: 'bg-t1' },
@@ -108,13 +109,15 @@ interface Props {
   onChatsCleared: () => void;
   /** Whether this server lets runs use the user's own browser: shows the Browser section. */
   browserRelay?: boolean;
+  /** The user changed where their runs get a browser. */
+  onBrowserPrefsChange?: (prefs: BrowserPrefs) => void;
 }
 
 export default function SettingsModal({
   user, onClose, onOpenSkills, onOpenMemory, onOpenConnectors, onOpenKeyVault, onOpenUpgrade, onLogout,
   onLocalModelChange, onReduceMotionChange,
   theme, onThemeChange, density, onDensityChange, runDetail, onRunDetailChange, onChatsCleared,
-  browserRelay = false,
+  browserRelay = false, onBrowserPrefsChange,
 }: Props) {
   const cap = detectLocalModelCapability();
   const [localOn, setLocalOn] = useState(localModelEnabled());
@@ -136,7 +139,8 @@ export default function SettingsModal({
     { id: 'general', label: 'General' },
     { id: 'appearance', label: 'Appearance' },
     { id: 'chat', label: 'Chat' },
-    ...(browserRelay ? [{ id: 'browser' as const, label: 'Browser' }] : []),
+    // Always: handing a chat to the desktop app needs nothing from the server.
+    { id: 'browser' as const, label: 'Browser' },
     { id: 'advanced', label: 'Advanced' },
     { id: 'privacy', label: 'Privacy' },
   ];
@@ -412,7 +416,7 @@ export default function SettingsModal({
           </>
         )}
 
-        {tab === 'browser' && browserRelay && <BrowserDevices />}
+        {tab === 'browser' && <BrowserSettings {...(onBrowserPrefsChange ? { onChange: onBrowserPrefsChange } : {})} />}
 
         {tab === 'privacy' && (
           <>

@@ -35,6 +35,7 @@ import { initTheme, applyTheme, applyDensity } from './lib/theme.js';
 import {
   deleteConversation, fetchConfig, fetchMe, fetchSkills, getMessages, listConversations, logout, renameConversation,
   type CloudConfig,
+  fetchBrowserPrefs, type BrowserPrefs,
 } from './lib/api.js';
 import { closeSocket, getSocket } from './lib/socket.js';
 import type { CloudConversation, CloudUser, ProviderConfig, Skill } from './lib/types.js';
@@ -154,6 +155,20 @@ export default function App() {
   // only it reads the daily allowance.
   const hostedBrowser = config?.remoteBrowserEnabled === true;
   const ownBrowser = config?.browserRelay === true;
+  // Where this user's runs get a browser (Settings → Browser): read once signed in.
+  const [browserPrefs, setBrowserPrefs] = useState<BrowserPrefs | null>(null);
+  useEffect(() => {
+    if (!user) { setBrowserPrefs(null); return; }
+    fetchBrowserPrefs().then(setBrowserPrefs, () => setBrowserPrefs(null));
+  }, [user]);
+  const ownEndpoint = browserPrefs?.source === 'endpoint' && browserPrefs.endpoint !== null && browserPrefs.offers.endpoint;
+  const toDesktop = browserPrefs?.source === 'desktop';
+  // A message that needs the browser, under "Run on my desktop": handed to the desktop app.
+  const [desktopHandoff, setDesktopHandoff] = useState<string | null>(null);
+  const send: typeof chat.send = (input) => {
+    if (chat.browserMode && toDesktop) { setDesktopHandoff(input.prompt); return; }
+    chat.send(input);
+  };
   const browserAllowance = useBrowserAllowance(user?.id, hostedBrowser, chat.busy, chat.browserMode, chat.setBrowserMode);
   const [localModelOn, setLocalModelOn] = useState(() => localModelEnabled());
 
@@ -395,7 +410,7 @@ export default function App() {
             skills={skills}
             skillId={skillId}
             onSkillChange={setSkillId}
-            onSend={chat.send}
+            onSend={send}
             onStop={chat.stop}
             browserLiveView={chat.browserLiveView}
             browserActive={chat.browserActive}
@@ -428,8 +443,8 @@ export default function App() {
             onAnswerClarification={chat.answerClarification}
             browserMode={chat.browserMode}
             onBrowserModeChange={chat.setBrowserMode}
-            browserAvailable={hostedBrowser || ownBrowser}
-            browserOwnOnly={ownBrowser && !hostedBrowser}
+            browserAvailable={hostedBrowser || ownBrowser || ownEndpoint || toDesktop}
+            browserOwnOnly={(ownBrowser || ownEndpoint || toDesktop) && !hostedBrowser}
             runDetail={detail}
             userName={(user.name ?? '').trim().split(/\s+/)[0] || undefined}
             contextTokens={chat.contextTokens}
@@ -458,6 +473,7 @@ export default function App() {
           <SettingsModal
             user={user}
             browserRelay={config?.browserRelay === true}
+            onBrowserPrefsChange={setBrowserPrefs}
             onClose={() => setShowSettings(false)}
             onOpenSkills={() => setShowSkills(true)}
             onOpenMemory={() => setShowMemory(true)}
@@ -533,6 +549,14 @@ export default function App() {
           <ContinueModal
             transcript={continueTranscript}
             onClose={() => setShowContinue(false)}
+            onRedeemed={handleRedeemed}
+          />
+        )}
+        {desktopHandoff !== null && (
+          <ContinueModal
+            transcript={{ ...continueTranscript, messages: [...continueTranscript.messages, { role: 'user', content: desktopHandoff }] }}
+            notice="Browser runs happen in your desktop app (Settings → Browser). Send this chat there to run it; the reply comes back here when the app syncs."
+            onClose={() => setDesktopHandoff(null)}
             onRedeemed={handleRedeemed}
           />
         )}

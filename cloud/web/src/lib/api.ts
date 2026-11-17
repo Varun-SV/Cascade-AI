@@ -19,6 +19,8 @@ export interface CloudConfig {
    * endpoint, so neither should the switch for it.
    */
   remoteBrowserEnabled?: boolean;
+  /** Whether a user may give their runs their own CDP endpoint here. Absent means no. */
+  browserEndpoints?: boolean;
   /**
    * Whether a user's own Chrome can serve their runs a browser here, through the
    * Cascade extension (the browser relay). Independent of `remoteBrowserEnabled`:
@@ -617,4 +619,36 @@ export async function fetchRelayDevices(): Promise<RelayDevice[]> {
 
 export function removeRelayDevice(id: string): Promise<{ ok: boolean }> {
   return json(fetch(`/api/browser-relay/devices/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' }));
+}
+
+// ── Where the user's runs get a browser (Settings → Browser) ──
+
+export type BrowserSource = 'device' | 'endpoint' | 'desktop';
+export interface BrowserPrefs {
+  source: BrowserSource;
+  /** Their own CDP endpoint, as its host only: the address itself is never sent back. */
+  endpoint: { host: string } | null;
+  /** What this server offers. */
+  offers: { device: boolean; endpoint: boolean; desktop: boolean };
+  privateEndpoints: boolean;
+}
+
+export function fetchBrowserPrefs(): Promise<BrowserPrefs> {
+  return json(fetch('/api/browser/prefs', { credentials: 'include' }));
+}
+
+export function setBrowserSource(source: BrowserSource): Promise<BrowserPrefs> {
+  return json(fetch('/api/browser/prefs', {
+    method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source }),
+  }));
+}
+
+export function saveBrowserEndpoint(url: string): Promise<BrowserPrefs> {
+  return json(fetch('/api/browser/endpoint', {
+    method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
+  }));
+}
+
+export function removeBrowserEndpoint(): Promise<BrowserPrefs> {
+  return json(fetch('/api/browser/endpoint', { method: 'DELETE', credentials: 'include' }));
 }
