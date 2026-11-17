@@ -597,3 +597,24 @@ export function importConversation(
     }),
   );
 }
+
+// ── Your own browser: devices paired with the browser relay ──
+
+/** A device the signed-in user paired: the extension in a Chrome, or a computer through the CLI. */
+export interface RelayDevice {
+  id: string;
+  name: string;
+  kind: 'extension' | 'cli' | 'desktop';
+  createdAt: number;
+  lastSeenAt: number | null;
+  online: boolean;
+}
+
+export async function fetchRelayDevices(): Promise<RelayDevice[]> {
+  const body = await json<{ devices?: RelayDevice[] }>(fetch('/api/browser-relay/devices', { credentials: 'include' }));
+  return body.devices ?? [];
+}
+
+export function removeRelayDevice(id: string): Promise<{ ok: boolean }> {
+  return json(fetch(`/api/browser-relay/devices/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' }));
+}

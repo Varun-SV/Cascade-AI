@@ -457,6 +457,7 @@ export default function App() {
         {showSettings && (
           <SettingsModal
             user={user}
+            browserRelay={config?.browserRelay === true}
             onClose={() => setShowSettings(false)}
             onOpenSkills={() => setShowSkills(true)}
             onOpenMemory={() => setShowMemory(true)}
