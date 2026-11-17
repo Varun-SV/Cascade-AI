@@ -61,4 +61,12 @@ describe('KeyVault', () => {
     render(<KeyVault keys={[]} onChange={vi.fn()} webSearch={null} onWebSearchChange={vi.fn()} syncEnabled={true} />);
     expect(screen.getByText(/sync your keys across/i)).toBeInTheDocument();
   });
+
+  it('says DuckDuckGo is in use, free and keyless, until a backend has a key', () => {
+    const { rerender } = render(<KeyVault keys={[]} onChange={vi.fn()} webSearch={null} onWebSearchChange={vi.fn()} />);
+    expect(screen.getByText('Free: DuckDuckGo, no key needed')).toBeInTheDocument();
+    rerender(<KeyVault keys={[]} onChange={vi.fn()} webSearch={{ backend: 'tavily', tavilyApiKey: 'tvly-x' }} onWebSearchChange={vi.fn()} />);
+    expect(screen.queryByText('Free: DuckDuckGo, no key needed')).not.toBeInTheDocument();
+    expect(screen.getByText(/Now using/)).toHaveTextContent('Now using: Tavily');
+  });
 });

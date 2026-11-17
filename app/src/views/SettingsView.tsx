@@ -665,8 +665,15 @@ export function SettingsView({ socket }: Props) {
               </div>
               <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                  Web search — without a backend, the <code>web_search</code> tool relies on scraping DuckDuckGo (works, but rate-limited and less reliable)
+                  Web search works without any of these: the <code>web_search</code> tool searches DuckDuckGo, which needs no key.
+                  A backend below gives fuller, steadier results, and DuckDuckGo stays the fallback if it fails.
                 </label>
+                <span aria-live="polite" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  Now using:{' '}
+                  <b style={{ color: 'var(--text)' }}>
+                    {searxngUrl.trim() ? 'SearXNG' : braveKey.trim() || searchKeysSet.brave ? 'Brave Search' : tavilyKey.trim() || searchKeysSet.tavily ? 'Tavily' : 'Free: DuckDuckGo, no key needed'}
+                  </b>
+                </span>
                 <input type="text" value={searxngUrl} onChange={(e) => edits('webSearch', setSearxngUrl)(e.target.value)}
                   placeholder="SearXNG URL (self-hosted) — e.g. https://searx.example.com"
                   style={{ width: '100%', background: 'var(--bg-overlay)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '6px 8px', fontSize: 11.5, outline: 'none', boxSizing: 'border-box' }} />
