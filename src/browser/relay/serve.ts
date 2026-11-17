@@ -72,7 +72,9 @@ export async function serveDevice(opts: ServeOptions): Promise<'stopped' | 'refu
     const why = await client.closed;
     opts.signal.removeEventListener('abort', stop);
     if (opts.signal.aborted) return 'stopped';
-    if (!welcomed && ++refusals >= (opts.maxRefusals ?? 3)) return 'refused';
+    // Only the server turning the device away counts: a restart or an outage fails
+    // before the server can say anything, and backing off waits it out.
+    if (!welcomed && client.rejected() && ++refusals >= (opts.maxRefusals ?? 3)) return 'refused';
     opts.log(`disconnected (${why}); trying again in ${Math.round(backoff / 1000)}s`);
     await sleep(backoff);
     backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);

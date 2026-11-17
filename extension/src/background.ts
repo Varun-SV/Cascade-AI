@@ -181,7 +181,8 @@ async function connect(): Promise<void> {
   void c.closed.then(async () => {
     if (client === c) client = null;
     delete status.run;
-    if (!welcomed && ++refusals >= 3) {
+    // Only the server turning this browser away counts; an outage is waited out.
+    if (!welcomed && c.rejected() && ++refusals >= 3) {
       status.connection = 'refused';
       status.notice = 'The server does not accept this browser any more. It may have been removed: forget it and pair again.';
       publish();

@@ -16,7 +16,7 @@ import type { CdpClient } from './cdp-client.js';
 import { WebSocket } from 'ws';
 import { type ApprovalPayload, type GrantPayload, type Identity, type Signed, createDeviceApprovals, signHello, verifyGrant } from './capability.js';
 import { type Consent, makeConsent } from './egress-rules.js';
-import { type ClaimFrame, type ClaimReply, type ControlFrame, type DeviceControlFrame, HUB_PROTOCOL } from './hub.js';
+import { type ClaimFrame, type ClaimReply, type ControlFrame, DEVICE_REJECTED_CLOSE, type DeviceControlFrame, HUB_PROTOCOL } from './hub.js';
 import { type DeviceRelay, createDeviceRelay } from './relay.js';
 import type { PageEndMode, RequestEnforcer } from './request-enforcer.js';
 import { type ServerClaim, type TabLease, acquireLease, createTabLease } from './tab-lease.js';
@@ -88,7 +88,15 @@ export interface DeviceClient {
   close(): Promise<void>;
   /** Resolves when the control connection has gone, with why. */
   closed: Promise<string>;
+  /**
+   * Whether the server turned this device away (an unknown or removed device, or a
+   * signature it didn't accept), as against the connection failing before it could
+   * say. Only the first is a reason to stop trying: a server that's restarting or
+   * unreachable will take the device back when it returns.
+   */
+  rejected(): boolean;
 }
+
 
 const OPEN = 1;
 
@@ -266,11 +274,16 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
     if (active) withdraw(active, why);
     finished(why);
   };
-  control.on('close', () => gone(closing ? 'closed' : 'the connection to the server dropped'));
+  let rejectedByServer = false;
+  control.on('close', (code: number) => {
+    rejectedByServer = !authenticated && code === DEVICE_REJECTED_CLOSE;
+    gone(closing ? 'closed' : rejectedByServer ? 'the server does not accept this device' : 'the connection to the server dropped');
+  });
   control.on('error', () => { /* 'close' follows */ });
 
   return {
     ready, closed,
+    rejected: () => rejectedByServer,
     lease: () => active?.lease ?? null,
     relay: () => active?.relay ?? null,
     revoke(reason) { if (active) withdraw(active, reason); },

@@ -166,6 +166,24 @@ describe('serving', () => {
     expect(outcome).toBe('refused');
   });
 
+  it('a server it cannot reach is waited out, however many attempts fail', async () => {
+    const h = await hubWithDevice();
+    // Nothing listens here: every attempt fails before any server can say no.
+    const idle = http.createServer();
+    await new Promise<void>((r) => idle.listen(0, '127.0.0.1', r));
+    const port = (idle.address() as AddressInfo).port;
+    await new Promise<void>((r) => idle.close(() => r()));
+    const stop = new AbortController();
+    let attempts = 0;
+    const outcome = await serveDevice({
+      stored: h.stored, endpoints: { controlUrl: `ws://127.0.0.1:${port}/c`, runUrl: `ws://127.0.0.1:${port}/r` },
+      signal: stop.signal, askUser: async () => null, startBrowser: noBrowser, log: () => {},
+      sleep: async () => { if (++attempts === 6) stop.abort(); },
+    });
+    expect(attempts).toBe(6);
+    expect(outcome).toBe('stopped');
+  });
+
   it('backs off between attempts, and starts over once connected', async () => {
     const waits: number[] = [];
     const stop = new AbortController();
@@ -178,6 +196,7 @@ describe('serving', () => {
         ready: ok ? Promise.resolve() : Promise.reject(new Error('no')),
         closed: Promise.resolve('gone'),
         close: async () => {},
+        rejected: () => true,
       } as unknown as DeviceClient;
     };
     const h = await hubWithDevice();

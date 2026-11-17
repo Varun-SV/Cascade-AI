@@ -29,6 +29,8 @@ import {
 } from './capability.js';
 
 export const HUB_PROTOCOL = 1;
+/** The close code a device gets when the server doesn't accept it (see authenticateControl). */
+export const DEVICE_REJECTED_CLOSE = 1008;
 const OFFER_TIMEOUT_MS = 120_000;
 const CLAIM_FRAME_TIMEOUT_MS = 10_000;
 const HELLO_TIMEOUT_MS = 10_000;
@@ -181,7 +183,7 @@ export function authenticateControl(socket: WebSocket, opts: {
       done = true;
       clearTimeout(timer);
       if (who) send(socket, { v: HUB_PROTOCOL, t: 'welcome' } satisfies ControlFrame);
-      else shut(socket, 1008, 'not a registered device');
+      else shut(socket, DEVICE_REJECTED_CLOSE, 'not a registered device');
       resolve(who);
     };
     const timer = setTimeout(() => finish(null), opts.timeoutMs ?? HELLO_TIMEOUT_MS);
