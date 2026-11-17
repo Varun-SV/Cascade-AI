@@ -415,6 +415,13 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
         return;
       }
       if (method === 'Log.enable') { out({ id, sessionId, result: {} }); return; }
+      // The fence this command runs under. Checked again just before its answer goes to
+      // the agent: the forwarder checks it when the tab replies, but a takeover or a
+      // revoke can land after that and before this continuation runs, and a hand-back
+      // opens a new fence, so an answer from before the takeover never goes out after.
+      const issued = lease.fence();
+      const stillOurs = (): boolean => issued !== null && lease.isCurrent(issued);
+      const fencedAnswer = 'Command refused: the tab changed hands before the answer could be sent';
       try {
         if (method === 'Page.navigateToHistoryEntry') {
           // A page restored from the back-forward cache sends no request, so the
@@ -436,12 +443,15 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
           throw e;
         }
         if (registering) pendingScripts -= 1;
-        if (r.error !== undefined) { replyError(id, sessionId, r.error); return; }
         const result = r.result ?? {};
-        if (registering && typeof result.identifier === 'string') {
+        // Recorded whatever happens next: a script the tab registered must be removed at
+        // the end, even when its answer is withheld below.
+        if (r.error === undefined && registering && typeof result.identifier === 'string') {
           const s = toTab(sessionId);
           injected.push({ identifier: result.identifier, ...(s ? { sessionId: s } : {}) });
         }
+        if (!stillOurs()) { replyError(id, sessionId, fencedAnswer); return; }
+        if (r.error !== undefined) { replyError(id, sessionId, r.error); return; }
         out({ id, sessionId, result: filterReply(method, result, consent) });
       } catch (e) {
         if (e instanceof CommandFenced) { replyError(id, sessionId, e.message); return; }

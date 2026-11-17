@@ -561,6 +561,35 @@ describe('asking where the tab is, while the user has it (Codex on e1bf934)', ()
     });
   }
 
+  for (const [name, change] of [['a takeover', (l: ReturnType<typeof createTabLease>) => l.suspend()], ['a revoke', (l: ReturnType<typeof createTabLease>) => l.revoke('user revoked')]] as const) {
+    it(`a reply already delivered when ${name} lands, before it's sent on, never reaches the agent (Codex on e589a38)`, async () => {
+      const tab = await answeringTab(new Set(['Runtime.evaluate']), { 'Runtime.evaluate': { result: { type: 'string', value: 'WHERETHEUSERIS' } } });
+      try {
+        const { lease, relay, agent } = setup(tab.url);
+        const out = sent(agent);
+        const served = relay.serve(agent as unknown as WebSocket);
+        agent.emit('message', evaluate(7));
+        await vi.waitFor(() => expect(tab.methods).toContain('Runtime.evaluate'));
+        // The change lands after the forwarder has delivered the reply under a current
+        // fence, and before the relay's continuation sends it on: exactly that gap.
+        const current = lease.isCurrent.bind(lease);
+        let armed = true;
+        lease.isCurrent = (f) => {
+          const ok = current(f);
+          if (ok && armed) { armed = false; queueMicrotask(() => change(lease)); }
+          return ok;
+        };
+        tab.release();
+        await settle();
+        expect(armed).toBe(false);
+        expect(out.join()).not.toContain('WHERETHEUSERIS');
+        expect(errored(out, 7)).toBe(true);
+        if (lease.state() !== 'ending' && lease.state() !== 'idle') lease.revoke('done');
+        await served;
+      } finally { tab.close(); }
+    });
+  }
+
   it('after a hand-back the query works again', async () => {
     const tab = await answeringTab(new Set());
     try {
