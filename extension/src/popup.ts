@@ -1,9 +1,10 @@
-// The toolbar popup: pair, see whether a run is using this browser, stop it, forget.
+// The toolbar popup: pair, see whether a run is using this browser, take it over or
+// stop it, forget.
 
 interface Status {
   connection: 'unpaired' | 'connecting' | 'online' | 'offline' | 'refused';
   device?: { name: string; server: string };
-  run?: { runId: string; sites: string[] };
+  run?: { runId: string; sites: string[]; takenOver?: boolean };
   pairing?: { userCode: string; verificationUri: string } | { error: string };
   notice?: string;
 }
@@ -31,6 +32,10 @@ function render(s: Status): void {
   $('device').textContent = s.device ? `“${s.device.name}” on ${s.device.server}` : '';
   $('run').hidden = !s.run;
   $('run-sites').textContent = s.run?.sites.join(', ') ?? '';
+  const mine = s.run?.takenOver === true;
+  $('take-over').hidden = mine;
+  $('hand-back').hidden = !mine;
+  $('run-paused').hidden = !mine;
   $('retry').hidden = s.connection !== 'refused';
   const notice = s.pairing && 'error' in s.pairing ? s.pairing.error : s.notice;
   $('notice').hidden = !notice;
@@ -56,6 +61,8 @@ $('pair-form').addEventListener('submit', (e) => {
   });
 });
 $('stop').addEventListener('click', () => { void send({ type: 'stop' }); });
+$('take-over').addEventListener('click', () => { void send({ type: 'take-over' }); });
+$('hand-back').addEventListener('click', () => { void send({ type: 'hand-back' }); });
 $('retry').addEventListener('click', () => { void send({ type: 'retry' }); });
 $('forget').addEventListener('click', () => {
   if (!confirm('Forget this browser? Its key is deleted here. To remove it from your account too, use your devices list on the server.')) return;

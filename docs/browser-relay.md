@@ -39,7 +39,11 @@ device shows which run is asking, and you type the sites it may use. Then:
   run (Chrome can't tell it which download is the run's, so none is touched), and
   the file stays in your Downloads folder.
 - No screenshot leaves your device, and there's no live view on the web: you
-  watch the run, and take it over, where it runs.
+  watch the run where it runs.
+- In the extension, **Take over** in the toolbar pauses the run so you can use its
+  tab yourself (to sign in, say): the run can't act there, and nothing from the
+  tab is sent, until you choose **Hand back**. The run then carries on from the
+  page you left. The CLI has no takeover.
 - Stop it from the extension's toolbar button, by closing its window, or with
   Ctrl-C in `cascade relay serve`.
 

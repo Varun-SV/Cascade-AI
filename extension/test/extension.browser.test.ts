@@ -452,6 +452,27 @@ suite('the extension in a real Chromium', { timeout: 90_000 }, () => {
     expect(r.hub.deviceOnline('user-a', 'dev-ext')).toBe(true);
   });
 
+  it('Take over pauses the agent while the user has the tab; Hand back gives it back up to date', async () => {
+    const r = await rig();
+    const { page } = await r.run('run-1');
+    await page.goto('http://allowed.test/hello');
+    const extId = new URL(r.sw.url()).host;
+    const popup = r.ctx.pages()[0]!;
+    await popup.goto(`chrome-extension://${extId}/popup.html`);
+    await vi.waitFor(async () => expect(await popup.evaluate<boolean>("!document.getElementById('take-over').hidden")).toBe(true));
+    await popup.click('#take-over');
+    await vi.waitFor(async () => expect(await popup.evaluate<boolean>("!document.getElementById('hand-back').hidden")).toBe(true));
+    // The agent can't act while the user has the tab.
+    await expect(Promise.race([page.evaluate<number>('1 + 1'), sleep(3000).then(() => { throw new Error('no answer'); })])).rejects.toThrow();
+    // The user can: they move the run's tab on, in their own browser.
+    const tab = r.ctx.pages().find((p) => p.url().includes('allowed.test/hello'))!;
+    await tab.goto('http://allowed.test/form');
+    await popup.click('#hand-back');
+    await vi.waitFor(async () => expect(await popup.evaluate<boolean>("!document.getElementById('take-over').hidden")).toBe(true));
+    // Back with the agent, which sees the page the user left it on.
+    await vi.waitFor(async () => expect(await page.evaluate<string>('location.pathname')).toBe('/form'), { timeout: 10_000 });
+  });
+
   it('Stop in the toolbar popup ends the run', async () => {
     const r = await rig();
     const { relayed } = await r.run('run-1');

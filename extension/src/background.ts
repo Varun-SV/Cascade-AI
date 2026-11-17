@@ -21,7 +21,7 @@ import { RUN_RULE_IDS_FROM, openRunTab, releaseWebRtcAfterRestart } from './tab-
 // ── State ────────────────────────────────────
 
 type Connection = 'unpaired' | 'connecting' | 'online' | 'offline' | 'refused';
-interface RunInfo { runId: string; sites: string[]; windowId?: number }
+interface RunInfo { runId: string; sites: string[]; windowId?: number; takenOver?: boolean }
 interface Status { connection: Connection; device?: { name: string; server: string }; run?: RunInfo; pairing?: { userCode: string; verificationUri: string } | { error: string }; notice?: string }
 
 const status: Status = { connection: 'unpaired' };
@@ -201,6 +201,8 @@ async function connect(): Promise<void> {
 
 type Message =
   | { type: 'status' }
+  | { type: 'take-over' }
+  | { type: 'hand-back' }
   | { type: 'consent:get'; ask: number }
   | { type: 'consent:answer'; ask: number; sites: string }
   | { type: 'pair'; server: string; name: string }
@@ -264,6 +266,26 @@ async function handle(msg: Message): Promise<unknown> {
     case 'stop':
       client?.revoke('you stopped it in the extension');
       return { ok: true };
+    case 'take-over': {
+      // The lease's fence closes before this returns: from here the agent's commands
+      // are refused and nothing the page does is passed on, until the user hands back.
+      // The relay brings the agent up to date with what changed when they do.
+      const lease = client?.lease();
+      if (!lease || lease.state() !== 'held' || !status.run) return { error: 'No run is using this browser.' };
+      lease.suspend();
+      status.run.takenOver = true;
+      publish();
+      if (status.run.windowId !== undefined) void chrome.windows.update(status.run.windowId, { focused: true }).catch(() => {});
+      return { ok: true };
+    }
+    case 'hand-back': {
+      const lease = client?.lease();
+      if (!lease || lease.state() !== 'suspended' || !status.run) return { error: 'The run is not paused for you.' };
+      lease.handBack();
+      status.run.takenOver = false;
+      publish();
+      return { ok: true };
+    }
     case 'retry':
       refusals = 0;
       await connect();

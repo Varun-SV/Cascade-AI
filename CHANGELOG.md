@@ -30,7 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the CLI, never a tab or profile you're using. Pages from any other site,
   private-network addresses, popups, dialogs and downloads are stopped on your
   device, before anything is sent, and no screenshot or live view leaves it: you
-  watch, and take over, where it runs. Devices sign in with a key made on them,
+  watch where it runs, and in the extension **Take over** pauses the run while
+  you use its tab, until you hand it back. Devices sign in with a key made on them,
   and the server holds only its public half. In the extension a run also
   reaches past its window, and says so when it asks: while it's open, WebRTC
   sends no UDP in any tab (a call elsewhere may get worse), and until Chrome

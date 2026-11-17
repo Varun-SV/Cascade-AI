@@ -32,7 +32,12 @@
       <div id="run" hidden>
         <p><strong>A run is using this browser</strong> on <span id="run-sites"></span>.</p>
         <p class="muted">Page addresses, text and structure from its window are being sent to your server.</p>
-        <button type="button" id="stop">Stop the run</button>
+        <p id="run-paused" hidden><strong>Paused for you.</strong> The run can't act in its window, and nothing from it is sent, until you hand it back.</p>
+        <div class="buttons">
+          <button type="button" id="take-over" class="secondary">Take over</button>
+          <button type="button" id="hand-back" class="secondary" hidden>Hand back to the run</button>
+          <button type="button" id="stop">Stop the run</button>
+        </div>
       </div>
       <div class="buttons">
         <button type="button" id="retry" class="secondary" hidden>Try again</button>
