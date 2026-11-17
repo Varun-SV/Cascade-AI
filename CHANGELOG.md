@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other setting, and can run alongside a hosted browser: a run uses the user's
   own device when one is online. Only the hosted browser counts against a
   plan's daily browser sessions.
+- **`HOSTED_BROWSER=off`** retires a server's hosted browser: `REMOTE_BROWSER_*`
+  are ignored, its daily session allowance goes, and every run's browser is the
+  user's own. On unless set off, so a hosted browser keeps working until its
+  operator turns it off.
+- **Settings → Browser** in the web app lists your paired devices, whether each
+  is online, and removes one (which also ends a run it is serving).
 
 ### Changed
 - **cascadeai.in no longer hosts a browser.** Runs there use your own Chrome

@@ -65,7 +65,8 @@ Turn on **Browser** in the composer's Tools menu. A run that needs a browser ask
 your most recently seen online device. If none is online, the run goes on without
 a browser, so keep the extension or `cascade relay serve` running.
 
-You can register up to 10 devices.
+You can register up to 10 devices. **Settings → Browser** lists them, shows which
+are online, and removes one; removing a device also ends a run it is serving.
 
 ## Running your own server
 
@@ -76,6 +77,11 @@ devices pin it when they pair.
 It can run alongside a hosted browser (`REMOTE_BROWSER_PROVIDER`). When both are on,
 a run uses the user's own device if one is online, and otherwise the hosted
 browser. Only the hosted browser counts against a plan's daily browser sessions.
+
+To retire the hosted browser, set `HOSTED_BROWSER=off`. `REMOTE_BROWSER_*` are then
+ignored, the daily browser-session allowance goes with them, and every run's browser
+is the user's own. Turn `BROWSER_RELAY` on first, or runs have no browser at all
+(the server warns about this at start).
 
 The relay keeps its connections in the server process, so run one instance (one
 replica) per deployment.
