@@ -129,8 +129,13 @@ async function rig() {
     let consent: PwPage | undefined;
     await vi.waitFor(() => { consent = ctx.pages().find((p) => p.url().includes('consent.html')); expect(consent).toBeTruthy(); }, { timeout: 10_000 });
     await vi.waitFor(async () => expect(await consent!.evaluate<string>('document.getElementById("who").textContent')).not.toBe('Loading…'));
-    if (sites === null) await consent!.click('#decline');
-    else { await consent!.fill('#sites', sites); await consent!.click('#allow'); }
+    // The window closes itself once the extension confirms the answer, and with a
+    // quick answer that can land before Playwright's click returns, which then
+    // throws "Target closed". The window going is the expected result, so that
+    // alone is not a failure; whether the answer counted is what callers assert.
+    const press = (selector: string) => consent!.click(selector).catch((e: unknown) => { if (!consent!.isClosed()) throw e; });
+    if (sites === null) await press('#decline');
+    else { await consent!.fill('#sites', sites); await press('#allow'); }
     return consent!;
   };
 
@@ -238,8 +243,12 @@ suite('the extension in a real Chromium', { timeout: 90_000 }, () => {
     // Synchronous, as a page's own script or a target=_blank click does it.
     const answered = await Promise.race([page.evaluate<number>("window.open('http://allowed.test/popup'); 1"), sleep(5000).then(() => 'stalled')]);
     expect(answered).toBe(1);
-    await vi.waitFor(() => expect(r.ctx.pages().some((p) => p.url().includes('/popup'))).toBe(false), { timeout: 5000 });
-    expect(r.ctx.pages().length).toBeLessThanOrEqual(before);
+    // Gone, not just off /popup: a popup still at about:blank has no /popup in its
+    // address yet, and the extension closes it only once Chrome has finished making it.
+    await vi.waitFor(() => {
+      expect(r.ctx.pages().some((p) => p.url().includes('/popup'))).toBe(false);
+      expect(r.ctx.pages().length).toBeLessThanOrEqual(before);
+    }, { timeout: 5000 });
     expect(await page.evaluate<number>('1 + 1')).toBe(2);
   });
 

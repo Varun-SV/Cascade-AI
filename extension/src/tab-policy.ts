@@ -135,19 +135,32 @@ export async function openRunTab(opts: TabPolicyOptions): Promise<LeasedBrowser 
   };
 
   // A page this tab opens is the run's, and runs nowhere. Its requests are blocked
-  // first, then it's closed: closing it inside this event leaves the opener's
-  // `window.open` waiting for ever (measured: the page's script stalls). What its first
-  // request could carry, the consented page could already send by `fetch` to any public
-  // site, and the agent never sees the page.
+  // first, then it's closed. What its first request could carry, the consented page
+  // could already send by `fetch` to any public site, and the agent never sees the page.
+  //
+  // Closed only once Chrome has finished making it. `onCreated` fires while the
+  // opener's `window.open` is still waiting on the browser for its answer, and a tab
+  // removed before that answer goes leaves the opener's script stalled for good
+  // (measured: with the CPU busy, 5 runs in 8 still hung after 30 s when the close
+  // followed only the rules update). The popup's first `onUpdated` comes after it is
+  // attached; the timer is a backstop, and the block rule holds meanwhile.
   const popupRule = opts.firstRuleId + 90;
+  const POPUP_SETTLE_MS = 3000;
   const onCreated = (tab: chrome.tabs.Tab): void => {
     if (tab.openerTabId !== tabId || tab.id === undefined) return;
     const popup = tab.id;
     closedPages.push(tab.pendingUrl ?? tab.url ?? '');
-    void chrome.declarativeNetRequest.updateSessionRules({
+    const settled = new Promise<void>((resolve) => {
+      const done = (): void => { clearTimeout(timer); chrome.tabs.onUpdated.removeListener(onUpdated); resolve(); };
+      const onUpdated = (id: number): void => { if (id === popup) done(); };
+      const timer = setTimeout(done, POPUP_SETTLE_MS);
+      chrome.tabs.onUpdated.addListener(onUpdated);
+    });
+    const blocked = chrome.declarativeNetRequest.updateSessionRules({
       removeRuleIds: [popupRule],
       addRules: [{ id: popupRule, priority: 4, action: { type: 'block' as chrome.declarativeNetRequest.RuleActionType }, condition: { tabIds: [popup], resourceTypes: EVERY_TYPE } }],
-    }).catch(() => {}).then(() => chrome.tabs.remove(popup)).catch(() => {});
+    }).catch(() => {});
+    void Promise.all([blocked, settled]).then(() => chrome.tabs.remove(popup)).catch(() => {});
   };
   chrome.tabs.onCreated.addListener(onCreated);
 
