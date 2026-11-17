@@ -513,6 +513,9 @@ export function relayBrowserControls(env: CloudEnv): Pick<RunControls, 'remoteBr
 }
 
 export function remoteBrowserControls(env: CloudEnv): Pick<RunControls, 'remoteBrowser'> {
+  // Retired by the operator: no hosted browser, whatever REMOTE_BROWSER_* say. This one
+  // reading is what the run config, /api/config and the allowance all go through.
+  if (env.HOSTED_BROWSER === false) return {};
   if (!env.REMOTE_BROWSER_PROVIDER) return {};
   return {
     remoteBrowser: {

@@ -564,6 +564,25 @@ describe('cloud/server app', () => {
     expect(llama).toMatchObject({ unpricedRuns: 0, priceUnknownRuns: 0 });
   });
 
+  it('HOSTED_BROWSER=off retires the hosted browser: no switch for it, and no allowance (stage 4)', async () => {
+    const config = async () => (await (await fetch(`${baseUrl}/api/config`)).json()) as { remoteBrowserEnabled?: boolean };
+    const usage = async () => {
+      const loginRes = await fetch(`${baseUrl}/auth/dev-login`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Retired' }),
+      });
+      const cookie = extractCookie(loginRes, SESSION_COOKIE_NAME)!;
+      return await (await fetch(`${baseUrl}/api/usage`, { headers: { Cookie: cookie } })).json() as Record<string, unknown>;
+    };
+    const hosted = { CASCADE_DEPLOYMENT_MODE: 'hosted' as const, REMOTE_BROWSER_PROVIDER: 'steel' as const, REMOTE_BROWSER_API_KEY: 'sk-test' };
+    // Control: on by default, the hosted browser and its allowance are there.
+    await restartWith(hosted);
+    expect((await config()).remoteBrowserEnabled).toBe(true);
+    expect(Object.keys(await usage())).toContain('browserSessionLimit');
+    await restartWith({ ...hosted, HOSTED_BROWSER: false });
+    expect((await config()).remoteBrowserEnabled).toBe(false);
+    expect(Object.keys(await usage())).not.toContain('browserSessionLimit');
+  });
+
   it('GET /api/usage reports no browser allowance where nothing rations one', async () => {
     // No browser, or the operator's own CDP endpoint, which opens no session:
     // a limit reported there is one nothing enforces, and the chip would show

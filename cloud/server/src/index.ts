@@ -33,6 +33,14 @@ export function bootstrap() {
   const store = new CloudStore(dbPath);
   // Off unless the operator turns it on: with it off, none of its endpoints exist.
   const browserRelay = env.BROWSER_RELAY ? createBrowserRelay({ dataDir: path.resolve(env.DATA_DIR), store }) : undefined;
+  // Said once at start, so an operator who turned the hosted browser off sees that
+  // their REMOTE_BROWSER_* settings are no longer read rather than wondering why.
+  if (!env.HOSTED_BROWSER && env.REMOTE_BROWSER_PROVIDER) {
+    console.log('[browser] HOSTED_BROWSER=off: REMOTE_BROWSER_* are ignored; runs use the user\'s own browser through the relay.');
+  }
+  if (!env.HOSTED_BROWSER && !env.BROWSER_RELAY) {
+    console.warn('[browser] HOSTED_BROWSER=off and BROWSER_RELAY is not on: runs have no browser at all.');
+  }
   const app = createApp(env, store, browserRelay ? { browserRelay } : {});
   const httpServer = http.createServer(app);
   browserRelay?.attach(httpServer);

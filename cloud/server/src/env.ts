@@ -119,6 +119,16 @@ const EnvSchema = z.object({
   //   steel — a Steel deployment. REMOTE_BROWSER_URL is the API base and
   //           defaults to Steel's hosted API; REMOTE_BROWSER_API_KEY is its key.
   REMOTE_BROWSER_PROVIDER: z.enum(['cdp', 'steel']).optional(),
+  // The switch that retires the hosted browser (stage 4 of
+  // docs/design/byo-browser-and-routing-data.md): `off` and every run's browser is
+  // the user's own, through the browser relay. REMOTE_BROWSER_* are then ignored,
+  // and the daily browser-session allowance, which rationed hosted sessions, goes
+  // with them. On by default, so a deployment's hosted browser keeps working until
+  // its operator turns it off.
+  HOSTED_BROWSER: z
+    .string()
+    .optional()
+    .transform((v) => !['0', 'false', 'off', 'no'].includes((v ?? '').trim().toLowerCase())),
   // TRIMMED, so a value that is only whitespace becomes empty and is then
   // dropped by `remoteBrowserControls` as absent.
   //
