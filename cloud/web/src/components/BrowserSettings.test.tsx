@@ -24,6 +24,17 @@ describe('Settings → Browser: where runs get a browser (stage 6)', () => {
     expect(await screen.findByText('Your devices')).toBeInTheDocument();
   });
 
+  it('with only the desktop on offer, it can still be chosen, and the way back is this server', async () => {
+    vi.mocked(fetchBrowserPrefs).mockResolvedValue(prefs({ offers: { device: false, endpoint: false, desktop: true } }));
+    vi.mocked(setBrowserSource).mockResolvedValue(prefs({ source: 'desktop', offers: { device: false, endpoint: false, desktop: true } }));
+    render(<BrowserSettings />);
+    const group = await screen.findByRole('group', { name: 'Where runs get a browser' });
+    expect(within(group).getAllByRole('button').map((b) => b.textContent)).toEqual(['This server', 'Run on my desktop']);
+    fireEvent.click(within(group).getByRole('button', { name: 'Run on my desktop' }));
+    await waitFor(() => expect(setBrowserSource).toHaveBeenCalledWith('desktop'));
+    expect(await screen.findByText(/handed to the Cascade desktop app/)).toBeInTheDocument();
+  });
+
   it('saves an endpoint, then shows only its host; a refusal is said', async () => {
     const onChange = vi.fn();
     vi.mocked(fetchBrowserPrefs).mockResolvedValue(prefs({ source: 'endpoint' }));

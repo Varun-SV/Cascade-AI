@@ -14,6 +14,7 @@ import ConversationSidebar from './chat/ConversationSidebar.js';
 import ChatPanel from './chat/ChatPanel.js';
 import ChatTopBar from './chat/ChatTopBar.js';
 import ContinueModal from './chat/ContinueModal.js';
+import { desktopHandoffNotice } from './lib/desktopHandoff.js';
 import EscalationModal from './chat/EscalationModal.js';
 import ContextApprovalDialog from './chat/ContextApprovalDialog.js';
 import KeyVault from './keys/KeyVault.js';
@@ -164,9 +165,13 @@ export default function App() {
   const ownEndpoint = browserPrefs?.source === 'endpoint' && browserPrefs.endpoint !== null && browserPrefs.offers.endpoint;
   const toDesktop = browserPrefs?.source === 'desktop';
   // A message that needs the browser, under "Run on my desktop": handed to the desktop app.
-  const [desktopHandoff, setDesktopHandoff] = useState<string | null>(null);
+  // A handoff carries text only, so files attached to the message are named, not lost silently.
+  const [desktopHandoff, setDesktopHandoff] = useState<{ prompt: string; files: string[] } | null>(null);
   const send: typeof chat.send = (input) => {
-    if (chat.browserMode && toDesktop) { setDesktopHandoff(input.prompt); return; }
+    if (chat.browserMode && toDesktop) {
+      setDesktopHandoff({ prompt: input.prompt, files: (input.attachments ?? []).map((a) => a.filename ?? (a.kind === 'document' ? 'a document' : 'an image')) });
+      return;
+    }
     chat.send(input);
   };
   const browserAllowance = useBrowserAllowance(user?.id, hostedBrowser, chat.busy, chat.browserMode, chat.setBrowserMode);
@@ -554,8 +559,8 @@ export default function App() {
         )}
         {desktopHandoff !== null && (
           <ContinueModal
-            transcript={{ ...continueTranscript, messages: [...continueTranscript.messages, { role: 'user', content: desktopHandoff }] }}
-            notice="Browser runs happen in your desktop app (Settings → Browser). Send this chat there to run it; the reply comes back here when the app syncs."
+            transcript={{ ...continueTranscript, messages: [...continueTranscript.messages, { role: 'user', content: desktopHandoff.prompt }] }}
+            notice={desktopHandoffNotice(desktopHandoff.files)}
             onClose={() => setDesktopHandoff(null)}
             onRedeemed={handleRedeemed}
           />

@@ -28,7 +28,10 @@ export default function BrowserSettings({ onChange }: { onChange?: (prefs: Brows
   if (!prefs) {
     return error ? <p role="alert" className="text-[12.5px] text-red-400">{error}</p> : <p className="text-[12.5px] text-ink-500">Loading…</p>;
   }
-  const sources = (['device', 'endpoint', 'desktop'] as const).filter((s) => prefs.offers[s]);
+  // "device" is always a choice: with the relay off it is this server's own browser, if
+  // it has one, so a user who picked another source can come back to it.
+  const sources: BrowserSource[] = ['device', ...(['endpoint', 'desktop'] as const).filter((s) => prefs.offers[s])];
+  const label = (s: BrowserSource) => (s === 'device' && !prefs.offers.device ? 'This server' : LABEL[s]);
   const choose = (s: BrowserSource) => { setBrowserSource(s).then(apply, (e: unknown) => setError(e instanceof Error ? e.message : 'Could not change it.')); };
 
   async function save(e: React.FormEvent) {
@@ -47,7 +50,7 @@ export default function BrowserSettings({ onChange }: { onChange?: (prefs: Brows
   return (
     <div className="space-y-4">
       {sources.length > 1 && (
-        <Segmented label="Where runs get a browser" value={prefs.source} onChange={choose} options={sources.map((s) => ({ value: s, label: LABEL[s] }))} />
+        <Segmented label="Where runs get a browser" value={prefs.source} onChange={choose} options={sources.map((s) => ({ value: s, label: label(s) }))} />
       )}
       {error && <p role="alert" className="text-[12.5px] text-red-400">{error}</p>}
 
