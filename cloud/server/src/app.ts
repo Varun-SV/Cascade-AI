@@ -26,12 +26,7 @@ import { remoteBrowserControls } from './runs.js';
 import { NativeAuthStore, isLoopbackRedirect, hashRefreshToken } from './native-auth.js';
 import { githubAuthUrl, exchangeGithubCode, googleAuthUrl, exchangeGoogleCode, type OAuthProfile } from './auth/oauth.js';
 import { limitsForPlan, ORPHAN_UPLOAD_TTL_MS, todayKey, checkStorageQuota } from './entitlements.js';
-import { buildSpendReport, DEVICE_RUN_ID, deviceEndedAt, deviceRunSpendId, parsePeriod, parseSurface, parseTimeZone, spendEntryFromRun, type SpendSurface } from './spend.js';
-
-/** A device says which it is; only these two, as a device can't have run on the server. */
-function deviceSurface(v: unknown): SpendSurface | null {
-  return v === 'desktop' || v === 'cli' ? v : null;
-}
+import { buildSpendReport, DEVICE_RUN_ID, deviceEndedAt, deviceRunSpendId, parsePeriod, parseTimeZone, spendEntryFromRun } from './spend.js';
 import { skillCatalog } from './skills.js';
 import { renderDocsPage } from './docs.js';
 import { tenantScratchDir } from './paths.js';
@@ -565,7 +560,6 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       runId?: unknown;
       outcome?: unknown;
       endedAt?: unknown;
-      surface?: unknown;
     };
     if (typeof id !== 'string' || typeof body?.userContent !== 'string' || typeof body?.assistant?.content !== 'string') {
       res.status(400).json({ error: 'userContent and assistant.content are required' }); return;
@@ -595,7 +589,6 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       runId: str(body.runId),
       ...(body.outcome === 'stopped' ? { outcome: 'stopped' as const } : {}),
       endedAt,
-      surface: deviceSurface(body.surface),
     });
     if (!path) { res.status(404).json({ error: 'Not found' }); return; }
     res.json({ messages: serializeActivePath(id) });
@@ -607,7 +600,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   // no reply is added to the ledger the same way (runs.ts); the CLI and the
   // desktop app otherwise report a run only through /turns.
   app.post('/api/usage/runs', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
-    const body = req.body as { conversationId?: unknown; outcome?: unknown; costUsd?: unknown; why?: unknown; runId?: unknown; endedAt?: unknown; surface?: unknown };
+    const body = req.body as { conversationId?: unknown; outcome?: unknown; costUsd?: unknown; why?: unknown; runId?: unknown; endedAt?: unknown };
     const outcome = body?.outcome === 'answered' || body?.outcome === 'failed' || body?.outcome === 'stopped' ? body.outcome : null;
     const costUsd = typeof body?.costUsd === 'number' && Number.isFinite(body.costUsd) && body.costUsd >= 0 ? body.costUsd : null;
     const why = typeof body?.why === 'string' && body.why.length <= MAX_RUN_WHY_LEN ? body.why : null;
@@ -629,7 +622,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       }
       conversationId = body.conversationId;
     }
-    const entry = spendEntryFromRun({ id: deviceRunSpendId(userId, runId), userId, conversationId, at: endedAt, costUsd, why, outcome, surface: deviceSurface(body.surface) });
+    const entry = spendEntryFromRun({ id: deviceRunSpendId(userId, runId), userId, conversationId, at: endedAt, costUsd, why, outcome });
     // Nothing billed, nothing to keep.
     if (entry.costUsd === 0 && entry.tokens === 0 && entry.lines.length === 0) { res.json({ recorded: false }); return; }
     store.recordSpend(entry);
@@ -1422,12 +1415,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     const period = parsePeriod(req.query['period'] ?? '30d');
     const tz = parseTimeZone(req.query['tz']);
     if (!period || tz === null) { res.status(400).json({ error: 'Invalid period or tz' }); return; }
-    // One surface's runs, or all of them (rows from before surfaces were kept count here only).
-    const surface = req.query['surface'] === undefined || req.query['surface'] === 'all' ? null : parseSurface(req.query['surface']);
-    if (surface === null && req.query['surface'] !== undefined && req.query['surface'] !== 'all') {
-      res.status(400).json({ error: 'surface must be all, cloud, desktop or cli' }); return;
-    }
-    res.json({ ...buildSpendReport(store.spendFor(surface), req.session!.userId, period, tz, Date.now()), surface: surface ?? 'all' });
+    res.json(buildSpendReport(store.spend, req.session!.userId, period, tz, Date.now()));
   });
 
   // ── Billing (Razorpay recurring subscriptions) ──

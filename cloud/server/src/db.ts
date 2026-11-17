@@ -16,17 +16,8 @@ import {
   deviceRunSpendId,
   legacyCliRunCost,
   spendEntryFromRun,
-  type SpendChatRow, type SpendEntry, type SpendSource, type SpendSurface, type SpendTotals,
+  type SpendChatRow, type SpendEntry, type SpendSource, type SpendTotals,
 } from './spend.js';
-
-/** A ledger row's columns, in the order `spendValues` gives them. */
-const SPEND_COLUMNS = `(id, user_id, conversation_id, at, cost_usd, saved_usd, tokens, outcome,
-  surface, duration_ms, failovers, agents_completed, agents_failed, agents_escalated, agents_other)`;
-const SPEND_PLACEHOLDERS = Array.from({ length: 15 }, () => '?').join(', ');
-const spendValues = (e: SpendEntry): unknown[] => [
-  e.id, e.userId, e.conversationId, e.at, e.costUsd, e.savedUsd, e.tokens, e.outcome,
-  e.surface, e.durationMs, e.failovers, e.agents.completed, e.agents.failed, e.agents.escalated, e.agents.other,
-];
 
 export type OAuthProvider = 'github' | 'google' | 'dev';
 
@@ -674,7 +665,6 @@ export class CloudStore {
       // Whether a line's calls had a price: 1 unpriced, 0 priced, NULL unknown.
       const cols = this.db.prepare('PRAGMA table_info(spend_ledger_models)').all() as Array<{ name: string }>;
       if (!cols.some((c) => c.name === 'unpriced')) this.db.exec('ALTER TABLE spend_ledger_models ADD COLUMN unpriced INTEGER');
-      this.addRunDetailColumns();
       return;
     }
     const create = this.db.transaction(() => {
@@ -700,7 +690,6 @@ export class CloudStore {
           PRIMARY KEY (run_id, tier, model)
         );
       `);
-      this.addRunDetailColumns();
       // A reply with neither a report nor a cost was not a run here: an
       // imported or handed-off transcript carries neither. The oldest
       // databases predate the cost column; their replies have a report or nothing.
@@ -1054,8 +1043,6 @@ export class CloudStore {
       outcome?: 'answered' | 'stopped';
       /** When the run finished, which the ledger counts it at (the reply's time otherwise). */
       endedAt?: number;
-      /** Which of the user's devices ran it, as it said: the desktop app or the CLI. */
-      surface?: SpendSurface | null;
     },
   ): CloudMessage[] | null {
     const convo = this.getConversation(conversationId, userId);
@@ -1110,7 +1097,7 @@ export class CloudStore {
         this.recordSpend(spendEntryFromRun({
           id: runId ? deviceRunSpendId(userId, runId) : reply.id,
           userId, conversationId, at: input.endedAt ?? reply.createdAt, costUsd: spent, why: input.assistant.why,
-          outcome: input.outcome ?? 'answered', surface: input.surface ?? null,
+          outcome: input.outcome ?? 'answered',
         }));
       }
     });
@@ -1206,31 +1193,15 @@ export class CloudStore {
 
   // ── Spend & savings ledger ────────────────────
 
-  /**
-   * Where each run ran, how long it took, its failovers and how its agents finished.
-   * Rows from before these were kept have NULL surface and duration, and zeros.
-   */
-  private addRunDetailColumns(): void {
-    const cols = new Set((this.db.prepare('PRAGMA table_info(spend_ledger)').all() as Array<{ name: string }>).map((c) => c.name));
-    const add = (name: string, type: string): void => { if (!cols.has(name)) this.db.exec(`ALTER TABLE spend_ledger ADD COLUMN ${name} ${type}`); };
-    add('surface', 'TEXT');
-    add('duration_ms', 'INTEGER');
-    add('failovers', 'INTEGER NOT NULL DEFAULT 0');
-    add('agents_completed', 'INTEGER NOT NULL DEFAULT 0');
-    add('agents_failed', 'INTEGER NOT NULL DEFAULT 0');
-    add('agents_escalated', 'INTEGER NOT NULL DEFAULT 0');
-    add('agents_other', 'INTEGER NOT NULL DEFAULT 0');
-    this.db.exec('CREATE INDEX IF NOT EXISTS idx_spend_surface_at ON spend_ledger(surface, at)');
-  }
-
   /** Record one run's spend. Recording the same run twice keeps the first. */
   recordSpend(e: SpendEntry): void {
     const tx = this.db.transaction(() => {
       const added = this.db
         .prepare(
-          `INSERT OR IGNORE INTO spend_ledger ${SPEND_COLUMNS} VALUES (${SPEND_PLACEHOLDERS})`,
+          `INSERT OR IGNORE INTO spend_ledger (id, user_id, conversation_id, at, cost_usd, saved_usd, tokens, outcome)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(...spendValues(e));
+        .run(e.id, e.userId, e.conversationId, e.at, e.costUsd, e.savedUsd, e.tokens, e.outcome);
       if (added.changes === 0) {
         // Counted already, with no chat (its spend went alone while its turn
         // could not be copied): the turn now copied gives it its chat. Only
@@ -1254,13 +1225,11 @@ export class CloudStore {
   replaceSpend(e: SpendEntry): void {
     const tx = this.db.transaction(() => {
       this.db.prepare(
-        `INSERT INTO spend_ledger ${SPEND_COLUMNS} VALUES (${SPEND_PLACEHOLDERS})
+        `INSERT INTO spend_ledger (id, user_id, conversation_id, at, cost_usd, saved_usd, tokens, outcome)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET user_id = excluded.user_id, conversation_id = excluded.conversation_id, at = excluded.at,
-           cost_usd = excluded.cost_usd, saved_usd = excluded.saved_usd, tokens = excluded.tokens, outcome = excluded.outcome,
-           surface = excluded.surface, duration_ms = excluded.duration_ms, failovers = excluded.failovers,
-           agents_completed = excluded.agents_completed, agents_failed = excluded.agents_failed,
-           agents_escalated = excluded.agents_escalated, agents_other = excluded.agents_other`,
-      ).run(...spendValues(e));
+           cost_usd = excluded.cost_usd, saved_usd = excluded.saved_usd, tokens = excluded.tokens, outcome = excluded.outcome`,
+      ).run(e.id, e.userId, e.conversationId, e.at, e.costUsd, e.savedUsd, e.tokens, e.outcome);
       this.db.prepare('DELETE FROM spend_ledger_models WHERE run_id = ?').run(e.id);
       this.insertSpendLines(e);
     });
@@ -1279,16 +1248,11 @@ export class CloudStore {
   }
 
   /** The queries behind a spend report, all owner-scoped. `fromMs` null is all time. */
-  get spend(): SpendSource { return this.spendFor(null); }
-
-  /** The same, for one surface's runs only; null is all of them, unlabelled rows included. */
-  spendFor(surface: SpendSurface | null): SpendSource {
-    // The surface is one of three fixed words or nothing, never caller text.
-    const only = surface ? ` AND l.surface = '${surface}'` : '';
-    const since = `l.user_id = ? AND (? IS NULL OR l.at >= ?)${only}`;
+  get spend(): SpendSource {
+    const since = 'l.user_id = ? AND (? IS NULL OR l.at >= ?)';
     return {
       firstSpendAt: (userId) => {
-        const row = this.db.prepare(`SELECT MIN(l.at) AS first FROM spend_ledger l WHERE l.user_id = ?${only}`).get(userId) as { first: number | null };
+        const row = this.db.prepare('SELECT MIN(at) AS first FROM spend_ledger WHERE user_id = ?').get(userId) as { first: number | null };
         return row.first ?? null;
       },
       spendTotals: (userId, fromMs): SpendTotals => {
@@ -1296,16 +1260,10 @@ export class CloudStore {
           `SELECT COALESCE(SUM(l.cost_usd), 0) AS spentUsd, COALESCE(SUM(l.saved_usd), 0) AS savedUsd,
                   COUNT(*) AS runs, COALESCE(SUM(l.tokens), 0) AS tokens,
                   COALESCE(SUM(l.outcome = 'failed'), 0) AS failedRuns,
-                  COALESCE(SUM(CASE WHEN l.outcome = 'failed' THEN l.cost_usd ELSE 0 END), 0) AS failedUsd,
-                  COALESCE(SUM(l.outcome = 'stopped'), 0) AS stoppedRuns,
-                  COALESCE(SUM(l.duration_ms), 0) AS durationMs, COUNT(l.duration_ms) AS timedRuns,
-                  COALESCE(SUM(l.failovers), 0) AS failovers,
-                  COALESCE(SUM(l.agents_completed), 0) AS agentsCompleted, COALESCE(SUM(l.agents_failed), 0) AS agentsFailed,
-                  COALESCE(SUM(l.agents_escalated), 0) AS agentsEscalated, COALESCE(SUM(l.agents_other), 0) AS agentsOther
+                  COALESCE(SUM(CASE WHEN l.outcome = 'failed' THEN l.cost_usd ELSE 0 END), 0) AS failedUsd
              FROM spend_ledger l WHERE ${since}`,
-        ).get(userId, fromMs, fromMs) as SpendTotals & { agentsCompleted: number; agentsFailed: number; agentsEscalated: number; agentsOther: number };
-        const { agentsCompleted, agentsFailed, agentsEscalated, agentsOther, ...totals } = row;
-        return { ...totals, agents: { completed: agentsCompleted, failed: agentsFailed, escalated: agentsEscalated, other: agentsOther } };
+        ).get(userId, fromMs, fromMs) as SpendTotals;
+        return row;
       },
       spendRuns: (userId, fromMs) =>
         this.db.prepare(

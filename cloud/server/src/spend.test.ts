@@ -3,22 +3,6 @@ import { bucketKey, buildSpendReport, legacyCliRunCost, parsePeriod, parseTimeZo
 
 const base = { id: 'r1', userId: 'u1', conversationId: 'c1', at: 1_000 };
 
-describe('spendEntryFromRun: where, how long, failovers and agents (stage 5)', () => {
-  const base = { id: 'r', userId: 'u', conversationId: null, at: 1 };
-  it('reads them from the report, as numbers only', () => {
-    const e = spendEntryFromRun({ ...base, surface: 'cli', why: {
-      durationMs: 1234.6,
-      decisions: [{ kind: 'failover', detail: 'T3 a → b' }, { kind: 'failover', detail: 'T2 c → d' }, { kind: 'budget', detail: 'x' }],
-      trace: [{ status: 'COMPLETED' }, { status: 'completed' }, { status: 'FAILED' }, { status: 'ESCALATED' }, { status: 'ACTIVE' }, {}],
-    } });
-    expect(e).toMatchObject({ surface: 'cli', durationMs: 1235, failovers: 2, agents: { completed: 2, failed: 1, escalated: 1, other: 2 } });
-  });
-  it('a report that says none of it gives nulls and zeros', () => {
-    expect(spendEntryFromRun({ ...base, why: '{}' })).toMatchObject({ surface: null, durationMs: null, failovers: 0, agents: { completed: 0, failed: 0, escalated: 0, other: 0 } });
-    expect(spendEntryFromRun({ ...base, why: { durationMs: -5, decisions: 'no', trace: {} } })).toMatchObject({ durationMs: null, failovers: 0 });
-  });
-});
-
 describe('spendEntryFromRun', () => {
   it('keeps a tier split across the models that served it', () => {
     const e = spendEntryFromRun({

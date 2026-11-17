@@ -105,11 +105,6 @@ export interface CloudClientOptions {
    * bytes of it are sent. The desktop uses it to re-check the sync opt-out.
    */
   beforeSend?: () => void;
-  /**
-   * Which kind of device this is, sent with each run it syncs so the account's
-   * reports can show runs by where they ran. `fromSession` (the CLI) says `cli`.
-   */
-  surface?: 'desktop' | 'cli';
 }
 
 /** Default store: the 0600 JSON file next to the global provider credentials. */
@@ -141,7 +136,6 @@ export class CloudClient {
   private readonly store: CloudSessionStore;
 
   private readonly beforeSend: (() => void) | undefined;
-  private readonly surface: 'desktop' | 'cli' | undefined;
 
   constructor(
     private readonly serverUrl: string,
@@ -151,14 +145,13 @@ export class CloudClient {
   ) {
     this.store = store ?? new FileCloudSessionStore(dir);
     this.beforeSend = options.beforeSend;
-    this.surface = options.surface;
   }
 
   /** Build a client from a stored session, or null if not signed in. */
-  static fromSession(dir?: string, store?: CloudSessionStore, options: CloudClientOptions = { surface: 'cli' }): CloudClient | null {
+  static fromSession(dir?: string, store?: CloudSessionStore): CloudClient | null {
     const src = store ?? new FileCloudSessionStore(dir);
     const s = src.load();
-    return s ? new CloudClient(s.serverUrl, dir, src, options) : null;
+    return s ? new CloudClient(s.serverUrl, dir, src) : null;
   }
 
   private url(p: string): string {
@@ -454,7 +447,7 @@ export class CloudClient {
   async appendTurn(conversationId: string, turn: CloudTurnInput): Promise<CloudMessage[]> {
     const b = await this.authed<{ messages: CloudMessage[] }>(
       `/api/conversations/${encodeURIComponent(conversationId)}/turns`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...turn, ...(this.surface ? { surface: this.surface } : {}) }) },
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(turn) },
     );
     return b.messages ?? [];
   }
@@ -473,7 +466,7 @@ export class CloudClient {
     endedAt?: number;
   }): Promise<{ recorded: boolean }> {
     return this.authed<{ recorded: boolean }>('/api/usage/runs', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...run, ...(this.surface ? { surface: this.surface } : {}) }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(run),
     });
   }
 

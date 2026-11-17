@@ -474,41 +474,6 @@ describe('cloud/server app', () => {
     expect(why).toMatchObject({ tier: 'T3', model: 'openai:nano' });
   });
 
-  it('the report by surface: device runs say where they ran, and the totals carry status, time and failovers (stage 5)', async () => {
-    const cookie = await login('Three surfaces');
-    const j = { 'Content-Type': 'application/json', Cookie: cookie };
-    const cid = ((await (await fetch(`${baseUrl}/api/conversations`, {
-      method: 'POST', headers: j, body: JSON.stringify({ title: 'Everywhere' }),
-    })).json()) as { conversation: { id: string } }).conversation.id;
-    const why = (extra: Record<string, unknown> = {}) => JSON.stringify({
-      totalTokens: 100, durationMs: 4000,
-      decisions: [{ at: 't', kind: 'failover', detail: 'T3 a → b' }, { at: 't', kind: 'model', detail: 'x' }],
-      trace: [{ id: '1', role: 'T3', status: 'COMPLETED' }, { id: '2', role: 'T3', status: 'FAILED' }, { id: '3', role: 'T2', status: 'ESCALATED' }],
-      ...extra,
-    });
-    // A desktop turn, a CLI run with no reply, and a device claiming to be the server.
-    expect((await fetch(`${baseUrl}/api/conversations/${cid}/turns`, { method: 'POST', headers: j, body: JSON.stringify({
-      userContent: 'q', surface: 'desktop', assistant: { content: 'a', costUsd: 0.01, why: why() },
-    }) })).status).toBe(200);
-    expect((await fetch(`${baseUrl}/api/usage/runs`, { method: 'POST', headers: j, body: JSON.stringify({
-      conversationId: null, outcome: 'stopped', costUsd: 0.02, why: why({ durationMs: 1000 }), runId: 'cli-run-00001', surface: 'cli',
-    }) })).status).toBe(200);
-    expect((await fetch(`${baseUrl}/api/usage/runs`, { method: 'POST', headers: j, body: JSON.stringify({
-      conversationId: null, outcome: 'failed', costUsd: 0.04, why: why(), runId: 'fake-cloud-001', surface: 'cloud',
-    }) })).status).toBe(200);
-    type Report = { surface: string; totals: { runs: number; spentUsd: number; stoppedRuns: number; failedRuns: number; durationMs: number; timedRuns: number; failovers: number; agents: Record<string, number> } };
-    const get = async (q: string) => (await (await fetch(`${baseUrl}/api/usage/report?period=today${q}`, { headers: { Cookie: cookie } })).json()) as Report;
-    const all = await get('');
-    expect(all.surface).toBe('all');
-    expect(all.totals).toMatchObject({ runs: 3, stoppedRuns: 1, failedRuns: 1, durationMs: 9000, timedRuns: 3, failovers: 3 });
-    expect(all.totals.agents).toEqual({ completed: 3, failed: 3, escalated: 3, other: 0 });
-    expect((await get('&surface=desktop')).totals).toMatchObject({ runs: 1, durationMs: 4000 });
-    expect((await get('&surface=cli')).totals).toMatchObject({ runs: 1, stoppedRuns: 1, durationMs: 1000 });
-    // A device can't say a run was the server's: that one is unlabelled, under All only.
-    expect((await get('&surface=cloud')).totals.runs).toBe(0);
-    expect((await fetch(`${baseUrl}/api/usage/report?surface=phone`, { headers: { Cookie: cookie } })).status).toBe(400);
-  });
-
   it('adds a turn resent with the same run id once, and refuses a malformed run id', async () => {
     const cookie = await login('Retrying device');
     const j = { 'Content-Type': 'application/json', Cookie: cookie };
