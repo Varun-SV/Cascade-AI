@@ -85,7 +85,11 @@ export async function pairWithServer(opts: PairOptions): Promise<PairedDevice> {
     tokens = await json(res, 'Signing in');
   }
 
+  // Cancelled (Forget, or a newer pairing) after the sign-in came back: nothing is
+  // registered or kept, and the sign-in is still revoked below.
+  const cancelled = (): Error => new Error('Pairing was cancelled.');
   try {
+    if (opts.signal?.aborted) throw cancelled();
     const key = generateStoredKey();
     const reg = await json<{ device: { id: string; name: string }; serverId: string; serverKey: string }>(
       await f(at('/api/browser-relay/devices'), {
@@ -94,6 +98,14 @@ export async function pairWithServer(opts: PairOptions): Promise<PairedDevice> {
         body: JSON.stringify({ name: opts.name, kind: 'extension', publicKey: key.publicKey }),
       }), 'Registering this browser');
     if (reg.serverId !== info.serverId || reg.serverKey !== info.serverKey) throw new Error('The server changed its identity while pairing. Nothing was saved.');
+    if (opts.signal?.aborted) {
+      // Registered as the cancel came: take it off the server again, with the
+      // same sign-in, before that is revoked.
+      await f(at(`/api/browser-relay/devices/${encodeURIComponent(reg.device.id)}`), {
+        method: 'DELETE', headers: { Authorization: `Bearer ${tokens.access_token}` },
+      }).catch(() => {});
+      throw cancelled();
+    }
     return {
       serverUrl: origin, deviceId: reg.device.id, name: reg.device.name, privateKeyPem: key.privateKeyPem,
       serverId: info.serverId, serverKey: info.serverKey, controlPath: info.controlPath, runPath: info.runPath,

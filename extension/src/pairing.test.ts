@@ -5,18 +5,20 @@ import { endpointsOf, pairWithServer, serverOrigin } from './pairing.js';
 const server = createIdentity('server-1');
 const info = { serverId: 'server-1', serverKey: publicKeyToText(server.publicKey), controlPath: '/api/browser-relay/control', runPath: '/api/browser-relay/run' };
 
-function fakeServer(over: { relay?: boolean; regKey?: string; polls?: number } = {}) {
+function fakeServer(over: { relay?: boolean; regKey?: string; polls?: number; onPath?: (path: string) => void } = {}) {
   const calls: { path: string; init?: RequestInit }[] = [];
   let polls = over.polls ?? 1;
   const f = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const path = new URL(String(url)).pathname;
     calls.push({ path, ...(init ? { init } : {}) });
+    over.onPath?.(path);
     const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
     if (path === '/api/browser-relay/server') return over.relay === false ? json(404, {}) : json(200, info);
     if (path === '/api/native/device') return json(200, { device_code: 'dc', user_code: 'ABCD-1234', verification_uri: 'https://cascade.test/activate', expires_in: 600, interval: 1 });
     if (path === '/api/native/device/token') return polls-- > 0 ? json(428, {}) : json(200, { access_token: 'AT', refresh_token: 'RT', expires_in: 900 });
     if (path === '/api/browser-relay/devices') return json(201, { device: { id: 'dev-9', name: 'Chrome' }, serverId: info.serverId, serverKey: over.regKey ?? info.serverKey });
     if (path === '/api/native/logout') return json(200, { ok: true });
+    if (path === '/api/browser-relay/devices/dev-9' && init?.method === 'DELETE') return json(200, { ok: true });
     return json(404, {});
   };
   return { f: f as typeof fetch, calls };
@@ -61,6 +63,26 @@ describe('pairing', () => {
     const { f, calls } = fakeServer({ regKey: publicKeyToText(createIdentity('x').publicKey) });
     await expect(pairWithServer({ server: 'https://cascade.test', name: 'Chrome', fetch: f, sleep: async () => {}, onCode: () => {} })).rejects.toThrow(/identity/);
     expect(calls.some((c) => c.path === '/api/native/logout')).toBe(true);
+  });
+
+  it('cancelled once signed in: nothing is registered, and the sign-in is still revoked', async () => {
+    const ctl = new AbortController();
+    // Forget, or a newer pairing, lands while the token reply is on its way.
+    const { f, calls } = fakeServer({ polls: 0, onPath: (p) => { if (p === '/api/native/device/token') ctl.abort(); } });
+    await expect(pairWithServer({ server: 'https://cascade.test', name: 'Chrome', fetch: f, sleep: async () => {}, onCode: () => {}, signal: ctl.signal })).rejects.toThrow(/cancelled/);
+    expect(calls.some((c) => c.path === '/api/browser-relay/devices')).toBe(false);
+    expect(calls.some((c) => c.path === '/api/native/logout')).toBe(true);
+  });
+
+  it('cancelled while registering: the new device is removed again, and the sign-in revoked', async () => {
+    const ctl = new AbortController();
+    const { f, calls } = fakeServer({ onPath: (p) => { if (p === '/api/browser-relay/devices') ctl.abort(); } });
+    await expect(pairWithServer({ server: 'https://cascade.test', name: 'Chrome', fetch: f, sleep: async () => {}, onCode: () => {}, signal: ctl.signal })).rejects.toThrow(/cancelled/);
+    const removed = calls.find((c) => c.path === '/api/browser-relay/devices/dev-9')!;
+    expect(removed.init!.method).toBe('DELETE');
+    expect((removed.init!.headers as Record<string, string>)['Authorization']).toBe('Bearer AT');
+    // Removed with the sign-in, so before it's revoked.
+    expect(calls.findIndex((c) => c.path === '/api/native/logout')).toBeGreaterThan(calls.indexOf(removed));
   });
 
   it('connects back to the server it paired with', () => {

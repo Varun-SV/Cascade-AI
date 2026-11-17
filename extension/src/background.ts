@@ -239,12 +239,18 @@ async function handle(msg: Message): Promise<unknown> {
           void chrome.tabs.create({ url: `${code.verificationUri}?code=${encodeURIComponent(code.userCode)}` });
         },
       }).then(async (device) => {
+        // Forget, or a newer pairing, since: this one's result is not to be kept.
+        if (pairing !== ctl || ctl.signal.aborted) return;
+        pairing = null;
         await chrome.storage.local.set({ device });
         delete status.pairing;
         delete status.notice;
         refusals = 0;
         await connect();
       }, (e: unknown) => {
+        if (pairing !== ctl) return;
+        pairing = null;
+        if (ctl.signal.aborted) return;
         status.pairing = { error: e instanceof Error ? e.message : String(e) };
         publish();
       });
