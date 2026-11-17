@@ -149,7 +149,12 @@ export default function App() {
   // view that hides them), so the controls are always visible to the session.
   const chat = useChatSession(socket, providers, skillId, webSearchPayload(webSearch), undefined, true);
   // Re-read as each run starts and ends, which is when a session can be spent.
-  const browserAllowance = useBrowserAllowance(user?.id, config?.remoteBrowserEnabled === true, chat.busy, chat.browserMode, chat.setBrowserMode);
+  // Two ways a run can have a browser: the deployment's hosted one, and the
+  // user's own Chrome through the extension. Only the hosted one is rationed, so
+  // only it reads the daily allowance.
+  const hostedBrowser = config?.remoteBrowserEnabled === true;
+  const ownBrowser = config?.browserRelay === true;
+  const browserAllowance = useBrowserAllowance(user?.id, hostedBrowser, chat.busy, chat.browserMode, chat.setBrowserMode);
   const [localModelOn, setLocalModelOn] = useState(() => localModelEnabled());
 
   // A run may have created a new conversation or renamed one — refresh the
@@ -423,7 +428,8 @@ export default function App() {
             onAnswerClarification={chat.answerClarification}
             browserMode={chat.browserMode}
             onBrowserModeChange={chat.setBrowserMode}
-            browserAvailable={config?.remoteBrowserEnabled === true}
+            browserAvailable={hostedBrowser || ownBrowser}
+            browserOwnOnly={ownBrowser && !hostedBrowser}
             runDetail={detail}
             userName={(user.name ?? '').trim().split(/\s+/)[0] || undefined}
             contextTokens={chat.contextTokens}

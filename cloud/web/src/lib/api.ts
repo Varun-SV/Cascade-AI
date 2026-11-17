@@ -19,6 +19,12 @@ export interface CloudConfig {
    * endpoint, so neither should the switch for it.
    */
   remoteBrowserEnabled?: boolean;
+  /**
+   * Whether a user's own Chrome can serve their runs a browser here, through the
+   * Cascade extension (the browser relay). Independent of `remoteBrowserEnabled`:
+   * a deployment can have this and no hosted browser at all. Absent means no.
+   */
+  browserRelay?: boolean;
 }
 
 async function json<T>(fetchPromise: Promise<Response>): Promise<T> {

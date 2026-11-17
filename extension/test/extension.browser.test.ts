@@ -63,10 +63,22 @@ async function site(handler?: (req: http.IncomingMessage, res: http.ServerRespon
   return { hits, port: (server.address() as AddressInfo).port };
 }
 
+/** A shared worker that fetches whatever URL it's sent, and says whether that got out. */
+const WORKER_JS = "onconnect = (e) => { const port = e.ports[0]; port.onmessage = (m) => { fetch(m.data, { mode: 'no-cors' }).then(() => port.postMessage('reached'), () => port.postMessage('blocked')); }; };";
+function workerScript(req: http.IncomingMessage, res: http.ServerResponse): boolean {
+  if (req.url !== '/worker.js') return false;
+  res.setHeader('content-type', 'text/javascript');
+  res.end(WORKER_JS);
+  return true;
+}
+
 async function rig() {
-  const offlist = await site();
+  const offlist = await site(workerScript);
+  // Stands in for a private-network service: reached by its literal loopback address.
+  const lan = await site();
   const allowed = await site((req, res) => {
     const html = (body: string) => { res.setHeader('content-type', 'text/html'); res.end(`<!doctype html><body>${body}</body>`); return true; };
+    if (workerScript(req, res)) return true;
     switch (req.url) {
       case '/links': return html('<a id=off href="http://offlist.test/link">off</a>');
       case '/redirect': res.statusCode = 302; res.setHeader('location', 'http://offlist.test/from-redirect'); res.end(); return true;
@@ -79,12 +91,15 @@ async function rig() {
   const server = createIdentity('server-1');
   const key = generateStoredKey();
   const deviceKey = publicKeyFromText(key.publicKey)!;
+  /** Control connections the extension has opened, authenticated or not. */
+  let controls = 0;
   const hub: RelayHub = createRelayHub({ server, store: createMemoryNonceStore(Date.now), deviceKey: (id) => (id === 'dev-ext' ? deviceKey : null) });
   const httpServer = http.createServer();
   const wss = new WebSocketServer({ server: httpServer });
   wss.on('connection', (ws, req) => {
     const p = (req.url ?? '').split('?')[0]!;
     if (p === '/control') {
+      controls++;
       void authenticateControl(ws, { serverId: server.id, device: (id) => (id === 'dev-ext' ? { userId: 'user-a', key: deviceKey } : null) })
         .then((who) => { if (who) hub.attachDevice(who, ws); });
     } else if (p === '/run') hub.attachRun(ws);
@@ -129,8 +144,13 @@ async function rig() {
     let consent: PwPage | undefined;
     await vi.waitFor(() => { consent = ctx.pages().find((p) => p.url().includes('consent.html')); expect(consent).toBeTruthy(); }, { timeout: 10_000 });
     await vi.waitFor(async () => expect(await consent!.evaluate<string>('document.getElementById("who").textContent')).not.toBe('Loading…'));
-    if (sites === null) await consent!.click('#decline');
-    else { await consent!.fill('#sites', sites); await consent!.click('#allow'); }
+    // The window closes itself once the extension confirms the answer, and with a
+    // quick answer that can land before Playwright's click returns, which then
+    // throws "Target closed". The window going is the expected result, so that
+    // alone is not a failure; whether the answer counted is what callers assert.
+    const press = (selector: string) => consent!.click(selector).catch((e: unknown) => { if (!consent!.isClosed()) throw e; });
+    if (sites === null) await press('#decline');
+    else { await consent!.fill('#sites', sites); await press('#allow'); }
     return consent!;
   };
 
@@ -148,7 +168,7 @@ async function rig() {
   /** The worker's own state and recent log, as DevTools on it would show. */
   const status = () => sw.evaluate<{ status: { run?: { runId: string; sites: string[] }; connection: string; notice?: string }; recent: string[] }>(
     () => JSON.parse(JSON.stringify((globalThis as unknown as { cascade: object }).cascade)) as never);
-  return { hub, ctx, sw, allowed, offlist, downloads, answer, run, status, browserCdp };
+  return { hub, ctx, sw, allowed, offlist, lan, downloads, answer, run, status, browserCdp, device, controls: () => controls };
 }
 
 suite('the extension in a real Chromium', { timeout: 90_000 }, () => {
@@ -238,8 +258,12 @@ suite('the extension in a real Chromium', { timeout: 90_000 }, () => {
     // Synchronous, as a page's own script or a target=_blank click does it.
     const answered = await Promise.race([page.evaluate<number>("window.open('http://allowed.test/popup'); 1"), sleep(5000).then(() => 'stalled')]);
     expect(answered).toBe(1);
-    await vi.waitFor(() => expect(r.ctx.pages().some((p) => p.url().includes('/popup'))).toBe(false), { timeout: 5000 });
-    expect(r.ctx.pages().length).toBeLessThanOrEqual(before);
+    // Gone, not just off /popup: a popup still at about:blank has no /popup in its
+    // address yet, and the extension closes it only once Chrome has finished making it.
+    await vi.waitFor(() => {
+      expect(r.ctx.pages().some((p) => p.url().includes('/popup'))).toBe(false);
+      expect(r.ctx.pages().length).toBeLessThanOrEqual(before);
+    }, { timeout: 5000 });
     expect(await page.evaluate<number>('1 + 1')).toBe(2);
   });
 
@@ -267,6 +291,51 @@ suite('the extension in a real Chromium', { timeout: 90_000 }, () => {
     await r.answer(null);
     await expect(again).rejects.toThrow(/declined/);
     expect(r.allowed.hits.filter((h) => h === 'GET /again')).toEqual([]);
+  });
+
+  it("a shared worker the consented page starts can't reach a private address; the user's own workers elsewhere can", async () => {
+    const r = await rig();
+    const { page } = await r.run('run-1');
+    const viaWorker = `(url) => new Promise((done) => {
+      const w = new SharedWorker('/worker.js');
+      w.port.onmessage = (m) => done(m.data);
+      w.port.postMessage(url);
+      setTimeout(() => done('no answer'), 5000);
+    })`;
+    const lanUrl = `http://127.0.0.1:${r.lan.port}/from-worker`;
+    await page.goto('http://allowed.test/hello');
+    // The worker runs, and its public requests go out as before.
+    expect(await page.evaluate(`(${viaWorker})('http://allowed.test/from-worker')`)).toBe('reached');
+    expect(r.allowed.hits).toContain('GET /from-worker');
+    // Its request to the private address is stopped before it's sent.
+    expect(await page.evaluate(`(${viaWorker})(${JSON.stringify(lanUrl)})`)).toBe('blocked');
+    expect(r.lan.hits).toEqual([]);
+    // Control, during the same run: the user's own tab on a site the run wasn't
+    // allowed starts the same worker, and it reaches the address.
+    const mine = r.ctx.pages()[0]!;
+    await mine.goto('http://offlist.test/mine');
+    expect(await mine.evaluate(`(${viaWorker})(${JSON.stringify(lanUrl)})`)).toBe('reached');
+    expect(r.lan.hits).toEqual(['GET /from-worker']);
+  });
+
+  it('attempts to connect that overlap make one client, not two that knock each other off', async () => {
+    const r = await rig();
+    const extId = new URL(r.sw.url()).host;
+    const popup = r.ctx.pages()[0]!;
+    await popup.goto(`chrome-extension://${extId}/popup.html`);
+    await popup.evaluate(() => chrome.runtime.sendMessage({ type: 'forget' }));
+    await vi.waitFor(() => expect(r.hub.deviceOnline('user-a', 'dev-ext')).toBe(false), { timeout: 5000 });
+    const before = r.controls();
+    // Pairing finishing (its storage change) and two quick Retries, all at once.
+    await popup.evaluate((d) => Promise.all([
+      chrome.storage.local.set({ device: d }),
+      chrome.runtime.sendMessage({ type: 'retry' }),
+      chrome.runtime.sendMessage({ type: 'retry' }),
+    ]), r.device as never);
+    await vi.waitFor(() => expect(r.hub.deviceOnline('user-a', 'dev-ext')).toBe(true), { timeout: 10_000 });
+    await sleep(1500);
+    expect(r.controls() - before).toBe(1);
+    expect(r.hub.deviceOnline('user-a', 'dev-ext')).toBe(true);
   });
 
   it('Stop in the toolbar popup ends the run', async () => {

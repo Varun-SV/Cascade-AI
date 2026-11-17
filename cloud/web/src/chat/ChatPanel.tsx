@@ -48,6 +48,8 @@ interface Props {
   onBrowserModeChange: (on: boolean) => void;
   /** False on a deployment with no hosted browser: the chip is absent, not inert. */
   browserAvailable: boolean;
+  /** The only browser is the user's own Chrome, through the extension. */
+  browserOwnOnly?: boolean;
   onWebSearchChange: (on: boolean) => void;
   /** Show the plan and the agent tree while a run works (Settings → Appearance). */
   runDetail: boolean;
@@ -109,7 +111,7 @@ export default function ChatPanel({
   onEditMessage, onDeleteMessage, onSelectSibling,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
   clarifications, onAnswerClarification,
-  browserMode, onBrowserModeChange, browserAvailable, runDetail, userName, contextTokens = 0, contextWindow = 0,
+  browserMode, onBrowserModeChange, browserAvailable, browserOwnOnly, runDetail, userName, contextTokens = 0, contextWindow = 0,
   onAddKey, onManageSkills, onManageConnectors, whyRequest, onOpenSpend, approval,
   compactionNotice, providerNotice, knowledgeNotice, browserRefusedNotice, browserAllowance, activity, browserLiveView, browserActive,
   browserFrame, browserTaskId, browserStreaming, browserHuman, browserCapturing, browserConfirmed, browserNotice,
@@ -361,6 +363,7 @@ export default function ChatPanel({
             browserMode={browserMode}
             onBrowserModeChange={onBrowserModeChange}
             browserAvailable={browserAvailable}
+            browserOwnOnly={browserOwnOnly}
             browserAllowance={browserAllowance ?? null}
             onWebSearchChange={onWebSearchChange}
             onManageSkills={onManageSkills}

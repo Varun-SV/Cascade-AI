@@ -12,7 +12,8 @@
 //    site. These act on requests before they're sent, in every frame and process of
 //    the tab.
 //  - Requests from the tab to private-network addresses are blocked too, by name and
-//    address as typed. This is best effort and claimed as nothing more: the extension
+//    address as typed, and so are those of service and shared workers the consented
+//    sites run (see `tabRules`). This is best effort and claimed as nothing more: the extension
 //    can't resolve names, so a public name pointing at a private address isn't caught.
 //    A run that needs a private site uses the CLI or the desktop app.
 //  - A page this tab opens is closed. A dialog is dismissed.
@@ -73,8 +74,26 @@ export function tabRules(tabId: number, consent: Consent, firstId: number): Rule
   for (const regexFilter of PRIVATE_URL_PATTERNS) {
     rules.push({ id: id++, priority: 3, action: block, condition: { tabIds: [tabId], resourceTypes: EVERY_TYPE, regexFilter, isUrlFilterCaseSensitive: false } });
   }
+  // Workers. A service or shared worker a consented page starts sends its requests
+  // with no tab (TAB_ID_NONE), so none of the rules above see them, and it could
+  // reach a private address the tab itself can't. These match requests from no tab
+  // whose initiator is a consented site: as close to "the run's workers" as Chrome
+  // lets a rule get. The cost, while the run lasts: the user's own workers on those
+  // same sites can't reach private-network addresses either. Nothing else of theirs
+  // changes, and public destinations are untouched.
+  const initiatorDomains = [...new Set([...consent.origins].map((o) => new URL(o).hostname.replace(/^\[|\]$/g, '')))];
+  if (initiatorDomains.length) {
+    const workers = { tabIds: [TAB_ID_NONE], initiatorDomains, resourceTypes: EVERY_TYPE };
+    rules.push({ id: id++, priority: 3, action: block, condition: { ...workers, requestDomains: [...PRIVATE_DOMAINS] } });
+    for (const regexFilter of PRIVATE_URL_PATTERNS) {
+      rules.push({ id: id++, priority: 3, action: block, condition: { ...workers, regexFilter, isUrlFilterCaseSensitive: false } });
+    }
+  }
   return rules;
 }
+
+/** `chrome.tabs.TAB_ID_NONE`: a request from no tab, such as a service or shared worker's. */
+const TAB_ID_NONE = -1;
 
 const PAGE_END_TIMEOUT_MS = 5000;
 
@@ -135,19 +154,32 @@ export async function openRunTab(opts: TabPolicyOptions): Promise<LeasedBrowser 
   };
 
   // A page this tab opens is the run's, and runs nowhere. Its requests are blocked
-  // first, then it's closed: closing it inside this event leaves the opener's
-  // `window.open` waiting for ever (measured: the page's script stalls). What its first
-  // request could carry, the consented page could already send by `fetch` to any public
-  // site, and the agent never sees the page.
+  // first, then it's closed. What its first request could carry, the consented page
+  // could already send by `fetch` to any public site, and the agent never sees the page.
+  //
+  // Closed only once Chrome has finished making it. `onCreated` fires while the
+  // opener's `window.open` is still waiting on the browser for its answer, and a tab
+  // removed before that answer goes leaves the opener's script stalled for good
+  // (measured: with the CPU busy, 5 runs in 8 still hung after 30 s when the close
+  // followed only the rules update). The popup's first `onUpdated` comes after it is
+  // attached; the timer is a backstop, and the block rule holds meanwhile.
   const popupRule = opts.firstRuleId + 90;
+  const POPUP_SETTLE_MS = 3000;
   const onCreated = (tab: chrome.tabs.Tab): void => {
     if (tab.openerTabId !== tabId || tab.id === undefined) return;
     const popup = tab.id;
     closedPages.push(tab.pendingUrl ?? tab.url ?? '');
-    void chrome.declarativeNetRequest.updateSessionRules({
+    const settled = new Promise<void>((resolve) => {
+      const done = (): void => { clearTimeout(timer); chrome.tabs.onUpdated.removeListener(onUpdated); resolve(); };
+      const onUpdated = (id: number): void => { if (id === popup) done(); };
+      const timer = setTimeout(done, POPUP_SETTLE_MS);
+      chrome.tabs.onUpdated.addListener(onUpdated);
+    });
+    const blocked = chrome.declarativeNetRequest.updateSessionRules({
       removeRuleIds: [popupRule],
       addRules: [{ id: popupRule, priority: 4, action: { type: 'block' as chrome.declarativeNetRequest.RuleActionType }, condition: { tabIds: [popup], resourceTypes: EVERY_TYPE } }],
-    }).catch(() => {}).then(() => chrome.tabs.remove(popup)).catch(() => {});
+    }).catch(() => {});
+    void Promise.all([blocked, settled]).then(() => chrome.tabs.remove(popup)).catch(() => {});
   };
   chrome.tabs.onCreated.addListener(onCreated);
 

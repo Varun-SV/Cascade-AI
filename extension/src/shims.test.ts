@@ -45,7 +45,7 @@ describe('the crypto shim agrees with Node', () => {
   });
 
   it('refuses keys that are not Ed25519', () => {
-    const rsa = node.generateKeyPairSync('rsa', { modulusLength: 1024 });
+    const rsa = node.generateKeyPairSync('rsa', { modulusLength: 2048 });
     expect(() => shim.createPrivateKey(rsa.privateKey.export({ type: 'pkcs8', format: 'pem' }) as string)).toThrow();
     expect(() => shim.createPublicKey({ key: new Uint8Array(rsa.publicKey.export({ type: 'spki', format: 'der' })), format: 'der', type: 'spki' })).toThrow();
   });
