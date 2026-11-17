@@ -63,6 +63,23 @@ describe('the Browser chip', () => {
   });
 });
 
+describe('the Browser chip with only the user’s own Chrome', () => {
+  it('is offered, says what it needs, and is never disabled by an allowance', () => {
+    renderComposer({ browserOwnOnly: true, browserAllowance: { used: 5, limit: 5 } });
+    fireEvent.click(screen.getByRole('button', { name: 'Tools' }));
+    const chip = screen.getByRole('menuitemcheckbox', { name: /browser/i }) as HTMLButtonElement;
+    expect(chip.disabled).toBe(false);
+    expect(chip).toHaveTextContent('Your Chrome, with the Cascade extension on');
+    expect(chip.getAttribute('title')).toContain('Cascade extension');
+  });
+
+  it('is absent where the deployment has no browser of either kind', () => {
+    renderComposer({ browserAvailable: false });
+    fireEvent.click(screen.getByRole('button', { name: 'Tools' }));
+    expect(screen.queryByRole('menuitemcheckbox', { name: /browser/i })).toBeNull();
+  });
+});
+
 function renderComposer(over: Partial<React.ComponentProps<typeof Composer>> = {}) {
   const props = {
     skills: [{ id: 'general', name: 'General assistant' }, { id: 'code-reviewer', name: 'Code reviewer' }] as never,

@@ -55,7 +55,10 @@ const ROUTING_MODES: Array<{ value: RoutingMode; label: string; sub: string }> =
 const FORCE_TIERS: ForceTier[] = ['auto', 'T1', 'T2', 'T3'];
 
 /** How many browser sessions are left, for the Browser switch's second line. */
-function browserSub(allowance: BrowserAllowanceView): string {
+function browserSub(allowance: BrowserAllowanceView, ownOnly: boolean): string {
+  // The user's own Chrome is the only browser here: nothing is rationed, and the
+  // one thing they need to know is what has to be running for it to work.
+  if (ownOnly) return 'Your Chrome, with the Cascade extension on';
   if (allowance === CHECKING) return 'Checking today’s sessions…';
   if (!allowance) return 'A real browser for this run';
   const left = Math.max(0, allowance.limit - allowance.used);
@@ -78,6 +81,8 @@ interface Props {
   browserMode: boolean;
   onBrowserModeChange: (on: boolean) => void;
   browserAvailable: boolean;
+  /** The only browser is the user's own Chrome, through the extension (no hosted one). */
+  browserOwnOnly?: boolean;
   /** Today's browser sessions against the plan's allowance. See `browserChip`. */
   browserAllowance?: BrowserAllowanceView;
   onWebSearchChange: (on: boolean) => void;
@@ -92,7 +97,7 @@ type MenuKey = 'plus' | 'tools' | 'mode';
 export default function Composer({
   skills, skillId, onSkillChange, hasProviders, busy, onSend, onStop,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
-  browserMode, onBrowserModeChange, browserAvailable, browserAllowance,
+  browserMode, onBrowserModeChange, browserAvailable, browserOwnOnly = false, browserAllowance,
   onManageSkills, onManageConnectors, draftRequest,
 }: Props) {
   const chip = browserChip(browserAllowance ?? null);
@@ -243,7 +248,10 @@ export default function Composer({
       if (browserAvailable) {
         list.push({
           kind: 'toggle', label: 'Browser', icon: <MonitorPlay size={15} />, checked: browserMode,
-          sub: browserSub(browserAllowance ?? null), title: chip.title, disabled: chip.disabled,
+          sub: browserSub(browserAllowance ?? null, browserOwnOnly),
+          ...(browserOwnOnly
+            ? { title: 'Lets this run use a tab in your own Chrome. Pair Chrome once with the Cascade extension; it asks you before each run starts.' }
+            : { title: chip.title, disabled: chip.disabled }),
           onToggle: () => onBrowserModeChange(!browserMode),
         });
       }
