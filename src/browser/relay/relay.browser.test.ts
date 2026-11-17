@@ -13,7 +13,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo, Socket } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket as WsClient, type WebSocket, WebSocketServer } from 'ws';
 import { connectCdp } from './cdp-client.js';
 import { type EgressProxy, type ProxyNetwork, browserProxyArgs, startEgressProxy } from './egress-proxy.js';
@@ -724,7 +724,12 @@ suite('fail closed when the proxy is unavailable', { timeout: 60_000 }, () => {
     const port = r.priv.port;
     await r.proxy.close();
     await sleep(100);
-    expect(r.lease.state()).toBe('idle');
+    // Revoked at once: no fence, so the agent can do nothing more. The teardown behind
+    // it ('ending', then 'idle') takes as long as the machine needs: a fixed wait for
+    // 'idle' failed on a busy CI runner (e589a38) with the lease correctly 'ending'.
+    expect(r.lease.fence()).toBeNull();
+    expect(['ending', 'idle']).toContain(r.lease.state());
+    await vi.waitFor(() => expect(r.lease.state()).toBe('idle'), { timeout: 10_000 });
     await r.serving;
     expect(r.relay.refusals.join()).toContain('egress-proxy-down');
     const raw = await connectCdp(r.browser.tabWs);
