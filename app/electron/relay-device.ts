@@ -79,6 +79,7 @@ export interface RunWindow {
   on(event: 'closed', fn: () => void): unknown;
   isDestroyed(): boolean;
   destroy(): void;
+  focus(): void;
 }
 
 export interface ElectronDeps {
@@ -174,6 +175,8 @@ export interface RunBrowser {
   };
   pageEnd: 'close';
   onEgressDown(fn: () => void): void;
+  /** Brings the run's window forward, for the user taking over. */
+  focus(): void;
   close(): Promise<void>;
   /** For the log and the tests. */
   readonly refused: readonly string[];
@@ -250,6 +253,7 @@ export async function openRunBrowser(consent: Consent, core: RelayCore, electron
       tabWs: '', tabTargetId, pageEnd: 'close', refused, cancelledDownloads,
       connectTab: async () => debuggerCdp(window.webContents.debugger),
       onEgressDown: (fn) => proxy.onClose(fn),
+      focus: () => { if (!window.isDestroyed()) window.focus(); },
       enforcer: {
         decisions: [], closedPages, children: [], dismissedDialogs,
         async checkTabBeforeLease() {

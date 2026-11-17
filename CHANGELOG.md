@@ -30,8 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the CLI, never a tab or profile you're using. Pages from any other site,
   private-network addresses, popups, dialogs and downloads are stopped on your
   device, before anything is sent, and no screenshot or live view leaves it: you
-  watch where it runs, and in the extension **Take over** pauses the run while
-  you use its tab, until you hand it back. Devices sign in with a key made on them,
+  watch where it runs, and in the extension or the desktop app **Take over**
+  pauses the run while you use its tab, until you hand it back. Devices sign in with a key made on them,
   and the server holds only its public half. In the extension a run also
   reaches past its window, and says so when it asks: while it's open, WebRTC
   sends no UDP in any tab (a call elsewhere may get worse), and until Chrome
@@ -54,7 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The desktop app as a device.** Settings → Cloud runs lets runs on Cascade
   Cloud use a browser in the app while it's open. Each run asks in the app, and
   gets a window of its own with an empty, in-memory profile, policed in the
-  app's main process as the CLI's browser is.
+  app's main process as the CLI's browser is. It serves only while the account
+  it was paired for is signed in.
 - **Images and documents in the desktop app.** The desktop chat takes images
   (attach or paste), shows them on the message, and gives them to the run. A
   chat handed from the web to the desktop app brings its files: images as

@@ -43,7 +43,8 @@ device shows which run is asking, and you type the sites it may use. Then:
 - In the extension, **Take over** in the toolbar pauses the run so you can use its
   tab yourself (to sign in, say): the run can't act there, and nothing from the
   tab is sent, until you choose **Hand back**. The run then carries on from the
-  page you left. The CLI has no takeover.
+  page you left. The desktop app has the same, at the bottom of its window while
+  a run is on. The CLI has no takeover.
 - Stop it from the extension's toolbar button, by closing its window, or with
   Ctrl-C in `cascade relay serve`.
 
@@ -86,7 +87,9 @@ app's own browser, and nothing you're signed in to is in it. The app's main
 process polices that window as the CLI does: its traffic goes through a proxy that
 resolves and checks every address, other sites' pages, downloads, permissions and
 pop-ups are refused, and the window and its storage go when the run ends.
-**Remove this app as a device** removes it on the server and here.
+It serves only while the Cascade Cloud account it was paired for is signed in:
+signing out stops it (a run on it ends), and signing in as someone else doesn't
+start it. **Remove this app as a device** removes it on the server and here.
 
 ## Using it from the web
 

@@ -36,6 +36,8 @@ export interface ServeOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Connections in a row the server closes before accepting the device, before giving up. */
   maxRefusals?: number;
+  /** The connection in use, and null when it closes: for a takeover, which acts on its lease. */
+  onClient?: (client: DeviceClient | null) => void;
 }
 
 const BACKOFF_START_MS = 1000;
@@ -61,6 +63,7 @@ export async function serveDevice(opts: ServeOptions): Promise<'stopped' | 'refu
     });
     const stop = (): void => { void client.close(); };
     opts.signal.addEventListener('abort', stop, { once: true });
+    opts.onClient?.(client);
     let welcomed = false;
     try {
       await client.ready;
@@ -70,6 +73,7 @@ export async function serveDevice(opts: ServeOptions): Promise<'stopped' | 'refu
       opts.log('connected: runs can ask for this machine\'s browser');
     } catch { /* closed before the server accepted it: counted below */ }
     const why = await client.closed;
+    opts.onClient?.(null);
     opts.signal.removeEventListener('abort', stop);
     if (opts.signal.aborted) return 'stopped';
     // Only the server turning the device away counts: a restart or an outage fails

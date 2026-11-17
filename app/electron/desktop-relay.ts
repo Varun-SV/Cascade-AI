@@ -16,6 +16,8 @@ import type { RelayCloudClient } from './cloudAuth.js';
 
 export interface StoredDesktopDevice {
   serverUrl: string;
+  /** The Cascade Cloud account it was paired for: it serves while that account is signed in. */
+  accountId: string;
   deviceId: string;
   name: string;
   serverId: string;
@@ -39,19 +41,25 @@ export interface DesktopRelayCore extends RelayCore {
     startBrowser(consent: Consent): Promise<RunBrowser>;
     log(line: string): void;
     signal: AbortSignal;
+    onClient?(client: RelayDeviceClient | null): void;
   }): Promise<'stopped' | 'refused'>;
 }
 
 export interface DesktopRelayDeps {
   core: DesktopRelayCore;
   electron: ElectronDeps;
-  /** The signed-in account's client and its server, or null when signed out. */
-  cloud(): { client: RelayCloudClient; serverUrl: string } | null;
+  /** The signed-in account: its id, its client and its server; null when signed out. */
+  cloud(): { userId: string; client: RelayCloudClient; serverUrl: string } | null;
   file: { load(): StoredDesktopDevice | null; save(d: StoredDesktopDevice): void; clear(): void };
   vault: { available(): boolean; encrypt(text: string): string; decrypt(blob: string): string };
   /** To the app's window: questions, and status. */
   notify(channel: 'relay:ask' | 'relay:ask-closed' | 'relay:status', payload: unknown): void;
   hostname?: () => string;
+}
+
+/** What a takeover needs of the connection: the lease of the run it serves. */
+export interface RelayDeviceClient {
+  lease(): { state(): string; suspend(): void; handBack(): void } | null;
 }
 
 export interface DesktopRelayStatus {
@@ -61,6 +69,8 @@ export interface DesktopRelayStatus {
   name: string | null;
   server: string | null;
   run: boolean;
+  /** The user has the run's window: the run can't act there until they hand it back. */
+  takenOver: boolean;
   error: string | null;
 }
 
@@ -72,11 +82,34 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
   let serving: AbortController | null = null;
   let connected = false;
   let run: RunBrowser | null = null;
+  let client: RelayDeviceClient | null = null;
   let error: string | null = null;
+
+  /** Whether the account signed in now is the one the pairing belongs to. */
+  const ownerSignedIn = (d: StoredDesktopDevice): boolean => {
+    const c = deps.cloud();
+    return !!c && c.userId === d.accountId && c.serverUrl === d.serverUrl;
+  };
+  /** Why a pairing left on isn't serving, when it's the account. */
+  const accountProblem = (d: StoredDesktopDevice | null): string | null => {
+    if (!d?.enabled || ownerSignedIn(d)) return null;
+    return deps.cloud()
+      ? 'This app was paired for another Cascade Cloud account. Sign in to that one, or remove this app as a device.'
+      : 'Sign in to Cascade Cloud, with the account this app was paired for, to serve its runs.';
+  };
 
   const status = (): DesktopRelayStatus => {
     const d = deps.file.load();
-    return { paired: !!d, enabled: !!d?.enabled, connected, name: d?.name ?? null, server: d?.serverUrl ?? null, run: run !== null, error };
+    const takenOver = run !== null && client?.lease()?.state() === 'suspended';
+    return { paired: !!d, enabled: !!d?.enabled, connected, name: d?.name ?? null, server: d?.serverUrl ?? null, run: run !== null, takenOver, error: error ?? accountProblem(d) };
+  };
+
+  /** Stops serving now: the connection closes, a run on it ends, a question gets no. */
+  const stopServing = (): void => {
+    serving?.abort();
+    serving = null;
+    connected = false;
+    for (const a of [...asks.values()]) a.resolve(null);
   };
   const publish = (): void => deps.notify('relay:status', status());
 
@@ -121,6 +154,7 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
       stored: { deviceId: d.deviceId, privateKeyPem, serverId: d.serverId, serverKey: d.serverKey },
       endpoints: deps.core.relayEndpoints(d.serverUrl, d),
       askUser, startBrowser, signal: ctl.signal,
+      onClient: (c) => { if (serving === ctl) client = c; },
       log: (line) => {
         if (line.startsWith('connected')) { connected = true; error = null; publish(); }
         else if (line.startsWith('disconnected')) { connected = false; publish(); }
@@ -143,6 +177,7 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
     /** Pairs if need be (signed in), then serves. */
     async enable(): Promise<DesktopRelayStatus> {
       let d = deps.file.load();
+      if (d && !ownerSignedIn(d)) throw new Error(accountProblem({ ...d, enabled: true })!);
       if (!d) {
         const cloud = deps.cloud();
         if (!cloud) throw new Error('Sign in to Cascade Cloud first.');
@@ -153,7 +188,7 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
         const reg = await cloud.client.registerRelayDevice({ name, kind: 'desktop', publicKey: key.publicKey });
         if (reg.serverId !== info.serverId || reg.serverKey !== info.serverKey) throw new Error('The server changed its identity while pairing. Nothing was saved.');
         d = {
-          serverUrl: cloud.serverUrl, deviceId: reg.device.id, name: reg.device.name, serverId: info.serverId, serverKey: info.serverKey,
+          serverUrl: cloud.serverUrl, accountId: cloud.userId, deviceId: reg.device.id, name: reg.device.name, serverId: info.serverId, serverKey: info.serverKey,
           controlPath: info.controlPath, runPath: info.runPath, privateKeyEnc: deps.vault.encrypt(key.privateKeyPem), enabled: true,
         };
       } else {
@@ -168,10 +203,7 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
 
     /** Stops serving; a run using this app's browser ends. The pairing is kept. */
     disable(): DesktopRelayStatus {
-      serving?.abort();
-      serving = null;
-      connected = false;
-      for (const a of [...asks.values()]) a.resolve(null);
+      stopServing();
       const d = deps.file.load();
       if (d) deps.file.save({ ...d, enabled: false });
       publish();
@@ -183,13 +215,37 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
       const d = deps.file.load();
       this.disable();
       if (d) {
-        const cloud = deps.cloud();
-        // Already gone on the server is fine: the key still goes from here.
-        await cloud?.client.removeRelayDevice(d.deviceId).catch((e: unknown) => { if (!/\(404\)/.test(String(e))) throw e; });
+        // Removed on the server only through the account it belongs to; under another
+        // account (or none) the key still goes from here. Already gone is fine.
+        if (ownerSignedIn(d)) {
+          await deps.cloud()!.client.removeRelayDevice(d.deviceId).catch((e: unknown) => { if (!/\(404\)/.test(String(e))) throw e; });
+        }
         deps.file.clear();
       }
       publish();
       return status();
+    },
+
+    /**
+     * The user takes the run's window: the lease's fence closes at once, so the run's
+     * commands are refused and nothing from the page is passed on, until hand back.
+     */
+    takeOver(): { ok: true } | { error: string } {
+      const lease = client?.lease();
+      if (!run || !lease || lease.state() !== 'held') return { error: 'No run is using this app\'s browser.' };
+      lease.suspend();
+      run.focus();
+      publish();
+      return { ok: true };
+    },
+
+    /** The run carries on, from the page the user left; the relay brings it up to date. */
+    handBack(): { ok: true } | { error: string } {
+      const lease = client?.lease();
+      if (!run || !lease || lease.state() !== 'suspended') return { error: 'The run is not paused for you.' };
+      lease.handBack();
+      publish();
+      return { ok: true };
     },
 
     /** The user's answer from the app's window. An answer that isn't sites is asked again. */
@@ -202,17 +258,23 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
       return { ok: true };
     },
 
-    /** At start: serve if the user left it on. */
+    /** At start: serve if the user left it on, and its account is the one signed in. */
     resume(): void {
       const d = deps.file.load();
-      if (d?.enabled) serve(d);
+      if (d?.enabled && ownerSignedIn(d)) serve(d);
+      publish();
+    },
+
+    /** Signed out, or in as someone else: stop, and serve again only for the pairing's own account. */
+    accountChanged(): void {
+      stopServing();
+      error = null;
+      this.resume();
     },
 
     /** Quitting: end everything. */
     shutdown(): void {
-      serving?.abort();
-      serving = null;
-      for (const a of [...asks.values()]) a.resolve(null);
+      stopServing();
     },
   };
 }

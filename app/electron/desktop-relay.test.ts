@@ -4,11 +4,20 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { parseSites } from '../../src/cli/commands/relay.js';
+const opened = vi.hoisted(() => ({ windows: [] as Array<{ focus: ReturnType<typeof import('vitest').vi.fn>; close: () => Promise<void> }> }));
+vi.mock('./relay-device.js', () => ({
+  openRunBrowser: async () => {
+    const w = { focus: vi.fn(), close: async () => {} };
+    opened.windows.push(w);
+    return w;
+  },
+}));
 import { createDesktopRelay, type DesktopRelayCore, type DesktopRelayDeps, type StoredDesktopDevice } from './desktop-relay.js';
 
 type ServeOpts = Parameters<DesktopRelayCore['serveDevice']>[0];
 
-function harness(over: { signedIn?: boolean; keychain?: boolean; reply?: { serverId: string; serverKey: string }; stored?: StoredDesktopDevice } = {}) {
+function harness(over: { signedIn?: boolean; keychain?: boolean; reply?: { serverId: string; serverKey: string }; stored?: StoredDesktopDevice; account?: string } = {}) {
+  let account: string | null = over.signedIn === false ? null : (over.account ?? 'user-a');
   let saved: StoredDesktopDevice | null = over.stored ?? null;
   const served: ServeOpts[] = [];
   let finish: ((o: 'stopped' | 'refused') => void) | null = null;
@@ -31,7 +40,8 @@ function harness(over: { signedIn?: boolean; keychain?: boolean; reply?: { serve
   const deps: DesktopRelayDeps = {
     core,
     electron: {} as DesktopRelayDeps['electron'],
-    cloud: () => (over.signedIn === false ? null : {
+    cloud: () => (account === null ? null : {
+      userId: account,
       serverUrl: 'https://cloud.test',
       client: {
         relayServer: async () => info,
@@ -44,11 +54,14 @@ function harness(over: { signedIn?: boolean; keychain?: boolean; reply?: { serve
     notify: (c, p) => notes.push([c, p]),
     hostname: () => 'box',
   };
-  return { relay: createDesktopRelay(deps), served, notes, registered, removed, saved: () => saved, finish: (o: 'stopped' | 'refused') => finish!(o) };
+  return {
+    relay: createDesktopRelay(deps), served, notes, registered, removed, saved: () => saved, finish: (o: 'stopped' | 'refused') => finish!(o),
+    signIn: (id: string | null) => { account = id; },
+  };
 }
 
 const pairedDevice = (enabled: boolean): StoredDesktopDevice => ({
-  serverUrl: 'https://cloud.test', deviceId: 'dev-1', name: 'box (desktop app)', serverId: 's1', serverKey: 'k1',
+  serverUrl: 'https://cloud.test', accountId: 'user-a', deviceId: 'dev-1', name: 'box (desktop app)', serverId: 's1', serverKey: 'k1',
   controlPath: '/c', runPath: '/r', privateKeyEnc: 'enc(pem)', enabled,
 });
 
@@ -57,7 +70,7 @@ describe('turning it on', () => {
     const h = harness();
     const s = await h.relay.enable();
     expect(h.registered).toEqual([{ name: 'box (desktop app)', kind: 'desktop', publicKey: 'pub' }]);
-    expect(h.saved()).toMatchObject({ deviceId: 'dev-1', serverId: 's1', serverKey: 'k1', enabled: true, privateKeyEnc: 'enc(-----BEGIN PRIVATE KEY-----x)' });
+    expect(h.saved()).toMatchObject({ accountId: 'user-a', deviceId: 'dev-1', serverId: 's1', serverKey: 'k1', enabled: true, privateKeyEnc: 'enc(-----BEGIN PRIVATE KEY-----x)' });
     expect(JSON.stringify(h.saved())).not.toMatch(/"privateKeyPem"/);
     expect(h.served).toHaveLength(1);
     expect(h.served[0]!.stored.privateKeyPem).toBe('-----BEGIN PRIVATE KEY-----x');
@@ -160,5 +173,70 @@ describe('forgetting', () => {
     expect(h.saved()).toBeNull();
     expect(s).toMatchObject({ paired: false, enabled: false });
     expect(h.served[0]!.signal.aborted).toBe(true);
+  });
+});
+
+describe("the pairing's account", () => {
+  it('signing out stops serving and ends a question; signing back in serves again', async () => {
+    const h = harness({ stored: pairedDevice(true) });
+    h.relay.resume();
+    const asked = h.served[0]!.askUser({ runId: 'r', expiresAt: Date.now() + 60_000, signal: new AbortController().signal });
+    h.signIn(null);
+    h.relay.accountChanged();
+    expect(h.served[0]!.signal.aborted).toBe(true);
+    await expect(asked).resolves.toBeNull();
+    expect(h.relay.status()).toMatchObject({ enabled: true, connected: false, error: expect.stringContaining('Sign in') });
+    h.signIn('user-a');
+    h.relay.accountChanged();
+    expect(h.served).toHaveLength(2);
+    expect(h.relay.status().error).toBeNull();
+  });
+
+  it("another account signed in neither resumes it, nor turns it on, nor removes it from that account", async () => {
+    const h = harness({ stored: pairedDevice(true), account: 'user-b' });
+    h.relay.resume();
+    expect(h.served).toEqual([]);
+    expect(h.relay.status().error).toMatch(/another Cascade Cloud account/);
+    await expect(h.relay.enable()).rejects.toThrow(/another Cascade Cloud account/);
+    expect(h.registered).toEqual([]);
+    await h.relay.forget();
+    expect(h.removed).toEqual([]);
+    expect(h.saved()).toBeNull();
+  });
+});
+
+describe('taking over the run window', () => {
+  function lease() {
+    let state = 'held';
+    return { state: () => state, suspend: vi.fn(() => { state = 'suspended'; }), handBack: vi.fn(() => { state = 'held'; }) };
+  }
+
+  it('pauses the run and brings its window forward; hand back lets it carry on', async () => {
+    const h = harness({ stored: pairedDevice(true) });
+    h.relay.resume();
+    const l = lease();
+    h.served[0]!.onClient!({ lease: () => l });
+    expect(h.relay.takeOver()).toEqual({ error: expect.stringContaining('No run') });
+    const run = await h.served[0]!.startBrowser({} as never);
+    expect(h.relay.takeOver()).toEqual({ ok: true });
+    expect(l.suspend).toHaveBeenCalledTimes(1);
+    expect(opened.windows.at(-1)!.focus).toHaveBeenCalled();
+    expect(h.relay.status()).toMatchObject({ run: true, takenOver: true });
+    expect(h.relay.takeOver()).toMatchObject({ error: expect.any(String) });
+    expect(h.relay.handBack()).toEqual({ ok: true });
+    expect(l.handBack).toHaveBeenCalledTimes(1);
+    expect(h.relay.status().takenOver).toBe(false);
+    expect(h.relay.handBack()).toMatchObject({ error: expect.stringContaining('not paused') });
+    await run.close();
+    expect(h.relay.status()).toMatchObject({ run: false, takenOver: false });
+  });
+
+  it('a closed connection has no lease to take', async () => {
+    const h = harness({ stored: pairedDevice(true) });
+    h.relay.resume();
+    h.served[0]!.onClient!({ lease: () => lease() });
+    await h.served[0]!.startBrowser({} as never);
+    h.served[0]!.onClient!(null);
+    expect(h.relay.takeOver()).toMatchObject({ error: expect.any(String) });
   });
 });

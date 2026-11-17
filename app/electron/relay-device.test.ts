@@ -87,6 +87,7 @@ function fakeWindow(dbg: ElectronDebugger) {
     on: (e: string, fn: () => void) => ee.on(e, fn),
     isDestroyed: () => destroyed,
     destroy: () => { if (!destroyed) { destroyed = true; ee.emit('closed'); } },
+    focus: vi.fn(),
     emit: (e: string) => { ee.emit(e); },
   };
   return { win, opened };

@@ -24,6 +24,7 @@ import {
 import { SettingsView } from './views/SettingsView.js';
 import { ApprovalModal } from './components/ApprovalModal.js';
 import { RelayConsentModal } from './components/RelayConsentModal.js';
+import { RelayRunBanner } from './components/RelayRunBanner.js';
 import { PlanApprovalModal } from './components/PlanApprovalModal.js';
 import { EscalationModal } from './components/EscalationModal.js';
 import { WhyPanel } from './components/WhyPanel.js';
@@ -86,7 +87,10 @@ export interface DesktopBrowserState {
 
 /** This app as a relay device: see app/electron/desktop-relay.ts. */
 export interface RelayStatus {
-  paired: boolean; enabled: boolean; connected: boolean; name: string | null; server: string | null; run: boolean; error: string | null;
+  paired: boolean; enabled: boolean; connected: boolean; name: string | null; server: string | null; run: boolean;
+  /** The user has the run's window; the run waits until they hand it back. */
+  takenOver: boolean;
+  error: string | null;
 }
 
 declare global {
@@ -143,6 +147,8 @@ declare global {
         disable(): Promise<RelayStatus | { error: string }>;
         forget(): Promise<RelayStatus | { error: string }>;
         answer(id: number, sites: string): Promise<{ ok: true } | { error: string }>;
+        takeOver(): Promise<{ ok: true } | { error: string }>;
+        handBack(): Promise<{ ok: true } | { error: string }>;
         onAsk(cb: (a: { id: number; runId: string; expiresAt: number }) => void): void;
         onAskClosed(cb: (a: { id: number }) => void): void;
         onStatus(cb: (s: RelayStatus) => void): void;
@@ -540,6 +546,7 @@ export function App() {
       {showSettings && <SettingsView socket={socketRef.current} />}
       <ApprovalModal socket={socketRef.current} />
       <RelayConsentModal />
+      <RelayRunBanner />
       <PlanApprovalModal socket={socketRef.current} />
       <EscalationModal socket={socketRef.current} />
       <ChangesModal />

@@ -177,6 +177,8 @@ contextBridge.exposeInMainWorld('cascade', {
     disable: () => ipcRenderer.invoke('relay:disable'),
     forget: () => ipcRenderer.invoke('relay:forget'),
     answer: (id: number, sites: string) => ipcRenderer.invoke('relay:answer', id, sites),
+    takeOver: () => ipcRenderer.invoke('relay:take-over'),
+    handBack: () => ipcRenderer.invoke('relay:hand-back'),
     onAsk: (cb: (a: { id: number; runId: string; expiresAt: number }) => void) => {
       ipcRenderer.on('relay:ask', (_e, a) => cb(a));
     },
