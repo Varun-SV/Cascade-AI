@@ -293,6 +293,22 @@ suite('the extension in a real Chromium', { timeout: 90_000 }, () => {
     expect(await page.evaluate<number>('1 + 1')).toBe(2);
   });
 
+  it('popups opened at once all stay blocked until they close', async () => {
+    const r = await rig();
+    const { page } = await r.run('run-1');
+    await page.goto('http://allowed.test/links');
+    const before = r.ctx.pages().length;
+    // All before any has loaded: an earlier one must not lose its block to a later one.
+    const answered = await Promise.race([
+      page.evaluate<number>("for (const n of ['first', 'second', 'third']) window.open('http://offlist.test/' + n); 1"),
+      sleep(5000).then(() => 'stalled'),
+    ]);
+    expect(answered).toBe(1);
+    await vi.waitFor(() => expect(r.ctx.pages().length).toBeLessThanOrEqual(before), { timeout: 8000 });
+    expect(r.offlist.hits).toEqual([]);
+    expect(await page.evaluate<number>('1 + 1')).toBe(2);
+  });
+
   it('R-A3: the service worker stopping mid-run ends the run, its window goes, and nothing reattaches without a new yes', async () => {
     const r = await rig();
     const { page, relayed } = await r.run('run-1');

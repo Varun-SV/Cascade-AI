@@ -272,9 +272,31 @@ export async function openRunTab(opts: TabPolicyOptions): Promise<LeasedBrowser 
   // attached; the timer is a backstop, and the block rule holds meanwhile.
   const popupRule = opts.firstRuleId + 90;
   const POPUP_SETTLE_MS = 3000;
+  // One rule for every popup not yet closed: a second popup must not take the first's
+  // block away while the first is still open. Each update carries the whole set and
+  // goes at once: Chrome applies an extension's calls in the order they're made, so
+  // the last one has every open popup in it, and nothing waits behind an earlier call
+  // while a new popup's first request is on its way (measured: queueing them let the
+  // second of two popups through).
+  const openPopups = new Set<number>();
+  const syncPopupRule = (): Promise<unknown> => chrome.declarativeNetRequest.updateSessionRules({
+    removeRuleIds: [popupRule],
+    addRules: openPopups.size
+      ? [{ id: popupRule, priority: 4, action: { type: 'block' as chrome.declarativeNetRequest.RuleActionType }, condition: { tabIds: [...openPopups], resourceTypes: EVERY_TYPE } }]
+      : [],
+  }).catch(() => {});
+  // Which new tabs are the run's: any in the run's own window (Chrome puts a page's
+  // popups there as tabs), any the run's tab opened, and any one of its popups opened.
+  // The opener alone isn't enough: with several opened at once, Chrome names each one's
+  // opener as the tab before it (measured), so only the first pointed at the run's tab.
+  const runPopups = new Set<number>();
   const onCreated = (tab: chrome.tabs.Tab): void => {
-    if (tab.openerTabId !== tabId || tab.id === undefined) return;
+    if (tab.id === undefined || tab.id === tabId) return;
+    const opener = tab.openerTabId;
+    const ours = tab.windowId === windowId || opener === tabId || (opener !== undefined && runPopups.has(opener));
+    if (!ours) return;
     const popup = tab.id;
+    runPopups.add(popup);
     closedPages.push(tab.pendingUrl ?? tab.url ?? '');
     const settled = new Promise<void>((resolve) => {
       const done = (): void => { clearTimeout(timer); chrome.tabs.onUpdated.removeListener(onUpdated); resolve(); };
@@ -282,11 +304,13 @@ export async function openRunTab(opts: TabPolicyOptions): Promise<LeasedBrowser 
       const timer = setTimeout(done, POPUP_SETTLE_MS);
       chrome.tabs.onUpdated.addListener(onUpdated);
     });
-    const blocked = chrome.declarativeNetRequest.updateSessionRules({
-      removeRuleIds: [popupRule],
-      addRules: [{ id: popupRule, priority: 4, action: { type: 'block' as chrome.declarativeNetRequest.RuleActionType }, condition: { tabIds: [popup], resourceTypes: EVERY_TYPE } }],
-    }).catch(() => {});
-    void Promise.all([blocked, settled]).then(() => chrome.tabs.remove(popup)).catch(() => {});
+    openPopups.add(popup);
+    const blocked = syncPopupRule();
+    // Its block goes only once the tab has: until then it stays covered.
+    void Promise.all([blocked, settled])
+      .then(() => chrome.tabs.remove(popup))
+      .catch(() => {})
+      .then(() => { openPopups.delete(popup); return syncPopupRule(); });
   };
   chrome.tabs.onCreated.addListener(onCreated);
 
