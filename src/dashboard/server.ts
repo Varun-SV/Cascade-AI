@@ -3,7 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { createServer } from 'node:http';
-import { attachmentIdsFrom, filesForRun, parseNewAttachment, withDocuments } from './run-files.js';
+import { RUN_FILE_LIMITS, attachmentIdsFrom, filesForRun, parseNewAttachment, withDocuments } from './run-files.js';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
@@ -345,7 +345,7 @@ export class DashboardServer {
       // Resuming an existing session: fold its stored history into the prompt
       // (built before persistRunStart so the new prompt isn't self-included).
       // The message's files: images go in as images, documents as text before it.
-      const files = filesForRun(this.store.getUnclaimedAttachments(attachmentIds));
+      const files = this.runFiles(requestedSessionId ? sessionId : null, attachmentIds);
       const runPrompt = withDocuments(requestedSessionId ? this.buildContinuationPrompt(sessionId, prompt) : prompt, files.documents);
       const title = this.persistRunStart(sessionId, prompt, attachmentIds);
       let cfg = model !== 'auto'
@@ -1164,6 +1164,26 @@ export class DashboardServer {
    * conversation to the new prompt. Called BEFORE persistRunStart so the new
    * prompt isn't duplicated into its own context.
    */
+  /**
+   * What a run gets from files: the new message's, and on a continued chat the ones
+   * earlier messages carried too, so a follow-up about them (or a chat handed over
+   * with them) still has them. Earlier documents all go in as text; of earlier
+   * images, the latest few, which bounds what a long chat costs.
+   */
+  private runFiles(continuedSessionId: string | null, attachmentIds: string[]): ReturnType<typeof filesForRun> {
+    const earlier: Array<NonNullable<ReturnType<MemoryStore['getAttachment']>>> = [];
+    if (continuedSessionId) {
+      const refs = this.store.getSessionMessages(continuedSessionId).flatMap((m) => m.attachments ?? []);
+      const images = refs.filter((r) => r.kind === 'image').slice(-RUN_FILE_LIMITS.earlierImages);
+      for (const r of refs) {
+        if (r.kind === 'image' && !images.includes(r)) continue;
+        const file = this.store.getAttachment(r.id);
+        if (file) earlier.push(file);
+      }
+    }
+    return filesForRun([...earlier, ...this.store.getUnclaimedAttachments(attachmentIds)]);
+  }
+
   private buildContinuationPrompt(sessionId: string, prompt: string): string {
     try {
       const history = this.store.getSessionMessages(sessionId);
@@ -1443,14 +1463,17 @@ export class DashboardServer {
 
     // A file for a message about to be sent (or imported): uploaded first, then
     // its id goes with the message. Within the app-wide 10mb body limit.
-    this.app.post('/api/attachments', auth, mutationLimiter, (req: Request, res: Response) => {
+    // Files come several at a time (a message's ten, a handed-over chat's), so they
+    // get their own allowance rather than the 10-a-minute one for runs.
+    const attachmentLimiter = rateLimit({ windowMs: 60 * 1000, limit: 120, standardHeaders: 'draft-7', legacyHeaders: false, message: { error: 'Too many files at once. Slow down.' } });
+    this.app.post('/api/attachments', attachmentLimiter, auth, (req: Request, res: Response) => {
       const parsed = parseNewAttachment(req.body);
       if ('error' in parsed) { res.status(400).json({ error: parsed.error }); return; }
       res.json(this.store.addAttachment(parsed));
     });
 
     // A message's file, to show it: an image's bytes, or a document's text.
-    this.app.get('/api/attachments/:id', auth, (req: Request, res: Response) => {
+    this.app.get('/api/attachments/:id', attachmentLimiter, auth, (req: Request, res: Response) => {
       const file = this.store.getAttachment(req.params.id as string);
       if (!file) { res.status(404).json({ error: 'Not found' }); return; }
       if (file.kind === 'image') {
@@ -1731,7 +1754,7 @@ export class DashboardServer {
 
       const prompt = body.prompt;
       const attachmentIds = attachmentIdsFrom(body.attachmentIds);
-      const files = filesForRun(this.store.getUnclaimedAttachments(attachmentIds));
+      const files = this.runFiles(requestedSessionId ? sessionId : null, attachmentIds);
       const runPrompt = withDocuments(requestedSessionId ? this.buildContinuationPrompt(sessionId, prompt) : prompt, files.documents);
       const title = this.persistRunStart(sessionId, prompt, attachmentIds);
 

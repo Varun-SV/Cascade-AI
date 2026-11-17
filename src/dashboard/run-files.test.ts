@@ -51,6 +51,7 @@ describe('what an upload may be', () => {
   it('a run takes at most ten ids, strings only, each once', () => {
     expect(attachmentIdsFrom(['a', 'a', 3, '', 'b'])).toEqual(['a', 'b']);
     expect(attachmentIdsFrom(Array.from({ length: 12 }, (_, i) => `f${i}`))).toHaveLength(10);
+    expect(attachmentIdsFrom(Array.from({ length: 1000 }, (_, i) => `f${i}`))).toEqual([]);
     expect(attachmentIdsFrom('a')).toEqual([]);
   });
 });
@@ -155,5 +156,25 @@ describe.skipIf(!hasSqlite)('the backend routes', () => {
     const [m] = store.getSessionMessages('s9');
     expect(m!.content).toBe('what is this');
     expect(m!.attachments?.map((f) => f.id)).toEqual([img.id]);
+  });
+
+  it('a continued chat gives the run the files earlier messages carried: every document, the latest images', async () => {
+    const { store, server } = await serve();
+    const start = (server as unknown as { persistRunStart: (s: string, p: string, ids: string[]) => string }).persistRunStart.bind(server);
+    const runFiles = (server as unknown as { runFiles: (s: string | null, ids: string[]) => { images: unknown[]; documents: Array<{ filename: string }> } }).runFiles.bind(server);
+    const doc = store.addAttachment({ kind: 'document', filename: 'spec.txt', text: 'the spec' });
+    start('s7', 'read this', [doc.id]);
+    const imgs = Array.from({ length: 6 }, () => store.addAttachment({ kind: 'image', mime: 'image/png', filename: null, data: PNG }));
+    start('s7', 'and these', imgs.map((i) => i.id));
+    await settle();
+    const fresh = store.addAttachment({ kind: 'image', mime: 'image/jpeg', filename: null, data: PNG });
+
+    const continued = runFiles('s7', [fresh.id]);
+    expect(continued.documents.map((d) => d.filename)).toEqual(['spec.txt']);
+    expect(continued.images).toHaveLength(5);
+    expect(continued.images.at(-1)).toMatchObject({ mimeType: 'image/jpeg' });
+
+    // A new chat gets only what it was sent.
+    expect(runFiles(null, [fresh.id])).toMatchObject({ documents: [], images: [{ mimeType: 'image/jpeg' }] });
   });
 });

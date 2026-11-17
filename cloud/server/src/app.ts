@@ -1192,7 +1192,8 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
 
   // A document upload's text, as a run reads it: what a handoff to the desktop app
   // carries for a document, since the desktop doesn't parse PDF or DOCX itself.
-  app.get('/api/uploads/:id/text', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+  const uploadTextLimiter = rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: true, legacyHeaders: false });
+  app.get('/api/uploads/:id/text', uploadTextLimiter, sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
     const id = req.params['id'];
     if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid upload id' }); return; }
     const userId = req.session!.userId;

@@ -17,6 +17,8 @@ export const RUN_FILE_LIMITS = {
   /** A document's text. */
   documentChars: 8_000_000,
   filename: 200,
+  /** Images from earlier in a chat that a continued run is given again, latest first. */
+  earlierImages: 4,
 } as const;
 
 const IMAGE_MIMES: ReadonlySet<string> = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
@@ -45,8 +47,14 @@ export function parseNewAttachment(body: unknown): NewMessageAttachment | { erro
 
 /** The ids a run was sent, as strings, at most a message's worth. */
 export function attachmentIdsFrom(raw: unknown): string[] {
-  if (!Array.isArray(raw)) return [];
-  return [...new Set(raw.filter((x): x is string => typeof x === 'string' && x.length > 0 && x.length <= 64))].slice(0, RUN_FILE_LIMITS.perMessage);
+  // Bounded before it's walked: a request names at most a message's files.
+  if (!Array.isArray(raw) || raw.length > RUN_FILE_LIMITS.perMessage * 2) return [];
+  const ids: string[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const x: unknown = raw[i];
+    if (typeof x === 'string' && x.length > 0 && x.length <= 64 && !ids.includes(x)) ids.push(x);
+  }
+  return ids.slice(0, RUN_FILE_LIMITS.perMessage);
 }
 
 /** What a run gets from a message's files. */
