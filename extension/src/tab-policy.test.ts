@@ -3,10 +3,14 @@ import { makeConsent } from '../../src/browser/relay/egress-rules.js';
 import { PRIVATE_DOMAINS, PRIVATE_URL_PATTERNS, tabRules } from './tab-policy.js';
 
 /** The rules applied the way declarativeNetRequest applies them: the highest priority wins. */
-function verdict(rules: ReturnType<typeof tabRules>, tabId: number, url: string, type: string): 'allow' | 'block' | 'none' {
+function verdict(rules: ReturnType<typeof tabRules>, tabId: number, url: string, type: string, initiator?: string): 'allow' | 'block' | 'none' {
   const hits = rules.filter((r) => {
     const c = r.condition;
     if (c.tabIds && !c.tabIds.includes(tabId)) return false;
+    if (c.initiatorDomains) {
+      const from = initiator ? new URL(initiator).hostname : '';
+      if (!c.initiatorDomains.some((d) => from === d || from.endsWith(`.${d}`))) return false;
+    }
     if (c.resourceTypes && !c.resourceTypes.includes(type as never)) return false;
     if (c.urlFilter) {
       // Only the `|prefix` form is used.
@@ -53,6 +57,30 @@ describe("the run tab's rules", () => {
     for (const url of ['https://172.32.0.1/', 'https://8.8.8.8/', 'https://localhost.example.com/', 'https://192.169.0.1/']) {
       expect([url, PRIVATE_URL_PATTERNS.some((p) => new RegExp(p, 'i').test(url)) || PRIVATE_DOMAINS.includes(new URL(url).hostname)]).toEqual([url, false]);
     }
+  });
+
+  it("the consented sites' service and shared workers can't reach private addresses either", () => {
+    // A worker's requests come from no tab (-1), with the worker's site as initiator.
+    for (const url of ['http://127.0.0.1/', 'http://192.168.0.1/admin', 'ws://[::1]:9000/', 'http://router.local/', 'http://10.0.0.5/']) {
+      for (const type of ['xmlhttprequest', 'websocket', 'other']) {
+        expect([url, type, verdict(rules, -1, url, type, 'https://example.com')]).toEqual([url, type, 'block']);
+        expect([url, type, verdict(rules, -1, url, type, 'http://allowed.test:8080')]).toEqual([url, type, 'block']);
+      }
+    }
+    // Their public requests are untouched.
+    expect(verdict(rules, -1, 'https://api.elsewhere.test/x', 'xmlhttprequest', 'https://example.com')).toBe('none');
+  });
+
+  it("leave other sites' workers alone", () => {
+    expect(verdict(rules, -1, 'http://192.168.0.1/', 'xmlhttprequest', 'https://elsewhere.test')).toBe('none');
+    expect(verdict(rules, -1, 'http://127.0.0.1/', 'xmlhttprequest', 'https://example.com.evil.test')).toBe('none');
+  });
+
+  it('stay inside the run\'s rule ids at the most sites a run can allow', () => {
+    const many = Array.from({ length: 50 }, (_, i) => `https://site${i}.example`);
+    const r = tabRules(7, makeConsent(many), 1000);
+    // The popup rule is firstRuleId + 90, and the next run starts at + 100.
+    expect(Math.max(...r.map((x) => x.id))).toBeLessThan(1000 + 90);
   });
 
   it("apply to the run's tab only: the user's other tabs are untouched", () => {
