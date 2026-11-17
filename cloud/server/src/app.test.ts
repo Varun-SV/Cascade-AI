@@ -395,6 +395,19 @@ describe('cloud/server app', () => {
     expect(body.browserSessionLimit).toBe(5);
   });
 
+  it('the Everyone view exists only when INSIGHTS_EVERYONE is on, signed in, and checks its inputs (stage 5)', async () => {
+    const cookie = await login('Everyone viewer');
+    const get = (q = '') => fetch(`${baseUrl}/api/insights/everyone${q}`, { headers: { Cookie: cookie } });
+    expect((await get()).status).toBe(404);
+    expect(((await (await fetch(`${baseUrl}/api/config`)).json()) as { insightsEveryone?: boolean }).insightsEveryone).toBe(false);
+    await restartWith({ INSIGHTS_EVERYONE: true });
+    expect(((await (await fetch(`${baseUrl}/api/config`)).json()) as { insightsEveryone?: boolean }).insightsEveryone).toBe(true);
+    expect((await fetch(`${baseUrl}/api/insights/everyone`)).status).toBe(401);
+    const body = await (await get('?surface=cli&weeks=4')).json() as { surface: string; rows: unknown[]; minimums: { runs: number; users: number } };
+    expect(body).toMatchObject({ surface: 'cli', rows: [], minimums: { runs: 20, users: 5 } });
+    for (const bad of ['?surface=phone', '?weeks=0', '?weeks=27', '?weeks=2.5', '?weeks=x']) expect([bad, (await get(bad)).status]).toEqual([bad, 400]);
+  });
+
   it('GET /api/usage/report is the signed-in user\'s own spend, and checks its inputs', async () => {
     expect((await fetch(`${baseUrl}/api/usage/report`)).status).toBe(401);
 

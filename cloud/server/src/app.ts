@@ -26,6 +26,7 @@ import { remoteBrowserControls } from './runs.js';
 import { NativeAuthStore, isLoopbackRedirect, hashRefreshToken } from './native-auth.js';
 import { githubAuthUrl, exchangeGithubCode, googleAuthUrl, exchangeGoogleCode, type OAuthProfile } from './auth/oauth.js';
 import { limitsForPlan, ORPHAN_UPLOAD_TTL_MS, todayKey, checkStorageQuota } from './entitlements.js';
+import { everyoneView, MAX_WEEKS, releaseClosedWeeks } from './insights.js';
 import { buildSpendReport, DEVICE_RUN_ID, deviceEndedAt, deviceRunSpendId, parsePeriod, parseSurface, parseTimeZone, spendEntryFromRun, type SpendSurface } from './spend.js';
 
 /** A device says which it is; only these two, as a device can't have run on the server. */
@@ -252,6 +253,8 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       devLoginEnabled: env.CLOUD_DEV_BYPASS,
       // Whether a user's own device can serve their runs a browser here.
       browserRelay: Boolean(options.browserRelay),
+      // Whether the Everyone view of routing and spend is published here.
+      insightsEveryone: env.INSIGHTS_EVERYONE === true,
       // Whether this deployment can actually produce a hosted browser. The
       // capability does not exist until an operator supplies a WORKING
       // endpoint, so the control for it must not either: a Browser toggle on a
@@ -1418,6 +1421,25 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   // viewer's IANA time zone (e.g. Europe/London), so each day ends at their
   // midnight under the rules in force that day; a bare offset in minutes east
   // of UTC is still accepted, as a fixed offset.
+  // Everyone: published weeks only, built from cells over the minimums (insights.ts).
+  // Signed in, as it's the app's; the figures hold no one user's runs.
+  // Off, it answers as missing, before anything else: not even a session is read.
+  app.get('/api/insights/everyone', (_req, res, next) => {
+    if (!env.INSIGHTS_EVERYONE) { res.status(404).json({ error: 'Not found' }); return; }
+    next();
+  });
+  app.get('/api/insights/everyone', rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: true, legacyHeaders: false }),
+    sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+      const raw = req.query['surface'];
+      const surface = raw === undefined || raw === 'all' ? null : parseSurface(raw);
+      if (surface === null && raw !== undefined && raw !== 'all') { res.status(400).json({ error: 'surface must be all, cloud, desktop or cli' }); return; }
+      const weeks = req.query['weeks'] === undefined ? 4 : Number(req.query['weeks']);
+      if (!Number.isInteger(weeks) || weeks < 1 || weeks > MAX_WEEKS) { res.status(400).json({ error: `weeks must be 1 to ${MAX_WEEKS}` }); return; }
+      const now = Date.now();
+      releaseClosedWeeks(store.insights, now);
+      res.json(everyoneView(store.insights, surface, weeks, now));
+    });
+
   app.get('/api/usage/report', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
     const period = parsePeriod(req.query['period'] ?? '30d');
     const tz = parseTimeZone(req.query['tz']);

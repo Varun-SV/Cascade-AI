@@ -514,6 +514,7 @@ export default function App() {
         {showConnectors && <ConnectorsModal onClose={() => setShowConnectors(false)} />}
         {showSpend && (
           <SpendReport
+            everyone={config?.insightsEveryone === true}
             onClose={() => setShowSpend(false)}
             onOpenChat={(id) => { setShowSpend(false); void selectConversation(id); }}
           />

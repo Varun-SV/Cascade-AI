@@ -19,6 +19,8 @@ export interface CloudConfig {
    * endpoint, so neither should the switch for it.
    */
   remoteBrowserEnabled?: boolean;
+  /** Whether the Everyone view of routing and spend is published here. Absent means no. */
+  insightsEveryone?: boolean;
   /**
    * Whether a user's own Chrome can serve their runs a browser here, through the
    * Cascade extension (the browser relay). Independent of `remoteBrowserEnabled`:
@@ -517,6 +519,15 @@ export interface SpendReport {
     /** Runs that ended in an error, and what they had cost by then. */
     failedRuns: number;
     failedUsd: number;
+    /** Runs the user stopped. */
+    stoppedRuns?: number;
+    /** The runs' time added up, and how many runs reported it. */
+    durationMs?: number;
+    timedRuns?: number;
+    /** Times a tier moved to another model mid-run. */
+    failovers?: number;
+    /** How the runs' agents finished, counted. */
+    agents?: { completed: number; failed: number; escalated: number; other: number };
   };
   /** One slot per hour, day or month, in order; `key` is local time
    *  ("2026-09-29 13", "2026-09-29" or "2026-09"). */
@@ -545,11 +556,29 @@ export interface SpendReport {
  * sent by name, so a day on the other side of a daylight-saving change ends
  * at its own midnight; today's offset is the fallback where it has no name.
  */
-export function fetchSpendReport(period: SpendPeriod): Promise<SpendReport> {
+export function fetchSpendReport(period: SpendPeriod, surface: SpendSurfaceFilter = 'all'): Promise<SpendReport> {
   let tz = '';
   try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone ?? ''; } catch { /* no Intl zone: use the offset */ }
   if (!tz) tz = String(-new Date().getTimezoneOffset());
-  return json(fetch(`/api/usage/report?period=${period}&tz=${encodeURIComponent(tz)}`, { credentials: 'include' }));
+  return json(fetch(`/api/usage/report?period=${period}&tz=${encodeURIComponent(tz)}&surface=${surface}`, { credentials: 'include' }));
+}
+
+/** Where runs ran: all of them, or the server's, the desktop app's or the CLI's. */
+export type SpendSurfaceFilter = 'all' | 'cloud' | 'desktop' | 'cli';
+
+export interface EveryoneRow { tier: string; model: string; runs: number; costUsd: number; tokens: number }
+/** Routing and spend across all users: published whole weeks only, over minimum cells. */
+export interface EveryoneView {
+  surface: SpendSurfaceFilter;
+  /** "week 2026-W45" or "weeks 2026-W42–2026-W45": never a month. */
+  label: string;
+  weeks: Array<{ week: string; rows: EveryoneRow[] }>;
+  rows: EveryoneRow[];
+  minimums: { runs: number; users: number };
+}
+
+export function fetchEveryone(surface: SpendSurfaceFilter, weeks: number): Promise<EveryoneView> {
+  return json(fetch(`/api/insights/everyone?surface=${surface}&weeks=${weeks}`, { credentials: 'include' }));
 }
 
 // ── Conversation handoff (open-and-continue, web ↔ desktop) ──
