@@ -16,7 +16,7 @@ import { parseSites } from '../../src/browser/relay/consent-input.js';
 import { type DeviceClient, type UserConsent, connectDeviceClient } from '../../src/browser/relay/device.js';
 import { makeConsent } from '../../src/browser/relay/egress-rules.js';
 import { type PairedDevice, endpointsOf, pairWithServer } from './pairing.js';
-import { openRunTab } from './tab-policy.js';
+import { RUN_RULE_IDS_FROM, openRunTab } from './tab-policy.js';
 
 // ── State ────────────────────────────────────
 
@@ -43,7 +43,7 @@ let connectAgain = false;
 let refusals = 0;
 let backoffMs = 1000;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
-let nextRuleId = 1000;
+let nextRuleId = RUN_RULE_IDS_FROM;
 /** The run the user approved last: the next browser started is its. */
 let approvedRun = '';
 
@@ -68,7 +68,9 @@ async function cleanUpAfterRestart(): Promise<void> {
   const { runWindows } = await chrome.storage.session.get('runWindows') as { runWindows?: number[] };
   // Closing a run's window closes its tab, and the debugger attachment goes with it.
   for (const windowId of runWindows ?? []) await chrome.windows.remove(windowId).catch(() => {});
-  const rules = await chrome.declarativeNetRequest.getSessionRules();
+  // The runs' rules only: the lasting worker rules below RUN_RULE_IDS_FROM stay until
+  // Chrome restarts (see keepWorkersOffPrivateNetwork).
+  const rules = (await chrome.declarativeNetRequest.getSessionRules()).filter((r) => r.id >= RUN_RULE_IDS_FROM);
   if (rules.length) await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: rules.map((r) => r.id) });
   await chrome.storage.session.set({ runWindows: [] });
 }

@@ -74,26 +74,67 @@ export function tabRules(tabId: number, consent: Consent, firstId: number): Rule
   for (const regexFilter of PRIVATE_URL_PATTERNS) {
     rules.push({ id: id++, priority: 3, action: block, condition: { tabIds: [tabId], resourceTypes: EVERY_TYPE, regexFilter, isUrlFilterCaseSensitive: false } });
   }
-  // Workers. A service or shared worker a consented page starts sends its requests
-  // with no tab (TAB_ID_NONE), so none of the rules above see them, and it could
-  // reach a private address the tab itself can't. These match requests from no tab
-  // whose initiator is a consented site: as close to "the run's workers" as Chrome
-  // lets a rule get. The cost, while the run lasts: the user's own workers on those
-  // same sites can't reach private-network addresses either. Nothing else of theirs
-  // changes, and public destinations are untouched.
-  const initiatorDomains = [...new Set([...consent.origins].map((o) => new URL(o).hostname.replace(/^\[|\]$/g, '')))];
-  if (initiatorDomains.length) {
-    const workers = { tabIds: [TAB_ID_NONE], initiatorDomains, resourceTypes: EVERY_TYPE };
-    rules.push({ id: id++, priority: 3, action: block, condition: { ...workers, requestDomains: [...PRIVATE_DOMAINS] } });
-    for (const regexFilter of PRIVATE_URL_PATTERNS) {
-      rules.push({ id: id++, priority: 3, action: block, condition: { ...workers, regexFilter, isUrlFilterCaseSensitive: false } });
-    }
+  rules.push(...workerRules(consentedHosts(consent), id));
+  return rules;
+}
+
+/** The hosts of the consented origins, as `initiatorDomains` writes them. */
+export function consentedHosts(consent: Consent): string[] {
+  return [...new Set([...consent.origins].map((o) => new URL(o).hostname.replace(/^\[|\]$/g, '')))];
+}
+
+/**
+ * Workers. A service or shared worker a consented page starts sends its requests
+ * with no tab (TAB_ID_NONE), so no tab rule sees them, and it could reach a private
+ * address the tab itself can't. These match requests from no tab whose initiator is
+ * one of `hosts`: as close to "the run's workers" as Chrome lets a rule get. The
+ * cost: the user's own workers on those same sites can't reach private-network
+ * addresses either. Nothing else of theirs changes, and public destinations are
+ * untouched.
+ */
+export function workerRules(hosts: readonly string[], firstId: number): Rule[] {
+  if (!hosts.length) return [];
+  let id = firstId;
+  const block = { type: 'block' as chrome.declarativeNetRequest.RuleActionType };
+  const workers = { tabIds: [TAB_ID_NONE], initiatorDomains: [...hosts], resourceTypes: EVERY_TYPE };
+  const rules: Rule[] = [{ id: id++, priority: 3, action: block, condition: { ...workers, requestDomains: [...PRIVATE_DOMAINS] } }];
+  for (const regexFilter of PRIVATE_URL_PATTERNS) {
+    rules.push({ id: id++, priority: 3, action: block, condition: { ...workers, regexFilter, isUrlFilterCaseSensitive: false } });
   }
   return rules;
 }
 
 /** `chrome.tabs.TAB_ID_NONE`: a request from no tab, such as a service or shared worker's. */
 const TAB_ID_NONE = -1;
+
+/**
+ * Rule ids below this are the extension's own, kept across runs and restarts of its
+ * worker; a run's rules are numbered from here up (see background.ts).
+ */
+export const RUN_RULE_IDS_FROM = 1000;
+/** Where the lasting worker rules live: ids 1 to 1 + PRIVATE_URL_PATTERNS.length. */
+const LASTING_WORKER_RULES_FROM = 1;
+
+let lasting: Promise<void> = Promise.resolve();
+/**
+ * A service worker outlives the tab that started it, and the run's own rules go when
+ * the run ends: a worker a consented page left running could then reach private
+ * addresses. So the worker rules for every site a run has been allowed stay until
+ * Chrome itself restarts, which clears session rules and session storage together.
+ * Serialized: two runs starting at once each add their sites, and neither's is lost.
+ */
+export function keepWorkersOffPrivateNetwork(hosts: readonly string[]): Promise<void> {
+  const next = lasting.then(async () => {
+    const { workerHosts = [] } = await chrome.storage.session.get('workerHosts') as { workerHosts?: string[] };
+    const all = [...new Set([...workerHosts, ...hosts])];
+    const rules = workerRules(all, LASTING_WORKER_RULES_FROM);
+    if (!rules.length) return;
+    await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: rules.map((r) => r.id), addRules: rules });
+    await chrome.storage.session.set({ workerHosts: all });
+  });
+  lasting = next.catch(() => {});
+  return next;
+}
 
 const PAGE_END_TIMEOUT_MS = 5000;
 
@@ -138,6 +179,8 @@ export async function openRunTab(opts: TabPolicyOptions): Promise<LeasedBrowser 
   let own: CdpClient;
   try {
     await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ruleIds, addRules: rules });
+    // Before anything loads: what this run's sites start may outlive the run.
+    await keepWorkersOffPrivateNetwork(consentedHosts(opts.consent));
     await chrome.debugger.attach({ tabId }, '1.3');
     attached = true;
     own = chromeTabCdp(tabId);

@@ -318,6 +318,43 @@ suite('the extension in a real Chromium', { timeout: 90_000 }, () => {
     expect(r.lan.hits).toEqual(['GET /from-worker']);
   });
 
+  it("a run's sites' workers stay off private addresses after the run, and after the extension restarts", async () => {
+    const r = await rig();
+    const { relayed } = await r.run('run-1');
+    const viaWorker = `(url) => new Promise((done) => {
+      const w = new SharedWorker('/worker.js');
+      w.port.onmessage = (m) => done(m.data);
+      w.port.postMessage(url);
+      setTimeout(() => done('no answer'), 5000);
+    })`;
+    const lanUrl = JSON.stringify(`http://127.0.0.1:${r.lan.port}/from-worker`);
+    // The run ends; a service worker its page left would carry on from here.
+    const extId = new URL(r.sw.url()).host;
+    const popup = r.ctx.pages()[0]!;
+    await popup.goto(`chrome-extension://${extId}/popup.html`);
+    await vi.waitFor(async () => expect(await popup.evaluate<boolean>("!document.getElementById('run').hidden")).toBe(true));
+    await popup.click('#stop');
+    await Promise.race([relayed.closed, sleep(5000).then(() => { throw new Error('the run did not stop'); })]);
+    const mine = await r.ctx.newPage();
+    await mine.goto('http://allowed.test/hello');
+    expect(await mine.evaluate(`(${viaWorker})(${lanUrl})`)).toBe('blocked');
+    // The extension's own worker stopped and woken, as Chrome does to an idle one:
+    // its clean-up after a restart leaves these rules in place.
+    const cdp = await r.browserCdp();
+    const targets = (await cdp.send('Target.getTargets')).targetInfos as { targetId: string; type: string; url: string }[];
+    const bg = targets.find((t) => t.type === 'service_worker' && t.url.endsWith('/background.js'))!;
+    await cdp.send('Target.closeTarget', { targetId: bg.targetId });
+    await popup.goto(`chrome-extension://${extId}/popup.html`);
+    await vi.waitFor(() => expect(r.hub.deviceOnline('user-a', 'dev-ext')).toBe(true), { timeout: 15_000 });
+    await mine.goto('http://allowed.test/hello');
+    expect(await mine.evaluate(`(${viaWorker})(${lanUrl})`)).toBe('blocked');
+    expect(r.lan.hits).toEqual([]);
+    // Control: a site no run was allowed is untouched.
+    await mine.goto('http://offlist.test/mine');
+    expect(await mine.evaluate(`(${viaWorker})(${lanUrl})`)).toBe('reached');
+    expect(r.lan.hits).toEqual(['GET /from-worker']);
+  });
+
   it('attempts to connect that overlap make one client, not two that knock each other off', async () => {
     const r = await rig();
     const extId = new URL(r.sw.url()).host;
