@@ -5,7 +5,7 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.84.0 - 2026-10-22
+## 0.85.0 - 2026-11-17
 
 <!-- One `### Added` / `### Changed` / `### Fixed` per release, not per PR.
      The release workflow copies this whole block verbatim into the GitHub
@@ -17,6 +17,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      bumps package.json. The workflow matches sections by version prefix, so
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
+
+### Added
+- **Your own browser for cloud runs.** A run on Cascade Cloud, or on a server
+  you host, can use a browser on your own machine instead of one the server
+  hosts. Pair a device once, with the new **Cascade Chrome extension**
+  (`extension/`, load unpacked from `extension/dist` after
+  `node extension/build.mjs`) or with **`cascade relay pair`** and
+  `cascade relay serve`; turn on Browser in the web composer as before. Each
+  run asks on your device first, and gets only the sites you type there: a new
+  window with one tab in your Chrome, or a fresh browser with an empty profile
+  from the CLI, never a tab or profile you're using. Pages from any other site,
+  private-network addresses, popups, dialogs and downloads are stopped on your
+  device, before anything is sent, and no screenshot or live view leaves it: you
+  watch, and take over, where it runs. Devices sign in with a key made on them,
+  and the server holds only its public half. See `docs/browser-relay.md`.
+- **`BROWSER_RELAY=true`** turns this on for a server you run. It needs no
+  other setting, and can run alongside a hosted browser: a run uses the user's
+  own device when one is online. Only the hosted browser counts against a
+  plan's daily browser sessions.
+
+### Changed
+- **cascadeai.in no longer hosts a browser.** Runs there use your own Chrome
+  through the extension or `cascade relay`. The Free and Pro daily browser
+  session counts applied to the hosted browser only, and go with it.
+- The SDK exports the relay's server and device pieces (`src/browser/relay`),
+  which the cloud server and the extension build on.
+
+## 0.84.0 - 2026-10-22
 
 ### Added
 - **A spend & savings report in the cloud app.** What your runs cost and

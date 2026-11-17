@@ -1,0 +1,81 @@
+# Your own browser for cloud runs
+
+A run on Cascade Cloud, or on a server you host, can use a browser on your own
+machine instead of one the server hosts. The server keeps no browser of its own:
+your device opens one, asks you first, and serves the run a single tab in it.
+
+The design, threat model and tests behind this are in
+[`design/byo-browser-and-routing-data.md`](design/byo-browser-and-routing-data.md)
+and [`design/stage-1-plan.md`](design/stage-1-plan.md).
+
+## What you agree to, each time
+
+Nothing happens without a yes on your device. When a run asks for a browser, your
+device shows which run is asking, and you type the sites it may use. Then:
+
+- The run gets **a new window with one tab**, never a tab you already have open.
+  With the CLI it gets a fresh browser with its own empty profile, closed afterwards.
+- Pages load only from the sites you typed. Anything else the page tries to open
+  is blocked before it's sent.
+- Private-network addresses (`localhost`, `10.x`, `192.168.x`, `.local` and the
+  like) are blocked, for the tab and for workers those sites start. The extension
+  matches names and addresses as written, and can't see a public name that resolves
+  to a private address; the CLI checks the resolved address too. A run that needs a
+  site on your own network has to use the CLI.
+- Popups the page opens are closed, and dialogs are dismissed.
+- Downloads: the CLI's browser refuses them. In the extension a download ends the
+  run (Chrome can't tell it which download is the run's, so none is touched), and
+  the file stays in your Downloads folder.
+- No screenshot leaves your device, and there's no live view on the web: you
+  watch the run, and take it over, where it runs.
+- Stop it from the extension's toolbar button, by closing its window, or with
+  Ctrl-C in `cascade relay serve`.
+
+## Chrome extension
+
+1. Build it: `node extension/build.mjs`. The result is in `extension/dist`.
+2. In Chrome, open `chrome://extensions`, turn on **Developer mode**, choose
+   **Load unpacked** and pick `extension/dist`.
+3. Open the extension from the toolbar, type your server's address (for example
+   `https://cascadeai.in`) and a name for this browser, and approve the code it
+   shows on the server's page, signed in.
+
+The extension keeps a key made in your browser. The server gets its public half
+only, and the sign-in used for pairing is revoked straight away. **Forget** in the
+extension deletes that key from this browser, so it can't connect again; the server
+keeps only the public half, which proves nothing without it. `cascade relay devices`
+lists every device the server knows, and `cascade relay forget` removes the CLI's
+machine on the server and locally.
+
+## CLI
+
+```bash
+cascade login                # if you haven't
+cascade relay pair           # register this machine (--name to choose what it's called)
+cascade relay serve          # stay connected; runs ask here first
+cascade relay devices        # your devices, and which are online
+cascade relay forget         # remove this machine, on the server and here
+```
+
+`serve` uses Playwright's Chromium, or `--chromium <path>` / `CASCADE_RELAY_CHROMIUM`.
+
+## Using it from the web
+
+Turn on **Browser** in the composer's Tools menu. A run that needs a browser asks
+your most recently seen online device. If none is online, the run goes on without
+a browser, so keep the extension or `cascade relay serve` running.
+
+You can register up to 10 devices.
+
+## Running your own server
+
+The relay is off by default. Set `BROWSER_RELAY=true` on the server to turn it on.
+It needs no other setting: the server makes its own relay key in `DATA_DIR`, and
+devices pin it when they pair.
+
+It can run alongside a hosted browser (`REMOTE_BROWSER_PROVIDER`). When both are on,
+a run uses the user's own device if one is online, and otherwise the hosted
+browser. Only the hosted browser counts against a plan's daily browser sessions.
+
+The relay keeps its connections in the server process, so run one instance (one
+replica) per deployment.
