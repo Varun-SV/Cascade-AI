@@ -6,6 +6,19 @@
 /** How a run ended. A failed run still spent whatever its calls cost. */
 export type SpendOutcome = 'answered' | 'stopped' | 'failed';
 
+/**
+ * Where a run ran: a hosted run here, or one on the user's own desktop app or CLI,
+ * synced. Null on rows recorded before this was kept, which count under All only.
+ */
+export type SpendSurface = 'cloud' | 'desktop' | 'cli';
+export const SPEND_SURFACES: readonly SpendSurface[] = ['cloud', 'desktop', 'cli'];
+export function parseSurface(v: unknown): SpendSurface | null {
+  return typeof v === 'string' && (SPEND_SURFACES as readonly string[]).includes(v) ? (v as SpendSurface) : null;
+}
+
+/** How the run's agents finished, counted: a number per status, never a label or a prompt. */
+export interface AgentStatusCounts { completed: number; failed: number; escalated: number; other: number }
+
 export interface SpendModelLine {
   tier: string;
   /** Model id, or '' when the run did not say which model served the tier. */
@@ -32,6 +45,13 @@ export interface SpendEntry {
   tokens: number;
   outcome: SpendOutcome;
   lines: SpendModelLine[];
+  /** Where it ran; null when not known (see SpendSurface). */
+  surface: SpendSurface | null;
+  /** How long the run took, as its report said; null when it didn't. */
+  durationMs: number | null;
+  /** How many times a tier moved to another model mid-run. */
+  failovers: number;
+  agents: AgentStatusCounts;
 }
 
 const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
@@ -80,6 +100,7 @@ export function spendEntryFromRun(input: {
   costUsd?: number | null;
   why: unknown;
   outcome?: SpendOutcome;
+  surface?: SpendSurface | null;
 }): SpendEntry {
   let why: Record<string, unknown> = {};
   if (typeof input.why === 'string') {
@@ -137,7 +158,25 @@ export function spendEntryFromRun(input: {
     tokens: Math.round(tokens),
     outcome: input.outcome ?? 'answered',
     lines: kept,
+    surface: input.surface ?? null,
+    durationMs: typeof why['durationMs'] === 'number' && Number.isFinite(why['durationMs']) && why['durationMs'] >= 0 ? Math.round(why['durationMs']) : null,
+    failovers: Array.isArray(why['decisions']) ? (why['decisions'] as unknown[]).filter((d) => record(d)['kind'] === 'failover').length : 0,
+    agents: agentCounts(why['trace']),
   };
+}
+
+/** The final status of each agent in the run's trace, counted. */
+function agentCounts(trace: unknown): AgentStatusCounts {
+  const out: AgentStatusCounts = { completed: 0, failed: 0, escalated: 0, other: 0 };
+  if (!Array.isArray(trace)) return out;
+  for (const node of trace) {
+    const status = String(record(node)['status'] ?? '').toUpperCase();
+    if (status === 'COMPLETED') out.completed += 1;
+    else if (status === 'FAILED') out.failed += 1;
+    else if (status === 'ESCALATED') out.escalated += 1;
+    else out.other += 1;
+  }
+  return out;
 }
 
 /**
@@ -346,6 +385,13 @@ export function periodRange(period: SpendPeriod, zone: TimeZone, nowMs: number, 
 // ── The report ─────────────────────────────────
 
 export interface SpendTotals {
+  /** Runs stopped by the user before they finished. */
+  stoppedRuns?: number;
+  /** The runs' time, added up, where their reports said it; and how many said it. */
+  durationMs?: number;
+  timedRuns?: number;
+  failovers?: number;
+  agents?: AgentStatusCounts;
   spentUsd: number;
   savedUsd: number;
   runs: number;

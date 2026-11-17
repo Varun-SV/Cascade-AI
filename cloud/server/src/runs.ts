@@ -2462,7 +2462,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
     // The ledger takes the run's final figures, late calls included; the
     // reply keeps the /why it was answered with.
     void recordSettledRunSpend(store, cascade.getRouter(), (settled, savedUsd) => spendEntryFromRun({
-      id: assistantMessage.id, userId, conversationId: conversation.id, at: assistantMessage.createdAt,
+      id: assistantMessage.id, userId, conversationId: conversation.id, at: assistantMessage.createdAt, surface: 'cloud',
       costUsd: Math.max(result.usage.estimatedCostUsd, settled.totalCostUsd),
       why: {
         ...why, savedUsd,
@@ -2501,7 +2501,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
     void recordSettledRunSpend(store, cascade.getRouter(), (spent, savedUsd) =>
       spent.totalCostUsd > 0 || spent.totalTokens > 0 || spent.untrackedCostCalls > 0
         ? spendEntryFromRun({
-          id: failedId, userId, conversationId: conversation.id, at: failedAt, costUsd: spent.totalCostUsd,
+          id: failedId, userId, conversationId: conversation.id, at: failedAt, costUsd: spent.totalCostUsd, surface: 'cloud',
           why: {
             costByModel: spent.costByTierModel, tokensByModel: spent.tokensByTierModel,
             unpricedByModel: spent.untrackedByTierModel, totalTokens: spent.totalTokens, savedUsd,

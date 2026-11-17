@@ -80,7 +80,7 @@ interface CloudClientLike {
   logout(): Promise<void>;
 }
 
-type CloudClientCtor = new (serverUrl: string, dir?: string, store?: SessionStore, options?: { beforeSend?: () => void }) => CloudClientLike;
+type CloudClientCtor = new (serverUrl: string, dir?: string, store?: SessionStore, options?: { beforeSend?: () => void; surface?: 'desktop' | 'cli' }) => CloudClientLike;
 
 // The subset of the Cascade core bundle this module uses.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -203,7 +203,8 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
   const store = new SafeStorageSessionStore();
   const core = () => loadCore() as CoreExports;
   const serverUrl = (process.env['CASCADE_CLOUD_URL'] || '').trim().replace(/\/$/, '') || core().DEFAULT_CLOUD_URL;
-  const client = (): CloudClientLike => new (core().CloudClient)(serverUrl, undefined, store);
+  // Runs it syncs are the desktop app's: the account's reports show them under Desktop.
+  const client = (): CloudClientLike => new (core().CloudClient)(serverUrl, undefined, store, { surface: 'desktop' });
   // Whether the user lets runs be copied to the cloud (see cloud-sync-consent.ts).
   const consent = fileSyncConsent(join(app.getPath('userData'), 'cloud-sync.json'));
 
@@ -258,7 +259,7 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
   const clientFor = (expected: unknown): CloudClientLike => {
     const userId = expected && typeof expected === 'object' ? (expected as { userId?: unknown }).userId : undefined;
     return typeof userId === 'string'
-      ? new (core().CloudClient)(serverUrl, undefined, pinnedStore(store, userId), { beforeSend: sendGate(() => consent.allowed()) })
+      ? new (core().CloudClient)(serverUrl, undefined, pinnedStore(store, userId), { beforeSend: sendGate(() => consent.allowed()), surface: 'desktop' })
       : client();
   };
   // A request that failed because the sign-in changed under it (during a

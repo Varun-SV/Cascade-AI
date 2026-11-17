@@ -40,6 +40,34 @@ describe('spend ledger', () => {
     }));
   }
 
+  it('a ledger from before surfaces were kept gains them, and its old rows count under All only (stage 5)', () => {
+    const u = user('migrated');
+    run(u.id, null, NOW, 0.1, 0);
+    store.close();
+    // As the ledger was before: drop the new columns' values by rebuilding without them.
+    const raw = new Database(dbPath);
+    raw.exec(`
+      PRAGMA foreign_keys = OFF;
+      CREATE TABLE spend_old (
+        id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, conversation_id TEXT,
+        at INTEGER NOT NULL, cost_usd REAL NOT NULL DEFAULT 0, saved_usd REAL NOT NULL DEFAULT 0,
+        tokens INTEGER NOT NULL DEFAULT 0, outcome TEXT NOT NULL DEFAULT 'answered'
+      );
+      INSERT INTO spend_old SELECT id, user_id, conversation_id, at, cost_usd, saved_usd, tokens, outcome FROM spend_ledger;
+      DROP TABLE spend_ledger;
+      ALTER TABLE spend_old RENAME TO spend_ledger;
+      CREATE INDEX idx_spend_user_at ON spend_ledger(user_id, at);
+    `);
+    raw.close();
+    store = new CloudStore(dbPath);
+    const cols = (new Database(dbPath, { readonly: true }).prepare('PRAGMA table_info(spend_ledger)').all() as Array<{ name: string }>).map((c) => c.name);
+    expect(cols).toEqual(expect.arrayContaining(['surface', 'duration_ms', 'failovers', 'agents_completed', 'agents_failed', 'agents_escalated', 'agents_other']));
+    store.recordSpend(spendEntryFromRun({ id: 'new-cli', userId: u.id, conversationId: null, at: NOW, costUsd: 0.2, surface: 'cli', why: { durationMs: 50 } }));
+    expect(store.spendFor(null).spendTotals(u.id, null)).toMatchObject({ runs: 2, durationMs: 50, timedRuns: 1 });
+    expect(store.spendFor('cli').spendTotals(u.id, null)).toMatchObject({ runs: 1 });
+    expect(store.spendFor('cloud').spendTotals(u.id, null)).toMatchObject({ runs: 0 });
+  });
+
   it('reports a period\'s totals, days, tiers with their models, and costliest chats', () => {
     const u = user('a');
     const big = store.createConversation(u.id, 'Big report');
