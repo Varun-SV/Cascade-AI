@@ -36,6 +36,10 @@ function note(line: string): void {
 (globalThis as unknown as { cascade: object }).cascade = { status, recent };
 let client: DeviceClient | null = null;
 let connecting = false;
+/** Bumped by Forget, so an attempt that read storage before it doesn't carry on. */
+let connectEpoch = 0;
+/** An attempt arrived while one was in flight: look again if that one ends with no client. */
+let connectAgain = false;
 let refusals = 0;
 let backoffMs = 1000;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -100,48 +104,70 @@ chrome.windows.onRemoved.addListener((windowId) => {
 // ── Serving ─────────────────────────────────
 
 async function connect(): Promise<void> {
-  if (client || connecting) return;
-  const device = await loadDevice();
-  if (!device) { status.connection = 'unpaired'; delete status.device; publish(); return; }
-  const serverKey = publicKeyFromText(device.serverKey);
-  if (!serverKey) { status.connection = 'refused'; status.notice = 'The saved server key is unreadable. Pair this browser again.'; publish(); return; }
+  if (client) return;
+  if (connecting) { connectAgain = true; return; }
+  // Reserved before the first await: two attempts that overlap there (a quick
+  // second Retry, or pairing finishing alongside its storage change) would each
+  // make a client, and the hub's replacing one control connection with the next
+  // has them knock each other off. Released on every way out below. One that
+  // arrives meanwhile is not lost: if this attempt ends with no client (it read
+  // storage just before pairing wrote it), it looks once more.
   connecting = true;
+  connectAgain = false;
+  const giveUp = (): void => {
+    connecting = false;
+    if (connectAgain) { connectAgain = false; void connect(); }
+  };
+  const epoch = connectEpoch;
+  let device: PairedDevice | null;
+  try { device = await loadDevice(); } catch (e) { giveUp(); throw e; }
+  if (epoch !== connectEpoch) { giveUp(); return; }
+  if (!device) { status.connection = 'unpaired'; delete status.device; publish(); giveUp(); return; }
+  const serverKey = publicKeyFromText(device.serverKey);
+  if (!serverKey) { status.connection = 'refused'; status.notice = 'The saved server key is unreadable. Pair this browser again.'; publish(); giveUp(); return; }
   status.connection = 'connecting';
   status.device = { name: device.name, server: device.serverUrl };
   publish();
-  const c = connectDeviceClient({
-    ...endpointsOf(device),
-    device: identityFromPrivateKey(device.deviceId, device.privateKeyPem),
-    serverId: device.serverId, serverKey,
-    keepaliveMs: KEEPALIVE_MS,
-    askUser,
-    startBrowser: async (consent) => {
-      const leased = await openRunTab({
-        consent, firstRuleId: (nextRuleId += 100),
-        onStop: (reason) => {
-          c.revoke(reason);
-          status.notice = reason;
-          publish();
-          void chrome.notifications?.create({ type: 'basic', iconUrl: 'icon-128.png', title: 'Cascade run stopped', message: reason }).catch(() => {});
-        },
-      });
-      await rememberWindow(leased.windowId, true);
-      status.run = { runId: approvedRun, sites: [...consent.origins], windowId: leased.windowId };
-      publish();
-      return {
-        ...leased,
-        async close() {
-          await leased.close();
-          await rememberWindow(leased.windowId, false);
-          if (status.run?.windowId === leased.windowId) delete status.run;
-          publish();
-        },
-      };
-    },
-    log: note,
-  });
-  client = c;
+  let c: DeviceClient;
+  try {
+    c = connectDeviceClient({
+      ...endpointsOf(device),
+      device: identityFromPrivateKey(device.deviceId, device.privateKeyPem),
+      serverId: device.serverId, serverKey,
+      keepaliveMs: KEEPALIVE_MS,
+      askUser,
+      startBrowser: async (consent) => {
+        const leased = await openRunTab({
+          consent, firstRuleId: (nextRuleId += 100),
+          onStop: (reason) => {
+            c.revoke(reason);
+            status.notice = reason;
+            publish();
+            void chrome.notifications?.create({ type: 'basic', iconUrl: 'icon-128.png', title: 'Cascade run stopped', message: reason }).catch(() => {});
+          },
+        });
+        await rememberWindow(leased.windowId, true);
+        status.run = { runId: approvedRun, sites: [...consent.origins], windowId: leased.windowId };
+        publish();
+        return {
+          ...leased,
+          async close() {
+            await leased.close();
+            await rememberWindow(leased.windowId, false);
+            if (status.run?.windowId === leased.windowId) delete status.run;
+            publish();
+          },
+        };
+      },
+      log: note,
+    });
+  } catch (e) {
+    giveUp();
+    throw e;
+  }
   connecting = false;
+  connectAgain = false;
+  client = c;
   let welcomed = false;
   c.ready.then(() => {
     welcomed = true; refusals = 0; backoffMs = 1000;
@@ -232,6 +258,7 @@ async function handle(msg: Message): Promise<unknown> {
       await connect();
       return { ok: true };
     case 'forget': {
+      connectEpoch++;
       pairing?.abort();
       await chrome.storage.local.remove('device');
       const c = client;

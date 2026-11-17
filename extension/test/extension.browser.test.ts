@@ -79,12 +79,15 @@ async function rig() {
   const server = createIdentity('server-1');
   const key = generateStoredKey();
   const deviceKey = publicKeyFromText(key.publicKey)!;
+  /** Control connections the extension has opened, authenticated or not. */
+  let controls = 0;
   const hub: RelayHub = createRelayHub({ server, store: createMemoryNonceStore(Date.now), deviceKey: (id) => (id === 'dev-ext' ? deviceKey : null) });
   const httpServer = http.createServer();
   const wss = new WebSocketServer({ server: httpServer });
   wss.on('connection', (ws, req) => {
     const p = (req.url ?? '').split('?')[0]!;
     if (p === '/control') {
+      controls++;
       void authenticateControl(ws, { serverId: server.id, device: (id) => (id === 'dev-ext' ? { userId: 'user-a', key: deviceKey } : null) })
         .then((who) => { if (who) hub.attachDevice(who, ws); });
     } else if (p === '/run') hub.attachRun(ws);
@@ -153,7 +156,7 @@ async function rig() {
   /** The worker's own state and recent log, as DevTools on it would show. */
   const status = () => sw.evaluate<{ status: { run?: { runId: string; sites: string[] }; connection: string; notice?: string }; recent: string[] }>(
     () => JSON.parse(JSON.stringify((globalThis as unknown as { cascade: object }).cascade)) as never);
-  return { hub, ctx, sw, allowed, offlist, downloads, answer, run, status, browserCdp };
+  return { hub, ctx, sw, allowed, offlist, downloads, answer, run, status, browserCdp, device, controls: () => controls };
 }
 
 suite('the extension in a real Chromium', { timeout: 90_000 }, () => {
@@ -276,6 +279,26 @@ suite('the extension in a real Chromium', { timeout: 90_000 }, () => {
     await r.answer(null);
     await expect(again).rejects.toThrow(/declined/);
     expect(r.allowed.hits.filter((h) => h === 'GET /again')).toEqual([]);
+  });
+
+  it('attempts to connect that overlap make one client, not two that knock each other off', async () => {
+    const r = await rig();
+    const extId = new URL(r.sw.url()).host;
+    const popup = r.ctx.pages()[0]!;
+    await popup.goto(`chrome-extension://${extId}/popup.html`);
+    await popup.evaluate(() => chrome.runtime.sendMessage({ type: 'forget' }));
+    await vi.waitFor(() => expect(r.hub.deviceOnline('user-a', 'dev-ext')).toBe(false), { timeout: 5000 });
+    const before = r.controls();
+    // Pairing finishing (its storage change) and two quick Retries, all at once.
+    await popup.evaluate((d) => Promise.all([
+      chrome.storage.local.set({ device: d }),
+      chrome.runtime.sendMessage({ type: 'retry' }),
+      chrome.runtime.sendMessage({ type: 'retry' }),
+    ]), r.device as never);
+    await vi.waitFor(() => expect(r.hub.deviceOnline('user-a', 'dev-ext')).toBe(true), { timeout: 10_000 });
+    await sleep(1500);
+    expect(r.controls() - before).toBe(1);
+    expect(r.hub.deviceOnline('user-a', 'dev-ext')).toBe(true);
   });
 
   it('Stop in the toolbar popup ends the run', async () => {
