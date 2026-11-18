@@ -38,3 +38,7 @@ li { margin: 4px 0; }
 .check input { width: auto; }
 fieldset.choice { border: 0; padding: 0; margin: 12px 0 0; }
 fieldset.choice legend { font-weight: 600; padding: 0; }
+.check:has(input:disabled) { opacity: .55; }
+.notice { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; }
+.notice p { margin: 0 0 6px; }
+.notice button { margin-top: 2px; }

@@ -70,7 +70,7 @@ export function toChatMessage(m: {
 }
 
 /** A step a run took in the user's own browser, as the server words it. */
-export interface BrowserStep { kind: string; summary: string; ok: boolean; at: number; url?: string; title?: string }
+export interface BrowserStep { kind: string; summary: string; ok: boolean; at: number; url?: string; title?: string; why?: string }
 
 export interface SendInput {
   prompt: string;
@@ -1850,6 +1850,7 @@ export function useChatSession(
         kind: String(s.kind ?? ''), summary: s.summary.slice(0, 200), ok: s.ok === true, at: typeof s.at === 'number' ? s.at : Date.now(),
         ...(typeof s.url === 'string' ? { url: s.url.slice(0, 2048) } : {}),
         ...(typeof s.title === 'string' ? { title: s.title.slice(0, 200) } : {}),
+        ...(s.ok !== true && typeof s.why === 'string' ? { why: s.why.slice(0, 200) } : {}),
       };
       setBrowserViews((prev) => {
         const views = prev[key];

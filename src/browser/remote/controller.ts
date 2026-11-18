@@ -696,6 +696,13 @@ interface RunBrowser {
    */
   documents?: number;
   /**
+   * How long one exchange with the page has taken lately, in ms. The browser can
+   * be the user's own, a relay and an ocean away: a Playwright click is a dozen
+   * exchanges, so waits sized for a browser beside the server have to grow with
+   * it. See `linkTime`.
+   */
+  linkMs?: number;
+  /**
    * Main-frame navigation requests: a new document on its way, before it has
    * loaded enough to count in `documents`. See `documentOf`.
    */
@@ -3639,7 +3646,12 @@ export class RemoteBrowserController {
       // reported as unknown, never as not done, so a payment is not repeated.
       // Playwright's own hit-target checks still apply.
       const checked = !!action.ref && REVALIDATED.has(action.kind);
-      const sendTimeout = Math.min(timeout, DISPATCH_WAIT_MS);
+      // "At once" is measured in exchanges with the page, not in a fixed time:
+      // with the browser on the server's network that is DISPATCH_WAIT_MS, and
+      // through the relay to a user's Chrome a single exchange can take a
+      // quarter of a second. A fixed 500 ms refused every click there, as "not
+      // ready", although nothing on the page had changed.
+      const sendTimeout = Math.min(timeout, DISPATCH_WAIT_MS + (checked ? DISPATCH_EXCHANGES * await linkTime(held, stoppable) : 0));
       const timedOut = (err: unknown) => err instanceof Error && err.name === 'TimeoutError';
       const send = async (
         ready: () => Promise<unknown>,
@@ -4189,6 +4201,32 @@ const REVALIDATED = new Set<BrowserAction['kind']>([...CHANGES_THE_PAGE, 'hover'
  */
 const DISPATCH_WAIT_MS = 500;
 
+/**
+ * Exchanges with the page a revalidated action may take on top of that, each at
+ * the link's measured time. A Playwright click is about ten: scrolling, boxes,
+ * the readiness checks in the page, its two animation frames, the hit test and
+ * the mouse events. Twice that leaves room for a slow moment.
+ */
+const DISPATCH_EXCHANGES = 20;
+
+/** Longest a single exchange is counted as: a link slower than this is not one to act over. */
+const LINK_MS_MAX = 1_000;
+
+/**
+ * How long one exchange with the run's page takes now: one round trip, timed.
+ * Remembered with a slow decay, so one quick answer after slow ones doesn't
+ * shrink the next wait. A page that can't be timed counts as beside the server.
+ */
+async function linkTime(held: RunBrowser, stoppable: <T>(work: Promise<T>) => Promise<T>): Promise<number> {
+  const page = held.page;
+  if (typeof page.evaluate !== 'function') return held.linkMs ?? 0;
+  const started = Date.now();
+  const answered = await stoppable(within(page.evaluate('0'), LINK_MS_MAX)).then(() => true, () => false);
+  const sample = answered ? Date.now() - started : LINK_MS_MAX;
+  held.linkMs = Math.min(LINK_MS_MAX, Math.max(sample, Math.round((held.linkMs ?? 0) * 0.75)));
+  return held.linkMs;
+}
+
 /** Hidden native option values affect what choosing a displayed label does. */
 async function bindOptionValues(page: Page, view: PageView): Promise<void> {
   const deadline = Date.now() + PAGE_CHECK_TIMEOUT_MS;
@@ -4322,6 +4360,8 @@ export interface BrowserStep {
   /** The page it left the run on, when known. */
   url?: string;
   title?: string;
+  /** Why it didn't work, in the controller's words: shown under the step. */
+  why?: string;
   at: number;
 }
 
@@ -4333,6 +4373,11 @@ function shownAddress(raw: string): string {
     const u = new URL(raw);
     return short(`${u.host}${u.pathname === '/' ? '' : u.pathname}`);
   } catch { return short(raw); }
+}
+
+/** A reason with any text the action typed taken out: an error can quote its input. */
+function withoutTyped(detail: string, typed: string | undefined): string {
+  return typed && typed.length > 0 ? detail.split(typed).join('…') : detail;
 }
 
 /** The step as words. Never the text typed: it may be a password, and the page has it. */
@@ -4355,6 +4400,7 @@ export function describeStep(action: BrowserAction, outcome: BrowserActionOutcom
   })();
   return {
     kind: action.kind, summary, ok: outcome.ok, at,
+    ...(!outcome.ok && outcome.detail ? { why: short(withoutTyped(outcome.detail, action.value), 200) } : {}),
     ...(outcome.url ? { url: outcome.url } : {}),
     ...(outcome.title ? { title: short(outcome.title, 120) } : {}),
   };
