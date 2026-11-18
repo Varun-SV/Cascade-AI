@@ -374,6 +374,64 @@ describe('BrowserControlTool — marks', () => {
   });
 });
 
+describe('BrowserControlTool — the person\'s own browser, approved on the device', () => {
+  // The device asked them which sites, in which window, before the run opened:
+  // that yes is the run's approval. Only what can't be taken back is asked
+  // about again, and only of them.
+  const VIEW = {
+    text: '[Page view 1]',
+    labels: {
+      e2: 'searchbox "Search"', e4: 'link "TheRevProGamers"', e6: 'button "Subscribe"', e8: 'textbox "Comment"',
+      e10: 'button "Pay $42.00"', e12: 'link "Videos sorted by popularity, with the newest and…"', e14: 'combobox "Country"',
+    },
+  };
+  async function deviceTool(askedOnDevice = true) {
+    const rec = recorder({ detail: 'Looked at the page.', url: 'https://www.youtube.com/@therevprogamers', view: VIEW });
+    const tool = new BrowserControlTool(rec.controller, undefined, { pageView: true, askedOnDevice });
+    await tool.execute({ action: 'observe' }, { sessionId: 'run-1' } as never);
+    return tool;
+  }
+
+  it('asks nobody about opening, reading, clicking, typing or searching on the sites allowed', async () => {
+    const tool = await deviceTool();
+    for (const call of [
+      { action: 'navigate', url: 'https://www.youtube.com/results?search_query=therevprogamers' },
+      { action: 'observe' }, { action: 'extract_text' }, { action: 'scroll', direction: 'down' },
+      { action: 'click', ref: 'e4' },
+      // No name in the view: on another browser asked every time, here covered by the yes.
+      { action: 'click', ref: 'e77' }, { action: 'click', selector: 'ytd-video-renderer a' },
+      { action: 'fill', ref: 'e2', value: 'therevprogamers' }, { action: 'fill', ref: 'e8', value: 'nice' },
+      { action: 'press', ref: 'e2', key: 'Enter' }, { action: 'press', key: 'Escape' },
+    ]) {
+      expect(tool.forApproval(call, 'run-1'), JSON.stringify(call)).toMatchObject({ notNeeded: true });
+    }
+  });
+
+  it('asks the person, and only the person, before what may not be taken back', async () => {
+    const tool = await deviceTool();
+    for (const call of [
+      { action: 'click', ref: 'e6' }, { action: 'click', ref: 'e10' }, { action: 'click', selector: '#delete-account' },
+      // Enter in a field that isn't a search box may send its form: a combobox too.
+      { action: 'press', ref: 'e8', key: 'Enter' }, { action: 'press', key: 'Enter' }, { action: 'press', ref: 'e14', key: 'Enter' },
+      // A name the view cut short may end in anything.
+      { action: 'click', ref: 'e12' },
+    ]) {
+      const need = tool.forApproval(call, 'run-1');
+      expect(need, JSON.stringify(call)).toMatchObject({ askPerson: true, alwaysAsk: false });
+      expect(need.notNeeded, JSON.stringify(call)).toBeUndefined();
+    }
+    // Shown as before: the element and the site.
+    expect(tool.forApproval({ action: 'click', ref: 'e6' }, 'run-1').input).toEqual({ action: 'click', ref: 'e6', target: 'button "Subscribe"', site: 'www.youtube.com' });
+  });
+
+  it('changes nothing for a browser the device did not ask about', async () => {
+    const tool = await deviceTool(false);
+    expect(tool.forApproval({ action: 'navigate', url: 'https://www.youtube.com/' }, 'run-1')).toEqual({ input: expect.anything(), alwaysAsk: false });
+    expect(tool.forApproval({ action: 'click', ref: 'e77' }, 'run-1')).toMatchObject({ alwaysAsk: true });
+    expect(tool.forApproval({ action: 'click', ref: 'e6' }, 'run-1').askPerson).toBeUndefined();
+  });
+});
+
 describe('BrowserControlTool — what a person approving sees', () => {
   const VIEW = {
     text: '[Page view 1]',

@@ -5077,6 +5077,67 @@ describe('page views and refs', () => {
     expect(waits[1]).toBeLessThan(500 + 20 * 1_000 + 1);
   });
 
+  it('moves the pointer aside and waits once more when something it brought up covers the control', async () => {
+    // A video preview the last action's hover left over the grid: the control
+    // never "receives events" while it is there.
+    snapshot = '- link "Video 2" [ref=e5] [box=84,0,32,25]';
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    const moves: Array<[number, number]> = [];
+    extra['mouse'] = { move: async (x: number, y: number) => { moves.push([x, y]); } };
+    let trials = 0;
+    let clicked = false;
+    extra['locator'] = (selector: string) => ({ ...locate(selector),
+      async click(opts: { trial?: boolean }) {
+        if (!opts.trial) { clicked = true; return; }
+        trials += 1;
+        if (trials === 1 && moves.length === 0) {
+          const err = new Error('elementHandle.click: Timeout 10000ms exceeded.\nCall log:\n  - <ytd-video-preview id="p"> intercepts pointer events');
+          err.name = 'TimeoutError';
+          throw err;
+        }
+      },
+    });
+    const out = await c.controller({ kind: 'click', ref: 'e5' }, ctx('run', 'w1'));
+    delete extra['mouse'];
+    expect(out.ok, out.detail).toBe(true);
+    expect(moves).toEqual([[0, 0]]);
+    expect(clicked).toBe(true);
+  });
+
+  it('does not use a control that changed during that longer moment', async () => {
+    // Disabled after the check, enabled again already checked: the longer
+    // wait would let the click untick it. Its state is read just after the
+    // check and again once it is ready; changed, it is not used.
+    snapshot = '- checkbox "Remember me" [ref=e5] [box=84,0,32,25]';
+    for (const [states, used] of [[['unchecked', 'checked'], false], [['unchecked', 'unchecked'], true]] as const) {
+      const c = controller();
+      await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+      const evaluate = extra['evaluate'] as (e: string) => Promise<unknown>;
+      extra['evaluate'] = async (expression: string) => {
+        if (expression === '0') await new Promise((r) => setTimeout(r, 60));
+        return evaluate(expression);
+      };
+      const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+      let read = 0;
+      let clicked = false;
+      extra['locator'] = (selector: string) => ({ ...locate(selector),
+        async evaluate(fn: (node: Record<string, unknown>) => unknown) {
+          const checked = states[Math.min(read++, 1)] === 'checked';
+          return fn({ nodeName: 'INPUT', checked, getAttribute: () => null, textContent: '' });
+        },
+        async click(opts: { trial?: boolean }) { if (!opts.trial) clicked = true; },
+      });
+      const out = await c.controller({ kind: 'click', ref: 'e5', timeoutMs: 30_000 }, ctx('run', 'w1'));
+      expect(out.ok, out.detail).toBe(used);
+      expect(clicked).toBe(used);
+      if (!used) expect(out.detail).toContain('changed while it was being made ready, so it was not used');
+      extra['evaluate'] = evaluate;
+      extra['locator'] = locate;
+    }
+  });
+
   it('sends a checked ref click without waiting for the page it loads', async () => {
     // A Pay button whose handler runs and starts a slow navigation: the
     // click went, and must be reported as done, not as not used.
@@ -6655,6 +6716,24 @@ describe('a failed action is told without Playwright\'s call log', () => {
     ].join('\n'));
     expect(actionError(err)).toBe('locator.selectOption: Error: Element is not a <select> element');
     expect(actionError('plain')).toBe('plain');
+  });
+
+  it('says why a control never became ready, in fixed words, with only a covering tag\'s name from the log', async () => {
+    // "Timeout 10000ms exceeded" alone gave the model, and the person watching,
+    // nothing to act on. The reason is in the log; the log itself is not passed on.
+    const { actionError } = await import('./controller.js');
+    const timeout = (...log: string[]) => new Error(['elementHandle.click: Timeout 10000ms exceeded.', 'Call log:', ...log].join('\n'));
+    const covered = actionError(timeout(
+      '  - attempting click action',
+      '    - waiting for element to be visible, enabled and stable',
+      '  - <ytd-video-preview id="video-preview" data-secret="hunter2"> intercepts pointer events',
+      '  - retrying click action',
+    ));
+    expect(covered).toBe('elementHandle.click: Timeout 10000ms exceeded. Why: another element (<ytd-video-preview>) covers it and would take the click. Scroll, close what covers it, or choose another control.');
+    expect(covered).not.toContain('hunter2');
+    expect(actionError(timeout('    - element is not visible'))).toContain('Why: it is not visible on the page.');
+    expect(actionError(timeout('    - element is not stable', '    - element is not visible'))).toContain('not visible');
+    expect(actionError(timeout('  - waiting for locator'))).toBe('elementHandle.click: Timeout 10000ms exceeded.');
   });
 
   it('stays quick and short on a reason built to be slow to clean', async () => {

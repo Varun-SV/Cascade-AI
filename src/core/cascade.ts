@@ -1190,7 +1190,10 @@ export class Cascade extends EventEmitter {
     // Marks are drawn by the host, so a host that cannot draw them sends the
     // clean picture instead.
     const marked = screenshots && vision === 'marked' && features.marked === true;
-    this.toolRegistry.register(new BrowserControlTool(controller, release, { pageView, screenshots, marked }));
+    this.toolRegistry.register(new BrowserControlTool(controller, release, {
+      pageView, screenshots, marked,
+      ...(features.askedOnDevice === true ? { askedOnDevice: true } : {}),
+    }));
   }
 
   /**
@@ -2163,12 +2166,16 @@ ${prompt}`
     options = await this.applyExtendedContext(options);
 
     // Create a fresh permission escalator for this task run
-    const escalator = new PermissionEscalator(this.config.approvalTimeoutMs ?? 600_000, this.config.autonomy === 'auto');
+    const escalator = new PermissionEscalator(this.config.approvalTimeoutMs ?? 600_000, this.config.autonomy === 'auto', this.config.approvalAdvice === true);
 
     // Wire escalator's user-required event → approvalCallback or direct event
     escalator.on('permission:user-required', async (req: PermissionRequest) => {
       this.emit('permission:user-required', req);
-      this.recordDecision('escalation', `"${req.toolName}" by ${req.requestedBy} — T2 and T1 both unsure, escalated to user`);
+      this.recordDecision('escalation', `"${req.toolName}" by ${req.requestedBy} — ${
+        req.askPerson ? 'only you can allow this one'
+          : req.trail?.length ? 'T2 and T1 both unsure, escalated to user'
+            : req.isDangerous ? 'a tool that can change things: asked you directly, no tier model consulted'
+              : 'escalated to user'}`);
 
       // Build enriched context for the approval callback / REPL
       const enrichedRequest = approvalRequestFor(req);
@@ -2942,7 +2949,11 @@ export function approvalRequestFor(req: PermissionRequest): ApprovalRequest & { 
     tierId: req.requestedBy,
     toolName: req.toolName,
     input: req.input,
-    description: `T3 Worker "${req.subtaskContext}" wants to run "${req.toolName}". T2 and T1 could not determine if this is safe.`,
+    description: req.askPerson
+      ? `T3 Worker "${req.subtaskContext}" wants to do this in your own browser, signed in as you. It may not be undoable, so only you can allow it.`
+      : req.trail?.length
+        ? `T3 Worker "${req.subtaskContext}" wants to run "${req.toolName}". T2 and T1 could not determine if this is safe.`
+        : `T3 Worker "${req.subtaskContext}" wants to run "${req.toolName}".`,
     isDangerous: req.isDangerous,
     ...(req.localOnly ? { localOnly: true } : {}),
     escalationContext: {

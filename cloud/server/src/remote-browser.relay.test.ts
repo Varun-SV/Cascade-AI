@@ -90,6 +90,13 @@ describe("a run on the user's own browser", () => {
     expect(wired[0]!.features).toMatchObject({ screenshots: false, marked: false });
   });
 
+  it("takes the device's question as the run's approval: what can't be undone is still asked", () => {
+    const { hub } = decliningHub();
+    const { cascade, wired } = fakeCascade();
+    attachRemoteBrowser({ cascade, config: relaySettings, conversationId: 'c1', emit: () => {}, relay: relayFor(hub) });
+    expect(wired[0]!.features).toMatchObject({ askedOnDevice: true });
+  });
+
   it('watching, taking over and input from the web are refused plainly: those are done on the device', async () => {
     const { hub } = decliningHub();
     const { cascade, handlers } = fakeCascade();

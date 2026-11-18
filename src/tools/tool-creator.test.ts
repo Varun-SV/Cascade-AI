@@ -609,7 +609,7 @@ describe('ToolCreator — hardened persistence (v0.9.6 item 3)', () => {
 
 describe('PermissionEscalator — forceReprompt bypasses the always-cache (v0.9.6)', () => {
   it('a cached always-approval does not satisfy a forceReprompt request', async () => {
-    const esc = new PermissionEscalator(0);
+    const esc = new PermissionEscalator(0, false, true); // Advice on: the cache under test is filled by a tier's answer.
     let evals = 0;
     esc.setT2Evaluator(async () => { evals++; return { requestId: 'x', approved: true, always: true, decidedBy: 'T2' }; });
     const base = { requestedBy: 'r', parentT2Id: 't2', toolName: 'shell', input: {}, isDangerous: true, subtaskContext: '', sectionContext: '' };

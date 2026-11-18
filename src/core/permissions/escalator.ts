@@ -71,11 +71,18 @@ export class PermissionEscalator extends EventEmitter {
   private readonly approvalTimeoutMs: number;
   /** Autonomous mode (autonomy: 'auto'): non-dangerous tools auto-approve. */
   private autonomous: boolean;
+  /**
+   * Whether T2 and T1 are asked about a dangerous call at all. They can only
+   * advise on one — it always comes to the user — so by default they aren't:
+   * each piece of advice was a model call per request, and the web never showed it.
+   */
+  private adviseOnDangerous: boolean;
 
-  constructor(approvalTimeoutMs = 600_000, autonomous = false) {
+  constructor(approvalTimeoutMs = 600_000, autonomous = false, adviseOnDangerous = false) {
     super();
     this.approvalTimeoutMs = approvalTimeoutMs;
     this.autonomous = autonomous;
+    this.adviseOnDangerous = adviseOnDangerous;
   }
 
   /** Toggle autonomous auto-approval at runtime (e.g. from /auto). */
@@ -112,7 +119,7 @@ export class PermissionEscalator extends EventEmitter {
     // A model's "always" does not stand for a local-only caller, whose
     // requests those models never see: only a person's grant — or a refusal,
     // which costs nothing to honour — carries over to it.
-    const stands = (approved: boolean, byModel: boolean) => !(req.localOnly && byModel && approved);
+    const stands = (approved: boolean, byModel: boolean) => !((req.localOnly || req.askPerson) && byModel && approved);
     if (!req.forceReprompt && this.taskWideCache.has(req.toolName)
       && stands(this.taskWideCache.get(req.toolName)!, this.modelDecided.has(`task:${req.toolName}`))) {
       return {
@@ -140,6 +147,11 @@ export class PermissionEscalator extends EventEmitter {
       };
     }
 
+    // ── 1c. The person's own to answer ─────────
+    // Nothing below may approve it: not a rule, not autonomous mode, not a
+    // tier's model. Only a person's earlier "allow for this run" (above) does.
+    if (req.askPerson) return this.waitForUserDecision(req, signal);
+
     // ── 2. Non-dangerous safe tools → rule-based auto-approve ──
     if (!req.isDangerous && SAFE_TOOLS.has(req.toolName)) {
       const decision: PermissionDecision = {
@@ -164,6 +176,10 @@ export class PermissionEscalator extends EventEmitter {
         reasoning: 'Autonomous mode — non-dangerous tool auto-approved',
       };
     }
+
+    // ── 2c. Dangerous: the user's, and nobody's advice is asked ──
+    // The tiers below never decide a dangerous call; they only add advice.
+    if (req.isDangerous && !this.adviseOnDangerous) return this.waitForUserDecision(req, signal);
 
     // ── 3. Ask T2 evaluator ───────────────────
     // Not for a local-only caller: the evaluators put the input in a prompt

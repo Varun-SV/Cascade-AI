@@ -437,6 +437,11 @@ export const CascadeConfigSchema = z.object({
    */
   approvalTimeoutMs: z.number().int().min(1000).default(600_000),
   /**
+   * Ask T2's and T1's models for advice (never a decision) on a dangerous
+   * tool's call before it comes to the user: two model calls per request.
+   */
+  approvalAdvice: z.boolean().optional(),
+  /**
    * Boardroom plan approval: pause after the plan is produced so the user can
    * review the org chart (sections, workers, estimated cost) before any worker
    * spawns. Scope:

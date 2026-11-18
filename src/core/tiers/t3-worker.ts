@@ -1255,8 +1255,13 @@ export class T3Worker extends BaseTier {
     }
 
     const shown = (this.toolRegistry.getTool?.(tc.name) as {
-      forApproval?: (input: Record<string, unknown>, sessionId: string, actorId?: string) => { input: Record<string, unknown>; alwaysAsk: boolean };
+      forApproval?: (input: Record<string, unknown>, sessionId: string, actorId?: string) => {
+        input: Record<string, unknown>; alwaysAsk: boolean; askPerson?: boolean; notNeeded?: boolean;
+      };
     } | undefined)?.forApproval?.(tc.input, this.taskId, this.id);
+    // Approved already, where the tool can say so: the person's own browser,
+    // whose device asked them about this run before it opened.
+    if (shown?.notNeeded) return null;
 
     // ── Hierarchical permission escalation: T3 → T2 → T1 → User ──
     if (this.permissionEscalator) {
@@ -1271,6 +1276,7 @@ export class T3Worker extends BaseTier {
         sectionContext: this.assignment?.subtaskTitle ?? 'Unknown section',
         localOnly: this.localOnlyMatch,
         ...(shown?.alwaysAsk ? { forceReprompt: true } : {}),
+        ...(shown?.askPerson ? { askPerson: true } : {}),
       };
       // The run's signal: a cancelled run withdraws the question rather
       // than leaving it with an evaluator or on screen.
