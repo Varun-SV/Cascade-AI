@@ -50,6 +50,8 @@ device shows which run is asking, and you type the sites it may use. Then:
 
 ## Chrome extension
 
+Its privacy policy: [`extension/PRIVACY.md`](../extension/PRIVACY.md).
+
 1. Build it: `node extension/build.mjs`. The result is in `extension/dist`.
 2. In Chrome, open `chrome://extensions`, turn on **Developer mode**, choose
    **Load unpacked** and pick `extension/dist`.
