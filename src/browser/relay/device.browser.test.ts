@@ -270,6 +270,46 @@ suite("the server's own browser controller, with the user's browser behind it", 
     await c.endRun('run-1');
   });
 
+  it('a ref click works over a slow link to the device, as a user\'s own Chrome far from the server is', async () => {
+    // Every exchange with the page crosses the relay. A ref click is checked, then
+    // checked once more "at once" before it is sent; a fixed 500 ms for that refused
+    // every click from a server an ocean away from the user, as "not ready".
+    const r = await rig();
+    const d = await r.device('user-a', 'device-a');
+    const DELAY_MS = 80;
+    const { WebSocket: WS } = await import('ws');
+    const slow = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+    await new Promise((res) => slow.once('listening', res));
+    closers.push(() => slow.close());
+    slow.on('connection', (client, req) => {
+      const up = new WS(r.agentUrl(String(req.url).slice('/agent/'.length)));
+      const queued: string[] = [];
+      up.on('open', () => { for (const m of queued.splice(0)) up.send(m); });
+      client.on('message', (m) => setTimeout(() => { if (up.readyState === WS.OPEN) up.send(String(m)); else queued.push(String(m)); }, DELAY_MS));
+      up.on('message', (m) => setTimeout(() => { if (client.readyState === WS.OPEN) client.send(String(m)); }, DELAY_MS));
+      client.on('close', () => up.close());
+      up.on('close', () => client.close());
+    });
+    const port = (slow.address() as AddressInfo).port;
+    const provider = new RelayBrowserProvider({ hub: r.hub, agentUrl: (t) => `ws://127.0.0.1:${port}/agent/${t}`, userId: 'user-a', deviceId: 'device-a', runId: 'run-1' });
+    const c = new RemoteBrowserController({ provider });
+    closers.push(() => c.dispose());
+    const act = async (a: Parameters<typeof c.controller>[0]) => {
+      const out = await c.controller(a, ctx('run-1', 'w1'));
+      expect(out.ok, `${a.kind}: ${out.detail}`).toBe(true);
+      return out;
+    };
+    await act({ kind: 'navigate', url: 'http://allowed.test/signup' });
+    await act({ kind: 'fill', selector: '#q', value: 'far away' });
+    const seen = await act({ kind: 'observe' });
+    const send = Object.entries(seen.view?.labels ?? {}).find(([, label]) => label.includes('Send'))?.[0];
+    expect(send, seen.view?.text).toBeTruthy();
+    await act({ kind: 'click', ref: send!, ...(seen.document ? { expectDocument: seen.document } : {}) });
+    expect((await act({ kind: 'extract_text', selector: '#out' })).detail).toContain('SENT:far away');
+    expect([...d.relay()!.refusedMethods]).toEqual([]);
+    await c.endRun('run-1');
+  });
+
   it('a user who says no gives the run a refusal it can show, and no browser', async () => {
     const r = await rig({ answer: null });
     await r.device('user-a', 'device-a');

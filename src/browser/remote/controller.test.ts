@@ -5048,6 +5048,35 @@ describe('page views and refs', () => {
     expect(clicked).toBe(false);
   });
 
+  it('gives a checked ref click time for a slow link to the browser, in exchanges rather than a fixed time', async () => {
+    // The user's own Chrome through the relay: every exchange with the page
+    // takes a while. A fixed 500 ms refused every click there as "not ready"
+    // although nothing had changed; the moment it may wait grows with the link.
+    snapshot = '- button "Go" [ref=e5] [box=84,0,32,25]';
+    const c = controller();
+    await c.controller({ kind: 'observe' }, ctx('run', 'w1'));
+    const evaluate = extra['evaluate'] as (e: string) => Promise<unknown>;
+    extra['evaluate'] = async (expression: string) => {
+      if (expression === '0') await new Promise((r) => setTimeout(r, 60));
+      return evaluate(expression);
+    };
+    const locate = extra['locator'] as (s: string) => Record<string, unknown>;
+    const waits: number[] = [];
+    let clicked = false;
+    extra['locator'] = (selector: string) => ({ ...locate(selector),
+      async click(opts: { trial?: boolean; timeout?: number }) {
+        if (opts.trial) waits.push(opts.timeout ?? Infinity);
+        else clicked = true;
+      },
+    });
+    const out = await c.controller({ kind: 'click', ref: 'e5', timeoutMs: 30_000 }, ctx('run', 'w1'));
+    expect(out.ok, out.detail).toBe(true);
+    expect(clicked).toBe(true);
+    // The second, short check: more than the fixed moment, far less than the action's own wait.
+    expect(waits[1]).toBeGreaterThan(500 + 20 * 50);
+    expect(waits[1]).toBeLessThan(500 + 20 * 1_000 + 1);
+  });
+
   it('sends a checked ref click without waiting for the page it loads', async () => {
     // A Pay button whose handler runs and starts a slow navigation: the
     // click went, and must be reported as done, not as not used.
