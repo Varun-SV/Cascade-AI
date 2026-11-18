@@ -9,6 +9,7 @@ import { MermaidBlock } from './MermaidBlock.js';
 import { CHAT_REHYPE_PLUGINS, CHAT_REMARK_PLUGINS, createAnswerPreparer, usePacedText } from '../lib/markdown.js';
 import { SessionRating } from './SessionRating.js';
 import { useAppDispatch, useAppSelector, appendMessage, finalizeLastMessage, setSessionId, loadTranscript, runStarted, clearComposerDraft, type ChatAttachmentRef } from '../store/index.js';
+import { composerStep } from '../lib/drafts.js';
 import { IMAGE_TYPES, MAX_FILES, attachmentName, readImageFile, uploadAttachment, useAttachmentImage } from '../lib/attachments.js';
 import { fetchSessionTranscript } from '../utils/sessionLoad.js';
 
@@ -271,13 +272,20 @@ export function ChatPanel({ socket, compact }: Props) {
 
   // A chat handed over from the web: its last message waits here, files and all, to send.
   // It stays saved until it's sent, so leaving the chat first doesn't lose it.
-  const waitingDraft = composerDrafts[activeSessionId ?? sessionId ?? ''];
+  // It's that chat's alone: the composer holds it only while that chat is open, and
+  // leaving clears it from the composer (it stays saved, and comes back on return),
+  // so another chat never sends its text or claims its files.
+  const currentChat = activeSessionId ?? sessionId ?? '';
+  const waitingDraft = composerDrafts[currentChat];
+  const draftShownFor = useRef<string | null>(null);
   useEffect(() => {
-    if (!waitingDraft) return;
-    setInput(waitingDraft.prompt);
-    setPending(waitingDraft.attachments);
+    const step = composerStep(draftShownFor.current, currentChat, waitingDraft);
+    if (step.kind === 'keep') return;
+    setInput(step.input);
+    setPending(step.pending);
     setFileError(null);
-  }, [waitingDraft]);
+    draftShownFor.current = step.shownFor;
+  }, [currentChat, waitingDraft]);
 
   const addFiles = async (files: File[]) => {
     if (!files.length) return;
@@ -323,6 +331,7 @@ export function ChatPanel({ socket, compact }: Props) {
     setPending([]);
     setFileError(null);
     if (composerDrafts[sid]) dispatch(clearComposerDraft(sid));
+    draftShownFor.current = null;
     dispatch(runStarted({ sessionId: sid }));
     setSessionDone(false);
   };
