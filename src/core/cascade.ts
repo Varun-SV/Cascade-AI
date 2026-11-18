@@ -1800,7 +1800,7 @@ export class Cascade extends EventEmitter {
   }
 
   private isCasualGreeting(prompt: string): boolean {
-    const casual = /^(hi|hello|hey|greetings|thanks|thank you|thx|bye|goodbye|cya)$/i.test(prompt.trim().replace(/[!?.]+$/, ''));
+    const casual = /^(hi|hello|hey|greetings|thanks|thank you|thx|bye|goodbye|cya)$/i.test(trimTrailing(prompt.trim(), '!?.'));
     return casual;
   }
 
@@ -1818,7 +1818,8 @@ export class Cascade extends EventEmitter {
       return p.split(/\s+/).length <= 12;
     }
     // Greeting-led openers ("hey there!", "hello cascade") with nothing else.
-    if (history.length === 0 && /^(?:hi|hello|hey|greetings)\b[\s,!.]*\w*[!.]*$/i.test(p)) return true;
+    // Trailing "!"/"." are cut first, so the pattern has no two runs that could match the same text.
+    if (history.length === 0 && /^(?:hi|hello|hey|greetings)\b[\s,!.]*\w*$/i.test(trimTrailing(p, '!.'))) return true;
     return false;
   }
 
@@ -1835,7 +1836,12 @@ export class Cascade extends EventEmitter {
   }
 
   private looksLikeSimpleArtifactTask(prompt: string): boolean {
-    return /create .*\.(txt|md|json|csv)\b/i.test(prompt)
+    // "create … .md" on one line: found by position, not by an unanchored `.*`.
+    const createsFile = prompt.split('\n').some((line) => {
+      const at = line.search(/create /i);
+      return at >= 0 && /\.(?:txt|md|json|csv)\b/i.test(line.slice(at + 'create '.length));
+    });
+    return createsFile
       && !/(research|compare|thorough|pdf|report|analy[sz]e|architecture|multi-agent)/i.test(prompt);
   }
 
@@ -1881,7 +1887,7 @@ export class Cascade extends EventEmitter {
     if (p.length < 24) return { buildVerb: false, scaleCount: 0, multiPart: false };
     const buildVerb = /\b(?:build|implement|create|develop|design|scaffold|refactor|migrate|architect|set up|integrate)\b/i.test(p);
     const scaleCount = (p.match(/\b(?:app(?:lication)?|system|platform|service|api|backend|frontend|full[- ]?stack|website|dashboard|pipeline|microservices?|database schema|authentication|end[- ]to[- ]end|codebase|project|multiple files|several (?:files|modules|components)|test suite)\b/gi) ?? []).length;
-    const multiPart = /(?:\b(?:and|then|also|plus|as well as)\b.*\b(?:and|then|also)\b)|(?:^|\n)\s*(?:[-*]|\d+[.)])\s+/i.test(p); // 2+ conjunctions or a list
+    const multiPart = hasTwoConjunctions(p) || p.split('\n').some((line) => /^\s*(?:[-*]|\d+[.)])\s+/.test(line)); // 2+ conjunctions or a list
     return { buildVerb, scaleCount, multiPart };
   }
 
@@ -2947,4 +2953,24 @@ export function approvalRequestFor(req: PermissionRequest): ApprovalRequest & { 
       taskContext: req.taskContext,
     },
   };
+}
+
+/** `text` without any run of `chars` at its end; a loop, where a regex would backtrack. */
+function trimTrailing(text: string, chars: string): string {
+  let end = text.length;
+  while (end > 0 && chars.includes(text[end - 1]!)) end -= 1;
+  return text.slice(0, end);
+}
+
+/**
+ * Whether a line has a joining word ("and", "then", "also", "plus", "as well as")
+ * followed later on that line by "and", "then" or "also": a multi-part ask. Found
+ * by the words' positions, not by a `.*` between two patterns.
+ */
+function hasTwoConjunctions(text: string): boolean {
+  return text.split('\n').some((line) => {
+    const first = /\b(?:and|then|also|plus|as well as)\b/i.exec(line);
+    if (!first) return false;
+    return /\b(?:and|then|also)\b/i.test(line.slice(first.index + first[0].length));
+  });
 }
