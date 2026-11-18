@@ -12,6 +12,7 @@ import { createApp } from './app.js';
 import { attachSocket } from './socket.js';
 import { startPendingMediaSweeper } from './pending-media.js';
 import { createBrowserRelay } from './browser-relay.js';
+import { logOpenWebSearches } from './open-web-log.js';
 
 export function bootstrap() {
   dotenv.config();
@@ -49,6 +50,9 @@ export function bootstrap() {
   // but an asset nobody ever opens again is exactly the one that would
   // otherwise sit on the volume forever — so the process sweeps on a timer too.
   const stopMediaSweeper = startPendingMediaSweeper(env, store);
+
+  // One line per free web search: which sources answered, never what was asked.
+  logOpenWebSearches();
 
   httpServer.listen(env.PORT, () => {
     console.log(`Cascade Cloud server listening on :${env.PORT}`);

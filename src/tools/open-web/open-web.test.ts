@@ -2,10 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { truncateForContext } from '../../utils/truncate.js';
 import { WebFetchTool } from '../web-fetch.js';
 import { WebSearchTool } from '../web-search.js';
-import { BlockedError, isDdgChallenge, parseArxiv, parseDdgAnchors, pypiCandidates } from './engines.js';
+import { BlockedError, isDdgChallenge, isDdgNoResults, parseArxiv, parseDdgAnchors, pypiCandidates } from './engines.js';
 import { canonicalUrl, fuse } from './fuse.js';
 import { decodeEntities, readHtml } from './html.js';
-import { OpenWebState, fetchReadable, openWebSearch } from './index.js';
+import { type OpenWebSummary, OpenWebState, fetchReadable, onOpenWebSearch, openWebSearch, simplerQuery } from './index.js';
 import { bestPassages, split } from './passages.js';
 import { route } from './route.js';
 
@@ -314,6 +314,41 @@ describe('Open Web search', () => {
   });
 });
 
+describe('when the first search finds nothing', () => {
+  it('takes an empty DuckDuckGo page that does not say "no results" for what it is, and tries Lite', async () => {
+    expect(isDdgNoResults('<div class="no-results">No results.</div>')).toBe(true);
+    expect(isDdgNoResults('<html><body><form></form></body></html>')).toBe(false);
+    // An empty html page, then Lite with results: Lite's are used.
+    const lite = `<table><tr><td><a class='result-link' href='https://moondroplab.com/en/products/chu-3'>Moondrop CHU 3</a></td></tr><tr><td class='result-snippet'>The CHU 3.</td></tr></table>`;
+    const { fetcher, calls } = sources({
+      'html.duckduckgo.com': () => reply('<html><body><div class="serp"></div></body></html>'),
+      'lite.duckduckgo.com': () => reply(lite),
+    });
+    const out = await openWebSearch('moondrop chu 3', { maxResults: 5, fetcher, state: new OpenWebState() });
+    expect(calls.some((u) => hostIs(u, 'lite.duckduckgo.com'))).toBe(true);
+    expect(out.results.map((r) => r.url)).toContain('https://moondroplab.com/en/products/chu-3');
+    // Both pages empty and unexplained: a failure, not "nothing exists".
+    const both = sources({
+      'html.duckduckgo.com': () => reply('<html><body></body></html>'),
+      'lite.duckduckgo.com': () => reply('<html><body></body></html>'),
+    });
+    const failed = await openWebSearch('moondrop chu 3', { maxResults: 5, fetcher: both.fetcher, state: new OpenWebState() });
+    expect(failed.sources.find((x) => x.engine === 'duckduckgo')).toMatchObject({ outcome: 'failed' });
+    // DuckDuckGo saying plainly it found nothing is believed, and Lite isn't asked.
+    const none = sources({ 'html.duckduckgo.com': () => reply('<div class="no-results">No results.</div>') });
+    const empty = await openWebSearch('zzqx', { maxResults: 5, fetcher: none.fetcher, state: new OpenWebState() });
+    expect(empty.sources.find((x) => x.engine === 'duckduckgo')).toMatchObject({ outcome: 'empty' });
+    expect(none.calls.some((u) => hostIs(u, 'lite.duckduckgo.com'))).toBe(false);
+  });
+
+  it('keeps the key words of a chatty query for a second try', () => {
+    expect(simplerQuery('should I buy the "Moondrop CHU 3" vs Aria 2 review?')).toBe('Moondrop CHU 3 Aria 2');
+    expect(simplerQuery('moondrop para 2 site:reddit.com')).toBe('moondrop para 2');
+    expect(simplerQuery('moondrop para')).toBeNull();
+    expect(simplerQuery('the best')).toBeNull();
+  });
+});
+
 describe('web_search with no keys', () => {
   afterEach(() => vi.unstubAllEnvs());
   const noKeys = () => {
@@ -321,6 +356,44 @@ describe('web_search with no keys', () => {
     vi.stubEnv('BRAVE_SEARCH_API_KEY', '');
     vi.stubEnv('TAVILY_API_KEY', '');
   };
+
+  it('tries the key words once more when the query as written finds nothing, and says so', async () => {
+    noKeys();
+    const lite = `<table><tr><td><a class='result-link' href='https://moondroplab.com/'>Moondrop</a></td></tr></table>`;
+    const { fetcher, calls } = sources({
+      'html.duckduckgo.com': (url) => reply(new URL(url).searchParams.get('q') === 'Moondrop CHU 3 Aria 2' ? lite.replace(/result-link/g, 'result__a') : '<div class="no-results">No results.</div>'),
+      'en.wikipedia.org': () => reply({ pages: [] }),
+      'api.marginalia.nu': () => reply({ results: [] }),
+    });
+    const summaries: OpenWebSummary[] = [];
+    const stop = onOpenWebSearch((x) => summaries.push(x));
+    const tool = new WebSearchTool({}, { fetcher, state: new OpenWebState() });
+    const query = 'should I buy the "Moondrop CHU 3" vs Aria 2 review?';
+    const out = await tool.execute({ query }, {} as never);
+    stop();
+    expect(out).toContain('https://moondroplab.com/');
+    expect(out).toContain('Nothing matched the query as written, so these are for "Moondrop CHU 3 Aria 2"');
+    expect(calls.filter((u) => hostIs(u, 'html.duckduckgo.com'))).toHaveLength(2);
+    // The operator's log line: what answered and how many, never what was asked.
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]).toMatchObject({ results: 1, retried: true });
+    const said = JSON.stringify(summaries[0]).toLowerCase();
+    for (const word of ['moondrop', 'chu', 'aria', 'buy', 'review', 'http']) expect(said).not.toContain(word);
+  });
+
+  it('tells the model plainly that search works when nothing matched, and what to do instead', async () => {
+    noKeys();
+    const { fetcher } = sources({
+      'html.duckduckgo.com': () => reply('<div class="no-results">No results.</div>'),
+      'en.wikipedia.org': () => reply({ pages: [] }),
+      'api.marginalia.nu': () => reply({ results: [] }),
+    });
+    const tool = new WebSearchTool({}, { fetcher, state: new OpenWebState() });
+    await expect(tool.execute({ query: 'qqzz xxyy' }, {} as never)).rejects.toMatchObject({
+      systemic: false,
+      message: expect.stringContaining('Web search is working'),
+    });
+  });
 
   it('lists the merged results and the sources asked', async () => {
     noKeys();

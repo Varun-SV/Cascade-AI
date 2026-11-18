@@ -61,6 +61,7 @@ export {
 export type { McpServerRename } from './tools/tool-name.js';
 export { CurrentPageTool, MAX_PAGE_TEXT_CHARS } from './tools/current-page.js';
 export { BrowserControlTool } from './tools/browser-control.js';
+export { onOpenWebSearch, type OpenWebSummary } from './tools/open-web/index.js';
 export type { BrowserController, BrowserAction, BrowserActionOutcome } from './tools/browser-control.js';
 export { AskUserTool } from './tools/ask-user.js';
 export type {

@@ -5,6 +5,30 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.88.1 - 2026-11-18
+
+### Fixed
+- **An empty DuckDuckGo page isn't taken for "nothing found".** From a hosted
+  server, DuckDuckGo can answer with a page that has no results on it and
+  doesn't say so. That page is now treated as unreadable: Lite is tried, and
+  if it does the same the source counts as failed, not as having found
+  nothing. A page where DuckDuckGo says "No results." is still believed.
+- **A chatty query gets a second try with its key words.** When every source
+  answers but none has a match, the search runs once more with the query's
+  key words alone (no quotes, operators or common words) before a run is told
+  nothing was found, and the result says it did.
+- **A run isn't told search is broken when it simply found nothing.** The
+  message now says search is working, nothing matched, and to try other words
+  or read a known site with web_fetch. A small model told only "found
+  nothing" answered without doing the research.
+
+### Added
+- **A line in the server's log for each free web search** (Cascade Cloud):
+  which sources answered and how many results there were, and whether the
+  shorter query was tried. Never the query, a result's address, or a hash of
+  either. Hosts opt in with `onOpenWebSearch`; the CLI and desktop log
+  nothing.
+
 ## 0.88.0 - 2026-11-18
 
 ### Added

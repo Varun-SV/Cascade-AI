@@ -25,6 +25,18 @@ export class BlockedError extends Error {
   }
 }
 
+/**
+ * A source that answered, with nothing that could be read as results: it was
+ * reached, so this is no outage, but its answer can't be taken for "nothing
+ * found" either.
+ */
+export class UnreadableAnswerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnreadableAnswerError';
+  }
+}
+
 export interface Engine {
   id: EngineId;
   search(query: string, max: number, signal: AbortSignal): Promise<WebSearchResult[]>;
@@ -119,6 +131,12 @@ export function isDdgChallenge(status: number, html: string): boolean {
     || head.includes('bots use duckduckgo too') || head.includes('please complete the following challenge');
 }
 
+/** DuckDuckGo's own "nothing found" page, as opposed to one with nothing on it. Exported for tests. */
+export function isDdgNoResults(html: string): boolean {
+  const head = html.slice(0, 60_000).toLowerCase();
+  return head.includes('no-results') || head.includes('no results.') || head.includes('no results found');
+}
+
 function duckduckgo(fetcher: Fetch): Engine {
   return {
     id: 'duckduckgo',
@@ -126,6 +144,7 @@ function duckduckgo(fetcher: Fetch): Engine {
       // The HTML endpoint first, Lite if it is turned away; one check page means
       // the other will likely say the same before long, but not always.
       let blocked: BlockedError | undefined;
+      let unreadable = false;
       for (const variant of ['html', 'lite'] as const) {
         const url = variant === 'html'
           ? `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`
@@ -142,9 +161,16 @@ function duckduckgo(fetcher: Fetch): Engine {
         const found = variant === 'html'
           ? parseDdgAnchors(html, 'result__a', 'result__snippet')
           : parseDdgAnchors(html, 'result-link', 'result-snippet');
-        return found.slice(0, max).map((r) => ({ ...r, engine: 'duckduckgo' }));
+        if (found.length) return found.slice(0, max).map((r) => ({ ...r, engine: 'duckduckgo' }));
+        // A page with no results that doesn't say so is not an answer: DDG
+        // serves a hosted server's address pages like that instead of a check.
+        // Lite is tried; if it does the same, that is a failure, not "nothing
+        // found", so a run isn't told a well-known thing doesn't exist.
+        if (isDdgNoResults(html)) return [];
+        unreadable = true;
       }
-      throw blocked ?? new Error('no answer');
+      if (blocked) throw blocked;
+      throw unreadable ? new UnreadableAnswerError('DuckDuckGo sent a page with no results it could read') : new Error('no answer');
     },
   };
 }

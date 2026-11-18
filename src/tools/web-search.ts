@@ -23,7 +23,7 @@
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
 import type { Fetch } from './open-web/engines.js';
-import { type OpenWebState, type PageFetch, type ReadResult, type SourceOutcome, openWebSearch, readTopResults } from './open-web/index.js';
+import { type OpenWebState, type PageFetch, type ReadResult, type SourceOutcome, openWebSearch, readTopResults, reportOpenWebSearch, simplerQuery } from './open-web/index.js';
 import { safeFetch } from './utils/safe-fetch.js';
 
 export { parseDdgAnchors, unwrapDdgRedirect } from './open-web/engines.js';
@@ -302,15 +302,33 @@ export class WebSearchTool extends BaseTool {
     }
 
     // ── 4. Open Web (always available, no key needed) ────────────────────
-    const open = await openWebSearch(query, {
+    const started = Date.now();
+    const searchOpenWeb = (q: string) => openWebSearch(q, {
       maxResults,
       ...(signal ? { signal } : {}),
       ...(this.deps.fetcher ? { fetcher: this.deps.fetcher } : {}),
       ...(this.deps.state ? { state: this.deps.state } : {}),
     });
+    let open = await searchOpenWeb(query);
+    // Nothing for the query as written, though sources answered: once more with
+    // its key words alone, before a run is told there is nothing. A long,
+    // chatty query is the commonest reason a search engine finds nothing.
+    const simpler = !open.results.length && open.reachable ? simplerQuery(query) : null;
+    if (simpler) {
+      const again = await searchOpenWeb(simpler);
+      open = { ...again, reachable: open.reachable || again.reachable };
+    }
+    reportOpenWebSearch({
+      sources: open.sources.map((o) => ({ engine: o.engine, outcome: o.outcome, found: o.found ?? 0 })),
+      results: open.results.length,
+      retried: simpler !== null,
+      ms: Date.now() - started,
+    });
     if (open.reachable) anyBackendReachable = true;
     const asked2 = open.sources.map((o) => `${o.engine} ${OUTCOME_WORDS[o.outcome]}`).join(', ');
-    if (open.results.length > 0) return done(open.results, `Searched free sources (no key): ${asked2}.`);
+    if (open.results.length > 0) {
+      return done(open.results, `Searched free sources (no key): ${asked2}.${simpler ? ` Nothing matched the query as written, so these are for "${simpler}".` : ''}`);
+    }
     for (const o of open.sources) {
       errors.push(`${o.engine}: ${OUTCOME_WORDS[o.outcome]}${o.detail ? ` (${o.detail})` : ''}`);
     }
@@ -329,9 +347,18 @@ export class WebSearchTool extends BaseTool {
       ? '\nTip: Configure a search backend for better results:\n  • Self-hosted: set SEARXNG_URL in your environment\n  • Brave Search API: set BRAVE_SEARCH_API_KEY\n  • Tavily API: set TAVILY_API_KEY'
       : '';
 
+    // Search worked and found nothing: said so, with what to do next. A small
+    // model told only "found nothing" took it for the tool being broken and
+    // answered without doing the research.
+    const advice = anyBackendReachable
+      ? 'Web search is working: the sources answered but none had a match. Do not conclude that search is unavailable. '
+        + 'Try again with different or fewer words (a product\'s exact name, a site name), or read a page you know directly with web_fetch '
+        + '(the maker\'s site, a review site, a shop).'
+      : '';
     throw Object.assign(new Error([
-      `Web search for "${query}" found nothing across all backends:`,
+      `Web search for "${query}" found nothing across all backends${simpler ? ` (also tried "${simpler}")` : ''}:`,
       ...errors.map((e) => `  • ${e}`),
+      ...(advice ? [advice] : []),
       configHint,
     ].join('\n')), { systemic: !anyBackendReachable });
   }
