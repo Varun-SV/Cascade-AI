@@ -8,6 +8,10 @@ import { OpenWebState, fetchReadable, openWebSearch } from './index.js';
 import { bestPassages, split } from './passages.js';
 import { route } from './route.js';
 
+/** A URL's host, compared whole: a substring of the URL could be anywhere in it. */
+const hostIs = (url: string, host: string): boolean => new URL(url).hostname === host;
+const ddgHost = (url: string): boolean => ['html.duckduckgo.com', 'lite.duckduckgo.com'].includes(new URL(url).hostname);
+
 /** A Response-like answer, as the sources' fetch returns it. */
 function reply(body: string | object, init: { status?: number; type?: string; headers?: Record<string, string>; url?: string } = {}): Response {
   const text = typeof body === 'string' ? body : JSON.stringify(body);
@@ -179,7 +183,7 @@ describe('Open Web search', () => {
     expect(out.reachable).toBe(true);
     expect(out.results.map((r) => r.url)).toContain('https://example.com/guide?utm_source=ddg');
     expect(out.results.map((r) => r.url)).not.toContain('https://duckduckgo.com/y.js?ad_provider=x');
-    expect(out.results.find((r) => r.url.includes('wikipedia'))).toMatchObject({ title: 'Guide (book) — Wikipedia', snippet: 'book: A guide' });
+    expect(out.results.find((r) => hostIs(r.url, 'en.wikipedia.org'))).toMatchObject({ title: 'Guide (book) — Wikipedia', snippet: 'book: A guide' });
   });
 
   it('falls back to Lite when DuckDuckGo shows its check, and rests a source that turned it away', async () => {
@@ -191,7 +195,7 @@ describe('Open Web search', () => {
     });
     const first = await openWebSearch('guide', { maxResults: 5, fetcher, state, now: () => now });
     expect(first.sources.find((s) => s.engine === 'duckduckgo')).toMatchObject({ outcome: 'blocked' });
-    expect(calls.filter((u) => u.includes('duckduckgo'))).toHaveLength(2);
+    expect(calls.filter(ddgHost)).toHaveLength(2);
     // Others still answered: not an outage.
     expect(first.reachable).toBe(true);
     expect(first.results.length).toBeGreaterThan(0);
@@ -200,12 +204,12 @@ describe('Open Web search', () => {
     now += 60_000;
     const second = await openWebSearch('another query', { maxResults: 5, fetcher, state, now: () => now });
     expect(second.sources.find((s) => s.engine === 'duckduckgo')).toMatchObject({ outcome: 'resting' });
-    expect(calls.some((u) => u.includes('duckduckgo'))).toBe(false);
+    expect(calls.some(ddgHost)).toBe(false);
     // Rested for minutes, not for ever.
     now += 6 * 60_000;
     calls.length = 0;
     await openWebSearch('a third query', { maxResults: 5, fetcher, state, now: () => now });
-    expect(calls.some((u) => u.includes('duckduckgo'))).toBe(true);
+    expect(calls.some(ddgHost)).toBe(true);
   });
 
   it('honours a rate limit\'s Retry-After, and keeps answers for a while', async () => {
@@ -259,9 +263,9 @@ describe('web_search with no keys', () => {
   it('with read, opens the top results and brings back the passages that answer the query', async () => {
     noKeys();
     const { fetcher } = sources();
-    const fetchPage = vi.fn(async (url: string) => url.includes('example.com')
+    const fetchPage = vi.fn(async (url: string) => hostIs(url, 'example.com')
       ? reply('<html><head><title>The Guide</title></head><body><article><h2>Basics</h2><p>Unrelated words about something else entirely, for a while.</p><h2>The guide</h2><p>This guide explains the guide in full, step by step, for everyone.</p></article></body></html>', { url })
-      : url.includes('wikipedia') ? reply('', { status: 500 }) : reply('plain text with nothing of note', { type: 'text/plain', url }));
+      : hostIs(url, 'en.wikipedia.org') ? reply('', { status: 500 }) : reply('plain text with nothing of note', { type: 'text/plain', url }));
     const tool = new WebSearchTool({}, { fetcher, fetchPage, state: new OpenWebState() });
     const out = await tool.execute({ query: 'guide', read: true }, {} as never);
     expect(fetchPage).toHaveBeenCalledTimes(3);
