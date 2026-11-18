@@ -1091,7 +1091,9 @@ describe('approvalRequestFor', () => {
       isDangerous: true, subtaskContext: 'Inspect the channel', sectionContext: 'Research', askPerson: true,
     };
     expect(approvalRequestFor(req as never).description).toBe('T3 Worker "Inspect the channel" wants to do this in your own browser, signed in as you. It may not be undoable, so only you can allow it.');
-    expect(approvalRequestFor({ ...req, askPerson: undefined } as never).description).toContain('T2 and T1 could not determine');
+    expect(approvalRequestFor({ ...req, askPerson: undefined, trail: [{ tier: 'T2', verdict: 'unsure', reason: 'T2: unsure' }] } as never).description).toContain('T2 and T1 could not determine');
+    // Not asked for advice (the default for a dangerous call): it doesn't say they were.
+    expect(approvalRequestFor({ ...req, askPerson: undefined } as never).description).toBe('T3 Worker "Inspect the channel" wants to run "browser_control".');
   });
 });
 

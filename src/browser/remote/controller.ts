@@ -48,6 +48,8 @@ type Page = {
   fill(selector: string, value: string, opts?: { timeout?: number }): Promise<void>;
   press(selector: string, key: string, opts?: { timeout?: number; noWaitAfter?: boolean }): Promise<void>;
   keyboard: { press(key: string): Promise<void> };
+  /** Where the pointer rests. Optional: a host without it skips moving it aside. */
+  mouse?: { move(x: number, y: number): Promise<void> };
   waitForSelector(selector: string, opts?: { timeout?: number }): Promise<unknown>;
   innerText(selector: string, opts?: { timeout?: number }): Promise<string>;
   /**
@@ -97,9 +99,33 @@ type FoundFields = {
   count(): Promise<number>;
   nth(index: number): { boundingBox(opts?: { timeout?: number }): Promise<Box | null> };
 };
+/** What `controlState` reads of an element, in the page. */
+type StateNode = {
+  nodeName: string;
+  getAttribute?(name: string): string | null;
+  checked?: unknown; disabled?: unknown; selected?: unknown; value?: unknown;
+  textContent?: string | null;
+};
+
+/**
+ * A control's state as a person would see it change: checked, pressed,
+ * expanded, selected, disabled, its value and its words. Runs in the page, so
+ * it is self-contained.
+ */
+const controlState = (node: StateNode): string => {
+  const attr = (name: string) => (node.getAttribute ? node.getAttribute(name) : null);
+  const flag = (v: unknown) => (typeof v === 'boolean' ? v : null);
+  return JSON.stringify([
+    attr('aria-checked'), attr('aria-pressed'), attr('aria-expanded'), attr('aria-selected'), attr('aria-disabled'), attr('aria-label'),
+    flag(node.checked), flag(node.disabled), flag(node.selected),
+    typeof node.value === 'string' ? node.value.slice(0, 200) : null,
+    (node.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 200),
+  ]);
+};
+
 /** One control on the page, as Playwright resolves it at the moment of acting. */
 type ActionElement = {
-  evaluate?(expression: (node: { nodeName: string }) => boolean): Promise<boolean>;
+  evaluate?<R = boolean>(expression: (node: StateNode) => R): Promise<R>;
   click(opts?: { timeout?: number; trial?: boolean; noWaitAfter?: boolean }): Promise<void>;
   fill(value: string, opts?: { timeout?: number }): Promise<void>;
   press(key: string, opts?: { timeout?: number; noWaitAfter?: boolean }): Promise<void>;
@@ -3575,7 +3601,19 @@ export class RemoteBrowserController {
         if (refRefusal(held, action.ref)) {
           return { ok: false, detail: 'The page changed while this action was being checked, so it was not run. Call observe for a fresh page view.', ...(await where()) };
         }
-        if (action.kind === 'click') await stoppable(element!.click({ timeout, trial: true }));
+        if (action.kind === 'click') {
+          try {
+            await stoppable(element!.click({ timeout, trial: true }));
+          } catch (err) {
+            // Covered by something the pointer itself brought up: a hover card
+            // or a video preview where the last action left it. Moved to the
+            // page's corner, that goes, and the control is waited for once more.
+            // Nothing is clicked by this; it is the same wait again.
+            if (!(err instanceof Error) || !err.message.includes('intercepts pointer events') || typeof page.mouse?.move !== 'function') throw err;
+            await stoppable(page.mouse.move(0, 0));
+            await stoppable(element!.click({ timeout, trial: true }));
+          }
+        }
         if (action.kind === 'hover') await stoppable(element!.hover({ timeout, trial: true }));
         if (action.kind === 'fill' || action.kind === 'select_option') {
           await stoppable(element!.waitForElementState('visible', { timeout }));
@@ -3653,6 +3691,15 @@ export class RemoteBrowserController {
       // ready", although nothing on the page had changed.
       const sendTimeout = Math.min(timeout, DISPATCH_WAIT_MS + (checked ? DISPATCH_EXCHANGES * await linkTime(held, stoppable) : 0));
       const timedOut = (err: unknown) => err instanceof Error && err.name === 'TimeoutError';
+      // A longer moment is room for the control to change, not only for the
+      // link: disabled, then enabled again already checked. So where the wait
+      // is longer than the plain moment, the control's state is read now, just
+      // after it was checked against the view, and again once it is ready; a
+      // control that is not as it was is not used. Not read, it is not used
+      // either.
+      const longWait = checked && sendTimeout > DISPATCH_WAIT_MS && typeof element?.evaluate === 'function';
+      const readState = (): Promise<string | null> => stoppable(within(element!.evaluate!(controlState))).catch(() => null);
+      const stateBefore = longWait ? await readState() : null;
       const send = async (
         ready: () => Promise<unknown>,
         input: () => Promise<unknown>,
@@ -3669,6 +3716,16 @@ export class RemoteBrowserController {
             detail: `${named} stopped being ready to use after it was checked, so it was not used. Call observe for a fresh page view.`,
             ...(await where()),
           };
+        }
+        if (longWait) {
+          const stateNow = await readState();
+          if (stateBefore === null || stateNow === null || stateNow !== stateBefore) {
+            return {
+              ok: false,
+              detail: `${named} changed while it was being made ready, so it was not used. Call observe for a fresh page view.`,
+              ...(await where()),
+            };
+          }
         }
         try {
           await stoppable(input());
@@ -3893,6 +3950,35 @@ export function actionError(err: unknown): string {
   // eslint-disable-next-line no-control-regex
   const plain = message.replace(/\u001b\[[0-9;]*m/g, '');
   const reason = plain.split('\n').map((line) => line.trim()).find((line) => line.length > 0) ?? '';
+  const why = blockedBecause(plain);
+  return why ? `${cleanReason(reason)} ${why}`.slice(0, ERROR_MAX_CHARS) : cleanReason(reason);
+}
+
+/**
+ * Why Playwright never found the control ready, from its call log, in fixed
+ * words. The log itself is never passed on: it quotes elements whole,
+ * attributes and all, a password field's value among them. Only a covering
+ * element's bare tag name is taken from it. The last reason in the log is the
+ * one that held when the wait ran out.
+ */
+function blockedBecause(log: string): string | null {
+  const lines = log.split('\n');
+  for (let i = lines.length - 1; i > 0; i--) {
+    const line = lines[i]!;
+    if (line.includes('intercepts pointer events')) {
+      const tag = /<([a-z][a-z0-9-]{0,40})/i.exec(line)?.[1];
+      return `Why: another element${tag ? ` (<${tag.toLowerCase()}>)` : ''} covers it and would take the click. Scroll, close what covers it, or choose another control.`;
+    }
+    if (line.includes('element is not visible')) return 'Why: it is not visible on the page.';
+    if (line.includes('element is not stable')) return 'Why: it kept moving (an animation or a page still loading).';
+    if (line.includes('element is not enabled') || line.includes('element is disabled')) return 'Why: it is disabled.';
+    if (line.includes('outside of the viewport')) return 'Why: it is outside the page\'s visible area and could not be scrolled to.';
+    if (line.includes('not attached to the DOM') || line.includes('element was detached')) return 'Why: it left the page.';
+  }
+  return null;
+}
+
+function cleanReason(reason: string): string {
   // Bounded and linear. A tag cut by this bound is still stripped through
   // the end; quotes can contain angle brackets without exposing attributes.
   const source = reason.slice(0, ERROR_MAX_CHARS);
@@ -4400,7 +4486,7 @@ export function describeStep(action: BrowserAction, outcome: BrowserActionOutcom
   })();
   return {
     kind: action.kind, summary, ok: outcome.ok, at,
-    ...(!outcome.ok && outcome.detail ? { why: short(withoutTyped(outcome.detail, action.value), 200) } : {}),
+    ...(!outcome.ok && outcome.detail ? { why: short(withoutTyped(outcome.detail, action.value), 320) } : {}),
     ...(outcome.url ? { url: outcome.url } : {}),
     ...(outcome.title ? { title: short(outcome.title, 120) } : {}),
   };

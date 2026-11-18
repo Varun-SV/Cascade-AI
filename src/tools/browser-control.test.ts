@@ -382,7 +382,7 @@ describe('BrowserControlTool — the person\'s own browser, approved on the devi
     text: '[Page view 1]',
     labels: {
       e2: 'searchbox "Search"', e4: 'link "TheRevProGamers"', e6: 'button "Subscribe"', e8: 'textbox "Comment"',
-      e10: 'button "Pay $42.00"', e12: 'link "Videos sorted by popularity, with the newest and…"',
+      e10: 'button "Pay $42.00"', e12: 'link "Videos sorted by popularity, with the newest and…"', e14: 'combobox "Country"',
     },
   };
   async function deviceTool(askedOnDevice = true) {
@@ -411,8 +411,8 @@ describe('BrowserControlTool — the person\'s own browser, approved on the devi
     const tool = await deviceTool();
     for (const call of [
       { action: 'click', ref: 'e6' }, { action: 'click', ref: 'e10' }, { action: 'click', selector: '#delete-account' },
-      // Enter in a field that isn't a search box may send its form.
-      { action: 'press', ref: 'e8', key: 'Enter' }, { action: 'press', key: 'Enter' },
+      // Enter in a field that isn't a search box may send its form: a combobox too.
+      { action: 'press', ref: 'e8', key: 'Enter' }, { action: 'press', key: 'Enter' }, { action: 'press', ref: 'e14', key: 'Enter' },
       // A name the view cut short may end in anything.
       { action: 'click', ref: 'e12' },
     ]) {

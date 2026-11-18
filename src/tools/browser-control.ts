@@ -420,8 +420,10 @@ export class BrowserControlTool extends BaseTool {
         // only theirs: the run is signed in as them. A control whose name the
         // view cut short may be one of those, so it is asked about too.
         // Enter in a search box searches; in any other field it may send the
-        // form it is in, whatever that form does.
-        const searches = submits && target !== undefined && /^(?:searchbox|combobox) /.test(target);
+        // form it is in, whatever that form does. A combobox is not a search
+        // box: the page view tells the two apart, and an editable dropdown in an
+        // account form submits that form as readily as a text field does.
+        const searches = submits && target !== undefined && target.startsWith('searchbox ');
         const consequential = action !== 'fill' && (
           irreversible(`${target ?? selector ?? ''}${chosen}`) || (submits && !searches) || (target !== undefined && cut(target)) || chosenCut);
         return consequential ? { input: shown, alwaysAsk: false, askPerson: true } : { input: shown, alwaysAsk: false, notNeeded: true };
