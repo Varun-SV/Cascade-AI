@@ -7,7 +7,7 @@
 //  (src/browser/relay/device.browser.test.ts), which CI runs with a browser.
 
 import { describe, it, expect, vi } from 'vitest';
-import { attachRemoteBrowser, ON_DEVICE_ONLY, providerRationsSessions, type RelayForRun } from './remote-browser.js';
+import { attachRemoteBrowser, chatKey, ON_DEVICE_ONLY, providerRationsSessions, type RelayForRun } from './remote-browser.js';
 import { buildCloudConfig, relayBrowserControls, relayForRun } from './runs.js';
 import type { BrowserRelay } from './browser-relay.js';
 import type { CloudEnv } from './env.js';
@@ -115,6 +115,43 @@ describe("a run on the user's own browser", () => {
     await a.wired[0]!.controller({ kind: 'navigate', url: 'https://example.com/' }, { sessionId: 't1', actorId: 'w1' });
     await b.wired[0]!.controller({ kind: 'navigate', url: 'https://example.com/' }, { sessionId: 't2', actorId: 'w1' });
     expect(new Set(asked.map((x) => x.runId)).size).toBe(2);
+  });
+});
+
+describe('what the user sees of a run on their own browser', () => {
+  it("the device is asked with the run's first site and a key for its chat, the same for each run of that chat and not the chat's id", async () => {
+    const seen: Array<{ hint?: { sites: string[]; chat?: string } }> = [];
+    const hub = {
+      requestBrowser: vi.fn(async (r: { hint?: { sites: string[]; chat?: string } }) => { seen.push(r); throw new RelayRefused('no'); }),
+      endRun: () => {}, deviceOnline: () => true, focusRun: () => true,
+    } as unknown as RelayHub;
+    for (const taskId of ['t1', 't2']) {
+      const { cascade, wired, handlers } = fakeCascade();
+      const attached = attachRemoteBrowser({ cascade, config: relaySettings, conversationId: 'conversation-42', emit: () => {}, relay: relayFor(hub) })!;
+      handlers.get('run:started')!({ taskId });
+      await wired[0]!.controller({ kind: 'navigate', url: 'https://www.rtings.com/headphones' }, { sessionId: taskId, actorId: 'w1' });
+      await attached.endRun();
+    }
+    expect(seen[0]!.hint!.sites).toEqual(['www.rtings.com']);
+    expect(seen[0]!.hint!.chat).toBe(seen[1]!.hint!.chat);
+    expect(seen[0]!.hint!.chat).toBe(chatKey('user-a', 'conversation-42'));
+    expect(seen[0]!.hint!.chat).not.toContain('conversation-42');
+    expect(chatKey('user-b', 'conversation-42')).not.toBe(chatKey('user-a', 'conversation-42'));
+  });
+
+  it("each step goes to the run's chat as words, and focus reaches the device", async () => {
+    const focusRun = vi.fn(() => true);
+    const hub = { ...decliningHub().hub, focusRun } as unknown as RelayHub;
+    const { cascade, wired, handlers } = fakeCascade();
+    const emitted: Array<[string, unknown]> = [];
+    const attached = attachRemoteBrowser({ cascade, config: relaySettings, conversationId: 'c1', emit: (e: string, p: unknown) => { emitted.push([e, p]); }, relay: relayFor(hub) })!;
+    handlers.get('run:started')!({ taskId: 't1' });
+    await wired[0]!.controller({ kind: 'navigate', url: 'https://example.com/' }, { sessionId: 't1', actorId: 'w1' });
+    const step = emitted.find(([e]) => e === 'browser:step');
+    expect(step?.[1]).toMatchObject({ conversationId: 'c1', taskId: 't1', step: { kind: 'navigate', summary: 'Opened example.com', ok: false } });
+    expect(attached.focus()).toBe(true);
+    expect(focusRun).toHaveBeenCalledWith(expect.stringMatching(/^c1:/));
+    await attached.endRun();
   });
 });
 

@@ -2045,6 +2045,12 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
     remoteBrowser?.stop();
   };
   socket.on('browser:stop', onBrowserStop);
+  // "Show me": the run's window, on the user's own device, brought forward.
+  const onBrowserFocus = (d: { taskId?: string }) => {
+    if (!addressesRun(remoteBrowser?.taskId, d)) return;
+    remoteBrowser?.focus();
+  };
+  socket.on('browser:focus', onBrowserFocus);
 
   // Watching costs money, so it is opt-in and scoped exactly like Stop.
   //
@@ -2565,6 +2571,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
     // the operator paying for a browser nobody is using, and a run that threw
     // is exactly the one that would otherwise leave one running.
     socket.off('browser:stop', onBrowserStop);
+    socket.off('browser:focus', onBrowserFocus);
     socket.off('browser:watch', onBrowserWatch);
     socket.off('browser:unwatch', onBrowserUnwatch);
     socket.off('browser:take-over', onBrowserTakeOver);

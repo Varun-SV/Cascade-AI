@@ -1231,3 +1231,36 @@ describe('BrowserLiveView — touch takeover gestures', () => {
       .toEqual([{ kind: 'click', x: 0.503125, y: 0.5025, button: 'left', clicks: 1 }]);
   });
 });
+
+describe('a run in the user\'s own browser', () => {
+  const steps = [
+    { kind: 'navigate', summary: 'Opened www.rtings.com/headphones', ok: true, at: 1, url: 'https://www.rtings.com/headphones', title: 'Best headphones' },
+    { kind: 'click', summary: 'Clicked element e4', ok: false, at: 2 },
+  ];
+
+  it('says where it is running instead of apologising for a stream, with the page and each step', () => {
+    render(<BrowserLiveView active liveViewUrl={undefined} onStop={() => {}} device={{ name: 'Work laptop' }} steps={steps} />);
+    expect(screen.getByText(/Running in your own browser, on “Work laptop”/)).toBeInTheDocument();
+    expect(screen.queryByText(/cannot be streamed/i)).not.toBeInTheDocument();
+    expect(screen.getByText('Best headphones')).toBeInTheDocument();
+    expect(screen.getByText('www.rtings.com')).toBeInTheDocument();
+    const list = screen.getByRole('list', { name: 'What it has done' });
+    expect(list).toHaveTextContent('Opened www.rtings.com/headphones');
+    expect(list).toHaveTextContent('Clicked element e4 (didn’t work)');
+  });
+
+  it('before its first step, says it may be waiting on the question in the browser', () => {
+    render(<BrowserLiveView active liveViewUrl={undefined} onStop={() => {}} device={{ name: 'Work laptop' }} steps={[]} />);
+    expect(screen.getByText(/answer the question in your browser/)).toBeInTheDocument();
+  });
+
+  it('Show the window and Stop do what they say', () => {
+    const onFocus = vi.fn();
+    const onStop = vi.fn();
+    render(<BrowserLiveView active liveViewUrl={undefined} onStop={onStop} onFocus={onFocus} device={{ name: 'Work laptop' }} steps={steps} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Show the window' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    expect(onFocus).toHaveBeenCalledTimes(1);
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+});

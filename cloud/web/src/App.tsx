@@ -427,6 +427,9 @@ export default function App() {
             browserCapturing={chat.browserCapturing}
             browserConfirmed={chat.browserConfirmed}
             browserNotice={chat.browserNotice}
+            browserDevice={chat.browserDevice}
+            browserSteps={chat.browserSteps}
+            onFocusBrowser={chat.focusBrowser}
             onTakeOverBrowser={chat.takeOverBrowser}
             onHandBackBrowser={chat.handBackBrowser}
             onBrowserInput={chat.sendBrowserInput}

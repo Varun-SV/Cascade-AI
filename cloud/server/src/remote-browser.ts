@@ -19,7 +19,7 @@
 //      one conversation holds many runs — and using the wrong one meant
 //      cleanup matched nothing, which cost a review round on the desktop.
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { UserEndpointProvider } from './user-endpoint.js';
 import {
   ALLOWANCE_UNAVAILABLE,
@@ -145,6 +145,8 @@ export interface AttachedBrowser {
    * frame rate waits on the viewer.
    */
   frameSeen(generation: number): void;
+  /** The user wants to see the run's window: on their device, brought forward. False if it can't be. */
+  focus(): boolean;
 }
 
 /**
@@ -248,7 +250,8 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
       opts.warn?.("remoteBrowser.provider 'relay' needs the browser relay, which this server does not have on");
       return null;
     }
-    return attachRun(opts, ownDeviceController(opts.relay, opts.conversationId), opts.relay.device);
+    const own = ownDeviceController(opts.relay, opts.conversationId);
+    return attachRun(opts, own.controller, { ...opts.relay.device, focus: () => own.focus() });
   }
   if (settings.provider === 'endpoint') {
     if (!opts.userEndpoint) {
@@ -333,28 +336,40 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
  * run, while this browser is one person's on one device and serves nobody else. Nothing
  * is allocated or billed, so there is no allowance to claim either.
  */
-function ownDeviceController(relay: RelayForRun, conversationId: string): RemoteBrowserController {
-  return new RemoteBrowserController({
+function ownDeviceController(relay: RelayForRun, conversationId: string): { controller: RemoteBrowserController; focus(): boolean } {
+  // One per attach: a conversation holds many runs, and each asks the device anew.
+  const runId = `${conversationId}:${randomUUID()}`;
+  const controller = new RemoteBrowserController({
     provider: new RelayBrowserProvider({
       hub: relay.hub,
       agentUrl: (token) => relay.agentUrl(token),
       userId: relay.userId,
       deviceId: relay.device.id,
-      // One per attach: a conversation holds many runs, and each asks the device anew.
-      runId: `${conversationId}:${randomUUID()}`,
+      runId,
+      chat: chatKey(relay.userId, conversationId),
     }),
     maxSessions: 1,
-    onReleaseFailed: (runId, sessionId, err) => {
-      console.error(`[browser ${runId}] the device's tab ${sessionId} was not handed back; the device ends it when the run's connection closes:`, err);
+    onReleaseFailed: (id, sessionId, err) => {
+      console.error(`[browser ${id}] the device's tab ${sessionId} was not handed back; the device ends it when the run's connection closes:`, err);
     },
   });
+  return { controller, focus: () => relay.hub.focusRun(runId) };
+}
+
+/**
+ * What a device is told about which chat a run is from, so it can keep an answer for
+ * that chat's runs when the user asks: the same for every run of the chat, and nothing
+ * the chat's own id can be read back from.
+ */
+export function chatKey(userId: string, conversationId: string): string {
+  return createHash('sha256').update(`cascade-relay-chat\0${userId}\0${conversationId}`).digest('base64url').slice(0, 22);
 }
 
 /** Wires a run to its controller: who hears about the page, and what the person may do. */
 function attachRun(
   opts: AttachOptions,
   controller: RemoteBrowserController,
-  device: RelayForRun['device'] | null,
+  device: (RelayForRun['device'] & { focus(): boolean }) | null,
   /** For a controller of the run's own: what ends it with the run. */
   dispose?: () => Promise<void>,
 ): AttachedBrowser {
@@ -435,6 +450,13 @@ function attachRun(
       busyAnnounced = true;
       opts.emit('browser:busy', { conversationId: opts.conversationId, taskId: id, limit });
     });
+    // On the user's own device no picture leaves it, so the pane shows the run's
+    // progress as words: each step, and the page it left. Never what was typed.
+    if (device) {
+      controller.onStepFor(id, (step) => {
+        try { opts.emit('browser:step', { conversationId: opts.conversationId, taskId: id, step }); } catch { /* the socket's problem, not the run's */ }
+      });
+    }
     controller.onLiveViewFor(id, ({ active, liveViewUrl }) => {
       // The browser opened, and the client and the replay both drop their
       // notice on this. A run that later loses the page and is refused again
@@ -482,7 +504,10 @@ function attachRun(
       get taskId() { return taskId; },
       async endRun() {
         try {
-          if (taskId) await controller.endRun(taskId);
+          if (taskId) {
+            await controller.endRun(taskId);
+            controller.offStepFor(taskId);
+          }
         } finally {
           // The controller was this run's alone.
           await controller.dispose();
@@ -496,6 +521,7 @@ function attachRun(
       input: async () => ({ ok: false, detail: ON_DEVICE_ONLY }),
       setCapture: async () => false,
       frameSeen: () => {},
+      focus: () => device.focus(),
     };
   }
 
@@ -557,6 +583,8 @@ function attachRun(
     frameSeen(generation: number) {
       if (taskId) controller.frameSeen(taskId, generation);
     },
+    // A hosted browser has no window on the user's screen to bring forward.
+    focus: () => false,
     async setCapture(on: boolean) {
       if (!taskId) return false;
       return await controller.setCapture(taskId, on);

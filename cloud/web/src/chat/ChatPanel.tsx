@@ -9,7 +9,7 @@ import Composer from './Composer.js';
 import PlanNotice from './PlanNotice.js';
 import ActivityDrawer from './ActivityDrawer.js';
 import { ReviewCard } from './ReviewCard.js';
-import type { ActivityNode, ChatMessage, ForceTier, PlanApproval, RoutingMode, SendInput , ReviewSummary} from './useChatSession.js';
+import type { ActivityNode, BrowserStep, ChatMessage, ForceTier, PlanApproval, RoutingMode, SendInput , ReviewSummary} from './useChatSession.js';
 import type { Skill } from '../lib/types.js';
 import { useMediaQuery } from '../lib/useMediaQuery.js';
 import { BrowserLiveView } from './BrowserLiveView.js';
@@ -91,6 +91,10 @@ interface Props {
   browserConfirmed?: boolean;
   /** Something the browser refused to do for this conversation. */
   browserNotice?: string | undefined;
+  /** Set when the run is in the user's own browser: see BrowserLiveView. */
+  browserDevice?: { name: string } | undefined;
+  browserSteps?: BrowserStep[] | undefined;
+  onFocusBrowser?: () => void;
   /** Ask for the browser, and give it back. */
   onTakeOverBrowser?: () => void;
   onHandBackBrowser?: () => void;
@@ -116,6 +120,7 @@ export default function ChatPanel({
   compactionNotice, providerNotice, knowledgeNotice, browserRefusedNotice, browserAllowance, activity, browserLiveView, browserActive,
   browserFrame, browserTaskId, browserStreaming, browserHuman, browserCapturing, browserConfirmed, browserNotice,
   onStopBrowser, onTakeOverBrowser, onHandBackBrowser, onBrowserInput, onBrowserCapture,
+  browserDevice, browserSteps, onFocusBrowser,
   onBrowserFrameShown,
   toolApprovals, onDecideToolApproval,
 }: Props) {
@@ -202,6 +207,9 @@ export default function ChatPanel({
       capturing={browserCapturing}
       confirmed={browserConfirmed}
       notice={browserNotice}
+      device={browserDevice}
+      steps={browserSteps}
+      {...(onFocusBrowser ? { onFocus: onFocusBrowser } : {})}
       onStop={() => onStopBrowser?.()}
       onTakeOver={() => onTakeOverBrowser?.()}
       onHandBack={() => onHandBackBrowser?.()}

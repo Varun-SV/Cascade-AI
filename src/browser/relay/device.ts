@@ -15,7 +15,7 @@ import type { KeyObject } from 'node:crypto';
 import type { CdpClient } from './cdp-client.js';
 import { WebSocket } from 'ws';
 import { type ApprovalPayload, type GrantPayload, type Identity, type Signed, createDeviceApprovals, signHello, verifyGrant } from './capability.js';
-import { type Consent, makeConsent } from './egress-rules.js';
+import { ANY_PUBLIC_SITE, type Consent, makeConsent } from './egress-rules.js';
 import { type ClaimFrame, type ClaimReply, type ControlFrame, DEVICE_REJECTED_CLOSE, type DeviceControlFrame, HUB_PROTOCOL } from './hub.js';
 import { type DeviceRelay, createDeviceRelay } from './relay.js';
 import type { PageEndMode, RequestEnforcer } from './request-enforcer.js';
@@ -34,7 +34,30 @@ interface ClaimedSocket {
 }
 
 /** What the user agreed to for one run. */
-export interface UserConsent { allowedOrigins: string[]; privateOrigins: string[] }
+export interface UserConsent {
+  allowedOrigins: string[];
+  privateOrigins: string[];
+  /** Any public site (private-network addresses still need naming in `privateOrigins`). */
+  anyPublic?: boolean;
+}
+
+/**
+ * What the server says about a run when it asks: suggestions only, unsigned, never
+ * trusted for consent. `sites` pre-fills the question; `chat` lets the device remember
+ * an answer for the runs of one chat, if the user asks it to.
+ */
+export interface RunHint { sites: string[]; chat?: string }
+
+/** A hint as it came over the wire, kept only if it is the shape a hint should be. */
+export function readRunHint(raw: unknown): RunHint | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const h = raw as { sites?: unknown; chat?: unknown };
+  const sites = Array.isArray(h.sites)
+    ? [...new Set(h.sites.slice(0, 10).filter((s): s is string => typeof s === 'string' && /^[a-z0-9.-]{1,253}$/i.test(s)).map((s) => s.toLowerCase()))]
+    : [];
+  const chat = typeof h.chat === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(h.chat) ? h.chat : undefined;
+  return sites.length || chat ? { sites, ...(chat ? { chat } : {}) } : undefined;
+}
 
 /** A browser started for one lease, with its policy already on. */
 export interface LeasedBrowser {
@@ -62,7 +85,9 @@ export interface DeviceClientOptions {
    * `signal` fires if the server withdraws the request, or it ends some other way,
    * before the user answers: take the question down. A later answer is ignored.
    */
-  askUser(run: { userId: string; runId: string; expiresAt: number; signal: AbortSignal }): Promise<UserConsent | null>;
+  askUser(run: { userId: string; runId: string; expiresAt: number; signal: AbortSignal; hint?: RunHint }): Promise<UserConsent | null>;
+  /** The run's owner asked to see its window: bring it forward, if there is one. */
+  onFocus?(): void;
   startBrowser(consent: Consent): Promise<LeasedBrowser>;
   /** How long an approval lasts. Never longer than the grant. */
   approvalTtlMs?: number;
@@ -176,7 +201,7 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
       });
     });
 
-  const onOffer = async (grant: Signed<GrantPayload>): Promise<void> => {
+  const onOffer = async (grant: Signed<GrantPayload>, hint?: RunHint): Promise<void> => {
     const nonce = grant?.payload?.nonce;
     if (typeof nonce !== 'string') return;
     // Checked before the user is asked anything: a grant that isn't this server's, for
@@ -197,13 +222,19 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
     active = mine;
     let browser: LeasedBrowser | null = null;
     try {
-      const answer = await unlessWithdrawn(opts.askUser({ userId: grant.payload.userId, runId: grant.payload.runId, expiresAt: grant.payload.exp, signal: mine.withdrawn.signal }));
+      const answer = await unlessWithdrawn(opts.askUser({
+        userId: grant.payload.userId, runId: grant.payload.runId, expiresAt: grant.payload.exp, signal: mine.withdrawn.signal,
+        ...(hint ? { hint } : {}),
+      }));
       if (mine.cancelled) return;
       if (!answer) { decline(nonce, 'the user said no'); return; }
-      const consent = makeConsent(answer.allowedOrigins, answer.privateOrigins);
+      const consent = makeConsent(answer.allowedOrigins, answer.privateOrigins, { anyPublic: answer.anyPublic === true });
       browser = await opts.startBrowser(consent);
       if (mine.cancelled) return;
-      const approval = approvals.approve(grant, { tabTargetId: browser.tabTargetId, ...answer }, opts.approvalTtlMs ?? 30 * 60_000);
+      // The signed record says what was allowed: "any public site" is written as its own entry.
+      const approved = { tabTargetId: browser.tabTargetId, privateOrigins: answer.privateOrigins,
+        allowedOrigins: answer.anyPublic ? [ANY_PUBLIC_SITE, ...answer.allowedOrigins] : answer.allowedOrigins };
+      const approval = approvals.approve(grant, approved, opts.approvalTtlMs ?? 30 * 60_000);
       if ('refused' in approval) { decline(nonce, approval.refused); return; }
       let claimed = null as ClaimedSocket | null;
       const claim = await acquireLease({
@@ -263,7 +294,8 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
     }
     // Nothing is acted on before the server has accepted this device.
     if (!authenticated) return;
-    if (f.t === 'offer' && f.grant) void onOffer(f.grant);
+    if (f.t === 'offer' && f.grant) void onOffer(f.grant, readRunHint((f as { hint?: unknown }).hint));
+    else if (f.t === 'focus' && active?.relay) opts.onFocus?.();
     else if (f.t === 'cancel' && active && active.nonce === f.nonce) withdraw(active, 'the request was withdrawn');
   });
   let keepalive: ReturnType<typeof setInterval> | undefined;

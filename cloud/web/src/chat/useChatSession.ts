@@ -69,6 +69,9 @@ export function toChatMessage(m: {
   };
 }
 
+/** A step a run took in the user's own browser, as the server words it. */
+export interface BrowserStep { kind: string; summary: string; ok: boolean; at: number; url?: string; title?: string }
+
 export interface SendInput {
   prompt: string;
   attachments?: ChatAttachment[];
@@ -733,6 +736,10 @@ export function useChatSession(
        * not have control" over this one's panel would be a lie about this page.
        */
       notice?: string;
+      /** The run is in the user's own browser, on this device: watched there, not here. */
+      device?: { name: string };
+      /** What it has done there, newest last, as words (never what it typed). */
+      steps?: BrowserStep[];
     }>>
   >({});
   const browserView = browserViews[activeConversationId() ?? '']?.at(-1);
@@ -759,6 +766,9 @@ export function useChatSession(
    * runs, and a conversation-scoped Stop halted all of them.
    */
   const browserTaskId = browserView?.taskId;
+  /** Set when the run is in the user's own browser: the pane shows its steps, not a picture. */
+  const browserDevice = browserView?.device;
+  const browserSteps = browserView?.steps;
   // Read by stopBrowser, which is declared before this value and must not close
   // over a stale one when the run changes under it.
   const browserTaskIdRef = useRef<string | undefined>(undefined);
@@ -865,6 +875,12 @@ export function useChatSession(
       return changed ? next : prev;
     });
   }, []);
+
+  /** Bring the run's window forward on the device it's running on. */
+  const focusBrowser = useCallback(() => {
+    const taskId = browserTaskIdRef.current;
+    if (taskId) socket?.emit('browser:focus', { taskId });
+  }, [socket]);
 
   const stopBrowser = useCallback(() => {
     // The task id, which the server requires to match exactly. Without it the
@@ -1674,7 +1690,8 @@ export function useChatSession(
     // session), so it is never persisted with the conversation and never
     // written to a log. An absent url means the run finished with it, or the
     // provider offers no live view at all.
-    const onLiveView = (e: { conversationId?: string; taskId?: string; liveViewUrl?: string; active?: boolean }) => {
+    const onLiveView = (e: { conversationId?: string; taskId?: string; liveViewUrl?: string; active?: boolean; device?: { name?: unknown } }) => {
+      const device = typeof e?.device?.name === 'string' ? { name: e.device.name.slice(0, 80) } : undefined;
       // Recorded AGAINST its conversation rather than into one shared slot. One
       // socket carries several runs, and a single slot meant switching chats
       // left another run's bearer-capability URL rendered in the pane you moved
@@ -1707,9 +1724,9 @@ export function useChatSession(
         const existing = views.findIndex((view) => view.taskId === taskId);
         if (existing >= 0) {
           const current = views[existing]!;
-          if (current.liveViewUrl === e?.liveViewUrl) return prev;
+          if (current.liveViewUrl === e?.liveViewUrl && current.device?.name === device?.name) return prev;
           const next = [...views];
-          next[existing] = { ...current, liveViewUrl: e?.liveViewUrl };
+          next[existing] = { ...current, liveViewUrl: e?.liveViewUrl, ...(device ? { device } : {}) };
           // A replay for an already-active task updates its capability URL but
           // does not make an older run jump in front of a newer one.
           return { ...prev, [key]: next };
@@ -1724,7 +1741,7 @@ export function useChatSession(
             ? { ...view, frame: undefined, streaming: false, confirmed: false }
             : view
         ));
-        return { ...prev, [key]: [...hidden, { taskId, liveViewUrl: e?.liveViewUrl }] };
+        return { ...prev, [key]: [...hidden, { taskId, liveViewUrl: e?.liveViewUrl, ...(device ? { device } : {}) }] };
       });
     };
     /**
@@ -1824,6 +1841,26 @@ export function useChatSession(
     socket.on('browser:frame', onBrowserFrame);
     socket.on('browser:watching', onBrowserWatching);
     socket.on('browser:live-view', onLiveView);
+    /** A step a run took in the user's own browser. Kept with its run, the last 50. */
+    const onBrowserStep = (e: { conversationId?: string; taskId?: string; step?: Partial<BrowserStep> }) => {
+      const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
+      const s = e?.step;
+      if (typeof e?.taskId !== 'string' || !s || typeof s.summary !== 'string') return;
+      const step: BrowserStep = {
+        kind: String(s.kind ?? ''), summary: s.summary.slice(0, 200), ok: s.ok === true, at: typeof s.at === 'number' ? s.at : Date.now(),
+        ...(typeof s.url === 'string' ? { url: s.url.slice(0, 2048) } : {}),
+        ...(typeof s.title === 'string' ? { title: s.title.slice(0, 200) } : {}),
+      };
+      setBrowserViews((prev) => {
+        const views = prev[key];
+        const at = views?.findIndex((v) => v.taskId === e.taskId) ?? -1;
+        if (!views || at < 0) return prev;
+        const next = [...views];
+        next[at] = { ...next[at]!, steps: [...(next[at]!.steps ?? []), step].slice(-50) };
+        return { ...prev, [key]: next };
+      });
+    };
+    socket.on('browser:step', onBrowserStep);
     socket.on('stream:token', onToken);
     socket.on('tier:status', onStatus);
     socket.on('run:why', onWhy);
@@ -1845,6 +1882,7 @@ export function useChatSession(
     socket.on('browser:busy', onBrowserBusy);
     socket.on('browser:limit', onBrowserLimit);
     return () => {
+      socket.off('browser:step', onBrowserStep);
       socket.off('stream:token', onToken);
       socket.off('tier:status', onStatus);
       socket.off('run:why', onWhy);
@@ -3207,6 +3245,7 @@ export function useChatSession(
     contextApproval, contextApprovals, resolveContextApproval, compactionNotice, providerNotice, knowledgeNotice, browserRefusedNotice, activity,
     browserLiveView, browserActive, browserTaskId, browserFrame, browserStreaming,
     browserHuman, browserCapturing, browserConfirmed, browserNotice, stopBrowser,
+    browserDevice, browserSteps, focusBrowser,
     takeOverBrowser, handBackBrowser, sendBrowserInput, setBrowserCapture,
     markBrowserFrameShown,
     toolApprovals, resolveToolApproval, clarifications, answerClarification,
