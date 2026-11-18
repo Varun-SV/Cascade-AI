@@ -276,7 +276,7 @@ const TOOL_FAILURE: Record<string, RegExp> = {
   // A non-zero exit, and the output that came with it.
   shell: /^Exit (?!0:)[^\s:]+:(?:\s|$)/,
   // A success starts "URL: …", so a failure's wording cannot be page text.
-  web_fetch: /^(?:HTTP [45]\d\d |Refused to fetch |Failed to fetch |Failed to read response body: )/,
+  web_fetch: /^(?:HTTP [45]\d\d |Refused to fetch |Failed to fetch |Failed to read response body: |Can't read |Error: url is required)/,
   web_search: /^Error: query is required/,
   github: /^(?:Error: No \w+ token provided|Authentication failed: |Permission denied: |Not found: Repository |Validation error from |Rate limited by |\w+ API error \(\d{3}\): |\w+ request failed: )/,
   grep: /^Invalid regex pattern: /,

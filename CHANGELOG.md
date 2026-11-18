@@ -5,6 +5,37 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.88.0 - 2026-11-18
+
+### Added
+- **Open Web: free web search that holds up, with no key.** With no search
+  backend set, `web_search` asks several free sources at once instead of
+  scraping one: DuckDuckGo, Marginalia and Wikipedia always, and Stack
+  Overflow, GitHub, Hacker News, arXiv, npm and PyPI when a query is theirs
+  (an error message, a library, a paper, a package). Their lists are merged
+  into one ranking (reciprocal rank fusion), the same page under two
+  addresses is folded into one, no single site takes over the top, and each
+  result says which sources found it.
+- **It looks after itself.** DuckDuckGo's bot check is recognised and Lite
+  tried instead; a source that turns it away, or rate-limits it, is rested
+  (honouring Retry-After), one that keeps failing is rested longer, answers
+  are kept for ten minutes, and the whole fan-out has an eight-second
+  deadline. A hosted server's address is what gets turned away most; with
+  several sources one refusing still leaves an answer.
+- **Search and read in one call.** `web_search` with `read: true` opens the
+  top three results and returns only their passages that answer the query
+  (ranked with BM25, each under its heading and numbered for citing),
+  instead of ten links to open one at a time.
+
+### Changed
+- **`web_fetch` reads a page as a reader would.** The main content with its
+  headings, lists, code and tables, without menus, footers, cookie banners
+  and hidden text; the page's links at the end so a run can go on to the next
+  page without a browser; long pages in parts (`offset`); and with `prompt`,
+  the passages that answer it first. Still through the SSRF guard.
+- Settings say "Free: Open Web (DuckDuckGo, Wikipedia and more), no key
+  needed" when no backend is set.
+
 ## 0.87.0 - 2026-11-18
 
 ### Changed
