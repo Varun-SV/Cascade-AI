@@ -5,6 +5,23 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.87.0 - 2026-11-18
+
+### Changed
+- **One approval for a run on your own browser.** The question your device
+  asks (which sites, which window) is now the run's approval. Opening pages on
+  those sites, reading, scrolling, clicking, typing and searching go ahead
+  without a prompt in the chat, where before every action could be asked
+  about, and clicks on controls the page view gives no name (most of
+  YouTube's) asked every time.
+- **What may not be undoable is still asked, and only you can answer it.** A
+  control named Pay, Buy, Delete, Send, Publish, Subscribe, Confirm and the
+  like, Enter in a field other than a search box, or a control whose name the
+  page view cut short: these come to you, never to a tier's model, since the
+  run is signed in as you. "Allow for this run" on one covers the later ones.
+  Other browsers (hosted, your own CDP endpoint, the desktop app) are asked
+  about as before.
+
 ## 0.86.0 - 2026-11-18
 
 ### Added

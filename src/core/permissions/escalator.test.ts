@@ -183,6 +183,38 @@ describe('PermissionEscalator', () => {
     expect(again.approved).toBe(true);
   });
 
+  // An action in the person's own browser that may not be taken back — a
+  // Subscribe, a Pay — is theirs alone: the run is signed in as them.
+  it('asks only the person about a request marked theirs: no rule, no autonomy, no model', async () => {
+    const t2 = vi.fn().mockResolvedValue(makeDecision(true, 'T2'));
+    const t1 = vi.fn().mockResolvedValue(makeDecision(true, 'T1'));
+    escalator.setT2Evaluator(t2 as any);
+    escalator.setT1Evaluator(t1 as any);
+    escalator.setAutonomous(true);
+    const req = makeRequest({ toolName: 'browser_control', isDangerous: false, askPerson: true, input: { action: 'click', target: 'button "Subscribe"' } });
+    const promise = escalator.requestPermission(req);
+    await flushPromises();
+    expect(t2).not.toHaveBeenCalled();
+    expect(t1).not.toHaveBeenCalled();
+    escalator.resolveUserDecision(req.id, true, false);
+    expect((await promise).decidedBy).toBe('USER');
+  });
+
+  it('lets a model-made "always" stand for nothing the person must answer, but their own "allow for this run" does', async () => {
+    escalator.setT2Evaluator(vi.fn().mockResolvedValue({ ...makeDecision(true, 'T2'), always: true }) as any);
+    escalator.setT1Evaluator(vi.fn().mockResolvedValue({ ...makeDecision(true, 'T1'), always: true }) as any);
+    await escalator.requestPermission(makeRequest({ toolName: 'browser_control', isDangerous: true }));
+
+    const mine = makeRequest({ toolName: 'browser_control', isDangerous: true, askPerson: true });
+    const asked = escalator.requestPermission(mine);
+    await flushPromises();
+    escalator.resolveUserDecision(mine.id, true, true);
+    expect((await asked).decidedBy).toBe('USER');
+    const again = await escalator.requestPermission(makeRequest({ toolName: 'browser_control', isDangerous: true, askPerson: true }));
+    expect(again.approved).toBe(true);
+    expect(again.always).toBe(true);
+  });
+
   // ── User denies ────────────────────────────
 
   it('returns denied decision when user resolves with false', async () => {

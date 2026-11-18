@@ -139,6 +139,13 @@ export interface BrowserControlFeatures {
   screenshots?: boolean;
   /** Draw each ref on the screenshot (`browserVision: marked`). */
   marked?: boolean;
+  /**
+   * The browser is the person's own, and the device asked them which sites the
+   * run may use, in which window, before it opened. That yes is the run's
+   * approval: what the run does there isn't asked about again, except what it
+   * can't take back. See `forApproval`.
+   */
+  askedOnDevice?: boolean;
 }
 
 const BASIC_ACTIONS = ['navigate', 'click', 'fill', 'press', 'wait_for', 'extract_text'] as const;
@@ -161,6 +168,18 @@ const LOOKALIKES: Record<string, string> = Object.fromEntries([
   ...[...'АВЕКМНОРСТХаеорсухіјѕԁԛԝӏ'].map((c, i) => [c, 'ABEKMHOPCTXaeopcyxijsdqwl'[i]!]),
   ...[...'ΑΒΕΖΗΙΚΜΝΟΡΤΥΧοαρυνκιτ'].map((c, i) => [c, 'ABEZHIKMNOPTYXoapuvkit'[i]!]),
 ]);
+/** Whether, and by whom, a call must be approved before it runs. */
+export interface ApprovalNeed {
+  /** The call as the person approving it sees it. */
+  input: Record<string, unknown>;
+  /** Asked even when an earlier answer this run said "always". */
+  alwaysAsk: boolean;
+  /** Only the person may answer it: no tier's model. */
+  askPerson?: boolean;
+  /** Already approved, on the device: nobody is asked. */
+  notNeeded?: boolean;
+}
+
 /** Actions that can set off what a control is labelled to do. */
 const TRIGGERS = new Set(['click', 'fill', 'press', 'select_option']);
 /**
@@ -264,6 +283,8 @@ export class BrowserControlTool extends BaseTool {
   private screenshots: boolean;
   /** Whether that screenshot has the refs drawn on it. Fixed at registration. */
   private marked: boolean;
+  /** The person's own browser, approved on the device. Fixed at registration. */
+  private askedOnDevice: boolean;
   /**
    * Per run and worker: what its latest page view called each ref, and the page it was
    * on. The approval prompt names the element from it, so a person approves
@@ -279,6 +300,7 @@ export class BrowserControlTool extends BaseTool {
     this.pageView = features.pageView === true;
     this.screenshots = this.pageView && features.screenshots === true;
     this.marked = this.screenshots && features.marked === true;
+    this.askedOnDevice = features.askedOnDevice === true;
     // The model is offered only what this host can do. A host without page
     // views gets exactly the six-action tool it always had, so nothing there
     // can name an action the host would have to refuse.
@@ -323,7 +345,7 @@ export class BrowserControlTool extends BaseTool {
    * `site`, the page it is on (or, for navigate, the one it opens). It is for
    * showing only: the call runs with the input the model wrote.
    */
-  forApproval(input: Record<string, unknown>, sessionId: string, actorId = sessionId): { input: Record<string, unknown>; alwaysAsk: boolean } {
+  forApproval(input: Record<string, unknown>, sessionId: string, actorId = sessionId): ApprovalNeed {
     const scope = JSON.stringify([sessionId, actorId]);
     const seen = this.seen.get(scope);
     const action = String(input['action']);
@@ -390,6 +412,24 @@ export class BrowserControlTool extends BaseTool {
         ...(site ? { site } : {}),
         ...(seen?.document ? { document: seen.document } : {}),
       });
+      if (this.askedOnDevice) {
+        // The person's own browser. They said yes on the device to these sites
+        // in this window, and the device keeps the run to them: going about
+        // those sites — clicking, typing, choosing — is what they agreed to.
+        // What can't be taken back is still theirs to decide each time, and
+        // only theirs: the run is signed in as them. A control whose name the
+        // view cut short may be one of those, so it is asked about too.
+        // Enter in a search box searches; in any other field it may send the
+        // form it is in, whatever that form does.
+        const searches = submits && target !== undefined && /^(?:searchbox|combobox) /.test(target);
+        const consequential = action !== 'fill' && (
+          irreversible(`${target ?? selector ?? ''}${chosen}`) || (submits && !searches) || (target !== undefined && cut(target)) || chosenCut);
+        return consequential ? { input: shown, alwaysAsk: false, askPerson: true } : { input: shown, alwaysAsk: false, notNeeded: true };
+      }
+    } else if (this.askedOnDevice) {
+      // Opening a page on the sites they allowed, reading, scrolling, waiting:
+      // the device's question already covered these.
+      return { input: shown, alwaysAsk: false, notNeeded: true };
     }
     return { input: shown, alwaysAsk };
   }

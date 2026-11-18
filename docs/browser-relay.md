@@ -120,7 +120,14 @@ are online, and removes one; removing a device also ends a run it is serving.
 
 **Settings → Browser** also chooses where your runs' browser comes from:
 
-- **My devices**: the extension, the CLI or the desktop app, as above.
+- **My devices**: the extension, the CLI or the desktop app, as above. The
+  device's question (which sites, which window) is the run's approval: opening
+  pages on those sites, reading, scrolling, clicking and typing go ahead
+  without a prompt in the chat. Only what may not be undoable is asked about,
+  and only you can answer it, never a tier's model: a control named Pay, Buy,
+  Delete, Send, Publish, Subscribe, Confirm and the like, Enter in a field
+  other than a search box, and a control whose name the page view cut short.
+  "Allow for this run" on one of those covers the later ones.
 - **My CDP endpoint**, where the server offers it: a `wss://` address of a browser
   you run (Browserless, your own Chromium with `--remote-debugging-port` behind
   TLS, and so on). The server keeps it encrypted, never shows it back (only its

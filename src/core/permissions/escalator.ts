@@ -112,7 +112,7 @@ export class PermissionEscalator extends EventEmitter {
     // A model's "always" does not stand for a local-only caller, whose
     // requests those models never see: only a person's grant — or a refusal,
     // which costs nothing to honour — carries over to it.
-    const stands = (approved: boolean, byModel: boolean) => !(req.localOnly && byModel && approved);
+    const stands = (approved: boolean, byModel: boolean) => !((req.localOnly || req.askPerson) && byModel && approved);
     if (!req.forceReprompt && this.taskWideCache.has(req.toolName)
       && stands(this.taskWideCache.get(req.toolName)!, this.modelDecided.has(`task:${req.toolName}`))) {
       return {
@@ -139,6 +139,11 @@ export class PermissionEscalator extends EventEmitter {
         reasoning: 'Cached from previous decision in this session',
       };
     }
+
+    // ── 1c. The person's own to answer ─────────
+    // Nothing below may approve it: not a rule, not autonomous mode, not a
+    // tier's model. Only a person's earlier "allow for this run" (above) does.
+    if (req.askPerson) return this.waitForUserDecision(req, signal);
 
     // ── 2. Non-dangerous safe tools → rule-based auto-approve ──
     if (!req.isDangerous && SAFE_TOOLS.has(req.toolName)) {

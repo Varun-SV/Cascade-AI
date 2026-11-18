@@ -1190,7 +1190,10 @@ export class Cascade extends EventEmitter {
     // Marks are drawn by the host, so a host that cannot draw them sends the
     // clean picture instead.
     const marked = screenshots && vision === 'marked' && features.marked === true;
-    this.toolRegistry.register(new BrowserControlTool(controller, release, { pageView, screenshots, marked }));
+    this.toolRegistry.register(new BrowserControlTool(controller, release, {
+      pageView, screenshots, marked,
+      ...(features.askedOnDevice === true ? { askedOnDevice: true } : {}),
+    }));
   }
 
   /**
@@ -2942,7 +2945,9 @@ export function approvalRequestFor(req: PermissionRequest): ApprovalRequest & { 
     tierId: req.requestedBy,
     toolName: req.toolName,
     input: req.input,
-    description: `T3 Worker "${req.subtaskContext}" wants to run "${req.toolName}". T2 and T1 could not determine if this is safe.`,
+    description: req.askPerson
+      ? `T3 Worker "${req.subtaskContext}" wants to do this in your own browser, signed in as you. It may not be undoable, so only you can allow it.`
+      : `T3 Worker "${req.subtaskContext}" wants to run "${req.toolName}". T2 and T1 could not determine if this is safe.`,
     isDangerous: req.isDangerous,
     ...(req.localOnly ? { localOnly: true } : {}),
     escalationContext: {

@@ -1218,7 +1218,7 @@ describe('batched browser ref safety', () => {
 });
 
 describe('a person approving a browser action sees what it acts on', () => {
-  async function approve(shown: { input: Record<string, unknown>; alwaysAsk: boolean }) {
+  async function approve(shown: { input: Record<string, unknown>; alwaysAsk: boolean; askPerson?: boolean; notNeeded?: boolean }) {
     let call = 0;
     const router = makeRouter(vi.fn(async () => {
       call += 1;
@@ -1241,7 +1241,7 @@ describe('a person approving a browser action sees what it acts on', () => {
     const worker = new T3Worker(router, registry, 't2-parent');
     worker.setPermissionEscalator(escalator);
     await worker.execute(makeAssignment({ subtaskTitle: 'Book a table' }), 'task-approve');
-    return { request: requestPermission.mock.calls[0]![0], forApproval, execute };
+    return { request: requestPermission.mock.calls[0]?.[0] as PermissionRequest, requests: requestPermission.mock.calls.length, forApproval, execute };
   }
 
   it('shows the element by name, and runs the call as the model wrote it', async () => {
@@ -1258,6 +1258,21 @@ describe('a person approving a browser action sees what it acts on', () => {
   it('puts an irreversible one to the person even after an "always"', async () => {
     const { request } = await approve({ input: { action: 'click', ref: 'e14', target: 'button "Pay $42.00"' }, alwaysAsk: true });
     expect(request.forceReprompt).toBe(true);
+  });
+
+  // The person's own browser: the device asked them about this run before it
+  // opened, and that yes covers going about the sites they allowed.
+  it('asks nobody about a call the device already approved, and runs it', async () => {
+    const { requests, execute } = await approve({ input: { action: 'click', ref: 'e14', target: 'link "Videos"' }, alwaysAsk: false, notNeeded: true });
+    expect(requests).toBe(0);
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks one that only the person may answer', async () => {
+    const { request, execute } = await approve({ input: { action: 'click', ref: 'e14', target: 'button "Subscribe"' }, alwaysAsk: false, askPerson: true });
+    expect(request.askPerson).toBe(true);
+    expect(request.forceReprompt).toBeUndefined();
+    expect(execute).toHaveBeenCalledTimes(1);
   });
 });
 

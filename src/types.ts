@@ -1184,6 +1184,14 @@ export interface PermissionRequest {
    */
   localOnly?: boolean;
   /**
+   * Only the person may answer: no tier's model decides it, and no answer a
+   * model gave earlier in the run stands for it. Set for an action in the
+   * person's own browser that can do something they can't take back (pay,
+   * delete, send, subscribe…), where what the run is signed in as is theirs.
+   * An "allow for this run" they give still covers later ones.
+   */
+  askPerson?: boolean;
+  /**
    * Escalation trail — each engaged tier's non-binding recommendation as the
    * request rose toward the user. Dangerous tools never get a terminal
    * decision from a tier; the tier records its advice here instead, so the
