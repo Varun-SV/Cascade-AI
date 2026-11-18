@@ -282,7 +282,13 @@ function render(root: Node, base: string | undefined, links: ReadablePage['links
     if (tag === 'pre') {
       blank();
       const code = decodeEntities(textOf(node)).replace(/\s+$/, '');
-      if (code.trim()) out.push('```', ...code.split('\n'), '```', '');
+      if (code.trim()) {
+        // One by one: spread into a call, a long block's lines pass the
+        // engine's argument limit.
+        out.push('```');
+        for (const l of code.split('\n')) out.push(l);
+        out.push('```', '');
+      }
       return;
     }
     const heading = /^h([1-6])$/.exec(tag);

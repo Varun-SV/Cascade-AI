@@ -88,7 +88,10 @@ export function unwrapDdgRedirect(href: string): string {
 export function parseDdgAnchors(html: string, anchorClass: string, snippetClass: string): WebSearchResult[] {
   const anchorRe = new RegExp(`<a\\b[^>]*class=["']?[^"'>]*\\b${anchorClass}\\b[^"'>]*["']?[^>]*>([\\s\\S]*?)<\\/a>`, 'gi');
   const snippetRe = new RegExp(`class=["']?[^"'>]*\\b${snippetClass}\\b[^"'>]*["']?[^>]*>([\\s\\S]*?)<\\/(?:td|a|div|span)>`, 'gi');
-  const results: WebSearchResult[] = [];
+  // Every anchor, ads included, where it stands in the page: a snippet is the
+  // one that follows its result, so it is matched by position, not by count.
+  // Dropping an ad's anchor alone would hand its sales text to the next result.
+  const found: Array<WebSearchResult & { at: number; ad: boolean }> = [];
   let m: RegExpExecArray | null;
   while ((m = anchorRe.exec(html)) !== null) {
     const href = /href=["']([^"']+)["']/i.exec(m[0])?.[1];
@@ -96,13 +99,16 @@ export function parseDdgAnchors(html: string, anchorClass: string, snippetClass:
     if (!href || !title) continue;
     const url = unwrapDdgRedirect(decodeEntities(href));
     // DDG's own ads go through its click tracker; they are not results.
-    if (/^https?:\/\/(?:[a-z0-9-]+\.)*duckduckgo\.com\/y\.js/i.test(url)) continue;
-    results.push({ title, url, snippet: '' });
+    const ad = /^https?:\/\/(?:[a-z0-9-]+\.)*duckduckgo\.com\/y\.js/i.test(url);
+    found.push({ title, url, snippet: '', at: m.index, ad });
   }
-  const snippets: string[] = [];
-  while ((m = snippetRe.exec(html)) !== null) snippets.push(strip(m[1] ?? ''));
-  for (let i = 0; i < results.length; i++) if (snippets[i]) results[i]!.snippet = snippets[i]!;
-  return results;
+  let next = 0;
+  while ((m = snippetRe.exec(html)) !== null) {
+    while (next + 1 < found.length && found[next + 1]!.at < m.index) next++;
+    const owner = found[next];
+    if (owner && owner.at < m.index && !owner.snippet) owner.snippet = strip(m[1] ?? '');
+  }
+  return found.filter((r) => !r.ad).map(({ title, url, snippet }) => ({ title, url, snippet }));
 }
 
 /** DuckDuckGo's bot check, as served in place of results. Exported for tests. */

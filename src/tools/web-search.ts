@@ -260,7 +260,7 @@ export class WebSearchTool extends BaseTool {
 
     const done = async (found: WebSearchResult[], footer?: string): Promise<string> =>
       this.formatResults(query, found, footer, read ? await readTopResults(found, query, {
-        count: 3, ...(signal ? { signal } : {}),
+        count: 3, perPage: 2, ...(signal ? { signal } : {}),
         ...(this.deps.fetchPage ? { fetchPage: this.deps.fetchPage } : {}),
         ...(this.deps.state ? { state: this.deps.state } : {}),
       }) : undefined);
@@ -355,7 +355,9 @@ export class WebSearchTool extends BaseTool {
         if (page.error) lines.push(`    Could not read it: ${page.error}`);
         else if (!page.passages.length) lines.push('    Nothing on it matched the query closely; web_fetch reads it whole.');
         for (const p of page.passages) {
-          const text = p.text.replace(/\s*\n\s*/g, ' ').slice(0, 700);
+          // Two passages a page, 600 characters each: with ten results above
+          // them, the answer stays inside what a worker keeps of it.
+          const text = p.text.replace(/\s*\n\s*/g, ' ').slice(0, 600);
           lines.push(`    > ${p.heading ? `[${p.heading}] ` : ''}${text}`);
         }
         lines.push('');

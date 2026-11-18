@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { truncateForContext } from '../../utils/truncate.js';
 import { WebFetchTool } from '../web-fetch.js';
 import { WebSearchTool } from '../web-search.js';
-import { BlockedError, isDdgChallenge, parseArxiv, pypiCandidates } from './engines.js';
+import { BlockedError, isDdgChallenge, parseArxiv, parseDdgAnchors, pypiCandidates } from './engines.js';
 import { canonicalUrl, fuse } from './fuse.js';
 import { decodeEntities, readHtml } from './html.js';
 import { OpenWebState, fetchReadable, openWebSearch } from './index.js';
@@ -79,6 +80,9 @@ describe('reading HTML', () => {
     readHtml(`<body>${'<div>'.repeat(50_000)}deep${'<a href="'.repeat(1)}${'x'.repeat(500_000)}"></body>`);
     readHtml(`<body>${'<p '.repeat(100_000)}</body>`);
     expect(Date.now() - started).toBeLessThan(3_000);
+    // A code block of very many lines: appended one by one, not spread into a call.
+    const code = readHtml(`<body><pre>${'a\n'.repeat(200_000)}</pre></body>`);
+    expect(code.text.startsWith('```\na\na')).toBe(true);
   });
 });
 
@@ -146,6 +150,17 @@ describe('the sources\' own answers', () => {
     expect(isDdgChallenge(202, '')).toBe(true);
     expect(isDdgChallenge(200, '<div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>')).toBe(true);
     expect(isDdgChallenge(200, DDG_HTML)).toBe(false);
+  });
+
+  it('gives each DuckDuckGo result its own snippet when an ad comes first', () => {
+    const html = `<div class="result"><a class="result__a" href="https://duckduckgo.com/y.js?ad_provider=x">Buy now</a>
+      <a class="result__snippet">Great deals on everything.</a></div>
+      <div class="result"><a class="result__a" href="https://docs.example/">The docs</a><a class="result__snippet">How it works.</a></div>
+      <div class="result"><a class="result__a" href="https://other.example/">No snippet here</a></div>`;
+    expect(parseDdgAnchors(html, 'result__a', 'result__snippet')).toEqual([
+      { title: 'The docs', url: 'https://docs.example/', snippet: 'How it works.' },
+      { title: 'No snippet here', url: 'https://other.example/', snippet: '' },
+    ]);
   });
 
   it('reads arXiv\'s feed, and finds likely PyPI names in a query', () => {
@@ -234,6 +249,32 @@ describe('Open Web search', () => {
     expect(out.results.length).toBeGreaterThan(0);
   });
 
+  it('rests a source that keeps running out the deadline, so it stops holding searches up', async () => {
+    const state = new OpenWebState();
+    const hang = () => new Promise<Response>(() => {});
+    const { fetcher, calls } = sources({ 'api.marginalia.nu': hang });
+    for (const q of ['one', 'two']) await openWebSearch(q, { maxResults: 5, fetcher, state, deadlineMs: 50 });
+    expect(state.resting('marginalia', Date.now())).toBeTruthy();
+    calls.length = 0;
+    const third = await openWebSearch('three', { maxResults: 5, fetcher, state, deadlineMs: 50 });
+    expect(third.sources.find((x) => x.engine === 'marginalia')).toMatchObject({ outcome: 'resting' });
+    expect(calls.some((u) => hostIs(u, 'api.marginalia.nu'))).toBe(false);
+  });
+
+  it('asks no source when the search was already stopped, and leaves nothing unhandled', async () => {
+    const stop = new AbortController();
+    stop.abort(new Error('stopped'));
+    const { fetcher } = sources();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown) => unhandled.push(e);
+    process.on('unhandledRejection', onUnhandled);
+    await expect(openWebSearch('guide', { maxResults: 5, fetcher, state: new OpenWebState(), signal: stop.signal })).rejects.toThrow('stopped');
+    await new Promise((r) => setTimeout(r, 20));
+    process.off('unhandledRejection', onUnhandled);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(unhandled).toEqual([]);
+  });
+
   it('says nothing could be reached only when nothing could', async () => {
     const out = await openWebSearch('guide', { maxResults: 5, fetcher: async () => { throw new Error('offline'); }, state: new OpenWebState() });
     expect(out).toMatchObject({ reachable: false, results: [] });
@@ -272,6 +313,7 @@ describe('web_search with no keys', () => {
     expect(out).toContain('── Read from the top results ──');
     expect(out).toContain('> [The guide] This guide explains the guide in full');
     expect(out).toContain('Could not read it: HTTP 500');
+    expect(truncateForContext(out)).toBe(out);
   });
 });
 
@@ -280,20 +322,41 @@ describe('web_fetch', () => {
     ${Array.from({ length: 300 }, (_, i) => `<p>Paragraph ${i}: ${i === 250 ? 'the secret recipe uses saffron and lemon' : 'filler words that say nothing much at all here, and then some more of them to make the page long enough'}.</p>`).join('\n')}
     <p><a href="/next">Next chapter</a></p></main></body></html>`;
 
-  it('reads the main content in parts, with the passages that answer the prompt first and the links at the end', async () => {
+  it('reads the main content in parts a worker keeps whole, with the passages that answer the prompt first and the links at the end', async () => {
     const fetchPage = vi.fn(async (url: string) => reply(article, { url }));
     const tool = new WebFetchTool({ fetchPage, state: new OpenWebState() });
     const first = await tool.execute({ url: 'https://book.example/ch1', prompt: 'secret recipe saffron' }, {} as never);
     expect(first).toContain('Title: Long read');
     expect(first).not.toContain('Menu');
     expect(first.indexOf('the secret recipe uses saffron')).toBeLessThan(first.indexOf('── The page ──'));
-    const more = /Read on with offset: (\d+)/.exec(first);
-    expect(more).not.toBeNull();
-    const second = await tool.execute({ url: 'https://book.example/ch1', offset: Number(more![1]) }, {} as never);
+    // Every part, read on until the end: each fits what a worker keeps (it is
+    // not cut in the middle), and together they hold every paragraph.
+    const seen: string[] = [];
+    let answer = first;
+    for (let i = 0; i < 20; i++) {
+      expect(answer.length).toBeLessThanOrEqual(12_000);
+      expect(truncateForContext(answer)).toBe(answer);
+      seen.push(answer);
+      const more = /Read on with offset: (\d+)/.exec(answer);
+      if (!more) break;
+      answer = await tool.execute({ url: 'https://book.example/ch1', offset: Number(more[1]) }, {} as never);
+    }
+    expect(seen.length).toBeGreaterThan(1);
+    const all = seen.join('\n');
+    for (const n of [0, 120, 250, 299]) expect(all).toContain(`Paragraph ${n}:`);
+    expect(seen.at(-1)).toContain('- Next chapter: https://book.example/next');
     // From memory: the page is fetched once.
     expect(fetchPage).toHaveBeenCalledTimes(1);
-    expect(second).toContain('Paragraph 299');
-    expect(second).toContain('- Next chapter: https://book.example/next');
+  });
+
+  it('keeps pages apart that only look alike: /docs and /docs/ are fetched each', async () => {
+    const fetchPage = vi.fn(async (url: string) => reply(`<html><head><title>${new URL(url).pathname}</title></head><body><main><p>${'words '.repeat(60)}</p></main></body></html>`, { url }));
+    const state = new OpenWebState();
+    const a = await fetchReadable('https://docs.example/docs', { fetchPage, state });
+    const b = await fetchReadable('https://docs.example/docs/', { fetchPage, state });
+    const again = await fetchReadable('https://docs.example/docs#install', { fetchPage, state });
+    expect([a.title, b.title, again.title]).toEqual(['/docs', '/docs/', '/docs']);
+    expect(fetchPage).toHaveBeenCalledTimes(2);
   });
 
   it('says plainly what it could not read', async () => {

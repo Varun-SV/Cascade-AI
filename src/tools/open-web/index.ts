@@ -22,7 +22,7 @@
 import { safeFetch } from '../utils/safe-fetch.js';
 import type { WebSearchResult } from '../web-search.js';
 import { BlockedError, BROWSER_UA, type EngineId, type Fetch, engines as allEngines } from './engines.js';
-import { type FusedResult, canonicalUrl, fuse } from './fuse.js';
+import { type FusedResult, fuse } from './fuse.js';
 import { type ReadablePage, readHtml } from './html.js';
 import { type Passage, bestPassages } from './passages.js';
 import { route } from './route.js';
@@ -125,8 +125,9 @@ export interface SearchOptions {
 
 /** The work, or the signal's reason once it fires: a source that ignores the signal can't hold up the rest. */
 function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(signal.reason);
+  // First: once this returns early, nothing else would ever see the work fail.
   work.catch(() => {});
+  if (signal.aborted) return Promise.reject(signal.reason);
   return new Promise<T>((resolve, reject) => {
     const stop = (): void => reject(signal.reason);
     signal.addEventListener('abort', stop, { once: true });
@@ -165,6 +166,8 @@ export async function openWebSearch(query: string, opts: SearchOptions): Promise
       }
       const resting = state.resting(id, now());
       if (resting) { outcomes.push({ engine: id, outcome: 'resting', ...(resting.reason ? { detail: resting.reason } : {}) }); return; }
+      // Stopped already: no source is asked at all.
+      if (opts.signal?.aborted) throw opts.signal.reason;
       try {
         const results = await untilAborted(sources[id].search(query, max, signal), signal);
         state.succeeded(id);
@@ -174,7 +177,13 @@ export async function openWebSearch(query: string, opts: SearchOptions): Promise
         outcomes.push({ engine: id, outcome: results.length ? 'answered' : 'empty' });
       } catch (err) {
         if (opts.signal?.aborted) throw err;
-        if (deadline.signal.aborted) { outcomes.push({ engine: id, outcome: 'too slow' }); return; }
+        if (deadline.signal.aborted) {
+          // Counted like any failure: a source that hangs would otherwise hold
+          // every search to the full deadline for as long as it is down.
+          state.failed(id, new Error('did not answer in time'), now());
+          outcomes.push({ engine: id, outcome: 'too slow' });
+          return;
+        }
         state.failed(id, err, now());
         outcomes.push({
           engine: id,
@@ -231,6 +240,10 @@ async function bodyText(resp: Response, maxBytes: number): Promise<{ text: strin
   return { text: decoder.decode(all), cut };
 }
 
+function pageKey(url: string): string {
+  try { const u = new URL(url); u.hash = ''; return u.toString(); } catch { return url; }
+}
+
 /** Pages we can't read as text. */
 export class UnreadablePageError extends Error {}
 
@@ -242,7 +255,10 @@ export class UnreadablePageError extends Error {}
 export async function fetchReadable(url: string, opts: { signal?: AbortSignal; fetchPage?: PageFetch; state?: OpenWebState; now?: () => number; maxBytes?: number } = {}): Promise<FetchedPage> {
   const state = opts.state ?? openWebState;
   const now = opts.now ?? Date.now;
-  const key = canonicalUrl(url);
+  // The address as asked for, less its fragment: the server never sees that.
+  // Not the search's canonical form, which folds /docs and /docs/, or www and
+  // the bare host, together: those can be different documents.
+  const key = pageKey(url);
   const cached = state.pages.get(key, now());
   if (cached) return cached;
   const fetchPage = opts.fetchPage ?? safeFetch;

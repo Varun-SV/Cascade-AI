@@ -16,15 +16,23 @@ import { type FetchedPage, type OpenWebState, type PageFetch, UnreadablePageErro
 import { bestPassages } from './open-web/passages.js';
 import { SsrfBlockedError } from './utils/safe-fetch.js';
 
-/** Characters of a page returned at once; `offset` reads on from there. */
-const PART_CHARS = 20_000;
-const MAX_LINKS = 40;
+/**
+ * What one answer may come to, whole. A worker keeps 12,000 characters of a
+ * tool's result (`truncateForContext`) and drops the middle of anything
+ * longer, so a part sized past that would skip text the next `offset` never
+ * covers. Kept under it, with room for the note that ends a part.
+ */
+export const ANSWER_CHARS = 11_000;
+/** A part is never smaller than this, however much else the answer holds. */
+const MIN_PART_CHARS = 3_000;
+const MAX_LINKS = 25;
+const LINK_CHARS = 160;
 
 export class WebFetchTool extends BaseTool {
   readonly name = 'web_fetch';
   readonly description =
     'Fetch a URL and read it: the main content as text (headings, lists, code, tables), without menus and page furniture, '
-    + 'plus the links on it. Long pages come in parts of 20,000 characters: pass offset to read on. '
+    + 'plus the links on it. Long pages come in parts of about 10,000 characters: pass offset to read on. '
     + 'Give prompt to get the passages that answer it first.';
   readonly inputSchema = {
     type: 'object',
@@ -70,30 +78,36 @@ export class WebFetchTool extends BaseTool {
     lines.push('');
 
     if (prompt && offset === 0 && page.text.length > 4_000) {
-      const best = bestPassages(page.text, prompt, 4);
+      const best = bestPassages(page.text, prompt, 3);
       if (best.length) {
         lines.push(`── Most relevant to "${prompt.slice(0, 120)}" ──`);
-        for (const p of best) lines.push(`> ${p.heading ? `[${p.heading}] ` : ''}${p.text.replace(/\s*\n\s*/g, ' ').slice(0, 900)}`);
+        for (const p of best) lines.push(`> ${p.heading ? `[${p.heading}] ` : ''}${p.text.replace(/\s*\n\s*/g, ' ').slice(0, 600)}`);
         lines.push('', '── The page ──');
       }
     }
 
+    // The links go at the end of the last part; room is kept for them in
+    // every part, so whether a part is the last doesn't change its size.
+    const links = page.links.length
+      ? [`── Links (${Math.min(page.links.length, MAX_LINKS)}${page.links.length > MAX_LINKS ? ` of ${page.links.length}` : ''}) ──`,
+        ...page.links.slice(0, MAX_LINKS).map((l) => `- ${l.text}: ${l.url}`.slice(0, LINK_CHARS))]
+      : [];
+    const head = lines.join('\n');
+    const NOTES = 200;
+    const part = Math.max(MIN_PART_CHARS, ANSWER_CHARS - head.length - links.join('\n').length - NOTES);
+
     const total = page.text.length;
-    if (offset >= total && total > 0) return `${lines.join('\n')}[The page has ${total} characters; offset ${offset} is past its end.]`;
+    if (offset >= total && total > 0) return `${head}\n[The page has ${total} characters; offset ${offset} is past its end.]`;
     // Cut at a line end where there is one near the limit, so a part doesn't end mid-sentence.
-    let end = Math.min(total, offset + PART_CHARS);
+    let end = Math.min(total, offset + part);
     if (end < total) {
       const nl = page.text.lastIndexOf('\n', end);
-      if (nl > offset + PART_CHARS * 0.8) end = nl;
+      if (nl > offset + part * 0.8) end = nl;
     }
     lines.push(page.text.slice(offset, end) || '(No readable text on this page.)');
     if (end < total) lines.push('', `[Part ${offset}–${end} of ${total} characters. Read on with offset: ${end}.]`);
     if (page.cut) lines.push('', '[The page was longer than Cascade reads; this is its start.]');
-
-    if (page.links.length && end >= total) {
-      lines.push('', `── Links (${Math.min(page.links.length, MAX_LINKS)}${page.links.length > MAX_LINKS ? ` of ${page.links.length}` : ''}) ──`);
-      for (const l of page.links.slice(0, MAX_LINKS)) lines.push(`- ${l.text}: ${l.url}`);
-    }
+    if (links.length && end >= total) lines.push('', ...links);
     return lines.join('\n');
   }
 }
