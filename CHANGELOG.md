@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run is signed in as you. "Allow for this run" on one covers the later ones.
   Other browsers (hosted, your own CDP endpoint, the desktop app) are asked
   about as before.
+
 ## 0.86.1 - 2026-11-18
 
 ### Fixed
