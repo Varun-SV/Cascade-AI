@@ -33,7 +33,8 @@ describe('PermissionEscalator', () => {
   let escalator: PermissionEscalator;
 
   beforeEach(() => {
-    escalator = new PermissionEscalator();
+    // Advice on: these drive T2's and T1's evaluators, which by default aren't asked about a dangerous call.
+    escalator = new PermissionEscalator(600_000, false, true);
   });
 
   // ── Safe tool auto-approve ─────────────────
@@ -183,6 +184,38 @@ describe('PermissionEscalator', () => {
     expect(again.approved).toBe(true);
   });
 
+  // An action in the person's own browser that may not be taken back — a
+  // Subscribe, a Pay — is theirs alone: the run is signed in as them.
+  it('asks only the person about a request marked theirs: no rule, no autonomy, no model', async () => {
+    const t2 = vi.fn().mockResolvedValue(makeDecision(true, 'T2'));
+    const t1 = vi.fn().mockResolvedValue(makeDecision(true, 'T1'));
+    escalator.setT2Evaluator(t2 as any);
+    escalator.setT1Evaluator(t1 as any);
+    escalator.setAutonomous(true);
+    const req = makeRequest({ toolName: 'browser_control', isDangerous: false, askPerson: true, input: { action: 'click', target: 'button "Subscribe"' } });
+    const promise = escalator.requestPermission(req);
+    await flushPromises();
+    expect(t2).not.toHaveBeenCalled();
+    expect(t1).not.toHaveBeenCalled();
+    escalator.resolveUserDecision(req.id, true, false);
+    expect((await promise).decidedBy).toBe('USER');
+  });
+
+  it('lets a model-made "always" stand for nothing the person must answer, but their own "allow for this run" does', async () => {
+    escalator.setT2Evaluator(vi.fn().mockResolvedValue({ ...makeDecision(true, 'T2'), always: true }) as any);
+    escalator.setT1Evaluator(vi.fn().mockResolvedValue({ ...makeDecision(true, 'T1'), always: true }) as any);
+    await escalator.requestPermission(makeRequest({ toolName: 'browser_control', isDangerous: true }));
+
+    const mine = makeRequest({ toolName: 'browser_control', isDangerous: true, askPerson: true });
+    const asked = escalator.requestPermission(mine);
+    await flushPromises();
+    escalator.resolveUserDecision(mine.id, true, true);
+    expect((await asked).decidedBy).toBe('USER');
+    const again = await escalator.requestPermission(makeRequest({ toolName: 'browser_control', isDangerous: true, askPerson: true }));
+    expect(again.approved).toBe(true);
+    expect(again.always).toBe(true);
+  });
+
   // ── User denies ────────────────────────────
 
   it('returns denied decision when user resolves with false', async () => {
@@ -271,7 +304,7 @@ describe('PermissionEscalator', () => {
   // ── Autonomous mode (autonomy: 'auto') ──
 
   it('autonomous mode auto-approves a non-dangerous tool without escalating', async () => {
-    const auto = new PermissionEscalator(600_000, true);
+    const auto = new PermissionEscalator(600_000, true, true);
     const t2 = vi.fn().mockResolvedValue(null);
     auto.setT2Evaluator(t2 as any);
 
@@ -295,8 +328,28 @@ describe('PermissionEscalator', () => {
     auto.resolveUserDecision('req-danger', false);
     const decision = await promise;
 
-    expect(t2).toHaveBeenCalled();        // escalated, not auto-approved
-    expect(decision.approved).toBe(false);
+    // Escalated to the person, not auto-approved; and no tier model is asked
+    // for advice it could not act on.
+    expect(decision).toMatchObject({ approved: false, decidedBy: 'USER' });
+    expect(t2).not.toHaveBeenCalled();
+    expect(t1).not.toHaveBeenCalled();
+  });
+
+  it('asks no tier model about a dangerous call unless advice is turned on: it is the person\'s either way', async () => {
+    for (const advice of [false, true]) {
+      const e = new PermissionEscalator(600_000, false, advice);
+      const t2 = vi.fn().mockResolvedValue(null);
+      const t1 = vi.fn().mockResolvedValue(null);
+      e.setT2Evaluator(t2 as any);
+      e.setT1Evaluator(t1 as any);
+      const req = makeRequest({ toolName: 'browser_control', isDangerous: true, id: `adv-${advice}` });
+      const promise = e.requestPermission(req);
+      await flushPromises();
+      e.resolveUserDecision(req.id, true);
+      expect(await promise).toMatchObject({ approved: true, decidedBy: 'USER' });
+      expect(t2.mock.calls.length, `advice ${advice}`).toBe(advice ? 1 : 0);
+      expect(t1.mock.calls.length, `advice ${advice}`).toBe(advice ? 1 : 0);
+    }
   });
 
   it('setAutonomous toggles the behavior at runtime', async () => {
@@ -353,7 +406,7 @@ describe('PermissionEscalator', () => {
 // What it asked must not be granted afterwards, to nothing still running.
 describe('PermissionEscalator — a withdrawn request', () => {
   it('takes back a question the user has not answered, and grants nothing later', async () => {
-    const escalator = new PermissionEscalator();
+    const escalator = new PermissionEscalator(600_000, false, true);
     const asked = vi.fn();
     escalator.on('permission:user-required', asked);
     const ended = new AbortController();
@@ -373,7 +426,7 @@ describe('PermissionEscalator — a withdrawn request', () => {
   });
 
   it('does not grant what a model approved after the caller stopped waiting', async () => {
-    const escalator = new PermissionEscalator();
+    const escalator = new PermissionEscalator(600_000, false, true);
     const ended = new AbortController();
     escalator.setT2Evaluator(async () => { ended.abort(); return makeDecision(true); });
     const decision = await escalator.requestPermission(makeRequest({ isDangerous: true }), ended.signal);
@@ -383,13 +436,13 @@ describe('PermissionEscalator — a withdrawn request', () => {
   it('caches nothing a model decided after the caller stopped waiting', async () => {
     // The next call for the tool, a live one, must not be approved by it.
     const caches = (e: PermissionEscalator) => e as unknown as { sessionCache: Map<string, boolean>; taskWideCache: Map<string, boolean> };
-    const viaT2 = new PermissionEscalator();
+    const viaT2 = new PermissionEscalator(600_000, false, true);
     const t2Ended = new AbortController();
     viaT2.setT2Evaluator(async () => { t2Ended.abort(); return makeDecision(true); });
     await viaT2.requestPermission(makeRequest({ isDangerous: true }), t2Ended.signal);
     expect(caches(viaT2).sessionCache.size).toBe(0);
 
-    const viaT1 = new PermissionEscalator();
+    const viaT1 = new PermissionEscalator(600_000, false, true);
     const t1Ended = new AbortController();
     viaT1.setT2Evaluator(async () => null);
     viaT1.setT1Evaluator(async () => { t1Ended.abort(); return makeDecision(true, 'T1'); });
@@ -401,7 +454,7 @@ describe('PermissionEscalator — a withdrawn request', () => {
     // Including when the model then failed: its error is not a reason to
     // put the question to a person for a call that has gone.
     for (const evaluate of [async () => null, async () => { throw new Error('model down'); }]) {
-      const escalator = new PermissionEscalator();
+      const escalator = new PermissionEscalator(600_000, false, true);
       const asked = vi.fn();
       escalator.on('permission:user-required', asked);
       const ended = new AbortController();
@@ -414,7 +467,7 @@ describe('PermissionEscalator — a withdrawn request', () => {
   });
 
   it('changes nothing for a caller that passes no signal', async () => {
-    const escalator = new PermissionEscalator();
+    const escalator = new PermissionEscalator(600_000, false, true);
     escalator.setT2Evaluator(async () => makeDecision(true));
     expect((await escalator.requestPermission(makeRequest({ isDangerous: true }))).approved).toBe(true);
   });

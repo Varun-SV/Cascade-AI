@@ -1083,6 +1083,18 @@ describe('approvalRequestFor', () => {
     expect(approvalRequestFor(req as never).localOnly).toBeUndefined();
     expect(approvalRequestFor(req as never).input).toEqual({ command: 'ls' });
   });
+
+  it('tells the person when only they can allow it, rather than that the tiers could not decide', async () => {
+    const { approvalRequestFor } = await import('./cascade.js');
+    const req = {
+      id: 'r2', requestedBy: 't3', parentT2Id: 't2', toolName: 'browser_control', input: { action: 'click', target: 'button "Subscribe"' },
+      isDangerous: true, subtaskContext: 'Inspect the channel', sectionContext: 'Research', askPerson: true,
+    };
+    expect(approvalRequestFor(req as never).description).toBe('T3 Worker "Inspect the channel" wants to do this in your own browser, signed in as you. It may not be undoable, so only you can allow it.');
+    expect(approvalRequestFor({ ...req, askPerson: undefined, trail: [{ tier: 'T2', verdict: 'unsure', reason: 'T2: unsure' }] } as never).description).toContain('T2 and T1 could not determine');
+    // Not asked for advice (the default for a dangerous call): it doesn't say they were.
+    expect(approvalRequestFor({ ...req, askPerson: undefined } as never).description).toBe('T3 Worker "Inspect the channel" wants to run "browser_control".');
+  });
 });
 
 describe('prompt checks that run on the user\'s text', () => {

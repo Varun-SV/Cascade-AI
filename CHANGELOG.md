@@ -5,6 +5,43 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.87.0 - 2026-11-18
+
+### Changed
+- **One approval for a run on your own browser.** The question your device
+  asks (which sites, which window) is now the run's approval. Opening pages on
+  those sites, reading, scrolling, clicking, typing and searching go ahead
+  without a prompt in the chat, where before every action could be asked
+  about, and clicks on controls the page view gives no name (most of
+  YouTube's) asked every time.
+- **What may not be undoable is still asked, and only you can answer it.** A
+  control named Pay, Buy, Delete, Send, Publish, Subscribe, Confirm and the
+  like, Enter in a field other than a search box, or a control whose name the
+  page view cut short: these come to you, never to a tier's model, since the
+  run is signed in as you. "Allow for this run" on one covers the later ones.
+  Other browsers (hosted, your own CDP endpoint, the desktop app) are asked
+  about as before.
+- **No model calls spent on advice nobody can use.** A dangerous tool's call
+  (a browser action, a shell command, a file write) always comes to you: T2
+  and T1 can't decide it. They were still each asked about every one, for
+  advice the web app never showed, two model calls per request. Now they
+  aren't, unless you set `approvalAdvice: true` (the desktop app shows that
+  advice in its approval window).
+
+### Fixed
+- **A click that never became ready says why.** "Timeout exceeded" now comes
+  with the reason from Playwright, in fixed words: covered by another element
+  (named by its tag), not visible, still moving, disabled, or gone. Nothing
+  else from its log is passed on, since it quotes elements' attributes.
+- **A control covered by something the pointer brought up is tried again.**
+  A hover card or video preview left over the page by the last action is moved
+  out of the way (the pointer goes to the corner) and the control is waited
+  for once more.
+- **A control that changes during the longer wait isn't used.** Since 0.86.1 a
+  checked click may wait longer on a slow link to your browser; the control's
+  state (checked, pressed, expanded, disabled, its value and words) is read
+  after the check and again just before the click, and a change stops it.
+
 ## 0.86.1 - 2026-11-18
 
 ### Fixed

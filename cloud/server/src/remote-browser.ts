@@ -494,7 +494,8 @@ function attachRun(
     controller.controller,
     (actorId) => controller.actorEnded(actorId),
     // On the user's device the agent reads pages, but no picture of one leaves it.
-    device ? { ...controller.features, screenshots: false, marked: false } : controller.features,
+    // And the device's own question is the run's approval: see `askedOnDevice`.
+    device ? { ...controller.features, screenshots: false, marked: false, askedOnDevice: true } : controller.features,
   );
 
   if (device) {

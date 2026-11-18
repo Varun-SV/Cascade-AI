@@ -831,6 +831,13 @@ export interface CascadeConfig {
   /** Timeout (ms) for a tool-approval decision; denies (never auto-approves) on timeout. Default: 600000. */
   approvalTimeoutMs?: number;
   /**
+   * Ask T2's and T1's models for advice on a dangerous tool's call before it
+   * comes to you. They can't decide it (a dangerous call is always yours), so
+   * each answer is advice only, shown in the desktop app's approval window,
+   * and costs two model calls per request. Default: false.
+   */
+  approvalAdvice?: boolean;
+  /**
    * Pause for user approval of the plan. 'never' (default), 'complex' (Complex
    * runs only; 'always' is an alias), or 'all' (Moderate + Complex).
    */
@@ -1183,6 +1190,14 @@ export interface PermissionRequest {
    * models. It is decided by rule or by the user.
    */
   localOnly?: boolean;
+  /**
+   * Only the person may answer: no tier's model decides it, and no answer a
+   * model gave earlier in the run stands for it. Set for an action in the
+   * person's own browser that can do something they can't take back (pay,
+   * delete, send, subscribe…), where what the run is signed in as is theirs.
+   * An "allow for this run" they give still covers later ones.
+   */
+  askPerson?: boolean;
   /**
    * Escalation trail — each engaged tier's non-binding recommendation as the
    * request rose toward the user. Dangerous tools never get a terminal
