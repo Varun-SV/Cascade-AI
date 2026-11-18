@@ -280,6 +280,25 @@ function render(root: Node, base: string | undefined, links: ReadablePage['links
     line = '';
   };
   const blank = (): void => { flush(); if (out.length && out[out.length - 1] !== '') out.push(''); };
+  const addLink = (node: Node): void => {
+    if (node.tag !== 'a' || !node.attrs['href']) return;
+    const url = absolute(node.attrs['href'], base);
+    const text = squash(decodeEntities(textOf(node))).trim();
+    if (url && text && !seen.has(url) && !url.startsWith(`${base ?? ''}#`)) { seen.add(url); links.push({ text: text.slice(0, 120), url }); }
+  };
+  // The links in a heading or a code block, which are rendered whole as text.
+  const collectLinks = (node: Node): void => {
+    addLink(node);
+    for (const c of node.children) if (typeof c !== 'string') collectLinks(c);
+  };
+  // A code block's text, with its <br>s as the line ends they are.
+  const preText = (node: Node | string): string => {
+    if (typeof node === 'string') return node;
+    if (node.tag === 'br') return '\n';
+    let t = '';
+    for (const c of node.children) t += preText(c);
+    return t;
+  };
   const walk = (node: Node | string, inPre: boolean): void => {
     if (typeof node === 'string') {
       const t = decodeEntities(node);
@@ -291,7 +310,8 @@ function render(root: Node, base: string | undefined, links: ReadablePage['links
     if (tag === 'hr') { blank(); return; }
     if (tag === 'pre') {
       blank();
-      const code = decodeEntities(textOf(node)).replace(/\s+$/, '');
+      collectLinks(node);
+      const code = decodeEntities(preText(node)).replace(/\s+$/, '');
       if (code.trim()) {
         // One by one: spread into a call, a long block's lines pass the
         // engine's argument limit.
@@ -306,6 +326,7 @@ function render(root: Node, base: string | undefined, links: ReadablePage['links
       blank();
       const t = squash(decodeEntities(textOf(node))).trim();
       if (t) out.push(`${'#'.repeat(Number(heading[1]))} ${t}`, '');
+      collectLinks(node);
       return;
     }
     if (tag === 'img') return;
@@ -314,11 +335,7 @@ function render(root: Node, base: string | undefined, links: ReadablePage['links
     else if (tag === 'p' || tag === 'blockquote' || tag === 'table' || tag === 'figure') blank();
     else if (block && tag !== 'td' && tag !== 'th') flush();
     if (tag === 'td' || tag === 'th') line += line.trim() ? ' | ' : '';
-    if (tag === 'a' && node.attrs['href']) {
-      const url = absolute(node.attrs['href'], base);
-      const text = squash(decodeEntities(textOf(node))).trim();
-      if (url && text && !seen.has(url) && !url.startsWith(`${base ?? ''}#`)) { seen.add(url); links.push({ text: text.slice(0, 120), url }); }
-    }
+    addLink(node);
     for (const c of node.children) walk(c, inPre);
     if (tag === 'tr') flush();
     else if (tag === 'p' || tag === 'blockquote' || tag === 'table' || tag === 'figure') blank();
