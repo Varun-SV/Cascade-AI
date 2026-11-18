@@ -8,7 +8,7 @@ import 'katex/dist/katex.min.css';
 import { MermaidBlock } from './MermaidBlock.js';
 import { CHAT_REHYPE_PLUGINS, CHAT_REMARK_PLUGINS, createAnswerPreparer, usePacedText } from '../lib/markdown.js';
 import { SessionRating } from './SessionRating.js';
-import { useAppDispatch, useAppSelector, appendMessage, finalizeLastMessage, setSessionId, loadTranscript, runStarted, setComposerDraft, type ChatAttachmentRef } from '../store/index.js';
+import { useAppDispatch, useAppSelector, appendMessage, finalizeLastMessage, setSessionId, loadTranscript, runStarted, clearComposerDraft, type ChatAttachmentRef } from '../store/index.js';
 import { IMAGE_TYPES, MAX_FILES, attachmentName, readImageFile, uploadAttachment, useAttachmentImage } from '../lib/attachments.js';
 import { fetchSessionTranscript } from '../utils/sessionLoad.js';
 
@@ -203,7 +203,7 @@ export function ChatPanel({ socket, compact }: Props) {
   const [uploading, setUploading] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const composerDraft = useAppSelector((s) => s.app.composerDraft);
+  const composerDrafts = useAppSelector((s) => s.app.composerDrafts);
   // Run-in-flight lives in the STORE (runActive), not component state: views are
   // conditionally mounted, so local state died on view switch and took the Stop
   // button with it while the backend kept running.
@@ -270,13 +270,14 @@ export function ChatPanel({ socket, compact }: Props) {
   }, [socket, dispatch]);
 
   // A chat handed over from the web: its last message waits here, files and all, to send.
+  // It stays saved until it's sent, so leaving the chat first doesn't lose it.
+  const waitingDraft = composerDrafts[activeSessionId ?? sessionId ?? ''];
   useEffect(() => {
-    if (!composerDraft || composerDraft.sessionId !== (activeSessionId ?? sessionId)) return;
-    setInput(composerDraft.prompt);
-    setPending(composerDraft.attachments);
+    if (!waitingDraft) return;
+    setInput(waitingDraft.prompt);
+    setPending(waitingDraft.attachments);
     setFileError(null);
-    dispatch(setComposerDraft(null));
-  }, [composerDraft, activeSessionId, sessionId, dispatch]);
+  }, [waitingDraft]);
 
   const addFiles = async (files: File[]) => {
     if (!files.length) return;
@@ -321,6 +322,7 @@ export function ChatPanel({ socket, compact }: Props) {
     setInput('');
     setPending([]);
     setFileError(null);
+    if (composerDrafts[sid]) dispatch(clearComposerDraft(sid));
     dispatch(runStarted({ sessionId: sid }));
     setSessionDone(false);
   };

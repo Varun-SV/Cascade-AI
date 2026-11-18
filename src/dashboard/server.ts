@@ -1475,6 +1475,14 @@ export class DashboardServer {
       res.json(this.store.addAttachment(parsed));
     });
 
+    // Files waiting in a session's draft (a chat handed over to send here): kept with it.
+    this.app.post('/api/attachments/hold', attachmentLimiter, auth, (req: Request, res: Response) => {
+      const body = (req.body ?? {}) as { sessionId?: unknown; ids?: unknown };
+      if (typeof body.sessionId !== 'string' || !body.sessionId || body.sessionId.length > 128) { res.status(400).json({ error: 'sessionId is required' }); return; }
+      if (!this.store.getSession(body.sessionId)) { res.status(404).json({ error: 'No such session' }); return; }
+      res.json({ held: this.store.holdAttachments(body.sessionId, attachmentIdsFrom(body.ids)) });
+    });
+
     // A message's file, to show it: an image's bytes, or a document's text.
     this.app.get('/api/attachments/:id', attachmentLimiter, auth, (req: Request, res: Response) => {
       const file = this.store.getAttachment(req.params.id as string);

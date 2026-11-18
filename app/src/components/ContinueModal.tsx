@@ -5,7 +5,7 @@ import {
   UploadCloud, DownloadCloud, KeyRound,
 } from 'lucide-react';
 import { CascadeMark } from './CascadeMark.js';
-import { useAppDispatch, useAppSelector, setShowContinue, loadTranscript, setComposerDraft, setView, type ComposerDraft } from '../store/index.js';
+import { useAppDispatch, useAppSelector, setShowContinue, loadTranscript, saveComposerDraft, setView } from '../store/index.js';
 import { uploadAttachment } from '../lib/attachments.js';
 import { keepHandoffFiles } from '../lib/cloudHandoff.js';
 import type { CloudUser, CloudMsg } from '../App.js';
@@ -668,6 +668,17 @@ function SendTab({ sessionTitle, sessionId, backendPort, authToken }: {
 
 // ── Bring a chat here (redeem a code from the web) ──
 
+/** Keeps a waiting message's files with its chat, so they aren't cleared as abandoned uploads. */
+async function holdDraftFiles(backendPort: number, authToken: string, sessionId: string, ids: string[]): Promise<void> {
+  if (!ids.length) return;
+  const res = await fetch(`http://localhost:${backendPort}/api/attachments/hold`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+    body: JSON.stringify({ sessionId, ids }),
+  });
+  if (!res.ok) throw new Error('Its files could not be kept with the chat. Try the code again.');
+}
+
 function ReceiveTab({ backendPort, authToken, onDone }: { backendPort: number; authToken: string; onDone: () => void }) {
   const dispatch = useAppDispatch();
   const [value, setValue] = useState('');
@@ -676,7 +687,7 @@ function ReceiveTab({ backendPort, authToken, onDone }: { backendPort: number; a
   const [imported, setImported] = useState<string | null>(null);
   // A chat that ends on a message not yet answered (one handed over to run here)
   // opens with that message in the composer, its files with it, to send.
-  const [toSend, setToSend] = useState<{ sessionId: string; draft: ComposerDraft } | null>(null);
+  const [toSend, setToSend] = useState<string | null>(null);
   const [missed, setMissed] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -696,7 +707,12 @@ function ReceiveTab({ backendPort, authToken, onDone }: { backendPort: number; a
       const id = await importTranscript(backendPort, authToken, title, (pendingLast ? messages.slice(0, -1) : messages)
         .map((m) => ({ role: m.role, content: m.content, attachmentIds: m.files.map((f) => f.id) })));
       setMissed(notKept);
-      if (pendingLast && id) setToSend({ sessionId: id, draft: { sessionId: id, prompt: last.content, attachments: last.files } });
+      if (pendingLast && id) {
+        // Saved now, not when the dialog's button is pressed: it waits in that chat until sent.
+        await holdDraftFiles(backendPort, authToken, id, last.files.map((f) => f.id));
+        dispatch(saveComposerDraft({ sessionId: id, prompt: last.content, attachments: last.files }));
+        setToSend(id);
+      }
       setImported(title);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'That code is invalid or has expired.');
@@ -711,7 +727,7 @@ function ReceiveTab({ backendPort, authToken, onDone }: { backendPort: number; a
         <Check size={26} style={{ color: 'var(--success)' }} />
         <p style={{ fontSize: 12, color: 'var(--text)', textAlign: 'center', lineHeight: 1.5 }}>
           Imported <b>{imported}</b>. It’s in your sidebar as <b>“{imported} (imported)”</b>
-          {toSend ? '. Its last message is ready to send here.' : ' — open it to continue.'}
+          {toSend ? '. Its last message is waiting in that chat, ready to send.' : ' — open it to continue.'}
         </p>
         {missed.length > 0 && (
           <p role="alert" style={{ fontSize: 11.5, color: 'var(--danger)', textAlign: 'center', lineHeight: 1.5, margin: 0 }}>
@@ -723,9 +739,8 @@ function ReceiveTab({ backendPort, authToken, onDone }: { backendPort: number; a
             style={primaryBtn}
             onClick={() => {
               void (async () => {
-                const history = await fetchSessionTranscript(backendPort, authToken, toSend.sessionId);
-                dispatch(loadTranscript({ sessionId: toSend.sessionId, messages: history ?? [] }));
-                dispatch(setComposerDraft(toSend.draft));
+                const history = await fetchSessionTranscript(backendPort, authToken, toSend);
+                dispatch(loadTranscript({ sessionId: toSend, messages: history ?? [] }));
                 dispatch(setView('chat'));
                 onDone();
               })();

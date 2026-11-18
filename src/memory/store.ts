@@ -408,7 +408,8 @@ export class MemoryStore {
   /** Keep a file for a message to come. Synchronous: the id is used at once. */
   addAttachment(file: NewMessageAttachment, now = new Date()): MessageAttachmentRef {
     const cutoff = new Date(now.getTime() - MemoryStore.UNCLAIMED_ATTACHMENT_MS).toISOString();
-    this.db.prepare('DELETE FROM message_attachments WHERE message_id IS NULL AND created_at < ?').run(cutoff);
+    // Held for a session (a draft waiting to be sent) isn't abandoned: it goes with the session.
+    this.db.prepare('DELETE FROM message_attachments WHERE message_id IS NULL AND session_id IS NULL AND created_at < ?').run(cutoff);
     return this.insertAttachment(file, null, null, now.toISOString());
   }
 
@@ -428,6 +429,14 @@ export class MemoryStore {
     const r = this.db.prepare('SELECT id, kind, mime, filename, size, data FROM message_attachments WHERE id = ?').get(id) as
       { id: string; kind: string; mime: string; filename: string | null; size: number; data: string } | undefined;
     return r ? { id: r.id, kind: r.kind as MessageAttachmentRef['kind'], mime: r.mime, filename: r.filename, size: r.size, data: r.data } : null;
+  }
+
+  /** Keep unclaimed files for a session's draft: not swept, and deleted with the session. */
+  holdAttachments(sessionId: string, ids: string[]): number {
+    const hold = this.db.prepare('UPDATE message_attachments SET session_id = ? WHERE id = ? AND message_id IS NULL');
+    let held = 0;
+    for (const id of ids) held += hold.run(sessionId, id).changes;
+    return held;
   }
 
   /** Give unclaimed files to a message. Queued after the message's own write. */

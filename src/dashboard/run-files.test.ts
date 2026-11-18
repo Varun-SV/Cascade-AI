@@ -122,6 +122,17 @@ describe.skipIf(!hasSqlite)('files kept with messages', () => {
     expect(other.getSessionMessages(madeBad!.id)[0]!.attachments).toBeUndefined();
   });
 
+  it("files held for a session's draft aren't swept, and go with the session", () => {
+    const store = tempStore();
+    store.createSession({ id: 's1', title: 't', createdAt: '', updatedAt: '', identityId: 'default', workspacePath: '', messages: [], metadata: { totalTokens: 0, totalCostUsd: 0, modelsUsed: [], toolsUsed: [], taskCount: 0 } });
+    const held = store.addAttachment({ kind: 'document', filename: 'x', text: 'x' }, new Date('2026-01-01T00:00:00Z'));
+    expect(store.holdAttachments('s1', [held.id, 'nope'])).toBe(1);
+    store.addAttachment({ kind: 'document', filename: 'y', text: 'y' }, new Date('2026-01-03T00:00:00Z'));
+    expect(store.getUnclaimedAttachments([held.id])).toHaveLength(1);
+    store.deleteSession('s1');
+    expect(store.getAttachment(held.id)).toBeNull();
+  });
+
   it('one never claimed goes after a day', () => {
     const store = tempStore();
     const old = store.addAttachment({ kind: 'document', filename: 'x', text: 'x' }, new Date('2026-01-01T00:00:00Z'));
@@ -184,6 +195,14 @@ describe.skipIf(!hasSqlite)('the backend routes', () => {
     expect(store.getSessionMessages(sessions[0]!.id)[0]!.attachments).toHaveLength(2);
     // Elsewhere the 10mb ceiling stands.
     expect((await post('/api/attachments', { kind: 'document', text: 'y'.repeat(11_000_000) })).status).toBe(413);
+  });
+
+  it("holds a draft's files for an existing session only", async () => {
+    const { store, post } = await serve();
+    const f = store.addAttachment({ kind: 'document', filename: 'x', text: 'x' });
+    expect((await post('/api/attachments/hold', { sessionId: 'missing', ids: [f.id] })).status).toBe(404);
+    store.createSession({ id: 's3', title: 't', createdAt: '', updatedAt: '', identityId: 'default', workspacePath: '', messages: [], metadata: { totalTokens: 0, totalCostUsd: 0, modelsUsed: [], toolsUsed: [], taskCount: 0 } });
+    expect(await (await post('/api/attachments/hold', { sessionId: 's3', ids: [f.id] })).json()).toEqual({ held: 1 });
   });
 
   it("a run's start claims the files it was sent", async () => {
