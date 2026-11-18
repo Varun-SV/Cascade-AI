@@ -102,6 +102,25 @@ describe('the bridge', () => {
   });
 });
 
+describe('ending a bridge', () => {
+  it('is prompt even while a socket is still closing because its driver never answers the close', async () => {
+    // An endpoint that hangs up at once, as one that refuses the run would.
+    const server = http.createServer();
+    const wss = new WebSocketServer({ server });
+    wss.on('connection', (ws) => ws.close());
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    closers.push(() => { wss.close(); server.closeAllConnections(); server.close(); });
+    const bridge = await openBridge(`ws://endpoint.test:${(server.address() as AddressInfo).port}/`, { allowPrivate: true, resolve: async () => ['127.0.0.1'] });
+    const driver = await connect(bridge.url);
+    // A driver that stops reading: the bridge's close frame is never answered.
+    (driver as unknown as { _socket: { pause(): void } })._socket.pause();
+    await new Promise((r) => setTimeout(r, 100));
+    const started = Date.now();
+    await bridge.close();
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+});
+
 describe('the provider', () => {
   it('opens a bridge per session and closes it with the session', async () => {
     const t = await target();

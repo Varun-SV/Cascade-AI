@@ -105,12 +105,13 @@ export async function openBridge(target: string, opts: { allowPrivate: boolean; 
   wss.on('connection', (local, req) => {
     if (req.url !== `/${secret}`) { local.close(1008, 'unknown path'); return; }
     const upstream = new WebSocket(target, { lookup: pinnedLookup(opts), perMessageDeflate: false, maxPayload: MAX_FRAME_BYTES, handshakeTimeout: 15_000 });
-    sockets.add(local); sockets.add(upstream);
+    // A socket leaves the set only once it has closed: a graceful close waits on the
+    // other end, and the bridge ending meanwhile must still be able to cut it.
+    for (const s of [local, upstream]) { sockets.add(s); s.once('close', () => sockets.delete(s)); }
     const early: Array<{ data: unknown; binary: boolean }> = [];
     let earlyBytes = 0;
     const shut = (code = 1000, why = ''): void => {
       for (const s of [local, upstream]) {
-        sockets.delete(s);
         try { s.close(code === 1005 || code === 1006 ? 1000 : code, why.slice(0, 120)); } catch { s.terminate(); }
       }
     };
@@ -144,7 +145,8 @@ export async function openBridge(target: string, opts: { allowPrivate: boolean; 
   return {
     url: `ws://127.0.0.1:${port}/${secret}`,
     async close() {
-      for (const s of sockets) { try { s.terminate(); } catch { /* gone */ } }
+      // Every socket still open or closing, and any the server holds (one turned away included).
+      for (const s of [...sockets, ...wss.clients]) { try { s.terminate(); } catch { /* gone */ } }
       sockets.clear();
       wss.close();
       server.closeAllConnections();
