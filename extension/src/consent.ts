@@ -36,6 +36,7 @@ async function main(): Promise<void> {
   if (!info.incognitoAllowed) {
     incognito.disabled = true;
     $('incognito-off').hidden = false;
+    $('incognito-setting').addEventListener('click', () => { void openIncognitoSetting(); });
     normal.checked = true;
   } else {
     (info.windowMode === 'normal' ? normal : incognito).checked = true;
@@ -49,6 +50,14 @@ async function main(): Promise<void> {
     void answer({ sites: sites.value, anyPublic: anyPublic.checked, incognito: incognito.checked, remember: $<HTMLInputElement>('remember').checked });
   });
   $('decline').addEventListener('click', () => { void answer({ sites: '', anyPublic: false, incognito: true, remember: false }); });
+}
+
+/**
+ * Chrome's page for this extension, where "Allow in Incognito" is. Only Chrome can
+ * turn it on: an extension can't grant itself private windows.
+ */
+async function openIncognitoSetting(): Promise<void> {
+  await chrome.tabs.create({ url: `chrome://extensions/?id=${chrome.runtime.id}` });
 }
 
 /** Closes only once the extension says it has the answer: a lost reply is not a yes. */

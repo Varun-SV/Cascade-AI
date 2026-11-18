@@ -64,6 +64,10 @@ $('pair-form').addEventListener('submit', (e) => {
     void send({ type: 'pair', server: origin, name });
   });
 });
+// Asked here, not of the worker: the popup can read it itself, and it is shown whether
+// or not a run is going.
+void chrome.extension.isAllowedIncognitoAccess().then((allowed) => { $('incognito-off').hidden = allowed; }, () => {});
+$('incognito-setting').addEventListener('click', () => { void chrome.tabs.create({ url: `chrome://extensions/?id=${chrome.runtime.id}` }); });
 $('stop').addEventListener('click', () => { void send({ type: 'stop' }); });
 $('take-over').addEventListener('click', () => { void send({ type: 'take-over' }); });
 $('hand-back').addEventListener('click', () => { void send({ type: 'hand-back' }); });

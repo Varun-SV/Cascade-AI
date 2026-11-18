@@ -69,7 +69,14 @@ describe('the steps the side pane shows', () => {
     expect(typed).toEqual({ kind: 'fill', summary: 'Typed into element e3', ok: true, at: 1, url: 'https://a.test/login', title: 'Sign in' });
     expect(JSON.stringify(typed)).not.toContain('hunter2');
     expect(describeStep({ kind: 'navigate', url: 'https://www.rtings.com/headphones?x=1' }, { ok: false, detail: 'blocked' }, 2))
-      .toMatchObject({ summary: 'Opened www.rtings.com/headphones', ok: false });
+      .toMatchObject({ summary: 'Opened www.rtings.com/headphones', ok: false, why: 'blocked' });
+  });
+
+  it('say why one did not work, without anything that was typed', () => {
+    const failed = describeStep({ kind: 'fill', ref: 'e3', value: 'hunter2' }, { ok: false, detail: 'elementHandle.fill("hunter2"): Timeout 500ms exceeded.' }, 3);
+    expect(failed.why).toBe('elementHandle.fill("…"): Timeout 500ms exceeded.');
+    expect(JSON.stringify(failed)).not.toContain('hunter2');
+    expect(describeStep({ kind: 'click', ref: 'e4' }, { ok: true, detail: 'Clicked e4' }, 4)).not.toHaveProperty('why');
   });
 });
 

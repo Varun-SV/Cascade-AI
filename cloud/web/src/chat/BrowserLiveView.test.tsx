@@ -1235,7 +1235,7 @@ describe('BrowserLiveView — touch takeover gestures', () => {
 describe('a run in the user\'s own browser', () => {
   const steps = [
     { kind: 'navigate', summary: 'Opened www.rtings.com/headphones', ok: true, at: 1, url: 'https://www.rtings.com/headphones', title: 'Best headphones' },
-    { kind: 'click', summary: 'Clicked element e4', ok: false, at: 2 },
+    { kind: 'click', summary: 'Clicked element e4', ok: false, at: 2, why: 'e4 is no longer on the page. Call observe for a fresh page view.' },
   ];
 
   it('says where it is running instead of apologising for a stream, with the page and each step', () => {
@@ -1247,6 +1247,8 @@ describe('a run in the user\'s own browser', () => {
     const list = screen.getByRole('list', { name: 'What it has done' });
     expect(list).toHaveTextContent('Opened www.rtings.com/headphones');
     expect(list).toHaveTextContent('Clicked element e4 (didn’t work)');
+    // Why, under it: "didn't work" alone gave nobody anything to go on.
+    expect(list).toHaveTextContent('e4 is no longer on the page.');
   });
 
   it('before its first step, says it may be waiting on the question in the browser', () => {

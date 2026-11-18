@@ -5,6 +5,22 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.86.1 - 2026-11-18
+
+### Fixed
+- **Clicks on your own browser work when the server is far away.** A click on
+  a control from the page view is checked once more just before it's sent, and
+  that last check had 500 ms. Through the relay to your Chrome, one exchange
+  with the page can take a quarter of a second, so every such click was
+  refused as "stopped being ready", though nothing had changed. The wait now
+  grows with how long the link to your browser takes.
+- **A step that didn't work says why.** The side pane shows the reason under
+  it, without anything that was typed.
+- **Private windows can be turned on from the extension.** Chrome lets an
+  extension open private windows only after "Allow in Incognito" is turned on
+  for it. The question a run asks, and the toolbar button, now say so plainly
+  and open Cascade's page in Chrome's settings (extension 0.2.1).
+
 ## 0.86.0 - 2026-11-18
 
 ### Added

@@ -23,7 +23,11 @@
         <legend>Open it in</legend>
         <label class="check"><input type="radio" name="window" value="incognito" id="window-incognito"> A private window <span class="muted">(signed out of everything; nothing kept after)</span></label>
         <label class="check"><input type="radio" name="window" value="normal" id="window-normal"> A normal window <span class="muted">(sites you're signed in to see you signed in)</span></label>
-        <p id="incognito-off" class="muted" hidden>To use a private window, turn on "Allow in Incognito" for Cascade in <code>chrome://extensions</code>.</p>
+        <div id="incognito-off" class="notice" hidden>
+          <p><strong>Private windows are off for Cascade.</strong> Chrome lets an extension open them only after you turn on <em>Allow in Incognito</em> for it.</p>
+          <p class="muted">Chrome restarts Cascade when you change that setting, so this request ends: start the run again once it's on.</p>
+          <button type="button" id="incognito-setting" class="secondary">Open Cascade's settings in Chrome</button>
+        </div>
       </fieldset>
 
       <label class="check" id="remember-row" hidden><input type="checkbox" id="remember"> Use this answer for this chat's next runs <span class="muted">(until Chrome closes, 8 hours at most)</span></label>
