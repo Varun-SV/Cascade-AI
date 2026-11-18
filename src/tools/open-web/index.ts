@@ -21,7 +21,7 @@
 
 import { safeFetch } from '../utils/safe-fetch.js';
 import type { WebSearchResult } from '../web-search.js';
-import { BlockedError, BROWSER_UA, type EngineId, type Fetch, engines as allEngines } from './engines.js';
+import { BlockedError, BROWSER_UA, type EngineId, type Fetch, UnreadableAnswerError, engines as allEngines } from './engines.js';
 import { type FusedResult, fuse } from './fuse.js';
 import { type ReadablePage, readHtml } from './html.js';
 import { type Passage, bestPassages } from './passages.js';
@@ -42,6 +42,62 @@ export interface SourceOutcome {
   engine: EngineId;
   outcome: 'answered' | 'empty' | 'blocked' | 'failed' | 'resting' | 'too slow';
   detail?: string;
+  /** Results it gave. */
+  found?: number;
+}
+
+/**
+ * One search, as an operator may see it: which sources answered, and how many
+ * results there were. Never the query, a result's address, or anything else
+ * that would say what a person searched for; not even a hash of it, which a
+ * guess can be checked against.
+ */
+export interface OpenWebSummary {
+  sources: Array<{ engine: EngineId; outcome: SourceOutcome['outcome']; found: number }>;
+  results: number;
+  /** A shorter form of the query was tried after the first found nothing. */
+  retried: boolean;
+  ms: number;
+}
+
+const summaryListeners = new Set<(summary: OpenWebSummary) => void>();
+
+/**
+ * Told of each Open Web search when it ends, for a host's own logs (the cloud
+ * server). Nothing listens unless a host asks, so a CLI prints nothing.
+ * Returns the way to stop listening.
+ */
+export function onOpenWebSearch(listener: (summary: OpenWebSummary) => void): () => void {
+  summaryListeners.add(listener);
+  return () => { summaryListeners.delete(listener); };
+}
+
+export function reportOpenWebSearch(summary: OpenWebSummary): void {
+  for (const listener of summaryListeners) {
+    try { listener(summary); } catch { /* a listener's trouble isn't the search's */ }
+  }
+}
+
+const QUERY_STOP = new Set([
+  'a', 'an', 'the', 'and', 'or', 'of', 'for', 'to', 'in', 'on', 'at', 'by', 'with', 'is', 'are', 'was', 'be', 'it', 'its',
+  'what', 'which', 'who', 'how', 'why', 'when', 'where', 'should', 'would', 'could', 'can', 'do', 'does', 'i', 'me', 'my',
+  'you', 'your', 'about', 'vs', 'versus', 'review', 'reviews', 'best', 'good', 'buy', 'worth', 'get', 'tell', 'find',
+]);
+
+/**
+ * The query's key words, for a second try when the first found nothing: no
+ * quotes or operators, no common words, at most six terms. Null when that is
+ * the query already, or leaves nothing. Exported for tests.
+ */
+export function simplerQuery(query: string): string | null {
+  const words = query
+    .replace(/\b(?:site|intitle|inurl|filetype):\S+/gi, ' ')
+    .replace(/["'`“”‘’()[\]{}<>]/g, ' ')
+    .split(/\s+/)
+    .map((w) => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ''))
+    .filter((w) => w && !QUERY_STOP.has(w.toLowerCase()));
+  const simple = [...new Set(words)].slice(0, 6).join(' ');
+  return simple && simple.toLowerCase() !== query.trim().replace(/\s+/g, ' ').toLowerCase() ? simple : null;
 }
 
 export interface OpenWebSearch {
@@ -161,7 +217,7 @@ export async function openWebSearch(query: string, opts: SearchOptions): Promise
       if (cached) {
         reachable = true;
         lists.push({ engine: id, weight, results: cached.results });
-        outcomes.push({ engine: id, outcome: cached.results.length ? 'answered' : 'empty', detail: 'from a moment ago' });
+        outcomes.push({ engine: id, outcome: cached.results.length ? 'answered' : 'empty', detail: 'from a moment ago', found: cached.results.length });
         return;
       }
       const resting = state.resting(id, now());
@@ -174,7 +230,7 @@ export async function openWebSearch(query: string, opts: SearchOptions): Promise
         state.searches.set(key, { engine: id, results }, now());
         reachable = true;
         lists.push({ engine: id, weight, results });
-        outcomes.push({ engine: id, outcome: results.length ? 'answered' : 'empty' });
+        outcomes.push({ engine: id, outcome: results.length ? 'answered' : 'empty', found: results.length });
       } catch (err) {
         if (opts.signal?.aborted) throw err;
         if (deadline.signal.aborted) {
@@ -185,6 +241,8 @@ export async function openWebSearch(query: string, opts: SearchOptions): Promise
           return;
         }
         state.failed(id, err, now());
+        // It answered: reached, whatever the answer was.
+        if (err instanceof UnreadableAnswerError) reachable = true;
         outcomes.push({
           engine: id,
           outcome: err instanceof BlockedError ? 'blocked' : 'failed',
