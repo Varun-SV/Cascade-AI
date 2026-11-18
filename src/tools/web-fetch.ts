@@ -1,114 +1,99 @@
 // ─────────────────────────────────────────────
 //  Cascade AI — Web Fetch Tool
 // ─────────────────────────────────────────────
+//
+//  A page as a reader would see it: the main content with its headings, lists,
+//  code and tables, without the menus, footers and banners around it, and the
+//  links in it, so a run can go on to the next page without a browser. A long
+//  page is read in parts (`offset`), and with `prompt` the passages that answer
+//  it come first.
+//
+//  Fetched through the SSRF guard: the address is the model's, or the web's.
 
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
-import { safeFetch, SsrfBlockedError } from './utils/safe-fetch.js';
+import { type FetchedPage, type OpenWebState, type PageFetch, UnreadablePageError, fetchReadable } from './open-web/index.js';
+import { bestPassages } from './open-web/passages.js';
+import { SsrfBlockedError } from './utils/safe-fetch.js';
 
-const MAX_CHARS = 50_000;
-const TIMEOUT_MS = 15_000;
-
-function stripHtml(html: string): string {
-  // Remove <script> and <style> blocks with their content
-  let text = html
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[\s\S]*?<\/style>/gi, '')
-    .replace(/<noscript[\s\S]*?<\/noscript>/gi, '');
-
-  // Convert common block elements to newlines
-  text = text
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>/gi, '\n')
-    .replace(/<\/div>/gi, '\n')
-    .replace(/<\/h[1-6]>/gi, '\n')
-    .replace(/<\/li>/gi, '\n')
-    .replace(/<\/tr>/gi, '\n')
-    .replace(/<\/td>/gi, '\t');
-
-  // Strip remaining tags
-  text = text.replace(/<[^>]+>/g, '');
-
-  // Decode common HTML entities
-  text = text
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
-
-  // Collapse excessive whitespace / blank lines
-  text = text
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0)
-    .join('\n');
-
-  return text;
-}
+/** Characters of a page returned at once; `offset` reads on from there. */
+const PART_CHARS = 20_000;
+const MAX_LINKS = 40;
 
 export class WebFetchTool extends BaseTool {
   readonly name = 'web_fetch';
   readonly description =
-    'Fetch a URL and return its content as plain text (HTML stripped). Use for reading documentation, web pages, or any URL. Limit: 50,000 characters.';
+    'Fetch a URL and read it: the main content as text (headings, lists, code, tables), without menus and page furniture, '
+    + 'plus the links on it. Long pages come in parts of 20,000 characters: pass offset to read on. '
+    + 'Give prompt to get the passages that answer it first.';
   readonly inputSchema = {
     type: 'object',
     properties: {
-      url: {
-        type: 'string',
-        description: 'The URL to fetch',
-      },
-      prompt: {
-        type: 'string',
-        description:
-          'Optional hint for what information to extract from the page (not used for filtering, just context)',
-      },
+      url: { type: 'string', description: 'The URL to fetch' },
+      prompt: { type: 'string', description: 'Optional: what you are looking for. The passages that answer it are put first.' },
+      offset: { type: 'number', description: 'Optional: character to start from, to read on in a long page (from the previous part\'s note)' },
     },
     required: ['url'],
   };
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
-    const url = input['url'] as string;
+  constructor(private readonly deps: { fetchPage?: PageFetch; state?: OpenWebState } = {}) {
+    super();
+  }
 
-    let resp: Response;
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
+    const url = typeof input['url'] === 'string' ? input['url'].trim() : '';
+    if (!url) return 'Error: url is required.';
+    const prompt = typeof input['prompt'] === 'string' ? input['prompt'].trim() : '';
+    const rawOffset = Number(input['offset'] ?? 0);
+    const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? Math.floor(rawOffset) : 0;
+
+    let page: FetchedPage;
     try {
+      page = await fetchReadable(url, {
+        ...(options?.signal ? { signal: options.signal } : {}),
+        ...(this.deps.fetchPage ? { fetchPage: this.deps.fetchPage } : {}),
+        ...(this.deps.state ? { state: this.deps.state } : {}),
+      });
+    } catch (err) {
       // safeFetch validates the scheme, blocks loopback/link-local/private
       // hosts (SSRF — e.g. the cloud metadata endpoint), and re-checks every
       // redirect hop. Set CASCADE_ALLOW_LOCAL_FETCH=1 to fetch local URLs.
-      resp = await safeFetch(url, {
-        headers: {
-          'User-Agent': 'Cascade-AI/1.0 WebFetchTool',
-          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5',
-        },
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-      });
-    } catch (err) {
-      if (err instanceof SsrfBlockedError) {
-        return `Refused to fetch ${url}: ${err.message}`;
-      }
+      if (err instanceof SsrfBlockedError) return `Refused to fetch ${url}: ${err.message}`;
+      if (err instanceof UnreadablePageError) return `Can't read ${url} as text: ${err.message}.`;
       return `Failed to fetch ${url}: ${err instanceof Error ? err.message : String(err)}`;
     }
 
-    if (!resp.ok) {
-      return `HTTP ${resp.status} ${resp.statusText} from ${url}`;
+    const lines: string[] = [`URL: ${page.url}`];
+    if (page.title) lines.push(`Title: ${page.title}`);
+    if (page.contentType) lines.push(`Content-Type: ${page.contentType}`);
+    if (page.description && offset === 0) lines.push(`Description: ${page.description}`);
+    lines.push('');
+
+    if (prompt && offset === 0 && page.text.length > 4_000) {
+      const best = bestPassages(page.text, prompt, 4);
+      if (best.length) {
+        lines.push(`── Most relevant to "${prompt.slice(0, 120)}" ──`);
+        for (const p of best) lines.push(`> ${p.heading ? `[${p.heading}] ` : ''}${p.text.replace(/\s*\n\s*/g, ' ').slice(0, 900)}`);
+        lines.push('', '── The page ──');
+      }
     }
 
-    const contentType = resp.headers.get('content-type') ?? '';
-    let text: string;
-
-    try {
-      const raw = await resp.text();
-      text = contentType.includes('html') ? stripHtml(raw) : raw;
-    } catch (err) {
-      return `Failed to read response body: ${err instanceof Error ? err.message : String(err)}`;
+    const total = page.text.length;
+    if (offset >= total && total > 0) return `${lines.join('\n')}[The page has ${total} characters; offset ${offset} is past its end.]`;
+    // Cut at a line end where there is one near the limit, so a part doesn't end mid-sentence.
+    let end = Math.min(total, offset + PART_CHARS);
+    if (end < total) {
+      const nl = page.text.lastIndexOf('\n', end);
+      if (nl > offset + PART_CHARS * 0.8) end = nl;
     }
+    lines.push(page.text.slice(offset, end) || '(No readable text on this page.)');
+    if (end < total) lines.push('', `[Part ${offset}–${end} of ${total} characters. Read on with offset: ${end}.]`);
+    if (page.cut) lines.push('', '[The page was longer than Cascade reads; this is its start.]');
 
-    if (text.length > MAX_CHARS) {
-      text = text.slice(0, MAX_CHARS) + `\n\n[Content truncated at ${MAX_CHARS} characters]`;
+    if (page.links.length && end >= total) {
+      lines.push('', `── Links (${Math.min(page.links.length, MAX_LINKS)}${page.links.length > MAX_LINKS ? ` of ${page.links.length}` : ''}) ──`);
+      for (const l of page.links.slice(0, MAX_LINKS)) lines.push(`- ${l.text}: ${l.url}`);
     }
-
-    return `URL: ${url}\nContent-Type: ${contentType}\n\n${text}`;
+    return lines.join('\n');
   }
 }

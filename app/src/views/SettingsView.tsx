@@ -215,7 +215,7 @@ export function SettingsView({ socket }: Props) {
   };
   const [ollamaUrl, setOllamaUrl] = useState('');
   // Web-search backends (tools.webSearch) — without one configured, the
-  // web_search tool depends entirely on scraping DuckDuckGo.
+  // web_search tool uses the free Open Web sources (src/tools/open-web).
   const [searxngUrl, setSearxngUrl] = useState('');
   const [braveKey, setBraveKey] = useState('');
   const [tavilyKey, setTavilyKey] = useState('');
@@ -665,13 +665,14 @@ export function SettingsView({ socket }: Props) {
               </div>
               <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                  Web search works without any of these: the <code>web_search</code> tool searches DuckDuckGo, which needs no key.
-                  A backend below gives fuller, steadier results, and DuckDuckGo stays the fallback if it fails.
+                  Web search works without any of these: the <code>web_search</code> tool searches the Open Web, several free
+                  sources at once (DuckDuckGo, Wikipedia, and Stack Overflow, GitHub, arXiv and others when a question is theirs),
+                  with no key. A backend below gives fuller, steadier results, and the Open Web stays the fallback if it fails.
                 </label>
                 <span aria-live="polite" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                   Now using:{' '}
                   <b style={{ color: 'var(--text)' }}>
-                    {searxngUrl.trim() ? 'SearXNG' : braveKey.trim() || searchKeysSet.brave ? 'Brave Search' : tavilyKey.trim() || searchKeysSet.tavily ? 'Tavily' : 'Free: DuckDuckGo, no key needed'}
+                    {searxngUrl.trim() ? 'SearXNG' : braveKey.trim() || searchKeysSet.brave ? 'Brave Search' : tavilyKey.trim() || searchKeysSet.tavily ? 'Tavily' : 'Free: Open Web (DuckDuckGo, Wikipedia and more), no key needed'}
                   </b>
                 </span>
                 <input type="text" value={searxngUrl} onChange={(e) => edits('webSearch', setSearxngUrl)(e.target.value)}

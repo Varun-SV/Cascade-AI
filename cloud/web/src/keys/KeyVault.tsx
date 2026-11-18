@@ -68,7 +68,7 @@ const WEB_SEARCH_BACKENDS: { value: WebSearchSettings['backend']; label: string 
 ];
 
 /** Search with no key at all, and the fallback when a configured one fails. */
-const FREE_SEARCH_LABEL = 'Free: DuckDuckGo, no key needed';
+const FREE_SEARCH_LABEL = 'Free: Open Web (DuckDuckGo, Wikipedia and more), no key needed';
 
 function WebSearchSection({
   settings,
@@ -95,8 +95,9 @@ function WebSearchSection({
       </div>
       <p className="text-xs leading-snug text-ink-400">
         Optional. The composer&apos;s <span className="text-ink-300">Web</span> toggle works without any: it searches
-        DuckDuckGo, which needs no key. A backend below gives fuller, steadier results, and DuckDuckGo stays the
-        fallback if it fails.
+        the Open Web, several free sources at once (DuckDuckGo, Wikipedia, and Stack Overflow, GitHub, arXiv and
+        others when a question is theirs), with no key. A backend below gives fuller, steadier results, and the
+        Open Web stays the fallback if it fails.
       </p>
       <p className="text-xs text-ink-300" aria-live="polite">
         Now using:{' '}

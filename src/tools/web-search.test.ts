@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { openWebState } from './open-web/index.js';
 import { parseDdgAnchors, unwrapDdgRedirect, WebSearchTool } from './web-search.js';
+
+// The free sources' health and cache are the process's: one test's failures must not rest a source for the next.
+afterEach(() => openWebState.clear());
 
 describe('unwrapDdgRedirect', () => {
   it('unwraps a protocol-relative uddg redirect to the real destination', () => {
