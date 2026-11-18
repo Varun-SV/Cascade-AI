@@ -65,9 +65,9 @@ export function registerRelayIpc(opts: {
   ipcMain.handle('relay:forget', () => wrap(() => relay.forget()));
   ipcMain.handle('relay:take-over', () => relay.takeOver());
   ipcMain.handle('relay:hand-back', () => relay.handBack());
-  ipcMain.handle('relay:answer', (_e, id: unknown, sites: unknown) => {
+  ipcMain.handle('relay:answer', (_e, id: unknown, sites: unknown, anyPublic: unknown) => {
     if (typeof id !== 'number' || typeof sites !== 'string' || sites.length > 4000) return { error: 'That answer could not be read.' };
-    return relay.answer(id, sites);
+    return relay.answer(id, sites, anyPublic === true);
   });
   app.on('before-quit', () => relay.shutdown());
   // Signing out, or into another account, stops serving the one it was paired for.

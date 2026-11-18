@@ -7,6 +7,7 @@ interface Status {
   run?: { runId: string; sites: string[]; takenOver?: boolean };
   pairing?: { userCode: string; verificationUri: string } | { error: string };
   notice?: string;
+  keptAnswers?: number;
 }
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -37,6 +38,9 @@ function render(s: Status): void {
   $('hand-back').hidden = !mine;
   $('run-paused').hidden = !mine;
   $('retry').hidden = s.connection !== 'refused';
+  const kept = s.keptAnswers ?? 0;
+  $('kept').hidden = kept === 0;
+  $('kept-text').textContent = kept === 1 ? 'One chat may use this browser without asking.' : `${kept} chats may use this browser without asking.`;
   const notice = s.pairing && 'error' in s.pairing ? s.pairing.error : s.notice;
   $('notice').hidden = !notice;
   $('notice').textContent = notice ?? '';
@@ -64,6 +68,7 @@ $('stop').addEventListener('click', () => { void send({ type: 'stop' }); });
 $('take-over').addEventListener('click', () => { void send({ type: 'take-over' }); });
 $('hand-back').addEventListener('click', () => { void send({ type: 'hand-back' }); });
 $('retry').addEventListener('click', () => { void send({ type: 'retry' }); });
+$('forget-kept').addEventListener('click', () => { void send({ type: 'answers:forget' }).then(() => send<Status>({ type: 'status' })).then(render); });
 $('forget').addEventListener('click', () => {
   if (!confirm('Forget this browser? Its key is deleted here. To remove it from your account too, use your devices list on the server.')) return;
   void send({ type: 'forget' });

@@ -176,10 +176,10 @@ contextBridge.exposeInMainWorld('cascade', {
     enable: () => ipcRenderer.invoke('relay:enable'),
     disable: () => ipcRenderer.invoke('relay:disable'),
     forget: () => ipcRenderer.invoke('relay:forget'),
-    answer: (id: number, sites: string) => ipcRenderer.invoke('relay:answer', id, sites),
+    answer: (id: number, sites: string, anyPublic?: boolean) => ipcRenderer.invoke('relay:answer', id, sites, anyPublic === true),
     takeOver: () => ipcRenderer.invoke('relay:take-over'),
     handBack: () => ipcRenderer.invoke('relay:hand-back'),
-    onAsk: (cb: (a: { id: number; runId: string; expiresAt: number }) => void) => {
+    onAsk: (cb: (a: { id: number; runId: string; expiresAt: number; sites?: string[] }) => void) => {
       ipcRenderer.on('relay:ask', (_e, a) => cb(a));
     },
     onAskClosed: (cb: (a: { id: number }) => void) => {

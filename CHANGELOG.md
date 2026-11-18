@@ -5,6 +5,32 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.86.0 - 2026-11-18
+
+### Added
+- **Any public site, for research runs.** When a run on your own browser asks
+  which sites it may use, you can tick "Any public site" (`*` in the CLI): it
+  opens whatever public site it finds. Your private network stays blocked: in
+  the extension by the run's rules, and for the background workers of each
+  site it opens, as it opens them.
+- **The site the run starts on is filled in.** The question shows it, for you
+  to keep, change or add to.
+- **A private window, or a normal one.** In the extension each run asks which:
+  a private (incognito) window by default, signed out of everything; or a
+  normal one, where your sign-ins apply. Your last choice is remembered.
+- **Keep an answer for a chat.** "Use this answer for this chat's next runs"
+  lets later runs from that chat go ahead without asking, until Chrome closes
+  (8 hours at most). The extension says when it does, and its toolbar button
+  lists and forgets kept answers.
+- **The side pane shows a run on your own browser.** In place of "it cannot be
+  streamed", it says which device the run is on, shows the page it's on and
+  each step it takes (never what it typed), and "Show the window" brings its
+  window forward on that device.
+
+### Changed
+- The extension is 0.2.0. It asks for incognito access (spanning), which Chrome
+  grants only when you turn on "Allow in Incognito".
+
 ## 0.85.0 - 2026-11-17
 
 <!-- One `### Added` / `### Changed` / `### Fixed` per release, not per PR.

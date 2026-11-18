@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { makeConsent } from '../../src/browser/relay/egress-rules.js';
-import { PRIVATE_DOMAINS, PRIVATE_URL_PATTERNS, tabRules } from './tab-policy.js';
+import { PRIVATE_DOMAINS, PRIVATE_URL_PATTERNS, documentHost, tabRules } from './tab-policy.js';
 
 /** The rules applied the way declarativeNetRequest applies them: the highest priority wins. */
 function verdict(rules: ReturnType<typeof tabRules>, tabId: number, url: string, type: string, initiator?: string): 'allow' | 'block' | 'none' {
@@ -90,5 +90,30 @@ describe("the run tab's rules", () => {
 
   it('use ids from the run\'s own range', () => {
     expect(rules.map((r) => r.id)).toEqual(Array.from({ length: rules.length }, (_, i) => 500 + i));
+  });
+});
+
+describe('a run allowed any public site', () => {
+  const rules = tabRules(7, makeConsent([], [], { anyPublic: true }), 500);
+
+  it('loads documents from any public site, and nothing on the private network', () => {
+    for (const type of ['main_frame', 'sub_frame']) {
+      expect(verdict(rules, 7, 'https://www.rtings.com/headphones', type)).not.toBe('block');
+      expect(verdict(rules, 7, 'https://reddit.com/r/headphones', type)).not.toBe('block');
+      expect(verdict(rules, 7, 'http://192.168.1.1/', type)).toBe('block');
+      expect(verdict(rules, 7, 'http://localhost:3000/', type)).toBe('block');
+    }
+    expect(verdict(rules, 7, 'http://10.0.0.5/api', 'xmlhttprequest')).toBe('block');
+  });
+
+  it("the run's tab only: another tab is untouched", () => {
+    expect(verdict(rules, 8, 'http://192.168.1.1/', 'main_frame')).toBe('none');
+  });
+
+  it('the site of each page it loads is read from the request, so its workers can be kept off the private network', () => {
+    expect(documentHost({ type: 'Document', request: { url: 'https://www.rtings.com/x?y' } })).toBe('www.rtings.com');
+    expect(documentHost({ type: 'Script', request: { url: 'https://cdn.test/a.js' } })).toBeNull();
+    expect(documentHost({ type: 'Document', request: { url: 'data:text/html,hi' } })).toBeNull();
+    expect(documentHost({})).toBeNull();
   });
 });

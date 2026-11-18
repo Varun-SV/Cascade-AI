@@ -37,7 +37,8 @@ export interface DesktopRelayCore extends RelayCore {
   serveDevice(opts: {
     stored: { deviceId: string; privateKeyPem: string; serverId: string; serverKey: string };
     endpoints: { controlUrl: string; runUrl: string };
-    askUser(run: { runId: string; expiresAt: number; signal: AbortSignal }): Promise<UserConsent | null>;
+    askUser(run: { runId: string; expiresAt: number; signal: AbortSignal; hint?: { sites: string[]; chat?: string } }): Promise<UserConsent | null>;
+    onFocus?(): void;
     startBrowser(consent: Consent): Promise<RunBrowser>;
     log(line: string): void;
     signal: AbortSignal;
@@ -116,7 +117,7 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
   };
   const publish = (): void => deps.notify('relay:status', status());
 
-  const askUser = (r: { runId: string; expiresAt: number; signal: AbortSignal }): Promise<UserConsent | null> =>
+  const askUser = (r: { runId: string; expiresAt: number; signal: AbortSignal; hint?: { sites: string[] } }): Promise<UserConsent | null> =>
     new Promise((resolve) => {
       const id = nextAsk++;
       const done = (c: UserConsent | null): void => {
@@ -126,7 +127,8 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
       };
       asks.set(id, { id, runId: r.runId, expiresAt: r.expiresAt, resolve: done });
       r.signal.addEventListener('abort', () => done(null), { once: true });
-      deps.notify('relay:ask', { id, runId: r.runId, expiresAt: r.expiresAt });
+      // The site the run wants to start on, to pre-fill: the user's to change.
+      deps.notify('relay:ask', { id, runId: r.runId, expiresAt: r.expiresAt, sites: r.hint?.sites ?? [] });
     });
 
   const startBrowser = async (consent: Consent): Promise<RunBrowser> => {
@@ -158,6 +160,8 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
       endpoints: deps.core.relayEndpoints(d.serverUrl, d),
       askUser, startBrowser, signal: ctl.signal,
       onClient: (c) => { if (serving === ctl) client = c; },
+      // "Show the window", from the chat on the web.
+      onFocus: () => run?.focus(),
       log: (line) => {
         if (line.startsWith('connected')) { connected = true; error = null; publish(); }
         else if (line.startsWith('disconnected')) { connected = false; publish(); }
@@ -266,13 +270,18 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
       return { ok: true };
     },
 
-    /** The user's answer from the app's window. An answer that isn't sites is asked again. */
-    answer(id: number, sites: string): { ok: true } | { error: string } {
+    /**
+     * The user's answer from the app's window: the sites typed, and whether any public
+     * site may load too. Nothing at all is a no; an answer that isn't sites is asked again.
+     */
+    answer(id: number, sites: string, anyPublic = false): { ok: true } | { error: string } {
       const a = asks.get(id);
       if (!a) return { error: 'This request is over.' };
       const parsed = deps.core.parseRelaySites(sites);
       if (parsed && 'error' in parsed) return parsed;
-      a.resolve(parsed ? parsed.consent : null);
+      if (!parsed && !anyPublic) { a.resolve(null); return { ok: true }; }
+      const consent = parsed?.consent ?? { allowedOrigins: [], privateOrigins: [] };
+      a.resolve(anyPublic || consent.anyPublic ? { ...consent, anyPublic: true } : consent);
       return { ok: true };
     },
 

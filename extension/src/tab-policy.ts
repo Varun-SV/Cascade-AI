@@ -59,11 +59,12 @@ export const PRIVATE_DOMAINS: readonly string[] = ['localhost', 'local'];
 /** The session rules for one run's tab. Ids from `firstId`, so runs never share one. */
 export function tabRules(tabId: number, consent: Consent, firstId: number): Rule[] {
   let id = firstId;
-  const rules: Rule[] = [
-    // Every document not allowed below.
+  const rules: Rule[] = consent.anyPublic ? [] : [
+    // Every document not allowed below. With any public site allowed there is no such
+    // block: only the private-network ones further down.
     { id: id++, priority: 1, action: { type: 'block' as chrome.declarativeNetRequest.RuleActionType }, condition: { tabIds: [tabId], resourceTypes: DOCUMENTS } },
   ];
-  for (const origin of consent.origins) {
+  for (const origin of consent.anyPublic ? [] : consent.origins) {
     // `|https://example.com/` matches that origin's URLs and nothing whose host only
     // starts with it: the slash ends the host.
     rules.push({ id: id++, priority: 2, action: { type: 'allow' as chrome.declarativeNetRequest.RuleActionType }, condition: { tabIds: [tabId], resourceTypes: DOCUMENTS, urlFilter: `|${origin}/` } });
@@ -144,6 +145,8 @@ export interface TabPolicyOptions {
   onStop(reason: string): void;
   /** Rule ids for this run start here. */
   firstRuleId: number;
+  /** A private (incognito) window: signed out of everything, its cookies gone when it closes. */
+  incognito?: boolean;
 }
 
 // ── WebRTC ──────────────────────────────────
@@ -212,7 +215,7 @@ export async function openRunTab(opts: TabPolicyOptions): Promise<LeasedBrowser 
   if (opts.consent.privateOrigins.size > 0) {
     throw new Error("A run in your own Chrome can't use sites on your private network. Use the Cascade CLI or desktop app for those.");
   }
-  const win = await chrome.windows.create({ url: 'about:blank', focused: false, type: 'normal' });
+  const win = await chrome.windows.create({ url: 'about:blank', focused: false, type: 'normal', ...(opts.incognito ? { incognito: true } : {}) });
   const tabId = win?.tabs?.[0]?.id;
   const windowId = win?.id;
   if (tabId === undefined || windowId === undefined) throw new Error('Chrome did not open a window for the run.');
@@ -256,6 +259,10 @@ export async function openRunTab(opts: TabPolicyOptions): Promise<LeasedBrowser 
     attached = true;
     own = chromeTabCdp(tabId);
     await own.send('Page.enable');
+    // Any public site: the sites aren't known ahead, so each one the run loads a page
+    // from joins the lasting worker rules as its request goes out, before its scripts
+    // can start a worker.
+    if (opts.consent.anyPublic) await own.send('Network.enable', { maxTotalBufferSize: 0, maxResourceBufferSize: 0 });
     await own.send('Page.addScriptToEvaluateOnNewDocument', { source: NO_WEBRTC_SCRIPT, runImmediately: true });
     await own.send('Runtime.evaluate', { expression: NO_WEBRTC_SCRIPT });
   } catch (e) {
@@ -325,6 +332,11 @@ export async function openRunTab(opts: TabPolicyOptions): Promise<LeasedBrowser 
 
   own.on((msg) => {
     if (msg.sessionId) return;
+    if (msg.method === 'Network.requestWillBeSent' && opts.consent.anyPublic) {
+      const host = documentHost(msg.params);
+      if (host) void keepWorkersOffPrivateNetwork([host]).catch(() => {});
+      return;
+    }
     if (msg.method === 'Page.frameNavigated') {
       const { frame } = (msg.params ?? {}) as { frame?: { parentId?: string; url?: string; unreachableUrl?: string } };
       // Only the main frame; a blocked navigation's error page is the rules working.
@@ -381,4 +393,14 @@ export async function openRunTab(opts: TabPolicyOptions): Promise<LeasedBrowser 
       enforcer.close();
     },
   };
+}
+
+/** The host a page or frame is about to be loaded from, from a `Network.requestWillBeSent`. */
+export function documentHost(params: unknown): string | null {
+  const p = (params ?? {}) as { type?: unknown; request?: { url?: unknown } };
+  if (p.type !== 'Document' || typeof p.request?.url !== 'string') return null;
+  try {
+    const u = new URL(p.request.url);
+    return u.protocol === 'http:' || u.protocol === 'https:' ? u.hostname.replace(/^\[|\]$/g, '') : null;
+  } catch { return null; }
 }

@@ -15,6 +15,18 @@
       <label for="sites">Sites it may open</label>
       <input id="sites" autocomplete="off" spellcheck="false" placeholder="example.com docs.example.com" aria-describedby="sites-help">
       <p id="sites-help" class="muted">Separate sites with spaces. Pages on any other site won't load in the run's window.</p>
+      <p id="suggested" class="muted" hidden></p>
+      <label class="check"><input type="checkbox" id="any-public"> Any public site <span class="muted">(for research: it can open whatever it finds)</span></label>
+      <p id="any-public-note" class="muted" hidden>It can open any public site. Your private network (localhost, your router, office addresses) stays blocked.</p>
+
+      <fieldset class="choice">
+        <legend>Open it in</legend>
+        <label class="check"><input type="radio" name="window" value="incognito" id="window-incognito"> A private window <span class="muted">(signed out of everything; nothing kept after)</span></label>
+        <label class="check"><input type="radio" name="window" value="normal" id="window-normal"> A normal window <span class="muted">(sites you're signed in to see you signed in)</span></label>
+        <p id="incognito-off" class="muted" hidden>To use a private window, turn on "Allow in Incognito" for Cascade in <code>chrome://extensions</code>.</p>
+      </fieldset>
+
+      <label class="check" id="remember-row" hidden><input type="checkbox" id="remember"> Use this answer for this chat's next runs <span class="muted">(until Chrome closes, 8 hours at most)</span></label>
       <p id="error" class="error" role="alert" hidden></p>
       <div class="buttons">
         <button type="submit" id="allow">Allow these sites</button>
@@ -26,7 +38,7 @@
       <summary>What happens if you allow it</summary>
       <ul>
         <li>The run gets a <strong>new window</strong>, not any tab you have open. It closes when the run ends.</li>
-        <li>That window is your own Chrome, so <strong>sites you're signed in to see you signed in</strong>.</li>
+        <li>In a <strong>normal</strong> window, that's your own Chrome, so <strong>sites you're signed in to see you signed in</strong>. A <strong>private</strong> window starts signed out of everything.</li>
         <li>Sent to your Cascade server while it runs: the addresses of pages in that window, their text and structure, and what the run types into them. No screenshots.</li>
         <li>A page in the run can save a file to your Downloads. Cascade stops the run when that happens but doesn't delete the file.</li>
         <li>Sites on your private network (localhost, your router, office addresses) can't be allowed here. Use the Cascade CLI or desktop app for those.</li>

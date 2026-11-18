@@ -12,9 +12,8 @@
 //  reattached. A run needs a new approval to start again.
 
 import { identityFromPrivateKey, publicKeyFromText } from '../../src/browser/relay/capability.js';
-import { parseSites } from '../../src/browser/relay/consent-input.js';
-import { type DeviceClient, type UserConsent, connectDeviceClient } from '../../src/browser/relay/device.js';
-import { makeConsent } from '../../src/browser/relay/egress-rules.js';
+import { type DeviceClient, type RunHint, type UserConsent, connectDeviceClient } from '../../src/browser/relay/device.js';
+import { type AnswerStore, type ConsentForm, consentFromForm, forgetAnswers, keepAnswer, keptCount, keptKey, recallAnswer } from './answers.js';
 import { type PairedDevice, endpointsOf, pairWithServer } from './pairing.js';
 import { RUN_RULE_IDS_FROM, openRunTab, releaseWebRtcAfterRestart } from './tab-policy.js';
 
@@ -22,7 +21,12 @@ import { RUN_RULE_IDS_FROM, openRunTab, releaseWebRtcAfterRestart } from './tab-
 
 type Connection = 'unpaired' | 'connecting' | 'online' | 'offline' | 'refused';
 interface RunInfo { runId: string; sites: string[]; windowId?: number; takenOver?: boolean }
-interface Status { connection: Connection; device?: { name: string; server: string }; run?: RunInfo; pairing?: { userCode: string; verificationUri: string } | { error: string }; notice?: string }
+interface Status {
+  connection: Connection; device?: { name: string; server: string }; run?: RunInfo;
+  pairing?: { userCode: string; verificationUri: string } | { error: string }; notice?: string;
+  /** Answers kept for chats' later runs, still in date: the popup offers to forget them. */
+  keptAnswers?: number;
+}
 
 const status: Status = { connection: 'unpaired' };
 /** The device's own log, the last lines only. Never sent anywhere. */
@@ -44,8 +48,17 @@ let refusals = 0;
 let backoffMs = 1000;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
 let nextRuleId = RUN_RULE_IDS_FROM;
-/** The run the user approved last: the next browser started is its. */
+/** The run the user approved last: the next browser started is its, in the window they chose. */
 let approvedRun = '';
+let approvedIncognito = true;
+
+const answers: AnswerStore = {
+  get: (key) => chrome.storage.session.get(key),
+  set: (items) => chrome.storage.session.set(items),
+};
+async function refreshKept(): Promise<void> {
+  status.keptAnswers = await keptCount(answers, Date.now()).catch(() => 0);
+}
 
 const KEEPALIVE_MS = 20_000;
 
@@ -84,14 +97,35 @@ async function rememberWindow(windowId: number, add: boolean): Promise<void> {
 
 // ── Asking the user ─────────────────────────
 
-interface PendingAsk { id: number; runId: string; expiresAt: number; resolve(c: UserConsent | null): void; windowId?: number }
+interface PendingAsk { id: number; runId: string; expiresAt: number; hint?: RunHint; resolve(c: UserConsent | null): void; windowId?: number }
 const asks = new Map<number, PendingAsk>();
 let nextAsk = 1;
 
-async function askUser(run: { runId: string; expiresAt: number; signal: AbortSignal }): Promise<UserConsent | null> {
+/** Normal or private window, as last chosen. A private one until the user picks otherwise. */
+async function lastWindowMode(): Promise<'incognito' | 'normal'> {
+  const { windowMode } = await chrome.storage.local.get('windowMode') as { windowMode?: string };
+  return windowMode === 'normal' ? 'normal' : 'incognito';
+}
+
+async function askUser(run: { runId: string; expiresAt: number; signal: AbortSignal; hint?: RunHint }): Promise<UserConsent | null> {
+  // An answer the user kept for this chat: used without asking, and said so.
+  const server = status.device?.server;
+  if (run.hint?.chat && server) {
+    const kept = await recallAnswer(answers, keptKey(server, run.hint.chat), Date.now()).catch(() => null);
+    const read = kept ? consentFromForm(kept) : null;
+    if (kept && read && 'consent' in read && (!kept.incognito || await chrome.extension.isAllowedIncognitoAccess())) {
+      approvedRun = run.runId;
+      approvedIncognito = kept.incognito;
+      void chrome.notifications?.create({
+        type: 'basic', iconUrl: 'icon-128.png', title: 'Cascade is using this browser',
+        message: `A run from a chat you allowed is using ${kept.anyPublic ? 'any public site' : kept.sites} in a ${kept.incognito ? 'private' : 'new'} window. Stop it from the Cascade button.`,
+      }).catch(() => {});
+      return read.consent;
+    }
+  }
   return new Promise((resolve) => {
     const id = nextAsk++;
-    const pending: PendingAsk = { id, runId: run.runId, expiresAt: run.expiresAt, resolve: (c) => { asks.delete(id); if (pending.windowId) void chrome.windows.remove(pending.windowId).catch(() => {}); resolve(c); } };
+    const pending: PendingAsk = { id, runId: run.runId, expiresAt: run.expiresAt, ...(run.hint ? { hint: run.hint } : {}), resolve: (c) => { asks.delete(id); if (pending.windowId) void chrome.windows.remove(pending.windowId).catch(() => {}); resolve(c); } };
     asks.set(id, pending);
     run.signal.addEventListener('abort', () => pending.resolve(null), { once: true });
     void chrome.windows.create({ url: chrome.runtime.getURL(`consent.html?ask=${id}`), type: 'popup', width: 480, height: 600, focused: true })
@@ -142,7 +176,7 @@ async function connect(): Promise<void> {
       askUser,
       startBrowser: async (consent) => {
         const leased = await openRunTab({
-          consent, firstRuleId: (nextRuleId += 100),
+          consent, firstRuleId: (nextRuleId += 100), incognito: approvedIncognito,
           onStop: (reason) => {
             c.revoke(reason);
             status.notice = reason;
@@ -151,7 +185,7 @@ async function connect(): Promise<void> {
           },
         });
         await rememberWindow(leased.windowId, true);
-        status.run = { runId: approvedRun, sites: [...consent.origins], windowId: leased.windowId };
+        status.run = { runId: approvedRun, sites: consent.anyPublic ? ['any public site', ...consent.origins] : [...consent.origins], windowId: leased.windowId };
         publish();
         return {
           ...leased,
@@ -162,6 +196,11 @@ async function connect(): Promise<void> {
             publish();
           },
         };
+      },
+      // The run's owner pressed "Show the window" in the chat.
+      onFocus: () => {
+        const w = status.run?.windowId;
+        if (w !== undefined) void chrome.windows.update(w, { focused: true, drawAttention: true }).catch(() => {});
       },
       log: note,
     });
@@ -204,7 +243,8 @@ type Message =
   | { type: 'take-over' }
   | { type: 'hand-back' }
   | { type: 'consent:get'; ask: number }
-  | { type: 'consent:answer'; ask: number; sites: string }
+  | ({ type: 'consent:answer'; ask: number } & ConsentForm)
+  | { type: 'answers:forget' }
   | { type: 'pair'; server: string; name: string }
   | { type: 'stop' }
   | { type: 'forget' }
@@ -214,25 +254,44 @@ let pairing: AbortController | null = null;
 
 async function handle(msg: Message): Promise<unknown> {
   switch (msg.type) {
-    case 'status': return status;
+    case 'status':
+      await refreshKept();
+      return status;
     case 'consent:get': {
       const a = asks.get(msg.ask);
-      return a ? { runId: a.runId, expiresAt: a.expiresAt, server: status.device?.server } : null;
+      if (!a) return null;
+      return {
+        runId: a.runId, expiresAt: a.expiresAt, server: status.device?.server,
+        // What the run says it will open first: pre-filled, the user's to change.
+        sites: a.hint?.sites ?? [],
+        canRemember: !!a.hint?.chat,
+        windowMode: await lastWindowMode(),
+        incognitoAllowed: await chrome.extension.isAllowedIncognitoAccess(),
+      };
     }
     case 'consent:answer': {
       const a = asks.get(msg.ask);
       if (!a) return { error: 'This request is over.' };
-      const parsed = parseSites(msg.sites);
-      if (!parsed) { a.resolve(null); return { ok: true }; }
-      if ('error' in parsed) return parsed;
-      if (parsed.consent.allowedOrigins.length > 50) return { error: 'Allow at most 50 sites for one run.' };
-      if (parsed.consent.privateOrigins.length) return { error: "Sites on your private network can't be used from your own Chrome: the extension can't keep a run off them. Use the Cascade CLI or desktop app for those." };
-      // Checked here as the policy will read it: an answer it would refuse is asked again.
-      makeConsent(parsed.consent.allowedOrigins);
+      const form: ConsentForm = { sites: String(msg.sites ?? ''), anyPublic: msg.anyPublic === true, incognito: msg.incognito !== false, remember: msg.remember === true };
+      const read = consentFromForm(form);
+      if (!read) { a.resolve(null); return { ok: true }; }
+      if ('error' in read) return read;
+      if (form.incognito && !await chrome.extension.isAllowedIncognitoAccess()) {
+        return { error: 'Chrome hasn\'t let Cascade use private windows. Turn on "Allow in Incognito" for Cascade in chrome://extensions, or choose a normal window.' };
+      }
+      await chrome.storage.local.set({ windowMode: form.incognito ? 'incognito' : 'normal' });
+      const server = status.device?.server;
+      if (form.remember && a.hint?.chat && server) await keepAnswer(answers, keptKey(server, a.hint.chat), form, Date.now());
       approvedRun = a.runId;
-      a.resolve(parsed.consent);
+      approvedIncognito = form.incognito;
+      a.resolve(read.consent);
       return { ok: true };
     }
+    case 'answers:forget':
+      await forgetAnswers(answers);
+      await refreshKept();
+      publish();
+      return { ok: true };
     case 'pair': {
       pairing?.abort();
       const ctl = new AbortController();
