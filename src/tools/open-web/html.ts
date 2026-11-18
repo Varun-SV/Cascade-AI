@@ -350,7 +350,11 @@ export function readHtml(html: string, url?: string): ReadablePage {
   prune(body);
   const main = mainContent(body);
   const links: ReadablePage['links'] = [];
-  const text = render(main, url, links);
+  // Relative links resolve against the page's <base href> where it gives one
+  // (the first, as browsers take it), itself resolved against the address.
+  const baseHref = find(root, (x) => x.tag === 'base' && typeof x.attrs['href'] === 'string')[0]?.attrs['href'];
+  const base = (baseHref !== undefined ? absolute(baseHref, url) : null) ?? url;
+  const text = render(main, base, links);
   const description = meta('description') ?? meta('og:description');
   return { title, text, links, ...(description ? { description: squash(description).trim() } : {}) };
 }

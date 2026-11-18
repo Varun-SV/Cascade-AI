@@ -60,6 +60,17 @@ describe('reading HTML', () => {
     expect(page.links).toEqual([{ text: '--timeout', url: 'https://docs.example/flags#t' }]);
   });
 
+  it('resolves relative links against the page\'s <base href>', () => {
+    const html = '<html><head><base href="https://assets.example/manual/"></head><body><main><p>Read <a href="install.html">the install guide</a> and <a href="/faq">the FAQ</a> before you start here.</p></main></body></html>';
+    expect(readHtml(html, 'https://example.com/view?id=1').links).toEqual([
+      { text: 'the install guide', url: 'https://assets.example/manual/install.html' },
+      { text: 'the FAQ', url: 'https://assets.example/faq' },
+    ]);
+    // A relative base is taken against the page's own address.
+    expect(readHtml('<head><base href="/docs/"></head><body><main><p>See <a href="a.html">a page</a> for the rest of the details here.</p></main></body>', 'https://example.com/x/y').links)
+      .toEqual([{ text: 'a page', url: 'https://example.com/docs/a.html' }]);
+  });
+
   it('finds the main content by its paragraphs when nothing marks it', () => {
     const para = (n: number) => `<p>Paragraph ${n} has enough words in it, with commas, to count as reading matter for a page.</p>`;
     const page = readHtml(`<body><div class="menu-col"><a href="/a">One</a> <a href="/b">Two</a> <a href="/c">Three</a></div>
