@@ -20,7 +20,10 @@ export function parseSites(answer: string): { consent: UserConsent } | { error: 
   if (words.length === 0) return null;
   const allowedOrigins: string[] = [];
   const privateOrigins: string[] = [];
+  let anyPublic = false;
   for (const w of words) {
+    // `*` is any public site; private ones still have to be named.
+    if (w === '*') { anyPublic = true; continue; }
     let u: URL;
     try { u = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(w) ? w : `https://${w}`); } catch { return { error: `"${w}" is not a site.` }; }
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return { error: `"${w}" is not an http or https site.` };
@@ -28,5 +31,5 @@ export function parseSites(answer: string): { consent: UserConsent } | { error: 
     const list = isPrivateHost(bareHost(u.hostname)) ? privateOrigins : allowedOrigins;
     if (!list.includes(u.origin)) list.push(u.origin);
   }
-  return { consent: { allowedOrigins, privateOrigins } };
+  return { consent: { allowedOrigins, privateOrigins, ...(anyPublic ? { anyPublic } : {}) } };
 }

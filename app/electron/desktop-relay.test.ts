@@ -262,3 +262,33 @@ describe('pairing while the account changes', () => {
     expect(h.registered).toHaveLength(1);
   });
 });
+
+describe("the run's hint, any public site, and showing the window", () => {
+  it('the question carries the site the run starts on; any public site is an answer of its own', async () => {
+    const h = harness({ stored: pairedDevice(true) });
+    h.relay.resume();
+    const asked = h.served[0]!.askUser({ runId: 'r', expiresAt: Date.now() + 60_000, signal: new AbortController().signal, hint: { sites: ['www.rtings.com'] } });
+    const ask = h.notes.filter(([c]) => c === 'relay:ask').at(-1)![1] as { id: number; sites: string[] };
+    expect(ask.sites).toEqual(['www.rtings.com']);
+    expect(h.relay.answer(ask.id, '', true)).toEqual({ ok: true });
+    await expect(asked).resolves.toEqual({ allowedOrigins: [], privateOrigins: [], anyPublic: true });
+  });
+
+  it('nothing typed and nothing ticked is still a no', async () => {
+    const h = harness({ stored: pairedDevice(true) });
+    h.relay.resume();
+    const asked = h.served[0]!.askUser({ runId: 'r', expiresAt: Date.now() + 60_000, signal: new AbortController().signal });
+    const ask = h.notes.filter(([c]) => c === 'relay:ask').at(-1)![1] as { id: number };
+    h.relay.answer(ask.id, '  ', false);
+    await expect(asked).resolves.toBeNull();
+  });
+
+  it("Show the window brings the run's window forward, when there is one", async () => {
+    const h = harness({ stored: pairedDevice(true) });
+    h.relay.resume();
+    h.served[0]!.onFocus!();
+    await h.served[0]!.startBrowser({} as never);
+    h.served[0]!.onFocus!();
+    expect(opened.windows.at(-1)!.focus).toHaveBeenCalledTimes(1);
+  });
+});

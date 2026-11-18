@@ -146,10 +146,10 @@ declare global {
         enable(): Promise<RelayStatus | { error: string }>;
         disable(): Promise<RelayStatus | { error: string }>;
         forget(): Promise<RelayStatus | { error: string }>;
-        answer(id: number, sites: string): Promise<{ ok: true } | { error: string }>;
+        answer(id: number, sites: string, anyPublic?: boolean): Promise<{ ok: true } | { error: string }>;
         takeOver(): Promise<{ ok: true } | { error: string }>;
         handBack(): Promise<{ ok: true } | { error: string }>;
-        onAsk(cb: (a: { id: number; runId: string; expiresAt: number }) => void): void;
+        onAsk(cb: (a: { id: number; runId: string; expiresAt: number; sites?: string[] }) => void): void;
         onAskClosed(cb: (a: { id: number }) => void): void;
         onStatus(cb: (s: RelayStatus) => void): void;
       };

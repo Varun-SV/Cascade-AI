@@ -109,9 +109,16 @@ export interface RemoteBrowserProvider {
    * say is assumed to be one that bills.
    */
   readonly allocatesSessions?: boolean;
-  createSession(signal?: AbortSignal): Promise<RemoteBrowserSession>;
+  /**
+   * `hint` says what the run is about to do with the browser (the site its first page
+   * is on), for a provider that asks a person: it may show it. Others ignore it.
+   */
+  createSession(signal?: AbortSignal, hint?: SessionHint): Promise<RemoteBrowserSession>;
   endSession(id: string): Promise<void>;
 }
+
+/** What a run is about to do with a new browser, for a provider that shows it to someone. */
+export interface SessionHint { sites: string[] }
 
 /** How the host was told to obtain browsers. */
 export interface RemoteBrowserConfig {

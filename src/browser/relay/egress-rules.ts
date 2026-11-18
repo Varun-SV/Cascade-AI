@@ -18,12 +18,22 @@ export interface Consent {
    * subset of `origins`, and meaningful only if the origin names a private host.
    */
   readonly privateOrigins: ReadonlySet<string>;
+  /**
+   * The user allowed any public site (for research, say): pages from any public
+   * origin may load. Private-network addresses still need their own confirmation.
+   */
+  readonly anyPublic: boolean;
 }
 
-export function makeConsent(origins: Iterable<string>, privateOrigins: Iterable<string> = []): Consent {
+/** How a signed approval records "any public site", among its origins. */
+export const ANY_PUBLIC_SITE = '*';
+
+export function makeConsent(origins: Iterable<string>, privateOrigins: Iterable<string> = [], opts: { anyPublic?: boolean } = {}): Consent {
   const norm = (o: string): string => new URL(o).origin;
   const priv = new Set([...privateOrigins].map(norm));
-  return { origins: new Set([...[...origins].map(norm), ...priv]), privateOrigins: priv };
+  const named = [...origins].filter((o) => o !== ANY_PUBLIC_SITE);
+  const anyPublic = opts.anyPublic === true || [...origins].includes(ANY_PUBLIC_SITE);
+  return { origins: new Set([...named.map(norm), ...priv]), privateOrigins: priv, anyPublic };
 }
 
 function isPrivateV4(host: string): boolean {
@@ -112,7 +122,7 @@ export function requestVerdict(rawUrl: string, resourceType: string, consent: Co
   }
   const isPrivate = isPrivateHost(url.hostname);
   if (isPrivate && !privateAllowed(url, consent)) return deny('private-network destination');
-  if (resourceType === 'Document' && !consent.origins.has(httpOrigin(url))) return deny('navigation to an origin without consent');
+  if (resourceType === 'Document' && !consent.anyPublic && !consent.origins.has(httpOrigin(url))) return deny('navigation to an origin without consent');
   return ALLOW;
 }
 
@@ -123,7 +133,8 @@ export function onConsentedSite(rawUrl: string, consent: Consent): boolean {
     const u = new URL(rawUrl);
     // A blob: URL's origin is its creator's.
     const web = u.protocol === 'http:' || u.protocol === 'https:' || u.protocol === 'blob:';
-    if (!web || !consent.origins.has(u.origin)) return false;
-    return !isPrivateHost(u.hostname) || consent.privateOrigins.has(u.origin);
+    if (!web) return false;
+    if (isPrivateHost(u.hostname)) return consent.privateOrigins.has(u.origin);
+    return consent.anyPublic || consent.origins.has(u.origin);
   } catch { return false; }
 }

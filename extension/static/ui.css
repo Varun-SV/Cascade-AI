@@ -34,3 +34,7 @@ li { margin: 4px 0; }
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; background: var(--muted); }
 .dot.online { background: var(--ok); }
 .dot.refused { background: var(--error); }
+.check { display: flex; align-items: baseline; gap: 6px; font-weight: 400; margin: 8px 0 0; }
+.check input { width: auto; }
+fieldset.choice { border: 0; padding: 0; margin: 12px 0 0; }
+fieldset.choice legend { font-weight: 600; padding: 0; }

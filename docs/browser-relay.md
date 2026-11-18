@@ -11,11 +11,25 @@ and [`design/stage-1-plan.md`](design/stage-1-plan.md).
 ## What you agree to, each time
 
 Nothing happens without a yes on your device. When a run asks for a browser, your
-device shows which run is asking, and you type the sites it may use. Then:
+device shows which run is asking, and you type the sites it may use. The site the
+run wants to start on is filled in for you; change the list as you like. For
+research, tick **Any public site** (in the CLI, type `*`): it can then open
+whatever public site it finds, and your private network stays blocked. Then:
 
 - The run gets **a new window with one tab**, never a tab you already have open.
-  With the CLI it gets a fresh browser with its own empty profile, closed afterwards.
-- Pages load only from the sites you typed. Anything else the page tries to open
+  With the CLI and the desktop app it gets a fresh browser with its own empty
+  profile, closed afterwards.
+- In the extension you choose the window: **a private (incognito) window**, the
+  default, which starts signed out of everything and keeps nothing afterwards, or
+  **a normal window**, where sites you're signed in to see you signed in. A private
+  window needs "Allow in Incognito" turned on for Cascade in `chrome://extensions`;
+  the question says so when it's off. If you already have a private window open,
+  the run's shares its sign-ins until all private windows close.
+- In the extension you can tick **Use this answer for this chat's next runs**: later
+  runs from the same chat use it without asking, until Chrome closes (8 hours at
+  most). A notification says when that happens, and the extension's toolbar button
+  shows how many chats have an answer kept, with **Forget them**.
+- Pages load only from the sites you allowed. Anything else the page tries to open
   is blocked before it's sent.
 - Private-network addresses (`localhost`, `10.x`, `192.168.x`, `.local` and the
   like) are blocked, for the tab and for workers those sites start. The extension
@@ -39,7 +53,9 @@ device shows which run is asking, and you type the sites it may use. Then:
   run (Chrome can't tell it which download is the run's, so none is touched), and
   the file stays in your Downloads folder.
 - No screenshot leaves your device, and there's no live view on the web: you
-  watch the run where it runs.
+  watch the run where it runs. The chat's side pane says which device it's on,
+  shows the page it's on and each step it has taken (never what it typed), and
+  **Show the window** brings its window to the front on that device.
 - In the extension, **Take over** in the toolbar pauses the run so you can use its
   tab yourself (to sign in, say): the run can't act there, and nothing from the
   tab is sent, until you choose **Hand back**. The run then carries on from the

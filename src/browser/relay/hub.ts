@@ -53,8 +53,12 @@ const OUTBOUND_BYTES_MAX = 32 * 1024 * 1024;
 export type ControlFrame =
   | { v: 1; t: 'challenge'; serverId: string; challenge: string }
   | { v: 1; t: 'welcome' }
-  | { v: 1; t: 'offer'; grant: Signed<GrantPayload> }
-  | { v: 1; t: 'cancel'; nonce: string };
+  // `hint` is the server's suggestion, unsigned: the sites to pre-fill, and which chat
+  // the run is from. A device never takes it as consent.
+  | { v: 1; t: 'offer'; grant: Signed<GrantPayload>; hint?: { sites: string[]; chat?: string } }
+  | { v: 1; t: 'cancel'; nonce: string }
+  // The run's owner asked to see its window. Devices that don't know it ignore it.
+  | { v: 1; t: 'focus' };
 export type DeviceControlFrame =
   | { v: 1; t: 'hello'; deviceId: string; sig: string }
   // Ignored here. A device in a browser extension sends it to stay awake: an MV3
@@ -71,7 +75,11 @@ export class RelayRefused extends Error {
   constructor(readonly reason: string) { super(`browser relay: ${reason}`); }
 }
 
-export interface RunRequest { userId: string; deviceId: string; runId: string; ttlMs?: number }
+export interface RunRequest {
+  userId: string; deviceId: string; runId: string; ttlMs?: number;
+  /** Shown to the user, never taken as consent: see ControlFrame's `offer`. */
+  hint?: { sites: string[]; chat?: string };
+}
 
 export interface RelayedBrowser {
   /** For `attachAgent`, once. Whoever holds it drives the tab, so it never leaves the server. */
@@ -117,6 +125,8 @@ export interface RelayHub {
   waitingBytes(): number;
   /** A run ended: whatever it was offered or holds ends with it. */
   endRun(runId: string, reason: string): void;
+  /** The run's owner wants to see its window: tell the device serving it. False if none is. */
+  focusRun(runId: string): boolean;
   close(): void;
 }
 
@@ -398,7 +408,7 @@ export function createRelayHub(opts: RelayHubOptions): RelayHub {
     const nonce = grant.payload.nonce;
     const timer = setTimeout(() => withdraw(nonce, 'the device did not answer in time'), offerTimeoutMs);
     pending.set(nonce, { run, grant, resolve, reject, timer, claiming: false });
-    send(control.socket, { v: HUB_PROTOCOL, t: 'offer', grant } satisfies ControlFrame);
+    send(control.socket, { v: HUB_PROTOCOL, t: 'offer', grant, ...(request.hint ? { hint: request.hint } : {}) } satisfies ControlFrame);
   });
 
   const hub: RelayHub = {
@@ -413,6 +423,13 @@ export function createRelayHub(opts: RelayHubOptions): RelayHub {
       for (const s of [...sessions]) if (s.run.deviceId === deviceId) s.end(reason);
       const c = controls.get(deviceId);
       if (c) { controls.delete(deviceId); shut(c.socket, 1008, reason); }
+    },
+    focusRun(runId) {
+      const s = [...sessions].find((x) => x.run.runId === runId);
+      const control = s ? controls.get(s.run.deviceId) : undefined;
+      if (!s || !control || control.userId !== s.run.userId || control.socket.readyState !== OPEN) return false;
+      send(control.socket, { v: HUB_PROTOCOL, t: 'focus' } satisfies ControlFrame);
+      return true;
     },
     endRun(runId, reason) {
       for (const [nonce, p] of pending) if (p.run.runId === runId) withdraw(nonce, reason);

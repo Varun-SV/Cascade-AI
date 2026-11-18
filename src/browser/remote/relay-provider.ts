@@ -13,7 +13,7 @@
 //  say about whose tab a session is.
 
 import type { RelayHub, RelayedBrowser } from '../relay/hub.js';
-import type { RemoteBrowserProvider, RemoteBrowserSession } from './provider.js';
+import type { RemoteBrowserProvider, RemoteBrowserSession, SessionHint } from './provider.js';
 
 export interface RelayProviderOptions {
   hub: RelayHub;
@@ -23,6 +23,11 @@ export interface RelayProviderOptions {
   userId: string;
   deviceId: string;
   runId: string;
+  /**
+   * An opaque name for the chat the run is from, so the device can remember an answer
+   * for that chat's runs when the user asks it to. Never the chat's own id.
+   */
+  chat?: string;
   now?: () => number;
 }
 
@@ -43,15 +48,18 @@ export class RelayBrowserProvider implements RemoteBrowserProvider {
    * claimed. A refusal rejects with words fit to show: the device is offline, the
    * user said no, the browser is in use.
    */
-  async createSession(signal?: AbortSignal): Promise<RemoteBrowserSession> {
-    const { hub, userId, deviceId, runId } = this.opts;
+  async createSession(signal?: AbortSignal, hint?: SessionHint): Promise<RemoteBrowserSession> {
+    const { hub, userId, deviceId, runId, chat } = this.opts;
+    // Shown on the device to pre-fill its question; never consent.
+    const sites = hint?.sites ?? [];
+    const offerHint = sites.length || chat ? { sites, ...(chat ? { chat } : {}) } : undefined;
     if (signal?.aborted) throw new Error('The run was stopped before its browser was asked for.');
     // A Stop while the user is still deciding withdraws the question on their device.
     const onAbort = (): void => hub.endRun(runId, 'the run was stopped');
     signal?.addEventListener('abort', onAbort, { once: true });
     let browser: RelayedBrowser;
     try {
-      browser = await hub.requestBrowser({ userId, deviceId, runId });
+      browser = await hub.requestBrowser({ userId, deviceId, runId, ...(offerHint ? { hint: offerHint } : {}) });
     } finally {
       signal?.removeEventListener('abort', onAbort);
     }

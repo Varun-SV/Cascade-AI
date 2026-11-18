@@ -31,7 +31,7 @@ import {
   type BrowserActionContext,
   type BrowserActionOutcome,
 } from '../../tools/browser-control.js';
-import type { RemoteBrowserProvider, RemoteBrowserSession } from './provider.js';
+import type { RemoteBrowserProvider, RemoteBrowserSession, SessionHint } from './provider.js';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -784,6 +784,10 @@ export class RemoteBrowserController {
    * bearer capability for a browser somebody else is driving.
    */
   private liveViewListeners = new Map<string, (info: BrowserViewInfo) => void | Promise<void>>();
+  /** Who hears of each step a run takes, by run: see onStepFor. */
+  private stepListeners = new Map<string, (step: BrowserStep) => void>();
+  /** The action a run is on, while it opens a browser: its site goes with the request. */
+  private pendingAction = new Map<string, BrowserAction>();
   /**
    * Told when a run's browser changes hands, or stops being pictured.
    *
@@ -986,7 +990,36 @@ export class RemoteBrowserController {
 
   /** The controller to hand to `Cascade.setBrowserController`. */
   get controller() {
-    return (action: BrowserAction, context: BrowserActionContext) => this.act(action, context);
+    return async (action: BrowserAction, context: BrowserActionContext): Promise<BrowserActionOutcome> => {
+      const runId = context.sessionId;
+      if (runId) this.pendingAction.set(runId, action);
+      try {
+        const outcome = await this.act(action, context);
+        if (runId) this.reportStep(runId, action, outcome);
+        return outcome;
+      } finally {
+        if (runId && this.pendingAction.get(runId) === action) this.pendingAction.delete(runId);
+      }
+    };
+  }
+
+  /**
+   * Hear of each step one run's browser takes: what it did, whether it worked, and the
+   * page it left. For a browser nobody here can watch (the user's own), this is what
+   * shows the run is getting on. What was typed is never in it.
+   */
+  onStepFor(runKey: string, listener: (step: BrowserStep) => void): void {
+    this.stepListeners.set(runKey, listener);
+  }
+
+  offStepFor(runKey: string): void {
+    this.stepListeners.delete(runKey);
+  }
+
+  private reportStep(runId: string, action: BrowserAction, outcome: BrowserActionOutcome): void {
+    const listener = this.stepListeners.get(runId);
+    if (!listener) return;
+    try { listener(describeStep(action, outcome, Date.now())); } catch { /* a listener's trouble isn't the run's */ }
   }
 
   /** Watch one run's browser. The URL never goes to any other run's listener. */
@@ -2824,7 +2857,7 @@ export class RemoteBrowserController {
     // because Playwright has no signal to hand it in the first place.
     const abort = this.aborts.get(runId)?.signal;
     const creationSignal = signal && abort ? AbortSignal.any([signal, abort]) : (signal ?? abort);
-    const session = await this.provider.createSession(creationSignal);
+    const session = await this.provider.createSession(creationSignal, sessionHintFor(this.pendingAction.get(runId)));
     // From here the session exists and is billed: the allowance unit claimed
     // at admission stays spent, whatever happens to the connection after.
     if (claim) claim.sessionCreated = true;
@@ -4278,4 +4311,60 @@ async function loadPlaywright(): Promise<{ chromium: { connectOverCDP(url: strin
   } catch {
     throw new Error('Playwright is not installed. Run: npm install playwright (no browser download is needed — this connects to a remote browser).');
   }
+}
+
+/** One step a run's browser took, as the person watching is told it. */
+export interface BrowserStep {
+  kind: BrowserAction['kind'];
+  /** In words: "Opened github.com/…", "Clicked “Sign in”", "Typed into a field". */
+  summary: string;
+  ok: boolean;
+  /** The page it left the run on, when known. */
+  url?: string;
+  title?: string;
+  at: number;
+}
+
+const short = (text: string, max = 80): string => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+
+/** A page address without its scheme, query or fragment, to show. */
+function shownAddress(raw: string): string {
+  try {
+    const u = new URL(raw);
+    return short(`${u.host}${u.pathname === '/' ? '' : u.pathname}`);
+  } catch { return short(raw); }
+}
+
+/** The step as words. Never the text typed: it may be a password, and the page has it. */
+export function describeStep(action: BrowserAction, outcome: BrowserActionOutcome, at: number): BrowserStep {
+  const target = action.ref ? `element ${action.ref}` : action.selector ? short(action.selector, 50) : 'the page';
+  const summary = ((): string => {
+    switch (action.kind) {
+      case 'navigate': return `Opened ${shownAddress(action.url ?? outcome.url ?? '')}`;
+      case 'click': return `Clicked ${target}`;
+      case 'fill': return `Typed into ${target}`;
+      case 'press': return `Pressed ${short(action.key ?? 'a key', 20)}`;
+      case 'select_option': return `Chose an option in ${target}`;
+      case 'hover': return `Pointed at ${target}`;
+      case 'scroll': return `Scrolled ${action.direction ?? 'the page'}`;
+      case 'wait_for': return `Waited for ${target}`;
+      case 'extract_text': return 'Read the page';
+      case 'observe': return 'Looked over the page';
+      default: return 'Worked on the page';
+    }
+  })();
+  return {
+    kind: action.kind, summary, ok: outcome.ok, at,
+    ...(outcome.url ? { url: outcome.url } : {}),
+    ...(outcome.title ? { title: short(outcome.title, 120) } : {}),
+  };
+}
+
+/** What a new browser is about to be used for: the site of the page the run is opening. */
+export function sessionHintFor(action: BrowserAction | undefined): SessionHint | undefined {
+  if (action?.kind !== 'navigate' || !action.url) return undefined;
+  try {
+    const u = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(action.url) ? action.url : `https://${action.url}`);
+    return u.protocol === 'http:' || u.protocol === 'https:' ? { sites: [u.hostname] } : undefined;
+  } catch { return undefined; }
 }

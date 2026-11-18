@@ -22,6 +22,7 @@
 //  It arrives over the socket, lives in component state, and goes nowhere else.
 
 import { useEffect, useRef } from 'react';
+import type { BrowserStep } from './useChatSession.js';
 
 /** The keys the server will accept as commands. Everything else is text. */
 const COMMAND_KEYS = new Set([
@@ -176,11 +177,21 @@ interface Props {
    * nothing else here changes to say the view did.
    */
   taskId?: string | undefined;
+  /**
+   * Set when the run is in the user's own browser, on one of their devices. No
+   * picture of it comes here, by design: the pane says where it is running, and
+   * shows what it has done there in words.
+   */
+  device?: { name: string } | undefined;
+  steps?: BrowserStep[] | undefined;
+  /** Bring the run's window forward on that device. */
+  onFocus?: () => void;
 }
 
 export function BrowserLiveView({
   active, liveViewUrl, frame, streaming, human, capturing, confirmed, notice,
   onStop, onTakeOver, onHandBack, onInput, onCapture, onFrameShown, taskId,
+  device, steps, onFocus,
 }: Props) {
   const imgRef = useRef<HTMLImageElement>(null);
   /**
@@ -337,6 +348,7 @@ export function BrowserLiveView({
   // case. Nothing above this line may return early, and nothing below it may
   // call a hook.
   if (!active) return null;
+  if (device) return <DeviceRunPanel device={device} steps={steps ?? []} notice={notice} onStop={onStop} {...(onFocus ? { onFocus } : {})} />;
 
   /**
    * Where on the PAGE the user clicked, as a fraction of it.
@@ -803,3 +815,53 @@ const chip: React.CSSProperties = {
   padding: '3px 9px', background: 'transparent', color: 'inherit',
   border: '1px solid currentColor', borderRadius: 4, fontSize: 12, cursor: 'pointer',
 };
+
+/**
+ * A run in the user's own browser. Nothing of the page is shown here, on purpose: no
+ * picture leaves their device. What this pane can say is where it is running, what
+ * page it is on, and each thing it has done, so a working run never looks stalled.
+ */
+function DeviceRunPanel({ device, steps, notice, onStop, onFocus }: {
+  device: { name: string }; steps: BrowserStep[]; notice: string | undefined; onStop: () => void; onFocus?: () => void;
+}) {
+  const page = [...steps].reverse().find((s) => s.url || s.title);
+  const host = (() => { try { return page?.url ? new URL(page.url).host : ''; } catch { return ''; } })();
+  const button = {
+    border: '1px solid currentColor', borderRadius: 6, background: 'transparent', color: 'inherit',
+    padding: '3px 9px', fontSize: 12, cursor: 'pointer', flexShrink: 0,
+  } as const;
+  return (
+    <section
+      aria-label="Agent browser"
+      style={{ display: 'flex', flexDirection: 'column', border: '1px solid var(--border, #333)', borderRadius: 8, overflow: 'hidden', margin: '8px 0', background: 'var(--panel, #111)' }}
+    >
+      <header style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: 'var(--ok-bg, #10331f)', color: 'var(--ok-fg, #7fd6a0)', fontSize: 12.5 }}>
+        <span aria-hidden style={{ width: 7, height: 7, borderRadius: '50%', background: 'currentColor', flexShrink: 0 }} />
+        <span style={{ flex: 1 }}>Running in your own browser, on “{device.name}”. Watch it in the Cascade window there.</span>
+        {onFocus && <button type="button" onClick={onFocus} style={button} title="Bring the run's window to the front on that computer">Show the window</button>}
+        <button type="button" onClick={onStop} style={button}>Stop</button>
+      </header>
+      {notice && <p role="status" style={{ margin: 0, padding: '6px 10px', fontSize: 12.5, color: 'var(--warn-fg, #f5c96b)' }}>{notice}</p>}
+      <div style={{ padding: '8px 10px', fontSize: 12.5, color: 'var(--text, #ddd)' }}>
+        {page ? (
+          <div style={{ marginBottom: 8 }}>
+            <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{page.title || host}</div>
+            {host && <div style={{ opacity: 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{host}</div>}
+          </div>
+        ) : (
+          <p style={{ margin: '0 0 8px', opacity: 0.8 }}>Waiting for it to start: answer the question in your browser if it&apos;s asking which sites to use.</p>
+        )}
+        {steps.length > 0 && (
+          <ol aria-label="What it has done" style={{ margin: 0, padding: 0, listStyle: 'none', maxHeight: 280, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 3 }}>
+            {steps.map((s, i) => (
+              <li key={`${s.at}-${i}`} style={{ display: 'flex', gap: 6, opacity: i === steps.length - 1 ? 1 : 0.75 }}>
+                <span aria-hidden style={{ color: s.ok ? 'var(--ok-fg, #7fd6a0)' : 'var(--warn-fg, #f5c96b)' }}>{s.ok ? '✓' : '!'}</span>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.summary}{s.ok ? '' : ' (didn’t work)'}</span>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+    </section>
+  );
+}

@@ -140,15 +140,16 @@ export function terminalAsk(onInterrupt: () => void, io: TerminalIo = { input: p
       console.log(chalk.magenta('\n  ◈ A cloud run wants a browser on this machine'));
       console.log(chalk.dim(`  run ${run.runId} · this question lapses in about ${mins} min`));
       console.log(chalk.dim('  It gets a fresh browser with an empty profile, closed when the run ends.'));
+      if (run.hint?.sites.length) console.log(chalk.dim(`  It wants to start on ${run.hint.sites.join(' ')}.`));
       const rl = readline.createInterface({ input: io.input, output: io.output, ...(io.terminal !== undefined ? { terminal: io.terminal } : {}) });
       rl.on('SIGINT', () => { console.log(chalk.dim('\n  Declined.')); rl.close(); onInterrupt(); });
       rl.on('close', () => resolve(null));
       const ask = (): void => {
-        rl.question('  Sites it may use (e.g. example.com docs.example.com), or Enter to say no: ', (text) => {
+        rl.question('  Sites it may use (e.g. example.com docs.example.com; * for any public site), or Enter to say no: ', (text) => {
           const parsed = parseSites(text);
           if (parsed && 'error' in parsed) { console.log(chalk.yellow(`  ${parsed.error}`)); ask(); return; }
           if (!parsed) console.log(chalk.dim('  Declined.'));
-          else console.log(chalk.green(`  Allowed: ${[...parsed.consent.allowedOrigins, ...parsed.consent.privateOrigins].join(' ')}`));
+          else console.log(chalk.green(`  Allowed: ${[...(parsed.consent.anyPublic ? ['any public site'] : []), ...parsed.consent.allowedOrigins, ...parsed.consent.privateOrigins].join(' ')}`));
           // Settled before closing: closing settles an unanswered question as a no.
           resolve(parsed ? parsed.consent : null);
           rl.close();
