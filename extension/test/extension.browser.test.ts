@@ -213,9 +213,20 @@ suite('the extension in a real Chromium', { timeout: 90_000 }, () => {
     await page.goto('http://allowed.test/links');
     await page.click('#off').catch(() => {});
     await page.evaluate("location.href = 'http://offlist.test/script'").catch(() => {});
-    await page.goto('http://allowed.test/links');
+    // Back to an allowed page: setup, not what is checked. The blocked navigations
+    // the page itself started (the link, the script) can still be settling, and on
+    // a loaded machine one that lands late aborts this goto, as a navigation would
+    // abort any other; it is asked again once that one is over.
+    const back = async (): Promise<void> => {
+      await page.goto('http://allowed.test/links').catch(async (e: Error) => {
+        if (!/ERR_ABORTED/.test(e.message)) throw e;
+        await sleep(300);
+        await page.goto('http://allowed.test/links');
+      });
+    };
+    await back();
     await page.goto('http://allowed.test/redirect').catch(() => {});
-    await page.goto('http://allowed.test/links');
+    await back();
     await page.evaluate("(() => { const f = document.createElement('iframe'); f.src = 'http://offlist.test/frame'; document.body.append(f); return 1; })()");
     await sleep(1500);
     expect(r.allowed.hits).toContain('GET /redirect');
