@@ -394,18 +394,22 @@ export class MemoryStore {
 
   static readonly UNCLAIMED_ATTACHMENT_MS = 24 * 60 * 60 * 1000;
 
-  /** Keep a file for a message to come. Synchronous: the id is used at once. */
-  addAttachment(file: NewMessageAttachment, now = new Date()): MessageAttachmentRef {
-    const cutoff = new Date(now.getTime() - MemoryStore.UNCLAIMED_ATTACHMENT_MS).toISOString();
-    this.db.prepare('DELETE FROM message_attachments WHERE message_id IS NULL AND created_at < ?').run(cutoff);
+  private insertAttachment(file: NewMessageAttachment, messageId: string | null, sessionId: string | null, at: string): MessageAttachmentRef {
     const id = randomUUID();
     const data = file.kind === 'image' ? file.data : file.text;
     const mime = file.kind === 'image' ? file.mime : 'text/plain';
     const size = file.kind === 'image' ? Math.floor((data.length * 3) / 4) : data.length;
     this.db.prepare(
-      'INSERT INTO message_attachments (id, message_id, session_id, kind, mime, filename, data, size, created_at) VALUES (?, NULL, NULL, ?, ?, ?, ?, ?, ?)',
-    ).run(id, file.kind, mime, file.filename, data, size, now.toISOString());
+      'INSERT INTO message_attachments (id, message_id, session_id, kind, mime, filename, data, size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(id, messageId, sessionId, file.kind, mime, file.filename, data, size, at);
     return { id, kind: file.kind, mime, filename: file.filename, size };
+  }
+
+  /** Keep a file for a message to come. Synchronous: the id is used at once. */
+  addAttachment(file: NewMessageAttachment, now = new Date()): MessageAttachmentRef {
+    const cutoff = new Date(now.getTime() - MemoryStore.UNCLAIMED_ATTACHMENT_MS).toISOString();
+    this.db.prepare('DELETE FROM message_attachments WHERE message_id IS NULL AND created_at < ?').run(cutoff);
+    return this.insertAttachment(file, null, null, now.toISOString());
   }
 
   /** Files not yet claimed by a message, in the order asked; unknown or claimed ids are left out. */
@@ -457,7 +461,14 @@ export class MemoryStore {
     const out: Session[] = [];
     for (const id of targets) {
       const s = this.getSession(id);
-      if (s) out.push(s);
+      if (!s) continue;
+      // A message's files go with it, contents and all, so an import can keep them.
+      out.push({
+        ...s,
+        messages: s.messages.map((m) => (m.attachments?.length
+          ? { ...m, attachments: m.attachments.map((a) => ({ ...a, data: this.getAttachment(a.id)?.data ?? '' })).filter((a) => a.data) }
+          : m)),
+      });
     }
     return out;
   }
@@ -493,6 +504,14 @@ export class MemoryStore {
         if (Array.isArray(fileIds)) {
           const claim = this.db.prepare('UPDATE message_attachments SET message_id = ?, session_id = ? WHERE id = ? AND message_id IS NULL');
           for (const id of fileIds.slice(0, 20)) if (typeof id === 'string') claim.run(messageId, newId, id);
+        }
+        // Or carry them whole (an export): kept again, as new files of the new message.
+        const carried = (m as { attachments?: unknown }).attachments;
+        if (Array.isArray(carried)) {
+          for (const a of carried.slice(0, 20)) {
+            const file = importedAttachment(a);
+            if (file) this.insertAttachment(file, messageId, newId, now);
+          }
         }
         msgStmt.run(
           messageId, newId, m.role,
@@ -1050,4 +1069,21 @@ interface DbRuntimeNodeLog {
   id: string; session_id: string; tier_id: string; role: string; label: string;
   status: string; current_action: string | null; progress_pct: number | null; timestamp: string;
   workspace_path: string | null; is_global: number; output: string | null;
+}
+
+const IMPORTED_IMAGE_MIMES: ReadonlySet<string> = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+
+/** A file carried in an export bundle, checked before it's kept; null when it isn't one. */
+function importedAttachment(raw: unknown): NewMessageAttachment | null {
+  const a = (raw ?? {}) as Record<string, unknown>;
+  const filename = typeof a['filename'] === 'string' ? a['filename'].slice(0, 200) : null;
+  const data = a['data'];
+  if (typeof data !== 'string' || !data) return null;
+  if (a['kind'] === 'image') {
+    const mime = a['mime'];
+    if (typeof mime !== 'string' || !IMPORTED_IMAGE_MIMES.has(mime) || data.length > 7_000_000 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) return null;
+    return { kind: 'image', mime, filename, data };
+  }
+  if (a['kind'] === 'document' && data.length <= 8_000_000) return { kind: 'document', filename: filename ?? 'document', text: data };
+  return null;
 }

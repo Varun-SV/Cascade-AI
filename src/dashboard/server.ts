@@ -1278,7 +1278,10 @@ export class DashboardServer {
   }
 
   private setupMiddleware(): void {
-    this.app.use(express.json({ limit: '10mb' }));
+    // An import bundle carries its chats' files, so it gets a larger allowance of its own.
+    const importJson = express.json({ limit: '200mb' });
+    const defaultJson = express.json({ limit: '10mb' });
+    this.app.use((req, res, next) => (req.path === '/api/import' || req.path === '/api/import/' ? importJson : defaultJson)(req, res, next));
     this.app.use(express.urlencoded({ extended: true }));
 
     // CORS for dev
@@ -1483,7 +1486,7 @@ export class DashboardServer {
       res.json({ filename: file.filename, text: file.data });
     });
 
-    // Body size is capped by the app-wide express.json limit (10mb).
+    // Body size: 200mb for this route alone (see setupMiddleware), for chats' files.
     this.app.post('/api/import', auth, mutationLimiter, (req: Request, res: Response) => {
       try {
         const bundle = req.body as {

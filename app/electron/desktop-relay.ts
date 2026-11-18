@@ -83,6 +83,9 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
   let connected = false;
   let run: RunBrowser | null = null;
   let client: RelayDeviceClient | null = null;
+  // Bumped by every sign-in and sign-out: a pairing that began under another account stops.
+  let accountEpoch = 0;
+  let pairing: Promise<StoredDesktopDevice> | null = null;
   let error: string | null = null;
 
   /** Whether the account signed in now is the one the pairing belongs to. */
@@ -171,6 +174,30 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
     });
   };
 
+  /** Registers this app for the account signed in now; nothing is kept if the account changes meanwhile. */
+  const pair = async (): Promise<StoredDesktopDevice> => {
+    const cloud = deps.cloud();
+    if (!cloud) throw new Error('Sign in to Cascade Cloud first.');
+    if (!deps.vault.available()) throw new Error('This computer has no keychain the app can use, so it can\'t keep a device key safely.');
+    const epoch = accountEpoch;
+    const stillThisAccount = (): boolean => epoch === accountEpoch && deps.cloud()?.userId === cloud.userId;
+    const info = await cloud.client.relayServer();
+    if (!stillThisAccount()) throw new Error('You signed out or changed account while pairing. Nothing was saved.');
+    const key = deps.core.generateRelayKey();
+    const name = `${(deps.hostname ?? os.hostname)()} (desktop app)`.slice(0, 80);
+    const reg = await cloud.client.registerRelayDevice({ name, kind: 'desktop', publicKey: key.publicKey });
+    if (!stillThisAccount()) {
+      // Registered for an account that's gone from here: take it back if the server still lets us.
+      await cloud.client.removeRelayDevice(reg.device.id).catch(() => { /* removable from that account's settings */ });
+      throw new Error('You signed out or changed account while pairing. Nothing was saved.');
+    }
+    if (reg.serverId !== info.serverId || reg.serverKey !== info.serverKey) throw new Error('The server changed its identity while pairing. Nothing was saved.');
+    return {
+      serverUrl: cloud.serverUrl, accountId: cloud.userId, deviceId: reg.device.id, name: reg.device.name, serverId: info.serverId, serverKey: info.serverKey,
+      controlPath: info.controlPath, runPath: info.runPath, privateKeyEnc: deps.vault.encrypt(key.privateKeyPem), enabled: true,
+    };
+  };
+
   return {
     status,
 
@@ -179,18 +206,9 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
       let d = deps.file.load();
       if (d && !ownerSignedIn(d)) throw new Error(accountProblem({ ...d, enabled: true })!);
       if (!d) {
-        const cloud = deps.cloud();
-        if (!cloud) throw new Error('Sign in to Cascade Cloud first.');
-        if (!deps.vault.available()) throw new Error('This computer has no keychain the app can use, so it can\'t keep a device key safely.');
-        const info = await cloud.client.relayServer();
-        const key = deps.core.generateRelayKey();
-        const name = `${(deps.hostname ?? os.hostname)()} (desktop app)`.slice(0, 80);
-        const reg = await cloud.client.registerRelayDevice({ name, kind: 'desktop', publicKey: key.publicKey });
-        if (reg.serverId !== info.serverId || reg.serverKey !== info.serverKey) throw new Error('The server changed its identity while pairing. Nothing was saved.');
-        d = {
-          serverUrl: cloud.serverUrl, accountId: cloud.userId, deviceId: reg.device.id, name: reg.device.name, serverId: info.serverId, serverKey: info.serverKey,
-          controlPath: info.controlPath, runPath: info.runPath, privateKeyEnc: deps.vault.encrypt(key.privateKeyPem), enabled: true,
-        };
+        // One pairing at a time: a second click waits for the first.
+        pairing ??= pair().finally(() => { pairing = null; });
+        d = await pairing;
       } else {
         d = { ...d, enabled: true };
       }
@@ -267,6 +285,7 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
 
     /** Signed out, or in as someone else: stop, and serve again only for the pairing's own account. */
     accountChanged(): void {
+      accountEpoch += 1;
       stopServing();
       error = null;
       this.resume();

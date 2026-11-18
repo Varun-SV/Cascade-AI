@@ -16,7 +16,7 @@ import { createDesktopRelay, type DesktopRelayCore, type DesktopRelayDeps, type 
 
 type ServeOpts = Parameters<DesktopRelayCore['serveDevice']>[0];
 
-function harness(over: { signedIn?: boolean; keychain?: boolean; reply?: { serverId: string; serverKey: string }; stored?: StoredDesktopDevice; account?: string } = {}) {
+function harness(over: { signedIn?: boolean; keychain?: boolean; reply?: { serverId: string; serverKey: string }; stored?: StoredDesktopDevice; account?: string; gate?: Promise<void> } = {}) {
   let account: string | null = over.signedIn === false ? null : (over.account ?? 'user-a');
   let saved: StoredDesktopDevice | null = over.stored ?? null;
   const served: ServeOpts[] = [];
@@ -45,7 +45,7 @@ function harness(over: { signedIn?: boolean; keychain?: boolean; reply?: { serve
       serverUrl: 'https://cloud.test',
       client: {
         relayServer: async () => info,
-        registerRelayDevice: async (input: unknown) => { registered.push(input); return { device: { id: 'dev-1', name: 'box (desktop app)' }, ...(over.reply ?? { serverId: 's1', serverKey: 'k1' }) }; },
+        registerRelayDevice: async (input: unknown) => { registered.push(input); await over.gate; return { device: { id: 'dev-1', name: 'box (desktop app)' }, ...(over.reply ?? { serverId: 's1', serverKey: 'k1' }) }; },
         removeRelayDevice: async (id: string) => { removed.push(id); },
       } as never,
     }),
@@ -238,5 +238,27 @@ describe('taking over the run window', () => {
     await h.served[0]!.startBrowser({} as never);
     h.served[0]!.onClient!(null);
     expect(h.relay.takeOver()).toMatchObject({ error: expect.any(String) });
+  });
+});
+
+describe('pairing while the account changes', () => {
+  it('a sign-out while registering saves nothing, serves nothing, and takes the device back', async () => {
+    let open!: () => void;
+    const h = harness({ gate: new Promise<void>((r) => { open = r; }) });
+    const enabling = h.relay.enable();
+    await vi.waitFor(() => expect(h.registered).toHaveLength(1));
+    h.signIn(null);
+    h.relay.accountChanged();
+    open();
+    await expect(enabling).rejects.toThrow(/signed out or changed account/);
+    expect(h.saved()).toBeNull();
+    expect(h.served).toEqual([]);
+    expect(h.removed).toEqual(['dev-1']);
+  });
+
+  it('two clicks pair once', async () => {
+    const h = harness();
+    await Promise.all([h.relay.enable(), h.relay.enable()]);
+    expect(h.registered).toHaveLength(1);
   });
 });

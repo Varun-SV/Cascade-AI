@@ -98,6 +98,30 @@ describe.skipIf(!hasSqlite)('files kept with messages', () => {
     expect(store.getAttachment(copy!.attachments![0]!.id)).not.toBeNull();
   });
 
+  it('an exported chat carries its files, and importing it keeps them', async () => {
+    const store = tempStore();
+    store.createSession({ id: 's1', title: 'With files', createdAt: '', updatedAt: '', identityId: 'default', workspacePath: '', messages: [], metadata: { totalTokens: 0, totalCostUsd: 0, modelsUsed: [], toolsUsed: [], taskCount: 0 } });
+    const img = store.addAttachment({ kind: 'image', mime: 'image/png', filename: 'a.png', data: PNG });
+    const doc = store.addAttachment({ kind: 'document', filename: 'n.txt', text: 'notes' });
+    store.addMessage({ id: 'm1', sessionId: 's1', role: 'user', content: 'look', timestamp: new Date().toISOString() });
+    store.claimAttachments('m1', 's1', [img.id, doc.id]);
+    await settle();
+
+    const bundle = JSON.parse(JSON.stringify(store.exportSessions(['s1']))) as Parameters<MemoryStore['importSessions']>[0];
+    expect((bundle[0]!.messages[0] as { attachments?: Array<{ data: string }> }).attachments?.map((a) => a.data)).toEqual([PNG, 'notes']);
+
+    const other = tempStore();
+    const [made] = other.importSessions(bundle);
+    const [m] = other.getSessionMessages(made!.id);
+    expect(m!.attachments?.map((a) => [a.kind, a.filename])).toEqual([['image', 'a.png'], ['document', 'n.txt']]);
+    expect(other.getAttachment(m!.attachments![1]!.id)?.data).toBe('notes');
+
+    // A carried file that isn't one is left out, not kept.
+    const bad = [{ title: 'x', messages: [{ role: 'user', content: 'y', attachments: [{ kind: 'image', mime: 'image/svg+xml', data: PNG }, { kind: 'script', data: 'x' }] }] }] as unknown as Parameters<MemoryStore['importSessions']>[0];
+    const [madeBad] = other.importSessions(bad);
+    expect(other.getSessionMessages(madeBad!.id)[0]!.attachments).toBeUndefined();
+  });
+
   it('one never claimed goes after a day', () => {
     const store = tempStore();
     const old = store.addAttachment({ kind: 'document', filename: 'x', text: 'x' }, new Date('2026-01-01T00:00:00Z'));
@@ -146,6 +170,20 @@ describe.skipIf(!hasSqlite)('the backend routes', () => {
     expect(imported.sessions).toHaveLength(1);
     const [m] = store.getSessionMessages(imported.sessions[0]!.id);
     expect(m!.attachments?.map((f) => f.id)).toEqual([img.id, doc.id]);
+  });
+
+  it('an import bundle may be larger than other requests, for its files', async () => {
+    const { store, post } = await serve();
+    const big = 'x'.repeat(6_000_000);
+    const res = await post('/api/import', {
+      format: 'cascade-export@1',
+      sessions: [{ title: 'Big', messages: [{ role: 'user', content: 'docs', attachments: [{ kind: 'document', filename: 'a', data: big }, { kind: 'document', filename: 'b', data: big }] }] }],
+    });
+    expect(res.status).toBe(200);
+    const { sessions } = (await res.json()) as { sessions: Array<{ id: string }> };
+    expect(store.getSessionMessages(sessions[0]!.id)[0]!.attachments).toHaveLength(2);
+    // Elsewhere the 10mb ceiling stands.
+    expect((await post('/api/attachments', { kind: 'document', text: 'y'.repeat(11_000_000) })).status).toBe(413);
   });
 
   it("a run's start claims the files it was sent", async () => {
