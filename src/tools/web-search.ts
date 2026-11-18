@@ -2,23 +2,31 @@
 //  Cascade AI — Web Search Tool
 // ─────────────────────────────────────────────
 //
-//  Supports multiple backends in priority order:
-//    1. SearXNG  (self-hosted, primary)
+//  Backends in priority order:
+//    1. SearXNG  (self-hosted)
 //    2. Brave Search API
 //    3. Tavily API
-//    4. DuckDuckGo Lite  (no API key needed, last resort)
+//    4. Open Web (no key: DuckDuckGo, Marginalia, Wikipedia, and Stack
+//       Overflow, GitHub, Hacker News, arXiv, npm and PyPI when the query is
+//       theirs, asked at once and merged; see ./open-web)
 //
 //  Configuration (env vars or config.json tools.webSearch):
 //    SEARXNG_URL          — Base URL of your SearXNG instance
 //    BRAVE_SEARCH_API_KEY — Brave Search API key
 //    TAVILY_API_KEY       — Tavily API key
 //
-//  DuckDuckGo Lite is always available as a final fallback.
+//  Open Web is always there as the fallback, and is what runs with no keys.
+//  With `read`, the top results are opened and the passages that answer the
+//  query come back with them, whichever backend found them.
 // ─────────────────────────────────────────────
 
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
+import type { Fetch } from './open-web/engines.js';
+import { type OpenWebState, type PageFetch, type ReadResult, type SourceOutcome, openWebSearch, readTopResults } from './open-web/index.js';
 import { safeFetch } from './utils/safe-fetch.js';
+
+export { parseDdgAnchors, unwrapDdgRedirect } from './open-web/engines.js';
 
 export interface WebSearchResult {
   title: string;
@@ -182,113 +190,43 @@ async function searchTavily(
     }));
 }
 
-// ── DuckDuckGo scraping (no key required, last resort) ───────────────
-//
-//  Two endpoints, both parsed with deliberately tolerant patterns: DDG's
-//  markup varies (single- vs double-quoted attributes, attribute order) and
-//  the old double-quote-only regex silently matched nothing — the reason
-//  web_search "didn't work" on default installs with no keyed backend.
-
-// A real browser UA — DDG serves bot-looking agents an anomaly page.
-const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
-
-/**
- * DDG wraps result hrefs in a redirect (`//duckduckgo.com/l/?uddg=<encoded>`).
- * Unwrap to the real destination so downstream web_fetch hits the actual site.
- * Exported for tests.
- */
-export function unwrapDdgRedirect(href: string): string {
-  try {
-    const url = new URL(href.startsWith('//') ? `https:${href}` : href, 'https://duckduckgo.com');
-    if (/(^|\.)duckduckgo\.com$/i.test(url.hostname) && url.pathname.startsWith('/l/')) {
-      const target = url.searchParams.get('uddg');
-      if (target) return decodeURIComponent(target);
-    }
-    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : href;
-  } catch {
-    return href;
-  }
-}
-
-function stripTags(html: string): string {
-  return html.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
-}
-
-function decodeEntities(text: string): string {
-  return text
-    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"').replace(/&#x27;|&#39;/g, "'").replace(/&nbsp;/g, ' ');
-}
-
-/**
- * Parse anchors carrying the given class from DDG markup, tolerating single
- * OR double quotes and any attribute order. Exported for tests.
- */
-export function parseDdgAnchors(html: string, anchorClass: string, snippetClass: string): WebSearchResult[] {
-  const anchorRe = new RegExp(`<a\\b[^>]*class=["']?[^"'>]*\\b${anchorClass}\\b[^"'>]*["']?[^>]*>([\\s\\S]*?)<\\/a>`, 'gi');
-  const snippetRe = new RegExp(`class=["']?[^"'>]*\\b${snippetClass}\\b[^"'>]*["']?[^>]*>([\\s\\S]*?)<\\/(?:td|a|div|span)>`, 'gi');
-
-  const results: WebSearchResult[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = anchorRe.exec(html)) !== null) {
-    const tag = m[0]!;
-    const href = /href=["']([^"']+)["']/i.exec(tag)?.[1];
-    const title = decodeEntities(stripTags(m[1] ?? ''));
-    if (!href || !title) continue;
-    results.push({ title, url: unwrapDdgRedirect(decodeEntities(href)), snippet: '' });
-  }
-
-  const snippets: string[] = [];
-  while ((m = snippetRe.exec(html)) !== null) {
-    snippets.push(decodeEntities(stripTags(m[1] ?? '')));
-  }
-  for (let i = 0; i < results.length; i++) {
-    if (snippets[i]) results[i]!.snippet = snippets[i]!;
-  }
-  return results;
-}
-
-async function searchDuckDuckGo(
-  query: string,
-  maxResults: number,
-  variant: 'html' | 'lite',
-): Promise<WebSearchResult[]> {
-  const base = variant === 'html'
-    ? 'https://html.duckduckgo.com/html/?q='
-    : 'https://lite.duckduckgo.com/lite/?q=';
-  const resp = await fetch(`${base}${encodeURIComponent(query)}`, {
-    headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html' },
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (!resp.ok) throw new Error(`DuckDuckGo ${variant} returned HTTP ${resp.status}`);
-  const html = await resp.text();
-
-  const parsed = variant === 'html'
-    ? parseDdgAnchors(html, 'result__a', 'result__snippet')
-    : parseDdgAnchors(html, 'result-link', 'result-snippet');
-
-  return parsed.slice(0, maxResults).map((r) => ({ ...r, engine: `duckduckgo-${variant}` }));
-}
-
 // ── WebSearchTool ────────────────────────────
+
+/** What the tool reaches the web with: replaced in tests. */
+export interface WebSearchDeps {
+  /** For the search sources, whose hosts are fixed. */
+  fetcher?: Fetch;
+  /** For the result pages `read` opens: the SSRF-guarded fetch unless replaced. */
+  fetchPage?: PageFetch;
+  state?: OpenWebState;
+}
+
+const OUTCOME_WORDS: Record<SourceOutcome['outcome'], string> = {
+  answered: 'answered', empty: 'found nothing', blocked: 'turned us away', failed: 'failed', resting: 'resting after refusing', 'too slow': 'too slow',
+};
 
 export class WebSearchTool extends BaseTool {
   readonly name = 'web_search';
   readonly description =
-    'Search the web for current information, news, documentation, or any topic. Returns a list of relevant results with titles, URLs, and snippets.';
+    'Search the web for current information, news, documentation, or any topic. Returns a list of relevant results with titles, URLs, and snippets. '
+    + 'Set read: true to also open the top results and get back the passages that answer the query, with their sources: one call instead of a search and several fetches. '
+    + 'Then use web_fetch to read a whole page.';
   readonly inputSchema = {
     type: 'object',
     properties: {
       query: { type: 'string', description: 'The search query' },
       maxResults: { type: 'number', description: 'Number of results to return (default: 5, max: 10)' },
+      read: { type: 'boolean', description: 'Also open the top 3 results and return the passages that answer the query (slower; default false)' },
     },
     required: ['query'],
   };
 
   private config: WebSearchConfig;
+  private readonly deps: WebSearchDeps;
 
-  constructor(config: WebSearchConfig = {}) {
+  constructor(config: WebSearchConfig = {}, deps: WebSearchDeps = {}) {
     super();
+    this.deps = deps;
     this.config = {
       searxngUrl: config.searxngUrl ?? process.env['SEARXNG_URL'],
       braveApiKey: config.braveApiKey ?? process.env['BRAVE_SEARCH_API_KEY'],
@@ -301,14 +239,14 @@ export class WebSearchTool extends BaseTool {
     };
   }
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
-    const query = input['query'] as string;
-    if (!query?.trim()) return 'Error: query is required and must be non-empty.';
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
+    const query = typeof input['query'] === 'string' ? input['query'] : '';
+    if (!query.trim()) return 'Error: query is required and must be non-empty.';
+    const signal = options?.signal;
 
-    const maxResults = Math.min(
-      (input['maxResults'] as number | undefined) ?? this.config.maxResults ?? 5,
-      10,
-    );
+    const asked = Number(input['maxResults'] ?? this.config.maxResults ?? 5);
+    const maxResults = Math.max(1, Math.min(Number.isFinite(asked) ? Math.floor(asked) : 5, 10));
+    const read = input['read'] === true;
 
     const errors: string[] = [];
     let results: WebSearchResult[] = [];
@@ -320,12 +258,19 @@ export class WebSearchTool extends BaseTool {
     // perfectly ordinary "no results for this narrow/misspelled query".
     let anyBackendReachable = false;
 
+    const done = async (found: WebSearchResult[], footer?: string): Promise<string> =>
+      this.formatResults(query, found, footer, read ? await readTopResults(found, query, {
+        count: 3, perPage: 2, ...(signal ? { signal } : {}),
+        ...(this.deps.fetchPage ? { fetchPage: this.deps.fetchPage } : {}),
+        ...(this.deps.state ? { state: this.deps.state } : {}),
+      }) : undefined);
+
     // ── 1. SearXNG (preferred — self-hosted, privacy-preserving) ──────────
     if (this.config.searxngUrl) {
       try {
         results = await searchSearXNG(query, this.config.searxngUrl, maxResults, this.config.guardSearxngUrl);
         anyBackendReachable = true;
-        if (results.length > 0) return this.formatResults(query, results);
+        if (results.length > 0) return done(results);
         errors.push('SearXNG: returned 0 results');
       } catch (err) {
         errors.push(`SearXNG: ${err instanceof Error ? err.message : String(err)}`);
@@ -337,7 +282,7 @@ export class WebSearchTool extends BaseTool {
       try {
         results = await searchBrave(query, this.config.braveApiKey, maxResults);
         anyBackendReachable = true;
-        if (results.length > 0) return this.formatResults(query, results);
+        if (results.length > 0) return done(results);
         errors.push('Brave: returned 0 results');
       } catch (err) {
         errors.push(`Brave: ${err instanceof Error ? err.message : String(err)}`);
@@ -349,24 +294,25 @@ export class WebSearchTool extends BaseTool {
       try {
         results = await searchTavily(query, this.config.tavilyApiKey, maxResults);
         anyBackendReachable = true;
-        if (results.length > 0) return this.formatResults(query, results);
+        if (results.length > 0) return done(results);
         errors.push('Tavily: returned 0 results');
       } catch (err) {
         errors.push(`Tavily: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
-    // ── 4. DuckDuckGo (always available, no key needed) ──────────────────
-    // html.duckduckgo.com first (richer markup), lite as the final fallback.
-    for (const variant of ['html', 'lite'] as const) {
-      try {
-        results = await searchDuckDuckGo(query, maxResults, variant);
-        anyBackendReachable = true;
-        if (results.length > 0) return this.formatResults(query, results);
-        errors.push(`DuckDuckGo ${variant}: returned 0 results`);
-      } catch (err) {
-        errors.push(`DuckDuckGo ${variant}: ${err instanceof Error ? err.message : String(err)}`);
-      }
+    // ── 4. Open Web (always available, no key needed) ────────────────────
+    const open = await openWebSearch(query, {
+      maxResults,
+      ...(signal ? { signal } : {}),
+      ...(this.deps.fetcher ? { fetcher: this.deps.fetcher } : {}),
+      ...(this.deps.state ? { state: this.deps.state } : {}),
+    });
+    if (open.reachable) anyBackendReachable = true;
+    const asked2 = open.sources.map((o) => `${o.engine} ${OUTCOME_WORDS[o.outcome]}`).join(', ');
+    if (open.results.length > 0) return done(open.results, `Searched free sources (no key): ${asked2}.`);
+    for (const o of open.sources) {
+      errors.push(`${o.engine}: ${OUTCOME_WORDS[o.outcome]}${o.detail ? ` (${o.detail})` : ''}`);
     }
 
     // Nothing came back with results — either every backend errored, or every
@@ -390,16 +336,35 @@ export class WebSearchTool extends BaseTool {
     ].join('\n')), { systemic: !anyBackendReachable });
   }
 
-  private formatResults(query: string, results: WebSearchResult[]): string {
+  private formatResults(query: string, results: WebSearchResult[], footer?: string, read?: ReadResult[]): string {
     const lines = [`Web search results for: "${query}"`, ''];
     for (let i = 0; i < results.length; i++) {
       const r = results[i]!;
+      const found = (r as { engines?: string[] }).engines;
       lines.push(`[${i + 1}] ${r.title}`);
       lines.push(`    URL: ${r.url}`);
       if (r.snippet) lines.push(`    ${r.snippet.slice(0, 300)}`);
-      if (r.engine) lines.push(`    Source: ${r.engine}`);
+      if (found && found.length) lines.push(`    Found by: ${found.join(', ')}`);
+      else if (r.engine) lines.push(`    Source: ${r.engine}`);
       lines.push('');
     }
-    return lines.join('\n');
+    if (read) {
+      lines.push('── Read from the top results ──', '');
+      for (const page of read) {
+        lines.push(`[${page.index}] ${page.title}`, `    ${page.url}`);
+        if (page.error) lines.push(`    Could not read it: ${page.error}`);
+        else if (!page.passages.length) lines.push('    Nothing on it matched the query closely; web_fetch reads it whole.');
+        for (const p of page.passages) {
+          // Two passages a page, 600 characters each: with ten results above
+          // them, the answer stays inside what a worker keeps of it.
+          const text = p.text.replace(/\s*\n\s*/g, ' ').slice(0, 600);
+          lines.push(`    > ${p.heading ? `[${p.heading}] ` : ''}${text}`);
+        }
+        lines.push('');
+      }
+      lines.push('Cite a passage by its result number. Read a whole page with web_fetch.');
+    }
+    if (footer) lines.push(footer);
+    return lines.join('\n').trimEnd();
   }
 }

@@ -216,7 +216,7 @@ const ChatRunPayloadSchema = z.object({
   browserDeviceId: z.string().min(1).max(64).optional(),
   // Optional web-search backend the user configured (browser-held, like keys).
   // Whichever field is set is used — SearXNG → Brave → Tavily priority in the
-  // tool. Absent → the tool's keyless DuckDuckGo fallback.
+  // tool. Absent → the tool's keyless Open Web fallback.
   webSearchConfig: z
     .object({
       searxngUrl: optionalNonEmptyString,

@@ -62,11 +62,11 @@ describe('KeyVault', () => {
     expect(screen.getByText(/sync your keys across/i)).toBeInTheDocument();
   });
 
-  it('says DuckDuckGo is in use, free and keyless, until a backend has a key', () => {
+  it('says the free Open Web is in use, keyless, until a backend has a key', () => {
     const { rerender } = render(<KeyVault keys={[]} onChange={vi.fn()} webSearch={null} onWebSearchChange={vi.fn()} />);
-    expect(screen.getByText('Free: DuckDuckGo, no key needed')).toBeInTheDocument();
+    expect(screen.getByText('Free: Open Web (DuckDuckGo, Wikipedia and more), no key needed')).toBeInTheDocument();
     rerender(<KeyVault keys={[]} onChange={vi.fn()} webSearch={{ backend: 'tavily', tavilyApiKey: 'tvly-x' }} onWebSearchChange={vi.fn()} />);
-    expect(screen.queryByText('Free: DuckDuckGo, no key needed')).not.toBeInTheDocument();
+    expect(screen.queryByText('Free: Open Web (DuckDuckGo, Wikipedia and more), no key needed')).not.toBeInTheDocument();
     expect(screen.getByText(/Now using/)).toHaveTextContent('Now using: Tavily');
   });
 });

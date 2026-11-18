@@ -11,7 +11,7 @@ export interface ProviderConfig {
 }
 
 /** Browser-held web-search backend. Whichever is set is used (SearXNG → Brave
- *  → Tavily priority); empty → the keyless DuckDuckGo fallback. */
+ *  → Tavily priority); empty → the keyless Open Web fallback (src/tools/open-web). */
 export interface WebSearchSettings {
   backend: 'brave' | 'tavily' | 'searxng';
   braveApiKey?: string;
