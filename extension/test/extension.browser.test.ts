@@ -473,6 +473,53 @@ suite('the extension in a real Chromium', { timeout: 90_000 }, () => {
     await vi.waitFor(async () => expect(await page.evaluate<string>('location.pathname')).toBe('/form'), { timeout: 10_000 });
   });
 
+  it('a popup still open when the run stops is closed before its protections go', async () => {
+    const r = await rig();
+    const { page, relayed } = await r.run('run-1');
+    await page.goto('http://allowed.test/links');
+    // Closing a tab made slow, as a busy machine makes it, and a note of which tabs
+    // still exist each time the run's rules are taken away.
+    const runWindow = ((await r.status()).status.run as unknown as { windowId: number }).windowId;
+    await r.sw.evaluate((runWin: number) => {
+      const g = globalThis as unknown as { atRuleRemoval: number[][]; popups: number[] };
+      g.atRuleRemoval = [];
+      g.popups = [];
+      chrome.tabs.onCreated.addListener((t) => { if (t.id !== undefined) g.popups.push(t.id); });
+      const remove = chrome.tabs.remove.bind(chrome.tabs) as (id: number) => Promise<void>;
+      // Slow only outside the run's window: the run itself ends at its usual pace, and a
+      // popup's own close is still on its way when the run's teardown begins.
+      const slow = (id: number): Promise<void> => chrome.tabs.get(id).then((t) => t.windowId === runWin
+        ? remove(id)
+        : new Promise<void>((res) => setTimeout(res, 3000)).then(() => remove(id)), () => remove(id));
+      (chrome.tabs as unknown as { remove: (id: number) => Promise<void> }).remove = slow;
+      (g as unknown as { patched: boolean }).patched = chrome.tabs.remove === (slow as unknown);
+      const update = chrome.declarativeNetRequest.updateSessionRules.bind(chrome.declarativeNetRequest);
+      (chrome.declarativeNetRequest as unknown as { updateSessionRules: typeof update }).updateSessionRules = (async (o: chrome.declarativeNetRequest.UpdateRuleOptions) => {
+        if ((o.removeRuleIds?.length ?? 0) > 3 && !o.addRules?.length) {
+          g.atRuleRemoval.push((await chrome.tabs.query({})).map((t) => t.id ?? -1).filter((id) => g.popups.includes(id)));
+        }
+        return update(o);
+      }) as typeof update;
+    }, runWindow as never);
+    // A popup in a window of its own, left on about:blank where its opener could still
+    // script it; then the run ends before the popup has been closed.
+    await page.evaluate("window.open('', 'side', 'popup,width=320,height=240'); 1");
+    await vi.waitFor(async () => expect((await r.sw.evaluate(() => chrome.tabs.query({}))).length).toBeGreaterThan(2));
+    await r.sw.evaluate(() => chrome.runtime.sendMessage({ type: 'stop' }).catch(() => {}));
+    const extId = new URL(r.sw.url()).host;
+    const ctl = r.ctx.pages()[0]!;
+    await ctl.goto(`chrome-extension://${extId}/popup.html`);
+    await ctl.click('#stop').catch(() => {});
+    await Promise.race([relayed.closed, sleep(8000).then(() => { throw new Error('the run did not stop'); })]);
+    type Seen = { atRuleRemoval: number[][]; popups: number[]; patched: boolean };
+    await vi.waitFor(async () => expect(await r.sw.evaluate(() => (globalThis as unknown as Seen).atRuleRemoval.length)).toBeGreaterThan(0), { timeout: 10_000 });
+    const seen = await r.sw.evaluate(() => { const g = globalThis as unknown as Seen; return { atRuleRemoval: g.atRuleRemoval, popups: g.popups, patched: g.patched }; });
+    expect(seen.patched).toBe(true);
+    expect(seen.popups.length).toBeGreaterThan(0);
+    // When the run's rules went, its popup had already gone.
+    for (const stillOpen of seen.atRuleRemoval) expect(stillOpen).toEqual([]);
+  });
+
   it('Stop in the toolbar popup ends the run', async () => {
     const r = await rig();
     const { relayed } = await r.run('run-1');

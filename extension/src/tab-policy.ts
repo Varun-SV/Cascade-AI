@@ -229,11 +229,20 @@ export async function openRunTab(opts: TabPolicyOptions): Promise<LeasedBrowser 
   const dismissedDialogs: string[] = [];
 
   let releaseWebRtc: (() => Promise<void>) | undefined;
+  /** Popups the run opened that aren't closed yet: their block rule must outlive them. */
+  const openPopups = new Set<number>();
+  const closeOpenPopups = (): Promise<unknown> => Promise.all([...openPopups].map((id) => chrome.tabs.remove(id).catch(() => {})));
+  let stopWatchingPopups: () => void = () => {};
   const removeEverything = async (): Promise<void> => {
     if (attached) { attached = false; await chrome.debugger.detach({ tabId }).catch(() => {}); }
-    await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ruleIds }).catch(() => {});
+    // Every page the run has goes before any protection does: popups first (one in a
+    // window of its own outlives the run's window), then the run's window, then any
+    // popup opened in the meantime. Only then the rules, and WebRTC back to the user.
+    await closeOpenPopups();
     await chrome.windows.remove(windowId).catch(() => {});
-    // Only once the run's pages are gone.
+    stopWatchingPopups();
+    await closeOpenPopups();
+    await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ruleIds }).catch(() => {});
     await releaseWebRtc?.();
   };
 
@@ -278,7 +287,6 @@ export async function openRunTab(opts: TabPolicyOptions): Promise<LeasedBrowser 
   // the last one has every open popup in it, and nothing waits behind an earlier call
   // while a new popup's first request is on its way (measured: queueing them let the
   // second of two popups through).
-  const openPopups = new Set<number>();
   const syncPopupRule = (): Promise<unknown> => chrome.declarativeNetRequest.updateSessionRules({
     removeRuleIds: [popupRule],
     addRules: openPopups.size
@@ -313,6 +321,7 @@ export async function openRunTab(opts: TabPolicyOptions): Promise<LeasedBrowser 
       .then(() => { openPopups.delete(popup); return syncPopupRule(); });
   };
   chrome.tabs.onCreated.addListener(onCreated);
+  stopWatchingPopups = () => chrome.tabs.onCreated.removeListener(onCreated);
 
   own.on((msg) => {
     if (msg.sessionId) return;
@@ -356,7 +365,7 @@ export async function openRunTab(opts: TabPolicyOptions): Promise<LeasedBrowser 
       return settlesWithin(chrome.tabs.remove(tabId), PAGE_END_TIMEOUT_MS);
     },
     close() {
-      chrome.tabs.onCreated.removeListener(onCreated);
+      // The popup listener stays until the run's window has gone: see removeEverything.
       void removeEverything();
     },
   };
