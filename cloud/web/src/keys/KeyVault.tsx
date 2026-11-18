@@ -67,6 +67,9 @@ const WEB_SEARCH_BACKENDS: { value: WebSearchSettings['backend']; label: string 
   { value: 'searxng', label: 'SearXNG (self-hosted)' },
 ];
 
+/** Search with no key at all, and the fallback when a configured one fails. */
+const FREE_SEARCH_LABEL = 'Free: DuckDuckGo, no key needed';
+
 function WebSearchSection({
   settings,
   onChange,
@@ -91,8 +94,15 @@ function WebSearchSection({
         <span className="font-medium">Web search</span>
       </div>
       <p className="text-xs leading-snug text-ink-400">
-        Optional. Configure a backend so the composer's <span className="text-ink-300">Web</span> toggle returns real
-        results instead of the basic keyless fallback.
+        Optional. The composer&apos;s <span className="text-ink-300">Web</span> toggle works without any: it searches
+        DuckDuckGo, which needs no key. A backend below gives fuller, steadier results, and DuckDuckGo stays the
+        fallback if it fails.
+      </p>
+      <p className="text-xs text-ink-300" aria-live="polite">
+        Now using:{' '}
+        <span className="font-medium text-ink-100">
+          {value.trim() ? WEB_SEARCH_BACKENDS.find((b) => b.value === backend)?.label : FREE_SEARCH_LABEL}
+        </span>
       </p>
       <label className="flex flex-col gap-1">
         <span className="text-xs text-ink-400">Backend</span>

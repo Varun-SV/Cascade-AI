@@ -14,6 +14,8 @@ import ConversationSidebar from './chat/ConversationSidebar.js';
 import ChatPanel from './chat/ChatPanel.js';
 import ChatTopBar from './chat/ChatTopBar.js';
 import ContinueModal from './chat/ContinueModal.js';
+import { desktopHandoffNotice, handoffFileName, handoffFiles } from './lib/desktopHandoff.js';
+import type { HandoffAttachment } from './lib/api.js';
 import EscalationModal from './chat/EscalationModal.js';
 import ContextApprovalDialog from './chat/ContextApprovalDialog.js';
 import KeyVault from './keys/KeyVault.js';
@@ -35,6 +37,7 @@ import { initTheme, applyTheme, applyDensity } from './lib/theme.js';
 import {
   deleteConversation, fetchConfig, fetchMe, fetchSkills, getMessages, listConversations, logout, renameConversation,
   type CloudConfig,
+  fetchBrowserPrefs, type BrowserPrefs,
 } from './lib/api.js';
 import { closeSocket, getSocket } from './lib/socket.js';
 import type { CloudConversation, CloudUser, ProviderConfig, Skill } from './lib/types.js';
@@ -149,7 +152,30 @@ export default function App() {
   // view that hides them), so the controls are always visible to the session.
   const chat = useChatSession(socket, providers, skillId, webSearchPayload(webSearch), undefined, true);
   // Re-read as each run starts and ends, which is when a session can be spent.
-  const browserAllowance = useBrowserAllowance(user?.id, config?.remoteBrowserEnabled === true, chat.busy, chat.browserMode, chat.setBrowserMode);
+  // Two ways a run can have a browser: the deployment's hosted one, and the
+  // user's own Chrome through the extension. Only the hosted one is rationed, so
+  // only it reads the daily allowance.
+  const hostedBrowser = config?.remoteBrowserEnabled === true;
+  const ownBrowser = config?.browserRelay === true;
+  // Where this user's runs get a browser (Settings → Browser): read once signed in.
+  const [browserPrefs, setBrowserPrefs] = useState<BrowserPrefs | null>(null);
+  useEffect(() => {
+    if (!user) { setBrowserPrefs(null); return; }
+    fetchBrowserPrefs().then(setBrowserPrefs, () => setBrowserPrefs(null));
+  }, [user]);
+  const ownEndpoint = browserPrefs?.source === 'endpoint' && browserPrefs.endpoint !== null && browserPrefs.offers.endpoint;
+  const toDesktop = browserPrefs?.source === 'desktop';
+  // A message that needs the browser, under "Run on my desktop": handed to the desktop app.
+  // Its files go with it (images as bytes, documents as text); any that can't be read are named.
+  const [desktopHandoff, setDesktopHandoff] = useState<{ prompt: string; files: HandoffAttachment[]; missed: string[] } | null>(null);
+  const send: typeof chat.send = (input) => {
+    if (chat.browserMode && toDesktop) {
+      void handoffFiles(input.attachments ?? []).then(({ files, missed }) => setDesktopHandoff({ prompt: input.prompt, files, missed }));
+      return;
+    }
+    chat.send(input);
+  };
+  const browserAllowance = useBrowserAllowance(user?.id, hostedBrowser, chat.busy, chat.browserMode, chat.setBrowserMode);
   const [localModelOn, setLocalModelOn] = useState(() => localModelEnabled());
 
   // A run may have created a new conversation or renamed one — refresh the
@@ -390,7 +416,7 @@ export default function App() {
             skills={skills}
             skillId={skillId}
             onSkillChange={setSkillId}
-            onSend={chat.send}
+            onSend={send}
             onStop={chat.stop}
             browserLiveView={chat.browserLiveView}
             browserActive={chat.browserActive}
@@ -423,7 +449,8 @@ export default function App() {
             onAnswerClarification={chat.answerClarification}
             browserMode={chat.browserMode}
             onBrowserModeChange={chat.setBrowserMode}
-            browserAvailable={config?.remoteBrowserEnabled === true}
+            browserAvailable={hostedBrowser || ownBrowser || ownEndpoint || toDesktop}
+            browserOwnOnly={(ownBrowser || ownEndpoint || toDesktop) && !hostedBrowser}
             runDetail={detail}
             userName={(user.name ?? '').trim().split(/\s+/)[0] || undefined}
             contextTokens={chat.contextTokens}
@@ -451,6 +478,8 @@ export default function App() {
         {showSettings && (
           <SettingsModal
             user={user}
+            browserRelay={config?.browserRelay === true}
+            onBrowserPrefsChange={setBrowserPrefs}
             onClose={() => setShowSettings(false)}
             onOpenSkills={() => setShowSkills(true)}
             onOpenMemory={() => setShowMemory(true)}
@@ -526,6 +555,20 @@ export default function App() {
           <ContinueModal
             transcript={continueTranscript}
             onClose={() => setShowContinue(false)}
+            onRedeemed={handleRedeemed}
+          />
+        )}
+        {desktopHandoff !== null && (
+          <ContinueModal
+            transcript={{
+              ...continueTranscript,
+              messages: [
+                ...continueTranscript.messages,
+                { role: 'user', content: desktopHandoff.prompt, ...(desktopHandoff.files.length ? { attachments: desktopHandoff.files } : {}) },
+              ],
+            }}
+            notice={desktopHandoffNotice(desktopHandoff.files.map(handoffFileName), desktopHandoff.missed)}
+            onClose={() => setDesktopHandoff(null)}
             onRedeemed={handleRedeemed}
           />
         )}

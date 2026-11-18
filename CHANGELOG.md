@@ -5,7 +5,7 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.84.0 - 2026-10-22
+## 0.85.0 - 2026-11-17
 
 <!-- One `### Added` / `### Changed` / `### Fixed` per release, not per PR.
      The release workflow copies this whole block verbatim into the GitHub
@@ -17,6 +17,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      bumps package.json. The workflow matches sections by version prefix, so
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
+
+### Added
+- **Your own browser for cloud runs.** A run on Cascade Cloud, or on a server
+  you host, can use a browser on your own machine instead of one the server
+  hosts. Pair a device once, with the new **Cascade Chrome extension**
+  (`extension/`, load unpacked from `extension/dist` after
+  `node extension/build.mjs`) or with **`cascade relay pair`** and
+  `cascade relay serve`; turn on Browser in the web composer as before. Each
+  run asks on your device first, and gets only the sites you type there: a new
+  window with one tab in your Chrome, or a fresh browser with an empty profile
+  from the CLI, never a tab or profile you're using. Pages from any other site,
+  private-network addresses, popups, dialogs and downloads are stopped on your
+  device, before anything is sent, and no screenshot or live view leaves it: you
+  watch where it runs, and in the extension or the desktop app **Take over**
+  pauses the run while you use its tab, until you hand it back. Devices sign in with a key made on them,
+  and the server holds only its public half. In the extension a run also
+  reaches past its window, and says so when it asks: while it's open, WebRTC
+  sends no UDP in any tab (a call elsewhere may get worse), and until Chrome
+  restarts, workers of the sites you allowed can't reach your private network.
+  See `docs/browser-relay.md`.
+- **`BROWSER_RELAY=true`** turns this on for a server you run. It needs no
+  other setting, and can run alongside a hosted browser: a run uses the user's
+  own device when one is online. Only the hosted browser counts against a
+  plan's daily browser sessions.
+- **`HOSTED_BROWSER=off`** retires a server's hosted browser: `REMOTE_BROWSER_*`
+  are ignored, its daily session allowance goes, and every run's browser is the
+  user's own. On unless set off, so a hosted browser keeps working until its
+  operator turns it off.
+- **Settings → Browser** in the web app lists your paired devices, whether each
+  is online, and removes one (which also ends a run it is serving). It also
+  chooses where your runs' browser comes from: your devices, **your own CDP
+  endpoint** (a `wss://` browser you run, kept encrypted and shown back only as
+  its host), or **the desktop app**, which a chat is handed to when a message
+  needs the browser.
+- **The desktop app as a device.** Settings → Cloud runs lets runs on Cascade
+  Cloud use a browser in the app while it's open. Each run asks in the app, and
+  gets a window of its own with an empty, in-memory profile, policed in the
+  app's main process as the CLI's browser is. It serves only while the account
+  it was paired for is signed in.
+- **Images and documents in the desktop app.** The desktop chat takes images
+  (attach or paste), shows them on the message, and gives them to the run. A
+  chat handed from the web to the desktop app brings its files: images as
+  they are, documents as the text a run reads. If the chat ends on a message
+  not yet answered, it opens with that message ready to send. Only a signed-in
+  sender can attach files to a handoff. A chat sent the other way, or redeemed
+  on the web, keeps its text, and says its files stayed behind.
+- **Web search names what it uses.** Settings in the web and desktop apps say
+  which search is in use, and that with no backend it's "Free: DuckDuckGo, no
+  key needed", which is also the fallback when a configured one fails.
+- **`BROWSER_ENDPOINTS=true`** offers users their own CDP endpoint. Only public
+  addresses are accepted, resolved once and pinned for the run, unless
+  **`BROWSER_ENDPOINTS_PRIVATE=true`**, for a server on the same network as its
+  users' browsers.
+
+### Changed
+- **cascadeai.in no longer hosts a browser.** Runs there use your own Chrome
+  through the extension or `cascade relay`. The Free and Pro daily browser
+  session counts applied to the hosted browser only, and go with it.
+- The SDK exports the relay's server and device pieces (`src/browser/relay`),
+  which the cloud server, the extension and the desktop app build on.
+
+## 0.84.0 - 2026-10-22
 
 ### Added
 - **A spend & savings report in the cloud app.** What your runs cost and

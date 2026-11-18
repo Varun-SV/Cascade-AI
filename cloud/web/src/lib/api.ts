@@ -19,6 +19,14 @@ export interface CloudConfig {
    * endpoint, so neither should the switch for it.
    */
   remoteBrowserEnabled?: boolean;
+  /** Whether a user may give their runs their own CDP endpoint here. Absent means no. */
+  browserEndpoints?: boolean;
+  /**
+   * Whether a user's own Chrome can serve their runs a browser here, through the
+   * Cascade extension (the browser relay). Independent of `remoteBrowserEnabled`:
+   * a deployment can have this and no hosted browser at all. Absent means no.
+   */
+  browserRelay?: boolean;
 }
 
 async function json<T>(fetchPromise: Promise<Response>): Promise<T> {
@@ -548,9 +556,30 @@ export function fetchSpendReport(period: SpendPeriod): Promise<SpendReport> {
 
 // ── Conversation handoff (open-and-continue, web ↔ desktop) ──
 
+/** A file going with a handed-off message: an image's bytes, or a document's text. */
+export type HandoffAttachment =
+  | { kind: 'image'; mime: string; filename: string | null; data: string }
+  | { kind: 'document'; filename: string; text: string };
+
 export interface HandoffMessage {
   role: string;
   content: string;
+  attachments?: HandoffAttachment[];
+}
+
+/** An image upload's bytes, base64, for a handoff to the desktop app. */
+export async function fetchUploadBase64(id: string): Promise<{ mime: string; data: string }> {
+  const res = await fetch(`/api/uploads/${encodeURIComponent(id)}`, { credentials: 'include' });
+  if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return { mime: (res.headers.get('content-type') ?? '').split(';')[0]!.trim(), data: btoa(bin) };
+}
+
+/** A document upload's text, as a run reads it. */
+export function fetchUploadText(id: string): Promise<{ filename: string; text: string }> {
+  return json(fetch(`/api/uploads/${encodeURIComponent(id)}/text`, { credentials: 'include' }));
 }
 
 export interface HandoffInput {
@@ -590,4 +619,57 @@ export function importConversation(
       body: JSON.stringify(input),
     }),
   );
+}
+
+// ── Your own browser: devices paired with the browser relay ──
+
+/** A device the signed-in user paired: the extension in a Chrome, or a computer through the CLI. */
+export interface RelayDevice {
+  id: string;
+  name: string;
+  kind: 'extension' | 'cli' | 'desktop';
+  createdAt: number;
+  lastSeenAt: number | null;
+  online: boolean;
+}
+
+export async function fetchRelayDevices(): Promise<RelayDevice[]> {
+  const body = await json<{ devices?: RelayDevice[] }>(fetch('/api/browser-relay/devices', { credentials: 'include' }));
+  return body.devices ?? [];
+}
+
+export function removeRelayDevice(id: string): Promise<{ ok: boolean }> {
+  return json(fetch(`/api/browser-relay/devices/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' }));
+}
+
+// ── Where the user's runs get a browser (Settings → Browser) ──
+
+export type BrowserSource = 'device' | 'endpoint' | 'desktop';
+export interface BrowserPrefs {
+  source: BrowserSource;
+  /** Their own CDP endpoint, as its host only: the address itself is never sent back. */
+  endpoint: { host: string } | null;
+  /** What this server offers. */
+  offers: { device: boolean; endpoint: boolean; desktop: boolean };
+  privateEndpoints: boolean;
+}
+
+export function fetchBrowserPrefs(): Promise<BrowserPrefs> {
+  return json(fetch('/api/browser/prefs', { credentials: 'include' }));
+}
+
+export function setBrowserSource(source: BrowserSource): Promise<BrowserPrefs> {
+  return json(fetch('/api/browser/prefs', {
+    method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source }),
+  }));
+}
+
+export function saveBrowserEndpoint(url: string): Promise<BrowserPrefs> {
+  return json(fetch('/api/browser/endpoint', {
+    method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
+  }));
+}
+
+export function removeBrowserEndpoint(): Promise<BrowserPrefs> {
+  return json(fetch('/api/browser/endpoint', { method: 'DELETE', credentials: 'include' }));
 }

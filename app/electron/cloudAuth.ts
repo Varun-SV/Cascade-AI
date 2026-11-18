@@ -78,7 +78,13 @@ interface CloudClientLike {
   pullSecrets(): Promise<{ blob: EncBlob | null; version?: number; updatedAt?: number }>;
   pushSecrets(blob: EncBlob): Promise<{ version: number; updatedAt: number }>;
   logout(): Promise<void>;
+  relayServer(): Promise<{ serverId: string; serverKey: string; controlPath: string; runPath: string }>;
+  registerRelayDevice(input: { name: string; kind: 'cli' | 'desktop'; publicKey: string }): Promise<{ device: { id: string; name: string }; serverId: string; serverKey: string }>;
+  removeRelayDevice(id: string): Promise<void>;
 }
+
+/** What pairing this app as a relay device needs of the signed-in account. */
+export type RelayCloudClient = Pick<CloudClientLike, 'relayServer' | 'registerRelayDevice' | 'removeRelayDevice'>;
 
 type CloudClientCtor = new (serverUrl: string, dir?: string, store?: SessionStore, options?: { beforeSend?: () => void }) => CloudClientLike;
 
@@ -197,6 +203,10 @@ class SafeStorageSessionStore implements SessionStore {
 export interface CloudAuthHandle {
   account(): { userId: string; serverUrl: string } | null;
   syncAllowed(): boolean;
+  /** The signed-in account's client, for pairing this app as a relay device; null when signed out. */
+  relayClient(): RelayCloudClient | null;
+  /** Called after a sign-in or a sign-out: the account signed in may have changed. */
+  onAccountChange(listener: () => void): void;
 }
 
 export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks): CloudAuthHandle {
@@ -208,6 +218,8 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
   const consent = fileSyncConsent(join(app.getPath('userData'), 'cloud-sync.json'));
 
   let loginAbort: AbortController | null = null;
+  const accountListeners: Array<() => void> = [];
+  const accountChanged = (): void => { for (const l of accountListeners) { try { l(); } catch { /* one listener's failure isn't the sign-in's */ } } };
 
   const status = () => {
     const s = store.load();
@@ -222,6 +234,7 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
     const p: 'google' | 'github' = provider === 'github' ? 'github' : 'google';
     try {
       await client().runLoopbackLogin((url) => { void shell.openExternal(url); }, { provider: p, signal: loginAbort.signal });
+      accountChanged();
       return { ok: true, ...status() };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : 'Sign-in failed.' };
@@ -234,6 +247,7 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
 
   ipcMain.handle('cloud:logout', async () => {
     try { await client().logout(); } catch { /* revoke is best-effort; local state still clears */ }
+    accountChanged();
     return { ok: true, ...status() };
   });
 
@@ -578,5 +592,7 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
       return s?.user?.id ? { userId: s.user.id, serverUrl } : null;
     },
     syncAllowed: () => consent.allowed(),
+    relayClient: () => (store.load() ? client() : null),
+    onAccountChange: (listener) => { accountListeners.push(listener); },
   };
 }

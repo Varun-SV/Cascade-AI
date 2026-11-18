@@ -23,6 +23,8 @@ import {
 } from './store/index.js';
 import { SettingsView } from './views/SettingsView.js';
 import { ApprovalModal } from './components/ApprovalModal.js';
+import { RelayConsentModal } from './components/RelayConsentModal.js';
+import { RelayRunBanner } from './components/RelayRunBanner.js';
 import { PlanApprovalModal } from './components/PlanApprovalModal.js';
 import { EscalationModal } from './components/EscalationModal.js';
 import { WhyPanel } from './components/WhyPanel.js';
@@ -83,6 +85,14 @@ export interface DesktopBrowserState {
   agentQueueDepth?: number;
 }
 
+/** This app as a relay device: see app/electron/desktop-relay.ts. */
+export interface RelayStatus {
+  paired: boolean; enabled: boolean; connected: boolean; name: string | null; server: string | null; run: boolean;
+  /** The user has the run's window; the run waits until they hand it back. */
+  takenOver: boolean;
+  error: string | null;
+}
+
 declare global {
   interface Window {
     cascade?: {
@@ -130,6 +140,18 @@ declare global {
         rename(oldPath: string, newPath: string): Promise<{ ok: boolean }>;
         delete(path: string): Promise<{ ok: boolean }>;
         search(root: string, query: string): Promise<Array<{ file: string; line: number; text: string }>>;
+      };
+      relay?: {
+        status(): Promise<RelayStatus>;
+        enable(): Promise<RelayStatus | { error: string }>;
+        disable(): Promise<RelayStatus | { error: string }>;
+        forget(): Promise<RelayStatus | { error: string }>;
+        answer(id: number, sites: string): Promise<{ ok: true } | { error: string }>;
+        takeOver(): Promise<{ ok: true } | { error: string }>;
+        handBack(): Promise<{ ok: true } | { error: string }>;
+        onAsk(cb: (a: { id: number; runId: string; expiresAt: number }) => void): void;
+        onAskClosed(cb: (a: { id: number }) => void): void;
+        onStatus(cb: (s: RelayStatus) => void): void;
       };
       cloud?: {
         status(): Promise<{ signedIn: boolean; user: CloudUser | null; serverUrl: string; storage: 'keychain' | 'encrypted-file' }>;
@@ -523,6 +545,8 @@ export function App() {
       <StatusBar socket={socketRef.current} />
       {showSettings && <SettingsView socket={socketRef.current} />}
       <ApprovalModal socket={socketRef.current} />
+      <RelayConsentModal />
+      <RelayRunBanner />
       <PlanApprovalModal socket={socketRef.current} />
       <EscalationModal socket={socketRef.current} />
       <ChangesModal />

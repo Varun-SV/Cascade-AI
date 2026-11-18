@@ -48,6 +48,25 @@ const EnvSchema = z.object({
     .string()
     .optional()
     .transform((v) => v === '1' || v === 'true'),
+  // The browser relay: a user's own device serves their runs a browser, and the
+  // server hosts none. Off by default while it is being built; with it off, the
+  // endpoints do not exist at all (docs/design/byo-browser-and-routing-data.md).
+  // Source C: a user may give their runs their own CDP endpoint (a wss:// connect URL
+  // for Steel, Browserless or a Chrome). Off by default. The server dials only public
+  // addresses, checked and pinned (user-endpoint.ts), unless BROWSER_ENDPOINTS_PRIVATE
+  // is on, for a self-hosted server whose users' browsers are on its own network.
+  BROWSER_ENDPOINTS: z
+    .string()
+    .optional()
+    .transform((v) => v === '1' || v === 'true'),
+  BROWSER_ENDPOINTS_PRIVATE: z
+    .string()
+    .optional()
+    .transform((v) => v === '1' || v === 'true'),
+  BROWSER_RELAY: z
+    .string()
+    .optional()
+    .transform((v) => v === '1' || v === 'true'),
   // Hard per-run cost ceiling passed straight to Cascade's own budget guard
   // (src/core/router — maxCostPerRunUsd). A safety rail on the shared server
   // ahead of real per-plan entitlements (task #29).
@@ -112,6 +131,16 @@ const EnvSchema = z.object({
   //   steel — a Steel deployment. REMOTE_BROWSER_URL is the API base and
   //           defaults to Steel's hosted API; REMOTE_BROWSER_API_KEY is its key.
   REMOTE_BROWSER_PROVIDER: z.enum(['cdp', 'steel']).optional(),
+  // The switch that retires the hosted browser (stage 4 of
+  // docs/design/byo-browser-and-routing-data.md): `off` and every run's browser is
+  // the user's own, through the browser relay. REMOTE_BROWSER_* are then ignored,
+  // and the daily browser-session allowance, which rationed hosted sessions, goes
+  // with them. On by default, so a deployment's hosted browser keeps working until
+  // its operator turns it off.
+  HOSTED_BROWSER: z
+    .string()
+    .optional()
+    .transform((v) => !['0', 'false', 'off', 'no'].includes((v ?? '').trim().toLowerCase())),
   // TRIMMED, so a value that is only whitespace becomes empty and is then
   // dropped by `remoteBrowserControls` as absent.
   //

@@ -105,6 +105,21 @@ describe('the operator configures a browser for their deployment', () => {
     expect(() => loadEnv({ ...baseEnv(dir), REMOTE_BROWSER_VISION: 'everything' })).toThrow();
   });
 
+  it('HOSTED_BROWSER=off: no run is given the hosted browser, whatever REMOTE_BROWSER_* say (stage 4)', async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-rb-retired-'));
+    const steel = { REMOTE_BROWSER_PROVIDER: 'steel', REMOTE_BROWSER_API_KEY: 'sk-test' };
+    const on = loadEnv({ ...baseEnv(dir), ...steel });
+    expect(on.HOSTED_BROWSER, 'on unless the operator turns it off').toBe(true);
+    expect(buildCloudConfig([], on.MAX_COST_PER_RUN_USD, { ...remoteBrowserControls(on), browserMode: true }).tools?.remoteBrowser?.provider).toBe('steel');
+    for (const value of ['off', 'OFF', '0', 'false', 'no', ' off ']) {
+      const off = loadEnv({ ...baseEnv(dir), ...steel, HOSTED_BROWSER: value });
+      expect([value, off.HOSTED_BROWSER]).toEqual([value, false]);
+      expect(remoteBrowserControls(off)).toEqual({});
+      expect(buildCloudConfig([], off.MAX_COST_PER_RUN_USD, { ...remoteBrowserControls(off), browserMode: true }).tools?.remoteBrowser).toBeUndefined();
+    }
+    expect(loadEnv({ ...baseEnv(dir), ...steel, HOSTED_BROWSER: 'on' }).HOSTED_BROWSER).toBe(true);
+  });
+
   it('leaves the config untouched when the operator configured nothing', async () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-rb-off-'));
     const env = loadEnv(baseEnv(dir));

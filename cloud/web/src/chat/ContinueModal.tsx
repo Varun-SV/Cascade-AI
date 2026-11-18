@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Copy, Check, ArrowRight, Loader2, RefreshCw, Send, Download, Monitor } from 'lucide-react';
 import Modal from '../components/Modal.js';
+import { toast } from '../lib/toast.js';
 import { createHandoff, fetchHandoff, importConversation, type HandoffMessage } from '../lib/api.js';
 
 export interface Transcript {
@@ -16,6 +17,8 @@ interface Props {
   onClose: () => void;
   /** Called with the new conversation id after a code is redeemed here. */
   onRedeemed: (conversationId: string) => void;
+  /** Why the chat is being sent, when it's for a reason: shown first, and opens on Send. */
+  notice?: string;
 }
 
 type Tab = 'send' | 'receive';
@@ -32,13 +35,14 @@ const tabBtn = (active: boolean) =>
     active ? 'bg-elev/[0.1] text-ink-50 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]' : 'text-ink-400 hover:text-ink-200'
   }`;
 
-export default function ContinueModal({ transcript, onClose, onRedeemed }: Props) {
+export default function ContinueModal({ transcript, onClose, onRedeemed, notice }: Props) {
   const canSend = !!transcript && transcript.messages.length > 0;
   const [tab, setTab] = useState<Tab>(canSend ? 'send' : 'receive');
 
   return (
     <Modal title="Continue elsewhere" onClose={onClose}>
       <div className="flex flex-col gap-4 p-4 text-sm text-ink-100">
+        {notice && <p role="note" className="m-0 rounded-lg bg-elev/[0.05] px-3 py-2 text-xs leading-relaxed text-ink-200">{notice}</p>}
         <div className="flex gap-1 rounded-xl border border-elev/10 bg-elev/[0.03] p-1">
           <button type="button" className={tabBtn(tab === 'send')} onClick={() => setTab('send')}>
             <Send size={13} /> Send this chat
@@ -195,6 +199,9 @@ function ReceiveTab({ onRedeemed }: { onRedeemed: (conversationId: string) => vo
         skillId: snap.skillId,
         messages: snap.messages,
       });
+      // Files a handoff carried are for the desktop app; here the chat keeps its text.
+      const files = snap.messages.reduce((n, m) => n + (m.attachments?.length ?? 0), 0);
+      if (files) toast(`${files === 1 ? 'A file' : `${files} files`} in that chat stayed behind: files go to the desktop app only.`);
       onRedeemed(conversation.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'That code is invalid or has expired.');

@@ -1084,3 +1084,40 @@ describe('approvalRequestFor', () => {
     expect(approvalRequestFor(req as never).input).toEqual({ command: 'ls' });
   });
 });
+
+describe('prompt checks that run on the user\'s text', () => {
+  type Checks = {
+    isCasualGreeting(p: string): boolean;
+    looksLikeSmallTalk(p: string, h?: unknown[]): boolean;
+    looksLikeSimpleArtifactTask(p: string): boolean;
+    buildSignals(p: string): { multiPart: boolean };
+  };
+  const checks = () => new Cascade(baseConfig, '/tmp') as unknown as Checks;
+
+  it('classify as before', () => {
+    const c = checks();
+    expect(c.isCasualGreeting('Thanks!!?')).toBe(true);
+    expect(c.isCasualGreeting('thanks for the help')).toBe(false);
+    expect(c.looksLikeSmallTalk('hey there!')).toBe(true);
+    expect(c.looksLikeSmallTalk('hello, cascade.')).toBe(true);
+    expect(c.looksLikeSmallTalk('hello build me an app')).toBe(false);
+    expect(c.looksLikeSimpleArtifactTask('please create a notes.md file')).toBe(true);
+    expect(c.looksLikeSimpleArtifactTask('create a report.md comparing vendors')).toBe(false);
+    expect(c.looksLikeSimpleArtifactTask('create a file\ncalled notes.md')).toBe(false);
+    expect(c.buildSignals('build the backend and then also wire up the frontend').multiPart).toBe(true);
+    expect(c.buildSignals('build a dashboard:\n- charts\n- filters for the team').multiPart).toBe(true);
+    expect(c.buildSignals('build a dashboard for the sales team please').multiPart).toBe(false);
+    expect(c.buildSignals('build the api and wire\nthe frontend then').multiPart).toBe(false);
+  });
+
+  it('stay linear on input made to make a regex backtrack', () => {
+    const c = checks();
+    const started = Date.now();
+    c.isCasualGreeting(`${'!'.repeat(50_000)}x`);
+    c.looksLikeSmallTalk(`hi${' '.repeat(50_000)}!x`);
+    c.looksLikeSimpleArtifactTask(`create ${'create '.repeat(20_000)}`);
+    c.buildSignals(`build an app ${'and '.repeat(20_000)}x`);
+    c.buildSignals(`build an app${'\n'.repeat(50_000)}x`);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+});

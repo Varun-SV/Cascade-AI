@@ -1,4 +1,5 @@
 import { configureStore, createSlice, PayloadAction } from '@reduxjs/toolkit';
+import { loadDrafts, saveDrafts } from '../lib/drafts.js';
 import { useDispatch, useSelector } from 'react-redux';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -39,6 +40,23 @@ export interface ChatMessage {
   model?: string;
   timestamp: number;
   streaming?: boolean;
+  /** Files sent with the message, kept by the local backend. */
+  attachments?: ChatAttachmentRef[];
+}
+
+/** An image or document kept by the local backend (GET /api/attachments/:id). */
+export interface ChatAttachmentRef {
+  id: string;
+  kind: 'image' | 'document';
+  mime: string;
+  filename: string | null;
+}
+
+/** A message waiting in the composer: a chat handed over from the web lands here, to send. */
+export interface ComposerDraft {
+  sessionId: string;
+  prompt: string;
+  attachments: ChatAttachmentRef[];
 }
 
 export interface RuntimeSession {
@@ -164,6 +182,8 @@ export interface AppState {
   changesSessionId: string | null;
   /** The "Continue elsewhere" handoff modal (web ↔ desktop) is open. */
   showContinue: boolean;
+  /** Messages waiting to be sent, by session: kept until sent, across restarts (lib/drafts.ts). */
+  composerDrafts: Record<string, ComposerDraft>;
 }
 
 /** A live T3↔T3 / T2↔T2 message, drawn as a transient edge in the graph. */
@@ -298,6 +318,7 @@ const initialState: AppState = {
   showPalette: false,
   changesSessionId: null,
   showContinue: false,
+  composerDrafts: loadDrafts(),
 };
 
 // ─── Slice ────────────────────────────────────────────────────────────────────
@@ -460,6 +481,7 @@ const appSlice = createSlice({
     removeSession(state, action: PayloadAction<string>) {
       state.sessions = state.sessions.filter((s) => s.sessionId !== action.payload);
       if (state.activeSessionId === action.payload) state.activeSessionId = null;
+      delete state.composerDrafts[action.payload];
     },
     toggleSessionSidebar(state) {
       state.sessionSidebarCollapsed = !state.sessionSidebarCollapsed;
@@ -570,11 +592,18 @@ const appSlice = createSlice({
     setShowContinue(state, action: PayloadAction<boolean>) {
       state.showContinue = action.payload;
     },
+    saveComposerDraft(state, action: PayloadAction<ComposerDraft>) {
+      state.composerDrafts[action.payload.sessionId] = action.payload;
+    },
+    clearComposerDraft(state, action: PayloadAction<string>) {
+      delete state.composerDrafts[action.payload];
+    },
   },
 });
 
 export const {
   setView, setConnected, setReconnecting, setBackendError, setShowSettings, setMeta, setSessionId, updateCost,
+  saveComposerDraft, clearComposerDraft,
   setAgents, upsertAgent, appendMessage, updateLastMessage, finalizeLastMessage, loadTranscript,
   setWorkspacePath, toggleTerminal, openTerminalAt, toggleCodeChat, setHelpContext, setTheme, setActiveModel, setActiveModelT1, setActiveModelChat,
   setSessions, setActiveSessionId, removeSession, toggleSessionSidebar, setSessionSidebarCollapsed,
@@ -589,6 +618,12 @@ export const {
 
 // ─── Store ────────────────────────────────────────────────────────────────────
 export const store = configureStore({ reducer: { app: appSlice.reducer } });
+// Drafts outlive the window: saved whenever they change.
+let savedDrafts = store.getState().app.composerDrafts;
+store.subscribe(() => {
+  const drafts = store.getState().app.composerDrafts;
+  if (drafts !== savedDrafts) { savedDrafts = drafts; saveDrafts(drafts); }
+});
 
 export type RootState = ReturnType<typeof store.getState>;
 export type AppDispatch = typeof store.dispatch;

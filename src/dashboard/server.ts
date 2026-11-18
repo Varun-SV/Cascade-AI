@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { createServer } from 'node:http';
+import { RUN_FILE_LIMITS, attachmentIdsFrom, filesForRun, parseNewAttachment, withDocuments } from './run-files.js';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
@@ -336,15 +337,17 @@ export class DashboardServer {
       return { refused, snapshot: settingsSnapshot(this.config) };
     });
 
-    this.socket.onCascadeRun(async (prompt, model, socketId, requestedSessionId, forceTier) => {
+    this.socket.onCascadeRun(async (prompt, model, socketId, requestedSessionId, forceTier, attachmentIds = []) => {
       const sessionId = requestedSessionId ?? randomUUID();
       const abortController = new AbortController();
       this.activeControllers.set(sessionId, abortController);
 
       // Resuming an existing session: fold its stored history into the prompt
       // (built before persistRunStart so the new prompt isn't self-included).
-      const runPrompt = requestedSessionId ? this.buildContinuationPrompt(sessionId, prompt) : prompt;
-      const title = this.persistRunStart(sessionId, prompt);
+      // The message's files: images go in as images, documents as text before it.
+      const files = this.runFiles(requestedSessionId ? sessionId : null, attachmentIds);
+      const runPrompt = withDocuments(requestedSessionId ? this.buildContinuationPrompt(sessionId, prompt) : prompt, files.documents);
+      const title = this.persistRunStart(sessionId, prompt, attachmentIds);
       let cfg = model !== 'auto'
         ? { ...this.config, models: { ...this.config.models, t1: model } }
         : this.config;
@@ -402,6 +405,7 @@ export class DashboardServer {
       try {
         const result = await cascade.run({
           prompt: runPrompt,
+          ...(files.images.length ? { images: files.images } : {}),
           signal: abortController.signal,
           approvalCallback: this.makeApprovalCallback(sessionId),
         });
@@ -714,7 +718,7 @@ export class DashboardServer {
   // helpers give both run paths the same persistence the CLI has.
 
   /** Record run start: session row (if new), the user message, and an ACTIVE runtime row. Returns the session title. */
-  private persistRunStart(sessionId: string, prompt: string): string {
+  private persistRunStart(sessionId: string, prompt: string, attachmentIds: string[] = []): string {
     const now = new Date().toISOString();
     let title = prompt.replace(/\s+/g, ' ').trim().slice(0, 40);
     try {
@@ -729,7 +733,9 @@ export class DashboardServer {
           metadata: { totalTokens: 0, totalCostUsd: 0, modelsUsed: [], toolsUsed: [], taskCount: 0 },
         });
       }
-      this.store.addMessage({ id: randomUUID(), sessionId, role: 'user', content: prompt, timestamp: now });
+      const messageId = randomUUID();
+      this.store.addMessage({ id: messageId, sessionId, role: 'user', content: prompt, timestamp: now });
+      this.store.claimAttachments(messageId, sessionId, attachmentIds);
     } catch (err) {
       console.warn('[dashboard] failed to persist run start:', err);
     }
@@ -1158,6 +1164,26 @@ export class DashboardServer {
    * conversation to the new prompt. Called BEFORE persistRunStart so the new
    * prompt isn't duplicated into its own context.
    */
+  /**
+   * What a run gets from files: the new message's, and on a continued chat the ones
+   * earlier messages carried too, so a follow-up about them (or a chat handed over
+   * with them) still has them. Earlier documents all go in as text; of earlier
+   * images, the latest few, which bounds what a long chat costs.
+   */
+  private runFiles(continuedSessionId: string | null, attachmentIds: string[]): ReturnType<typeof filesForRun> {
+    const earlier: Array<NonNullable<ReturnType<MemoryStore['getAttachment']>>> = [];
+    if (continuedSessionId) {
+      const refs = this.store.getSessionMessages(continuedSessionId).flatMap((m) => m.attachments ?? []);
+      const images = refs.filter((r) => r.kind === 'image').slice(-RUN_FILE_LIMITS.earlierImages);
+      for (const r of refs) {
+        if (r.kind === 'image' && !images.includes(r)) continue;
+        const file = this.store.getAttachment(r.id);
+        if (file) earlier.push(file);
+      }
+    }
+    return filesForRun([...earlier, ...this.store.getUnclaimedAttachments(attachmentIds)]);
+  }
+
   private buildContinuationPrompt(sessionId: string, prompt: string): string {
     try {
       const history = this.store.getSessionMessages(sessionId);
@@ -1252,7 +1278,10 @@ export class DashboardServer {
   }
 
   private setupMiddleware(): void {
-    this.app.use(express.json({ limit: '10mb' }));
+    // An import bundle carries its chats' files, so it gets a larger allowance of its own.
+    const importJson = express.json({ limit: '200mb' });
+    const defaultJson = express.json({ limit: '10mb' });
+    this.app.use((req, res, next) => (req.path === '/api/import' || req.path === '/api/import/' ? importJson : defaultJson)(req, res, next));
     this.app.use(express.urlencoded({ extended: true }));
 
     // CORS for dev
@@ -1435,7 +1464,37 @@ export class DashboardServer {
       }
     });
 
-    // Body size is capped by the app-wide express.json limit (10mb).
+    // A file for a message about to be sent (or imported): uploaded first, then
+    // its id goes with the message. Within the app-wide 10mb body limit.
+    // Files come several at a time (a message's ten, a handed-over chat's), so they
+    // get their own allowance rather than the 10-a-minute one for runs.
+    const attachmentLimiter = rateLimit({ windowMs: 60 * 1000, limit: 120, standardHeaders: 'draft-7', legacyHeaders: false, message: { error: 'Too many files at once. Slow down.' } });
+    this.app.post('/api/attachments', attachmentLimiter, auth, (req: Request, res: Response) => {
+      const parsed = parseNewAttachment(req.body);
+      if ('error' in parsed) { res.status(400).json({ error: parsed.error }); return; }
+      res.json(this.store.addAttachment(parsed));
+    });
+
+    // Files waiting in a session's draft (a chat handed over to send here): kept with it.
+    this.app.post('/api/attachments/hold', attachmentLimiter, auth, (req: Request, res: Response) => {
+      const body = (req.body ?? {}) as { sessionId?: unknown; ids?: unknown };
+      if (typeof body.sessionId !== 'string' || !body.sessionId || body.sessionId.length > 128) { res.status(400).json({ error: 'sessionId is required' }); return; }
+      if (!this.store.getSession(body.sessionId)) { res.status(404).json({ error: 'No such session' }); return; }
+      res.json({ held: this.store.holdAttachments(body.sessionId, attachmentIdsFrom(body.ids)) });
+    });
+
+    // A message's file, to show it: an image's bytes, or a document's text.
+    this.app.get('/api/attachments/:id', attachmentLimiter, auth, (req: Request, res: Response) => {
+      const file = this.store.getAttachment(req.params.id as string);
+      if (!file) { res.status(404).json({ error: 'Not found' }); return; }
+      if (file.kind === 'image') {
+        res.type(file.mime).set('Cache-Control', 'private, max-age=86400').send(Buffer.from(file.data, 'base64'));
+        return;
+      }
+      res.json({ filename: file.filename, text: file.data });
+    });
+
+    // Body size: 200mb for this route alone (see setupMiddleware), for chats' files.
     this.app.post('/api/import', auth, mutationLimiter, (req: Request, res: Response) => {
       try {
         const bundle = req.body as {
@@ -1472,7 +1531,7 @@ export class DashboardServer {
           }
         }
         this.socket.broadcast('runtime:refresh', { scope: 'workspace' });
-        res.json({ ok: true, imported: { sessions: importedSessions.length, facts, logEntries, identities } });
+        res.json({ ok: true, imported: { sessions: importedSessions.length, facts, logEntries, identities }, sessions: importedSessions });
       } catch (err) {
         res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
       }
@@ -1694,7 +1753,7 @@ export class DashboardServer {
 
     // ── Remote Run ──────────────────────────────
     this.app.post('/api/run', auth, mutationLimiter, (req: Request, res: Response) => {
-      const body = req.body as { prompt?: string; identityId?: string; sessionId?: string };
+      const body = req.body as { prompt?: string; identityId?: string; sessionId?: string; attachmentIds?: unknown };
       if (!body.prompt || typeof body.prompt !== 'string') {
         res.status(400).json({ error: 'prompt is required' });
         return;
@@ -1705,8 +1764,10 @@ export class DashboardServer {
       res.json({ sessionId, status: 'ACTIVE' });
 
       const prompt = body.prompt;
-      const runPrompt = requestedSessionId ? this.buildContinuationPrompt(sessionId, prompt) : prompt;
-      const title = this.persistRunStart(sessionId, prompt);
+      const attachmentIds = attachmentIdsFrom(body.attachmentIds);
+      const files = this.runFiles(requestedSessionId ? sessionId : null, attachmentIds);
+      const runPrompt = withDocuments(requestedSessionId ? this.buildContinuationPrompt(sessionId, prompt) : prompt, files.documents);
+      const title = this.persistRunStart(sessionId, prompt, attachmentIds);
 
       void (async () => {
         const cascade = new Cascade(this.config, this.workspacePath, this.store);
@@ -1762,6 +1823,7 @@ export class DashboardServer {
         try {
           const result = await cascade.run({
             prompt: runPrompt,
+            ...(files.images.length ? { images: files.images } : {}),
             identityId: body.identityId,
             approvalCallback: this.makeApprovalCallback(sessionId),
           });

@@ -395,6 +395,36 @@ describe('cloud/server app', () => {
     expect(body.browserSessionLimit).toBe(5);
   });
 
+  it('a user\'s own CDP endpoint: offered only when on, public only, stored encrypted, shown as its host (stage 6, C)', async () => {
+    const cookie = await login('Endpoint owner');
+    const j = { 'Content-Type': 'application/json', Cookie: cookie };
+    const put = (url: unknown) => fetch(`${baseUrl}/api/browser/endpoint`, { method: 'PUT', headers: j, body: JSON.stringify({ url }) });
+    const prefs = async () => (await (await fetch(`${baseUrl}/api/browser/prefs`, { headers: { Cookie: cookie } })).json()) as {
+      source: string; endpoint: { host: string } | null; offers: Record<string, boolean>;
+    };
+    expect(await prefs()).toMatchObject({ source: 'device', endpoint: null, offers: { endpoint: false, desktop: true } });
+    expect((await put('wss://connect.example.com/?apiKey=SECRETTOKEN')).status).toBe(404);
+    expect((await fetch(`${baseUrl}/api/browser/prefs`, { method: 'PUT', headers: j, body: JSON.stringify({ source: 'endpoint' }) })).status).toBe(400);
+
+    await restartWith({ BROWSER_ENDPOINTS: true });
+    for (const bad of ['ws://connect.example.com', 'wss://127.0.0.1:9222', 'wss://localhost', 'https://x.example.com', 'wss://u:p@x.example.com']) {
+      expect([bad, (await put(bad)).status]).toEqual([bad, 400]);
+    }
+    const saved = await put('wss://connect.example.com/?apiKey=SECRETTOKEN');
+    expect(saved.status).toBe(200);
+    const text = await saved.text();
+    expect(text).toContain('connect.example.com');
+    expect(text).not.toContain('SECRETTOKEN');
+    expect(JSON.stringify(await prefs())).not.toContain('SECRETTOKEN');
+    // At rest it is ciphertext: the token is nowhere in the database file.
+    expect((await fs.readFile(path.join(dir, 'cloud.db'))).includes('SECRETTOKEN')).toBe(false);
+    expect((await (await fetch(`${baseUrl}/api/browser/prefs`, { method: 'PUT', headers: j, body: JSON.stringify({ source: 'endpoint' }) })).json() as { source: string }).source).toBe('endpoint');
+    expect((await fetch(`${baseUrl}/api/browser/prefs`, { method: 'PUT', headers: j, body: JSON.stringify({ source: 'phone' }) })).status).toBe(400);
+    expect((await (await fetch(`${baseUrl}/api/browser/endpoint`, { method: 'DELETE', headers: { Cookie: cookie } })).json() as { endpoint: unknown }).endpoint).toBeNull();
+    expect((await fetch(`${baseUrl}/api/browser/prefs`)).status).toBe(401);
+    expect(((await (await fetch(`${baseUrl}/api/config`)).json()) as { browserEndpoints?: boolean }).browserEndpoints).toBe(true);
+  });
+
   it('GET /api/usage/report is the signed-in user\'s own spend, and checks its inputs', async () => {
     expect((await fetch(`${baseUrl}/api/usage/report`)).status).toBe(401);
 
@@ -562,6 +592,25 @@ describe('cloud/server app', () => {
     // The local model was priced, at $0: free, not missing a price.
     const llama = body.tiers[0]!.models.find((m) => m.model === 'ollama:llama')!;
     expect(llama).toMatchObject({ unpricedRuns: 0, priceUnknownRuns: 0 });
+  });
+
+  it('HOSTED_BROWSER=off retires the hosted browser: no switch for it, and no allowance (stage 4)', async () => {
+    const config = async () => (await (await fetch(`${baseUrl}/api/config`)).json()) as { remoteBrowserEnabled?: boolean };
+    const usage = async () => {
+      const loginRes = await fetch(`${baseUrl}/auth/dev-login`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Retired' }),
+      });
+      const cookie = extractCookie(loginRes, SESSION_COOKIE_NAME)!;
+      return await (await fetch(`${baseUrl}/api/usage`, { headers: { Cookie: cookie } })).json() as Record<string, unknown>;
+    };
+    const hosted = { CASCADE_DEPLOYMENT_MODE: 'hosted' as const, REMOTE_BROWSER_PROVIDER: 'steel' as const, REMOTE_BROWSER_API_KEY: 'sk-test' };
+    // Control: on by default, the hosted browser and its allowance are there.
+    await restartWith(hosted);
+    expect((await config()).remoteBrowserEnabled).toBe(true);
+    expect(Object.keys(await usage())).toContain('browserSessionLimit');
+    await restartWith({ ...hosted, HOSTED_BROWSER: false });
+    expect((await config()).remoteBrowserEnabled).toBe(false);
+    expect(Object.keys(await usage())).not.toContain('browserSessionLimit');
   });
 
   it('GET /api/usage reports no browser allowance where nothing rations one', async () => {
@@ -1162,6 +1211,60 @@ describe('cloud/server app', () => {
     // A different user cannot.
     const foreign = await fetch(`${baseUrl}/api/uploads/${id}`, { headers: { Cookie: bob } });
     expect(foreign.status).toBe(404);
+  });
+
+  it('handoff files: only a signed-in sender may attach them, and a redeem returns them', async () => {
+    const files = [
+      { kind: 'image', mime: 'image/png', filename: 'shot.png', data: TINY_PNG_BASE64 },
+      { kind: 'document', filename: 'notes.txt', text: 'the notes' },
+    ];
+    const payload = JSON.stringify({ messages: [{ role: 'user', content: 'open this', attachments: files }] });
+    const anon = await fetch(`${baseUrl}/api/handoff`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload });
+    expect(anon.status).toBe(400);
+    expect(((await anon.json()) as { error: string }).error).toMatch(/Sign in/);
+
+    const alice = await login('Alice');
+    const created = await fetch(`${baseUrl}/api/handoff`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice }, body: payload });
+    expect(created.status).toBe(200);
+    const { code } = (await created.json()) as { code: string };
+    // The keyless desktop app redeems it without signing in.
+    const read = (await (await fetch(`${baseUrl}/api/handoff/${code}`)).json()) as { messages: Array<{ attachments?: unknown }> };
+    expect(read.messages[0]!.attachments).toEqual(files);
+
+    // Redeemed into the web, the chat keeps its text.
+    const imported = await fetch(`${baseUrl}/api/conversations/import`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice }, body: JSON.stringify(read),
+    });
+    expect(imported.status).toBe(200);
+  });
+
+  it('a signed-in handoff can carry more than the anonymous body limit', async () => {
+    const alice = await login('Alice');
+    const data = 'A'.repeat(6_000_000);
+    const created = await fetch(`${baseUrl}/api/handoff`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'big', attachments: [{ kind: 'image', mime: 'image/png', filename: null, data }] }] }),
+    });
+    expect(created.status).toBe(200);
+  });
+
+  it("uploads: a document's text is its owner's alone, and an image has none", async () => {
+    const alice = await login('Alice');
+    const bob = await login('Bob');
+    const doc = await fetch(`${baseUrl}/api/uploads`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ mime: 'text/plain', filename: 'notes.txt', dataBase64: Buffer.from('hello notes').toString('base64') }),
+    });
+    const { id } = (await doc.json()) as { id: string };
+    const own = await fetch(`${baseUrl}/api/uploads/${id}/text`, { headers: { Cookie: alice } });
+    expect(await own.json()).toEqual({ filename: 'notes.txt', text: 'hello notes' });
+    expect((await fetch(`${baseUrl}/api/uploads/${id}/text`, { headers: { Cookie: bob } })).status).toBe(404);
+    const img = await fetch(`${baseUrl}/api/uploads`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ mime: 'image/png', dataBase64: TINY_PNG_BASE64 }),
+    });
+    const imgId = ((await img.json()) as { id: string }).id;
+    expect((await fetch(`${baseUrl}/api/uploads/${imgId}/text`, { headers: { Cookie: alice } })).status).toBe(404);
   });
 
   it('POST /api/uploads rejects an unsupported type and missing data', async () => {

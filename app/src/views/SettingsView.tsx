@@ -7,9 +7,10 @@ import { X, Monitor, Sun, Moon, Sparkles, RefreshCw, List } from 'lucide-react';
 import { useAppDispatch, useAppSelector, type ThemePref } from '../store/index.js';
 import { setShowSettings } from '../store/index.js';
 import { setThemePreference } from '../theme/useTheme.js';
+import { RelaySettingsPanel } from './RelaySettingsPanel.js';
 import { UpdatesPanel } from './UpdatesPanel.js';
 
-type Tab = 'keys' | 'models' | 'budget' | 'connectors' | 'advanced' | 'data' | 'appearance' | 'updates';
+type Tab = 'keys' | 'models' | 'budget' | 'connectors' | 'cloudRuns' | 'advanced' | 'data' | 'appearance' | 'updates';
 type Bias = 'balanced' | 'quality' | 'cost';
 
 /** Advanced config knobs surfaced 1:1 from the core schema. */
@@ -564,7 +565,7 @@ export function SettingsView({ socket }: Props) {
 
         {/* Tabs */}
         <div style={{ display: 'flex', flexWrap: 'wrap', borderBottom: '1px solid var(--border)', padding: '0 18px', flexShrink: 0 }}>
-          {(['keys', 'models', 'budget', 'connectors', 'advanced', 'data', 'appearance', 'updates'] as Tab[]).map((t) => (
+          {(['keys', 'models', 'budget', 'connectors', 'cloudRuns', 'advanced', 'data', 'appearance', 'updates'] as Tab[]).map((t) => (
             <button key={t} onClick={() => setTab(t)} style={{
               background: 'none', border: 'none', cursor: 'pointer', padding: '10px 10px',
               fontSize: 12, fontWeight: tab === t ? 600 : 400,
@@ -572,7 +573,7 @@ export function SettingsView({ socket }: Props) {
               borderBottom: tab === t ? '2px solid var(--accent)' : '2px solid transparent',
               marginBottom: -1, transition: 'color 0.12s', whiteSpace: 'nowrap',
             }}>
-              {t === 'keys' ? 'Providers' : t === 'models' ? 'Models' : t === 'budget' ? 'Budget' : t === 'connectors' ? 'Connectors' : t === 'advanced' ? 'Advanced' : t === 'data' ? 'Data' : t === 'appearance' ? 'Appearance' : 'Updates'}
+              {t === 'keys' ? 'Providers' : t === 'models' ? 'Models' : t === 'budget' ? 'Budget' : t === 'connectors' ? 'Connectors' : t === 'cloudRuns' ? 'Cloud runs' : t === 'advanced' ? 'Advanced' : t === 'data' ? 'Data' : t === 'appearance' ? 'Appearance' : 'Updates'}
             </button>
           ))}
         </div>
@@ -664,8 +665,15 @@ export function SettingsView({ socket }: Props) {
               </div>
               <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                  Web search — without a backend, the <code>web_search</code> tool relies on scraping DuckDuckGo (works, but rate-limited and less reliable)
+                  Web search works without any of these: the <code>web_search</code> tool searches DuckDuckGo, which needs no key.
+                  A backend below gives fuller, steadier results, and DuckDuckGo stays the fallback if it fails.
                 </label>
+                <span aria-live="polite" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  Now using:{' '}
+                  <b style={{ color: 'var(--text)' }}>
+                    {searxngUrl.trim() ? 'SearXNG' : braveKey.trim() || searchKeysSet.brave ? 'Brave Search' : tavilyKey.trim() || searchKeysSet.tavily ? 'Tavily' : 'Free: DuckDuckGo, no key needed'}
+                  </b>
+                </span>
                 <input type="text" value={searxngUrl} onChange={(e) => edits('webSearch', setSearxngUrl)(e.target.value)}
                   placeholder="SearXNG URL (self-hosted) — e.g. https://searx.example.com"
                   style={{ width: '100%', background: 'var(--bg-overlay)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '6px 8px', fontSize: 11.5, outline: 'none', boxSizing: 'border-box' }} />
@@ -769,6 +777,7 @@ export function SettingsView({ socket }: Props) {
           )}
 
           {tab === 'connectors' && <McpConnectorsPanel />}
+          {tab === 'cloudRuns' && <RelaySettingsPanel />}
 
           {tab === 'updates' && <UpdatesPanel />}
 

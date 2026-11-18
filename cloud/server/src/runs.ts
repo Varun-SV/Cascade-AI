@@ -15,7 +15,11 @@ import {
   azureModelForDeployment, DEFAULT_CONTEXT_LIMIT, MODELS,
 } from '#cascade-ai';
 import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ApprovalRequest, ProviderConfig, BrowserAllowance, BrowserInput } from '#cascade-ai';
-import { attachRemoteBrowser, providerRationsSessions } from './remote-browser.js';
+import { attachRemoteBrowser, providerRationsSessions, type RelayForRun } from './remote-browser.js';
+import type { BrowserRelay } from './browser-relay.js';
+import { decryptAtRest } from './secrets.js';
+import { checkEndpointUrl } from './user-endpoint.js';
+import type { BrowserPrefs } from './db.js';
 import type { ClarificationAnswer } from '#cascade-ai';
 type RouterStats = ReturnType<ReturnType<Cascade['getRouter']>['getStats']>;
 import fs from 'node:fs/promises';
@@ -207,6 +211,9 @@ const ChatRunPayloadSchema = z.object({
   // `webSearchOn` for what it actually does, and why it is one decision
   // rather than two independent toggles.
   browserMode: z.boolean().optional(),
+  // Which of the user's own registered devices serves the browser, when they have
+  // several online. Checked against their devices; absent picks the one seen last.
+  browserDeviceId: z.string().min(1).max(64).optional(),
   // Optional web-search backend the user configured (browser-held, like keys).
   // Whichever field is set is used — SearXNG → Brave → Tavily priority in the
   // tool. Absent → the tool's keyless DuckDuckGo fallback.
@@ -414,7 +421,7 @@ export interface RunControls {
    * `browser_control` is never registered.
    */
   remoteBrowser?: {
-    provider?: 'cdp' | 'steel';
+    provider?: 'cdp' | 'steel' | 'relay' | 'endpoint';
     url?: string;
     apiKey?: string;
     cdpHostHeader?: string;
@@ -497,7 +504,45 @@ export function parkApproval(
  * deployment carries no `remoteBrowser` key at all and the tool is never
  * registered.
  */
+/** The run's browser is the user's own CDP endpoint, reached through a pinned bridge. */
+export function endpointBrowserControls(env: CloudEnv): Pick<RunControls, 'remoteBrowser'> {
+  return {
+    remoteBrowser: {
+      provider: 'endpoint',
+      maxSessions: 1,
+      ...(env.REMOTE_BROWSER_VISION ? { vision: env.REMOTE_BROWSER_VISION } : {}),
+    },
+  };
+}
+
+/**
+ * The user's endpoint for this run, decrypted, or null: not offered here, not chosen,
+ * none saved, unreadable, or no longer allowed by this server's rules.
+ */
+export function endpointForRun(env: CloudEnv, prefs: BrowserPrefs): { url: string; allowPrivate: boolean } | null {
+  if (!env.BROWSER_ENDPOINTS || prefs.source !== 'endpoint' || !prefs.endpointEnc) return null;
+  const allowPrivate = env.BROWSER_ENDPOINTS_PRIVATE === true;
+  let url: string;
+  try { url = decryptAtRest(prefs.endpointEnc, env.SESSION_SECRET, 'cascade-browser-endpoint-v1'); } catch { return null; }
+  const check = checkEndpointUrl(url, { allowPrivate });
+  return check.ok ? { url: check.url.toString(), allowPrivate } : null;
+}
+
+/** The run's browser is the user's own: no endpoint, no key, one tab. */
+export function relayBrowserControls(env: CloudEnv): Pick<RunControls, 'remoteBrowser'> {
+  return {
+    remoteBrowser: {
+      provider: 'relay',
+      maxSessions: 1,
+      ...(env.REMOTE_BROWSER_VISION ? { vision: env.REMOTE_BROWSER_VISION } : {}),
+    },
+  };
+}
+
 export function remoteBrowserControls(env: CloudEnv): Pick<RunControls, 'remoteBrowser'> {
+  // Retired by the operator: no hosted browser, whatever REMOTE_BROWSER_* say. This one
+  // reading is what the run config, /api/config and the allowance all go through.
+  if (env.HOSTED_BROWSER === false) return {};
   if (!env.REMOTE_BROWSER_PROVIDER) return {};
   return {
     remoteBrowser: {
@@ -1411,6 +1456,35 @@ export interface ChatRunDeps {
    * it gets for free with no listener at all.
    */
   interactive?: boolean;
+  /**
+   * The browser relay, when this server has it on. A browser-mode run then uses the
+   * user's own browser on one of their devices that is online, ahead of any browser
+   * the deployment hosts.
+   */
+  browserRelay?: BrowserRelay;
+}
+
+/**
+ * The user's own browser for this run, or null when none of their devices is online.
+ *
+ * Only the user's own registered devices, and only one connected now: a device that is
+ * offline would leave the run waiting on a question nobody can see. The one asked for
+ * by id if it qualifies, otherwise the one seen last.
+ */
+export async function relayForRun(
+  relay: BrowserRelay,
+  store: Pick<CloudStore, 'listRelayDevices'>,
+  userId: string,
+  wanted?: string,
+): Promise<RelayForRun | null> {
+  const online = store.listRelayDevices(userId)
+    .filter((d) => relay.hub.deviceOnline(userId, d.id))
+    .sort((a, b) => (b.lastSeenAt ?? 0) - (a.lastSeenAt ?? 0));
+  const device = (wanted ? online.find((d) => d.id === wanted) : undefined) ?? online[0];
+  if (!device) return null;
+  // The loopback endpoint the run's client connects to has to be listening first.
+  await relay.ready;
+  return { hub: relay.hub, agentUrl: (token) => relay.agentUrl(token), userId, device: { id: device.id, name: device.name } };
 }
 
 /** The asset the SDK hands a media sink — inferred so we don't re-declare it. */
@@ -1892,6 +1966,16 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
   // The user can raise/lower the per-run cost cap (their own keys pay); fall
   // back to the server's safety-rail default when they haven't set one.
   const costCap = payload.maxCostPerRunUsd ?? env.MAX_COST_PER_RUN_USD;
+  // The user's own browser, when the relay is on and one of their devices is online.
+  // Only for a run someone is watching: the device asks its user, and that question
+  // belongs to a person who started the run. Otherwise the deployment's, as before.
+  // Their own CDP endpoint, when they chose it and this server offers it. Read now and
+  // checked again against today's rules: an operator may have stopped allowing
+  // private endpoints since it was saved.
+  const userEndpoint = payload.browserMode && interactive ? endpointForRun(env, store.getBrowserPrefs(userId)) : null;
+  const ownBrowser = !userEndpoint && payload.browserMode && interactive && deps.browserRelay
+    ? await relayForRun(deps.browserRelay, store, userId, payload.browserDeviceId)
+    : null;
   const config = buildCloudConfig(payload.providers as ProviderConfig[], costCap, {
     routingMode: payload.routingMode,
     forceTier: payload.forceTier,
@@ -1906,7 +1990,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
     maxTokensPerRun: payload.maxTokensPerRun,
     mcpServers: mcpServers.length ? mcpServers : undefined,
     disabledTools: payload.fastAnswer ? [] : store.listDisabledMcpTools(userId),
-    ...remoteBrowserControls(env),
+    ...(userEndpoint ? endpointBrowserControls(env) : ownBrowser ? relayBrowserControls(env) : remoteBrowserControls(env)),
   });
   // The run's state stays with the tenant's data, beside its scratch folder —
   // not in it, where the run's tools could read it: a hosted server never
@@ -1950,6 +2034,8 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
     allowance: providerRationsSessions(config.tools?.remoteBrowser, env.CASCADE_DEPLOYMENT_MODE)
       ? browserAllowanceFor(store, userId)
       : undefined,
+    ...(ownBrowser ? { relay: ownBrowser } : {}),
+    ...(userEndpoint ? { userEndpoint } : {}),
   });
   // The kill switch, alongside the live view that makes it meaningful. Scoped
   // to this run and removed with the run's other listeners below: a Stop is

@@ -74,8 +74,37 @@ export { ALLOWANCE_UNAVAILABLE, RemoteBrowserController } from './browser/remote
 export type { BrowserFrame, BrowserInput, BrowserControlState, BrowserBusyInfo, BrowserAllowance } from './browser/remote/controller.js';
 export { GenericCdpProvider, isCdpEndpoint } from './browser/remote/generic-cdp.js';
 export { SteelProvider, isHostedSteel, isUsableSteelBase, isUsableSteelKey } from './browser/remote/steel.js';
+export { RelayBrowserProvider } from './browser/remote/relay-provider.js';
 export { BrowserLease } from './browser/lease.js';
 export type { RemoteBrowserProvider, RemoteBrowserSession, RemoteBrowserConfig } from './browser/remote/provider.js';
+// The browser relay: a user's own browser, on their own device, serving a run on
+// the server. These are the server's pieces and the device client. See
+// docs/design/byo-browser-and-routing-data.md.
+export { createRelayHub, authenticateControl, RelayRefused, HUB_PROTOCOL } from './browser/relay/hub.js';
+export type { RelayHub, RelayedBrowser, RunRequest as RelayRunRequest } from './browser/relay/hub.js';
+export {
+  generateStoredKey as generateRelayKey, identityFromPrivateKey as relayIdentityFromPrivateKey,
+  publicKeyFromText as relayPublicKeyFromText, publicKeyToText as relayPublicKeyToText,
+  StoreUnavailable as RelayStoreUnavailable, StoreOutcomeUnknown as RelayStoreOutcomeUnknown,
+  MAX_LIFETIME_MS as RELAY_MAX_LIFETIME_MS,
+} from './browser/relay/capability.js';
+export type { NonceStore as RelayNonceStore, Identity as RelayIdentity } from './browser/relay/capability.js';
+export { connectDeviceClient } from './browser/relay/device.js';
+// The private-network rule, for a server deciding whether it may dial an address a user gave.
+export { isPrivateHost as isPrivateNetworkHost, bareHost } from './browser/relay/egress-rules.js';
+export type { DeviceClient, DeviceClientOptions, LeasedBrowser, UserConsent } from './browser/relay/device.js';
+export { startDedicatedBrowser } from './browser/relay/dedicated-browser.js';
+// For a device that isn't the CLI: the desktop app polices its own run sessions with
+// the same proxy, consent and request rules, and stays connected with the same loop.
+export { serveDevice, relayEndpoints } from './browser/relay/serve.js';
+export type { ServeOptions as RelayServeOptions, PairedDeviceKey as RelayPairedDeviceKey } from './browser/relay/serve.js';
+export { startEgressProxy } from './browser/relay/egress-proxy.js';
+export { makeConsent, onConsentedSite, requestVerdict } from './browser/relay/egress-rules.js';
+export type { Consent as RelayConsent } from './browser/relay/egress-rules.js';
+export { parseSites as parseRelaySites } from './browser/relay/consent-input.js';
+export { settlesWithin } from './browser/relay/settles.js';
+export type { CdpClient as RelayCdpClient, CdpMessage as RelayCdpMessage } from './browser/relay/cdp-client.js';
+export type { RequestEnforcer as RelayRequestEnforcer } from './browser/relay/request-enforcer.js';
 export type { CurrentPageProvider, CurrentPageSnapshot } from './tools/current-page.js';
 export type { DiscoveredMcpTool, McpDiscoveryResult } from './mcp/discover.js';
 export {

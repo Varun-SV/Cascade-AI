@@ -5,7 +5,9 @@ import {
   UploadCloud, DownloadCloud, KeyRound,
 } from 'lucide-react';
 import { CascadeMark } from './CascadeMark.js';
-import { useAppDispatch, useAppSelector, setShowContinue } from '../store/index.js';
+import { useAppDispatch, useAppSelector, setShowContinue, loadTranscript, saveComposerDraft, setView } from '../store/index.js';
+import { uploadAttachment } from '../lib/attachments.js';
+import { keepHandoffFiles } from '../lib/cloudHandoff.js';
 import type { CloudUser, CloudMsg } from '../App.js';
 import { fetchSessionTranscript } from '../utils/sessionLoad.js';
 import { createCloudHandoff, fetchCloudHandoff } from '../lib/cloudHandoff.js';
@@ -17,7 +19,7 @@ function formatRemaining(ms: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-interface ImportMessage { role: string; content: string }
+interface ImportMessage { role: string; content: string; attachmentIds?: string[] }
 
 /**
  * Import a transcript into the local backend as a new session the user can keep
@@ -25,11 +27,14 @@ interface ImportMessage { role: string; content: string }
  */
 async function importTranscript(
   backendPort: number, authToken: string, title: string, messages: ImportMessage[],
-): Promise<void> {
+): Promise<string | null> {
   const now = new Date().toISOString();
   const bundle = {
     format: 'cascade-export@1',
-    sessions: [{ title, messages: messages.map((m) => ({ role: m.role, content: m.content, timestamp: now })) }],
+    sessions: [{
+      title,
+      messages: messages.map((m) => ({ role: m.role, content: m.content, timestamp: now, ...(m.attachmentIds?.length ? { attachmentIds: m.attachmentIds } : {}) })),
+    }],
   };
   const res = await fetch(`http://localhost:${backendPort}/api/import`, {
     method: 'POST',
@@ -37,6 +42,8 @@ async function importTranscript(
     body: JSON.stringify(bundle),
   });
   if (!res.ok) throw new Error('Import failed — is the local backend running?');
+  const body = (await res.json().catch(() => ({}))) as { sessions?: Array<{ id: string }> };
+  return body.sessions?.[0]?.id ?? null;
 }
 
 type CloudAccount =
@@ -557,6 +564,8 @@ function SendTab({ sessionTitle, sessionId, backendPort, authToken }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // The web takes a chat's text: files on it stay in this app, and say so.
+  const [filesKept, setFilesKept] = useState(0);
 
   const create = useCallback(async () => {
     if (!sessionId) { setError('Open a session first, then send it.'); return; }
@@ -568,6 +577,7 @@ function SendTab({ sessionTitle, sessionId, backendPort, authToken }: {
         .filter((m) => m.content.trim())
         .map((m) => ({ role: m.role, content: m.content }));
       if (messages.length === 0) { setError('This session has no messages to send yet.'); return; }
+      setFilesKept((transcript ?? []).reduce((n, m) => n + (m.attachments?.length ?? 0), 0));
       const res = await createCloudHandoff({ title: sessionTitle, skillId: null, messages });
       setCode(res.code);
       setExpiresAt(res.expiresAt);
@@ -634,6 +644,11 @@ function SendTab({ sessionTitle, sessionId, backendPort, authToken }: {
           : <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-dim)' }}>expires in {formatRemaining(remaining)}</span>}
       </div>
 
+      {filesKept > 0 && (
+        <p role="note" style={{ margin: 0, fontSize: 11.5, lineHeight: 1.5, color: 'var(--text-muted)' }}>
+          {filesKept === 1 ? 'The image or document in this chat stays' : `The ${filesKept} images and documents in this chat stay`} in this app: the web gets the chat&apos;s text.
+        </p>
+      )}
       <ol style={{ display: 'flex', flexDirection: 'column', gap: 5, margin: 0, padding: 0, listStyle: 'none', fontSize: 11.5, color: 'var(--text-muted)' }}>
         <li style={{ display: 'flex', gap: 8 }}><Globe size={13} style={{ marginTop: 1, flexShrink: 0, color: 'var(--text-dim)' }} /> Open Cascade on the web and sign in.</li>
         <li style={{ display: 'flex', gap: 8 }}><span style={{ width: 13, flexShrink: 0 }} /> Go to <b style={{ color: 'var(--text)' }}>Continue elsewhere → Bring a chat here</b>.</li>
@@ -653,11 +668,27 @@ function SendTab({ sessionTitle, sessionId, backendPort, authToken }: {
 
 // ── Bring a chat here (redeem a code from the web) ──
 
+/** Keeps a waiting message's files with its chat, so they aren't cleared as abandoned uploads. */
+async function holdDraftFiles(backendPort: number, authToken: string, sessionId: string, ids: string[]): Promise<void> {
+  if (!ids.length) return;
+  const res = await fetch(`http://localhost:${backendPort}/api/attachments/hold`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+    body: JSON.stringify({ sessionId, ids }),
+  });
+  if (!res.ok) throw new Error('Its files could not be kept with the chat. Try the code again.');
+}
+
 function ReceiveTab({ backendPort, authToken, onDone }: { backendPort: number; authToken: string; onDone: () => void }) {
+  const dispatch = useAppDispatch();
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [imported, setImported] = useState<string | null>(null);
+  // A chat that ends on a message not yet answered (one handed over to run here)
+  // opens with that message in the composer, its files with it, to send.
+  const [toSend, setToSend] = useState<string | null>(null);
+  const [missed, setMissed] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { inputRef.current?.focus(); }, []);
@@ -669,8 +700,20 @@ function ReceiveTab({ backendPort, authToken, onDone }: { backendPort: number; a
     setError(null);
     try {
       const snap = await fetchCloudHandoff(code);
-      await importTranscript(backendPort, authToken, snap.title || 'Continued chat', snap.messages);
-      setImported(snap.title || 'Continued chat');
+      const { messages, missed: notKept } = await keepHandoffFiles(snap.messages, (f) => uploadAttachment(backendPort, authToken, f));
+      const last = messages.at(-1);
+      const pendingLast = last?.role === 'user';
+      const title = snap.title || 'Continued chat';
+      const id = await importTranscript(backendPort, authToken, title, (pendingLast ? messages.slice(0, -1) : messages)
+        .map((m) => ({ role: m.role, content: m.content, attachmentIds: m.files.map((f) => f.id) })));
+      setMissed(notKept);
+      if (pendingLast && id) {
+        // Saved now, not when the dialog's button is pressed: it waits in that chat until sent.
+        await holdDraftFiles(backendPort, authToken, id, last.files.map((f) => f.id));
+        dispatch(saveComposerDraft({ sessionId: id, prompt: last.content, attachments: last.files }));
+        setToSend(id);
+      }
+      setImported(title);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'That code is invalid or has expired.');
     } finally {
@@ -683,9 +726,31 @@ function ReceiveTab({ backendPort, authToken, onDone }: { backendPort: number; a
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12, alignItems: 'center', padding: '8px 0' }}>
         <Check size={26} style={{ color: 'var(--success)' }} />
         <p style={{ fontSize: 12, color: 'var(--text)', textAlign: 'center', lineHeight: 1.5 }}>
-          Imported <b>{imported}</b>. It’s in your sidebar as <b>“{imported} (imported)”</b> — open it to continue.
+          Imported <b>{imported}</b>. It’s in your sidebar as <b>“{imported} (imported)”</b>
+          {toSend ? '. Its last message is waiting in that chat, ready to send.' : ' — open it to continue.'}
         </p>
-        <button style={primaryBtn} onClick={onDone}>Done</button>
+        {missed.length > 0 && (
+          <p role="alert" style={{ fontSize: 11.5, color: 'var(--danger)', textAlign: 'center', lineHeight: 1.5, margin: 0 }}>
+            {missed.join(', ')} couldn&apos;t be kept here: attach {missed.length === 1 ? 'it' : 'them'} again.
+          </p>
+        )}
+        {toSend ? (
+          <button
+            style={primaryBtn}
+            onClick={() => {
+              void (async () => {
+                const history = await fetchSessionTranscript(backendPort, authToken, toSend);
+                dispatch(loadTranscript({ sessionId: toSend, messages: history ?? [] }));
+                dispatch(setView('chat'));
+                onDone();
+              })();
+            }}
+          >
+            Open it to send
+          </button>
+        ) : (
+          <button style={primaryBtn} onClick={onDone}>Done</button>
+        )}
       </div>
     );
   }

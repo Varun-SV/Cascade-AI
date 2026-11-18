@@ -36,7 +36,7 @@ The CLI, desktop app and Cascade Cloud share one account. Settings can follow yo
 ## ✨ Highlights
 
 - 🧠 **Live benchmark Auto-routing** — set a tier to `Auto` and Cascade fuses *live* public benchmark scores with *live* pricing to pick the best-**value** model for each task, then learns from how each model actually did.
-- 🌐 **Browser control** (desktop app and web) — the agent drives a real browser: the desktop's own, or on the web your Chrome over CDP or a hosted Steel session. You watch it live and can take the wheel and hand it back. On the web the agent reads each page as a list of its controls, each with a ref like `e14`, and acts on them by ref; a model that can see images can also get a screenshot (`tools.browserVision`).
+- 🌐 **Browser control** (desktop app and web) — the agent drives a real browser: the desktop's own, or on the web your own Chrome through the Cascade extension or `cascade relay` ([how](docs/browser-relay.md)), a Chrome over CDP, or a hosted Steel session. You watch it live and can take the wheel and hand it back. On the web the agent reads each page as a list of its controls, each with a ref like `e14`, and acts on them by ref; a model that can see images can also get a screenshot (`tools.browserVision`).
 - 🙋 **Asks instead of guessing** (Cascade Cloud and self-hosted web) — when a request is genuinely ambiguous, Cascade asks one structured question rather than inventing an answer.
 - 🤖 **Autonomous mode** (`/auto`) — hands-off runs: safe tools run silently, dangerous ones still ask, budget caps stay the hard stop.
 - 📋 **Boardroom plan review** — pause to review, **edit**, or steer T1's plan (with an AI reviewer's critique) before any worker spawns.
@@ -510,7 +510,7 @@ T3 workers have access to the following tools. All destructive operations requir
 | `web_search` | Search the web (SearXNG, Brave or Tavily) | |
 | `web_fetch` | Fetch a page, SSRF-guarded | |
 | `browser` | Headless Playwright automation (off unless `tools.browserEnabled`) | ✓ |
-| `browser_control` | Drive a real browser — desktop app and web (CDP or Steel). On the web: page views with refs, and screenshots for vision models (`tools.browserVision`) | ✓ |
+| `browser_control` | Drive a real browser — desktop app and web (your own Chrome through the relay, CDP or Steel). On the web: page views with refs, and screenshots for vision models (`tools.browserVision`; never from your own Chrome) | ✓ |
 | `read_current_page` | Read the page you have open — desktop app | |
 | `image_analyze` | Describe an image (vision-capable models) | |
 | `generate_image` · `generate_speech` · `generate_video` | Generate media, with a provider key that supports it | |

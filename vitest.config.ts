@@ -17,7 +17,9 @@ export default defineConfig({
     include: [
       'src/**/*.test.ts', 'src/**/*.spec.ts', 'scripts/**/*.test.mjs',
       'app/electron/**/*.test.ts', 'app/src/lib/**/*.test.ts',
+      'extension/**/*.test.ts',
     ],
+    exclude: ['**/node_modules/**', 'extension/dist/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
