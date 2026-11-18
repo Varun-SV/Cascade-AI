@@ -72,7 +72,9 @@ export function decodeEntities(text: string): string {
       const code = body[1] === 'x' || body[1] === 'X' ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
       return Number.isFinite(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
     }
-    return NAMED[body.toLowerCase()] ?? whole;
+    const name = body.toLowerCase();
+    // Own entries only: `&constructor;` must not find Object's own.
+    return Object.hasOwn(NAMED, name) ? NAMED[name]! : whole;
   });
 }
 
@@ -80,10 +82,17 @@ const isNameChar = (c: number): boolean =>
   (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c === 45 || c === 58 || c === 95;
 const isSpace = (c: number): boolean => c === 32 || c === 9 || c === 10 || c === 13 || c === 12;
 
+/** `A`–`Z` to `a`–`z`, nothing else: the same length, the same offsets. */
+function asciiLower(text: string): string {
+  return text.replace(/[A-Z]+/g, (run) => run.toLowerCase());
+}
+
 /** The document as a tree. Linear in its length. */
 export function parseHtml(input: string): Node {
   const html = input.length > MAX_HTML_CHARS ? input.slice(0, MAX_HTML_CHARS) : input;
-  const lower = html.toLowerCase();
+  // ASCII letters only, so every offset in `lower` is the same in `html`:
+  // full Unicode lowercasing turns some letters (İ) into two.
+  const lower = asciiLower(html);
   const root: Node = { tag: '#root', attrs: {}, children: [], parent: null, depth: 0 };
   let current = root;
   let nodes = 0;
@@ -169,7 +178,8 @@ export function parseHtml(input: string): Node {
       continue;
     }
     if (++nodes > MAX_NODES) break;
-    const closes = SELF_CLOSING_SIBLINGS[tag];
+    // Own entries only: a <constructor> tag must not find Object's own.
+    const closes = Object.hasOwn(SELF_CLOSING_SIBLINGS, tag) ? SELF_CLOSING_SIBLINGS[tag] : undefined;
     if (closes && closes.includes(current.tag)) current = current.parent ?? root;
     const node: Node = { tag, attrs, children: [], parent: current, depth: current.depth + 1 };
     current.children.push(node);

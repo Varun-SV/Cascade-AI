@@ -80,6 +80,15 @@ describe('reading HTML', () => {
     readHtml(`<body>${'<div>'.repeat(50_000)}deep${'<a href="'.repeat(1)}${'x'.repeat(500_000)}"></body>`);
     readHtml(`<body>${'<p '.repeat(100_000)}</body>`);
     expect(Date.now() - started).toBeLessThan(3_000);
+    // A letter whose lowercase is two letters, before the markup: offsets stay true.
+    const turkish = readHtml('<body><main><h1>İstanbul</h1><p>Visible article content, long enough to keep.</p><script>secretScriptCode()</script><nav>Menu</nav></main></body>');
+    expect(turkish.text).toContain('# İstanbul');
+    expect(turkish.text).toContain('Visible article content');
+    expect(turkish.text).not.toContain('secretScriptCode');
+    expect(turkish.text).not.toContain('Menu');
+    // Names that are Object's own, as a tag or an entity: nothing inherited is found.
+    const odd = readHtml('<body><main><constructor>x</constructor><p>Readable text &constructor; &toString; stays.</p></main></body>');
+    expect(odd.text).toContain('Readable text &constructor; &toString; stays.');
     // A code block of very many lines: appended one by one, not spread into a call.
     const code = readHtml(`<body><pre>${'a\n'.repeat(200_000)}</pre></body>`);
     expect(code.text.startsWith('```\na\na')).toBe(true);
@@ -357,6 +366,21 @@ describe('web_fetch', () => {
     const again = await fetchReadable('https://docs.example/docs#install', { fetchPage, state });
     expect([a.title, b.title, again.title]).toEqual(['/docs', '/docs/', '/docs']);
     expect(fetchPage).toHaveBeenCalledTimes(2);
+  });
+
+  it('lists links with whole addresses: long words are shortened, an address never is', async () => {
+    const longPath = `https://docs.example/${'section/'.repeat(12)}page`;
+    const huge = `https://docs.example/${'x'.repeat(400)}`;
+    const html = `<html><body><main><p>${'Some words of the page. '.repeat(5)}</p>
+      <p><a href="${longPath}">${'A very long link label that goes on and on '.repeat(4)}</a> <a href="${huge}">huge</a></p></main></body></html>`;
+    const tool = new WebFetchTool({ fetchPage: async (url) => reply(html, { url }), state: new OpenWebState() });
+    const out = await tool.execute({ url: 'https://docs.example/' }, {} as never);
+    const line = out.split('\n').find((l) => l.includes(longPath));
+    expect(line).toBeDefined();
+    expect(line!.endsWith(`: ${longPath}`)).toBe(true);
+    expect(line!.length).toBeLessThan(longPath.length + 100);
+    expect(out).not.toContain(huge.slice(0, 60));
+    expect(out).toContain('1 more not listed, some with very long addresses');
   });
 
   it('says plainly what it could not read', async () => {

@@ -26,7 +26,10 @@ export const ANSWER_CHARS = 11_000;
 /** A part is never smaller than this, however much else the answer holds. */
 const MIN_PART_CHARS = 3_000;
 const MAX_LINKS = 25;
-const LINK_CHARS = 160;
+/** A link's words are shortened to this; its address never is. */
+const LINK_TEXT_CHARS = 80;
+/** An address longer than this is left out, and said to be, rather than cut into a wrong one. */
+const LINK_URL_CHARS = 300;
 
 export class WebFetchTool extends BaseTool {
   readonly name = 'web_fetch';
@@ -88,9 +91,12 @@ export class WebFetchTool extends BaseTool {
 
     // The links go at the end of the last part; room is kept for them in
     // every part, so whether a part is the last doesn't change its size.
-    const links = page.links.length
-      ? [`── Links (${Math.min(page.links.length, MAX_LINKS)}${page.links.length > MAX_LINKS ? ` of ${page.links.length}` : ''}) ──`,
-        ...page.links.slice(0, MAX_LINKS).map((l) => `- ${l.text}: ${l.url}`.slice(0, LINK_CHARS))]
+    const fitting = page.links.filter((l) => l.url.length <= LINK_URL_CHARS);
+    const shown = fitting.slice(0, MAX_LINKS);
+    const left = page.links.length - shown.length;
+    const links = shown.length
+      ? [`── Links (${shown.length}${left ? `; ${left} more not listed${fitting.length < page.links.length ? ', some with very long addresses' : ''}` : ''}) ──`,
+        ...shown.map((l) => `- ${l.text.length > LINK_TEXT_CHARS ? `${l.text.slice(0, LINK_TEXT_CHARS - 1)}…` : l.text}: ${l.url}`)]
       : [];
     const head = lines.join('\n');
     const NOTES = 200;
