@@ -96,6 +96,14 @@ describe('commonsImages', () => {
     expect(asked).toContain('commons.wikimedia.org');
     expect(c).toEqual([expect.objectContaining({ url: 'https://upload.example/t1600.jpg', credit: 'Jane Doe', license: 'CC BY-SA 4.0', page: 'https://commons.wikimedia.org/wiki/File:Tower.jpg' })]);
   });
+
+  it('leaves no markup in the credit or description, however the tags are nested', async () => {
+    const body = { query: { pages: { '1': { index: 1, title: 'File:T.jpg', imageinfo: [{ thumburl: 'https://upload.example/t.jpg',
+      extmetadata: { Artist: { value: '<<script>script>alert(1)<</script>/script>Jane' }, ImageDescription: { value: '<img src=x onerror=alert(1)>A <b>tower</b> <' } } }] } } } };
+    const [c] = await commonsImages('t', { fetcher: async () => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } }) });
+    expect(c!.credit).not.toMatch(/[<>]/);
+    expect(c!.alt).toBe('A tower');
+  });
 });
 
 describe('annotateImage', () => {

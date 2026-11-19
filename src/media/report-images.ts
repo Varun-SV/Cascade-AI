@@ -353,7 +353,9 @@ export async function commonsImages(query: string, opts: { signal?: AbortSignal;
     const meta = info?.extmetadata ?? {};
     const plain = (k: string): string | undefined => {
       const v = meta[k]?.value;
-      return v ? v.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim().slice(0, 120) || undefined : undefined;
+      // Tags out, then any bracket left over: one pass alone leaves "<script" from
+      // "<<script>script>", and this text goes into the report's Markdown.
+      return v ? v.replace(/<[^>]*>/g, '').replace(/[<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120) || undefined : undefined;
     };
     out.push({
       url,
