@@ -26,6 +26,10 @@ export interface AgentNode {
   blockedBy?: string[];
   parentId?: string;
   stream?: string;
+  /** What the node's model thought, its calls in order (`tier:thinking`). */
+  thinking?: string;
+  /** Each model call's thinking so far, by call number; `thinking` joins them. */
+  thinkingCalls?: Record<number, string>;
   /** The model serving this node (`provider:id`), once the tier resolved it. */
   model?: string;
   /** The run/session this node belongs to — lets Cockpit show only the
@@ -367,6 +371,8 @@ const appSlice = createSlice({
         state.agents[idx] = {
           ...action.payload,
           stream: state.agents[idx]!.stream,
+          thinking: state.agents[idx]!.thinking,
+          thinkingCalls: state.agents[idx]!.thinkingCalls,
           model: action.payload.model ?? state.agents[idx]!.model,
         };
       } else {
@@ -377,6 +383,18 @@ const appSlice = createSlice({
     appendAgentStream(state, action: PayloadAction<{ id: string; text: string }>) {
       const node = state.agents.find((a) => a.id === action.payload.id);
       if (node) node.stream = (node.stream ?? '') + action.payload.text;
+    },
+    // A streamed piece of a call's thinking is appended; the call's `done`
+    // event carries all of it and replaces what streamed.
+    mergeAgentThinking(state, action: PayloadAction<{ id: string; call: number; text: string; done: boolean }>) {
+      const node = state.agents.find((a) => a.id === action.payload.id);
+      if (!node) return;
+      const calls = { ...(node.thinkingCalls ?? {}) };
+      const { call, text, done } = action.payload;
+      calls[call] = done ? text.trim() : (calls[call] ?? '') + text;
+      node.thinkingCalls = calls;
+      node.thinking = Object.keys(calls).map(Number).sort((a, b) => a - b)
+        .map((k) => calls[k]!.trim()).filter(Boolean).join('\n\n');
     },
     selectNode(state, action: PayloadAction<string | null>) {
       state.selectedNodeId = action.payload;
@@ -608,7 +626,7 @@ export const {
   setWorkspacePath, toggleTerminal, openTerminalAt, toggleCodeChat, setHelpContext, setTheme, setActiveModel, setActiveModelT1, setActiveModelChat,
   setSessions, setActiveSessionId, removeSession, toggleSessionSidebar, setSessionSidebarCollapsed,
   enqueueApproval, dequeueApproval, clearApprovals,
-  appendAgentStream, selectNode, dismissCompletedNodes, addPeerEdge, expirePeerEdges, setForceTier, runStarted, runEnded,
+  appendAgentStream, mergeAgentThinking, selectNode, dismissCompletedNodes, addPeerEdge, expirePeerEdges, setForceTier, runStarted, runEnded,
   openTab, closeTab, setActiveTab, setTabDirty,
   setOnboardingDone,
   setPendingPlan, enqueueEscalation, dequeueEscalation, clearEscalationForSession, setWhyReport, setShowWhyPanel,

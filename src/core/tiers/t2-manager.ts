@@ -35,6 +35,7 @@ import { describeGenerationForPlanner } from '../multimodal/registry.js';
 import { compileSubtaskGraph } from '../orchestration/adapters.js';
 import { planSpecShape, typedFieldRules } from './plan-spec.js';
 import { keepFirst, workersWithin } from '../router/run-budget.js';
+import { parseModelJson } from '../../utils/json-extract.js';
 
 // Built per-run so the peer-coordination hint only appears when the
 // peer_message tool is actually registered. On a restricted host (e.g. cloud
@@ -574,9 +575,8 @@ Return ONLY the JSON array.`;
     });
 
     try {
-      const jsonMatch = /\[[\s\S]*\]/.exec(result.content);
-      if (!jsonMatch) throw new Error('No JSON array found');
-      const parsed = JSON.parse(jsonMatch[0]) as T2ToT3Assignment[];
+      const parsed = parseModelJson<T2ToT3Assignment[]>(result.content, 'array');
+      if (!parsed) throw new Error('No JSON array found');
       // Same class of bug as T1's plan (see T1Administrator.validatePlan):
       // the LLM's JSON doesn't honor `constraints: string[]` being required,
       // and every T3 prompt builder calls `.join`/`.map` on it unguarded.
@@ -622,6 +622,7 @@ Return ONLY the JSON array.`;
       this.t3Workers.set(a.subtaskId, worker);
 
       worker.on('stream:token', (e) => this.emit('stream:token', e));
+      worker.on('tier:thinking', (e) => this.emit('tier:thinking', e));
       worker.on('log', (e) => this.emit('log', e));
       worker.on('tier:status', (e) => this.emit('tier:status', e));
       worker.on('tool:approval-request', (e) => this.emit('tool:approval-request', {
@@ -675,6 +676,7 @@ Return ONLY the JSON array.`;
 
       // Bubble up events
       worker.on('stream:token', (e) => this.emit('stream:token', e));
+      worker.on('tier:thinking', (e) => this.emit('tier:thinking', e));
       worker.on('log', (e) => this.emit('log', e));
       worker.on('tier:status', (e) => this.emit('tier:status', e));
       worker.on('tool:call', (e) => this.emit('tool:call', e));
@@ -1089,6 +1091,7 @@ Return ONLY the JSON array.`;
     worker.on('log', (e) => this.emit('log', e));
     worker.on('tier:status', (e) => this.emit('tier:status', e));
     worker.on('stream:token', (e) => this.emit('stream:token', e));
+    worker.on('tier:thinking', (e) => this.emit('tier:thinking', e));
     worker.on('tool:approval-request', (e) => this.emit('tool:approval-request', {
       ...e,
       __cascadeResponder: (decision: { approved: boolean; always?: boolean }) =>

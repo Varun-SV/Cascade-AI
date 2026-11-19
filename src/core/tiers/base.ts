@@ -11,6 +11,7 @@ import type {
   TierStatus,
 } from '../../types.js';
 import { CascadeCancelledError } from '../../utils/retry.js';
+import { ReasoningStream, splitReasoning } from '../../utils/reasoning.js';
 // Type-only: the router imports tiers, so a value import here would close a
 // cycle. Nothing at runtime depends on it.
 import type { CascadeRouter } from '../router/index.js';
@@ -182,17 +183,66 @@ export abstract class BaseTier extends EventEmitter {
   protected async generateAuxiliary(
     ...args: Parameters<CascadeRouter['generate']>
   ): Promise<Awaited<ReturnType<CascadeRouter['generate']>>> {
-    return this.router.generate(...this.withBudgetClass(args));
+    return this.answerOnly(await this.router.generate(...this.withBudgetClass(args)));
   }
 
   protected async generateTracked(
     ...args: Parameters<CascadeRouter['generate']>
   ): Promise<Awaited<ReturnType<CascadeRouter['generate']>>> {
-    const result = await this.router.generate(...this.withBudgetClass(args));
+    const call = ++this.thinkingCalls;
+    const [tier, options, onChunk, ...rest] = this.withBudgetClass(args);
+    // Thinking is shown as it streams, when the call streams at all. Passing a
+    // callback where the caller passed none would turn streaming on, so a
+    // call that doesn't stream shows its thinking when it ends.
+    const live = onChunk && this.showsThinking() ? new ReasoningStream() : undefined;
+    const relay = live
+      ? (chunk: Parameters<NonNullable<typeof onChunk>>[0]) => {
+          onChunk!(chunk);
+          const part = live.push(chunk.text ?? '');
+          if (part.reasoning) this.emitThinking(call, part.reasoning, false);
+        }
+      : onChunk;
+    const result = await this.router.generate(tier, options, relay, ...rest);
     if (result?.servedBy) {
       this.setServingModel(`${result.servedBy.provider}:${result.servedBy.id}`);
     }
-    return result;
+    const reasoning = result ? splitReasoning(result.content ?? '').reasoning : '';
+    // The whole of it, once: what streamed may have been cut by a retry or
+    // have missed thinking that began before the reply did.
+    if (reasoning && this.showsThinking()) this.emitThinking(call, reasoning, true);
+    return this.answerOnly(result);
+  }
+
+  /** Calls this tier has made, numbering each one's thinking. */
+  private thinkingCalls = 0;
+
+  /**
+   * Whether this tier's thinking may be shown. A tier whose words must stay
+   * on this machine (a local-only subtask) says no.
+   */
+  protected showsThinking(): boolean {
+    return true;
+  }
+
+  /**
+   * `tier:thinking`: a model's reasoning, for the person watching the run.
+   * `call` numbers this tier's model calls; while it streams, `text` is the
+   * next piece of that call's thinking, and the `done` event carries all of
+   * it, which replaces what streamed.
+   */
+  private emitThinking(call: number, text: string, done: boolean): void {
+    this.emit('tier:thinking', { tierId: this.id, role: this.role, call, text, done });
+  }
+
+  /**
+   * The result with its reasoning set aside. Whatever reads a tier's reply
+   * next, a plan parser, the manager collecting results or the next turn of
+   * the worker's own loop, reads the answer; the thinking went to the person.
+   */
+  private answerOnly<R extends { content?: string } | undefined>(result: R): R {
+    if (!result || typeof result.content !== 'string') return result;
+    const { answer, reasoning } = splitReasoning(result.content);
+    return reasoning || answer !== result.content ? { ...result, content: answer } : result;
   }
 
   protected setLabel(label: string): void {

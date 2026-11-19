@@ -361,3 +361,22 @@ The same `node scripts/refresh-benchmarks.mjs` run aggregates both pipelines in 
 pass — text sources into `families`, modality sources into `modalities` — and writes
 `benchmark-data.json` only when either section actually changed. `--explain` /
 `BENCHMARK_EXPLAIN=1` prints both traces; `BENCHMARK_AGG=off` skips both aggregators.
+
+## Models no board has measured
+
+A model that matches no family (a fine-tune on a local server, a new open
+model behind a gateway, a preview id) is not given a flat 0.5 any more.
+`estimateBenchmark` in `src/core/router/benchmarks.ts` places it from what is
+known about it:
+
+- **Size**, from the local server's report or a size in its name (`-32b`,
+  `8x7b`; the total, never Qwen's active `a3b`). The scale is anchored on the
+  measured open families: about 56 at 8B and 72 at 70B.
+- Otherwise **price**: a Theil–Sen line of mixed score against log blended
+  price, fitted over the catalog's measured models.
+
+The raw estimate is pulled 30% toward 50 and capped at the measured models'
+75th percentile, so a guess can place a model but never outrank one a board
+has tested. It stands for every task type and carries no agentic score.
+`benchmarkBasis` says which of measured / estimated-from-size /
+estimated-from-price / unknown a score is.

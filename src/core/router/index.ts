@@ -505,6 +505,9 @@ const BASE_URL_ENV: Partial<Record<ProviderType, string>> = {
   anthropic: 'ANTHROPIC_BASE_URL',
 };
 
+/** Providers whose model listings can't be trusted on tool support: a text-tool verdict is kept for them. */
+const REMEMBERS_TEXT_TOOLS: ReadonlySet<ProviderType> = new Set<ProviderType>(['openai-compatible', 'ollama']);
+
 export class CascadeRouter extends EventEmitter {
   private selector!: ModelSelector;
   private failover!: FailoverManager;
@@ -836,6 +839,15 @@ export class CascadeRouter extends EventEmitter {
    * Cloud providers are never probed — their metadata is authoritative.
    */
   async probeLocalToolSupport(store: MemoryStore): Promise<void> {
+    this.capabilityStore = store;
+    // A model caught writing its tool calls as text in an earlier run (see
+    // useTextTools) starts in the text format, whatever its listing says.
+    for (const m of this.selector.getAllAvailableModels()) {
+      if (!REMEMBERS_TEXT_TOOLS.has(m.provider) || m.supportsToolUse === false || m.supportsToolUse === undefined) continue;
+      if (store.getModelProfile(m.id, m.provider)?.supportsToolUse === false) {
+        this.selector.addDynamicModel({ ...m, supportsToolUse: false });
+      }
+    }
     const unknown = this.selector.getAllAvailableModels().filter(
       (m) => m.provider === 'openai-compatible' && m.supportsToolUse === undefined,
     );
@@ -856,6 +868,31 @@ export class CascadeRouter extends EventEmitter {
       if (!cur) continue;
       const fresh = this.selector.getModelById(cur.id);
       if (fresh) this.tierModels.set(tier, fresh);
+    }
+  }
+
+  /** Where tool-format verdicts are kept between runs, once a store is known. */
+  private capabilityStore?: MemoryStore;
+
+  /**
+   * A model that was handed native tools answered with a tool call written as
+   * text. Its later calls get the text format instead: in this run for every
+   * model, and in later runs too for the providers whose listings don't
+   * describe tool support reliably (OpenAI-compatible servers and Ollama). A
+   * first-party listing is trusted again next run; one slip there is a slip.
+   */
+  useTextTools(model: { provider: ProviderType; id: string }): void {
+    const known = this.selector.getModelById(model.id);
+    if (!known || known.provider !== model.provider || known.supportsToolUse === false) return;
+    this.selector.addDynamicModel({ ...known, supportsToolUse: false });
+    for (const tier of ['T1', 'T2', 'T3'] as TierRole[]) {
+      const cur = this.tierModels.get(tier);
+      if (cur && cur.id === known.id && cur.provider === known.provider) {
+        this.tierModels.set(tier, { ...cur, supportsToolUse: false });
+      }
+    }
+    if (REMEMBERS_TEXT_TOOLS.has(known.provider)) {
+      try { this.capabilityStore?.saveModelCapability(known.id, known.provider, { supportsToolUse: false }); } catch { /* kept for this run */ }
     }
   }
 

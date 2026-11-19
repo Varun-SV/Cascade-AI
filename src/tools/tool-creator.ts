@@ -28,6 +28,7 @@ import type { ToolRegistry } from './registry.js';
 import type { CascadeRouter } from '../core/router/index.js';
 import type { PermissionEscalator } from '../core/permissions/escalator.js';
 import type { PermissionRequest } from '../types.js';
+import { parseModelJson } from '../utils/json-extract.js';
 
 export type SandboxMode = 'isolate' | 'wasm' | 'auto';
 
@@ -645,12 +646,11 @@ Required capability: ${description.slice(0, 300)}`;
           messages: [{ role: 'user', content: prompt }],
           maxTokens: 800,
         });
-        const jsonMatch = /\{[\s\S]*\}/.exec(result.content);
-        if (!jsonMatch) {
+        const parsed = parseModelJson<GeneratedToolSpec>(result.content, 'object');
+        if (!parsed) {
           this.log(`[tool-creator] Attempt ${attempt}: model returned no JSON object.`);
           continue;
         }
-        const parsed = JSON.parse(jsonMatch[0]) as GeneratedToolSpec;
         if (!parsed.name || !parsed.description || !parsed.executeCode || !parsed.inputSchema) {
           this.log(`[tool-creator] Attempt ${attempt}: spec missing required fields (name/description/executeCode/inputSchema).`);
           continue;

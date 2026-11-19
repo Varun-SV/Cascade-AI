@@ -11,6 +11,7 @@
 //  from the Knowledge tab.
 
 import type { ConversationMessage } from '../../types.js';
+import { parseModelJson } from '../../utils/json-extract.js';
 
 export interface DistilledFact {
   entity: string;
@@ -78,10 +79,9 @@ Conversation:
 ${transcript}`;
   try {
     const raw = await generate(prompt);
-    const match = /\[[\s\S]*\]/.exec(raw);
-    if (!match) return [];
-    const parsed = JSON.parse(match[0]);
-    if (!Array.isArray(parsed)) return [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const parsed = parseModelJson<any[]>(raw, 'array');
+    if (!parsed) return [];
     const out: DistilledFact[] = [];
     for (const f of parsed.slice(0, 6)) {
       if (

@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from 'framer-motion';
-import { CheckCircle2, AlertTriangle, ArrowUpCircle, Ban } from 'lucide-react';
+import { useState } from 'react';
+import { CheckCircle2, AlertTriangle, ArrowUpCircle, Ban, Brain, ChevronRight } from 'lucide-react';
 import CascadeMark from '../components/CascadeMark.js';
 import type { ActivityNode } from './useChatSession.js';
 
@@ -43,6 +44,33 @@ function shortModel(model: string): string {
   return i >= 0 ? model.slice(i + 1) : model;
 }
 
+/**
+ * One agent's thinking, folded under its row. Open, it follows the stream;
+ * it stays shut until asked, since a busy run has many agents thinking at once.
+ */
+function NodeThinking({ text, level, active }: { text: string; level: number; active: boolean }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="flex flex-col" style={{ paddingLeft: level * 16 + 22 }}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex items-center gap-1 self-start rounded px-1 py-0.5 text-[11.5px] text-ink-500 hover:bg-elev/[0.05] hover:text-ink-100"
+      >
+        <ChevronRight size={11} className={open ? 'rotate-90 transition-transform' : 'transition-transform'} aria-hidden="true" />
+        <Brain size={11} aria-hidden="true" />
+        <span>{active ? 'Thinking…' : 'Thought process'}</span>
+      </button>
+      {open && (
+        <div className="mb-1 ml-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words border-l-2 border-elev/[0.17] pl-2.5 text-[12px] leading-relaxed text-ink-300">
+          {text}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ActivityDrawer({ activity }: { activity: ActivityNode[] }) {
   if (activity.length === 0) return null;
   const nodes = [...activity].sort((a, b) => a.order - b.order);
@@ -63,8 +91,8 @@ export default function ActivityDrawer({ activity }: { activity: ActivityNode[] 
           const tier = n.role.slice(0, 2);
           const dot = tier === 'T1' ? 'bg-t1' : tier === 'T2' ? 'bg-t2' : tier === 'T3' ? 'bg-t3' : 'bg-ink-500';
           return (
+            <div key={n.tierId} className="flex flex-col">
             <motion.div
-              key={n.tierId}
               layout="position"
               // A worker springs out of its manager: it arrives from the left,
               // one indent up, as the tree spawns it.
@@ -130,6 +158,8 @@ export default function ActivityDrawer({ activity }: { activity: ActivityNode[] 
                 </div>
               )}
             </motion.div>
+            {n.thinking && <NodeThinking text={n.thinking} level={level} active={statusKind(n.status) === 'active'} />}
+            </div>
           );
         })}
       </div>

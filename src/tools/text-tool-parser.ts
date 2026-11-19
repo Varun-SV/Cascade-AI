@@ -15,6 +15,7 @@
 //
 
 import type { ToolCall } from '../types.js';
+import { parseModelJson } from '../utils/json-extract.js';
 
 const TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
 // Fenced code blocks: ```json / ```tool_call / ``` … ``` containing a call object
@@ -23,6 +24,29 @@ const JSON_BLOCK_RE = /```(?:json|tool_call|tool)?\s*([\s\S]*?)```/g;
 export interface ParsedTextToolCall {
   name: string;
   input: Record<string, unknown>;
+}
+
+/**
+ * Tool calls a model wrote as text although it was handed native tools.
+ *
+ * Stricter than `parseTextToolCalls`, because here an answer that merely
+ * mentions a call must not be taken for one: the call has to be in one of the
+ * dedicated call formats (`<tool_call>`, `<function=…>`, `[TOOL_CALLS]`,
+ * `<|python_tag|>`), or the reply has to open with it, and it has to name a
+ * tool this worker actually has.
+ */
+export function strayTextToolCalls(
+  text: string,
+  tools: ReadonlyArray<{ name: string }>,
+): ParsedTextToolCall[] {
+  if (!text) return [];
+  const trimmed = text.trim();
+  const marked = /<tool_call>|<function=|\[TOOL_CALLS\]|<\|python_tag\|>/.test(trimmed);
+  const opensWithCall = /^(?:```(?:json|tool_call|tool)?\s*)?\{/.test(trimmed);
+  if (!marked && !opensWithCall) return [];
+  const names = new Set(tools.map((t) => t.name));
+  const calls = parseTextToolCalls(trimmed);
+  return calls.length > 0 && calls.every((c) => names.has(c.name)) ? calls : [];
 }
 
 /**
@@ -35,6 +59,12 @@ export interface ParsedTextToolCall {
 export function parseTextToolCalls(text: string): ParsedTextToolCall[] {
   const xml = collect(text, TOOL_CALL_RE);
   if (xml.length > 0) return xml;
+
+  const fns = functionTags(text);
+  if (fns.length > 0) return fns;
+
+  const mistral = mistralCalls(text);
+  if (mistral.length > 0) return mistral;
 
   const fenced = collect(text, JSON_BLOCK_RE);
   if (fenced.length > 0) return fenced;
@@ -81,13 +111,31 @@ function tryBareObjects(text: string): ParsedTextToolCall[] {
     const candidate = text.slice(i, end + 1);
     // Accept both double- and single-quoted keys; parseJsonLoose normalises the
     // latter before parsing.
-    if (/['"]name['"]\s*:/.test(candidate) && /['"](?:input|arguments)['"]\s*:/.test(candidate)) {
+    if (/['"]name['"]\s*:/.test(candidate) && /['"](?:input|arguments|parameters)['"]\s*:/.test(candidate)) {
       const call = coerceCall(parseJsonLoose(candidate));
       if (call) results.push(call);
     }
     i = end;
   }
   return results;
+}
+
+/** `<function=name>{…}</function>`, the format of Llama 3.1's and some Qwen templates. */
+function functionTags(text: string): ParsedTextToolCall[] {
+  const out: ParsedTextToolCall[] = [];
+  for (const m of text.matchAll(/<function=([\w.-]+)>\s*([\s\S]*?)\s*<\/function>/g)) {
+    const parsed = m[2] ? parseJsonLoose(m[2]) : {};
+    out.push({ name: m[1]!, input: parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {} });
+  }
+  return out;
+}
+
+/** `[TOOL_CALLS] [{"name": …, "arguments": {…}}]`, Mistral's format. */
+function mistralCalls(text: string): ParsedTextToolCall[] {
+  const at = text.indexOf('[TOOL_CALLS]');
+  if (at === -1) return [];
+  const list = parseModelJson<unknown[]>(text.slice(at + '[TOOL_CALLS]'.length), 'array') ?? [];
+  return list.map(coerceCall).filter((c): c is ParsedTextToolCall => c !== null);
 }
 
 /** Parse JSON, retrying once with single-quotes normalised to double-quotes. */
@@ -123,7 +171,9 @@ function coerceCall(raw: unknown): ParsedTextToolCall | null {
     : fn && typeof fn.name === 'string' ? fn.name : null;
   if (!name) return null;
 
-  const rawInput = obj.input ?? obj.arguments ?? (fn ? (fn.input ?? fn.arguments) : undefined);
+  // `parameters` is Llama 3's name for them.
+  const rawInput = obj.input ?? obj.arguments ?? obj.parameters
+    ?? (fn ? (fn.input ?? fn.arguments ?? fn.parameters) : undefined);
   let input: Record<string, unknown> = {};
   if (rawInput && typeof rawInput === 'object') {
     input = rawInput as Record<string, unknown>;

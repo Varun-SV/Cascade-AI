@@ -855,6 +855,7 @@ ${quotedFieldRules(spec)}
       this.t2Managers.set(section.sectionId, manager);
 
       bind(manager, 'stream:token', (e) => this.emit('stream:token', e));
+      bind(manager, 'tier:thinking', (e) => this.emit('tier:thinking', e));
       bind(manager, 'log', (e) => this.emit('log', e));
       bind(manager, 'tier:status', (e) => this.emit('tier:status', e));
       bind(manager, 'tool:call', (e) => this.emit('tool:call', e));

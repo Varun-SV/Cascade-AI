@@ -465,6 +465,101 @@ describe('T3Worker — text-tool lean prompts (v0.15.0)', () => {
   });
 });
 
+describe('a model that lists native tools but writes its calls as text', () => {
+  it('runs the call, switches the model to the text format, and tells the router', async () => {
+    const seen: Array<{ tools: unknown; system: string }> = [];
+    let calls = 0;
+    const useTextTools = vi.fn();
+    const execute = vi.fn().mockResolvedValue('written');
+    const router = {
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content?: unknown }>; systemPrompt?: string; tools?: unknown }) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        seen.push({ tools: options.tools, system: String(options.systemPrompt ?? '') });
+        calls += 1;
+        if (calls === 1) {
+          return { ...makeResult('<tool_call>{"name":"file_write","input":{"path":"a.md","content":"x"}}</tool_call>'), servedBy: { provider: 'openai-compatible', id: 'qwen-local' } };
+        }
+        return makeResult('Final answer');
+      }),
+      getModelForTier: () => ({ id: 'qwen-local', provider: 'openai-compatible', supportsToolUse: true }),
+      useTextTools,
+    } as unknown as CascadeRouter;
+
+    const worker = new T3Worker(router, makeToolRegistry({ execute }), 't2-parent');
+    const result = await worker.execute(makeAssignment(), 'task-stray');
+
+    expect(result.status).toBe('COMPLETED');
+    expect(execute).toHaveBeenCalledWith('file_write', { path: 'a.md', content: 'x' }, expect.anything());
+    expect(useTextTools).toHaveBeenCalledWith({ provider: 'openai-compatible', id: 'qwen-local' });
+    expect(seen[0]!.tools).toBeDefined();                       // native tools, first call
+    expect(seen[1]!.tools).toBeUndefined();                     // then the text format
+    expect(seen[1]!.system).toContain('TOOL USE INSTRUCTIONS');
+  });
+
+  it('takes a final answer that only mentions a call for the answer', async () => {
+    const useTextTools = vi.fn();
+    const router = {
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content?: unknown }> }) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        return makeResult('Send {"name": "file_write", "input": {"path": "a"}} to write a file.');
+      }),
+      getModelForTier: () => ({ id: 'gpt-x', provider: 'openai', supportsToolUse: true }),
+      useTextTools,
+    } as unknown as CascadeRouter;
+
+    const worker = new T3Worker(router, makeToolRegistry(), 't2-parent');
+    const result = await worker.execute(makeAssignment(), 'task-mention');
+
+    expect(result.status).toBe('COMPLETED');
+    expect(useTextTools).not.toHaveBeenCalled();
+  });
+});
+
+describe('a worker\'s thinking', () => {
+  it('is shown as tier:thinking and kept out of its output and its next turn', async () => {
+    const histories: string[] = [];
+    let calls = 0;
+    const router = {
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ role: string; content?: unknown }> }, onChunk?: (c: { text: string }) => void) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        histories.push(JSON.stringify(options.messages));
+        calls += 1;
+        if (calls === 1) {
+          for (const t of ['<think>\nI should ', 'write a.md\n</think>\n\n']) onChunk?.({ text: t });
+          return makeResult('<think>\nI should write a.md\n</think>\n\n', [{ id: 'c1', name: 'file_write', input: { path: 'a.md' } }], 'tool_use');
+        }
+        onChunk?.({ text: 'Wrote it.' });
+        return makeResult('<think>done now</think>Wrote it.');
+      }),
+      getModelForTier: () => ({ id: 'm', provider: 'openai', supportsToolUse: true }),
+    } as unknown as CascadeRouter;
+
+    const worker = new T3Worker(router, makeToolRegistry(), 't2-parent');
+    const thinking: Array<{ call: number; text: string; done: boolean; role: string }> = [];
+    worker.on('tier:thinking', (e) => thinking.push(e));
+    const result = await worker.execute(makeAssignment(), 'task-think');
+
+    expect(result.output).toBe('Wrote it.');
+    expect(histories[1]).not.toContain('I should write');
+    const live = thinking.filter((t) => t.call === 1 && !t.done).map((t) => t.text).join('');
+    expect(live).toBe('\nI should write a.md\n');
+    expect(thinking).toContainEqual(expect.objectContaining({ call: 1, done: true, text: 'I should write a.md', role: 'T3' }));
+    expect(thinking).toContainEqual(expect.objectContaining({ call: 2, done: true, text: 'done now' }));
+  });
+});
+
 describe('T3Worker.executeTool — unified provider-error classification (used to loop instead of fast-failing)', () => {
   // Regression: a dead image-gen model's 404 ("This model is no longer
   // available to new users") fell through the old hand-rolled regex (which

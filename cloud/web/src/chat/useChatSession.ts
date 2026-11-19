@@ -186,6 +186,10 @@ export interface ActivityNode {
   dependsOn?: string[];
   /** Execution wave. Nodes sharing one ran at the same time. */
   waveId?: number;
+  /** What this agent's model thought, its calls in order, as it streams. */
+  thinking?: string;
+  /** Each model call's thinking so far, by call number; `thinking` joins them. */
+  thinkingCalls?: Record<number, string>;
   order: number;           // arrival order, for stable display
 }
 
@@ -215,8 +219,32 @@ function mergeActivity(prev: ActivityNode[], e: Record<string, unknown>): Activi
       ? (e['dependsOn'] as unknown[]).filter((d): d is string => typeof d === 'string')
       : cur?.dependsOn,
     waveId: typeof e['waveId'] === 'number' ? (e['waveId'] as number) : cur?.waveId,
+    ...(cur?.thinkingCalls ? { thinkingCalls: cur.thinkingCalls, thinking: cur.thinking } : {}),
     order: cur?.order ?? prev.length,
   };
+  if (i >= 0) { const copy = [...prev]; copy[i] = node; return copy; }
+  return [...prev, node];
+}
+
+/**
+ * Fold a `tier:thinking` event into the activity list. A streamed piece is
+ * appended to its call; the call's `done` event carries all of it and replaces
+ * what streamed, which a retry may have doubled.
+ */
+export function mergeThinking(prev: ActivityNode[], e: Record<string, unknown>): ActivityNode[] {
+  const tierId = typeof e['tierId'] === 'string' ? e['tierId'] : '';
+  const text = typeof e['text'] === 'string' ? e['text'] : '';
+  const call = typeof e['call'] === 'number' ? e['call'] : 0;
+  if (!tierId || (!text && e['done'] !== true)) return prev;
+  const i = prev.findIndex((n) => n.tierId === tierId);
+  const cur: ActivityNode = i >= 0
+    ? prev[i]!
+    : { tierId, role: String(e['role'] ?? '').toUpperCase(), status: 'ACTIVE', order: prev.length };
+  const calls = { ...(cur.thinkingCalls ?? {}) };
+  calls[call] = e['done'] === true ? text.trim() : (calls[call] ?? '') + text;
+  const thinking = Object.keys(calls).map(Number).sort((a, b) => a - b)
+    .map((k) => calls[k]!.trim()).filter(Boolean).join('\n\n');
+  const node: ActivityNode = { ...cur, thinkingCalls: calls, thinking };
   if (i >= 0) { const copy = [...prev]; copy[i] = node; return copy; }
   return [...prev, node];
 }
@@ -1382,6 +1410,13 @@ export function useChatSession(
       setStatus(statusLabel(e));
       setActivity((prev) => mergeActivity(prev, e));
     };
+    const onThinking = (e: Record<string, unknown>) => {
+      // Same scoping as onStatus, for the same reasons.
+      const convo = e['conversationId'];
+      const current = conversationIdRef.current;
+      if (current && typeof convo === 'string' && convo !== current) return;
+      setActivity((prev) => mergeThinking(prev, e));
+    };
     const onWhy = (r: WhyReport) => { pendingWhyRef.current = r; };
     const onPlan = (e: PlanApproval) => setApproval(e);
     const onClarificationRequired = (e: ClarificationRequest & { conversationId?: string }) => {
@@ -1864,6 +1899,7 @@ export function useChatSession(
     socket.on('browser:step', onBrowserStep);
     socket.on('stream:token', onToken);
     socket.on('tier:status', onStatus);
+    socket.on('tier:thinking', onThinking);
     socket.on('run:why', onWhy);
     socket.on('plan:approval-required', onPlan);
     socket.on('clarification:required', onClarificationRequired);
@@ -1886,6 +1922,7 @@ export function useChatSession(
       socket.off('browser:step', onBrowserStep);
       socket.off('stream:token', onToken);
       socket.off('tier:status', onStatus);
+      socket.off('tier:thinking', onThinking);
       socket.off('run:why', onWhy);
       socket.off('plan:approval-required', onPlan);
       socket.off('clarification:required', onClarificationRequired);

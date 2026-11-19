@@ -38,3 +38,49 @@ describe('extractFirstJsonObject', () => {
     expect(parseFirstJsonObject('{not valid json}')).toBeNull();
   });
 });
+
+describe('parseModelJson', () => {
+  it('reads the array after the thinking, not a bracket inside it', async () => {
+    const { parseModelJson } = await import('./json-extract.js');
+    const reply = '<think>Option [A] or [B]? I will pick both.</think>\n[{"id":1},{"id":2}]';
+    expect(parseModelJson(reply, 'array')).toEqual([{ id: 1 }, { id: 2 }]);
+  });
+
+  it('skips prose brackets before the real array', async () => {
+    const { parseModelJson } = await import('./json-extract.js');
+    expect(parseModelJson('Here it is [see below]:\n[1, 2, 3]', 'array')).toEqual([1, 2, 3]);
+  });
+
+  it('prefers a fenced block', async () => {
+    const { parseModelJson } = await import('./json-extract.js');
+    expect(parseModelJson('Example {"x":0}\n```json\n{"x":1}\n```', 'object')).toEqual({ x: 1 });
+  });
+
+  it('repairs trailing commas, comments, curly quotes and Python literals', async () => {
+    const { parseModelJson } = await import('./json-extract.js');
+    const reply = '{\n  // verdict\n  “sufficient”: False, /* why */ "notes": None,\n  "tags": ["a", "b",],\n}';
+    expect(parseModelJson(reply, 'object')).toEqual({ sufficient: false, notes: null, tags: ['a', 'b'] });
+  });
+
+  it('leaves a comma or a Python word inside a string alone', async () => {
+    const { parseModelJson } = await import('./json-extract.js');
+    expect(parseModelJson('{"s": "True, ]", "n": 1,}', 'object')).toEqual({ s: 'True, ]', n: 1 });
+  });
+
+  it('does not take an object for an array or the other way round', async () => {
+    const { parseModelJson } = await import('./json-extract.js');
+    expect(parseModelJson('{"a":[1]}', 'array')).toEqual([1]);
+    expect(parseModelJson('[1,2]', 'object')).toBeNull();
+  });
+
+  it('finds an array after an earlier bracket that never closes', async () => {
+    const { parseModelJson } = await import('./json-extract.js');
+    expect(parseModelJson('Note [unfinished. Result: ["ok"]', 'array')).toEqual(['ok']);
+  });
+
+  it('returns null when nothing parses', async () => {
+    const { parseModelJson } = await import('./json-extract.js');
+    expect(parseModelJson('no json at all', 'array')).toBeNull();
+    expect(parseModelJson('', 'object')).toBeNull();
+  });
+});
