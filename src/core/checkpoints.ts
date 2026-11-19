@@ -38,6 +38,12 @@ export interface Checkpoint {
   undone?: boolean;
   /** Put back by /undo except for files changed by hand since; /undo --force finishes it. */
   partial?: boolean;
+  /**
+   * What was in the project but left out of the snapshot when the run began
+   * (files, and folders ending in /, the .gitignore excluded then). A run can
+   * change the .gitignore: these were never recorded, whatever it says later.
+   */
+  ignored?: string[];
 }
 
 export interface UndoResult {
@@ -51,6 +57,15 @@ export interface UndoResult {
   skipped: string[];
   /** Repositories nested in the project, which a checkpoint records only as a pointer: not touched. */
   nested?: string[];
+  /** Files there before the run but left out of its snapshot (.gitignore then): not removed. */
+  unrecorded?: string[];
+  /** Runs whose end was never recorded (Cascade stopped mid-run): not undone unless forced. */
+  incomplete?: Checkpoint[];
+}
+
+/** Whether a project path (with /) is one of these left-out paths, inside one, or a folder holding one. */
+function among(rel: string, left: string[]): boolean {
+  return left.some((e) => e === rel || e === `${rel}/` || (e.endsWith('/') && rel.startsWith(e)) || e.startsWith(`${rel}/`));
 }
 
 const KEEP = 50;
@@ -98,7 +113,13 @@ export class Checkpoints {
     const before = await this.snapshot('before a run').catch(() => null);
     if (!before) return null;
     const all = this.list();
-    const cp: Checkpoint = { n: (all.at(-1)?.n ?? 0) + 1, label: oneLine(label, 80), at: new Date().toISOString(), before };
+    // What the snapshot left out, as the rules are now: folders collapsed.
+    const ignored = (await this.git(['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z']).catch(() => ''))
+      .split('\0').filter(Boolean);
+    const cp: Checkpoint = {
+      n: (all.at(-1)?.n ?? 0) + 1, label: oneLine(label, 80), at: new Date().toISOString(), before,
+      ...(ignored.length ? { ignored } : {}),
+    };
     await this.git(['update-ref', `refs/cascade/${cp.n}`, before]);
     this.save([...all, cp]);
     return cp;
@@ -137,6 +158,11 @@ export class Checkpoints {
     // The project's own .git is never recorded (git keeps it out of any
     // snapshot), so a write to its config or refs could not be put back.
     if (rel.some((r) => r.split(path.sep).includes('.git'))) return false;
+    // Nor a file left out when the run began: a run that removes its
+    // .gitignore line first would otherwise find it "covered", though its
+    // contents then were never recorded.
+    const left = this.list().at(-1)?.ignored ?? [];
+    if (left.length && rel.some((r) => among(r.split(path.sep).join('/'), left))) return false;
     try {
       // Exit 0 names the ignored ones; exit 1 means none is.
       const ignored = await this.git(['check-ignore', '-z', '--stdin'], rel.join('\0'), [0, 1]);
@@ -178,6 +204,11 @@ export class Checkpoints {
     const all = this.list();
     const runs = all.filter((c) => !c.undone).slice(-Math.max(1, count)).reverse();
     if (!runs.length) return { runs: [], restored: [], removed: [], skipped: [] };
+    // A run whose end was never recorded (Cascade stopped, or the last
+    // snapshot failed): which changes since are its own, and which were made
+    // by hand later, can't be told. Only when forced.
+    const incomplete = runs.filter((r) => !r.after);
+    if (incomplete.length && !force) return { runs: [], restored: [], removed: [], skipped: [], incomplete };
     const now = await this.snapshot('before /undo');
     // Each path the runs touched: what it was before the FIRST of them that
     // changed it, and what the last of them left it as. A file made by hand
@@ -211,6 +242,8 @@ export class Checkpoints {
     }
     const restored: string[] = [];
     const removed: string[] = [];
+    const unrecorded: string[] = [];
+    const left = [...new Set(runs.flatMap((r) => r.ignored ?? []))];
     // A folder about to be replaced (by the file it was before, or removed as
     // made by the run) may hold files the checkpoint never recorded, made
     // since and left out by .gitignore: those would go with it. Left alone,
@@ -235,13 +268,19 @@ export class Checkpoints {
       const back = paths.filter((p) => status.has(p) && status.get(p) !== 'A');
       if (back.length) await this.git(['restore', `--source=${source}`, '--worktree', '--pathspec-from-file=-', '--pathspec-file-nul'], back.join('\0'));
       restored.push(...back);
-      for (const p of paths.filter((x) => status.get(x) === 'A')) { this.removeFile(p); removed.push(p); }
+      for (const p of paths.filter((x) => status.get(x) === 'A')) {
+        // Not in the snapshot only because the .gitignore left it out then:
+        // it was there before the run, so it stays.
+        if (among(p, left)) { unrecorded.push(p); continue; }
+        this.removeFile(p);
+        removed.push(p);
+      }
     }
     // With files left alone, the runs stay open: /undo --force can still
     // put those back, as the reply says it can.
     const done = new Set(runs.map((r) => r.n));
     this.save(all.map((c) => (!done.has(c.n) ? c : skipped.length ? { ...c, partial: true } : { ...c, undone: true, partial: false })));
-    return { runs, restored, removed, skipped, ...(nested.length ? { nested } : {}) };
+    return { runs, restored, removed, skipped, ...(nested.length ? { nested } : {}), ...(unrecorded.length ? { unrecorded } : {}) };
   }
 
   // ── git ─────────────────────────────────────

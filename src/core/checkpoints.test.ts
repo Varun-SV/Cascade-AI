@@ -108,12 +108,38 @@ describe('Checkpoints', () => {
     expect(fs.existsSync(path.join(root, '.git', 'refs', 'cascade'))).toBe(false);
   });
 
-  it('a run that never ended is undone against the files as they are now', async () => {
+  it('a run that never ended is undone only when forced, against the files as they are now (Codex on c194786)', async () => {
     const cp = new Checkpoints(root, state);
     await cp.begin('crashed');
     write('a.txt', 'half done');
-    await cp.undo();
+    write('later.txt', 'made by hand after Cascade stopped');
+    const r = await cp.undo();
+    expect(r.runs).toEqual([]);
+    expect(r.incomplete?.map((c) => c.n)).toEqual([1]);
+    expect(read('a.txt')).toBe('half done');
+    expect(read('later.txt')).toBe('made by hand after Cascade stopped');
+    expect(cp.list()[0]!.undone).toBeFalsy();
+    await cp.undo(1, true);
     expect(read('a.txt')).toBe('one');
+    expect(exists('later.txt')).toBe(false);
+  });
+
+  it('a file left out when the run began stays uncovered, and kept, whatever the run does to .gitignore (Codex on c194786)', async () => {
+    write('.gitignore', 'out/\nlocal.txt\n');
+    write('local.txt', 'mine, never recorded');
+    const cp = new Checkpoints(root, state);
+    const run = (await cp.begin('x'))!;
+    write('.gitignore', 'out/\n');
+    expect(await cp.covers([path.join(root, 'local.txt')])).toBe(false);
+    expect(await cp.covers([path.join(root, 'out', 'build.js')])).toBe(false);
+    expect(await cp.covers([path.join(root, 'a.txt')])).toBe(true);
+    write('local.txt', 'overwritten by the run');
+    await cp.end(run);
+    const r = await cp.undo();
+    expect(exists('local.txt')).toBe(true);
+    expect(r.unrecorded).toEqual(['local.txt']);
+    expect(r.removed).not.toContain('local.txt');
+    expect(read('.gitignore')).toBe('out/\nlocal.txt\n');
   });
 
   it('says whether it records a file: not one the .gitignore leaves out, nor one outside (Codex on f8f4a10)', async () => {

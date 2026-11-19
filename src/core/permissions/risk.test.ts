@@ -167,6 +167,13 @@ describe('assessRisk: other tools', () => {
     expect(code('out.write_text("x")').category).toBe('unrecorded');
     expect(code('open("/etc/hosts", "a").write("x")').category).toBe('outside-project');
   });
+  it('run_code: a script that changes folder before writing a relative name asks (Codex on c194786)', () => {
+    const code = (c: string) => assessRisk('run_code', { code: c }, root);
+    expect(code("import os; os.chdir('/outside'); open('a.txt', 'w').write('changed')").category).toBe('unrecorded');
+    expect(code("process.chdir('/tmp'); require('fs').writeFileSync('a.txt', 'x')").category).toBe('unrecorded');
+    expect(code("import os; os.chdir('/outside'); open('/etc/x', 'w')").category).toBe('outside-project');
+    expect(code("import os; os.chdir('sub'); print(os.listdir('.'))")).toMatchObject({ level: 'recoverable' });
+  });
 });
 
 describe('what an undoable call writes, for the checkpoint to vouch for (Codex on f8f4a10)', () => {

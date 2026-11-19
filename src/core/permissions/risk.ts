@@ -761,6 +761,12 @@ export function assessCode(code: string, root?: string, cwd: string = root ?? ''
   // command's must: named in the code, so they can be checked before it runs.
   const targets = codeWriteTargets(text);
   if (targets === null) return risky('unrecorded', 'the code writes a file whose name it works out as it runs, so whether /undo could put it back can\'t be told');
+  // A script that changes folder first writes a relative name somewhere else
+  // than where it is checked: only absolute ones are known then.
+  if (targets.length && /\b(?:os\.(?:chdir|fchdir)|process\.chdir|Dir\.chdir|chdir)\s*\(/.test(text)) {
+    const relative = targets.find((t) => !path.isAbsolute(t) && !/^~/.test(t));
+    if (relative) return risky('unrecorded', `the code changes folder before it writes ${relative}, so where it lands, and whether /undo could put it back, can't be told`);
+  }
   if (targets.length && root) return worst(recoverable('runs code in the project (checkpointed)'), writesTo(targets, root, cwd));
   return recoverable('runs code in the project (checkpointed)');
 }

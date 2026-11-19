@@ -16,6 +16,11 @@ const ago = (iso: string, now = Date.now()): string => {
 };
 
 export function describeUndo(r: UndoResult): string {
+  if (r.incomplete?.length) {
+    const which = r.incomplete.map((c) => `#${c.n} ("${c.label}")`).join(', ');
+    return `Not undone: Cascade stopped before it recorded the end of run ${which}, so which changes since are that run's and which you made later can't be told.\n\n`
+      + `/undo --force takes the project back to before that run, losing every change since, yours included. /checkpoints lists the runs.`;
+  }
   if (!r.runs.length) return 'Nothing to undo: no run in this project has a checkpoint left that isn\'t undone already.';
   const which = r.runs.length === 1 ? `run #${r.runs[0]!.n} ("${r.runs[0]!.label}")` : `the last ${r.runs.length} runs (#${r.runs.at(-1)!.n}–#${r.runs[0]!.n})`;
   const parts = [`Undid ${which}.`];
@@ -26,6 +31,7 @@ export function describeUndo(r: UndoResult): string {
     parts.push(`Left alone, because they changed again after the run (${r.skipped.length}):\n${list(r.skipped)}\n`
       + `/undo --force puts these back too, losing the later changes.`);
   }
+  if (r.unrecorded?.length) parts.push(`Kept, as they were there before the run but your .gitignore left them out of its checkpoint (${r.unrecorded.length}):\n${list(r.unrecorded)}`);
   if (r.nested?.length) parts.push(`Not touched, as they are git repositories of their own inside the project, which a checkpoint can't record (${r.nested.length}):\n${list(r.nested)}`);
   parts.push('Files your .gitignore leaves out (node_modules, build output) aren\'t kept, and anything that left this computer (a push, a deploy, a message) can\'t be taken back.');
   return parts.join('\n\n');
