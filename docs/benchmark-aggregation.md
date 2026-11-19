@@ -110,18 +110,26 @@ claude-fable-5
 
 ## Sources
 
-One JSON file per board in `scripts/benchmarks/sources/` (text sources, as of 2026-10-28):
+One JSON file per board in `scripts/benchmarks/sources/` (text sources, as of 2026-11-19):
 
 | file | measures | tasks | provenance |
 | --- | --- | --- | --- |
 | `vals-terminal-bench-2-1` | 89 terminal tasks, one harness | code, agentic (**anchor**) | captured |
 | `vals-terminal-bench-4` | 66 long-horizon terminal tasks | code, agentic (fitted) | captured |
 | `vals-swebench-verified` | real GitHub issues, bash-only agent | code, agentic (fitted) | captured |
-| `aa-tau2-bench-telecom` | multi-turn tool use under a policy | agentic (fitted) | mirror-captured |
 | `vals-index` | finance/coding/legal/tax agent work | analysis, data (**anchor**) | captured |
 | `general-fallback-terminal-bench-4` | Terminal-Bench 4.0 fitted to the index | analysis, data (fallback) | derived |
 | `lmarena-creative-writing` | human preference on writing | creative (**anchor**) | mirror-captured |
 | `openai-gpt-5.6-2026-08` | OpenAI's GPT-5.6 launch evals | all four | captured |
+
+**Retired 2026-11-19: `aa-tau2-bench-telecom`** (Artificial Analysis τ²-bench Telecom, via BenchLM), now in
+`scripts/benchmarks/retired/`, which the refresh does not read. Its fit onto Terminal-Bench 2.1 cleared the gate at
+ρ = 0.67 in October. Re-read in November, AA has re-run Claude Opus 4.7 (74 → 88.6) and GPT-5 (86.5 → 84.8) and
+still not run the 5.5/6.x generation, and the fit falls to ρ = 0.50 over the first-party models (0.19 with DeepSeek
+V4 Pro and MiniMax M3), so the aggregator skipped it and it set no score. The file keeps that November capture; move
+it back into `sources/` once AA has run the current models and the fit clears the gate again. The models only it
+measured (GPT-4o, GPT-4.1, Gemini 2.x) keep their committed scores, and lose only a separate agentic value that
+equalled their task score.
 
 ```json
 {
@@ -313,10 +321,13 @@ being the best of a forty-model blended arena both come out near 100, and nothin
 the number says which happened. Reading two such scores off one 0-100 axis is only
 valid when the sources share enough models to anchor one to the other.
 
-The committed text-to-speech pair is the live example: `text-to-speech-aa-arena`
-rates eight models, `text-to-speech-aa-open-weights` rates five, and **they share
-none**. There is no measurement linking the two populations, so no amount of
-arithmetic here can calibrate them — the information simply is not in the data.
+The committed vision pair is the live example: `vision-arena` rates nineteen models,
+`vision-mmmu` rates twenty-four, and **they share none**. There is no measurement
+linking the two populations, so no amount of arithmetic here can calibrate them — the
+information simply is not in the data. (Text-to-speech was the example until the
+2026-11-19 refresh: the September captures rated eight and five models with none in
+common. Read directly, Artificial Analysis's full leaderboard rates 103 voices, the
+open-weights ones among them, so the two TTS sources now share twenty.)
 
 So the aggregator reports the condition instead of hiding it. `cohortOverlap()`
 returns `{ sources, families, shared, components, disjoint }` per modality, and it
@@ -342,18 +353,24 @@ occurrence. And `components === 1` is necessary but not sufficient: the committe
 `embeddings` pair is connected by exactly **one** shared model out of sixteen — a
 bridge in the graph sense, nowhere near a calibration.
 
-Over the committed sources today, **two modalities are disjoint: `text-to-speech` and
-`vision`** (the second found by running the measure rather than by reasoning about the
-first).
+Over the committed sources today, **one modality is disjoint: `vision`** (found by
+running the measure rather than by reasoning about text-to-speech, which was disjoint
+until the 2026-11-19 refresh bridged it).
+
+A refresh that re-reads a whole board also removes the board's models it no longer
+lists from the committed snapshot before aggregating: on 2026-11-19, three music and
+four text-to-speech models Artificial Analysis had replaced with newer versions.
+Carried forward, they would keep percentiles measured on a board that has since been
+re-anchored, and each would count as an absent source's component.
 
 **Before `modalities` drives routing**, a consumer must require `components === 1`
 *and* enough `shared` anchors to mean it, or keep each source's percentiles separate
 rather than collapsing them onto one axis. Treating today's values as comparable
 quality scores would rank a small model top of a weak field above a strong model
 mid-field in a hard one. `modality-aggregate.test.mjs` pins that failure mode with a
-disjoint strong-vs-weak pair, pins the unconnected-third-source case, and asserts the
-committed TTS and vision sources are disjoint — so a future refresh that adds a
-bridging source shows up as those tests changing.
+disjoint strong-vs-weak pair, pins the unconnected-third-source case, asserts the
+committed vision sources are disjoint and that the TTS sources became connected — so a
+future refresh that adds or removes a bridging source shows up as those tests changing.
 
 ### Running it
 

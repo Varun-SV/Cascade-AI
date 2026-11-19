@@ -2,8 +2,8 @@
   "source": "vals-terminal-bench-4",
   "label": "Vals AI \u00b7 Terminal-Bench 4.0 (mini-swe-agent, bash only, avg@3)",
   "url": "https://www.vals.ai/benchmarks/terminal-bench-4",
-  "capturedAt": "2026-10-28",
-  "sourceUpdatedAt": "2026-10-26",
+  "capturedAt": "2026-11-19",
+  "sourceUpdatedAt": "2026-11-18",
   "provenance": "captured",
   "scale": "percent",
   "calibration": {
@@ -14,8 +14,12 @@
       "fitTo": "vals-terminal-bench-2-1"
     }
   },
-  "note": "66 new long-horizon terminal tasks (software, science, ML, ops, hardware, security, media), 8-hour limit, no partial credit. Much harder than 2.1 (scores are not comparable raw), so it is FITTED onto Terminal-Bench 2.1 over the models both rate rather than given its own band. It is the current Vals agentic board and the only one here that rates GPT-6.1 Sol/Terra and Claude Haiku 5.5.",
+  "note": "66 new long-horizon terminal tasks (software, science, ML, ops, hardware, security, media), 8-hour limit, no partial credit. Much harder than 2.1 (scores are not comparable raw), so it is FITTED onto Terminal-Bench 2.1 over the models both rate rather than given its own band. It is the current Vals agentic board and the only agentic board here that rates Claude Fable 5.2, GPT-6.2 Astra/Sol, GPT-6.1 Sol/Terra, Gemini 4 Carbon/Neon/Hydrogen and Claude Haiku 5.5. The open and other providers' models this board rates (Kimi, GLM, Grok, DeepSeek, Qwen, MiniMax, Mistral Large 4, MiMo) are left out ON PURPOSE. They score far lower here than first-party models with the same Terminal-Bench 2.1 score (Kimi K3: 80.9 on 2.1, 17.2 on 4.0), which takes the fit onto 2.1 below its 0.6 correlation gate (0.51 with them, 0.70 without) and would drop this board entirely. Their code and agentic scores therefore come from Terminal-Bench 2.1 and SWE-bench, which this board suggests flatter them on long-horizon work. Where a board lists a model both undated and as a dated snapshot (DeepSeek V4 / V4 Pro 0813, DeepSeek V4.1 Flash / 1017, Qwen 3.8 Max / 0902), the newest dated snapshot is used: it is what the provider's alias serves. Only the board's own harness counts (Mini-SWE-agent or Terminus 2), never a vendor harness row such as Claude Code, Codex or Factory.",
   "models": {
+    "claude-fable-5.2": {
+      "code": 65.15,
+      "agentic": 65.15
+    },
     "claude-opus-5.5": {
       "code": 65.15,
       "agentic": 65.15
@@ -23,6 +27,22 @@
     "claude-sonnet-5.5": {
       "code": 64.14,
       "agentic": 64.14
+    },
+    "gpt-6.2-astra": {
+      "code": 63.13,
+      "agentic": 63.13
+    },
+    "gemini-4-carbon": {
+      "code": 63.13,
+      "agentic": 63.13
+    },
+    "gemini-4-neon": {
+      "code": 61.62,
+      "agentic": 61.62
+    },
+    "gpt-6.2-sol": {
+      "code": 60.61,
+      "agentic": 60.61
     },
     "gpt-6-astra": {
       "code": 59.6,
@@ -39,6 +59,10 @@
     "gpt-6.1-sol": {
       "code": 55.05,
       "agentic": 55.05
+    },
+    "gemini-4-hydrogen": {
+      "code": 54.04,
+      "agentic": 54.04
     },
     "claude-opus-5": {
       "code": 53.53,

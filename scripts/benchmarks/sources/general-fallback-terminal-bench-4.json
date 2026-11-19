@@ -2,7 +2,7 @@
   "source": "general-fallback-terminal-bench-4",
   "label": "Fallback: Terminal-Bench 4.0 fitted onto the analysis/data anchor (Vals Index)",
   "url": "https://www.vals.ai/benchmarks/terminal-bench-4",
-  "capturedAt": "2026-10-28",
+  "capturedAt": "2026-11-19",
   "provenance": "derived",
   "role": "fallback",
   "scale": "percent",
@@ -16,6 +16,10 @@
   },
   "note": "Not a measurement of analysis or data work. A FALLBACK (role \"fallback\") that fills a cell only when no primary source rates that model for that task, so a current model the Vals Index has not run (GPT-5.6, Opus 5, Fable 5, Gemini 3.x) is scored from a real single-harness board instead of a hand-typed seed. Terminal-Bench 4.0 is itself one of the Vals Index's coding components and tracks it closely (Spearman 0.97 over 9 shared models), so it is fitted onto the index. Terminal-Bench 2.1 was tried in this role and fails the aggregator's correlation gate against the index (0.43), and no agentic board predicts writing preference (0.23 against LMArena creative), so neither is used; a cell nothing measures is imputed from the model's own measured cells instead. Same raw numbers as vals-terminal-bench-4.json.",
   "models": {
+    "claude-fable-5.2": {
+      "analysis": 65.15,
+      "data": 65.15
+    },
     "claude-opus-5.5": {
       "analysis": 65.15,
       "data": 65.15
@@ -23,6 +27,22 @@
     "claude-sonnet-5.5": {
       "analysis": 64.14,
       "data": 64.14
+    },
+    "gpt-6.2-astra": {
+      "analysis": 63.13,
+      "data": 63.13
+    },
+    "gemini-4-carbon": {
+      "analysis": 63.13,
+      "data": 63.13
+    },
+    "gemini-4-neon": {
+      "analysis": 61.62,
+      "data": 61.62
+    },
+    "gpt-6.2-sol": {
+      "analysis": 60.61,
+      "data": 60.61
     },
     "gpt-6-astra": {
       "analysis": 59.6,
@@ -39,6 +59,10 @@
     "gpt-6.1-sol": {
       "analysis": 55.05,
       "data": 55.05
+    },
+    "gemini-4-hydrogen": {
+      "analysis": 54.04,
+      "data": 54.04
     },
     "claude-opus-5": {
       "analysis": 53.53,
