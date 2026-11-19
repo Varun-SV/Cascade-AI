@@ -353,9 +353,7 @@ export async function commonsImages(query: string, opts: { signal?: AbortSignal;
     const meta = info?.extmetadata ?? {};
     const plain = (k: string): string | undefined => {
       const v = meta[k]?.value;
-      // Tags out, then any bracket left over: one pass alone leaves "<script" from
-      // "<<script>script>", and this text goes into the report's Markdown.
-      return v ? v.replace(/<[^>]*>/g, '').replace(/[<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120) || undefined : undefined;
+      return v ? htmlText(v).replace(/\s+/g, ' ').trim().slice(0, 120) || undefined : undefined;
     };
     out.push({
       url,
@@ -365,6 +363,23 @@ export async function commonsImages(query: string, opts: { signal?: AbortSignal;
       ...(plain('Artist') ? { credit: plain('Artist') } : {}),
       ...(plain('LicenseShortName') ? { license: plain('LicenseShortName') } : {}),
     });
+  }
+  return out;
+}
+
+/**
+ * The text of a snippet of HTML, as Commons gives an author or a description.
+ * Read character by character, not with a replace: whatever sits between a
+ * `<` and the next `>` is dropped, and no `<` or `>` is ever kept, so no way
+ * of nesting or breaking a tag leaves markup in the report's Markdown.
+ */
+export function htmlText(html: string): string {
+  let out = '';
+  let inTag = false;
+  for (const ch of html) {
+    if (ch === '<') { inTag = true; continue; }
+    if (ch === '>') { inTag = false; continue; }
+    if (!inTag) out += ch;
   }
   return out;
 }
@@ -405,16 +420,20 @@ export async function annotateImage(
   if (!sharp) throw new ImageToolsUnavailableError();
   if (!marks.length) throw new Error('Give at least one mark.');
   if (marks.length > MAX_MARKS) throw new Error(`At most ${MAX_MARKS} marks at once.`);
-  const { width: W, height: H } = image;
+  // Upright first, and measured as it now is: a photo whose EXIF says "turn
+  // 90°" is taller than its stored width says, and the overlay must match.
+  const upright = await sharp(image.bytes).rotate().png().toBuffer({ resolveWithObject: true });
+  const W = upright.info.width;
+  const H = upright.info.height;
   const resolved = marks.map((m, i) => ({ ...m, at: boxOf(m, i, W, H, image.boxes) }));
 
-  let base = sharp(image.bytes).rotate();
+  let base = sharp(upright.data);
   const blurs = resolved.filter((m) => m.shape === 'blur');
   if (blurs.length) {
     const composites = [];
     for (const m of blurs) {
       const r = clampBox(pad(m.at, 4), W, H);
-      const region = await sharp(image.bytes).rotate().extract({ left: r.x, top: r.y, width: r.w, height: r.h })
+      const region = await sharp(upright.data).extract({ left: r.x, top: r.y, width: r.w, height: r.h })
         .blur(Math.max(8, Math.min(r.w, r.h) / 6)).toBuffer();
       composites.push({ input: region, left: r.x, top: r.y });
     }

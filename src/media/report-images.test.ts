@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import sharp from 'sharp';
 import {
   ImageAssets, ImageFetchError, MAX_STORED_IMAGES, annotateImage, captionFor, commonsImages, fetchImage,
-  jsonLdImages, pageImages,
+  htmlText, jsonLdImages, pageImages,
 } from './report-images.js';
 
 /** A solid-colour picture, as a real encoded file. */
@@ -95,6 +95,11 @@ describe('commonsImages', () => {
     const c = await commonsImages('eiffel tower', { fetcher: async (url) => { asked = url; return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } }); } });
     expect(asked).toContain('commons.wikimedia.org');
     expect(c).toEqual([expect.objectContaining({ url: 'https://upload.example/t1600.jpg', credit: 'Jane Doe', license: 'CC BY-SA 4.0', page: 'https://commons.wikimedia.org/wiki/File:Tower.jpg' })]);
+  });
+
+  it('htmlText keeps no angle bracket at all', () => {
+    expect(htmlText('<<script>script>alert(1)<</script>/script>')).toBe('scriptalert(1)/script');
+    expect(htmlText('a <b>b</b> c >< d')).toBe('a b c ');
   });
 
   it('leaves no markup in the credit or description, however the tags are nested', async () => {

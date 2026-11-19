@@ -26,25 +26,43 @@ const EARLY_BYTES_MAX = 4 * 1024 * 1024;
 
 /**
  * Run in the tab around a screenshot the person allowed: blurs every field
- * that can hold a password, a card or a one-time code, and every frame from
- * another site (a payment form is usually one), then takes the blur off. The
+ * that can hold a password, a card or a one-time code, in the page and in every
+ * same-site frame inside it, and every frame from another site (a payment form
+ * is usually one), then takes the blur off. The
  * page's own scripts never see a change they could undo in between: the style
  * goes in, the picture is taken, the style comes out.
  */
 const SHOT_GUARD_ON = `(() => {
   const css = 'input[type=password],input[autocomplete*="cc-"],input[autocomplete*="one-time-code"],input[name*="card" i],input[name*="cvv" i],input[name*="cvc" i],input[name*="otp" i],input[id*="cvv" i],input[id*="otp" i],[data-cascade-shot-blur]{filter:blur(12px)!important}';
-  for (const f of document.querySelectorAll('iframe')) {
-    try { if (!f.contentDocument) f.setAttribute('data-cascade-shot-blur', ''); } catch { f.setAttribute('data-cascade-shot-blur', ''); }
-  }
-  const s = document.createElement('style');
-  s.id = 'cascade-shot-guard';
-  s.textContent = css;
-  (document.head || document.documentElement).appendChild(s);
+  // Into every frame this page can reach (a same-site frame's fields are its
+  // own document's, which the top page's style doesn't cover); a frame it
+  // can't reach, from another site, is blurred whole.
+  const guard = (doc, depth) => {
+    const s = doc.createElement('style');
+    s.id = 'cascade-shot-guard';
+    s.textContent = css;
+    (doc.head || doc.documentElement).appendChild(s);
+    for (const f of doc.querySelectorAll('iframe, frame')) {
+      let inner = null;
+      try { inner = f.contentDocument; } catch { inner = null; }
+      if (inner && inner.documentElement && depth < 8) guard(inner, depth + 1);
+      else f.setAttribute('data-cascade-shot-blur', '');
+    }
+  };
+  guard(document, 0);
   return true;
 })()`;
 const SHOT_GUARD_OFF = `(() => {
-  document.getElementById('cascade-shot-guard')?.remove();
-  for (const f of document.querySelectorAll('[data-cascade-shot-blur]')) f.removeAttribute('data-cascade-shot-blur');
+  const clear = (doc, depth) => {
+    for (const s of doc.querySelectorAll('#cascade-shot-guard')) s.remove();
+    for (const f of doc.querySelectorAll('[data-cascade-shot-blur]')) f.removeAttribute('data-cascade-shot-blur');
+    for (const f of doc.querySelectorAll('iframe, frame')) {
+      let inner = null;
+      try { inner = f.contentDocument; } catch { inner = null; }
+      if (inner && inner.documentElement && depth < 8) clear(inner, depth + 1);
+    }
+  };
+  clear(document, 0);
   return true;
 })()`;
 

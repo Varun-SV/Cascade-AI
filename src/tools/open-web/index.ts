@@ -268,7 +268,8 @@ export interface FetchedPage extends ReadablePage {
 /** A page, as its server sent it: through the SSRF guard, redirects and all. */
 export type PageFetch = (url: string, init: RequestInit) => Promise<Response>;
 
-async function bodyText(resp: Response, maxBytes: number): Promise<{ text: string; cut: boolean }> {
+/** A response's text, read no further than `maxBytes`: the rest is never downloaded. */
+export async function bodyText(resp: Response, maxBytes: number): Promise<{ text: string; cut: boolean }> {
   const reader = resp.body?.getReader?.();
   if (!reader) {
     const text = await resp.text();

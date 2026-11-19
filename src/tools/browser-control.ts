@@ -30,6 +30,7 @@
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
 import { type Box, type ImageAssets, captionFor, loadSharp } from '../media/report-images.js';
+import { uniqueName } from './report-images.js';
 
 /** Saves a picture where generated media go, and says where (a workspace path, a file address). */
 export type ReportImageSink = (asset: { data: Buffer; mimeType: string; filename: string }) => Promise<string>;
@@ -654,7 +655,7 @@ export class BrowserControlTool extends BaseTool {
       }
     }
     const host = hostOf(outcome.url)?.replace(/^www\./, '') ?? 'page';
-    const name = `screenshot-${host.replace(/[^a-z0-9.-]+/gi, '-')}-${++this.captures}.jpg`;
+    const name = uniqueName(`screenshot-${host.replace(/[^a-z0-9.-]+/gi, '-')}-${++this.captures}`, 'jpg');
     let locator: string;
     try {
       locator = await images.sink({ data: bytes, mimeType: 'image/jpeg', filename: name });

@@ -355,6 +355,24 @@ suite('screenshots the person allowed', { timeout: 60_000 }, () => {
     expect(await r.page.evaluate('!!document.getElementById("cascade-shot-guard") || !!document.querySelector("[data-cascade-shot-blur]")')).toBe(false);
     expect(await r.page.evaluate('getComputedStyle(document.getElementById("pw")).filter')).toBe('none');
   });
+  it('a password field inside a same-site frame is blurred too (Codex on 53a9cae)', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    const inner = '<body style="margin:0;background:#fff"><input type=password value=hunter2 style="position:absolute;left:20px;top:20px;width:200px;height:100px;background:#000;border:0;outline:0"></body>';
+    const page = '<!doctype html><body style="margin:0;background:#fff">'
+      + `<iframe srcdoc='${inner}' style="position:absolute;left:100px;top:100px;width:300px;height:200px;border:0"></iframe>`
+      + '<div style="position:absolute;left:500px;top:120px;width:200px;height:100px;background:#000"></div></body>';
+    await r.page.evaluate(`document.open(); document.write(${JSON.stringify(page)}); document.close(); new Promise((res) => { const f = document.querySelector('iframe'); if (f.contentDocument && f.contentDocument.readyState === 'complete' && f.contentDocument.querySelector('input')) res(true); else f.onload = () => res(true); })`);
+    const shot = await r.page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 900, height: 400 } });
+    const sharp = (await import('sharp')).default;
+    const { data, info } = await sharp(shot).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const at = (x: number, y: number) => data[(y * info.width + x) * info.channels]!;
+    expect(at(503, 123)).toBeLessThan(20);
+    // The field's corner, inside the frame: 100 + 20 + 3.
+    expect(at(123, 123)).toBeGreaterThan(40);
+    expect(await r.page.evaluate('document.querySelector("iframe").contentDocument.getElementById("cascade-shot-guard") === null')).toBe(true);
+  });
+
   it('a screenshot past the viewport is refused even with the opt-in', async () => {
     const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
     const r = await startRig({ consent, raw: true });

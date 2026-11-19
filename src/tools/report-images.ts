@@ -10,12 +10,14 @@
 //  same sink the media tools use, so it lands where a generated image would:
 //  in the workspace on the desktop, as a file of the conversation in the cloud.
 
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
 import { resolveInWorkspace } from './utils/workspace-path.js';
 import { safeFetch } from './utils/safe-fetch.js';
-import { MAX_PAGE_BYTES, openWebSearch } from './open-web/index.js';
+import { MAX_PAGE_BYTES, bodyText, openWebSearch } from './open-web/index.js';
 import {
   type ImageAssets, type ImageCandidate, type ImageFetch, type Mark, type MarkShape, type StoredImage,
   ImageToolsUnavailableError, MAX_MARKS, annotateImage, captionFor, commonsImages, fetchImage, loadSharp, pageImages,
@@ -41,8 +43,16 @@ const MAX_COUNT = 3;
 const MAX_TRIES = 8;
 /** Pages opened to look for a picture, at most. */
 const MAX_PAGES = 4;
+/** Of MAX_TRIES, kept for Wikimedia Commons when the web's pictures all fail. */
+const COMMONS_TRIES = 3;
 
 const slug = (s: string): string => s.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'image';
+/**
+ * A name no earlier save has: the sink writes over a file of the same name, and
+ * a path this run already handed out (in a report, with its caption) must keep
+ * showing the picture it showed.
+ */
+export const uniqueName = (base: string, ext: string): string => `${base}-${randomBytes(4).toString('hex')}.${ext}`;
 
 /** The open-web search, keeping only the pages' addresses. */
 export const openWebPages: PageSearch = async (query, signal) => {
@@ -57,9 +67,9 @@ async function fetchHtml(url: string, fetcher: ImageFetch, signal?: AbortSignal)
     signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     headers: { accept: 'text/html,application/xhtml+xml' },
   });
-  if (!res.ok || !(res.headers.get('content-type') ?? 'text/html').includes('html')) return null;
-  const text = await res.text();
-  return text.length > MAX_PAGE_BYTES ? text.slice(0, MAX_PAGE_BYTES) : text;
+  if (!res.ok || !(res.headers.get('content-type') ?? 'text/html').includes('html')) { await res.body?.cancel().catch(() => {}); return null; }
+  // Read no further than the cap: a huge page is never held whole.
+  return (await bodyText(res, MAX_PAGE_BYTES)).text;
 }
 
 export class FindImageTool extends BaseTool {
@@ -122,30 +132,32 @@ export class FindImageTool extends BaseTool {
       for (let i = 0; i < 2; i++) for (const list of found) if (list[i]) candidates.push(list[i]!);
       if (!pages.length) notes.push('the web search found no pages');
     }
-    if (query && !pageUrl && !imageUrl && (source === 'commons' || (source === 'auto' && candidates.length < count))) {
-      candidates.push(...await commonsImages(query, { fetcher, ...(signal ? { signal } : {}) }).catch(() => []));
-    }
+    const fromCommons = (): Promise<ImageCandidate[]> => commonsImages(query, { fetcher, ...(signal ? { signal } : {}) }).catch(() => []);
+    if (query && !pageUrl && !imageUrl && source === 'commons') candidates.push(...await fromCommons());
 
     const saved: string[] = [];
     const seen = new Set<string>();
     let tries = 0;
-    for (const c of candidates) {
-      if (saved.length >= count || tries >= MAX_TRIES) break;
-      if (seen.has(c.url)) continue;
-      seen.add(c.url);
-      tries++;
-      try {
-        const img = await fetchImage(c.url, { fetcher, ...(signal ? { signal } : {}), referer: c.page });
-        const name = `${slug(query || c.alt || new URL(c.page).hostname)}-${saved.length + 1}.${img.mime === 'image/png' ? 'png' : 'jpg'}`;
-        const locator = await this.deps.sink({ data: img.bytes, mimeType: img.mime, filename: name });
-        const src = { kind: 'web' as const, url: c.url, page: c.page, ...(c.credit ? { credit: c.credit } : {}), ...(c.license ? { license: c.license } : {}) };
-        this.deps.assets.set(locator, { bytes: img.bytes, mime: img.mime, width: img.width, height: img.height, source: src });
-        const alt = (c.alt || query || 'image').replace(/[[\]\n]/g, ' ').slice(0, 100);
-        saved.push(`${saved.length + 1}. ${locator} (${img.width}×${img.height}) from ${c.page}\n   ![${alt}](${locator})\n   *${captionFor(src)}*`);
-      } catch (err) {
-        if (err instanceof ImageToolsUnavailableError) return `Error: ${err.message}`;
-        notes.push(`${c.url}: ${err instanceof Error ? err.message : String(err)}`);
+    // auto: the web's pictures first, with some tries kept back, so pictures that
+    // all turn out dead, tiny or not pictures at all still leave room for Commons.
+    const commonsAfter = query && !pageUrl && !imageUrl && source === 'auto';
+    const tryAll = async (list: ImageCandidate[], budget: number): Promise<string | null> => {
+      for (const c of list) {
+        if (saved.length >= count || tries >= budget) break;
+        if (seen.has(c.url)) continue;
+        seen.add(c.url);
+        tries++;
+        const failed = await this.saveOne(c, query, fetcher, signal, saved);
+        if (failed instanceof ImageToolsUnavailableError) return `Error: ${failed.message}`;
+        if (failed) notes.push(`${c.url}: ${failed}`);
       }
+      return null;
+    };
+    const stop = await tryAll(candidates, commonsAfter ? MAX_TRIES - COMMONS_TRIES : MAX_TRIES);
+    if (stop) return stop;
+    if (commonsAfter && saved.length < count) {
+      const more = await tryAll(await fromCommons(), MAX_TRIES);
+      if (more) return more;
     }
 
     if (!saved.length) {
@@ -157,6 +169,25 @@ export class FindImageTool extends BaseTool {
       ...saved,
       'To circle, label, point at or blur part of one: annotate_image with its path.',
     ].join('\n');
+  }
+
+  /** Downloads and saves one picture, adding its lines to `saved`. Says why not, if not. */
+  private async saveOne(c: ImageCandidate, query: string, fetcher: ImageFetch, signal: AbortSignal | undefined, saved: string[]): Promise<string | ImageToolsUnavailableError | null> {
+    {
+      try {
+        const img = await fetchImage(c.url, { fetcher, ...(signal ? { signal } : {}), referer: c.page });
+        const name = uniqueName(slug(query || c.alt || new URL(c.page).hostname), img.mime === 'image/png' ? 'png' : 'jpg');
+        const locator = await this.deps.sink({ data: img.bytes, mimeType: img.mime, filename: name });
+        const src = { kind: 'web' as const, url: c.url, page: c.page, ...(c.credit ? { credit: c.credit } : {}), ...(c.license ? { license: c.license } : {}) };
+        this.deps.assets.set(locator, { bytes: img.bytes, mime: img.mime, width: img.width, height: img.height, source: src });
+        const alt = (c.alt || query || 'image').replace(/[[\]\n]/g, ' ').slice(0, 100);
+        saved.push(`${saved.length + 1}. ${locator} (${img.width}×${img.height}) from ${c.page}\n   ![${alt}](${locator})\n   *${captionFor(src)}*`);
+        return null;
+      } catch (err) {
+        if (err instanceof ImageToolsUnavailableError) return err;
+        return err instanceof Error ? err.message : String(err);
+      }
+    }
   }
 }
 
@@ -221,15 +252,21 @@ export class AnnotateImageTool extends BaseTool {
       });
     }
 
+    const name = uniqueName(`${slug(locator.split(/[\\/]/).pop()!.replace(/\.[a-z0-9]+$/i, ''))}-marked`, 'png');
     let image: StoredImage | undefined = this.deps.assets.get(locator);
     if (!image) {
       const read = await this.readWorkspaceImage(locator, options);
       if (typeof read === 'string') return read;
-      image = read;
+      // The copy goes where generated media go, readable by every worker: a
+      // local-only picture (privacy.paths) is not copied there.
+      const dest = path.join(this.workspaceRoot, 'generated', name);
+      if (!this.readGate(options, { file: dest })(read.abs) || options.isOffline?.()) {
+        return `Error: ${locator} is local-only (privacy.paths), and a marked copy would be saved where other workers can read it. Mark it up outside Cascade, or remove it from privacy.paths.`;
+      }
+      image = read.image;
     }
     try {
       const out = await annotateImage(image, marks);
-      const name = `${slug(locator.split(/[\\/]/).pop()!.replace(/\.[a-z0-9]+$/i, ''))}-marked.png`;
       const saved = await this.deps.sink({ data: out.bytes, mimeType: 'image/png', filename: name });
       // The marked copy keeps the original's source, for its caption, and its refs.
       this.deps.assets.set(saved, {
@@ -250,7 +287,7 @@ export class AnnotateImageTool extends BaseTool {
   }
 
   /** An image file in the workspace, read through the same gate file_read uses. */
-  private async readWorkspaceImage(locator: string, options: ToolExecuteOptions): Promise<StoredImage | string> {
+  private async readWorkspaceImage(locator: string, options: ToolExecuteOptions): Promise<{ image: StoredImage; abs: string } | string> {
     if (/^[a-z]+:\/\//i.test(locator)) {
       return `Error: ${locator} is not an image this run made or found. Save it with find_image (image_url) first, then annotate the path that returns.`;
     }
@@ -263,7 +300,7 @@ export class AnnotateImageTool extends BaseTool {
       const bytes = await fs.readFile(abs);
       const meta = await sharp(bytes).metadata();
       if (!meta.width || !meta.height || meta.format === 'svg') return `Error: ${locator} is not a picture this can mark up.`;
-      return { bytes, mime: `image/${meta.format}`, width: meta.width, height: meta.height };
+      return { image: { bytes, mime: `image/${meta.format}`, width: meta.width, height: meta.height }, abs };
     } catch {
       return `Error: no image at ${locator}. Use the path an image tool returned.`;
     }
