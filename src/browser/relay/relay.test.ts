@@ -905,6 +905,8 @@ describe('screenshots, one at a time (Codex on 7dca271)', () => {
       if (method === 'Runtime.evaluate' && params?.expression === SHOT_GUARD_ON) { blurred = true; guards += 1; reply({ result: { type: 'boolean', value: true } }, guards === 2 ? 300 : 0); return; }
       if (method === 'Runtime.evaluate' && params?.expression === SHOT_GUARD_OFF) { blurred = false; reply({ result: { type: 'boolean', value: true } }); return; }
       if (method === 'DOM.getDocument') { reply({ root: { nodeId: 1, nodeType: 9, children: [] } }); return; }
+      if (method === 'Page.getFrameTree') { reply({ frameTree: { frame: { id: 'main' } } }); return; }
+      if (method === 'Page.createIsolatedWorld') { reply({ executionContextId: 7 }); return; }
       if (method === 'Page.captureScreenshot') { reply({ data: blurred ? 'BLURRED' : 'CLEAR' }); return; }
       reply({ result: { type: 'number', value: 1 } });
     }));

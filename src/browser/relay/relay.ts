@@ -37,6 +37,9 @@ const EARLY_BYTES_MAX = 4 * 1024 * 1024;
  * must then compute a blur, or the guard says no and no picture is taken.
  * Each element keeps what its own style said before, and gets it back.
  */
+/** The isolated world the screenshot guard runs in: none of the page's own scripts are there. */
+const SHOT_WORLD = 'cascade-screenshot-guard';
+
 export const SHOT_GUARD_ON = `(() => {
   // The controller's own description of a private field (private-fields.ts):
   // a password shown in clear by its "show" button, card and code fields by
@@ -587,14 +590,26 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
               replyError(id, sessionId, 'Denied by Cascade relay policy: Page.captureScreenshot while a field or frame the device cannot blur is on the page');
               return;
             }
-            const guard = await forward('Runtime.evaluate', { expression: SHOT_GUARD_ON, returnByValue: true }, sessionId);
+            // The guard runs in a world of the device's own, not the page's: the page
+            // can redefine querySelectorAll, getComputedStyle or anything else in
+            // its own world to make a field invisible to a script there. An isolated
+            // world has the browser's own versions of all of them, on the same DOM.
+            const refused = () => replyError(id, sessionId, 'Denied by Cascade relay policy: the page could not be prepared for a screenshot');
+            const tree = await forward('Page.getFrameTree', {}, sessionId).catch(() => null);
+            const frameId = (tree?.result?.frameTree as { frame?: { id?: unknown } } | undefined)?.frame?.id;
+            if (typeof frameId !== 'string') { refused(); return; }
+            const world = await forward('Page.createIsolatedWorld', { frameId, worldName: SHOT_WORLD }, sessionId).catch(() => null);
+            const contextId = world?.result?.executionContextId;
+            if (typeof contextId !== 'number') { refused(); return; }
+            const guard = await forward('Runtime.evaluate', { expression: SHOT_GUARD_ON, contextId, returnByValue: true }, sessionId);
             if (guard.error !== undefined || (guard.result?.result as { value?: unknown } | undefined)?.value !== true) {
-              replyError(id, sessionId, 'Denied by Cascade relay policy: the page could not be prepared for a screenshot');
+              await forward('Runtime.evaluate', { expression: SHOT_GUARD_OFF, contextId, returnByValue: true }, sessionId).catch(() => undefined);
+              refused();
               return;
             }
             let shot: Awaited<ReturnType<typeof forward>>;
             try { shot = await forward(method, params, sessionId); } finally {
-              await forward('Runtime.evaluate', { expression: SHOT_GUARD_OFF, returnByValue: true }, sessionId).catch(() => undefined);
+              await forward('Runtime.evaluate', { expression: SHOT_GUARD_OFF, contextId, returnByValue: true }, sessionId).catch(() => undefined);
             }
             if (!stillOurs()) { replyError(id, sessionId, fencedAnswer); return; }
             if (shot.error !== undefined) { replyError(id, sessionId, shot.error); return; }

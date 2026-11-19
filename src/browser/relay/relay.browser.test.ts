@@ -496,6 +496,24 @@ suite('screenshots the person allowed', { timeout: 60_000 }, () => {
     expect(at(103, 103)).toBeGreaterThan(40);
   });
 
+  it("a page that redefines its own DOM methods can't hide a field from the guard (Codex on 7c776e6)", async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    await r.page.evaluate(`document.open(); document.write(${JSON.stringify(PAGE)}); document.close();
+      document.querySelectorAll = () => [];
+      Document.prototype.querySelectorAll = () => [];
+      Element.prototype.querySelectorAll = () => [];
+      window.getComputedStyle = () => ({ filter: 'blur(99px)' });
+      CSSStyleDeclaration.prototype.setProperty = () => {};
+      true`);
+    const shot = await r.page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 900, height: 300 } });
+    const sharp = (await import('sharp')).default;
+    const { data, info } = await sharp(shot).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const at = (x: number, y: number) => data[(y * info.width + x) * info.channels]!;
+    expect(at(503, 103)).toBeLessThan(20);
+    expect(at(103, 103)).toBeGreaterThan(40);
+  });
+
   it('a screenshot past the viewport is refused even with the opt-in', async () => {
     const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
     const r = await startRig({ consent, raw: true });
