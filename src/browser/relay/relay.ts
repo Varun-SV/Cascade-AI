@@ -28,34 +28,48 @@ const EARLY_BYTES_MAX = 4 * 1024 * 1024;
  * Run in the tab around a screenshot the person allowed: blurs every field
  * that can hold a password, a card or a one-time code, in the page and in every
  * same-site frame inside it, and every frame from another site (a payment form
- * is usually one), then takes the blur off. The
- * page's own scripts never see a change they could undo in between: the style
- * goes in, the picture is taken, the style comes out.
+ * is usually one), then takes the blur off.
+ *
+ * Set on each element's own style through the CSSOM, not as a stylesheet: a
+ * site's Content-Security-Policy can refuse an inserted <style> without any
+ * error, and the CSSOM is not something it governs. And checked: every element
+ * must then compute a blur, or the guard says no and no picture is taken.
+ * Each element keeps what its own style said before, and gets it back.
  */
 const SHOT_GUARD_ON = `(() => {
-  const css = 'input[type=password],input[autocomplete*="cc-"],input[autocomplete*="one-time-code"],input[name*="card" i],input[name*="cvv" i],input[name*="cvc" i],input[name*="otp" i],input[id*="cvv" i],input[id*="otp" i],[data-cascade-shot-blur]{filter:blur(12px)!important}';
-  // Into every frame this page can reach (a same-site frame's fields are its
-  // own document's, which the top page's style doesn't cover); a frame it
-  // can't reach, from another site, is blurred whole.
+  const SEL = 'input[type=password],input[autocomplete*="cc-"],input[autocomplete*="one-time-code"],input[name*="card" i],input[name*="cvv" i],input[name*="cvc" i],input[name*="otp" i],input[id*="cvv" i],input[id*="otp" i]';
+  const MARK = 'data-cascade-shot-blur';
+  const marked = [];
+  const blur = (el) => {
+    if (el.hasAttribute(MARK)) { marked.push(el); return; }
+    el.setAttribute(MARK, JSON.stringify([el.style.getPropertyValue('filter'), el.style.getPropertyPriority('filter')]));
+    el.style.setProperty('filter', 'blur(12px)', 'important');
+    marked.push(el);
+  };
   const guard = (doc, depth) => {
-    const s = doc.createElement('style');
-    s.id = 'cascade-shot-guard';
-    s.textContent = css;
-    (doc.head || doc.documentElement).appendChild(s);
+    for (const el of doc.querySelectorAll(SEL)) blur(el);
     for (const f of doc.querySelectorAll('iframe, frame')) {
       let inner = null;
       try { inner = f.contentDocument; } catch { inner = null; }
       if (inner && inner.documentElement && depth < 8) guard(inner, depth + 1);
-      else f.setAttribute('data-cascade-shot-blur', '');
+      else blur(f);
     }
   };
   guard(document, 0);
-  return true;
+  return marked.every((el) => {
+    const view = el.ownerDocument.defaultView;
+    return !!view && /blur\\(/.test(view.getComputedStyle(el).filter);
+  });
 })()`;
 const SHOT_GUARD_OFF = `(() => {
+  const MARK = 'data-cascade-shot-blur';
   const clear = (doc, depth) => {
-    for (const s of doc.querySelectorAll('#cascade-shot-guard')) s.remove();
-    for (const f of doc.querySelectorAll('[data-cascade-shot-blur]')) f.removeAttribute('data-cascade-shot-blur');
+    for (const el of doc.querySelectorAll('[' + MARK + ']')) {
+      let before = ['', ''];
+      try { before = JSON.parse(el.getAttribute(MARK)); } catch { /* the page changed it: take ours off */ }
+      if (before[0]) el.style.setProperty('filter', before[0], before[1]); else el.style.removeProperty('filter');
+      el.removeAttribute(MARK);
+    }
     for (const f of doc.querySelectorAll('iframe, frame')) {
       let inner = null;
       try { inner = f.contentDocument; } catch { inner = null; }
