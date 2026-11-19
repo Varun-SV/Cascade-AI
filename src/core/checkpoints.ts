@@ -228,7 +228,9 @@ export class Checkpoints {
       ], {
         cwd: this.root,
         windowsHide: true,
-        stdio: ['pipe', 'pipe', 'pipe'],
+        // stdin only for a command given input: git that exits without
+        // reading it made the write fail with EPIPE, an error nobody caught.
+        stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
         env: {
           ...process.env,
           GIT_DIR: this.gitDir,
@@ -244,8 +246,8 @@ export class Checkpoints {
       });
       const out: Buffer[] = [];
       const err: Buffer[] = [];
-      child.stdout.on('data', (c: Buffer) => out.push(c));
-      child.stderr.on('data', (c: Buffer) => err.push(c));
+      child.stdout?.on('data', (c: Buffer) => out.push(c));
+      child.stderr?.on('data', (c: Buffer) => err.push(c));
       const timer = setTimeout(() => { child.kill(); reject(new Error(`git ${args[0]} took longer than ${this.timeoutMs / 1000}s`)); }, this.timeoutMs);
       child.on('error', (e) => { clearTimeout(timer); reject(e); });
       child.on('close', (code) => {
@@ -253,7 +255,10 @@ export class Checkpoints {
         if (code === 0) resolve(Buffer.concat(out).toString('utf8'));
         else reject(new Error(`git ${args[0]} failed: ${Buffer.concat(err).toString('utf8').trim().slice(0, 300)}`));
       });
-      child.stdin.end(input ?? '');
+      if (child.stdin) {
+        child.stdin.on('error', () => { /* git exited first; its exit code says what happened */ });
+        child.stdin.end(input);
+      }
     });
   }
 }
