@@ -60,6 +60,25 @@ describe('find_image', () => {
     expect(asked).not.toContain('https://commons.wikimedia.org');
   });
 
+  it('reads a redirected page\'s relative pictures against where it ended up (Codex on 3a31301)', async () => {
+    const asked: string[] = [];
+    const fetcher = async (url: string) => {
+      asked.push(url);
+      if (url === 'https://shop.example/product') {
+        // As safeFetch hands back the last hop: its address is the final one.
+        const res = new Response('<img src="hero.jpg" width="800" height="600">', { headers: { 'content-type': 'text/html' } });
+        Object.defineProperty(res, 'url', { value: 'https://shop.example/product/' });
+        return res;
+      }
+      if (url === 'https://shop.example/product/hero.jpg') return new Response(new Uint8Array(await picture(800, 600)), { headers: { 'content-type': 'image/jpeg' } });
+      return new Response('', { status: 404 });
+    };
+    const { saved, sink } = sinkInto();
+    await new FindImageTool({ assets: new ImageAssets(), sink, fetcher }).execute({ page_url: 'https://shop.example/product' }, {} as never);
+    expect(asked).toContain('https://shop.example/product/hero.jpg');
+    expect(saved).toHaveLength(1);
+  });
+
   it('skips a dead or tiny picture and takes the next', async () => {
     const { fetcher } = web({
       'https://p.example/': { body: '<meta property="og:image" content="https://p.example/gone.jpg"><img src="https://p.example/tiny.png" ><img src="https://p.example/ok.jpg" width="600" height="400">', type: 'text/html' },

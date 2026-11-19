@@ -60,8 +60,12 @@ export const openWebPages: PageSearch = async (query, signal) => {
   return found.results.map((r) => r.url);
 };
 
-/** A page's HTML, bounded, through the SSRF guard. Null when it isn't an HTML page. */
-async function fetchHtml(url: string, fetcher: ImageFetch, signal?: AbortSignal): Promise<string | null> {
+/**
+ * A page's HTML, bounded, through the SSRF guard, with the address it was
+ * finally served from: a relative picture is relative to that, after any
+ * redirect, not to the address asked for. Null when it isn't an HTML page.
+ */
+async function fetchHtml(url: string, fetcher: ImageFetch, signal?: AbortSignal): Promise<{ html: string; url: string } | null> {
   const timeout = AbortSignal.timeout(10_000);
   const res = await fetcher(url, {
     signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
@@ -69,7 +73,7 @@ async function fetchHtml(url: string, fetcher: ImageFetch, signal?: AbortSignal)
   });
   if (!res.ok || !(res.headers.get('content-type') ?? 'text/html').includes('html')) { await res.body?.cancel().catch(() => {}); return null; }
   // Read no further than the cap: a huge page is never held whole.
-  return (await bodyText(res, MAX_PAGE_BYTES)).text;
+  return { html: (await bodyText(res, MAX_PAGE_BYTES)).text, url: res.url || url };
 }
 
 export class FindImageTool extends BaseTool {
@@ -112,8 +116,8 @@ export class FindImageTool extends BaseTool {
     if (imageUrl) candidates.push({ url: imageUrl, page: pageUrl || imageUrl, rank: 0, ...(query ? { alt: query } : {}) });
     const fromPage = async (url: string): Promise<void> => {
       try {
-        const html = await fetchHtml(url, fetcher, signal);
-        if (html) candidates.push(...pageImages(html, url));
+        const page = await fetchHtml(url, fetcher, signal);
+        if (page) candidates.push(...pageImages(page.html, page.url));
       } catch (err) {
         notes.push(`${url}: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -124,8 +128,8 @@ export class FindImageTool extends BaseTool {
       // Side by side, then in the search's order: the first page's pictures first.
       const found = await Promise.all(pages.slice(0, MAX_PAGES).map(async (url) => {
         try {
-          const html = await fetchHtml(url, fetcher, signal);
-          return html ? pageImages(html, url).slice(0, 2) : [];
+          const page = await fetchHtml(url, fetcher, signal);
+          return page ? pageImages(page.html, page.url).slice(0, 2) : [];
         } catch { return []; }
       }));
       // One picture per page before a second from any: different sources, not the same photo twice.

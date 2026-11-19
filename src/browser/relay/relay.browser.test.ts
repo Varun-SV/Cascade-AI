@@ -433,6 +433,21 @@ suite('screenshots the person allowed', { timeout: 60_000 }, () => {
     expect((await r.page.screenshot({ type: 'png' })).length).toBeGreaterThan(100);
   });
 
+  it('a field whose filter is set to ease in slowly is blurred at full strength in the picture (Codex on 3a31301)', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    await r.page.evaluate(`document.open(); document.write(${JSON.stringify(PAGE)}); document.close();
+      const pw = document.getElementById('pw'); pw.style.setProperty('transition', 'filter 10s linear'); true`);
+    const shot = await r.page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 900, height: 300 } });
+    const sharp = (await import('sharp')).default;
+    const { data, info } = await sharp(shot).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const at = (x: number, y: number) => data[(y * info.width + x) * info.channels]!;
+    expect(at(503, 103)).toBeLessThan(20);
+    expect(at(103, 103)).toBeGreaterThan(40);
+    // And the page's own transition is back after.
+    expect(await r.page.evaluate('document.getElementById("pw").style.transition')).toBe('filter 10s linear');
+  });
+
   it('a screenshot past the viewport is refused even with the opt-in', async () => {
     const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
     const r = await startRig({ consent, raw: true });

@@ -40,9 +40,14 @@ const SHOT_GUARD_ON = `(() => {
   const SEL = 'input[type=password],input[autocomplete*="cc-"],input[autocomplete*="one-time-code"],input[name*="card" i],input[name*="cvv" i],input[name*="cvc" i],input[name*="otp" i],input[id*="cvv" i],input[id*="otp" i]';
   const MARK = 'data-cascade-shot-blur';
   const marked = [];
+  // A transition or an animation on the filter would ease the blur in, and the
+  // picture could catch it half-way: both are off while it is taken.
+  const PROPS = ['transition', 'animation', 'filter'];
   const blur = (el) => {
     if (el.hasAttribute(MARK)) { marked.push(el); return; }
-    el.setAttribute(MARK, JSON.stringify([el.style.getPropertyValue('filter'), el.style.getPropertyPriority('filter')]));
+    el.setAttribute(MARK, JSON.stringify(PROPS.map((p) => [el.style.getPropertyValue(p), el.style.getPropertyPriority(p)])));
+    el.style.setProperty('transition', 'none', 'important');
+    el.style.setProperty('animation', 'none', 'important');
     el.style.setProperty('filter', 'blur(12px)', 'important');
     marked.push(el);
   };
@@ -62,18 +67,24 @@ const SHOT_GUARD_ON = `(() => {
     }
   };
   guard(document, 0);
+  // The blur as it is now, at full strength: not on its way there.
   return marked.every((el) => {
     const view = el.ownerDocument.defaultView;
-    return !!view && /blur\\(/.test(view.getComputedStyle(el).filter);
+    const m = view && /blur\\(([0-9.]+)px\\)/.exec(view.getComputedStyle(el).filter);
+    return !!m && Number(m[1]) >= 12;
   });
 })()`;
 const SHOT_GUARD_OFF = `(() => {
   const MARK = 'data-cascade-shot-blur';
   const clear = (root, depth) => {
     for (const el of root.querySelectorAll('[' + MARK + ']')) {
-      let before = ['', ''];
+      const PROPS = ['transition', 'animation', 'filter'];
+      let before = [];
       try { before = JSON.parse(el.getAttribute(MARK)); } catch { /* the page changed it: take ours off */ }
-      if (before[0]) el.style.setProperty('filter', before[0], before[1]); else el.style.removeProperty('filter');
+      PROPS.forEach((p, i) => {
+        const was = Array.isArray(before[i]) ? before[i] : ['', ''];
+        if (was[0]) el.style.setProperty(p, was[0], was[1]); else el.style.removeProperty(p);
+      });
       el.removeAttribute(MARK);
     }
     for (const f of root.querySelectorAll('iframe, frame')) {
