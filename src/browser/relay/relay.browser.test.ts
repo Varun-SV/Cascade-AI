@@ -514,6 +514,17 @@ suite('screenshots the person allowed', { timeout: 60_000 }, () => {
     expect(at(103, 103)).toBeGreaterThan(40);
   });
 
+  it('an <object> or <embed> on the page is blurred whole (Codex on e5fb6eb)', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    await r.page.evaluate(`document.open(); document.write('<!doctype html><body><object id=o type="text/html" data="/" width=300 height=150></object><embed id=e type="text/html" src="/" width=300 height=150></body>'); document.close(); true`);
+    const { SHOT_GUARD_ON, SHOT_GUARD_OFF } = await import('./relay.js');
+    expect(await r.page.evaluate(SHOT_GUARD_ON)).toBe(true);
+    expect(await r.page.evaluate('[getComputedStyle(document.getElementById("o")).filter, getComputedStyle(document.getElementById("e")).filter]')).toEqual(['blur(12px)', 'blur(12px)']);
+    await r.page.evaluate(SHOT_GUARD_OFF);
+    expect(await r.page.evaluate('getComputedStyle(document.getElementById("o")).filter')).toBe('none');
+  });
+
   it('a screenshot past the viewport is refused even with the opt-in', async () => {
     const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
     const r = await startRig({ consent, raw: true });

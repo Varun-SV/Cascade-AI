@@ -45,6 +45,11 @@ describe('pageImages', () => {
     expect(c.every((x) => x.page === 'https://shop.example/aria2')).toBe(true);
   });
 
+  it('resolves against the first <base href> even when pictures come before it (Codex on e5fb6eb)', () => {
+    const c = pageImages('<meta property="og:image" content="hero.jpg"><base href="https://cdn.example/assets/"><base href="https://ignored.example/">', 'https://shop.example/p');
+    expect(c[0]!.url).toBe('https://cdn.example/assets/hero.jpg');
+  });
+
   it('takes the largest image of a srcset', () => {
     const c = pageImages('<img srcset="a.jpg 320w, b.jpg 1280w, c.jpg 640w" width="400">', 'https://x.example/');
     expect(c[0]!.url).toBe('https://x.example/b.jpg');

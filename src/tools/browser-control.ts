@@ -29,7 +29,7 @@
 
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
-import { type Box, type ImageAssets, captionFor, loadSharp } from '../media/report-images.js';
+import { type Box, type ImageAssets, ImageToolsUnavailableError, captionFor, loadSharp } from '../media/report-images.js';
 import { uniqueName } from './report-images.js';
 
 /** Saves a picture where generated media go, and says where (a workspace path, a file address). */
@@ -641,7 +641,9 @@ export class BrowserControlTool extends BaseTool {
       const at = Object.hasOwn(boxes, ref) ? boxes[ref] : undefined;
       if (!at) return `Error: ${ref} is not on screen in the page view just taken. Scroll it into view (scroll with its ref) and capture again.`;
       const sharp = await loadSharp();
-      if (sharp) {
+      // Asked for one control, the whole screen is not an answer.
+      if (!sharp) return `Error: ${new ImageToolsUnavailableError().message} Capture without a ref to save the whole view.`;
+      {
         const pad = 48;
         const x = Math.max(0, Math.floor(at.x - pad));
         const y = Math.max(0, Math.floor(at.y - pad));

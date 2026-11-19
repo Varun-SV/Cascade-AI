@@ -229,7 +229,16 @@ const PAGE_CANDIDATES = 6;
  */
 export function pageImages(html: string, pageUrl: string): ImageCandidate[] {
   const root = parseHtml(html, { extraAttrs: IMAGE_ATTRS, keepJsonLd: true });
+  // The document's base is its first <base href>, wherever it sits: a picture
+  // named before it in the source is still relative to it.
+  const firstBase = (node: Node): string | undefined => {
+    if (node.tag === 'base' && node.attrs['href']) return node.attrs['href'];
+    for (const c of node.children) if (typeof c !== 'string') { const b = firstBase(c); if (b) return b; }
+    return undefined;
+  };
   let base = pageUrl;
+  const declared = firstBase(root);
+  if (declared) { try { base = new URL(declared, pageUrl).toString(); } catch { /* the page's own address */ } }
   let title = '';
   const found = new Map<string, ImageCandidate>();
   const add = (raw: string | undefined, rank: number, alt?: string): void => {
@@ -244,7 +253,6 @@ export function pageImages(html: string, pageUrl: string): ImageCandidate[] {
   const walk = (node: Node): void => {
     const a = node.attrs;
     switch (node.tag) {
-      case 'base': if (a['href']) { try { base = new URL(a['href'], pageUrl).toString(); } catch { /* kept */ } } break;
       case 'title': title = textOf(node).trim(); break;
       case 'meta': {
         const key = (a['property'] ?? a['name'] ?? '').toLowerCase();

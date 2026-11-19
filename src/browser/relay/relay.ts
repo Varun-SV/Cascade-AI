@@ -76,6 +76,9 @@ export const SHOT_GUARD_ON = `(() => {
   const guard = (root, depth) => {
     for (const el of root.querySelectorAll(SEL)) blur(el);
     for (const el of root.querySelectorAll(TEXT)) if (said(el)) blur(el);
+    // An embedded document or plug-in (<object>, <embed>) is blurred whole: what
+    // it shows is not this document's to look into.
+    for (const el of root.querySelectorAll('object, embed')) blur(el);
     for (const f of root.querySelectorAll('iframe, frame')) {
       let inner = null;
       try { inner = f.contentDocument; } catch { inner = null; }
