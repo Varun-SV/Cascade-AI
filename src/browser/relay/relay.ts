@@ -49,7 +49,10 @@ export const SHOT_GUARD_ON = `(() => {
     const doc = el.ownerDocument;
     const parts = [el.getAttribute('aria-label'), el.getAttribute('placeholder')];
     for (const l of el.labels || []) parts.push(l.textContent);
-    for (const id of (el.getAttribute('aria-labelledby') || '').split(/\\s+/)) if (id) parts.push(doc.getElementById(id)?.textContent);
+    // An id names an element in the field's own tree: its shadow root, if it is in one.
+    const tree = el.getRootNode();
+    const byId = (id) => (typeof tree.getElementById === 'function' ? tree.getElementById(id) : null) || doc.getElementById(id);
+    for (const id of (el.getAttribute('aria-labelledby') || '').split(/\\s+/)) if (id) parts.push(byId(id)?.textContent);
     return SAYS.test(parts.filter(Boolean).join(' '));
   };
   const MARK = 'data-cascade-shot-blur';

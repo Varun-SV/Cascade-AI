@@ -433,8 +433,11 @@ export async function annotateImage(
     const composites = [];
     for (const m of blurs) {
       const r = clampBox(pad(m.at, 4), W, H);
+      // Made opaque (on white) before it goes on: a patch with any transparency
+      // left, laid over the original, would let the sharp original show through.
       const region = await sharp(upright.data).extract({ left: r.x, top: r.y, width: r.w, height: r.h })
-        .blur(Math.max(8, Math.min(r.w, r.h) / 6)).toBuffer();
+        .flatten({ background: '#ffffff' })
+        .blur(Math.max(8, Math.min(r.w, r.h) / 6)).png().toBuffer();
       composites.push({ input: region, left: r.x, top: r.y });
     }
     base = sharp(await base.composite(composites).png().toBuffer());

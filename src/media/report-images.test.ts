@@ -149,6 +149,23 @@ describe('annotateImage', () => {
     expect(await pixel(out.bytes, 100, 10)).toEqual([0, 0, 0]);
   });
 
+  it('blurs a transparent picture so the sharp original does not show through (Codex on 582e919)', async () => {
+    // Opaque black "lettering" on a transparent background.
+    const clear = sharp({ create: { width: 200, height: 200, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } });
+    const bar = await sharp({ create: { width: 6, height: 200, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 1 } } }).png().toBuffer();
+    const bytes = await clear.composite([{ input: bar, left: 97, top: 0 }]).png().toBuffer();
+    const out = await annotateImage({ bytes, width: 200, height: 200 }, [{ shape: 'blur', box: [40, 40, 120, 120] }]);
+    const { data, info } = await sharp(out.bytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    const px = (x: number, y: number) => { const i = (y * info.width + x) * info.channels; return [data[i]!, data[i + 1]!, data[i + 2]!, data[i + 3]!]; };
+    // In the blur, the bar's pure black is gone: the patch is opaque and grey, not black under a haze.
+    const [r, , , a] = px(100, 100);
+    expect(a).toBe(255);
+    expect(r).toBeGreaterThan(60);
+    // Outside the blur, the bar and its transparent surroundings are as they were.
+    expect(px(100, 10)).toEqual([0, 0, 0, 255]);
+    expect(px(10, 10)[3]).toBe(0);
+  });
+
   it('says what is wrong with a mark', async () => {
     const img = { bytes: await picture(100, 100), width: 100, height: 100, boxes: { e1: { x: 1, y: 1, w: 5, h: 5 } } };
     await expect(annotateImage(img, [{ shape: 'circle', ref: 'e9' }])).rejects.toThrow(/e9 is not on this screenshot. Refs on it: e1/);

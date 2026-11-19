@@ -482,6 +482,20 @@ suite('screenshots the person allowed', { timeout: 60_000 }, () => {
     expect(at(103, 103)).toBeGreaterThan(40);
   });
 
+  it('a field in a shadow root named by a label in that same root is blurred (Codex on 582e919)', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    await r.page.evaluate(`document.open(); document.write('<!doctype html><body style="margin:0;background:#fff"><x-login></x-login><div style="position:absolute;left:500px;top:100px;width:300px;height:150px;background:#000"></div></body>'); document.close();
+      document.querySelector('x-login').attachShadow({ mode: 'open' }).innerHTML = '<span id=pl style="position:absolute;left:0;top:260px">Password</span><input aria-labelledby=pl value=hunter2 style="position:absolute;left:100px;top:100px;width:300px;height:150px;background:#000;color:#000;border:0;outline:0">';
+      true`);
+    const shot = await r.page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 900, height: 300 } });
+    const sharp = (await import('sharp')).default;
+    const { data, info } = await sharp(shot).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const at = (x: number, y: number) => data[(y * info.width + x) * info.channels]!;
+    expect(at(503, 103)).toBeLessThan(20);
+    expect(at(103, 103)).toBeGreaterThan(40);
+  });
+
   it('a screenshot past the viewport is refused even with the opt-in', async () => {
     const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
     const r = await startRig({ consent, raw: true });
