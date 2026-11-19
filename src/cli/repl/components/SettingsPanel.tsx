@@ -97,8 +97,9 @@ export function SettingsPanel({ config, theme, initialSection, initialSearch, on
         else commit(e.item, e.buffer);
         return;
       }
-      if (key.backspace || key.delete) { setEditing({ ...editing, buffer: editing.buffer.slice(0, -1) }); return; }
-      if (input && !key.ctrl && !key.meta) setEditing({ ...editing, buffer: editing.buffer + input.replace(/[\r\n]/g, '') });
+      if (key.backspace || key.delete) { setEditing((e) => (e ? { ...e, buffer: e.buffer.slice(0, -1) } : e)); return; }
+      // Updated from the latest state: keys that arrive before a redraw (fast typing, a paste) all count.
+      if (input && !key.ctrl && !key.meta) setEditing((e) => (e ? { ...e, buffer: e.buffer + input.replace(/[\r\n]/g, '') } : e));
       return;
     }
     if (search !== null) {
@@ -106,8 +107,8 @@ export function SettingsPanel({ config, theme, initialSection, initialSearch, on
       if (key.upArrow) { setRow((r) => Math.max(0, r - 1)); return; }
       if (key.downArrow) { setRow((r) => Math.min(items.length - 1, r + 1)); return; }
       if (key.return) { if (current) choose(current); return; }
-      if (key.backspace || key.delete) { setSearch(search.slice(0, -1)); setRow(0); return; }
-      if (input && !key.ctrl && !key.meta && !key.tab) { setSearch(search + input); setRow(0); }
+      if (key.backspace || key.delete) { setSearch((q) => (q ?? '').slice(0, -1)); setRow(0); return; }
+      if (input && !key.ctrl && !key.meta && !key.tab) { setSearch((q) => (q ?? '') + input); setRow(0); }
       return;
     }
     if (key.escape || input === 'q') { onClose(); return; }

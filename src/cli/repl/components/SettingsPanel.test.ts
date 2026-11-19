@@ -21,7 +21,9 @@ function terminal() {
   let queued: string[] = [];
   stdin.read = () => queued.shift() ?? null;
   const press = async (s: string) => { queued.push(s); stdin.emit('readable'); await tick(); };
-  return { stdout, stdin, press, frame: () => frame.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '') };
+  /** Several reads with no redraw between them. */
+  const burst = (...chunks: string[]) => { for (const c of chunks) { queued.push(c); stdin.emit('readable'); } };
+  return { stdout, stdin, press, burst, frame: () => frame.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '') };
 }
 const tick = () => new Promise((r) => setTimeout(r, 30));
 
@@ -92,6 +94,12 @@ describe('/settings panel', () => {
     await p.press('/');
     for (const ch of 'budget') await p.press(ch);
     expect(p.frame()).toContain('Most a run may cost');
+    // Keys that arrive before a redraw all count (fast typing, a paste in pieces).
+    await p.press('\x1b');
+    await p.press('/');
+    p.burst('bud', 'get');
+    await new Promise((r) => setTimeout(r, 60));
+    expect(p.frame()).toContain('search: budget');
     p.unmount();
   });
 });
