@@ -1058,6 +1058,23 @@ export class Cascade extends EventEmitter {
     this.config = validateConfig(next) as CascadeConfig;
     const routerReads = (c: CascadeConfig) => JSON.stringify([c.providers, c.models, c.rateLimits, c.localConcurrency, c.autoBias, c.budget]);
     if (this.initialized && routerReads(before) !== routerReads(this.config)) await this.router.init(this.config);
+    // Auto's analyzer holds its bias from when it was made: made again (or
+    // dropped) when Auto or its bias changes, so the next run routes by it.
+    if (before.cascadeAuto !== this.config.cascadeAuto || before.autoBias !== this.config.autoBias) this.refreshTaskAnalyzer();
+  }
+
+  private refreshTaskAnalyzer(): void {
+    if (this.config.cascadeAuto !== true) {
+      this.taskAnalyzer = undefined;
+      this.router.setTaskAnalyzer(undefined);
+      return;
+    }
+    if (!this.perfTracker) {
+      this.perfTracker = new ModelPerformanceTracker(this.config.routing?.perfStatsPath, { readOnly: this.config.routing?.learnFromOutcomes === false });
+      void this.perfTracker.load();
+    }
+    this.taskAnalyzer = new TaskAnalyzer(this.perfTracker, this.config.autoBias ?? 'balanced');
+    this.router.setTaskAnalyzer(this.taskAnalyzer);
   }
 
   getAutonomy(): 'manual' | 'auto' {

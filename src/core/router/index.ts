@@ -1935,8 +1935,10 @@ export class CascadeRouter extends EventEmitter {
     this.pendingFeedbackSource = source;
   }
 
-  setTaskAnalyzer(analyzer: TaskAnalyzer): void {
+  /** The analyzer Auto routes subtasks with; undefined turns per-subtask routing off. */
+  setTaskAnalyzer(analyzer: TaskAnalyzer | undefined): void {
     this.taskAnalyzer = analyzer;
+    if (!analyzer) return;
     // Ordering between setFeedbackSource and setTaskAnalyzer is not guaranteed
     // by callers, so a source supplied first is applied on arrival.
     if (this.pendingFeedbackSource) analyzer.setFeedbackSource(this.pendingFeedbackSource);

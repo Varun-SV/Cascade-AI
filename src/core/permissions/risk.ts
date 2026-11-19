@@ -158,6 +158,22 @@ const WRITERS = new Set([
 /** Shells and interpreters whose argument is itself a command. */
 const WRAPPERS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'fish', 'cmd', 'powershell', 'pwsh']);
 const PASSTHROUGH = new Set(['time', 'nice', 'nohup', 'command', 'builtin', 'exec', 'xargs', 'env', 'watch', 'timeout', 'stdbuf']);
+/** Their options that take the next word as a value: `xargs -I {} rm {}` runs rm, not `{}`. */
+const PASSTHROUGH_VALUES: Record<string, ReadonlySet<string>> = {
+  env: new Set(['-u', '--unset', '-C', '--chdir']),
+  xargs: new Set(['-I', '-L', '-n', '-P', '-d', '-E', '-s', '-a', '--max-args', '--max-procs', '--delimiter', '--arg-file', '--replace', '--max-lines', '--eof']),
+  timeout: new Set(['-s', '--signal', '-k', '--kill-after']),
+  nice: new Set(['-n', '--adjustment']),
+  watch: new Set(['-n', '--interval']),
+  stdbuf: new Set(['-i', '-o', '-e']),
+  time: new Set(['-f', '--format', '-o', '--output']),
+  exec: new Set(['-a']),
+};
+/** Commands whose every operand is a file they write (or move, or make). */
+const OPERAND_WRITERS = new Set([
+  'cp', 'mv', 'touch', 'tee', 'ln', 'install', 'mkdir', 'copy', 'move', 'ren', 'rename', 'xcopy', 'robocopy',
+  'new-item', 'ni', 'set-content', 'sc', 'add-content', 'ac', 'out-file', 'copy-item', 'cpi', 'move-item', 'mi', 'rename-item', 'rni',
+]);
 
 const DANGEROUS_SQL = [
   /\bdrop\s+(table|database|schema|index|view|collection|user|role)\b/i,
@@ -288,11 +304,30 @@ function assessSegment(segment: string, root: string, cwd: string): Risk {
   let prog = programName(w[0]!);
   let args = w.slice(1);
   // time, nohup, xargs…: the program is the one after them.
+  // Its options, their values, env's NAME=value assignments, a timeout's
+  // duration: none of them is the program it runs (Codex: `env TOKEN=x git push`).
   while (PASSTHROUGH.has(prog) && args.length) {
-    while (args.length && (args[0]!.startsWith('-') || /^\d+[smh]?$/.test(args[0]!))) args.shift();
-    if (!args.length) break;
-    prog = programName(args[0]!);
-    args = args.slice(1);
+    if (prog === 'env') {
+      const split = args.findIndex((a) => a === '-S' || a === '--split-string' || a.startsWith('--split-string=') || /^-S./.test(a));
+      if (split >= 0) {
+        const a = args[split]!;
+        const line = a === '-S' || a === '--split-string' ? args.slice(split + 1).join(' ') : `${a.replace(/^(-S|--split-string=)/, '')} ${args.slice(split + 1).join(' ')}`;
+        return worst(assessShell(line, root, cwd), writesTo(redirects, root, cwd));
+      }
+    }
+    const takes = PASSTHROUGH_VALUES[prog] ?? new Set<string>();
+    let i = 0;
+    while (i < args.length) {
+      const a = args[i]!;
+      if (a === '--') { i += 1; break; }
+      if (a.startsWith('-')) { i += takes.has(a) ? 2 : 1; continue; }
+      if (prog === 'env' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(a)) { i += 1; continue; }
+      if ((prog === 'timeout' || prog === 'nice' || prog === 'watch') && /^[+-]?\d+(\.\d+)?[smhd]?$/.test(a)) { i += 1; continue; }
+      break;
+    }
+    if (i >= args.length) break;
+    prog = programName(args[i]!);
+    args = args.slice(i + 1);
   }
   if (WRAPPERS.has(prog)) {
     const script = args.findIndex((a) => /^(-c|\/c|\/k|-command|-c?ommand)$/i.test(a));
@@ -346,7 +381,9 @@ function assessSegment(segment: string, root: string, cwd: string): Risk {
   if ((prog === 'python' || prog === 'python3' || prog === 'py') && args[0] === '-m' && /^pip$/.test(args[1] ?? '')) {
     return PACKAGE_MANAGERS['pip']!.test(args[2] ?? '') ? risky('install-system', `pip ${args[2]} installs or removes packages`) : SAFE;
   }
-  if ((prog === 'python' || prog === 'python3' || prog === 'py' || prog === 'node' || prog === 'deno' || prog === 'ruby' || prog === 'perl')
+  // perl -pi -e '…' file edits files in place: read below as sed is, not as code.
+  const perlInPlace = prog === 'perl' && args.some((a) => /^-\w*i/.test(a));
+  if ((prog === 'python' || prog === 'python3' || prog === 'py' || prog === 'node' || prog === 'deno' || prog === 'ruby' || prog === 'perl') && !perlInPlace
     && args.some((a) => /^(-c|-e|--eval|-p)$/.test(a))) {
     return worst(assessCode(args.slice(args.findIndex((a) => /^(-c|-e|--eval|-p)$/.test(a)) + 1).join(' ')), base);
   }
@@ -370,11 +407,14 @@ function assessSegment(segment: string, root: string, cwd: string): Risk {
     if (prog === 'sed' || prog === 'perl') return SAFE;
     return base;
   }
-  if (prog === 'sed' || prog === 'perl') return worst(has('-i', '--in-place') || args.some((a) => /^-i/.test(a)) ? recoverable('edits files in place (checkpointed)') : SAFE, worst(base, pathsOutside(prog, args, root, cwd, has('-i', '--in-place') || args.some((a) => /^-i/.test(a)))));
+  if (prog === 'sed' || prog === 'perl') {
+    const inPlace = has('-i', '--in-place') || args.some((a) => /^-i/.test(a) || /^-\w*i\w*$/.test(a) && prog === 'perl');
+    return worst(inPlace ? recoverable('edits files in place (checkpointed)') : SAFE, worst(base, pathsOutside(prog, operandsOf(prog, args), root, cwd, inPlace)));
+  }
   if (WRITERS.has(prog)) {
     if (prog === 'rsync' && (has('--delete', '--del', '--delete-after', '--delete-before', '--remove-source-files'))) return risky('delete', 'rsync deletes files');
     if (prog === 'rsync' && args.some((a) => /^[\w.-]+@?[\w.-]*:/.test(a) && !/^[a-z]:[\\/]/i.test(a))) return risky('leaves-machine', 'rsync copies to another machine');
-    return worst(recoverable(`${prog} changes files (checkpointed)`), worst(base, pathsOutside(prog, args, root, cwd, true)));
+    return worst(recoverable(`${prog} changes files (checkpointed)`), worst(base, pathsOutside(prog, operandsOf(prog, args), root, cwd, true)));
   }
   // Anything else runs the project's own code or a build tool: what it does
   // to the project's files the checkpoint covers.
@@ -392,9 +432,32 @@ function writesTo(targets: string[], root: string, cwd: string): Risk {
 }
 
 /** A path argument of a writing command that lands outside the project. */
-function pathsOutside(prog: string, args: string[], root: string, cwd: string, writes: boolean): Risk {
+/**
+ * The files a writing command names. Every operand of cp, mv, touch and their
+ * kin, slash or not (`cp a.txt local.txt` writes local.txt); for sed and perl,
+ * every operand but the script; for the rest, what looks like a path.
+ */
+function operandsOf(prog: string, args: string[]): string[] {
+  if (OPERAND_WRITERS.has(prog)) return args.filter((a) => !a.startsWith('-'));
+  if (prog === 'sed' || prog === 'perl') {
+    const out: string[] = [];
+    let scriptGiven = false;
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i]!;
+      const takesScript = prog === 'sed' ? /^(-e|-f|--expression|--file)$/.test(a) : /^-\w*[eE]$/.test(a);
+      if (takesScript) { scriptGiven = true; i += 1; continue; }
+      if (prog === 'sed' && /^(--expression|--file)=/.test(a)) { scriptGiven = true; continue; }
+      if (a.startsWith('-')) continue;
+      out.push(a);
+    }
+    // sed with no -e: its first operand is the script.
+    return prog === 'sed' && !scriptGiven ? out.slice(1) : out;
+  }
+  return args.filter((a) => !a.startsWith('-') && looksLikePath(a));
+}
+
+function pathsOutside(prog: string, paths: string[], root: string, cwd: string, writes: boolean): Risk {
   if (!writes) return SAFE;
-  const paths = args.filter((a) => !a.startsWith('-') && looksLikePath(a));
   for (const a of paths) {
     if (outside(a, root, cwd)) return risky('outside-project', `${prog} changes ${a}, outside the project`);
   }

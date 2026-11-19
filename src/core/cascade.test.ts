@@ -1085,6 +1085,25 @@ describe('secretValuesIn — what the process jail keeps out of a command\'s env
 
 // The host was handed a local-only subtask's request like any other, with
 // nothing to tell it that the input may carry what the subtask read.
+describe('Cascade.reconfigure: Auto routing settings apply on the next run (Codex on 27db466)', () => {
+  it('makes the analyzer again for a new bias, makes one when Auto is turned on, and drops it when off', async () => {
+    const c = new Cascade({ ...baseConfig, cascadeAuto: false } as never, '/tmp');
+    const analyzer = () => (c as unknown as { taskAnalyzer?: { bias?: string } }).taskAnalyzer;
+    const routerAnalyzer = () => (c.getRouter() as unknown as { taskAnalyzer?: unknown }).taskAnalyzer;
+    expect(analyzer()).toBeUndefined();
+    await c.reconfigure({ ...baseConfig, cascadeAuto: true, autoBias: 'cost' } as never);
+    const first = analyzer();
+    expect(first).toBeDefined();
+    expect(routerAnalyzer()).toBe(first);
+    await c.reconfigure({ ...baseConfig, cascadeAuto: true, autoBias: 'quality' } as never);
+    expect(analyzer()).not.toBe(first);
+    expect(routerAnalyzer()).toBe(analyzer());
+    await c.reconfigure({ ...baseConfig, cascadeAuto: false } as never);
+    expect(analyzer()).toBeUndefined();
+    expect(routerAnalyzer()).toBeUndefined();
+  });
+});
+
 describe('approvalRequestFor', () => {
   it('says when the request is a local-only subtask\'s, so a host can withhold its input', async () => {
     const { approvalRequestFor } = await import('./cascade.js');

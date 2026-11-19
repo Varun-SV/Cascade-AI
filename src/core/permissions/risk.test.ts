@@ -90,6 +90,19 @@ describe('assessShell: what asks, by kind', () => {
     expect(assessShell('npm test', root, path.dirname(root)).category).toBe('outside-project');
   });
 
+  it("a wrapper's options, values and assignments don't hide the command it runs (Codex on 27db466)", () => {
+    expect(sh('env TOKEN=x git push').category).toBe('leaves-machine');
+    expect(sh('env MODE=test rm -rf local-data').category).toBe('delete');
+    expect(sh('env -u HOME -C src git reset --hard').category).toBe('git-history');
+    expect(sh("env -S 'git push origin main'").category).toBe('leaves-machine');
+    expect(sh('xargs -I {} rm {}').category).toBe('delete');
+    expect(sh('xargs -n 1 -P 4 git push').category).toBe('leaves-machine');
+    expect(sh('timeout -s KILL 30 npm publish').category).toBe('leaves-machine');
+    expect(sh('nice -n 10 rm a.txt').category).toBe('delete');
+    expect(sh('env').level).toBe('safe');
+    expect(sh('timeout 30 npm test').level).toBe('recoverable');
+  });
+
   it('a quoted word is not a command', () => {
     expect(sh('git commit -m "rm -rf and push"').level).toBe('recoverable');
     expect(sh('echo "kill it; rm all"').level).toBe('safe');
@@ -146,6 +159,16 @@ describe('what an undoable call writes, for the checkpoint to vouch for (Codex o
     expect(sh('mv old/a.ts new/a.ts').writes).toEqual([path.join(root, 'old/a.ts'), path.join(root, 'new/a.ts')]);
     expect(sh('echo a > x.txt && echo b > y.txt').writes).toEqual([path.join(root, 'x.txt'), path.join(root, 'y.txt')]);
     expect(sh('npm test').writes).toBeUndefined();
+  });
+
+  it('names bare filenames too: no slash is still a file (Codex on 27db466)', () => {
+    expect(sh('cp source.txt local.txt').writes).toEqual([path.join(root, 'local.txt')]);
+    expect(sh('mv a.txt b.txt').writes).toEqual([path.join(root, 'a.txt'), path.join(root, 'b.txt')]);
+    expect(sh('touch notes.md').writes).toEqual([path.join(root, 'notes.md')]);
+    expect(sh("sed -i 's/a/b/' config.ini").writes).toEqual([path.join(root, 'config.ini')]);
+    expect(sh("sed -i -e 's/a/b/' a.ini b.ini").writes).toEqual([path.join(root, 'a.ini'), path.join(root, 'b.ini')]);
+    expect(sh("perl -pi -e 's/a/b/' data.csv").writes).toEqual([path.join(root, 'data.csv')]);
+    expect(sh("sed 's/a/b/' config.ini").level).toBe('safe');
   });
 });
 
