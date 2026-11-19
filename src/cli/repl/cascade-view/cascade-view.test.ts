@@ -65,6 +65,8 @@ describe('activity', () => {
     const t = Date.now();
     expect(testSummary('0'.repeat(200_000))).toBeUndefined();
     expect(testSummary(`${'1'.repeat(50_000)} passed`)).toBeUndefined();
+    expect(testSummary(`3 ${','.repeat(100_000)}x`)).toBeUndefined();
+    expect(testSummary('3 failed,, 9 passed.')).toBe('3 failed, 9 passed');
     expect(Date.now() - t).toBeLessThan(500);
     expect(testSummary('Mocha\n  12 passing (40ms)\n  1 failing')).toBe('1 failed, 12 passed');
     expect(testSummary('OK (5 tests)')).toBe('5 passed');

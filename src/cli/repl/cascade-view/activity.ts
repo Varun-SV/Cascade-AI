@@ -151,7 +151,14 @@ export function testSummary(output: string): string | undefined {
     const digits = (word ?? '').replace(/^\(/, '');
     return digits.length > 0 && digits.length <= 9 && [...digits].every((ch) => ch >= '0' && ch <= '9') ? digits : undefined;
   };
-  const is = (word: string | undefined, ...names: string[]) => names.includes((word ?? '').toLowerCase().replace(/[,.;:)]+$/, ''));
+  // Trailing punctuation off by a loop: `[,.;:)]+$` rescans from every
+  // position on a long run of it (CodeQL).
+  const bare = (word: string): string => {
+    let end = word.length;
+    while (end > 0 && ',.;:)'.includes(word[end - 1]!)) end -= 1;
+    return word.slice(0, end);
+  };
+  const is = (word: string | undefined, ...names: string[]) => names.includes(bare((word ?? '').toLowerCase()));
   let failed: string | undefined;
   let passed: string | undefined;
   let ran: string | undefined;
