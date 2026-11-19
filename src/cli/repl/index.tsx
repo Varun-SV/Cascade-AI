@@ -30,6 +30,10 @@ import { statePath, STATE } from '../../config/project-state.js';
 import { writeProjectConfig } from '../../config/write-config.js';
 import { Cascade, type DecisionLogEntry } from '../../core/cascade.js';
 import { Checkpoints, type Checkpoint } from '../../core/checkpoints.js';
+import { SettingsPanel } from './components/SettingsPanel.js';
+import { SECTIONS, changedText, findSetting, parseValue, type SectionId, type SettingItem } from '../settings/spec.js';
+import { accountLine, pullSettings, pushSettings, signIn, signOut } from '../commands/cloud.js';
+import { ConfigManager } from '../../config/index.js';
 import { describeCheckpoints, describeUndo } from './checkpoint-text.js';
 import { MemoryStore } from '../../memory/store.js';
 import { CloudClient } from '../../cloud/client.js';
@@ -319,6 +323,11 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   /** The last run's after-record, still being written: /undo and the next run wait for it. */
   const checkpointEndRef = useRef<Promise<unknown>>(Promise.resolve());
   const [lastCheckpoint, setLastCheckpoint] = useState<Checkpoint | null>(null);
+  /** /settings, open at a section or a search; null when closed. */
+  const [settingsView, setSettingsView] = useState<{ section?: SectionId; search?: string } | null>(null);
+  /** A setting changed during a run: the live Cascade takes it once the run ends. */
+  const pendingReconfigureRef = useRef(false);
+  const slashCommandRef = useRef<((text: string) => Promise<void>) | null>(null);
   // Ref mirror of cancelAttempted — read synchronously in the key handler so a
   // rapid double-press isn't dropped by a stale React state value.
   const cancelArmedRef = useRef(false);
@@ -612,6 +621,52 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   // when nothing is executing and nobody is typing, the screen must stay
   // perfectly still so native drag-select + right-click copy work.
 
+  /** Change one setting: in the config, on disk, and in the live session. */
+  const applySetting = useCallback(async (item: SettingItem, value: unknown): Promise<string> => {
+    // The keys as they were: one another Cascade saved meanwhile is kept.
+    const base = config.providers.map((p) => ({ ...p }));
+    item.set?.(config, value);
+    const written = writeProjectConfig(workspacePath, config as never, undefined, base);
+    if (!written.ok) return `Couldn't save ${item.label}: ${written.error}`;
+    if (item.id === 'theme') setTheme(getTheme(String(value)));
+    const running = runAbortRef.current !== null;
+    if (item.applies !== 'restart') {
+      if (running) pendingReconfigureRef.current = true;
+      else await cascadeRef.current?.reconfigure(config).catch((err: unknown) => setStartupWarning(`Settings: ${err instanceof Error ? err.message : String(err)}`));
+    }
+    return `${changedText(item, config)}${running && item.applies !== 'restart' ? ' Applies from the next run.' : ''}`;
+  }, [config, workspacePath]);
+
+  /** Read the config again from disk (after /sync pull) and hand it to the live session. */
+  const reloadConfig = useCallback(async () => {
+    const cm = new ConfigManager(workspacePath);
+    await cm.load();
+    Object.assign(config, cm.getConfig());
+    if (runAbortRef.current) pendingReconfigureRef.current = true;
+    else await cascadeRef.current?.reconfigure(config);
+  }, [config, workspacePath]);
+
+  const runSettingAction = useCallback(async (item: SettingItem, passphrase: string | undefined, progress: (text: string) => void): Promise<string> => {
+    switch (item.action) {
+      case 'models': setSettingsView(null); setIsShowingModels(true); return 'Opening the model picker.';
+      case 'login': {
+        const who = await accountLine();
+        if (who && !who.startsWith('signed in, but')) return `Already signed in: ${who}. Sign out first to switch accounts.`;
+        return signIn(progress);
+      }
+      case 'logout': return signOut();
+      case 'sync-push': return pushSettings(workspacePath, passphrase ?? '');
+      case 'sync-pull': {
+        const out = await pullSettings(workspacePath, passphrase ?? '');
+        if (out.startsWith('✓')) await reloadConfig().catch(() => undefined);
+        return out;
+      }
+      case 'mcp': setSettingsView(null); void slashCommandRef.current?.('/mcp'); return 'Listing your MCP servers.';
+      case 'checkpoints': { await checkpointEndRef.current; setSettingsView(null); void slashCommandRef.current?.('/checkpoints'); return 'Listing checkpoints.'; }
+      default: return 'Nothing to do.';
+    }
+  }, [workspacePath, reloadConfig]);
+
   const handleSlashCommand = useCallback(async (trimmed: string) => {
     const result = await slashRef.current.handle(trimmed, {
       sessionId: sessionIdRef.current,
@@ -655,6 +710,38 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         } catch (err) {
           return `Couldn't undo: ${err instanceof Error ? err.message : String(err)}`;
         }
+      },
+      onSettings: async (args: string[]) => {
+        if (!args.length) { setSettingsView({}); return 'Opening settings. ←→ moves between sections, Esc closes.'; }
+        const [name, ...rest] = args;
+        const section = SECTIONS.find((sec) => sec.id === name!.toLowerCase() || sec.title.toLowerCase().startsWith(name!.toLowerCase()));
+        if (section && !rest.length) { setSettingsView({ section: section.id }); return `Opening settings: ${section.title}.`; }
+        const item = findSetting(name!);
+        if (!item) { setSettingsView({ search: args.join(' ') }); return `No setting is called "${name}"; showing what matches.`; }
+        if (!rest.length || item.kind === 'action' || item.kind === 'secret') {
+          // A key is typed in the panel, never on the command line, where it would stay in the history.
+          setSettingsView({ search: item.label });
+          return item.kind === 'secret' && rest.length ? 'Keys are entered in the panel, so they stay out of your input history. Press Enter on it there.' : `Opening settings at ${item.label}.`;
+        }
+        const parsed = parseValue(item, rest.join(' '));
+        if (!parsed.ok) return parsed.error;
+        return applySetting(item, parsed.value);
+      },
+      onLogin: async () => {
+        const who = await accountLine();
+        if (who && !who.startsWith('signed in, but')) return `Already signed in: ${who}.`;
+        return signIn((text) => {
+          const timestamp = new Date().toISOString();
+          dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'system', content: text, timestamp } });
+        });
+      },
+      onLogout: async () => signOut(),
+      onSync: async (args: string[]) => {
+        const sub = (args[0] ?? '').toLowerCase();
+        if (sub !== 'push' && sub !== 'pull') return 'Usage: /sync push (upload this machine\'s keys) or /sync pull (get them here). Both ask for your sync passphrase.';
+        // The passphrase is typed in the panel, masked, never into the input line.
+        setSettingsView({ search: sub === 'push' ? 'upload this machine' : 'get my keys' });
+        return 'Press Enter on it, then type your sync passphrase.';
       },
       onCheckpoints: async () => {
         await checkpointEndRef.current;
@@ -828,13 +915,13 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         const sub = (args[0] ?? '').toLowerCase();
         if (sub === 'on' || sub === 'enable') {
           cascade.setAutonomy('auto');
-          return '✔ Autonomous mode ON — plans auto-approve and non-dangerous tools run without prompts. Dangerous tools still ask, and budget caps still stop runaway cost.';
+          return '✔ Auto mode on. Cascade works on its own, and asks only before something /undo can\'t take back: deleting files, sending anything off this computer (push, publish, deploy, email), rewriting git history, installs and system changes, writing outside the project, dropping database data, stopping processes, changing permissions, or a command it can\'t read. Every run is checkpointed: /undo takes it back. Budget caps still apply.';
         }
         if (sub === 'off' || sub === 'disable') {
           cascade.setAutonomy('manual');
-          return '✔ Autonomous mode OFF — plan and tool approvals will prompt as usual.';
+          return '✔ Auto mode off. Cascade asks before each change, and before running its plan if you set that in /settings.';
         }
-        return `Autonomous mode: ${cascade.getAutonomy() === 'auto' ? 'ON' : 'OFF'}\nToggle with  /auto on  or  /auto off`;
+        return `Auto mode is ${cascade.getAutonomy() === 'auto' ? 'on' : 'off'}. /auto on or /auto off; /settings autonomy for the rest.`;
       },
       onPlan: async (args) => {
         const cascade = cascadeRef.current;
@@ -896,7 +983,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'assistant', content: safeOutput, timestamp } });
       persistMessage('assistant', safeOutput, timestamp);
     }
-  }, [workspacePath, exit, state.messages, identities, currentIdentityId, persistMessage]);
+  }, [workspacePath, exit, state.messages, identities, currentIdentityId, persistMessage, applySetting]);
+  slashCommandRef.current = handleSlashCommand;
 
   const handleSubmit = useCallback(async (userInput: string) => {
     if (slashCompletions.length > 0) {
@@ -1210,6 +1298,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         checkpointEndRef.current = checkpointsRef.current!.end(begun).then(setLastCheckpoint, () => undefined);
       }
       runAbortRef.current = null;
+      if (pendingReconfigureRef.current) {
+        pendingReconfigureRef.current = false;
+        void cascadeRef.current?.reconfigure(config).catch(() => undefined);
+      }
       cancelArmedRef.current = false;
       setCancelAttempted(false);
       setCancelling(false);
@@ -1223,7 +1315,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     // Tab, number keys, Esc) to the picker's own useInput so navigation
     // isn't hijacked — this is the root-cause fix for the "only ↑ worked
     // in the model selector" regression.
-    if (isShowingModels) {
+    if (isShowingModels || settingsView) {
       if (key.ctrl && _input === 'c') {
         if (quitAttempted) { markQuitByUser(); exit(); return; }
         setQuitAttempted(true);
@@ -1457,6 +1549,18 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         </Box>
       )}
 
+      {settingsView && (
+        <SettingsPanel
+          config={config}
+          theme={theme}
+          {...(settingsView.section ? { initialSection: settingsView.section } : {})}
+          {...(settingsView.search !== undefined ? { initialSearch: settingsView.search } : {})}
+          onChange={applySetting}
+          onAction={runSettingAction}
+          onClose={() => setSettingsView(null)}
+        />
+      )}
+
       {isShowingModels && (
         <Box paddingX={1}>
           <ModelsDisplay
@@ -1581,7 +1685,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         <Box flexDirection="row">
           <Text color={theme.colors.primary} bold>› {queuedMessages.length > 0 ? <Text color={theme.colors.accent}>[QUEUED] </Text> : ''}</Text>
           <SafeTextInput
-            focus={!state.approvalRequest && !planApprovalRequest && !isShowingModels}
+            focus={!state.approvalRequest && !planApprovalRequest && !isShowingModels && !settingsView}
             value={input}
             manageMouseReporting={false}
             onChange={(val) => {

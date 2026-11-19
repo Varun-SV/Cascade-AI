@@ -1043,6 +1043,21 @@ export class Cascade extends EventEmitter {
     this.config = { ...this.config, autonomy: mode };
   }
 
+  /**
+   * Take new settings between runs (/settings). What is read as each run
+   * starts — autonomy, approvals, budget, memory, context — applies from the
+   * next run; a change to the providers, their keys or the tier models also
+   * has the router look again at what it can reach. The session's spend and
+   * stats are kept. Tools and MCP servers are set up once, as Cascade starts:
+   * a change to those applies from the next start. Not to be called during a run.
+   */
+  async reconfigure(next: CascadeConfig): Promise<void> {
+    const before = this.config;
+    this.config = validateConfig(next) as CascadeConfig;
+    const routerReads = (c: CascadeConfig) => JSON.stringify([c.providers, c.models, c.rateLimits, c.localConcurrency, c.autoBias, c.budget]);
+    if (this.initialized && routerReads(before) !== routerReads(this.config)) await this.router.init(this.config);
+  }
+
   getAutonomy(): 'manual' | 'auto' {
     return this.config.autonomy === 'auto' ? 'auto' : 'manual';
   }
