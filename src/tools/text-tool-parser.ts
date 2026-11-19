@@ -66,7 +66,14 @@ function parseSpan(span: string): ParsedTextToolCall[] {
     const args = fn[2]!.trim() ? parseJsonLoose(fn[2]!.trim()) : {};
     return [{ name: fn[1]!, input: args && typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : {} }];
   }
-  return parseTextToolCalls(span);
+  if (span.startsWith('[TOOL_CALLS]')) return mistralCalls(span);
+  if (span.startsWith('<|python_tag|>')) {
+    const rest = span.slice('<|python_tag|>'.length).trim();
+    const end = rest.startsWith('{') ? jsonObjectEnd(rest) : -1;
+    const c = end === -1 ? null : coerceCall(parseJsonLoose(rest.slice(0, end + 1)));
+    return c ? [c] : [];
+  }
+  return [];
 }
 
 /** Index of `needle` at or after `from`, not inside a double-quoted JSON string; -1 if none. */
@@ -175,6 +182,11 @@ export function strayTextToolCalls(
  *   3. bare {name, input|arguments} (or {function:{…}}) objects anywhere in text
  */
 export function parseTextToolCalls(text: string): ParsedTextToolCall[] {
+  // Calls in a dedicated format are read block by block, each from its own
+  // content, so an example inside one call's arguments is never a call.
+  const blocks = callSpans(text).flatMap((sp) => parseSpan(sp.text));
+  if (blocks.length > 0) return blocks;
+
   const xml = collect(text, TOOL_CALL_RE);
   if (xml.length > 0) return xml;
 

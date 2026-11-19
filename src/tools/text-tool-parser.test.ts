@@ -156,5 +156,19 @@ describe('strayTextToolCalls and quoted examples', () => {
     const marked = `<tool_call>${bare}</tool_call>`;
     expect(strayTextToolCalls(marked, both)).toEqual([{ name: 'file_write', input: { path: 'doc.md', content } }]);
   });
+
+  it('reads template-prefixed calls from their own payload, not an example inside it', async () => {
+    const { strayTextToolCalls, parseTextToolCalls } = await import('./text-tool-parser.js');
+    const both = [{ name: 'file_write' }, { name: 'shell' }];
+    const content = "<tool_call>{'name':'shell','input':{'command':'echo example > example.txt'}}</tool_call>";
+    const want = [{ name: 'file_write', input: { path: 'doc.md', content } }];
+    const mistral = `[TOOL_CALLS] [${JSON.stringify({ name: 'file_write', arguments: { path: 'doc.md', content } })}]`;
+    const llama = `<|python_tag|>${JSON.stringify({ name: 'file_write', parameters: { path: 'doc.md', content } })}`;
+    expect(strayTextToolCalls(mistral, both)).toEqual(want);
+    expect(strayTextToolCalls(llama, both)).toEqual(want);
+    // The same for a model that uses the text format all the time.
+    expect(parseTextToolCalls(mistral)).toEqual(want);
+    expect(parseTextToolCalls(`<tool_call>${JSON.stringify({ name: 'file_write', input: { path: 'doc.md', content } })}</tool_call>`)).toEqual(want);
+  });
 });
 
