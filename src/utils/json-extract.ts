@@ -58,6 +58,9 @@ export function parseFirstJsonObject<T = unknown>(input: string): T | null {
   return parseModelJson<T>(input, 'object');
 }
 
+/** What follows a bracket that opens JSON rather than prose: a value, or the end of an empty one. */
+const OPENS_JSON = /^\s*(?:[{["\]}\d-]|true\b|false\b|null\b)/;
+
 /** At most this many opening brackets are tried, so a huge reply stays cheap. */
 const MAX_STARTS = 64;
 
@@ -98,11 +101,21 @@ export function parseModelJson<T = unknown>(input: string, shape: 'object' | 'ar
     for (let i = text.indexOf(open); i !== -1 && tries < MAX_STARTS; i = text.indexOf(open, i + 1)) {
       tries++;
       const end = balancedEnd(text, i, open, close);
-      if (end === -1) continue;
+      // A bracket that opens JSON and never closes is a payload cut short:
+      // everything after it is inside it, and an inner array or object (an
+      // assignment's `constraints: []`) must not be taken for the whole. A
+      // bracket in prose ("[unfinished note") is passed over.
+      if (end === -1) {
+        if (OPENS_JSON.test(text.slice(i + 1, i + 40))) break;
+        continue;
+      }
       const parsed = parseLenient(text.slice(i, end + 1));
       if (parsed !== undefined && (shape === 'array' ? Array.isArray(parsed) : isPlainObject(parsed))) {
         return parsed as T;
       }
+      // Likewise a closed one that opens JSON but won't parse: its inner
+      // brackets belong to it, so the search resumes after it.
+      if (OPENS_JSON.test(text.slice(i + 1, i + 40))) i = end;
     }
   }
   return null;

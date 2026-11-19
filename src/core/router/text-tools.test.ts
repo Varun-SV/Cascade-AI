@@ -26,6 +26,11 @@ function routerWith(models: ModelInfo[]) {
   return { router, pool, tiers };
 }
 
+/** The restore beginRun() starts with; beginRun itself needs a fully initialised router. */
+function restoreAtRunStart(router: CascadeRouter): void {
+  (router as unknown as { restoreRunTextTools(): void }).restoreRunTextTools();
+}
+
 function storeWith(verdicts: Record<string, boolean> = {}) {
   const saved: Array<[string, string, { supportsToolUse?: boolean }]> = [];
   const store = {
@@ -74,5 +79,32 @@ describe('CascadeRouter.useTextTools', () => {
     const { router, pool } = routerWith([model('qwen', 'openai-compatible', true)]);
     router.useTextTools({ provider: 'ollama', id: 'qwen' });
     expect(pool.get('qwen')!.supportsToolUse).toBe(true);
+  });
+
+  it('gives a first-party model its native tools back at the next run', async () => {
+    const { router, pool, tiers } = routerWith([model('gpt-x', 'openai', true)]);
+    await router.probeLocalToolSupport(storeWith().store);
+    router.useTextTools({ provider: 'openai', id: 'gpt-x' });
+    expect(pool.get('gpt-x')!.supportsToolUse).toBe(false);
+
+    restoreAtRunStart(router);
+
+    expect(pool.get('gpt-x')!.supportsToolUse).toBe(true);
+    expect(tiers.get('T3')!.supportsToolUse).toBe(true);
+  });
+
+  it('keeps an OpenAI-compatible model in the text format across runs', async () => {
+    const { router, pool } = routerWith([model('qwen', 'openai-compatible', true)]);
+    await router.probeLocalToolSupport(storeWith().store);
+    router.useTextTools({ provider: 'openai-compatible', id: 'qwen' });
+
+    restoreAtRunStart(router);
+
+    expect(pool.get('qwen')!.supportsToolUse).toBe(false);
+  });
+
+  it('restores them as the first thing beginRun does', () => {
+    const src = CascadeRouter.prototype.beginRun.toString();
+    expect(src.indexOf('restoreRunTextTools')).toBeGreaterThan(-1);
   });
 });

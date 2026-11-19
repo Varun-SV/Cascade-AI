@@ -96,4 +96,16 @@ describe('parseModelJson', () => {
     const { parseModelJson } = await import('./json-extract.js');
     expect(parseModelJson('Like {"x":0}, but:\n```json\n{"x":1}\n```', 'object')).toEqual({ x: 1 });
   });
+
+  it('does not take an inner array of a cut-off plan for the whole plan', async () => {
+    const { parseModelJson } = await import('./json-extract.js');
+    expect(parseModelJson('[{"subtaskId":"a","description":"work","constraints":[]', 'array')).toBeNull();
+    expect(parseModelJson('{"plan": {"steps": 1}', 'object')).toBeNull();
+  });
+
+  it('does not take an inner array of a closed payload that will not parse', async () => {
+    const { parseModelJson } = await import('./json-extract.js');
+    expect(parseModelJson('[{"subtaskId":"a", "constraints":[], broken here}]', 'array')).toBeNull();
+  });
 });
+

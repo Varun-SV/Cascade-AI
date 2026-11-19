@@ -875,6 +875,13 @@ export class CascadeRouter extends EventEmitter {
   private capabilityStore?: MemoryStore;
 
   /**
+   * First-party models switched to the text tool format for THIS run, with
+   * their entries as they were. A REPL or desktop session runs many tasks on
+   * one router, so beginRun() restores them: one slip is not a verdict.
+   */
+  private runTextTools = new Map<string, ModelInfo>();
+
+  /**
    * A model that was handed native tools answered with a tool call written as
    * text. Its later calls get the text format instead: in this run for every
    * model, and in later runs too for the providers whose listings don't
@@ -884,6 +891,10 @@ export class CascadeRouter extends EventEmitter {
   useTextTools(model: { provider: ProviderType; id: string }): void {
     const known = this.selector.getModelById(model.id);
     if (!known || known.provider !== model.provider || known.supportsToolUse === false) return;
+    // A run-only verdict keeps what it replaced, for beginRun() to put back.
+    if (!REMEMBERS_TEXT_TOOLS.has(known.provider) && !this.runTextTools.has(known.id)) {
+      this.runTextTools.set(known.id, known);
+    }
     this.selector.addDynamicModel({ ...known, supportsToolUse: false });
     for (const tier of ['T1', 'T2', 'T3'] as TierRole[]) {
       const cur = this.tierModels.get(tier);
@@ -2685,7 +2696,29 @@ export class CascadeRouter extends EventEmitter {
     return { ...this.runScreenshots };
   }
 
+  /**
+   * A first-party model the last run switched to the text tool format gets
+   * its native tools back (see useTextTools): in the selector, and in any
+   * tier it is bound to.
+   */
+  private restoreRunTextTools(): void {
+    for (const [id, original] of this.runTextTools) {
+      const cur = this.selector.getModelById(id);
+      if (cur && cur.provider === original.provider) {
+        this.selector.addDynamicModel({ ...cur, supportsToolUse: original.supportsToolUse });
+      }
+      for (const tier of ['T1', 'T2', 'T3'] as TierRole[]) {
+        const bound = this.tierModels.get(tier);
+        if (bound && bound.id === id && bound.provider === original.provider) {
+          this.tierModels.set(tier, { ...bound, supportsToolUse: original.supportsToolUse });
+        }
+      }
+    }
+    this.runTextTools.clear();
+  }
+
   beginRun(): void {
+    this.restoreRunTextTools();
     // Per-run, like everything else here: a stale mapping would credit this
     // run's calls to the task type a previous run happened to select under.
     this.tierSelectionTaskTypes.clear();
