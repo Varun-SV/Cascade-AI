@@ -63,6 +63,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     ended, and the next start says so if it wasn't you.
 - Opening a panel from a command (`/settings`, `/model`) clears the input
   line, instead of leaving it and its suggestions behind the panel.
+- **A requested picture that can't be made no longer costs the answer.** A
+  browsing run asked for "real images from the internet" could end with the
+  worker's own correction note ("call generate_image…") as its answer, and
+  the research gone. Now:
+  - A run that can browse also gets `find_image`, even with web search off.
+  - A screenshot taken with `browser_control`'s `capture` counts as a picture.
+  - Real pictures are tried before generated ones.
+  - A correction round that comes back empty keeps the answer it was meant
+    to improve.
+  - A missing picture is reported as a plain note under the answer.
 
 ## 0.90.0 - 2026-11-19
 
