@@ -26,8 +26,86 @@ export interface ParsedTextToolCall {
   input: Record<string, unknown>;
 }
 
-/** A call written in one of the dedicated call formats, as it appears in a reply. */
-const CALL_SPAN_RE = /<tool_call>[\s\S]*?<\/tool_call>|<function=[\w.-]+>[\s\S]*?<\/function>|\[TOOL_CALLS\][\s\S]*$|<\|python_tag\|>[\s\S]*$/g;
+/**
+ * The calls written in a dedicated call format, in order. A block's end is
+ * looked for outside its JSON strings, so a call whose argument shows an
+ * example `</tool_call>` is not cut short, and nothing inside one block is
+ * taken for another.
+ */
+function callSpans(text: string): Array<{ start: number; end: number; text: string }> {
+  const spans: Array<{ start: number; end: number; text: string }> = [];
+  const OPENERS = /<tool_call>|<function=[\w.-]+>|\[TOOL_CALLS\]|<\|python_tag\|>/g;
+  let m: RegExpExecArray | null;
+  while ((m = OPENERS.exec(text))) {
+    const start = m.index;
+    const tag = m[0];
+    let end: number;
+    if (tag === '[TOOL_CALLS]' || tag === '<|python_tag|>') {
+      end = text.length;
+    } else {
+      const closer = tag === '<tool_call>' ? '</tool_call>' : '</function>';
+      const at = indexOutsideStrings(text, closer, start + tag.length);
+      if (at === -1) continue;
+      end = at + closer.length;
+    }
+    spans.push({ start, end, text: text.slice(start, end) });
+    OPENERS.lastIndex = end;
+  }
+  return spans;
+}
+
+/**
+ * The call(s) in one call block, read from that block's own content only, so
+ * an example inside its arguments is never parsed as a call of its own.
+ */
+function parseSpan(span: string): ParsedTextToolCall[] {
+  const tc = /^<tool_call>([\s\S]*)<\/tool_call>$/.exec(span);
+  if (tc) { const c = coerceCall(parseJsonLoose(tc[1]!.trim())); return c ? [c] : []; }
+  const fn = /^<function=([\w.-]+)>([\s\S]*)<\/function>$/.exec(span);
+  if (fn) {
+    const args = fn[2]!.trim() ? parseJsonLoose(fn[2]!.trim()) : {};
+    return [{ name: fn[1]!, input: args && typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : {} }];
+  }
+  return parseTextToolCalls(span);
+}
+
+/** Index of `needle` at or after `from`, not inside a double-quoted JSON string; -1 if none. */
+function indexOutsideStrings(text: string, needle: string, from: number): number {
+  let inString = false;
+  let escape = false;
+  for (let i = from; i < text.length; i++) {
+    const ch = text[i]!;
+    if (inString) {
+      if (escape) escape = false;
+      else if (ch === '\\') escape = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (text.startsWith(needle, i)) return i;
+  }
+  return -1;
+}
+
+/** Where the object opening `text` closes, string-aware; -1 if it never does. */
+function jsonObjectEnd(text: string): number {
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (inString) {
+      if (escape) escape = false;
+      else if (ch === '\\') escape = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}' && --depth === 0) return i;
+  }
+  return -1;
+}
 
 /** [start, end) of each fenced code block (an unclosed one runs to the end) and each inline code span. */
 function codeRegions(text: string): Array<[number, number]> {
@@ -64,7 +142,18 @@ export function strayTextToolCalls(
   // the text around them, so backticks inside a call's own arguments (a file
   // it writes, a command it runs) are never mistaken for a code block. A call
   // block that starts inside a code block or inline code is an example.
-  const spans = [...trimmed.matchAll(CALL_SPAN_RE)].map((m) => ({ start: m.index!, end: m.index! + m[0].length, text: m[0] }));
+  // A reply that opens with a call object is that call, whatever its string
+  // values say: a file it writes may show a <tool_call> example.
+  if (trimmed.startsWith('{')) {
+    const end = jsonObjectEnd(trimmed);
+    const one = end === -1 ? null : coerceCall(parseJsonLoose(trimmed.slice(0, end + 1)));
+    const lead = one ? [one] : [];
+    if (lead.length > 0) {
+      const names = new Set(tools.map((t) => t.name));
+      return lead.every((c) => names.has(c.name)) ? lead : [];
+    }
+  }
+  const spans = callSpans(trimmed);
   let around = trimmed;
   for (const { start, end } of spans) around = around.slice(0, start) + ' '.repeat(end - start) + around.slice(end);
   const quoted = codeRegions(around);
@@ -72,7 +161,7 @@ export function strayTextToolCalls(
   // Each accepted call is parsed from the reply as written, never from a
   // copy with anything taken out.
   const calls = live.length > 0
-    ? live.flatMap((sp) => parseTextToolCalls(sp.text))
+    ? live.flatMap((sp) => parseSpan(sp.text))
     : trimmed.startsWith('{') ? parseTextToolCalls(trimmed) : [];
   const names = new Set(tools.map((t) => t.name));
   return calls.length > 0 && calls.every((c) => names.has(c.name)) ? calls : [];

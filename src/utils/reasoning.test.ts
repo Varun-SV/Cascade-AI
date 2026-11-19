@@ -32,6 +32,13 @@ describe('splitReasoning', () => {
     });
   });
 
+  it('keeps a lone close tag inside JSON, code or a sentence as the answer\'s text', () => {
+    const call = '{"name":"file_write","input":{"path":"a","content":"</think>"}}';
+    expect(splitReasoning(call)).toEqual({ answer: call, reasoning: '' });
+    expect(withoutReasoning('Use </think> to end a block.')).toBe('Use </think> to end a block.');
+    expect(withoutReasoning('`</think>`\nis the closing tag')).toBe('`</think>`\nis the closing tag');
+  });
+
   it('makes the rest of the reply reasoning when a leading block never closes', () => {
     expect(splitReasoning('  <think>ran out of tokens while')).toEqual({ answer: '', reasoning: 'ran out of tokens while' });
     expect(splitReasoning('Partial <think>not leading')).toEqual({ answer: 'Partial <think>not leading', reasoning: '' });

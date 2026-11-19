@@ -53,9 +53,11 @@ export function splitReasoning(text: string): Split {
   }
 
   // A close before any open: the reasoning started before the reply did.
+  // Only as a template writes it, on a line of its own after prose: a lone
+  // `</think>` inside JSON, code or a sentence is the answer's own text.
   const firstClose = CLOSE.exec(rest);
   const firstOpen = OPEN.exec(rest);
-  if (firstClose && (!firstOpen || firstClose.index < firstOpen.index)) {
+  if (firstClose && (!firstOpen || firstClose.index < firstOpen.index) && templateClose(rest, firstClose)) {
     thoughts.push(rest.slice(0, firstClose.index).trim());
     rest = rest.slice(firstClose.index + firstClose[0].length);
   }
@@ -74,6 +76,19 @@ export function splitReasoning(text: string): Split {
   const reasoning = thoughts.filter(Boolean).join('\n\n');
   if (!reasoning && thoughts.length === 0) return { answer: text, reasoning: '' };
   return { answer: answer.trim(), reasoning };
+}
+
+/**
+ * Whether a close-only `</think>` is one a chat template's reasoning ends
+ * with: what comes before it reads as prose (not JSON, markup or code), and
+ * there is a real line break on one side of it, which JSON strings never
+ * contain.
+ */
+function templateClose(text: string, close: RegExpExecArray): boolean {
+  const before = text.slice(0, close.index);
+  if (/^\s*[{[<`]/.test(before)) return false;
+  const after = text.slice(close.index + close[0].length);
+  return /\n[ \t]*$/.test(before) || /^[ \t]*(?:\n|$)/.test(after);
 }
 
 /** A reply without its reasoning. */

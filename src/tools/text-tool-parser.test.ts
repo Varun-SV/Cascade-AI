@@ -146,5 +146,15 @@ describe('strayTextToolCalls and quoted examples', () => {
     const reply = JSON.stringify({ name: 'shell', arguments: { command: 'echo `date`' } });
     expect(strayTextToolCalls(reply, tools)).toEqual([{ name: 'shell', input: { command: 'echo `date`' } }]);
   });
+
+  it('runs the outer call when its argument shows a call example', async () => {
+    const { strayTextToolCalls } = await import('./text-tool-parser.js');
+    const both = [{ name: 'file_write' }, { name: 'shell' }];
+    const content = "<tool_call>{'name':'shell','input':{'command':'echo example > example.txt'}}</tool_call>";
+    const bare = JSON.stringify({ name: 'file_write', input: { path: 'doc.md', content } });
+    expect(strayTextToolCalls(bare, both)).toEqual([{ name: 'file_write', input: { path: 'doc.md', content } }]);
+    const marked = `<tool_call>${bare}</tool_call>`;
+    expect(strayTextToolCalls(marked, both)).toEqual([{ name: 'file_write', input: { path: 'doc.md', content } }]);
+  });
 });
 
