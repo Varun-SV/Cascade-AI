@@ -107,9 +107,14 @@ describe('/settings panel', () => {
     await p.press('/');
     for (const ch of 'budget') await p.press(ch);
     expect(await p.until('Most a run may cost')).toContain('Most a run may cost');
-    // Keys that arrive before a redraw all count (fast typing, a paste in pieces).
-    await p.press('\x1b');
+    p.unmount();
+  });
+
+  it('keys that arrive before a redraw all count (fast typing, a paste in pieces)', async () => {
+    const p = mount(config());
+    await tick();
     await p.press('/');
+    await p.until('search: ▌');
     p.burst('bud', 'get');
     expect(await p.until('search: budget')).toContain('search: budget');
     p.unmount();
