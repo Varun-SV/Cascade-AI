@@ -448,6 +448,25 @@ suite('screenshots the person allowed', { timeout: 60_000 }, () => {
     expect(await r.page.evaluate('document.getElementById("pw").style.transition')).toBe('filter 10s linear');
   });
 
+  it('a password shown in clear, a code known only by its label, and a card number by its placeholder are blurred too (Codex on 0c23f46)', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    const box = (left: number, top: number) => `position:absolute;left:${left}px;top:${top}px;width:150px;height:80px;background:#000;color:#000;border:0;outline:0`;
+    const page = '<!doctype html><body style="margin:0;background:#fff">'
+      + `<input type=text name=pass autocomplete=current-password value=hunter2 style="${box(20, 20)}">`
+      + `<label for=c style="position:absolute;left:0;top:200px">Verification code</label><input id=c value=123456 style="${box(200, 20)}">`
+      + `<input placeholder="1234 1234 1234 1234" value=4242 style="${box(380, 20)}">`
+      + `<input name=city value=Pune style="${box(560, 20)}"></body>`;
+    await r.page.evaluate(`document.open(); document.write(${JSON.stringify(page)}); document.close(); true`);
+    const shot = await r.page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 800, height: 150 } });
+    const sharp = (await import('sharp')).default;
+    const { data, info } = await sharp(shot).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const at = (x: number, y: number) => data[(y * info.width + x) * info.channels]!;
+    for (const x of [23, 203, 383]) expect(at(x, 23), `field at ${x}`).toBeGreaterThan(40);
+    // An ordinary field stays as it is.
+    expect(at(563, 23)).toBeLessThan(20);
+  });
+
   it('a screenshot past the viewport is refused even with the opt-in', async () => {
     const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
     const r = await startRig({ consent, raw: true });

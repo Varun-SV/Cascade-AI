@@ -14,6 +14,7 @@ import { type CommandFrame, type FrameTreeNode, HIDDEN_HISTORY_URL, checkCommand
 import { type Consent, onConsentedSite } from './egress-rules.js';
 import type { PageEndMode, RequestEnforcer } from './request-enforcer.js';
 import { settlesWithin } from './settles.js';
+import { PRIVATE_FIELDS, PRIVATE_PLACEHOLDER } from '../private-fields.js';
 import { CommandFenced, type CommandTransport, type TabLease, createFencedForwarder } from './tab-lease.js';
 
 const TAB_SESSION = 'cascade-tab-1';
@@ -37,7 +38,20 @@ const EARLY_BYTES_MAX = 4 * 1024 * 1024;
  * Each element keeps what its own style said before, and gets it back.
  */
 const SHOT_GUARD_ON = `(() => {
-  const SEL = 'input[type=password],input[autocomplete*="cc-"],input[autocomplete*="one-time-code"],input[name*="card" i],input[name*="cvv" i],input[name*="cvc" i],input[name*="otp" i],input[id*="cvv" i],input[id*="otp" i]';
+  // The controller's own description of a private field (private-fields.ts):
+  // a password shown in clear by its "show" button, card and code fields by
+  // name, id or autocomplete token, one box per digit. And a field known only
+  // by its label or placeholder.
+  const SEL = ${JSON.stringify(PRIVATE_FIELDS + ', input[name*="card" i], input[id*="card" i]')};
+  const SAYS = new RegExp(${JSON.stringify(PRIVATE_PLACEHOLDER.source)}, 'i');
+  const TEXT = 'input:not([type=hidden i]):not([type=checkbox i]):not([type=radio i]):not([type=button i]):not([type=submit i]):not([type=reset i]):not([type=image i]):not([type=range i]):not([type=color i]):not([type=file i]), textarea, select, [contenteditable]:not([contenteditable="false" i]), [role="textbox" i], [role="searchbox" i], [role="combobox" i], [role="spinbutton" i]';
+  const said = (el) => {
+    const doc = el.ownerDocument;
+    const parts = [el.getAttribute('aria-label'), el.getAttribute('placeholder')];
+    for (const l of el.labels || []) parts.push(l.textContent);
+    for (const id of (el.getAttribute('aria-labelledby') || '').split(/\s+/)) if (id) parts.push(doc.getElementById(id)?.textContent);
+    return SAYS.test(parts.filter(Boolean).join(' '));
+  };
   const MARK = 'data-cascade-shot-blur';
   const marked = [];
   // A transition or an animation on the filter would ease the blur in, and the
@@ -55,6 +69,7 @@ const SHOT_GUARD_ON = `(() => {
   // runs, by the device (see closedRootHolds).
   const guard = (root, depth) => {
     for (const el of root.querySelectorAll(SEL)) blur(el);
+    for (const el of root.querySelectorAll(TEXT)) if (said(el)) blur(el);
     for (const f of root.querySelectorAll('iframe, frame')) {
       let inner = null;
       try { inner = f.contentDocument; } catch { inner = null; }
