@@ -5,7 +5,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { statePath, STATE } from '../config/project-state.js';
-import { execFile, execSync } from 'node:child_process';
+import { execSync } from 'node:child_process';
+import { runInOwnGroup } from './shell.js';
 import { randomUUID } from 'node:crypto';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
@@ -107,22 +108,22 @@ export class CodeInterpreterTool extends BaseTool {
       const launch = prepared?.launch ?? { file: cmdPrefix, args: execArgs, cwd: this.workspaceRoot, env: process.env };
 
       // 3. Execute
-      output = await new Promise<string>((resolve) => {
-        const startMs = Date.now();
-        execFile(launch.file, launch.args, { cwd: launch.cwd, env: launch.env, timeout: 30000, signal: options.signal }, (error, stdout, stderr) => {
-          const duration = Date.now() - startMs;
-          if (error) {
-            const timedOut = error.killed && duration >= 30000;
-            if (timedOut) {
-              resolve(`Execution timed out after 30s. Consider breaking the task into smaller pieces.\nPartial stdout: ${stdout}\nStderr: ${stderr}`);
-            } else {
-              resolve(`Execution failed (${duration}ms):\nError: ${error.message}\nStderr: ${stderr}\nStdout: ${stdout}`);
-            }
-          } else {
-            resolve(`Execution successful (${duration}ms):\nStdout: ${stdout}\nStderr: ${stderr}`);
-          }
-        });
-      });
+      // In a process group of its own (see shell.ts runInOwnGroup): a script
+      // that interrupts its group can't reach Cascade, and a timeout stops
+      // what it started too.
+      const startMs = Date.now();
+      try {
+        const ran = await runInOwnGroup({ file: launch.file, args: launch.args }, { cwd: launch.cwd, env: launch.env, timeout: 30000, ...(options.signal ? { signal: options.signal } : {}) });
+        const duration = Date.now() - startMs;
+        output = ran.timedOut
+          ? `Execution timed out after 30s. Consider breaking the task into smaller pieces.\nPartial stdout: ${ran.stdout}\nStderr: ${ran.stderr}`
+          : ran.code !== 0
+            ? `Execution failed (${duration}ms):\nError: exited with code ${ran.code}\nStderr: ${ran.stderr}\nStdout: ${ran.stdout}`
+            : `Execution successful (${duration}ms):\nStdout: ${ran.stdout}\nStderr: ${ran.stderr}`;
+      } catch (err) {
+        // A cancelled run is reported as a failed execution, as before.
+        output = `Execution failed (${Date.now() - startMs}ms):\nError: ${err instanceof Error ? err.message : String(err)}\nStderr: \nStdout: `;
+      }
     } finally {
       // 4. Cleanup, before the jail looks for what the command wrote.
       try {

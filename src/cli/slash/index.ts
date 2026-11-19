@@ -263,7 +263,7 @@ export class SlashCommandRegistry {
 
     this.register({
       command: '/logs',
-      description: 'Show recent runtime logs',
+      description: 'Show recent runtime logs (/logs exit: how the last session ended)',
       handler: async (args, ctx) => ({ output: await ctx.onLogs(args), handled: true }),
     });
 

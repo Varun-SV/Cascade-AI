@@ -5,6 +5,7 @@
 import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { mcpServersIn } from '../../tools/mcp.js';
 import { Box, Static, Text, useApp, useInput, useStdout } from 'ink';
+import { ExitGuard, guardEvents, markQuitByUser, noteActivity } from '../exit-guard.js';
 import { SafeTextInput } from '../components/SafeTextInput.js';
 import { sanitizeTerminalInput, containsMouseSequence } from '../utils/terminal-input.js';
 import { randomUUID } from 'node:crypto';
@@ -24,7 +25,7 @@ import type {
   Theme,
   Message,
 } from '../../types.js';
-import { GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE } from '../../constants.js';
+import { CASCADE_VERSION, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE } from '../../constants.js';
 import { statePath, STATE } from '../../config/project-state.js';
 import { writeProjectConfig } from '../../config/write-config.js';
 import { Cascade, type DecisionLogEntry } from '../../core/cascade.js';
@@ -495,6 +496,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     }
     const history = nodeLogsRef.current.get(node.id) ?? [];
     nodeLogsRef.current.set(node.id, [...history.slice(-24), [node.status, node.currentAction].filter(Boolean).join(' — ')]);
+    // For the exit record: what was going on, should the process stop.
+    noteActivity(`"${(lastUserPrompt.current ?? '').slice(0, 120)}" — last step: ${node.role} ${node.label}${node.currentAction ? `: ${node.currentAction}` : ''}`);
     rebuildTree();
   }, [rebuildTree, workspacePath]);
 
@@ -552,6 +555,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         message: { id: randomUUID(), role: 'system', content: `⚠ ${startupNotice}`, timestamp: new Date().toISOString() },
       });
     }
+    // A signal ignored, a background error survived: said, not swallowed.
+    const onGuardNotice = (text: string) => dispatch({
+      type: 'ADD_MESSAGE',
+      message: { id: randomUUID(), role: 'system', content: `⚠ ${text}`, timestamp: new Date().toISOString() },
+    });
+    guardEvents.on('notice', onGuardNotice);
     store.createSession({ id: sessionIdRef.current, title: 'Cascade Session', createdAt: startedAtRef.current, updatedAt: startedAtRef.current, identityId: config.defaultIdentityId ?? 'default', workspacePath, messages: [], metadata: { totalTokens: 0, totalCostUsd: 0, modelsUsed: [], toolsUsed: [], taskCount: 0 } });
     persistRuntimeSession('ACTIVE');
     // Signed in? Prepare to mirror finished turns into a shared cloud session
@@ -564,6 +573,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     cascadeRef.current.init().catch(err => setStartupWarning(`Init failed: ${err.message}`));
     validateConfiguredModels(config).then(setStartupWarning);
     return () => {
+      guardEvents.off('notice', onGuardNotice);
       persistRuntimeSession('COMPLETED');
       // Close any MCP servers / telemetry the Cascade orchestrator opened so
       // we don't leak child processes when the REPL exits.
@@ -606,7 +616,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         persistMessage('assistant', safeText, timestamp);
       },
       onClear: () => dispatch({ type: 'CLEAR' }),
-      onExit: () => exit(),
+      onExit: () => { markQuitByUser(); exit(); },
       onThemeChange: (name) => setTheme(getTheme(name)),
       onExport: async (fmt) => {
         const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -1181,7 +1191,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     // in the model selector" regression.
     if (isShowingModels) {
       if (key.ctrl && _input === 'c') {
-        if (quitAttempted) { exit(); return; }
+        if (quitAttempted) { markQuitByUser(); exit(); return; }
         setQuitAttempted(true);
       }
       return;
@@ -1202,6 +1212,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       }
       // Idle → quit Cascade (double-press confirm).
       if (quitAttempted) {
+        markQuitByUser();
         exit();
         return;
       }
@@ -1734,6 +1745,18 @@ async function diagnoseRuntime(config: CascadeConfig, workspacePath: string): Pr
 }
 
 async function showRecentLogs(args: string[], workspacePath: string): Promise<string> {
+  if (args[0] === 'exit') {
+    // How the session before this one ended (see exit-guard.ts).
+    const record = new ExitGuard(statePath(workspacePath, STATE.exitLog), CASCADE_VERSION).previous();
+    if (!record) return 'No record of how an earlier session ended.';
+    return [
+      `Last session ended ${record.at} after ${record.uptimeSec}s (Cascade ${record.version}, pid ${record.pid}): ${record.clean ? 'you quit it.' : 'unexpectedly.'}`,
+      `Why: ${record.reason}`,
+      ...(record.running ? [`Working on: ${record.running}`] : []),
+      ...(record.error ? [`Error:\n${record.error}`] : []),
+      ...(record.survived?.length ? [`Errors it carried on past:\n${record.survived.join('\n')}`] : []),
+    ].join('\n');
+  }
   const limit = Number.parseInt(args[0] ?? '10', 10) || 10;
   const store = new MemoryStore(statePath(workspacePath, STATE.memoryDb));
   try {
