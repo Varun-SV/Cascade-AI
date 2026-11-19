@@ -258,7 +258,11 @@ describe('cohorts that do not overlap', () => {
 // The committed data, checked as data: if a future refresh adds a source that
 // bridges these two cohorts, this test is the thing that notices.
 describe('the committed text-to-speech sources', () => {
-  it('are disjoint today, which is why their scores are not yet comparable', async () => {
+  it('became connected when the full leaderboard was read directly', async () => {
+    // Until 2026-11-19 these were two search-quoted captures, eight and five
+    // voices, with nothing in common. Artificial Analysis's full leaderboard
+    // rates the open-weights voices too, so the pair now shares models: still a
+    // percentile per board, but no longer two islands.
     const { readFileSync } = await import('node:fs');
     const { fileURLToPath } = await import('node:url');
     const read = (n) => JSON.parse(readFileSync(
@@ -269,12 +273,12 @@ describe('the committed text-to-speech sources', () => {
       read('text-to-speech-aa-open-weights.json'),
     ]);
     expect(o.sources).toBe(2);
-    expect(o.shared, 'no model appears in both leaderboards').toBe(0);
-    expect(o.components).toBe(2);
-    expect(o.disjoint).toBe(true);
+    expect(o.shared, 'the open-weights voices appear on both boards').toBeGreaterThanOrEqual(5);
+    expect(o.components).toBe(1);
+    expect(o.disjoint).toBe(false);
   });
 
-  it('is not the only disjoint modality — vision is too', () => {
+  it('leaves vision as the disjoint modality', () => {
     // Found by running the overlap over the real committed sources rather than
     // reasoning about the one that was reported. Two vision sources, 43
     // families between them, and not a single model in both.

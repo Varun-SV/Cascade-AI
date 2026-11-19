@@ -1,18 +1,27 @@
 {
   "source": "artificial-analysis-music-arena-vocals",
   "modality": "music-generation",
-  "metric": "Artificial Analysis Music Arena Elo — vocal tracks",
+  "metric": "Artificial Analysis Music Arena Elo \u2014 vocal tracks",
   "label": "Artificial Analysis Music Arena (Vocals)",
   "url": "https://artificialanalysis.ai/music/leaderboard/vocals",
-  "capturedAt": "2026-09-21",
-  "provenance": "captured-via-search",
+  "capturedAt": "2026-11-19",
+  "provenance": "captured",
   "lowerIsBetter": false,
-  "note": "Same retrieval method as music-generation-aa-instrumental.json.",
+  "note": "Read directly from the Artificial Analysis leaderboard table (server-rendered on the page), every row, on 2026-11-19. The Elo is the point estimate; the 95% interval AA shows beside it is not used. Where a model is listed as several dated snapshots (e.g. \"Gradium TTS (Aug/Sep/Oct 2026)\"), the newest snapshot stands for it. Same re-anchoring as the instrumental board (MiniMax Music 3.0 = 1000).",
   "models": {
-    "suno-v5.5": 1169,
-    "mureka-v9": 1155,
-    "mureka-v8": 1139,
-    "suno-v5": 1097,
-    "minimax-music-2.5-plus": 1092
+    "ace-music-v1": 1160,
+    "suno-v6": 1144,
+    "suno-v6-mini": 1132,
+    "mureka-v9.5": 1101,
+    "mureka-v9": 1063,
+    "lyria-3.5": 1050,
+    "lyria-3-pro": 1048,
+    "eleven-music-v2.5": 1016,
+    "eleven-music-v2": 1002,
+    "minimax-music-3.0": 1000,
+    "eleven-music": 998,
+    "minimax-music-2.6": 998,
+    "minimax-music-2.5-plus": 990,
+    "melodia-v3": 964
   }
 }

@@ -3,42 +3,54 @@
   "label": "LMArena \u00b7 Creative Writing arena (style-controlled, via BenchLeader mirror)",
   "url": "https://www.benchleader.com/benchmarks/lmarena_text_creative",
   "primaryUrl": "https://lmarena.ai/leaderboard/text/creative-writing",
-  "capturedAt": "2026-10-28",
+  "capturedAt": "2026-11-19",
   "provenance": "mirror-captured",
   "scale": "elo",
   "eloFloor": 1000,
   "eloCeil": 1550,
-  "note": "ANCHOR for creative. Human pairwise preference on writing prompts (Bradley-Terry, Elo-like, style control on), newest result 2026-10-22. Read from a mirror because the arena page renders client-side; treat as lower confidence than the Vals captures. Where a model is listed at several reasoning efforts, the default row is used, else the lower of the listed rows. Ceiling 1550 because the top now exceeds the old 1500 default.",
+  "note": "ANCHOR for creative. Human pairwise preference on writing prompts (Bradley-Terry, Elo-like, style control on), result dated 2026-11-18. Read from a mirror because the arena page renders client-side; treat as lower confidence than the Vals captures. Where a model is listed at several reasoning efforts, the default row is used, else the lower of the listed rows. The mirror's leaderboard shows its top 60 rows; families below them are read from each model's own BenchLeader page (Claude Haiku 5.5, Claude Sonnet 5, GPT-6 Sol/Luna, GPT-5.6 Terra/Luna, Grok 4.7, GLM 5.3 Flash, DeepSeek V4.1 Flash, MiMo V2.6 Flash, Mistral Large 4). Not yet rated: Claude Fable 5.2, GPT-6.2, GPT-6.1 Terra, Qwen 4 Max, MiniMax M3.1 Flash. GPT-5.4 is left out: its page lists only rows whose reasoning effort is unstated (1292 and 1301), which can't be matched to the 1442 row this file used to carry. Ceiling 1550 because the top now exceeds the old 1500 default.",
   "models": {
-    "claude-opus-5.5": {
-      "creative": 1520
-    },
     "gemini-4-argon": {
-      "creative": 1512
+      "creative": 1521
+    },
+    "claude-opus-5.5": {
+      "creative": 1516
+    },
+    "gemini-4-carbon": {
+      "creative": 1515
+    },
+    "gemini-4-neon": {
+      "creative": 1514
     },
     "claude-fable-5": {
       "creative": 1501
     },
-    "gemini-3.7-flash": {
+    "claude-fable-5.1": {
       "creative": 1492
     },
-    "claude-fable-5.1": {
-      "creative": 1487
+    "gemini-4-hydrogen": {
+      "creative": 1491
     },
     "gemini-3.8-flash": {
-      "creative": 1485
+      "creative": 1489
+    },
+    "gemini-3.7-flash": {
+      "creative": 1487
     },
     "gemini-3-pro": {
-      "creative": 1485
+      "creative": 1484
     },
     "claude-opus-4.7": {
       "creative": 1482
     },
     "gemini-3.1-pro": {
-      "creative": 1481
+      "creative": 1482
     },
     "claude-opus-4.6": {
       "creative": 1478
+    },
+    "qwen-3.8-max": {
+      "creative": 1473
     },
     "claude-opus-5": {
       "creative": 1471
@@ -47,31 +59,43 @@
       "creative": 1471
     },
     "gpt-5.6-sol": {
-      "creative": 1470
+      "creative": 1471
     },
     "gemini-3.5-flash": {
-      "creative": 1464
+      "creative": 1465
     },
     "claude-opus-4.8": {
-      "creative": 1463
-    },
-    "claude-sonnet-5.5": {
-      "creative": 1466
+      "creative": 1464
     },
     "claude-opus-4.5": {
-      "creative": 1462
+      "creative": 1461
+    },
+    "kimi-k3": {
+      "creative": 1460
+    },
+    "claude-sonnet-5.5": {
+      "creative": 1460
+    },
+    "glm-5.3": {
+      "creative": 1457
     },
     "gemini-3-flash": {
       "creative": 1457
     },
+    "kimi-k3.1": {
+      "creative": 1456
+    },
     "claude-sonnet-4.5": {
-      "creative": 1454
+      "creative": 1455
     },
     "gpt-6.1-sol": {
-      "creative": 1453
+      "creative": 1450
     },
     "gpt-6-astra": {
-      "creative": 1450
+      "creative": 1449
+    },
+    "mimo-v2.6-pro": {
+      "creative": 1449
     },
     "claude-sonnet-4.6": {
       "creative": 1449
@@ -79,11 +103,47 @@
     "gpt-5.5": {
       "creative": 1448
     },
+    "deepseek-v4-pro": {
+      "creative": 1446
+    },
     "gemini-2.5-pro": {
+      "creative": 1444
+    },
+    "grok-4.6": {
       "creative": 1443
     },
-    "gpt-5.4": {
-      "creative": 1442
+    "deepseek-v4.1-flash": {
+      "creative": 1440
+    },
+    "glm-5.3-flash": {
+      "creative": 1435
+    },
+    "claude-sonnet-5": {
+      "creative": 1433
+    },
+    "gpt-5.6-terra": {
+      "creative": 1430
+    },
+    "gpt-6-sol": {
+      "creative": 1427
+    },
+    "grok-4.7": {
+      "creative": 1422
+    },
+    "gpt-5.6-luna": {
+      "creative": 1411
+    },
+    "gpt-6-luna": {
+      "creative": 1408
+    },
+    "mimo-v2.6-flash": {
+      "creative": 1394
+    },
+    "claude-haiku-5.5": {
+      "creative": 1360
+    },
+    "mistral-large-4": {
+      "creative": 1360
     }
   }
 }
