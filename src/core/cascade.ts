@@ -2201,7 +2201,7 @@ ${prompt}`
     options = await this.applyExtendedContext(options);
 
     // Create a fresh permission escalator for this task run
-    const escalator = new PermissionEscalator(this.config.approvalTimeoutMs ?? 600_000, this.config.autonomy === 'auto', this.config.approvalAdvice === true);
+    const escalator = new PermissionEscalator(this.config.approvalTimeoutMs ?? 600_000, this.config.autonomy === 'auto', this.config.approvalAdvice === true, options.undoable === true);
 
     // Wire escalator's user-required event → approvalCallback or direct event
     escalator.on('permission:user-required', async (req: PermissionRequest) => {
@@ -2993,6 +2993,7 @@ export function approvalRequestFor(req: PermissionRequest): ApprovalRequest & { 
         : `T3 Worker "${req.subtaskContext}" wants to run "${req.toolName}".`,
     isDangerous: req.isDangerous,
     ...(req.localOnly ? { localOnly: true } : {}),
+    ...(req.risk ? { risk: req.risk } : {}),
     escalationContext: {
       requestedBy: req.requestedBy,
       parentT2Id: req.parentT2Id,

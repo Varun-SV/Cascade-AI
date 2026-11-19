@@ -2,6 +2,7 @@
 //  Cascade AI — T3 Worker
 // ─────────────────────────────────────────────
 
+import { assessRisk } from '../permissions/risk.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type {
@@ -1305,6 +1306,8 @@ export class T3Worker extends BaseTier {
         toolName: tc.name,
         input: shown?.input ?? tc.input,
         isDangerous: this.toolRegistry.isDangerous(tc.name),
+        // Read from the call as made, not as shown: what is shown may be cut short.
+        risk: assessRisk(tc.name, tc.input, this.artifactRoot()),
         subtaskContext: this.assignment?.subtaskTitle ?? 'Unknown subtask',
         sectionContext: this.assignment?.subtaskTitle ?? 'Unknown section',
         localOnly: this.localOnlyMatch,

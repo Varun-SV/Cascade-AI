@@ -20,6 +20,10 @@ export interface SlashCommandContext {
   onThemeChange: (theme: string) => void;
   onExport: (format: 'markdown' | 'json') => Promise<void>;
   onRollback: () => Promise<string | void>;
+  /** Puts back what the last run (or the last n) changed: /undo [n] [--force]. */
+  onUndo: (args: string[]) => Promise<string> | string;
+  /** Lists the runs that can be undone. */
+  onCheckpoints: () => Promise<string> | string;
   /** Injects live steering guidance into the currently running task's workers. */
   onSteer: (args: string[]) => string | Promise<string>;
   onBranch: () => Promise<void>;
@@ -167,8 +171,21 @@ export class SlashCommandRegistry {
     });
 
     this.register({
+      command: '/undo',
+      description: 'Undo the last run\'s changes to your files (/undo 3: the last three runs; --force: also files you changed since)',
+      args: ['[n]', '[--force]'],
+      handler: async (args, ctx) => ({ output: await ctx.onUndo(args), handled: true }),
+    });
+
+    this.register({
+      command: '/checkpoints',
+      description: 'List the runs /undo can take back, and what each changed',
+      handler: async (_args, ctx) => ({ output: await ctx.onCheckpoints(), handled: true }),
+    });
+
+    this.register({
       command: '/rollback',
-      description: 'Undo all file changes in this session',
+      description: 'Undo every file the file tools changed in this session (/undo also covers commands, run by run)',
       handler: async (_args, ctx) => {
         const out = await ctx.onRollback();
         return { output: out || 'File changes rolled back.', handled: true };

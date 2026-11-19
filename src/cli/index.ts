@@ -497,6 +497,11 @@ async function startRepl(options: {
     { exitOnCtrlC: false },
   );
 
+  // The session lasts until the person ends it. Node ends a process with
+  // nothing left to wait on, and an approval's timer doesn't count (it is
+  // unref'd); if the screen ever let go of the keyboard while one was
+  // showing, Cascade would have closed without a word. This holds it open.
+  const keepAlive = setInterval(() => { /* holds the session open */ }, 1 << 30);
   try {
     await waitUntilExit();
   } catch (err) {
@@ -505,6 +510,8 @@ async function startRepl(options: {
     leaveAltScreen();
     process.stderr.write(chalk.red(`\n  Cascade stopped: the screen failed to draw (${describe(err).split('\n')[0]}). Details: ${guard.path}\n`));
     process.exit(1);
+  } finally {
+    clearInterval(keepAlive);
   }
   leaveAltScreen();
   process.exit(0);

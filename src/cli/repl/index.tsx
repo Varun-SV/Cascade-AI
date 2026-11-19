@@ -29,6 +29,8 @@ import { CASCADE_VERSION, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE } from '../.
 import { statePath, STATE } from '../../config/project-state.js';
 import { writeProjectConfig } from '../../config/write-config.js';
 import { Cascade, type DecisionLogEntry } from '../../core/cascade.js';
+import { Checkpoints, type Checkpoint } from '../../core/checkpoints.js';
+import { describeCheckpoints, describeUndo } from './checkpoint-text.js';
 import { MemoryStore } from '../../memory/store.js';
 import { CloudClient } from '../../cloud/client.js';
 import { cloudTurnAccounting, settledRunReport, type CloudRunReport } from '../../cloud/run-report.js';
@@ -311,6 +313,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const [commandRunning, setCommandRunning] = useState(false);
   // AbortController for the in-progress run, so Ctrl+C / ESC can cancel the task.
   const runAbortRef = useRef<AbortController | null>(null);
+  // The project recorded before and after each run, for /undo.
+  const checkpointsRef = useRef<Checkpoints | null>(null);
+  checkpointsRef.current ??= new Checkpoints(workspacePath, statePath(workspacePath, STATE.checkpoints));
+  /** The last run's after-record, still being written: /undo and the next run wait for it. */
+  const checkpointEndRef = useRef<Promise<unknown>>(Promise.resolve());
+  const [lastCheckpoint, setLastCheckpoint] = useState<Checkpoint | null>(null);
   // Ref mirror of cancelAttempted — read synchronously in the key handler so a
   // rapid double-press isn't dropped by a stale React state value.
   const cancelArmedRef = useRef(false);
@@ -637,6 +645,20 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           try { await fs.writeFile(filePath, content, 'utf-8'); } catch (err) { console.error(`Restore failed: ${filePath}`, err); }
         }
         return `Restored ${snapshots.length} files to their initial session state.`;
+      },
+      onUndo: async (args: string[]) => {
+        if (runAbortRef.current) return 'A run is in progress. Stop it first (Esc or Ctrl+C), then /undo.';
+        const n = Math.max(1, Number.parseInt(args.find((a) => /^\d+$/.test(a)) ?? '1', 10));
+        await checkpointEndRef.current;
+        try {
+          return describeUndo(await checkpointsRef.current!.undo(n, args.includes('--force')));
+        } catch (err) {
+          return `Couldn't undo: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      },
+      onCheckpoints: async () => {
+        await checkpointEndRef.current;
+        return describeCheckpoints(checkpointsRef.current!.list());
       },
       onSteer: (args: string[]) => {
         const text = args.join(' ').trim();
@@ -1086,11 +1108,19 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       }, after);
       return () => report;
     };
+    let checkpoint: Checkpoint | null = null;
     try {
       runAbortRef.current = new AbortController();
+      // Record the project first, so this run can be undone; a run that
+      // can't be checkpointed goes ahead, and auto mode then asks about
+      // every change, as before.
+      await checkpointEndRef.current;
+      checkpoint = await checkpointsRef.current!.begin(trimmed).catch(() => null);
+      setLastCheckpoint(checkpoint);
       const result = await cascade.run({
         prompt: trimmed,
         workspacePath,
+        undoable: checkpoint !== null,
         signal: runAbortRef.current.signal,
         identityId: currentIdentityId,
         conversationHistory: toConversationHistory(state.messages),
@@ -1174,6 +1204,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
             totalCostUsd: finalStats.totalCostUsd,
           }
         });
+      }
+      if (checkpoint) {
+        const begun = checkpoint;
+        checkpointEndRef.current = checkpointsRef.current!.end(begun).then(setLastCheckpoint, () => undefined);
       }
       runAbortRef.current = null;
       cancelArmedRef.current = false;
