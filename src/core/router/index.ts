@@ -1859,6 +1859,15 @@ export class CascadeRouter extends EventEmitter {
   }
 
   /** Project-knowledge settings (config.knowledge). Facts extraction on by default. */
+  /**
+   * Take settings that need no re-detection of providers (Cascade.reconfigure
+   * for, say, knowledge.factsExtraction): read from here on each call, not
+   * bound at init.
+   */
+  adoptConfig(config: CascadeConfig): void {
+    this.config = config;
+  }
+
   getKnowledgeConfig(): { factsExtraction: boolean } {
     return { factsExtraction: this.config?.knowledge?.factsExtraction !== false };
   }

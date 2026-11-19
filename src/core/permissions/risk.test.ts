@@ -177,6 +177,14 @@ describe('what an undoable call writes, for the checkpoint to vouch for (Codex o
     expect(assessShell('cp a.txt new.txt', proj).writes).toEqual([path.join(proj, 'new.txt')]);
   });
 
+  it('a write to a path worked out as it runs asks: a variable, a command, a glob (Codex on 4daf87b)', () => {
+    expect(sh('OUT=ignored.txt; printf changed > "$OUT"').category).toBe('unrecorded');
+    expect(sh('cp a.txt $DEST').category).toBe('unrecorded');
+    expect(sh('echo x > $(date).log').category).toBe('unrecorded');
+    expect(sh('echo x > *.log').category).toBe('unrecorded');
+    expect(sh('echo $HOME > out.txt').writes).toEqual([path.join(root, 'out.txt')]);
+  });
+
   it('a redirect on a cd is judged where it starts (Codex on 8c4090e)', () => {
     expect(sh('cd . > ignored.txt').writes).toEqual([path.join(root, 'ignored.txt')]);
     expect(sh('cd .. > a.txt').writes).toEqual([path.join(root, 'a.txt')]);

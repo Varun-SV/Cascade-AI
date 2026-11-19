@@ -1086,6 +1086,14 @@ describe('secretValuesIn — what the process jail keeps out of a command\'s env
 // The host was handed a local-only subtask's request like any other, with
 // nothing to tell it that the input may carry what the subtask read.
 describe('Cascade.reconfigure: Auto routing settings apply on the next run (Codex on 27db466)', () => {
+  it('turning facts off reaches the router workers ask (Codex on 4daf87b)', async () => {
+    const c = new Cascade({ ...baseConfig } as never, '/tmp');
+    (c as unknown as { initialized: boolean }).initialized = true;
+    expect(c.getRouter().getKnowledgeConfig().factsExtraction).toBe(true);
+    await c.reconfigure({ ...baseConfig, knowledge: { factsExtraction: false } } as never);
+    expect(c.getRouter().getKnowledgeConfig().factsExtraction).toBe(false);
+  });
+
   it('makes the analyzer again for a new bias, makes one when Auto is turned on, and drops it when off', async () => {
     const c = new Cascade({ ...baseConfig, cascadeAuto: false } as never, '/tmp');
     const analyzer = () => (c as unknown as { taskAnalyzer?: { bias?: string } }).taskAnalyzer;

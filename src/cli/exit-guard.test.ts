@@ -2,11 +2,18 @@ import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ExitGuard, previousEndingNotice, signalExitCode } from './exit-guard.js';
+import { ExitGuard, describe as describeError, previousEndingNotice, signalExitCode } from './exit-guard.js';
 
 const fresh = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'exit-guard-')), 'state', 'last-exit.json');
 
 describe('ExitGuard', () => {
+  it('a rejection with no reason is still reported, not thrown on (Codex on 4daf87b)', () => {
+    expect(describeError(undefined)).toBe('undefined');
+    const guard = new ExitGuard(fresh(), '1.0.0');
+    guard.begin();
+    expect(() => guard.survive(undefined)).not.toThrow();
+  });
+
   it('still says how the last session ended once this one has begun (Codex on 53bc237)', () => {
     const file = fresh();
     const last = new ExitGuard(file, '1.0.0');

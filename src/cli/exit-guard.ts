@@ -153,7 +153,9 @@ export function previousEndingNotice(record: ExitRecord | null): string | null {
 /** A readable account of an error, stack included. */
 export function describe(err: unknown): string {
   if (err instanceof Error) return err.stack ?? `${err.name}: ${err.message}`;
-  try { return typeof err === 'string' ? err : JSON.stringify(err); } catch { return String(err); }
+  // JSON.stringify(undefined) is undefined, not a string: a bare
+  // Promise.reject() must still give text, or the guard that reports it throws.
+  try { return typeof err === 'string' ? err : JSON.stringify(err) ?? String(err); } catch { return String(err); }
 }
 
 /** Exit status for a signal, as shells report it (128 + its number). */

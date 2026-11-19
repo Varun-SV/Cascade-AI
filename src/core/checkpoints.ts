@@ -161,8 +161,16 @@ export class Checkpoints {
     }
     const skipped: string[] = [];
     const bySource = new Map<string, string[]>();
+    const kept: Array<[string, string]> = [];
     for (const [p, { source, leftBy }] of touched) {
       if (!force && leftBy !== now && !(await this.same(leftBy, now, p))) { skipped.push(p); continue; }
+      kept.push([p, source]);
+    }
+    // A path inside, or around, one left alone is left alone too: putting
+    // back a/original.txt would turn the file `a` edited since into a folder.
+    const related = (p: string, s: string) => p.startsWith(`${s}/`) || s.startsWith(`${p}/`);
+    for (const [p, source] of kept) {
+      if (skipped.some((s) => related(p, s))) { skipped.push(p); continue; }
       bySource.set(source, [...(bySource.get(source) ?? []), p]);
     }
     const restored: string[] = [];

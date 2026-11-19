@@ -1058,6 +1058,9 @@ export class Cascade extends EventEmitter {
     this.config = validateConfig(next) as CascadeConfig;
     const routerReads = (c: CascadeConfig) => JSON.stringify([c.providers, c.models, c.rateLimits, c.localConcurrency, c.autoBias, c.budget]);
     if (this.initialized && routerReads(before) !== routerReads(this.config)) await this.router.init(this.config);
+    // Everything else the router reads per call (knowledge.factsExtraction…)
+    // it reads from its own copy, which has to be this one too.
+    else if (this.initialized) this.router.adoptConfig(this.config);
     // Auto's analyzer holds its bias from when it was made: made again (or
     // dropped) when Auto or its bias changes, so the next run routes by it.
     if (before.cascadeAuto !== this.config.cascadeAuto || before.autoBias !== this.config.autoBias) this.refreshTaskAnalyzer();

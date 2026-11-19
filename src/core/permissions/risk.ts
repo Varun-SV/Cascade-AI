@@ -260,7 +260,7 @@ function segments(text: string): string[] {
   const inner = /\$\(([^()]*)\)|`([^`]*)`/g;
   let m: RegExpExecArray | null;
   while ((m = inner.exec(text))) out.push(...segments(m[1] ?? m[2] ?? ''));
-  const flat = text.replace(inner, ' X ').replace(/\d?>&\d/g, ' ').replace(/&>/g, '>');
+  const flat = text.replace(inner, '$__SUBST__').replace(/\d?>&\d/g, ' ').replace(/&>/g, '>');
   for (const part of splitOutsideQuotes(flat)) if (part.trim()) out.push(part.trim());
   return out;
 }
@@ -447,10 +447,18 @@ function assessSegment(segment: string, root: string, cwd: string): Risk {
 }
 
 /** Redirected output: a write, inside or outside the project. */
+/**
+ * A path the shell works out only as it runs: a variable, a command, a glob.
+ * Its spelling here is not the file it names, so nothing can vouch for it.
+ */
+const unresolved = (p: string): boolean => /[$`*?[]|%\w+%/.test(p);
+const unresolvedWrite = (p: string): Risk => risky('unrecorded', `writes to ${p}, a path worked out only as it runs, so whether /undo could put it back can't be told`);
+
 function writesTo(targets: string[], root: string, cwd: string): Risk {
   let r: Risk = SAFE;
   for (const t of targets) {
     if (!t || /^(\/dev\/(null|stdout|stderr)|nul|\$null|&\d)$/i.test(t)) continue;
+    if (unresolved(t) && !/^(%\w+%|\$env:|\$home)/i.test(t)) { r = worst(r, unresolvedWrite(t)); continue; }
     r = worst(r, outside(t, root, cwd) ? risky('outside-project', `writes ${t}, outside the project`) : recoverable(`writes ${t} (checkpointed)`, [path.resolve(cwd, t)]));
   }
   return r;
@@ -489,6 +497,8 @@ function pathsOutside(prog: string, paths: string[], root: string, cwd: string, 
   // What it writes, for the checkpoint to vouch for: a copy writes only
   // where it copies to; anything else (mv, tee, sed -i…) every path named.
   const written = COPIES.has(prog) ? paths.slice(-1) : paths;
+  const pending = written.find(unresolved);
+  if (pending) return unresolvedWrite(pending);
   const targets = written.map((p) => path.resolve(cwd, p));
   // A copy into a folder writes the files named after its sources in it
   // (`cp a.txt dest/` writes dest/a.txt); the folder is named too, and the

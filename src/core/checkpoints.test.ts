@@ -138,6 +138,20 @@ describe('Checkpoints', () => {
     expect(await cp.covers([path.join(root, 'inside-link.txt')])).toBe(true);
   });
 
+  it('leaves alone what is inside or around a file left alone (Codex on 4daf87b)', async () => {
+    write('a/original.txt', 'first');
+    const cp = new Checkpoints(root, state);
+    const run = (await cp.begin('x'))!;
+    fs.rmSync(path.join(root, 'a'), { recursive: true });
+    write('a', 'a file now');
+    await cp.end(run);
+    write('a', 'edited by hand');
+    const r = await cp.undo();
+    expect(read('a')).toBe('edited by hand');
+    expect(r.skipped).toEqual(expect.arrayContaining(['a', 'a/original.txt']));
+    expect(r.restored).toEqual([]);
+  });
+
   it('a folder is covered only if nothing inside it is left out (Codex on 8c4090e)', async () => {
     const cp = new Checkpoints(root, state);
     write('.gitignore', 'dest/a.txt\n');
