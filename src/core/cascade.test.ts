@@ -1097,6 +1097,21 @@ describe('approvalRequestFor', () => {
     expect(approvalRequestFor(req as never).input).toEqual({ command: 'ls' });
   });
 
+  it("a local-only call's risk keeps its kind but not words taken from its input (Codex on 53bc237)", async () => {
+    const { approvalRequestFor } = await import('./cascade.js');
+    const { assessRisk } = await import('./permissions/risk.js');
+    const input = { command: "pkill -f 'PRIVATE_PROJECT_IDENTIFIER'" };
+    const req = {
+      id: 'r1', requestedBy: 't3', parentT2Id: 't2', toolName: 'shell', input,
+      isDangerous: true, subtaskContext: 's', sectionContext: 's', risk: assessRisk('shell', input, '/proj'),
+    };
+    expect(req.risk.reason).toContain('PRIVATE_PROJECT_IDENTIFIER');
+    const shown = approvalRequestFor({ ...req, localOnly: true } as never);
+    expect(shown.risk).toEqual({ level: 'risky', category: 'processes', reason: 'stops processes or containers' });
+    expect(JSON.stringify(shown.risk)).not.toContain('PRIVATE');
+    expect(approvalRequestFor(req as never).risk?.reason).toContain('PRIVATE_PROJECT_IDENTIFIER');
+  });
+
   it('tells the person when only they can allow it, rather than that the tiers could not decide', async () => {
     const { approvalRequestFor } = await import('./cascade.js');
     const req = {

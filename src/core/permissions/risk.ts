@@ -16,6 +16,7 @@
 //  When in doubt a call is risky: a classifier that guesses "fine" is the
 //  one that deletes something.
 
+import os from 'node:os';
 import path from 'node:path';
 import type { Risk, RiskCategory, RiskLevel } from '../../types.js';
 
@@ -184,11 +185,43 @@ export function assessShell(command: string, root: string, cwd: string = root): 
   for (const p of DESTRUCTIVE_MIGRATIONS) if (p.test(text)) return risky('database', 'rolls back or resets a database');
   if (DANGEROUS_SQL.some((p) => p.test(text))) return risky('database', 'drops, truncates or deletes database data');
   let result: Risk = SAFE;
+  // Where each part runs: `cd .. && echo x > a.txt` writes outside the
+  // project. null once a move can't be read before it runs (`cd -`, `cd $X`).
+  let here: string | null = cwd;
   for (const segment of segments(text)) {
-    result = worst(result, assessSegment(segment, root, cwd));
+    const moved = directoryChange(segment, here);
+    if (moved !== undefined) { here = moved; continue; }
+    let r = assessSegment(segment, root, here ?? root);
+    if (r.level === 'recoverable') {
+      if (here === null) r = risky('outside-project', 'changes to a folder that can\'t be told before it runs, then changes files there');
+      else if (outside(here, root, root)) r = risky('outside-project', `changes files in ${here}, outside the project`);
+    }
+    result = worst(result, r);
     if (result.level === 'risky') return result;
   }
   return result;
+}
+
+const CHANGES_DIRECTORY = new Set(['cd', 'chdir', 'pushd', 'popd', 'set-location', 'sl', 'push-location', 'pop-location']);
+
+/**
+ * The folder a segment moves to, if it is a `cd` (or its kin): undefined when
+ * it is not one, null when where it goes can't be read before it runs.
+ */
+function directoryChange(segment: string, from: string | null): string | null | undefined {
+  const w = words(segment);
+  const prog = programName(w[0] ?? '');
+  if (!CHANGES_DIRECTORY.has(prog)) return undefined;
+  if (prog === 'popd' || prog === 'pop-location') return null;
+  // `Set-Location -Path x`, `cd /d D:\x` (cmd), or the first word that isn't a flag.
+  const args = w.slice(1).filter((a) => !/^\/d$/i.test(a));
+  const named = args.findIndex((a) => /^-(path|literalpath)$/i.test(a));
+  const target = named >= 0 ? args[named + 1] : args.find((a) => !a.startsWith('-'));
+  if (target === undefined || target === '~') return os.homedir();
+  if (target === '-' || /[$%`]/.test(target) || from === null) return null;
+  if (target.startsWith('~/') || target.startsWith('~\\')) return path.join(os.homedir(), target.slice(2));
+  if (/^[a-z]:[\\/]/i.test(target) && process.platform !== 'win32') return null;
+  return path.resolve(from, target);
 }
 
 /** A command line's simple commands: split on && || ; | & and newlines, with $(…) and `…` read as commands of their own. */
@@ -377,9 +410,16 @@ export function outside(p: string, root: string, cwd: string): boolean {
 
 // ── git ─────────────────────────────────────────
 
+/** git's own options, before the subcommand, that take the next word as their value. */
+const GIT_OPTION_VALUES = new Set(['-c', '-C', '--git-dir', '--work-tree', '--namespace', '--config-env', '--exec-path', '--super-prefix', '--attr-source', '--list-cmds']);
+
 function assessGitArgs(args: string[]): Risk {
-  const sub = (args.find((a) => !a.startsWith('-') && !/^[\w.-]+=/.test(a)) ?? '').toLowerCase();
-  const rest = args.slice(args.findIndex((a) => a.toLowerCase() === sub) + 1).map((a) => a.toLowerCase());
+  // `git -C . push`, `git -c x=y reset --hard`: the subcommand comes after
+  // git's own options and their values, which are not it.
+  let at = 0;
+  while (at < args.length && args[at]!.startsWith('-')) at += GIT_OPTION_VALUES.has(args[at]!) ? 2 : 1;
+  const sub = (args[at] ?? '').toLowerCase();
+  const rest = args.slice(at + 1).map((a) => a.toLowerCase());
   const has = (...f: string[]) => rest.some((a) => f.includes(a) || f.some((x) => x.startsWith('--') && a.startsWith(`${x}=`)));
   switch (sub) {
     case 'push': return risky('leaves-machine', `git push${has('-f', '--force', '--force-with-lease') ? ' --force' : ''} sends commits to a remote`);

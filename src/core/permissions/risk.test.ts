@@ -68,6 +68,28 @@ describe('assessShell: what asks, by kind', () => {
     expect(sh('FOO=1 git push').category).toBe('leaves-machine');
   });
 
+  it("git's own options before the subcommand don't hide it (Codex on 53bc237)", () => {
+    expect(sh('git -C . push').category).toBe('leaves-machine');
+    expect(sh('git -c user.name=x reset --hard').category).toBe('git-history');
+    expect(sh('git --git-dir=.git --no-pager clean -fd').category).toBe('git-history');
+    expect(sh('git -C . status').level).toBe('safe');
+    expect(sh('git -C ../other commit -m x').category).toBe('outside-project');
+  });
+
+  it('a write after a cd is judged where it lands (Codex on 53bc237)', () => {
+    expect(sh('cd .. && echo changed > victim.txt').category).toBe('outside-project');
+    expect(sh('cd .. && npm test').category).toBe('outside-project');
+    expect(sh('cd src && echo x > a.txt').level).toBe('recoverable');
+    expect(sh('cd src && cd .. && touch a.txt').level).toBe('recoverable');
+    expect(sh('cd - && touch a.txt').category).toBe('outside-project');
+    expect(sh('cd $TARGET; touch a.txt').category).toBe('outside-project');
+    expect(sh('cd && touch a.txt').category).toBe('outside-project');
+    expect(sh('Set-Location -Path .. ; New-Item x.txt').category).toBe('outside-project');
+    expect(sh('cd .. && ls').level).toBe('safe');
+    // A shell started outside the project is outside it from the first word.
+    expect(assessShell('npm test', root, path.dirname(root)).category).toBe('outside-project');
+  });
+
   it('a quoted word is not a command', () => {
     expect(sh('git commit -m "rm -rf and push"').level).toBe('recoverable');
     expect(sh('echo "kill it; rm all"').level).toBe('safe');

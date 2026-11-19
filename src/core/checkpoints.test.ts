@@ -58,6 +58,36 @@ describe('Checkpoints', () => {
     expect(read('src/b.ts')).toBe('two');
   });
 
+  it('a forced retry finishes a run whose files were left alone (Codex on 53bc237)', async () => {
+    const cp = new Checkpoints(root, state);
+    const run = (await cp.begin('x'))!;
+    write('a.txt', 'by the run');
+    await cp.end(run);
+    write('a.txt', 'by hand');
+    expect((await cp.undo()).skipped).toEqual(['a.txt']);
+    expect(cp.list()[0]).toMatchObject({ partial: true });
+    expect(cp.list()[0]!.undone).toBeFalsy();
+    const forced = await cp.undo(1, true);
+    expect(forced.runs.map((r) => r.n)).toEqual([1]);
+    expect(read('a.txt')).toBe('one');
+    expect(cp.list()[0]).toMatchObject({ undone: true });
+  });
+
+  it('several runs: each file goes back to before the first run that changed it, keeping work done between them (Codex on 53bc237)', async () => {
+    const cp = new Checkpoints(root, state);
+    const one = (await cp.begin('one'))!;
+    write('a.txt', 'run one');
+    await cp.end(one);
+    write('b.txt', 'made by hand between runs');
+    const two = (await cp.begin('two'))!;
+    write('b.txt', 'run two');
+    await cp.end(two);
+    const r = await cp.undo(2);
+    expect(read('a.txt')).toBe('one');
+    expect(read('b.txt')).toBe('made by hand between runs');
+    expect(r.removed).toEqual([]);
+  });
+
   it('undoes the last n runs together, and leaves the project\'s own git alone', async () => {
     execFileSync('git', ['init', '-q'], { cwd: root });
     const head = () => { try { return execFileSync('git', ['status', '--porcelain'], { cwd: root }).toString(); } catch { return 'err'; } };

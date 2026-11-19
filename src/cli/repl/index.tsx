@@ -5,7 +5,7 @@
 import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { mcpServersIn } from '../../tools/mcp.js';
 import { Box, Static, Text, useApp, useInput, useStdout } from 'ink';
-import { ExitGuard, guardEvents, markQuitByUser, noteActivity } from '../exit-guard.js';
+import { ExitGuard, currentGuard, guardEvents, markQuitByUser, noteActivity } from '../exit-guard.js';
 import { SafeTextInput } from '../components/SafeTextInput.js';
 import { sanitizeTerminalInput, containsMouseSequence } from '../utils/terminal-input.js';
 import { randomUUID } from 'node:crypto';
@@ -33,7 +33,7 @@ import { Checkpoints, type Checkpoint } from '../../core/checkpoints.js';
 import { SettingsPanel } from './components/SettingsPanel.js';
 import { CascadeView, stepSelection } from './cascade-view/CascadeView.js';
 import { ActivityLog } from './cascade-view/activity.js';
-import { SECTIONS, changedText, findSetting, parseValue, type SectionId, type SettingItem } from '../settings/spec.js';
+import { SECTIONS, changedText, findSetting, parseValue, tryChange, type SectionId, type SettingItem } from '../settings/spec.js';
 import { accountLine, pullSettings, pushSettings, signIn, signOut } from '../commands/cloud.js';
 import { ConfigManager } from '../../config/index.js';
 import { describeCheckpoints, describeUndo } from './checkpoint-text.js';
@@ -640,6 +640,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
 
   /** Change one setting: in the config, on disk, and in the live session. */
   const applySetting = useCallback(async (item: SettingItem, value: unknown): Promise<string> => {
+    // Checked on a copy first: a value the schema refuses is reported, and
+    // neither the live config nor the file is touched.
+    const checked = tryChange(config, item, value);
+    if (!checked.ok) return `Couldn't save it. ${checked.error}`;
     // The keys as they were: one another Cascade saved meanwhile is kept.
     const base = config.providers.map((p) => ({ ...p }));
     item.set?.(config, value);
@@ -1934,7 +1938,9 @@ async function diagnoseRuntime(config: CascadeConfig, workspacePath: string): Pr
 async function showRecentLogs(args: string[], workspacePath: string): Promise<string> {
   if (args[0] === 'exit') {
     // How the session before this one ended (see exit-guard.ts).
-    const record = new ExitGuard(statePath(workspacePath, STATE.exitLog), CASCADE_VERSION).previous();
+    // The running session's guard read the last ending before writing its own;
+    // a fresh read of the file would find this session's "still running" record.
+    const record = currentGuard()?.previous() ?? new ExitGuard(statePath(workspacePath, STATE.exitLog), CASCADE_VERSION).previous();
     if (!record) return 'No record of how an earlier session ended.';
     return [
       `Last session ended ${record.at} after ${record.uptimeSec}s (Cascade ${record.version}, pid ${record.pid}): ${record.clean ? 'you quit it.' : 'unexpectedly.'}`,

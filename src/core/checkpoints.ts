@@ -35,6 +35,8 @@ export interface Checkpoint {
   changed?: number;
   /** Put back by /undo. */
   undone?: boolean;
+  /** Put back by /undo except for files changed by hand since; /undo --force finishes it. */
+  partial?: boolean;
 }
 
 export interface UndoResult {
@@ -115,35 +117,35 @@ export class Checkpoints {
     const runs = all.filter((c) => !c.undone).slice(-Math.max(1, count)).reverse();
     if (!runs.length) return { runs: [], restored: [], removed: [], skipped: [] };
     const now = await this.snapshot('before /undo');
-    const oldest = runs.at(-1)!;
-    // Each path the runs touched, and the state the last run touching it left it in.
-    const touched = new Map<string, string>();
+    // Each path the runs touched: what it was before the FIRST of them that
+    // changed it, and what the last of them left it as. A file made by hand
+    // between two runs and then edited by the later one goes back to the
+    // hand-made version, not away with the earlier run's snapshot.
+    const touched = new Map<string, { source: string; leftBy: string }>();
     for (const run of [...runs].reverse()) {
-      for (const [, p] of await this.diff(run.before, run.after ?? now)) touched.set(p, run.after ?? now);
+      for (const [, p] of await this.diff(run.before, run.after ?? now)) {
+        touched.set(p, { source: touched.get(p)?.source ?? run.before, leftBy: run.after ?? now });
+      }
     }
     const skipped: string[] = [];
-    const paths: string[] = [];
-    for (const [p, leftBy] of touched) {
-      if (!force && leftBy !== now && !(await this.same(leftBy, now, p))) skipped.push(p);
-      else paths.push(p);
+    const bySource = new Map<string, string[]>();
+    for (const [p, { source, leftBy }] of touched) {
+      if (!force && leftBy !== now && !(await this.same(leftBy, now, p))) { skipped.push(p); continue; }
+      bySource.set(source, [...(bySource.get(source) ?? []), p]);
     }
     const restored: string[] = [];
     const removed: string[] = [];
-    if (paths.length) {
-      const status = new Map((await this.diff(oldest.before, now, paths)).map(([s, p]) => [p, s]));
-      for (const p of paths) {
-        const s = status.get(p);
-        if (!s) continue; // already as it was
-        if (s === 'A') removed.push(p);
-        else restored.push(p);
-      }
-      if (restored.length) {
-        await this.git(['restore', `--source=${oldest.before}`, '--worktree', '--pathspec-from-file=-', '--pathspec-file-nul'], restored.join('\0'));
-      }
-      for (const p of removed) this.removeFile(p);
+    for (const [source, paths] of bySource) {
+      const status = new Map((await this.diff(source, now, paths)).map(([s, p]) => [p, s]));
+      const back = paths.filter((p) => status.has(p) && status.get(p) !== 'A');
+      if (back.length) await this.git(['restore', `--source=${source}`, '--worktree', '--pathspec-from-file=-', '--pathspec-file-nul'], back.join('\0'));
+      restored.push(...back);
+      for (const p of paths.filter((x) => status.get(x) === 'A')) { this.removeFile(p); removed.push(p); }
     }
-    const undone = new Set(runs.map((r) => r.n));
-    this.save(all.map((c) => (undone.has(c.n) ? { ...c, undone: true } : c)));
+    // With files left alone, the runs stay open: /undo --force can still
+    // put those back, as the reply says it can.
+    const done = new Set(runs.map((r) => r.n));
+    this.save(all.map((c) => (!done.has(c.n) ? c : skipped.length ? { ...c, partial: true } : { ...c, undone: true, partial: false })));
     return { runs, restored, removed, skipped };
   }
 

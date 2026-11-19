@@ -9,6 +9,7 @@
 
 import type { CascadeConfig, ProviderType } from '../../types.js';
 import { applyProviderApiKey } from '../../config/index.js';
+import { validateConfig } from '../../config/validate.js';
 import { listThemes } from '../themes/index.js';
 
 export type SectionId = 'models' | 'account' | 'autonomy' | 'context' | 'budget' | 'tools' | 'privacy' | 'appearance';
@@ -36,8 +37,10 @@ export interface SettingItem {
   kind: 'toggle' | 'choice' | 'number' | 'text' | 'secret' | 'action';
   choices?: readonly string[];
   unit?: string;
-  /** Whole numbers only, at least `min`. */
+  /** At least `min`, at most `max`; `integer` for whole numbers only. Kept to what the config schema accepts. */
   min?: number;
+  max?: number;
+  integer?: boolean;
   get?: (c: CascadeConfig) => unknown;
   set?: (c: CascadeConfig, value: unknown) => void;
   action?: ActionId;
@@ -105,26 +108,26 @@ export const SETTINGS: SettingItem[] = [
   // ── Autonomy & approvals ──
   { id: 'autonomy', section: 'autonomy', label: 'Mode', help: 'auto: Cascade works on its own and asks only before something /undo can\'t take back (deleting, pushing, installing, outside the project…). manual: it asks before every change.', kind: 'choice', choices: ['manual', 'auto'], ...field('autonomy', 'manual') },
   { id: 'planApproval', section: 'autonomy', label: 'Show me the plan first', help: 'never; complex: for big tasks; all / always: every task.', kind: 'choice', choices: ['never', 'complex', 'all', 'always'], ...field('planApproval', 'never') },
-  { id: 'approvalTimeout', section: 'autonomy', label: 'Wait for my answer', help: 'How long a question waits for you before Cascade says no and carries on.', kind: 'number', unit: 'min', min: 1,
+  { id: 'approvalTimeout', section: 'autonomy', label: 'Wait for my answer', help: 'How long a question waits for you before Cascade says no and carries on.', kind: 'number', unit: 'min', min: 1, integer: true,
     get: (c) => Math.round((c.approvalTimeoutMs ?? 600_000) / 60_000), set: (c, v) => { c.approvalTimeoutMs = Number(v) * 60_000; } },
   { id: 'approvalAdvice', section: 'autonomy', label: 'Tier advice on risky calls', help: 'Have T2 and T1 add their view to a question before it reaches you (a model call each).', kind: 'toggle', ...field('approvalAdvice', false) },
   { id: 'checkpoints', section: 'autonomy', label: 'Checkpoints and /undo', help: 'Every run is recorded before and after, so /undo can take it back. See what can be undone.', kind: 'action', action: 'checkpoints' },
 
   // ── Context & memory ──
   { id: 'extendedContext', section: 'context', label: 'Extended context', help: 'Compact a long conversation or big input to fit the model, instead of failing.', kind: 'toggle', ...field('extendedContext.enabled', false) },
-  { id: 'contextMultiplier', section: 'context', label: 'Extended context up to', help: 'How many times the model\'s window it may compact down from.', kind: 'number', unit: '×', min: 1, ...field('extendedContext.maxMultiplier', 4) },
-  { id: 'maxSessionMessages', section: 'context', label: 'Messages kept in a session', help: 'Older messages are summarized past this.', kind: 'number', min: 10, ...field('memory.maxSessionMessages', 200) },
-  { id: 'autoSummarizeAt', section: 'context', label: 'Summarize past', help: 'Tokens of conversation before it is summarized.', kind: 'number', unit: 'tokens', min: 1000, ...field('memory.autoSummarizeAt', 80_000) },
-  { id: 'retentionDays', section: 'context', label: 'Keep sessions for', help: 'Days before old sessions are deleted from this machine.', kind: 'number', unit: 'days', min: 1, ...field('memory.retentionDays', 90) },
+  { id: 'contextMultiplier', section: 'context', label: 'Extended context up to', help: 'How many times the model\'s window it may compact down from.', kind: 'number', unit: '×', min: 1, max: 5, ...field('extendedContext.maxMultiplier', 2) },
+  { id: 'maxSessionMessages', section: 'context', label: 'Messages kept in a session', help: 'Older messages are summarized past this.', kind: 'number', min: 10, integer: true, ...field('memory.maxSessionMessages', 1000) },
+  { id: 'autoSummarizeAt', section: 'context', label: 'Summarize past', help: 'Tokens of conversation before it is summarized.', kind: 'number', unit: 'tokens', min: 1000, integer: true, ...field('memory.autoSummarizeAt', 150_000) },
+  { id: 'retentionDays', section: 'context', label: 'Keep sessions for', help: 'Days before old sessions are deleted from this machine.', kind: 'number', unit: 'days', min: 1, integer: true, ...field('memory.retentionDays', 90) },
   { id: 'facts', section: 'context', label: 'Learn facts about the project', help: 'Note lasting facts from runs, to use in later ones.', kind: 'toggle', ...field('knowledge.factsExtraction', true) },
   { id: 'codeIndex', section: 'context', label: 'Code index', help: 'Index the project\'s code for code_search.', kind: 'toggle', applies: 'restart', ...field('codeIndex.enabled', true) },
 
   // ── Budget ──
-  { id: 'maxCostPerRun', section: 'budget', label: 'Most a run may cost', help: 'A run stops starting new work past this. Empty: no cap.', kind: 'number', unit: 'USD', min: 0, ...field('budget.maxCostPerRunUsd') },
-  { id: 'sessionBudget', section: 'budget', label: 'Most a session may cost', help: 'Empty: no cap.', kind: 'number', unit: 'USD', min: 0, ...field('budget.sessionBudgetUsd') },
-  { id: 'dailyBudget', section: 'budget', label: 'Most a day may cost', help: 'Empty: no cap.', kind: 'number', unit: 'USD', min: 0, ...field('budget.dailyBudgetUsd') },
-  { id: 'maxTokensPerRun', section: 'budget', label: 'Most tokens a run may use', help: 'Empty: the default (200,000).', kind: 'number', unit: 'tokens', min: 1000, ...field('budget.maxTokensPerRun') },
-  { id: 'warnAt', section: 'budget', label: 'Warn me at', help: 'Percent of a cap at which Cascade warns you.', kind: 'number', unit: '%', min: 1, ...field('budget.warnAtPct', 80) },
+  { id: 'maxCostPerRun', section: 'budget', label: 'Most a run may cost', help: 'A run stops starting new work past this. Empty: no cap.', kind: 'number', unit: 'USD', min: 0.01, ...field('budget.maxCostPerRunUsd') },
+  { id: 'sessionBudget', section: 'budget', label: 'Most a session may cost', help: 'Empty: no cap.', kind: 'number', unit: 'USD', min: 0.01, ...field('budget.sessionBudgetUsd') },
+  { id: 'dailyBudget', section: 'budget', label: 'Most a day may cost', help: 'Empty: no cap.', kind: 'number', unit: 'USD', min: 0.01, ...field('budget.dailyBudgetUsd') },
+  { id: 'maxTokensPerRun', section: 'budget', label: 'Most tokens a run may use', help: 'Empty: the default (200,000).', kind: 'number', unit: 'tokens', min: 1000, integer: true, ...field('budget.maxTokensPerRun') },
+  { id: 'warnAt', section: 'budget', label: 'Warn me at', help: 'Percent of a cap at which Cascade warns you.', kind: 'number', unit: '%', min: 1, max: 100, ...field('budget.warnAtPct', 80) },
 
   // ── Tools & browser ──
   { id: 'browser', section: 'tools', label: 'Browser', help: 'Let runs open web pages in a browser.', kind: 'toggle', applies: 'restart', ...field('tools.browserEnabled', false) },
@@ -185,7 +188,10 @@ export function parseValue(item: SettingItem, raw: string): { ok: true; value: u
     case 'number': {
       if (!text) return { ok: true, value: undefined };
       const n = Number(text.replace(/[,_$%]/g, ''));
-      if (!Number.isFinite(n) || (item.min !== undefined && n < item.min)) return { ok: false, error: `${item.label} is a number${item.min !== undefined ? ` of at least ${item.min}` : ''}.` };
+      const range = [item.min !== undefined ? `at least ${item.min}` : '', item.max !== undefined ? `at most ${item.max}` : ''].filter(Boolean).join(' and ');
+      if (!Number.isFinite(n) || (item.min !== undefined && n < item.min) || (item.max !== undefined && n > item.max) || (item.integer && !Number.isInteger(n))) {
+        return { ok: false, error: `${item.label} is a ${item.integer ? 'whole number' : 'number'}${range ? ` ${range}` : ''}.` };
+      }
       return { ok: true, value: n };
     }
     case 'text':
@@ -215,4 +221,22 @@ export function changedText(item: SettingItem, config: CascadeConfig): string {
   const shown = display(item, config);
   const when = item.applies === 'restart' ? ' Takes effect the next time you start Cascade.' : '';
   return `${item.label}: ${shown}.${when}`;
+}
+
+/**
+ * The config as it would be with this change, checked against the schema
+ * Cascade validates on load, before anything is changed or saved: a value
+ * the schema refuses must never reach the file, where it would stop the
+ * next start.
+ */
+export function tryChange(config: CascadeConfig, item: SettingItem, value: unknown): { ok: true } | { ok: false; error: string } {
+  const candidate = structuredClone(config);
+  item.set?.(candidate, value);
+  try {
+    validateConfig(candidate);
+    return { ok: true };
+  } catch (err) {
+    const issue = (err as { issues?: Array<{ message?: string }> }).issues?.[0]?.message;
+    return { ok: false, error: `${item.label} can't be ${display(item, candidate)}: ${issue ?? (err instanceof Error ? err.message.split('\n')[0] : String(err))}` };
+  }
 }

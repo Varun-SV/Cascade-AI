@@ -144,10 +144,27 @@ export function toolNote(tool: string, input: Record<string, unknown>, output: s
 
 /** "12 passed", "3 failed, 9 passed" from the usual test runners' summaries. */
 export function testSummary(output: string): string | undefined {
-  const tail = output.slice(-4000);
-  const failed = /(\d+) (?:failed|failing)/i.exec(tail)?.[1];
-  const passed = /(\d+) (?:passed|passing)/i.exec(tail)?.[1] ?? /Tests:\s+(\d+) passed/i.exec(tail)?.[1] ?? /ok \((\d+) tests?\)/i.exec(tail)?.[1];
-  if (!failed && !passed) return /\bRan (\d+) tests?\b[\s\S]*\bOK\b/.test(tail) ? `${/\bRan (\d+) tests?/.exec(tail)![1]} passed` : undefined;
+  // Read word by word, not with a pattern that can rescan a long run of
+  // digits from every position (CodeQL: polynomial regex on command output).
+  const words = output.slice(-4000).split(/\s+/);
+  const count = (word: string | undefined): string | undefined => {
+    const digits = (word ?? '').replace(/^\(/, '');
+    return digits.length > 0 && digits.length <= 9 && [...digits].every((ch) => ch >= '0' && ch <= '9') ? digits : undefined;
+  };
+  const is = (word: string | undefined, ...names: string[]) => names.includes((word ?? '').toLowerCase().replace(/[,.;:)]+$/, ''));
+  let failed: string | undefined;
+  let passed: string | undefined;
+  let ran: string | undefined;
+  let ok = false;
+  for (let i = 0; i < words.length; i++) {
+    const n = count(words[i]);
+    if (n !== undefined && is(words[i + 1], 'failed', 'failing')) failed ??= n;
+    if (n !== undefined && is(words[i + 1], 'passed', 'passing')) passed ??= n;
+    if (n !== undefined && words[i]!.startsWith('(') && is(words[i - 1], 'ok') && is(words[i + 1], 'test', 'tests')) passed ??= n;
+    if (is(words[i], 'ran') && n === undefined && count(words[i + 1]) !== undefined && is(words[i + 2], 'test', 'tests')) ran ??= count(words[i + 1]);
+    if (ran !== undefined && words[i] === 'OK') ok = true;
+  }
+  if (!failed && !passed) return ran !== undefined && ok ? `${ran} passed` : undefined;
   return [failed && Number(failed) > 0 ? `${failed} failed` : '', passed ? `${passed} passed` : ''].filter(Boolean).join(', ') || undefined;
 }
 

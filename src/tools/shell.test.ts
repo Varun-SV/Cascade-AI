@@ -117,6 +117,13 @@ describe('stopsCascade: commands that would end Cascade itself', () => {
       'node server.js', 'npm run kill-port', 'kill %1', 'npx kill-port 3000',
     ]) expect(stopsCascade(c, [4242, 77]), c).toBe(false);
   });
+  it('reads a long command in linear time (CodeQL on 53bc237)', () => {
+    const t = Date.now();
+    expect(stopsCascade(`pkill${' -- --'.repeat(50_000)}x`, [4242, 77])).toBe(false);
+    expect(stopsCascade(`pkill${' -9'.repeat(20_000)} node`, [4242, 77])).toBe(true);
+    expect(Date.now() - t).toBeLessThan(1000);
+  });
+
   it('is refused before it runs, with a way to do what was meant', async () => {
     await expect(new ShellTool().execute({ command: 'taskkill /F /IM node.exe' }, { tierId: 'T3', sessionId: 's' } as never))
       .rejects.toThrow(/would stop Cascade itself.*by its own process id, or by the port/);

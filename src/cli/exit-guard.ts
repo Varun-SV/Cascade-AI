@@ -53,8 +53,19 @@ export class ExitGuard {
     this.startedAt = now();
   }
 
-  /** The record the previous session left, if any. */
+  /**
+   * The record the previous session left, if any. Read once, before begin()
+   * writes this session's own over it: asked later (/logs exit), it still
+   * says how the last session ended, not that this one is running.
+   */
   previous(): ExitRecord | null {
+    if (this.before !== undefined) return this.before;
+    return (this.before = this.readRecord());
+  }
+
+  private before: ExitRecord | null | undefined;
+
+  private readRecord(): ExitRecord | null {
     try {
       const raw = JSON.parse(fs.readFileSync(this.file, 'utf8')) as Partial<ExitRecord>;
       return typeof raw.reason === 'string' && typeof raw.clean === 'boolean' ? raw as ExitRecord : null;
@@ -69,6 +80,7 @@ export class ExitGuard {
    * gets to overwrite this, and the next start says so.
    */
   begin(): void {
+    this.previous();
     this.writeRecord({
       clean: false,
       reason: 'Cascade was stopped without warning: another program ended it (for example `taskkill /F` or `kill -9`), the terminal window was closed, or the computer shut down.',

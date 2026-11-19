@@ -85,11 +85,18 @@ export function stopsCascade(command: string, pids: number[] = [process.pid, pro
   const byName = [
     /\btaskkill\b[^|;&]*\/im\s+["']?(?:node|cascade)(?:\.exe)?["']?(?:\s|$)/,
     /\b(?:stop-process|spps|kill)\b[^|;&]*-(?:processname|name)\s+["']?(?:node|cascade)["']?(?:\s|$|,)/,
-    /\b(?:pkill|killall)\b(?:\s+-[\w-]+(?:\s+\S+)?)*\s+["']?(?:node|nodejs|cascade)["']?(?:\s|$)/,
     /\bwmic\b[^|;&]*name\s*=\s*['"]?(?:node|cascade)(?:\.exe)?['"]?[^|;&]*\b(?:delete|terminate)\b/,
     /\bget-process\b[^|;&]*\b(?:node|cascade)\b[^;&]*\|\s*(?:stop-process|spps|kill)\b/,
   ];
   if (byName.some((p) => p.test(c))) return true;
+  // pkill / killall naming node: read word by word, as a nested pattern for
+  // "any flags, then node" can backtrack without end on a long command (CodeQL).
+  const killsNode = c.split(/[|;&\n]/).some((segment) => {
+    const words = segment.trim().split(/\s+/);
+    const at = words.findIndex((w) => /(^|[\\/])(pkill|killall)$/.test(w));
+    return at >= 0 && words.slice(at + 1).some((w) => /^["']?(node|nodejs|cascade)["']?$/.test(w));
+  });
+  if (killsNode) return true;
   const ids = pids.filter((p) => Number.isInteger(p) && p > 1).map(String);
   if (!ids.length) return false;
   const pidRe = new RegExp(`(?:\\b(?:kill|taskkill|stop-process|spps)\\b[^|;&]*?)(?:/pid\\s+|-id\\s+|-\\w+\\s+|\\s)(${ids.join('|')})(?:\\s|$|,)`);

@@ -34,7 +34,7 @@ export function describeCheckpoints(all: Checkpoint[], now = Date.now()): string
   if (!all.length) return 'No checkpoints yet. Cascade records your project before and after each run, so /undo can take a run back.';
   const rows = all.slice(-15).reverse().map((c) => {
     const changed = c.changed === undefined ? 'running or stopped' : c.changed === 1 ? '1 file' : `${c.changed} files`;
-    return `  #${String(c.n).padEnd(4)}${ago(c.at, now).padEnd(12)}${changed.padEnd(20)}${c.undone ? '(undone) ' : ''}${c.label}`;
+    return `  #${String(c.n).padEnd(4)}${ago(c.at, now).padEnd(12)}${changed.padEnd(20)}${c.undone ? '(undone) ' : c.partial ? '(partly undone) ' : ''}${c.label}`;
   });
   const open = all.filter((c) => !c.undone).length;
   return [`Checkpoints, newest first (${open} can be undone):`, ...rows, '', '/undo takes back the newest; /undo 3 the last three.'].join('\n');

@@ -14,6 +14,7 @@ import type { EscalationContext,
   ConversationMessage,
   ImageAttachment,
   PermissionRequest,
+  Risk,
   StreamChunk,
   TaskComplexity,
   TierRole,
@@ -60,6 +61,7 @@ import { AuditLogger } from '../audit/log.js';
 import { AuditLogger as EncryptedAuditLogger } from './audit/audit-logger.js';
 import { MemoryStore } from '../memory/store.js';
 import { PermissionEscalator } from './permissions/escalator.js';
+import { RISK_LABELS } from './permissions/risk.js';
 import { validateConfig } from '../config/validate.js';
 import { Telemetry, noopTelemetry } from '../telemetry/index.js';
 import { TaskAnalyzer } from './router/task-analyzer.js';
@@ -3018,7 +3020,10 @@ export function approvalRequestFor(req: PermissionRequest): ApprovalRequest & { 
         : `T3 Worker "${req.subtaskContext}" wants to run "${req.toolName}".`,
     isDangerous: req.isDangerous,
     ...(req.localOnly ? { localOnly: true } : {}),
-    ...(req.risk ? { risk: req.risk } : {}),
+    // A local-only call's reason can quote its input ("stops processes: pkill
+    // -f 'private-name'"), which hosts withhold off this machine: its kind of
+    // risk goes, in words that come from no input.
+    ...(req.risk ? { risk: req.localOnly ? withoutInput(req.risk) : req.risk } : {}),
     escalationContext: {
       requestedBy: req.requestedBy,
       parentT2Id: req.parentT2Id,
@@ -3026,6 +3031,15 @@ export function approvalRequestFor(req: PermissionRequest): ApprovalRequest & { 
       sectionContext: req.sectionContext,
       taskContext: req.taskContext,
     },
+  };
+}
+
+/** A risk said without anything taken from the call's input. */
+function withoutInput(risk: Risk): Risk {
+  return {
+    level: risk.level,
+    ...(risk.category ? { category: risk.category } : {}),
+    reason: risk.category ? RISK_LABELS[risk.category] : risk.level === 'safe' ? 'only reads' : 'changes files in the project (checkpointed)',
   };
 }
 

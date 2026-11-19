@@ -61,6 +61,15 @@ describe('activity', () => {
     expect(toolNote('file_edit', { old_string: 'a\nb', new_string: 'c' }, '')).toBe('+1 −2');
     expect(clock(72_000)).toBe('1:12');
   });
+  it('reads a summary in linear time, however hostile the output (CodeQL on 53bc237)', () => {
+    const t = Date.now();
+    expect(testSummary('0'.repeat(200_000))).toBeUndefined();
+    expect(testSummary(`${'1'.repeat(50_000)} passed`)).toBeUndefined();
+    expect(Date.now() - t).toBeLessThan(500);
+    expect(testSummary('Mocha\n  12 passing (40ms)\n  1 failing')).toBe('1 failed, 12 passed');
+    expect(testSummary('OK (5 tests)')).toBe('5 passed');
+  });
+
   it('says comms in plain words', () => {
     const ev = (syncType: PeerMessageEvent['syncType'], payload?: string, toId?: string): PeerMessageEvent => ({ fromId: 'T3-a1', ...(toId ? { toId } : {}), syncType, ...(payload ? { payload } : {}), timestamp: '', sessionId: 's' });
     const name = (id: string) => (id === 'T3-a1' ? 'T3·db' : 'T3·api');

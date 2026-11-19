@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { SETTINGS, SECTIONS, findSetting, display, parseValue, nextValue, changedText } from './spec.js';
+import { SETTINGS, SECTIONS, findSetting, display, parseValue, nextValue, changedText, tryChange } from './spec.js';
+import { validateConfig } from '../../config/validate.js';
 import type { CascadeConfig } from '../../types.js';
 
 const config = (): CascadeConfig => ({ providers: [{ type: 'anthropic', apiKey: 'sk-ant-abcdef1234' }], theme: 'cascade', budget: { warnAtPct: 80 } } as unknown as CascadeConfig);
@@ -49,6 +50,19 @@ describe('settings', () => {
     expect(c.extendedContext?.enabled).toBe(true);
     item('maxCostPerRun').set!(c, undefined);
     expect(display(item('maxCostPerRun'), c)).toBe('no cap');
+  });
+
+  it('a value the config schema refuses is caught before anything is saved (Codex on 53bc237)', () => {
+    expect(parseValue(item('maxCostPerRun'), '0').ok).toBe(false);
+    expect(parseValue(item('contextMultiplier'), '6').ok).toBe(false);
+    expect(parseValue(item('maxTokensPerRun'), '1500.5').ok).toBe(false);
+    // And whatever the parser lets through is checked against the schema itself.
+    const c = validateConfig({ providers: [], theme: 'cascade' });
+    const before = JSON.stringify(c);
+    const bad = tryChange(c, { ...item('contextMultiplier'), max: undefined }, 9);
+    expect(bad.ok).toBe(false);
+    expect(JSON.stringify(c)).toBe(before);
+    expect(tryChange(c, item('contextMultiplier'), 3)).toEqual({ ok: true });
   });
 
   it('Enter cycles a choice and flips a toggle', () => {

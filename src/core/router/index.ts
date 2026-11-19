@@ -683,6 +683,11 @@ export class CascadeRouter extends EventEmitter {
   }
 
   async init(config: CascadeConfig): Promise<void> {
+    // Bindings are made from the provider settings (key, endpoint, deployment)
+    // and kept per model. Taking new settings (Cascade.reconfigure: a key
+    // changed in /settings) drops them, so the next call binds with the new
+    // credentials instead of billing, or failing on, the old ones.
+    if (this.config && JSON.stringify(this.config.providers) !== JSON.stringify(config.providers)) this.providers.clear();
     this.config = config;
 
     const availableProviders = await this.detectAvailableProviders(config.providers);
