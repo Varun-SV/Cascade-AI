@@ -11,9 +11,12 @@ const pkg = JSON.parse(
 // `.node` binary or are dynamically imported with a graceful fallback. The
 // desktop app ships better-sqlite3 (rebuilt for the Electron ABI) into
 // cascade-core/node_modules; keytar/playwright/fsevents/node-notifier are
-// optional and degrade gracefully when absent.
+// optional and degrade gracefully when absent. sharp (report images) loads its
+// platform's libvips binary from @img/*: shipped beside the desktop core too,
+// and when it's missing find_image / annotate_image say so instead of failing.
 const NATIVE_EXTERNAL = [
   'better-sqlite3',
+  'sharp',
   'isolated-vm',
   'playwright',
   'fsevents',
@@ -28,6 +31,7 @@ const NATIVE_EXTERNAL = [
 // blanket noExternal pulled Playwright's unresolvable internals into the bundle.
 const DESKTOP_KEEP_EXTERNAL = [
   'better-sqlite3',
+  'sharp',
   'isolated-vm',
   'playwright',
   'playwright-core',

@@ -24,6 +24,30 @@ const TAB_CONNECT_TIMEOUT_MS = 3000;
 const EARLY_FRAMES_MAX = 1000;
 const EARLY_BYTES_MAX = 4 * 1024 * 1024;
 
+/**
+ * Run in the tab around a screenshot the person allowed: blurs every field
+ * that can hold a password, a card or a one-time code, and every frame from
+ * another site (a payment form is usually one), then takes the blur off. The
+ * page's own scripts never see a change they could undo in between: the style
+ * goes in, the picture is taken, the style comes out.
+ */
+const SHOT_GUARD_ON = `(() => {
+  const css = 'input[type=password],input[autocomplete*="cc-"],input[autocomplete*="one-time-code"],input[name*="card" i],input[name*="cvv" i],input[name*="cvc" i],input[name*="otp" i],input[id*="cvv" i],input[id*="otp" i],[data-cascade-shot-blur]{filter:blur(12px)!important}';
+  for (const f of document.querySelectorAll('iframe')) {
+    try { if (!f.contentDocument) f.setAttribute('data-cascade-shot-blur', ''); } catch { f.setAttribute('data-cascade-shot-blur', ''); }
+  }
+  const s = document.createElement('style');
+  s.id = 'cascade-shot-guard';
+  s.textContent = css;
+  (document.head || document.documentElement).appendChild(s);
+  return true;
+})()`;
+const SHOT_GUARD_OFF = `(() => {
+  document.getElementById('cascade-shot-guard')?.remove();
+  for (const f of document.querySelectorAll('[data-cascade-shot-blur]')) f.removeAttribute('data-cascade-shot-blur');
+  return true;
+})()`;
+
 export interface RelayEvents {
   /** Why a command was refused or the lease ended, for the device's log. Never sent to the server. */
   refusals: string[];
@@ -407,7 +431,7 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
 
     const run = async (f: CommandFrame): Promise<void> => {
       const { id, method, params, sessionId } = f;
-      const decision = checkCommand(f, { knownSessions });
+      const decision = checkCommand(f, { knownSessions, ...(consent.screenshots === true ? { screenshots: true } : {}) });
       if (!decision.forward) {
         refusals.push(decision.reason);
         if (decision.reason.includes('not on the allowlist')) refusedMethods.add(method);
@@ -433,6 +457,24 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
             replyError(id, sessionId, 'Denied by Cascade relay policy: that history entry is not on a consented site');
             return;
           }
+        }
+        if (method === 'Page.captureScreenshot') {
+          // A picture of the tab itself only, never of a frame inside it, and only
+          // with the sensitive fields blurred. No guard, no picture.
+          if (toTab(sessionId) !== undefined) { replyError(id, sessionId, 'Denied by Cascade relay policy: Page.captureScreenshot of a frame'); return; }
+          const guard = await forward('Runtime.evaluate', { expression: SHOT_GUARD_ON, returnByValue: true }, sessionId);
+          if (guard.error !== undefined || (guard.result?.result as { value?: unknown } | undefined)?.value !== true) {
+            replyError(id, sessionId, 'Denied by Cascade relay policy: the page could not be prepared for a screenshot');
+            return;
+          }
+          let shot: Awaited<ReturnType<typeof forward>>;
+          try { shot = await forward(method, params, sessionId); } finally {
+            await forward('Runtime.evaluate', { expression: SHOT_GUARD_OFF, returnByValue: true }, sessionId).catch(() => undefined);
+          }
+          if (!stillOurs()) { replyError(id, sessionId, fencedAnswer); return; }
+          if (shot.error !== undefined) { replyError(id, sessionId, shot.error); return; }
+          out({ id, sessionId, result: { data: typeof shot.result?.data === 'string' ? shot.result.data : '' } });
+          return;
         }
         const registering = method === 'Page.addScriptToEvaluateOnNewDocument';
         if (registering) pendingScripts += 1;

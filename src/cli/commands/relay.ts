@@ -148,10 +148,23 @@ export function terminalAsk(onInterrupt: () => void, io: TerminalIo = { input: p
         rl.question('  Sites it may use (e.g. example.com docs.example.com; * for any public site), or Enter to say no: ', (text) => {
           const parsed = parseSites(text);
           if (parsed && 'error' in parsed) { console.log(chalk.yellow(`  ${parsed.error}`)); ask(); return; }
-          if (!parsed) console.log(chalk.dim('  Declined.'));
-          else console.log(chalk.green(`  Allowed: ${[...(parsed.consent.anyPublic ? ['any public site'] : []), ...parsed.consent.allowedOrigins, ...parsed.consent.privateOrigins].join(' ')}`));
-          // Settled before closing: closing settles an unanswered question as a no.
-          resolve(parsed ? parsed.consent : null);
+          if (!parsed) {
+            console.log(chalk.dim('  Declined.'));
+            // Settled before closing: closing settles an unanswered question as a no.
+            resolve(null);
+            rl.close();
+            return;
+          }
+          console.log(chalk.green(`  Allowed: ${[...(parsed.consent.anyPublic ? ['any public site'] : []), ...parsed.consent.allowedOrigins, ...parsed.consent.privateOrigins].join(' ')}`));
+          askShots(parsed.consent);
+        });
+      };
+      // Off unless the person says yes: still pictures of the run's window, for its report.
+      const askShots = (consent: UserConsent): void => {
+        rl.question('  Let Cascade take screenshots of these sites for your report? Password, card and code fields are blurred. [y/N] ', (text) => {
+          const yes = /^\s*y(es)?\s*$/i.test(text);
+          if (yes) console.log(chalk.green('  Screenshots allowed for this run.'));
+          resolve(yes ? { ...consent, screenshots: true } : consent);
           rl.close();
         });
       };

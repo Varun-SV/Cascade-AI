@@ -225,6 +225,16 @@ describe('the question in the terminal', () => {
     expect(interrupted).toHaveBeenCalledTimes(1);
   });
 
+  it('screenshots are allowed only by a yes to their own question', async () => {
+    const t = io();
+    const answer = terminalAsk(vi.fn(), t)(run());
+    await new Promise((r) => setTimeout(r, 20));
+    t.input.write('example.com\r');
+    await new Promise((r) => setTimeout(r, 20));
+    t.input.write('y\r');
+    await expect(answer).resolves.toMatchObject({ allowedOrigins: ['https://example.com'], screenshots: true });
+  });
+
   it('an answer still counts, and the next question is asked', async () => {
     const t = io();
     const interrupted = vi.fn();
@@ -232,8 +242,11 @@ describe('the question in the terminal', () => {
     const first = ask(run());
     await new Promise((r) => setTimeout(r, 20));
     t.input.write('example.com\r');
+    await new Promise((r) => setTimeout(r, 20));
+    t.input.write('\r');
     const consent = await first;
     expect(consent && [...consent.allowedOrigins]).toEqual(['https://example.com']);
+    expect(consent).not.toHaveProperty('screenshots');
     const second = ask(run());
     await new Promise((r) => setTimeout(r, 20));
     t.input.write('\r');

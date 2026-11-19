@@ -11,7 +11,7 @@
 //  and it tolerates the broken markup real pages are full of.
 
 /** What is kept of an element. */
-interface Node {
+export interface Node {
   tag: string;
   attrs: Record<string, string>;
   children: Array<Node | string>;
@@ -87,8 +87,17 @@ function asciiLower(text: string): string {
   return text.replace(/[A-Z]+/g, (run) => run.toLowerCase());
 }
 
+/** What a caller other than the reader needs kept: image finding wants src/srcset/alt and JSON-LD. */
+export interface ParseOptions {
+  /** Attributes kept besides the reader's own. */
+  extraAttrs?: readonly string[];
+  /** Keep the text of <script type="application/ld+json">, as the script's one child. */
+  keepJsonLd?: boolean;
+}
+
 /** The document as a tree. Linear in its length. */
-export function parseHtml(input: string): Node {
+export function parseHtml(input: string, options: ParseOptions = {}): Node {
+  const kept = options.extraAttrs?.length ? new Set([...KEPT_ATTRS, ...options.extraAttrs]) : KEPT_ATTRS;
   const html = input.length > MAX_HTML_CHARS ? input.slice(0, MAX_HTML_CHARS) : input;
   // ASCII letters only, so every offset in `lower` is the same in `html`:
   // full Unicode lowercasing turns some letters (İ) into two.
@@ -166,13 +175,16 @@ export function parseHtml(input: string): Node {
           value = html.slice(start, j);
         }
       }
-      if (name && KEPT_ATTRS.has(name)) attrs[name] = decodeEntities(value);
+      if (name && kept.has(name)) attrs[name] = decodeEntities(value);
       if (j === nameStart) j++;
     }
     i = j;
     if (RAW.has(tag)) {
       const end = lower.indexOf(`</${tag}`, i);
       if (end === -1) { i = n; continue; }
+      if (options.keepJsonLd && tag === 'script' && (attrs['type'] ?? '').toLowerCase().includes('ld+json') && ++nodes <= MAX_NODES) {
+        current.children.push({ tag, attrs, children: [html.slice(i, end)], parent: current, depth: current.depth + 1 });
+      }
       const gt = html.indexOf('>', end);
       i = gt === -1 ? n : gt + 1;
       continue;

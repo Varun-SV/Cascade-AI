@@ -271,17 +271,18 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
     },
 
     /**
-     * The user's answer from the app's window: the sites typed, and whether any public
-     * site may load too. Nothing at all is a no; an answer that isn't sites is asked again.
+     * The user's answer from the app's window: the sites typed, whether any public
+     * site may load too, and whether still screenshots may go to the server for the
+     * run's report. Nothing at all is a no; an answer that isn't sites is asked again.
      */
-    answer(id: number, sites: string, anyPublic = false): { ok: true } | { error: string } {
+    answer(id: number, sites: string, anyPublic = false, screenshots = false): { ok: true } | { error: string } {
       const a = asks.get(id);
       if (!a) return { error: 'This request is over.' };
       const parsed = deps.core.parseRelaySites(sites);
       if (parsed && 'error' in parsed) return parsed;
       if (!parsed && !anyPublic) { a.resolve(null); return { ok: true }; }
       const consent = parsed?.consent ?? { allowedOrigins: [], privateOrigins: [] };
-      a.resolve(anyPublic || consent.anyPublic ? { ...consent, anyPublic: true } : consent);
+      a.resolve({ ...consent, ...(anyPublic || consent.anyPublic ? { anyPublic: true } : {}), ...(screenshots ? { screenshots: true } : {}) });
       return { ok: true };
     },
 

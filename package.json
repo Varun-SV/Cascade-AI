@@ -1,6 +1,6 @@
 {
   "name": "cascade-ai",
-  "version": "0.89.0",
+  "version": "0.90.0",
   "description": "Multi-tier AI orchestration CLI — T1/T2/T3 hierarchical agent system",
   "type": "module",
   "main": "dist/index.cjs",
@@ -78,6 +78,7 @@
     "quickjs-emscripten-core": "^0.32.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "sharp": "^0.34.5",
     "simple-git": "^3.27.0",
     "socket.io": "^4.8.0",
     "socket.io-msgpack-parser": "^3.0.2",

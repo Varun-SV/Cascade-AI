@@ -21,6 +21,11 @@ export interface ConsentForm {
   incognito: boolean;
   /** Keep this answer for later runs from the same chat. */
   remember: boolean;
+  /**
+   * Still screenshots of the run's pages may go to the server, for the run's
+   * report. Off unless ticked. Password, card and code fields are blurred.
+   */
+  screenshots?: boolean;
 }
 
 export const MAX_SITES = 50;
@@ -30,7 +35,7 @@ export const REMEMBER_MS = 8 * 60 * 60 * 1000;
 const PRIVATE_REFUSED = "Sites on your private network can't be used from your own Chrome: the extension can't keep a run off them. Use the Cascade CLI or desktop app for those.";
 
 /** The consent a form gives; null is a no; an error is asked again. */
-export function consentFromForm(form: Pick<ConsentForm, 'sites' | 'anyPublic'>): { consent: UserConsent } | { error: string } | null {
+export function consentFromForm(form: Pick<ConsentForm, 'sites' | 'anyPublic' | 'screenshots'>): { consent: UserConsent } | { error: string } | null {
   const parsed = parseSites(form.sites);
   if (parsed && 'error' in parsed) return parsed;
   if (!parsed && !form.anyPublic) return null;
@@ -39,12 +44,13 @@ export function consentFromForm(form: Pick<ConsentForm, 'sites' | 'anyPublic'>):
   if (parsed?.consent.privateOrigins.length) return { error: PRIVATE_REFUSED };
   const anyPublic = form.anyPublic || parsed?.consent.anyPublic === true;
   // Checked here as the policy will read it: an answer it would refuse is asked again.
-  makeConsent(allowedOrigins, [], { anyPublic });
-  return { consent: { allowedOrigins, privateOrigins: [], ...(anyPublic ? { anyPublic } : {}) } };
+  const screenshots = form.screenshots === true;
+  makeConsent(allowedOrigins, [], { anyPublic, screenshots });
+  return { consent: { allowedOrigins, privateOrigins: [], ...(anyPublic ? { anyPublic } : {}), ...(screenshots ? { screenshots } : {}) } };
 }
 
 /** An answer kept for one chat's runs. */
-export interface KeptAnswer { sites: string; anyPublic: boolean; incognito: boolean; until: number }
+export interface KeptAnswer { sites: string; anyPublic: boolean; incognito: boolean; screenshots: boolean; until: number }
 
 /** Where answers are kept: chrome.storage.session, or a stand-in in tests. */
 export interface AnswerStore {
@@ -62,7 +68,7 @@ async function all(store: AnswerStore, now: number): Promise<Record<string, Kept
   if (raw && typeof raw === 'object') {
     for (const [k, v] of Object.entries(raw as Record<string, Partial<KeptAnswer>>)) {
       if (v && typeof v.sites === 'string' && typeof v.until === 'number' && v.until > now) {
-        out[k] = { sites: v.sites, anyPublic: v.anyPublic === true, incognito: v.incognito !== false, until: v.until };
+        out[k] = { sites: v.sites, anyPublic: v.anyPublic === true, incognito: v.incognito !== false, screenshots: v.screenshots === true, until: v.until };
       }
     }
   }
@@ -75,7 +81,7 @@ export async function recallAnswer(store: AnswerStore, key: string, now: number)
 
 export async function keepAnswer(store: AnswerStore, key: string, form: ConsentForm, now: number): Promise<void> {
   const kept = await all(store, now);
-  kept[key] = { sites: form.sites, anyPublic: form.anyPublic, incognito: form.incognito, until: now + REMEMBER_MS };
+  kept[key] = { sites: form.sites, anyPublic: form.anyPublic, incognito: form.incognito, screenshots: form.screenshots === true, until: now + REMEMBER_MS };
   await store.set({ [KEY]: kept });
 }
 

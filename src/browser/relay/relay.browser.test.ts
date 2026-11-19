@@ -35,6 +35,7 @@ interface PwPage {
   goForward(o: object): Promise<unknown>;
   waitForLoadState(s: string, o?: object): Promise<unknown>;
   on(e: string, f: (x: { dismiss(): Promise<void> }) => void): void;
+  screenshot(o?: object): Promise<Buffer>;
 }
 interface PwBrowser { contexts(): { pages(): PwPage[]; waitForEvent(e: string, o: object): Promise<PwPage>; newCDPSession(p: PwPage): Promise<{ send(m: string, p?: object): Promise<unknown> }> }[]; close(): Promise<void> }
 const pw = await import('playwright') as unknown as {
@@ -329,6 +330,38 @@ suite('P1 in a real browser', { timeout: 60_000 }, () => {
     const r = await startRig();
     await expect(r.page.goto('file:///etc/hostname')).rejects.toThrow();
     expect(r.relay.refusals.join()).toContain('Page.navigate to file:');
+  });
+});
+
+suite('screenshots the person allowed', { timeout: 60_000 }, () => {
+  const PAGE = '<!doctype html><body style="margin:0;background:#fff">'
+    + '<input id=pw type=password value=hunter2 style="position:absolute;left:100px;top:100px;width:300px;height:150px;background:#000;border:0;outline:0">'
+    + '<div id=plain style="position:absolute;left:500px;top:100px;width:300px;height:150px;background:#000"></div></body>';
+  it('without the opt-in, a screenshot is refused at the device and nothing is taken', async () => {
+    const r = await startRig();
+    await expect(r.page.screenshot({ type: 'jpeg', timeout: 5000 })).rejects.toThrow(/Denied by Cascade relay policy: Page.captureScreenshot/);
+  });
+  it('with it, the picture comes back with password fields blurred, and the page is left as it was', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    await r.page.evaluate(`document.open(); document.write(${JSON.stringify(PAGE)}); document.close(); true`);
+    const shot = await r.page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 900, height: 300 } });
+    const sharp = (await import('sharp')).default;
+    const { data, info } = await sharp(shot).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const at = (x: number, y: number) => data[(y * info.width + x) * info.channels]!;
+    // Just inside each black box's corner: the plain one is sharp, the password field is not.
+    expect(at(503, 103)).toBeLessThan(20);
+    expect(at(103, 103)).toBeGreaterThan(40);
+    expect(await r.page.evaluate('!!document.getElementById("cascade-shot-guard") || !!document.querySelector("[data-cascade-shot-blur]")')).toBe(false);
+    expect(await r.page.evaluate('getComputedStyle(document.getElementById("pw")).filter')).toBe('none');
+  });
+  it('a screenshot past the viewport is refused even with the opt-in', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent, raw: true });
+    const res = await r.command('Page.captureScreenshot', { captureBeyondViewport: true }) as { error?: { message: string } };
+    expect(res.error?.message).toContain('beyond the viewport');
+    const ok = await r.command('Page.captureScreenshot', { format: 'jpeg' }) as { result?: { data?: string } };
+    expect(ok.result?.data?.length).toBeGreaterThan(100);
   });
 });
 

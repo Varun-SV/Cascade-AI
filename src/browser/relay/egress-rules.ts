@@ -23,17 +23,22 @@ export interface Consent {
    * origin may load. Private-network addresses still need their own confirmation.
    */
   readonly anyPublic: boolean;
+  /**
+   * The user allowed still screenshots of the run's page, for the run's report.
+   * Off unless they ticked it when they approved. See command-policy.
+   */
+  readonly screenshots?: boolean;
 }
 
 /** How a signed approval records "any public site", among its origins. */
 export const ANY_PUBLIC_SITE = '*';
 
-export function makeConsent(origins: Iterable<string>, privateOrigins: Iterable<string> = [], opts: { anyPublic?: boolean } = {}): Consent {
+export function makeConsent(origins: Iterable<string>, privateOrigins: Iterable<string> = [], opts: { anyPublic?: boolean; screenshots?: boolean } = {}): Consent {
   const norm = (o: string): string => new URL(o).origin;
   const priv = new Set([...privateOrigins].map(norm));
   const named = [...origins].filter((o) => o !== ANY_PUBLIC_SITE);
   const anyPublic = opts.anyPublic === true || [...origins].includes(ANY_PUBLIC_SITE);
-  return { origins: new Set([...named.map(norm), ...priv]), privateOrigins: priv, anyPublic };
+  return { origins: new Set([...named.map(norm), ...priv]), privateOrigins: priv, anyPublic, ...(opts.screenshots === true ? { screenshots: true } : {}) };
 }
 
 function isPrivateV4(host: string): boolean {

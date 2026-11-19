@@ -99,7 +99,7 @@ const KNOWN_TOOLS = [
   // as "no tools registered" and dropped all tool guidance — the worker was
   // then told nothing about using tools at all, and wrote the video as prose.
   'generate_image', 'generate_video', 'generate_speech', 'transcribe_audio',
-  'generate_document',
+  'generate_document', 'find_image', 'annotate_image',
   // The same miss again. In browser mode the Web chip is off, so the browser
   // is often a run's ONLY tool, and a run with just that "had no tools": the
   // worker was told nothing about using one.
@@ -156,20 +156,26 @@ export function buildWorkerRules(has: (toolName: string) => boolean): string {
     // deliverables flatten a reference straight to caption text — telling the
     // model to call generate_image for THOSE just pays for an image nobody
     // ever sees.
+    // Real pictures first: they show the actual thing, they are credited, and
+    // they cost nothing, where a generated image is the most expensive call a
+    // run makes and shows an invention. The rule below still demands a
+    // picture where the deliverable needs one; this says which kind.
+    has('find_image') &&
+      '- Pictures of real things — a product, a place, a building, a person in public life, a website\'s page — come from the real thing, not from an image model: call "find_image" (free) for a product or place, or "browser_control" with action "capture" for a page the run is looking at, then "annotate_image" to circle, box, point at, highlight, number or blur parts of it. Put each picture on its own line exactly as the tool gives the Markdown line, and keep the italic caption line it gives under it: it says where the picture is from. Use "generate_image" only for an illustration of something that does not exist, or when the user asks for a generated or AI image.',
     has('generate_image') &&
       // Supersedes the earlier wording of this same rule: it now names the
       // standalone-line parser constraint, says to generate BEFORE writing the
       // document, and points data-driven visuals at a ```chart: block rather
       // than a Markdown table, which is only the right advice now that chart
       // blocks render as real chart objects.
-      '- When a slide deck (PowerPoint) or Word document deliverable calls for a decorative image, photo or illustration, you MUST call the "generate_image" tool — once per image the deliverable needs, BEFORE you write the document — and then put each result on a line of its OWN using Markdown image syntax: ![description](location), where "location" is exactly the string the tool reported back. A reference inside a sentence stays prose and no picture appears. NEVER write a text placeholder or a bracketed description such as [image: a cat] in its place, and never state that an image is included when you did not generate one. Do NOT use "generate_image" for a chart, graph or diagram that must show exact data (numbers, axes, labels) — an image model cannot guarantee those values are correct; emit a ```chart: block instead. For any OTHER deliverable format (PDF, plain text, code, etc.) do NOT call "generate_image" — those cannot embed the result, so describe the visual in words instead.',
+      `- When a slide deck (PowerPoint) or Word document deliverable calls for a decorative image, photo or illustration, you MUST ${has('find_image') ? 'produce one with a tool — "find_image" (or a browser capture) for a real thing, "generate_image" for an illustration —' : 'call the "generate_image" tool —'} once per image the deliverable needs, BEFORE you write the document — and then put each result on a line of its OWN using Markdown image syntax: ![description](location), where "location" is exactly the string the tool reported back. A reference inside a sentence stays prose and no picture appears. NEVER write a text placeholder or a bracketed description such as [image: a cat] in its place, and never state that an image is included when you did not generate one. Do NOT use "generate_image" for a chart, graph or diagram that must show exact data (numbers, axes, labels) — an image model cannot guarantee those values are correct; emit a \`\`\`chart: block instead. For any OTHER deliverable format (PDF, plain text, code, etc.) do NOT call "generate_image" — those cannot embed the result, so describe the visual in words instead.`,
     // The other half of image reliability, and the half no amount of
     // instruction-tightening could fix: generate_image only exists when an
     // OpenAI or Gemini key is configured (multimodal/registry.ts CAPABILITIES).
     // With neither, the model was never given a choice — and a model that
     // doesn't know that writes "[illustration of a cat]" and moves on. Said out
     // loud, up front, so the fallback is a real chart or honest prose.
-    !has('generate_image') && (has('generate_document') || canWriteFiles) &&
+    !has('generate_image') && !has('find_image') && (has('generate_document') || canWriteFiles) &&
       '- No image-generation model is available on this run, so there is NO tool that can draw a picture. Do not emit a Markdown image reference, a bracketed placeholder such as [image: a cat], or any claim that an illustration is included. If the request needs a data visualization use a ```chart: block, which needs no image model; otherwise describe the visual in words and say plainly that no image could be generated.',
     // The video counterpart of the image rule above, and the fix for the
     // reported "it writes scripts forever and never makes the video" run. The
@@ -318,6 +324,8 @@ const VISUAL_REQUEST_RE =
 
 /** Evidence the output really CONTAINS a visual, not a sentence about one. */
 const IMAGE_REF_RE = /!\[[^\]]*\]\([^)]+\)/;
+/** Tools that produce a picture or a chart: calling one satisfies a request for a visual. */
+const VISUAL_TOOLS = new Set(['generate_image', 'generate_document', 'find_image', 'annotate_image']);
 const CHART_BLOCK_RE = /^\s*```+\s*chart\s*:/im;
 
 /**
@@ -347,14 +355,17 @@ export function missingVisualEvidence(
   calledTools: string[],
   toolNames: string[],
 ): string | null {
-  const canVisualize = toolNames.includes('generate_image') || toolNames.includes('generate_document');
+  const canVisualize = toolNames.includes('generate_image') || toolNames.includes('generate_document') || toolNames.includes('find_image');
   if (!canVisualize) return null;
   const haystack = `${assignment?.description ?? ''}\n${assignment?.expectedOutput ?? ''}`;
   if (!VISUAL_REQUEST_RE.test(haystack)) return null;
-  if (calledTools.includes('generate_image') || calledTools.includes('generate_document')) return null;
+  if (calledTools.some((t) => VISUAL_TOOLS.has(t))) return null;
   if (IMAGE_REF_RE.test(output) || CHART_BLOCK_RE.test(output)) return null;
 
   const options: string[] = [];
+  if (toolNames.includes('find_image')) {
+    options.push('for a real thing, call "find_image" and put the Markdown line it gives on its own line');
+  }
   if (toolNames.includes('generate_image')) {
     options.push('call "generate_image" and reference the result on its own line as ![description](location)');
   }

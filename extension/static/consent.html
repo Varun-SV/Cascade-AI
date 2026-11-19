@@ -30,6 +30,7 @@
         </div>
       </fieldset>
 
+      <label class="check"><input type="checkbox" id="screenshots"> Let Cascade take screenshots of these sites for your report <span class="muted">(password, card and code fields are blurred)</span></label>
       <label class="check" id="remember-row" hidden><input type="checkbox" id="remember"> Use this answer for this chat's next runs <span class="muted">(until Chrome closes, 8 hours at most)</span></label>
       <p id="error" class="error" role="alert" hidden></p>
       <div class="buttons">
@@ -43,7 +44,7 @@
       <ul>
         <li>The run gets a <strong>new window</strong>, not any tab you have open. It closes when the run ends.</li>
         <li>In a <strong>normal</strong> window, that's your own Chrome, so <strong>sites you're signed in to see you signed in</strong>. A <strong>private</strong> window starts signed out of everything.</li>
-        <li>Sent to your Cascade server while it runs: the addresses of pages in that window, their text and structure, and what the run types into them. No screenshots.</li>
+        <li>Sent to your Cascade server while it runs: the addresses of pages in that window, their text and structure, and what the run types into them. No screenshots, unless you tick the box for them: then still pictures of the run's window, with password, card and one-time-code fields and other sites' frames blurred.</li>
         <li>A page in the run can save a file to your Downloads. Cascade stops the run when that happens but doesn't delete the file.</li>
         <li>Sites on your private network (localhost, your router, office addresses) can't be allowed here. Use the Cascade CLI or desktop app for those.</li>
         <li>While the run is open, WebRTC in all your tabs goes without UDP, so a video call elsewhere may get worse until it ends. Until Chrome restarts, background workers of the sites you allow can't reach your private network, even in your own tabs.</li>

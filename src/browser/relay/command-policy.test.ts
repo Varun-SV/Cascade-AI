@@ -33,11 +33,24 @@ describe('P1: commands are default deny', () => {
       expect(JSON.stringify(d)).toContain('not on the allowlist');
     }
   });
-  it('refuses a screenshot or a screencast of the page, whatever session asks', () => {
+  it('refuses a screenshot or a screencast of the page, whatever session asks, unless the person allowed screenshots', () => {
     // The device's own promise to the user, not only the server's choice not to ask.
     for (const m of ['Page.captureScreenshot', 'Page.startScreencast']) {
       for (const sess of ['tab', 'nested']) expect(checkCommand(cmd(m, {}, sess), ctx).forward, `${m} ${sess}`).toBe(false);
     }
+    expect(checkCommand(cmd('Page.captureScreenshot', {}), { ...ctx, screenshots: false }).forward).toBe(false);
+  });
+  it('with screenshots allowed, forwards a still picture of the viewport and nothing more', () => {
+    const allowed = { ...ctx, screenshots: true };
+    expect(checkCommand(cmd('Page.captureScreenshot', { format: 'jpeg', quality: 80, clip: { x: 0, y: 0, width: 1280, height: 800, scale: 1 } }), allowed)).toEqual({ forward: true });
+    expect(checkCommand(cmd('Page.captureScreenshot', {}), allowed)).toEqual({ forward: true });
+    // Never moving pictures, never past the viewport, never a giant surface, never an unknown session.
+    expect(checkCommand(cmd('Page.startScreencast', {}), allowed).forward).toBe(false);
+    expect(checkCommand(cmd('Page.captureScreenshot', { captureBeyondViewport: true }), allowed).forward).toBe(false);
+    expect(checkCommand(cmd('Page.captureScreenshot', { format: 'webp' }), allowed).forward).toBe(false);
+    expect(checkCommand(cmd('Page.captureScreenshot', { clip: { x: 0, y: 0, width: 20000, height: 800 } }), allowed).forward).toBe(false);
+    expect(checkCommand(cmd('Page.captureScreenshot', { clip: { x: 0, y: 0, width: 0, height: 800 } }), allowed).forward).toBe(false);
+    expect(checkCommand(cmd('Page.captureScreenshot', {}, 'made-up'), allowed).forward).toBe(false);
   });
   it('refuses a fabricated session id, and an allowed method with no session', () => {
     expect(checkCommand(cmd('Runtime.evaluate', {}, 'made-up'), ctx).forward).toBe(false);
@@ -76,7 +89,12 @@ describe('the compatibility rule', () => {
     });
     const digest = createHash('sha256').update(lists).digest('hex').slice(0, 16);
     // Change a list → bump POLICY_VERSION and update both values, in one reviewed commit.
-    expect({ POLICY_VERSION, digest }).toEqual({ POLICY_VERSION: 4, digest: '06b6da0576d7119c' });
+    // The one exception: a change only the device enforces, where an older device
+    // stays strictly stricter. Page.captureScreenshot left ALWAYS_DENIED for a
+    // check gated on the person's own consent (0.90): an older device still refuses
+    // it, and the server never relies on it, so a bump would only refuse every
+    // grant to devices that haven't updated yet.
+    expect({ POLICY_VERSION, digest }).toEqual({ POLICY_VERSION: 4, digest: 'f50c4b919a37a4ee' });
   });
 });
 

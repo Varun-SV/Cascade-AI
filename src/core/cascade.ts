@@ -47,6 +47,8 @@ const ESCALATION_DECISION_TIMEOUT_MS = 5 * 60_000;
  */
 const CLARIFICATION_TIMEOUT_MS = 2 * 60_000;
 import { buildMediaTools, type AssetSink } from '../tools/generate-media.js';
+import { buildReportImageTools, type ImageSink } from '../tools/report-images.js';
+import { ImageAssets } from '../media/report-images.js';
 import { buildDocumentTools } from '../tools/generate-document.js';
 import { RunBreaker } from './run-breaker.js';
 import { T3Worker } from './tiers/t3-worker.js';
@@ -131,6 +133,12 @@ export class Cascade extends EventEmitter {
   private toolRegistry: ToolRegistry;
   private multimodal: MultimodalRegistry;
   private mediaSink?: AssetSink;
+  /**
+   * The images this instance's runs have made, found or captured, by where
+   * they were saved, so annotate_image can mark one up and a report can say
+   * where it came from. Bounded (see ImageAssets).
+   */
+  private readonly imageAssets = new ImageAssets();
   private mcpClient: McpClient;
   private codeIndex?: WorkspaceIndex;
   private config: CascadeConfig;
@@ -1193,7 +1201,15 @@ export class Cascade extends EventEmitter {
     this.toolRegistry.register(new BrowserControlTool(controller, release, {
       pageView, screenshots, marked,
       ...(features.askedOnDevice === true ? { askedOnDevice: true } : {}),
+      // `capture` saves report screenshots where generated media go. Not tied to
+      // `browserVision`: the picture is for the report, not for the model.
+      reportImages: { assets: this.imageAssets, sink: this.imageSink(this.workspacePath) },
     }));
+    // A capture is something to mark up: offer annotate_image if nothing else did.
+    if (!this.toolRegistry.hasTool('annotate_image') && !(this.config.tools?.disabledTools ?? []).includes('annotate_image')) {
+      const [annotate] = buildReportImageTools({ assets: this.imageAssets, sink: this.imageSink(this.workspacePath) }, { web: false, imageSource: true });
+      if (annotate) { annotate.setWorkspaceRoot(this.workspacePath); this.toolRegistry.register(annotate); }
+    }
   }
 
   /**
@@ -1246,15 +1262,8 @@ export class Cascade extends EventEmitter {
       {
         registry: this.multimodal,
         lookupProvider: (provider) => (this.config.providers ?? []).find((p) => p.type === provider),
-        sink: this.mediaSink ?? (async (asset) => {
-          const fsp = await import('node:fs/promises');
-          const nodePath = await import('node:path');
-          const dir = nodePath.join(workspacePath, 'generated');
-          await fsp.mkdir(dir, { recursive: true });
-          const dest = nodePath.join(dir, asset.filename);
-          await fsp.writeFile(dest, asset.data);
-          return nodePath.relative(workspacePath, dest);
-        }),
+        // Kept as they are saved, so a generated picture can be marked up too.
+        sink: this.imageAssets.recording(this.baseMediaSink(workspacePath), { kind: 'generated' }),
       },
       async (p) => {
         const fsp = await import('node:fs/promises');
@@ -1262,7 +1271,15 @@ export class Cascade extends EventEmitter {
       },
     );
 
-    for (const tool of tools) {
+    // Real pictures instead of generated ones: find_image only where the run
+    // may reach the web at all, annotate_image wherever images can be saved.
+    const web = this.toolRegistry.hasTool('web_fetch') || this.toolRegistry.hasTool('web_search');
+    const imageTools = buildReportImageTools(
+      { assets: this.imageAssets, sink: this.imageSink(workspacePath) },
+      { web, imageSource: tools.some((t) => t.name === 'generate_image') || this.toolRegistry.hasTool('browser_control') },
+    );
+
+    for (const tool of [...tools, ...imageTools]) {
       // `enabledTools` is the single off-switch for the whole tool surface, and
       // a restricted embed must not gain new tools just because it has an
       // OpenAI key.
@@ -1270,6 +1287,24 @@ export class Cascade extends EventEmitter {
       tool.setWorkspaceRoot(workspacePath);
       this.toolRegistry.register(tool);
     }
+  }
+
+  /** Where generated media go: the host's sink, else the workspace's generated/ folder. */
+  private baseMediaSink(workspacePath: string): AssetSink {
+    return this.mediaSink ?? (async (asset) => {
+      const fsp = await import('node:fs/promises');
+      const nodePath = await import('node:path');
+      const dir = nodePath.join(workspacePath, 'generated');
+      await fsp.mkdir(dir, { recursive: true });
+      const dest = nodePath.join(dir, asset.filename);
+      await fsp.writeFile(dest, asset.data);
+      return nodePath.relative(workspacePath, dest);
+    });
+  }
+
+  /** The same place, for pictures nobody generated: found, captured or marked up. */
+  private imageSink(workspacePath: string): ImageSink {
+    return (asset) => this.baseMediaSink(workspacePath)({ ...asset, modelId: 'none', provider: 'cascade' });
   }
 
   /**

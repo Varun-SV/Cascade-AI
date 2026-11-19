@@ -274,6 +274,21 @@ describe("the run's hint, any public site, and showing the window", () => {
     await expect(asked).resolves.toEqual({ allowedOrigins: [], privateOrigins: [], anyPublic: true });
   });
 
+  it('screenshots go with an answer only when ticked', async () => {
+    const h = harness({ stored: pairedDevice(true) });
+    h.relay.resume();
+    const start = () => {
+      const asked = h.served[0]!.askUser({ runId: 'r', expiresAt: Date.now() + 60_000, signal: new AbortController().signal });
+      return { asked, id: (h.notes.filter(([c]) => c === 'relay:ask').at(-1)![1] as { id: number }).id };
+    };
+    const yes = start();
+    expect(h.relay.answer(yes.id, 'example.com', false, true)).toEqual({ ok: true });
+    await expect(yes.asked).resolves.toMatchObject({ screenshots: true });
+    const no = start();
+    h.relay.answer(no.id, 'example.com');
+    expect(await no.asked).not.toHaveProperty('screenshots');
+  });
+
   it('nothing typed and nothing ticked is still a no', async () => {
     const h = harness({ stored: pairedDevice(true) });
     h.relay.resume();

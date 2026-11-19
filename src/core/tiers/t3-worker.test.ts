@@ -308,6 +308,24 @@ ${ACTING_INTEGRITY_RULE}
     expect(out).toContain('[image: a cat]');
   });
 
+  it('with find_image, sends real things to real pictures and keeps generate_image for illustrations', () => {
+    const out = buildWorkerRules((name) => new Set([...FULL, 'generate_image', 'find_image', 'annotate_image']).has(name));
+    expect(out).toContain('Pictures of real things');
+    expect(out).toContain('call "find_image" (free)');
+    expect(out).toContain('action "capture"');
+    expect(out).toContain('keep the italic caption line');
+    expect(out).toContain('"find_image" (or a browser capture) for a real thing, "generate_image" for an illustration');
+    // Without find_image, the old wording stands and find_image is not named.
+    const without = buildWorkerRules((name) => new Set([...FULL, 'generate_image']).has(name));
+    expect(without).not.toContain('find_image');
+  });
+
+  it('with find_image but no image model, does not say no picture can be had', () => {
+    const out = buildWorkerRules((name) => new Set([...FULL, 'find_image', 'generate_document']).has(name));
+    expect(out).not.toContain('there is NO tool that can draw a picture');
+    expect(out).toContain('call "find_image" (free)');
+  });
+
   it('scopes the image instruction to PowerPoint/Word — the only exporters that actually embed one', () => {
     // Regression: an unconditional "call generate_image for any deliverable"
     // instruction also fires for a PDF request, but the PDF exporter
@@ -751,6 +769,8 @@ describe('missingVisualEvidence — "you asked for a picture, is there one?"', (
     // up in the worker's text — the call itself is the evidence.
     expect(missingVisualEvidence(ASKS, 'Done.', ['generate_document'], TOOLS)).toBeNull();
     expect(missingVisualEvidence(ASKS, 'Done.', ['generate_image'], TOOLS)).toBeNull();
+    expect(missingVisualEvidence(ASKS, 'Done.', ['find_image'], ['find_image'])).toBeNull();
+    expect(missingVisualEvidence(ASKS, 'Here is what it looks like.', [], ['find_image'])).toContain('call "find_image"');
   });
 
   it('stays silent when the subtask never asked for a visual', () => {

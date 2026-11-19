@@ -19,6 +19,12 @@ describe("the consent window's answer", () => {
     expect(consentFromForm({ sites: 'github.com', anyPublic: true })).toMatchObject({ consent: { allowedOrigins: ['https://github.com'], anyPublic: true } });
   });
 
+  it('screenshots only when ticked, and never as an answer on their own', () => {
+    expect(consentFromForm({ sites: 'github.com', anyPublic: false, screenshots: true })).toMatchObject({ consent: { screenshots: true } });
+    expect(consentFromForm({ sites: 'github.com', anyPublic: false })).not.toHaveProperty('consent.screenshots');
+    expect(consentFromForm({ sites: '', anyPublic: false, screenshots: true })).toBeNull();
+  });
+
   it('nothing at all is a no; a private site or a bad one is asked again, any public site or not', () => {
     expect(consentFromForm({ sites: '  ', anyPublic: false })).toBeNull();
     expect(consentFromForm({ sites: 'localhost:3000', anyPublic: true })).toMatchObject({ error: expect.stringContaining('private network') });
@@ -39,11 +45,19 @@ describe('answers kept for a chat', () => {
     expect(await recallAnswer(store, keptKey('https://cascadeai.in', 'chat1'), 1000 + REMEMBER_MS + 1)).toBeNull();
   });
 
+  it('keep the screenshot choice with the rest of the answer', async () => {
+    const store = memoryStore();
+    await keepAnswer(store, 'a|1', { ...form, screenshots: true }, 0);
+    expect(await recallAnswer(store, 'a|1', 1)).toMatchObject({ screenshots: true });
+    expect(consentFromForm((await recallAnswer(store, 'a|1', 1))!)).toMatchObject({ consent: { screenshots: true } });
+  });
+
   it('are counted, and forgotten all at once', async () => {
     const store = memoryStore();
     await keepAnswer(store, 'a|1', form, 0);
     await keepAnswer(store, 'a|2', { ...form, anyPublic: true }, 0);
     expect(await keptCount(store, 1)).toBe(2);
+    expect(await recallAnswer(store, 'a|1', 1)).toMatchObject({ screenshots: false });
     await forgetAnswers(store);
     expect(await keptCount(store, 1)).toBe(0);
   });

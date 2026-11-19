@@ -360,6 +360,8 @@ const MARKS_TIMEOUT_MS = 3_000;
  * frame past a cut-off.
  */
 const PRIVACY_FRAME_LIMIT = 50;
+/** Why no screenshot: the person's own browser wasn't allowed to take one in this run. */
+export const NOT_ALLOWED_SHOT = 'No screenshot: the person\'s browser does not allow screenshots in this run (they can allow them when Cascade next asks for their browser). Use find_image for pictures of the things on the page instead.';
 /** Why a screenshot was skipped when something private is, or may be, on screen. */
 const PRIVATE_SHOT = 'No screenshot: a password, card or one-time-code field is on screen.';
 const UNCHECKED_SHOT = 'No screenshot: the page could not be checked for password, card or one-time-code fields.';
@@ -3280,7 +3282,12 @@ export class RemoteBrowserController {
       const data = drawn ?? clean;
       held.shotOf = marked && !drawn ? undefined : print;
       return { image: { data, mimeType: 'image/jpeg', ...size } };
-    } catch {
+    } catch (err) {
+      // The person's own browser decides: its relay refuses a picture unless
+      // they allowed screenshots for this run when they were asked.
+      if (err instanceof Error && /Denied by Cascade relay policy: Page\.captureScreenshot/.test(err.message)) {
+        return { withheld: NOT_ALLOWED_SHOT };
+      }
       return { withheld: 'No screenshot: the picture could not be taken.' };
     }
   }
@@ -3424,8 +3431,14 @@ export class RemoteBrowserController {
     stoppable: <T>(work: Promise<T>) => Promise<T>,
     seen: { view: PageView; viewport: Viewport | undefined; document: string },
     action: BrowserAction,
-  ): Promise<Pick<BrowserActionOutcome, 'view' | 'image' | 'imageUnchanged' | 'imageWithheld'>> {
+  ): Promise<Pick<BrowserActionOutcome, 'view' | 'image' | 'imageUnchanged' | 'imageWithheld' | 'boxes'>> {
     const view = viewOutcome(seen.view);
+    if (action.capture) {
+      // For a report: always a picture, never with marks drawn by the page.
+      const shot = await this.screenshot(held, stoppable, seen, true, false);
+      if ('image' in shot) return { view, image: shot.image, boxes: seen.view.marks.map((m) => ({ ...m })) };
+      if ('withheld' in shot) return { view: { ...view, text: `${view.text}\n\n${shot.withheld}` }, imageWithheld: true };
+    }
     if (!action.screenshot) return { view };
     // Asked for by name, a picture is sent even of an unchanged page.
     const shot = await this.screenshot(held, stoppable, seen, action.kind === 'observe', action.marked === true);
