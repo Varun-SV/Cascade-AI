@@ -467,6 +467,21 @@ suite('screenshots the person allowed', { timeout: 60_000 }, () => {
     expect(at(563, 23)).toBeLessThan(20);
   });
 
+  it('a field named only by aria-labelledby is blurred (Codex on 7dca271)', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    const page = '<!doctype html><body style="margin:0;background:#fff"><span id=lead style="position:absolute;left:0;top:250px">Your</span><span id=password-label style="position:absolute;left:60px;top:250px">password</span>'
+      + '<input aria-labelledby="lead password-label" value=hunter2 style="position:absolute;left:100px;top:100px;width:300px;height:150px;background:#000;color:#000;border:0;outline:0">'
+      + '<div style="position:absolute;left:500px;top:100px;width:300px;height:150px;background:#000"></div></body>';
+    await r.page.evaluate(`document.open(); document.write(${JSON.stringify(page)}); document.close(); true`);
+    const shot = await r.page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 900, height: 300 } });
+    const sharp = (await import('sharp')).default;
+    const { data, info } = await sharp(shot).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const at = (x: number, y: number) => data[(y * info.width + x) * info.channels]!;
+    expect(at(503, 103)).toBeLessThan(20);
+    expect(at(103, 103)).toBeGreaterThan(40);
+  });
+
   it('a screenshot past the viewport is refused even with the opt-in', async () => {
     const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
     const r = await startRig({ consent, raw: true });

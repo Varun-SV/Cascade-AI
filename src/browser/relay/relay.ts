@@ -37,7 +37,7 @@ const EARLY_BYTES_MAX = 4 * 1024 * 1024;
  * must then compute a blur, or the guard says no and no picture is taken.
  * Each element keeps what its own style said before, and gets it back.
  */
-const SHOT_GUARD_ON = `(() => {
+export const SHOT_GUARD_ON = `(() => {
   // The controller's own description of a private field (private-fields.ts):
   // a password shown in clear by its "show" button, card and code fields by
   // name, id or autocomplete token, one box per digit. And a field known only
@@ -49,7 +49,7 @@ const SHOT_GUARD_ON = `(() => {
     const doc = el.ownerDocument;
     const parts = [el.getAttribute('aria-label'), el.getAttribute('placeholder')];
     for (const l of el.labels || []) parts.push(l.textContent);
-    for (const id of (el.getAttribute('aria-labelledby') || '').split(/\s+/)) if (id) parts.push(doc.getElementById(id)?.textContent);
+    for (const id of (el.getAttribute('aria-labelledby') || '').split(/\\s+/)) if (id) parts.push(doc.getElementById(id)?.textContent);
     return SAYS.test(parts.filter(Boolean).join(' '));
   };
   const MARK = 'data-cascade-shot-blur';
@@ -89,7 +89,7 @@ const SHOT_GUARD_ON = `(() => {
     return !!m && Number(m[1]) >= 12;
   });
 })()`;
-const SHOT_GUARD_OFF = `(() => {
+export const SHOT_GUARD_OFF = `(() => {
   const MARK = 'data-cascade-shot-blur';
   const clear = (root, depth) => {
     for (const el of root.querySelectorAll('[' + MARK + ']')) {
@@ -296,6 +296,8 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
     // Registrations forwarded but not yet answered. A revoke can discard such a reply,
     // so its identifier is never known; the page step then closes the tab instead.
     let pendingScripts = 0;
+    // The screenshot in progress, if any: see the Page.captureScreenshot branch below.
+    let shooting: Promise<void> = Promise.resolve();
     let targetInfo: Record<string, unknown> | null = null;
     let lastId = -1;
     let ended = false;
@@ -564,30 +566,35 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
           }
         }
         if (method === 'Page.captureScreenshot') {
-          // A picture of the tab itself only, never of a frame inside it, and only
-          // with the sensitive fields blurred. No guard, no picture.
-          if (toTab(sessionId) !== undefined) { replyError(id, sessionId, 'Denied by Cascade relay policy: Page.captureScreenshot of a frame'); return; }
-          // What the page's script cannot see: fields and frames in a closed shadow
-          // root. Read from the browser's own DOM, here on the device.
-          const dom = await forward('DOM.getDocument', { depth: -1, pierce: true }, sessionId).catch(() => null);
-          // The agent cannot enable DOM events (not on its list), so none were wanted.
-          await forward('DOM.disable', {}, sessionId).catch(() => undefined);
-          if (!dom || dom.error !== undefined || closedRootHolds(dom.result?.root as DomNode | undefined)) {
-            replyError(id, sessionId, 'Denied by Cascade relay policy: Page.captureScreenshot while a field or frame the device cannot blur is on the page');
-            return;
-          }
-          const guard = await forward('Runtime.evaluate', { expression: SHOT_GUARD_ON, returnByValue: true }, sessionId);
-          if (guard.error !== undefined || (guard.result?.result as { value?: unknown } | undefined)?.value !== true) {
-            replyError(id, sessionId, 'Denied by Cascade relay policy: the page could not be prepared for a screenshot');
-            return;
-          }
-          let shot: Awaited<ReturnType<typeof forward>>;
-          try { shot = await forward(method, params, sessionId); } finally {
-            await forward('Runtime.evaluate', { expression: SHOT_GUARD_OFF, returnByValue: true }, sessionId).catch(() => undefined);
-          }
-          if (!stillOurs()) { replyError(id, sessionId, fencedAnswer); return; }
-          if (shot.error !== undefined) { replyError(id, sessionId, shot.error); return; }
-          out({ id, sessionId, result: { data: typeof shot.result?.data === 'string' ? shot.result.data : '' } });
+          // One at a time, guard to clean-up: two pictures taken side by side would
+          // share the blur, and the first one's clean-up would take it off while the
+          // second was being taken.
+          const turn = shooting.then(async () => {
+            if (toTab(sessionId) !== undefined) { replyError(id, sessionId, 'Denied by Cascade relay policy: Page.captureScreenshot of a frame'); return; }
+            // What the page's script cannot see: fields and frames in a closed shadow
+            // root. Read from the browser's own DOM, here on the device.
+            const dom = await forward('DOM.getDocument', { depth: -1, pierce: true }, sessionId).catch(() => null);
+            // The agent cannot enable DOM events (not on its list), so none were wanted.
+            await forward('DOM.disable', {}, sessionId).catch(() => undefined);
+            if (!dom || dom.error !== undefined || closedRootHolds(dom.result?.root as DomNode | undefined)) {
+              replyError(id, sessionId, 'Denied by Cascade relay policy: Page.captureScreenshot while a field or frame the device cannot blur is on the page');
+              return;
+            }
+            const guard = await forward('Runtime.evaluate', { expression: SHOT_GUARD_ON, returnByValue: true }, sessionId);
+            if (guard.error !== undefined || (guard.result?.result as { value?: unknown } | undefined)?.value !== true) {
+              replyError(id, sessionId, 'Denied by Cascade relay policy: the page could not be prepared for a screenshot');
+              return;
+            }
+            let shot: Awaited<ReturnType<typeof forward>>;
+            try { shot = await forward(method, params, sessionId); } finally {
+              await forward('Runtime.evaluate', { expression: SHOT_GUARD_OFF, returnByValue: true }, sessionId).catch(() => undefined);
+            }
+            if (!stillOurs()) { replyError(id, sessionId, fencedAnswer); return; }
+            if (shot.error !== undefined) { replyError(id, sessionId, shot.error); return; }
+            out({ id, sessionId, result: { data: typeof shot.result?.data === 'string' ? shot.result.data : '' } });
+          });
+          shooting = turn.catch(() => undefined);
+          await turn;
           return;
         }
         const registering = method === 'Page.addScriptToEvaluateOnNewDocument';
