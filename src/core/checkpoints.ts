@@ -19,6 +19,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { insideNestedRepo } from './permissions/risk.js';
 
 export interface Checkpoint {
   /** 1, 2, 3… in the order runs started. */
@@ -48,6 +49,8 @@ export interface UndoResult {
   removed: string[];
   /** Files changed since the run by someone else, left as they are. */
   skipped: string[];
+  /** Repositories nested in the project, which a checkpoint records only as a pointer: not touched. */
+  nested?: string[];
 }
 
 const KEEP = 50;
@@ -114,6 +117,10 @@ export class Checkpoints {
     const real = paths.map((p) => realPath(path.resolve(this.root, p)));
     const rel = real.map((p) => path.relative(root, p));
     if (rel.some((r) => !r || r === '..' || r.startsWith(`..${path.sep}`) || path.isAbsolute(r))) return false;
+    // A repository nested in the project (a submodule, a clone) is recorded
+    // only as a pointer to its commit: its files, and work not committed
+    // there, are not in the checkpoint.
+    if (real.some((p) => insideNestedRepo(p, root) || (isDir(p) && hasNestedRepo(p)))) return false;
     try {
       // Exit 0 names the ignored ones; exit 1 means none is.
       const ignored = await this.git(['check-ignore', '-z', '--stdin'], rel.join('\0'), [0, 1]);
@@ -130,6 +137,12 @@ export class Checkpoints {
     } catch {
       return false;
     }
+  }
+
+  /** The nested repositories' pointers (gitlinks) a snapshot holds: one listing of it, its paths only. */
+  private async gitlinks(rev: string): Promise<string[]> {
+    const out = await this.git(['ls-tree', '-r', '-z', '--full-tree', rev]).catch(() => '');
+    return out.split('\0').filter((e) => e.startsWith('160000 ')).map((e) => e.slice(e.indexOf('\t') + 1));
   }
 
   /** The files a run changed, made or deleted: [status, path], status A (made), D (deleted) or M. */
@@ -162,7 +175,13 @@ export class Checkpoints {
     const skipped: string[] = [];
     const bySource = new Map<string, string[]>();
     const kept: Array<[string, string]> = [];
+    // A nested repository is recorded as a pointer, not its files: putting
+    // "it" back would give an empty folder. Left as it is, and said so.
+    const links = new Set<string>();
+    for (const rev of [...runs.map((r) => r.before), now]) for (const l of await this.gitlinks(rev)) links.add(l);
+    const nested = [...touched.keys()].filter((p) => links.has(p));
     for (const [p, { source, leftBy }] of touched) {
+      if (nested.includes(p)) continue;
       if (!force && leftBy !== now && !(await this.same(leftBy, now, p))) { skipped.push(p); continue; }
       kept.push([p, source]);
     }
@@ -186,7 +205,7 @@ export class Checkpoints {
     // put those back, as the reply says it can.
     const done = new Set(runs.map((r) => r.n));
     this.save(all.map((c) => (!done.has(c.n) ? c : skipped.length ? { ...c, partial: true } : { ...c, undone: true, partial: false })));
-    return { runs, restored, removed, skipped };
+    return { runs, restored, removed, skipped, ...(nested.length ? { nested } : {}) };
   }
 
   // ── git ─────────────────────────────────────
@@ -308,6 +327,27 @@ export class Checkpoints {
       }
     });
   }
+}
+
+function isDir(p: string): boolean {
+  try { return fs.statSync(p).isDirectory(); } catch { return false; }
+}
+
+/** Whether a folder holds a repository of its own anywhere inside it (bounded: it stops at the first). */
+function hasNestedRepo(dir: string): boolean {
+  const stack = [dir];
+  let seen = 0;
+  while (stack.length && seen < 5000) {
+    const d = stack.pop()!;
+    seen += 1;
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (e.name === '.git') return true;
+      if (e.isDirectory() && e.name !== 'node_modules') stack.push(path.join(d, e.name));
+    }
+  }
+  return false;
 }
 
 /**

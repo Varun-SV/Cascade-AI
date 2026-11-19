@@ -185,6 +185,34 @@ describe('what an undoable call writes, for the checkpoint to vouch for (Codex o
     expect(sh('echo $HOME > out.txt').writes).toEqual([path.join(root, 'out.txt')]);
   });
 
+  it('commands inside loops, conditions and groups are judged (Codex on 680b34e)', () => {
+    expect(sh('for f in ignored.txt; do rm "$f"; done').category).toBe('delete');
+    expect(sh('if grep -q x a.txt; then git push; fi').category).toBe('leaves-machine');
+    expect(sh('while true; do rm a.txt; done').category).toBe('delete');
+    expect(sh('(rm a.txt)').category).toBe('delete');
+    expect(sh('{ rm a.txt; }').category).toBe('delete');
+    expect(sh('for f in *.ts; do echo "$f"; done').level).toBe('safe');
+  });
+
+  it('a read-only command with an output option or operand writes (Codex on 680b34e)', () => {
+    expect(sh('sort -o ignored.txt input.txt').writes).toEqual([path.join(root, 'ignored.txt')]);
+    expect(sh('sort --output=out.txt in.txt').writes).toEqual([path.join(root, 'out.txt')]);
+    expect(sh('uniq in.txt out.txt').writes).toEqual([path.join(root, 'out.txt')]);
+    expect(sh('xxd in.bin out.hex').writes).toEqual([path.join(root, 'out.hex')]);
+    expect(sh('date -s "2020-01-01"').category).toBe('install-system');
+    expect(sh('hostname newbox').category).toBe('install-system');
+    expect(sh('sort in.txt').level).toBe('safe');
+    expect(sh('hostname').level).toBe('safe');
+  });
+
+  it('work inside another git repository in the project asks (Codex on 680b34e)', () => {
+    const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'risk-nested-'));
+    fs.mkdirSync(path.join(proj, 'vendor', 'lib', '.git'), { recursive: true });
+    expect(assessShell('cd vendor/lib && touch a.txt', proj).category).toBe('unrecorded');
+    expect(assessShell('npm test', proj, path.join(proj, 'vendor', 'lib')).category).toBe('unrecorded');
+    expect(assessShell('touch a.txt', proj).level).toBe('recoverable');
+  });
+
   it('a redirect on a cd is judged where it starts (Codex on 8c4090e)', () => {
     expect(sh('cd . > ignored.txt').writes).toEqual([path.join(root, 'ignored.txt')]);
     expect(sh('cd .. > a.txt').writes).toEqual([path.join(root, 'a.txt')]);

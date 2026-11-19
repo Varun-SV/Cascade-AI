@@ -26,6 +26,7 @@ export function describeUndo(r: UndoResult): string {
     parts.push(`Left alone, because they changed again after the run (${r.skipped.length}):\n${list(r.skipped)}\n`
       + `/undo --force puts these back too, losing the later changes.`);
   }
+  if (r.nested?.length) parts.push(`Not touched, as they are git repositories of their own inside the project, which a checkpoint can't record (${r.nested.length}):\n${list(r.nested)}`);
   parts.push('Files your .gitignore leaves out (node_modules, build output) aren\'t kept, and anything that left this computer (a push, a deploy, a message) can\'t be taken back.');
   return parts.join('\n\n');
 }

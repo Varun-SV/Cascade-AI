@@ -152,6 +152,26 @@ describe('Checkpoints', () => {
     expect(r.restored).toEqual([]);
   });
 
+  it("a repository nested in the project: not covered, and /undo doesn't empty it (Codex on 680b34e)", async () => {
+    const nestedDir = path.join(root, 'vendor', 'lib');
+    fs.mkdirSync(nestedDir, { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: nestedDir });
+    fs.writeFileSync(path.join(nestedDir, 'base.txt'), 'committed');
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'add', '.'], { cwd: nestedDir });
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'base'], { cwd: nestedDir });
+    fs.writeFileSync(path.join(nestedDir, 'work.txt'), 'uncommitted');
+    const cp = new Checkpoints(root, state);
+    expect(await cp.covers([path.join(nestedDir, 'work.txt')])).toBe(false);
+    expect(await cp.covers([path.join(root, 'vendor')])).toBe(false);
+    expect(await cp.covers([path.join(root, 'a.txt')])).toBe(true);
+    const run = (await cp.begin('x'))!;
+    fs.rmSync(nestedDir, { recursive: true });
+    await cp.end(run);
+    const r = await cp.undo();
+    expect(r.nested).toEqual(['vendor/lib']);
+    expect(r.restored).not.toContain('vendor/lib');
+  });
+
   it('a folder is covered only if nothing inside it is left out (Codex on 8c4090e)', async () => {
     const cp = new Checkpoints(root, state);
     write('.gitignore', 'dest/a.txt\n');

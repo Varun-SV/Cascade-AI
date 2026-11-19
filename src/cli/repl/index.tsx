@@ -328,6 +328,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const [settingsView, setSettingsView] = useState<{ section?: SectionId; search?: string } | null>(null);
   /** A setting changed during a run: the live Cascade takes it once the run ends. */
   const pendingReconfigureRef = useRef(false);
+  const reconfiguringRef = useRef<Promise<unknown>>(Promise.resolve());
   const slashCommandRef = useRef<((text: string) => Promise<void>) | null>(null);
   // The live cascade view: what each node is doing, the node picked with ↑↓
   // (null follows the busiest), a clock for the run's timers.
@@ -1265,6 +1266,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       // can't be checkpointed goes ahead, and auto mode then asks about
       // every change, as before.
       await checkpointEndRef.current;
+      await reconfiguringRef.current;
       checkpoint = await checkpointsRef.current!.begin(trimmed).catch(() => null);
       setLastCheckpoint(checkpoint);
       const result = await cascade.run({
@@ -1366,7 +1368,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       runAbortRef.current = null;
       if (pendingReconfigureRef.current) {
         pendingReconfigureRef.current = false;
-        void cascadeRef.current?.reconfigure(config).catch(() => undefined);
+        // Kept, and awaited before the next run starts: new provider settings
+        // clear the router's bindings, and a run begun before they are made
+        // again would find none.
+        reconfiguringRef.current = cascadeRef.current?.reconfigure(config).catch(() => undefined) ?? Promise.resolve();
       }
       cancelArmedRef.current = false;
       setCancelAttempted(false);

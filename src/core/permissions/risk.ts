@@ -112,7 +112,6 @@ const READ_ONLY = new Set([
   'resolve-path', 'get-item', 'gi', 'measure-object', 'where-object', 'select-object', 'format-table',
   'format-list', 'out-string', 'get-command', 'get-process', 'gps', 'get-date', 'write-output', 'write-host',
   'findstr', 'ver', 'systeminfo', 'tasklist', 'xxd', 'od', 'hexdump', 'strings', 'md5sum', 'sha256sum', 'shasum',
-  'certutil',
 ]);
 
 const DELETERS = new Set(['rm', 'rmdir', 'del', 'erase', 'rd', 'unlink', 'shred', 'srm', 'trash', 'remove-item', 'ri', 'truncate']);
@@ -170,6 +169,28 @@ const PASSTHROUGH_VALUES: Record<string, ReadonlySet<string>> = {
   time: new Set(['-f', '--format', '-o', '--output']),
   exec: new Set(['-a']),
 };
+/** Words of the shell itself that come before a command: the command follows them. */
+const SHELL_KEYWORDS = new Set(['do', 'then', 'else', 'elif', 'if', 'while', 'until', '!', '{', '(', 'time']);
+/** Words that open, or close, a part that runs nothing of its own. */
+const SHELL_HEADERS = new Set(['for', 'select', 'case', 'function', 'done', 'fi', 'esac', '}', ')', ';;', 'in']);
+
+/** The files a read-only command writes after all, through an option or operand. */
+function outputOperands(prog: string, args: string[]): string[] {
+  const out: string[] = [];
+  const valueOf = (flags: string[], longs: string[]) => {
+    args.forEach((a, i) => {
+      if (flags.includes(a) && args[i + 1]) out.push(args[i + 1]!);
+      for (const l of longs) if (a.startsWith(`${l}=`)) out.push(a.slice(l.length + 1));
+      for (const f of flags) if (f.length === 2 && a.startsWith(f) && a.length > 2 && !a.startsWith('--')) out.push(a.slice(2));
+    });
+  };
+  const operands = args.filter((a) => !a.startsWith('-'));
+  if (prog === 'sort') valueOf(['-o'], ['--output']);
+  else if (prog === 'tree') valueOf(['-o'], []);
+  else if (prog === 'uniq' || prog === 'xxd') { if (operands.length >= 2) out.push(operands[1]!); }
+  return out;
+}
+
 /** Commands whose every operand is a file they write (or move, or make). */
 const OPERAND_WRITERS = new Set([
   'cp', 'mv', 'touch', 'tee', 'ln', 'install', 'mkdir', 'copy', 'move', 'ren', 'rename', 'xcopy', 'robocopy',
@@ -224,6 +245,7 @@ export function assessShell(command: string, root: string, cwd: string = root): 
     if (r.level === 'recoverable') {
       if (here === null) r = risky('outside-project', 'changes to a folder that can\'t be told before it runs, then changes files there');
       else if (outside(here, root, root)) r = risky('outside-project', `changes files in ${here}, outside the project`);
+      else if (insideNestedRepo(here, root)) r = risky('unrecorded', `works inside ${path.relative(root, here) || '.'}, another git repository in the project, whose files a checkpoint doesn't record`);
     }
     result = worst(result, r);
     if (result.level === 'risky') return result;
@@ -323,6 +345,12 @@ function assessSegment(segment: string, root: string, cwd: string): Risk {
     if (glued) { redirects.push(glued[1]!); return false; }
     return i === 0 || !/^\d?>>?$/.test(all[i - 1] ?? '');
   });
+  // The shell's own words around a command (`for … ; do rm "$f"; done`,
+  // `if grep …; then …`, `( … )`, `{ …; }`): the command is what follows
+  // them. A loop's or case's header runs nothing; its body is its own part.
+  w = w.map((word, i, all) => (i === 0 ? word.replace(/^[({]+/, '') : i === all.length - 1 ? word.replace(/[)}]+$/, '') : word)).filter(Boolean);
+  while (w.length && SHELL_KEYWORDS.has(w[0]!)) w.shift();
+  if (w.length && SHELL_HEADERS.has(w[0]!)) return writesTo(redirects, root, cwd);
   // Leading VAR=value assignments.
   while (w.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(w[0]!)) w.shift();
   if (!w.length) return writesTo(redirects, root, cwd);
@@ -430,7 +458,14 @@ function assessSegment(segment: string, root: string, cwd: string): Risk {
   if (prog === 'twine' && sub === 'upload') return risky('leaves-machine', 'uploads a package');
   if (READ_ONLY.has(prog)) {
     if (prog === 'sed' || prog === 'perl') return SAFE;
-    return base;
+    // Read-only, but for an option or operand that writes or changes:
+    // `sort -o out`, `uniq in out`, `xxd in out`, `tree -o out`, `date -s …`,
+    // `hostname new-name`.
+    if ((prog === 'date' && has('-s', '--set')) || (prog === 'hostname' && args.some((a) => !a.startsWith('-')))) {
+      return risky('install-system', `${prog} changes the system's ${prog === 'date' ? 'clock' : 'name'}`);
+    }
+    const outputs = outputOperands(prog, args);
+    return outputs.length ? worst(base, writesTo(outputs, root, cwd)) : base;
   }
   if (prog === 'sed' || prog === 'perl') {
     const inPlace = has('-i', '--in-place') || args.some((a) => /^-i/.test(a) || /^-\w*i\w*$/.test(a) && prog === 'perl');
@@ -507,6 +542,17 @@ function pathsOutside(prog: string, paths: string[], root: string, cwd: string, 
     for (const source of paths.slice(0, -1)) targets.push(path.join(targets[0]!, path.basename(source)));
   }
   return targets.length ? recoverable(`${prog} changes files (checkpointed)`, targets) : SAFE;
+}
+
+/** Whether a folder in the project is, or is in, a git repository of its own (a submodule, a nested clone). */
+export function insideNestedRepo(dir: string, root: string): boolean {
+  const top = path.resolve(root);
+  let d = path.resolve(dir);
+  while (d.startsWith(`${top}${path.sep}`)) {
+    if (fs.existsSync(path.join(d, '.git'))) return true;
+    d = path.dirname(d);
+  }
+  return false;
 }
 
 function isDirectory(p: string): boolean {
