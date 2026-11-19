@@ -40,6 +40,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and Ollama models that is remembered for later runs too. The text format now
   also reads Llama's `parameters`, `<function=…>` tags and Mistral's
   `[TOOL_CALLS]`.
+## 0.88.2 - 2026-11-19
+
+### Changed
+- **Routing benchmarks refreshed to 2026-11-19.** Vals AI's Terminal-Bench 4.0
+  and Vals Index (both updated 2026-11-18) are recaptured. Terminal-Bench 2.1
+  and SWE-bench Verified (archived by Vals) and LMArena creative writing are
+  re-read. The Artificial Analysis music and text-to-speech boards are now read
+  directly, where before they came from search quotes.
+- **New models are scored as themselves.** Claude Fable 5.2, GPT-6.2 Astra and
+  Sol, and Gemini 4 Carbon, Neon and Hydrogen have their own scores. Fable 5.2
+  used to score as Fable 5.1 and GPT-6.2 as GPT-6.
+- **Other providers' current models are scored too.** This covers Kimi K3 and
+  K3.1, GLM 5.3 and 5.3 Flash, Grok 4.6 and 4.7, DeepSeek V4 Pro and V4.1
+  Flash, Qwen 3.8 Max and 4 Max, MiniMax M3 and M3.1 Flash, Mistral Large 4,
+  and MiMo V2.6 Pro and Flash. Whether reached through their own APIs or an
+  OpenAI-compatible gateway, they are routed on their own scores. Their rows
+  on Terminal-Bench 4.0 are left out on purpose: they score far lower there
+  than first-party models with the same Terminal-Bench 2.1 score, which would
+  fail the board's calibration and drop it for everyone (see the source note).
+
+### Removed
+- **τ²-bench (Artificial Analysis) is retired as a routing source.** It no
+  longer calibrates against Terminal-Bench 2.1 (ρ 0.50, gate 0.6) after AA
+  re-ran two models, and it has not run the current generation. The capture is
+  kept in `scripts/benchmarks/retired/`.
 
 ## 0.88.1 - 2026-11-18
 

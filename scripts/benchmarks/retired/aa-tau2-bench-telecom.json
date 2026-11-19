@@ -3,7 +3,7 @@
   "label": "Artificial Analysis \u00b7 \u03c4\u00b2-Bench Telecom (via BenchLM mirror)",
   "url": "https://benchlm.ai/benchmarks/tau2-bench",
   "primaryUrl": "https://artificialanalysis.ai/evaluations/tau2-bench",
-  "capturedAt": "2026-10-28",
+  "capturedAt": "2026-11-19",
   "provenance": "mirror-captured",
   "scale": "percent",
   "calibration": {
@@ -11,10 +11,13 @@
       "fitTo": "vals-terminal-bench-2-1"
     }
   },
-  "note": "Multi-turn tool calling against a simulated user and policy (the closest public measure of a manager/worker holding a tool loop together). Artificial Analysis blocks automated fetches, so this is read from BenchLM, which republishes AA rows labelled with their setup; ONLY rows labelled \"AA\" are used, so every number shares one harness. Vendor-published telecom rows (GPT-5.4/5.5, Gemini 3.1 Pro) use other setups and are excluded. Agentic only, fitted onto Terminal-Bench 2.1. It covers the older models the Vals boards never ran, which is where it earns its place: GPT-4o, GPT-4.1 and Gemini 2.x hold a tool loop together far worse than their old seed scores claimed. Where AA lists a model twice the default (non-thinking) row is used.",
+  "note": "Multi-turn tool calling against a simulated user and policy (the closest public measure of a manager/worker holding a tool loop together). Artificial Analysis blocks automated fetches, so this is read from BenchLM, which republishes AA rows labelled with their setup; ONLY rows labelled \"AA\" are used, so every number shares one harness. Vendor-published telecom rows (GPT-5.4/5.5, Gemini 3.1 Pro) use other setups and are excluded. Agentic only, fitted onto Terminal-Bench 2.1. It covers the older models the Vals boards never ran, which is where it earns its place: GPT-4o, GPT-4.1 and Gemini 2.x hold a tool loop together far worse than their old seed scores claimed. Where AA lists a model twice the default (non-thinking) row is used. As of the 2026-11-19 capture AA has not run the 5.5/6.x generation; since October it re-ran Claude Opus 4.7 (74 to 88.6) and GPT-5 (86.5 to 84.8), and DeepSeek V4 Pro and MiniMax M3 are now captured too.",
   "models": {
     "claude-fable-5": {
       "agentic": 98.5
+    },
+    "deepseek-v4-pro": {
+      "agentic": 96.2
     },
     "gemini-3.5-flash": {
       "agentic": 95.3
@@ -22,26 +25,29 @@
     "claude-opus-4.8": {
       "agentic": 94.4
     },
-    "claude-opus-4.6": {
-      "agentic": 84.8
-    },
-    "claude-opus-4.5": {
-      "agentic": 86.3
+    "minimax-m3": {
+      "agentic": 88.9
     },
     "claude-opus-4.7": {
-      "agentic": 74.0
+      "agentic": 88.6
     },
     "gemini-3-pro": {
       "agentic": 87.1
     },
-    "gpt-5": {
-      "agentic": 86.5
-    },
     "gpt-5.6-terra": {
+      "agentic": 86.3
+    },
+    "claude-opus-4.5": {
       "agentic": 86.3
     },
     "gpt-5.6-sol": {
       "agentic": 85.1
+    },
+    "gpt-5": {
+      "agentic": 84.8
+    },
+    "claude-opus-4.6": {
+      "agentic": 84.8
     },
     "gpt-5.2": {
       "agentic": 84.8

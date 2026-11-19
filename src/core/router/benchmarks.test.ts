@@ -174,3 +174,56 @@ describe('the committed snapshot', () => {
     }
   });
 });
+
+describe('families added in the 2026-11-19 refresh', () => {
+  const fam = (id: string, name = id) => resolveFamily({ id, name, provider: 'openai-compatible' } as ModelInfo);
+
+  it('scores the new first-party models as themselves, not as the release before', () => {
+    expect(fam('claude-fable-5-2')).toBe('claude-fable-5.2');
+    expect(fam('claude-fable-5.1')).toBe('claude-fable-5.1');
+    expect(fam('gpt-6.2-astra')).toBe('gpt-6.2-astra');
+    expect(fam('gpt-6.2-sol')).toBe('gpt-6.2-sol');
+    expect(fam('gpt-6-astra')).toBe('gpt-6-astra');
+    expect(fam('gemini-4-carbon')).toBe('gemini-4-carbon');
+    expect(fam('gemini-4-neon')).toBe('gemini-4-neon');
+    expect(fam('gemini-4-hydrogen')).toBe('gemini-4-hydrogen');
+    // A Fable newer than the table scores as the newest one measured.
+    expect(fam('claude-fable-6')).toBe('claude-fable-5.2');
+  });
+
+  it('reads other providers\' models however a gateway spells them', () => {
+    expect(fam('moonshotai/kimi-k3.1-pro')).toBe('kimi-k3.1');
+    expect(fam('kimi-k3')).toBe('kimi-k3');
+    expect(fam('z-ai/glm-5.3')).toBe('glm-5.3');
+    expect(fam('glm-5.3-flash')).toBe('glm-5.3-flash');
+    expect(fam('x-ai/grok-4.7')).toBe('grok-4.7');
+    expect(fam('grok-4-6')).toBe('grok-4.6');
+    expect(fam('deepseek-v4.1-flash')).toBe('deepseek-v4.1-flash');
+    expect(fam('deepseek/deepseek-v4-pro')).toBe('deepseek-v4-pro');
+    expect(fam('qwen4-max')).toBe('qwen-4-max');
+    expect(fam('Qwen 3.8 Max', 'Qwen 3.8 Max')).toBe('qwen-3.8-max');
+    expect(fam('MiniMax-M3.1-Flash')).toBe('minimax-m3.1-flash');
+    expect(fam('minimax-m3')).toBe('minimax-m3');
+    expect(fam('mistral-large-4')).toBe('mistral-large-4');
+    expect(fam('mimo-v2.6-pro')).toBe('mimo-v2.6-pro');
+  });
+
+  it('does not score a different version of those lines as the measured one', () => {
+    expect(fam('kimi-k2.6')).toBeNull();
+    expect(fam('glm-5.2')).toBeNull();
+    expect(fam('grok-4.20')).toBeNull();
+    expect(fam('minimax-m2.7')).toBeNull();
+    expect(fam('mistral-large-2411')).toBe('mistral');
+    // Older DeepSeek and Qwen builds keep the generic local families.
+    expect(fam('deepseek-v4-flash')).toBe('deepseek');
+    expect(fam('qwen3-4b')).toBe('qwen');
+  });
+
+  it('has a measured profile for every family it can resolve to', () => {
+    for (const f of ['claude-fable-5.2', 'gpt-6.2-astra', 'gpt-6.2-sol', 'gemini-4-carbon', 'gemini-4-neon', 'gemini-4-hydrogen',
+      'kimi-k3.1', 'kimi-k3', 'glm-5.3', 'glm-5.3-flash', 'grok-4.7', 'grok-4.6', 'deepseek-v4.1-flash', 'deepseek-v4-pro',
+      'qwen-4-max', 'qwen-3.8-max', 'minimax-m3.1-flash', 'minimax-m3', 'mistral-large-4', 'mimo-v2.6-pro', 'mimo-v2.6-flash']) {
+      expect(benchmarkProfile({ id: f, name: f, provider: 'openai-compatible' } as ModelInfo), f).not.toBeNull();
+    }
+  });
+});

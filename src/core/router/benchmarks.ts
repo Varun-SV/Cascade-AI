@@ -9,7 +9,7 @@
 //    - analysis ← Vals Index (multi-step finance, legal, tax, coding work)
 //    - creative ← LMArena creative-writing arena
 //    - data     ← Vals Index
-//    - agentic  ← Terminal-Bench, SWE-bench, τ²-bench: how well a model holds a
+//    - agentic  ← Terminal-Bench, SWE-bench: how well a model holds a
 //                 tool loop together. Weighted for the tiers that orchestrate.
 //
 //  The numbers live in benchmark-data.json, produced by
@@ -57,6 +57,7 @@ const BUNDLED: Record<string, BenchmarkProfile> =
 const FAMILY_MATCHERS: Array<[RegExp, string]> = [
   // Anthropic. Mythos is the same model as Fable without Fable's extra
   // safeguards, so it scores as Fable.
+  [/(?:fable|mythos)[\s.-]?5[-.]2/i, 'claude-fable-5.2'],
   [/(?:fable|mythos)[\s.-]?5[-.]1/i, 'claude-fable-5.1'],
   [/(?:fable|mythos)[\s.-]?5(?![-.]?\d)/i, 'claude-fable-5'],
   [/opus[\s.-]?5[-.]5/i, 'claude-opus-5.5'],
@@ -78,12 +79,15 @@ const FAMILY_MATCHERS: Array<[RegExp, string]> = [
   // A Claude version newer than this table scores as the newest one we have
   // measured in its line — newer releases have not scored lower on these
   // boards — instead of a neutral 0.5 that would lose to everything measured.
-  [/fable|mythos/i, 'claude-fable-5.1'],
+  [/fable|mythos/i, 'claude-fable-5.2'],
   [/opus/i, 'claude-opus-5.5'],
   [/sonnet/i, 'claude-sonnet-5.5'],
   [/haiku/i, 'claude-haiku-5.5'],
 
-  // OpenAI GPT-6.
+  // OpenAI GPT-6. Point releases first: "gpt-6.2-astra" must not fall into
+  // the bare "gpt-6 astra" rule.
+  [/gpt-?6[-.]2.*astra/i, 'gpt-6.2-astra'],
+  [/gpt-?6[-.]2.*sol/i, 'gpt-6.2-sol'],
   [/gpt-?6[-.]1.*sol/i, 'gpt-6.1-sol'],
   [/gpt-?6[-.]1.*terra/i, 'gpt-6.1-terra'],
   [/gpt-?6.*astra/i, 'gpt-6-astra'],
@@ -109,6 +113,9 @@ const FAMILY_MATCHERS: Array<[RegExp, string]> = [
 
   // Google Gemini.
   [/gemini-?4.*argon/i, 'gemini-4-argon'],
+  [/gemini-?4.*carbon/i, 'gemini-4-carbon'],
+  [/gemini-?4.*neon/i, 'gemini-4-neon'],
+  [/gemini-?4.*hydrogen/i, 'gemini-4-hydrogen'],
   [/gemini-?3\.8-flash(?!-lite)/i, 'gemini-3.8-flash'],
   [/gemini-?3\.7-flash(?!-lite)/i, 'gemini-3.7-flash'],
   [/gemini-?3\.6-flash(?!-lite)/i, 'gemini-3.6-flash'],
@@ -130,6 +137,27 @@ const FAMILY_MATCHERS: Array<[RegExp, string]> = [
   [/gemini.*flash.?lite/i, 'gemini-3.5-flash-lite'],
   [/gemini.*(?:pro|argon|ultra)/i, 'gemini-4-argon'],
   [/gemini.*flash/i, 'gemini-3.8-flash'],
+
+  // Other providers' current models, as served by their own APIs or through an
+  // OpenAI-compatible gateway ("moonshotai/kimi-k3.1-pro", "z-ai/glm-5.3",
+  // "x-ai/grok-4.7"). Exact versions only: an older or newer release of one
+  // of these lines is not scored as the version measured here, since these
+  // lines have moved a long way between releases.
+  [/kimi[\s.-]?k3[-.]1/i, 'kimi-k3.1'],
+  [/kimi[\s.-]?k3(?![-.]?\d)/i, 'kimi-k3'],
+  [/glm[\s.-]?5[-.]3[\s.-]?flash/i, 'glm-5.3-flash'],
+  [/glm[\s.-]?5[-.]3(?![-.]?\d)/i, 'glm-5.3'],
+  [/grok[\s.-]?4[-.]7(?!\d)/i, 'grok-4.7'],
+  [/grok[\s.-]?4[-.]6(?!\d)/i, 'grok-4.6'],
+  [/deepseek[\s.-]?v4[-.]1[\s.-]?flash/i, 'deepseek-v4.1-flash'],
+  [/deepseek[\s.-]?v4[\s.-]?pro/i, 'deepseek-v4-pro'],
+  [/qwen[\s.-]?4[\s.-]?max/i, 'qwen-4-max'],
+  [/qwen[\s.-]?3[-.]8[\s.-]?max/i, 'qwen-3.8-max'],
+  [/minimax[\s.-]?m3[-.]1[\s.-]?flash/i, 'minimax-m3.1-flash'],
+  [/minimax[\s.-]?m3(?![-.]?\d)/i, 'minimax-m3'],
+  [/mistral[\s.-]?large[\s.-]?4(?!\d)/i, 'mistral-large-4'],
+  [/mimo[\s.-]?v2[-.]6[\s.-]?pro/i, 'mimo-v2.6-pro'],
+  [/mimo[\s.-]?v2[-.]6[\s.-]?flash/i, 'mimo-v2.6-flash'],
 
   // Local (Ollama) tags. No current board measures these builds; their
   // scores are carried seeds that only rank local models against each other

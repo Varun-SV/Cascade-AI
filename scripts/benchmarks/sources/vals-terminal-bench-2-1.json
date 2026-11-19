@@ -2,7 +2,7 @@
   "source": "vals-terminal-bench-2-1",
   "label": "Vals AI \u00b7 Terminal-Bench 2.1 (Terminus 2 harness, pass@1)",
   "url": "https://www.vals.ai/benchmarks/terminal-bench-2-1",
-  "capturedAt": "2026-10-28",
+  "capturedAt": "2026-11-19",
   "sourceUpdatedAt": "2026-10-01",
   "provenance": "captured",
   "scale": "percent",
@@ -16,7 +16,7 @@
       "max": 90
     }
   },
-  "note": "ANCHOR for code and agentic: every other code/agentic source is fitted onto this scale over the models both rate (see \"fitTo\"). One harness (Terminus 2), 89 terminal tasks, a task scores only if all its tests pass. Archived by Vals on 2026-10-01 in favour of Terminal-Bench 4.0, so it stops gaining models, but it rates more current models than any other single-harness agentic benchmark. Band 0..90: the frontier (~88%) reads ~97. Rows run under a different harness (Claude Code, Codex, Factory, Cursor) are left out. gemini-3.1-flash-lite is the Preview snapshot (the only one rated).",
+  "note": "ANCHOR for code and agentic: every other code/agentic source is fitted onto this scale over the models both rate (see \"fitTo\"). One harness (Terminus 2), 89 terminal tasks, a task scores only if all its tests pass. Archived by Vals on 2026-10-01 in favour of Terminal-Bench 4.0, so it stops gaining models, but it rates more current models than any other single-harness agentic benchmark. Band 0..90: the frontier (~88%) reads ~97. Rows run under a different harness (Claude Code, Codex, Factory, Cursor) are left out. gemini-3.1-flash-lite is the Preview snapshot (the only one rated). Open and other providers' current versions are captured too (Kimi, GLM, Grok, DeepSeek, Qwen, MiniMax, Mistral Large 4, MiMo), so a model reached through an OpenAI-compatible endpoint is routed on its own scores. Where a board lists a model both undated and as a dated snapshot (DeepSeek V4 / V4 Pro 0813, DeepSeek V4.1 Flash / 1017, Qwen 3.8 Max / 0902), the newest dated snapshot is used: it is what the provider's alias serves. Only the board's own harness counts (Mini-SWE-agent or Terminus 2), never a vendor harness row such as Claude Code, Codex or Factory.",
   "models": {
     "claude-opus-5.5": {
       "code": 87.64,
@@ -50,6 +50,10 @@
       "code": 81.27,
       "agentic": 81.27
     },
+    "kimi-k3": {
+      "code": 80.9,
+      "agentic": 80.9
+    },
     "claude-fable-5": {
       "code": 80.52,
       "agentic": 80.52
@@ -57,6 +61,10 @@
     "gpt-5.6-luna": {
       "code": 79.03,
       "agentic": 79.03
+    },
+    "grok-4.6": {
+      "code": 78.28,
+      "agentic": 78.28
     },
     "gemini-3.7-flash": {
       "code": 77.53,
@@ -70,6 +78,14 @@
       "code": 76.4,
       "agentic": 76.4
     },
+    "mimo-v2.6-flash": {
+      "code": 76.4,
+      "agentic": 76.4
+    },
+    "deepseek-v4.1-flash": {
+      "code": 74.53,
+      "agentic": 74.53
+    },
     "claude-sonnet-5": {
       "code": 74.53,
       "agentic": 74.53
@@ -82,6 +98,10 @@
       "code": 73.78,
       "agentic": 73.78
     },
+    "grok-4.7": {
+      "code": 73.41,
+      "agentic": 73.41
+    },
     "gpt-6-luna": {
       "code": 73.03,
       "agentic": 73.03
@@ -90,6 +110,10 @@
       "code": 71.91,
       "agentic": 71.91
     },
+    "glm-5.3": {
+      "code": 71.54,
+      "agentic": 71.54
+    },
     "gemini-3.1-pro": {
       "code": 70.79,
       "agentic": 70.79
@@ -97,6 +121,18 @@
     "claude-opus-4.7": {
       "code": 68.54,
       "agentic": 68.54
+    },
+    "mimo-v2.6-pro": {
+      "code": 67.79,
+      "agentic": 67.79
+    },
+    "qwen-3.8-max": {
+      "code": 67.42,
+      "agentic": 67.42
+    },
+    "glm-5.3-flash": {
+      "code": 62.92,
+      "agentic": 62.92
     },
     "gemini-4-argon": {
       "code": 57.68,
@@ -110,9 +146,17 @@
       "code": 54.68,
       "agentic": 54.68
     },
+    "deepseek-v4-pro": {
+      "code": 54.68,
+      "agentic": 54.68
+    },
     "gemini-3-flash": {
       "code": 53.93,
       "agentic": 53.93
+    },
+    "minimax-m3": {
+      "code": 53.56,
+      "agentic": 53.56
     },
     "gemini-3.5-flash-lite": {
       "code": 50.19,
