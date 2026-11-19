@@ -44,6 +44,20 @@ extraResources:
     to: "cascade-core/node_modules/bindings"
   - from: "../node_modules/file-uri-to-path"
     to: "cascade-core/node_modules/file-uri-to-path"
+  # sharp (report images: find_image, annotate_image, screenshot crops) stays
+  # external too: it loads a prebuilt libvips for the platform from @img/*, which
+  # npm installs for the build machine (the release job adds the other macOS
+  # arch). No Electron rebuild: sharp uses Node-API, which is ABI-stable. Without
+  # it those tools say they're unavailable; nothing else depends on it.
+  - from: "../node_modules/sharp"
+    to: "cascade-core/node_modules/sharp"
+    filter: ["**/*", "!src/**", "!install/**"]
+  - from: "../node_modules/@img"
+    to: "cascade-core/node_modules/@img"
+  - from: "../node_modules/detect-libc"
+    to: "cascade-core/node_modules/detect-libc"
+  - from: "../node_modules/semver"
+    to: "cascade-core/node_modules/semver"
   # isolated-vm is deliberately NOT shipped: it can't link against Electron's
   # V8 on Windows and Electron ABIs never match its Node prebuilds, so inside
   # the app it could never load — the embedded core's dynamic tools use the

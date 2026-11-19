@@ -48,10 +48,9 @@ export const ALLOWED_COMMANDS: ReadonlySet<string> = new Set([
 /** Denied whatever the allowlist says, so a bad edit to it can't open these. */
 export const ALWAYS_DENIED_PREFIXES: readonly string[] = ['Fetch.', 'Storage.', 'SystemInfo.', 'Browser.'];
 export const ALWAYS_DENIED: ReadonlySet<string> = new Set([
-  // No picture of the user's page leaves their device, from the CLI or the
-  // extension: both tell the user so when they approve. The server doesn't ask
-  // for one on a device run, and this holds even if it did (policy 4).
-  'Page.captureScreenshot',
+  // No moving picture of the user's page ever leaves their device. A still
+  // picture leaves only if they allowed screenshots when they approved the run
+  // (see checkCommand and CommandContext.screenshots): off by default.
   'Page.startScreencast',
   'Network.clearBrowserCookies',
   'Network.deleteCookies',
@@ -103,7 +102,16 @@ export type CommandDecision = { forward: true } | { forward: false; reason: stri
 export interface CommandContext {
   /** The tab's session and nested sessions it announced on a consented site. */
   knownSessions: ReadonlySet<string>;
+  /**
+   * The person allowed screenshots of the run's sites when they approved it
+   * (for the run's report). Without it, no picture of the page leaves the
+   * device, whatever the server asks.
+   */
+  screenshots?: boolean;
 }
+
+/** Largest screenshot side allowed, in CSS pixels: a viewport, not a whole page. */
+const MAX_SHOT_EDGE = 4096;
 
 const refuse = (reason: string): CommandDecision => ({ forward: false, reason: `Denied by Cascade relay policy: ${reason}` });
 
@@ -111,6 +119,17 @@ export function checkCommand(frame: CommandFrame, ctx: CommandContext): CommandD
   const { method, params, sessionId } = frame;
   if (ALWAYS_DENIED.has(method) || ALWAYS_DENIED_PREFIXES.some((p) => method.startsWith(p))) return refuse(method);
   if (sessionId === undefined || !ctx.knownSessions.has(sessionId)) return refuse(`unknown session for ${method}`);
+  if (method === 'Page.captureScreenshot') {
+    if (ctx.screenshots !== true) return refuse(method);
+    // What is on screen, as a still JPEG or PNG: never the whole page beyond the
+    // viewport, never an oversized surface.
+    if (params.format !== undefined && params.format !== 'jpeg' && params.format !== 'png') return refuse('Page.captureScreenshot in that format');
+    if (params.captureBeyondViewport === true) return refuse('Page.captureScreenshot beyond the viewport');
+    const clip = params.clip as { width?: unknown; height?: unknown } | undefined;
+    if (clip !== undefined && (typeof clip !== 'object' || clip === null || !(Number(clip.width) > 0) || !(Number(clip.height) > 0)
+      || Number(clip.width) > MAX_SHOT_EDGE || Number(clip.height) > MAX_SHOT_EDGE)) return refuse('Page.captureScreenshot of that area');
+    return { forward: true };
+  }
   if (!ALLOWED_COMMANDS.has(method)) return refuse(`${method} is not on the allowlist`);
   if (method === 'Page.navigate') {
     const url = String(params.url ?? '');

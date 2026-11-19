@@ -35,7 +35,7 @@ export interface RelayCdpClient {
 }
 
 export interface Consent { readonly origins: ReadonlySet<string>; readonly privateOrigins: ReadonlySet<string> }
-export interface UserConsent { allowedOrigins: string[]; privateOrigins: string[]; anyPublic?: boolean }
+export interface UserConsent { allowedOrigins: string[]; privateOrigins: string[]; anyPublic?: boolean; screenshots?: boolean }
 
 export interface RelayCore {
   startEgressProxy(opts: { consent: Consent }): Promise<{

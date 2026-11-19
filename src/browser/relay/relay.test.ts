@@ -877,3 +877,73 @@ describe('the page the user moved to during a takeover is the page the agent has
     await s.done();
   });
 });
+
+describe('the screenshot guard, as the page receives it', () => {
+  it('parses, and splits a list of label ids on whitespace (Codex on 7dca271)', async () => {
+    const { SHOT_GUARD_ON, SHOT_GUARD_OFF } = await import('./relay.js');
+    expect(() => new Function(SHOT_GUARD_ON)).not.toThrow();
+    expect(() => new Function(SHOT_GUARD_OFF)).not.toThrow();
+    // A backslash a template literal ate would leave split(/s+/), which splits on the letter s.
+    expect(SHOT_GUARD_ON).toContain(String.raw`split(/\s+/)`);
+    expect(SHOT_GUARD_ON).not.toContain('split(/s+/)');
+  });
+});
+
+describe('screenshots, one at a time (Codex on 7dca271)', () => {
+  it('a second picture asked for during the first is never taken after the first one took the blur off', async () => {
+    const { SHOT_GUARD_ON, SHOT_GUARD_OFF } = await import('./relay.js');
+    // A tab that says whether the blur was on when each picture was taken. It
+    // answers the second guard late, as a busy page can: without turns, the
+    // first picture's clean-up then lands before the second picture.
+    let blurred = false;
+    let guards = 0;
+    const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+    await new Promise((r) => wss.once('listening', r));
+    wss.on('connection', (ws) => ws.on('message', (raw) => {
+      const { id, method, params } = JSON.parse(String(raw)) as { id: number; method: string; params?: { expression?: string } };
+      const reply = (result: object, after = 0) => setTimeout(() => ws.send(JSON.stringify({ id, result })), after);
+      if (method === 'Runtime.evaluate' && params?.expression === SHOT_GUARD_ON) { blurred = true; guards += 1; reply({ result: { type: 'boolean', value: true } }, guards === 2 ? 300 : 0); return; }
+      if (method === 'Runtime.evaluate' && params?.expression === SHOT_GUARD_OFF) { blurred = false; reply({ result: { type: 'boolean', value: true } }); return; }
+      if (method === 'DOM.getDocument') { reply({ root: { nodeId: 1, nodeType: 9, children: [] } }); return; }
+      if (method === 'Page.getFrameTree') { reply({ frameTree: { frame: { id: 'main' } } }); return; }
+      if (method === 'Page.createIsolatedWorld') { reply({ executionContextId: 7 }); return; }
+      if (method === 'Page.captureScreenshot') { reply({ data: blurred ? 'BLURRED' : 'CLEAR' }); return; }
+      reply({ result: { type: 'number', value: 1 } });
+    }));
+    try {
+      const lease = createTabLease();
+      lease.promote(lease.reserve()!, { expiresAt: Date.now() + 60_000 });
+      const relay = createDeviceRelay({
+        tabWs: `ws://127.0.0.1:${(wss.address() as AddressInfo).port}/`, consent: makeConsent(['https://a.test'], [], { screenshots: true }),
+        lease, enforcer, pageEnd: 'close',
+      });
+      const agent = fakeAgent();
+      const out = sent(agent);
+      void relay.serve(agent as unknown as WebSocket);
+      const shot = (id: number) => JSON.stringify({ id, method: 'Page.captureScreenshot', params: { format: 'png' }, sessionId: 'cascade-tab-1' });
+      agent.emit('message', shot(1));
+      agent.emit('message', shot(2));
+      await vi.waitFor(() => expect(out.filter((f) => /"id":[12],/.test(f))).toHaveLength(2), { timeout: 5000 });
+      const data = out.map((f) => JSON.parse(f) as { id?: number; result?: { data?: string } }).filter((f) => f.id === 1 || f.id === 2).map((f) => f.result?.data);
+      expect(data).toEqual(['BLURRED', 'BLURRED']);
+    } finally { wss.close(); }
+  });
+});
+
+describe('closedRootHolds: what a closed shadow root may not hide from a screenshot', () => {
+  const closed = (...children: object[]) => ({ nodeType: 9, children: [{ nodeType: 1, nodeName: 'X-WIDGET', shadowRoots: [{ nodeType: 11, shadowRootType: 'closed', children }] }] });
+  it('a typed field, a frame, or a custom widget by its role (Codex on d3d8764)', async () => {
+    const { closedRootHolds } = await import('./relay.js');
+    expect(closedRootHolds(closed({ nodeType: 1, nodeName: 'INPUT', attributes: ['type', 'password'] }))).toBe(true);
+    expect(closedRootHolds(closed({ nodeType: 1, nodeName: 'IFRAME' }))).toBe(true);
+    for (const role of ['textbox', 'spinbutton', 'searchbox', 'combobox', 'listbox', 'presentation textbox']) {
+      expect(closedRootHolds(closed({ nodeType: 1, nodeName: 'DIV', attributes: ['role', role] })), role).toBe(true);
+    }
+  });
+  it('but not text, a button, or anything in an open root', async () => {
+    const { closedRootHolds } = await import('./relay.js');
+    expect(closedRootHolds(closed({ nodeType: 1, nodeName: 'P' }, { nodeType: 1, nodeName: 'INPUT', attributes: ['type', 'checkbox'] }, { nodeType: 1, nodeName: 'DIV', attributes: ['role', 'button'] }))).toBe(false);
+    const open = { nodeType: 9, children: [{ nodeType: 1, nodeName: 'X', shadowRoots: [{ nodeType: 11, shadowRootType: 'open', children: [{ nodeType: 1, nodeName: 'DIV', attributes: ['role', 'textbox'] }] }] }] };
+    expect(closedRootHolds(open)).toBe(false);
+  });
+});

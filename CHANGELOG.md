@@ -5,6 +5,43 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.90.0 - 2026-11-19
+
+### Added
+- **Reports use real pictures, not generated ones.** Two new tools, both free:
+  - `find_image` finds a real picture of a real thing, such as a product, a
+    place or a person. It looks on the page itself (its chosen picture, its
+    product data, its large images) or on Wikimedia Commons. The picture is
+    saved with a caption naming where it came from (site, author, licence),
+    and the report keeps that caption under it. Workers are told to use it,
+    or a screenshot, before `generate_image`, which is now for things that
+    don't exist yet. Image generation costs money; these don't.
+  - `annotate_image` circles, boxes, points to, highlights, labels, numbers or
+    blurs parts of a screenshot or picture, and saves a marked copy. On a
+    screenshot, a control can be marked by its ref (`e14`), not only by
+    coordinates.
+- **Screenshots for reports from browser control.** `browser_control`'s new
+  `capture` action saves what's on screen (or one control, by ref) as an image
+  for the report, with a caption naming the site and date. The picture goes
+  into the report and is not sent to the model. The same privacy check as
+  other screenshots applies: none while a password, card or one-time-code
+  field is on screen.
+- **Screenshots from your own browser, if you allow them.** The extension's,
+  desktop app's and CLI's approval for a run has a new choice, off by default:
+  *Let Cascade take screenshots of these sites for your report*. Your device
+  enforces it. Without it, a screenshot is refused there whatever the server
+  asks. With it, the device takes still pictures of the run's window only:
+  never a recording, never past the visible window, never of a frame on its
+  own. Password, card and one-time-code fields, and frames from other sites,
+  are blurred in each picture, including inside web components' open shadow
+  roots. A page with a field or frame in a closed shadow root, which no script
+  can blur, gets no picture. Older devices keep refusing screenshots, so
+  runs on them fall back to `find_image`. Chrome extension 0.3.0.
+
+### Changed
+- The desktop app ships `sharp` for the image tools. If it can't load on a
+  machine, those tools say so and everything else works. The cloud image
+  installs a font so labels on marked images render.
 ## 0.89.1 - 2026-11-19
 
 ### Fixed

@@ -29,6 +29,11 @@
 
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
+import { type Box, type ImageAssets, ImageToolsUnavailableError, captionFor, loadSharp } from '../media/report-images.js';
+import { uniqueName } from './report-images.js';
+
+/** Saves a picture where generated media go, and says where (a workspace path, a file address). */
+export type ReportImageSink = (asset: { data: Buffer; mimeType: string; filename: string }) => Promise<string>;
 
 /** One thing to do to the open page. */
 export interface BrowserAction {
@@ -83,6 +88,12 @@ export interface BrowserAction {
   screenshot?: true;
   /** With `screenshot`: draw each listed ref on it, on a copy, outside the page. */
   marked?: true;
+  /**
+   * With `observe`: take a clean picture for a report, whatever the model can
+   * see, and say where each listed control is on it (`boxes`). Set by the
+   * tool's `capture` action.
+   */
+  capture?: true;
 }
 
 export interface BrowserActionOutcome {
@@ -119,6 +130,8 @@ export interface BrowserActionOutcome {
    * was on screen or the page could not be checked. `view` says why.
    */
   imageWithheld?: true;
+  /** With `capture`: where each control the page view lists is on the picture, in its pixels. */
+  boxes?: Array<{ ref: string; x: number; y: number; w: number; h: number }>;
   /**
    * The action may or may not have run: the browser did not confirm it in
    * time. Nothing from the earlier page view may be acted on until the page
@@ -146,6 +159,13 @@ export interface BrowserControlFeatures {
    * can't take back. See `forApproval`.
    */
   askedOnDevice?: boolean;
+  /**
+   * Where `capture` saves the screenshots it takes for reports. Without it
+   * there is no `capture` action. A host offers it whether or not the model
+   * can see pictures: the picture is for the report, not for the model. On the
+   * person's own browser, their device decides whether one may be taken.
+   */
+  reportImages?: { assets: ImageAssets; sink: ReportImageSink };
 }
 
 const BASIC_ACTIONS = ['navigate', 'click', 'fill', 'press', 'wait_for', 'extract_text'] as const;
@@ -285,6 +305,9 @@ export class BrowserControlTool extends BaseTool {
   private marked: boolean;
   /** The person's own browser, approved on the device. Fixed at registration. */
   private askedOnDevice: boolean;
+  /** Where `capture` saves its pictures; none, no `capture`. Fixed at registration. */
+  private reportImages?: { assets: ImageAssets; sink: ReportImageSink };
+  private captures = 0;
   /**
    * Per run and worker: what its latest page view called each ref, and the page it was
    * on. The approval prompt names the element from it, so a person approves
@@ -301,11 +324,12 @@ export class BrowserControlTool extends BaseTool {
     this.screenshots = this.pageView && features.screenshots === true;
     this.marked = this.screenshots && features.marked === true;
     this.askedOnDevice = features.askedOnDevice === true;
+    if (this.pageView && features.reportImages) this.reportImages = features.reportImages;
     // The model is offered only what this host can do. A host without page
     // views gets exactly the six-action tool it always had, so nothing there
     // can name an action the host would have to refuse.
-    this.description = this.pageView ? VIEW_DESCRIPTION : BASIC_DESCRIPTION;
-    this.inputSchema = this.pageView ? VIEW_SCHEMA : BASIC_SCHEMA;
+    this.description = this.pageView ? VIEW_DESCRIPTION + (this.reportImages ? CAPTURE_DESCRIPTION : '') : BASIC_DESCRIPTION;
+    this.inputSchema = this.pageView ? (this.reportImages ? CAPTURE_SCHEMA : VIEW_SCHEMA) : BASIC_SCHEMA;
   }
 
   /**
@@ -490,8 +514,9 @@ export class BrowserControlTool extends BaseTool {
 
     // Validated here rather than in the host so the model gets a specific,
     // correctable message instead of a generic failure from three layers down.
-    const allowed: readonly string[] = this.pageView ? VIEW_ACTIONS : BASIC_ACTIONS;
+    const allowed: readonly string[] = this.pageView ? (this.reportImages ? CAPTURE_ACTIONS : VIEW_ACTIONS) : BASIC_ACTIONS;
     if (!allowed.includes(kind)) return `Error: "${String(kind)}" is not something this browser can do.`;
+    if ((kind as string) === 'capture') return this.capture(input, options ?? {} as ToolExecuteOptions);
     if (!this.pageView && input['ref'] !== undefined) {
       return 'Error: this browser takes CSS selectors, not refs.';
     }
@@ -580,6 +605,78 @@ export class BrowserControlTool extends BaseTool {
     }
     return `${outcome.ok ? '' : 'Failed: '}${outcome.detail}${where}${shown}`;
   }
+
+  /**
+   * `capture`: a screenshot of the page for a report, saved where generated
+   * media go, with where each listed control is on it so annotate_image can
+   * mark one by its ref. With a ref, the picture is cropped to that control
+   * and what is around it. It is not shown to the model: it is for the report.
+   * The same protections apply as to any screenshot: none while a password,
+   * card or one-time-code field is on screen, and on the person's own browser
+   * none unless they allowed screenshots for the run.
+   */
+  private async capture(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
+    const images = this.reportImages!;
+    const sessionId = options.sessionId ?? '';
+    const actorId = options.tierId ?? sessionId;
+    const ref = typeof input['ref'] === 'string' ? input['ref'] : undefined;
+    if (ref !== undefined && !REF_PATTERN.test(ref)) return 'Error: ref must look like e14, from the latest page view.';
+    let outcome: BrowserActionOutcome;
+    try {
+      outcome = await this.controller({ kind: 'observe', pageView: true, screenshot: true, capture: true }, {
+        sessionId, actorId, ...(options.signal ? { signal: options.signal } : {}),
+      });
+    } catch (err) {
+      return `Error: the browser could not capture the page — ${err instanceof Error ? err.message : String(err)}`;
+    }
+    this.remember(sessionId, actorId, outcome);
+    if (!outcome.image) {
+      const why = outcome.view?.text.split('\n').reverse().find((l) => l.startsWith('No screenshot')) ?? 'No screenshot could be taken.';
+      return `${outcome.ok ? '' : 'Failed: '}${why}`;
+    }
+    let bytes: Buffer = Buffer.from(outcome.image.data, 'base64');
+    let { width, height } = outcome.image;
+    let boxes: Record<string, Box> = Object.fromEntries((outcome.boxes ?? []).map((b) => [b.ref, { x: b.x, y: b.y, w: b.w, h: b.h }]));
+    if (ref) {
+      const at = Object.hasOwn(boxes, ref) ? boxes[ref] : undefined;
+      if (!at) return `Error: ${ref} is not on screen in the page view just taken. Scroll it into view (scroll with its ref) and capture again.`;
+      const sharp = await loadSharp();
+      // Asked for one control, the whole screen is not an answer.
+      if (!sharp) return `Error: ${new ImageToolsUnavailableError().message} Capture without a ref to save the whole view.`;
+      {
+        const pad = 48;
+        const x = Math.max(0, Math.floor(at.x - pad));
+        const y = Math.max(0, Math.floor(at.y - pad));
+        const w = Math.min(width - x, Math.ceil(at.w + 2 * pad));
+        const h = Math.min(height - y, Math.ceil(at.h + 2 * pad));
+        bytes = await sharp(bytes).extract({ left: x, top: y, width: w, height: h }).jpeg({ quality: 90 }).toBuffer();
+        width = w; height = h;
+        boxes = Object.fromEntries(Object.entries(boxes)
+          .map(([r, b]) => [r, { x: b.x - x, y: b.y - y, w: b.w, h: b.h }] as const)
+          .filter(([, b]) => b.x >= 0 && b.y >= 0 && b.x + b.w <= w && b.y + b.h <= h));
+      }
+    }
+    const host = hostOf(outcome.url)?.replace(/^www\./, '') ?? 'page';
+    const name = uniqueName(`screenshot-${host.replace(/[^a-z0-9.-]+/gi, '-')}-${++this.captures}`, 'jpg');
+    let locator: string;
+    try {
+      locator = await images.sink({ data: bytes, mimeType: 'image/jpeg', filename: name });
+    } catch (err) {
+      return `Error: the screenshot could not be saved — ${err instanceof Error ? err.message : String(err)}`;
+    }
+    const source = { kind: 'screenshot' as const, ...(outcome.url ? { page: outcome.url } : {}), capturedAt: new Date().toISOString() };
+    images.assets.set(locator, { bytes, mime: 'image/jpeg', width, height, source, boxes });
+    const labels = outcome.view?.labels ?? {};
+    const listed = Object.entries(boxes).slice(0, 30)
+      .map(([r, b]) => `  ${r} ${labels[r] ?? ''} at [${Math.round(b.x)}, ${Math.round(b.y)}, ${Math.round(b.w)}, ${Math.round(b.h)}]`);
+    const title = (outcome.title || host).replace(/[[\]\n]/g, ' ').slice(0, 80);
+    return [
+      `Saved a screenshot of ${outcome.title ? `${outcome.title} — ` : ''}${outcome.url ?? 'the page'}: ${locator} (${width}×${height}). It is not shown to you; it is for the report.`,
+      `![${title}](${locator})`,
+      `*${captionFor(source)}*`,
+      ...(listed.length ? ['Controls on it (ref, name, [x, y, width, height]); annotate_image can mark one by ref:', ...listed] : []),
+    ].join('\n');
+  }
 }
 
 const BASIC_DESCRIPTION =
@@ -618,6 +715,12 @@ const BASIC_SCHEMA = {
   required: ['action'],
 };
 
+const CAPTURE_DESCRIPTION =
+  ' capture saves a screenshot of the page for a report (with ref: cropped to that control) and lists where each control is on it; mark it up with annotate_image. Use it for pictures of what the run saw; for pictures of products or places use find_image.';
+
+/** VIEW_ACTIONS and capture, for a host that saves report screenshots. */
+const CAPTURE_ACTIONS = [...VIEW_ACTIONS, 'capture'] as const;
+
 const VIEW_SCHEMA = {
   type: 'object',
   properties: {
@@ -641,6 +744,15 @@ const VIEW_SCHEMA = {
     timeoutMs: { type: 'number', description: 'For wait_for: how long to wait before giving up (default 10000, max 30000).' },
   },
   required: ['action'],
+};
+
+const CAPTURE_SCHEMA = {
+  ...VIEW_SCHEMA,
+  properties: {
+    ...VIEW_SCHEMA.properties,
+    action: { ...VIEW_SCHEMA.properties.action, enum: [...CAPTURE_ACTIONS], description: 'What to do. observe describes the page without changing it; capture saves a screenshot of it for a report.' },
+    ref: { ...VIEW_SCHEMA.properties.ref, description: `${VIEW_SCHEMA.properties.ref.description} For capture: crop the screenshot to that control and what is around it.` },
+  },
 };
 
 /** The host of an http(s) address, or undefined. */

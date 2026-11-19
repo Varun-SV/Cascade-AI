@@ -12,7 +12,7 @@ Only while a run you have approved is open, and only from that run's own window,
 - the text and structure of those pages;
 - what the run types or clicks in that window.
 
-This is sent so the run can carry out the task you gave it. Nothing is sent from your other tabs or windows, and nothing at all when no run is open. No screenshots or recordings of your screen are taken or sent.
+This is sent so the run can carry out the task you gave it. Nothing is sent from your other tabs or windows, and nothing at all when no run is open. No recordings of your screen are ever taken or sent. Screenshots are taken only if you tick "Let Cascade take screenshots of these sites for your report" when you allow a run: then the run's server receives still pictures of the run's window (never your other tabs or windows), with password, card and one-time-code fields and frames from other sites blurred. They go into the report you asked for.
 
 ## What stays on your computer
 

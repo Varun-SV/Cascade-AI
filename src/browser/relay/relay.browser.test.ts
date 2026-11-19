@@ -35,6 +35,7 @@ interface PwPage {
   goForward(o: object): Promise<unknown>;
   waitForLoadState(s: string, o?: object): Promise<unknown>;
   on(e: string, f: (x: { dismiss(): Promise<void> }) => void): void;
+  screenshot(o?: object): Promise<Buffer>;
 }
 interface PwBrowser { contexts(): { pages(): PwPage[]; waitForEvent(e: string, o: object): Promise<PwPage>; newCDPSession(p: PwPage): Promise<{ send(m: string, p?: object): Promise<unknown> }> }[]; close(): Promise<void> }
 const pw = await import('playwright') as unknown as {
@@ -159,6 +160,16 @@ async function startRig(opts: {
         res.end('<!doctype html>from the cache');
         return true;
       case '/sw-import.js': res.setHeader('content-type', 'text/javascript'); res.end("importScripts('http://flip.test/imported.js');"); return true;
+      case '/csp-style':
+        // A site that allows no inline style at all: an inserted <style> is refused.
+        res.setHeader('content-type', 'text/html');
+        res.setHeader('Content-Security-Policy', "style-src 'self'");
+        res.end('<!doctype html><link rel=stylesheet href="/csp-style.css"><body><input id=pw type=password value=hunter2><div id=plain></div></body>');
+        return true;
+      case '/csp-style.css':
+        res.setHeader('content-type', 'text/css');
+        res.end('body{margin:0;background:#fff}#pw,#plain{position:absolute;top:100px;width:300px;height:150px;background:#000;border:0;outline:0}#pw{left:100px}#plain{left:500px}');
+        return true;
       case '/csp':
         res.setHeader('content-type', 'text/html');
         res.setHeader('Content-Security-Policy', "img-src 'none'; report-uri http://offlist.test/csp-report");
@@ -329,6 +340,198 @@ suite('P1 in a real browser', { timeout: 60_000 }, () => {
     const r = await startRig();
     await expect(r.page.goto('file:///etc/hostname')).rejects.toThrow();
     expect(r.relay.refusals.join()).toContain('Page.navigate to file:');
+  });
+});
+
+suite('screenshots the person allowed', { timeout: 60_000 }, () => {
+  const PAGE = '<!doctype html><body style="margin:0;background:#fff">'
+    + '<input id=pw type=password value=hunter2 style="position:absolute;left:100px;top:100px;width:300px;height:150px;background:#000;border:0;outline:0">'
+    + '<div id=plain style="position:absolute;left:500px;top:100px;width:300px;height:150px;background:#000"></div></body>';
+  it('without the opt-in, a screenshot is refused at the device and nothing is taken', async () => {
+    const r = await startRig();
+    await expect(r.page.screenshot({ type: 'jpeg', timeout: 5000 })).rejects.toThrow(/Denied by Cascade relay policy: Page.captureScreenshot/);
+  });
+  it('with it, the picture comes back with password fields blurred, and the page is left as it was', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    await r.page.evaluate(`document.open(); document.write(${JSON.stringify(PAGE)}); document.close(); true`);
+    const shot = await r.page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 900, height: 300 } });
+    const sharp = (await import('sharp')).default;
+    const { data, info } = await sharp(shot).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const at = (x: number, y: number) => data[(y * info.width + x) * info.channels]!;
+    // Just inside each black box's corner: the plain one is sharp, the password field is not.
+    expect(at(503, 103)).toBeLessThan(20);
+    expect(at(103, 103)).toBeGreaterThan(40);
+    expect(await r.page.evaluate('!!document.querySelector("[data-cascade-shot-blur]")')).toBe(false);
+    expect(await r.page.evaluate('getComputedStyle(document.getElementById("pw")).filter')).toBe('none');
+  });
+  it('a password field inside a same-site frame is blurred too (Codex on 53a9cae)', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    const inner = '<body style="margin:0;background:#fff"><input type=password value=hunter2 style="position:absolute;left:20px;top:20px;width:200px;height:100px;background:#000;border:0;outline:0"></body>';
+    const page = '<!doctype html><body style="margin:0;background:#fff">'
+      + `<iframe srcdoc='${inner}' style="position:absolute;left:100px;top:100px;width:300px;height:200px;border:0"></iframe>`
+      + '<div style="position:absolute;left:500px;top:120px;width:200px;height:100px;background:#000"></div></body>';
+    await r.page.evaluate(`document.open(); document.write(${JSON.stringify(page)}); document.close(); new Promise((res) => { const f = document.querySelector('iframe'); if (f.contentDocument && f.contentDocument.readyState === 'complete' && f.contentDocument.querySelector('input')) res(true); else f.onload = () => res(true); })`);
+    const shot = await r.page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 900, height: 400 } });
+    const sharp = (await import('sharp')).default;
+    const { data, info } = await sharp(shot).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const at = (x: number, y: number) => data[(y * info.width + x) * info.channels]!;
+    expect(at(503, 123)).toBeLessThan(20);
+    // The field's corner, inside the frame: 100 + 20 + 3.
+    expect(at(123, 123)).toBeGreaterThan(40);
+    expect(await r.page.evaluate('getComputedStyle(document.querySelector("iframe").contentDocument.querySelector("input")).filter')).toBe('none');
+  });
+
+  it('on a site whose CSP refuses inline styles, the field is still blurred (Codex on 7c8ae02)', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    await r.page.goto('http://allowed.test/csp-style');
+    // The control: this site does refuse an inserted stylesheet.
+    expect(await r.page.evaluate("(() => { const s = document.createElement('style'); s.textContent = '#plain{filter:blur(12px)}'; document.head.append(s); return getComputedStyle(document.getElementById('plain')).filter; })()")).toBe('none');
+    const shot = await r.page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 900, height: 300 } });
+    const sharp = (await import('sharp')).default;
+    const { data, info } = await sharp(shot).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const at = (x: number, y: number) => data[(y * info.width + x) * info.channels]!;
+    expect(at(503, 103)).toBeLessThan(20);
+    expect(at(103, 103)).toBeGreaterThan(40);
+    expect(await r.page.evaluate('getComputedStyle(document.getElementById("pw")).filter')).toBe('none');
+  });
+
+  it('keeps a filter the page set on a field, and gives it back after the picture', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    await r.page.evaluate(`document.open(); document.write(${JSON.stringify(PAGE)}); document.close(); document.getElementById('pw').style.setProperty('filter', 'grayscale(1)'); true`);
+    await r.page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 900, height: 300 } });
+    expect(await r.page.evaluate('document.getElementById("pw").style.filter')).toBe('grayscale(1)');
+  });
+
+  it('a password field inside an open shadow root is blurred (Codex on 47a547c)', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    await r.page.evaluate(`document.open(); document.write('<!doctype html><body style="margin:0;background:#fff"><x-login></x-login><div style="position:absolute;left:500px;top:100px;width:300px;height:150px;background:#000"></div></body>'); document.close();
+      const host = document.querySelector('x-login');
+      host.attachShadow({ mode: 'open' }).innerHTML = '<input type=password value=hunter2 style="position:absolute;left:100px;top:100px;width:300px;height:150px;background:#000;border:0;outline:0">';
+      true`);
+    const shot = await r.page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 900, height: 300 } });
+    const sharp = (await import('sharp')).default;
+    const { data, info } = await sharp(shot).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const at = (x: number, y: number) => data[(y * info.width + x) * info.channels]!;
+    expect(at(503, 103)).toBeLessThan(20);
+    expect(at(103, 103)).toBeGreaterThan(40);
+    expect(await r.page.evaluate('getComputedStyle(document.querySelector("x-login").shadowRoot.querySelector("input")).filter')).toBe('none');
+  });
+
+  it('a field inside a closed shadow root, which no script can blur, means no picture (Codex on 47a547c)', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    await r.page.evaluate(`document.querySelector('body').attachShadow({ mode: 'closed' }).innerHTML = '<input type=password value=hunter2>'; true`);
+    await expect(r.page.screenshot({ type: 'png', timeout: 5000 })).rejects.toThrow(/cannot blur/);
+    // A closed root with nothing typed in it is no reason to refuse.
+    await r.page.goto('http://allowed.test/');
+    await r.page.evaluate(`document.querySelector('body').attachShadow({ mode: 'closed' }).innerHTML = '<p>hello</p>'; true`);
+    expect((await r.page.screenshot({ type: 'png' })).length).toBeGreaterThan(100);
+  });
+
+  it('a field whose filter is set to ease in slowly is blurred at full strength in the picture (Codex on 3a31301)', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    await r.page.evaluate(`document.open(); document.write(${JSON.stringify(PAGE)}); document.close();
+      const pw = document.getElementById('pw'); pw.style.setProperty('transition', 'filter 10s linear'); true`);
+    const shot = await r.page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 900, height: 300 } });
+    const sharp = (await import('sharp')).default;
+    const { data, info } = await sharp(shot).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const at = (x: number, y: number) => data[(y * info.width + x) * info.channels]!;
+    expect(at(503, 103)).toBeLessThan(20);
+    expect(at(103, 103)).toBeGreaterThan(40);
+    // And the page's own transition is back after.
+    expect(await r.page.evaluate('document.getElementById("pw").style.transition')).toBe('filter 10s linear');
+  });
+
+  it('a password shown in clear, a code known only by its label, and a card number by its placeholder are blurred too (Codex on 0c23f46)', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    const box = (left: number, top: number) => `position:absolute;left:${left}px;top:${top}px;width:150px;height:80px;background:#000;color:#000;border:0;outline:0`;
+    const page = '<!doctype html><body style="margin:0;background:#fff">'
+      + `<input type=text name=pass autocomplete=current-password value=hunter2 style="${box(20, 20)}">`
+      + `<label for=c style="position:absolute;left:0;top:200px">Verification code</label><input id=c value=123456 style="${box(200, 20)}">`
+      + `<input placeholder="1234 1234 1234 1234" value=4242 style="${box(380, 20)}">`
+      + `<input name=city value=Pune style="${box(560, 20)}"></body>`;
+    await r.page.evaluate(`document.open(); document.write(${JSON.stringify(page)}); document.close(); true`);
+    const shot = await r.page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 800, height: 150 } });
+    const sharp = (await import('sharp')).default;
+    const { data, info } = await sharp(shot).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const at = (x: number, y: number) => data[(y * info.width + x) * info.channels]!;
+    for (const x of [23, 203, 383]) expect(at(x, 23), `field at ${x}`).toBeGreaterThan(40);
+    // An ordinary field stays as it is.
+    expect(at(563, 23)).toBeLessThan(20);
+  });
+
+  it('a field named only by aria-labelledby is blurred (Codex on 7dca271)', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    const page = '<!doctype html><body style="margin:0;background:#fff"><span id=lead style="position:absolute;left:0;top:250px">Your</span><span id=password-label style="position:absolute;left:60px;top:250px">password</span>'
+      + '<input aria-labelledby="lead password-label" value=hunter2 style="position:absolute;left:100px;top:100px;width:300px;height:150px;background:#000;color:#000;border:0;outline:0">'
+      + '<div style="position:absolute;left:500px;top:100px;width:300px;height:150px;background:#000"></div></body>';
+    await r.page.evaluate(`document.open(); document.write(${JSON.stringify(page)}); document.close(); true`);
+    const shot = await r.page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 900, height: 300 } });
+    const sharp = (await import('sharp')).default;
+    const { data, info } = await sharp(shot).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const at = (x: number, y: number) => data[(y * info.width + x) * info.channels]!;
+    expect(at(503, 103)).toBeLessThan(20);
+    expect(at(103, 103)).toBeGreaterThan(40);
+  });
+
+  it('a field in a shadow root named by a label in that same root is blurred (Codex on 582e919)', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    await r.page.evaluate(`document.open(); document.write('<!doctype html><body style="margin:0;background:#fff"><x-login></x-login><div style="position:absolute;left:500px;top:100px;width:300px;height:150px;background:#000"></div></body>'); document.close();
+      document.querySelector('x-login').attachShadow({ mode: 'open' }).innerHTML = '<span id=pl style="position:absolute;left:0;top:260px">Password</span><input aria-labelledby=pl value=hunter2 style="position:absolute;left:100px;top:100px;width:300px;height:150px;background:#000;color:#000;border:0;outline:0">';
+      true`);
+    const shot = await r.page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 900, height: 300 } });
+    const sharp = (await import('sharp')).default;
+    const { data, info } = await sharp(shot).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const at = (x: number, y: number) => data[(y * info.width + x) * info.channels]!;
+    expect(at(503, 103)).toBeLessThan(20);
+    expect(at(103, 103)).toBeGreaterThan(40);
+  });
+
+  it("a page that redefines its own DOM methods can't hide a field from the guard (Codex on 7c776e6)", async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    await r.page.evaluate(`document.open(); document.write(${JSON.stringify(PAGE)}); document.close();
+      document.querySelectorAll = () => [];
+      Document.prototype.querySelectorAll = () => [];
+      Element.prototype.querySelectorAll = () => [];
+      window.getComputedStyle = () => ({ filter: 'blur(99px)' });
+      CSSStyleDeclaration.prototype.setProperty = () => {};
+      true`);
+    const shot = await r.page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 900, height: 300 } });
+    const sharp = (await import('sharp')).default;
+    const { data, info } = await sharp(shot).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const at = (x: number, y: number) => data[(y * info.width + x) * info.channels]!;
+    expect(at(503, 103)).toBeLessThan(20);
+    expect(at(103, 103)).toBeGreaterThan(40);
+  });
+
+  it('an <object> or <embed> on the page is blurred whole (Codex on e5fb6eb)', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    await r.page.evaluate(`document.open(); document.write('<!doctype html><body><object id=o type="text/html" data="/" width=300 height=150></object><embed id=e type="text/html" src="/" width=300 height=150></body>'); document.close(); true`);
+    const { SHOT_GUARD_ON, SHOT_GUARD_OFF } = await import('./relay.js');
+    expect(await r.page.evaluate(SHOT_GUARD_ON)).toBe(true);
+    expect(await r.page.evaluate('[getComputedStyle(document.getElementById("o")).filter, getComputedStyle(document.getElementById("e")).filter]')).toEqual(['blur(12px)', 'blur(12px)']);
+    await r.page.evaluate(SHOT_GUARD_OFF);
+    expect(await r.page.evaluate('getComputedStyle(document.getElementById("o")).filter')).toBe('none');
+  });
+
+  it('a screenshot past the viewport is refused even with the opt-in', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent, raw: true });
+    const res = await r.command('Page.captureScreenshot', { captureBeyondViewport: true }) as { error?: { message: string } };
+    expect(res.error?.message).toContain('beyond the viewport');
+    const ok = await r.command('Page.captureScreenshot', { format: 'jpeg' }) as { result?: { data?: string } };
+    expect(ok.result?.data?.length).toBeGreaterThan(100);
   });
 });
 

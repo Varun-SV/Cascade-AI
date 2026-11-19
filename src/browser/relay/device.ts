@@ -39,6 +39,12 @@ export interface UserConsent {
   privateOrigins: string[];
   /** Any public site (private-network addresses still need naming in `privateOrigins`). */
   anyPublic?: boolean;
+  /**
+   * Still screenshots of the run's page may leave the device, for the run's
+   * report. Off unless the person ticked it. Password, card and code fields are
+   * blurred in each picture (see relay.ts).
+   */
+  screenshots?: boolean;
 }
 
 /**
@@ -234,7 +240,7 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
       }));
       if (mine.cancelled) return;
       if (!answer) { decline(nonce, 'the user said no'); return; }
-      const consent = makeConsent(answer.allowedOrigins, answer.privateOrigins, { anyPublic: answer.anyPublic === true });
+      const consent = makeConsent(answer.allowedOrigins, answer.privateOrigins, { anyPublic: answer.anyPublic === true, screenshots: answer.screenshots === true });
       browser = await opts.startBrowser(consent);
       if (mine.cancelled) return;
       // The signed record says what was allowed: "any public site" is written as its own entry.

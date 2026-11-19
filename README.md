@@ -510,10 +510,12 @@ T3 workers have access to the following tools. All destructive operations requir
 | `web_search` | Search the web (SearXNG, Brave or Tavily) | |
 | `web_fetch` | Fetch a page, SSRF-guarded | |
 | `browser` | Headless Playwright automation (off unless `tools.browserEnabled`) | ✓ |
-| `browser_control` | Drive a real browser — desktop app and web (your own Chrome through the relay, CDP or Steel). On the web: page views with refs, and screenshots for vision models (`tools.browserVision`; never from your own Chrome) | ✓ |
+| `browser_control` | Drive a real browser — desktop app and web (your own Chrome through the relay, CDP or Steel). On the web: page views with refs, and screenshots for vision models (`tools.browserVision`; from your own Chrome only if you allow screenshots when you approve the run). `capture` saves a screenshot for a report | ✓ |
 | `read_current_page` | Read the page you have open — desktop app | |
 | `image_analyze` | Describe an image (vision-capable models) | |
 | `generate_image` · `generate_speech` · `generate_video` | Generate media, with a provider key that supports it | |
+| `find_image` | A real picture of a real thing, from the page it's on or Wikimedia Commons, saved with a caption naming its source. Free, so reports use it before `generate_image` | |
+| `annotate_image` | Circle, box, arrow, highlight, label, number or blur parts of a screenshot or picture (a screenshot's controls by ref), saved as a copy | |
 | `transcribe_audio` | Speech-to-text for an audio file | |
 | `generate_document` | Render a REAL `.docx` / `.pptx` / `.xlsx` from Markdown or CSV | ✓ |
 | `pdf_create` | Render a PDF | ✓ |

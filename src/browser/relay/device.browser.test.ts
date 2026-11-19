@@ -245,6 +245,32 @@ suite("the server's own browser controller, with the user's browser behind it", 
     expect(r.browsers[0]!.closed).toBe(true);
   });
 
+  it('a screenshot the person allowed comes back through the controller, the way capture asks for one', async () => {
+    const r = await rig({ answer: { allowedOrigins: ['http://allowed.test'], privateOrigins: [], screenshots: true } });
+    await r.device('user-a', 'device-a');
+    const provider = new RelayBrowserProvider({ hub: r.hub, agentUrl: r.agentUrl, userId: 'user-a', deviceId: 'device-a', runId: 'run-1' });
+    const c = new RemoteBrowserController({ provider });
+    closers.push(() => c.dispose());
+    const nav = await c.controller({ kind: 'navigate', url: 'http://allowed.test/form' }, ctx('run-1', 'w1'));
+    expect(nav.ok, nav.detail).toBe(true);
+    const shot = await c.controller({ kind: 'observe', pageView: true, screenshot: true, capture: true }, ctx('run-1', 'w1'));
+    expect(shot.ok, shot.detail).toBe(true);
+    expect(shot.view?.text ?? '', 'no "No screenshot" note').not.toMatch(/No screenshot/);
+    expect(shot.image?.data.length).toBeGreaterThan(100);
+  });
+
+  it('without the opt-in, the controller is told the person did not allow screenshots', async () => {
+    const r = await rig();
+    await r.device('user-a', 'device-a');
+    const provider = new RelayBrowserProvider({ hub: r.hub, agentUrl: r.agentUrl, userId: 'user-a', deviceId: 'device-a', runId: 'run-1' });
+    const c = new RemoteBrowserController({ provider });
+    closers.push(() => c.dispose());
+    await c.controller({ kind: 'navigate', url: 'http://allowed.test/form' }, ctx('run-1', 'w1'));
+    const shot = await c.controller({ kind: 'observe', pageView: true, screenshot: true, capture: true }, ctx('run-1', 'w1'));
+    expect(shot.image).toBeUndefined();
+    expect(shot.view?.text).toContain("the person's browser does not allow screenshots");
+  });
+
   it('fill and click work through the relay, by selector and by a ref from a page view', async () => {
     const r = await rig();
     const d = await r.device('user-a', 'device-a');

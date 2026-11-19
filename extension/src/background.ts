@@ -136,7 +136,7 @@ async function askUser(run: { runId: string; expiresAt: number; signal: AbortSig
       approvedIncognito = kept.incognito;
       void chrome.notifications?.create({
         type: 'basic', iconUrl: 'icon-128.png', title: 'Cascade is using this browser',
-        message: `A run from a chat you allowed is using ${kept.anyPublic ? 'any public site' : kept.sites} in a ${kept.incognito ? 'private' : 'new'} window. Stop it from the Cascade button.`,
+        message: `A run from a chat you allowed is using ${kept.anyPublic ? 'any public site' : kept.sites} in a ${kept.incognito ? 'private' : 'new'} window${kept.screenshots ? ', with screenshots for its report' : ''}. Stop it from the Cascade button.`,
       }).catch(() => {});
       return read.consent;
     }
@@ -306,7 +306,7 @@ async function handle(msg: Message): Promise<unknown> {
     case 'consent:answer': {
       const a = asks.get(msg.ask);
       if (!a) return { error: 'This request is over.' };
-      const form: ConsentForm = { sites: String(msg.sites ?? ''), anyPublic: msg.anyPublic === true, incognito: msg.incognito !== false, remember: msg.remember === true };
+      const form: ConsentForm = { sites: String(msg.sites ?? ''), anyPublic: msg.anyPublic === true, incognito: msg.incognito !== false, remember: msg.remember === true, screenshots: msg.screenshots === true };
       const read = consentFromForm(form);
       if (!read) { a.resolve(null); return { ok: true }; }
       if ('error' in read) return read;

@@ -166,6 +166,24 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y rpm libarchive-tools zstd
 
+      # One macOS runner builds both arches, but npm installs sharp's libvips for
+      # the runner's arch only. Unpacked beside it, not installed, so the tree
+      # npm ci laid down is untouched: an Intel Mac gets its own binary.
+      - name: Add the other macOS arch of sharp's binaries
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          other=$([ "$(node -p process.arch)" = arm64 ] && echo x64 || echo arm64)
+          tmp=$(mktemp -d)
+          for p in sharp-darwin-$other sharp-libvips-darwin-$other; do
+            v=$(node -p "require('sharp/package.json').optionalDependencies['@img/$p']")
+            (cd "$tmp" && npm pack "@img/$p@$v" --silent)
+            mkdir -p "node_modules/@img/$p"
+            tar -xzf "$tmp"/img-"$p"-*.tgz -C "node_modules/@img/$p" --strip-components=1
+          done
+          ls node_modules/@img
+
       - name: Build Cascade core (electron-builder extraResources)
         run: npm run build:cli
 

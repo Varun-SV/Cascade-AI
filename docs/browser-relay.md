@@ -52,8 +52,14 @@ whatever public site it finds, and your private network stays blocked. Then:
 - Downloads: the CLI's browser refuses them. In the extension a download ends the
   run (Chrome can't tell it which download is the run's, so none is touched), and
   the file stays in your Downloads folder.
-- No screenshot leaves your device, and there's no live view on the web: you
-  watch the run where it runs. The chat's side pane says which device it's on,
+- No screenshot leaves your device unless you tick **Let Cascade take screenshots
+  of these sites for your report** when you approve the run (in the CLI, answer
+  `y` to the question after the sites). It's off by default and applies to that
+  run only, or to the chat's later runs if you also keep the answer. With it on, a
+  run can take still pictures of its window, never a recording. Your device blurs
+  password, card and one-time-code fields, and frames from other sites, in each
+  picture, and refuses anything past the visible window. There's no live view on
+  the web: you watch the run where it runs. The chat's side pane says which device it's on,
   shows the page it's on and each step it has taken (never what it typed), and
   **Show the window** brings its window to the front on that device.
 - In the extension, **Take over** in the toolbar pauses the run so you can use its

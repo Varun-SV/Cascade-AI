@@ -6287,6 +6287,18 @@ describe('page views and refs', () => {
       expect(out.view!.text).toContain('controls changed');
     });
 
+    it('withholds a report capture, too, when controls move during it, so its boxes never miss (Codex on 0c23f46)', async () => {
+      const shoot = extra['screenshot'] as (opts: unknown) => Promise<Uint8Array>;
+      extra['screenshot'] = async (opts: unknown) => {
+        snapshot = BOOKING.replace('[box=84,0,32,25]', '[box=400,200,32,25]');
+        return shoot(opts);
+      };
+      const out = await controller().controller({ kind: 'observe', pageView: true, screenshot: true, capture: true }, ctx('run', 'w1'));
+      expect(out.image).toBeUndefined();
+      expect(out.boxes).toBeUndefined();
+      expect(out.view!.text).toContain('controls changed');
+    });
+
     it('does not retain an unseen renamed control from marked screenshot validation', async () => {
       const shoot = extra['screenshot'] as (opts: unknown) => Promise<Uint8Array>;
       extra['screenshot'] = async (opts: unknown) => {

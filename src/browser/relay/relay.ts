@@ -14,6 +14,7 @@ import { type CommandFrame, type FrameTreeNode, HIDDEN_HISTORY_URL, checkCommand
 import { type Consent, onConsentedSite } from './egress-rules.js';
 import type { PageEndMode, RequestEnforcer } from './request-enforcer.js';
 import { settlesWithin } from './settles.js';
+import { PRIVATE_FIELDS, PRIVATE_PLACEHOLDER } from '../private-fields.js';
 import { CommandFenced, type CommandTransport, type TabLease, createFencedForwarder } from './tab-lease.js';
 
 const TAB_SESSION = 'cascade-tab-1';
@@ -23,6 +24,147 @@ const TAB_CONNECT_TIMEOUT_MS = 3000;
 // What may wait while the tab is reached and checked. A client's setup burst is far smaller.
 const EARLY_FRAMES_MAX = 1000;
 const EARLY_BYTES_MAX = 4 * 1024 * 1024;
+
+/**
+ * Run in the tab around a screenshot the person allowed: blurs every field
+ * that can hold a password, a card or a one-time code, in the page and in every
+ * same-site frame inside it, and every frame from another site (a payment form
+ * is usually one), then takes the blur off.
+ *
+ * Set on each element's own style through the CSSOM, not as a stylesheet: a
+ * site's Content-Security-Policy can refuse an inserted <style> without any
+ * error, and the CSSOM is not something it governs. And checked: every element
+ * must then compute a blur, or the guard says no and no picture is taken.
+ * Each element keeps what its own style said before, and gets it back.
+ */
+/** The isolated world the screenshot guard runs in: none of the page's own scripts are there. */
+const SHOT_WORLD = 'cascade-screenshot-guard';
+
+export const SHOT_GUARD_ON = `(() => {
+  // The controller's own description of a private field (private-fields.ts):
+  // a password shown in clear by its "show" button, card and code fields by
+  // name, id or autocomplete token, one box per digit. And a field known only
+  // by its label or placeholder.
+  const SEL = ${JSON.stringify(PRIVATE_FIELDS + ', input[name*="card" i], input[id*="card" i]')};
+  const SAYS = new RegExp(${JSON.stringify(PRIVATE_PLACEHOLDER.source)}, 'i');
+  const TEXT = 'input:not([type=hidden i]):not([type=checkbox i]):not([type=radio i]):not([type=button i]):not([type=submit i]):not([type=reset i]):not([type=image i]):not([type=range i]):not([type=color i]):not([type=file i]), textarea, select, [contenteditable]:not([contenteditable="false" i]), [role="textbox" i], [role="searchbox" i], [role="combobox" i], [role="spinbutton" i]';
+  const said = (el) => {
+    const doc = el.ownerDocument;
+    const parts = [el.getAttribute('aria-label'), el.getAttribute('placeholder')];
+    for (const l of el.labels || []) parts.push(l.textContent);
+    // An id names an element in the field's own tree: its shadow root, if it is in one.
+    const tree = el.getRootNode();
+    const byId = (id) => (typeof tree.getElementById === 'function' ? tree.getElementById(id) : null) || doc.getElementById(id);
+    for (const id of (el.getAttribute('aria-labelledby') || '').split(/\\s+/)) if (id) parts.push(byId(id)?.textContent);
+    return SAYS.test(parts.filter(Boolean).join(' '));
+  };
+  const MARK = 'data-cascade-shot-blur';
+  const marked = [];
+  // A transition or an animation on the filter would ease the blur in, and the
+  // picture could catch it half-way: both are off while it is taken.
+  const PROPS = ['transition', 'animation', 'filter'];
+  const blur = (el) => {
+    if (el.hasAttribute(MARK)) { marked.push(el); return; }
+    el.setAttribute(MARK, JSON.stringify(PROPS.map((p) => [el.style.getPropertyValue(p), el.style.getPropertyPriority(p)])));
+    el.style.setProperty('transition', 'none', 'important');
+    el.style.setProperty('animation', 'none', 'important');
+    el.style.setProperty('filter', 'blur(12px)', 'important');
+    marked.push(el);
+  };
+  // A document or an open shadow root; a closed one is checked before this
+  // runs, by the device (see closedRootHolds).
+  const guard = (root, depth) => {
+    for (const el of root.querySelectorAll(SEL)) blur(el);
+    for (const el of root.querySelectorAll(TEXT)) if (said(el)) blur(el);
+    // An embedded document or plug-in (<object>, <embed>) is blurred whole: what
+    // it shows is not this document's to look into.
+    for (const el of root.querySelectorAll('object, embed')) blur(el);
+    for (const f of root.querySelectorAll('iframe, frame')) {
+      let inner = null;
+      try { inner = f.contentDocument; } catch { inner = null; }
+      if (inner && inner.documentElement && depth < 8) guard(inner, depth + 1);
+      else blur(f);
+    }
+    for (const el of root.querySelectorAll('*')) {
+      if (!el.shadowRoot) continue;
+      if (depth < 32) guard(el.shadowRoot, depth + 1); else blur(el);
+    }
+  };
+  guard(document, 0);
+  // The blur as it is now, at full strength: not on its way there.
+  return marked.every((el) => {
+    const view = el.ownerDocument.defaultView;
+    const m = view && /blur\\(([0-9.]+)px\\)/.exec(view.getComputedStyle(el).filter);
+    return !!m && Number(m[1]) >= 12;
+  });
+})()`;
+export const SHOT_GUARD_OFF = `(() => {
+  const MARK = 'data-cascade-shot-blur';
+  const clear = (root, depth) => {
+    for (const el of root.querySelectorAll('[' + MARK + ']')) {
+      const PROPS = ['transition', 'animation', 'filter'];
+      let before = [];
+      try { before = JSON.parse(el.getAttribute(MARK)); } catch { /* the page changed it: take ours off */ }
+      PROPS.forEach((p, i) => {
+        const was = Array.isArray(before[i]) ? before[i] : ['', ''];
+        if (was[0]) el.style.setProperty(p, was[0], was[1]); else el.style.removeProperty(p);
+      });
+      el.removeAttribute(MARK);
+    }
+    for (const f of root.querySelectorAll('iframe, frame')) {
+      let inner = null;
+      try { inner = f.contentDocument; } catch { inner = null; }
+      if (inner && inner.documentElement && depth < 8) clear(inner, depth + 1);
+    }
+    for (const el of root.querySelectorAll('*')) if (el.shadowRoot && depth < 32) clear(el.shadowRoot, depth + 1);
+  };
+  clear(document, 0);
+  return true;
+})()`;
+
+/** A node of the DOM as `DOM.getDocument` gives it. */
+interface DomNode {
+  nodeType?: number;
+  nodeName?: string;
+  attributes?: string[];
+  children?: DomNode[];
+  shadowRoots?: Array<DomNode & { shadowRootType?: string }>;
+  contentDocument?: DomNode;
+}
+/** Inputs that take no typed text: nothing for a picture to give away. */
+const UNTYPED = new Set(['hidden', 'checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'range', 'color', 'file']);
+/** Roles of widgets someone types into, whatever element they are built from. */
+const TYPED_ROLES = new Set(['textbox', 'searchbox', 'combobox', 'listbox', 'spinbutton']);
+
+/**
+ * Whether a closed shadow root anywhere on the page (its frames' included)
+ * holds a field someone types into, or a frame: things the page's own script,
+ * and so the blur, cannot reach. A screenshot is refused then, not taken with
+ * them in it. Exported for tests.
+ */
+export function closedRootHolds(root: DomNode | undefined): boolean {
+  if (!root) return true;
+  // A stack, not recursion: a page decides how deep its DOM goes.
+  const stack: Array<[DomNode, boolean]> = [[root, false]];
+  while (stack.length) {
+    const [node, closed] = stack.pop()!;
+    if (closed && (node.nodeType === undefined || node.nodeType === 1)) {
+      const name = node.nodeName?.toUpperCase() ?? '';
+      const attrs = new Map<string, string>();
+      for (let i = 0; i + 1 < (node.attributes?.length ?? 0); i += 2) attrs.set(node.attributes![i]!.toLowerCase(), node.attributes![i + 1]!);
+      const editable = attrs.get('contenteditable');
+      if (name === 'IFRAME' || name === 'FRAME' || name === 'OBJECT' || name === 'EMBED' || name === 'TEXTAREA' || name === 'SELECT') return true;
+      if (name === 'INPUT' && !UNTYPED.has((attrs.get('type') ?? 'text').toLowerCase())) return true;
+      if (editable !== undefined && editable.toLowerCase() !== 'false') return true;
+      // A custom widget someone types into, by its role: as the controller's own check counts them.
+      if ((attrs.get('role') ?? '').toLowerCase().split(/\s+/).some((role) => TYPED_ROLES.has(role))) return true;
+    }
+    for (const child of node.children ?? []) stack.push([child, closed]);
+    for (const shadow of node.shadowRoots ?? []) stack.push([shadow, closed || shadow.shadowRootType === 'closed']);
+    if (node.contentDocument) stack.push([node.contentDocument, closed]);
+  }
+  return false;
+}
 
 export interface RelayEvents {
   /** Why a command was refused or the lease ended, for the device's log. Never sent to the server. */
@@ -167,6 +309,8 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
     // Registrations forwarded but not yet answered. A revoke can discard such a reply,
     // so its identifier is never known; the page step then closes the tab instead.
     let pendingScripts = 0;
+    // The screenshot in progress, if any: see the Page.captureScreenshot branch below.
+    let shooting: Promise<void> = Promise.resolve();
     let targetInfo: Record<string, unknown> | null = null;
     let lastId = -1;
     let ended = false;
@@ -407,7 +551,7 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
 
     const run = async (f: CommandFrame): Promise<void> => {
       const { id, method, params, sessionId } = f;
-      const decision = checkCommand(f, { knownSessions });
+      const decision = checkCommand(f, { knownSessions, ...(consent.screenshots === true ? { screenshots: true } : {}) });
       if (!decision.forward) {
         refusals.push(decision.reason);
         if (decision.reason.includes('not on the allowlist')) refusedMethods.add(method);
@@ -433,6 +577,50 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
             replyError(id, sessionId, 'Denied by Cascade relay policy: that history entry is not on a consented site');
             return;
           }
+        }
+        if (method === 'Page.captureScreenshot') {
+          // One at a time, guard to clean-up: two pictures taken side by side would
+          // share the blur, and the first one's clean-up would take it off while the
+          // second was being taken.
+          const turn = shooting.then(async () => {
+            if (toTab(sessionId) !== undefined) { replyError(id, sessionId, 'Denied by Cascade relay policy: Page.captureScreenshot of a frame'); return; }
+            // What the page's script cannot see: fields and frames in a closed shadow
+            // root. Read from the browser's own DOM, here on the device.
+            const dom = await forward('DOM.getDocument', { depth: -1, pierce: true }, sessionId).catch(() => null);
+            // The agent cannot enable DOM events (not on its list), so none were wanted.
+            await forward('DOM.disable', {}, sessionId).catch(() => undefined);
+            if (!dom || dom.error !== undefined || closedRootHolds(dom.result?.root as DomNode | undefined)) {
+              replyError(id, sessionId, 'Denied by Cascade relay policy: Page.captureScreenshot while a field or frame the device cannot blur is on the page');
+              return;
+            }
+            // The guard runs in a world of the device's own, not the page's: the page
+            // can redefine querySelectorAll, getComputedStyle or anything else in
+            // its own world to make a field invisible to a script there. An isolated
+            // world has the browser's own versions of all of them, on the same DOM.
+            const refused = () => replyError(id, sessionId, 'Denied by Cascade relay policy: the page could not be prepared for a screenshot');
+            const tree = await forward('Page.getFrameTree', {}, sessionId).catch(() => null);
+            const frameId = (tree?.result?.frameTree as { frame?: { id?: unknown } } | undefined)?.frame?.id;
+            if (typeof frameId !== 'string') { refused(); return; }
+            const world = await forward('Page.createIsolatedWorld', { frameId, worldName: SHOT_WORLD }, sessionId).catch(() => null);
+            const contextId = world?.result?.executionContextId;
+            if (typeof contextId !== 'number') { refused(); return; }
+            const guard = await forward('Runtime.evaluate', { expression: SHOT_GUARD_ON, contextId, returnByValue: true }, sessionId);
+            if (guard.error !== undefined || (guard.result?.result as { value?: unknown } | undefined)?.value !== true) {
+              await forward('Runtime.evaluate', { expression: SHOT_GUARD_OFF, contextId, returnByValue: true }, sessionId).catch(() => undefined);
+              refused();
+              return;
+            }
+            let shot: Awaited<ReturnType<typeof forward>>;
+            try { shot = await forward(method, params, sessionId); } finally {
+              await forward('Runtime.evaluate', { expression: SHOT_GUARD_OFF, contextId, returnByValue: true }, sessionId).catch(() => undefined);
+            }
+            if (!stillOurs()) { replyError(id, sessionId, fencedAnswer); return; }
+            if (shot.error !== undefined) { replyError(id, sessionId, shot.error); return; }
+            out({ id, sessionId, result: { data: typeof shot.result?.data === 'string' ? shot.result.data : '' } });
+          });
+          shooting = turn.catch(() => undefined);
+          await turn;
+          return;
         }
         const registering = method === 'Page.addScriptToEvaluateOnNewDocument';
         if (registering) pendingScripts += 1;

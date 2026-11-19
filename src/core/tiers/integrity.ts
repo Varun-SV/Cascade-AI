@@ -263,7 +263,7 @@ const MEDIA_UNAVAILABLE = String.raw`No \w+ model is available on your configure
 
 const TOOL_FAILURE: Record<string, RegExp> = {
   // `outcome.detail` is page content, so only the prefixes this tool adds.
-  browser_control: /^(?:Failed: |Error: (?:browser control is not available|action is required|the run was cancelled|"(?:[^"\\\n]|\\.)*" (?:needs |is not something this browser can do|is not a ref|does not take a ref)|the browser could not perform |this browser takes CSS selectors|give either ref or selector|direction must be |use ref, not an aria-ref selector|the page has not been verified|this worker has not observed|this approval belongs to another worker or page view))/,
+  browser_control: /^(?:Failed: |Error: (?:browser control is not available|action is required|the run was cancelled|"(?:[^"\\\n]|\\.)*" (?:needs |is not something this browser can do|is not a ref|does not take a ref)|the browser could not perform |this browser takes CSS selectors|give either ref or selector|direction must be |use ref, not an aria-ref selector|the page has not been verified|this worker has not observed|this approval belongs to another worker or page view|ref must look like e14|the browser could not capture the page|\S+ is not on screen in the page view just taken|the screenshot could not be saved|[^\n]* Capture without a ref to save the whole view)|No screenshot(?: |:))/,
   browser: /^(?:Error: Playwright is not installed|Browser launch failed: |Browser action "[^"\n]*" failed: |Browser error \(page reset\): |Unknown browser action: )/,
   read_current_page: /^(?:Error: could not read the open page|No page is open in the built-in browser)/,
   code_search: /^(?:Code search failed: |Provide a "query" to search the codebase)/,
@@ -278,6 +278,9 @@ const TOOL_FAILURE: Record<string, RegExp> = {
   // A success starts "URL: …", so a failure's wording cannot be page text.
   web_fetch: /^(?:HTTP [45]\d\d |Refused to fetch |Failed to fetch |Failed to read response body: |Can't read |Error: url is required)/,
   web_search: /^Error: query is required/,
+  // A success starts "Saved", so every failure is one of these.
+  find_image: /^Error: /,
+  annotate_image: /^Error: /,
   github: /^(?:Error: No \w+ token provided|Authentication failed: |Permission denied: |Not found: Repository |Validation error from |Rate limited by |\w+ API error \(\d{3}\): |\w+ request failed: )/,
   grep: /^Invalid regex pattern: /,
   peer_message: /^(?:Error: (?:toId is required|Peer communication is not enabled)|Unknown action: )/,

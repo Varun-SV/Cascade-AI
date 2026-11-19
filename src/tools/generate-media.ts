@@ -186,7 +186,9 @@ async function runWithProviderFallback<T>(
 export class GenerateImageTool extends BaseTool {
   readonly name = 'generate_image';
   readonly description =
-    'Generate an image from a text description using the best available image model. Returns where the image was saved. Use when the user asks for a picture, illustration, diagram render, logo or any visual asset.';
+    'Generate an image from a text description using the best available image model. Returns where the image was saved. '
+    + 'Use it for an illustration of something that does not exist (a concept, a scene, a logo, a mock-up), or when the user asks for a generated or AI image. '
+    + 'For a picture of something real — a product, a place, a building, a person, a page the run looked at — use find_image or browser_control capture where you have them: the real thing, credited, at no cost, where generating one costs far more and shows an invention.';
   readonly inputSchema = {
     type: 'object',
     properties: {
