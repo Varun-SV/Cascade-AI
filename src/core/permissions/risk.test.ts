@@ -161,6 +161,14 @@ describe('what an undoable call writes, for the checkpoint to vouch for (Codex o
     expect(sh('npm test').writes).toBeUndefined();
   });
 
+  it('a redirect written against its neighbours is still a write (Codex on 806c9af)', () => {
+    expect(sh('printf changed>ignored.txt').writes).toEqual([path.join(root, 'ignored.txt')]);
+    expect(sh('echo x>>log.txt').writes).toEqual([path.join(root, 'log.txt')]);
+    expect(sh('echo x>/etc/hosts').category).toBe('outside-project');
+    expect(sh('echo "a>b"').level).toBe('safe');
+    expect(sh('npm test 2>&1').writes).toBeUndefined();
+  });
+
   it('names bare filenames too: no slash is still a file (Codex on 27db466)', () => {
     expect(sh('cp source.txt local.txt').writes).toEqual([path.join(root, 'local.txt')]);
     expect(sh('mv a.txt b.txt').writes).toEqual([path.join(root, 'a.txt'), path.join(root, 'b.txt')]);

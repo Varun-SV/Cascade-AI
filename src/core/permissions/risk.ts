@@ -277,6 +277,28 @@ function splitOutsideQuotes(text: string): string[] {
   return parts;
 }
 
+/**
+ * A redirect written against its neighbours (`printf x>a.txt`, `echo x>>log`)
+ * set apart, so it is read as one: outside quotes only, in one pass.
+ */
+function spaceRedirects(segment: string): string {
+  let out = '';
+  let quote: string | null = null;
+  for (let i = 0; i < segment.length; i++) {
+    const c = segment[i]!;
+    if (quote) { out += c; if (c === quote) quote = null; continue; }
+    if (c === '"' || c === "'") { quote = c; out += c; continue; }
+    if (c === '>') {
+      const twice = segment[i + 1] === '>';
+      out += twice ? ' >> ' : ' > ';
+      if (twice) i += 1;
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
 /** Words of a simple command, quotes taken off. */
 function words(segment: string): string[] {
   const out: string[] = [];
@@ -289,7 +311,7 @@ function words(segment: string): string[] {
 const programName = (w: string): string => path.basename(w.replace(/\\/g, '/')).toLowerCase().replace(/\.(exe|cmd|bat|ps1|com)$/, '');
 
 function assessSegment(segment: string, root: string, cwd: string): Risk {
-  let w = words(segment);
+  let w = words(spaceRedirects(segment));
   // Output redirected to a file: a write, checked like any other.
   const redirects: string[] = [];
   w = w.filter((word, i, all) => {

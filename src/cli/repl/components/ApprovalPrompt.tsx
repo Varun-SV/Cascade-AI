@@ -15,6 +15,8 @@ import type { ApprovalRequest, Theme } from '../../../types.js';
 import { RISK_LABELS, undoable } from '../../../core/permissions/risk.js';
 
 interface ApprovalPromptProps {
+  /** Whether it reads the keyboard; false while another dialog owns it. */
+  active?: boolean;
   request: ApprovalRequest;
   theme: Theme;
   onDecision: (decision: { approved: boolean; always: boolean }) => void;
@@ -72,7 +74,7 @@ export function summarizeApproval(request: ApprovalRequest): ApprovalSummary {
   return { who, verb, what, why, undo, always };
 }
 
-export function ApprovalPrompt({ request, theme, onDecision }: ApprovalPromptProps): React.ReactElement {
+export function ApprovalPrompt({ request, theme, onDecision, active = true }: ApprovalPromptProps): React.ReactElement {
   const [decided, setDecided] = useState(false);
   const [full, setFull] = useState(false);
 
@@ -90,7 +92,7 @@ export function ApprovalPrompt({ request, theme, onDecision }: ApprovalPromptPro
     } else if (input === 'v' || input === 'V') {
       setFull((f) => !f);
     }
-  });
+  }, { isActive: active });
 
   const s = summarizeApproval(request);
   const risky = request.risk ? request.risk.level === 'risky' : request.isDangerous;

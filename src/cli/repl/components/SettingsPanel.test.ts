@@ -35,7 +35,7 @@ const tick = () => new Promise((r) => setTimeout(r, 30));
 
 const config = () => ({ providers: [{ type: 'anthropic', apiKey: 'sk-ant-xyz9876' }], theme: 'cascade', autonomy: 'manual', budget: { warnAtPct: 80 } } as unknown as CascadeConfig);
 
-function mount(c: CascadeConfig, opts: { section?: 'models' | 'autonomy' | 'account' } = {}) {
+function mount(c: CascadeConfig, opts: { section?: 'models' | 'autonomy' | 'account'; active?: boolean } = {}) {
   const t = terminal();
   const changes: Array<[string, unknown]> = [];
   const actions: Array<[string, string | undefined]> = [];
@@ -45,6 +45,7 @@ function mount(c: CascadeConfig, opts: { section?: 'models' | 'autonomy' | 'acco
       config: c,
       theme: getTheme('cascade'),
       ...(opts.section ? { initialSection: opts.section } : {}),
+      ...(opts.active !== undefined ? { active: opts.active } : {}),
       onChange: (item: SettingItem, v: unknown) => { changes.push([item.id, v]); item.set?.(c, v); return `${item.label} saved`; },
       onAction: (item: SettingItem, pass: string | undefined) => { actions.push([item.id, pass]); return 'done'; },
       onClose: () => { closed = true; },
@@ -107,6 +108,16 @@ describe('/settings panel', () => {
     await p.press('/');
     for (const ch of 'budget') await p.press(ch);
     expect(await p.until('Most a run may cost')).toContain('Most a run may cost');
+    p.unmount();
+  });
+
+  it('while a tool approval waits it reads no keys, so nothing typed here can answer it (Codex on 806c9af)', async () => {
+    const p = mount(config(), { section: 'autonomy', active: false });
+    await tick();
+    for (const k of ['\r', 'a', 'y', '\x1b[C']) await p.press(k);
+    expect(p.changes).toEqual([]);
+    expect(p.closed()).toBe(false);
+    expect(await p.until('answer the question below first')).toContain('answer the question below first');
     p.unmount();
   });
 

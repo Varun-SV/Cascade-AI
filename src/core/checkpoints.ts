@@ -107,8 +107,12 @@ export class Checkpoints {
    */
   async covers(paths: string[]): Promise<boolean> {
     if (!(await this.prepare())) return false;
-    const root = path.resolve(this.root);
-    const rel = paths.map((p) => path.relative(root, path.resolve(root, p)));
+    // Judged where a write would really land: a symlink in the project to a
+    // file outside it is recorded as the link, and the file it points to is
+    // not (Codex: `printf x > linked.txt` overwrote an outside file).
+    const root = realPath(path.resolve(this.root));
+    const real = paths.map((p) => realPath(path.resolve(this.root, p)));
+    const rel = real.map((p) => path.relative(root, p));
     if (rel.some((r) => !r || r === '..' || r.startsWith(`..${path.sep}`) || path.isAbsolute(r))) return false;
     try {
       // Exit 0 names the ignored ones; exit 1 means none is.
@@ -283,6 +287,17 @@ export class Checkpoints {
       }
     });
   }
+}
+
+/**
+ * Where a path really is: through every symlink on the way, its own last
+ * one included. A path not made yet is resolved through the nearest folder
+ * on the way that does exist.
+ */
+function realPath(p: string): string {
+  try { return fs.realpathSync.native(p); } catch { /* not there yet */ }
+  const parent = path.dirname(p);
+  return parent === p ? p : path.join(realPath(parent), path.basename(p));
 }
 
 function chunk<T>(items: T[], size: number): T[][] {

@@ -16,6 +16,12 @@ import type { CascadeConfig, Theme } from '../../../types.js';
 import { SECTIONS, SETTINGS, display, nextValue, parseValue, type SectionId, type SettingItem } from '../../settings/spec.js';
 
 interface SettingsPanelProps {
+  /**
+   * Whether it reads the keyboard. Off while a tool approval waits: the two
+   * once both listened, and a `y` or `a` typed into a setting also allowed
+   * the pending call.
+   */
+  active?: boolean;
   config: CascadeConfig;
   theme: Theme;
   initialSection?: SectionId;
@@ -29,7 +35,7 @@ interface SettingsPanelProps {
 
 type Editing = { item: SettingItem; buffer: string; passphrase: boolean } | null;
 
-export function SettingsPanel({ config, theme, initialSection, initialSearch, onChange, onAction, onClose }: SettingsPanelProps): React.ReactElement {
+export function SettingsPanel({ config, theme, initialSection, initialSearch, onChange, onAction, onClose, active = true }: SettingsPanelProps): React.ReactElement {
   const [section, setSection] = useState(Math.max(0, SECTIONS.findIndex((s) => s.id === initialSection)));
   const [row, setRow] = useState(0);
   const [search, setSearch] = useState<string | null>(initialSearch ?? null);
@@ -127,7 +133,7 @@ export function SettingsPanel({ config, theme, initialSection, initialSearch, on
     if (key.rightArrow || key.tab) { setSection((s) => (s + 1) % SECTIONS.length); setRow(0); setStatus(null); return; }
     if (key.return || input === ' ') { if (current) choose(current); return; }
     if (/^[1-8]$/.test(input)) { setSection(Number(input) - 1); setRow(0); setStatus(null); }
-  });
+  }, { isActive: active });
 
   const labelWidth = Math.max(28, ...items.map((i) => i.label.length + 2));
   const title = search !== null ? `search: ${search}${editing ? '' : '▌'}` : `‹ ${SECTIONS[section]!.title} ›`;
@@ -166,6 +172,7 @@ export function SettingsPanel({ config, theme, initialSection, initialSearch, on
           </Text>
         </Box>
       )}
+      {!active && <Text color={theme.colors.warning}>  Paused: answer the question below first.</Text>}
       {busy && <Text color={theme.colors.warning} wrap="wrap">  {progress ?? 'Working…'}</Text>}
       {!busy && status && <Text color={status.ok ? theme.colors.success : theme.colors.error} wrap="wrap">{status.ok ? '✓ ' : '✗ '}{status.text.replace(/^✓\s*/, '')}</Text>}
       <Box marginTop={1}>

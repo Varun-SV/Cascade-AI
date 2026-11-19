@@ -954,10 +954,14 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         const sub = (args[0] ?? '').toLowerCase();
         if (sub === 'on' || sub === 'enable') {
           cascade.setAutonomy('auto');
+          // The REPL's copy too: a later /settings change hands it to Cascade
+          // whole, and a stale mode in it would quietly undo this.
+          config.autonomy = 'auto';
           return '✔ Auto mode on. Cascade works on its own, and asks only before something /undo can\'t take back: deleting files, sending anything off this computer (push, publish, deploy, email), rewriting git history, installs and system changes, writing outside the project, dropping database data, stopping processes, changing permissions, or a command it can\'t read. Every run is checkpointed: /undo takes it back. Budget caps still apply.';
         }
         if (sub === 'off' || sub === 'disable') {
           cascade.setAutonomy('manual');
+          config.autonomy = 'manual';
           return '✔ Auto mode off. Cascade asks before each change, and before running its plan if you set that in /settings.';
         }
         return `Auto mode is ${cascade.getAutonomy() === 'auto' ? 'on' : 'off'}. /auto on or /auto off; /settings autonomy for the rest.`;
@@ -1628,6 +1632,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           onChange={applySetting}
           onAction={runSettingAction}
           onClose={() => setSettingsView(null)}
+          active={!state.approvalRequest && !planApprovalRequest}
         />
       )}
 

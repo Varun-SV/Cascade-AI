@@ -126,6 +126,18 @@ describe('Checkpoints', () => {
     expect(await cp.covers([path.join(path.dirname(root), 'elsewhere.txt')])).toBe(false);
   });
 
+  it('a symlink is judged by where it points: not covered when that is outside (Codex on 806c9af)', async () => {
+    const cp = new Checkpoints(root, state);
+    const outsideFile = path.join(path.dirname(root), 'outside.txt');
+    fs.writeFileSync(outsideFile, 'theirs');
+    fs.symlinkSync(outsideFile, path.join(root, 'linked.txt'));
+    fs.symlinkSync(path.join(root, 'a.txt'), path.join(root, 'inside-link.txt'));
+    fs.symlinkSync(path.dirname(root), path.join(root, 'up'));
+    expect(await cp.covers([path.join(root, 'linked.txt')])).toBe(false);
+    expect(await cp.covers([path.join(root, 'up', 'new.txt')])).toBe(false);
+    expect(await cp.covers([path.join(root, 'inside-link.txt')])).toBe(true);
+  });
+
   it('takes no checkpoint of the home folder', async () => {
     expect(await new Checkpoints(os.homedir(), state).begin('x')).toBeNull();
   });
