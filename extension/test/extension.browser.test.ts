@@ -555,6 +555,8 @@ suite('the extension in a real Chromium', { timeout: 90_000 }, () => {
     await r.run('run-1');
     const mine = r.ctx.pages()[0]!;
     await mine.goto('http://offlist.test/mine');
-    expect(r.offlist.hits).toEqual(['GET /mine']);
+    // Chromium may also ask for the site's icon, on its own schedule: also
+    // unpoliced, and not the page's request, so it is left out of the count.
+    expect(r.offlist.hits.filter((h) => h !== 'GET /favicon.ico')).toEqual(['GET /mine']);
   });
 });
