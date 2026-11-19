@@ -478,6 +478,23 @@ suite('the extension in a real Chromium', { timeout: 90_000 }, () => {
     expect(r.controls() - before).toBe(1);
   });
 
+  it('offline, a saved pairing still shows, and it connects once the network is back (Codex on 7ecb40e)', async () => {
+    const r = await rig();
+    const extId = new URL(r.sw.url()).host;
+    const popup = r.ctx.pages()[0]!;
+    await popup.goto(`chrome-extension://${extId}/popup.html`);
+    await popup.evaluate(() => chrome.runtime.sendMessage({ type: 'forget' }));
+    await vi.waitFor(() => expect(r.hub.deviceOnline('user-a', 'dev-ext')).toBe(false), { timeout: 5000 });
+    // The worker's view of the network, as Chrome gives it when the machine is offline.
+    await r.sw.evaluate(() => { Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false }); });
+    const before = r.controls();
+    await r.sw.evaluate((d) => chrome.storage.local.set({ device: d }), r.device as never);
+    await vi.waitFor(async () => expect((await r.status()).status).toMatchObject({ connection: 'offline', device: { name: 'Test Chrome' } }), { timeout: 5000 });
+    expect(r.controls() - before).toBe(0);
+    await r.sw.evaluate(() => { Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => true }); dispatchEvent(new Event('online')); });
+    await vi.waitFor(() => expect(r.hub.deviceOnline('user-a', 'dev-ext')).toBe(true), { timeout: 10_000 });
+  });
+
   it('a dropped connection is retried at once, as before', async () => {
     const r = await rig();
     const before = r.controls();

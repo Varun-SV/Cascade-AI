@@ -90,8 +90,12 @@ export function gracefulShutdown(parts: {
       console.log(`[shutdown] ${signal}: closing connections`);
       parts.stopMediaSweeper();
       await parts.browserRelay?.close().catch(() => {});
-      await new Promise<void>((r) => { parts.io.close(() => r()); });
+      // Socket.IO's close also closes the HTTP server and waits for every request
+      // on it: a slow upload would hold the shutdown past its timeout, and the
+      // database would never be closed. Open requests are cut before waiting.
+      const socketsClosed = new Promise<void>((r) => { parts.io.close(() => r()); });
       parts.httpServer.closeAllConnections?.();
+      await socketsClosed;
       await new Promise<void>((r) => parts.httpServer.close(() => r()));
       try { parts.store.close(); } catch { /* already closed */ }
       console.log('[shutdown] done');

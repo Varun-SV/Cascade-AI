@@ -162,8 +162,13 @@ chrome.windows.onRemoved.addListener((windowId) => {
 async function connect(): Promise<void> {
   if (client) return;
   if (!online()) {
-    // Waits for the 'online' event below rather than failing once a backoff.
-    if (status.device) { status.connection = 'offline'; publish(); }
+    // Waits for the 'online' event below rather than failing once a backoff. The
+    // saved pairing is still read (it's local): a worker that starts offline
+    // shows it, so the popup offers "Forget this browser" rather than pairing.
+    const epoch = connectEpoch;
+    const device = await loadDevice().catch(() => null);
+    if (epoch !== connectEpoch || client || online()) return;
+    if (device) { status.connection = 'offline'; status.device = { name: device.name, server: device.serverUrl }; publish(); }
     return;
   }
   if (connecting) { connectAgain = true; return; }
