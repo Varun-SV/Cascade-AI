@@ -33,7 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   asks. With it, the device takes still pictures of the run's window only:
   never a recording, never past the visible window, never of a frame on its
   own. Password, card and one-time-code fields, and frames from other sites,
-  are blurred in each picture. Older devices keep refusing screenshots, so
+  are blurred in each picture, including inside web components' open shadow
+  roots. A page with a field or frame in a closed shadow root, which no script
+  can blur, gets no picture. Older devices keep refusing screenshots, so
   runs on them fall back to `find_image`. Chrome extension 0.3.0.
 
 ### Changed

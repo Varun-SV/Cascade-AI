@@ -406,6 +406,33 @@ suite('screenshots the person allowed', { timeout: 60_000 }, () => {
     expect(await r.page.evaluate('document.getElementById("pw").style.filter')).toBe('grayscale(1)');
   });
 
+  it('a password field inside an open shadow root is blurred (Codex on 47a547c)', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    await r.page.evaluate(`document.open(); document.write('<!doctype html><body style="margin:0;background:#fff"><x-login></x-login><div style="position:absolute;left:500px;top:100px;width:300px;height:150px;background:#000"></div></body>'); document.close();
+      const host = document.querySelector('x-login');
+      host.attachShadow({ mode: 'open' }).innerHTML = '<input type=password value=hunter2 style="position:absolute;left:100px;top:100px;width:300px;height:150px;background:#000;border:0;outline:0">';
+      true`);
+    const shot = await r.page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 900, height: 300 } });
+    const sharp = (await import('sharp')).default;
+    const { data, info } = await sharp(shot).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const at = (x: number, y: number) => data[(y * info.width + x) * info.channels]!;
+    expect(at(503, 103)).toBeLessThan(20);
+    expect(at(103, 103)).toBeGreaterThan(40);
+    expect(await r.page.evaluate('getComputedStyle(document.querySelector("x-login").shadowRoot.querySelector("input")).filter')).toBe('none');
+  });
+
+  it('a field inside a closed shadow root, which no script can blur, means no picture (Codex on 47a547c)', async () => {
+    const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
+    const r = await startRig({ consent });
+    await r.page.evaluate(`document.querySelector('body').attachShadow({ mode: 'closed' }).innerHTML = '<input type=password value=hunter2>'; true`);
+    await expect(r.page.screenshot({ type: 'png', timeout: 5000 })).rejects.toThrow(/cannot blur/);
+    // A closed root with nothing typed in it is no reason to refuse.
+    await r.page.goto('http://allowed.test/');
+    await r.page.evaluate(`document.querySelector('body').attachShadow({ mode: 'closed' }).innerHTML = '<p>hello</p>'; true`);
+    expect((await r.page.screenshot({ type: 'png' })).length).toBeGreaterThan(100);
+  });
+
   it('a screenshot past the viewport is refused even with the opt-in', async () => {
     const consent = makeConsent(['http://allowed.test'], [], { screenshots: true });
     const r = await startRig({ consent, raw: true });

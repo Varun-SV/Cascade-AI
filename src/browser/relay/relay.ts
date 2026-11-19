@@ -46,13 +46,19 @@ const SHOT_GUARD_ON = `(() => {
     el.style.setProperty('filter', 'blur(12px)', 'important');
     marked.push(el);
   };
-  const guard = (doc, depth) => {
-    for (const el of doc.querySelectorAll(SEL)) blur(el);
-    for (const f of doc.querySelectorAll('iframe, frame')) {
+  // A document or an open shadow root; a closed one is checked before this
+  // runs, by the device (see closedRootHolds).
+  const guard = (root, depth) => {
+    for (const el of root.querySelectorAll(SEL)) blur(el);
+    for (const f of root.querySelectorAll('iframe, frame')) {
       let inner = null;
       try { inner = f.contentDocument; } catch { inner = null; }
       if (inner && inner.documentElement && depth < 8) guard(inner, depth + 1);
       else blur(f);
+    }
+    for (const el of root.querySelectorAll('*')) {
+      if (!el.shadowRoot) continue;
+      if (depth < 32) guard(el.shadowRoot, depth + 1); else blur(el);
     }
   };
   guard(document, 0);
@@ -63,22 +69,63 @@ const SHOT_GUARD_ON = `(() => {
 })()`;
 const SHOT_GUARD_OFF = `(() => {
   const MARK = 'data-cascade-shot-blur';
-  const clear = (doc, depth) => {
-    for (const el of doc.querySelectorAll('[' + MARK + ']')) {
+  const clear = (root, depth) => {
+    for (const el of root.querySelectorAll('[' + MARK + ']')) {
       let before = ['', ''];
       try { before = JSON.parse(el.getAttribute(MARK)); } catch { /* the page changed it: take ours off */ }
       if (before[0]) el.style.setProperty('filter', before[0], before[1]); else el.style.removeProperty('filter');
       el.removeAttribute(MARK);
     }
-    for (const f of doc.querySelectorAll('iframe, frame')) {
+    for (const f of root.querySelectorAll('iframe, frame')) {
       let inner = null;
       try { inner = f.contentDocument; } catch { inner = null; }
       if (inner && inner.documentElement && depth < 8) clear(inner, depth + 1);
     }
+    for (const el of root.querySelectorAll('*')) if (el.shadowRoot && depth < 32) clear(el.shadowRoot, depth + 1);
   };
   clear(document, 0);
   return true;
 })()`;
+
+/** A node of the DOM as `DOM.getDocument` gives it. */
+interface DomNode {
+  nodeType?: number;
+  nodeName?: string;
+  attributes?: string[];
+  children?: DomNode[];
+  shadowRoots?: Array<DomNode & { shadowRootType?: string }>;
+  contentDocument?: DomNode;
+}
+/** Inputs that take no typed text: nothing for a picture to give away. */
+const UNTYPED = new Set(['hidden', 'checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'range', 'color', 'file']);
+
+/**
+ * Whether a closed shadow root anywhere on the page (its frames' included)
+ * holds a field someone types into, or a frame: things the page's own script,
+ * and so the blur, cannot reach. A screenshot is refused then, not taken with
+ * them in it. Exported for tests.
+ */
+export function closedRootHolds(root: DomNode | undefined): boolean {
+  if (!root) return true;
+  // A stack, not recursion: a page decides how deep its DOM goes.
+  const stack: Array<[DomNode, boolean]> = [[root, false]];
+  while (stack.length) {
+    const [node, closed] = stack.pop()!;
+    if (closed && (node.nodeType === undefined || node.nodeType === 1)) {
+      const name = node.nodeName?.toUpperCase() ?? '';
+      const attrs = new Map<string, string>();
+      for (let i = 0; i + 1 < (node.attributes?.length ?? 0); i += 2) attrs.set(node.attributes![i]!.toLowerCase(), node.attributes![i + 1]!);
+      const editable = attrs.get('contenteditable');
+      if (name === 'IFRAME' || name === 'FRAME' || name === 'OBJECT' || name === 'EMBED' || name === 'TEXTAREA' || name === 'SELECT') return true;
+      if (name === 'INPUT' && !UNTYPED.has((attrs.get('type') ?? 'text').toLowerCase())) return true;
+      if (editable !== undefined && editable.toLowerCase() !== 'false') return true;
+    }
+    for (const child of node.children ?? []) stack.push([child, closed]);
+    for (const shadow of node.shadowRoots ?? []) stack.push([shadow, closed || shadow.shadowRootType === 'closed']);
+    if (node.contentDocument) stack.push([node.contentDocument, closed]);
+  }
+  return false;
+}
 
 export interface RelayEvents {
   /** Why a command was refused or the lease ended, for the device's log. Never sent to the server. */
@@ -494,6 +541,15 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
           // A picture of the tab itself only, never of a frame inside it, and only
           // with the sensitive fields blurred. No guard, no picture.
           if (toTab(sessionId) !== undefined) { replyError(id, sessionId, 'Denied by Cascade relay policy: Page.captureScreenshot of a frame'); return; }
+          // What the page's script cannot see: fields and frames in a closed shadow
+          // root. Read from the browser's own DOM, here on the device.
+          const dom = await forward('DOM.getDocument', { depth: -1, pierce: true }, sessionId).catch(() => null);
+          // The agent cannot enable DOM events (not on its list), so none were wanted.
+          await forward('DOM.disable', {}, sessionId).catch(() => undefined);
+          if (!dom || dom.error !== undefined || closedRootHolds(dom.result?.root as DomNode | undefined)) {
+            replyError(id, sessionId, 'Denied by Cascade relay policy: Page.captureScreenshot while a field or frame the device cannot blur is on the page');
+            return;
+          }
           const guard = await forward('Runtime.evaluate', { expression: SHOT_GUARD_ON, returnByValue: true }, sessionId);
           if (guard.error !== undefined || (guard.result?.result as { value?: unknown } | undefined)?.value !== true) {
             replyError(id, sessionId, 'Denied by Cascade relay policy: the page could not be prepared for a screenshot');

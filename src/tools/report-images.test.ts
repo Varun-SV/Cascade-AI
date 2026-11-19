@@ -170,6 +170,18 @@ describe('annotate_image', () => {
     expect(asked).toContainEqual({ file: expect.stringMatching(/generated[\\/]id-marked-[0-9a-f]{8}\.png$/) });
   });
 
+  it('a local-only subtask makes no marked copy, even of a picture the run found (Codex on 47a547c)', async () => {
+    const assets = new ImageAssets();
+    assets.set('generated/aria.jpg', { bytes: await picture(400, 300), mime: 'image/jpeg', width: 400, height: 300, source: { kind: 'web', page: 'https://x.example/' } });
+    const { saved, sink } = sinkInto();
+    const out = await new AnnotateImageTool({ assets, sink }).execute(
+      { image: 'generated/aria.jpg', marks: [{ shape: 'label', box: [10, 10, 5, 5], text: 'salary: 12,34,567' }] },
+      { isOffline: () => true } as never,
+    );
+    expect(out).toMatch(/^Error: this subtask is local-only/);
+    expect(saved).toHaveLength(0);
+  });
+
   it('reads an image from the workspace', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'annot-'));
     await fs.writeFile(path.join(dir, 'chart.png'), await sharp({ create: { width: 300, height: 200, channels: 3, background: 'white' } }).png().toBuffer());

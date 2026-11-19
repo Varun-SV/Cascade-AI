@@ -37,6 +37,8 @@ export class RelayBrowserProvider implements RemoteBrowserProvider {
   readonly isolatesSessions = true;
   // Nothing is allocated or billed: the browser is the user's.
   readonly allocatesSessions = false;
+  // The device guards every picture itself (see relay.ts SHOT_GUARD_ON).
+  readonly guardsScreenshots = true;
 
   private readonly held = new Map<string, RelayedBrowser>();
   private next = 1;

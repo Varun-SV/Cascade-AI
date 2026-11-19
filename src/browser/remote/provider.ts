@@ -110,6 +110,16 @@ export interface RemoteBrowserProvider {
    */
   readonly allocatesSessions?: boolean;
   /**
+   * True when the browser itself guards every screenshot: the person's own
+   * device, which refuses a picture unless they allowed screenshots, blurs
+   * password, card and code fields and other sites' frames in it, and refuses
+   * one with a field it cannot reach (a closed shadow root). The controller's
+   * own checks that need a CDP session of their own (closed shadow roots, a
+   * frame in its own process) cannot run there, and are the device's to do.
+   * Its in-page field checks still run.
+   */
+  readonly guardsScreenshots?: boolean;
+  /**
    * `hint` says what the run is about to do with the browser (the site its first page
    * is on), for a provider that asks a person: it may show it. Others ignore it.
    */

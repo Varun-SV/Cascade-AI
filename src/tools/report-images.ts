@@ -265,6 +265,12 @@ export class AnnotateImageTool extends BaseTool {
       }
       image = read.image;
     }
+    // Whatever the picture, the marks are this call's: a local-only subtask's
+    // labels can carry what it read from privacy.paths, and generated/ is
+    // readable by every worker. Checked as the copy is about to be made.
+    if (options.isOffline?.()) {
+      return 'Error: this subtask is local-only (privacy.paths), and a marked copy would be saved where other workers can read it, with its labels. Mark it up in a subtask that is not local-only, with no private details in the labels.';
+    }
     try {
       const out = await annotateImage(image, marks);
       const saved = await this.deps.sink({ data: out.bytes, mimeType: 'image/png', filename: name });

@@ -3346,7 +3346,8 @@ export class RemoteBrowserController {
       try {
         return await stoppable(within(privateIn(frame, area)))
           // A frame in a process of its own is out of the page's DOM below.
-          ?? (main ? null : await stoppable(this.closedInOwnFrame(page, frame)));
+          // A device that guards its own pictures blurs such a frame whole.
+          ?? (main || this.provider.guardsScreenshots ? null : await stoppable(this.closedInOwnFrame(page, frame)));
       } catch {
         // A frame that went away mid-check has nothing to show; one still on
         // the page that could not be read might.
@@ -3355,6 +3356,10 @@ export class RemoteBrowserController {
     }));
     const found = verdicts.find((v) => v === PRIVATE_SHOT) ?? verdicts.find((v) => v !== null);
     if (found) return found;
+    // The person's own device checks closed shadow roots itself, before it
+    // takes the picture, and refuses one with a field in such a root: a CDP
+    // session of our own, which this check needs, is not something it offers.
+    if (this.provider.guardsScreenshots) return null;
     // Playwright's queries do not reach into a closed shadow root, so a field
     // there passes them unseen. The browser's own DOM does show it: any text
     // field in one, on screen, is a field this check cannot vouch for.
@@ -3421,7 +3426,18 @@ export class RemoteBrowserController {
         return typeof width === 'number' && typeof height === 'number' && width > 0 && height > 0 ? { width, height } : null;
       });
     } catch {
-      return null;
+      // The person's own device offers no CDP session of our own. It guards the
+      // picture itself and refuses one past the viewport, so the page's own
+      // word on its size can only make this check look at too little.
+      if (!this.provider.guardsScreenshots || typeof page.evaluate !== 'function') return null;
+      try {
+        const size = await within(page.evaluate('({ width: innerWidth, height: innerHeight })')) as { width?: unknown; height?: unknown };
+        const width = Number(size?.width);
+        const height = Number(size?.height);
+        return width > 0 && height > 0 && Number.isFinite(width) && Number.isFinite(height) ? { width, height } : null;
+      } catch {
+        return null;
+      }
     }
   }
 
