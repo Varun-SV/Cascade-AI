@@ -100,6 +100,25 @@ export class Checkpoints {
     return done;
   }
 
+  /**
+   * Whether a checkpoint records every one of these files (absolute paths):
+   * none outside the project, none the project's .gitignore (or the
+   * folders always left out) excludes. False when it can't tell.
+   */
+  async covers(paths: string[]): Promise<boolean> {
+    if (!(await this.prepare())) return false;
+    const root = path.resolve(this.root);
+    const rel = paths.map((p) => path.relative(root, path.resolve(root, p)));
+    if (rel.some((r) => !r || r === '..' || r.startsWith(`..${path.sep}`) || path.isAbsolute(r))) return false;
+    try {
+      // Exit 0 names the ignored ones; exit 1 means none is.
+      const ignored = await this.git(['check-ignore', '-z', '--stdin'], rel.join('\0'), [0, 1]);
+      return ignored.replace(/\0/g, '') === '';
+    } catch {
+      return false;
+    }
+  }
+
   /** The files a run changed, made or deleted: [status, path], status A (made), D (deleted) or M. */
   async changedBy(cp: Checkpoint): Promise<Array<[string, string]>> {
     const after = cp.after ?? (await this.snapshot('now'));
@@ -221,7 +240,7 @@ export class Checkpoints {
     fs.renameSync(tmp, this.indexFile);
   }
 
-  private git(args: string[], input?: string): Promise<string> {
+  private git(args: string[], input?: string, okCodes: number[] = [0]): Promise<string> {
     return new Promise((resolve, reject) => {
       const child = spawn('git', [
         '-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false', '-c', 'core.fsmonitor=false',
@@ -243,7 +262,8 @@ export class Checkpoints {
           GIT_COMMITTER_NAME: 'Cascade', GIT_COMMITTER_EMAIL: 'checkpoints@cascade.local',
           GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0',
           // A path is a path, never a pattern: a file named `*.ts` is that file.
-          GIT_LITERAL_PATHSPECS: '1',
+          // Not for check-ignore, which refuses it and reads plain paths anyway.
+          ...(args[0] === 'check-ignore' ? {} : { GIT_LITERAL_PATHSPECS: '1' }),
         },
       });
       const out: Buffer[] = [];
@@ -254,7 +274,7 @@ export class Checkpoints {
       child.on('error', (e) => { clearTimeout(timer); reject(e); });
       child.on('close', (code) => {
         clearTimeout(timer);
-        if (code === 0) resolve(Buffer.concat(out).toString('utf8'));
+        if (okCodes.includes(code ?? -1)) resolve(Buffer.concat(out).toString('utf8'));
         else reject(new Error(`git ${args[0]} failed: ${Buffer.concat(err).toString('utf8').trim().slice(0, 300)}`));
       });
       if (child.stdin) {

@@ -32,6 +32,7 @@ export const RISK_LABELS: Record<RiskCategory, string> = {
   database: 'destroys database data',
   processes: 'stops processes or containers',
   permissions: 'changes file permissions or ownership',
+  unrecorded: 'changes a file /undo can\'t put back',
   unclassified: 'runs something Cascade can\'t check',
 };
 
@@ -43,8 +44,14 @@ export function undoable(risk: Risk): boolean {
 const SAFE: Risk = { level: 'safe', reason: 'only reads' };
 const order: Record<RiskLevel, number> = { safe: 0, recoverable: 1, risky: 2 };
 const risky = (category: RiskCategory, reason: string): Risk => ({ level: 'risky', category, reason });
-const recoverable = (reason: string): Risk => ({ level: 'recoverable', reason });
-const worst = (a: Risk, b: Risk): Risk => (order[b.level] > order[a.level] ? b : a);
+const recoverable = (reason: string, writes: string[] = []): Risk => ({ level: 'recoverable', reason, ...(writes.length ? { writes } : {}) });
+/** The riskier of two; two undoable ones keep every file either writes. */
+const worst = (a: Risk, b: Risk): Risk => {
+  if (a.level === 'recoverable' && b.level === 'recoverable' && (a.writes || b.writes)) {
+    return { ...a, writes: [...new Set([...(a.writes ?? []), ...(b.writes ?? [])])] };
+  }
+  return order[b.level] > order[a.level] ? b : a;
+};
 
 /** The risk of one tool call, given the project folder it runs in. */
 export function assessRisk(tool: string, input: Record<string, unknown>, workspaceRoot: string): Risk {
@@ -61,7 +68,7 @@ export function assessRisk(tool: string, input: Record<string, unknown>, workspa
     case 'file_write': case 'file_edit': case 'pdf_create': case 'generate_document': {
       const target = str('path') || str('output') || str('filename');
       if (target && outside(target, workspaceRoot, workspaceRoot)) return risky('outside-project', `writes ${target}, outside the project`);
-      return recoverable(`changes ${target || 'a file'} in the project (checkpointed)`);
+      return recoverable(`changes ${target || 'a file'} in the project (checkpointed)`, target ? [path.resolve(workspaceRoot, target)] : []);
     }
     case 'git':
       return assessGitTool(str('operation'), Array.isArray(input['args']) ? (input['args'] as unknown[]).map(String) : []);
@@ -72,6 +79,10 @@ export function assessRisk(tool: string, input: Record<string, unknown>, workspa
     case 'browser': {
       const action = str('action');
       if (['navigate', 'screenshot', 'extract_text', 'wait', 'close'].includes(action)) return SAFE;
+      // Page JavaScript can do anything the page can: post a form, call an
+      // API, pay. Nothing about it can be read before it runs, and a checkpoint
+      // of files undoes none of it.
+      if (action === 'evaluate') return risky('unclassified', 'runs JavaScript in the page, which can send or change things on the site');
       const target = `${str('selector')} ${str('text')} ${str('value')}`;
       if (action === 'click' && SUBMITS.test(target)) return risky('leaves-machine', `clicks "${target.trim().slice(0, 60)}", which may submit, pay or send`);
       return recoverable(`${action} in the browser`);
@@ -375,7 +386,7 @@ function writesTo(targets: string[], root: string, cwd: string): Risk {
   let r: Risk = SAFE;
   for (const t of targets) {
     if (!t || /^(\/dev\/(null|stdout|stderr)|nul|\$null|&\d)$/i.test(t)) continue;
-    r = worst(r, outside(t, root, cwd) ? risky('outside-project', `writes ${t}, outside the project`) : recoverable(`writes ${t} (checkpointed)`));
+    r = worst(r, outside(t, root, cwd) ? risky('outside-project', `writes ${t}, outside the project`) : recoverable(`writes ${t} (checkpointed)`, [path.resolve(cwd, t)]));
   }
   return r;
 }
@@ -383,12 +394,17 @@ function writesTo(targets: string[], root: string, cwd: string): Risk {
 /** A path argument of a writing command that lands outside the project. */
 function pathsOutside(prog: string, args: string[], root: string, cwd: string, writes: boolean): Risk {
   if (!writes) return SAFE;
-  for (const a of args) {
-    if (a.startsWith('-') || !looksLikePath(a)) continue;
+  const paths = args.filter((a) => !a.startsWith('-') && looksLikePath(a));
+  for (const a of paths) {
     if (outside(a, root, cwd)) return risky('outside-project', `${prog} changes ${a}, outside the project`);
   }
-  return SAFE;
+  // What it writes, for the checkpoint to vouch for: a copy writes only
+  // where it copies to; anything else (mv, tee, sed -i…) every path named.
+  const written = COPIES.has(prog) ? paths.slice(-1) : paths;
+  return written.length ? recoverable(`${prog} changes files (checkpointed)`, written.map((p) => path.resolve(cwd, p))) : SAFE;
 }
+
+const COPIES = new Set(['cp', 'copy', 'copy-item', 'cpi', 'install', 'rsync', 'xcopy', 'robocopy']);
 
 function gitPaths(args: string[], root: string, cwd: string): Risk {
   const c = args.findIndex((a) => a === '-C');

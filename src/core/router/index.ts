@@ -806,7 +806,16 @@ export class CascadeRouter extends EventEmitter {
 
     // Fill any tiers without explicit overrides.
     for (const tier of ['T1', 'T2', 'T3'] as TierRole[]) {
-      if (this.tierModels.has(tier)) continue;
+      // A tier already chosen keeps its model, bound again with the current
+      // provider settings: new settings drop the bindings (above), and a tier
+      // left unbound failed every call with "No provider for model". One
+      // whose provider is gone altogether is chosen afresh.
+      const kept = this.tierModels.get(tier);
+      if (kept && config.providers.some((p) => p.type === kept.provider)) {
+        this.ensureProvider(kept, config.providers);
+        continue;
+      }
+      this.tierModels.delete(tier);
       // 1. A benchmarked model from the tier's priority chain wins when present.
       // 2. Otherwise, the rank-appropriate Azure deployment for this tier.
       // 3. Otherwise, the generic "any available model" fallback.

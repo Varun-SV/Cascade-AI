@@ -122,6 +122,8 @@ describe('assessRisk: other tools', () => {
     expect(assessRisk('browser', { action: 'navigate', url: 'https://x.io' }, root).level).toBe('safe');
     expect(assessRisk('browser', { action: 'click', selector: '#place-order', text: 'Place order' }, root).category).toBe('leaves-machine');
     expect(assessRisk('browser', { action: 'click', selector: '.tab' }, root).level).toBe('recoverable');
+    // Page JavaScript can post or pay (Codex on f8f4a10).
+    expect(assessRisk('browser', { action: 'evaluate', script: "fetch('/api/order', { method: 'POST' })" }, root).category).toBe('unclassified');
   });
   it('a tool with no rules asks, unless its name says it reads', () => {
     expect(assessRisk('mcp__crm__send_email', {}, root).category).toBe('unclassified');
@@ -133,6 +135,17 @@ describe('assessRisk: other tools', () => {
     expect(assessCode('import subprocess; subprocess.run(["ls"])').category).toBe('unclassified');
     expect(assessCode('print(sum(range(10)))').level).toBe('recoverable');
     expect(assessRisk('run_code', { code: 'print(1)' }, root).level).toBe('recoverable');
+  });
+});
+
+describe('what an undoable call writes, for the checkpoint to vouch for (Codex on f8f4a10)', () => {
+  it('names the files written: a file tool, a redirect, a copy\'s destination, every path of a move', () => {
+    expect(assessRisk('file_write', { path: 'local-data/notes.txt' }, root).writes).toEqual([path.join(root, 'local-data/notes.txt')]);
+    expect(sh('printf changed > local-data/notes.txt').writes).toEqual([path.join(root, 'local-data/notes.txt')]);
+    expect(sh('cp node_modules/x/a.js src/a.js').writes).toEqual([path.join(root, 'src/a.js')]);
+    expect(sh('mv old/a.ts new/a.ts').writes).toEqual([path.join(root, 'old/a.ts'), path.join(root, 'new/a.ts')]);
+    expect(sh('echo a > x.txt && echo b > y.txt').writes).toEqual([path.join(root, 'x.txt'), path.join(root, 'y.txt')]);
+    expect(sh('npm test').writes).toBeUndefined();
   });
 });
 
@@ -171,6 +184,20 @@ describe('PermissionEscalator in auto mode with checkpoints', () => {
       await e.requestPermission(req('shell', { command: 'ls' }));
       expect(asked).toBe(1);
     }
+  });
+
+  it('a write the checkpoint does not record asks, saying /undo could not put it back (Codex on f8f4a10)', async () => {
+    const e = new PermissionEscalator(1000, true, false, true);
+    const recorded = new Set([path.join(root, 'src/a.ts')]);
+    e.setCheckpointCoverage(async (paths) => paths.every((p) => recorded.has(p)));
+    const asked: PermissionRequest[] = [];
+    e.on('permission:user-required', (r: PermissionRequest) => { asked.push(r); e.resolveUserDecision(r.id, true); });
+    expect((await e.requestPermission(req('file_write', { path: 'src/a.ts' }))).approved).toBe(true);
+    expect(asked).toEqual([]);
+    await e.requestPermission(req('shell', { command: 'printf changed > local-data/notes.txt' }));
+    expect(asked).toHaveLength(1);
+    expect(asked[0]!.risk).toMatchObject({ level: 'risky', category: 'unrecorded' });
+    expect(asked[0]!.risk!.reason).toMatch(/\/undo couldn't put it back/);
   });
 
   it('an untrusted tool, or one only the person may answer, still asks', async () => {

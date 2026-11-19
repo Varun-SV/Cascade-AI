@@ -116,6 +116,16 @@ describe('Checkpoints', () => {
     expect(read('a.txt')).toBe('one');
   });
 
+  it('says whether it records a file: not one the .gitignore leaves out, nor one outside (Codex on f8f4a10)', async () => {
+    const cp = new Checkpoints(root, state);
+    write('.gitignore', 'out/\nlocal-data/\n');
+    expect(await cp.covers([path.join(root, 'src/b.ts'), path.join(root, 'new-file.txt')])).toBe(true);
+    expect(await cp.covers([path.join(root, 'local-data/notes.txt')])).toBe(false);
+    expect(await cp.covers([path.join(root, 'src/b.ts'), path.join(root, 'out/build.js')])).toBe(false);
+    expect(await cp.covers([path.join(root, 'node_modules/x/index.js')])).toBe(false);
+    expect(await cp.covers([path.join(path.dirname(root), 'elsewhere.txt')])).toBe(false);
+  });
+
   it('takes no checkpoint of the home folder', async () => {
     expect(await new Checkpoints(os.homedir(), state).begin('x')).toBeNull();
   });

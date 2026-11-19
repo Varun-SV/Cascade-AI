@@ -2229,6 +2229,7 @@ ${prompt}`
 
     // Create a fresh permission escalator for this task run
     const escalator = new PermissionEscalator(this.config.approvalTimeoutMs ?? 600_000, this.config.autonomy === 'auto', this.config.approvalAdvice === true, options.undoable === true);
+    if (options.checkpointed) escalator.setCheckpointCoverage(options.checkpointed);
 
     // Wire escalator's user-required event → approvalCallback or direct event
     escalator.on('permission:user-required', async (req: PermissionRequest) => {

@@ -85,6 +85,13 @@ export class PermissionEscalator extends EventEmitter {
    * deletes" — rather than the whole tool.
    */
   private undoable: boolean;
+  /** Whether the run's checkpoint records these files (CascadeRunOptions.checkpointed). */
+  private checkpointed?: (paths: string[]) => Promise<boolean>;
+
+  /** How to tell whether a file a call writes is in the run's checkpoint. */
+  setCheckpointCoverage(fn: (paths: string[]) => Promise<boolean>): void {
+    this.checkpointed = fn;
+  }
 
   constructor(approvalTimeoutMs = 600_000, autonomous = false, adviseOnDangerous = false, undoable = false) {
     super();
@@ -130,6 +137,20 @@ export class PermissionEscalator extends EventEmitter {
 
   private async decide(req: PermissionRequest, signal?: AbortSignal): Promise<PermissionDecision> {
     if (signal?.aborted) return withdrawn(req);
+    // An undoable call is only undoable if the checkpoint records what it
+    // writes: a file the .gitignore leaves out (local-data/, .env) would be
+    // overwritten with nothing to put it back. Settled first, so an earlier
+    // "allow for this run" is looked up under what the call really is.
+    if (this.autonomous && this.undoable && req.risk?.level === 'recoverable' && req.risk.writes?.length && this.checkpointed) {
+      const recorded = await this.checkpointed(req.risk.writes).catch(() => false);
+      if (signal?.aborted) return withdrawn(req);
+      if (!recorded) {
+        req.risk = {
+          level: 'risky', category: 'unrecorded',
+          reason: `writes a file the checkpoint doesn't record (the project's .gitignore leaves it out), so /undo couldn't put it back`,
+        };
+      }
+    }
     // ── 1. Check the task-wide cache (USER/T1 "always") ────────────
     // Checked BEFORE the per-T2 cache so a grant covers every sibling worker
     // in the run, regardless of which T2 section raises the same tool next.

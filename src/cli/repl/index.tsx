@@ -388,6 +388,24 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   // turn, and the whole thing is best-effort: it never blocks or breaks a run,
   // and `CASCADE_NO_CLOUD_SYNC=1` opts out.
   const cloudMirrorRef = useRef<{ client: CloudClient; convId: string | null } | null>(null);
+  /**
+   * Sign in or out from inside the REPL, keeping the cloud mirror in step:
+   * it was set up only as the REPL started, so a /login after that synced
+   * nothing until a restart. A new sign-in mirrors from the next turn, into
+   * a new cloud chat.
+   */
+  const signInHere = useCallback(async (show: (text: string) => void): Promise<string> => {
+    const out = await signIn(show);
+    if (out.startsWith('✓')) {
+      try { const cloud = CloudClient.fromSession(); cloudMirrorRef.current = cloud ? { client: cloud, convId: null } : null; } catch { /* stays local */ }
+    }
+    return out;
+  }, []);
+  const signOutHere = useCallback(async (): Promise<string> => {
+    const out = await signOut();
+    cloudMirrorRef.current = null;
+    return out;
+  }, []);
   const ensureCloudConversation = useCallback(async (mirror: { client: CloudClient; convId: string | null }, title: string): Promise<string> => {
     if (mirror.convId) return mirror.convId;
     const convo = await mirror.client.createConversation(title.slice(0, 72));
@@ -673,9 +691,9 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       case 'login': {
         const who = await accountLine();
         if (who && !who.startsWith('signed in, but')) return `Already signed in: ${who}. Sign out first to switch accounts.`;
-        return signIn(progress);
+        return signInHere(progress);
       }
-      case 'logout': return signOut();
+      case 'logout': return signOutHere();
       case 'sync-push': return pushSettings(workspacePath, passphrase ?? '');
       case 'sync-pull': {
         const out = await pullSettings(workspacePath, passphrase ?? '');
@@ -751,12 +769,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       onLogin: async () => {
         const who = await accountLine();
         if (who && !who.startsWith('signed in, but')) return `Already signed in: ${who}.`;
-        return signIn((text) => {
+        return signInHere((text) => {
           const timestamp = new Date().toISOString();
           dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'system', content: text, timestamp } });
         });
       },
-      onLogout: async () => signOut(),
+      onLogout: async () => signOutHere(),
       onSync: async (args: string[]) => {
         const sub = (args[0] ?? '').toLowerCase();
         if (sub !== 'push' && sub !== 'pull') return 'Usage: /sync push (upload this machine\'s keys) or /sync pull (get them here). Both ask for your sync passphrase.';
@@ -1249,6 +1267,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         prompt: trimmed,
         workspacePath,
         undoable: checkpoint !== null,
+        // …and whether a file a call names is one the checkpoint records.
+        ...(checkpoint ? { checkpointed: (paths: string[]) => checkpointsRef.current!.covers(paths) } : {}),
         signal: runAbortRef.current.signal,
         identityId: currentIdentityId,
         conversationHistory: toConversationHistory(state.messages),

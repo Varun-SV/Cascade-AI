@@ -1165,6 +1165,7 @@ export type RiskCategory =
   | 'database'
   | 'processes'
   | 'permissions'
+  | 'unrecorded'
   | 'unclassified';
 export interface Risk {
   level: RiskLevel;
@@ -1172,6 +1173,12 @@ export interface Risk {
   category?: RiskCategory;
   /** In plain words, why. */
   reason: string;
+  /**
+   * For an undoable call: the files it names as what it writes, absolute.
+   * Undoable only if the run's checkpoint records them; one the project's
+   * .gitignore leaves out is not (see CascadeRunOptions.checkpointed).
+   */
+  writes?: string[];
 }
 
 export interface ApprovalResponse {
@@ -1317,6 +1324,13 @@ export interface CascadeRunOptions {
    * the whole tool.
    */
   undoable?: boolean;
+  /**
+   * With `undoable`: whether the run's checkpoint records every one of these
+   * files (absolute paths). A write to one it doesn't (the project's
+   * .gitignore leaves it out) is asked about in auto mode, like any other
+   * change /undo couldn't put back.
+   */
+  checkpointed?: (paths: string[]) => Promise<boolean>;
   /**
    * An optional `AbortSignal` to cancel the run mid-execution.
    * When aborted, all tiers (T1 → T2 → T3) stop at the next safe checkpoint
