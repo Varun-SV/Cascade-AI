@@ -47,6 +47,24 @@ let connectAgain = false;
 let refusals = 0;
 let backoffMs = 1000;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
+/**
+ * When the next attempt is due (ms since epoch). The one-minute wake alarm and
+ * a browser restart honour it, so they don't cut a backoff short. Lost with the
+ * worker, which is fine: a worker that just started may try at once.
+ */
+let nextAttemptAt = 0;
+/** After the server says it is restarting (a deploy), the first try waits this long. */
+const RESTART_WAIT_MS = 8_000;
+
+/** Whether Chrome reports a network at all. No network: no attempt, and no error in the log. */
+const online = (): boolean => (typeof navigator === 'undefined' ? true : navigator.onLine !== false);
+
+/** Try again in `ms`, unless an attempt is already due sooner. */
+function retryIn(ms: number): void {
+  clearTimeout(retryTimer);
+  nextAttemptAt = Date.now() + ms;
+  retryTimer = setTimeout(() => { void connect(); }, ms);
+}
 let nextRuleId = RUN_RULE_IDS_FROM;
 /** The run the user approved last: the next browser started is its, in the window they chose. */
 let approvedRun = '';
@@ -143,6 +161,16 @@ chrome.windows.onRemoved.addListener((windowId) => {
 
 async function connect(): Promise<void> {
   if (client) return;
+  if (!online()) {
+    // Waits for the 'online' event below rather than failing once a backoff. The
+    // saved pairing is still read (it's local): a worker that starts offline
+    // shows it, so the popup offers "Forget this browser" rather than pairing.
+    const epoch = connectEpoch;
+    const device = await loadDevice().catch(() => null);
+    if (epoch !== connectEpoch || client || online()) return;
+    if (device) { status.connection = 'offline'; status.device = { name: device.name, server: device.serverUrl }; publish(); }
+    return;
+  }
   if (connecting) { connectAgain = true; return; }
   // Reserved before the first await: two attempts that overlap there (a quick
   // second Retry, or pairing finishing alongside its storage change) would each
@@ -230,8 +258,14 @@ async function connect(): Promise<void> {
     if (!await loadDevice()) { status.connection = 'unpaired'; publish(); return; }
     status.connection = 'offline';
     publish();
-    clearTimeout(retryTimer);
-    retryTimer = setTimeout(() => { void connect(); }, backoffMs);
+    if (c.restarting()) {
+      // A deploy: the server comes back in seconds. Asking at once would only
+      // reach the gap before it is up, and Chrome logs every such failure.
+      backoffMs = 1000;
+      retryIn(RESTART_WAIT_MS + Math.floor(Math.random() * 2000));
+      return;
+    }
+    retryIn(backoffMs);
     backoffMs = Math.min(backoffMs * 2, 30_000);
   });
 }
@@ -376,7 +410,11 @@ chrome.runtime.onMessage.addListener((msg: Message, sender, reply) => {
 const started = cleanUpAfterRestart().catch(() => {}).then(() => connect());
 // Chrome wakes a stopped worker for an alarm; a paired browser reconnects then.
 chrome.alarms.create('wake', { periodInMinutes: 1 });
-chrome.alarms.onAlarm.addListener(() => { void started.then(() => connect()); });
+// Not before a scheduled retry is due: the alarm wakes a stopped worker, it
+// doesn't overrule the backoff a running one is keeping.
+chrome.alarms.onAlarm.addListener(() => { void started.then(() => { if (Date.now() >= nextAttemptAt) void connect(); }); });
+// The network came back: try now rather than at the end of a backoff.
+self.addEventListener('online', () => { backoffMs = 1000; nextAttemptAt = 0; void started.then(() => connect()); });
 // Paired: the device was saved, by this worker or another page of this extension.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && changes['device']?.newValue) { refusals = 0; void started.then(() => connect()); }

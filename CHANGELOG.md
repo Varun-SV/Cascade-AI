@@ -40,6 +40,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The desktop app ships `sharp` for the image tools. If it can't load on a
   machine, those tools say so and everything else works. The cloud image
   installs a font so labels on marked images render.
+## 0.89.1 - 2026-11-19
+
+### Fixed
+- **A deploy no longer floods the extension with connection errors.**
+  Railway stops the old server before starting the new one for a service with
+  a volume, as this one has. The server was killed mid-connection, and every
+  paired browser retried straight into the gap, so Chrome logged a connection
+  reset and then 502s. The cloud server now shuts down cleanly on SIGTERM: it
+  tells paired browsers it is restarting (WebSocket close code 1012), ends any
+  run's lease on purpose, closes its sockets, and closes the database. A device
+  that is told the server is restarting waits about eight seconds before
+  reconnecting, so its first try reaches the new server. `DeviceClient.restarting()`
+  reports it.
+- **The extension doesn't retry while there is no network** (extension
+  0.2.2). It waits for Chrome's `online` event instead of logging an
+  `ERR_NETWORK_IO_SUSPENDED` or a connection reset on every backoff while the
+  computer sleeps. The one-minute wake alarm no longer cuts a backoff short.
 
 ## 0.89.0 - 2026-11-19
 

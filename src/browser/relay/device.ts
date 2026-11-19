@@ -16,7 +16,7 @@ import type { CdpClient } from './cdp-client.js';
 import { WebSocket } from 'ws';
 import { type ApprovalPayload, type GrantPayload, type Identity, type Signed, createDeviceApprovals, signHello, verifyGrant } from './capability.js';
 import { ANY_PUBLIC_SITE, type Consent, makeConsent } from './egress-rules.js';
-import { type ClaimFrame, type ClaimReply, type ControlFrame, DEVICE_REJECTED_CLOSE, type DeviceControlFrame, HUB_PROTOCOL } from './hub.js';
+import { type ClaimFrame, type ClaimReply, type ControlFrame, DEVICE_REJECTED_CLOSE, type DeviceControlFrame, HUB_PROTOCOL, SERVER_RESTART_CLOSE } from './hub.js';
 import { type DeviceRelay, createDeviceRelay } from './relay.js';
 import type { PageEndMode, RequestEnforcer } from './request-enforcer.js';
 import { type ServerClaim, type TabLease, acquireLease, createTabLease } from './tab-lease.js';
@@ -126,6 +126,12 @@ export interface DeviceClient {
    * unreachable will take the device back when it returns.
    */
   rejected(): boolean;
+  /**
+   * Whether the server closed the connection because it is restarting (a
+   * deploy), so it will be back shortly; a reconnect should wait a little
+   * rather than ask before it is.
+   */
+  restarting(): boolean;
 }
 
 
@@ -313,15 +319,19 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
     finished(why);
   };
   let rejectedByServer = false;
+  let serverRestarting = false;
   control.on('close', (code: number) => {
     rejectedByServer = !authenticated && code === DEVICE_REJECTED_CLOSE;
-    gone(closing ? 'closed' : rejectedByServer ? 'the server does not accept this device' : 'the connection to the server dropped');
+    serverRestarting = !closing && code === SERVER_RESTART_CLOSE;
+    gone(closing ? 'closed' : rejectedByServer ? 'the server does not accept this device'
+      : serverRestarting ? 'the server is restarting' : 'the connection to the server dropped');
   });
   control.on('error', () => { /* 'close' follows */ });
 
   return {
     ready, closed,
     rejected: () => rejectedByServer,
+    restarting: () => serverRestarting,
     lease: () => active?.lease ?? null,
     relay: () => active?.relay ?? null,
     revoke(reason) { if (active) withdraw(active, reason); },
