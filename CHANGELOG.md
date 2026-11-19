@@ -20,7 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - destroying database data (DROP, TRUNCATE, DELETE without WHERE, migration resets);
   - stopping processes or containers;
   - changing permissions or ownership;
-  - commands it can't read before they run (`eval`, `curl | sh`, encoded PowerShell).
+  - commands it can't read before they run (`eval`, `curl | sh`, encoded PowerShell);
+  - writing a file a checkpoint doesn't record (one your `.gitignore` leaves
+    out), or one whose name a script works out only as it runs.
 
   Shell commands are read part by part, including inside `sh -c`, `cmd /c`,
   `$(…)` and `npx`. "Allow for this run" now covers that kind of risk (say,

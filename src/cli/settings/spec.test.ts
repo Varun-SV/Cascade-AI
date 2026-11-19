@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { SETTINGS, SECTIONS, findSetting, display, parseValue, nextValue, changedText, tryChange } from './spec.js';
+import { SETTINGS, SECTIONS, findSetting, display, parseValue, nextValue, changedText, tryChange, redactSecrets } from './spec.js';
 import { validateConfig } from '../../config/validate.js';
 import type { CascadeConfig } from '../../types.js';
 
@@ -77,5 +77,21 @@ describe('settings', () => {
     const c = config();
     item('browser').set!(c, true);
     expect(changedText(item('browser'), c)).toBe('Browser: on. Takes effect the next time you start Cascade.');
+  });
+});
+
+describe('redactSecrets (Codex on 9c6b865)', () => {
+  it('masks a key typed after a key setting, and anything that looks like a key', () => {
+    expect(redactSecrets('/settings key.openai sk-proj-abcdefghijklmnop1234')).toBe('/settings key.openai ••••');
+    expect(redactSecrets('/settings key.openai not-even-a-key-shape')).toBe('/settings key.openai ••••');
+    expect(redactSecrets('/settings braveKey BSAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')).toBe('/settings braveKey ••••');
+    expect(redactSecrets('/settings sk-ant-api03-abcdefghijklmnopqrstuvwxyz')).toBe('/settings ••••');
+    expect(redactSecrets('/settings ollama sk-abcdefghijklmnop')).toBe('/settings ollama ••••');
+  });
+  it('leaves ordinary settings and other commands as typed', () => {
+    expect(redactSecrets('/settings mode auto')).toBe('/settings mode auto');
+    expect(redactSecrets('/settings key.openai')).toBe('/settings key.openai');
+    expect(redactSecrets('/settings budget')).toBe('/settings budget');
+    expect(redactSecrets('/why')).toBe('/why');
   });
 });

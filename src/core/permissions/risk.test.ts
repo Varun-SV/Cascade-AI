@@ -150,6 +150,23 @@ describe('assessRisk: other tools', () => {
     expect(assessCode('print(sum(range(10)))').level).toBe('recoverable');
     expect(assessRisk('run_code', { code: 'print(1)' }, root).level).toBe('recoverable');
   });
+  it('run_code: the files a script writes are named, or it asks (Codex on 9c6b865)', () => {
+    const code = (c: string) => assessRisk('run_code', { code: c }, root);
+    expect(code('from pathlib import Path; Path("ignored.txt").write_text("replacement")').writes).toEqual([path.join(root, 'ignored.txt')]);
+    expect(code('with open("out/report.md", "w") as f:\n    f.write(text)').writes).toEqual([path.join(root, 'out/report.md')]);
+    expect(code('df.to_csv("data/clean.csv", index=False)').writes).toEqual([path.join(root, 'data/clean.csv')]);
+    expect(code("require('fs').writeFileSync('notes.txt', s)").writes).toEqual([path.join(root, 'notes.txt')]);
+    expect(code('shutil.copy("a.txt", "b.txt")').writes).toEqual([path.join(root, 'a.txt'), path.join(root, 'b.txt')]);
+    // Reading, and calls that only look alike, write nothing.
+    expect(code('rows = open("data.csv").read()')).toMatchObject({ level: 'recoverable' });
+    expect(code('rows = open("data.csv", "r").read()').writes).toBeUndefined();
+    expect(code('df = df.rename(columns={"a": "b"}); print(df.to_json(orient="records"))')).toMatchObject({ level: 'recoverable' });
+    // A name worked out as it runs, or a place outside the project, asks.
+    expect(code('p = "ignored.txt"\nopen(p, "w").write("x")').category).toBe('unrecorded');
+    expect(code('Path(f"{name}.txt").write_text("x")').category).toBe('unrecorded');
+    expect(code('out.write_text("x")').category).toBe('unrecorded');
+    expect(code('open("/etc/hosts", "a").write("x")').category).toBe('outside-project');
+  });
 });
 
 describe('what an undoable call writes, for the checkpoint to vouch for (Codex on f8f4a10)', () => {
@@ -279,6 +296,10 @@ describe('PermissionEscalator in auto mode with checkpoints', () => {
     expect(asked).toHaveLength(1);
     expect(asked[0]!.risk).toMatchObject({ level: 'risky', category: 'unrecorded' });
     expect(asked[0]!.risk!.reason).toMatch(/\/undo couldn't put it back/);
+    // A script's write is held to the same: one the checkpoint leaves out asks.
+    await e.requestPermission(req('run_code', { code: 'from pathlib import Path; Path("ignored.txt").write_text("replacement")' }));
+    expect(asked).toHaveLength(2);
+    expect(asked[1]!.risk).toMatchObject({ level: 'risky', category: 'unrecorded' });
   });
 
   it('an untrusted tool, or one only the person may answer, still asks', async () => {

@@ -33,7 +33,7 @@ import { Checkpoints, type Checkpoint } from '../../core/checkpoints.js';
 import { SettingsPanel } from './components/SettingsPanel.js';
 import { CascadeView, stepSelection } from './cascade-view/CascadeView.js';
 import { ActivityLog } from './cascade-view/activity.js';
-import { SECTIONS, changedText, findSetting, parseValue, tryChange, type SectionId, type SettingItem } from '../settings/spec.js';
+import { SECTIONS, changedText, findSetting, parseValue, redactSecrets, tryChange, type SectionId, type SettingItem } from '../settings/spec.js';
 import { accountLine, pullSettings, pushSettings, signIn, signOut } from '../commands/cloud.js';
 import { ConfigManager } from '../../config/index.js';
 import { describeCheckpoints, describeUndo } from './checkpoint-text.js';
@@ -334,6 +334,17 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
    * another /undo) waits for it to finish before it starts.
    */
   const undoingRef = useRef<Promise<unknown>>(Promise.resolve());
+  /**
+   * Hand the config to the live session. Kept in reconfiguringRef, which a
+   * run awaits before it starts: new provider settings clear the router's
+   * bindings, and a prompt sent right after /settings must find them made
+   * again. One at a time, in the order they were asked for.
+   */
+  const reconfigureNow = useCallback((): Promise<unknown> => {
+    const next = reconfiguringRef.current.then(() => cascadeRef.current?.reconfigure(config));
+    reconfiguringRef.current = next.catch(() => undefined);
+    return next;
+  }, [config]);
   const slashCommandRef = useRef<((text: string) => Promise<void>) | null>(null);
   // The live cascade view: what each node is doing, the node picked with ↑↓
   // (null follows the busiest), a clock for the run's timers.
@@ -689,10 +700,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     const running = runAbortRef.current !== null;
     if (item.applies !== 'restart') {
       if (running) pendingReconfigureRef.current = true;
-      else await cascadeRef.current?.reconfigure(config).catch((err: unknown) => setStartupWarning(`Settings: ${err instanceof Error ? err.message : String(err)}`));
+      else await reconfigureNow().catch((err: unknown) => setStartupWarning(`Settings: ${err instanceof Error ? err.message : String(err)}`));
     }
     return `${changedText(item, config)}${running && item.applies !== 'restart' ? ' Applies from the next run.' : ''}`;
-  }, [config, workspacePath]);
+  }, [config, workspacePath, reconfigureNow]);
 
   /** Read the config again from disk (after /sync pull) and hand it to the live session. */
   const reloadConfig = useCallback(async () => {
@@ -700,8 +711,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     await cm.load();
     Object.assign(config, cm.getConfig());
     if (runAbortRef.current) pendingReconfigureRef.current = true;
-    else await cascadeRef.current?.reconfigure(config);
-  }, [config, workspacePath]);
+    else await reconfigureNow();
+  }, [config, workspacePath, reconfigureNow]);
 
   const runSettingAction = useCallback(async (item: SettingItem, passphrase: string | undefined, progress: (text: string) => void): Promise<string> => {
     switch (item.action) {
@@ -1074,7 +1085,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     if (state.isExecuting) {
       if (slashRef.current.isSlashCommand(trimmed)) {
         setInput('');
-        dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'user', content: trimmed, timestamp: new Date().toISOString() } });
+        dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'user', content: redactSecrets(trimmed), timestamp: new Date().toISOString() } });
         setCommandRunning(true);
         try { await handleSlashCommand(trimmed); } finally { setCommandRunning(false); }
         return;
@@ -1092,7 +1103,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     if (slashRef.current.isSlashCommand(trimmed)) {
       // Echo the command immediately so there's a visual cue it was sent, and
       // show a running indicator while async commands (e.g. /plan) do their work.
-      dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'user', content: trimmed, timestamp: new Date().toISOString() } });
+      // A key typed into it is masked: the chat is sent to the model later.
+      dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'user', content: redactSecrets(trimmed), timestamp: new Date().toISOString() } });
       // Cleared first: a command that opens a panel (/settings, /model) takes
       // the keyboard, and the line would stay behind it with its suggestions open.
       setInput('');
@@ -1399,7 +1411,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         // Kept, and awaited before the next run starts: new provider settings
         // clear the router's bindings, and a run begun before they are made
         // again would find none.
-        reconfiguringRef.current = cascadeRef.current?.reconfigure(config).catch(() => undefined) ?? Promise.resolve();
+        void reconfigureNow().catch(() => undefined);
       }
       cancelArmedRef.current = false;
       setCancelAttempted(false);

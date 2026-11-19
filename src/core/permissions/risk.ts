@@ -61,7 +61,8 @@ export function assessRisk(tool: string, input: Record<string, unknown>, workspa
     case 'shell':
       return assessShell(str('command'), workspaceRoot, str('cwd') || workspaceRoot);
     case 'run_code':
-      return assessCode(str('code'));
+      // run_code runs in the project folder.
+      return assessCode(str('code'), workspaceRoot, workspaceRoot);
     case 'file_read': case 'file_list': case 'grep': case 'glob': case 'diff_view':
       return SAFE;
     case 'file_delete':
@@ -438,7 +439,7 @@ function assessSegment(segment: string, root: string, cwd: string): Risk {
   const perlInPlace = prog === 'perl' && args.some((a) => /^-\w*i/.test(a));
   if ((prog === 'python' || prog === 'python3' || prog === 'py' || prog === 'node' || prog === 'deno' || prog === 'ruby' || prog === 'perl') && !perlInPlace
     && args.some((a) => /^(-c|-e|--eval|-p)$/.test(a))) {
-    return worst(assessCode(args.slice(args.findIndex((a) => /^(-c|-e|--eval|-p)$/.test(a)) + 1).join(' ')), base);
+    return worst(assessCode(args.slice(args.findIndex((a) => /^(-c|-e|--eval|-p)$/.test(a)) + 1).join(' '), root, cwd), base);
   }
   const pm = PACKAGE_MANAGERS[prog];
   if (pm) {
@@ -642,8 +643,107 @@ function assessGh(args: string[]): Risk {
 
 // ── Code ────────────────────────────────────────
 
+/**
+ * The arguments of the call whose opening parenthesis is at `open`, split at
+ * top-level commas (strings and brackets kept whole). Null if it never closes.
+ */
+function callArgs(text: string, open: number): string[] | null {
+  const args: string[] = [];
+  let depth = 0;
+  let quote = '';
+  let start = open + 1;
+  for (let i = open + 1; i < text.length; i++) {
+    const c = text[i]!;
+    if (quote) {
+      if (c === '\\') i += 1;
+      else if (c === quote) quote = '';
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') quote = c;
+    else if (c === '(' || c === '[' || c === '{') depth += 1;
+    else if (c === ')' || c === ']' || c === '}') {
+      if (depth === 0) {
+        const last = text.slice(start, i).trim();
+        if (last || args.length) args.push(last);
+        return args;
+      }
+      depth -= 1;
+    } else if (c === ',' && depth === 0) {
+      args.push(text.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  return null;
+}
+
+/** The path a string literal names, or null for anything worked out as the code runs. */
+const PATH_KEYWORD = /^(?:file|path|fname|filename|dest|dst|path_or_buf|excel_writer)\s*=/;
+function literalPath(arg: string | undefined): string | null {
+  if (!arg) return null;
+  const m = /^[rRbB]?(['"`])([^'"`]*)\1$/.exec(arg.replace(PATH_KEYWORD, '').trim());
+  if (!m || (m[1] === '`' && m[2]!.includes('${'))) return null;
+  return m[2]!;
+}
+
+/** Calls that write the file their argument(s) name: which argument positions are targets. */
+const CODE_WRITERS: Array<[RegExp, number[]]> = [
+  [/\b(?:fs\.(?:promises\.)?)?(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream)\(/g, [0]],
+  [/\b(?:fs\.(?:promises\.)?)?(?:copyFileSync|copyFile|renameSync)\(|\bfs\.(?:promises\.)?(?:rename|cp|cpSync)\(/g, [0, 1]],
+  [/\bshutil\.(?:copy|copy2|copyfile|copytree|move)\(/g, [0, 1]],
+  [/\bos\.(?:rename|replace|renames)\(/g, [0, 1]],
+  [/\b(?:np|numpy)\.(?:save|savez|savez_compressed|savetxt)\(|\bsavefig\(|\.to_(?:csv|json|parquet|excel|pickle|feather|html|markdown)\(/g, [0]],
+  [/\btorch\.save\(|\bjoblib\.dump\(/g, [1]],
+  [/\b(?:File|IO)\.(?:write|binwrite)\(/g, [0]],
+];
+
+/**
+ * The files a script writes, as its own text names them; null when it writes
+ * one whose name it works out as it runs (a variable, an f-string), which
+ * can't be checked against the checkpoint before it runs.
+ */
+export function codeWriteTargets(code: string): string[] | null {
+  const targets: string[] = [];
+  // open(path, mode): a write only with a mode that writes, appends or creates.
+  for (const m of code.matchAll(/(?<![\w.])(?:open|io\.open|codecs\.open|fs\.openSync|fs\.open)\(/g)) {
+    const args = callArgs(code, m.index! + m[0].length - 1);
+    if (!args) return null;
+    const modeArg = args.find((a) => /^mode\s*=/.test(a)) ?? args.slice(1).find((a) => !/^\w+\s*=/.test(a));
+    if (modeArg === undefined) continue;
+    const mode = literalPath(modeArg.replace(/^mode\s*=\s*/, ''));
+    if (mode !== null && !/[wax+]/.test(mode)) continue;
+    const target = literalPath(args[0]);
+    if (target === null) return null;
+    targets.push(target);
+  }
+  // Path(...).write_text(), .write_bytes(), .touch(), .open('w'): the Path names it.
+  for (const m of code.matchAll(/\.(?:write_text|write_bytes|touch|symlink_to|hardlink_to)\(|\.open\(\s*['"][^'"]*[wax+][^'"]*['"]/g)) {
+    const before = code.slice(0, m.index!);
+    const receiver = /\bPath\(\s*([rRbB]?(['"])[^'"]*\2)\s*\)\s*$/.exec(before);
+    const target = receiver ? literalPath(receiver[1]) : null;
+    if (target === null) return null;
+    targets.push(target);
+  }
+  for (const [re, positions] of CODE_WRITERS) {
+    for (const m of code.matchAll(re)) {
+      const all = callArgs(code, m.index! + m[0].length - 1);
+      if (!all) return null;
+      // Positional arguments, and a path given by keyword; other keywords
+      // (orient=, index=) aren't where it writes.
+      const args = all.filter((a) => !/^\w+\s*=/.test(a) || PATH_KEYWORD.test(a));
+      if (!args.length) continue; // df.to_csv() with no path returns text
+      for (const i of positions) {
+        if (i >= args.length) continue;
+        const target = literalPath(args[i]);
+        if (target === null) return null;
+        targets.push(target);
+      }
+    }
+  }
+  return targets;
+}
+
 /** What a run_code script or an inline -c/-e program does that a checkpoint can't undo. */
-export function assessCode(code: string): Risk {
+export function assessCode(code: string, root?: string, cwd: string = root ?? ''): Risk {
   const text = code;
   if (/\b(os\.(remove|unlink|rmdir|removedirs)|shutil\.rmtree|Path\([^)]*\)\.(unlink|rmdir)|\.unlink\(|rmSync|unlinkSync|rmdirSync|fs\.rm\b|fs\.promises\.rm\b|Remove-Item|FileUtils\.rm|File\.delete)/.test(text)) {
     return risky('delete', 'the code deletes files');
@@ -657,5 +757,10 @@ export function assessCode(code: string): Risk {
   if (DANGEROUS_SQL.some((p) => p.test(text))) return risky('database', 'the code drops, truncates or deletes database data');
   if (/\b(os\.kill|process\.kill|signal\.SIGKILL)\b/.test(text)) return risky('processes', 'the code stops processes');
   if (/\b(os\.chmod|os\.chown|fs\.chmod|fs\.chown)/.test(text)) return risky('permissions', 'the code changes file permissions');
+  // The files it writes must be ones a checkpoint records, as a shell
+  // command's must: named in the code, so they can be checked before it runs.
+  const targets = codeWriteTargets(text);
+  if (targets === null) return risky('unrecorded', 'the code writes a file whose name it works out as it runs, so whether /undo could put it back can\'t be told');
+  if (targets.length && root) return worst(recoverable('runs code in the project (checkpointed)'), writesTo(targets, root, cwd));
   return recoverable('runs code in the project (checkpointed)');
 }

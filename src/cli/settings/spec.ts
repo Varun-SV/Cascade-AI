@@ -161,6 +161,25 @@ export function findSetting(name: string): SettingItem | undefined {
     ?? SETTINGS.find((s) => s.label.toLowerCase().includes(q));
 }
 
+/** A word that looks like a key, whatever it was typed after. */
+const LOOKS_LIKE_KEY = /^(?:sk-|sk_|xai-|gsk_|ghp_|gho_|github_pat_|AIza|pk-|rk-|hf_)\S{8,}$|^[A-Za-z0-9_\-+/=.]{32,}$/;
+
+/**
+ * A /settings command as it may be shown and kept: a value typed for a key
+ * ("/settings key.openai sk-…"), or anything that looks like one, is masked.
+ * The panel refuses keys typed on the command line, but the line itself is
+ * echoed into the chat, which later runs send to the model and /export saves.
+ */
+export function redactSecrets(line: string): string {
+  const m = /^(\/settings\s+)(\S+)(\s+[\s\S]*)?$/i.exec(line.trim());
+  if (!m) return line;
+  const [, head, name, rest] = m;
+  const masked = (words: string) => words.replace(/\S+/g, (w) => (LOOKS_LIKE_KEY.test(w) ? '••••' : w));
+  if (LOOKS_LIKE_KEY.test(name!)) return `${head}•••• ${rest ? masked(rest).trim() : ''}`.trim();
+  if (!rest?.trim()) return line.trim();
+  return findSetting(name!)?.kind === 'secret' ? `${head}${name} ••••` : `${head}${name} ${masked(rest).trim()}`;
+}
+
 /** How a setting's value is shown. A secret shows only that it is set, and its last four characters. */
 export function display(item: SettingItem, config: CascadeConfig): string {
   if (item.kind === 'action') return '';
