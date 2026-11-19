@@ -33,7 +33,9 @@ export interface ParsedTextToolCall {
  * mentions a call must not be taken for one: the call has to be in one of the
  * dedicated call formats (`<tool_call>`, `<function=…>`, `[TOOL_CALLS]`,
  * `<|python_tag|>`), or the reply has to open with it, and it has to name a
- * tool this worker actually has.
+ * tool this worker actually has. A call inside a code block or inline code is
+ * an example being shown, not a call — unless the whole reply is that one
+ * fenced block, which is how some models send a call.
  */
 export function strayTextToolCalls(
   text: string,
@@ -41,11 +43,15 @@ export function strayTextToolCalls(
 ): ParsedTextToolCall[] {
   if (!text) return [];
   const trimmed = text.trim();
-  const marked = /<tool_call>|<function=|\[TOOL_CALLS\]|<\|python_tag\|>/.test(trimmed);
-  const opensWithCall = /^(?:```(?:json|tool_call|tool)?\s*)?\{/.test(trimmed);
+  const whole = /^```[\w-]*[ \t]*\n([\s\S]*?)\n?[ \t]*```$/.exec(trimmed);
+  const body = whole && !whole[1]!.includes('```')
+    ? whole[1]!.trim()
+    : trimmed.replace(/```[\s\S]*?(?:```|$)/g, ' ').replace(/`[^`\n]*`/g, ' ').trim();
+  const marked = /<tool_call>|<function=|\[TOOL_CALLS\]|<\|python_tag\|>/.test(body);
+  const opensWithCall = body.startsWith('{');
   if (!marked && !opensWithCall) return [];
   const names = new Set(tools.map((t) => t.name));
-  const calls = parseTextToolCalls(trimmed);
+  const calls = parseTextToolCalls(body);
   return calls.length > 0 && calls.every((c) => names.has(c.name)) ? calls : [];
 }
 

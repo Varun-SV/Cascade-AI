@@ -67,7 +67,10 @@ const MAX_STARTS = 64;
  * Written for every model, not only the ones that answer cleanly:
  *  - the reasoning is set aside first (`<think>` blocks; see utils/reasoning),
  *    so a bracket in the thinking is never mistaken for the answer;
- *  - fenced ```json blocks are tried before the prose around them;
+ *  - a reply that is the JSON itself is taken whole; otherwise fenced ```json
+ *    blocks are tried before the prose around them. A fence counts only at
+ *    the start of a line with a real line break after its tag, which a fence
+ *    inside a JSON string value (where line breaks are escaped) never has;
  *  - each opening bracket is tried in turn, string-aware, so prose such as
  *    "[see below]" before the real array doesn't end the search;
  *  - common slips are repaired: trailing commas, // and block comments,
@@ -80,8 +83,13 @@ export function parseModelJson<T = unknown>(input: string, shape: 'object' | 'ar
   const answer = withoutReasoning(input);
   const open = shape === 'array' ? '[' : '{';
   const close = shape === 'array' ? ']' : '}';
+  const whole = answer.trim();
+  if (whole.startsWith(open)) {
+    const parsed = parseLenient(whole);
+    if (parsed !== undefined && (shape === 'array' ? Array.isArray(parsed) : isPlainObject(parsed))) return parsed as T;
+  }
   const candidates: string[] = [];
-  for (const m of answer.matchAll(/```[a-zA-Z_]*[ \t]*\n?([\s\S]*?)```/g)) {
+  for (const m of answer.matchAll(/(?:^|\n)[ \t]*```[\w-]*[ \t]*\n([\s\S]*?)\n[ \t]*```/g)) {
     if (m[1]!.includes(open)) candidates.push(m[1]!);
   }
   candidates.push(answer);

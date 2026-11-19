@@ -13,10 +13,16 @@ describe('splitReasoning', () => {
     });
   });
 
-  it('joins several blocks and keeps the text between them', () => {
-    const s = splitReasoning('<think>one</think>A <THINK>two</THINK> B');
-    expect(s.reasoning).toBe('one\n\ntwo');
-    expect(s.answer).toBe('A  B');
+  it('joins the blocks the reply opens with', () => {
+    expect(splitReasoning('<think>one</think>\n<THINK>two</THINK> Answer')).toEqual({ answer: 'Answer', reasoning: 'one\n\ntwo' });
+  });
+
+  it('leaves a tag after the answer has begun as the answer\'s own text', () => {
+    // A text tool call that writes a file containing the tags, or an
+    // explanation that shows them: cutting them out would change the call.
+    const call = '<tool_call>{"name":"file_write","input":{"path":"a.md","content":"<think>keep this text</think>"}}</tool_call>';
+    expect(splitReasoning(call)).toEqual({ answer: call, reasoning: '' });
+    expect(splitReasoning('<think>plan</think>A <think>two</think> B')).toEqual({ answer: 'A <think>two</think> B', reasoning: 'plan' });
   });
 
   it('reads a close with no open as reasoning the template began', () => {
@@ -26,11 +32,9 @@ describe('splitReasoning', () => {
     });
   });
 
-  it('makes the rest of the reply reasoning when a block never closes', () => {
-    expect(splitReasoning('Partial <think>ran out of tokens while')).toEqual({
-      answer: 'Partial',
-      reasoning: 'ran out of tokens while',
-    });
+  it('makes the rest of the reply reasoning when a leading block never closes', () => {
+    expect(splitReasoning('  <think>ran out of tokens while')).toEqual({ answer: '', reasoning: 'ran out of tokens while' });
+    expect(splitReasoning('Partial <think>not leading')).toEqual({ answer: 'Partial <think>not leading', reasoning: '' });
   });
 
   it('honours a leading <thinking> or <reasoning> block', () => {
@@ -71,6 +75,10 @@ describe('ReasoningStream', () => {
 
   it('releases a held tail that turned out not to be a tag', () => {
     expect(run(['a <t', 'able>'])).toEqual({ answer: 'a <table>', reasoning: '' });
+  });
+
+  it('stops reading tags once the answer has begun', () => {
+    expect(run(['<think>a</think>Hi ', '<think>', 'not this</think>'])).toEqual({ answer: 'Hi <think>not this</think>', reasoning: 'a' });
   });
 
   it('streams nothing as reasoning before an orphan close, which the final split settles', () => {

@@ -106,3 +106,30 @@ describe('strayTextToolCalls', () => {
     expect(strayTextToolCalls('', tools)).toEqual([]);
   });
 });
+
+describe('strayTextToolCalls and quoted examples', () => {
+  const tools = [{ name: 'shell' }];
+
+  it('does not run a call shown in a code block', async () => {
+    const { strayTextToolCalls } = await import('./text-tool-parser.js');
+    const reply = 'Here is an example; do not run it:\n```\n<tool_call>{"name":"shell","input":{"command":"echo example > example.txt"}}</tool_call>\n```';
+    expect(strayTextToolCalls(reply, tools)).toEqual([]);
+  });
+
+  it('does not run a call shown in inline code', async () => {
+    const { strayTextToolCalls } = await import('./text-tool-parser.js');
+    expect(strayTextToolCalls('Send `<tool_call>{"name":"shell","input":{}}</tool_call>` to run it.', tools)).toEqual([]);
+  });
+
+  it('still runs a reply that is one fenced call', async () => {
+    const { strayTextToolCalls } = await import('./text-tool-parser.js');
+    expect(strayTextToolCalls('```tool_call\n<tool_call>{"name":"shell","input":{"command":"ls"}}</tool_call>\n```', tools))
+      .toEqual([{ name: 'shell', input: { command: 'ls' } }]);
+  });
+
+  it('runs a marked call outside a code block that also shows an example', async () => {
+    const { strayTextToolCalls } = await import('./text-tool-parser.js');
+    const reply = '<tool_call>{"name":"shell","input":{"command":"ls"}}</tool_call>\nLike `<tool_call>{"name":"shell","input":{"command":"pwd"}}</tool_call>`.';
+    expect(strayTextToolCalls(reply, tools)).toEqual([{ name: 'shell', input: { command: 'ls' } }]);
+  });
+});

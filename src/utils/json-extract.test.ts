@@ -83,4 +83,17 @@ describe('parseModelJson', () => {
     expect(parseModelJson('no json at all', 'array')).toBeNull();
     expect(parseModelJson('', 'object')).toBeNull();
   });
+
+  it('does not take a fence inside a JSON string value for the payload', async () => {
+    const { parseModelJson } = await import('./json-extract.js');
+    const plan = JSON.stringify([{ subtaskId: 'a', description: 'Return ```json\n[]\n``` when empty' }]);
+    expect(parseModelJson(plan, 'array')).toEqual([{ subtaskId: 'a', description: 'Return ```json\n[]\n``` when empty' }]);
+    const spec = 'Spec:\n' + JSON.stringify({ name: 't', executeCode: 'return "```{}```"' });
+    expect(parseModelJson(spec, 'object')).toEqual({ name: 't', executeCode: 'return "```{}```"' });
+  });
+
+  it('still prefers a real fenced block to an example in the prose', async () => {
+    const { parseModelJson } = await import('./json-extract.js');
+    expect(parseModelJson('Like {"x":0}, but:\n```json\n{"x":1}\n```', 'object')).toEqual({ x: 1 });
+  });
 });

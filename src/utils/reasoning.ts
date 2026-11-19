@@ -29,12 +29,17 @@ export interface Split {
 /**
  * A reply's answer and reasoning, apart.
  *
- * - every `<think>…</think>` block is reasoning;
+ * - the `<think>…</think>` blocks the reply OPENS with are reasoning;
  * - a `</think>` with no `<think>` before it closes reasoning that began at the
  *   start of the reply (the template opened it);
- * - a `<think>` that never closes (the model ran out of tokens while thinking)
- *   makes the rest of the reply reasoning;
+ * - a leading `<think>` that never closes (the model ran out of tokens while
+ *   thinking) makes the rest of the reply reasoning;
  * - a leading `<thinking>` or `<reasoning>` block is reasoning too.
+ *
+ * Only leading blocks: models and providers put their thinking before the
+ * answer. A `<think>` tag later in the reply is the answer's own text — the
+ * content of a file a tool call writes, an example in an explanation — and
+ * cutting it out would change what the call does.
  */
 export function splitReasoning(text: string): Split {
   if (!text) return { answer: text ?? '', reasoning: '' };
@@ -55,17 +60,16 @@ export function splitReasoning(text: string): Split {
     rest = rest.slice(firstClose.index + firstClose[0].length);
   }
 
-  let answer = '';
   for (;;) {
-    const open = OPEN.exec(rest);
-    if (!open) { answer += rest; break; }
-    answer += rest.slice(0, open.index);
-    const after = rest.slice(open.index + open[0].length);
+    const lead = /^\s*<think>/i.exec(rest);
+    if (!lead) break;
+    const after = rest.slice(lead[0].length);
     const close = CLOSE.exec(after);
-    if (!close) { thoughts.push(after.trim()); break; }
+    if (!close) { thoughts.push(after.trim()); rest = ''; break; }
     thoughts.push(after.slice(0, close.index).trim());
     rest = after.slice(close.index + close[0].length);
   }
+  const answer = rest;
 
   const reasoning = thoughts.filter(Boolean).join('\n\n');
   if (!reasoning && thoughts.length === 0) return { answer: text, reasoning: '' };
@@ -84,14 +88,17 @@ const TAG_CLOSE = '</think>';
  * The same split, a streamed chunk at a time, for showing thinking while it
  * happens. A tag cut across two chunks is held back until it can be read.
  *
- * Only `<think>` blocks are seen here: a reply whose thinking began before it
- * did (an orphan `</think>`) can't be told apart from an answer until the close
- * arrives, so the caller settles on `splitReasoning` of the whole reply when
- * the call ends.
+ * Only leading `<think>` blocks are seen here, as in `splitReasoning`: once
+ * the answer has begun, a later tag is the answer's own text. A reply whose
+ * thinking began before it did (an orphan `</think>`) can't be told apart
+ * from an answer until the close arrives, so the caller settles on
+ * `splitReasoning` of the whole reply when the call ends.
  */
 export class ReasoningStream {
   private inside = false;
   private held = '';
+  /** The answer has begun: no later tag opens reasoning. */
+  private answered = false;
 
   /** The answer and reasoning text in this chunk. */
   push(chunk: string): Split {
@@ -100,19 +107,34 @@ export class ReasoningStream {
     let answer = '';
     let reasoning = '';
     for (;;) {
-      const tag = this.inside ? TAG_CLOSE : TAG_OPEN;
-      const at = text.toLowerCase().indexOf(tag);
-      if (at === -1) {
-        // Keep back a tail that could be the start of the tag.
-        const keep = partialTagTail(text, tag);
-        const out = text.slice(0, text.length - keep);
-        this.held = text.slice(text.length - keep);
-        if (this.inside) reasoning += out; else answer += out;
-        break;
+      if (this.answered) { answer += text; break; }
+      if (this.inside) {
+        const at = text.toLowerCase().indexOf(TAG_CLOSE);
+        if (at === -1) {
+          // Keep back a tail that could be the start of the closing tag.
+          const keep = partialTagTail(text, TAG_CLOSE);
+          reasoning += text.slice(0, text.length - keep);
+          this.held = text.slice(text.length - keep);
+          break;
+        }
+        reasoning += text.slice(0, at);
+        text = text.slice(at + TAG_CLOSE.length);
+        this.inside = false;
+        continue;
       }
-      if (this.inside) reasoning += text.slice(0, at); else answer += text.slice(0, at);
-      text = text.slice(at + tag.length);
-      this.inside = !this.inside;
+      // Outside a block, before any answer: whitespace, then maybe a tag.
+      const lead = text.length - text.trimStart().length;
+      const rest = text.slice(lead).toLowerCase();
+      answer += text.slice(0, lead);
+      if (!rest) break;
+      if (rest.startsWith(TAG_OPEN)) {
+        text = text.slice(lead + TAG_OPEN.length);
+        this.inside = true;
+        continue;
+      }
+      if (TAG_OPEN.startsWith(rest)) { this.held = text.slice(lead); break; }
+      this.answered = true;
+      text = text.slice(lead);
     }
     return { answer, reasoning };
   }
