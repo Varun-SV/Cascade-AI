@@ -10,7 +10,7 @@
 //    ✓ Mode: auto.
 //    ↑↓ choose · ←→ section · ↵ change · / search · esc close
 
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import type { CascadeConfig, Theme } from '../../../types.js';
 import { SECTIONS, SETTINGS, display, nextValue, parseValue, type SectionId, type SettingItem } from '../../settings/spec.js';
@@ -33,7 +33,14 @@ export function SettingsPanel({ config, theme, initialSection, initialSearch, on
   const [section, setSection] = useState(Math.max(0, SECTIONS.findIndex((s) => s.id === initialSection)));
   const [row, setRow] = useState(0);
   const [search, setSearch] = useState<string | null>(initialSearch ?? null);
-  const [editing, setEditing] = useState<Editing>(null);
+  const [editing, setEditingState] = useState<Editing>(null);
+  // Read by the key handler, which can run again before a redraw: Enter in the
+  // same burst as the last characters typed (a pasted passphrase) must see them.
+  const editingRef = useRef<Editing>(null);
+  const setEditing = (next: Editing | ((e: Editing) => Editing)): void => {
+    editingRef.current = typeof next === 'function' ? next(editingRef.current) : next;
+    setEditingState(editingRef.current);
+  };
   const [status, setStatus] = useState<{ text: string; ok: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<string | null>(null);
@@ -88,6 +95,7 @@ export function SettingsPanel({ config, theme, initialSection, initialSearch, on
 
   useInput((input, key) => {
     if (busy) return;
+    const editing = editingRef.current;
     if (editing) {
       if (key.escape) { setEditing(null); setStatus(null); return; }
       if (key.return) {

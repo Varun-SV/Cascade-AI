@@ -23,7 +23,13 @@ function terminal() {
   const press = async (s: string) => { queued.push(s); stdin.emit('readable'); await tick(); };
   /** Several reads with no redraw between them. */
   const burst = (...chunks: string[]) => { for (const c of chunks) { queued.push(c); stdin.emit('readable'); } };
-  return { stdout, stdin, press, burst, frame: () => frame.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '') };
+  /** Waits for a frame with `text` in it (a loaded machine redraws late), up to 2 s. */
+  const until = async (text: string) => {
+    const end = Date.now() + 2000;
+    while (!frame.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').includes(text) && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
+    return frame.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+  };
+  return { stdout, stdin, press, burst, until, frame: () => frame.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '') };
 }
 const tick = () => new Promise((r) => setTimeout(r, 30));
 
@@ -52,8 +58,8 @@ describe('/settings panel', () => {
   it('shows a section, with keys masked', async () => {
     const p = mount(config(), { section: 'models' });
     await tick();
-    expect(p.frame()).toContain('Models & keys');
-    expect(p.frame()).toContain('set ••••9876');
+    expect(await p.until('Models & keys')).toContain('Models & keys');
+    expect(await p.until('set ••••9876')).toContain('set ••••9876');
     expect(p.frame()).not.toContain('sk-ant-xyz9876');
     p.unmount();
   });
@@ -64,9 +70,9 @@ describe('/settings panel', () => {
     await tick();
     await p.press('\r');
     expect(p.changes).toEqual([['autonomy', 'auto']]);
-    expect(p.frame()).toContain('Mode saved');
+    expect(await p.until('Mode saved')).toContain('Mode saved');
     await p.press('\x1b[C');
-    expect(p.frame()).toContain('Context & memory');
+    expect(await p.until('Context & memory')).toContain('Context & memory');
     await p.press('\x1b');
     await tick();
     expect(p.closed()).toBe(true);
@@ -79,12 +85,19 @@ describe('/settings panel', () => {
     await p.press('\x1b[B');
     await p.press('\x1b[B');
     await p.press('\r');
-    expect(p.frame()).toContain('sync passphrase');
+    expect(await p.until('sync passphrase')).toContain('sync passphrase');
     for (const ch of 'hunter2') await p.press(ch);
-    expect(p.frame()).toContain('•••••••');
+    expect(await p.until('•••••••')).toContain('•••••••');
     expect(p.frame()).not.toContain('hunter2');
     await p.press('\r');
     expect(p.actions).toEqual([['sync-push', 'hunter2']]);
+    // Pasted with Enter in one go, before any redraw: every character still counts.
+    await p.until('done');
+    await p.press('\r');
+    await p.until('sync passphrase');
+    p.burst('pass', 'word', '\r');
+    await p.until('done');
+    expect(p.actions.at(-1)).toEqual(['sync-push', 'password']);
     p.unmount();
   });
 
@@ -93,13 +106,12 @@ describe('/settings panel', () => {
     await tick();
     await p.press('/');
     for (const ch of 'budget') await p.press(ch);
-    expect(p.frame()).toContain('Most a run may cost');
+    expect(await p.until('Most a run may cost')).toContain('Most a run may cost');
     // Keys that arrive before a redraw all count (fast typing, a paste in pieces).
     await p.press('\x1b');
     await p.press('/');
     p.burst('bud', 'get');
-    await new Promise((r) => setTimeout(r, 60));
-    expect(p.frame()).toContain('search: budget');
+    expect(await p.until('search: budget')).toContain('search: budget');
     p.unmount();
   });
 });
