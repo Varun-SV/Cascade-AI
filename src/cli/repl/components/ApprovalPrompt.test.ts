@@ -15,7 +15,7 @@ describe('the approval card says who, what, why, and what /undo can do', () => {
     expect(s.who).toBe('T3 · CLI & verification');
     expect(s.verb).toBe('wants to run');
     expect(s.what).toBe('rm -r build/');
-    expect(s.why).toMatch(/^deletes files/);
+    expect(s.why).toBe('deletes build/');
     expect(s.undo).toMatch(/\/undo can put back/);
     expect(s.always).toBe('allow "deletes files" for this run');
   });

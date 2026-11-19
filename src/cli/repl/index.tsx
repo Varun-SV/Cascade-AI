@@ -31,6 +31,8 @@ import { writeProjectConfig } from '../../config/write-config.js';
 import { Cascade, type DecisionLogEntry } from '../../core/cascade.js';
 import { Checkpoints, type Checkpoint } from '../../core/checkpoints.js';
 import { SettingsPanel } from './components/SettingsPanel.js';
+import { CascadeView, stepSelection } from './cascade-view/CascadeView.js';
+import { ActivityLog } from './cascade-view/activity.js';
 import { SECTIONS, changedText, findSetting, parseValue, type SectionId, type SettingItem } from '../settings/spec.js';
 import { accountLine, pullSettings, pushSettings, signIn, signOut } from '../commands/cloud.js';
 import { ConfigManager } from '../../config/index.js';
@@ -51,7 +53,7 @@ import { SlashCommandRegistry } from '../slash/index.js';
 import { computeAdaptiveLayoutMode, computeLiveAreaBudget, computeTranscriptRows, flattenTranscript, windowTranscript } from './layout.js';
 import { disableMouseReporting } from '../utils/terminal-input.js';
 import { writeClipboardSync } from '../utils/clipboard.js';
-import { AgentTree, type TierNode } from './components/AgentTree.js';
+import type { TierNode } from './components/AgentTree.js';
 import { TimelinePanel } from './components/TimelinePanel.js';
 import { StatusBar } from './components/StatusBar.js';
 import { HintBar } from './components/HintBar.js';
@@ -60,7 +62,6 @@ import { ModelsDisplay, type ModelPickerSelection } from './components/ModelsDis
 import { CostTracker } from './components/CostTracker.js';
 import { CompactStatus } from './components/CompactStatus.js';
 import { ChatMessage } from './components/ChatMessage.js';
-import { PeerFeed } from './components/PeerFeed.js';
 import { PlanApproval, type PlanApprovalRequest } from './components/PlanApproval.js';
 
 // Keep only the most recent peer-comms events — a long run can produce
@@ -328,6 +329,14 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   /** A setting changed during a run: the live Cascade takes it once the run ends. */
   const pendingReconfigureRef = useRef(false);
   const slashCommandRef = useRef<((text: string) => Promise<void>) | null>(null);
+  // The live cascade view: what each node is doing, the node picked with ↑↓
+  // (null follows the busiest), a clock for the run's timers.
+  const activityRef = useRef(new ActivityLog());
+  const [activityVersion, setActivityVersion] = useState(0);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
+  const [runEndedAt, setRunEndedAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   // Ref mirror of cancelAttempted — read synchronously in the key handler so a
   // rapid double-press isn't dropped by a stale React state value.
   const cancelArmedRef = useRef(false);
@@ -505,6 +514,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     const existing = treeNodesRef.current.get(event.tierId);
     const node: FlatTreeNode = { id: event.tierId, role: event.role ?? existing?.role ?? 'T3', label: event.label ?? existing?.label ?? event.tierId, status: event.status ?? existing?.status ?? 'IDLE', currentAction: event.currentAction ?? existing?.currentAction, progressPct: event.progressPct ?? existing?.progressPct, parentId: event.parentId ?? existing?.parentId, nodeId: event.nodeId ?? existing?.nodeId, dependsOn: event.dependsOn ?? existing?.dependsOn, waveId: event.waveId ?? existing?.waveId, blockedBy: event.blockedBy ?? existing?.blockedBy, children: [] };
     treeNodesRef.current.set(event.tierId, node);
+    if (event.status) activityRef.current.status(event.tierId, event.status);
     const store = storeRef.current;
     if (store) {
       const runtimeNode: RuntimeNode = { tierId: node.id, sessionId: sessionIdRef.current, parentId: node.parentId, role: node.role, label: node.label, status: node.status, currentAction: node.currentAction, progressPct: node.progressPct, updatedAt: new Date().toISOString(), workspacePath, isGlobal: false, output: event.output };
@@ -609,6 +619,13 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       setSlashIndex(0);
     }
   }, [slashCompletions.length, slashIndex]);
+
+  // The run's timers tick once a second while it works, and stand still after.
+  useEffect(() => {
+    if (!state.isExecuting) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [state.isExecuting]);
 
   // New messages snap the alt-screen transcript back to the newest line.
   useEffect(() => {
@@ -996,7 +1013,11 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       }
     }
     const trimmed = userInput.trim();
-    if (!trimmed) return;
+    if (!trimmed) {
+      // Enter on an empty line while a run works: stop following the picked node.
+      if (state.isExecuting) setSelectedNodeId(null);
+      return;
+    }
     if (state.isExecuting) {
       if (slashRef.current.isSlashCommand(trimmed)) {
         setInput('');
@@ -1019,6 +1040,9 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       // Echo the command immediately so there's a visual cue it was sent, and
       // show a running indicator while async commands (e.g. /plan) do their work.
       dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'user', content: trimmed, timestamp: new Date().toISOString() } });
+      // Cleared first: a command that opens a panel (/settings, /model) takes
+      // the keyboard, and the line would stay behind it with its suggestions open.
+      setInput('');
       setCommandRunning(true);
       try { await handleSlashCommand(trimmed); } finally { setCommandRunning(false); }
       return;
@@ -1041,6 +1065,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       return;
     }
     treeNodesRef.current.clear(); rebuildTree(); setTreeScrollOffset(0);
+    activityRef.current.clear();
+    setSelectedNodeId(null);
+    setRunStartedAt(Date.now());
+    setRunEndedAt(null);
     dispatch({ type: 'CLEAR_PEER_EVENTS' });
     const onRoot = ({ role }: RootTierEvent) => {
       const tierId = role === 'T1' ? 'T1' : `${role.toLowerCase()}-root` as 't2-root' | 't3-root';
@@ -1077,6 +1105,14 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier, costByFeature: stats.costByFeature, savedUsd: savings.savedUsd, savedPct: savings.savedPct });
       statusThrottleTimeout = null;
     };
+    // What each node does, for the cascade view: redrawn at most every 100 ms.
+    let activityTimer: NodeJS.Timeout | null = null;
+    const activityChanged = () => {
+      if (!activityTimer) activityTimer = setTimeout(() => { activityTimer = null; setActivityVersion((v) => v + 1); }, 100);
+    };
+    cascade.on('tool:call', (ev: { id: string; tierId: string; toolName: string; input?: Record<string, unknown> }) => { activityRef.current.toolCall(ev); activityChanged(); });
+    cascade.on('tool:result', (ev: { id: string; tierId: string; toolName: string; output?: string; error?: string }) => { activityRef.current.toolResult(ev); activityChanged(); });
+    cascade.on('tier:thinking', (ev: { tierId: string; call?: number; text?: string; done?: boolean }) => { activityRef.current.think(ev); activityChanged(); });
     cascade.on('tier:root', onRoot);
     cascade.on('stream:token', onStream);
     cascade.on('tier:status', (ev: TierStatusEvent) => {
@@ -1279,6 +1315,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       if (streamThrottleTimeout) { clearTimeout(streamThrottleTimeout); streamThrottleTimeout = null; }
       if (statusThrottleTimeout) { clearTimeout(statusThrottleTimeout); statusThrottleTimeout = null; }
       if (peerThrottleTimeout) { clearTimeout(peerThrottleTimeout); peerThrottleTimeout = null; }
+      setActivityVersion((v) => v + 1);
+      setRunEndedAt(Date.now());
       decisionLogRef.current = cascade.getDecisionLog();
       cascade.removeAllListeners();
       setPlanApprovalRequest(null);
@@ -1373,6 +1411,11 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       setHistoryOffset((prev) => Math.min(Math.max(0, key.pageUp ? prev + step : prev - step), maxOffset));
       return;
     }
+    if (state.isExecuting && !input && state.agentTree && (key.upArrow || key.downArrow)) {
+      setSelectedNodeId((cur) => stepSelection(state.agentTree!, cur, activityRef.current, key.upArrow ? -1 : 1));
+      return;
+    }
+    if (state.isExecuting && !input && key.tab) { dispatch({ type: 'TOGGLE_COMMS' }); return; }
     if (key.upArrow && !input.includes('\n')) {
       if (slashCompletions.length > 0) { setSlashIndex(p => (p <= 0 ? slashCompletions.length - 1 : p - 1)); return; }
       const nextIndex = historyIndex === null ? 0 : Math.min(historyIndex + 1, inputHistory.length - 1);
@@ -1522,6 +1565,9 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         workspacePath={workspacePath}
         isExecuting={state.isExecuting}
         activeTier={state.agentTree?.status === 'ACTIVE' ? 'T1' : undefined}
+        autonomy={cascadeRef.current?.getAutonomy() ?? (config.autonomy === 'auto' ? 'auto' : 'manual')}
+        checkpoint={lastCheckpoint?.n ?? null}
+        {...(runStartedAt !== null ? { elapsedMs: (runEndedAt ?? now) - runStartedAt } : {})}
       />
 
       {startupWarning && (
@@ -1583,17 +1629,20 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           isStreaming={state.isStreaming}
         />
       ) : (
-        <AgentTree
+        // The cascade: the tree, and beside it (under it when narrow) what
+        // the picked or busiest node is doing. Comms show in its panel.
+        <CascadeView
           root={state.agentTree}
+          activity={activityRef.current}
+          version={activityVersion}
+          selectedId={selectedNodeId}
+          width={width}
+          maxRows={Math.max(6, liveBudget.treeMaxRows + (state.showComms ? liveBudget.commsMaxEvents : 0))}
           theme={theme}
-          scrollOffset={treeScrollOffset}
-          maxRows={adaptiveMode === 'medium' ? Math.min(4, liveBudget.treeMaxRows) : liveBudget.treeMaxRows}
+          peerEvents={state.peerEvents}
+          showComms={state.showComms}
+          now={runEndedAt ?? now}
         />
-      )}
-
-      {/* Agent-to-agent comms feed — the radio chatter between workers */}
-      {adaptiveMode === 'wide' && state.showComms && liveBudget.commsMaxEvents > 0 && (
-        <PeerFeed events={state.peerEvents} theme={theme} maxRows={liveBudget.commsMaxEvents} />
       )}
 
       {adaptiveMode === 'wide' && state.showDetails && liveBudget.showTimeline && (
@@ -1662,7 +1711,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         </Box>
       )}
       {/* ── Hint bar — keyboard shortcuts, hidden during execution ── */}
-      <HintBar theme={theme} isExecuting={state.isExecuting} />
+      <HintBar theme={theme} isExecuting={state.isExecuting} picked={selectedNodeId !== null} comms={state.showComms} />
 
       <Box borderStyle="round" borderColor={(quitAttempted || cancelAttempted || cancelling) ? 'red' : (state.isStreaming ? theme.colors.accent : theme.colors.border)} paddingX={2} flexDirection="column">
         {cancelling ? (

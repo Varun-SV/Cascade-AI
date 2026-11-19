@@ -58,8 +58,10 @@ export function summarizeApproval(request: ApprovalRequest): ApprovalSummary {
     default: what = `${request.toolName} ${oneLine(JSON.stringify(i), 80)}`;
   }
   const risk = request.risk;
+  // "deletes build/" says it already; "sends something off this computer: git push…" needs both.
+  const label = risk?.category ? RISK_LABELS[risk.category] : '';
   const why = risk?.level === 'risky' && risk.category
-    ? `${RISK_LABELS[risk.category]}${risk.reason && !risk.reason.startsWith(what) ? `: ${risk.reason}` : ''}`
+    ? (risk.reason.split(' ')[0] === label.split(' ')[0] ? risk.reason : `${label}: ${risk.reason}`)
     : risk ? risk.reason : request.description;
   const undo = !risk ? ''
     : risk.level === 'safe' ? 'only reads'
