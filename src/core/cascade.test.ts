@@ -58,6 +58,19 @@ describe('Cascade.setBrowserController — the gate on acting for real', () => {
     expect(c.getToolRegistry().hasTool('browser_control')).toBe(true);
   });
 
+  it('a run that can browse can also find real pictures, even with web search off', () => {
+    // A hosted run with the web toggle off has an empty enabledTools, so
+    // find_image never registered, and a browsing run asked for pictures was
+    // offered only generate_image: paid, and made up.
+    const c = cascadeWith({ agentBrowserControl: true, enabledTools: [] });
+    c.setBrowserController(controller);
+    expect(c.getToolRegistry().hasTool('find_image')).toBe(true);
+    expect(c.getToolRegistry().hasTool('annotate_image')).toBe(true);
+    const off = cascadeWith({ agentBrowserControl: true, enabledTools: [], disabledTools: ['find_image'] });
+    off.setBrowserController(controller);
+    expect(off.getToolRegistry().hasTool('find_image')).toBe(false);
+  });
+
   it('still honours disabledTools when the setting is on', () => {
     // disabledTools reaches tools registered outside the enabledTools
     // allowlist, and this is one of them.

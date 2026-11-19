@@ -326,7 +326,15 @@ const VISUAL_REQUEST_RE =
 /** Evidence the output really CONTAINS a visual, not a sentence about one. */
 const IMAGE_REF_RE = /!\[[^\]]*\]\([^)]+\)/;
 /** Tools that produce a picture or a chart: calling one satisfies a request for a visual. */
-const VISUAL_TOOLS = new Set(['generate_image', 'generate_document', 'find_image', 'annotate_image']);
+const VISUAL_TOOLS = new Set(['generate_image', 'generate_document', 'find_image', 'annotate_image', 'browser_control:capture']);
+
+/** A call's name for the visual check: a browser screenshot for the report counts as a picture. */
+export function visualCallName(call: { name: string; input?: Record<string, unknown> }): string {
+  return call.name === 'browser_control' && call.input?.['action'] === 'capture' ? 'browser_control:capture' : call.name;
+}
+
+/** What the person is told when a requested picture is missing: the instructions above are for the worker. */
+export const MISSING_VISUAL_NOTE = 'the answer has no picture: none could be found or made for it';
 const CHART_BLOCK_RE = /^\s*```+\s*chart\s*:/im;
 
 /**
@@ -356,19 +364,25 @@ export function missingVisualEvidence(
   calledTools: string[],
   toolNames: string[],
 ): string | null {
-  const canVisualize = toolNames.includes('generate_image') || toolNames.includes('generate_document') || toolNames.includes('find_image');
+  const canCapture = toolNames.includes('browser_control');
+  const canVisualize = canCapture || toolNames.includes('generate_image') || toolNames.includes('generate_document') || toolNames.includes('find_image');
   if (!canVisualize) return null;
   const haystack = `${assignment?.description ?? ''}\n${assignment?.expectedOutput ?? ''}`;
   if (!VISUAL_REQUEST_RE.test(haystack)) return null;
   if (calledTools.some((t) => VISUAL_TOOLS.has(t))) return null;
   if (IMAGE_REF_RE.test(output) || CHART_BLOCK_RE.test(output)) return null;
 
+  // Real pictures first: they are free and true. A generated one is for
+  // what does not exist yet, and it costs money.
   const options: string[] = [];
   if (toolNames.includes('find_image')) {
-    options.push('for a real thing, call "find_image" and put the Markdown line it gives on its own line');
+    options.push('for a real thing (a product, a place, a person), call "find_image" and put the Markdown line it gives on its own line');
+  }
+  if (canCapture) {
+    options.push('for a page you visited, call "browser_control" with action "capture" and put the Markdown line it gives on its own line');
   }
   if (toolNames.includes('generate_image')) {
-    options.push('call "generate_image" and reference the result on its own line as ![description](location)');
+    options.push('only for something that does not exist yet, call "generate_image" and reference the result on its own line as ![description](location)');
   }
   if (toolNames.includes('generate_document')) {
     options.push('emit a fenced ```chart:bar (or chart:line / chart:pie) block whose body is CSV, for anything data-driven');
@@ -392,6 +406,8 @@ const READS_SEEN = new Set([
 ]);
 
 export class T3Worker extends BaseTier {
+  /** The tool calls of the last correction round, so a check after it can see what it did. */
+  private lastCorrectionCalls: ToolCall[] = [];
   protected router: CascadeRouter;
   private toolRegistry: ToolRegistry;
   private context: ContextManager;
@@ -686,13 +702,19 @@ export class T3Worker extends BaseTier {
       // the thing. Not a hard failure — a missing illustration should never
       // throw away an otherwise-good deliverable.
       const visualIssue = missingVisualEvidence(
-        assignment, output, toolCalls.map((t) => t.name), this.tools.map((t) => t.name),
+        assignment, output, toolCalls.map(visualCallName), this.tools.map((t) => t.name),
       );
       if (visualIssue) {
         correctionAttempts++;
-        issues.push(visualIssue);
         this.sendStatusUpdate({ progressPct: 68, currentAction: 'Verifying requested visuals', status: 'IN_PROGRESS' });
-        output = await this.correctOutput(output, [visualIssue]);
+        const corrected = await this.correctOutput(output, [visualIssue]);
+        // Recorded only if the round still left no picture, and in words for
+        // the person: the instruction above is for the worker, and it reached
+        // a person's screen as the answer once.
+        if (missingVisualEvidence(assignment, corrected, [...toolCalls.map(visualCallName), ...this.lastCorrectionCalls.map(visualCallName)], this.tools.map((t) => t.name))) {
+          issues.push(MISSING_VISUAL_NOTE);
+        }
+        output = corrected;
       }
 
       // ── Deterministic rung of the verification ladder ──
@@ -2209,6 +2231,16 @@ Correct the issues and provide an improved version that addresses all failures. 
         + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
       this.tools
     );
+    this.lastCorrectionCalls = result.toolCalls;
+    // A round that answers with nothing (only tool calls, or an empty
+    // reply) must not wipe out the work it was asked to improve: the answer
+    // a person paid for was replaced by an error once.
+    if (!result.output.trim()) return originalOutput;
+    // Nor one that answers with a fragment of it: a picture line and a
+    // sentence, where there were pages of findings, keeps the findings.
+    if (result.output.trim().length < originalOutput.trim().length * 0.3 && IMAGE_REF_RE.test(result.output) && !IMAGE_REF_RE.test(originalOutput)) {
+      return `${originalOutput.trimEnd()}\n\n${result.output.trim()}`;
+    }
     return result.output;
   }
 

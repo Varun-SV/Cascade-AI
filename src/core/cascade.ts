@@ -1220,10 +1220,20 @@ export class Cascade extends EventEmitter {
       // `browserVision`: the picture is for the report, not for the model.
       reportImages: { assets: this.imageAssets, sink: this.imageSink(this.workspacePath) },
     }));
-    // A capture is something to mark up: offer annotate_image if nothing else did.
-    if (!this.toolRegistry.hasTool('annotate_image') && !(this.config.tools?.disabledTools ?? []).includes('annotate_image')) {
-      const [annotate] = buildReportImageTools({ assets: this.imageAssets, sink: this.imageSink(this.workspacePath) }, { web: false, imageSource: true });
-      if (annotate) { annotate.setWorkspaceRoot(this.workspacePath); this.toolRegistry.register(annotate); }
+    // A capture is something to mark up: offer annotate_image if nothing else
+    // did. And a run that can browse the web can find real pictures on it:
+    // find_image fetches public pages and Commons from here, not through the
+    // person's browser. Without it, a browsing run asked for a picture was
+    // offered only generate_image, the paid and made-up one.
+    // Outside the enabledTools allowlist, like browser_control itself (a
+    // hosted run with web search off has an empty one); disabledTools, the
+    // person's own "not this tool", still applies.
+    const disabled = this.config.tools?.disabledTools ?? [];
+    const allowed = (name: string) => !this.toolRegistry.hasTool(name) && !disabled.includes(name);
+    for (const tool of buildReportImageTools({ assets: this.imageAssets, sink: this.imageSink(this.workspacePath) }, { web: true, imageSource: true })) {
+      if (!allowed(tool.name)) continue;
+      tool.setWorkspaceRoot(this.workspacePath);
+      this.toolRegistry.register(tool);
     }
   }
 

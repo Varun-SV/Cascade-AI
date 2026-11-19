@@ -16,7 +16,7 @@ import { fitScreenshots, countScreenshots } from '../router/screenshots.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import { PeerBus } from '../peer/bus.js';
 import { PermissionEscalator } from '../permissions/escalator.js';
-import { T3Worker, buildWorkerRules, canProduceFiles, canProduceNonDiskDeliverables, hasFileWritingTool, missingVisualEvidence, shouldRequireArtifact, tscErrors } from './t3-worker.js';
+import { T3Worker, MISSING_VISUAL_NOTE, buildWorkerRules, canProduceFiles, canProduceNonDiskDeliverables, hasFileWritingTool, missingVisualEvidence, shouldRequireArtifact, tscErrors, visualCallName } from './t3-worker.js';
 import { ACTING_INTEGRITY_RULE } from './integrity.js';
 import os from 'node:os';
 import fs from 'node:fs';
@@ -779,6 +779,19 @@ describe('missingVisualEvidence — "you asked for a picture, is there one?"', (
     )).toBeNull();
   });
 
+  it('a browser screenshot for the report counts, and real pictures are offered before a generated one', () => {
+    const tools = ['browser_control', 'find_image', 'generate_image'];
+    expect(missingVisualEvidence(ASKS, 'Done.', [visualCallName({ name: 'browser_control', input: { action: 'capture' } })], tools)).toBeNull();
+    // Clicking around is not a picture.
+    const issue = missingVisualEvidence(ASKS, 'Done.', [visualCallName({ name: 'browser_control', input: { action: 'click' } })], tools)!;
+    expect(issue).toContain('action "capture"');
+    expect(issue.indexOf('find_image')).toBeLessThan(issue.indexOf('generate_image'));
+    expect(issue.indexOf('capture')).toBeLessThan(issue.indexOf('generate_image'));
+    expect(issue).toMatch(/only for something that does not exist yet, call "generate_image"/);
+    // A browsing worker with nothing else can still be asked for a screenshot.
+    expect(missingVisualEvidence(ASKS, 'Done.', [], ['browser_control'])).toContain('capture');
+  });
+
   it('stays silent when nothing registered could satisfy it', () => {
     // Demanding a picture from a worker with no way to make one is the
     // unsatisfiable-requirement bug verifyArtifacts already had to unlearn.
@@ -942,6 +955,49 @@ describe('acceptance checking on a worker with no file tools', () => {
       'task-desktop',
     );
     expect(result.status).toBe('ESCALATED');
+  });
+});
+
+describe('a requested picture that could not be made never costs the answer', () => {
+  // The production run: "use browser_control to research, then use real
+  // images from the internet". The worker wrote its findings, the picture
+  // check sent it back, the correction round answered with nothing, and the
+  // person was shown the worker's instructions ("call generate_image…")
+  // instead of the research they had paid for.
+  function worker(correction: string): T3Worker {
+    let round = 0;
+    const router = makeRouter(vi.fn(async (_tier, options) => {
+      const latest = options.messages[options.messages.length - 1];
+      const content = typeof latest?.content === 'string' ? latest.content : '';
+      if (content.startsWith('Self-test this output')) {
+        return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+      }
+      round += 1;
+      return makeResult(round === 1 ? 'The Nikon Z5II has a newer sensor and processor than the Z5; here is the full comparison of both bodies.' : correction);
+    }));
+    const registry = makeToolRegistry({
+      getToolDefinitions: () => [
+        { name: 'web_search', description: 'Search', inputSchema: {} },
+        { name: 'generate_image', description: 'Make a picture', inputSchema: {} },
+      ],
+    });
+    return new T3Worker(router, registry, 't2-parent');
+  }
+  const asks = makeAssignment({ description: 'Compare the Nikon Z5 and Z5II, with pictures of both', expectedOutput: 'A comparison with images' });
+
+  it('a correction round that answers with nothing keeps the findings', async () => {
+    const result = await worker('').execute(asks, 'task-visual');
+    expect(result.output).toContain('full comparison of both bodies');
+    expect(result.output).not.toContain('call "generate_image"');
+    expect(result.issues ?? []).toContain(MISSING_VISUAL_NOTE);
+    expect((result.issues ?? []).join(' ')).not.toContain('generate_image');
+  });
+
+  it('a correction round that answers with only the picture keeps the findings too', async () => {
+    const result = await worker('![Nikon Z5II](images/z5ii.jpg)').execute(asks, 'task-visual-2');
+    expect(result.output).toContain('full comparison of both bodies');
+    expect(result.output).toContain('![Nikon Z5II](images/z5ii.jpg)');
+    expect(result.issues ?? []).not.toContain(MISSING_VISUAL_NOTE);
   });
 });
 
