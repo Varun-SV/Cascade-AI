@@ -215,6 +215,29 @@ describe('Checkpoints', () => {
     expect(fs.readFileSync(path.join(root, 'win.txt'), 'utf8')).toBe('one\r\ntwo\r\n');
   });
 
+  it('reclaims the space of expired checkpoints (Codex on 16905ac)', async () => {
+    const cp = new Checkpoints(root, state, 60_000, { keep: 2, reclaimEvery: 1, pruneOlderThan: 'now' });
+    const objects = (): string[] => execFileSync('git', ['cat-file', '--batch-all-objects', '--batch-check=%(objectname)'], {
+      env: { ...process.env, GIT_DIR: path.join(state, 'repo.git') },
+    }).toString().split('\n').filter(Boolean);
+    const blobOf = (s: string) => execFileSync('git', ['hash-object', '--stdin'], { input: s }).toString().trim();
+    for (let i = 1; i <= 5; i++) {
+      const run = (await cp.begin(`run ${i}`))!;
+      write('big.bin', `version ${i}`);
+      await cp.end(run);
+    }
+    await cp.idle();
+    expect(cp.list().map((c) => c.n)).toEqual([4, 5]);
+    const left = objects();
+    // What only the expired runs held is gone; what the kept ones need is there.
+    expect(left).not.toContain(blobOf('version 1'));
+    expect(left).not.toContain(blobOf('version 2'));
+    expect(left).toContain(blobOf('version 3'));
+    expect(left).toContain(blobOf('version 5'));
+    await cp.undo(2);
+    expect(read('big.bin')).toBe('version 3');
+  });
+
   it('takes no checkpoint of the home folder', async () => {
     expect(await new Checkpoints(os.homedir(), state).begin('x')).toBeNull();
   });

@@ -32,7 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the files the last run changed and removes the ones it made; `/undo 3` takes
   back three runs. A file you changed by hand since is left alone unless you
   add `--force`. `/checkpoints` lists the runs. Files your `.gitignore` leaves
-  out aren't recorded.
+  out aren't recorded. The last 50 runs are kept; the space of older ones is
+  reclaimed. A run you start while `/undo` is still working waits for it.
 - **`/settings`: every setting in one panel.** Eight sections: models and
   keys, account and sync, autonomy and approvals, context and memory, budget,
   tools and browser, privacy, appearance. Arrows move, Enter changes, `/`

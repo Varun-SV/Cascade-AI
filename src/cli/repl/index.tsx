@@ -329,6 +329,11 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   /** A setting changed during a run: the live Cascade takes it once the run ends. */
   const pendingReconfigureRef = useRef(false);
   const reconfiguringRef = useRef<Promise<unknown>>(Promise.resolve());
+  /**
+   * An /undo under way: it rewrites the project's files, so a run (and
+   * another /undo) waits for it to finish before it starts.
+   */
+  const undoingRef = useRef<Promise<unknown>>(Promise.resolve());
   const slashCommandRef = useRef<((text: string) => Promise<void>) | null>(null);
   // The live cascade view: what each node is doing, the node picked with ↑↓
   // (null follows the busiest), a clock for the run's timers.
@@ -471,10 +476,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
    * the turns in the order they happened.
    */
   const cloudQueueRef = useRef<Promise<unknown>>(Promise.resolve());
-  const queueCloud = useCallback((send: () => Promise<unknown>, authGen = authGenRef.current) => {
+  const queueCloud = useCallback((send: (sameAccount: () => boolean) => Promise<unknown>, authGen = authGenRef.current) => {
     // Dropped if the account changed since the run began (authGen): its
-    // prompt and answer belong to the account it ran under.
-    cloudQueueRef.current = cloudQueueRef.current.then(() => (authGenRef.current === authGen ? send() : undefined)).catch(() => { /* best-effort mirror */ });
+    // prompt and answer belong to the account it ran under. `send` checks
+    // again after each wait (its report), right before it uploads.
+    const sameAccount = () => authGenRef.current === authGen;
+    cloudQueueRef.current = cloudQueueRef.current.then(() => (sameAccount() ? send(sameAccount) : undefined)).catch(() => { /* best-effort mirror */ });
   }, []);
 
   /**
@@ -754,9 +761,13 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       onUndo: async (args: string[]) => {
         if (runAbortRef.current) return 'A run is in progress. Stop it first (Esc or Ctrl+C), then /undo.';
         const n = Math.max(1, Number.parseInt(args.find((a) => /^\d+$/.test(a)) ?? '1', 10));
-        await checkpointEndRef.current;
-        try {
+        const undoing = undoingRef.current.then(async () => {
+          await checkpointEndRef.current;
           return describeUndo(await checkpointsRef.current!.undo(n, args.includes('--force')));
+        });
+        undoingRef.current = undoing.catch(() => undefined);
+        try {
+          return await undoing;
         } catch (err) {
           return `Couldn't undo: ${err instanceof Error ? err.message : String(err)}`;
         }
@@ -1283,6 +1294,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       // every change, as before.
       await checkpointEndRef.current;
       await reconfiguringRef.current;
+      await undoingRef.current;
       checkpoint = await checkpointsRef.current!.begin(trimmed).catch(() => null);
       setLastCheckpoint(checkpoint);
       const result = await cascade.run({
@@ -1332,9 +1344,9 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       const reportFor = runReportLater(result.durationMs, titled);
       // When it finished: a send queued behind a slow one still counts on this day.
       const endedAt = Date.now();
-      queueCloud(async () => {
+      queueCloud(async (sameAccount) => {
         const report = await reportFor();
-        if (!report) return;
+        if (!report || !sameAccount()) return;
         // A stopped run returns what it had written so far: kept, as a stop.
         if (output) return mirrorTurnToCloud(trimmed, { content: output, ...cloudTurnAccounting(report) }, stopped ? 'stopped' : 'answered', endedAt);
         return recordRunSpendInCloud(stopped ? 'stopped' : 'answered', report, endedAt);
@@ -1352,9 +1364,9 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       const outcome = runAbortRef.current?.signal.aborted ? 'stopped' : 'failed';
       const reportFor = runReportLater(0);
       const endedAt = Date.now();
-      queueCloud(async () => {
+      queueCloud(async (sameAccount) => {
         const report = await reportFor();
-        if (report) await recordRunSpendInCloud(outcome, report, endedAt);
+        if (report && sameAccount()) await recordRunSpendInCloud(outcome, report, endedAt);
       }, authGen);
     }
     finally {

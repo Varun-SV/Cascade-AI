@@ -61,13 +61,22 @@ export class Checkpoints {
   private readonly gitDir: string;
   private readonly indexFile: string;
   private ready?: Promise<boolean>;
+  /** Removing expired checkpoints and reclaiming their space, done in the background. */
+  private upkeep: Promise<unknown> = Promise.resolve();
 
   /**
    * @param root the project folder
    * @param dir a folder of Cascade's own for it, outside the project (STATE.checkpoints)
    * @param timeoutMs how long recording may take before the run goes ahead without a checkpoint
+   * @param retention how many checkpoints are kept, how often (in expired checkpoints) their
+   *   space is reclaimed, and how old an unreferenced object must be to go (git's --prune)
    */
-  constructor(private readonly root: string, private readonly dir: string, private readonly timeoutMs = 60_000) {
+  constructor(
+    private readonly root: string,
+    private readonly dir: string,
+    private readonly timeoutMs = 60_000,
+    private readonly retention: { keep?: number; reclaimEvery?: number; pruneOlderThan?: string } = {},
+  ) {
     this.gitDir = path.join(dir, 'repo.git');
     this.indexFile = path.join(dir, 'checkpoints.json');
   }
@@ -83,6 +92,9 @@ export class Checkpoints {
   /** Record the project before a run. Null when it can't be: the run is then not undoable. */
   async begin(label: string): Promise<Checkpoint | null> {
     if (!(await this.prepare())) return null;
+    // Never while space is being reclaimed: a snapshot's objects are named by
+    // no ref until it is done, and must not be taken for expired ones.
+    await this.upkeep;
     const before = await this.snapshot('before a run').catch(() => null);
     if (!before) return null;
     const all = this.list();
@@ -94,6 +106,7 @@ export class Checkpoints {
 
   /** Record the project after the run that `begin` returned `cp` for. */
   async end(cp: Checkpoint): Promise<Checkpoint> {
+    await this.upkeep;
     const after = await this.snapshot('after a run').catch(() => null);
     if (!after) return cp;
     const changed = (await this.diff(cp.before, after)).length;
@@ -161,6 +174,7 @@ export class Checkpoints {
    */
   async undo(count = 1, force = false): Promise<UndoResult> {
     if (!(await this.prepare())) throw new Error('Checkpoints need git, and git could not be run here.');
+    await this.upkeep;
     const all = this.list();
     const runs = all.filter((c) => !c.undone).slice(-Math.max(1, count)).reverse();
     if (!runs.length) return { runs: [], restored: [], removed: [], skipped: [] };
@@ -295,11 +309,30 @@ export class Checkpoints {
     }
   }
 
+  /** Settles once expired checkpoints are removed and their space reclaimed. */
+  idle(): Promise<void> {
+    return this.upkeep.then(() => undefined);
+  }
+
   private save(list: Checkpoint[]): void {
-    const kept = list.slice(-KEEP);
-    for (const old of list.slice(0, -KEEP)) {
-      void this.git(['update-ref', '-d', `refs/cascade/${old.n}`]).catch(() => undefined);
-      void this.git(['update-ref', '-d', `refs/cascade/${old.n}-after`]).catch(() => undefined);
+    const keep = this.retention.keep ?? KEEP;
+    const kept = list.slice(-keep);
+    const expired = list.slice(0, -keep);
+    if (expired.length) {
+      const every = this.retention.reclaimEvery ?? 10;
+      this.upkeep = this.upkeep.then(async () => {
+        for (const old of expired) {
+          await this.git(['update-ref', '-d', `refs/cascade/${old.n}`]).catch(() => undefined);
+          await this.git(['update-ref', '-d', `refs/cascade/${old.n}-after`]).catch(() => undefined);
+        }
+        // Every so often, the files only expired checkpoints held go too, or
+        // the store would grow for as long as the project is worked on. Only
+        // objects older than an hour: one a snapshot being taken right now has
+        // just written, and no ref names yet, is kept.
+        if (expired.some((old) => old.n % every === 0)) {
+          await this.git(['gc', '--quiet', `--prune=${this.retention.pruneOlderThan ?? '1.hour.ago'}`]).catch(() => undefined);
+        }
+      }).catch(() => undefined);
     }
     const tmp = `${this.indexFile}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(kept, null, 2), { mode: 0o600 });
