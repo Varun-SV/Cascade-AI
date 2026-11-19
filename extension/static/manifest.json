@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Cascade: your browser for your runs",
   "short_name": "Cascade",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Lets runs on your Cascade server use this browser, in a window of their own, on sites you allow each time.",
   "minimum_chrome_version": "125",
   "incognito": "spanning",

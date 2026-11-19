@@ -31,6 +31,12 @@ import {
 export const HUB_PROTOCOL = 1;
 /** The close code a device gets when the server doesn't accept it (see authenticateControl). */
 export const DEVICE_REJECTED_CLOSE = 1008;
+/**
+ * The close code a device gets when the server is restarting (a deploy): the
+ * WebSocket "Service Restart" code. The device waits a few seconds before it
+ * reconnects instead of asking a server that isn't back yet.
+ */
+export const SERVER_RESTART_CLOSE = 1012;
 const OFFER_TIMEOUT_MS = 120_000;
 const CLAIM_FRAME_TIMEOUT_MS = 10_000;
 const HELLO_TIMEOUT_MS = 10_000;
@@ -440,7 +446,7 @@ export function createRelayHub(opts: RelayHubOptions): RelayHub {
       clearInterval(revalidate);
       for (const nonce of [...pending.keys()]) withdraw(nonce, 'the server is shutting down');
       for (const s of [...sessions]) s.end('the server is shutting down');
-      for (const c of controls.values()) shut(c.socket, 1001, 'server closing');
+      for (const c of controls.values()) shut(c.socket, SERVER_RESTART_CLOSE, 'server restarting');
       controls.clear();
     },
   };

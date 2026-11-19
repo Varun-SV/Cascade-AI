@@ -158,4 +158,36 @@ describe('over the relay', () => {
     await vi.waitFor(() => expect(focused).toHaveBeenCalledTimes(1));
     expect(w.hub.focusRun('another-run')).toBe(false);
   });
+
+  // A deploy: the server shuts its hub down and the device is told it is a
+  // restart, so the extension waits before reconnecting (see background.ts).
+  it('a server restart is told apart from a dropped connection', async () => {
+    const w = await world();
+    const options = {
+      controlUrl: `${w.base}/control`, runUrl: `${w.base}/run`, device: w.device, serverId: w.server.id, serverKey: w.server.publicKey,
+      askUser: async () => null,
+      startBrowser: async (): Promise<LeasedBrowser> => { throw new Error('not used'); },
+    };
+    const client = connectDeviceClient(options);
+    await client.ready;
+    await vi.waitFor(() => expect(w.hub.deviceOnline('user-a', w.device.id)).toBe(true));
+    w.hub.close();
+    expect(await client.closed).toBe('the server is restarting');
+    expect(client.restarting()).toBe(true);
+    expect(client.rejected()).toBe(false);
+  });
+
+  it('a device dropped by the server is not taken for a restart', async () => {
+    const w = await world();
+    const client = connectDeviceClient({
+      controlUrl: `${w.base}/control`, runUrl: `${w.base}/run`, device: w.device, serverId: w.server.id, serverKey: w.server.publicKey,
+      askUser: async () => null,
+      startBrowser: async (): Promise<LeasedBrowser> => { throw new Error('not used'); },
+    });
+    await client.ready;
+    await vi.waitFor(() => expect(w.hub.deviceOnline('user-a', w.device.id)).toBe(true));
+    w.hub.dropDevice(w.device.id, 'signed out');
+    await client.closed;
+    expect(client.restarting()).toBe(false);
+  });
 });
