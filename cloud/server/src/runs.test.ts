@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { ToolRegistry, CascadeConfigSchema, Retriever, embedderFromProviders } from '#cascade-ai';
 import type { Chunk, ProviderConfig, ScoredChunk } from '#cascade-ai';
-import { allowances, answersThisRun, browserAllowanceFor, buildCloudConfig, buildMediaSink, parseChatRunPayload, primaryTierOf, MAX_TRACE_NODES, resolveDocuments, runChatTurn, sanitiseClarificationAnswers, sanitiseEscalationNote, tenantScratchDir, traceStatus, type TraceNode } from './runs.js';
+import { allowances, answersThisRun, browserAllowanceFor, buildCloudConfig, buildMediaSink, parseChatRunPayload, primaryTierOf, MAX_TRACE_NODES, resolveDocuments, runChatTurn, sanitiseClarificationAnswers, sanitiseEscalationNote, tenantScratchDir, traceStatus, traceThinking, traceForReport, MAX_TRACE_THINKING, MAX_TRACE_THINKING_TOTAL, type TraceNode } from './runs.js';
 import { CloudStore } from './db.js';
 import { limitsForPlan, PENDING_MEDIA_TTL_MS } from './entitlements.js';
 import type { CloudEnv } from './env.js';
@@ -1457,5 +1457,47 @@ describe('primaryTierOf', () => {
     expect(primaryTierOf({}, {}, { T3: 'openai-compatible:stub-model' })).toBe('T3');
     // Several tiers and nothing to rank them by: none is named.
     expect(primaryTierOf({}, {}, { T1: 'a', T3: 'b' })).toBeNull();
+  });
+});
+
+describe('traceThinking', () => {
+  it('keeps each finished call\'s thinking on its agent, through later status updates', () => {
+    const t = new Map<string, TraceNode>();
+    traceStatus(t, { tierId: 'T3-1', role: 't3', label: 'Read', status: 'ACTIVE' });
+    traceThinking(t, { tierId: 'T3-1', role: 'T3', call: 1, text: 'partial', done: false });
+    traceThinking(t, { tierId: 'T3-1', role: 'T3', call: 1, text: ' first look ', done: true });
+    traceThinking(t, { tierId: 'T3-1', role: 'T3', call: 2, text: 'second', done: true });
+    traceStatus(t, { tierId: 'T3-1', status: 'COMPLETED' });
+    expect(t.get('T3-1')).toEqual({ id: 'T3-1', role: 'T3', label: 'Read', status: 'COMPLETED', thinking: 'first look\n\nsecond' });
+  });
+
+  it('starts an agent it has not seen and ignores empty or unnamed thinking', () => {
+    const t = new Map<string, TraceNode>();
+    traceThinking(t, { tierId: 'T1-a', role: 't1', call: 1, text: 'plan', done: true });
+    traceThinking(t, { tierId: 'T1-b', call: 1, text: '   ', done: true });
+    traceThinking(t, { call: 1, text: 'x', done: true });
+    expect([...t.values()]).toEqual([{ id: 'T1-a', role: 'T1', status: 'ACTIVE', thinking: 'plan' }]);
+  });
+
+  it('keeps the latest thinking when an agent thinks past its allowance', () => {
+    const t = new Map<string, TraceNode>();
+    traceThinking(t, { tierId: 'a', role: 'T3', call: 1, text: 'x'.repeat(MAX_TRACE_THINKING), done: true });
+    traceThinking(t, { tierId: 'a', role: 'T3', call: 2, text: 'the end', done: true });
+    const kept = t.get('a')!.thinking!;
+    expect(kept.length).toBe(MAX_TRACE_THINKING);
+    expect(kept.startsWith('…')).toBe(true);
+    expect(kept.endsWith('the end')).toBe(true);
+  });
+
+  it('cuts thinking across the saved tree once the whole allowance is spent', () => {
+    const t = new Map<string, TraceNode>();
+    const per = MAX_TRACE_THINKING - 10;
+    const agents = Math.ceil(MAX_TRACE_THINKING_TOTAL / per) + 2;
+    for (let i = 0; i < agents; i++) traceThinking(t, { tierId: `n${i}`, role: 'T3', call: 1, text: 'y'.repeat(per), done: true });
+    const saved = traceForReport(t);
+    expect(saved).toHaveLength(agents);
+    expect(saved.reduce((n, s) => n + (s.thinking?.length ?? 0), 0)).toBeLessThanOrEqual(MAX_TRACE_THINKING_TOTAL);
+    expect(saved[agents - 1]!.thinking).toBeUndefined();
+    expect(saved[0]!.thinking).toHaveLength(per);
   });
 });

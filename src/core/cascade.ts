@@ -2329,6 +2329,7 @@ ${prompt}`
       on(event: 'stream:token', listener: (event: { text: string }) => void): TierEventSource;
       on(event: 'log', listener: (event: unknown) => void): TierEventSource;
       on(event: 'tier:status', listener: (event: unknown) => void): TierEventSource;
+      on(event: 'tier:thinking', listener: (event: unknown) => void): TierEventSource;
       on(
         event: 'tool:approval-request',
         listener: (
@@ -2346,6 +2347,7 @@ ${prompt}`
       });
       tier.on('log', (e) => this.emit('log', e));
       tier.on('tier:status', (e) => this.emit('tier:status', e));
+      tier.on('tier:thinking', (e) => this.emit('tier:thinking', e));
       // Accumulate finished sections so an interruption can checkpoint them.
       tier.on('section:complete', (e: CompletedNode) => {
         if (e.status !== 'COMPLETED' && e.status !== 'PARTIAL') return;

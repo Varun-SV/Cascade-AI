@@ -8,7 +8,7 @@
 // went, those orderings had nothing under them.
 
 import { describe, expect, it } from 'vitest';
-import { benchmarkProfile, benchmarkScore01, resolveFamily } from './benchmarks.js';
+import { benchmarkBasis, benchmarkProfile, benchmarkScore01, resolveFamily } from './benchmarks.js';
 import { MODELS } from '../../constants.js';
 import type { ModelInfo } from '../../types.js';
 import benchmarkData from './benchmark-data.json' with { type: 'json' };
@@ -96,7 +96,10 @@ describe('benchmarkScore01', () => {
     // tool loop together, whatever the old seed table said (85 and 82).
     expect(benchmarkScore01(MODELS['gpt-4o']!, 'code')).toBeLessThan(0.6);
     expect(benchmarkScore01(MODELS['gemini-2.5-flash']!, 'code')).toBeLessThan(0.6);
-    expect(benchmarkScore01(MODELS['gpt-4o-mini']!, 'code')).toBe(0.5);
+    // No board scores it any more: it is placed by its price alone, a guess
+    // pulled toward the middle, not credited with the old seed score.
+    expect(benchmarkBasis(MODELS['gpt-4o-mini']!)).toBe('estimated-from-price');
+    expect(benchmarkScore01(MODELS['gpt-4o-mini']!, 'code')).toBeLessThan(0.6);
   });
 
   it('keeps gemini-2.5-flash-lite apart from the full gemini-2.5-flash', () => {

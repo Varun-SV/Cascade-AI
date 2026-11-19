@@ -856,6 +856,8 @@ export interface TraceNode {
   label?: string;
   model?: string;
   status: string;
+  /** What the agent's model thought, its latest calls first cut; see traceThinking. */
+  thinking?: string;
 }
 
 // A run's tree is stored in every reply's /why report, so it is kept small: a
@@ -888,6 +890,44 @@ export function traceStatus(trace: Map<string, TraceNode>, e: unknown): void {
     ...(label ? { label: label.slice(0, MAX_TRACE_LABEL) } : {}),
     ...((str('model') ?? prev?.model) ? { model: str('model') ?? prev?.model } : {}),
     status: str('status') ?? prev?.status ?? 'ACTIVE',
+    ...(prev?.thinking ? { thinking: prev.thinking } : {}),
+  });
+}
+
+/** Thinking kept per agent in the saved tree; the latest is kept when there is more. */
+export const MAX_TRACE_THINKING = 4000;
+/** Thinking kept across the whole saved tree. */
+export const MAX_TRACE_THINKING_TOTAL = 24_000;
+
+/**
+ * Fold one finished `tier:thinking` event (`done: true`, the call's whole
+ * reasoning) into the run's trace. Streamed pieces are for the live view only;
+ * the finished call replaces them, so only it is kept.
+ */
+export function traceThinking(trace: Map<string, TraceNode>, e: unknown): void {
+  const ev = (e ?? {}) as Record<string, unknown>;
+  if (ev['done'] !== true || typeof ev['text'] !== 'string' || !ev['text'].trim()) return;
+  const id = typeof ev['tierId'] === 'string' ? ev['tierId'].trim() : '';
+  if (!id) return;
+  const prev = trace.get(id);
+  if (!prev && trace.size >= MAX_TRACE_NODES) return;
+  const joined = prev?.thinking ? `${prev.thinking}\n\n${ev['text'].trim()}` : ev['text'].trim();
+  const thinking = joined.length > MAX_TRACE_THINKING ? `…${joined.slice(joined.length - MAX_TRACE_THINKING + 1)}` : joined;
+  trace.set(id, {
+    ...(prev ?? { id, role: typeof ev['role'] === 'string' ? ev['role'].toUpperCase() : '', status: 'ACTIVE' }),
+    thinking,
+  });
+}
+
+/** The trace as it is saved: agents in order, thinking cut once the whole tree's allowance is spent. */
+export function traceForReport(trace: Map<string, TraceNode>): TraceNode[] {
+  let left = MAX_TRACE_THINKING_TOTAL;
+  return [...trace.values()].map((n) => {
+    if (!n.thinking) return n;
+    if (left <= 0) { const { thinking: _dropped, ...rest } = n; return rest; }
+    const kept = n.thinking.length <= left ? n.thinking : `${n.thinking.slice(0, left - 1)}…`;
+    left -= kept.length;
+    return { ...n, thinking: kept };
   });
 }
 
@@ -2199,6 +2239,12 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
     traceStatus(trace, e);
     socket.emit('tier:status', { conversationId: conversation.id, ...(e as object) });
   };
+  // Each agent's thinking, live, and the finished calls into the saved tree.
+  // A local-only subtask never emits it (see the SDK's BaseTier.showsThinking).
+  const onThinking = (e: unknown) => {
+    traceThinking(trace, e);
+    socket.emit('tier:thinking', { conversationId: conversation.id, ...(e as object) });
+  };
   const onPlan = (e: unknown) => {
     // Surface the boardroom plan to the client (read-only), then immediately
     // approve so the hosted run proceeds. The SDK's plan gate BLOCKS for 120s
@@ -2398,6 +2444,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
 
   cascade.on('stream:token', onToken);
   cascade.on('tier:status', onStatus);
+  cascade.on('tier:thinking', onThinking);
   // The plan gate resolves inline (onPlan calls resolvePlanApproval(true)), so
   // it is safe either way — but a non-interactive caller has nothing to show
   // the plan TO, and "no listener" already means proceed. Skipping it keeps the
@@ -2455,7 +2502,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
       tokensByModel: stats.tokensByTierModel,
       unpricedByModel: stats.untrackedByTierModel,
       models: tierModels,
-      ...(trace.size > 0 ? { trace: [...trace.values()] } : {}),
+      ...(trace.size > 0 ? { trace: traceForReport(trace) } : {}),
     };
 
     const cancelled = signal?.aborted ?? false;
@@ -2554,6 +2601,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
     cascade.off('log', onLog);
     cascade.off('stream:token', onToken);
     cascade.off('tier:status', onStatus);
+    cascade.off('tier:thinking', onThinking);
     cascade.off('plan:approval-required', onPlan);
     cascade.off('context:approval-required', onContextApproval);
     cascade.off('context:approval-closed', onContextClosed);

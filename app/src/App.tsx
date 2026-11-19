@@ -17,7 +17,7 @@ import {
   useAppDispatch, useAppSelector,
   setConnected, setReconnecting, setBackendError, setMeta, updateCost, upsertAgent, updateLastMessage,
   setSessions, removeSession, setOnboardingDone,
-  enqueueApproval, clearApprovals, appendAgentStream, addPeerEdge, expirePeerEdges, runEnded, finalizeLastMessage,
+  enqueueApproval, clearApprovals, appendAgentStream, mergeAgentThinking, addPeerEdge, expirePeerEdges, runEnded, finalizeLastMessage,
   setPendingPlan, enqueueEscalation, dequeueEscalation, clearEscalationForSession, setWhyReport, appendCommsEvent,
   type RuntimeSession, type PendingPlan, type PendingEscalation, type WhyReport,
 } from './store/index.js';
@@ -326,6 +326,13 @@ export function App() {
         waveId: data.waveId,
         blockedBy: data.blockedBy,
       }));
+    });
+
+    // Each node's thinking, for its detail panel. Session-tagged like the
+    // node itself, so it needs no scoping here either.
+    socket.on('tier:thinking', (data: { tierId?: string; call?: number; text?: string; done?: boolean }) => {
+      if (!data.tierId || typeof data.text !== 'string') return;
+      dispatch(mergeAgentThinking({ id: data.tierId, call: data.call ?? 0, text: data.text, done: data.done === true }));
     });
 
     socket.on('stream:token', (data: { text: string; tierId?: string; primary?: boolean; sessionId?: string }) => {

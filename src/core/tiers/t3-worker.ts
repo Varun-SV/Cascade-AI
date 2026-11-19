@@ -30,6 +30,7 @@ import type { ToolCreator, GeneratedToolSpec } from '../../tools/tool-creator.js
 import type { WorldStateDB } from '../knowledge/world-state.js';
 import {
   parseTextToolCalls,
+  strayTextToolCalls,
   toToolCall,
   buildTextToolSystemPrompt,
   buildTextToolReminder,
@@ -47,6 +48,7 @@ import { IMAGE_TOKENS_EACH } from '../router/index.js';
 import { mayTakeScreenshots } from '../router/screenshots.js';
 import { statePath, STATE } from '../../config/project-state.js';
 import { onTrustedPath, ownTsc } from '../../utils/trusted-exec.js';
+import { parseModelJson } from '../../utils/json-extract.js';
 
 /**
  * Thrown by executeTool() when the underlying tool error indicates a condition
@@ -862,6 +864,11 @@ export class T3Worker extends BaseTier {
    * route to it: one reached through a gateway never gets one, so none is
    * taken for it.
    */
+  /** A local-only subtask's thinking stays off the event stream, like its words. */
+  protected override showsThinking(): boolean {
+    return !this.localOnlyMatch;
+  }
+
   private mayBeShown(model: ModelInfo | undefined): boolean {
     if (!model) return false;
     let gateway = false;
@@ -1121,6 +1128,21 @@ export class T3Worker extends BaseTier {
       if (useTextTools && effectiveToolCalls.length === 0) {
         const textCalls = parseTextToolCalls(result.content);
         effectiveToolCalls = textCalls.map((tc, i) => toToolCall(tc, i));
+      } else if (!useTextTools && effectiveToolCalls.length === 0 && tools.length > 0) {
+        // Handed native tools, the model wrote its call as text instead: many
+        // open models on OpenAI-compatible servers list tool support and then
+        // answer in their own chat template's format. Run the call rather than
+        // take it for the final answer, and give this model the text format
+        // from here on, which it evidently speaks.
+        const stray = strayTextToolCalls(result.content, tools);
+        if (stray.length) {
+          effectiveToolCalls = stray.map((tc, i) => toToolCall(tc, i));
+          useTextTools = true;
+          sentFullTextContract = false;
+          const writer = result.servedBy ?? (effectiveModel ? { provider: effectiveModel.provider, id: effectiveModel.id } : undefined);
+          if (writer) this.router.useTextTools?.(writer);
+          this.log(`${writer ? `${writer.provider}:${writer.id}` : 'The model'} wrote its tool call as text; using the text tool format for it from here on.`);
+        }
       }
       const effectiveResult = { ...result, toolCalls: effectiveToolCalls };
 
@@ -1956,8 +1978,7 @@ Is this output sufficient and correct? Respond with ONLY a JSON object:
           ...(this.localOnlyMatch ? { forceLocal: true } : {}),
         });
 
-        const match = /\{[\s\S]*\}/.exec(verdictResult.content);
-        const parsed = (match ? JSON.parse(match[0]) : { sufficient: true }) as { sufficient?: boolean; notes?: string };
+        const parsed = parseModelJson<{ sufficient?: boolean; notes?: string }>(verdictResult.content, 'object') ?? { sufficient: true };
 
         if (parsed.sufficient !== false) {
           this.log('T2-Critic approved output.');
@@ -2138,10 +2159,9 @@ ${output.slice(0, 4000)}`;
         ...(this.signal ? { signal: this.signal } : {}),
         ...(this.localOnlyMatch ? { forceLocal: true } : {}),
       });
-      const match = /\[[\s\S]*\]/.exec(result.content);
-      if (!match) return;
-      const facts = JSON.parse(match[0]);
-      if (!Array.isArray(facts)) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const facts = parseModelJson<any[]>(result.content, 'array');
+      if (!facts) return;
       // Where they came from: the files it was set to work on and those it
       // read, so a fact is set aside if one of them turns local-only later.
       // A command, or a tool whose reads are not seen, may have read any file:

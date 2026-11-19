@@ -530,11 +530,12 @@ interface Props {
   onOpenSpend?: () => void;
 }
 
-/** "1 manager · 3 workers", or "Worked through 4 sections · 9 workers". */
+/** "1 manager · 3 workers", "Worked through 4 sections · 9 workers", or "1 worker · thought process". */
 function traceSummary(trace: TraceNode[]): string {
   const managers = trace.filter((n) => n.role.startsWith('T2')).length;
   const workers = trace.filter((n) => n.role.startsWith('T3')).length;
   const w = `${workers} worker${workers === 1 ? '' : 's'}`;
+  if (managers === 0) return workers === 0 ? 'Thought process' : `${w} · thought process`;
   return managers > 1 ? `Worked through ${managers} sections · ${w}` : `${managers} manager · ${w}`;
 }
 
@@ -554,7 +555,7 @@ function TraceFold({ trace }: { trace: TraceNode[] }) {
       </button>
       {open && (
         <div className="border-l-2 border-elev/[0.17] pl-3.5">
-          <ActivityDrawer activity={trace.map((n, i) => ({ tierId: n.id, role: n.role, label: n.label, model: n.model, status: n.status, order: i }))} />
+          <ActivityDrawer activity={trace.map((n, i) => ({ tierId: n.id, role: n.role, label: n.label, model: n.model, status: n.status, ...(n.thinking ? { thinking: n.thinking } : {}), order: i }))} />
         </div>
       )}
     </div>
@@ -713,7 +714,7 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
             {thinking && <ThinkingBlock text={thinking} streaming={message.streaming && thinkingOpen} />}
             {/* Only an orchestrated run has a tree worth folding: a direct answer
                 has no managers, and "0 managers" says nothing. */}
-            {!message.streaming && message.why?.trace?.some((n) => n.role.startsWith('T2')) && <TraceFold trace={message.why.trace} />}
+            {!message.streaming && message.why?.trace?.some((n) => n.role.startsWith('T2') || !!n.thinking) && <TraceFold trace={message.why.trace} />}
             {rest && (
               <div className={`cascade-answer prose prose-invert max-w-none text-ink-100${message.streaming ? ' is-streaming' : justFinished ? ' cz-settle' : ''}`}>
                 <Markdown>{rest}</Markdown>

@@ -115,4 +115,6 @@ export interface TraceNode {
   label?: string;
   model?: string;
   status: string;
+  /** What the agent's model thought. Absent when it didn't, and from older reports. */
+  thinking?: string;
 }

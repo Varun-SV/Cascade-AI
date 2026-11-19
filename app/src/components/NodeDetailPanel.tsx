@@ -9,6 +9,14 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 /**
+ * The stream without its `<think>` blocks, which the Thinking section shows.
+ * An unclosed block at the end is thinking still under way.
+ */
+function withoutThinking(stream: string): string {
+  return stream.replace(/<think>[\s\S]*?<\/think>\s*/gi, '').replace(/<think>[\s\S]*$/i, '').trim();
+}
+
+/**
  * Live detail for the agent node selected in the Cockpit graph — its role,
  * status, current action, accumulated output stream, and recent peer messages.
  * Fixes "click a node, see nothing": every tier's stream is captured
@@ -20,10 +28,14 @@ export function NodeDetailPanel() {
   const node = useAppSelector((s) => s.app.agents.find((a) => a.id === s.app.selectedNodeId));
   const peerEdges = useAppSelector((s) => s.app.peerEdges);
   const streamRef = useRef<HTMLDivElement>(null);
+  const thinkingRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (streamRef.current) streamRef.current.scrollTop = streamRef.current.scrollHeight;
   }, [node?.stream]);
+  useEffect(() => {
+    if (thinkingRef.current) thinkingRef.current.scrollTop = thinkingRef.current.scrollHeight;
+  }, [node?.thinking]);
 
   if (!selectedId || !node) return null;
 
@@ -59,9 +71,20 @@ export function NodeDetailPanel() {
         </div>
       )}
 
+      {node.thinking && (
+        <>
+          <div style={{ padding: '6px 12px 2px', fontSize: 9.5, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text-dim)' }}>
+            {node.status === 'ACTIVE' ? 'Thinking…' : 'Thought process'}
+          </div>
+          <div ref={thinkingRef} style={{ maxHeight: '35%', overflow: 'auto', padding: '2px 12px 8px', fontSize: 11.5, lineHeight: 1.55, color: 'var(--text-muted)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontStyle: 'italic', borderBottom: '1px solid var(--border)' }}>
+            {node.thinking}
+          </div>
+        </>
+      )}
+
       <div style={{ padding: '6px 12px 2px', fontSize: 9.5, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text-dim)' }}>Live output</div>
       <div ref={streamRef} style={{ flex: 1, overflow: 'auto', padding: '2px 12px 10px', fontSize: 11.5, lineHeight: 1.55, color: 'var(--text)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'var(--font-mono)' }}>
-        {node.stream || <span style={{ color: 'var(--text-dim)' }}>No output captured yet.</span>}
+        {withoutThinking(node.stream ?? '') || <span style={{ color: 'var(--text-dim)' }}>No output captured yet.</span>}
       </div>
 
       {nodePeers.length > 0 && (

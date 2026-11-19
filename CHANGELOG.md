@@ -5,6 +5,41 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.89.0 - 2026-11-19
+
+### Added
+- **See each agent's thinking.** When a reasoning model works a run, its
+  thinking now shows under its own node in the run's tree: under each row of
+  the activity list on the web (and in the finished reply's fold), and in the
+  node's detail panel in the desktop Cockpit. It streams while the model
+  thinks. A finished reply keeps the thinking it showed (up to 4,000
+  characters per agent). A local-only subtask's thinking never leaves the
+  machine, the same as its words. Engines: a new `tier:thinking` event.
+- **Models nobody has benchmarked get an estimated score.** A model no board
+  has measured used to score a flat 0.5, so a 1B model and a 70B one were
+  routed alike. Its score is now estimated from its size (from the local
+  server or its name, such as `-32b`) or, failing that, its price. The
+  estimate is pulled toward the middle, is capped below the measured leaders,
+  and gives no agentic score.
+
+### Fixed
+- **A model's reasoning is no longer read as its answer.** Reasoning models
+  (Claude thinking, DeepSeek, Qwen, QwQ) write `<think>` blocks into their
+  reply. Planners, managers and workers parsed those blocks as the answer, so
+  a bracket in the thinking could reduce a manager's plan to a single task. A
+  worker's thinking also went to its manager as part of the result, and was
+  re-sent on every later turn. Reasoning is now set aside before anything
+  reads the reply, including a close-only `</think>` and an unclosed block.
+- **Model JSON is read the way weaker models write it.** Plans, critiques,
+  facts and generated tools now use one parser. It tries each bracket in
+  turn, prefers a fenced block, and repairs trailing commas, comments, curly
+  quotes and Python's `True`/`False`/`None`.
+- **A model that lists tool support but writes its calls as text is
+  understood.** The call runs instead of being taken for the final answer,
+  and the model gets the text tool format from then on. For OpenAI-compatible
+  and Ollama models that is remembered for later runs too. The text format now
+  also reads Llama's `parameters`, `<function=…>` tags and Mistral's
+  `[TOOL_CALLS]`.
 ## 0.88.2 - 2026-11-19
 
 ### Changed

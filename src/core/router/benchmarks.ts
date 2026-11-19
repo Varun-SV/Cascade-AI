@@ -25,6 +25,7 @@ import type { ModelInfo } from '../../types.js';
 import type { TaskType } from './task-analyzer.js';
 import type { LiveDataProvider } from './live-data.js';
 import benchmarkData from './benchmark-data.json' with { type: 'json' };
+import { MODELS } from '../../constants.js';
 
 export type BenchmarkTask = Exclude<TaskType, 'mixed'>;
 export type BenchmarkProfile = Partial<Record<BenchmarkTask | 'agentic', number>>;
@@ -199,7 +200,7 @@ export function benchmarkProfile(model: ModelInfo): BenchmarkProfile | null {
  * no agentic board has measured is scored on the task alone.
  */
 export function benchmarkScore01(model: ModelInfo, taskType: TaskType, agenticWeight = 0): number {
-  const profile = benchmarkProfile(model);
+  const profile = benchmarkProfile(model) ?? estimatedProfile(model);
   if (!profile) return 0.5;
 
   let score: number;
@@ -215,4 +216,139 @@ export function benchmarkScore01(model: ModelInfo, taskType: TaskType, agenticWe
     score = (1 - w) * score + w * profile.agentic;
   }
   return Math.max(0, Math.min(1, score / 100));
+}
+
+// ── Models no benchmark has measured ─────────────────────────────────────────
+//
+// Cascade is meant to run on whatever model it is given: a fine-tune on a
+// llama.cpp server, a new open model behind an OpenAI-compatible gateway, a
+// preview id no board has scored yet. A flat 0.5 for all of them put a 1B
+// model and a 400B one on the same footing, so routing could not place either.
+//
+// What is known about such a model still says something. Its size, when the
+// id or the local server gives one, and its price, when it has one, both track
+// public scores closely across the models that ARE measured. The estimate is
+// read off those, then pulled toward the middle and capped below the measured
+// leaders, so a guess can place a model but never outrank one the boards have
+// actually tested.
+
+/** How a model's benchmark score was arrived at. */
+export type ScoreBasis = 'measured' | 'estimated-from-size' | 'estimated-from-price' | 'unknown';
+
+/** How far an estimate is pulled toward the neutral 50: it is a guess. */
+const ESTIMATE_SHRINK = 0.7;
+
+/** Billions of parameters, from the local server's report or the model's name ("qwen2.5-32b", "8x7b"). */
+export function parameterCountB(model: ModelInfo): number | null {
+  if (typeof model.minSizeB === 'number' && model.minSizeB > 0) return model.minSizeB;
+  const hay = `${model.id} ${model.name}`;
+  // A preceding letter is not allowed, so Qwen's active-parameter "a3b" isn't read as the size.
+  const m = /(?:^|[^a-z0-9.])(?:(\d+)x)?(\d+(?:\.\d+)?)b(?![a-z0-9])/i.exec(hay);
+  if (!m) return null;
+  const n = Number(m[2]) * (m[1] ? Number(m[1]) : 1);
+  return Number.isFinite(n) && n > 0 && n < 10_000 ? n : null;
+}
+
+/** Blended USD per million tokens (three input to one output), or null when there is no real price. */
+function blendedPricePerM(model: ModelInfo): number | null {
+  if (model.isLocal || model.pricingUnknown) return null;
+  const blended = ((model.inputCostPer1kTokens * 3 + model.outputCostPer1kTokens) / 4) * 1000;
+  return blended > 0 ? blended : null;
+}
+
+function mixed(profile: BenchmarkProfile): number | null {
+  const vals = TASKS.map((t) => profile[t]).filter((v): v is number => typeof v === 'number');
+  return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+}
+
+function median(xs: number[]): number {
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
+}
+
+interface PriceFit { slope: number; intercept: number; cap: number }
+let priceFit: PriceFit | null | undefined;
+
+/**
+ * Score against log price across the catalog's measured models, by Theil–Sen
+ * (median of pairwise slopes), the same robust line the aggregation uses, so
+ * one oddly priced model doesn't tilt it. The cap is the measured models'
+ * 75th percentile. Null when the catalog gives too little to fit.
+ */
+function fitPrice(): PriceFit | null {
+  if (priceFit !== undefined) return priceFit;
+  const pts: Array<[number, number]> = [];
+  for (const m of Object.values(MODELS)) {
+    const price = blendedPricePerM(m);
+    const fam = resolveFamily(m);
+    const profile = fam ? BUNDLED[fam] : undefined;
+    const score = profile ? mixed(profile) : null;
+    if (price !== null && score !== null) pts.push([Math.log10(price), score]);
+  }
+  const slopes: number[] = [];
+  for (let i = 0; i < pts.length; i++) {
+    for (let j = i + 1; j < pts.length; j++) {
+      const dx = pts[j]![0] - pts[i]![0];
+      if (Math.abs(dx) > 1e-6) slopes.push((pts[j]![1] - pts[i]![1]) / dx);
+    }
+  }
+  if (pts.length < 5 || slopes.length === 0) return (priceFit = null);
+  const slope = median(slopes);
+  if (!(slope > 0)) return (priceFit = null);
+  const intercept = median(pts.map(([x, y]) => y - slope * x));
+  const sorted = pts.map(([, y]) => y).sort((a, b) => a - b);
+  const cap = sorted[Math.floor(sorted.length * 0.75)]!;
+  return (priceFit = { slope, intercept, cap });
+}
+
+/**
+ * Size to score, anchored on the measured open families of known size: the
+ * small Llama and Gemma builds (about 8B) score in the mid-50s, the 70B Llama
+ * about 72. So 1B ≈ 41, 8B ≈ 56, 32B ≈ 66, 70B ≈ 72, before the pull toward
+ * the middle.
+ */
+function scoreFromSize(b: number): number {
+  return 40.6 + 17 * Math.log10(b);
+}
+
+/**
+ * An estimated profile for a model no benchmark has measured, and how it was
+ * estimated; null when nothing is known to estimate from. The same score
+ * stands for every task type, and there is no agentic score: nothing about a
+ * model's size or price says how well it holds a tool loop together.
+ */
+export function estimateBenchmark(model: ModelInfo): { profile: BenchmarkProfile; basis: Exclude<ScoreBasis, 'measured' | 'unknown'> } | null {
+  const fit = fitPrice();
+  const cap = fit?.cap ?? 70;
+  const size = parameterCountB(model);
+  const price = blendedPricePerM(model);
+  let raw: number | null = null;
+  let basis: 'estimated-from-size' | 'estimated-from-price' | null = null;
+  if (size !== null) {
+    raw = scoreFromSize(size);
+    basis = 'estimated-from-size';
+  } else if (price !== null && fit) {
+    raw = fit.intercept + fit.slope * Math.log10(price);
+    basis = 'estimated-from-price';
+  }
+  if (raw === null || basis === null) return null;
+  const score = Math.max(15, Math.min(cap, 50 + ESTIMATE_SHRINK * (raw - 50)));
+  const rounded = Math.round(score * 10) / 10;
+  return { profile: { code: rounded, analysis: rounded, creative: rounded, data: rounded }, basis };
+}
+
+function estimatedProfile(model: ModelInfo): BenchmarkProfile | null {
+  return estimateBenchmark(model)?.profile ?? null;
+}
+
+/** Where a model's benchmark score comes from, for explaining a routing choice. */
+export function benchmarkBasis(model: ModelInfo): ScoreBasis {
+  if (benchmarkProfile(model)) return 'measured';
+  return estimateBenchmark(model)?.basis ?? 'unknown';
+}
+
+/** For tests: forget the fitted price line so a changed catalog is refitted. */
+export function resetBenchmarkEstimateForTest(): void {
+  priceFit = undefined;
 }

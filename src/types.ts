@@ -1100,6 +1100,7 @@ export type CascadeEventType =
   | 'tier:status'
   | 'tier:result'
   | 'tier:root'
+  | 'tier:thinking'
   | 'stream:token'
   | 'stream:done'
   | 'tool:approval-request'
