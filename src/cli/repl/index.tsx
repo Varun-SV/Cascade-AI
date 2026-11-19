@@ -395,15 +395,23 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
    * nothing until a restart. A new sign-in mirrors from the next turn, into
    * a new cloud chat.
    */
+  /**
+   * Which sign-in the cloud mirror belongs to: moved on by every sign-in or
+   * sign-out. A run's uploads, queued until its report settles, go only if
+   * it is still the same, so a run never lands in an account signed in after it.
+   */
+  const authGenRef = useRef(0);
   const signInHere = useCallback(async (show: (text: string) => void): Promise<string> => {
     const out = await signIn(show);
     if (out.startsWith('✓')) {
+      authGenRef.current += 1;
       try { const cloud = CloudClient.fromSession(); cloudMirrorRef.current = cloud ? { client: cloud, convId: null } : null; } catch { /* stays local */ }
     }
     return out;
   }, []);
   const signOutHere = useCallback(async (): Promise<string> => {
     const out = await signOut();
+    authGenRef.current += 1;
     cloudMirrorRef.current = null;
     return out;
   }, []);
@@ -463,8 +471,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
    * the turns in the order they happened.
    */
   const cloudQueueRef = useRef<Promise<unknown>>(Promise.resolve());
-  const queueCloud = useCallback((send: () => Promise<unknown>) => {
-    cloudQueueRef.current = cloudQueueRef.current.then(send).catch(() => { /* best-effort mirror */ });
+  const queueCloud = useCallback((send: () => Promise<unknown>, authGen = authGenRef.current) => {
+    // Dropped if the account changed since the run began (authGen): its
+    // prompt and answer belong to the account it ran under.
+    cloudQueueRef.current = cloudQueueRef.current.then(() => (authGenRef.current === authGen ? send() : undefined)).catch(() => { /* best-effort mirror */ });
   }, []);
 
   /**
@@ -896,11 +906,16 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
             return 'Invalid amount. Usage: /budget set 1.00';
           }
           router.setSessionBudget(amount);
+          // The REPL's copy too: a later /settings change hands Cascade the
+          // whole config, and a cap missing from it would be dropped.
+          config.budget = { ...config.budget, sessionBudgetUsd: amount };
           return `✔ Session budget set to $${amount.toFixed(2)}. Cascade will stop new tasks once this limit is reached.`;
         }
 
         if (args[0] === 'clear') {
           router.setSessionBudget(null);
+          const { sessionBudgetUsd: _cleared, ...rest } = config.budget ?? {};
+          config.budget = rest as typeof config.budget;
           return '✔ Session budget cap removed.';
         }
 
@@ -1260,6 +1275,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       return () => report;
     };
     let checkpoint: Checkpoint | null = null;
+    const authGen = authGenRef.current;
     try {
       runAbortRef.current = new AbortController();
       // Record the project first, so this run can be undone; a run that
@@ -1322,7 +1338,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         // A stopped run returns what it had written so far: kept, as a stop.
         if (output) return mirrorTurnToCloud(trimmed, { content: output, ...cloudTurnAccounting(report) }, stopped ? 'stopped' : 'answered', endedAt);
         return recordRunSpendInCloud(stopped ? 'stopped' : 'answered', report, endedAt);
-      });
+      }, authGen);
       // One-line run receipt — the delegation economics in scrollback.
       const receipt = formatRunReceipt(result, stats.totalCostUsd, savings);
       if (receipt) {
@@ -1339,7 +1355,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       queueCloud(async () => {
         const report = await reportFor();
         if (report) await recordRunSpendInCloud(outcome, report, endedAt);
-      });
+      }, authGen);
     }
     finally {
       if (streamThrottleTimeout) { clearTimeout(streamThrottleTimeout); streamThrottleTimeout = null; }

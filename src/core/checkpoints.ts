@@ -121,6 +121,9 @@ export class Checkpoints {
     // only as a pointer to its commit: its files, and work not committed
     // there, are not in the checkpoint.
     if (real.some((p) => insideNestedRepo(p, root) || (isDir(p) && hasNestedRepo(p)))) return false;
+    // The project's own .git is never recorded (git keeps it out of any
+    // snapshot), so a write to its config or refs could not be put back.
+    if (rel.some((r) => r.split(path.sep).includes('.git'))) return false;
     try {
       // Exit 0 names the ignored ones; exit 1 means none is.
       const ignored = await this.git(['check-ignore', '-z', '--stdin'], rel.join('\0'), [0, 1]);
@@ -194,7 +197,26 @@ export class Checkpoints {
     }
     const restored: string[] = [];
     const removed: string[] = [];
+    // A folder about to be replaced (by the file it was before, or removed as
+    // made by the run) may hold files the checkpoint never recorded, made
+    // since and left out by .gitignore: those would go with it. Left alone,
+    // unless forced.
+    if (!force) {
+      for (const [source, paths] of [...bySource]) {
+        const held: string[] = [];
+        for (const p of paths) {
+          if (!isDir(path.join(this.root, p))) continue;
+          const inside = await this.git(['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z', '--', p]).catch(() => 'x');
+          if (inside.replace(/\0/g, '') !== '') held.push(p);
+        }
+        if (!held.length) continue;
+        const related = (p: string) => held.some((h) => p === h || p.startsWith(`${h}/`) || h.startsWith(`${p}/`));
+        skipped.push(...paths.filter(related));
+        bySource.set(source, paths.filter((p) => !related(p)));
+      }
+    }
     for (const [source, paths] of bySource) {
+      if (!paths.length) continue;
       const status = new Map((await this.diff(source, now, paths)).map(([s, p]) => [p, s]));
       const back = paths.filter((p) => status.has(p) && status.get(p) !== 'A');
       if (back.length) await this.git(['restore', `--source=${source}`, '--worktree', '--pathspec-from-file=-', '--pathspec-file-nul'], back.join('\0'));

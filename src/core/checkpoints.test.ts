@@ -172,6 +172,28 @@ describe('Checkpoints', () => {
     expect(r.restored).not.toContain('vendor/lib');
   });
 
+  it('does not replace a folder holding files it never recorded (Codex on f470f73)', async () => {
+    write('.gitignore', 'a/private\n');
+    write('a', 'a file');
+    const cp = new Checkpoints(root, state);
+    const run = (await cp.begin('x'))!;
+    fs.rmSync(path.join(root, 'a'));
+    write('a/b', 'made by the run');
+    await cp.end(run);
+    write('a/private', 'made by hand, ignored');
+    const r = await cp.undo();
+    expect(read('a/private')).toBe('made by hand, ignored');
+    expect(r.skipped).toEqual(expect.arrayContaining(['a']));
+    expect(r.restored).not.toContain('a');
+  });
+
+  it("the project's own .git is never covered (Codex on f470f73)", async () => {
+    execFileSync('git', ['init', '-q'], { cwd: root });
+    const cp = new Checkpoints(root, state);
+    expect(await cp.covers([path.join(root, '.git', 'config')])).toBe(false);
+    expect(await cp.covers([path.join(root, 'src', 'b.ts')])).toBe(true);
+  });
+
   it('a folder is covered only if nothing inside it is left out (Codex on 8c4090e)', async () => {
     const cp = new Checkpoints(root, state);
     write('.gitignore', 'dest/a.txt\n');
