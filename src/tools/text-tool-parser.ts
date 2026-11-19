@@ -26,6 +26,21 @@ export interface ParsedTextToolCall {
   input: Record<string, unknown>;
 }
 
+/** A call written in one of the dedicated call formats, as it appears in a reply. */
+const CALL_SPAN_RE = /<tool_call>[\s\S]*?<\/tool_call>|<function=[\w.-]+>[\s\S]*?<\/function>|\[TOOL_CALLS\][\s\S]*$|<\|python_tag\|>[\s\S]*$/g;
+
+/** [start, end) of each fenced code block (an unclosed one runs to the end) and each inline code span. */
+function codeRegions(text: string): Array<[number, number]> {
+  const regions: Array<[number, number]> = [];
+  let rest = text;
+  for (const m of text.matchAll(/```[\s\S]*?(?:```|$)/g)) {
+    regions.push([m.index!, m.index! + m[0].length]);
+    rest = rest.slice(0, m.index!) + ' '.repeat(m[0].length) + rest.slice(m.index! + m[0].length);
+  }
+  for (const m of rest.matchAll(/`[^`\n]*`/g)) regions.push([m.index!, m.index! + m[0].length]);
+  return regions;
+}
+
 /**
  * Tool calls a model wrote as text although it was handed native tools.
  *
@@ -44,14 +59,22 @@ export function strayTextToolCalls(
   if (!text) return [];
   const trimmed = text.trim();
   const whole = /^```[\w-]*[ \t]*\n([\s\S]*?)\n?[ \t]*```$/.exec(trimmed);
-  const body = whole && !whole[1]!.includes('```')
-    ? whole[1]!.trim()
-    : trimmed.replace(/```[\s\S]*?(?:```|$)/g, ' ').replace(/`[^`\n]*`/g, ' ').trim();
-  const marked = /<tool_call>|<function=|\[TOOL_CALLS\]|<\|python_tag\|>/.test(body);
-  const opensWithCall = body.startsWith('{');
-  if (!marked && !opensWithCall) return [];
+  if (whole && !whole[1]!.includes('```')) return strayTextToolCalls(whole[1]!, tools);
+  // The call blocks are found first, and code blocks are looked for only in
+  // the text around them, so backticks inside a call's own arguments (a file
+  // it writes, a command it runs) are never mistaken for a code block. A call
+  // block that starts inside a code block or inline code is an example.
+  const spans = [...trimmed.matchAll(CALL_SPAN_RE)].map((m) => ({ start: m.index!, end: m.index! + m[0].length, text: m[0] }));
+  let around = trimmed;
+  for (const { start, end } of spans) around = around.slice(0, start) + ' '.repeat(end - start) + around.slice(end);
+  const quoted = codeRegions(around);
+  const live = spans.filter(({ start }) => !quoted.some(([a, b]) => start >= a && start < b));
+  // Each accepted call is parsed from the reply as written, never from a
+  // copy with anything taken out.
+  const calls = live.length > 0
+    ? live.flatMap((sp) => parseTextToolCalls(sp.text))
+    : trimmed.startsWith('{') ? parseTextToolCalls(trimmed) : [];
   const names = new Set(tools.map((t) => t.name));
-  const calls = parseTextToolCalls(body);
   return calls.length > 0 && calls.every((c) => names.has(c.name)) ? calls : [];
 }
 

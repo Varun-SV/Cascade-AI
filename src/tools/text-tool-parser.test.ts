@@ -132,4 +132,19 @@ describe('strayTextToolCalls and quoted examples', () => {
     const reply = '<tool_call>{"name":"shell","input":{"command":"ls"}}</tool_call>\nLike `<tool_call>{"name":"shell","input":{"command":"pwd"}}</tool_call>`.';
     expect(strayTextToolCalls(reply, tools)).toEqual([{ name: 'shell', input: { command: 'ls' } }]);
   });
+
+  it('keeps backticks inside a real call\'s arguments exactly as written', async () => {
+    const { strayTextToolCalls } = await import('./text-tool-parser.js');
+    const tools2 = [{ name: 'file_write' }];
+    const content = 'Use `npm test` to check.\n```sh\nnpm run lint\n```';
+    const reply = `<tool_call>${JSON.stringify({ name: 'file_write', input: { path: 'README.md', content } })}</tool_call>`;
+    expect(strayTextToolCalls(reply, tools2)).toEqual([{ name: 'file_write', input: { path: 'README.md', content } }]);
+  });
+
+  it('keeps backticks in a bare JSON call that opens the reply', async () => {
+    const { strayTextToolCalls } = await import('./text-tool-parser.js');
+    const reply = JSON.stringify({ name: 'shell', arguments: { command: 'echo `date`' } });
+    expect(strayTextToolCalls(reply, tools)).toEqual([{ name: 'shell', input: { command: 'echo `date`' } }]);
+  });
 });
+
