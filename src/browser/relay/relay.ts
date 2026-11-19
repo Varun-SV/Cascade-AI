@@ -127,6 +127,8 @@ interface DomNode {
 }
 /** Inputs that take no typed text: nothing for a picture to give away. */
 const UNTYPED = new Set(['hidden', 'checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'range', 'color', 'file']);
+/** Roles of widgets someone types into, whatever element they are built from. */
+const TYPED_ROLES = new Set(['textbox', 'searchbox', 'combobox', 'listbox', 'spinbutton']);
 
 /**
  * Whether a closed shadow root anywhere on the page (its frames' included)
@@ -148,6 +150,8 @@ export function closedRootHolds(root: DomNode | undefined): boolean {
       if (name === 'IFRAME' || name === 'FRAME' || name === 'OBJECT' || name === 'EMBED' || name === 'TEXTAREA' || name === 'SELECT') return true;
       if (name === 'INPUT' && !UNTYPED.has((attrs.get('type') ?? 'text').toLowerCase())) return true;
       if (editable !== undefined && editable.toLowerCase() !== 'false') return true;
+      // A custom widget someone types into, by its role: as the controller's own check counts them.
+      if ((attrs.get('role') ?? '').toLowerCase().split(/\s+/).some((role) => TYPED_ROLES.has(role))) return true;
     }
     for (const child of node.children ?? []) stack.push([child, closed]);
     for (const shadow of node.shadowRoots ?? []) stack.push([shadow, closed || shadow.shadowRootType === 'closed']);

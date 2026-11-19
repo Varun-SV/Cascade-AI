@@ -927,3 +927,21 @@ describe('screenshots, one at a time (Codex on 7dca271)', () => {
     } finally { wss.close(); }
   });
 });
+
+describe('closedRootHolds: what a closed shadow root may not hide from a screenshot', () => {
+  const closed = (...children: object[]) => ({ nodeType: 9, children: [{ nodeType: 1, nodeName: 'X-WIDGET', shadowRoots: [{ nodeType: 11, shadowRootType: 'closed', children }] }] });
+  it('a typed field, a frame, or a custom widget by its role (Codex on d3d8764)', async () => {
+    const { closedRootHolds } = await import('./relay.js');
+    expect(closedRootHolds(closed({ nodeType: 1, nodeName: 'INPUT', attributes: ['type', 'password'] }))).toBe(true);
+    expect(closedRootHolds(closed({ nodeType: 1, nodeName: 'IFRAME' }))).toBe(true);
+    for (const role of ['textbox', 'spinbutton', 'searchbox', 'combobox', 'listbox', 'presentation textbox']) {
+      expect(closedRootHolds(closed({ nodeType: 1, nodeName: 'DIV', attributes: ['role', role] })), role).toBe(true);
+    }
+  });
+  it('but not text, a button, or anything in an open root', async () => {
+    const { closedRootHolds } = await import('./relay.js');
+    expect(closedRootHolds(closed({ nodeType: 1, nodeName: 'P' }, { nodeType: 1, nodeName: 'INPUT', attributes: ['type', 'checkbox'] }, { nodeType: 1, nodeName: 'DIV', attributes: ['role', 'button'] }))).toBe(false);
+    const open = { nodeType: 9, children: [{ nodeType: 1, nodeName: 'X', shadowRoots: [{ nodeType: 11, shadowRootType: 'open', children: [{ nodeType: 1, nodeName: 'DIV', attributes: ['role', 'textbox'] }] }] }] };
+    expect(closedRootHolds(open)).toBe(false);
+  });
+});
