@@ -16,9 +16,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { WebSocketServer } from 'ws';
+import { type WebSocket, WebSocketServer } from 'ws';
 import { createIdentity, createMemoryNonceStore, generateStoredKey, publicKeyFromText, publicKeyToText } from '../../src/browser/relay/capability.js';
-import { authenticateControl, createRelayHub, type RelayHub } from '../../src/browser/relay/hub.js';
+import { SERVER_RESTART_CLOSE, authenticateControl, createRelayHub, type RelayHub } from '../../src/browser/relay/hub.js';
 import { connectCdp } from '../../src/browser/relay/cdp-client.js';
 
 interface PwPage { goto(u: string, o?: object): Promise<unknown>; evaluate<T>(fn: string): Promise<T>; url(): string; fill(s: string, v: string): Promise<void>; click(s: string): Promise<void>; waitForURL?(u: string): Promise<void>; isClosed(): boolean; close(): Promise<void> }
@@ -119,6 +119,8 @@ async function rig() {
   const deviceKey = publicKeyFromText(key.publicKey)!;
   /** Control connections the extension has opened, authenticated or not. */
   let controls = 0;
+  /** The control sockets, newest last, so a test can close one as a restarting server would. */
+  const controlSockets: WebSocket[] = [];
   const hub: RelayHub = createRelayHub({ server, store: createMemoryNonceStore(Date.now), deviceKey: (id) => (id === 'dev-ext' ? deviceKey : null) });
   const httpServer = http.createServer();
   const wss = new WebSocketServer({ server: httpServer });
@@ -126,6 +128,7 @@ async function rig() {
     const p = (req.url ?? '').split('?')[0]!;
     if (p === '/control') {
       controls++;
+      controlSockets.push(ws);
       void authenticateControl(ws, { serverId: server.id, device: (id) => (id === 'dev-ext' ? { userId: 'user-a', key: deviceKey } : null) })
         .then((who) => { if (who) hub.attachDevice(who, ws); });
     } else if (p === '/run') hub.attachRun(ws);
@@ -194,7 +197,7 @@ async function rig() {
   /** The worker's own state and recent log, as DevTools on it would show. */
   const status = () => sw.evaluate<{ status: { run?: { runId: string; sites: string[] }; connection: string; notice?: string }; recent: string[] }>(
     () => JSON.parse(JSON.stringify((globalThis as unknown as { cascade: object }).cascade)) as never);
-  return { hub, ctx, sw, allowed, offlist, lan, downloads, answer, run, status, browserCdp, device, controls: () => controls };
+  return { hub, ctx, sw, allowed, offlist, lan, downloads, answer, run, status, browserCdp, device, controls: () => controls, controlSockets };
 }
 
 suite('the extension in a real Chromium', { timeout: 90_000 }, () => {
@@ -461,6 +464,43 @@ suite('the extension in a real Chromium', { timeout: 90_000 }, () => {
     await sleep(1500);
     expect(r.controls() - before).toBe(1);
     expect(r.hub.deviceOnline('user-a', 'dev-ext')).toBe(true);
+  });
+
+  it('a server restarting (a deploy): the extension waits for it rather than retrying into the gap, then comes back', async () => {
+    const r = await rig();
+    const before = r.controls();
+    // What the hub sends every device when the server shuts down.
+    r.controlSockets.at(-1)!.close(SERVER_RESTART_CLOSE, 'server restarting');
+    await vi.waitFor(() => expect(r.hub.deviceOnline('user-a', 'dev-ext')).toBe(false), { timeout: 5000 });
+    await sleep(4000);
+    expect(r.controls() - before).toBe(0);
+    await vi.waitFor(() => expect(r.hub.deviceOnline('user-a', 'dev-ext')).toBe(true), { timeout: 15_000 });
+    expect(r.controls() - before).toBe(1);
+  });
+
+  it('offline, a saved pairing still shows, and it connects once the network is back (Codex on 7ecb40e)', async () => {
+    const r = await rig();
+    const extId = new URL(r.sw.url()).host;
+    const popup = r.ctx.pages()[0]!;
+    await popup.goto(`chrome-extension://${extId}/popup.html`);
+    await popup.evaluate(() => chrome.runtime.sendMessage({ type: 'forget' }));
+    await vi.waitFor(() => expect(r.hub.deviceOnline('user-a', 'dev-ext')).toBe(false), { timeout: 5000 });
+    // The worker's view of the network, as Chrome gives it when the machine is offline.
+    await r.sw.evaluate(() => { Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false }); });
+    const before = r.controls();
+    await r.sw.evaluate((d) => chrome.storage.local.set({ device: d }), r.device as never);
+    await vi.waitFor(async () => expect((await r.status()).status).toMatchObject({ connection: 'offline', device: { name: 'Test Chrome' } }), { timeout: 5000 });
+    expect(r.controls() - before).toBe(0);
+    await r.sw.evaluate(() => { Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => true }); dispatchEvent(new Event('online')); });
+    await vi.waitFor(() => expect(r.hub.deviceOnline('user-a', 'dev-ext')).toBe(true), { timeout: 10_000 });
+  });
+
+  it('a dropped connection is retried at once, as before', async () => {
+    const r = await rig();
+    const before = r.controls();
+    r.controlSockets.at(-1)!.terminate();
+    await vi.waitFor(() => expect(r.controls() - before).toBe(1), { timeout: 4000 });
+    await vi.waitFor(() => expect(r.hub.deviceOnline('user-a', 'dev-ext')).toBe(true), { timeout: 5000 });
   });
 
   it('Take over pauses the agent while the user has the tab; Hand back gives it back up to date', async () => {

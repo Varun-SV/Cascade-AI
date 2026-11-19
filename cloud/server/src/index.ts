@@ -58,10 +58,61 @@ export function bootstrap() {
     console.log(`Cascade Cloud server listening on :${env.PORT}`);
   });
 
-  return { httpServer, app, io, store, env, stopMediaSweeper, browserRelay };
+  const shutdown = gracefulShutdown({ httpServer, io, store, stopMediaSweeper, browserRelay });
+  return { httpServer, app, io, store, env, stopMediaSweeper, browserRelay, shutdown };
+}
+
+/** How long a shutdown may take before the process exits anyway. */
+export const SHUTDOWN_TIMEOUT_MS = 10_000;
+
+/**
+ * Shut down cleanly: Railway sends SIGTERM on every deploy and then kills the
+ * process. Killed mid-connection, every browser device saw a reset and retried
+ * straight into the gap before the new server was up (a 502). Instead:
+ *  - paired browsers are told it is a restart (close code 1012), so they wait
+ *    a few seconds before reconnecting, and every lease ends on purpose;
+ *  - no new connections are accepted, open sockets are closed;
+ *  - the database is closed, so its write-ahead log is folded in rather than
+ *    left for the next start to recover.
+ * Runs once; a hard timeout exits even if something hangs.
+ */
+export function gracefulShutdown(parts: {
+  httpServer: http.Server;
+  io: { close(cb?: () => void): unknown };
+  store: { close(): void };
+  stopMediaSweeper: () => void;
+  browserRelay?: { close(): Promise<void> };
+}): (signal: string) => Promise<void> {
+  let started: Promise<void> | null = null;
+  return (signal) => {
+    if (started) return started;
+    started = (async () => {
+      console.log(`[shutdown] ${signal}: closing connections`);
+      parts.stopMediaSweeper();
+      await parts.browserRelay?.close().catch(() => {});
+      // Socket.IO's close also closes the HTTP server and waits for every request
+      // on it: a slow upload would hold the shutdown past its timeout, and the
+      // database would never be closed. Open requests are cut before waiting.
+      const socketsClosed = new Promise<void>((r) => { parts.io.close(() => r()); });
+      parts.httpServer.closeAllConnections?.();
+      await socketsClosed;
+      await new Promise<void>((r) => parts.httpServer.close(() => r()));
+      try { parts.store.close(); } catch { /* already closed */ }
+      console.log('[shutdown] done');
+    })();
+    return started;
+  };
+}
+
+function exitAfter(shutdown: (signal: string) => Promise<void>, signal: string): void {
+  const timer = setTimeout(() => { console.warn('[shutdown] timed out; exiting'); process.exit(1); }, SHUTDOWN_TIMEOUT_MS);
+  timer.unref();
+  void shutdown(signal).then(() => process.exit(0), () => process.exit(1));
 }
 
 const isMainModule = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMainModule) {
-  bootstrap();
+  const { shutdown } = bootstrap();
+  process.once('SIGTERM', () => exitAfter(shutdown, 'SIGTERM'));
+  process.once('SIGINT', () => exitAfter(shutdown, 'SIGINT'));
 }
