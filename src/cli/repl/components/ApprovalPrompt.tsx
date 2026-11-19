@@ -67,6 +67,8 @@ export function summarizeApproval(request: ApprovalRequest): ApprovalSummary {
     : risk ? risk.reason : request.description;
   const undo = !risk ? ''
     : risk.level === 'safe' ? 'only reads'
+      // No checkpoint this run (the home folder, no git): nothing to promise.
+      : request.undoable === false ? 'this run has no checkpoint: /undo can\'t take it back'
       : risk.category === 'delete' ? '/undo can put back what the project\'s checkpoint holds (not files .gitignore leaves out)'
         : undoable(risk) ? '/undo can take it back'
           : '/undo can\'t take this back';
@@ -97,7 +99,7 @@ export function ApprovalPrompt({ request, theme, onDecision, active = true }: Ap
   const s = summarizeApproval(request);
   const risky = request.risk ? request.risk.level === 'risky' : request.isDangerous;
   const color = risky ? theme.colors.error : theme.colors.warning;
-  const cantUndo = request.risk ? !undoable(request.risk) : false;
+  const cantUndo = request.risk ? request.undoable === false && request.risk.level !== 'safe' || !undoable(request.risk) : false;
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1} marginY={1}>

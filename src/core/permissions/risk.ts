@@ -16,6 +16,7 @@
 //  When in doubt a call is risky: a classifier that guesses "fine" is the
 //  one that deletes something.
 
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Risk, RiskCategory, RiskLevel } from '../../types.js';
@@ -216,8 +217,9 @@ export function assessShell(command: string, root: string, cwd: string = root): 
   // project. null once a move can't be read before it runs (`cd -`, `cd $X`).
   let here: string | null = cwd;
   for (const segment of segments(text)) {
+    // Judged where it starts, a cd included: `cd . > a.txt` writes a.txt
+    // before it moves. Then, for a cd, the folder the rest runs in.
     const moved = directoryChange(segment, here);
-    if (moved !== undefined) { here = moved; continue; }
     let r = assessSegment(segment, root, here ?? root);
     if (r.level === 'recoverable') {
       if (here === null) r = risky('outside-project', 'changes to a folder that can\'t be told before it runs, then changes files there');
@@ -225,6 +227,7 @@ export function assessShell(command: string, root: string, cwd: string = root): 
     }
     result = worst(result, r);
     if (result.level === 'risky') return result;
+    if (moved !== undefined) here = moved;
   }
   return result;
 }
@@ -486,7 +489,18 @@ function pathsOutside(prog: string, paths: string[], root: string, cwd: string, 
   // What it writes, for the checkpoint to vouch for: a copy writes only
   // where it copies to; anything else (mv, tee, sed -i…) every path named.
   const written = COPIES.has(prog) ? paths.slice(-1) : paths;
-  return written.length ? recoverable(`${prog} changes files (checkpointed)`, written.map((p) => path.resolve(cwd, p))) : SAFE;
+  const targets = written.map((p) => path.resolve(cwd, p));
+  // A copy into a folder writes the files named after its sources in it
+  // (`cp a.txt dest/` writes dest/a.txt); the folder is named too, and the
+  // checkpoint looks inside it for anything it doesn't record.
+  if (COPIES.has(prog) && targets.length === 1 && isDirectory(targets[0]!)) {
+    for (const source of paths.slice(0, -1)) targets.push(path.join(targets[0]!, path.basename(source)));
+  }
+  return targets.length ? recoverable(`${prog} changes files (checkpointed)`, targets) : SAFE;
+}
+
+function isDirectory(p: string): boolean {
+  try { return fs.statSync(p).isDirectory(); } catch { return false; }
 }
 
 const COPIES = new Set(['cp', 'copy', 'copy-item', 'cpi', 'install', 'rsync', 'xcopy', 'robocopy']);

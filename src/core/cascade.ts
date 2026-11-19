@@ -3042,6 +3042,7 @@ export function approvalRequestFor(req: PermissionRequest): ApprovalRequest & { 
     // -f 'private-name'"), which hosts withhold off this machine: its kind of
     // risk goes, in words that come from no input.
     ...(req.risk ? { risk: req.localOnly ? withoutInput(req.risk) : req.risk } : {}),
+    ...(req.undoable !== undefined ? { undoable: req.undoable } : {}),
     escalationContext: {
       requestedBy: req.requestedBy,
       parentT2Id: req.parentT2Id,

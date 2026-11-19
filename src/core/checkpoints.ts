@@ -117,7 +117,16 @@ export class Checkpoints {
     try {
       // Exit 0 names the ignored ones; exit 1 means none is.
       const ignored = await this.git(['check-ignore', '-z', '--stdin'], rel.join('\0'), [0, 1]);
-      return ignored.replace(/\0/g, '') === '';
+      if (ignored.replace(/\0/g, '') !== '') return false;
+      // A folder is covered only if nothing in it is left out: `cp a.txt
+      // dest/` writes into it, and a file there the .gitignore names would be
+      // overwritten with nothing to put it back.
+      const folders = rel.filter((r, i) => { try { return fs.statSync(real[i]!).isDirectory(); } catch { return false; } });
+      if (folders.length) {
+        const inside = await this.git(['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z', '--', ...folders]);
+        if (inside.replace(/\0/g, '') !== '') return false;
+      }
+      return true;
     } catch {
       return false;
     }
@@ -188,6 +197,10 @@ export class Checkpoints {
         }
         fs.mkdirSync(path.join(this.gitDir, 'info'), { recursive: true });
         fs.writeFileSync(path.join(this.gitDir, 'info', 'exclude'), `${ALWAYS_LEFT_OUT.join('\n')}\n`);
+        // Files are kept byte for byte: the project's .gitattributes (text=auto,
+        // eol, filters) would otherwise turn CRLF into LF on the way in, and
+        // /undo would give back a different file. info/attributes wins over it.
+        fs.writeFileSync(path.join(this.gitDir, 'info', 'attributes'), '* -text -eol -filter -ident -working-tree-encoding\n');
         fs.writeFileSync(path.join(this.dir, 'gitconfig'), '');
         return true;
       } catch { return false; }

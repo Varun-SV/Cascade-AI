@@ -345,6 +345,9 @@ export class PermissionEscalator extends EventEmitter {
 
       signal?.addEventListener('abort', onAbort, { once: true });
       // Emit event so cascade.ts / REPL can pick it up
+      // Whether this run has a checkpoint, so the question can say truly
+      // whether /undo could take the change back.
+      req.undoable = this.undoable;
       this.emit('permission:user-required', req);
     });
   }

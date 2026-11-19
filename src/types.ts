@@ -1147,6 +1147,8 @@ export interface ApprovalRequest {
   localOnly?: boolean;
   /** How risky this one call is, where Cascade could tell: see Risk. */
   risk?: Risk;
+  /** Whether the run has a checkpoint /undo could take this back with; false when it has none. */
+  undoable?: boolean;
 }
 
 /**
@@ -1208,6 +1210,8 @@ export interface PermissionRequest {
   isDangerous: boolean;
   /** How risky this one call is (src/core/permissions/risk.ts). */
   risk?: Risk;
+  /** Whether the run has a checkpoint /undo could take this back with. */
+  undoable?: boolean;
   /** What the T3 subtask is trying to accomplish */
   subtaskContext: string;
   /** What the parent T2 section's goal is */

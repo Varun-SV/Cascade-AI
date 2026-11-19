@@ -25,6 +25,12 @@ describe('the approval card says who, what, why, and what /undo can do', () => {
     expect(s.why).toMatch(/sends something off this computer/);
     expect(s.undo).toBe("/undo can't take this back");
   });
+  it("promises nothing when the run has no checkpoint (Codex on 8c4090e)", () => {
+    const s = summarizeApproval({ ...req('file_write', { path: 'src/a.ts' }), undoable: false });
+    expect(s.undo).toBe("this run has no checkpoint: /undo can't take it back");
+    expect(summarizeApproval({ ...req('file_write', { path: 'src/a.ts' }), undoable: true }).undo).toBe('/undo can take it back');
+  });
+
   it('without a risk, it falls back to the description', () => {
     const s = summarizeApproval({ id: 'r', tierId: 'MCP', toolName: 'mcp::x', input: { command: 'npx x' }, description: 'Spawn MCP server', isDangerous: true });
     expect(s.why).toBe('Spawn MCP server');

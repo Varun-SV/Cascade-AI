@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { assessRisk, assessShell, assessCode, undoable } from './risk.js';
@@ -167,6 +168,19 @@ describe('what an undoable call writes, for the checkpoint to vouch for (Codex o
     expect(sh('echo x>/etc/hosts').category).toBe('outside-project');
     expect(sh('echo "a>b"').level).toBe('safe');
     expect(sh('npm test 2>&1').writes).toBeUndefined();
+  });
+
+  it('a copy into a folder names the file it writes there (Codex on 8c4090e)', () => {
+    const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'risk-cp-'));
+    fs.mkdirSync(path.join(proj, 'dest'));
+    expect(assessShell('cp a.txt b.txt dest/', proj).writes).toEqual([path.join(proj, 'dest'), path.join(proj, 'dest', 'a.txt'), path.join(proj, 'dest', 'b.txt')]);
+    expect(assessShell('cp a.txt new.txt', proj).writes).toEqual([path.join(proj, 'new.txt')]);
+  });
+
+  it('a redirect on a cd is judged where it starts (Codex on 8c4090e)', () => {
+    expect(sh('cd . > ignored.txt').writes).toEqual([path.join(root, 'ignored.txt')]);
+    expect(sh('cd .. > a.txt').writes).toEqual([path.join(root, 'a.txt')]);
+    expect(sh('cd .. > a.txt && touch b.txt').category).toBe('outside-project');
   });
 
   it('names bare filenames too: no slash is still a file (Codex on 27db466)', () => {

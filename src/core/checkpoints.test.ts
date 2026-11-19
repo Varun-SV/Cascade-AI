@@ -138,6 +138,27 @@ describe('Checkpoints', () => {
     expect(await cp.covers([path.join(root, 'inside-link.txt')])).toBe(true);
   });
 
+  it('a folder is covered only if nothing inside it is left out (Codex on 8c4090e)', async () => {
+    const cp = new Checkpoints(root, state);
+    write('.gitignore', 'dest/a.txt\n');
+    write('dest/a.txt', 'kept by hand');
+    write('dest/b.txt', 'tracked');
+    write('clean/c.txt', 'tracked');
+    expect(await cp.covers([path.join(root, 'dest')])).toBe(false);
+    expect(await cp.covers([path.join(root, 'clean')])).toBe(true);
+  });
+
+  it('gives back a CRLF file byte for byte, whatever the .gitattributes says (Codex on 8c4090e)', async () => {
+    write('.gitattributes', '* text=auto\n');
+    fs.writeFileSync(path.join(root, 'win.txt'), 'one\r\ntwo\r\n');
+    const cp = new Checkpoints(root, state);
+    const run = (await cp.begin('x'))!;
+    fs.writeFileSync(path.join(root, 'win.txt'), 'changed\r\n');
+    await cp.end(run);
+    await cp.undo();
+    expect(fs.readFileSync(path.join(root, 'win.txt'), 'utf8')).toBe('one\r\ntwo\r\n');
+  });
+
   it('takes no checkpoint of the home folder', async () => {
     expect(await new Checkpoints(os.homedir(), state).begin('x')).toBeNull();
   });
