@@ -2,6 +2,7 @@
 //  Cascade AI — T3 Worker
 // ─────────────────────────────────────────────
 
+import { formatRunFacts } from '../knowledge/run-memory.js';
 import { assessRisk } from '../permissions/risk.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -1104,6 +1105,13 @@ export class T3Worker extends BaseTier {
 
       if (this.localOnlyMatch && !resolvedPrivately) servePrivately();
 
+      // What other workers (or earlier runs) found, before this worker pays to
+      // find it too. Not for a local-only subtask: it shares nothing either way.
+      if (!this.localOnlyMatch) {
+        const found = this.router.getRunMemory?.(this.artifactRoot())?.unseenBy(this.id) ?? [];
+        if (found.length) await this.context.addMessage({ role: 'user', content: formatRunFacts(found) });
+      }
+
       let textToolSuffix = '';
       if (useTextTools) {
         const signature = tools.map((t) => t.name).join(',');
@@ -1420,6 +1428,18 @@ export class T3Worker extends BaseTier {
       });
     }
 
+    // The run's board: a read-only command another worker already ran, with
+    // nothing changed since, is answered from there instead of run again.
+    const board = this.localOnlyMatch ? undefined : this.router.getRunMemory?.(this.artifactRoot());
+    const reused = board?.reuse(tc.name, tc.input);
+    if (reused) {
+      const note = `[Already run in this run${reused.by === this.id ? '' : ' by another worker'}, and nothing has changed since: its answer is given again rather than running it twice.]\n`;
+      this.emit('tool:call', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), input: tc.input });
+      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), output: this.shareable(`${note}${reused.output}`, 'tool result'), durationMs: 0 });
+      return `${note}${reused.output}`;
+    }
+    const boardAt = board?.begin(tc.name, tc.input) ?? 0;
+
     this.emit('tool:call', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), input: this.localOnlyMatch ? {} : tc.input });
     const toolStartMs = Date.now();
     // A picture is of the page after the last browser action. One that ran
@@ -1472,11 +1492,14 @@ export class T3Worker extends BaseTier {
         }
       }
       const durationMs = Date.now() - toolStartMs;
-      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), output: this.shareable(typeof result === 'string' ? result : JSON.stringify(result), 'tool result'), durationMs });
-      return typeof result === 'string' ? result : JSON.stringify(result);
+      const text = typeof result === 'string' ? result : JSON.stringify(result);
+      board?.observe(tc.name, tc.input, text, this.id, boardAt);
+      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), output: this.shareable(text, 'tool result'), durationMs });
+      return text;
     } catch (err) {
       const durationMs = Date.now() - toolStartMs;
       const errMsg = err instanceof Error ? err.message : String(err);
+      board?.observe(tc.name, tc.input, errMsg, this.id, boardAt);
       this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), error: this.shareable(errMsg, 'tool error'), durationMs });
       // Unrecoverable/systemic conditions (rate-limit, auth, quota, AND a 404
       // "model not found" — the shared classifier this reuses is the same one

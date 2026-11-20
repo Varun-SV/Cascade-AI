@@ -2247,3 +2247,51 @@ describe('a worker whose dependency failed', () => {
     expect(router.generate).not.toHaveBeenCalled();
   });
 });
+
+describe('workers share what they find (run-memory.ts)', () => {
+  // The run that prompted this: one worker ran git in a folder with no
+  // repository, and the next ran the same command there and paid to learn it again.
+  it('the second worker is told what the first found, and its repeat of a read-only command is answered without running', async () => {
+    const { RunMemory } = await import('../knowledge/run-memory.js');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-share-'));
+    try {
+      const memory = new RunMemory(root);
+      const prompts: string[] = [];
+      const generate = (calls: () => GenerateResult[]) => {
+        const queue = calls();
+        return vi.fn(async (_tier: string, options: { messages: Array<{ role: string; content: unknown }> }) => {
+          for (const m of options.messages) if (typeof m.content === 'string') prompts.push(m.content);
+          return queue.shift() ?? makeResult('done');
+        });
+      };
+      const router = (calls: () => GenerateResult[]) => ({
+        generate: generate(calls),
+        getModelForTier: () => undefined,
+        getRunMemory: () => memory,
+      }) as unknown as CascadeRouter;
+      const execute = vi.fn(async (_name: string, input: Record<string, unknown>) => (
+        String(input['command']).startsWith('git') ? 'fatal: not a git repository (or any of the parent directories): .git' : 'a.txt'
+      ));
+      const registry = makeToolRegistry({
+        getToolDefinitions: () => [{ name: 'shell', description: 'Run a command', inputSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } }],
+        getWorkspaceRoot: () => root,
+        execute,
+      } as unknown as Partial<ToolRegistry>);
+      const call = (command: string) => makeResult('', [{ id: `c-${command}`, name: 'shell', input: { command } }], 'tool_use');
+
+      await new T3Worker(router(() => [call('git status'), call('ls'), makeResult('first done')]), registry, 't2-a')
+        .execute(makeAssignment({ subtaskId: 's-a' }), 'task-share');
+      expect(execute).toHaveBeenCalledTimes(2);
+
+      prompts.length = 0;
+      const second = new T3Worker(router(() => [call('ls'), makeResult('second done')]), registry, 't2-b');
+      await second.execute(makeAssignment({ subtaskId: 's-b', subtaskTitle: 'Another part' }), 'task-share');
+
+      // Told before its first call…
+      expect(prompts.some((p) => p.startsWith('ALREADY FOUND IN THIS RUN') && p.includes('not a git repository'))).toBe(true);
+      // …and its `ls` answered from the board: the registry ran nothing more.
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(prompts.some((p) => p.includes('[Already run in this run by another worker') && p.includes('a.txt'))).toBe(true);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+});

@@ -5,6 +5,31 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.98.0 - 2026-11-20
+
+### Added
+- **Workers share what they find, and the project remembers it.** Workers
+  running side by side used to each find the same things out: one ran
+  `git status` in a folder with no repository, and the next did the same
+  and paid to learn it again. Now one board covers the whole run, every
+  section's workers alike:
+  - **Facts about your machine** are read from what tools answer: a folder
+    that is not a git repository, a command your shell doesn't have (as
+    bash, cmd and PowerShell say it). Each worker is told the ones it
+    hasn't seen yet, before its next model call.
+  - **A read-only command run again** in the same folder (`ls`,
+    `git status`, judged by the same rules auto mode uses) gets the earlier
+    answer instead of running and being reasoned about twice. Anything
+    that can change things clears these, and while such a call is running
+    no earlier answer is given. Commands whose answer moves by itself,
+    like `date`, are never reused.
+  - **It grows with you.** The facts are kept in the project's knowledge,
+    so the next run starts out knowing them. One that stops being true
+    (you run `git init`, a command starts working) is taken back out.
+  - Only short facts in Cascade's own words are kept, never what a tool
+    printed. A subtask under your local-only `privacy.paths` neither adds
+    to the board nor reads from it.
+
 ## 0.96.3 - 2026-11-20
 
 ### Fixed

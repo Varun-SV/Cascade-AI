@@ -2,6 +2,7 @@
 //  Cascade AI — Model Router
 // ─────────────────────────────────────────────
 
+import { RunMemory } from '../knowledge/run-memory.js';
 import EventEmitter, { setMaxListeners } from 'node:events';
 import crypto from 'node:crypto';
 import type {
@@ -509,6 +510,8 @@ const BASE_URL_ENV: Partial<Record<ProviderType, string>> = {
 const REMEMBERS_TEXT_TOOLS: ReadonlySet<ProviderType> = new Set<ProviderType>(['openai-compatible', 'ollama']);
 
 export class CascadeRouter extends EventEmitter {
+  private runMemory?: RunMemory;
+  private runMemoryRoot?: string;
   private selector!: ModelSelector;
   private failover!: FailoverManager;
   private providers: Map<string, BaseProvider> = new Map();
@@ -2007,6 +2010,18 @@ export class CascadeRouter extends EventEmitter {
   }
 
   /**
+   * The run's shared board of what its workers have found (see run-memory.ts):
+   * one per run, made on first use, for every section's workers alike.
+   */
+  getRunMemory(root: string): RunMemory {
+    if (!this.runMemory || this.runMemoryRoot !== root) {
+      this.runMemory = new RunMemory(root, this.worldStateDB);
+      this.runMemoryRoot = root;
+    }
+    return this.runMemory;
+  }
+
+  /**
    * "Private" = inference never leaves the user's machine/network: the
    * endpoint serving the model — Ollama, or an OpenAI-compatible server such
    * as llama.cpp, vLLM or LM Studio — is loopback or a private range. A cloud
@@ -2744,6 +2759,9 @@ export class CascadeRouter extends EventEmitter {
 
   beginRun(): void {
     this.restoreRunTextTools();
+    // A new board each run: its stored answers belong to the run that got them.
+    // The facts that last carry over through the project's knowledge.
+    this.runMemory = undefined;
     // Per-run, like everything else here: a stale mapping would credit this
     // run's calls to the task type a previous run happened to select under.
     this.tierSelectionTaskTypes.clear();
