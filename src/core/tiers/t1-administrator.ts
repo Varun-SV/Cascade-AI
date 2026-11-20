@@ -823,14 +823,16 @@ ${quotedFieldRules(spec)}
       registered.push([m, event, handler as (...args: unknown[]) => void]);
     };
 
-    const managers: T2Manager[] = sections.map((section) => {
+    const managers: T2Manager[] = sections.map((section, sectionIndex) => {
       const manager = new T2Manager(this.router, this.toolRegistry, this.id);
       // One breaker for the whole run. Three sections each failing once against
       // a dead model is the same fact as one section failing three times — a
       // per-section breaker would never reach its threshold and every section
       // would pay to rediscover it.
       if (this.runBreaker) manager.setRunBreaker(this.runBreaker);
-      if (this.escalationCallback) manager.setEscalationCallback(this.escalationCallback);
+      // Each section's question says where in the plan it sits ("Section 2 of 4").
+      const ask = this.escalationCallback;
+      if (ask) manager.setEscalationCallback((ctx) => ask({ ...ctx, position: { index: sectionIndex + 1, of: sections.length } }));
       manager.setHierarchyContext(`You are a T2 Manager for the section "${section.sectionTitle}". You are part of a COMPLEX task overseen by T1 Administrator.`);
       // Graph identity and edges are known now; the wave only once the
       // scheduler reaches this node (see onWaveStart below).

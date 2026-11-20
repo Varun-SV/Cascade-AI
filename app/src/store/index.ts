@@ -240,6 +240,8 @@ export interface PendingEscalation {
   goal?: string;
   issues: string[];
   summary: string;
+  /** Where the section sits in T1's plan (1-based). Absent on a run with no plan, or from an older server. */
+  position?: { index: number; of: number };
   timeoutMs: number;
   /** Client clock at arrival — the modal counts down from here, not from mount. */
   receivedAt: number;

@@ -458,3 +458,28 @@ describe('T1Administrator runs under the id it is given', () => {
     expect(planned, 'one plan, under the run id').toEqual(['run-xyz']);
   });
 });
+
+describe('T1Administrator tells each section where it sits in the plan', () => {
+  it('a section that escalates asks with its position: Section 2 of 3', async () => {
+    const { T2Manager } = await import('./t2-manager.js');
+    const wrappers: Array<(ctx: never) => Promise<unknown>> = [];
+    const spy = vi.spyOn(T2Manager.prototype, 'setEscalationCallback').mockImplementation(function (cb) { wrappers.push(cb as never); });
+    try {
+      const router = { getModelForTier: () => null } as unknown as CascadeRouter;
+      const admin = new T1Administrator(router, {} as ToolRegistry, {} as CascadeConfig);
+      const asked: unknown[] = [];
+      admin.setEscalationCallback(async (ctx) => { asked.push(ctx); return { action: 'skip' }; });
+      const inner = admin as unknown as {
+        runT2sWithDependencies: (...a: unknown[]) => Promise<T2Result[]>;
+        dispatchT2Managers: (s: T1ToT2Assignment[]) => Promise<T2Result[]>;
+      };
+      inner.runT2sWithDependencies = async () => [];
+      await inner.dispatchT2Managers([makeSection('s1'), makeSection('s2'), makeSection('s3')]);
+      expect(wrappers).toHaveLength(3);
+      await wrappers[1]!({ sectionId: 's2', sectionTitle: 'Section s2', issues: [], summary: '' } as never);
+      expect(asked).toEqual([expect.objectContaining({ sectionId: 's2', position: { index: 2, of: 3 } })]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

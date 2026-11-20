@@ -312,6 +312,8 @@ export interface EscalationRequest {
   /** What the section has produced so far: what "Skip" keeps, and what a
    *  retry throws away. Shown, because it is half of the decision. */
   summary: string;
+  /** Where the section sits in T1's plan (1-based). Absent on a run with no plan, or from an older server. */
+  position?: { index: number; of: number };
   timeoutMs: number;
   /** Client clock at arrival. The deadline is anchored here rather than to the
    *  modal's mount so an unrelated re-render cannot restart the countdown. */

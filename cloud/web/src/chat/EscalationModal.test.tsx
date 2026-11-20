@@ -9,7 +9,7 @@
 //  the prompt on top.
 
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import EscalationModal from './EscalationModal.js';
 import type { EscalationRequest } from './useChatSession.js';
@@ -51,7 +51,7 @@ describe('EscalationModal', () => {
     expect(screen.getByText('Section alpha')).toBeInTheDocument();
     expect(screen.getByText('Section beta')).toBeInTheDocument();
     expect(screen.getByText('Section gamma')).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: /skip this section/i }), 'each answerable on its own').toHaveLength(3);
+    expect(screen.getAllByRole('radio', { name: /^Skip/ }), 'each answerable on its own').toHaveLength(3);
   });
 
   it('says how many are waiting in the title, rather than hiding the count', () => {
@@ -63,7 +63,7 @@ describe('EscalationModal', () => {
         onExpire={noop}
       />,
     );
-    expect(screen.getByText(/2 sections need your decision/i)).toBeInTheDocument();
+    expect(screen.getByText(/2 sections paused for your decision/i)).toBeInTheDocument();
   });
 
   it('answers the section whose button was pressed, not the first on screen', () => {
@@ -78,7 +78,9 @@ describe('EscalationModal', () => {
         onExpire={noop}
       />,
     );
-    fireEvent.click(screen.getAllByRole('button', { name: /skip this section/i })[1]!);
+    const beta = screen.getByRole('region', { name: 'Section beta' });
+    fireEvent.click(within(beta).getByRole('radio', { name: /^Skip/ }));
+    fireEvent.click(within(beta).getByRole('button', { name: 'Skip and keep draft' }));
     expect(onResolve).toHaveBeenCalledWith('skip', undefined, 'req-2');
   });
 
@@ -95,15 +97,18 @@ describe('EscalationModal', () => {
         onExpire={noop}
       />,
     );
-    fireEvent.change(screen.getByLabelText('Guidance for Section alpha'), {
+    const alpha = screen.getByRole('region', { name: 'Section alpha' });
+    const beta = screen.getByRole('region', { name: 'Section beta' });
+    fireEvent.click(within(alpha).getByRole('radio', { name: /^Guide/ }));
+    fireEvent.change(screen.getByLabelText('Notes for Section alpha'), {
       target: { value: 'only the public repos' },
     });
 
-    // The OTHER section's guidance button stays disabled — its box is empty.
-    const guidanceButtons = screen.getAllByRole('button', { name: /retry with guidance/i });
-    expect(guidanceButtons[1], 'beta has no draft of its own').toBeDisabled();
+    // The OTHER section has no notes box and nothing chosen: nothing to send.
+    expect(screen.queryByLabelText('Notes for Section beta')).not.toBeInTheDocument();
+    expect(within(beta).getByRole('button', { name: 'Choose how to continue' }), 'beta has no answer of its own').toBeDisabled();
 
-    fireEvent.click(guidanceButtons[0]!);
+    fireEvent.click(within(alpha).getByRole('button', { name: 'Retry with notes' }));
     expect(onResolve).toHaveBeenCalledWith('guidance', 'only the public repos', 'req-1');
   });
 
@@ -156,7 +161,6 @@ describe('EscalationModal', () => {
         onExpire={noop}
       />,
     );
-    expect(screen.getByText(/what it was asked to do/i)).toBeInTheDocument();
     expect(screen.getByText('Log in and probe the chatbot for prompt leakage')).toBeInTheDocument();
   });
 
@@ -172,8 +176,11 @@ describe('EscalationModal', () => {
         onExpire={noop}
       />,
     );
-    expect(screen.getByText('What it has so far')).toBeInTheDocument();
-    expect(screen.getByText('Logged in; captured two responses.')).toBeInTheDocument();
+    expect(screen.getByText('Draft')).toBeInTheDocument();
+    expect(screen.getByText(/Logged in; captured two responses\./)).toBeInTheDocument();
+    // The whole of it, on asking.
+    fireEvent.click(screen.getByRole('button', { name: 'View' }));
+    expect(screen.getAllByText(/Logged in; captured two responses\./)).toHaveLength(2);
   });
 
   it('says what each choice does to the run', () => {
@@ -181,15 +188,10 @@ describe('EscalationModal', () => {
     // the irreversible one (a retry replaces the partial work) read as the
     // safest of the three.
     render(<EscalationModal requests={[parked()]} onResolve={noop} onDismiss={noop} onExpire={noop} />);
-    expect(screen.getByRole('button', { name: /retry with guidance/i }))
-      .toHaveAccessibleName(/replaces the work above/i);
-    // BOTH retries discard the work shown above — not only the guided one.
-    // "Retry as-is" said only that it runs unchanged, which made the second
-    // irreversible choice read as the harmless one.
-    expect(screen.getByRole('button', { name: /retry as-is/i }))
-      .toHaveAccessibleName(/unchanged, replacing the work above/i);
-    expect(screen.getByRole('button', { name: /skip this section/i }))
-      .toHaveAccessibleName(/keeps the work above/i);
+    expect(screen.getByRole('radio', { name: /^Guide/ })).toHaveAccessibleName(/replaces the draft/i);
+    // BOTH retries discard the draft, not only the guided one.
+    expect(screen.getByRole('radio', { name: /^Retry/ })).toHaveAccessibleName(/same way\. replaces the draft/i);
+    expect(screen.getByRole('radio', { name: /^Skip/ })).toHaveAccessibleName(/keep the draft/i);
   });
 
   it('omits a block it has nothing to put in, rather than showing an empty one', () => {
@@ -201,7 +203,78 @@ describe('EscalationModal', () => {
         onExpire={noop}
       />,
     );
-    expect(screen.queryByText('What it was asked to do')).not.toBeInTheDocument();
-    expect(screen.queryByText('What it has so far')).not.toBeInTheDocument();
+    expect(screen.queryByText('Draft')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'View' })).not.toBeInTheDocument();
+  });
+
+  describe('the cascade card', () => {
+    it('says where in the plan it stopped, and which checks failed', () => {
+      render(
+        <EscalationModal
+          requests={[parked({ position: { index: 2, of: 4 }, issues: ['Initial check failed: completeness, compliance', 'Ran out of time'] })]}
+          onResolve={noop}
+          onDismiss={noop}
+          onExpire={noop}
+        />,
+      );
+      const path = screen.getByRole('navigation', { name: 'Where in the run' });
+      expect(path).toHaveTextContent(/Plan.*Section 2 of 4.*Review/);
+      const failed = screen.getByRole('list', { name: 'Failed checks' });
+      expect(within(failed).getAllByRole('listitem').map((li) => li.textContent?.replace('✕', '').trim())).toEqual(['completeness', 'compliance']);
+      expect(screen.getByText('Ran out of time')).toBeInTheDocument();
+    });
+
+    it('nothing is sent until a choice is made; a guided retry needs notes', () => {
+      const onResolve = vi.fn();
+      render(<EscalationModal requests={[parked()]} onResolve={onResolve} onDismiss={noop} onExpire={noop} />);
+      expect(screen.getByRole('button', { name: 'Choose how to continue' })).toBeDisabled();
+      fireEvent.click(screen.getByRole('radio', { name: /^Guide/ }));
+      expect(screen.getByRole('button', { name: 'Retry with notes' })).toBeDisabled();
+      fireEvent.click(screen.getByRole('radio', { name: /^Retry/ }));
+      fireEvent.click(screen.getByRole('button', { name: 'Retry as-is' }));
+      expect(onResolve).toHaveBeenCalledWith('retry', undefined, 'req-1');
+    });
+
+    it('G, R and S choose, and Enter confirms, when one section is asking; never while typing notes', () => {
+      const onResolve = vi.fn();
+      render(<EscalationModal requests={[parked()]} onResolve={onResolve} onDismiss={noop} onExpire={noop} />);
+      fireEvent.keyDown(window, { key: 'g' });
+      expect(screen.getByRole('radio', { name: /^Guide/ })).toHaveAttribute('aria-checked', 'true');
+      const notes = screen.getByLabelText('Notes for Section alpha');
+      fireEvent.change(notes, { target: { value: 'keep it short' } });
+      fireEvent.keyDown(notes, { key: 's' });
+      expect(screen.getByRole('radio', { name: /^Guide/ }), 'a letter in the notes is a letter').toHaveAttribute('aria-checked', 'true');
+      fireEvent.keyDown(notes, { key: 'Enter', ctrlKey: true });
+      expect(onResolve).toHaveBeenCalledWith('guidance', 'keep it short', 'req-1');
+    });
+
+    it('the time left drains along the top', () => {
+      render(
+        <EscalationModal
+          requests={[parked({ timeoutMs: 300_000, receivedAt: Date.now() - 150_000 })]}
+          onResolve={noop}
+          onDismiss={noop}
+          onExpire={noop}
+        />,
+      );
+      const bar = screen.getByRole('progressbar', { name: 'Time left for Section alpha' });
+      expect(Number(bar.getAttribute('aria-valuenow'))).toBeGreaterThanOrEqual(49);
+      expect(Number(bar.getAttribute('aria-valuenow'))).toBeLessThanOrEqual(51);
+      expect(screen.getByText(/auto-fails in 2:30/)).toBeInTheDocument();
+    });
+  });
+
+  it('Enter on a focused button is that button\'s, not a confirm (Codex on 8bf614b)', () => {
+    const onResolve = vi.fn();
+    render(<EscalationModal requests={[parked({ summary: 'Logged in.' })]} onResolve={onResolve} onDismiss={noop} onExpire={noop} />);
+    fireEvent.keyDown(window, { key: 'r' });
+    const view = screen.getByRole('button', { name: 'View' });
+    fireEvent.keyDown(view, { key: 'Enter' });
+    expect(onResolve).not.toHaveBeenCalled();
+    fireEvent.keyDown(screen.getByRole('radio', { name: /^Skip/ }), { key: 'Enter' });
+    expect(onResolve).not.toHaveBeenCalled();
+    // With nothing interactive focused, Enter confirms what was chosen.
+    fireEvent.keyDown(window, { key: 'Enter' });
+    expect(onResolve).toHaveBeenCalledWith('retry', undefined, 'req-1');
   });
 });

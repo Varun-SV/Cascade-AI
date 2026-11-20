@@ -25,6 +25,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Every call can be stopped, runs on your own providers, and shows in your
     spend report. A rejected key or a failed call is reported as such.
 
+## 0.95.0 - 2026-11-20
+
+### Changed
+- **A paused section now asks for your decision on one clear card**, in Cascade
+  Cloud and the desktop app.
+  - **Where it stopped, on the cascade:** a path of Plan › Section 2 of 4 ›
+    Review in the tier colours, the section's title marked Paused, and its
+    goal in two lines that open in full.
+  - **The time left drains along the top**, with "auto-fails in 1:17" beside
+    it, instead of a sentence at the bottom.
+  - **What failed and what it has, at a glance:** failed checks as chips
+    (✕ completeness, ✕ compliance), and the draft in one line with its size
+    and a View link, instead of long blocks of text.
+  - **Three ways on, as cards side by side:** Guide (redo with your notes),
+    Retry (redo the same way) and Skip (keep the draft and move on). Each says
+    what it does to the draft. Nothing is sent until you choose and confirm.
+    The notes box appears only for Guide, focused and ready to type.
+  - **Keyboard:** G, R and S choose, and Enter confirms (Ctrl/⌘+Enter in the
+    notes). The keys never fire while you type.
+- Each paused section now carries where it sits in the plan ("Section 2 of
+  4"), so the path is the run's own, not a guess.
+
 ## 0.94.1 - 2026-11-20
 
 ### Fixed
