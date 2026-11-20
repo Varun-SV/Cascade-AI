@@ -61,6 +61,11 @@ export interface DesktopRelayDeps {
 /** What a takeover needs of the connection: the lease of the run it serves. */
 export interface RelayDeviceClient {
   lease(): { state(): string; suspend(): void; handBack(): void } | null;
+  /** Every tab's lease, for a run with several. */
+  leases?(): Array<{ state(): string; suspend(): void; handBack(): void }>;
+  /** The whole run, and any tab it opens until hand back. */
+  takeOver?(): boolean;
+  handBack?(): boolean;
 }
 
 export interface DesktopRelayStatus {
@@ -82,7 +87,10 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
   let nextAsk = 1;
   let serving: AbortController | null = null;
   let connected = false;
-  let run: RunBrowser | null = null;
+  /** The run's windows: one per tab it has open, the first one its own. */
+  const runs: RunBrowser[] = [];
+  const leasesOf = (c: RelayDeviceClient | null): Array<{ state(): string; suspend(): void; handBack(): void }> =>
+    c?.leases ? c.leases() : c?.lease() ? [c.lease()!] : [];
   let client: RelayDeviceClient | null = null;
   // Bumped by every sign-in and sign-out: a pairing that began under another account stops.
   let accountEpoch = 0;
@@ -104,8 +112,8 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
 
   const status = (): DesktopRelayStatus => {
     const d = deps.file.load();
-    const takenOver = run !== null && client?.lease()?.state() === 'suspended';
-    return { paired: !!d, enabled: !!d?.enabled, connected, name: d?.name ?? null, server: d?.serverUrl ?? null, run: run !== null, takenOver, error: error ?? accountProblem(d) };
+    const takenOver = runs.length > 0 && leasesOf(client).some((l) => l.state() === 'suspended');
+    return { paired: !!d, enabled: !!d?.enabled, connected, name: d?.name ?? null, server: d?.serverUrl ?? null, run: runs.length > 0, takenOver, error: error ?? accountProblem(d) };
   };
 
   /** Stops serving now: the connection closes, a run on it ends, a question gets no. */
@@ -133,13 +141,14 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
 
   const startBrowser = async (consent: Consent): Promise<RunBrowser> => {
     const b = await openRunBrowser(consent, deps.core, deps.electron);
-    run = b;
+    runs.push(b);
     publish();
     return {
       ...b,
       async close() {
         await b.close();
-        if (run === b) run = null;
+        const at = runs.indexOf(b);
+        if (at >= 0) runs.splice(at, 1);
         publish();
       },
     };
@@ -161,7 +170,7 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
       askUser, startBrowser, signal: ctl.signal,
       onClient: (c) => { if (serving === ctl) client = c; },
       // "Show the window", from the chat on the web.
-      onFocus: () => run?.focus(),
+      onFocus: () => runs[0]?.focus(),
       log: (line) => {
         if (line.startsWith('connected')) { connected = true; error = null; publish(); }
         else if (line.startsWith('disconnected')) { connected = false; publish(); }
@@ -253,19 +262,22 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
      * commands are refused and nothing from the page is passed on, until hand back.
      */
     takeOver(): { ok: true } | { error: string } {
-      const lease = client?.lease();
-      if (!run || !lease || lease.state() !== 'held') return { error: 'No run is using this app\'s browser.' };
-      lease.suspend();
-      run.focus();
+      // Every window of the run, and any it opens until hand back: the person has the run.
+      const held = leasesOf(client).filter((l) => l.state() === 'held');
+      if (!runs.length || (!held.length && !client?.takeOver)) return { error: 'No run is using this app\'s browser.' };
+      if (client?.takeOver) { if (!client.takeOver()) return { error: 'No run is using this app\'s browser.' }; }
+      else for (const lease of held) lease.suspend();
+      runs[0]!.focus();
       publish();
       return { ok: true };
     },
 
     /** The run carries on, from the page the user left; the relay brings it up to date. */
     handBack(): { ok: true } | { error: string } {
-      const lease = client?.lease();
-      if (!run || !lease || lease.state() !== 'suspended') return { error: 'The run is not paused for you.' };
-      lease.handBack();
+      const paused = leasesOf(client).filter((l) => l.state() === 'suspended');
+      if (client?.handBack) { if (!runs.length || !client.handBack()) return { error: 'The run is not paused for you.' }; }
+      else if (!runs.length || !paused.length) return { error: 'The run is not paused for you.' };
+      else for (const lease of paused) lease.handBack();
       publish();
       return { ok: true };
     },
@@ -273,16 +285,19 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
     /**
      * The user's answer from the app's window: the sites typed, whether any public
      * site may load too, and whether still screenshots may go to the server for the
-     * run's report. Nothing at all is a no; an answer that isn't sites is asked again.
+     * run's report, and how many browsers it may have at once (parts of the run
+     * working side by side). Nothing at all is a no; an answer that isn't sites is
+     * asked again.
      */
-    answer(id: number, sites: string, anyPublic = false, screenshots = false): { ok: true } | { error: string } {
+    answer(id: number, sites: string, anyPublic = false, screenshots = false, maxTabs = 1): { ok: true } | { error: string } {
       const a = asks.get(id);
       if (!a) return { error: 'This request is over.' };
       const parsed = deps.core.parseRelaySites(sites);
       if (parsed && 'error' in parsed) return parsed;
       if (!parsed && !anyPublic) { a.resolve(null); return { ok: true }; }
       const consent = parsed?.consent ?? { allowedOrigins: [], privateOrigins: [] };
-      a.resolve({ ...consent, ...(anyPublic || consent.anyPublic ? { anyPublic: true } : {}), ...(screenshots ? { screenshots: true } : {}) });
+      const tabs = Math.min(8, Math.max(1, Math.floor(Number.isFinite(maxTabs) ? maxTabs : 1)));
+      a.resolve({ ...consent, ...(anyPublic || consent.anyPublic ? { anyPublic: true } : {}), ...(screenshots ? { screenshots: true } : {}), maxTabs: tabs });
       return { ok: true };
     },
 

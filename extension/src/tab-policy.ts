@@ -147,7 +147,23 @@ export interface TabPolicyOptions {
   firstRuleId: number;
   /** A private (incognito) window: signed out of everything, its cookies gone when it closes. */
   incognito?: boolean;
+  /**
+   * The run's window, for its second tab and later ones: the tab is made in a window
+   * of its own, its rules and debugger put in place there, and only then moved in. So
+   * it never appears in the run's window as a new tab, which the run's other tabs
+   * would take for a popup and close.
+   */
+  joinWindow?: number;
 }
+
+/** The run tabs in each window: a window goes when its last one does. */
+const runTabsIn = new Map<number, Set<number>>();
+const noteRunTab = (windowId: number, tabId: number, add: boolean): number => {
+  const tabs = runTabsIn.get(windowId) ?? new Set<number>();
+  if (add) tabs.add(tabId); else tabs.delete(tabId);
+  if (tabs.size) runTabsIn.set(windowId, tabs); else runTabsIn.delete(windowId);
+  return tabs.size;
+};
 
 // ── WebRTC ──────────────────────────────────
 //
@@ -217,8 +233,10 @@ export async function openRunTab(opts: TabPolicyOptions): Promise<LeasedBrowser 
   }
   const win = await chrome.windows.create({ url: 'about:blank', focused: false, type: 'normal', ...(opts.incognito ? { incognito: true } : {}) });
   const tabId = win?.tabs?.[0]?.id;
-  const windowId = win?.id;
+  // The window it is in: its own until it joins the run's.
+  let windowId = win?.id;
   if (tabId === undefined || windowId === undefined) throw new Error('Chrome did not open a window for the run.');
+  noteRunTab(windowId, tabId, true);
   const rules = tabRules(tabId, opts.consent, opts.firstRuleId);
   // The run's rules, and the one its pop-ups get.
   const ruleIds = [...rules.map((r) => r.id), opts.firstRuleId + 90];
@@ -242,7 +260,10 @@ export async function openRunTab(opts: TabPolicyOptions): Promise<LeasedBrowser 
     // window of its own outlives the run's window), then the run's window, then any
     // popup opened in the meantime. Only then the rules, and WebRTC back to the user.
     await closeOpenPopups();
-    await chrome.windows.remove(windowId).catch(() => {});
+    // This tab, and its window once no other tab of a run is left in it.
+    const left = noteRunTab(windowId!, tabId, false);
+    if (left) await chrome.tabs.remove(tabId).catch(() => {});
+    else await chrome.windows.remove(windowId!).catch(() => {});
     stopWatchingPopups();
     await closeOpenPopups();
     await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ruleIds }).catch(() => {});
@@ -265,6 +286,14 @@ export async function openRunTab(opts: TabPolicyOptions): Promise<LeasedBrowser 
     if (opts.consent.anyPublic) await own.send('Network.enable', { maxTotalBufferSize: 0, maxResourceBufferSize: 0 });
     await own.send('Page.addScriptToEvaluateOnNewDocument', { source: NO_WEBRTC_SCRIPT, runImmediately: true });
     await own.send('Runtime.evaluate', { expression: NO_WEBRTC_SCRIPT });
+    // Policed from here on: now it may join the run's window. Its own empty window
+    // closes as it leaves.
+    if (opts.joinWindow !== undefined && opts.joinWindow !== windowId) {
+      await chrome.tabs.move(tabId, { windowId: opts.joinWindow, index: -1 });
+      noteRunTab(windowId, tabId, false);
+      windowId = opts.joinWindow;
+      noteRunTab(windowId, tabId, true);
+    }
   } catch (e) {
     await removeEverything();
     throw e;
@@ -383,7 +412,7 @@ export async function openRunTab(opts: TabPolicyOptions): Promise<LeasedBrowser 
   };
 
   return {
-    tabId, windowId, tabWs: '', tabTargetId, enforcer,
+    tabId, windowId: windowId!, tabWs: '', tabTargetId, enforcer,
     connectTab: async () => chromeTabCdp(tabId),
     // The run's window is the run's: it closes with it.
     pageEnd: 'close',

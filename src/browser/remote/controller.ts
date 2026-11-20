@@ -4431,6 +4431,8 @@ export interface BrowserStep {
   title?: string;
   /** Why it didn't work, in the controller's words: shown under the step. */
   why?: string;
+  /** Which of the run's tabs, once it has more than one (see tabbed-controller.ts). */
+  tab?: number;
   at: number;
 }
 

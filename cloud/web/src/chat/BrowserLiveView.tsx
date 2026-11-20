@@ -857,7 +857,7 @@ function DeviceRunPanel({ device, steps, notice, onStop, onFocus }: {
               <li key={`${s.at}-${i}`} style={{ display: 'flex', gap: 6, opacity: i === steps.length - 1 ? 1 : 0.75 }}>
                 <span aria-hidden style={{ color: s.ok ? 'var(--ok-fg, #7fd6a0)' : 'var(--warn-fg, #f5c96b)' }}>{s.ok ? '✓' : '!'}</span>
                 <span style={{ minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.summary}{s.ok ? '' : ' (didn’t work)'}</span>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.tab ? `Tab ${s.tab} · ` : ''}{s.summary}{s.ok ? '' : ' (didn’t work)'}</span>
                   {!s.ok && s.why && <span style={{ fontSize: '0.9em', opacity: 0.8, overflowWrap: 'anywhere' }}>{s.why}</span>}
                 </span>
               </li>

@@ -51,6 +51,17 @@ describe("useChatSession — a run in the user's own browser", () => {
     expect(view.result.current.browserSteps?.at(-1)?.summary).toBe('step 59');
   });
 
+  it('a step says which of the run\'s tabs it was in, when it is a tab number', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    act(() => { fake.fire('browser:live-view', { taskId: 't1', active: true, device: { name: 'Work laptop' } }); });
+    act(() => {
+      fake.fire('browser:step', { taskId: 't1', step: { kind: 'navigate', summary: 'Opened b.test', ok: true, at: 1, tab: 2 } });
+      fake.fire('browser:step', { taskId: 't1', step: { kind: 'navigate', summary: 'Opened c.test', ok: true, at: 2, tab: 99 } });
+    });
+    expect(view.result.current.browserSteps?.map((s) => s.tab)).toEqual([2, undefined]);
+  });
+
   it('Show the window asks the server for this run', () => {
     const fake = fakeSocket();
     const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
