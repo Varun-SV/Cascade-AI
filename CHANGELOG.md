@@ -33,7 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     printed, and none while `knowledge.factsExtraction` is off (changing
     it mid-run counts from then on). A subtask under your local-only
     `privacy.paths` neither adds to the board nor reads from it, though
-    what it changes still clears the stored answers. What git says after a
+    what it changes still clears the stored answers. What an earlier run
+    kept is shown only if it may go to any model (the same check as the
+    plan's project knowledge), and a folder that is local-only is never
+    named on the board. What git says after a
     `cd`, or with `git -C` or `--git-dir`, isn't taken as being about the
     folder the command started in.
 

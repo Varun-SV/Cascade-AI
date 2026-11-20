@@ -32,7 +32,7 @@
 //  stored answers stale.
 
 import path from 'node:path';
-import type { WorldStateDB } from './world-state.js';
+import { factMayLeave, type FactPrivacy, type WorldStateDB } from './world-state.js';
 
 /** A fact for the board: `key` identifies it (one per thing it is about). */
 export interface RunFact { key: string; text: string; from: string }
@@ -77,7 +77,8 @@ function gitReads(sub: string, args: string[]): boolean {
  */
 export function commandReadsOnly(command: string): boolean {
   if (!command.trim() || /[`<>]|\$\(/.test(command)) return false;
-  const parts = command.split(/&&|\|\||;|\||\n/);
+  // A lone `&` ends a command too (it runs it in the background): `echo ready & touch x` is two.
+  const parts = command.split(/&&|\|\||;|\||&|\n/);
   return parts.every((part) => {
     const words = part.trim().split(/\s+/).filter(Boolean);
     if (!words.length) return false;
@@ -183,12 +184,24 @@ export class RunMemory {
    *   at each write, so a setting changed mid-run (knowledge.factsExtraction) holds
    *   from then on; the board itself still works for the run.
    */
-  constructor(private readonly root: string, private readonly db?: WorldStateDB, private readonly keep: () => boolean = () => true) {
-    // Start knowing what earlier runs found.
+  constructor(
+    private readonly root: string,
+    private readonly db?: WorldStateDB,
+    private readonly keep: () => boolean = () => true,
+    /** The project's privacy.paths rules: what the board shows goes to cloud models. */
+    private readonly privacy: () => FactPrivacy | undefined = () => undefined,
+  ) {
+    // Start knowing what earlier runs found: only what may go to any model. The
+    // entity is the project's general knowledge, not only what this board wrote,
+    // so each fact passes the same gate as T1's plan and graph_search
+    // (factMayLeave), and one about a folder that is local-only now is left out.
+    const rules = privacy();
     for (const f of db?.getFactsForEntities([ENTITY]) ?? []) {
       const key = f.relation.startsWith('git repository at ') ? `git-repo:${f.relation.slice('git repository at '.length)}`
         : f.relation.startsWith('command ') ? `missing:${f.relation.slice('command '.length)}` : '';
       if (!key) continue;
+      if (!factMayLeave(f, rules, root)) continue;
+      if (key.startsWith('git-repo:') && this.folderPrivate(key.slice('git-repo:'.length), rules)) continue;
       const text = key.startsWith('git-repo:')
         ? `${key.slice('git-repo:'.length)} is not a git repository: git commands there fail (run "git init" first if one is needed).`
         : `\`${key.slice('missing:'.length)}\` is not available in this machine's shell: use another way (another command, or run_code).`;
@@ -199,6 +212,18 @@ export class RunMemory {
   private cwd(input: Record<string, unknown>): string {
     const raw = typeof input['cwd'] === 'string' && input['cwd'] ? input['cwd'] : '.';
     return path.resolve(this.root, raw);
+  }
+
+  /**
+   * Whether the folder a fact names (relative to the project, or the project
+   * folder itself) is local-only: its name then stays off the board, which
+   * every worker reads, whatever model it runs on.
+   */
+  private folderPrivate(rel: string, rules = this.privacy()): boolean {
+    if (!rules?.hasPolicies()) return false;
+    const name = rel === 'the project folder' ? '.' : rel;
+    if (name === '.') return rules.isLocalOnly('.');
+    return rules.isLocalOnly(name) || rules.coversFile(path.resolve(this.root, name), this.root);
   }
 
   private label(abs: string): string {
@@ -242,12 +267,14 @@ export class RunMemory {
     // stored before it is stale.
     if (!callReadsOnly(tool, input)) { this.epoch += 1; this.changing = Math.max(0, this.changing - 1); }
     if (!how.publish) return;
-    const { learnt, unlearnt } = factsFrom(tool, input, output, this.label(this.cwd(input)), how.failed);
+    const where = this.cwd(input);
+    const { learnt, unlearnt } = factsFrom(tool, input, output, this.label(where), how.failed);
     for (const key of unlearnt) this.forget(key);
     // A command that ran is no longer missing.
     const ran = commandOf(tool, input).trim().split(/\s+/)[0]?.toLowerCase();
     if (ran && !how.failed) this.forget(`missing:${ran}`);
     for (const f of learnt) {
+      if (f.key.startsWith('git-repo:') && this.folderPrivate(path.relative(this.root, where).split(path.sep).join('/') || 'the project folder')) continue;
       if (this.facts.size >= MAX_FACTS && !this.facts.has(f.key)) break;
       const isNew = !this.facts.has(f.key);
       this.facts.set(f.key, { key: f.key, text: f.text, from: by, relation: f.relation });

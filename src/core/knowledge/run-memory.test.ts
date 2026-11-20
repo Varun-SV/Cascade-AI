@@ -80,6 +80,13 @@ describe('what may be answered again: only commands that read (Codex on 9789d5b)
     for (const c of ['date', 'echo ready && date', 'ls; ps aux', 'cat a | sort', 'uptime']) expect(commandReadsOnly(c), c).toBe(false);
   });
 
+  it('not a command sent to the background with a lone & (Codex on 2abacac)', () => {
+    expect(commandReadsOnly('echo ready & touch marker')).toBe(false);
+    expect(commandReadsOnly('ls &')).toBe(false);
+    // Control: && still joins two reads.
+    expect(commandReadsOnly('ls && pwd')).toBe(true);
+  });
+
   it('not a redirect, a substitution, or a find that runs or deletes', () => {
     for (const c of ['ls > out.txt', 'echo $(date)', 'cat `which x`', 'find . -delete', 'find . -exec rm {} ;']) {
       expect(commandReadsOnly(c), c).toBe(false);
@@ -176,6 +183,30 @@ describe('work the board sees no call for (Codex on 6c77d8f)', () => {
 });
 
 describe('kept in the project, so the next run starts knowing', () => {
+  it('only what may go to any model: privacy.paths holds for what an earlier run kept (Codex on 2abacac)', async () => {
+    const { PrivacyPaths } = await import('../privacy/paths.js');
+    const db = new WorldStateDB(root);
+    try {
+      // From elsewhere in the project's knowledge: drawn from a local-only file.
+      db.upsertFact('environment', 'git repository at docs', 'none', 'T3-old', undefined, ['secret/setup.md']);
+      // Named for a local-only folder, though drawn from no file.
+      db.upsertFact('environment', 'git repository at secret/acquisition', 'none', 'run:T3-old', undefined, []);
+      // Saved before sources were recorded.
+      db.upsertFact('environment', 'git repository at legacy', 'none', 'T3-old');
+      db.upsertFact('environment', 'command wc', 'not available', 'run:T3-old', undefined, []);
+      const rules = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]);
+      const mem = new RunMemory(root, db, () => true, () => rules);
+      expect(mem.all().map((f) => f.key)).toEqual(['missing:wc']);
+      // Control: with no rules, all of them.
+      expect(new RunMemory(root, db).all().map((f) => f.key).sort()).toEqual(['git-repo:docs', 'git-repo:legacy', 'git-repo:secret/acquisition', 'missing:wc']);
+      // Nor is one learnt about a local-only folder now.
+      fs.mkdirSync(path.join(root, 'secret', 'acq'), { recursive: true });
+      run(mem, 'shell', { command: 'git status', cwd: 'secret/acq' }, NOT_A_REPO, 'T3-a', bad);
+      expect(mem.all().map((f) => f.key)).toEqual(['missing:wc']);
+      expect(db.getFactsForEntities(['environment']).map((f) => f.relation)).not.toContain('git repository at secret/acq');
+    } finally { db.close(); }
+  });
+
   it('not while knowledge.factsExtraction is off, asked at each write (Codex on 6c77d8f)', () => {
     const db = new WorldStateDB(root);
     try {
