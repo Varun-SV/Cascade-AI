@@ -129,4 +129,22 @@ describe('memory build (server)', () => {
     expect(store.spend.firstSpendAt(U('u1'))).toEqual(expect.any(Number));
     void handle;
   });
+
+  it('two updates to one memory never overwrite each other; evidence past what a memory keeps is trimmed (Codex on bca3626)', () => {
+    const kept = store.addMemory(U('u1'), 'Building Cascade with TypeScript', 'projects', 'permanent');
+    const ev = (at: number) => ({ conversationId: mine, quote: `quote ${at}`, at });
+    const { saved } = acceptMemories(store, U('u1'), { items: [
+      { category: 'projects', content: 'Building Cascade with Rust', durability: 'permanent', evidence: [ev(1)], revises: kept.id },
+      { category: 'projects', content: 'Building Cascade with Go', durability: 'permanent', evidence: [ev(2)], revises: kept.id },
+      // Already kept, sent with its stored wording: evidence only, the update stands.
+      { category: 'projects', content: 'Building Cascade with TypeScript', durability: 'permanent', evidence: Array.from({ length: 30 }, (_, k) => ev(10 + k)), revises: kept.id },
+    ] });
+    expect(saved).toHaveLength(3);
+    const list = store.listMemories(U('u1'));
+    expect(list.map((m) => m.content).sort()).toEqual(['Building Cascade with Go', 'Building Cascade with Rust']);
+    const target = list.find((m) => m.id === kept.id)!;
+    expect(target.content).toBe('Building Cascade with Rust');
+    expect(target.evidence.length).toBe(12);
+    expect(target.evidence.some((e) => e.at === 39)).toBe(true);
+  });
 });

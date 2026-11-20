@@ -116,4 +116,35 @@ describe('MemoryModal', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Build from my chats/ }));
     expect(screen.getByText(/Add a provider key in Settings first/)).toBeInTheDocument();
   });
+
+  it('closing the panel mid-build stops the build; two updates to one memory are never both ticked (Codex on bca3626)', async () => {
+    vi.mocked(api.fetchMemoryBuildChats).mockResolvedValue({ chats: [{ id: 'c1', title: 'Go', updatedAt: 2, turns: 4, worth: true }] });
+    const running = fakeSocket([]);
+    const first = render(<MemoryModal onClose={vi.fn()} socket={running} providers={PROVIDERS} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Build from my chats/ }));
+    await screen.findByLabelText('Go', { exact: false });
+    fireEvent.click(screen.getByRole('button', { name: /Build memories/ }));
+    first.unmount();
+    expect(running.emitted.map(([e]) => e)).toContain('memories:cancel');
+
+    const target = { id: '1', content: 'Building Cascade with TypeScript' };
+    const ev = [{ conversationId: 'c1', quote: 'q', at: 1 }];
+    const socket = fakeSocket([
+      { category: 'projects', content: 'Building Cascade with Rust', durability: 'permanent', status: 'revision', matches: target, evidence: ev },
+      { category: 'projects', content: 'Building Cascade with Go', durability: 'permanent', status: 'revision', matches: target, evidence: ev },
+    ]);
+    render(<MemoryModal onClose={vi.fn()} socket={socket} providers={PROVIDERS} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Build from my chats/ }));
+    await screen.findByLabelText('Go', { exact: false });
+    fireEvent.click(screen.getByRole('button', { name: /Build memories/ }));
+    act(() => socket.finish());
+    const rust = await screen.findByRole('checkbox', { name: 'Keep: Building Cascade with Rust' });
+    const go = screen.getByRole('checkbox', { name: 'Keep: Building Cascade with Go' });
+    expect(rust).toBeChecked();
+    expect(go).not.toBeChecked();
+    expect(screen.getAllByText(/updates it too: keep one/).length).toBe(2);
+    fireEvent.click(go);
+    expect(go).toBeChecked();
+    expect(rust).not.toBeChecked();
+  });
 });

@@ -166,15 +166,20 @@ const EvidenceSchema = z.object({
   at: z.number().int().nonnegative(),
 });
 
+/** Memories saved per request; the page sends a larger selection in batches. */
+export const ACCEPT_BATCH = 200;
+
 export const AcceptSchema = z.object({
   items: z.array(z.object({
     category: z.enum(MEMORY_CATEGORIES.map((c) => c.id) as [string, ...string[]]),
-    content: z.string().trim().min(1).max(500),
+    // As long as a memory may be (an "already kept" one carries its stored wording).
+    content: z.string().trim().min(1).max(2000),
     durability: z.enum(['permanent', 'volatile']),
-    evidence: z.array(EvidenceSchema).min(1).max(12),
+    // More than a memory keeps is trimmed, not refused: the store keeps the most recent.
+    evidence: z.array(EvidenceSchema).min(1).max(100),
     /** The kept memory this adds to, or rewords. Absent for a new one. */
     revises: z.string().min(1).max(100).optional(),
-  })).min(1).max(200),
+  })).min(1).max(ACCEPT_BATCH),
 });
 
 /**
@@ -186,14 +191,28 @@ export function acceptMemories(store: CloudStore, userId: string, input: unknown
   const { items } = AcceptSchema.parse(input);
   const mine = new Set(store.listConversations(userId, Number.MAX_SAFE_INTEGER).map((c) => c.id));
   const saved: CloudMemory[] = [];
+  // The wording each target had before this request, and what it has now: two
+  // suggestions that reword one memory must not silently overwrite each other.
+  const before = new Map(store.listMemories(userId).map((m) => [m.id, m.content]));
+  const touched = new Map<string, string>();
   for (const item of items) {
-    const evidence: MemoryEvidenceRow[] = item.evidence.filter((e) => mine.has(e.conversationId));
+    const evidence: MemoryEvidenceRow[] = item.evidence
+      .filter((e) => mine.has(e.conversationId))
+      .sort((a, b) => b.at - a.at)
+      .slice(0, 12);
     if (!evidence.length) continue;
-    if (item.revises) {
-      const revised = store.reviseMemory(item.revises, userId, {
-        evidence, content: item.content, category: item.category, durability: item.durability,
-      });
-      if (revised) { saved.push(revised); continue; }
+    if (item.revises && before.has(item.revises)) {
+      const now = touched.get(item.revises);
+      const sameWords = item.content === before.get(item.revises) || item.content === now;
+      // Reworded already in this request, and this says something else: kept as its own memory.
+      if (now === undefined || sameWords) {
+        const revised = store.reviseMemory(item.revises, userId, {
+          evidence,
+          ...(now === undefined || item.content === now ? { content: item.content } : {}),
+          category: item.category, durability: item.durability,
+        });
+        if (revised) { touched.set(revised.id, revised.content); saved.push(revised); continue; }
+      }
     }
     saved.push(store.addMemory(userId, item.content, item.category, item.durability, { source: 'chats', evidence }));
   }

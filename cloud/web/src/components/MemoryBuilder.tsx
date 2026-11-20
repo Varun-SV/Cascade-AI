@@ -21,10 +21,35 @@ function formatCost(usd: number | null): string {
   return `about $${usd.toFixed(2)}`;
 }
 
-function statusLine(d: Draft): string | null {
+/** Memories saved per request (the server's limit), and evidence a memory keeps. */
+const ACCEPT_BATCH = 200;
+const MAX_EVIDENCE = 12;
+
+function statusLine(d: Draft, rivals: number): string | null {
   if (d.status === 'known') return `You already have this: “${d.matches?.content}”. Keeping it adds where you said it.`;
-  if (d.status === 'revision') return `Updates “${d.matches?.content}”. The old wording is kept in its history.`;
+  if (d.status === 'revision') {
+    const also = rivals > 0 ? ` ${rivals === 1 ? 'Another suggestion updates' : `${rivals} other suggestions update`} it too: keep one.` : '';
+    return `Updates “${d.matches?.content}”. The old wording is kept in its history.${also}`;
+  }
   return null;
+}
+
+/**
+ * What starts ticked: new memories, and the first update to each kept one. A
+ * memory you already have starts unticked (keeping it only adds evidence), and
+ * so does a second update to the same memory: two can't both be its wording.
+ */
+function initialDrafts(candidates: MemoryCandidate[]): Draft[] {
+  const updated = new Set<string>();
+  return candidates.map((c) => {
+    if (c.status === 'known') return { ...c, keep: false };
+    if (c.status === 'revision' && c.matches) {
+      const first = !updated.has(c.matches.id);
+      updated.add(c.matches.id);
+      return { ...c, keep: first };
+    }
+    return { ...c, keep: true };
+  });
 }
 
 /**
@@ -48,6 +73,10 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
   const [saving, setSaving] = useState(false);
   const [savedCount, setSavedCount] = useState(0);
   const estimateSeq = useRef(0);
+  // A build still running when the panel closes is stopped: nobody is left to
+  // review what it finds, and every chat it reads after that costs money.
+  const running = useRef(false);
+  useEffect(() => () => { if (running.current) socket?.emit('memories:cancel'); }, [socket]);
 
   useEffect(() => {
     fetchMemoryBuildChats()
@@ -86,11 +115,12 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
     setStopped(false);
     setProgress({ read: 0, total: worthChosen, found: 0 });
     setStep('running');
+    running.current = true;
     socket.emit('memories:build', { providers, conversationIds: [...chosen] }, (r: { candidates: MemoryCandidate[]; cancelled: boolean } | { error: string }) => {
+      running.current = false;
       if ('error' in r) { setError(r.error); setStep('pick'); return; }
       setStopped(r.cancelled);
-      // A memory you already have is unticked: keeping it only adds evidence.
-      setDrafts(r.candidates.map((c) => ({ ...c, keep: c.status !== 'known' })));
+      setDrafts(initialDrafts(r.candidates));
       setStep('review');
     });
   }
@@ -98,20 +128,32 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
   function stop() { socket?.emit('memories:cancel'); }
 
   function patch(i: number, change: Partial<Draft>) {
-    setDrafts((prev) => prev.map((d, j) => (j === i ? { ...d, ...change } : d)));
+    setDrafts((prev) => {
+      const target = prev[i];
+      // One update per kept memory: ticking one unticks any other update to it.
+      const exclusive = change.keep === true && target?.status === 'revision' && target.matches;
+      return prev.map((d, j) => {
+        if (j === i) return { ...d, ...change };
+        if (exclusive && d.status === 'revision' && d.matches?.id === target.matches!.id) return { ...d, keep: false };
+        return d;
+      });
+    });
   }
 
   async function save() {
     const items = drafts.filter((d) => d.keep && d.content.trim()).map((d) => ({
-      category: d.category, content: d.content.trim(), durability: d.durability, evidence: d.evidence,
+      category: d.category, content: d.content.trim(), durability: d.durability, evidence: d.evidence.slice(0, MAX_EVIDENCE),
       ...(d.matches && d.status !== 'new' ? { revises: d.matches.id } : {}),
     }));
     if (!items.length) { onDone(); return; }
     setSaving(true);
     setError(null);
     try {
-      const { saved } = await acceptMemories(items);
-      setSavedCount(saved.length);
+      let count = 0;
+      for (let at = 0; at < items.length; at += ACCEPT_BATCH) {
+        count += (await acceptMemories(items.slice(at, at + ACCEPT_BATCH))).saved.length;
+      }
+      setSavedCount(count);
       setStep('saved');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not save.');
@@ -275,7 +317,11 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
                     </span>
                   )}
                 </div>
-                {statusLine(d) && <p className="pl-6 text-[11px] text-ink-400">{statusLine(d)}</p>}
+                {(() => {
+                  const rivals = d.status === 'revision' ? drafts.filter((x, k) => k !== i && x.status === 'revision' && x.matches?.id === d.matches?.id).length : 0;
+                  const line = statusLine(d, rivals);
+                  return line && <p className="pl-6 text-[11px] text-ink-400">{line}</p>;
+                })()}
                 <ul className="flex flex-col gap-0.5 pl-6">
                   {d.evidence.slice(0, 3).map((e, k) => (
                     <li key={k} className="flex items-start gap-1 text-[11px] italic text-ink-400">

@@ -131,3 +131,35 @@ describe('similarity on hostile input', () => {
     expect(similarity('Uses Go.', 'uses go')).toBe(1);
   });
 });
+
+describe('Codex on bca3626', () => {
+  const chat = {
+    id: 'c1', title: 't',
+    messages: [{ role: 'user' as const, content: 'I am a backend engineer in Lisbon and I write services in Go for a payments team', createdAt: 5 }],
+  };
+
+  it('skips a null or non-object item from the model instead of throwing', async () => {
+    const { extractFromChat } = await import('./memory-builder.js');
+    const out = await extractFromChat(chat, async () => JSON.stringify([null, 3, 'x', [], { category: 'about-you', memory: 'Engineer in Lisbon', quote: 'backend engineer in Lisbon' }]));
+    expect(out.map((c) => c.content)).toEqual(['Engineer in Lisbon']);
+  });
+
+  it('keeps the most recent evidence, as many as a memory holds, when one memory is said in many chats', async () => {
+    const { reconcile, MAX_EVIDENCE } = await import('./memory-builder.js');
+    const found = Array.from({ length: 20 }, (_, i) => ({
+      category: 'preferences' as const, content: 'Prefers Go', durability: 'permanent' as const, status: 'new' as const,
+      evidence: [{ conversationId: `c${i}`, quote: 'Go', at: i }],
+    }));
+    const [one] = reconcile([], found);
+    expect(one!.evidence).toHaveLength(MAX_EVIDENCE);
+    expect(one!.evidence[0]!.at).toBe(19);
+  });
+
+  it('an already-kept memory keeps its own wording', async () => {
+    const { reconcile } = await import('./memory-builder.js');
+    const [c] = reconcile([{ id: 'm1', content: 'Prefers Go for services', category: 'preferences', durability: 'permanent' }], [
+      { category: 'preferences', content: 'Prefers Go for services.', durability: 'permanent', status: 'new', evidence: [{ conversationId: 'c', quote: 'Go', at: 1 }] },
+    ]);
+    expect(c).toMatchObject({ status: 'known', content: 'Prefers Go for services' });
+  });
+});

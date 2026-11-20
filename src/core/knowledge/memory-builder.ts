@@ -101,6 +101,8 @@ export interface MemoryCandidate {
 const MAX_PER_CHAT = 8;
 const MAX_CONTENT = 280;
 const MAX_QUOTE = 240;
+/** Evidence one memory carries: the most recent, as the store keeps it. */
+export const MAX_EVIDENCE = 12;
 
 function textOf(content: ConversationMessage['content']): string {
   if (typeof content === 'string') return content;
@@ -173,6 +175,8 @@ export async function extractFromChat(chat: ChatForMemory, generate: (prompt: st
   const out: MemoryCandidate[] = [];
   for (const item of parsed) {
     if (out.length >= MAX_PER_CHAT) break;
+    // A model can return [null] or [3]: skipped, never thrown on.
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
     const r = item as { category?: unknown; memory?: unknown; durable?: unknown; quote?: unknown };
     const content = typeof r.memory === 'string' ? r.memory.trim().replace(/\s+/g, ' ') : '';
     const quote = typeof r.quote === 'string' ? r.quote.trim().replace(/^["“]|["”]$/g, '') : '';
@@ -244,10 +248,16 @@ export function reconcile(existing: StoredMemory[], found: MemoryCandidate[]): M
     if (best.s >= SAME) {
       c.status = 'known';
       c.matches = { id: best.m.id, content: best.m.content };
+      // Already kept: keeping it adds where it was said, and leaves its wording alone.
+      c.content = best.m.content;
     } else if (best.s >= RELATED && normalizeCategory(best.m.category) === c.category) {
       c.status = 'revision';
       c.matches = { id: best.m.id, content: best.m.content };
     }
+  }
+  // Said in many chats: the most recent evidence, as many as a memory keeps.
+  for (const c of merged) {
+    if (c.evidence.length > MAX_EVIDENCE) c.evidence = [...c.evidence].sort((a, b) => b.at - a.at).slice(0, MAX_EVIDENCE);
   }
   const order = (c: MemoryCandidate): number => CATEGORY_IDS.indexOf(c.category);
   return merged.sort((a, b) => order(a) - order(b) || b.evidence.length - a.evidence.length);
