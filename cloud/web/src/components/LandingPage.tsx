@@ -7,6 +7,7 @@ import { devLogin } from '../lib/api.js';
 import { savePendingPrompt } from '../lib/pendingPrompt.js';
 import CascadeMark from './CascadeMark.js';
 import DownloadSection from './DownloadSection.js';
+import LeaderboardSection from './LeaderboardSection.js';
 import Modal from './Modal.js';
 import type { DescentPlan, DescentScene } from './landing/descentScene.js';
 import './landing/descent.css';
@@ -351,6 +352,8 @@ export default function LandingPage({ config, onDevLogin, reduceMotion = false }
               ))}
             </div>
           </section>
+
+          <LeaderboardSection h2={h2} />
 
           <DownloadSection reduced={reduced} />
 
