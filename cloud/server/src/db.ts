@@ -115,9 +115,25 @@ export interface CloudMemory {
   durability: MemoryDurability;
   createdAt: number;
   updatedAt: number;
+  /**
+   * The person's own words it rests on, and the chat each is from: what a memory
+   * built from chats was drawn from, and more as later chats say it again. Empty
+   * for one typed by hand.
+   */
+  evidence: MemoryEvidenceRow[];
+  /** How it came to be: typed ('manual'), from a remembered session ('session'), built from chats ('chats'), imported ('import'). */
+  source: string;
+  /** Its earlier wordings, oldest first, when a later chat revised it. */
+  revisions: Array<{ content: string; at: number }>;
 }
 
+export interface MemoryEvidenceRow { conversationId: string; quote: string; at: number }
+
 export type MemoryDurability = 'permanent' | 'volatile';
+
+/** Evidence and revisions kept per memory, at most: enough to show, never a second copy of the chats. */
+const MAX_MEMORY_EVIDENCE = 12;
+const MAX_MEMORY_REVISIONS = 10;
 
 export interface CloudSkill {
   id: string;
@@ -178,6 +194,9 @@ interface DbMemoryRow {
   durability: string | null;
   created_at: number;
   updated_at: number;
+  evidence?: string | null;
+  source?: string | null;
+  revisions?: string | null;
 }
 
 interface DbSkillRow {
@@ -561,6 +580,11 @@ export class CloudStore {
     // saved something they expected to expire — so they back-fill as permanent.
     // NULL is read as permanent too, which keeps a pre-migration row honest.
     if (!hasCol('memories', 'durability')) this.db.exec('ALTER TABLE memories ADD COLUMN durability TEXT');
+    // Memories as evidence-backed claims: the person's words each rests on, how it
+    // came to be, and its earlier wordings. JSON; NULL for rows from before.
+    if (!hasCol('memories', 'evidence')) this.db.exec('ALTER TABLE memories ADD COLUMN evidence TEXT');
+    if (!hasCol('memories', 'source')) this.db.exec('ALTER TABLE memories ADD COLUMN source TEXT');
+    if (!hasCol('memories', 'revisions')) this.db.exec('ALTER TABLE memories ADD COLUMN revisions TEXT');
     // Document attachments: original filename + extracted text (parsed at upload)
     // so a run injects the text without re-parsing, plus a char count for display.
     if (!hasCol('attachments', 'filename')) this.db.exec('ALTER TABLE attachments ADD COLUMN filename TEXT');
@@ -1428,16 +1452,53 @@ export class CloudStore {
     content: string,
     category: string | null = null,
     durability: MemoryDurability = 'permanent',
+    extra: { source?: string; evidence?: MemoryEvidenceRow[] } = {},
   ): CloudMemory {
     const now = Date.now();
     const row: DbMemoryRow = {
       id: randomUUID(), user_id: userId, content, category, durability,
       created_at: now, updated_at: now,
+      evidence: extra.evidence?.length ? JSON.stringify([...extra.evidence].sort((a, b) => a.at - b.at).slice(-MAX_MEMORY_EVIDENCE)) : null,
+      source: extra.source ?? (category === 'session' ? 'session' : 'manual'),
+      revisions: null,
     };
     this.db
-      .prepare('INSERT INTO memories (id, user_id, content, category, durability, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(row.id, row.user_id, row.content, row.category, row.durability, row.created_at, row.updated_at);
+      .prepare('INSERT INTO memories (id, user_id, content, category, durability, created_at, updated_at, evidence, source, revisions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(row.id, row.user_id, row.content, row.category, row.durability, row.created_at, row.updated_at, row.evidence, row.source, row.revisions);
     return this.deserializeMemory(row);
+  }
+
+  /**
+   * More evidence for a kept memory, and with `content`, a new wording for it: the
+   * old one is kept in its revisions. The person's yes on a candidate from their
+   * chats is the only caller. Null when it isn't theirs.
+   */
+  reviseMemory(
+    id: string,
+    userId: string,
+    change: { evidence: MemoryEvidenceRow[]; content?: string; category?: string | null; durability?: MemoryDurability },
+  ): CloudMemory | null {
+    const row = this.db.prepare('SELECT * FROM memories WHERE id = ? AND user_id = ?').get(id, userId) as DbMemoryRow | undefined;
+    if (!row) return null;
+    const current = this.deserializeMemory(row);
+    const evidence = [...current.evidence];
+    for (const e of change.evidence) {
+      if (!evidence.some((x) => x.conversationId === e.conversationId && x.quote === e.quote)) evidence.push(e);
+    }
+    const reworded = change.content !== undefined && change.content !== current.content;
+    const revisions = reworded ? [...current.revisions, { content: current.content, at: current.updatedAt }].slice(-MAX_MEMORY_REVISIONS) : current.revisions;
+    this.db
+      .prepare('UPDATE memories SET content = ?, category = ?, durability = ?, evidence = ?, revisions = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+      .run(
+        reworded ? change.content : current.content,
+        change.category !== undefined ? change.category : current.category,
+        change.durability ?? current.durability,
+        // Oldest first, the most recent kept: by when it was said, not when it was added.
+        evidence.length ? JSON.stringify([...evidence].sort((a, b) => a.at - b.at).slice(-MAX_MEMORY_EVIDENCE)) : null,
+        revisions.length ? JSON.stringify(revisions) : null,
+        Date.now(), id, userId,
+      );
+    return this.deserializeMemory(this.db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as DbMemoryRow);
   }
 
   updateMemory(
@@ -2168,6 +2229,9 @@ export class CloudStore {
       durability: row.durability === 'volatile' ? 'volatile' : 'permanent',
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      evidence: parseJsonList<MemoryEvidenceRow>(row.evidence, (e) => typeof e?.conversationId === 'string' && typeof e?.quote === 'string'),
+      source: row.source ?? (row.category === 'session' ? 'session' : 'manual'),
+      revisions: parseJsonList<{ content: string; at: number }>(row.revisions, (r) => typeof r?.content === 'string'),
     };
   }
 
@@ -2257,4 +2321,13 @@ export class CloudStore {
       createdAt: row.created_at,
     };
   }
+}
+
+/** A JSON list column read back, keeping only entries of the right shape; [] for NULL or anything else. */
+function parseJsonList<T>(raw: string | null | undefined, ok: (v: T) => boolean): T[] {
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw) as unknown;
+    return Array.isArray(v) ? (v as T[]).filter((x) => x && typeof x === 'object' && ok(x)) : [];
+  } catch { return []; }
 }

@@ -535,7 +535,7 @@ export default function App() {
             <UpgradeModal />
           </Modal>
         )}
-        {showMemory && <MemoryModal onClose={() => setShowMemory(false)} />}
+        {showMemory && <MemoryModal onClose={() => setShowMemory(false)} socket={socket} providers={providers} />}
         {showConnectors && <ConnectorsModal onClose={() => setShowConnectors(false)} />}
         {showSpend && (
           <SpendReport

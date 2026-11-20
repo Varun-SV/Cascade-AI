@@ -1,0 +1,232 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import { EventEmitter } from 'node:events';
+import { CloudStore } from './db.js';
+import { acceptMemories, attachMemoryBuild, buildChatRows, buildMemories, chatsForMemory, estimateFor, recordBuildSpend, tokenBudgetFor } from './memory-build.js';
+
+const PROVIDERS = [{ type: 'anthropic', apiKey: 'sk-test' }];
+const LONG = 'I am a backend engineer in Lisbon and I write most of my services in Go these days, mostly for a payments team that ships every week';
+
+describe('memory build (server)', () => {
+  let dir: string;
+  let store: CloudStore;
+  let mine: string;
+  let short: string;
+  let theirs: string;
+  let users: { u1: string; u2: string };
+  const U = (k: 'u1' | 'u2') => users[k];
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-memory-build-'));
+    store = new CloudStore(path.join(dir, 'cloud.db'));
+    const u1 = store.upsertUser({ provider: 'github', providerId: '1', email: null, name: null, avatar: null }).id;
+    const u2 = store.upsertUser({ provider: 'github', providerId: '2', email: null, name: null, avatar: null }).id;
+    users = { u1, u2 };
+    mine = store.importConversation(U('u1'), 'Go services', null, [
+      { role: 'user', content: LONG }, { role: 'assistant', content: 'Noted.' },
+    ]).id;
+    short = store.importConversation(U('u1'), 'hi', null, [{ role: 'user', content: 'hi' }]).id;
+    theirs = store.importConversation(U('u2'), 'Other', null, [{ role: 'user', content: LONG }]).id;
+  });
+
+  afterEach(async () => {
+    store.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('lists only the person\'s own chats, with titles and counts and nothing that was said', () => {
+    const rows = buildChatRows(store, U('u1'));
+    expect(rows.map((r) => r.id).sort()).toEqual([mine, short].sort());
+    expect(rows.find((r) => r.id === mine)).toMatchObject({ title: 'Go services', turns: 1, worth: true });
+    expect(rows.find((r) => r.id === short)?.worth).toBe(false);
+    expect(JSON.stringify(rows)).not.toContain('Lisbon');
+    // Asking for another person's chat by id finds nothing.
+    expect(chatsForMemory(store, U('u1'), [theirs])).toEqual([]);
+  });
+
+  it('estimates the tokens, and a price only when the model has one', () => {
+    const chats = chatsForMemory(store, U('u1'));
+    const priced = estimateFor(chats, { getModelForTier: () => ({ id: 'm', name: 'm', inputCostPer1kTokens: 0.003, outputCostPer1kTokens: 0.015 }) as never });
+    expect(priced.chats).toBe(1);
+    expect(priced.model).toBe('m');
+    expect(priced.costUsd).toBeGreaterThan(0);
+    expect(estimateFor(chats, null)).toMatchObject({ chats: 1, model: null, costUsd: null });
+  });
+
+  it('builds from the chats worth reading, skips one that fails, and stops when cancelled', async () => {
+    const chats = chatsForMemory(store, U('u1'));
+    const progress: number[] = [];
+    const out = await buildMemories({
+      chats, existing: [], signal: new AbortController().signal,
+      generate: async () => JSON.stringify([{ category: 'about-you', memory: 'Backend engineer in Lisbon', durable: true, quote: 'I am a backend engineer in Lisbon' }]),
+      onProgress: (p) => progress.push(p.read),
+    });
+    expect(out).toMatchObject({ read: 1, total: 1, cancelled: false });
+    expect(out.candidates).toEqual([expect.objectContaining({ category: 'about-you', content: 'Backend engineer in Lisbon', status: 'new' })]);
+    expect(progress).toEqual([1]);
+
+    const failing = await buildMemories({ chats, existing: [], signal: new AbortController().signal, generate: async () => { throw new Error('rate limited'); } });
+    // Counted as failed, not as read with nothing in it (Codex on 556f88d).
+    expect(failing).toMatchObject({ read: 0, failed: 1, failure: 'other', candidates: [] });
+    const refused = await buildMemories({ chats, existing: [], signal: new AbortController().signal, generate: async () => { throw new Error('401 invalid x-api-key'); } });
+    expect(refused).toMatchObject({ failed: 1, failure: 'auth' });
+
+    const stop = new AbortController();
+    stop.abort();
+    expect(await buildMemories({ chats, existing: [], signal: stop.signal, generate: async () => '[]' })).toMatchObject({ read: 0, cancelled: true });
+  });
+
+  it('saves what the person kept: new ones, and more evidence for one they have, but never evidence from someone else\'s chat', () => {
+    const kept = store.addMemory(U('u1'), 'Writes Go', 'preferences', 'permanent');
+    const ev = { conversationId: mine, quote: 'I write most of my services in Go', at: 1 };
+    const { saved } = acceptMemories(store, U('u1'), { items: [
+      { category: 'about-you', content: 'Backend engineer in Lisbon', durability: 'permanent', evidence: [ev] },
+      { category: 'preferences', content: 'Writes most services in Go', durability: 'permanent', evidence: [ev], revises: kept.id },
+      { category: 'facts', content: 'Stolen', durability: 'permanent', evidence: [{ conversationId: theirs, quote: 'x', at: 1 }] },
+    ] });
+    expect(saved.map((m) => m.content)).toEqual(['Backend engineer in Lisbon', 'Writes most services in Go']);
+    const list = store.listMemories(U('u1'));
+    expect(list).toHaveLength(2);
+    const revised = list.find((m) => m.id === kept.id)!;
+    expect(revised.revisions.map((r) => r.content)).toEqual(['Writes Go']);
+    expect(revised.evidence).toEqual([ev]);
+    expect(list.find((m) => m.content.startsWith('Backend'))).toMatchObject({ source: 'chats', category: 'about-you' });
+    expect(() => acceptMemories(store, U('u1'), { items: [{ category: 'nonsense', content: 'x', durability: 'permanent', evidence: [ev] }] })).toThrow();
+  });
+
+  it('over the socket: estimates, builds with progress, records the spend, and allows one build at a time', async () => {
+    const socket = new EventEmitter() as EventEmitter & { emitted: Array<[string, unknown]> };
+    socket.emitted = [];
+    const emit = socket.emit.bind(socket);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    const fakeRouter = {
+      getModelForTier: () => ({ id: 'm', name: 'm', inputCostPer1kTokens: 0.003, outputCostPer1kTokens: 0.015 }),
+      generate: async () => {
+        await held;
+        return { content: JSON.stringify([{ category: 'projects', memory: 'Works on a payments team', durable: true, quote: 'mostly for a payments team' }]) };
+      },
+      getStats: () => ({ totalCostUsd: 0.01, totalTokens: 900, costByTierModel: { T3: { m: 0.01 } }, tokensByTierModel: { T3: { m: 900 } }, untrackedByTierModel: {} }),
+    };
+    const handle = attachMemoryBuild({
+      on: (e, fn) => socket.on(e, fn),
+      emit: (e, p) => { socket.emitted.push([e, p]); return true; },
+    }, store, U('u1'), async () => fakeRouter as never);
+
+    const call = (event: string, payload: unknown) => new Promise<any>((resolve) => { emit(event, payload, resolve); });
+    expect(await call('memories:estimate', { providers: PROVIDERS, conversationIds: [mine, short] })).toMatchObject({ chats: 1, model: 'm' });
+    expect(await call('memories:build', { providers: PROVIDERS, conversationIds: [] })).toHaveProperty('error');
+
+    const first = call('memories:build', { providers: PROVIDERS, conversationIds: [mine] });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(await call('memories:build', { providers: PROVIDERS, conversationIds: [mine] })).toEqual({ error: expect.stringMatching(/already running/) });
+    release();
+    const done = await first;
+    expect(done).toMatchObject({ read: 1, total: 1, cancelled: false });
+    expect(done.candidates[0]).toMatchObject({ category: 'projects', content: 'Works on a payments team' });
+    expect(socket.emitted).toContainEqual(['memories:progress', { read: 1, total: 1, found: 1, failed: 0 }]);
+    // Nothing is saved until the person keeps it; the build's cost is on their ledger.
+    expect(store.listMemories(U('u1'))).toEqual([]);
+    expect(store.spend.firstSpendAt(U('u1'))).toEqual(expect.any(Number));
+    void handle;
+  });
+
+  it('two updates to one memory never overwrite each other; evidence past what a memory keeps is trimmed (Codex on bca3626)', () => {
+    const kept = store.addMemory(U('u1'), 'Building Cascade with TypeScript', 'projects', 'permanent');
+    const ev = (at: number) => ({ conversationId: mine, quote: `quote ${at}`, at });
+    const { saved } = acceptMemories(store, U('u1'), { items: [
+      { category: 'projects', content: 'Building Cascade with Rust', durability: 'permanent', evidence: [ev(1)], revises: kept.id },
+      { category: 'projects', content: 'Building Cascade with Go', durability: 'permanent', evidence: [ev(2)], revises: kept.id },
+      // Already kept, sent with its stored wording: evidence only, the update stands.
+      { category: 'projects', content: 'Building Cascade with TypeScript', durability: 'permanent', evidence: Array.from({ length: 30 }, (_, k) => ev(10 + k)), revises: kept.id },
+    ] });
+    expect(saved).toHaveLength(3);
+    const list = store.listMemories(U('u1'));
+    expect(list.map((m) => m.content).sort()).toEqual(['Building Cascade with Go', 'Building Cascade with Rust']);
+    const target = list.find((m) => m.id === kept.id)!;
+    expect(target.content).toBe('Building Cascade with Rust');
+    expect(target.evidence.length).toBe(12);
+    expect(target.evidence.some((e) => e.at === 39)).toBe(true);
+  });
+
+  it('keeps the most recent evidence by when it was said, whatever order it was added in (Codex on 411b9d6)', () => {
+    const ev = (at: number) => ({ conversationId: mine, quote: `q${at}`, at });
+    const m = store.addMemory(U('u1'), 'Writes Go', 'preferences', 'permanent', { evidence: Array.from({ length: 12 }, (_, k) => ev(28 + k)) });
+    store.reviseMemory(m.id, U('u1'), { evidence: [ev(40)] });
+    let kept = store.listMemories(U('u1')).find((x) => x.id === m.id)!.evidence.map((e) => e.at);
+    expect(kept).toEqual(Array.from({ length: 12 }, (_, k) => 29 + k));
+    // An older quote added later doesn't push out a newer one.
+    store.reviseMemory(m.id, U('u1'), { evidence: [ev(1)] });
+    kept = store.listMemories(U('u1')).find((x) => x.id === m.id)!.evidence.map((e) => e.at);
+    expect(kept).toEqual(Array.from({ length: 12 }, (_, k) => 29 + k));
+  });
+
+  it('a build where every call fails says why, rather than that nothing was worth remembering (Codex on 556f88d)', async () => {
+    const socket = new EventEmitter();
+    const failing = (message: string) => ({
+      getModelForTier: () => undefined,
+      generate: async () => { throw new Error(message); },
+      getStats: () => ({ totalCostUsd: 0, totalTokens: 0, costByTierModel: {}, tokensByTierModel: {}, untrackedByTierModel: {} }),
+    });
+    let router = failing('401 Unauthorized: invalid x-api-key');
+    attachMemoryBuild({ on: (e, fn) => socket.on(e, fn), emit: () => true }, store, U('u1'), async () => router as never);
+    const call = () => new Promise<any>((resolve) => { socket.emit('memories:build', { providers: PROVIDERS, conversationIds: [mine] }, resolve); });
+    expect(await call()).toEqual({ error: expect.stringMatching(/refused the request. Check its key/) });
+    router = failing('socket hang up');
+    expect(await call()).toEqual({ error: expect.stringMatching(/None of the chats could be read/) });
+  });
+
+  it('an answer cut off at its length limit is a failure to report, not an empty chat (Codex on 5a8cdf5)', async () => {
+    const socket = new EventEmitter();
+    let maxTokens = 0;
+    const router = {
+      getModelForTier: () => undefined,
+      generate: async (_tier: string, opts: { maxTokens: number }) => { maxTokens = opts.maxTokens; return { content: '[{"category":"facts","memory":"Lives in Lis', finishReason: 'length' }; },
+      getStats: () => ({ totalCostUsd: 0, totalTokens: 0, costByTierModel: {}, tokensByTierModel: {}, untrackedByTierModel: {} }),
+    };
+    attachMemoryBuild({ on: (e, fn) => socket.on(e, fn), emit: () => true }, store, U('u1'), async () => router as never);
+    const reply = await new Promise<any>((resolve) => { socket.emit('memories:build', { providers: PROVIDERS, conversationIds: [mine] }, resolve); });
+    expect(reply).toEqual({ error: expect.stringMatching(/None of the chats could be read/) });
+    // Room for the longest answer the prompt allows (8 memories with quotes).
+    expect(maxTokens).toBeGreaterThanOrEqual(1500);
+  });
+
+  it('an unchanged "already kept" memory only adds evidence, even after an update in an earlier batch (Codex on 69c9693)', () => {
+    const kept = store.addMemory(U('u1'), 'Building Cascade with TypeScript', 'projects', 'volatile');
+    const ev = (at: number) => ({ conversationId: mine, quote: `q${at}`, at });
+    acceptMemories(store, U('u1'), { items: [{ category: 'projects', content: 'Building Cascade with Rust', durability: 'volatile', evidence: [ev(1)], revises: kept.id }] });
+    // The next batch: the same memory, as it was, marked evidence-only.
+    acceptMemories(store, U('u1'), { items: [{ category: 'facts', content: 'Building Cascade with TypeScript', durability: 'permanent', evidence: [ev(2)], revises: kept.id, evidenceOnly: true }] });
+    const now = store.listMemories(U('u1')).find((m) => m.id === kept.id)!;
+    expect(now).toMatchObject({ content: 'Building Cascade with Rust', category: 'projects', durability: 'volatile' });
+    expect(now.evidence.map((e) => e.at)).toEqual([1, 2]);
+  });
+
+  it('a large build gets a token allowance for all of it, not a run\'s 200,000 (Codex on 15152a6)', async () => {
+    const big = Array.from({ length: 300 }, (_, k) => ({ id: `c${k}`, messages: [{ role: 'user' as const, content: LONG.repeat(20), createdAt: k }] }));
+    const budget = tokenBudgetFor(big);
+    // The router refuses work at 80% of it: every chat's prompt and longest answer must fit under that.
+    expect(budget * 0.8).toBeGreaterThan(300 * 2000);
+    expect(budget).toBeGreaterThan(200_000);
+    // The build asks for it.
+    const socket = new EventEmitter();
+    let asked: number | undefined;
+    const router = {
+      getModelForTier: () => undefined,
+      generate: async () => ({ content: '[]', finishReason: 'stop' }),
+      getStats: () => ({ totalCostUsd: 0, totalTokens: 0, costByTierModel: {}, tokensByTierModel: {}, untrackedByTierModel: {} }),
+    };
+    attachMemoryBuild({ on: (e, fn) => socket.on(e, fn), emit: () => true }, store, U('u1'), async (_p, maxTokens) => { asked = maxTokens; return router as never; });
+    await new Promise((resolve) => { socket.emit('memories:build', { providers: PROVIDERS, conversationIds: [mine] }, resolve); });
+    expect(asked).toBe(tokenBudgetFor(chatsForMemory(store, U('u1'), [mine])));
+  });
+
+  it('records a build whose only calls were to an unpriced model that reported no usage (Codex on 15152a6)', () => {
+    recordBuildSpend(store, U('u1'), {
+      getStats: () => ({ totalCostUsd: 0, totalTokens: 0, costByTierModel: {}, tokensByTierModel: {}, untrackedByTierModel: { T3: { 'local-x': 2 } } }),
+    } as never, 'answered');
+    expect(store.spend.firstSpendAt(U('u1'))).toEqual(expect.any(Number));
+  });
+});

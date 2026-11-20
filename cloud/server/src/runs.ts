@@ -65,6 +65,52 @@ const TierParamSchema = z
 
 // Keys are browser-held and travel with the run request only — never
 // persisted server-side (see db.ts: no api key column anywhere).
+/** The user's providers, as a run (or a memory build) sends them. */
+export const ProvidersSchema = z
+  .preprocess(
+    // Drop provider types this build no longer supports BEFORE the enum
+    // sees them. A browser tab that was already open across the rollout
+    // keeps sending its in-memory list until the page is reloaded, and the
+    // localStorage migration only runs in freshly loaded assets — so
+    // without this, every run from that tab fails outright even when it
+    // also carries a perfectly usable provider. Being liberal at a version
+    // boundary is the same posture the config and sync migrations take.
+    //
+    // Filtering here rather than after validation matters: `.min(1)` below
+    // then judges what remains, so a payload whose ONLY provider was retired
+    // is still rejected — it genuinely has nothing to run with — while one
+    // that also carries a usable provider proceeds on that provider alone.
+    (v) => (Array.isArray(v)
+      ? v.filter((p) => !RETIRED_PROVIDER_TYPES.has(String((p as { type?: unknown } | null)?.type ?? '')))
+      : v),
+    z
+      .array(
+        z.object({
+          type: z.enum(PROVIDER_TYPES),
+          label: optionalNonEmptyString,
+          apiKey: optionalNonEmptyString,
+          baseUrl: optionalNonEmptyString,
+          deploymentName: optionalNonEmptyString,
+          apiVersion: optionalNonEmptyString,
+          model: optionalNonEmptyString,
+        }),
+      )
+      .min(1)
+      // KeyVault's SELECTABLE_TYPES offers 4 single-instance cloud types
+      // (anthropic, openai, gemini, openai-compatible) plus Azure, which
+      // alone supports MULTIPLE deployments — each its own resource and
+      // endpoint, one array entry per deployment. So the ceiling is really
+      // "the singles, plus however many Azure deployments you run".
+      //
+      // Deliberately NOT lowered when github-models was removed. The bound
+      // exists to stop an absurd payload, not to state the exact shape of a
+      // maximal config, and tightening it to match today's dropdown would
+      // start rejecting a config that was valid before — 4 singles plus 3
+      // Azure deployments, say. A cap that shrinks under users is worse than
+      // one with a little slack.
+      .max(7),
+  );
+
 const ChatRunPayloadSchema = z.object({
   conversationId: z.string().optional(),
   /**
@@ -224,50 +270,7 @@ const ChatRunPayloadSchema = z.object({
       tavilyApiKey: optionalNonEmptyString,
     })
     .optional(),
-  providers: z
-    .preprocess(
-      // Drop provider types this build no longer supports BEFORE the enum
-      // sees them. A browser tab that was already open across the rollout
-      // keeps sending its in-memory list until the page is reloaded, and the
-      // localStorage migration only runs in freshly loaded assets — so
-      // without this, every run from that tab fails outright even when it
-      // also carries a perfectly usable provider. Being liberal at a version
-      // boundary is the same posture the config and sync migrations take.
-      //
-      // Filtering here rather than after validation matters: `.min(1)` below
-      // then judges what remains, so a payload whose ONLY provider was retired
-      // is still rejected — it genuinely has nothing to run with — while one
-      // that also carries a usable provider proceeds on that provider alone.
-      (v) => (Array.isArray(v)
-        ? v.filter((p) => !RETIRED_PROVIDER_TYPES.has(String((p as { type?: unknown } | null)?.type ?? '')))
-        : v),
-      z
-        .array(
-          z.object({
-            type: z.enum(PROVIDER_TYPES),
-            label: optionalNonEmptyString,
-            apiKey: optionalNonEmptyString,
-            baseUrl: optionalNonEmptyString,
-            deploymentName: optionalNonEmptyString,
-            apiVersion: optionalNonEmptyString,
-            model: optionalNonEmptyString,
-          }),
-        )
-        .min(1)
-        // KeyVault's SELECTABLE_TYPES offers 4 single-instance cloud types
-        // (anthropic, openai, gemini, openai-compatible) plus Azure, which
-        // alone supports MULTIPLE deployments — each its own resource and
-        // endpoint, one array entry per deployment. So the ceiling is really
-        // "the singles, plus however many Azure deployments you run".
-        //
-        // Deliberately NOT lowered when github-models was removed. The bound
-        // exists to stop an absurd payload, not to state the exact shape of a
-        // maximal config, and tightening it to match today's dropdown would
-        // start rejecting a config that was valid before — 4 singles plus 3
-        // Azure deployments, say. A cap that shrinks under users is worse than
-        // one with a little slack.
-        .max(7),
-    ),
+  providers: ProvidersSchema,
 });
 
 export type ChatRunPayload = z.infer<typeof ChatRunPayloadSchema>;
