@@ -1197,12 +1197,17 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     cascade.on('tier:thinking', (ev: { tierId: string; call?: number; text?: string; done?: boolean }) => { activityRef.current.think(ev); activityChanged(); });
     // Once per model: its calls are counted in tokens but not in cost, so the cost
     // shown is partial from here on. Said when it happens, not left for /cost.
-    cascade.getRouter().on('cost:untracked', (ev: { modelId: string; provider: string }) => {
+    // On the router, which lives as long as the session: taken off again with this
+    // run's other listeners (below), or every prompt would add one more, and a
+    // model first met on the Nth run would be announced N times.
+    const router = cascade.getRouter();
+    const onUntracked = (ev: { modelId: string; provider: string }): void => {
       const capped = config.budget?.maxCostPerRunUsd != null || config.budget?.sessionBudgetUsd != null;
       const content = `Cost not counted for ${ev.provider}:${ev.modelId}: Cascade has no price for this model. Its tokens still count, but the cost shown leaves its calls out (marked "+"); /cost lists them.`
         + (capped ? ' Your cost budget can\'t see this spend either; the token cap still applies.' : '');
       dispatch({ type: 'ADD_NOTICE', message: { id: randomUUID(), role: 'system', content, timestamp: new Date().toISOString() } });
-    });
+    };
+    router.on('cost:untracked', onUntracked);
     cascade.on('tier:root', onRoot);
     cascade.on('stream:token', onStream);
     cascade.on('tier:status', (ev: TierStatusEvent) => {
@@ -1417,6 +1422,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       setRunEndedAt(Date.now());
       decisionLogRef.current = cascade.getDecisionLog();
       cascade.removeAllListeners();
+      router.off('cost:untracked', onUntracked);
       setPlanApprovalRequest(null);
       const finalStats = cascade.getRouter().getStats();
       const currentSession = storeRef.current?.getSession(sessionIdRef.current);
