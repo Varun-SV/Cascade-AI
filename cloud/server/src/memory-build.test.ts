@@ -192,4 +192,15 @@ describe('memory build (server)', () => {
     // Room for the longest answer the prompt allows (8 memories with quotes).
     expect(maxTokens).toBeGreaterThanOrEqual(1500);
   });
+
+  it('an unchanged "already kept" memory only adds evidence, even after an update in an earlier batch (Codex on 69c9693)', () => {
+    const kept = store.addMemory(U('u1'), 'Building Cascade with TypeScript', 'projects', 'volatile');
+    const ev = (at: number) => ({ conversationId: mine, quote: `q${at}`, at });
+    acceptMemories(store, U('u1'), { items: [{ category: 'projects', content: 'Building Cascade with Rust', durability: 'volatile', evidence: [ev(1)], revises: kept.id }] });
+    // The next batch: the same memory, as it was, marked evidence-only.
+    acceptMemories(store, U('u1'), { items: [{ category: 'facts', content: 'Building Cascade with TypeScript', durability: 'permanent', evidence: [ev(2)], revises: kept.id, evidenceOnly: true }] });
+    const now = store.listMemories(U('u1')).find((m) => m.id === kept.id)!;
+    expect(now).toMatchObject({ content: 'Building Cascade with Rust', category: 'projects', durability: 'volatile' });
+    expect(now.evidence.map((e) => e.at)).toEqual([1, 2]);
+  });
 });

@@ -171,6 +171,9 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
         count += (await acceptMemories(batch.map((d) => ({
           category: d.category, content: d.content.trim(), durability: d.durability, evidence: d.evidence.slice(0, MAX_EVIDENCE),
           ...(d.matches && d.status !== 'new' ? { revises: d.matches.id } : {}),
+          // Already kept and left as it was: only where it was said is added, so
+          // it never puts back a wording an update in an earlier batch replaced.
+          ...(d.status === 'known' && d.matches && d.content.trim() === d.matches.content ? { evidenceOnly: true } : {}),
         })))).saved.length;
         // Saved: out of the review, so a retry after a later batch fails sends
         // only what is left, and nothing is saved twice.

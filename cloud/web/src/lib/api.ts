@@ -297,7 +297,7 @@ export function fetchMemoryBuildChats(): Promise<{ chats: MemoryBuildChat[] }> {
 
 /** Saves the memories the person kept from a build: new ones, or more for one they have (`revises`). */
 export function acceptMemories(items: Array<{
-  category: string; content: string; durability: MemoryDurability; evidence: MemoryEvidence[]; revises?: string;
+  category: string; content: string; durability: MemoryDurability; evidence: MemoryEvidence[]; revises?: string; evidenceOnly?: boolean;
 }>): Promise<{ saved: Memory[] }> {
   return json(
     fetch('/api/memories/accept', {

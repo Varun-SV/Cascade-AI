@@ -203,6 +203,8 @@ export const AcceptSchema = z.object({
     evidence: z.array(EvidenceSchema).min(1).max(100),
     /** The kept memory this adds to, or rewords. Absent for a new one. */
     revises: z.string().min(1).max(100).optional(),
+    /** With `revises`: add where it was said, and leave the memory's wording, category and durability as they are. */
+    evidenceOnly: z.boolean().optional(),
   })).min(1).max(ACCEPT_BATCH),
 });
 
@@ -225,7 +227,13 @@ export function acceptMemories(store: CloudStore, userId: string, input: unknown
       .sort((a, b) => b.at - a.at)
       .slice(0, 12);
     if (!evidence.length) continue;
-    if (item.revises && before.has(item.revises)) {
+    // "Already kept", unchanged: evidence only, whatever this or an earlier
+    // request did to the memory's wording.
+    if (item.revises && item.evidenceOnly && before.has(item.revises)) {
+      const added = store.reviseMemory(item.revises, userId, { evidence });
+      if (added) { saved.push(added); continue; }
+    }
+    if (item.revises && !item.evidenceOnly && before.has(item.revises)) {
       const now = touched.get(item.revises);
       const sameWords = item.content === before.get(item.revises) || item.content === now;
       // Reworded already in this request, and this says something else: kept as its own memory.
