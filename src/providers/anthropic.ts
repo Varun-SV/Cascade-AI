@@ -163,6 +163,17 @@ export function anthropicAuth(
   return { mode: 'none' };
 }
 
+/**
+ * Anthropic's stop reason in the shared vocabulary. `max_tokens` (and a context
+ * overflow) is a cut-off answer, the same as OpenAI's `length`: callers that
+ * check for truncation see one value whichever provider ran.
+ */
+export function stopReasonOf(reason: string | null | undefined): GenerateResult['finishReason'] {
+  if (reason === 'max_tokens' || reason === 'model_context_window_exceeded') return 'length';
+  if (reason === 'tool_use') return 'tool_use';
+  return 'stop';
+}
+
 export class AnthropicProvider extends BaseProvider {
   private client: Anthropic;
 
@@ -278,13 +289,14 @@ export class AnthropicProvider extends BaseProvider {
         input: b.input as Record<string, unknown>,
       }));
 
-    onChunk({ text: '', finishReason: finalMessage.stop_reason as GenerateResult['finishReason'] });
+    const finishReason = stopReasonOf(finalMessage.stop_reason);
+    onChunk({ text: '', finishReason });
 
     return {
       content: fullContent,
       usage: this.makeUsage(inputTokens, outputTokens),
       toolCalls: toolCalls.length ? toolCalls : undefined,
-      finishReason: (finalMessage.stop_reason as GenerateResult['finishReason']) ?? 'stop',
+      finishReason,
     };
   }
 

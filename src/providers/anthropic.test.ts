@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeAll, afterAll } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { AnthropicProvider } from './anthropic.js';
+import { AnthropicProvider, stopReasonOf } from './anthropic.js';
 
 const fetchSpy = vi.spyOn(globalThis, 'fetch');
 
@@ -489,4 +489,19 @@ describe('AnthropicProvider.listModels — a failed gateway is not a validated c
     }
   });
 
+});
+
+describe('stopReasonOf', () => {
+  it('reads a cut-off answer as length, as other providers report it', () => {
+    expect(stopReasonOf('max_tokens')).toBe('length');
+    expect(stopReasonOf('model_context_window_exceeded')).toBe('length');
+  });
+
+  it('keeps tool use, and reads every other end as stop', () => {
+    expect(stopReasonOf('tool_use')).toBe('tool_use');
+    expect(stopReasonOf('end_turn')).toBe('stop');
+    expect(stopReasonOf('stop_sequence')).toBe('stop');
+    expect(stopReasonOf('refusal')).toBe('stop');
+    expect(stopReasonOf(null)).toBe('stop');
+  });
 });
