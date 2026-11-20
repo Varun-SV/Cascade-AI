@@ -29,7 +29,7 @@ import type { CascadeRouter } from '../core/router/index.js';
 import type { PermissionEscalator } from '../core/permissions/escalator.js';
 import type { PermissionRequest } from '../types.js';
 import { parseModelJson } from '../utils/json-extract.js';
-import { crashNote } from '../utils/crash-note.js';
+import { nativeRun } from '../utils/crash-note.js';
 
 export type SandboxMode = 'isolate' | 'wasm' | 'auto';
 
@@ -419,11 +419,11 @@ class DynamicTool extends BaseTool {
       if (ivm) {
         // A crash in native code ends the process with nothing to catch it: the
         // host is told what was running, so the next start can say so.
-        crashNote(`running the agent-written tool ${this.name} in the isolated-vm sandbox`);
+        const over = nativeRun(`running the agent-written tool ${this.name} in the isolated-vm sandbox`);
         try {
           return await this.runInIsolate(ivm, input, callTool, sendOut, options.signal);
         } finally {
-          crashNote(null);
+          over();
         }
       }
       if (mode === 'isolate' && !ivmWarned) {
