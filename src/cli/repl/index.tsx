@@ -146,6 +146,8 @@ interface TierStatusEvent {
   dependsOn?: string[];
   waveId?: number;
   blockedBy?: string[];
+  /** Finished with part of its work done (a section where some subtasks failed). */
+  partial?: boolean;
 }
 
 interface ReplState {
@@ -559,7 +561,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
 
   const recordNodeEvent = useCallback((event: TierStatusEvent) => {
     const existing = treeNodesRef.current.get(event.tierId);
-    const node: FlatTreeNode = { id: event.tierId, role: event.role ?? existing?.role ?? 'T3', label: event.label ?? existing?.label ?? event.tierId, status: event.status ?? existing?.status ?? 'IDLE', currentAction: event.currentAction ?? existing?.currentAction, progressPct: event.progressPct ?? existing?.progressPct, parentId: event.parentId ?? existing?.parentId, nodeId: event.nodeId ?? existing?.nodeId, dependsOn: event.dependsOn ?? existing?.dependsOn, waveId: event.waveId ?? existing?.waveId, blockedBy: event.blockedBy ?? existing?.blockedBy, children: [] };
+    const node: FlatTreeNode = { id: event.tierId, role: event.role ?? existing?.role ?? 'T3', label: event.label ?? existing?.label ?? event.tierId, status: event.status ?? existing?.status ?? 'IDLE', currentAction: event.currentAction ?? existing?.currentAction, progressPct: event.progressPct ?? existing?.progressPct, parentId: event.parentId ?? existing?.parentId, nodeId: event.nodeId ?? existing?.nodeId, dependsOn: event.dependsOn ?? existing?.dependsOn, waveId: event.waveId ?? existing?.waveId, blockedBy: event.blockedBy ?? existing?.blockedBy, partial: event.partial, children: [] };
     treeNodesRef.current.set(event.tierId, node);
     if (event.status) activityRef.current.status(event.tierId, event.status);
     const store = storeRef.current;

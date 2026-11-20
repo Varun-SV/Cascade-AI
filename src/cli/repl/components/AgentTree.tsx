@@ -22,6 +22,8 @@ export interface TierNode {
   blockedBy?: string[];
   currentAction?: string;
   progressPct?: number;
+  /** COMPLETED with part of its work done: some of its subtasks failed. */
+  partial?: boolean;
   children?: TierNode[];
 }
 
@@ -138,7 +140,9 @@ function AgentTreeInternal({
                   {t3ActiveCount > 0 ? <Text color={theme.colors.muted}> ({t3ActiveCount} running)</Text> : null}
                 </>
               )}
-              {node.status === 'COMPLETED' && <Text color={theme.colors.success}> ✔</Text>}
+              {node.status === 'COMPLETED' && (node.partial
+                ? <Text color={theme.colors.warning}> ✔ partly</Text>
+                : <Text color={theme.colors.success}> ✔</Text>)}
               {node.status === 'FAILED' && <Text color={theme.colors.error}> ✘</Text>}
               {node.status === 'ESCALATED' && <Text color={theme.colors.warning}> ▲</Text>}
               {/* Skipped, not broken — muted rather than the error colour. */}

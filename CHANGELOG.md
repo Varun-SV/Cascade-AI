@@ -5,6 +5,25 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.96.2 - 2026-11-20
+
+### Fixed
+- **A run that needed a second pass reads as one.** When the review sends a
+  fix pass, the run's tree no longer shows what looks like the same section
+  twice, a tick on a section that didn't fully work, or a step left "running":
+  - Sections of a fix pass are named as fixes ("Fix 1 · Story Generation and
+    PDF Export").
+  - A section where some subtasks failed shows "✔ partly" in the warning
+    colour, not the plain tick of a full success. Its work is still used.
+  - A subtask that couldn't start because the one it needed failed now ends
+    as ⤫ (not attempted). It used to stay ◐ with its clock running after its
+    section had ended.
+- **A fix pass builds on what the first pass left.** It is told which of the
+  files the plan named are already in the workspace, by name and size (never
+  their contents), and plans to check, fix or finish them where they are.
+  Before, a story written in a pass that failed part-way was planned and
+  written again from scratch, and paid for twice.
+
 ## 0.96.0 - 2026-11-20
 
 ### Added

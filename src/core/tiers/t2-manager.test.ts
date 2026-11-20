@@ -364,10 +364,22 @@ describe('T2Manager', () => {
       const manager = new T2Manager(router, makeToolRegistry(), 't1-root');
       manager.setEscalationCallback(async () => ({ action: 'skip' }));
 
+      const finals: Array<{ status: string; partial?: boolean }> = [];
+      manager.on('tier:status', (e: { tierId: string; status: string; partial?: boolean }) => {
+        if (e.tierId === manager.id) finals.push(e);
+      });
+
       const result = await manager.execute(assignment, 'task-skip');
 
       expect(result.status).toBe('PARTIAL'); // kept, not dropped — see settledEscalationStatus
       expect(result.userSkipped).toBe(true);
+      // The section's node says so: COMPLETED (its work is used), marked partial,
+      // so a screen doesn't show it with the same plain tick as a full success.
+      const last = finals.at(-1)!;
+      expect(last.status).toBe('COMPLETED');
+      expect(last.partial).toBe(true);
+      // While it ran it was not partial yet.
+      expect(finals[0]!.partial).toBeUndefined();
     });
 
     it('tells the asker what the section was FOR, not just what went wrong', async () => {
