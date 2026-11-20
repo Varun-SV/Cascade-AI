@@ -232,7 +232,23 @@ describe('the question in the terminal', () => {
     t.input.write('example.com\r');
     await new Promise((r) => setTimeout(r, 20));
     t.input.write('y\r');
+    await new Promise((r) => setTimeout(r, 20));
+    t.input.write('\r');
     await expect(answer).resolves.toMatchObject({ allowedOrigins: ['https://example.com'], screenshots: true });
+  });
+
+  it('asks how many browsers at once: four unless told, and never more than eight', async () => {
+    for (const [typed, expected] of [['', 4], ['2', 2], ['50', 8], ['x', 1]] as const) {
+      const t = io();
+      const answer = terminalAsk(vi.fn(), t)(run());
+      await new Promise((r) => setTimeout(r, 20));
+      t.input.write('example.com\r');
+      await new Promise((r) => setTimeout(r, 20));
+      t.input.write('\r');
+      await new Promise((r) => setTimeout(r, 20));
+      t.input.write(`${typed}\r`);
+      await expect(answer).resolves.toMatchObject({ maxTabs: expected });
+    }
   });
 
   it('an answer still counts, and the next question is asked', async () => {
@@ -242,6 +258,8 @@ describe('the question in the terminal', () => {
     const first = ask(run());
     await new Promise((r) => setTimeout(r, 20));
     t.input.write('example.com\r');
+    await new Promise((r) => setTimeout(r, 20));
+    t.input.write('\r');
     await new Promise((r) => setTimeout(r, 20));
     t.input.write('\r');
     const consent = await first;

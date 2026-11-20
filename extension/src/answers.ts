@@ -9,7 +9,7 @@
 //  trust their server that far.
 
 import { parseSites } from '../../src/browser/relay/consent-input.js';
-import type { UserConsent } from '../../src/browser/relay/device.js';
+import { type UserConsent, DEFAULT_RUN_TABS, tabsAllowed } from '../../src/browser/relay/device.js';
 import { makeConsent } from '../../src/browser/relay/egress-rules.js';
 
 /** What the consent window sends. */
@@ -26,6 +26,8 @@ export interface ConsentForm {
    * report. Off unless ticked. Password, card and code fields are blurred.
    */
   screenshots?: boolean;
+  /** How many tabs the run may have at once. Four unless the person picks. */
+  maxTabs?: number;
 }
 
 export const MAX_SITES = 50;
@@ -35,7 +37,7 @@ export const REMEMBER_MS = 8 * 60 * 60 * 1000;
 const PRIVATE_REFUSED = "Sites on your private network can't be used from your own Chrome: the extension can't keep a run off them. Use the Cascade CLI or desktop app for those.";
 
 /** The consent a form gives; null is a no; an error is asked again. */
-export function consentFromForm(form: Pick<ConsentForm, 'sites' | 'anyPublic' | 'screenshots'>): { consent: UserConsent } | { error: string } | null {
+export function consentFromForm(form: Pick<ConsentForm, 'sites' | 'anyPublic' | 'screenshots' | 'maxTabs'>): { consent: UserConsent } | { error: string } | null {
   const parsed = parseSites(form.sites);
   if (parsed && 'error' in parsed) return parsed;
   if (!parsed && !form.anyPublic) return null;
@@ -46,11 +48,12 @@ export function consentFromForm(form: Pick<ConsentForm, 'sites' | 'anyPublic' | 
   // Checked here as the policy will read it: an answer it would refuse is asked again.
   const screenshots = form.screenshots === true;
   makeConsent(allowedOrigins, [], { anyPublic, screenshots });
-  return { consent: { allowedOrigins, privateOrigins: [], ...(anyPublic ? { anyPublic } : {}), ...(screenshots ? { screenshots } : {}) } };
+  const maxTabs = tabsAllowed({ maxTabs: form.maxTabs ?? DEFAULT_RUN_TABS });
+  return { consent: { allowedOrigins, privateOrigins: [], ...(anyPublic ? { anyPublic } : {}), ...(screenshots ? { screenshots } : {}), maxTabs } };
 }
 
 /** An answer kept for one chat's runs. */
-export interface KeptAnswer { sites: string; anyPublic: boolean; incognito: boolean; screenshots: boolean; until: number }
+export interface KeptAnswer { sites: string; anyPublic: boolean; incognito: boolean; screenshots: boolean; maxTabs?: number; until: number }
 
 /** Where answers are kept: chrome.storage.session, or a stand-in in tests. */
 export interface AnswerStore {
@@ -68,7 +71,7 @@ async function all(store: AnswerStore, now: number): Promise<Record<string, Kept
   if (raw && typeof raw === 'object') {
     for (const [k, v] of Object.entries(raw as Record<string, Partial<KeptAnswer>>)) {
       if (v && typeof v.sites === 'string' && typeof v.until === 'number' && v.until > now) {
-        out[k] = { sites: v.sites, anyPublic: v.anyPublic === true, incognito: v.incognito !== false, screenshots: v.screenshots === true, until: v.until };
+        out[k] = { sites: v.sites, anyPublic: v.anyPublic === true, incognito: v.incognito !== false, screenshots: v.screenshots === true, ...(typeof v.maxTabs === 'number' ? { maxTabs: tabsAllowed({ maxTabs: v.maxTabs }) } : {}), until: v.until };
       }
     }
   }
@@ -81,7 +84,7 @@ export async function recallAnswer(store: AnswerStore, key: string, now: number)
 
 export async function keepAnswer(store: AnswerStore, key: string, form: ConsentForm, now: number): Promise<void> {
   const kept = await all(store, now);
-  kept[key] = { sites: form.sites, anyPublic: form.anyPublic, incognito: form.incognito, screenshots: form.screenshots === true, until: now + REMEMBER_MS };
+  kept[key] = { sites: form.sites, anyPublic: form.anyPublic, incognito: form.incognito, screenshots: form.screenshots === true, maxTabs: tabsAllowed({ maxTabs: form.maxTabs ?? DEFAULT_RUN_TABS }), until: now + REMEMBER_MS };
   await store.set({ [KEY]: kept });
 }
 

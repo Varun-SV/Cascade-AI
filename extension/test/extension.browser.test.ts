@@ -238,6 +238,43 @@ suite('the extension in a real Chromium', { timeout: 90_000 }, () => {
     expect(page.url()).toContain('allowed.test');
   });
 
+  it("a run's second tab: given under the same answer, policed the same, in the run's window, and not closed as a popup", async () => {
+    const r = await rig();
+    const first = await r.run('run-1');
+    await first.page.goto('http://allowed.test/hello');
+    const pagesBefore = r.ctx.pages().filter((p) => p.url().includes('consent.html')).length;
+    // No question this time: the run already has the person's answer.
+    const second = await r.hub.requestBrowser({ userId: 'user-a', deviceId: 'dev-ext', runId: 'run-1' });
+    expect(r.ctx.pages().filter((p) => p.url().includes('consent.html')).length).toBe(pagesBefore);
+    const agent = await pw.chromium.connectOverCDP(`ws://127.0.0.1:${r.device.serverUrl.split(':').pop()}/agent/${second.token}`);
+    closers.push(() => agent.close());
+    const c = agent.contexts()[0]!;
+    const page = c.pages()[0] ?? await c.waitForEvent('page', { timeout: 10_000 });
+    await page.goto('http://allowed.test/form');
+    expect(await page.evaluate<string>('document.title || document.body.textContent')).toBeTruthy();
+    await expect(page.goto('http://offlist.test/second', { timeout: 5000 })).rejects.toThrow();
+    expect(r.offlist.hits).toEqual([]);
+    await sleep(1000);
+    // Both open, side by side in one window.
+    const run = (await r.status()).status.run as { runId: string; tabs?: number; windowId?: number } | undefined;
+    expect(run).toMatchObject({ runId: 'run-1', tabs: 2 });
+    const inWindow = await r.sw.evaluate((w) => chrome.tabs.query({ windowId: w }), run!.windowId as never) as unknown[];
+    expect(inWindow).toHaveLength(2);
+    // The first tab still works alongside.
+    await first.page.goto('http://allowed.test/links');
+    expect(first.page.url()).toContain('/links');
+    // The popup says so, and its Stop ends both, and the window with them.
+    const extId = new URL(r.sw.url()).host;
+    const popup = await r.ctx.newPage();
+    await popup.goto(`chrome-extension://${extId}/popup.html`);
+    await vi.waitFor(async () => expect(await popup.evaluate<string>("document.getElementById('run-tabs').textContent")).toBe(', in 2 tabs'));
+    await popup.click('#stop');
+    const stopped = (p: Promise<string>) => Promise.race([p, sleep(8000).then(() => { throw new Error('a tab did not stop'); })]);
+    await stopped(first.relayed.closed);
+    await stopped(second.closed);
+    await vi.waitFor(async () => expect(await r.sw.evaluate((w) => chrome.windows.get(w).then(() => true, () => false), run!.windowId as never)).toBe(false), { timeout: 8000 });
+  });
+
   it('fill and click work in the run tab', async () => {
     const r = await rig();
     const { page } = await r.run('run-1');

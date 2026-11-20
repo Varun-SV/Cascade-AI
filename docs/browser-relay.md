@@ -2,7 +2,8 @@
 
 A run on Cascade Cloud, or on a server you host, can use a browser on your own
 machine instead of one the server hosts. The server keeps no browser of its own:
-your device opens one, asks you first, and serves the run a single tab in it.
+your device opens one, asks you first, and serves the run a tab in it, or several
+when parts of the run browse side by side (up to the number you allow).
 
 The design, threat model and tests behind this are in
 [`design/byo-browser-and-routing-data.md`](design/byo-browser-and-routing-data.md)
@@ -16,9 +17,19 @@ run wants to start on is filled in for you; change the list as you like. For
 research, tick **Any public site** (in the CLI, type `*`): it can then open
 whatever public site it finds, and your private network stays blocked. Then:
 
-- The run gets **a new window with one tab**, never a tab you already have open.
-  With the CLI and the desktop app it gets a fresh browser with its own empty
-  profile, closed afterwards.
+- The run gets **a new window**, never a tab you already have open. With the CLI
+  and the desktop app it gets a fresh browser with its own empty profile, closed
+  afterwards.
+- **Tabs at once** (four unless you pick, eight at most): parts of the run that
+  browse at the same time each get a tab of their own instead of taking turns. In
+  the extension they are tabs of the run's one window; with the CLI and the desktop
+  app each is a browser window of its own. The run's later tabs come under the
+  answer you gave for its first, without asking again. Each has the same rules as
+  the first, and its own lease and connection; **Stop**, **Take over** and closing
+  the window act on all of them. No more than two of a run's tabs are on one site at once, since many
+  signed-in sites take several sessions acting together for a bot. Each tab uses
+  some of your computer's memory. An older extension or app gives a run one tab,
+  as before, and its parts take turns.
 - In the extension you choose the window: **a private (incognito) window**, the
   default, which starts signed out of everything and keeps nothing afterwards, or
   **a normal window**, where sites you're signed in to see you signed in. A private

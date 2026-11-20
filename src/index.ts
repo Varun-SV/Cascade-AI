@@ -77,6 +77,8 @@ export { GenericCdpProvider, isCdpEndpoint } from './browser/remote/generic-cdp.
 export { SteelProvider, isHostedSteel, isUsableSteelBase, isUsableSteelKey } from './browser/remote/steel.js';
 export { buildLeaderboard, withSnapshot, publishedBenchmark, LEADERBOARD_TASKS, MIN_RANKED_RUNS, INACTIVE_AFTER_DAYS, type Leaderboard, type LeaderboardRow, type LeaderboardHistory, type PoolStat } from './core/router/leaderboard.js';
 export { RelayBrowserProvider } from './browser/remote/relay-provider.js';
+export { TabbedBrowserController, SAME_SITE_TABS, type RunBrowserControl } from './browser/remote/tabbed-controller.js';
+export { MAX_RUN_TABS, DEFAULT_RUN_TABS } from './browser/relay/device.js';
 export { BrowserLease } from './browser/lease.js';
 export type { RemoteBrowserProvider, RemoteBrowserSession, RemoteBrowserConfig } from './browser/remote/provider.js';
 // The browser relay: a user's own browser, on their own device, serving a run on

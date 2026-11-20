@@ -271,7 +271,18 @@ describe("the run's hint, any public site, and showing the window", () => {
     const ask = h.notes.filter(([c]) => c === 'relay:ask').at(-1)![1] as { id: number; sites: string[] };
     expect(ask.sites).toEqual(['www.rtings.com']);
     expect(h.relay.answer(ask.id, '', true)).toEqual({ ok: true });
-    await expect(asked).resolves.toEqual({ allowedOrigins: [], privateOrigins: [], anyPublic: true });
+    await expect(asked).resolves.toEqual({ allowedOrigins: [], privateOrigins: [], anyPublic: true, maxTabs: 1 });
+  });
+
+  it('the browsers-at-once choice goes with the answer, within one to eight', async () => {
+    const h = harness({ stored: pairedDevice(true) });
+    h.relay.resume();
+    for (const [picked, given] of [[3, 3], [20, 8], [0, 1]] as const) {
+      const asked = h.served[0]!.askUser({ runId: 'r', expiresAt: Date.now() + 60_000, signal: new AbortController().signal });
+      const ask = h.notes.filter(([c]) => c === 'relay:ask').at(-1)![1] as { id: number };
+      expect(h.relay.answer(ask.id, 'example.com', false, false, picked)).toEqual({ ok: true });
+      await expect(asked).resolves.toMatchObject({ maxTabs: given });
+    }
   });
 
   it('screenshots go with an answer only when ticked', async () => {

@@ -25,6 +25,8 @@ import {
   ALLOWANCE_UNAVAILABLE,
   RemoteBrowserController,
   RelayBrowserProvider,
+  TabbedBrowserController,
+  MAX_RUN_TABS,
   GenericCdpProvider,
   SteelProvider,
   isHostedSteel,
@@ -37,6 +39,7 @@ import {
   type CascadeConfig,
   type RemoteBrowserProvider,
   type RelayHub,
+  type RunBrowserControl,
 } from '#cascade-ai';
 
 /**
@@ -336,10 +339,12 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
  * run, while this browser is one person's on one device and serves nobody else. Nothing
  * is allocated or billed, so there is no allowance to claim either.
  */
-function ownDeviceController(relay: RelayForRun, conversationId: string): { controller: RemoteBrowserController; focus(): boolean } {
+function ownDeviceController(relay: RelayForRun, conversationId: string): { controller: RunBrowserControl; focus(): boolean } {
   // One per attach: a conversation holds many runs, and each asks the device anew.
   const runId = `${conversationId}:${randomUUID()}`;
-  const controller = new RemoteBrowserController({
+  // A tab for each worker that browses, up to as many as the person allows on the
+  // device (MAX_RUN_TABS at most); an older device gives one, and the run shares it.
+  const controller = new TabbedBrowserController({
     provider: new RelayBrowserProvider({
       hub: relay.hub,
       agentUrl: (token) => relay.agentUrl(token),
@@ -348,10 +353,14 @@ function ownDeviceController(relay: RelayForRun, conversationId: string): { cont
       runId,
       chat: chatKey(relay.userId, conversationId),
     }),
-    maxSessions: 1,
-    onReleaseFailed: (id, sessionId, err) => {
-      console.error(`[browser ${id}] the device's tab ${sessionId} was not handed back; the device ends it when the run's connection closes:`, err);
-    },
+    maxTabs: MAX_RUN_TABS,
+    makeTab: (provider) => new RemoteBrowserController({
+      provider,
+      maxSessions: 1,
+      onReleaseFailed: (id, sessionId, err) => {
+        console.error(`[browser ${id}] the device's tab ${sessionId} was not handed back; the device ends it when the run's connection closes:`, err);
+      },
+    }),
   });
   return { controller, focus: () => relay.hub.focusRun(runId) };
 }
@@ -368,7 +377,7 @@ export function chatKey(userId: string, conversationId: string): string {
 /** Wires a run to its controller: who hears about the page, and what the person may do. */
 function attachRun(
   opts: AttachOptions,
-  controller: RemoteBrowserController,
+  controller: RunBrowserControl,
   device: (RelayForRun['device'] & { focus(): boolean }) | null,
   /** For a controller of the run's own: what ends it with the run. */
   dispose?: () => Promise<void>,

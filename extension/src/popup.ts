@@ -4,7 +4,7 @@
 interface Status {
   connection: 'unpaired' | 'connecting' | 'online' | 'offline' | 'refused';
   device?: { name: string; server: string };
-  run?: { runId: string; sites: string[]; takenOver?: boolean };
+  run?: { runId: string; sites: string[]; takenOver?: boolean; tabs?: number };
   pairing?: { userCode: string; verificationUri: string } | { error: string };
   notice?: string;
   keptAnswers?: number;
@@ -33,6 +33,7 @@ function render(s: Status): void {
   $('device').textContent = s.device ? `“${s.device.name}” on ${s.device.server}` : '';
   $('run').hidden = !s.run;
   $('run-sites').textContent = s.run?.sites.join(', ') ?? '';
+  $('run-tabs').textContent = (s.run?.tabs ?? 1) > 1 ? `, in ${s.run!.tabs} tabs` : '';
   const mine = s.run?.takenOver === true;
   $('take-over').hidden = mine;
   $('hand-back').hidden = !mine;
