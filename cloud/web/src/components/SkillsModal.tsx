@@ -48,6 +48,11 @@ export default function SkillsModal({ skills, onClose, onChange, activeSkillId, 
   /** The suggestion the open form came from, so saving it takes it off the list and cancelling goes back. */
   const [fromSuggestion, setFromSuggestion] = useState<number | null>(null);
   const canAi = !!socket && providers.length > 0;
+  /**
+   * The fields hold still while a model answer is on its way or a proposal is open:
+   * the answer replaces them, so an edit typed meanwhile would be lost.
+   */
+  const locked = thinking || !!proposal;
 
   // Closing while the model writes stops it.
   useEffect(() => () => { if (aiRunning.current && socket) cancelSkillAi(socket); }, [socket]);
@@ -221,24 +226,28 @@ export default function SkillsModal({ skills, onClose, onChange, activeSkillId, 
                 )}
               </div>
             )}
+            {locked && <p className="text-[11px] text-ink-500">{thinking ? 'The fields unlock when your model has written it.' : 'Use or discard the proposal to edit again.'}</p>}
             <input
-              className="cz-field text-[14px] placeholder:text-ink-500"
+              className="cz-field text-[14px] placeholder:text-ink-500 read-only:opacity-60"
               placeholder="Name (e.g. SQL Tutor)"
               value={draft.name}
               onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+              readOnly={locked}
               autoFocus={!canAi}
             />
             <input
-              className="cz-field text-[14px] placeholder:text-ink-500"
+              className="cz-field text-[14px] placeholder:text-ink-500 read-only:opacity-60"
               placeholder="Short description (optional)"
               value={draft.description}
               onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+              readOnly={locked}
             />
             <textarea
-              className="cz-field h-auto min-h-[120px] resize-y py-2.5 text-[14px] placeholder:text-ink-500"
+              className="cz-field h-auto min-h-[120px] resize-y py-2.5 text-[14px] placeholder:text-ink-500 read-only:opacity-60"
               placeholder="Instructions — the system prompt Cascade follows when this skill is active."
               value={draft.systemPrompt}
               onChange={(e) => setDraft({ ...draft, systemPrompt: e.target.value })}
+              readOnly={locked}
             />
             {error && <p className="text-xs text-danger-400">{error}</p>}
             <div className="flex justify-end gap-2">

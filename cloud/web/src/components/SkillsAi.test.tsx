@@ -168,6 +168,38 @@ describe('Skills with AI', () => {
       expect(screen.getByRole('alert')).toHaveTextContent(/connection dropped/);
     });
 
+    it('the fields hold still while the model writes, so nothing typed meanwhile is overwritten', async () => {
+      const socket = fakeSocket({ 'skills:draft': { draft: { name: 'Tutor', description: 'd', instructions: 'You tutor.' } } }, true);
+      render(<SkillsModal skills={[]} onClose={vi.fn()} onChange={vi.fn()} socket={socket} providers={PROVIDERS} />);
+      fireEvent.click(screen.getByRole('button', { name: /New skill/ }));
+      fireEvent.change(screen.getByLabelText(/Write it with AI/), { target: { value: 'a tutor' } });
+      fireEvent.click(screen.getByRole('button', { name: /Write it$/ }));
+      const name = screen.getByPlaceholderText(/^Name/);
+      const instructions = screen.getByPlaceholderText(/^Instructions/);
+      expect(name).toHaveAttribute('readonly');
+      expect(screen.getByPlaceholderText(/^Short description/)).toHaveAttribute('readonly');
+      expect(instructions).toHaveAttribute('readonly');
+      expect(screen.getByText(/unlock when your model has written it/)).toBeInTheDocument();
+      await act(async () => { socket.release(); });
+      expect(name).not.toHaveAttribute('readonly');
+      expect(instructions).toHaveValue('You tutor.');
+    });
+
+    it('while a proposal is open the fields hold still, and unlock on Use this or Discard', async () => {
+      const socket = fakeSocket({ 'skills:refine': {
+        draft: { name: 'SQL Tutor', description: 'Teaches SQL', instructions: 'stricter' },
+        before: { name: 'SQL Tutor', description: 'Teaches SQL', instructions: 'You teach SQL.' },
+      } });
+      render(<SkillsModal skills={[mine]} onClose={vi.fn()} onChange={vi.fn()} socket={socket} providers={PROVIDERS} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Edit skill' }));
+      fireEvent.change(screen.getByLabelText(/Improve with AI/), { target: { value: 'be stricter' } });
+      fireEvent.click(screen.getByRole('button', { name: /Improve$/ }));
+      await screen.findByRole('region', { name: 'Proposed' });
+      expect(screen.getByDisplayValue('You teach SQL.')).toHaveAttribute('readonly');
+      fireEvent.click(screen.getByRole('button', { name: /Discard/ }));
+      expect(screen.getByDisplayValue('You teach SQL.')).not.toHaveAttribute('readonly');
+    });
+
     it('adding one suggestion keeps the others: saving it, or cancelling, goes back to them', async () => {
       vi.mocked(api.fetchMemoryBuildChats).mockResolvedValue({ chats: [
         { id: 'c1', title: 'A', updatedAt: 2, turns: 1, worth: true },
