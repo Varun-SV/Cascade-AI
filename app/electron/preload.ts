@@ -176,7 +176,7 @@ contextBridge.exposeInMainWorld('cascade', {
     enable: () => ipcRenderer.invoke('relay:enable'),
     disable: () => ipcRenderer.invoke('relay:disable'),
     forget: () => ipcRenderer.invoke('relay:forget'),
-    answer: (id: number, sites: string, anyPublic?: boolean, screenshots?: boolean) => ipcRenderer.invoke('relay:answer', id, sites, anyPublic === true, screenshots === true),
+    answer: (id: number, sites: string, anyPublic?: boolean, screenshots?: boolean, maxTabs?: number) => ipcRenderer.invoke('relay:answer', id, sites, anyPublic === true, screenshots === true, typeof maxTabs === 'number' ? maxTabs : 1),
     takeOver: () => ipcRenderer.invoke('relay:take-over'),
     handBack: () => ipcRenderer.invoke('relay:hand-back'),
     onAsk: (cb: (a: { id: number; runId: string; expiresAt: number; sites?: string[] }) => void) => {

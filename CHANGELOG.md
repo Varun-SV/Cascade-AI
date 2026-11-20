@@ -5,6 +5,38 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.92.0 - 2026-11-20
+
+### Added
+- **Several tabs at once on your own browser.** When parts of a run browse at
+  the same time (checking prices across shops, reading several sources, filling
+  forms on different sites), each now gets a tab of its own instead of taking
+  turns in one. The run finishes in about the time of its slowest page, not the
+  sum of all of them.
+  - **You choose how many**, from one to eight, when you approve the run: four
+    unless you pick. The extension, the CLI and the desktop app all ask.
+  - **One question per run.** The run's later tabs come under the answer you
+    gave for its first. Tabs it asks for before you answer wait for your answer.
+  - **The same rules for every tab.** Each tab has its own lease, fence and
+    connection, exactly as the one tab had: the sites you allowed, the
+    private-network block, popups closed, screenshots only if you ticked them.
+  - **No more than two of a run's tabs on one site at once.** Many signed-in
+    sites take several sessions acting together for a bot. A part of the run
+    heading for a site that already has two takes its turn in one of them.
+  - **In the extension** the tabs share the run's window. Each is set up in a
+    window of its own and moved in only once its rules are on, so the run's
+    other tabs never mistake it for a popup. **Stop**, **Take over** and closing
+    the window act on every tab; the toolbar says how many the run has.
+  - **With the CLI and the desktop app** each tab is a fresh browser window of
+    its own.
+  - **Older extensions and apps** give a run one tab, as before. The run then
+    shares it, its parts taking turns, and the model is never told of it.
+  - In the chat, a run's steps say which tab they were in once it has more than
+    one.
+
+### Changed
+- Extension 0.4.0.
+
 ## 0.91.0 - 2026-11-19
 
 ### Added

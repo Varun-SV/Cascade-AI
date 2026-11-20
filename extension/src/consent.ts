@@ -47,9 +47,9 @@ async function main(): Promise<void> {
   $('form').addEventListener('submit', (e) => {
     e.preventDefault();
     if (!sites.value.trim() && !anyPublic.checked) { showError('Type at least one site, tick "Any public site", or press Say no.'); return; }
-    void answer({ sites: sites.value, anyPublic: anyPublic.checked, incognito: incognito.checked, remember: $<HTMLInputElement>('remember').checked, screenshots: $<HTMLInputElement>('screenshots').checked });
+    void answer({ sites: sites.value, anyPublic: anyPublic.checked, incognito: incognito.checked, remember: $<HTMLInputElement>('remember').checked, screenshots: $<HTMLInputElement>('screenshots').checked, maxTabs: Number($<HTMLSelectElement>('tabs').value) });
   });
-  $('decline').addEventListener('click', () => { void answer({ sites: '', anyPublic: false, incognito: true, remember: false, screenshots: false }); });
+  $('decline').addEventListener('click', () => { void answer({ sites: '', anyPublic: false, incognito: true, remember: false, screenshots: false, maxTabs: 1 }); });
 }
 
 /**
@@ -61,7 +61,7 @@ async function openIncognitoSetting(): Promise<void> {
 }
 
 /** Closes only once the extension says it has the answer: a lost reply is not a yes. */
-async function answer(form: { sites: string; anyPublic: boolean; incognito: boolean; remember: boolean; screenshots: boolean }): Promise<void> {
+async function answer(form: { sites: string; anyPublic: boolean; incognito: boolean; remember: boolean; screenshots: boolean; maxTabs: number }): Promise<void> {
   const r = await send<{ ok?: boolean; error?: string } | undefined>({ type: 'consent:answer', ask, ...form }).catch(() => undefined);
   if (r?.ok) { window.close(); return; }
   showError(r?.error ?? 'Cascade did not get your answer. Try again.');

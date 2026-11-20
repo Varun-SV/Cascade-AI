@@ -24,7 +24,7 @@ import chalk from 'chalk';
 import { CloudClient, type RelayServerInfo } from '../../cloud/client.js';
 import { globalDir } from '../../cloud/session-store.js';
 import { generateStoredKey, identityFromPrivateKey, publicKeyFromText } from '../../browser/relay/capability.js';
-import { connectDeviceClient, type DeviceClient, type DeviceClientOptions, type UserConsent } from '../../browser/relay/device.js';
+import { DEFAULT_RUN_TABS, MAX_RUN_TABS, connectDeviceClient, tabsAllowed, type DeviceClient, type DeviceClientOptions, type UserConsent } from '../../browser/relay/device.js';
 
 export { parseSites };
 export { relayEndpoints, serveDevice, type ServeOptions } from '../../browser/relay/serve.js';
@@ -164,7 +164,16 @@ export function terminalAsk(onInterrupt: () => void, io: TerminalIo = { input: p
         rl.question('  Let Cascade take screenshots of these sites for your report? Password, card and code fields are blurred. [y/N] ', (text) => {
           const yes = /^\s*y(es)?\s*$/i.test(text);
           if (yes) console.log(chalk.green('  Screenshots allowed for this run.'));
-          resolve(yes ? { ...consent, screenshots: true } : consent);
+          askTabs(yes ? { ...consent, screenshots: true } : consent);
+        });
+      };
+      // Parts of the run can browse side by side, each in a browser of its own.
+      const askTabs = (consent: UserConsent): void => {
+        rl.question(`  Browsers at once, for parts of the run working side by side (1-${MAX_RUN_TABS}; each uses some memory) [${DEFAULT_RUN_TABS}] `, (text) => {
+          const n = text.trim() ? Number.parseInt(text, 10) : DEFAULT_RUN_TABS;
+          const maxTabs = tabsAllowed({ maxTabs: Number.isFinite(n) ? n : 1 });
+          console.log(chalk.green(`  Up to ${maxTabs} at once.`));
+          resolve({ ...consent, maxTabs });
           rl.close();
         });
       };

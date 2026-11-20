@@ -11,11 +11,11 @@ function memoryStore(): AnswerStore {
 
 describe("the consent window's answer", () => {
   it('named sites, as before', () => {
-    expect(consentFromForm({ sites: 'github.com docs.github.com', anyPublic: false })).toEqual({ consent: { allowedOrigins: ['https://github.com', 'https://docs.github.com'], privateOrigins: [] } });
+    expect(consentFromForm({ sites: 'github.com docs.github.com', anyPublic: false })).toEqual({ consent: { allowedOrigins: ['https://github.com', 'https://docs.github.com'], privateOrigins: [], maxTabs: 4 } });
   });
 
   it('any public site, with or without sites typed too', () => {
-    expect(consentFromForm({ sites: '', anyPublic: true })).toEqual({ consent: { allowedOrigins: [], privateOrigins: [], anyPublic: true } });
+    expect(consentFromForm({ sites: '', anyPublic: true })).toEqual({ consent: { allowedOrigins: [], privateOrigins: [], anyPublic: true, maxTabs: 4 } });
     expect(consentFromForm({ sites: 'github.com', anyPublic: true })).toMatchObject({ consent: { allowedOrigins: ['https://github.com'], anyPublic: true } });
   });
 
@@ -23,6 +23,13 @@ describe("the consent window's answer", () => {
     expect(consentFromForm({ sites: 'github.com', anyPublic: false, screenshots: true })).toMatchObject({ consent: { screenshots: true } });
     expect(consentFromForm({ sites: 'github.com', anyPublic: false })).not.toHaveProperty('consent.screenshots');
     expect(consentFromForm({ sites: '', anyPublic: false, screenshots: true })).toBeNull();
+  });
+
+  it('tabs at once: four unless picked, one to eight', () => {
+    expect(consentFromForm({ sites: 'github.com', anyPublic: false, maxTabs: 2 })).toMatchObject({ consent: { maxTabs: 2 } });
+    expect(consentFromForm({ sites: 'github.com', anyPublic: false, maxTabs: 40 })).toMatchObject({ consent: { maxTabs: 8 } });
+    expect(consentFromForm({ sites: 'github.com', anyPublic: false, maxTabs: 0 })).toMatchObject({ consent: { maxTabs: 1 } });
+    expect(consentFromForm({ sites: '', anyPublic: false, maxTabs: 4 })).toBeNull();
   });
 
   it('nothing at all is a no; a private site or a bad one is asked again, any public site or not', () => {
@@ -50,6 +57,14 @@ describe('answers kept for a chat', () => {
     await keepAnswer(store, 'a|1', { ...form, screenshots: true }, 0);
     expect(await recallAnswer(store, 'a|1', 1)).toMatchObject({ screenshots: true });
     expect(consentFromForm((await recallAnswer(store, 'a|1', 1))!)).toMatchObject({ consent: { screenshots: true } });
+  });
+
+  it('keep the tab choice; one kept before it was asked gives one tab', async () => {
+    const store = memoryStore();
+    await keepAnswer(store, 'a|1', { ...form, maxTabs: 3 }, 0);
+    expect(await recallAnswer(store, 'a|1', 1)).toMatchObject({ maxTabs: 3 });
+    await store.set({ keptAnswers: { 'a|2': { sites: 'github.com', anyPublic: false, incognito: true, screenshots: false, until: 100 } } });
+    expect(await recallAnswer(store, 'a|2', 1)).not.toHaveProperty('maxTabs');
   });
 
   it('are counted, and forgotten all at once', async () => {

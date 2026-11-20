@@ -151,3 +151,111 @@ describe('a request withdrawn while the user is still being asked (Codex on 3d07
     expect(started).toBe(0);
   });
 });
+
+describe('several tabs for one run', () => {
+  /** A server that offers on demand, accepts every claim, and records what the device declined. */
+  async function tabServer() {
+    const server = createIdentity('server');
+    const device = createIdentity('device-a');
+    const httpServer = http.createServer();
+    const wss = new WebSocketServer({ server: httpServer });
+    let control!: WebSocket;
+    const declined: string[] = [];
+    const runSockets: WebSocket[] = [];
+    wss.on('connection', (ws: WebSocket, req) => {
+      if (req.url === '/run') {
+        runSockets.push(ws);
+        ws.once('message', () => ws.send(JSON.stringify({ v: 1, t: 'claimed' })));
+        return;
+      }
+      void authenticateControl(ws, { serverId: server.id, device: (id) => (id === device.id ? { userId: 'user-a', key: device.publicKey } : null) }).then((who) => {
+        if (!who) return;
+        control = ws;
+        ws.on('message', (raw) => { const f = JSON.parse(String(raw)) as { t: string; reason?: string }; if (f.t === 'decline') declined.push(f.reason ?? ''); });
+      });
+    });
+    await new Promise<void>((r) => httpServer.listen(0, '127.0.0.1', r));
+    const base = `ws://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
+    closers.push(() => { httpServer.closeAllConnections(); httpServer.close(); });
+    const offer = (runId: string) => {
+      const grant = issueGrant(server, { userId: 'user-a', deviceId: device.id, runId, ttlMs: 600_000, now: Date.now() });
+      control.send(JSON.stringify({ v: 1, t: 'offer', grant }));
+    };
+    return { server, device, base, offer, declined, runSockets };
+  }
+
+  async function deviceFor(s: Awaited<ReturnType<typeof tabServer>>, answer: () => Promise<UserConsent | null>) {
+    let asked = 0;
+    let started = 0;
+    const client = connectDeviceClient({
+      controlUrl: `${s.base}/control`, runUrl: `${s.base}/run`,
+      device: s.device, serverId: s.server.id, serverKey: s.server.publicKey,
+      askUser: () => { asked += 1; return answer(); },
+      startBrowser: async () => {
+        started += 1;
+        return { tabWs: await fakeTab(), tabTargetId: `tab-${started}`, enforcer, pageEnd: 'close', onEgressDown: () => {}, close: async () => {} };
+      },
+    });
+    closers.push(() => client.close());
+    await client.ready;
+    return { client, asked: () => asked, started: () => started };
+  }
+
+  it('the run\'s later tabs are served under its one answer, up to the number allowed', async () => {
+    const s = await tabServer();
+    const d = await deviceFor(s, async () => ({ allowedOrigins: ['https://a.test'], privateOrigins: [], maxTabs: 2 }));
+    s.offer('run-1');
+    await vi.waitFor(() => expect(d.client.leases()).toHaveLength(1));
+    s.offer('run-1');
+    await vi.waitFor(() => expect(d.client.leases()).toHaveLength(2));
+    s.offer('run-1');
+    await vi.waitFor(() => expect(s.declined).toContain('the run has all the tabs it was allowed'));
+    expect(d.asked()).toBe(1);
+    expect(d.client.leases()).toHaveLength(2);
+    // Another run is still turned away while this one is served.
+    s.offer('run-2');
+    await vi.waitFor(() => expect(s.declined).toContain('the browser is already in use'));
+  });
+
+  it('tabs asked for before the person answers wait for that answer, and are not asked themselves', async () => {
+    const s = await tabServer();
+    let answer!: (c: UserConsent | null) => void;
+    const d = await deviceFor(s, () => new Promise((r) => { answer = r; }));
+    s.offer('run-1');
+    await vi.waitFor(() => expect(d.asked()).toBe(1));
+    s.offer('run-1');
+    s.offer('run-1');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(s.declined).toEqual([]);
+    answer({ allowedOrigins: ['https://a.test'], privateOrigins: [], maxTabs: 4 });
+    await vi.waitFor(() => expect(d.client.leases()).toHaveLength(3));
+    expect(d.asked()).toBe(1);
+  });
+
+  it('an answer that says nothing of tabs gives one, as before', async () => {
+    const s = await tabServer();
+    const d = await deviceFor(s, async () => ({ allowedOrigins: ['https://a.test'], privateOrigins: [] }));
+    s.offer('run-1');
+    await vi.waitFor(() => expect(d.client.leases()).toHaveLength(1));
+    s.offer('run-1');
+    await vi.waitFor(() => expect(s.declined).toContain('the run has all the tabs it was allowed'));
+  });
+
+  it('after the person\'s Stop, no tab of the run comes back without asking', async () => {
+    const s = await tabServer();
+    const d = await deviceFor(s, async () => ({ allowedOrigins: ['https://a.test'], privateOrigins: [], maxTabs: 4 }));
+    s.offer('run-1');
+    s.offer('run-1');
+    await vi.waitFor(() => expect(d.client.leases()).toHaveLength(2));
+    d.client.revoke('the user pressed Stop');
+    s.offer('run-1');
+    // Refused while its tabs are still ending, or asked again once they're gone: never
+    // served on the answer the person stopped.
+    await vi.waitFor(() => expect(s.declined.includes('the run was stopped on this device') || d.asked() === 2).toBe(true), { timeout: 10_000 });
+    if (d.asked() === 1) {
+      await vi.waitFor(() => expect(d.client.leases()).toHaveLength(0), { timeout: 10_000 });
+      s.offer('run-1');
+    }
+    await vi.waitFor(() => expect(d.asked()).toBe(2));
+  });
+});

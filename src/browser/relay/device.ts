@@ -45,6 +45,23 @@ export interface UserConsent {
    * blurred in each picture (see relay.ts).
    */
   screenshots?: boolean;
+  /**
+   * How many tabs the run may have at once, each its own lease (MAX_RUN_TABS at
+   * most). The first is asked for; the run's later ones are given under this same
+   * answer without asking again. One when the asker doesn't say.
+   */
+  maxTabs?: number;
+}
+
+/** The most tabs one run may have at once on a device, whatever is asked. */
+export const MAX_RUN_TABS = 8;
+/** What the question offers unless the person picks otherwise. */
+export const DEFAULT_RUN_TABS = 4;
+
+/** The tab limit an answer gives, within 1..MAX_RUN_TABS. */
+export function tabsAllowed(answer: Pick<UserConsent, 'maxTabs'>): number {
+  const n = Math.floor(Number(answer.maxTabs ?? 1));
+  return Number.isFinite(n) ? Math.min(MAX_RUN_TABS, Math.max(1, n)) : 1;
 }
 
 /**
@@ -110,10 +127,12 @@ export interface DeviceClientOptions {
 export interface DeviceClient {
   /** Resolves once the server has accepted this device's proof of its key. */
   ready: Promise<void>;
-  /** The lease being served now, if any. */
+  /** The run's first lease being served now, if any. */
   lease(): TabLease | null;
   relay(): DeviceRelay | null;
-  /** The user's Stop: ends the lease, on the device. */
+  /** Every lease being served now: one per tab of the run. */
+  leases(): TabLease[];
+  /** The user's Stop: ends every lease, on the device. */
   revoke(reason: string): void;
   /** Logout, quitting, the user turning the source off: ends everything and disconnects. */
   close(): Promise<void>;
@@ -143,7 +162,14 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
   const approvals = createDeviceApprovals({ device: opts.device, serverId: opts.serverId, serverKey: opts.serverKey, now });
   const control = new WebSocket(opts.controlUrl, { perMessageDeflate: false });
   interface Active { nonce: string; lease: TabLease; relay: DeviceRelay | null; cancelled: boolean; withdrawn: AbortController }
-  let active: Active | null = null;
+  /** One per tab of the run being served. All the same run's. */
+  const actives: Active[] = [];
+  /**
+   * The run being served, and the answer the person gave for it. A later tab of
+   * this run is served under it without asking again, up to its tab limit; any
+   * other run is refused while one is served. Forgotten once its last tab ends.
+   */
+  let serving: { userId: string; runId: string; answer: Promise<UserConsent | null>; stopped: boolean } | null = null;
   /** Ends whatever this offer has got to: the question, the browser starting, or the lease. */
   const withdraw = (a: Active, reason: string): void => {
     a.cancelled = true;
@@ -220,8 +246,13 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
     // this device, and in date, never reaches them.
     const g = verifyGrant(grant, opts.serverKey, { serverId: opts.serverId, deviceId: opts.device.id }, now());
     if (!g.ok) { decline(nonce, g.reason); return; }
-    // One tab, one lease. Refused without asking the user, and without touching the grant.
-    if (active) { decline(nonce, 'the browser is already in use'); return; }
+    // One run at a time. Another tab of the run being served is given under the answer
+    // already given, while the run has fewer than the person allowed; anything else is
+    // refused without asking the user, and without touching the grant.
+    const sameRun = serving !== null && serving.userId === grant.payload.userId && serving.runId === grant.payload.runId;
+    if (serving && !sameRun) { decline(nonce, 'the browser is already in use'); return; }
+    // Stopped by the person: no tab of this run comes back without a new question.
+    if (sameRun && serving!.stopped) { decline(nonce, 'the run was stopped on this device'); return; }
     const mine: Active = { nonce, lease: createTabLease(), relay: null, cancelled: false, withdrawn: new AbortController() };
     // Settles as soon as the offer is withdrawn, so nothing waits on a question nobody needs answered.
     const unlessWithdrawn = <T>(p: Promise<T>): Promise<T | null> => Promise.race([
@@ -231,15 +262,24 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
         else mine.withdrawn.signal.addEventListener('abort', () => resolve(null), { once: true });
       }),
     ]);
-    active = mine;
-    let browser: LeasedBrowser | null = null;
-    try {
-      const answer = await unlessWithdrawn(opts.askUser({
+    actives.push(mine);
+    // The run's first tab asks; a later one waits for that same answer (its workers
+    // start together, before the person has answered) and is never asked itself.
+    const run = sameRun ? serving! : (serving = {
+      userId: grant.payload.userId, runId: grant.payload.runId, stopped: false,
+      answer: opts.askUser({
         userId: grant.payload.userId, runId: grant.payload.runId, expiresAt: grant.payload.exp, signal: mine.withdrawn.signal,
         ...(hint ? { hint } : {}),
-      }));
+      }).catch(() => null),
+    });
+    let browser: LeasedBrowser | null = null;
+    try {
+      const answer = await unlessWithdrawn(run.answer);
       if (mine.cancelled) return;
-      if (!answer) { decline(nonce, 'the user said no'); return; }
+      if (!answer || run.stopped) { decline(nonce, run.stopped ? 'the run was stopped on this device' : 'the user said no'); return; }
+      // Counted once the answer is in: the tabs this run has, this one among them.
+      // In the order they were asked for, so of several waiting the first ones are served.
+      if (actives.indexOf(mine) >= tabsAllowed(answer)) { decline(nonce, 'the run has all the tabs it was allowed'); return; }
       const consent = makeConsent(answer.allowedOrigins, answer.privateOrigins, { anyPublic: answer.anyPublic === true, screenshots: answer.screenshots === true });
       browser = await opts.startBrowser(consent);
       if (mine.cancelled) return;
@@ -261,7 +301,7 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
         if (claim.outcome === 'leased') mine.lease.revoke('no run connection');
         return;
       }
-      const run: ClaimedSocket = claimed;
+      const socket: ClaimedSocket = claimed;
       if (mine.cancelled) { mine.lease.revoke('the request was withdrawn'); }
       const lease = mine.lease;
       browser.onEgressDown(() => lease.revoke('egress-proxy-down'));
@@ -271,8 +311,8 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
       });
       // The relay starts listening before its first await, so nothing arrives between
       // that and the hand-over on the next line.
-      const served = mine.relay.serve(run.socket);
-      run.release();
+      const served = mine.relay.serve(socket.socket);
+      socket.release();
       // Resolves when the lease is over, page step included.
       await served;
       log(`lease over: ${mine.relay.refusals.filter((r) => r.startsWith('lease ended')).join('; ')}`);
@@ -283,7 +323,10 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
     } finally {
       // The policy and the browser are this lease's alone. They go with it.
       await browser?.close().catch(() => {});
-      if (active === mine) active = null;
+      const at = actives.indexOf(mine);
+      if (at >= 0) actives.splice(at, 1);
+      // The run's last tab: its answer goes with it. A later offer asks again.
+      if (!actives.length && serving === run) serving = null;
     }
   };
 
@@ -307,15 +350,15 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
     // Nothing is acted on before the server has accepted this device.
     if (!authenticated) return;
     if (f.t === 'offer' && f.grant) void onOffer(f.grant, readRunHint((f as { hint?: unknown }).hint));
-    else if (f.t === 'focus' && active?.relay) opts.onFocus?.();
-    else if (f.t === 'cancel' && active && active.nonce === f.nonce) withdraw(active, 'the request was withdrawn');
+    else if (f.t === 'focus' && actives.some((a) => a.relay)) opts.onFocus?.();
+    else if (f.t === 'cancel') { const a = actives.find((x) => x.nonce === f!.nonce); if (a) withdraw(a, 'the request was withdrawn'); }
   });
   let keepalive: ReturnType<typeof setInterval> | undefined;
   const gone = (why: string): void => {
     clearInterval(keepalive);
     notWelcomed(new Error(why));
-    // A network drop: the lease ends here, without waiting to be told.
-    if (active) withdraw(active, why);
+    // A network drop: every lease ends here, without waiting to be told.
+    for (const a of [...actives]) withdraw(a, why);
     finished(why);
   };
   let rejectedByServer = false;
@@ -332,12 +375,16 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
     ready, closed,
     rejected: () => rejectedByServer,
     restarting: () => serverRestarting,
-    lease: () => active?.lease ?? null,
-    relay: () => active?.relay ?? null,
-    revoke(reason) { if (active) withdraw(active, reason); },
+    lease: () => actives[0]?.lease ?? null,
+    relay: () => actives[0]?.relay ?? null,
+    leases: () => actives.map((a) => a.lease),
+    revoke(reason) {
+      if (serving) serving.stopped = true;
+      for (const a of [...actives]) withdraw(a, reason);
+    },
     async close() {
       closing = true;
-      if (active) withdraw(active, 'the device signed out');
+      for (const a of [...actives]) withdraw(a, 'the device signed out');
       try { control.close(); } catch { /* already closing */ }
       await closed;
     },

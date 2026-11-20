@@ -146,7 +146,7 @@ declare global {
         enable(): Promise<RelayStatus | { error: string }>;
         disable(): Promise<RelayStatus | { error: string }>;
         forget(): Promise<RelayStatus | { error: string }>;
-        answer(id: number, sites: string, anyPublic?: boolean, screenshots?: boolean): Promise<{ ok: true } | { error: string }>;
+        answer(id: number, sites: string, anyPublic?: boolean, screenshots?: boolean, maxTabs?: number): Promise<{ ok: true } | { error: string }>;
         takeOver(): Promise<{ ok: true } | { error: string }>;
         handBack(): Promise<{ ok: true } | { error: string }>;
         onAsk(cb: (a: { id: number; runId: string; expiresAt: number; sites?: string[] }) => void): void;

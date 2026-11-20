@@ -30,6 +30,13 @@
         </div>
       </fieldset>
 
+      <label for="tabs">Tabs at once</label>
+      <select id="tabs" aria-describedby="tabs-help">
+        <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+        <option value="4" selected>4</option><option value="5">5</option><option value="6">6</option>
+        <option value="7">7</option><option value="8">8</option>
+      </select>
+      <p id="tabs-help" class="muted">Parts of the run work side by side, each in its own tab of the run's window. Each tab uses some of your computer's memory, and no more than two are on one site at once.</p>
       <label class="check"><input type="checkbox" id="screenshots"> Let Cascade take screenshots of these sites for your report <span class="muted">(password, card and code fields are blurred)</span></label>
       <label class="check" id="remember-row" hidden><input type="checkbox" id="remember"> Use this answer for this chat's next runs <span class="muted">(until Chrome closes, 8 hours at most)</span></label>
       <p id="error" class="error" role="alert" hidden></p>

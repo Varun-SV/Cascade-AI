@@ -20,7 +20,7 @@ import { RUN_RULE_IDS_FROM, openRunTab, releaseWebRtcAfterRestart } from './tab-
 // ── State ────────────────────────────────────
 
 type Connection = 'unpaired' | 'connecting' | 'online' | 'offline' | 'refused';
-interface RunInfo { runId: string; sites: string[]; windowId?: number; takenOver?: boolean }
+interface RunInfo { runId: string; sites: string[]; windowId?: number; takenOver?: boolean; /** How many tabs it has open now. */ tabs?: number }
 interface Status {
   connection: Connection; device?: { name: string; server: string }; run?: RunInfo;
   pairing?: { userCode: string; verificationUri: string } | { error: string }; notice?: string;
@@ -68,6 +68,11 @@ function retryIn(ms: number): void {
 let nextRuleId = RUN_RULE_IDS_FROM;
 /** The run the user approved last: the next browser started is its, in the window they chose. */
 let approvedRun = '';
+/**
+ * The window of the run being served, once its first tab has one. Its later tabs,
+ * which the device starts together once the person answers, wait for it and join.
+ */
+let runWindow: { runId: string; ready: Promise<number | undefined> } | null = null;
 let approvedIncognito = true;
 
 const answers: AnswerStore = {
@@ -130,13 +135,14 @@ async function askUser(run: { runId: string; expiresAt: number; signal: AbortSig
   const server = status.device?.server;
   if (run.hint?.chat && server) {
     const kept = await recallAnswer(answers, keptKey(server, run.hint.chat), Date.now()).catch(() => null);
-    const read = kept ? consentFromForm(kept) : null;
+    // An answer kept before the question asked about tabs gave one.
+    const read = kept ? consentFromForm({ ...kept, maxTabs: kept.maxTabs ?? 1 }) : null;
     if (kept && read && 'consent' in read && (!kept.incognito || await chrome.extension.isAllowedIncognitoAccess())) {
       approvedRun = run.runId;
       approvedIncognito = kept.incognito;
       void chrome.notifications?.create({
         type: 'basic', iconUrl: 'icon-128.png', title: 'Cascade is using this browser',
-        message: `A run from a chat you allowed is using ${kept.anyPublic ? 'any public site' : kept.sites} in a ${kept.incognito ? 'private' : 'new'} window${kept.screenshots ? ', with screenshots for its report' : ''}. Stop it from the Cascade button.`,
+        message: `A run from a chat you allowed is using ${kept.anyPublic ? 'any public site' : kept.sites} in a ${kept.incognito ? 'private' : 'new'} window${(kept.maxTabs ?? 1) > 1 ? `, up to ${kept.maxTabs} tabs at once` : ''}${kept.screenshots ? ', with screenshots for its report' : ''}. Stop it from the Cascade button.`,
       }).catch(() => {});
       return read.consent;
     }
@@ -203,24 +209,54 @@ async function connect(): Promise<void> {
       keepaliveMs: KEEPALIVE_MS,
       askUser,
       startBrowser: async (consent) => {
-        const leased = await openRunTab({
-          consent, firstRuleId: (nextRuleId += 100), incognito: approvedIncognito,
-          onStop: (reason) => {
-            c.revoke(reason);
-            status.notice = reason;
-            publish();
-            void chrome.notifications?.create({ type: 'basic', iconUrl: 'icon-128.png', title: 'Cascade run stopped', message: reason }).catch(() => {});
-          },
-        });
-        await rememberWindow(leased.windowId, true);
-        status.run = { runId: approvedRun, sites: consent.anyPublic ? ['any public site', ...consent.origins] : [...consent.origins], windowId: leased.windowId };
+        // The run's later tabs join its window. The device serves one run at a time, so
+        // a run shown here is the one this tab is for.
+        const runId = approvedRun;
+        let first: ((windowId: number | undefined) => void) | undefined;
+        const joinWindow = runWindow?.runId === runId ? await runWindow.ready : undefined;
+        if (joinWindow === undefined) {
+          const ready = new Promise<number | undefined>((r) => { first = r; });
+          runWindow = { runId, ready };
+        }
+        let leased: Awaited<ReturnType<typeof openRunTab>>;
+        try {
+          leased = await openRunTab({
+            consent, firstRuleId: (nextRuleId += 100), incognito: approvedIncognito,
+            ...(joinWindow !== undefined ? { joinWindow } : {}),
+            onStop: (reason) => {
+              c.revoke(reason);
+              status.notice = reason;
+              publish();
+              void chrome.notifications?.create({ type: 'basic', iconUrl: 'icon-128.png', title: 'Cascade run stopped', message: reason }).catch(() => {});
+            },
+          });
+        } catch (e) {
+          // No window came of it: a later tab opens one of its own.
+          if (first) { first(undefined); if (runWindow?.runId === runId) runWindow = null; }
+          throw e;
+        }
+        if (joinWindow !== undefined && status.run?.windowId === joinWindow) {
+          status.run.tabs = (status.run.tabs ?? 1) + 1;
+        } else {
+          // Shown before anything else is awaited, so a later tab that joins finds it.
+          status.run = { runId, sites: consent.anyPublic ? ['any public site', ...consent.origins] : [...consent.origins], windowId: leased.windowId, tabs: 1 };
+          first?.(leased.windowId);
+          await rememberWindow(leased.windowId, true);
+        }
         publish();
         return {
           ...leased,
           async close() {
             await leased.close();
-            await rememberWindow(leased.windowId, false);
-            if (status.run?.windowId === leased.windowId) delete status.run;
+            if (status.run?.windowId === leased.windowId) {
+              status.run.tabs = (status.run.tabs ?? 1) - 1;
+              // The run's last tab: its window has gone with it.
+              if (status.run.tabs <= 0) {
+                await rememberWindow(leased.windowId, false);
+                delete status.run;
+                if (runWindow?.runId === runId) runWindow = null;
+              }
+            }
             publish();
           },
         };
@@ -306,7 +342,7 @@ async function handle(msg: Message): Promise<unknown> {
     case 'consent:answer': {
       const a = asks.get(msg.ask);
       if (!a) return { error: 'This request is over.' };
-      const form: ConsentForm = { sites: String(msg.sites ?? ''), anyPublic: msg.anyPublic === true, incognito: msg.incognito !== false, remember: msg.remember === true, screenshots: msg.screenshots === true };
+      const form: ConsentForm = { sites: String(msg.sites ?? ''), anyPublic: msg.anyPublic === true, incognito: msg.incognito !== false, remember: msg.remember === true, screenshots: msg.screenshots === true, maxTabs: Number(msg.maxTabs) || 1 };
       const read = consentFromForm(form);
       if (!read) { a.resolve(null); return { ok: true }; }
       if ('error' in read) return read;
@@ -363,18 +399,19 @@ async function handle(msg: Message): Promise<unknown> {
       // The lease's fence closes before this returns: from here the agent's commands
       // are refused and nothing the page does is passed on, until the user hands back.
       // The relay brings the agent up to date with what changed when they do.
-      const lease = client?.lease();
-      if (!lease || lease.state() !== 'held' || !status.run) return { error: 'No run is using this browser.' };
-      lease.suspend();
+      // Every tab of the run: the person has the whole window.
+      const held = client?.leases().filter((l) => l.state() === 'held') ?? [];
+      if (!held.length || !status.run) return { error: 'No run is using this browser.' };
+      for (const lease of held) lease.suspend();
       status.run.takenOver = true;
       publish();
       if (status.run.windowId !== undefined) void chrome.windows.update(status.run.windowId, { focused: true }).catch(() => {});
       return { ok: true };
     }
     case 'hand-back': {
-      const lease = client?.lease();
-      if (!lease || lease.state() !== 'suspended' || !status.run) return { error: 'The run is not paused for you.' };
-      lease.handBack();
+      const paused = client?.leases().filter((l) => l.state() === 'suspended') ?? [];
+      if (!paused.length || !status.run) return { error: 'The run is not paused for you.' };
+      for (const lease of paused) lease.handBack();
       status.run.takenOver = false;
       publish();
       return { ok: true };
