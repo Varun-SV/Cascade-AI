@@ -72,6 +72,19 @@ describe('escalation gate', () => {
     expect(seen).not.toHaveBeenCalled();
   });
 
+  it('tells the host where the section sits in the plan, when it knows', async () => {
+    const c = new Cascade(config, '/tmp');
+    const seen: Array<{ position?: unknown; requestId: string }> = [];
+    c.on('escalation:decision-required', (e: { position?: unknown; requestId: string }) => {
+      seen.push(e);
+      setTimeout(() => c.resolveEscalation('skip', undefined, e.requestId), 0);
+    });
+    await gateOf(c)({ ...ctx('a'), position: { index: 2, of: 4 } } as never, 'task-1');
+    await gateOf(c)(ctx('b'), 'task-1');
+    expect(seen[0]!.position).toEqual({ index: 2, of: 4 });
+    expect(seen[1]).not.toHaveProperty('position');
+  });
+
   it('delivers the answer the user actually gave', async () => {
     const c = new Cascade(config, '/tmp');
     c.on('escalation:decision-required', (e: { requestId: string }) => {
