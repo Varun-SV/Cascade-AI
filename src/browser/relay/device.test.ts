@@ -241,6 +241,22 @@ describe('several tabs for one run', () => {
     await vi.waitFor(() => expect(s.declined).toContain('the run has all the tabs it was allowed'));
   });
 
+  it('a tab the run opens while the person has it is theirs too, until they hand back (Codex on fb05b5d)', async () => {
+    const s = await tabServer();
+    const d = await deviceFor(s, async () => ({ allowedOrigins: ['https://a.test'], privateOrigins: [], maxTabs: 4 }));
+    s.offer('run-1');
+    await vi.waitFor(() => expect(d.client.leases()).toHaveLength(1));
+    expect(d.client.takeOver()).toBe(true);
+    expect(d.client.takenOver()).toBe(true);
+    expect(d.client.leases()[0]!.state()).toBe('suspended');
+    s.offer('run-1');
+    await vi.waitFor(() => expect(d.client.leases()).toHaveLength(2));
+    await vi.waitFor(() => expect(d.client.leases()[1]!.state()).toBe('suspended'));
+    expect(d.client.handBack()).toBe(true);
+    expect(d.client.leases().map((l) => l.state())).toEqual(['held', 'held']);
+    expect(d.client.handBack()).toBe(false);
+  });
+
   it('after the person\'s Stop, no tab of the run comes back without asking', async () => {
     const s = await tabServer();
     const d = await deviceFor(s, async () => ({ allowedOrigins: ['https://a.test'], privateOrigins: [], maxTabs: 4 }));

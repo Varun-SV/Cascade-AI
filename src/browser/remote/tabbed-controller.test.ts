@@ -141,6 +141,33 @@ describe('TabbedBrowserController', () => {
     expect(ctl.tabCount()).toBe(3);
   });
 
+  it('workers heading for one site together open no more than two tabs there (Codex on fb05b5d)', async () => {
+    const { ctl, tabs, act } = setup(8);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    // Every tab's first action waits, so none has reported its page yet.
+    const go4 = ['w1', 'w2', 'w3', 'w4'].map((w) => {
+      const p = act(w, go('https://example.com/' + w));
+      for (const t of tabs) t.gate = held;
+      return p;
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(ctl.tabCount()).toBe(2);
+    release();
+    await Promise.all(go4);
+    expect(ctl.tabCount()).toBe(2);
+  });
+
+  it('after Stop, no action runs and no new tab is opened for the run (Codex on fb05b5d)', async () => {
+    const { ctl, act, tabs } = setup(8);
+    await act('w1', go('https://a.com'));
+    ctl.stopRun('run-1');
+    const out = await act('w2', go('https://b.com'));
+    expect(out).toEqual({ ok: false, detail: 'The user stopped browser control for this run.' });
+    expect(ctl.tabCount()).toBe(1);
+    expect(tabs).toHaveLength(1);
+  });
+
   it('moving a worker to another tab ends its hold on the old one', async () => {
     const { tabs, act } = setup(8);
     await act('w1', go('https://a.com'));

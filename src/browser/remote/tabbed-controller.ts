@@ -67,6 +67,8 @@ interface Tab {
   actors: Set<string>;
   /** The site its page is on, as last reported. */
   site?: string;
+  /** The site a navigation under way in it is heading for: counted before it lands. */
+  heading?: string;
   /** Whether its browser is open, as its live view last said. */
   active: boolean;
 }
@@ -102,6 +104,8 @@ export class TabbedBrowserController implements RunBrowserControl {
   private readonly allowances = new Map<string, Parameters<RemoteBrowserController['setAllowanceFor']>[1]>();
   /** What each run's host was last told about its live view, so a tab closing doesn't say the browser did. */
   private readonly liveShown = new Map<string, boolean>();
+  /** Runs the person stopped: no action runs, and no tab opens, for them again. */
+  private readonly stopped = new Set<string>();
 
   constructor(private readonly opts: TabbedControllerOptions) {
     this.maxTabs = Math.max(1, Math.floor(opts.maxTabs));
@@ -147,6 +151,8 @@ export class TabbedBrowserController implements RunBrowserControl {
     for (const [key, l] of this.lives) this.wireLive(tab, key, l);
     for (const [key, l] of this.busies) tab.ctl.onBusyFor(key, l);
     for (const [key, a] of this.allowances) tab.ctl.setAllowanceFor(key, a);
+    // A tab made after a Stop is stopped too, though nothing should ask for one.
+    for (const runId of this.stopped) tab.ctl.stopRun(runId);
     return tab;
   }
 
@@ -191,7 +197,9 @@ export class TabbedBrowserController implements RunBrowserControl {
     if (mine && !this.tabs.includes(mine)) mine = undefined;
     const site = action.kind === 'navigate' && action.url ? siteOf(action.url) : undefined;
     if (site && mine?.site !== site) {
-      const there = this.tabs.filter((t) => t !== mine && t.site === site);
+      // Pages already there, and navigations on their way there: workers that start
+      // together would otherwise each find the site empty and open a tab of their own.
+      const there = this.tabs.filter((t) => t !== mine && (t.site === site || t.heading === site));
       // Enough of the run's tabs are on that site already: this worker joins one of
       // them, and takes its turn there.
       if (there.length >= this.sameSite) return this.assign(actor, this.leastBusy(there));
@@ -208,11 +216,21 @@ export class TabbedBrowserController implements RunBrowserControl {
   get controller(): (action: BrowserAction, context: BrowserActionContext) => Promise<BrowserActionOutcome> {
     return async (action, context) => {
       if (!context.sessionId) return this.primary.controller(action, context);
+      // Checked before a tab is chosen or made: a Stop holds for tabs the run doesn't have yet.
+      if (this.stopped.has(context.sessionId)) return { ok: false, detail: 'The user stopped browser control for this run.' };
       const actor = context.actorId || context.sessionId;
+      const site = action.kind === 'navigate' && action.url ? siteOf(action.url) : undefined;
       let tab = this.tabFor(actor, action);
       for (;;) {
         const failed = tab.failures;
-        const outcome = await tab.ctl.controller(action, context);
+        // Reserved in the same step as the tab was chosen, before anything is awaited.
+        if (site) tab.heading = site;
+        let outcome: BrowserActionOutcome;
+        try {
+          outcome = await tab.ctl.controller(action, context);
+        } finally {
+          if (site && tab.heading === site) tab.heading = undefined;
+        }
         if (outcome.url) tab.site = siteOf(outcome.url) ?? tab.site;
         // Only a tab past the first that never opened is given up on: the device gave
         // no more (an older one, or its limit). The action never ran, so it runs again
@@ -275,8 +293,11 @@ export class TabbedBrowserController implements RunBrowserControl {
   handBack(...a: Parameters<RemoteBrowserController['handBack']>) { return this.primary.handBack(...a); }
   input(...a: Parameters<RemoteBrowserController['input']>) { return this.primary.input(...a); }
 
-  /** The person's Stop: every tab. */
-  stopRun(runId: string): void { for (const t of this.tabs) t.ctl.stopRun(runId); }
+  /** The person's Stop: every tab, and any the run might ask for later. */
+  stopRun(runId: string): void {
+    this.stopped.add(runId);
+    for (const t of this.tabs) t.ctl.stopRun(runId);
+  }
   async endRun(runId: string): Promise<void> { await Promise.all(this.tabs.map((t) => t.ctl.endRun(runId))); }
   async dispose(): Promise<void> { await Promise.all(this.tabs.map((t) => t.ctl.dispose())); }
 }

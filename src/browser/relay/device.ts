@@ -134,6 +134,15 @@ export interface DeviceClient {
   leases(): TabLease[];
   /** The user's Stop: ends every lease, on the device. */
   revoke(reason: string): void;
+  /**
+   * The person takes the run over: every tab's lease is suspended, and so is any tab
+   * the run opens until `handBack`. False when no run is being served.
+   */
+  takeOver(): boolean;
+  /** The run carries on: every suspended tab is handed back. False when it wasn't taken over. */
+  handBack(): boolean;
+  /** Whether the person has the run now. */
+  takenOver(): boolean;
   /** Logout, quitting, the user turning the source off: ends everything and disconnects. */
   close(): Promise<void>;
   /** Resolves when the control connection has gone, with why. */
@@ -169,7 +178,7 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
    * this run is served under it without asking again, up to its tab limit; any
    * other run is refused while one is served. Forgotten once its last tab ends.
    */
-  let serving: { userId: string; runId: string; answer: Promise<UserConsent | null>; stopped: boolean } | null = null;
+  let serving: { userId: string; runId: string; answer: Promise<UserConsent | null>; stopped: boolean; takenOver: boolean } | null = null;
   /** Ends whatever this offer has got to: the question, the browser starting, or the lease. */
   const withdraw = (a: Active, reason: string): void => {
     a.cancelled = true;
@@ -266,7 +275,7 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
     // The run's first tab asks; a later one waits for that same answer (its workers
     // start together, before the person has answered) and is never asked itself.
     const run = sameRun ? serving! : (serving = {
-      userId: grant.payload.userId, runId: grant.payload.runId, stopped: false,
+      userId: grant.payload.userId, runId: grant.payload.runId, stopped: false, takenOver: false,
       answer: opts.askUser({
         userId: grant.payload.userId, runId: grant.payload.runId, expiresAt: grant.payload.exp, signal: mine.withdrawn.signal,
         ...(hint ? { hint } : {}),
@@ -304,6 +313,8 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
       const socket: ClaimedSocket = claimed;
       if (mine.cancelled) { mine.lease.revoke('the request was withdrawn'); }
       const lease = mine.lease;
+      // The person has the run: a tab it opens meanwhile is theirs too, until they hand back.
+      if (run.takenOver && lease.state() === 'held') lease.suspend();
       browser.onEgressDown(() => lease.revoke('egress-proxy-down'));
       mine.relay = createDeviceRelay({
         tabWs: browser.tabWs, consent, lease, enforcer: browser.enforcer, pageEnd: browser.pageEnd,
@@ -382,6 +393,21 @@ export function connectDeviceClient(opts: DeviceClientOptions): DeviceClient {
       if (serving) serving.stopped = true;
       for (const a of [...actives]) withdraw(a, reason);
     },
+    takeOver() {
+      if (!serving) return false;
+      const held = actives.filter((a) => a.lease.state() === 'held');
+      if (!held.length && !serving.takenOver) return false;
+      serving.takenOver = true;
+      for (const a of held) a.lease.suspend();
+      return true;
+    },
+    handBack() {
+      if (!serving?.takenOver) return false;
+      serving.takenOver = false;
+      for (const a of actives) if (a.lease.state() === 'suspended') a.lease.handBack();
+      return true;
+    },
+    takenOver: () => serving?.takenOver === true,
     async close() {
       closing = true;
       for (const a of [...actives]) withdraw(a, 'the device signed out');

@@ -63,6 +63,9 @@ export interface RelayDeviceClient {
   lease(): { state(): string; suspend(): void; handBack(): void } | null;
   /** Every tab's lease, for a run with several. */
   leases?(): Array<{ state(): string; suspend(): void; handBack(): void }>;
+  /** The whole run, and any tab it opens until hand back. */
+  takeOver?(): boolean;
+  handBack?(): boolean;
 }
 
 export interface DesktopRelayStatus {
@@ -259,10 +262,11 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
      * commands are refused and nothing from the page is passed on, until hand back.
      */
     takeOver(): { ok: true } | { error: string } {
-      // Every window of the run: the person has the run, not one of its parts.
+      // Every window of the run, and any it opens until hand back: the person has the run.
       const held = leasesOf(client).filter((l) => l.state() === 'held');
-      if (!runs.length || !held.length) return { error: 'No run is using this app\'s browser.' };
-      for (const lease of held) lease.suspend();
+      if (!runs.length || (!held.length && !client?.takeOver)) return { error: 'No run is using this app\'s browser.' };
+      if (client?.takeOver) { if (!client.takeOver()) return { error: 'No run is using this app\'s browser.' }; }
+      else for (const lease of held) lease.suspend();
       runs[0]!.focus();
       publish();
       return { ok: true };
@@ -271,8 +275,9 @@ export function createDesktopRelay(deps: DesktopRelayDeps) {
     /** The run carries on, from the page the user left; the relay brings it up to date. */
     handBack(): { ok: true } | { error: string } {
       const paused = leasesOf(client).filter((l) => l.state() === 'suspended');
-      if (!runs.length || !paused.length) return { error: 'The run is not paused for you.' };
-      for (const lease of paused) lease.handBack();
+      if (client?.handBack) { if (!runs.length || !client.handBack()) return { error: 'The run is not paused for you.' }; }
+      else if (!runs.length || !paused.length) return { error: 'The run is not paused for you.' };
+      else for (const lease of paused) lease.handBack();
       publish();
       return { ok: true };
     },

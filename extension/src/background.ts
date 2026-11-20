@@ -399,19 +399,15 @@ async function handle(msg: Message): Promise<unknown> {
       // The lease's fence closes before this returns: from here the agent's commands
       // are refused and nothing the page does is passed on, until the user hands back.
       // The relay brings the agent up to date with what changed when they do.
-      // Every tab of the run: the person has the whole window.
-      const held = client?.leases().filter((l) => l.state() === 'held') ?? [];
-      if (!held.length || !status.run) return { error: 'No run is using this browser.' };
-      for (const lease of held) lease.suspend();
+      // Every tab of the run, and any it opens until hand back: the person has the whole window.
+      if (!status.run || !client?.takeOver()) return { error: 'No run is using this browser.' };
       status.run.takenOver = true;
       publish();
       if (status.run.windowId !== undefined) void chrome.windows.update(status.run.windowId, { focused: true }).catch(() => {});
       return { ok: true };
     }
     case 'hand-back': {
-      const paused = client?.leases().filter((l) => l.state() === 'suspended') ?? [];
-      if (!paused.length || !status.run) return { error: 'The run is not paused for you.' };
-      for (const lease of paused) lease.handBack();
+      if (!status.run || !client?.handBack()) return { error: 'The run is not paused for you.' };
       status.run.takenOver = false;
       publish();
       return { ok: true };
