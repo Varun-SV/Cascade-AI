@@ -1084,9 +1084,12 @@ suite('the user takes the tab over and navigates, then hands it back (Codex on 3
 
   /**
    * Until the page's child frames include `want`, checked on each of Playwright's
-   * frame events and on a short timer, for up to 20s. A fixed 5s of polling was
-   * too short on a loaded CI runner: a cross-site frame was still '/links > <>'
-   * (attached, not yet navigated) when the assertion ran.
+   * frame events and on a short timer, for up to 20s. A frame is reported attached
+   * before its navigation is, so it reads '/links > <>' for a moment.
+   *
+   * That it sometimes read so for good was the relay's doing, not the runner's: a
+   * frame's snapshot reply reached the agent after its own navigation event (see
+   * relay.test.ts, "in the order the tab said it").
    */
   const untilChildFrame = (r: Rig, want: string, timeoutMs = 20_000) => new Promise<void>((resolve) => {
     const check = () => { if (childFrames(r).includes(want)) done(); };
