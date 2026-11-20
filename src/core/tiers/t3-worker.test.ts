@@ -2247,3 +2247,118 @@ describe('a worker whose dependency failed', () => {
     expect(router.generate).not.toHaveBeenCalled();
   });
 });
+
+describe('workers share what they find (run-memory.ts)', () => {
+  // The run that prompted this: one worker ran git in a folder with no
+  // repository, and the next ran the same command there and paid to learn it again.
+  it('the second worker is told what the first found, and its repeat of a read-only command is answered without running', async () => {
+    const { RunMemory } = await import('../knowledge/run-memory.js');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-share-'));
+    try {
+      const memory = new RunMemory(root);
+      const prompts: string[] = [];
+      const generate = (calls: () => GenerateResult[]) => {
+        const queue = calls();
+        return vi.fn(async (_tier: string, options: { messages: Array<{ role: string; content: unknown }> }) => {
+          for (const m of options.messages) if (typeof m.content === 'string') prompts.push(m.content);
+          return queue.shift() ?? makeResult('done');
+        });
+      };
+      const router = (calls: () => GenerateResult[]) => ({
+        generate: generate(calls),
+        getModelForTier: () => undefined,
+        getRunMemory: () => memory,
+      }) as unknown as CascadeRouter;
+      const execute = vi.fn(async (_name: string, input: Record<string, unknown>) => (
+        String(input['command']).startsWith('git') ? 'Exit 128:\nfatal: not a git repository (or any of the parent directories): .git' : 'a.txt'
+      ));
+      const registry = makeToolRegistry({
+        getToolDefinitions: () => [{ name: 'shell', description: 'Run a command', inputSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } }],
+        getWorkspaceRoot: () => root,
+        execute,
+      } as unknown as Partial<ToolRegistry>);
+      const call = (command: string) => makeResult('', [{ id: `c-${command}`, name: 'shell', input: { command } }], 'tool_use');
+
+      await new T3Worker(router(() => [call('git status'), call('ls'), makeResult('first done')]), registry, 't2-a')
+        .execute(makeAssignment({ subtaskId: 's-a' }), 'task-share');
+      expect(execute).toHaveBeenCalledTimes(2);
+
+      prompts.length = 0;
+      const second = new T3Worker(router(() => [call('ls'), makeResult('second done')]), registry, 't2-b');
+      await second.execute(makeAssignment({ subtaskId: 's-b', subtaskTitle: 'Another part' }), 'task-share');
+
+      // Told before its first call…
+      expect(prompts.some((p) => p.startsWith('ALREADY FOUND IN THIS RUN') && p.includes('not a git repository'))).toBe(true);
+      // …and its `ls` answered from the board: the registry ran nothing more.
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(prompts.some((p) => p.includes('[Already run in this run by another worker') && p.includes('a.txt'))).toBe(true);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+  // Codex on 6c77d8f: both wrote, or may have, without the board knowing.
+  const scripted = (calls: GenerateResult[], extra: Record<string, unknown> = {}) => {
+    const queue = [...calls];
+    return {
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> }) => {
+        const latest = options.messages[options.messages.length - 1];
+        if (typeof latest?.content === 'string' && latest.content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        return queue.shift() ?? makeResult('done');
+      }),
+      getModelForTier: () => undefined,
+      ...extra,
+    } as unknown as CascadeRouter;
+  };
+
+  it("a local-only worker's write still makes the others' stored answers stale", async () => {
+    const { RunMemory } = await import('../knowledge/run-memory.js');
+    const { PrivacyPaths } = await import('../privacy/paths.js');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-share-'));
+    try {
+      const memory = new RunMemory(root);
+      memory.observe('shell', { command: 'ls' }, 'a.txt', 'T3-other', memory.begin('shell', { command: 'ls' }), { failed: false, publish: true });
+      const registry = makeToolRegistry({
+        getToolDefinitions: () => [{ name: 'shell', description: 'Run a command', inputSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } }],
+        getWorkspaceRoot: () => root,
+        execute: vi.fn(async () => 'Exit 0:'),
+      } as unknown as Partial<ToolRegistry>);
+      const router = scripted(
+        [makeResult('', [{ id: 'w', name: 'shell', input: { command: 'touch secret/b.txt' } }], 'tool_use'), makeResult('written')],
+        { getRunMemory: () => memory, getPrivacyPaths: () => new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]), hasPrivateModel: () => true },
+      );
+      const result = await new T3Worker(router, registry, 't2-p').execute(makeAssignment({ subtaskId: 's-p', files: ['secret/b.txt'] }), 'task-share');
+      expect(result.localOnly).toBe(true);
+      expect(memory.reuse('shell', { command: 'ls' })).toBeNull();
+      // And it put nothing on the board.
+      expect(memory.all()).toEqual([]);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('the tool a failed call falls back to is covered until it is over', async () => {
+    const { RunMemory } = await import('../knowledge/run-memory.js');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-share-'));
+    try {
+      const memory = new RunMemory(root);
+      memory.observe('shell', { command: 'ls' }, 'a.txt', 'T3-other', memory.begin('shell', { command: 'ls' }), { failed: false, publish: true });
+      let duringFallback: unknown = 'not run';
+      const execute = vi.fn(async (name: string) => {
+        if (name === 'file_read') throw new Error('EISDIR: illegal operation on a directory');
+        duringFallback = memory.reuse('shell', { command: 'ls' });
+        return 'written';
+      });
+      const registry = makeToolRegistry({
+        getToolDefinitions: () => [
+          { name: 'file_read', description: 'Read a file', inputSchema: {} },
+          { name: 'file_write', description: 'Write a file', inputSchema: {} },
+        ],
+        getWorkspaceRoot: () => root,
+        execute,
+      } as unknown as Partial<ToolRegistry>);
+      const router = scripted([makeResult('', [{ id: 'r', name: 'file_read', input: { path: 'notes' } }], 'tool_use'), makeResult('done')], { getRunMemory: () => memory });
+      await new T3Worker(router, registry, 't2-f').execute(makeAssignment({ subtaskId: 's-f' }), 'task-share');
+      expect(execute.mock.calls.map((c) => c[0])).toEqual(['file_read', 'file_write']);
+      expect(duringFallback).toBeNull();
+      expect(memory.reuse('shell', { command: 'ls' })).toBeNull();
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+});

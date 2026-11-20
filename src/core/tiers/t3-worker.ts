@@ -2,6 +2,7 @@
 //  Cascade AI — T3 Worker
 // ─────────────────────────────────────────────
 
+import { formatRunFacts } from '../knowledge/run-memory.js';
 import { assessRisk } from '../permissions/risk.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -1104,6 +1105,13 @@ export class T3Worker extends BaseTier {
 
       if (this.localOnlyMatch && !resolvedPrivately) servePrivately();
 
+      // What other workers (or earlier runs) found, before this worker pays to
+      // find it too. Not for a local-only subtask: it shares nothing either way.
+      if (!this.localOnlyMatch) {
+        const found = this.router.getRunMemory?.(this.artifactRoot())?.unseenBy(this.id) ?? [];
+        if (found.length) await this.context.addMessage({ role: 'user', content: formatRunFacts(found) });
+      }
+
       let textToolSuffix = '';
       if (useTextTools) {
         const signature = tools.map((t) => t.name).join(',');
@@ -1420,6 +1428,23 @@ export class T3Worker extends BaseTier {
       });
     }
 
+    // The run's board: a read-only command another worker already ran, with
+    // nothing changed since, is answered from there instead of run again. A
+    // local-only subtask reads nothing from it and adds nothing to it, but what
+    // it changes still has to make the others' stored answers stale.
+    const board = this.router.getRunMemory?.(this.artifactRoot());
+    const reused = this.localOnlyMatch ? null : board?.reuse(tc.name, tc.input);
+    if (reused) {
+      // Read as surely as if it had run: what this worker learns from it has the same
+      // unknown sources a command's output gives it (extractAndStoreFacts).
+      this.noteRan(tc.name);
+      const note = `[Already run in this run${reused.by === this.id ? '' : ' by another worker'}, and nothing has changed since: its answer is given again rather than running it twice.]\n`;
+      this.emit('tool:call', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), input: tc.input });
+      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), output: this.shareable(`${note}${reused.output}`, 'tool result'), durationMs: 0 });
+      return `${note}${reused.output}`;
+    }
+    const boardAt = board?.begin(tc.name, tc.input) ?? 0;
+
     this.emit('tool:call', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), input: this.localOnlyMatch ? {} : tc.input });
     const toolStartMs = Date.now();
     // A picture is of the page after the last browser action. One that ran
@@ -1472,11 +1497,20 @@ export class T3Worker extends BaseTier {
         }
       }
       const durationMs = Date.now() - toolStartMs;
-      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), output: this.shareable(typeof result === 'string' ? result : JSON.stringify(result), 'tool result'), durationMs });
-      return typeof result === 'string' ? result : JSON.stringify(result);
+      const text = typeof result === 'string' ? result : JSON.stringify(result);
+      // Judged now, not before the call: a read during it can make this subtask
+      // local-only, and then what it got stays here.
+      board?.observe(tc.name, tc.input, text, this.id, boardAt, { failed: /^Exit [1-9]\d*:/.test(text), publish: !this.localOnlyMatch });
+      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), output: this.shareable(text, 'tool result'), durationMs });
+      return text;
     } catch (err) {
       const durationMs = Date.now() - toolStartMs;
       const errMsg = err instanceof Error ? err.message : String(err);
+      board?.observe(tc.name, tc.input, errMsg, this.id, boardAt, { failed: true, publish: !this.localOnlyMatch });
+      // The fallback below runs other tools in this one's place, which the board
+      // sees no call for: held open until it is over (taken in the same tick as
+      // the observe above, so nothing is stored in between).
+      const fallbackDone = board?.hold();
       this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), error: this.shareable(errMsg, 'tool error'), durationMs });
       // Unrecoverable/systemic conditions (rate-limit, auth, quota, AND a 404
       // "model not found" — the shared classifier this reuses is the same one
@@ -1498,6 +1532,7 @@ export class T3Worker extends BaseTier {
       const isTaggedSystemic = err instanceof Error && (err as Error & { systemic?: boolean }).systemic === true;
       const isProviderBacked = PROVIDER_BACKED_TOOLS.has(tc.name);
       if (isTaggedSystemic || (isProviderBacked && classifyProviderError(err).systemic)) {
+        fallbackDone?.();
         throw new CriticalToolError(errMsg, tc.name);
       }
       // A provider-backed GENERATION call that failed for a NON-systemic reason
@@ -1518,6 +1553,7 @@ export class T3Worker extends BaseTier {
       // Failing the subtask on the first attempt, with the real reason intact,
       // is both cheaper and more honest.
       if (isProviderBacked) {
+        fallbackDone?.();
         throw new CriticalToolError(
           `${tc.name} failed and was not retried — media generation is billed per attempt, `
           + `so Cascade stops on the first failure instead of paying for a second. Reason: ${errMsg}`,
@@ -1526,7 +1562,11 @@ export class T3Worker extends BaseTier {
       }
       // Try to recover via a sibling tool or a synthesized one before giving up;
       // returns the original error string if no fallback succeeds.
-      return await this.adaptiveFallback(tc, `Tool error: ${errMsg}`, browserBatch);
+      try {
+        return await this.adaptiveFallback(tc, `Tool error: ${errMsg}`, browserBatch);
+      } finally {
+        fallbackDone?.();
+      }
     }
   }
 

@@ -5,6 +5,41 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.99.0 - 2026-11-20
+
+### Added
+- **Workers share what they find, and the project remembers it.** Workers
+  running side by side used to each find the same things out: one ran
+  `git status` in a folder with no repository, and the next did the same
+  and paid to learn it again. Now one board covers the whole run, every
+  section's workers alike:
+  - **Facts about your machine** are read from commands that ran here and
+    failed: a folder that is not a git repository, a command your shell
+    doesn't have (as bash, cmd and PowerShell say it). A file or log that
+    only mentions such an error is not taken as one. Each worker is told
+    the ones it hasn't seen yet, before its next model call.
+  - **A command that only reads, run again** in the same folder (`ls`,
+    `git status`, `cat a | wc -l`; every part of a compound command is
+    checked) gets the earlier answer instead of running and being reasoned
+    about twice. Anything else that runs clears these, including git
+    config and git fetch, and while it's running no earlier answer is
+    given. Commands whose answer moves by itself, like `date` or `ps`, are
+    never reused, wherever they sit in a command.
+  - **It grows with you.** The facts are kept in the project's knowledge,
+    so the next run starts out knowing them. One that stops being true
+    (git works in that folder now, a command starts working) is taken back
+    out.
+  - Only short facts in Cascade's own words are kept, never what a tool
+    printed, and none while `knowledge.factsExtraction` is off (changing
+    it mid-run counts from then on). A subtask under your local-only
+    `privacy.paths` neither adds to the board nor reads from it, though
+    what it changes still clears the stored answers. What an earlier run
+    kept is shown only if it may go to any model (the same check as the
+    plan's project knowledge), and a folder that is local-only is never
+    named on the board. What git says after a
+    `cd`, or with `git -C` or `--git-dir`, isn't taken as being about the
+    folder the command started in.
+
 ## 0.97.3 - 2026-11-20
 
 ### Fixed
