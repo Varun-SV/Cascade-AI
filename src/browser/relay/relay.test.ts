@@ -1001,7 +1001,8 @@ describe('a reply that arrives after its command was refused (Codex on a1819ec)'
       await settle();
       lease.handBack();
       tab.emit({ method: 'Page.frameNavigated', params: { type: 'Navigation', frame: { id: 'F', loaderId: 'L', url: 'https://a.test/after', securityOrigin: 'https://a.test', mimeType: 'text/html' } } });
-      await vi.waitFor(() => expect(out.some((m) => m.includes('https://a.test/after'))).toBe(true));
+      const navigatedTo = (m: string) => (JSON.parse(m) as { method?: string; params?: { frame?: { url?: string } } });
+      await vi.waitFor(() => expect(out.map(navigatedTo).some((m) => m.method === 'Page.frameNavigated' && m.params?.frame?.url === 'https://a.test/after')).toBe(true));
       lease.revoke('done');
       await served;
     } finally { tab.close(); }
