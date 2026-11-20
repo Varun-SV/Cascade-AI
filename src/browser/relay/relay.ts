@@ -330,6 +330,12 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
     interface Slot { ready: boolean; m: object | null; detached?: boolean }
     const inLine: Slot[] = [];
     const answering = new Map<number, Slot>();
+    /**
+     * Commands whose answer is still to be sent. A reply that arrives for one that
+     * isn't (refused at a takeover, its answer already sent) holds no place: nothing
+     * would ever settle that place, and everything behind it would wait for good.
+     */
+    const awaiting = new Set<number>();
     const flushLine = (): void => {
       while (inLine.length && inLine[0]!.ready) { const e = inLine.shift()!; if (e.m) out(e.m); }
     };
@@ -339,12 +345,14 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
     };
     /** An answer's place in line, taken when the tab's reply arrives. */
     const holdPlace = (key: number): void => {
+      if (!awaiting.has(key)) return;
       const slot: Slot = { ready: false, m: null };
       inLine.push(slot);
       answering.set(key, slot);
     };
     /** Sends an answer in its place (or now, if it never had one), and what waited behind it. */
     const settle = (key: number, m: object | null): void => {
+      awaiting.delete(key);
       const slot = answering.get(key);
       answering.delete(key);
       if (!slot || slot.detached) { if (m) out(m); return; }
@@ -673,6 +681,7 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
         const registering = method === 'Page.addScriptToEvaluateOnNewDocument';
         if (registering) pendingScripts += 1;
         answerKey = nextKey++;
+        awaiting.add(answerKey);
         let r: Awaited<ReturnType<typeof forward>>;
         try { r = await forward(method, params, sessionId, answerKey, true); } catch (e) {
           // Fenced: whether it was written is unknown, so it stays counted as pending.

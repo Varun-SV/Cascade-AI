@@ -981,3 +981,29 @@ describe('what the tab says reaches the agent in the order the tab said it', () 
     } finally { wss.close(); }
   });
 });
+
+describe('a reply that arrives after its command was refused (Codex on a1819ec)', () => {
+  it('holds no place in line: events after the hand-back still reach the agent', async () => {
+    // The user takes over while a command waits for its reply: the command is
+    // refused and answered. Its late reply must not take a place in line that
+    // nothing would ever free, or every event after the hand-back waits for good.
+    const tab = await answeringTab(new Set(['Page.getFrameTree']));
+    try {
+      const { lease, relay, agent } = setup(tab.url);
+      const out = sent(agent);
+      const served = relay.serve(agent as unknown as WebSocket);
+      await settle();
+      agent.emit('message', JSON.stringify({ id: 1, method: 'Page.getFrameTree', params: {}, sessionId: 'cascade-tab-1' }));
+      await vi.waitFor(() => expect(tab.methods).toContain('Page.getFrameTree'));
+      lease.suspend();
+      await vi.waitFor(() => expect(replied(out, 1)).toBe(true));
+      tab.release();
+      await settle();
+      lease.handBack();
+      tab.emit({ method: 'Page.frameNavigated', params: { type: 'Navigation', frame: { id: 'F', loaderId: 'L', url: 'https://a.test/after', securityOrigin: 'https://a.test', mimeType: 'text/html' } } });
+      await vi.waitFor(() => expect(out.some((m) => m.includes('https://a.test/after'))).toBe(true));
+      lease.revoke('done');
+      await served;
+    } finally { tab.close(); }
+  });
+});
