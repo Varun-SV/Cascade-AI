@@ -65,7 +65,9 @@ export function EscalationModal({ socket }: { socket: Socket | null }) {
       if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
       const hit = CHOICES.find((c) => c.key.toLowerCase() === e.key.toLowerCase());
       if (hit) { e.preventDefault(); setChoice(hit.id); }
-      else if (e.key === 'Enter' && ready) { e.preventDefault(); decide(); }
+      // Enter on a focused button or link is that control's own (View, a card, the goal):
+      // it confirms only when nothing interactive has the focus.
+      else if (e.key === 'Enter' && ready && !(e.target instanceof Element && e.target.closest('button, a, [role="button"], [role="radio"], summary'))) { e.preventDefault(); decide(); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);

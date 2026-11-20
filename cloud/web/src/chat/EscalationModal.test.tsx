@@ -263,4 +263,18 @@ describe('EscalationModal', () => {
       expect(screen.getByText(/auto-fails in 2:30/)).toBeInTheDocument();
     });
   });
+
+  it('Enter on a focused button is that button\'s, not a confirm (Codex on 8bf614b)', () => {
+    const onResolve = vi.fn();
+    render(<EscalationModal requests={[parked({ summary: 'Logged in.' })]} onResolve={onResolve} onDismiss={noop} onExpire={noop} />);
+    fireEvent.keyDown(window, { key: 'r' });
+    const view = screen.getByRole('button', { name: 'View' });
+    fireEvent.keyDown(view, { key: 'Enter' });
+    expect(onResolve).not.toHaveBeenCalled();
+    fireEvent.keyDown(screen.getByRole('radio', { name: /^Skip/ }), { key: 'Enter' });
+    expect(onResolve).not.toHaveBeenCalled();
+    // With nothing interactive focused, Enter confirms what was chosen.
+    fireEvent.keyDown(window, { key: 'Enter' });
+    expect(onResolve).toHaveBeenCalledWith('retry', undefined, 'req-1');
+  });
 });
