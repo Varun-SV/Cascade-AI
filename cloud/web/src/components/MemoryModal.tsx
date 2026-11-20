@@ -228,7 +228,8 @@ export default function MemoryModal({ onClose, socket = null, providers = [] }: 
               </button>
             </div>
 
-            {total > 5 && (
+            {/* Shown while a search is on, however few are left: a filter must never hide memories with no way to clear it. */}
+            {(total > 5 || query) && (
               <div className="flex items-center gap-2 rounded-md border border-elev/10 bg-elev/[0.04] px-2.5 py-1.5">
                 <Search size={13} className="text-ink-400" />
                 <input

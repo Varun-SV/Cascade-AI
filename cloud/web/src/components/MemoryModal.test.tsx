@@ -317,4 +317,18 @@ describe('MemoryModal', () => {
     act(() => acks[1]!({ chats: 1, inputTokens: 1000, outputTokens: 350, model: 'm', costUsd: 0.01 }));
     expect(screen.getByRole('button', { name: /Build memories/ })).toBeEnabled();
   });
+
+  it('the search box stays while a search is on, even when deleting leaves five or fewer (Codex on fd1fb9b)', async () => {
+    vi.mocked(api.fetchMemories).mockResolvedValue({ memories: Array.from({ length: 6 }, (_, k) => mem(`${k}`, k === 0 ? 'Zebra fact' : `Fact ${k}`, 'facts')) });
+    vi.mocked(api.deleteMemory).mockResolvedValue({ ok: true });
+    render(<MemoryModal onClose={vi.fn()} />);
+    const search = await screen.findByRole('textbox', { name: 'Search memories' });
+    fireEvent.change(search, { target: { value: 'zebra' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Delete memory' }));
+    await waitFor(() => expect(screen.queryByText('Zebra fact')).not.toBeInTheDocument());
+    const still = screen.getByRole('textbox', { name: 'Search memories' });
+    fireEvent.change(still, { target: { value: '' } });
+    expect(await screen.findByText('Fact 1')).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Search memories' })).not.toBeInTheDocument();
+  });
 });
