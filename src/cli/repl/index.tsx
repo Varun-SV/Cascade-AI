@@ -5,7 +5,7 @@
 import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { mcpServersIn } from '../../tools/mcp.js';
 import { Box, Static, Text, useApp, useInput, useStdout } from 'ink';
-import { ExitGuard, currentGuard, guardEvents, markQuitByUser, noteActivity } from '../exit-guard.js';
+import { ExitGuard, currentGuard, guardEvents, markQuitByUser, noteActivity, noteStep } from '../exit-guard.js';
 import { SafeTextInput } from '../components/SafeTextInput.js';
 import { sanitizeTerminalInput, containsMouseSequence } from '../utils/terminal-input.js';
 import { randomUUID } from 'node:crypto';
@@ -1319,6 +1319,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         identityId: currentIdentityId,
         conversationHistory: toConversationHistory(state.messages),
         approvalCallback: async (req) => {
+          // Written down at once: if the session dies here, the next start says where.
+          noteStep(`waiting for your answer on ${req.toolName}`);
           dispatch({ type: 'SET_APPROVAL', request: req });
           return new Promise<{ approved: boolean; always: boolean }>((resolve) => {
             approvalResolverRef.current = resolve;
@@ -1382,6 +1384,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       }, authGen);
     }
     finally {
+      noteStep(null);
       if (streamThrottleTimeout) { clearTimeout(streamThrottleTimeout); streamThrottleTimeout = null; }
       if (statusThrottleTimeout) { clearTimeout(statusThrottleTimeout); statusThrottleTimeout = null; }
       if (peerThrottleTimeout) { clearTimeout(peerThrottleTimeout); peerThrottleTimeout = null; }
@@ -1726,7 +1729,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       {liveBudget.collapsed && (state.showCost || state.showDetails || state.agentTree != null) && (
         <Text color={theme.colors.muted} dimColor>  ▸ panels collapsed (small terminal)</Text>
       )}
-      {state.approvalRequest && <ApprovalPrompt request={state.approvalRequest} theme={theme} onDecision={(decision) => { dispatch({ type: 'SET_APPROVAL', request: null }); approvalResolverRef.current?.(decision); }} />}
+      {state.approvalRequest && <ApprovalPrompt request={state.approvalRequest} theme={theme} onDecision={(decision) => {
+        // Tool name and the answer only: where a crash right after an answer happened.
+        noteStep(`carrying on after you answered "${decision.approved ? (decision.always ? 'a' : 'y') : 'n'}" to ${state.approvalRequest?.toolName ?? 'a tool'}`);
+        dispatch({ type: 'SET_APPROVAL', request: null });
+        approvalResolverRef.current?.(decision);
+      }} />}
       {planApprovalRequest && (
         <PlanApproval
           request={planApprovalRequest}
