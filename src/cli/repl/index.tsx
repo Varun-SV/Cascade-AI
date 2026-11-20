@@ -1209,6 +1209,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       const content = `Cost not counted for ${ev.provider}:${ev.modelId}: Cascade has no price for this model. Its tokens still count, but the cost shown leaves its calls out (marked "+"); /cost lists them.`
         + (capped ? ' Your cost budget can\'t see this spend either; the token cap still applies.' : '');
       dispatch({ type: 'ADD_NOTICE', message: { id: randomUUID(), role: 'system', content, timestamp: new Date().toISOString() } });
+      // And the figures with it: a call that settles after the run (the session's
+      // title) comes after the run's last cost update, and the status bar and /cost
+      // would otherwise go on without the "+" this notice talks about.
+      const stats = router.getStats();
+      const savings = router.getDelegationSavings();
+      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier, costByFeature: stats.costByFeature, savedUsd: savings.savedUsd, savedPct: savings.savedPct, unpricedByModel: unpricedByModel(stats.untrackedByTierModel) });
     };
     if (!routersNoticed.has(router)) {
       routersNoticed.add(router);
