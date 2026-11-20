@@ -173,12 +173,13 @@ function Detail({ node, activity, width, maxRows, theme, now, comms }: {
           {node.status === 'ACTIVE' ? '∙ thinking…' : node.status === 'COMPLETED' ? '✔ done' : node.currentAction ?? 'waiting for its turn'}
         </Text>
       )}
-      {shown.map((it) => {
+      {shown.map((it, i) => {
         const mark = it.state === 'running' ? '◐' : it.state === 'failed' ? '✘' : '▸';
         const color = it.state === 'running' ? theme.colors.warning : it.state === 'failed' ? theme.colors.error : theme.colors.success;
         const note = it.note ? `  ${it.note}` : '';
         return (
-          <Text key={it.id} wrap="truncate-end">
+          // The row's place too: a call id is the provider's, and not every provider makes them unique.
+          <Text key={`${it.id}-${i}`} wrap="truncate-end">
             <Text color={color}>{mark} </Text>
             <Text color={theme.colors.secondary}>{it.tool.padEnd(toolW)}</Text>
             <Text color={theme.colors.foreground}>{fit(it.target, Math.max(4, width - toolW - 2 - note.length))}</Text>

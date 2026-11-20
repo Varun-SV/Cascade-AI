@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeAll, afterAll } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { GeminiProvider, toGeminiFunctionCalls } from './gemini.js';
+import { GeminiProvider, geminiCallId, geminiFunctionName, toGeminiFunctionCalls } from './gemini.js';
 import { ProviderUnreachableError } from './base.js';
 import type { ModelInfo } from '../types.js';
 
@@ -544,7 +544,7 @@ describe('GeminiProvider — generation against a configured endpoint', () => {
 
       expect(chunks).toEqual(['Hel', 'lo']);
       expect(result.content).toBe('Hello');
-      expect(result.toolCalls).toEqual([{ id: 'read_file', name: 'read_file', input: { path: 'a.ts' } }]);
+      expect(result.toolCalls).toEqual([{ id: expect.stringMatching(/^read_file#/), name: 'read_file', input: { path: 'a.ts' } }]);
       expect(result.finishReason).toBe('tool_use');
       expect(result.usage.inputTokens).toBe(11);
       expect(result.usage.outputTokens).toBe(4);
@@ -664,5 +664,41 @@ describe('GeminiProvider — countTokens is on the same guarded transport', () =
     } finally {
       await new Promise((r) => server.close(r));
     }
+  });
+});
+
+describe('Gemini call ids', () => {
+  it('two calls to the same tool get different ids, each naming its function', () => {
+    const a = geminiCallId('shell');
+    const b = geminiCallId('shell');
+    expect(a).not.toBe(b);
+    expect(geminiFunctionName(a)).toBe('shell');
+    expect(geminiFunctionName(b)).toBe('shell');
+  });
+
+  it('an id saved before the suffix (the bare name) still names its function', () => {
+    expect(geminiFunctionName('web_search')).toBe('web_search');
+    expect(geminiFunctionName(undefined)).toBeUndefined();
+  });
+
+  it('a tool result goes back under the function name, without the suffix', async () => {
+    const provider = new GeminiProvider({ type: 'gemini', apiKey: 'test' }, MODEL);
+    const generateContentStream = vi.fn(async () => fakeStream([
+      { candidates: [{ content: { parts: [{ text: 'done' }] }, finishReason: 'STOP' }] },
+    ]));
+    (provider as unknown as { client: unknown }).client = { models: { generateContentStream } };
+    const id = geminiCallId('shell');
+    await provider.generateStream({
+      messages: [
+        { role: 'user', content: 'count words' },
+        { role: 'assistant', content: '', toolCalls: [{ id, name: 'shell', input: { command: 'wc -w a.md' } }] },
+        { role: 'tool', content: '12 a.md', toolCallId: id },
+      ],
+    }, () => {});
+    const sent = generateContentStream.mock.calls[0]?.[0] as unknown as {
+      contents: Array<{ role?: string; parts?: Array<{ functionResponse?: { name: string } }> }>;
+    };
+    const response = sent.contents.flatMap((c) => c.parts ?? []).find((p) => p.functionResponse);
+    expect(response?.functionResponse?.name).toBe('shell');
   });
 });

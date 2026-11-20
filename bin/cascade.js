@@ -1,5 +1,15 @@
 #!/usr/bin/env node
 // Cascade AI — Entry point
+
+// React (through Ink) picks its development or production build from NODE_ENV
+// when it loads. Left unset, the development build loads, and its warnings are
+// printed straight over the terminal UI. Set only for loading: the CLI clears it
+// again before anything else runs, so commands it starts never inherit it.
+if (process.env.NODE_ENV === undefined) {
+  process.env.NODE_ENV = 'production';
+  process.env.CASCADE_CLEAR_NODE_ENV = '1';
+}
+
 try {
   await import('../dist/cli.js');
 } catch (err) {

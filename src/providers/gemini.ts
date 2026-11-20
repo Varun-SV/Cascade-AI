@@ -145,6 +145,23 @@ export function toGeminiTools(tools: readonly ToolDefinition[]): FunctionDeclara
  * costs LESS than Cascade's normalized form, and sizing that form refused
  * budgets over ids never sent.
  */
+/** Separates the function name from what makes a Gemini call id unique; never part of a function name. */
+const CALL_ID_MARK = '#';
+let callSeq = 0;
+
+/** A unique id for a Gemini call: the function name, then a suffix. */
+export function geminiCallId(name: string): string {
+  callSeq = (callSeq + 1) % 1_000_000;
+  return `${name}${CALL_ID_MARK}${Date.now().toString(36)}${callSeq.toString(36)}`;
+}
+
+/** The function name a call id stands for; ids from before the suffix are the bare name. */
+export function geminiFunctionName(id: string | undefined): string | undefined {
+  if (!id) return undefined;
+  const at = id.indexOf(CALL_ID_MARK);
+  return at > 0 ? id.slice(0, at) : id;
+}
+
 export function toGeminiFunctionCalls(toolCalls: readonly ToolCall[]): Part[] {
   return toolCalls.map((tc) => ({
     functionCall: {
@@ -268,9 +285,12 @@ export class GeminiProvider extends BaseProvider {
             onChunk({ text: part.text, finishReason: null });
           }
           if (part.functionCall) {
-            // Use function name as ID — Gemini matches functionResponse by name, not timestamp
+            // Gemini gives calls no id and matches a functionResponse by name, so the
+            // id is the name plus a suffix that makes it unique (the screen and the
+            // tool loop tell calls apart by id); the suffix is cut off again when
+            // the result is sent back.
             toolCalls.push({
-              id: part.functionCall.name as string,
+              id: geminiCallId(part.functionCall.name as string),
               name: part.functionCall.name as string,
               input: (part.functionCall.args ?? {}) as Record<string, unknown>,
               // Carried, not read. A thinking model signs the part it asks the
@@ -559,8 +579,8 @@ export class GeminiProvider extends BaseProvider {
       // ── Tool result messages → Gemini functionResponse in a user turn ──
       if (m.role === 'tool') {
         const toolContent = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
-        // toolCallId carries the function name for Gemini (set by gemini provider using tool name)
-        const functionName = m.toolCallId ?? 'unknown_function';
+        // toolCallId is the function name, with the suffix geminiCallId added
+        const functionName = geminiFunctionName(m.toolCallId) ?? 'unknown_function';
         contents.push({
           role: 'user',
           parts: [{
