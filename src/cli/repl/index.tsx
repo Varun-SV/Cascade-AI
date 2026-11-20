@@ -70,6 +70,28 @@ const PEER_EVENT_BUFFER = 50;
 /** Routers given the cost:untracked notice listener: one each, for the session. */
 const routersNoticed = new WeakSet<object>();
 
+/**
+ * Says, once per model, that its calls are counted in tokens but not in cost, so
+ * the cost shown is partial from here on; and brings the status bar and /cost up
+ * to date with it. On the router, which lives as long as the session, and once per
+ * router: the router emits this only the first time per model, so the listener has
+ * to be there before any call can be made (a slash command's, the session title's
+ * after a run, or a run's), and must not be added twice.
+ */
+function attachCostNotice(router: ReturnType<Cascade['getRouter']>, config: CascadeConfig, dispatch: (action: ReplAction) => void): void {
+  if (routersNoticed.has(router)) return;
+  routersNoticed.add(router);
+  router.on('cost:untracked', (ev: { modelId: string; provider: string }) => {
+    const capped = config.budget?.maxCostPerRunUsd != null || config.budget?.sessionBudgetUsd != null;
+    const content = `Cost not counted for ${ev.provider}:${ev.modelId}: Cascade has no price for this model. Its tokens still count, but the cost shown leaves its calls out (marked "+"); /cost lists them.`
+      + (capped ? ' Your cost budget can\'t see this spend either; the token cap still applies.' : '');
+    dispatch({ type: 'ADD_NOTICE', message: { id: randomUUID(), role: 'system', content, timestamp: new Date().toISOString() } });
+    const stats = router.getStats();
+    const savings = router.getDelegationSavings();
+    dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier, costByFeature: stats.costByFeature, savedUsd: savings.savedUsd, savedPct: savings.savedPct, unpricedByModel: unpricedByModel(stats.untrackedByTierModel) });
+  });
+}
+
 // Show only the last N lines of a streaming buffer in the live area so a
 // long generation can't push the rest of the TUI off-screen. The full text
 // appears in scrollback once the stream commits as a message.
@@ -663,6 +685,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       if (cloud) cloudMirrorRef.current = { client: cloud, convId: null };
     } catch { /* not signed in — CLI stays fully local */ }
     cascadeRef.current = new Cascade(config, workspacePath);
+    // Before anything can call a model: /plan, the session's title and runs alike.
+    attachCostNotice(cascadeRef.current.getRouter(), config, dispatch);
     cascadeRef.current.init().catch(err => setStartupWarning(`Init failed: ${err.message}`));
     validateConfiguredModels(config).then(setStartupWarning);
     return () => {
@@ -1197,29 +1221,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     cascade.on('tool:call', (ev: { id: string; tierId: string; toolName: string; input?: Record<string, unknown> }) => { activityRef.current.toolCall(ev); activityChanged(); });
     cascade.on('tool:result', (ev: { id: string; tierId: string; toolName: string; output?: string; error?: string }) => { activityRef.current.toolResult(ev); activityChanged(); });
     cascade.on('tier:thinking', (ev: { tierId: string; call?: number; text?: string; done?: boolean }) => { activityRef.current.think(ev); activityChanged(); });
-    // Once per model: its calls are counted in tokens but not in cost, so the cost
-    // shown is partial from here on. Said when it happens, not left for /cost.
-    // On the router, which lives as long as the session, and so once per router
-    // rather than once per run: a call that settles after the run (the session's
-    // title, say) is covered too, and a model first met on the Nth run is still
-    // announced once. The router emits this only the first time per model.
-    const router = cascade.getRouter();
-    const onUntracked = (ev: { modelId: string; provider: string }): void => {
-      const capped = config.budget?.maxCostPerRunUsd != null || config.budget?.sessionBudgetUsd != null;
-      const content = `Cost not counted for ${ev.provider}:${ev.modelId}: Cascade has no price for this model. Its tokens still count, but the cost shown leaves its calls out (marked "+"); /cost lists them.`
-        + (capped ? ' Your cost budget can\'t see this spend either; the token cap still applies.' : '');
-      dispatch({ type: 'ADD_NOTICE', message: { id: randomUUID(), role: 'system', content, timestamp: new Date().toISOString() } });
-      // And the figures with it: a call that settles after the run (the session's
-      // title) comes after the run's last cost update, and the status bar and /cost
-      // would otherwise go on without the "+" this notice talks about.
-      const stats = router.getStats();
-      const savings = router.getDelegationSavings();
-      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier, costByFeature: stats.costByFeature, savedUsd: savings.savedUsd, savedPct: savings.savedPct, unpricedByModel: unpricedByModel(stats.untrackedByTierModel) });
-    };
-    if (!routersNoticed.has(router)) {
-      routersNoticed.add(router);
-      router.on('cost:untracked', onUntracked);
-    }
+    // Also attached at startup; this covers a router made since (a reconfigure).
+    attachCostNotice(cascade.getRouter(), config, dispatch);
     cascade.on('tier:root', onRoot);
     cascade.on('stream:token', onStream);
     cascade.on('tier:status', (ev: TierStatusEvent) => {
