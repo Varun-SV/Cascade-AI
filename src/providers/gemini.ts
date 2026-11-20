@@ -137,6 +137,32 @@ export function toGeminiTools(tools: readonly ToolDefinition[]): FunctionDeclara
   }));
 }
 
+let callSeq = 0;
+
+/**
+ * A unique id for a Gemini call, which comes with none.
+ *
+ * Letters, digits and `_` only: the history is shared with whatever provider a
+ * run fails over to, and Anthropic refuses a tool-use id outside
+ * [a-zA-Z0-9_-]. The function name is not in it: a tool result finds its name
+ * from the call it answers (see buildContents).
+ */
+export function geminiCallId(): string {
+  callSeq = (callSeq + 1) % 1_000_000;
+  return `gemini_${Date.now().toString(36)}_${callSeq.toString(36)}`;
+}
+
+/**
+ * The function a tool result answers, for Gemini's functionResponse, which is
+ * matched by name: the name of the call with that id earlier in the history.
+ * A session saved before ids were unique used the bare name as the id, so an
+ * id no call has is taken as the name.
+ */
+export function geminiFunctionName(id: string | undefined, namesById: ReadonlyMap<string, string>): string | undefined {
+  if (!id) return undefined;
+  return namesById.get(id) ?? id;
+}
+
 /**
  * An assistant turn's tool calls in the shape this provider actually submits.
  *
@@ -268,9 +294,10 @@ export class GeminiProvider extends BaseProvider {
             onChunk({ text: part.text, finishReason: null });
           }
           if (part.functionCall) {
-            // Use function name as ID — Gemini matches functionResponse by name, not timestamp
+            // Gemini gives calls no id, and two calls to one tool need different
+            // ones (the screen and the tool loop tell calls apart by id).
             toolCalls.push({
-              id: part.functionCall.name as string,
+              id: geminiCallId(),
               name: part.functionCall.name as string,
               input: (part.functionCall.args ?? {}) as Record<string, unknown>,
               // Carried, not read. A thinking model signs the part it asks the
@@ -538,8 +565,11 @@ export class GeminiProvider extends BaseProvider {
     extraImages?: ImageAttachment[],
   ): Content[] {
     const contents: Content[] = [];
+    // Each call's id → its function name, for the results that answer them.
+    const namesById = new Map<string, string>();
 
     for (const m of messages) {
+      for (const tc of m.role === 'assistant' ? m.toolCalls ?? [] : []) namesById.set(tc.id, tc.name);
       // ── System messages in history: prepend to the next user turn ──────
       // Gemini only accepts systemInstruction at the top level; mid-conversation
       // system messages are folded into the following user turn as context.
@@ -559,8 +589,7 @@ export class GeminiProvider extends BaseProvider {
       // ── Tool result messages → Gemini functionResponse in a user turn ──
       if (m.role === 'tool') {
         const toolContent = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
-        // toolCallId carries the function name for Gemini (set by gemini provider using tool name)
-        const functionName = m.toolCallId ?? 'unknown_function';
+        const functionName = geminiFunctionName(m.toolCallId, namesById) ?? 'unknown_function';
         contents.push({
           role: 'user',
           parts: [{

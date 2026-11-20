@@ -117,6 +117,32 @@ describe('the cascade view', () => {
     expect(f).toContain('comms  T3·Database schema released src/db.py, models.py');
   });
 
+  it('two calls with the same id each get a row, with no duplicate-key warning', () => {
+    // Gemini named every call after its tool, so two `shell` calls shared an id
+    // and React printed a warning per redraw over the screen.
+    const a = new ActivityLog();
+    a.status('T3-b1', 'ACTIVE', 1_000_000);
+    a.toolCall({ id: 'shell', tierId: 'T3-b1', toolName: 'shell', input: { command: 'wc -w story.md' } }, 1_000_000);
+    a.toolCall({ id: 'shell', tierId: 'T3-b1', toolName: 'shell', input: { command: 'dir story.pdf' } }, 1_001_000);
+    const errors: unknown[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => { errors.push(args); };
+    let frame = '';
+    try {
+      const stdout = Object.assign(new EventEmitter(), { columns: 140, rows: 40, isTTY: true, write: (s: string) => { if (s.includes('T3')) frame = s; return true; } });
+      const app = render(React.createElement(CascadeView, {
+        root: tree(), activity: a, version: 1, selectedId: 'T3-b1', width: 140, maxRows: 9, theme: getTheme('cascade'),
+        peerEvents: [], showComms: false, now: 1_002_000,
+      }), { stdout: stdout as never, debug: true, patchConsole: false });
+      app.unmount();
+    } finally {
+      console.error = original;
+    }
+    expect(errors.filter((e) => String((e as unknown[])[0]).includes('same key'))).toEqual([]);
+    expect(frame).toContain('wc -w story.md');
+    expect(frame).toContain('dir story.pdf');
+  });
+
   it('a section done in part shows "partly", not the plain tick of a full success', () => {
     const root = tree();
     root.children![0]!.partial = true;

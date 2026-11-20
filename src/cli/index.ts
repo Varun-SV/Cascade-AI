@@ -42,6 +42,14 @@ import { onCrashNote } from '../utils/crash-note.js';
 import { armFatalReport, takeFatalReport } from './fatal-report.js';
 import { STATE, statePath } from '../config/project-state.js';
 
+// bin/cascade.js set NODE_ENV only so React loaded its production build (by
+// now it has). Cleared before anything reads it, so neither a project's .env
+// nor a command the agent runs sees a value the person never set.
+if (process.env['CASCADE_CLEAR_NODE_ENV']) {
+  delete process.env['NODE_ENV'];
+  delete process.env['CASCADE_CLEAR_NODE_ENV'];
+}
+
 dotenv.config();
 
 // ── Stale-build detection ─────────────────────────────────────────────
