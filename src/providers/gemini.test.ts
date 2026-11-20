@@ -544,7 +544,7 @@ describe('GeminiProvider — generation against a configured endpoint', () => {
 
       expect(chunks).toEqual(['Hel', 'lo']);
       expect(result.content).toBe('Hello');
-      expect(result.toolCalls).toEqual([{ id: expect.stringMatching(/^read_file#/), name: 'read_file', input: { path: 'a.ts' } }]);
+      expect(result.toolCalls).toEqual([{ id: expect.stringMatching(/^gemini_[a-z0-9_]+$/), name: 'read_file', input: { path: 'a.ts' } }]);
       expect(result.finishReason).toBe('tool_use');
       expect(result.usage.inputTokens).toBe(11);
       expect(result.usage.outputTokens).toBe(4);
@@ -668,37 +668,46 @@ describe('GeminiProvider — countTokens is on the same guarded transport', () =
 });
 
 describe('Gemini call ids', () => {
-  it('two calls to the same tool get different ids, each naming its function', () => {
-    const a = geminiCallId('shell');
-    const b = geminiCallId('shell');
-    expect(a).not.toBe(b);
-    expect(geminiFunctionName(a)).toBe('shell');
-    expect(geminiFunctionName(b)).toBe('shell');
+  it('two calls to the same tool get different ids', () => {
+    expect(geminiCallId()).not.toBe(geminiCallId());
   });
 
-  it('an id saved before the suffix (the bare name) still names its function', () => {
-    expect(geminiFunctionName('web_search')).toBe('web_search');
-    expect(geminiFunctionName(undefined)).toBeUndefined();
+  it('an id is one every provider accepts, so a run can fail over to Anthropic', () => {
+    // Anthropic refuses a tool_use id outside [a-zA-Z0-9_-].
+    for (let i = 0; i < 50; i++) expect(geminiCallId()).toMatch(/^[a-zA-Z0-9_-]+$/);
   });
 
-  it('a tool result goes back under the function name, without the suffix', async () => {
+  it('a result is sent under the name of the call it answers', () => {
+    const names = new Map([['gemini_x_1', 'shell'], ['toolu_01AbC', 'file_read']]);
+    expect(geminiFunctionName('gemini_x_1', names)).toBe('shell');
+    // A call another provider made, before the run failed over to Gemini.
+    expect(geminiFunctionName('toolu_01AbC', names)).toBe('file_read');
+    // A session saved when the id was the bare name.
+    expect(geminiFunctionName('web_search', names)).toBe('web_search');
+    expect(geminiFunctionName(undefined, names)).toBeUndefined();
+  });
+
+  it('two results for two calls to one tool each go back under its name', async () => {
     const provider = new GeminiProvider({ type: 'gemini', apiKey: 'test' }, MODEL);
     const generateContentStream = vi.fn(async () => fakeStream([
       { candidates: [{ content: { parts: [{ text: 'done' }] }, finishReason: 'STOP' }] },
     ]));
     (provider as unknown as { client: unknown }).client = { models: { generateContentStream } };
-    const id = geminiCallId('shell');
+    const a = geminiCallId();
+    const b = geminiCallId();
     await provider.generateStream({
       messages: [
         { role: 'user', content: 'count words' },
-        { role: 'assistant', content: '', toolCalls: [{ id, name: 'shell', input: { command: 'wc -w a.md' } }] },
-        { role: 'tool', content: '12 a.md', toolCallId: id },
+        { role: 'assistant', content: '', toolCalls: [{ id: a, name: 'shell', input: { command: 'wc -w a.md' } }] },
+        { role: 'tool', content: '12 a.md', toolCallId: a },
+        { role: 'assistant', content: '', toolCalls: [{ id: b, name: 'shell', input: { command: 'dir a.pdf' } }] },
+        { role: 'tool', content: 'a.pdf', toolCallId: b },
       ],
     }, () => {});
     const sent = generateContentStream.mock.calls[0]?.[0] as unknown as {
       contents: Array<{ role?: string; parts?: Array<{ functionResponse?: { name: string } }> }>;
     };
-    const response = sent.contents.flatMap((c) => c.parts ?? []).find((p) => p.functionResponse);
-    expect(response?.functionResponse?.name).toBe('shell');
+    const names = sent.contents.flatMap((c) => c.parts ?? []).filter((p) => p.functionResponse).map((p) => p.functionResponse!.name);
+    expect(names).toEqual(['shell', 'shell']);
   });
 });

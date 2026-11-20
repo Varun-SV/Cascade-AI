@@ -12,9 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same key" warnings.** Gemini gives its tool calls no id, so Cascade used
   the tool's name, and every `shell` call shared one. The activity list
   warned about the repeat on each redraw.
-  - Gemini calls now get a unique id (the tool's name plus a suffix). The
-    result still goes back under the plain name, as Gemini expects, and
-    sessions saved before this still work.
+  - Gemini calls now get a unique id, made of letters, digits and `_` so a
+    run can still fail over to Anthropic. Each result goes back to Gemini
+    under the name of the call it answers, and sessions saved before this
+    still work.
   - The activity list no longer relies on ids being unique.
   - The CLI loads React's production build, so React's development warnings
     are never printed over the screen. This is set only while loading and

@@ -137,6 +137,32 @@ export function toGeminiTools(tools: readonly ToolDefinition[]): FunctionDeclara
   }));
 }
 
+let callSeq = 0;
+
+/**
+ * A unique id for a Gemini call, which comes with none.
+ *
+ * Letters, digits and `_` only: the history is shared with whatever provider a
+ * run fails over to, and Anthropic refuses a tool-use id outside
+ * [a-zA-Z0-9_-]. The function name is not in it: a tool result finds its name
+ * from the call it answers (see buildContents).
+ */
+export function geminiCallId(): string {
+  callSeq = (callSeq + 1) % 1_000_000;
+  return `gemini_${Date.now().toString(36)}_${callSeq.toString(36)}`;
+}
+
+/**
+ * The function a tool result answers, for Gemini's functionResponse, which is
+ * matched by name: the name of the call with that id earlier in the history.
+ * A session saved before ids were unique used the bare name as the id, so an
+ * id no call has is taken as the name.
+ */
+export function geminiFunctionName(id: string | undefined, namesById: ReadonlyMap<string, string>): string | undefined {
+  if (!id) return undefined;
+  return namesById.get(id) ?? id;
+}
+
 /**
  * An assistant turn's tool calls in the shape this provider actually submits.
  *
@@ -145,23 +171,6 @@ export function toGeminiTools(tools: readonly ToolDefinition[]): FunctionDeclara
  * costs LESS than Cascade's normalized form, and sizing that form refused
  * budgets over ids never sent.
  */
-/** Separates the function name from what makes a Gemini call id unique; never part of a function name. */
-const CALL_ID_MARK = '#';
-let callSeq = 0;
-
-/** A unique id for a Gemini call: the function name, then a suffix. */
-export function geminiCallId(name: string): string {
-  callSeq = (callSeq + 1) % 1_000_000;
-  return `${name}${CALL_ID_MARK}${Date.now().toString(36)}${callSeq.toString(36)}`;
-}
-
-/** The function name a call id stands for; ids from before the suffix are the bare name. */
-export function geminiFunctionName(id: string | undefined): string | undefined {
-  if (!id) return undefined;
-  const at = id.indexOf(CALL_ID_MARK);
-  return at > 0 ? id.slice(0, at) : id;
-}
-
 export function toGeminiFunctionCalls(toolCalls: readonly ToolCall[]): Part[] {
   return toolCalls.map((tc) => ({
     functionCall: {
@@ -285,12 +294,10 @@ export class GeminiProvider extends BaseProvider {
             onChunk({ text: part.text, finishReason: null });
           }
           if (part.functionCall) {
-            // Gemini gives calls no id and matches a functionResponse by name, so the
-            // id is the name plus a suffix that makes it unique (the screen and the
-            // tool loop tell calls apart by id); the suffix is cut off again when
-            // the result is sent back.
+            // Gemini gives calls no id, and two calls to one tool need different
+            // ones (the screen and the tool loop tell calls apart by id).
             toolCalls.push({
-              id: geminiCallId(part.functionCall.name as string),
+              id: geminiCallId(),
               name: part.functionCall.name as string,
               input: (part.functionCall.args ?? {}) as Record<string, unknown>,
               // Carried, not read. A thinking model signs the part it asks the
@@ -558,8 +565,11 @@ export class GeminiProvider extends BaseProvider {
     extraImages?: ImageAttachment[],
   ): Content[] {
     const contents: Content[] = [];
+    // Each call's id → its function name, for the results that answer them.
+    const namesById = new Map<string, string>();
 
     for (const m of messages) {
+      for (const tc of m.role === 'assistant' ? m.toolCalls ?? [] : []) namesById.set(tc.id, tc.name);
       // ── System messages in history: prepend to the next user turn ──────
       // Gemini only accepts systemInstruction at the top level; mid-conversation
       // system messages are folded into the following user turn as context.
@@ -579,8 +589,7 @@ export class GeminiProvider extends BaseProvider {
       // ── Tool result messages → Gemini functionResponse in a user turn ──
       if (m.role === 'tool') {
         const toolContent = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
-        // toolCallId is the function name, with the suffix geminiCallId added
-        const functionName = geminiFunctionName(m.toolCallId) ?? 'unknown_function';
+        const functionName = geminiFunctionName(m.toolCallId, namesById) ?? 'unknown_function';
         contents.push({
           role: 'user',
           parts: [{
