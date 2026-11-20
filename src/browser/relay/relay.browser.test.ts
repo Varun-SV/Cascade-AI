@@ -1082,6 +1082,28 @@ suite('the user takes the tab over and navigates, then hands it back (Codex on 3
   const childFrames = (r: Rig) => r.page.frames().filter((f) => f !== r.page.mainFrame())
     .map((f) => `${path_(f.parentFrame()!.url())} > ${path_(f.url())}`).sort();
 
+  /**
+   * Until the page's child frames include `want`, checked on each of Playwright's
+   * frame events and on a short timer, for up to 20s. A fixed 5s of polling was
+   * too short on a loaded CI runner: a cross-site frame was still '/links > <>'
+   * (attached, not yet navigated) when the assertion ran.
+   */
+  const untilChildFrame = (r: Rig, want: string, timeoutMs = 20_000) => new Promise<void>((resolve) => {
+    const check = () => { if (childFrames(r).includes(want)) done(); };
+    const timer = setInterval(check, 50);
+    const deadline = setTimeout(() => done(), timeoutMs);
+    function done() {
+      clearInterval(timer);
+      clearTimeout(deadline);
+      r.page.off('framenavigated', check);
+      r.page.off('frameattached', check);
+      resolve();
+    }
+    r.page.on('framenavigated', check);
+    r.page.on('frameattached', check);
+    check();
+  });
+
   it('its frames are the ones on the page now, nested ones too, as its own visit would show them (Codex on ca21b23)', async () => {
     const r = await startRig();
     // What the agent is shown when it goes there itself: the off-list frame exists, with no URL.
@@ -1140,7 +1162,7 @@ suite('the user takes the tab over and navigates, then hands it back (Codex on 3
     await r.page.evaluate("(() => { const f = document.createElement('iframe'); f.src = 'http://other.test/one'; document.body.append(f); return new Promise((res) => { f.onload = () => res(1); }); })()");
     // Waited for by its address, not its count: the frame is reported attached before
     // its navigation is, and in that moment it has no URL yet ('/links > <>').
-    for (let i = 0; i < 100 && !childFrames(r).includes('/links > /one'); i++) await sleep(50);
+    await untilChildFrame(r, '/links > /one');
     expect(childFrames(r)).toEqual(['/links > /one']);
     const frameBefore = r.page.frames().find((f) => f.url().endsWith('/one'))!;
     expect(await frameBefore.evaluate('location.host')).toBe('other.test');
@@ -1149,7 +1171,7 @@ suite('the user takes the tab over and navigates, then hands it back (Codex on 3
     await user.send('Runtime.evaluate', { expression: "(() => { const f = document.querySelector('iframe'); f.src = 'http://other.test/two'; return new Promise((res) => { f.onload = () => res(1); }); })()", awaitPromise: true });
     user.close();
     r.lease.handBack();
-    for (let i = 0; i < 100 && !childFrames(r).includes('/links > /two'); i++) await sleep(50);
+    await untilChildFrame(r, '/links > /two');
     expect(childFrames(r)).toEqual(['/links > /two']);
     const frame = r.page.frames().find((f) => f.url().endsWith('/two'))!;
     expect(await Promise.race([frame.evaluate('location.pathname'), sleep(10_000).then(() => 'timed out')])).toBe('/two');
