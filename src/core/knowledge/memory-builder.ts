@@ -191,8 +191,15 @@ export async function extractFromChat(chat: ChatForMemory, generate: (prompt: st
 }
 
 const STOP = new Set(['a', 'an', 'the', 'and', 'or', 'of', 'to', 'in', 'on', 'for', 'with', 'is', 'are', 'was', 'be', 'you', 'your', 'yours', 'i', 'my', 'me', 'at', 'as', 'it', 'that', 'this', 'by', 'from']);
+/** A word without its trailing dots and dashes. A loop, not /[.-]+$/: that regex is quadratic on a long run of dashes. */
+function trimTail(w: string): string {
+  let end = w.length;
+  while (end > 0 && (w[end - 1] === '.' || w[end - 1] === '-')) end -= 1;
+  return w.slice(0, end);
+}
+
 function terms(s: string): Set<string> {
-  return new Set(s.toLowerCase().replace(/[^a-z0-9+#.\s-]/g, ' ').split(/\s+/).map((w) => w.replace(/[.-]+$/, '')).filter((w) => w && !STOP.has(w)));
+  return new Set(s.toLowerCase().replace(/[^a-z0-9+#.\s-]/g, ' ').split(/\s+/).map(trimTail).filter((w) => w && !STOP.has(w)));
 }
 
 /** How alike two memories read, 0–1 (shared words over all words). */

@@ -120,3 +120,14 @@ describe('estimateBuildCostUsd', () => {
     expect(estimateBuildCostUsd({ inputTokens: 10_000, outputTokens: 1_000 }, { id: 'x', name: 'x', isLocal: true } as never)).toBe(0);
   });
 });
+
+describe('similarity on hostile input', () => {
+  it('stays fast on a long run of dashes, and still drops trailing punctuation', async () => {
+    const { similarity } = await import('./memory-builder.js');
+    const evil = `a${'-'.repeat(100_000)}b ${'-'.repeat(100_000)}`;
+    const t = Date.now();
+    similarity(evil, evil);
+    expect(Date.now() - t).toBeLessThan(500);
+    expect(similarity('Uses Go.', 'uses go')).toBe(1);
+  });
+});
