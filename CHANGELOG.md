@@ -5,6 +5,20 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.97.1 - 2026-11-20
+
+### Fixed
+- **The CLI says when the cost shown leaves calls out.** When a run moved
+  on to a model Cascade has no price for, its calls were counted in tokens
+  but added $0, so the cost stopped rising while the tokens kept climbing,
+  with nothing to say why. Now:
+  - The status bar shows the cost as a floor: `$8.51+`, and on a wide
+    terminal how many calls it leaves out ("42 calls not priced").
+  - `/cost` names each model it couldn't price and how many calls each made.
+  - The first call to such a model puts a notice in the chat, which also
+    says when a cost budget can't see that spend (the token cap still
+    applies).
+
 ## 0.96.3 - 2026-11-20
 
 ### Fixed

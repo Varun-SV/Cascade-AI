@@ -27,6 +27,8 @@ interface CostTrackerProps {
   savedPct?: number;
   /** Optional per-feature tag cost breakdown. */
   costByFeature?: Record<string, number>;
+  /** Calls per model (`provider:id`) that Cascade has no price for: not in the cost above. */
+  unpricedByModel?: Record<string, number>;
 }
 
 // Cap the provider list so the panel height stays bounded no matter how
@@ -45,8 +47,15 @@ export function CostTracker({
   savedUsd = 0,
   savedPct = 0,
   costByFeature,
+  unpricedByModel = {},
 }: CostTrackerProps): React.ReactElement {
   const hasTierCost = costByTier && Object.keys(costByTier).length > 0;
+  const unpriced = Object.entries(unpricedByModel).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
+  const unpricedCalls = unpriced.reduce((a, [, n]) => a + n, 0);
+  const costText = `$${totalCostUsd.toFixed(6)}${unpricedCalls ? '+' : ''}`;
+  const unpricedLine = unpricedCalls
+    ? `Not counted: ${unpricedCalls} call${unpricedCalls === 1 ? '' : 's'} to ${unpriced.map(([m, n]) => `${m} (${n})`).join(', ')}, which ${unpriced.length === 1 ? 'has' : 'have'} no known price`
+    : null;
   const savingsLine = savedUsd > 0
     ? `Saved $${savedUsd.toFixed(4)} (${savedPct}%) vs. running every call on T1`
     : null;
@@ -64,9 +73,10 @@ export function CostTracker({
         </Box>
         <Box>
           <Box width={20}><Text color={theme.colors.muted}>Estimated cost:</Text></Box>
-          <Text color={theme.colors.success} bold>${totalCostUsd.toFixed(6)}</Text>
+          <Text color={theme.colors.success} bold>{costText}</Text>
         </Box>
         {tierSummary ? <Text color={theme.colors.muted} wrap="truncate-end">{tierSummary}</Text> : null}
+        {unpricedLine ? <Text color={theme.colors.warning} wrap="truncate-end">{unpricedLine}</Text> : null}
         {savingsLine ? <Text color={theme.colors.success} wrap="truncate-end">{savingsLine}</Text> : null}
       </Box>
     );
@@ -86,8 +96,9 @@ export function CostTracker({
       </Box>
       <Box>
         <Box width={20}><Text color={theme.colors.muted}>Estimated cost:</Text></Box>
-        <Text color={theme.colors.success} bold>${totalCostUsd.toFixed(6)}</Text>
+        <Text color={theme.colors.success} bold>{costText}</Text>
       </Box>
+      {unpricedLine && <Text color={theme.colors.warning} wrap="wrap">{unpricedLine}</Text>}
       {savingsLine && (
         <Box>
           <Box width={20}><Text color={theme.colors.muted}>Delegation:</Text></Box>

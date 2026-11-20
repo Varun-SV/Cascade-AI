@@ -150,7 +150,18 @@ interface TierStatusEvent {
   partial?: boolean;
 }
 
+/** Calls per model with no known price, summed over the tiers that made them. */
+export function unpricedByModel(byTier: Record<string, Record<string, number>> | undefined): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const models of Object.values(byTier ?? {})) {
+    for (const [model, calls] of Object.entries(models)) if (calls > 0) out[model] = (out[model] ?? 0) + calls;
+  }
+  return out;
+}
+
 interface ReplState {
+  /** Calls per model with no known price: their cost isn't in totalCostUsd. */
+  unpricedByModel: Record<string, number>;
   messages: Message[];
   agentTree: TierNode | null;
   isStreaming: boolean;
@@ -176,10 +187,12 @@ interface ReplState {
 
 type ReplAction =
   | { type: 'ADD_MESSAGE'; message: Message }
+  /** A message that arrives mid-run: unlike ADD_MESSAGE, it leaves the reply being streamed alone. */
+  | { type: 'ADD_NOTICE'; message: Message }
   | { type: 'APPEND_STREAM'; text: string }
   | { type: 'COMMIT_STREAM'; finalText: string; timestamp?: string }
   | { type: 'SET_TREE'; tree: TierNode | null }
-  | { type: 'UPDATE_COST'; tokens: number; costUsd: number; byProvider: Record<string,number>; byTier: Record<string,number>; costByTier: Record<string,number>; tokensByTier: Record<string,number>; costByFeature: Record<string,number>; savedUsd: number; savedPct: number }
+  | { type: 'UPDATE_COST'; tokens: number; costUsd: number; byProvider: Record<string,number>; byTier: Record<string,number>; costByTier: Record<string,number>; tokensByTier: Record<string,number>; costByFeature: Record<string,number>; savedUsd: number; savedPct: number; unpricedByModel: Record<string,number> }
   | { type: 'SET_APPROVAL'; request: ApprovalRequest | null }
   | { type: 'SET_EXECUTING'; isExecuting: boolean }
   | { type: 'SET_STREAMING'; isStreaming: boolean }
@@ -195,6 +208,8 @@ type ReplAction =
 
 function replReducer(state: ReplState, action: ReplAction): ReplState {
   switch (action.type) {
+    case 'ADD_NOTICE':
+      return { ...state, messages: [...state.messages, action.message] };
     case 'ADD_MESSAGE':
       return { ...state, messages: [...state.messages, action.message], isStreaming: false, streamBuffer: '' };
     case 'APPEND_STREAM':
@@ -211,7 +226,7 @@ function replReducer(state: ReplState, action: ReplAction): ReplState {
     case 'SET_TREE':
       return { ...state, agentTree: action.tree };
     case 'UPDATE_COST':
-      return { ...state, totalTokens: action.tokens, totalCostUsd: action.costUsd, callsByProvider: action.byProvider, callsByTier: action.byTier, costByTier: action.costByTier, tokensByTier: action.tokensByTier, costByFeature: action.costByFeature, savedUsd: action.savedUsd, savedPct: action.savedPct };
+      return { ...state, totalTokens: action.tokens, totalCostUsd: action.costUsd, callsByProvider: action.byProvider, callsByTier: action.byTier, costByTier: action.costByTier, tokensByTier: action.tokensByTier, costByFeature: action.costByFeature, savedUsd: action.savedUsd, savedPct: action.savedPct, unpricedByModel: action.unpricedByModel };
     case 'SET_APPROVAL':
       return { ...state, approvalRequest: action.request };
     case 'SET_EXECUTING':
@@ -225,7 +240,7 @@ function replReducer(state: ReplState, action: ReplAction): ReplState {
     case 'TOGGLE_COMMS':
       return { ...state, showComms: !state.showComms };
     case 'CLEAR':
-      return { ...state, messages: [], agentTree: null, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, costByFeature: {}, savedUsd: 0, savedPct: 0, peerEvents: [], activeTool: null };
+      return { ...state, messages: [], agentTree: null, streamBuffer: '', unpricedByModel: {}, totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, costByFeature: {}, savedUsd: 0, savedPct: 0, peerEvents: [], activeTool: null };
     case 'CLEAR_TREE':
       return { ...state, agentTree: null };
     case 'TOGGLE_COST':
@@ -293,7 +308,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const [slashIndex, setSlashIndex] = useState(0);
   const [identities, setIdentities] = useState<Array<{ id: string; name: string; isDefault: boolean }>>([]);
   const [currentIdentityId, setCurrentIdentityId] = useState<string | undefined>(config.defaultIdentityId);
-  const [state, dispatch] = useReducer(replReducer, { messages: [], agentTree: null, isStreaming: false, isExecuting: false, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, costByFeature: {}, savedUsd: 0, savedPct: 0, peerEvents: [], showComms: true, approvalRequest: null, showCost: false, showDetails: false, error: null, activeTool: null });
+  const [state, dispatch] = useReducer(replReducer, { unpricedByModel: {}, messages: [], agentTree: null, isStreaming: false, isExecuting: false, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, costByFeature: {}, savedUsd: 0, savedPct: 0, peerEvents: [], showComms: true, approvalRequest: null, showCost: false, showDetails: false, error: null, activeTool: null });
   const [isShowingModels, setIsShowingModels] = useState(false);
   const [planApprovalRequest, setPlanApprovalRequest] = useState<PlanApprovalRequest | null>(null);
   // Alt-screen transcript scroll position, in lines up from the newest line.
@@ -1169,7 +1184,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       if (lastTool !== null) dispatch({ type: 'SET_ACTIVE_TOOL', toolName: lastTool });
       const stats = cascade.getRouter().getStats();
       const savings = cascade.getRouter().getDelegationSavings();
-      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier, costByFeature: stats.costByFeature, savedUsd: savings.savedUsd, savedPct: savings.savedPct });
+      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier, costByFeature: stats.costByFeature, savedUsd: savings.savedUsd, savedPct: savings.savedPct, unpricedByModel: unpricedByModel(stats.untrackedByTierModel) });
       statusThrottleTimeout = null;
     };
     // What each node does, for the cascade view: redrawn at most every 100 ms.
@@ -1180,6 +1195,14 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     cascade.on('tool:call', (ev: { id: string; tierId: string; toolName: string; input?: Record<string, unknown> }) => { activityRef.current.toolCall(ev); activityChanged(); });
     cascade.on('tool:result', (ev: { id: string; tierId: string; toolName: string; output?: string; error?: string }) => { activityRef.current.toolResult(ev); activityChanged(); });
     cascade.on('tier:thinking', (ev: { tierId: string; call?: number; text?: string; done?: boolean }) => { activityRef.current.think(ev); activityChanged(); });
+    // Once per model: its calls are counted in tokens but not in cost, so the cost
+    // shown is partial from here on. Said when it happens, not left for /cost.
+    cascade.getRouter().on('cost:untracked', (ev: { modelId: string; provider: string }) => {
+      const capped = config.budget?.maxCostPerRunUsd != null || config.budget?.sessionBudgetUsd != null;
+      const content = `Cost not counted for ${ev.provider}:${ev.modelId}: Cascade has no price for this model. Its tokens still count, but the cost shown leaves its calls out (marked "+"); /cost lists them.`
+        + (capped ? ' Your cost budget can\'t see this spend either; the token cap still applies.' : '');
+      dispatch({ type: 'ADD_NOTICE', message: { id: randomUUID(), role: 'system', content, timestamp: new Date().toISOString() } });
+    });
     cascade.on('tier:root', onRoot);
     cascade.on('stream:token', onStream);
     cascade.on('tier:status', (ev: TierStatusEvent) => {
@@ -1334,7 +1357,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       flushPeerEvents();
       const stats = cascade.getRouter().getStats();
       const savings = cascade.getRouter().getDelegationSavings();
-      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier, costByFeature: stats.costByFeature, savedUsd: savings.savedUsd, savedPct: savings.savedPct });
+      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier, costByFeature: stats.costByFeature, savedUsd: savings.savedUsd, savedPct: savings.savedPct, unpricedByModel: unpricedByModel(stats.untrackedByTierModel) });
       dispatch({ type: 'COMMIT_STREAM', finalText: result.output, timestamp: new Date().toISOString() });
       persistMessage('assistant', result.output, new Date().toISOString());
       // Mirror the finished turn into the shared cloud session (best-effort),
@@ -1639,6 +1662,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         }}
         tokens={state.totalTokens}
         costUsd={state.totalCostUsd}
+        unpricedCalls={Object.values(state.unpricedByModel).reduce((a, n) => a + n, 0)}
         savedUsd={state.savedUsd}
         workspacePath={workspacePath}
         isExecuting={state.isExecuting}
@@ -1727,7 +1751,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       {adaptiveMode === 'wide' && state.showDetails && liveBudget.showTimeline && (
         <TimelinePanel nodes={[...treeNodesRef.current.values()]} theme={theme} currentIndex={timelineIndex} onChangeIndex={setTimelineIndex} />
       )}
-      {adaptiveMode !== 'narrow' && state.showCost && <CostTracker theme={theme} totalTokens={state.totalTokens} totalCostUsd={state.totalCostUsd} callsByProvider={state.callsByProvider} callsByTier={state.callsByTier} costByTier={state.costByTier} tokensByTier={state.tokensByTier} costByFeature={state.costByFeature} compact={liveBudget.costCompact} savedUsd={state.savedUsd} savedPct={state.savedPct} />}
+      {adaptiveMode !== 'narrow' && state.showCost && <CostTracker theme={theme} totalTokens={state.totalTokens} totalCostUsd={state.totalCostUsd} callsByProvider={state.callsByProvider} callsByTier={state.callsByTier} costByTier={state.costByTier} tokensByTier={state.tokensByTier} costByFeature={state.costByFeature} unpricedByModel={state.unpricedByModel} compact={liveBudget.costCompact} savedUsd={state.savedUsd} savedPct={state.savedPct} />}
       {liveBudget.collapsed && (state.showCost || state.showDetails || state.agentTree != null) && (
         <Text color={theme.colors.muted} dimColor>  ▸ panels collapsed (small terminal)</Text>
       )}
