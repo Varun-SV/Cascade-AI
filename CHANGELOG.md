@@ -18,7 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     percentages. Several series get a colour each and a legend. A chart
     that doesn't parse is shown as written. Labels in Chinese, Japanese or
     Korean are measured by the columns they take, so values stay in view.
-    An area chart is shaded to zero from either side. This works in the
+    An area chart is shaded to zero from either side, and a line chart
+    names both its first and last label. A chart written out as an example
+    inside an ordinary code block stays as written. This works in the
     alt-screen view too.
   - **Images** on your machine, inside the project or Cascade's own folders,
     are drawn as a small colour thumbnail made of half blocks, with an

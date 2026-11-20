@@ -137,3 +137,31 @@ describe('Codex on 356220c', () => {
     expect(plot.slice(zeroRow + 1, -1).some((r) => shaded(r) > 4)).toBe(true);
   });
 });
+
+describe('Codex on f238e53', () => {
+  it('a chart shown inside an ordinary fence is an example, left as written', async () => {
+    const { expandCharts } = await import('./chart-text.js');
+    const example = 'To draw one, write:\n````markdown\n```chart:bar\nItem,Value\nA,1\n```\n````\nDone.';
+    expect(expandCharts(example, 60)).toBe(example);
+    const tilde = '~~~\n```chart:bar\nItem,Value\nA,1\n```\n~~~';
+    expect(expandCharts(tilde, 60)).toBe(tilde);
+    // Control: the same chart on its own is drawn, after an example or not.
+    const drawn = plain(expandCharts(`${example}\n\`\`\`chart:bar\nItem,Value\nA,1\n\`\`\``, 60));
+    expect(drawn).toContain('```chart:bar');
+    expect(drawn).toMatch(/A\s+█+ 1$/m);
+  });
+
+  it('both ends of a plot are named, within the width', () => {
+    for (const w of [30, 40]) {
+      const lines = draw('line', 'Month,Value\nA very long category label that fills the whole plot width,10\nDec,20', w);
+      const labels = lines.find((l) => l.includes('Dec'));
+      expect(labels, lines.join('\n')).toBeDefined();
+      for (const l of lines) expect(stringWidth(l), l).toBeLessThanOrEqual(w);
+    }
+    // A long last label gives way to a short first one.
+    const lines = draw('line', 'Month,Value\nJan,10\nA very long category label that fills the whole plot width,20', 30);
+    expect(lines.some((l) => /^\s+Jan\s+A very.*…$/.test(l))).toBe(true);
+    // Control: short labels both whole, one at each end.
+    expect(draw('line', 'Month,Value\nJan,10\nDec,20', 40).some((l) => /^\s+Jan\s{3,}Dec$/.test(l))).toBe(true);
+  });
+});

@@ -197,9 +197,21 @@ function plotLines(spec: ChartSpec, w: number): string[] {
   out.push(`${' '.repeat(axis)} └${'─'.repeat(width)}`);
   const first = spec.categories[0] ?? '';
   const last = n > 1 ? spec.categories[n - 1]! : '';
-  const firstShown = cut(first, width);
-  const gap = Math.max(1, width - cols(firstShown) - cols(last));
-  out.push(`${' '.repeat(axis + 2)}${firstShown}${last ? ' '.repeat(gap) + cut(last, Math.max(1, width - cols(firstShown) - 1)) : ''}`);
+  // Both ends named, in the width: each gets half, and gives what it doesn't need
+  // to the other.
+  let firstShown = cut(first, width);
+  let lastShown = '';
+  if (last) {
+    const room = width - 1;
+    const half = Math.floor(room / 2);
+    const cf = cols(first);
+    const cl = cols(last);
+    const firstRoom = cf + cl <= room || cf <= half ? cf : cl <= room - half ? room - cl : half;
+    firstShown = cut(first, Math.min(firstRoom, room - 1));
+    lastShown = cut(last, room - cols(firstShown));
+  }
+  const gap = lastShown ? Math.max(1, width - cols(firstShown) - cols(lastShown)) : 0;
+  out.push(`${' '.repeat(axis + 2)}${firstShown}${' '.repeat(gap)}${lastShown}`);
   if (spec.series.length > 1) out.push('', legend(spec));
   return out;
 }
@@ -211,20 +223,23 @@ function plotLines(spec: ChartSpec, w: number): string[] {
  */
 export function expandCharts(text: string, width: number): string {
   // Line by line, not one pattern over the whole reply: a reply is model-written and
-  // can be long. A fence string found to have no closer after some line has none
-  // after any later line either, so it is never looked for twice; and a block that
-  // doesn't parse is passed over whole. Each line is read a bounded number of times.
+  // can be long. Every fenced block is passed over whole, so each line is read once.
+  // Fences as Markdown has them: ``` or ~~~, closed by a run of the same at least as
+  // long, or by the end of the reply. A ```chart:<kind> block is drawn only as a block
+  // of its own: one shown inside an ordinary fence (````markdown … ````) is an example,
+  // left as written to be read and copied.
   const lines = text.split('\n');
   const out: string[] = [];
-  const unclosed = new Set<string>();
   for (let i = 0; i < lines.length; i++) {
-    const open = /^ {0,3}(`{3,})[ \t]*chart[ \t]*:(.*)$/i.exec(lines[i]!);
-    if (!open || unclosed.has(open[1]!)) { out.push(lines[i]!); continue; }
+    const open = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(lines[i]!);
+    // A backtick in a backtick fence's info string makes it no fence.
+    if (!open || (open[1]![0] === '`' && open[2]!.includes('`'))) { out.push(lines[i]!); continue; }
     const fence = open[1]!;
+    const closer = new RegExp(`^ {0,3}${fence[0] === '`' ? '`' : '~'}{${fence.length},}[ \\t]*$`);
     let end = i + 1;
-    while (end < lines.length && lines[end]!.trim() !== fence) end++;
-    if (end >= lines.length) { unclosed.add(fence); out.push(lines[i]!); continue; }
-    const k = chartKind(open[2]!);
+    while (end < lines.length && !closer.test(lines[end]!)) end++;
+    const chart = fence[0] === '`' && end < lines.length ? /^[ \t]*chart[ \t]*:(.*)$/i.exec(open[2]!) : null;
+    const k = chart ? chartKind(chart[1]!) : null;
     const spec = k ? parseChartSpec(k, lines.slice(i + 1, end).join('\n')) : null;
     out.push(...(spec ? chartToLines(spec, width) : lines.slice(i, end + 1)));
     i = end;
