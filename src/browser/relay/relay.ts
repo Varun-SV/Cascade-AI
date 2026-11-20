@@ -316,26 +316,74 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
     let ended = false;
 
     const out = (m: object): void => { if (agent.readyState === agent.OPEN) agent.send(JSON.stringify(m)); };
-    const replyError = (id: number, sessionId: string | undefined, message: string): void => {
-      out({ id, ...(sessionId ? { sessionId } : {}), error: { code: -32000, message } });
-    };
+    const errorFrame = (id: number, sessionId: string | undefined, message: string): object =>
+      ({ id, ...(sessionId ? { sessionId } : {}), error: { code: -32000, message } });
+    const replyError = (id: number, sessionId: string | undefined, message: string): void => { out(errorFrame(id, sessionId, message)); };
     const toTab = (sessionId: string | undefined): string | undefined => (sessionId === TAB_SESSION ? undefined : sessionId);
 
-    interface Outbound { key: number; method: string; params: Record<string, unknown>; sessionId?: string }
+    // What the tab says goes to the agent in the order the tab said it. An event is
+    // forwarded as it arrives, but the answer to one of the agent's commands is read,
+    // fenced and filtered first, so an event the tab sent just after that answer used to
+    // reach the agent before it. A frame's snapshot (Page.getFrameTree) could then land
+    // after its own navigation, and the agent kept the older, empty address for good.
+    // So an answer takes its place in line when it arrives, and what came after it waits.
+    interface Slot { ready: boolean; m: object | null; detached?: boolean }
+    const inLine: Slot[] = [];
+    const answering = new Map<number, Slot>();
+    /**
+     * Commands whose answer is still to be sent. A reply that arrives for one that
+     * isn't (refused at a takeover, its answer already sent) holds no place: nothing
+     * would ever settle that place, and everything behind it would wait for good.
+     */
+    const awaiting = new Set<number>();
+    const flushLine = (): void => {
+      while (inLine.length && inLine[0]!.ready) { const e = inLine.shift()!; if (e.m) out(e.m); }
+    };
+    const sendInOrder = (m: object): void => {
+      if (!inLine.length) { out(m); return; }
+      inLine.push({ ready: true, m });
+    };
+    /** An answer's place in line, taken when the tab's reply arrives. */
+    const holdPlace = (key: number): void => {
+      if (!awaiting.has(key)) return;
+      const slot: Slot = { ready: false, m: null };
+      inLine.push(slot);
+      answering.set(key, slot);
+    };
+    /** Sends an answer in its place (or now, if it never had one), and what waited behind it. */
+    const settle = (key: number, m: object | null): void => {
+      awaiting.delete(key);
+      const slot = answering.get(key);
+      answering.delete(key);
+      if (!slot || slot.detached) { if (m) out(m); return; }
+      slot.ready = true;
+      slot.m = m;
+      flushLine();
+    };
+    // The agent losing the tab ends the wait: what was in line goes now, as it always
+    // did, and an answer still being read goes out when it is ready (fenced, as before).
+    lease.onChange((_why, state) => {
+      if (state === 'held') return;
+      for (const e of inLine.splice(0)) {
+        if (e.ready) { if (e.m) out(e.m); } else e.detached = true;
+      }
+    });
+
+    interface Outbound { key: number; method: string; params: Record<string, unknown>; sessionId?: string; answers?: boolean }
     let nextKey = 1;
     const transport: CommandTransport<Outbound> = {
       ...(opts.beforeForward ? { beforeForward: opts.beforeForward as (c: Outbound) => Promise<void> } : {}),
       write(c) {
-        tab.send(c.method, c.params, c.sessionId).then(
+        tab.send(c.method, c.params, c.sessionId, c.answers ? () => holdPlace(c.key) : undefined).then(
           (result) => forwarder.deliver(c.key, { result }),
           (e: Error) => forwarder.deliver(c.key, { error: e.message }),
         );
       },
     };
     const forwarder = createFencedForwarder<Outbound, { result?: Record<string, unknown>; error?: string }>(lease, transport, generation);
-    const forward = (method: string, params: Record<string, unknown>, sessionId: string | undefined) => {
-      const key = nextKey++;
-      return forwarder.dispatch({ key, method, params, ...(toTab(sessionId) ? { sessionId: toTab(sessionId)! } : {}) }, key);
+    /** `answers`: the tab's reply to this is the agent's answer, so it keeps its place in line. */
+    const forward = (method: string, params: Record<string, unknown>, sessionId: string | undefined, key = nextKey++, answers = false) => {
+      return forwarder.dispatch({ key, method, params, ...(answers ? { answers: true } : {}), ...(toTab(sessionId) ? { sessionId: toTab(sessionId)! } : {}) }, key);
     };
 
     const end = (why: string): void => {
@@ -505,7 +553,7 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
       }
       const safe = filterEvent(msg.method, params, consent);
       if (safe === null) { droppedEvents.add(msg.method); return; }
-      out({ method: msg.method, params: safe, sessionId: msg.sessionId ?? TAB_SESSION });
+      sendInOrder({ method: msg.method, params: safe, sessionId: msg.sessionId ?? TAB_SESSION });
     });
 
     const handleRoot = (f: CommandFrame): void => {
@@ -566,6 +614,14 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
       const issued = lease.fence();
       const stillOurs = (): boolean => issued !== null && lease.isCurrent(issued);
       const fencedAnswer = 'Command refused: the tab changed hands before the answer could be sent';
+      // The command whose reply is the answer, once it is sent: the answer goes in its place.
+      let answerKey: number | undefined;
+      const answer = (m: object): void => {
+        if (answerKey === undefined) { out(m); return; }
+        const key = answerKey;
+        answerKey = undefined;
+        settle(key, m);
+      };
       try {
         if (method === 'Page.navigateToHistoryEntry') {
           // A page restored from the back-forward cache sends no request, so the
@@ -624,8 +680,10 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
         }
         const registering = method === 'Page.addScriptToEvaluateOnNewDocument';
         if (registering) pendingScripts += 1;
+        answerKey = nextKey++;
+        awaiting.add(answerKey);
         let r: Awaited<ReturnType<typeof forward>>;
-        try { r = await forward(method, params, sessionId); } catch (e) {
+        try { r = await forward(method, params, sessionId, answerKey, true); } catch (e) {
           // Fenced: whether it was written is unknown, so it stays counted as pending.
           if (registering && !(e instanceof CommandFenced)) pendingScripts -= 1;
           throw e;
@@ -638,12 +696,15 @@ export function createDeviceRelay(opts: DeviceRelayOptions): DeviceRelay {
           const s = toTab(sessionId);
           injected.push({ identifier: result.identifier, ...(s ? { sessionId: s } : {}) });
         }
-        if (!stillOurs()) { replyError(id, sessionId, fencedAnswer); return; }
-        if (r.error !== undefined) { replyError(id, sessionId, r.error); return; }
-        out({ id, sessionId, result: filterReply(method, result, consent) });
+        if (!stillOurs()) { answer(errorFrame(id, sessionId, fencedAnswer)); return; }
+        if (r.error !== undefined) { answer(errorFrame(id, sessionId, r.error)); return; }
+        answer({ id, sessionId, result: filterReply(method, result, consent) });
       } catch (e) {
-        if (e instanceof CommandFenced) { replyError(id, sessionId, e.message); return; }
+        if (e instanceof CommandFenced) { answer(errorFrame(id, sessionId, e.message)); return; }
         throw e;
+      } finally {
+        // An answer that never came (the relay ended) holds nothing up behind it.
+        if (answerKey !== undefined) settle(answerKey, null);
       }
     };
 
