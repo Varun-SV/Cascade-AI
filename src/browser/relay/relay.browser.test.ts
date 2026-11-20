@@ -1138,7 +1138,9 @@ suite('the user takes the tab over and navigates, then hands it back (Codex on 3
     const r = await startRig({ consent: makeConsent(['http://allowed.test', 'http://other.test']) });
     await r.page.goto('http://allowed.test/links');
     await r.page.evaluate("(() => { const f = document.createElement('iframe'); f.src = 'http://other.test/one'; document.body.append(f); return new Promise((res) => { f.onload = () => res(1); }); })()");
-    for (let i = 0; i < 100 && childFrames(r).length < 1; i++) await sleep(50);
+    // Waited for by its address, not its count: the frame is reported attached before
+    // its navigation is, and in that moment it has no URL yet ('/links > <>').
+    for (let i = 0; i < 100 && !childFrames(r).includes('/links > /one'); i++) await sleep(50);
     expect(childFrames(r)).toEqual(['/links > /one']);
     const frameBefore = r.page.frames().find((f) => f.url().endsWith('/one'))!;
     expect(await frameBefore.evaluate('location.host')).toBe('other.test');
