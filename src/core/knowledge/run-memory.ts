@@ -26,8 +26,10 @@
 //    working in that folder, the command now running) is taken back out.
 //
 //  Only short facts in Cascade's own words are kept, never a tool's output,
-//  and a local-only subtask (privacy.paths) adds nothing and reads nothing,
-//  including one that became local-only during the call being observed.
+//  and none while knowledge.factsExtraction is off. A local-only subtask
+//  (privacy.paths) adds nothing and reads nothing, including one that became
+//  local-only during the call being observed; what it changes still makes the
+//  stored answers stale.
 
 import path from 'node:path';
 import type { WorldStateDB } from './world-state.js';
@@ -98,6 +100,22 @@ export function callReadsOnly(tool: string, input: Record<string, unknown>): boo
   return false;
 }
 
+/**
+ * Whether git may have run somewhere other than the folder the call was given:
+ * a `cd` (or the like) in the command, `git -C`, or a git directory or work tree
+ * named outright. What git said is then about that other place and tells
+ * nothing about this folder either way. Erring wide is safe: a fact not learnt
+ * is only a command run again.
+ */
+function runsElsewhere(tool: string, input: Record<string, unknown>, command: string): boolean {
+  if (tool === 'git') {
+    const args = Array.isArray(input['args']) ? (input['args'] as unknown[]).map(String) : [];
+    return args.some((a) => /^--(git-dir|work-tree)(=|$)/.test(a));
+  }
+  return /(^|[\s;&|(])(cd|pushd|popd|chdir|set-location|sl|push-location|pop-location)(?=$|[\s;&|)])/i.test(command)
+    || /(^|\s)-C(\s|$)|--git-dir|--work-tree|(^|\s)GIT_(DIR|WORK_TREE)=/.test(command);
+}
+
 /** The command a call ran, when it ran one. */
 function commandOf(tool: string, input: Record<string, unknown>): string {
   if (tool === 'shell') return typeof input['command'] === 'string' ? input['command'] : '';
@@ -118,7 +136,7 @@ export function factsFrom(tool: string, input: Record<string, unknown>, output: 
   const text = output.slice(0, 8000);
   // Lowercase, as the project's knowledge stores it, so a kept fact and a fresh one are the same fact.
   const repoKey = `git-repo:${cwdLabel.toLowerCase()}`;
-  const gitRelated = tool === 'git' || /(^|[\s;&|])git\s/.test(` ${command}`);
+  const gitRelated = (tool === 'git' || /(^|[\s;&|])git\s/.test(` ${command}`)) && !runsElsewhere(tool, input, command);
   if (gitRelated && failed && /not a git repository/i.test(text)) {
     learnt.push({ key: repoKey, text: `${cwdLabel} is not a git repository: git commands there fail (run "git init" first if one is needed).`, from: '', relation: `git repository at ${cwdLabel.toLowerCase()}`, value: 'none' });
   } else if (gitRelated && !/not a git repository/i.test(text) && (!failed || /\bgit\s+(init|clone)\b/.test(command))) {
@@ -160,7 +178,12 @@ export class RunMemory {
   /** Calls that may change things, still running. */
   private changing = 0;
 
-  constructor(private readonly root: string, private readonly db?: WorldStateDB) {
+  /**
+   * @param keep Whether facts may be written to the project's knowledge now. Asked
+   *   at each write, so a setting changed mid-run (knowledge.factsExtraction) holds
+   *   from then on; the board itself still works for the run.
+   */
+  constructor(private readonly root: string, private readonly db?: WorldStateDB, private readonly keep: () => boolean = () => true) {
     // Start knowing what earlier runs found.
     for (const f of db?.getFactsForEntities([ENTITY]) ?? []) {
       const key = f.relation.startsWith('git repository at ') ? `git-repo:${f.relation.slice('git repository at '.length)}`
@@ -230,7 +253,7 @@ export class RunMemory {
       this.facts.set(f.key, { key: f.key, text: f.text, from: by, relation: f.relation });
       // Who found it has seen it.
       this.seenBy(by).add(f.key);
-      if (isNew) this.db?.upsertFact(ENTITY, f.relation, f.value, `run:${by}`, undefined, []);
+      if (isNew && this.keep()) this.db?.upsertFact(ENTITY, f.relation, f.value, `run:${by}`, undefined, []);
     }
     const key = this.reusable(tool, input);
     if (key && !how.failed && startedAt === this.epoch && output.length <= MAX_RESULT_CHARS) {
@@ -239,11 +262,28 @@ export class RunMemory {
     }
   }
 
+  /**
+   * Work that may change things and that the board sees no call for (after a
+   * failure, the fallback that runs another tool in its place): no stored answer
+   * is given while it runs, and none from before it afterwards. Call the
+   * returned function once it is over.
+   */
+  hold(): () => void {
+    this.changing += 1;
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      this.epoch += 1;
+      this.changing = Math.max(0, this.changing - 1);
+    };
+  }
+
   private forget(key: string): void {
     const fact = this.facts.get(key);
     if (!fact) return;
     this.facts.delete(key);
-    if (fact.relation) this.db?.deleteFact(ENTITY, fact.relation);
+    if (fact.relation && this.keep()) this.db?.deleteFact(ENTITY, fact.relation);
   }
 
   private seenBy(worker: string): Set<string> {

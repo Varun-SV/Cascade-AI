@@ -2015,7 +2015,9 @@ export class CascadeRouter extends EventEmitter {
    */
   getRunMemory(root: string): RunMemory {
     if (!this.runMemory || this.runMemoryRoot !== root) {
-      this.runMemory = new RunMemory(root, this.worldStateDB);
+      // Kept in the project's knowledge only while the setting allows it, asked at
+      // each write so a live reconfigure counts.
+      this.runMemory = new RunMemory(root, this.worldStateDB, () => this.getKnowledgeConfig().factsExtraction);
       this.runMemoryRoot = root;
     }
     return this.runMemory;

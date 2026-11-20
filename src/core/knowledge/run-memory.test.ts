@@ -41,6 +41,23 @@ describe('facts read from commands that ran here and failed', () => {
     expect(factsFrom('shell', { command: 'cat build.log missing.txt' }, `Exit 1:\n${log}`, '.', true).learnt).toEqual([]);
   });
 
+  it('not about this folder when git ran somewhere else (Codex on 6c77d8f)', () => {
+    const keys = (command: string) => factsFrom('shell', { command }, NOT_A_REPO, 'The project folder', true).learnt.map((f) => f.key);
+    expect(keys('cd /tmp && git status')).toEqual([]);
+    expect(keys('pushd ../other; git log')).toEqual([]);
+    expect(keys('Set-Location C:\\x; git status')).toEqual([]);
+    expect(keys('git -C ../other status')).toEqual([]);
+    expect(keys('git --git-dir=/x/.git status')).toEqual([]);
+    expect(keys('GIT_DIR=/x/.git git status')).toEqual([]);
+    expect(factsFrom('git', { operation: 'status', args: ['--work-tree=/x'] }, NOT_A_REPO, '.', true).learnt).toEqual([]);
+    // Nor does git working there say anything about this folder.
+    expect(factsFrom('shell', { command: 'cd sub && git status' }, 'On branch main', 'The project folder', false).unlearnt).toEqual([]);
+    // Control: the same command, here.
+    expect(keys('git status')).toEqual(['git-repo:the project folder']);
+    // A word that merely contains one is not one.
+    expect(keys('git status --decorate')).toEqual(['git-repo:the project folder']);
+  });
+
   it('control: an ordinary answer is no fact', () => {
     expect(factsFrom('shell', { command: 'ls' }, 'a.txt\nb.txt', '.', false).learnt).toEqual([]);
   });
@@ -141,7 +158,46 @@ describe('one board for the whole run', () => {
   });
 });
 
+describe('work the board sees no call for (Codex on 6c77d8f)', () => {
+  it('no stored answer while it runs, and none from before it afterwards', () => {
+    const mem = new RunMemory(root);
+    run(mem, 'shell', { command: 'ls' }, 'a.txt', 'T3-a');
+    const done = mem.hold();
+    expect(mem.reuse('shell', { command: 'ls' })).toBeNull();
+    // A read that finished meanwhile is not kept either.
+    run(mem, 'shell', { command: 'cat a.txt' }, 'old', 'T3-b');
+    done();
+    done(); // once only
+    expect(mem.reuse('shell', { command: 'ls' })).toBeNull();
+    expect(mem.reuse('shell', { command: 'cat a.txt' })).toBeNull();
+    run(mem, 'shell', { command: 'ls' }, 'a.txt b.txt', 'T3-a');
+    expect(mem.reuse('shell', { command: 'ls' })?.output).toBe('a.txt b.txt');
+  });
+});
+
 describe('kept in the project, so the next run starts knowing', () => {
+  it('not while knowledge.factsExtraction is off, asked at each write (Codex on 6c77d8f)', () => {
+    const db = new WorldStateDB(root);
+    try {
+      let keep = false;
+      const mem = new RunMemory(root, db, () => keep);
+      run(mem, 'shell', { command: 'git log' }, NOT_A_REPO, 'T3-a', bad);
+      // Still on the board for this run…
+      expect(mem.unseenBy('T3-b').map((f) => f.key)).toEqual(['git-repo:the project folder']);
+      // …but not kept.
+      expect(db.getFactsForEntities(['environment'])).toEqual([]);
+      // Turned on mid-run: kept from then on.
+      keep = true;
+      run(mem, 'shell', { command: 'wc -w a.md' }, 'Exit 127:\nbash: wc: command not found', 'T3-a', bad);
+      expect(db.getFactsForEntities(['environment']).map((f) => f.relation)).toEqual(['command wc']);
+      // Off again: what is kept stays as it is.
+      keep = false;
+      run(mem, 'shell', { command: 'wc -w a.md' }, '12 a.md', 'T3-a');
+      expect(db.getFactsForEntities(['environment']).map((f) => f.relation)).toEqual(['command wc']);
+    } finally { db.close(); }
+  });
+
+
   it('a fact is kept, the next run is shown it, and it is taken back out once it stops being true', () => {
     const db = new WorldStateDB(root);
     try {
