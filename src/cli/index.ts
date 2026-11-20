@@ -39,6 +39,7 @@ import {
   ExitGuard, currentGuard, describe, guardEvents, previousEndingNotice, setCurrentGuard, signalExitCode, wasQuitByUser,
 } from './exit-guard.js';
 import { onCrashNote } from '../utils/crash-note.js';
+import { armFatalReport, takeFatalReport } from './fatal-report.js';
 import { STATE, statePath } from '../config/project-state.js';
 
 dotenv.config();
@@ -449,7 +450,8 @@ async function startRepl(options: {
   // the screen clear between here and Ink erases anything printed now.
   // How the last session here ended, and the record for this one.
   const guard = new ExitGuard(statePath(workspacePath, STATE.exitLog), CASCADE_VERSION);
-  const lastEnding = previousEndingNotice(guard.previous());
+  // Node's own account, when it killed the last session outright (out of memory, a fatal V8 error).
+  const lastEnding = previousEndingNotice(guard.explainPrevious(takeFatalReport(path.dirname(guard.path))));
   const retired = cm.takeRetiredNotice();
   const startupNotice = [lastEnding, retired].filter(Boolean).join('\n') || undefined;
 
@@ -485,6 +487,8 @@ async function startRepl(options: {
   guardReplErrors(guard);
   // Native code about to run (a sandbox): named in the record, should it crash.
   onCrashNote((doing) => guard.noteNative(doing));
+  // If Node itself kills the process, its report lands beside the record (read on the next start).
+  armFatalReport(path.dirname(guard.path));
 
   // Render ink REPL
   const { waitUntilExit } = render(

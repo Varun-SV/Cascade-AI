@@ -93,4 +93,21 @@ describe('ExitGuard', () => {
     guard.noteNative('late');
     expect(new ExitGuard(file, '1.0.0').previous()).toMatchObject({ clean: true, reason: 'quit' });
   });
+
+  it('says where a session died that was waiting on, or had just answered, an approval', () => {
+    const file = fresh();
+    const g = new ExitGuard(file, '1.0.0');
+    g.begin();
+    g.noteStep('waiting for your answer on dynamic_run_shell_cmd');
+    expect(new ExitGuard(file, '1.0.0').previous()).toMatchObject({ clean: false, running: 'waiting for your answer on dynamic_run_shell_cmd' });
+    g.noteStep('carrying on after you answered "n" to dynamic_run_shell_cmd');
+    expect(previousEndingNotice(new ExitGuard(file, '1.0.0').previous())).toMatch(/It was working on: carrying on after you answered "n" to dynamic_run_shell_cmd/);
+    // A native run names itself over the step; the step returns once it is over.
+    g.noteNative('running the agent-written tool x in the isolated-vm sandbox');
+    expect(new ExitGuard(file, '1.0.0').previous()?.running).toMatch(/isolated-vm/);
+    g.noteNative(null);
+    expect(new ExitGuard(file, '1.0.0').previous()?.running).toMatch(/answered "n"/);
+    g.noteStep(null);
+    expect(new ExitGuard(file, '1.0.0').previous()?.running).toBeUndefined();
+  });
 });
