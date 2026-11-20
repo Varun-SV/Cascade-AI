@@ -57,8 +57,12 @@ const READ_COMMANDS = new Set([
 /** git subcommands that only read; a few only in their listing form. */
 const GIT_READS = new Set(['status', 'log', 'diff', 'show', 'rev-parse', 'ls-files', 'describe', 'blame', 'shortlog', 'cat-file', 'ls-tree']);
 const GIT_LISTS = new Set(['branch', 'tag', 'remote']);
-/** Options that make an otherwise reading command write or run something. */
-const WRITES = /(^|\s)(-exec|-execdir|-delete|-ok|-fprint\S*|-fls|--output\S*|-o)(\s|=|$)/;
+/**
+ * Options that make an otherwise reading command write or run something: find's
+ * actions, an output file, and ripgrep's `--pre`, which runs a program on every
+ * file it searches.
+ */
+const WRITES = /(^|\s)(-exec|-execdir|-delete|-ok|-fprint\S*|-fls|--output\S*|-o|--pre|--pre-glob)(\s|=|$)/;
 
 /** Whether `args` (after a git subcommand) leave it reading only. */
 function gitReads(sub: string, args: string[]): boolean {
@@ -200,6 +204,10 @@ export class RunMemory {
       const key = f.relation.startsWith('git repository at ') ? `git-repo:${f.relation.slice('git repository at '.length)}`
         : f.relation.startsWith('command ') ? `missing:${f.relation.slice('command '.length)}` : '';
       if (!key) continue;
+      // Only the failure each relation records: the entity is general knowledge, and
+      // a fact extracted or imported there may say the opposite ("command jq:
+      // available"), which must not reach workers as something missing.
+      if (f.value.trim().toLowerCase() !== (key.startsWith('git-repo:') ? 'none' : 'not available')) continue;
       if (!factMayLeave(f, rules, root)) continue;
       if (key.startsWith('git-repo:') && this.folderPrivate(key.slice('git-repo:'.length), rules)) continue;
       const text = key.startsWith('git-repo:')

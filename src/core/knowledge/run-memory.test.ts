@@ -182,6 +182,27 @@ describe('work the board sees no call for (Codex on 6c77d8f)', () => {
   });
 });
 
+describe('Codex on b2b0aba', () => {
+  it("not ripgrep running a preprocessor on what it searches", () => {
+    expect(commandReadsOnly('rg --pre=./pre hit input.txt')).toBe(false);
+    expect(commandReadsOnly('rg --pre ./pre hit input.txt')).toBe(false);
+    expect(commandReadsOnly('rg --pre-glob "*.pdf" --pre ./pre hit')).toBe(false);
+    // Control: an ordinary search.
+    expect(commandReadsOnly('rg -n hit input.txt')).toBe(true);
+  });
+
+  it('only the failure a fact records is shown: one saying the opposite is not', () => {
+    const db = new WorldStateDB(root);
+    try {
+      db.upsertFact('environment', 'command jq', 'available', 'T3-old', undefined, []);
+      db.upsertFact('environment', 'git repository at docs', 'present', 'T3-old', undefined, []);
+      db.upsertFact('environment', 'command wc', 'not available', 'run:T3-old', undefined, []);
+      db.upsertFact('environment', 'git repository at legacy', 'none', 'run:T3-old', undefined, []);
+      expect(new RunMemory(root, db).all().map((f) => f.key).sort()).toEqual(['git-repo:legacy', 'missing:wc']);
+    } finally { db.close(); }
+  });
+});
+
 describe('kept in the project, so the next run starts knowing', () => {
   it('only what may go to any model: privacy.paths holds for what an earlier run kept (Codex on 2abacac)', async () => {
     const { PrivacyPaths } = await import('../privacy/paths.js');
