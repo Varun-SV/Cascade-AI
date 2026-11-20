@@ -45,6 +45,7 @@ export function poolFrom(raw: unknown): Record<string, PoolStat> {
       out[key] = {
         successCount: s.successCount, failureCount: Number(s.failureCount) || 0,
         totalRetries: Number(s.totalRetries) || 0, totalCostUsd: Number(s.totalCostUsd) || 0, sampleCount: s.sampleCount,
+        ...(typeof s.explicitCount === 'number' ? { explicitCount: s.explicitCount } : {}),
       };
     }
   }

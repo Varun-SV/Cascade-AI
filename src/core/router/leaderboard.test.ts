@@ -66,6 +66,24 @@ describe('buildLeaderboard', () => {
     expect(buildLeaderboard(pool, { now, history: { '2026-11-18': { 'm|code': { runs: 50, low: 0.7 } } }, benchmark: noBench }).tasks.code[0]!.trend7d).toBeUndefined();
   });
 
+  it('the 7-day change reads only a snapshot six to nine days back, never a month-old one (Codex on dcf6cb4)', () => {
+    const pool = { 'm:code': stat(100, 0.9) };
+    const at = (day: string) => buildLeaderboard(pool, { now, history: { [day]: { 'm|code': { runs: 50, low: 0.7 } } }, benchmark: noBench }).tasks.code[0]!.trend7d;
+    expect(at('2026-11-12')).toEqual(expect.any(Number));
+    expect(at('2026-11-11')).toEqual(expect.any(Number));
+    expect(at('2026-10-20')).toBeUndefined();
+    expect(at('2026-11-10')).toBeUndefined();
+  });
+
+  it('counts runs, not ratings of them: cost per run and run totals leave ratings out (Codex on dcf6cb4)', () => {
+    // Ten $0.10 runs, then ten thumbs on them.
+    const board = buildLeaderboard({ 'm:code': { successCount: 40, failureCount: 0, totalRetries: 0, totalCostUsd: 1, sampleCount: 20, explicitCount: 10 } }, { now, benchmark: noBench });
+    expect(board.totalRuns).toBe(10);
+    expect(board.tasks.code[0]).toMatchObject({ runs: 10, avgCostUsd: 0.1 });
+    // Without the count (an older pool), every observation is taken for a run, as before.
+    expect(buildLeaderboard({ 'm:code': stat(20, 1) }, { now, benchmark: noBench }).tasks.code[0]!.runs).toBe(20);
+  });
+
   it('holds nothing but counts: no field of a row is text from a run', () => {
     const row = buildLeaderboard({ 'm:code': stat(10, 0.8) }, { now, benchmark: noBench }).tasks.code[0]!;
     expect(Object.keys(row).sort()).toEqual(['avgCostUsd', 'avgRetries', 'confidence', 'high', 'low', 'model', 'rank', 'runs', 'score', 'successRate']);
@@ -86,5 +104,11 @@ describe('publishedBenchmark', () => {
   it('a model a board measured has a score; one nobody measured has none', () => {
     expect(publishedBenchmark('claude-sonnet-5-5', 'code')).toEqual(expect.any(Number));
     expect(publishedBenchmark('totally-unknown-model-xyz', 'code')).toBeUndefined();
+  });
+
+  it('a carried seed, or a later release mapped onto a measured one, is no published score (Codex on dcf6cb4)', () => {
+    expect(publishedBenchmark('ollama/qwen3:32b', 'code')).toBeUndefined();
+    expect(publishedBenchmark('llama3.1:8b', 'code')).toBeUndefined();
+    expect(publishedBenchmark('claude-3-opus-20240229', 'code')).toBeUndefined();
   });
 });

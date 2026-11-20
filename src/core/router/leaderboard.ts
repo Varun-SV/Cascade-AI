@@ -21,7 +21,7 @@
 
 import type { ModelInfo, TaskType } from '../../types.js';
 import { posteriorMean, posteriorStdDev, weightedPosterior } from './bayes.js';
-import { benchmarkProfile } from './benchmarks.js';
+import { CARRIED_SEED_FAMILIES, benchmarkProfile, resolveFamily } from './benchmarks.js';
 
 /** One model on one task type, as the learning pool holds it. */
 export interface PoolStat {
@@ -29,7 +29,10 @@ export interface PoolStat {
   failureCount: number;
   totalRetries: number;
   totalCostUsd: number;
+  /** Observations: runs, and explicit ratings of them. What the posterior's tightness reads. */
   sampleCount: number;
+  /** How many of those were ratings, not runs (absent in older pools). */
+  explicitCount?: number;
 }
 
 export const LEADERBOARD_TASKS: readonly TaskType[] = ['code', 'analysis', 'creative', 'data', 'mixed'];
@@ -59,7 +62,7 @@ export interface LeaderboardRow {
   avgRetries: number;
   /** The published benchmarks' score for this kind of task, 0–100, when a board has measured the model. */
   benchmark?: number;
-  /** Change in `low`, in points, against the snapshot about a week back, when there is one. */
+  /** Change in `low`, in points, against a snapshot six to nine days back, when there is one. */
   trend7d?: number;
   /** The last day a new run of it was seen, from the snapshots (YYYY-MM-DD). */
   lastRun?: string;
@@ -90,6 +93,9 @@ function splitKey(key: string): { model: string; task: TaskType } | null {
 
 const finite = (n: unknown): number => (typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : 0);
 
+/** Executions of the model: observations less ratings of them. */
+const runsOf = (s: PoolStat): number => Math.max(0, finite(s.sampleCount) - finite(s.explicitCount));
+
 function intervalOf(s: PoolStat): { score: number; low: number; high: number; successRate: number } {
   const p = weightedPosterior(finite(s.successCount), finite(s.failureCount), finite(s.sampleCount));
   const score = posteriorMean(p);
@@ -103,9 +109,21 @@ function intervalOf(s: PoolStat): { score: number; low: number; high: number; su
   };
 }
 
-/** The published benchmark for a model on a task type, 0–100, only where a board measured its family. */
+const squash = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+/**
+ * The published benchmark for a model on a task type, 0–100, only where a board
+ * measured that very model. Routing is looser, and rightly: it carries seed scores
+ * for local builds no board measures, and maps a release no board has reached yet
+ * onto its measured predecessor. Neither is a published score, so neither is shown:
+ * a carried seed is left out, and so is a model whose own id doesn't name the
+ * measured family's version.
+ */
 export function publishedBenchmark(model: string, task: TaskType): number | undefined {
-  const profile = benchmarkProfile({ id: model, name: model } as ModelInfo);
+  const info = { id: model, name: model } as ModelInfo;
+  const family = resolveFamily(info);
+  if (!family || CARRIED_SEED_FAMILIES.has(family) || !squash(model).includes(squash(family))) return undefined;
+  const profile = benchmarkProfile(info);
   if (!profile) return undefined;
   if (task === 'mixed') {
     const vals = (['code', 'analysis', 'creative', 'data'] as const).map((t) => profile[t]).filter((v): v is number => typeof v === 'number');
@@ -128,8 +146,8 @@ export function withSnapshot(history: LeaderboardHistory, pool: Record<string, P
   const day: Record<string, LeaderboardSnapshot> = {};
   for (const [key, stat] of Object.entries(pool)) {
     const k = splitKey(key);
-    if (!k || finite(stat.sampleCount) === 0) continue;
-    day[`${k.model}|${k.task}`] = { runs: finite(stat.sampleCount), low: Math.round(intervalOf(stat).low * 1000) / 1000 };
+    if (!k || runsOf(stat) === 0) continue;
+    day[`${k.model}|${k.task}`] = { runs: runsOf(stat), low: Math.round(intervalOf(stat).low * 1000) / 1000 };
   }
   return { ...history, [today]: day };
 }
@@ -145,8 +163,12 @@ export function buildLeaderboard(
   const benchmark = opts.benchmark ?? publishedBenchmark;
   const history = opts.history ?? {};
   const days = Object.keys(history).sort();
-  // The snapshot nearest a week back, at least six days old.
-  const weekAgo = [...days].reverse().find((d) => dayOf(today) - dayOf(d) >= 6 * dayMs);
+  // A snapshot about a week back: six to nine days old, the one nearest seven. The
+  // history is kept only on the days the board is read, so the nearest older one
+  // can be a month back, and a month's change shown as "7 days" would mislead.
+  const weekAgo = days
+    .filter((d) => { const age = (dayOf(today) - dayOf(d)) / dayMs; return age >= 6 && age <= 9; })
+    .sort((a, b) => Math.abs((dayOf(today) - dayOf(a)) / dayMs - 7) - Math.abs((dayOf(today) - dayOf(b)) / dayMs - 7))[0];
 
   const tasks = Object.fromEntries(LEADERBOARD_TASKS.map((t) => [t, [] as LeaderboardRow[]])) as Record<TaskType, LeaderboardRow[]>;
   const models = new Set<string>();
@@ -154,7 +176,9 @@ export function buildLeaderboard(
   for (const [key, stat] of Object.entries(pool)) {
     const k = splitKey(key);
     if (!k) continue;
-    const runs = finite(stat.sampleCount);
+    // Runs, not observations: an explicit rating of a run is not another run, and
+    // costs nothing, so counting it would inflate runs and shrink cost per run.
+    const runs = runsOf(stat);
     totalRuns += runs;
     if (runs < minRuns) continue;
     models.add(k.model);

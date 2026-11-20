@@ -87,6 +87,17 @@ describe('ModelPerformanceTracker — weight is evidence, sampleCount is confide
     expect(t.sampleCountFor('m1', 'code')).toBe(1);
   });
 
+  it('keeps apart how many observations were ratings, so a run count can leave them out', () => {
+    const t = mem();
+    t.record('m1', 'code', 'success', 0, 0.1);
+    t.recordExplicit('m1', 'code', 'good');
+    t.recordExplicit('m1', 'code', 'bad');
+    const s = t.getAll().get('m1:code')!;
+    expect(s.sampleCount).toBe(3);
+    expect(s.explicitCount).toBe(2);
+    expect(t.getAll().get('m1:code')!.totalCostUsd).toBeCloseTo(0.1);
+  });
+
   it('lets a rating win the argument against an automatic outcome that disagrees', () => {
     // What the weight is FOR. A thumbs-up alongside a failed run should not
     // land at "we know nothing" — the user watched the output and the run

@@ -171,6 +171,14 @@ const FAMILY_MATCHERS: Array<[RegExp, string]> = [
   [/gemma/i, 'gemma'],
 ];
 
+/**
+ * The families whose scores are carried seeds, not measurements: the local
+ * (Ollama) catch-alls below, which no current board measures. Routing may use
+ * them to rank local models against each other; nothing should present them as
+ * published scores.
+ */
+export const CARRIED_SEED_FAMILIES: ReadonlySet<string> = new Set(['codellama', 'deepseek', 'qwen', 'llama-70b', 'llama-small', 'mistral', 'gemma']);
+
 export function resolveFamily(model: ModelInfo): string | null {
   // Prefer the canonical base-model id (e.g. an Azure deployment's real model)
   // so a deployment named "prod-fast" still resolves via its baseModelId.
