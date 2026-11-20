@@ -3,7 +3,7 @@ import { Sparkles, Plus, Trash2, Pencil, Check, X, Lock, Wand2, Loader2, Square,
 import Modal from './Modal.js';
 import SkillSuggest from './SkillSuggest.js';
 import { createSkill, deleteSkill, updateSkill } from '../lib/api.js';
-import { cancelSkillAi, draftSkill, refineSkill, type SkillAiSocket, type SkillDraft } from '../lib/skill-ai.js';
+import { cancelSkillAi, draftSkill, refineSkill, type SkillAiSocket, type SkillDraft, type SkillSuggestion } from '../lib/skill-ai.js';
 import type { ProviderConfig, Skill } from '../lib/types.js';
 
 interface Props {
@@ -41,13 +41,25 @@ export default function SkillsModal({ skills, onClose, onChange, activeSkillId, 
   /** A proposed change to an existing skill, shown beside what it replaces until accepted. */
   const [proposal, setProposal] = useState<{ before: SkillDraft; after: SkillDraft } | null>(null);
   const aiRunning = useRef(false);
+  /** Which form a model answer belongs to: bumped whenever another form opens, so a late answer is dropped. */
+  const formToken = useRef(0);
+  /** Suggestions from the last pass, kept while one of them is open in the form. */
+  const [suggestions, setSuggestions] = useState<SkillSuggestion[] | null>(null);
+  /** The suggestion the open form came from, so saving it takes it off the list and cancelling goes back. */
+  const [fromSuggestion, setFromSuggestion] = useState<number | null>(null);
   const canAi = !!socket && providers.length > 0;
 
   // Closing while the model writes stops it.
   useEffect(() => () => { if (aiRunning.current && socket) cancelSkillAi(socket); }, [socket]);
 
   function openDraft(next: DraftState) {
+    formToken.current += 1;
+    // A model still writing for the form being left is stopped: its answer is for that form.
+    if (aiRunning.current && socket) cancelSkillAi(socket);
+    aiRunning.current = false;
+    setThinking(false);
     setDraft(next);
+    setFromSuggestion(null);
     setError(null);
     setAsk('');
     setAiError(null);
@@ -56,12 +68,15 @@ export default function SkillsModal({ skills, onClose, onChange, activeSkillId, 
 
   async function writeWithAi() {
     if (!socket || !draft || !ask.trim() || thinking) return;
+    const token = formToken.current;
     setThinking(true);
     setAiError(null);
     aiRunning.current = true;
     if (draft.id) {
-      // An existing skill: the change is shown beside what it replaces, and applied only on "Use this".
-      const r = await refineSkill(socket, providers, draft.id, ask.trim());
+      // An existing skill, as the form holds it now: unsaved edits are what the change is made to.
+      // The proposal is shown beside it, and applied only on "Use this".
+      const r = await refineSkill(socket, providers, draft.id, ask.trim(), { name: draft.name, description: draft.description, instructions: draft.systemPrompt });
+      if (token !== formToken.current) return;
       aiRunning.current = false;
       setThinking(false);
       if (!r.ok) { if ('error' in r) setAiError(r.error); return; }
@@ -69,6 +84,7 @@ export default function SkillsModal({ skills, onClose, onChange, activeSkillId, 
       return;
     }
     const r = await draftSkill(socket, providers, ask.trim());
+    if (token !== formToken.current) return;
     aiRunning.current = false;
     setThinking(false);
     if (!r.ok) { if ('error' in r) setAiError(r.error); return; }
@@ -90,6 +106,13 @@ export default function SkillsModal({ skills, onClose, onChange, activeSkillId, 
       else await createSkill(input);
       setDraft(null);
       onChange();
+      // Saved from a suggestion: it leaves the list, and the rest are still there to add.
+      if (fromSuggestion !== null && suggestions) {
+        const rest = suggestions.filter((_, i) => i !== fromSuggestion);
+        setSuggestions(rest);
+        setFromSuggestion(null);
+        if (rest.length) setView('suggest');
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not save skill.');
     } finally {
@@ -129,8 +152,14 @@ export default function SkillsModal({ skills, onClose, onChange, activeSkillId, 
           <SkillSuggest
             socket={socket}
             providers={providers}
-            onBack={() => setView('list')}
-            onAdd={(d) => { setView('list'); openDraft({ id: null, name: d.name, description: d.description, systemPrompt: d.instructions }); }}
+            onBack={() => { setView('list'); setSuggestions(null); }}
+            results={suggestions}
+            onResults={setSuggestions}
+            onAdd={(d, index) => {
+              setView('list');
+              openDraft({ id: null, name: d.name, description: d.description, systemPrompt: d.instructions });
+              setFromSuggestion(index);
+            }}
           />
         ) : draft ? (
           <div className="flex flex-col gap-2">
@@ -215,7 +244,17 @@ export default function SkillsModal({ skills, onClose, onChange, activeSkillId, 
             <div className="flex justify-end gap-2">
               <button
                 type="button"
-                onClick={() => { setDraft(null); setError(null); setProposal(null); if (thinking && socket) cancelSkillAi(socket); }}
+                onClick={() => {
+                  formToken.current += 1;
+                  if (thinking && socket) cancelSkillAi(socket);
+                  aiRunning.current = false;
+                  setThinking(false);
+                  setDraft(null);
+                  setError(null);
+                  setProposal(null);
+                  // Opened from a suggestion: back to the others.
+                  if (fromSuggestion !== null) { setFromSuggestion(null); setView('suggest'); }
+                }}
                 className="cz-btn cz-btn-quiet cz-btn-sm"
               >
                 <X size={13} /> Cancel

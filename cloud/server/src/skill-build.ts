@@ -26,7 +26,13 @@ import { ProvidersSchema } from './runs.js';
 import { chatsForMemory, failureOf, memoryRouter, recordBuildSpend } from './memory-build.js';
 
 const DraftSchema = z.object({ providers: ProvidersSchema, want: z.string().trim().min(3).max(2000) });
-const RefineSchema = z.object({ providers: ProvidersSchema, skillId: z.string().min(1).max(100), change: z.string().trim().min(3).max(2000) });
+const RefineSchema = z.object({
+  providers: ProvidersSchema,
+  skillId: z.string().min(1).max(100),
+  change: z.string().trim().min(3).max(2000),
+  /** The skill as the form holds it now, unsaved edits included: what the change is made to. */
+  current: z.object({ name: z.string().max(200), description: z.string().max(1000), instructions: z.string().max(20_000) }).optional(),
+});
 const SuggestSchema = z.object({ providers: ProvidersSchema, conversationIds: z.array(z.string().min(1).max(100)).min(2).max(SUGGEST_MAX_CHATS) });
 
 /** Room for a whole skill (instructions up to ~2,700 characters), or five suggestions. */
@@ -98,7 +104,11 @@ export function attachSkillBuild(
     if (!p.success) { reply?.({ error: 'Say what to change in a few words, and add a provider in Settings.' }); return; }
     const skill = store.getUserSkill(p.data.skillId, userId);
     if (!skill) { reply?.({ error: 'That skill was not found.' }); return; }
-    const before: SkillDraft = { name: skill.name, description: skill.description, instructions: skill.systemPrompt };
+    // What the form holds now, when it says, so unsaved edits are what gets changed;
+    // the skill must still be theirs.
+    const before: SkillDraft = p.data.current && p.data.current.instructions.trim()
+      ? { name: p.data.current.name.trim() || skill.name, description: p.data.current.description.trim(), instructions: p.data.current.instructions }
+      : { name: skill.name, description: skill.description, instructions: skill.systemPrompt };
     await job(p.data.providers as ProviderConfig[], reply, DRAFT_MAX_TOKENS, refineSkillPrompt(before, p.data.change),
       (raw) => { const draft = parseSkillDraft(raw); return draft ? { draft, before } : null; },
       'The model did not return a usable skill. Try asking differently.');

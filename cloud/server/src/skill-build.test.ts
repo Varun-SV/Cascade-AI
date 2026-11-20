@@ -102,4 +102,16 @@ describe('skills written with a model\'s help (server)', () => {
     expect(await p).toEqual({ cancelled: true });
     expect(seen?.aborted).toBe(true);
   });
+
+  it('refines the skill as the form holds it (unsaved edits), and only one of the person\'s own (Codex on 1bdf892)', async () => {
+    const skill = store.createUserSkill(u1, { name: 'Tutor', description: 'SQL', systemPrompt: 'You teach SQL.' });
+    const { call, prompts } = rig(store, u1, () => ({ content: '{"name":"Tutor","description":"SQL","instructions":"Edited, strictly."}' }));
+    const current = { name: 'Tutor', description: 'SQL', instructions: 'Edited in the form, not saved.' };
+    const out = await call('skills:refine', { providers: PROVIDERS, skillId: skill.id, change: 'be stricter', current });
+    expect(out.before).toEqual(current);
+    expect(prompts[0]).toContain('Edited in the form, not saved.');
+    expect(prompts[0]).not.toContain('You teach SQL.');
+    const other = rig(store, u2, () => ({ content: '{}' }));
+    expect(await other.call('skills:refine', { providers: PROVIDERS, skillId: skill.id, change: 'be stricter', current })).toEqual({ error: 'That skill was not found.' });
+  });
 });

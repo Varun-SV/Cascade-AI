@@ -121,4 +121,80 @@ describe('Skills with AI', () => {
     fireEvent.click(screen.getByRole('button', { name: /New skill/ }));
     expect(screen.queryByLabelText(/Write it with AI/)).not.toBeInTheDocument();
   });
+
+  describe('Codex on 1bdf892', () => {
+    it('Improve works on the form as it is, unsaved edits included', async () => {
+      const socket = fakeSocket({ 'skills:refine': {
+        draft: { name: 'SQL Tutor', description: 'Teaches SQL', instructions: 'edited, then stricter' },
+        before: { name: 'SQL Tutor', description: 'Teaches SQL', instructions: 'edited' },
+      } });
+      render(<SkillsModal skills={[mine]} onClose={vi.fn()} onChange={vi.fn()} socket={socket} providers={PROVIDERS} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Edit skill' }));
+      fireEvent.change(screen.getByDisplayValue('You teach SQL.'), { target: { value: 'edited' } });
+      fireEvent.change(screen.getByLabelText(/Improve with AI/), { target: { value: 'be stricter' } });
+      fireEvent.click(screen.getByRole('button', { name: /Improve$/ }));
+      await screen.findByRole('region', { name: 'Proposed' });
+      expect(socket.sent[0]).toEqual(['skills:refine', { providers: PROVIDERS, skillId: 'k1', change: 'be stricter', current: { name: 'SQL Tutor', description: 'Teaches SQL', instructions: 'edited' } }]);
+    });
+
+    it('an answer for a form that was left is dropped, never written into another skill', async () => {
+      const socket = fakeSocket({ 'skills:draft': { draft: { name: 'Late', description: 'd', instructions: 'late text' } } }, true);
+      render(<SkillsModal skills={[mine]} onClose={vi.fn()} onChange={vi.fn()} socket={socket} providers={PROVIDERS} />);
+      fireEvent.click(screen.getByRole('button', { name: /New skill/ }));
+      fireEvent.change(screen.getByLabelText(/Write it with AI/), { target: { value: 'a tutor' } });
+      fireEvent.click(screen.getByRole('button', { name: /Write it$/ }));
+      // Off to edit another skill while it writes: the writing is stopped.
+      fireEvent.click(screen.getByRole('button', { name: 'Edit skill' }));
+      expect(socket.sent.map(([e]) => e)).toContain('skills:cancel');
+      await act(async () => { socket.release(); });
+      expect(screen.getByDisplayValue('You teach SQL.')).toBeInTheDocument();
+      expect(screen.queryByDisplayValue('late text')).not.toBeInTheDocument();
+    });
+
+    it('a dropped connection ends the wait with a message, not "writing…" for ever', async () => {
+      const listeners = new Map<string, () => void>();
+      const socket = {
+        emit: vi.fn(),
+        on: (e: string, fn: () => void) => { listeners.set(e, fn); },
+        off: (e: string) => { listeners.delete(e); },
+      };
+      render(<SkillsModal skills={[]} onClose={vi.fn()} onChange={vi.fn()} socket={socket} providers={PROVIDERS} />);
+      fireEvent.click(screen.getByRole('button', { name: /New skill/ }));
+      fireEvent.change(screen.getByLabelText(/Write it with AI/), { target: { value: 'a tutor' } });
+      fireEvent.click(screen.getByRole('button', { name: /Write it$/ }));
+      expect(screen.getByText(/Your model is writing it/)).toBeInTheDocument();
+      await act(async () => { listeners.get('disconnect')?.(); });
+      expect(screen.queryByText(/Your model is writing it/)).not.toBeInTheDocument();
+      expect(screen.getByRole('alert')).toHaveTextContent(/connection dropped/);
+    });
+
+    it('adding one suggestion keeps the others: saving it, or cancelling, goes back to them', async () => {
+      vi.mocked(api.fetchMemoryBuildChats).mockResolvedValue({ chats: [
+        { id: 'c1', title: 'A', updatedAt: 2, turns: 1, worth: true },
+        { id: 'c2', title: 'B', updatedAt: 1, turns: 1, worth: true },
+      ] });
+      vi.mocked(api.createSkill).mockClear();
+      const two = [
+        { name: 'One', description: 'd1', instructions: 'i1', why: 'w1', chats: [{ id: 'c1', title: 'A' }, { id: 'c2', title: 'B' }] },
+        { name: 'Two', description: 'd2', instructions: 'i2', why: 'w2', chats: [{ id: 'c1', title: 'A' }, { id: 'c2', title: 'B' }] },
+      ];
+      const socket = fakeSocket({ 'skills:suggest-estimate': { chats: 2, inputTokens: 1, outputTokens: 1, model: 'm', costUsd: 0.01 }, 'skills:suggest': { suggestions: two } });
+      render(<SkillsModal skills={[]} onClose={vi.fn()} onChange={vi.fn()} socket={socket} providers={PROVIDERS} />);
+      fireEvent.click(screen.getByRole('button', { name: /Suggest from my chats/ }));
+      await screen.findByText(/Reads 2 chats/);
+      fireEvent.click(screen.getByRole('button', { name: /Suggest skills/ }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Add One' }));
+      // Cancel: back to both.
+      fireEvent.click(screen.getByRole('button', { name: /Cancel/ }));
+      expect(screen.getByRole('button', { name: 'Add One' })).toBeInTheDocument();
+      // Save one: it leaves the list, the other stays to add.
+      fireEvent.click(screen.getByRole('button', { name: 'Add One' }));
+      fireEvent.click(screen.getByRole('button', { name: /Create/ }));
+      await waitFor(() => expect(api.createSkill).toHaveBeenCalledTimes(1));
+      expect(await screen.findByRole('button', { name: 'Add Two' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Add One' })).not.toBeInTheDocument();
+      // Only one paid pass.
+      expect(socket.sent.filter(([e]) => e === 'skills:suggest')).toHaveLength(1);
+    });
+  });
 });

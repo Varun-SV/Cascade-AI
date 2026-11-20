@@ -11,18 +11,25 @@ const DEFAULT_CHATS = 40;
  * Skills for tasks the person keeps coming back to, read from their chats.
  * Pick chats, see the cost, suggest, then add (to edit before saving) or dismiss each.
  */
-export default function SkillSuggest({ socket, providers, onBack, onAdd }: {
+export default function SkillSuggest({ socket, providers, onBack, onAdd, results, onResults }: {
   socket: SkillAiSocket | null;
   providers: ProviderConfig[];
   onBack: () => void;
   /** Opens the suggestion in the skill form, to edit before it is saved. */
-  onAdd: (draft: SkillDraft) => void;
+  onAdd: (draft: SkillDraft, index: number) => void;
+  /** The last pass's suggestions, kept by the parent so adding one doesn't lose the rest. */
+  results: SkillSuggestion[] | null;
+  onResults: (s: SkillSuggestion[] | null) => void;
 }) {
   const [chats, setChats] = useState<MemoryBuildChat[] | null>(null);
   const [chosen, setChosen] = useState<Set<string>>(new Set());
   const [estimate, setEstimate] = useState<SuggestEstimate | null>(null);
-  const [step, setStep] = useState<'pick' | 'running' | 'done'>('pick');
-  const [suggestions, setSuggestions] = useState<SkillSuggestion[]>([]);
+  const [running_, setRunning] = useState(false);
+  const step: 'pick' | 'running' | 'done' = running_ ? 'running' : results ? 'done' : 'pick';
+  const suggestions = results ?? [];
+  const setSuggestions = (f: (prev: SkillSuggestion[]) => SkillSuggestion[]) => onResults(f(suggestions));
+  /** Bumped on each reconnect: an estimate lost with the old connection is asked again. */
+  const [connection, setConnection] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const seq = useRef(0);
   const running = useRef(false);
@@ -46,7 +53,14 @@ export default function SkillSuggest({ socket, providers, onBack, onAdd }: {
       void estimateSuggest(socket, providers, [...chosen]).then((r) => { if (n === seq.current && r.ok) setEstimate(r.value); });
     }, 300);
     return () => clearTimeout(t);
-  }, [socket, providers, chosen]);
+  }, [socket, providers, chosen, connection]);
+
+  useEffect(() => {
+    if (!socket?.on) return;
+    const onConnect = () => setConnection((c) => c + 1);
+    socket.on('connect', onConnect);
+    return () => { socket.off?.('connect', onConnect); };
+  }, [socket]);
 
   // Leaving while it runs stops it: nobody is left to read what it finds.
   useEffect(() => () => { if (running.current && socket) cancelSkillAi(socket); }, [socket]);
@@ -54,13 +68,13 @@ export default function SkillSuggest({ socket, providers, onBack, onAdd }: {
   async function run() {
     if (!socket || chosen.size < 2) return;
     setError(null);
-    setStep('running');
+    setRunning(true);
     running.current = true;
     const r = await suggestSkills(socket, providers, [...chosen]);
     running.current = false;
-    if (r.ok) { setSuggestions(r.value.suggestions); setStep('done'); return; }
+    setRunning(false);
+    if (r.ok) { onResults(r.value.suggestions); return; }
     if ('error' in r) setError(r.error);
-    setStep('pick');
   }
 
   const toggle = (id: string) => setChosen((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
@@ -112,7 +126,7 @@ export default function SkillSuggest({ socket, providers, onBack, onAdd }: {
                       {s.description && <p className="text-xs text-ink-300">{s.description}</p>}
                     </div>
                     <div className="flex shrink-0 gap-1">
-                      <button type="button" onClick={() => onAdd({ name: s.name, description: s.description, instructions: s.instructions })} className="cz-btn cz-btn-sm" aria-label={`Add ${s.name}`}>
+                      <button type="button" onClick={() => onAdd({ name: s.name, description: s.description, instructions: s.instructions }, i)} className="cz-btn cz-btn-sm" aria-label={`Add ${s.name}`}>
                         <Plus size={13} /> Add
                       </button>
                       <button type="button" aria-label={`Dismiss ${s.name}`} onClick={() => setSuggestions((prev) => prev.filter((_, j) => j !== i))} className="cz-ib cz-ib-sm">
